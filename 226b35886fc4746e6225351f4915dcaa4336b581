@@ -1,0 +1,16 @@
+{
+  "records": [
+    {
+      "canonical_key": "{\"lenses\":[\"design-drift\"],\"source_sha\":\"226b35886fc4746e6225351f4915dcaa4336b581\",\"trigger_id\":\"user:docs-agent-prompts-simplification\"}",
+      "key_digest": "3d4ada8a911e73ad42fadf76fffc2212a969f5c458ab31df0f7741d203cc3cd6",
+      "lenses": [
+        "design-drift"
+      ],
+      "outcome": "findings",
+      "source_sha": "226b35886fc4746e6225351f4915dcaa4336b581",
+      "trigger_id": "user:docs-agent-prompts-simplification"
+    }
+  ],
+  "source_sha": "226b35886fc4746e6225351f4915dcaa4336b581",
+  "version": 1
+}
