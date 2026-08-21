@@ -240,7 +240,8 @@ fn al_expr(e: HExpr) -> HExpr {
         HExpr::HandleExpr { body, handlers, ty, effects, span } => {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
-                new_handlers.push(HEffectHandler { effect_name: h.effect_name, op_name: h.op_name,
+                new_handlers.push(HEffectHandler { effect_name: h.effect_name,
+                    op_name: h.op_name, op_def_id: h.op_def_id,
                     params: h.params, resume_binding: h.resume_binding,
                     body: al_expr(h.body) })
             }
@@ -250,10 +251,13 @@ fn al_expr(e: HExpr) -> HExpr {
             HExpr::Lambda { def_id: def_id,
                 params: params, return_type: return_type,
                 body: al_expr(body), ty: ty, effects: effects, span: span },
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, op_def_id,
+                          args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(al_expr(a)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args, ty: ty, effects: effects, span: span }
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                op_def_id: op_def_id, args: new_args,
+                ty: ty, effects: effects, span: span }
         },
         HExpr::RangeExpr { start, end, inclusive, ty, effects, span } =>
             HExpr::RangeExpr { start: al_expr(start),

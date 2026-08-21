@@ -9,12 +9,13 @@ use types::{Type, Effect, EffectRow, StructField, EnumVariant,
     CALLABLE_FIRST_MUT_BORROW_OWNED, CALLABLE_BORROW_BORROWED,
     CALLABLE_MUT_MOVE_OWNED, CALLABLE_BORROW_MOVE_BORROWED,
     CALLABLE_MOVE_BORROW_OWNED, CALLABLE_BORROW_MUT_BORROW_OWNED,
-    CALLABLE_SOURCE_BUILTIN}
+    CALLABLE_SOURCE_BUILTIN,
+    callable_interface_transfer_levels, callable_owning_transfer_levels}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     EffectDef, EffectOpDef, BuiltInKind, TraitDef, TraitMethodDef,
     ImplEntry, ImplDictBound, MethodOrigin, mono, add_impl,
     install_method_scheme, specialize_trait_method_scheme,
-    register_exact_shadow_callable_scheme}
+    register_exact_shadow_callable_scheme_with_transfer_levels}
 use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
@@ -32,48 +33,48 @@ struct OpenRow {
 // Shared built-in method installation
 // ============================================================
 
-fn owning_transfer_flags(arity: Int) -> List<Bool> {
-    let mut flags: List<Bool> = []
-    let mut index = 0
-    while index < arity {
-        flags.push(false)
-        index = index + 1
-    }
-    flags
-}
-
 fn exact_builtin_callable_scheme(
-    mut env: TypeEnv, scheme: TypeScheme, producer_def_id: Int?
+    mut env: TypeEnv, scheme: TypeScheme, producer_def_id: Int?,
+    force_move_params: Bool
 ) -> TypeScheme {
     let exact = match scheme.def_id {
         some(_) => scheme,
         none => TypeScheme { ..scheme, def_id: some(env.fresh_def_id()) }
     }
-    let arity = match exact.ty {
-        Type::FnType { params, .. } => params.len(),
+    match exact.ty {
+        Type::FnType { .. } => {},
         _ => panic("unreachable: builtin callable is not a function")
     }
-    register_exact_shadow_callable_scheme(
-        env, exact, CALLABLE_SOURCE_BUILTIN, producer_def_id,
-        owning_transfer_flags(arity))
+    let levels = if force_move_params {
+        callable_interface_transfer_levels(
+            env.types.ownership_metadata, exact.ty)
+    } else {
+        callable_owning_transfer_levels(
+            env.types.ownership_metadata, exact.ty)
+    }
+    register_exact_shadow_callable_scheme_with_transfer_levels(
+        env, exact, CALLABLE_SOURCE_BUILTIN, producer_def_id, levels)
 }
 
-fn register_bound_builtin_callable(mut env: TypeEnv, name: Str) {
+fn register_bound_builtin_callable(
+    mut env: TypeEnv, name: Str, force_move_params: Bool
+) {
     let scheme = match env.lookup(name) {
         some(value) => value,
         none => panic("unreachable: builtin callable binding is missing")
     }
-    env.rebind(name, exact_builtin_callable_scheme(env, scheme, none))
+    env.rebind(name, exact_builtin_callable_scheme(
+        env, scheme, none, force_move_params))
 }
 
 fn builtin_trait_method(
     mut env: TypeEnv, name: Str, ty: Type, has_default: Bool,
-    param_mutabilities: List<Bool>
+    param_mutabilities: List<Bool>, force_move_params: Bool
 ) -> TraitMethodDef {
     let exact = exact_builtin_callable_scheme(env, TypeScheme {
         ty: ty, type_vars: [], bounds: [],
         def_id: some(env.fresh_def_id())
-    }, none)
+    }, none, force_move_params)
     TraitMethodDef {
         name: name,
         def_id: exact.def_id.unwrap_or(-1),
@@ -96,7 +97,7 @@ fn builtin_effect_op(
             ownership_term: CALLABLE_BORROW_OWNED
         },
         type_vars: [], bounds: [], def_id: some(def_id)
-    }, none)
+    }, none, false)
     let exact_parts = match exact.ty {
         Type::FnType { params, return_type, .. } => (params, return_type),
         _ => panic("unreachable: builtin effect op is not callable")
@@ -120,7 +121,7 @@ fn install_builtin_method_map(
         let (method_name, scheme) = entry
         let exact_scheme = match scheme.def_id {
             some(_) => scheme,
-            none => exact_builtin_callable_scheme(env, scheme, none)
+            none => exact_builtin_callable_scheme(env, scheme, none, false)
         }
         let _ = install_method_scheme(
             env.trait_reg, sink,
@@ -188,7 +189,8 @@ fn add_builtin_impl(
                             type_var_ids, map_new(), scheme_bounds)
                         exact.insert(method_name,
                             exact_builtin_callable_scheme(
-                                env, specialized, some(method.def_id)))
+                                env, specialized, some(method.def_id),
+                                trait_name == "Drop"))
                     },
                     none => {}
                 }
@@ -356,7 +358,7 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    register_bound_builtin_callable(env, BUILTIN_CELL)
+    register_bound_builtin_callable(env, BUILTIN_CELL, false)
 
     // Methods: get, set, update
     let m_t_id = env.fresh_var_id()
@@ -434,7 +436,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    register_bound_builtin_callable(env, "some")
+    register_bound_builtin_callable(env, "some", false)
     // `some` is a normal payload constructor. Preserve exact constructor
     // identity through its DefId so call lowering and sink classification do
     // not depend on a same-spelled local/global.
@@ -539,8 +541,8 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            builtin_trait_method(env, "eq", eq_fn, false, [false, false]),
-            builtin_trait_method(env, "ne", ne_fn, true, [false, false])
+            builtin_trait_method(env, "eq", eq_fn, false, [false, false], false),
+            builtin_trait_method(env, "ne", ne_fn, true, [false, false], false)
         ],
         supertraits: [],
         assoc_types: []
@@ -578,7 +580,7 @@ fn register_clone_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            builtin_trait_method(env, "clone", clone_fn, false, [false])
+            builtin_trait_method(env, "clone", clone_fn, false, [false], false)
         ],
         supertraits: [],
         assoc_types: []
@@ -619,7 +621,7 @@ fn register_drop_trait(mut env: TypeEnv) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            builtin_trait_method(env, "drop", drop_fn, false, [false])
+            builtin_trait_method(env, "drop", drop_fn, false, [false], true)
         ],
         supertraits: [],
         assoc_types: []
@@ -652,7 +654,7 @@ fn register_ord_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            builtin_trait_method(env, "cmp", cmp_fn, false, [false, false])
+            builtin_trait_method(env, "cmp", cmp_fn, false, [false, false], false)
         ],
         supertraits: [],
         assoc_types: []
@@ -678,7 +680,7 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            builtin_trait_method(env, "debug", debug_fn, false, [false])
+            builtin_trait_method(env, "debug", debug_fn, false, [false], false)
         ],
         supertraits: [],
         assoc_types: []
@@ -734,7 +736,7 @@ fn register_hash_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            builtin_trait_method(env, "hash", hash_fn, false, [false])
+            builtin_trait_method(env, "hash", hash_fn, false, [false], false)
         ],
         supertraits: [],
         assoc_types: []
@@ -1101,7 +1103,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    register_bound_builtin_callable(env, "alloc")
+    register_bound_builtin_callable(env, "alloc", false)
 
     // dealloc(p: Ptr<T>, count: Int) -> () / unsafe
     let dealloc_t_id = env.fresh_var_id()
@@ -1113,7 +1115,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    register_bound_builtin_callable(env, "dealloc")
+    register_bound_builtin_callable(env, "dealloc", true)
 
     // ptr_copy(src: Ptr<T>, dst: Ptr<T>, count: Int) -> () / unsafe
     let copy_t_id = env.fresh_var_id()
@@ -1125,7 +1127,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    register_bound_builtin_callable(env, "ptr_copy")
+    register_bound_builtin_callable(env, "ptr_copy", false)
 
     // ptr_from_addr(a: Int) -> Ptr<T> (safe)
     let from_t_id = env.fresh_var_id()
@@ -1137,7 +1139,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    register_bound_builtin_callable(env, "ptr_from_addr")
+    register_bound_builtin_callable(env, "ptr_from_addr", false)
 
     // ---- Ptr<T> methods ----
 

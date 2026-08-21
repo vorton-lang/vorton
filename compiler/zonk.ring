@@ -359,6 +359,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 handlers: handlers.map(fn(h) {
                     HEffectHandler {
                         effect_name: h.effect_name, op_name: h.op_name,
+                        op_def_id: h.op_def_id,
                         params: h.params.map(fn(p) { zonk_param(ctx, p) }),
                         resume_binding: match h.resume_binding {
                             some(binding) => some(HPatternBinding {
@@ -381,8 +382,11 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 body: zonk_expr(ctx, body),
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::EffectOp { effect_name, op_name, args, .. } =>
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: args.map(fn(a) { zonk_expr(ctx, a) }), ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::EffectOp { effect_name, op_name, op_def_id, args, .. } =>
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                op_def_id: op_def_id,
+                args: args.map(fn(a) { zonk_expr(ctx, a) }),
+                ty: z_ty, effects: z_eff, span: z_span },
         HExpr::RangeExpr { start, end, inclusive, .. } =>
             HExpr::RangeExpr { start: zonk_expr(ctx, start), end: zonk_expr(ctx, end), inclusive: inclusive, ty: z_ty, effects: z_eff, span: z_span },
         HExpr::ListLit { elements, .. } =>

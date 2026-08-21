@@ -1139,6 +1139,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 let h_body = anf_block_expr(h.body, externs, counter)
                 new_handlers.push(HEffectHandler {
                     effect_name: h.effect_name, op_name: h.op_name,
+                    op_def_id: h.op_def_id,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
@@ -1155,7 +1156,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, op_def_id,
+                          args, ty, effects, span } => {
             // B-104 D1 Stage 2 — EFFECT-OP ARG position (closes the W1-era
             // conservative hold-out).  Args are BORROW-passed to the handler
             // closure (gen_effect_op → gen_closure_call; closure params are
@@ -1177,7 +1179,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             //     never released).
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(anf_operand(a, hoists, externs, counter)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args,
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                op_def_id: op_def_id, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -2794,6 +2797,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 let h_body = rc_block_root(h.body, true, [], boxed, externs, drop_types, gensym, 0 - 1)
                 new_handlers.push(HEffectHandler {
                     effect_name: h.effect_name, op_name: h.op_name,
+                    op_def_id: h.op_def_id,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
@@ -2816,12 +2820,14 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, op_def_id,
+                          args, ty, effects, span } => {
             // Effect-op args: treat like ordinary call args — borrow (the handler
             // closure receives them; full effect-arg ownership is B-096 scope).
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(rc_expr(a, false, owned, boxed, externs, drop_types, gensym, loop_base)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args,
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                op_def_id: op_def_id, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 

@@ -1,7 +1,9 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant, RecordField,
-    OwnershipMetadata, INT, effects_match_kind, nominal_display_name,
+    OwnershipMetadata, CallableTransferLevel,
+    INT, effects_match_kind, nominal_display_name,
     CALLABLE_UNKNOWN, fresh_ownership_term, with_callable_ownership_term,
-    record_shadow_callable, replace_shadow_callable,
+    record_shadow_callable_with_transfer_levels,
+    replace_shadow_callable_with_transfer_levels,
     new_ownership_metadata}
 use union_find::{UnionFind, uf_find, uf_lookup}
 use ast::{Span, EffectExpr, TypeParam, DeriveAttribute}
@@ -274,24 +276,49 @@ pub fn register_exact_shadow_callable_scheme(
     mut env: TypeEnv, scheme: TypeScheme, source: Int,
     producer_def_id: Int?, force_params: List<Bool>
 ) -> TypeScheme {
+    register_exact_shadow_callable_scheme_with_transfer_levels(
+        env, scheme, source, producer_def_id,
+        [CallableTransferLevel {
+            ownership_term: match scheme.ty {
+                Type::FnType { ownership_term, .. } => ownership_term,
+                _ => CALLABLE_UNKNOWN
+            },
+            force_params: force_params
+        }])
+}
+
+pub fn register_exact_shadow_callable_scheme_with_transfer_levels(
+    mut env: TypeEnv, scheme: TypeScheme, source: Int,
+    producer_def_id: Int?, transfer_levels: List<CallableTransferLevel>
+) -> TypeScheme {
     let def_id = match scheme.def_id {
         some(id) => id,
         none => panic("unreachable: shadow callable scheme has no exact DefId")
     }
     match scheme.ty {
         Type::FnType { params, ownership_term, .. } => {
-            if force_params.len() != params.len() {
-                panic("unreachable: shadow callable force arity mismatch")
-            }
             let term = if ownership_term == CALLABLE_UNKNOWN {
                 fresh_ownership_term(env.types.ownership_metadata)
             } else {
                 ownership_term
             }
             let ty = with_callable_ownership_term(scheme.ty, term)
-            record_shadow_callable(
+            let mut exact_levels: List<CallableTransferLevel> = []
+            let mut level_index = 0
+            for level in transfer_levels {
+                exact_levels.push(CallableTransferLevel {
+                    ownership_term: if level_index == 0 {
+                        term
+                    } else {
+                        level.ownership_term
+                    },
+                    force_params: level.force_params
+                })
+                level_index = level_index + 1
+            }
+            record_shadow_callable_with_transfer_levels(
                 env.types.ownership_metadata, def_id, term, source,
-                params.len(), producer_def_id, force_params)
+                params.len(), producer_def_id, exact_levels)
             TypeScheme { ..scheme, ty: ty }
         },
         _ => panic("unreachable: shadow callable scheme is not a function")
@@ -302,19 +329,29 @@ pub fn replace_exact_shadow_callable_scheme(
     mut env: TypeEnv, scheme: TypeScheme, ownership_term: Int,
     source: Int, producer_def_id: Int?, force_params: List<Bool>
 ) -> TypeScheme {
+    replace_exact_shadow_callable_scheme_with_transfer_levels(
+        env, scheme, ownership_term, source, producer_def_id,
+        [CallableTransferLevel {
+            ownership_term: ownership_term,
+            force_params: force_params
+        }])
+}
+
+pub fn replace_exact_shadow_callable_scheme_with_transfer_levels(
+    mut env: TypeEnv, scheme: TypeScheme, ownership_term: Int,
+    source: Int, producer_def_id: Int?,
+    transfer_levels: List<CallableTransferLevel>
+) -> TypeScheme {
     let def_id = match scheme.def_id {
         some(id) => id,
         none => panic("unreachable: exact shadow override has no DefId")
     }
     match scheme.ty {
         Type::FnType { params, .. } => {
-            if params.len() != force_params.len() {
-                panic("unreachable: exact shadow override arity mismatch")
-            }
-            replace_shadow_callable(
+            replace_shadow_callable_with_transfer_levels(
                 env.types.ownership_metadata,
                 def_id, ownership_term, source,
-                params.len(), producer_def_id, force_params)
+                params.len(), producer_def_id, transfer_levels)
             TypeScheme {
                 ..scheme,
                 ty: with_callable_ownership_term(
