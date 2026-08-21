@@ -1,7 +1,5 @@
 use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam}
-use types::{Type, EffectRow, StructField, EnumVariant, RecordField,
-    OwnershipMetadata, PARAM_OWNERSHIP_UNKNOWN,
-    validate_shadow_ownership_metadata}
+use types::{Type, EffectRow, StructField, EnumVariant, RecordField}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
@@ -20,7 +18,6 @@ pub use builtin_methods::{CELL_METHODS, STR_METHODS, INT_METHODS, FLOAT_METHODS,
 pub const SYNTHETIC_DICT_DEF_ID_BASE: Int = 0 - 3000000000
 pub const SYNTHETIC_ANF_DEF_ID_BASE: Int = 0 - 4000000000
 pub const SYNTHETIC_RC_DEF_ID_BASE: Int = 0 - 5000000000
-pub const SYNTHETIC_CALLABLE_DEF_ID_BASE: Int = 0 - 2000000000
 pub const SYNTHETIC_DEF_ID_NAMESPACE_SIZE: Int = 1000000000
 
 pub fn synthetic_def_id(base: Int, ordinal: Int) -> Int {
@@ -33,12 +30,6 @@ pub fn synthetic_def_id(base: Int, ordinal: Int) -> Int {
 pub fn is_synthetic_dict_def_id(def_id: Int) -> Bool {
     def_id < SYNTHETIC_DICT_DEF_ID_BASE &&
         def_id > SYNTHETIC_DICT_DEF_ID_BASE -
-            SYNTHETIC_DEF_ID_NAMESPACE_SIZE
-}
-
-pub fn is_synthetic_callable_def_id(def_id: Int) -> Bool {
-    def_id < SYNTHETIC_CALLABLE_DEF_ID_BASE &&
-        def_id > SYNTHETIC_CALLABLE_DEF_ID_BASE -
             SYNTHETIC_DEF_ID_NAMESPACE_SIZE
 }
 
@@ -170,9 +161,7 @@ pub struct HParam {
     pub name: Str,
     pub ty: Type,
     pub def_id: Int?,
-    pub is_mutable: Bool,
-    // S1 shadow-only caller/callee mode.  Unknown is inert until activation.
-    pub ownership_mode: Int
+    pub is_mutable: Bool
 }
 
 // B-104 D4 (#151): dict evidence is FIRST-CLASS in HIR.  Three reference forms:
@@ -304,7 +293,7 @@ pub enum HExpr {
     Ident { name: Str, resolved_name: Str?, def_id: Int?, dict_closure_dicts: List<DictRef>?, ty: Type, effects: EffectRow, span: Span },
     BinOp { op: BinOp, left: HExpr, right: HExpr, eq_dispatch: TraitDispatch?, ord_dispatch: TraitDispatch?, ty: Type, effects: EffectRow, span: Span },
     UnaryOp { op: UnaryOp, operand: HExpr, ty: Type, effects: EffectRow, span: Span },
-    Call { callee: HExpr, callee_def_id: Int?, callable_result_def_id: Int?, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, ty: Type, effects: EffectRow, span: Span },
+    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, ty: Type, effects: EffectRow, span: Span },
     FieldAccess { receiver: HExpr, field: Str, ty: Type, effects: EffectRow, span: Span },
     StructLit { name: Str, type_args: List<Type>, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
     NamedVariantConstruct { enum_name: Str, variant_name: Str, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
@@ -314,7 +303,7 @@ pub enum HExpr {
     StringInterp { parts: List<HStringInterpPart>, ty: Type, effects: EffectRow, span: Span },
     TryCatch { body: HExpr, arms: List<HMatchArm>, ty: Type, effects: EffectRow, span: Span },
     HandleExpr { body: HExpr, handlers: List<HEffectHandler>, ty: Type, effects: EffectRow, span: Span },
-    Lambda { def_id: Int, params: List<HParam>, return_type: Type, body: HExpr, ty: Type, effects: EffectRow, span: Span },
+    Lambda { params: List<HParam>, return_type: Type, body: HExpr, ty: Type, effects: EffectRow, span: Span },
     EffectOp { effect_name: Str, op_name: Str, args: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
     RangeExpr { start: HExpr, end: HExpr, inclusive: Bool, ty: Type, effects: EffectRow, span: Span },
     ListLit { elements: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
@@ -383,7 +372,6 @@ pub struct HEnumVariant {
 
 pub struct HEffectOp {
     pub name: Str,
-    pub def_id: Int,
     pub params: List<HParam>,
     pub return_type: Type,
     pub has_default: Bool,
@@ -392,7 +380,6 @@ pub struct HEffectOp {
 
 pub struct HTraitMethod {
     pub name: Str,
-    pub def_id: Int,
     pub params: List<HParam>,
     pub return_type: Type,
     pub effects: EffectRow,
@@ -413,7 +400,6 @@ pub struct HAssocType {
 
 pub struct HSigMember {
     pub name: Str,
-    pub def_id: Int,
     pub fn_type: Type,
     pub span: Span
 }
@@ -496,9 +482,7 @@ pub struct HProgram {
     pub extern_type_names: Set<Str>,
     // B-002p1: types with user `impl Drop` — perceus skips dup (move semantics),
     // codegen calls user drop body in ring_drop_T, move checker prevents UAM.
-    pub drop_types: Set<Str>,
-    // S1 shadow-only; Perceus/verifier/codegen remain non-consumers.
-    pub ownership_metadata: OwnershipMetadata
+    pub drop_types: Set<Str>
 }
 
 // Definition identity is a cross-pass invariant.  Validate immediately after
@@ -507,7 +491,6 @@ pub struct HProgram {
 pub fn validate_hir_binder_def_ids(program: HProgram) {
     let mut seen: Set<Int> = set_new()
     validate_hir_decls(program.decls, seen)
-    validate_shadow_ownership_metadata(program.ownership_metadata)
 }
 
 struct HirValidationScope {
@@ -610,10 +593,6 @@ fn validate_hir_params(
     mut scope: HirValidationScope, label: Str
 ) {
     for param in params {
-        if param.ownership_mode < 0 ||
-           param.ownership_mode > PARAM_OWNERSHIP_UNKNOWN {
-            panic("HIR ${label} parameter '${param.name}' has invalid shadow ownership mode")
-        }
         let id = required_hir_def_id(
             param.def_id, "${label} parameter '${param.name}'")
         validate_hir_binder(seen, id,
@@ -820,16 +799,7 @@ fn validate_hir_expr(
         },
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
-        HExpr::Call { callee, callable_result_def_id, args, .. } => {
-            match callable_result_def_id {
-                some(id) => {
-                    if !is_synthetic_callable_def_id(id) {
-                        panic("HIR callable result is outside its synthetic DefId namespace")
-                    }
-                    validate_hir_binder(seen, id, "callable result")
-                },
-                none => {}
-            }
+        HExpr::Call { callee, args, .. } => {
             validate_hir_expr(callee, seen, scope)
             for arg in args { validate_hir_expr(arg, seen, scope) }
         },
@@ -896,11 +866,7 @@ fn validate_hir_expr(
                 pop_hir_validation_scope(scope)
             }
         },
-        HExpr::Lambda { def_id, params, body, .. } => {
-            if !is_synthetic_callable_def_id(def_id) {
-                panic("HIR lambda is outside its synthetic DefId namespace")
-            }
-            validate_hir_binder(seen, def_id, "lambda")
+        HExpr::Lambda { params, body, .. } => {
             push_hir_validation_scope(scope)
             validate_hir_params(params, seen, scope, "lambda")
             validate_hir_expr(body, seen, scope)
@@ -952,8 +918,6 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
             HDecl::Impl { methods, .. } => validate_hir_decls(methods, seen),
             HDecl::Effect { name, ops, .. } => {
                 for op in ops {
-                    validate_hir_binder(seen, op.def_id,
-                        "effect operation '${name}.${op.name}'")
                     match op.default_body {
                         some(body) => {
                             let mut scope = new_hir_validation_scope()
@@ -971,8 +935,6 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
             },
             HDecl::Trait { name, methods, .. } => {
                 for method in methods {
-                    validate_hir_binder(seen, method.def_id,
-                        "trait method '${name}.${method.name}'")
                     match method.body {
                         some(body) => {
                             let mut scope = new_hir_validation_scope()
@@ -996,14 +958,8 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
             HDecl::ModBlock { decls: inner, .. } =>
                 validate_hir_decls(inner, seen),
             HDecl::Struct { .. } | HDecl::Enum { .. } |
-            HDecl::ExternFn { .. } | HDecl::ExternType { .. } => {},
-            HDecl::Sig { name, members, .. } => {
-                for member in members {
-                    validate_hir_binder(seen, member.def_id,
-                        "sig member '${name}.${member.name}'")
-                }
-            },
-            HDecl::TypeAlias { .. } => {}
+            HDecl::ExternFn { .. } | HDecl::ExternType { .. } |
+            HDecl::TypeAlias { .. } | HDecl::Sig { .. } => {}
         }
     }
 }

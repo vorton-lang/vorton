@@ -66,8 +66,7 @@ pub fn lower_dicts(program: HProgram) -> HProgram {
         boxed_vars: program.boxed_vars,
         static_dicts: defs,
         extern_type_names: program.extern_type_names,
-        drop_types: program.drop_types,
-        ownership_metadata: program.ownership_metadata
+        drop_types: program.drop_types
     }
     validate_hir_binder_def_ids(lowered)
     lowered
@@ -176,8 +175,7 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                     some(b) => some(dl_expr(b, defs, seen, counter)),
                     none => none,
                 }
-                new_methods.push(HTraitMethod { name: tm.name, def_id: tm.def_id,
-                    params: tm.params,
+                new_methods.push(HTraitMethod { name: tm.name, params: tm.params,
                     return_type: tm.return_type, effects: tm.effects, has_default: tm.has_default, body: new_body })
             }
             HDecl::Trait { name: name, type_params: type_params, methods: new_methods,
@@ -195,8 +193,7 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                     none => none,
                 }
                 new_ops.push(HEffectOp {
-                    name: op.name, def_id: op.def_id,
-                    params: op.params, return_type: op.return_type,
+                    name: op.name, params: op.params, return_type: op.return_type,
                     has_default: op.has_default, default_body: new_default_body
                 })
             }
@@ -397,9 +394,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 ty: ty, effects: effects, span: span },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: dl_expr(operand, defs, seen, counter), ty: ty, effects: effects, span: span },
-        HExpr::Call { callee, callee_def_id, callable_result_def_id,
-                      args, type_args, resolved_dicts, dict_dispatch,
-                      ty, effects, span } => {
+        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, ty, effects, span } => {
             let new_callee = dl_expr(callee, defs, seen, counter)
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(dl_expr(a, defs, seen, counter)) }
@@ -408,10 +403,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             for dr in resolved_dicts {
                 new_dicts.push(dl_ref_dyn(dr, defs, seen, counter, lets, span))
             }
-            let call = HExpr::Call { callee: new_callee,
-                callee_def_id: callee_def_id,
-                callable_result_def_id: callable_result_def_id,
-                args: new_args, type_args: type_args,
+            let call = HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
                 resolved_dicts: new_dicts,
                 dict_dispatch: dl_dict_dispatch(dict_dispatch, defs, seen),
                 ty: ty, effects: effects, span: span }
@@ -490,9 +482,8 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             }
             HExpr::HandleExpr { body: dl_expr(body, defs, seen, counter), handlers: new_handlers, ty: ty, effects: effects, span: span }
         },
-        HExpr::Lambda { def_id, params, return_type, body, ty, effects, span } =>
-            HExpr::Lambda { def_id: def_id,
-                params: params, return_type: return_type,
+        HExpr::Lambda { params, return_type, body, ty, effects, span } =>
+            HExpr::Lambda { params: params, return_type: return_type,
                 body: dl_expr(body, defs, seen, counter), ty: ty, effects: effects, span: span },
         HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []

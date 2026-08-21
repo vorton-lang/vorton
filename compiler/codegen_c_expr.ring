@@ -13,8 +13,7 @@
 // Step 6 adds effect handlers (tail-resumptive + abort), try/catch and
 // default evidence — see the "Step 6" section below for the mechanism notes.
 //
-use types::{Type, EffectRow, EMPTY_ROW, type_to_builtin_name, BUILTIN_RANGE,
-    PARAM_OWNERSHIP_UNKNOWN}
+use types::{Type, EffectRow, EMPTY_ROW, type_to_builtin_name, BUILTIN_RANGE}
 use ast::{BinOp, UnaryOp, Pattern, LiteralValue, NamedPatternField, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
@@ -343,8 +342,7 @@ fn gen_c_extern_closure_wrapper(
         panic("C codegen: extern closure wrapper for '${name}' received ${dict_refs.len()} dicts")
     }
     let (param_types, return_type, fn_effects) = match ty {
-        Type::FnType { params, return_type, effects, .. } =>
-            (params, return_type, effects),
+        Type::FnType { params, return_type, effects } => (params, return_type, effects),
         _ => panic("C codegen: extern closure wrapper for non-function '${name}'"),
     }
 
@@ -374,9 +372,7 @@ fn gen_c_extern_closure_wrapper(
         dict_closure_dicts: none, ty: ty, effects: EMPTY_ROW, span: span
     }
     let result = gen_c_expr(ctx, HExpr::Call {
-        callee: synthetic_callee, callee_def_id: none,
-        callable_result_def_id: none,
-        args: synthetic_args, type_args: [],
+        callee: synthetic_callee, args: synthetic_args, type_args: [],
         resolved_dicts: [], dict_dispatch: none, ty: return_type,
         effects: fn_effects, span: span
     })
@@ -1324,8 +1320,7 @@ fn extend_c_handler_capture_params(
         some(binding) => {
             extended.push(HParam {
                 name: binding.name, ty: binding.ty,
-                def_id: some(binding.def_id), is_mutable: false,
-                ownership_mode: PARAM_OWNERSHIP_UNKNOWN
+                def_id: some(binding.def_id), is_mutable: false
             })
         },
         none => {},

@@ -54,7 +54,7 @@ pub fn occurs_in(var_id: Int, t: Type, subst: UnionFind) -> Bool {
                 none => false
             }
         },
-        Type::FnType { params, return_type, effects, .. } =>
+        Type::FnType { params, return_type, effects } =>
             params.any(fn(p) { occurs_in(var_id, p, subst) }) ||
             occurs_in(var_id, return_type, subst) ||
             occurs_in_row(var_id, effects, subst),
@@ -499,8 +499,8 @@ pub fn unify(t1: Type, t2: Type, subst: UnionFind, mut env: TypeEnv) -> UnionFin
         (Type::UnitType, Type::UnitType) => subst,
 
         // Function types
-        (Type::FnType { params: pa, return_type: ra, effects: ea, .. },
-         Type::FnType { params: pb, return_type: rb, effects: eb, .. }) => {
+        (Type::FnType { params: pa, return_type: ra, effects: ea },
+         Type::FnType { params: pb, return_type: rb, effects: eb }) => {
             if pa.len() != pb.len() {
                 unify_error(t1, t2, some("parameter count mismatch: ${pa.len()} vs ${pb.len()}"))
             }

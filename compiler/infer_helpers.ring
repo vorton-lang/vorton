@@ -1,7 +1,7 @@
 use types::{Type, Effect, EffectRow,
     INT, FLOAT, STR, BOOL, UNIT, NEVER, ANY, EMPTY_ROW,
     type_to_string, nominal_display_name, types_equal,
-    type_to_builtin_name, CALLABLE_UNKNOWN, CALLABLE_BORROW_OWNED}
+    type_to_builtin_name}
 use ast::{Expr, Pattern, Span, NamedPatternField}
 use hir::{HExpr, HStmt, TraitDispatch, DictRef, ValueBindingKind,
     trait_dict_name, trait_bound_param_name,
@@ -14,7 +14,7 @@ use env::{TypeEnv, TypeScheme,
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     type_error, unify_at, resolve_relative_qualifier,
     resolve_dict_ref_for_type, resolve_dicts_from_scheme, variant_ctor_origin,
-    value_binding_kind, shadow_callable_result}
+    value_binding_kind}
 
 
 pub struct MethodLookupResult {
@@ -705,7 +705,7 @@ pub fn is_bounded_direct_callable_ident(ctx: InferCtx, expr: HExpr) -> Bool {
     }
 }
 
-pub fn resolve_value_ident(mut ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
+pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
     let metadata = resolve_callee_metadata(ctx, harg)
     match harg {
         HExpr::Ident { name, resolved_name, def_id, dict_closure_dicts, ty, effects, span } => {
@@ -720,8 +720,7 @@ pub fn resolve_value_ident(mut ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExp
             match kind {
                 ValueBindingKind::ConstGetter => {
                     let getter_ty = Type::FnType {
-                        params: [], return_type: ty, effects: EMPTY_ROW,
-                        ownership_term: CALLABLE_BORROW_OWNED
+                        params: [], return_type: ty, effects: EMPTY_ROW
                     }
                     let getter = HExpr::Ident {
                         name: name, resolved_name: none, def_id: def_id,
@@ -730,15 +729,10 @@ pub fn resolve_value_ident(mut ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExp
                         dict_closure_dicts: some([]), ty: getter_ty,
                         effects: EMPTY_ROW, span: span
                     }
-                    let callable_result = shadow_callable_result(
-                        ctx, ty, def_id)
                     return HExpr::Call {
-                        callee: getter, callee_def_id: def_id,
-                        callable_result_def_id: callable_result.1,
-                        args: [], type_args: [],
+                        callee: getter, args: [], type_args: [],
                         resolved_dicts: [], dict_dispatch: none,
-                        ty: callable_result.0,
-                        effects: effects, span: span
+                        ty: ty, effects: effects, span: span
                     }
                 },
                 _ => {}
@@ -935,11 +929,8 @@ pub fn lookup_impl_method(mut ctx: InferCtx, type_name: Str, method: Str) -> Met
     }
 }
 
-pub fn lookup_trait_method(
-    mut ctx: InferCtx, type_name: Str, method: Str, span: Span
-) -> MethodLookupResult {
+pub fn lookup_trait_method(mut ctx: InferCtx, type_name: Str, method: Str, span: Span) -> Type? {
     let mut found_type: Type? = none
-    let mut found_scheme: TypeScheme? = none
     let mut found_trait_name: Str? = none
     match ctx.env.trait_reg.trait_impls.get(type_name) {
         some(type_impls) => {
@@ -957,20 +948,10 @@ pub fn lookup_trait_method(
                                         let _ = type_error(ctx.sink, E0504,
                                             "Ambiguous method '${method}' on '${type_display}': found in trait '${prev_display}' and '${trait_display}'",
                                             span, DiagnosticContext::OtherContext { detail: some("disambiguate by calling TraitName::${method}") })
-                                        return MethodLookupResult {
-                                            method_type: found_type,
-                                            method_scheme: found_scheme
-                                        }
+                                        return found_type
                                     },
                                     none => {
-                                        let scheme = TypeScheme {
-                                            ty: found_method.ty,
-                                            type_vars: trait_def.type_param_vars,
-                                            bounds: [],
-                                            def_id: some(found_method.def_id)
-                                        }
-                                        found_type = some(ctx.env.instantiate(scheme))
-                                        found_scheme = some(scheme)
+                                        found_type = some(ctx.env.instantiate(TypeScheme { ty: found_method.ty, type_vars: trait_def.type_param_vars, bounds: [], def_id: none }))
                                         found_trait_name = some(impl_entry.trait_name)
                                     }
                                 }
@@ -984,10 +965,7 @@ pub fn lookup_trait_method(
         },
         none => {}
     }
-    MethodLookupResult {
-        method_type: found_type,
-        method_scheme: found_scheme
-    }
+    found_type
 }
 
 // ============================================================

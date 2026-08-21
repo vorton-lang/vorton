@@ -1,18 +1,5 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant,
-    CallableOwnershipDescriptor,
-    EMPTY_ROW, effects_same_kind, type_to_builtin_name, type_to_string,
-    effect_to_string, nominal_display_name,
-    CALLABLE_UNKNOWN, CALLABLE_BORROW_OWNED,
-    CALLABLE_FIRST_MUT_BORROW_OWNED, CALLABLE_MOVE_OWNED,
-    CALLABLE_MOVE_BORROW_OWNED, CALLABLE_MUT_BORROW_MOVE_OWNED,
-    CALLABLE_BORROW_MUT_BORROW_OWNED, CALLABLE_SLOT_MOVE_OWNED,
-    CALLABLE_SOURCE_DECLARED, CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-    CALLABLE_SOURCE_BUILTIN, CALLABLE_RESULT_ROLE_NONE,
-    CALLABLE_RESULT_ROLE_FRESH_OWNED_SLOT,
-    PARAM_OWNERSHIP_BORROW, PARAM_OWNERSHIP_MUT_BORROW,
-    RETURN_OWNERSHIP_OWNED, fresh_ownership_term,
-    normalize_callable_ownership_descriptor,
-    record_shadow_callable}
+    EMPTY_ROW, effects_same_kind, type_to_builtin_name, type_to_string, effect_to_string, nominal_display_name}
 use ast::{Decl, Span, TypeParam, Param, TypeExpr, EffectOpDecl, StructFieldDecl,
     EnumVariantDecl, NamedEnumField, TypeBound, span_zero, EffectExpr, SigMember,
     UseDecl, UseImport, DeriveAttribute}
@@ -20,8 +7,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     TraitDef, TraitMethodDef, ImplEntry, ImplDictBound, TypeAliasDef, FnBound, SigDef,
     EffectAliasDef, AssocTypeDef, MethodOrigin, mono, apply_subst, apply_subst_effect_map,
     apply_subst_map, add_impl, has_impl, find_impl, impl_origin, impl_decl_origin,
-    install_method_scheme, specialize_trait_method_scheme, build_type_var_map,
-    register_exact_shadow_callable_scheme}
+    install_method_scheme, specialize_trait_method_scheme, build_type_var_map}
 use diagnostics::{DiagnosticContext}
 use codes::{E0207, E0406, E0501, E0502, E0503, E0504, E0505, E0506, E0507, E0508, E0509, E0510, E0511, E0513, E0514}
 use hir::{compare_by_first, module_item_identity, variant_ctor_name, ValueBindingKind}
@@ -32,148 +18,6 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     enter_project_root_frame, enter_project_child_frame,
     refresh_project_namespace_frame, exit_project_namespace_frame}
 use infer_helpers::{is_value_type}
-
-fn shadow_param_mode(param: Param) -> Int {
-    if param.is_mutable {
-        PARAM_OWNERSHIP_MUT_BORROW
-    } else {
-        PARAM_OWNERSHIP_BORROW
-    }
-}
-
-fn shadow_param_modes(params: List<Param>) -> List<Int> {
-    let mut modes: List<Int> = []
-    for param in params { modes.push(shadow_param_mode(param)) }
-    modes
-}
-
-fn interface_callable_term(params: List<Param>) -> Int {
-    let modes = shadow_param_modes(params)
-    let mut mut_index = 0 - 1
-    let mut mut_count = 0
-    let mut index = 0
-    for mode in modes {
-        if mode == PARAM_OWNERSHIP_MUT_BORROW {
-            mut_index = index
-            mut_count = mut_count + 1
-        }
-        index = index + 1
-    }
-    if mut_count == 0 { return CALLABLE_BORROW_OWNED }
-    if mut_count == 1 && mut_index == 0 {
-        return CALLABLE_FIRST_MUT_BORROW_OWNED
-    }
-    if mut_count == 1 && mut_index == 1 && params.len() <= 3 {
-        return CALLABLE_BORROW_MUT_BORROW_OWNED
-    }
-    CALLABLE_UNKNOWN
-}
-
-fn registered_interface_callable_term(
-    mut ctx: InferCtx, params: List<Param>
-) -> Int {
-    let compact = interface_callable_term(params)
-    if compact != CALLABLE_UNKNOWN { return compact }
-    let term = fresh_ownership_term(ctx.env.types.ownership_metadata)
-    ctx.env.types.ownership_metadata.callable_descriptors.insert(
-        term,
-        normalize_callable_ownership_descriptor(
-            CallableOwnershipDescriptor {
-                prefix_params: shadow_param_modes(params),
-                rest_param: -1,
-                result: RETURN_OWNERSHIP_OWNED
-            }))
-    term
-}
-
-// Called only after checker::load_prelude has resolved the final local DefId
-// and attached its unspellable prelude identity.  Later phases never inspect
-// these raw ABI spellings.
-pub fn exact_prelude_extern_ownership(
-    name: Str, params: List<Param>
-) -> Int {
-    if name == "ring_slot_alloc" { return CALLABLE_BORROW_OWNED }
-    if name == "ring_slot_dealloc" { return CALLABLE_MOVE_BORROW_OWNED }
-    if name == "ring_slot_read" { return CALLABLE_BORROW_OWNED }
-    if name == "ring_slot_take" {
-        return CALLABLE_FIRST_MUT_BORROW_OWNED
-    }
-    if name == "ring_slot_write" {
-        return CALLABLE_MUT_BORROW_MOVE_OWNED
-    }
-    if name == "ring_slot_replace" || name == "ring_slot_swap" ||
-       name == "ring_slot_drop" {
-        return CALLABLE_FIRST_MUT_BORROW_OWNED
-    }
-    if name == "ring_slot_move" { return CALLABLE_SLOT_MOVE_OWNED }
-    interface_callable_term(params)
-}
-
-pub fn exact_prelude_extern_source(name: Str) -> Int {
-    if name == "ring_slot_alloc" || name == "ring_slot_dealloc" ||
-       name == "ring_slot_read" || name == "ring_slot_take" ||
-       name == "ring_slot_write" || name == "ring_slot_replace" ||
-       name == "ring_slot_swap" || name == "ring_slot_move" ||
-       name == "ring_slot_drop" {
-        CALLABLE_SOURCE_BUILTIN
-    } else {
-        CALLABLE_SOURCE_DECLARED
-    }
-}
-
-pub fn exact_prelude_extern_result_role(name: Str) -> Int {
-    if name == "ring_slot_read" || name == "ring_slot_take" {
-        CALLABLE_RESULT_ROLE_FRESH_OWNED_SLOT
-    } else {
-        CALLABLE_RESULT_ROLE_NONE
-    }
-}
-
-// S1 has no source Move syntax.  The vector is nevertheless exact and keeps
-// caller-declared FORCE distinct from a future body-inferred OWNING edge.
-fn interface_force_params(params: List<Param>) -> List<Bool> {
-    let mut result: List<Bool> = []
-    for _param in params { result.push(false) }
-    result
-}
-
-fn owning_force_params(arity: Int) -> List<Bool> {
-    let mut result: List<Bool> = []
-    let mut index = 0
-    while index < arity {
-        result.push(false)
-        index = index + 1
-    }
-    result
-}
-
-// Establish an identity only for callable registries which had no value
-// binding to allocate one (trait/effect/sig/impl members).  Existing DefIds
-// are always reused; this never localizes or replaces an identity by name.
-fn establish_shadow_callable_scheme(
-    mut ctx: InferCtx, scheme: TypeScheme, source: Int,
-    producer_def_id: Int?, force_params: List<Bool>
-) -> TypeScheme {
-    let exact = match scheme.def_id {
-        some(_) => scheme,
-        none => TypeScheme { ..scheme, def_id: some(ctx.env.fresh_def_id()) }
-    }
-    register_exact_shadow_callable_scheme(
-        ctx.env, exact, source, producer_def_id, force_params)
-}
-
-fn register_bound_shadow_callable(
-    mut ctx: InferCtx, name: Str, source: Int,
-    producer_def_id: Int?, force_params: List<Bool>
-) {
-    let scheme = match ctx.env.lookup(name) {
-        some(value) => value,
-        none => panic("unreachable: bound shadow callable is missing")
-    }
-    let exact = register_exact_shadow_callable_scheme(
-        ctx.env, scheme, source, producer_def_id, force_params)
-    ctx.env.rebind(name, exact)
-}
 
 // ============================================================
 // Public entry points
@@ -1607,17 +1451,12 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                 } else if variant.fields.len() == 0 {
                     bind_variant_constructor(ctx, binding_name, enum_type, tv_ids)
                 } else {
-                    let fn_type = Type::FnType { params: variant.fields,
-                        return_type: enum_type, effects: EMPTY_ROW,
-                        ownership_term: CALLABLE_MOVE_OWNED }
+                    let fn_type = Type::FnType { params: variant.fields, return_type: enum_type, effects: EMPTY_ROW }
                     if tv_ids.len() > 0 {
                         ctx.env.bind(binding_name, TypeScheme { ty: fn_type, type_vars: tv_ids, bounds: [], def_id: none })
                     } else {
                         ctx.env.bind_mono(binding_name, fn_type)
                     }
-                    register_bound_shadow_callable(
-                        ctx, binding_name, CALLABLE_SOURCE_DECLARED, none,
-                        owning_force_params(variant.fields.len()))
                 }
                 if !project_active {
                     // The single-file pipeline still binds the historical leaf
@@ -1625,26 +1464,12 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                     // payload without changing legacy visibility.
                     match ctx.env.lookup(variant.name) {
                         some(scheme) => {
-                            let producer_def_id = scheme.def_id
-                            let arity = match scheme.ty {
-                                Type::FnType { params, .. } => params.len(),
-                                _ => 0
-                            }
                             ctx.env.bind(ctor_payload, TypeScheme {
                                 ty: scheme.ty,
                                 type_vars: scheme.type_vars,
                                 bounds: scheme.bounds,
                                 def_id: none
                             })
-                            match scheme.ty {
-                                Type::FnType { .. } =>
-                                    register_bound_shadow_callable(
-                                        ctx, ctor_payload,
-                                        CALLABLE_SOURCE_DECLARED,
-                                        producer_def_id,
-                                        owning_force_params(arity)),
-                                _ => {}
-                            }
                         },
                         none => {}
                     }
@@ -1702,26 +1527,7 @@ fn register_effect(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, o
         }
         let ret = resolve_type_expr(ctx, op.return_type)
         let op_has_default = op.body.is_some()
-        let exact = establish_shadow_callable_scheme(ctx, TypeScheme {
-            ty: Type::FnType {
-                params: param_types, return_type: ret,
-                effects: EMPTY_ROW,
-                ownership_term: registered_interface_callable_term(
-                    ctx, op.params)
-            },
-            type_vars: tp_vars, bounds: [], def_id: none
-        }, CALLABLE_SOURCE_DECLARED, none,
-            interface_force_params(op.params))
-        let def_id = exact.def_id.unwrap_or(-1)
-        let exact_parts = match exact.ty {
-            Type::FnType { params, return_type, .. } => (params, return_type),
-            _ => panic("unreachable: effect op shadow is not callable")
-        }
-        effect_ops.push(EffectOpDef {
-            name: op.name, def_id: def_id,
-            params: exact_parts.0, return_type: exact_parts.1,
-            has_default: op_has_default
-        })
+        effect_ops.push(EffectOpDef { name: op.name, params: param_types, return_type: ret, has_default: op_has_default })
     }
     let mut all_defaults = true
     for eop in effect_ops {
@@ -1898,23 +1704,8 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
                     some(de) => resolve_declared_effects(ctx, de),
                     none => EMPTY_ROW
                 }
-                let fn_type = Type::FnType { params: param_types,
-                    return_type: ret, effects: method_effects,
-                    ownership_term: registered_interface_callable_term(
-                        ctx, params) }
-                let exact = establish_shadow_callable_scheme(ctx,
-                    TypeScheme {
-                        ty: fn_type, type_vars: tp_vars,
-                        bounds: [], def_id: none
-                    }, CALLABLE_SOURCE_DECLARED, none,
-                    interface_force_params(params))
-                trait_methods.push(TraitMethodDef {
-                    name: mname,
-                    def_id: exact.def_id.unwrap_or(-1),
-                    ty: exact.ty, has_default: !is_abstract,
-                    param_mutabilities: param_muts,
-                    method_type_params: method_tps
-                })
+                let fn_type = Type::FnType { params: param_types, return_type: ret, effects: method_effects }
+                trait_methods.push(TraitMethodDef { name: mname, ty: fn_type, has_default: !is_abstract, param_mutabilities: param_muts, method_type_params: method_tps })
             },
             _ => {}
         }
@@ -2192,22 +1983,13 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
                     for trait_method in trait_def.methods {
                         if trait_method.has_default &&
                            !impl_method_names.contains(trait_method.name) {
-                            let specialized = specialize_trait_method_scheme(
-                                trait_def, trait_method, impl_self_type,
-                                trait_type_args, impl_tv_ids,
-                                assoc_type_map,
-                                impl_bounds.scheme_bounds)
-                            let arity = match specialized.ty {
-                                Type::FnType { params, .. } => params.len(),
-                                _ => panic("unreachable: trait default is not callable")
-                            }
                             exact_method_schemes.insert(
                                 trait_method.name,
-                                establish_shadow_callable_scheme(
-                                    ctx, specialized,
-                                    CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-                                    some(trait_method.def_id),
-                                    owning_force_params(arity)))
+                                specialize_trait_method_scheme(
+                                    trait_def, trait_method, impl_self_type,
+                                    trait_type_args, impl_tv_ids,
+                                    assoc_type_map,
+                                    impl_bounds.scheme_bounds))
                         }
                     }
 
@@ -2325,15 +2107,12 @@ fn register_impl_method(
         some(de) => resolve_declared_effects(ctx, de),
         none => infer_hof_effect_row(param_types)
     }
-    let fn_type = Type::FnType { params: param_types, return_type: ret,
-        effects: impl_m_effects,
-        ownership_term: registered_interface_callable_term(ctx, params) }
+    let fn_type = Type::FnType { params: param_types, return_type: ret, effects: impl_m_effects }
     collect_effect_tail_vars(fn_type, all_tvs)
-    let scheme = establish_shadow_callable_scheme(ctx, TypeScheme {
+    let scheme = TypeScheme {
         ty: fn_type, type_vars: all_tvs,
         bounds: impl_scheme_bounds, def_id: none
-    }, CALLABLE_SOURCE_DECLARED, none,
-        interface_force_params(params))
+    }
 
     // Track mut self methods
     if params.len() > 0 {
@@ -2424,7 +2203,7 @@ fn specialize_delegate_method_scheme(
 ) -> TypeScheme {
     let mapped_type = apply_subst_map(field_var_map, field_scheme.ty)
     let specialized_type = match mapped_type {
-        Type::FnType { params, return_type, effects, ownership_term } => {
+        Type::FnType { params, return_type, effects } => {
             let mut forwarded_params: List<Type> = []
             let mut first = true
             for param in params {
@@ -2438,8 +2217,7 @@ fn specialize_delegate_method_scheme(
             Type::FnType {
                 params: forwarded_params,
                 return_type: return_type,
-                effects: effects,
-                ownership_term: ownership_term
+                effects: effects
             }
         },
         _ => mapped_type
@@ -2818,20 +2596,11 @@ fn register_delegate_traits(
                                     }
                                     match resolved_method_scheme {
                                         some(field_scheme) => {
-                                            let specialized = specialize_delegate_method_scheme(
+                                            let scheme = specialize_delegate_method_scheme(
                                                 ctx, field_scheme, field_var_map,
                                                 self_type, impl_tv_ids,
                                                 impl_scheme_bounds,
                                                 wrapper_fn_bounds, span)
-                                            let arity = match specialized.ty {
-                                                Type::FnType { params, .. } => params.len(),
-                                                _ => panic("unreachable: delegated method is not callable")
-                                            }
-                                            let scheme = establish_shadow_callable_scheme(
-                                                ctx, specialized,
-                                                CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-                                                field_scheme.def_id,
-                                                owning_force_params(arity))
                                             exact_method_schemes.insert(tm.name, scheme)
                                             let _ = install_method_scheme(
                                                 ctx.env.trait_reg, ctx.sink,
@@ -2946,7 +2715,7 @@ fn expand_effect_exprs(mut ctx: InferCtx, decl_effects: List<EffectExpr>, mut ex
 
 fn collect_effect_tail_vars(ty: Type, mut vars: List<Int>) {
     match ty {
-        Type::FnType { params, return_type, effects, .. } => {
+        Type::FnType { params, return_type, effects } => {
             match effects.tail {
                 some(t_id) => {
                     if !vars.contains(t_id) { vars.push(t_id) }
@@ -3127,9 +2896,7 @@ fn register_fn_common(
         some(de) => resolve_declared_effects(ctx, de),
         none => infer_hof_effect_row(param_types)
     }
-    let fn_type = Type::FnType { params: param_types, return_type: ret,
-        effects: effects,
-        ownership_term: registered_interface_callable_term(ctx, params) }
+    let fn_type = Type::FnType { params: param_types, return_type: ret, effects: effects }
     collect_effect_tail_vars(fn_type, type_vars)
 
     let mut fn_bounds_list: List<FnBound> = []
@@ -3206,9 +2973,6 @@ fn register_fn_common(
     } else {
         ctx.env.bind_mono(name, fn_type)
     }
-    register_bound_shadow_callable(
-        ctx, name, CALLABLE_SOURCE_DECLARED, none,
-        interface_force_params(params))
     let callable_kind = if track_fn_bounds {
         ValueBindingKind::DirectCallable
     } else {
@@ -3216,10 +2980,7 @@ fn register_fn_common(
     }
     record_value_binding_kind(ctx, name, callable_kind)
     match ctx.env.lookup(name) {
-        some(s) => match s.def_id {
-            some(did) => ctx.env.record_def_span(did, span),
-            none => {}
-        },
+        some(s) => match s.def_id { some(did) => ctx.env.record_def_span(did, span), none => {} },
         none => {}
     }
 }
@@ -3294,19 +3055,7 @@ fn register_const(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, span
         }
     }
     match ctx.env.lookup(name) {
-        some(s) => match s.def_id {
-            some(did) => {
-                ctx.env.record_def_span(did, span)
-                // A const DefId names its zero-argument getter.  A callable
-                // stored value receives a distinct result identity at each
-                // exact getter Call in final zonk.
-                record_shadow_callable(
-                    ctx.env.types.ownership_metadata,
-                    did, CALLABLE_BORROW_OWNED,
-                    CALLABLE_SOURCE_DECLARED, 0, none, [])
-            },
-            none => {}
-        },
+        some(s) => match s.def_id { some(did) => ctx.env.record_def_span(did, span), none => {} },
         none => {}
     }
     record_value_binding_kind(ctx, name, ValueBindingKind::ConstGetter)
@@ -3334,16 +3083,8 @@ fn register_sig(mut ctx: InferCtx, name: Str, members: List<SigMember>, is_pub: 
             some(rt) => resolve_type_expr(ctx, rt),
             none => ctx.env.fresh_var()
         }
-        let fn_type = Type::FnType { params: param_types, return_type: ret,
-            effects: EMPTY_ROW,
-            ownership_term: registered_interface_callable_term(
-                ctx, m.params) }
-        sig_members.insert(m.name, establish_shadow_callable_scheme(ctx,
-            TypeScheme {
-                ty: fn_type, type_vars: type_vars,
-                bounds: [], def_id: none
-            }, CALLABLE_SOURCE_CONSERVATIVE_INTERFACE, none,
-            interface_force_params(m.params)))
+        let fn_type = Type::FnType { params: param_types, return_type: ret, effects: EMPTY_ROW }
+        sig_members.insert(m.name, TypeScheme { ty: fn_type, type_vars: type_vars, bounds: [], def_id: none })
         ctx.type_param_scope = msaved
     }
     ctx.type_param_scope = saved

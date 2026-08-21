@@ -1,4 +1,4 @@
-use types::{Type, EnumVariant, OwnershipMetadata}
+use types::{Type, EnumVariant, EMPTY_ROW}
 use ast::{Program, Decl, UseDecl, UseImport, NamedImport}
 use hir::{HProgram, HDecl, ValueBindingKind, ModuleImplFact, compare_by_first,
     variant_ctor_name}
@@ -14,9 +14,6 @@ use infer_register::{prefix_decl_name, module_prefix_decl_name}
 pub struct ModuleExports {
     pub module_key: Str,
     pub module_prefix: Str,
-    // Exact exported DefIds remain foreign keys in this immutable snapshot;
-    // checker hydration creates/reuses one local identity per canonical origin.
-    pub ownership_metadata: OwnershipMetadata,
     pub values: Map<Str, TypeScheme>,
     pub value_origins: Map<Str, Str>,
     // Exact registration kind for public value bindings. Absence is a local
@@ -124,18 +121,26 @@ fn declared_value_kind(kinds: Map<Int, ValueBindingKind>, scheme: TypeScheme) ->
     }
 }
 
-// Export an enum constructor from its canonical registration identity. Looking
-// up the variant leaf is unsound because a same-spelled local may shadow it.
-// The immutable export keeps this module's exact DefId; dependency hydration
-// later allocates one consumer-local DefId with a canonical producer edge.
-fn variant_ctor_scheme(
-    env: TypeEnv, def: EnumDef, variant: EnumVariant
-) -> TypeScheme {
-    let exact_identity = variant_ctor_name(def.name, variant.name)
-    match env.lookup(exact_identity) {
-        some(scheme) => scheme,
-        none => panic(
-            "unreachable: canonical enum constructor scheme is missing")
+// Reconstruct an enum constructor from its canonical definition. Looking up the
+// variant leaf in the value environment is unsound: a later module-local value
+// with the same spelling may shadow that leaf while the public enum must still
+// export its own constructor. Consumers allocate a fresh local DefId, so export
+// schemes deliberately carry none here.
+fn variant_ctor_scheme(def: EnumDef, variant: EnumVariant) -> TypeScheme {
+    let enum_params = def.type_param_vars.map(fn(id) {
+        Type::TypeVar { id: id, name: none }
+    })
+    let enum_type = Type::EnumType { name: def.name, type_params: enum_params }
+    let ctor_type = if variant.field_names.is_some() || variant.fields.len() == 0 {
+        enum_type
+    } else {
+        Type::FnType { params: variant.fields, return_type: enum_type, effects: EMPTY_ROW }
+    }
+    TypeScheme {
+        ty: ctor_type,
+        type_vars: def.type_param_vars,
+        bounds: [],
+        def_id: none
     }
 }
 
@@ -271,7 +276,7 @@ fn copy_inline_export(
             // gives inference an exact lookup; the legacy leaf binding keeps
             // named enum imports compatible when it is not already occupied.
             for variant in def.variants {
-                let ctor_scheme = variant_ctor_scheme(env, def, variant)
+                let ctor_scheme = variant_ctor_scheme(def, variant)
                 let ctor_origin = variant_ctor_name(def.name, variant.name)
                 let facade_ctor = "${local}::${variant.name}"
                 values.insert(facade_ctor, ctor_scheme)
@@ -384,7 +389,7 @@ fn extract_decl_export(
                         // same-spelled private fn/const. Export the enum's exact
                         // constructor scheme and identity from EnumDef instead.
                         for v in edef.variants {
-                            let ctor_scheme = variant_ctor_scheme(env, edef, v)
+                            let ctor_scheme = variant_ctor_scheme(edef, v)
                             let ctor_origin = variant_ctor_name(edef.name, v.name)
                             values.insert(v.name, ctor_scheme)
                             value_origins.insert(v.name, ctor_origin)
@@ -543,8 +548,7 @@ fn extract_decl_export(
 // ============================================================
 
 fn copy_exported_name(
-    source: ModuleExports, env: TypeEnv,
-    source_name: Str, local_name: Str,
+    source: ModuleExports, source_name: Str, local_name: Str,
     mut values: Map<Str, TypeScheme>, mut value_origins: Map<Str, Str>,
     mut value_binding_kinds: Map<Str, ValueBindingKind>,
     mut variant_ctor_origins: Map<Str, Str>,
@@ -558,20 +562,12 @@ fn copy_exported_name(
     mut inherent_methods: Map<Str, List<Str>>, mut mut_methods: Map<Str, Set<Str>>
 ) {
     match source.values.get(source_name) {
-        some(_) => {
-            let origin = match source.value_origins.get(source_name) {
-                some(value) => value,
-                none => panic("unreachable: re-exported value has no canonical origin")
+        some(scheme) => {
+            values.insert(local_name, scheme)
+            match source.value_origins.get(source_name) {
+                some(origin) => { value_origins.insert(local_name, origin) },
+                none => {}
             }
-            // Dependency hydration already established one checker-local
-            // exact scheme for the canonical origin.  Export that local DefId
-            // so this module's OwnershipMetadata owns every published key.
-            let exact_scheme = match env.lookup(origin) {
-                some(value) => value,
-                none => panic("unreachable: re-exported value origin is not hydrated")
-            }
-            values.insert(local_name, exact_scheme)
-            value_origins.insert(local_name, origin)
             match source.value_binding_kinds.get(source_name) {
                 some(kind) => { value_binding_kinds.insert(local_name, kind) },
                 none => {}
@@ -585,76 +581,40 @@ fn copy_exported_name(
     }
     match source.types.get(source_name) {
         some(def) => {
+            types.insert(local_name, def)
             let canonical_type = match def {
-                TypeDef::StructDef_(sdef) => {
-                    let exact = if sdef.is_extern {
-                        env.types.extern_structs.get(sdef.name)
-                    } else {
-                        env.types.structs.get(sdef.name)
-                    }
-                    match exact {
-                        some(value) => types.insert(
-                            local_name, TypeDef::StructDef_(value)),
-                        none => panic(
-                            "unreachable: re-exported struct is not hydrated")
-                    }
-                    sdef.name
-                },
-                TypeDef::EnumDef_(edef) => {
-                    match env.types.enums.get(edef.name) {
-                        some(value) => types.insert(
-                            local_name, TypeDef::EnumDef_(value)),
-                        none => panic(
-                            "unreachable: re-exported enum is not hydrated")
-                    }
-                    edef.name
-                }
+                TypeDef::StructDef_(sdef) => sdef.name,
+                TypeDef::EnumDef_(edef) => edef.name
             }
-            match env.trait_reg.impl_methods.get(canonical_type) {
+            match source.impl_methods.get(canonical_type) {
                 some(methods) => { impl_methods.insert(canonical_type, map_clone(methods)) }, none => {}
             }
-            match env.trait_reg.method_origins.get(canonical_type) {
+            match source.method_origins.get(canonical_type) {
                 some(origins) => { method_origins.insert(canonical_type, map_clone(origins)) }, none => {}
             }
             match source.inherent_methods.get(canonical_type) {
                 some(methods) => { inherent_methods.insert(canonical_type, list_clone(methods)) }, none => {}
             }
-            match env.trait_reg.mut_methods.get(canonical_type) {
+            match source.mut_methods.get(canonical_type) {
                 some(methods) => { mut_methods.insert(canonical_type, methods) }, none => {}
             }
         },
         none => {}
     }
     match source.type_aliases.get(source_name) {
-        some(def) => match env.types.type_aliases.get(def.name) {
-            some(exact) => { type_aliases.insert(local_name, exact) },
-            none => panic("unreachable: re-exported type alias is not hydrated")
-        },
-        none => {}
+        some(def) => { type_aliases.insert(local_name, def) }, none => {}
     }
     match source.effects.get(source_name) {
-        some(def) => match env.types.effects.get(def.name) {
-            some(exact) => { effects.insert(local_name, exact) },
-            none => panic("unreachable: re-exported effect is not hydrated")
-        },
-        none => {}
+        some(def) => { effects.insert(local_name, def) }, none => {}
     }
     match source.effect_aliases.get(source_name) {
         some(def) => { effect_aliases.insert(local_name, def) }, none => {}
     }
     match source.traits.get(source_name) {
-        some(def) => match env.trait_reg.traits.get(def.name) {
-            some(exact) => { traits.insert(local_name, exact) },
-            none => panic("unreachable: re-exported trait is not hydrated")
-        },
-        none => {}
+        some(def) => { traits.insert(local_name, def) }, none => {}
     }
     match source.sigs.get(source_name) {
-        some(def) => match env.types.sigs.get(def.name) {
-            some(exact) => { sigs.insert(local_name, exact) },
-            none => panic("unreachable: re-exported sig is not hydrated")
-        },
-        none => {}
+        some(def) => { sigs.insert(local_name, def) }, none => {}
     }
     match source.struct_field_orders.get(source_name) {
         some(fields) => { struct_field_orders.insert(local_name, fields) }, none => {}
@@ -795,7 +755,7 @@ pub fn extract_exports(
                     UseImport::NamedItems { names } => {
                         for item in names {
                             let local_name = match item.alias { some(a) => a, none => item.name }
-                            copy_exported_name(source, env, item.name, local_name,
+                            copy_exported_name(source, item.name, local_name,
                                 values, value_origins, value_binding_kinds,
                                 variant_ctor_origins,
                                 types, type_aliases, effects, effect_aliases, traits, sigs,
@@ -805,7 +765,7 @@ pub fn extract_exports(
                             match source.types.get(item.name) {
                                 some(TypeDef::EnumDef_(edef)) => {
                                     for v in edef.variants {
-                                        copy_exported_name(source, env, v.name, v.name,
+                                        copy_exported_name(source, v.name, v.name,
                                             values, value_origins, value_binding_kinds,
                                             variant_ctor_origins,
                                             types, type_aliases, effects, effect_aliases, traits, sigs,
@@ -829,7 +789,7 @@ pub fn extract_exports(
                         let mut sorted_names = names.to_list()
                         sorted_names.sort()
                         for name in sorted_names {
-                            copy_exported_name(source, env, name, name,
+                            copy_exported_name(source, name, name,
                                 values, value_origins, value_binding_kinds,
                                 variant_ctor_origins,
                                 types, type_aliases, effects, effect_aliases, traits, sigs,
@@ -875,7 +835,6 @@ pub fn extract_exports(
     ModuleExports {
         module_key: module_key,
         module_prefix: module_prefix,
-        ownership_metadata: hprogram.ownership_metadata,
         values: values,
         value_origins: value_origins,
         value_binding_kinds: value_binding_kinds,

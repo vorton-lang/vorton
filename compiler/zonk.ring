@@ -52,12 +52,11 @@ fn label_vars(names: Map<Int, Str>, t: Type) -> Type {
                 none => t,
             }
         },
-        Type::FnType { params, return_type, effects, ownership_term } =>
+        Type::FnType { params, return_type, effects } =>
             Type::FnType {
                 params: params.map(fn(p) { label_vars(names, p) }),
                 return_type: label_vars(names, return_type),
-                effects: label_effect_row(names, effects),
-                ownership_term: ownership_term
+                effects: label_effect_row(names, effects)
             },
         Type::StructType { name, type_params } =>
             Type::StructType {
@@ -113,8 +112,7 @@ pub fn zonk_row(ctx: ZonkCtx, r: EffectRow) -> EffectRow {
 }
 
 pub fn zonk_param(ctx: ZonkCtx, p: HParam) -> HParam {
-    HParam { name: p.name, ty: zonk_type(ctx, p.ty), def_id: p.def_id,
-        is_mutable: p.is_mutable, ownership_mode: p.ownership_mode }
+    HParam { name: p.name, ty: zonk_type(ctx, p.ty), def_id: p.def_id, is_mutable: p.is_mutable }
 }
 
 fn zonk_dispatch(ctx: ZonkCtx, dispatch: TraitDispatch?) -> TraitDispatch? {
@@ -242,15 +240,12 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
             HExpr::BinOp { op: op, left: zonk_expr(ctx, left), right: zonk_expr(ctx, right), eq_dispatch: zonk_dispatch(ctx, eq_dispatch), ord_dispatch: zonk_dispatch(ctx, ord_dispatch), ty: z_ty, effects: z_eff, span: z_span },
         HExpr::UnaryOp { op, operand, .. } =>
             HExpr::UnaryOp { op: op, operand: zonk_expr(ctx, operand), ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::Call { callee, callee_def_id, callable_result_def_id,
-                      args, type_args, resolved_dicts, dict_dispatch, .. } =>
+        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, .. } =>
             HExpr::Call {
                 // A syntactic Ident callee uses the direct ABI and gets its
                 // evidence from Call.resolved_dicts.  Every other recursive
                 // position is a value position and must form a real closure.
                 callee: zonk_direct_callee(ctx, callee),
-                callee_def_id: callee_def_id,
-                callable_result_def_id: callable_result_def_id,
                 args: args.map(fn(a) { zonk_expr(ctx, a) }),
                 type_args: type_args.map(fn(t) { zonk_type(ctx, t) }),
                 resolved_dicts: resolved_dicts,
@@ -373,9 +368,8 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 }),
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::Lambda { def_id, params, return_type, body, .. } =>
+        HExpr::Lambda { params, return_type, body, .. } =>
             HExpr::Lambda {
-                def_id: def_id,
                 params: params.map(fn(p) { zonk_param(ctx, p) }),
                 return_type: zonk_type(ctx, return_type),
                 body: zonk_expr(ctx, body),

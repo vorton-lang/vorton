@@ -5308,384 +5308,12 @@ def identity_ledger_contract_errors(
     return errors
 
 
-def ownership_shadow_transport_contract_errors(
-    sources: dict[str, str],
-) -> List[str]:
-    """Lock A-prime S1 as exact, total, and semantically inert transport."""
-    errors: List[str] = []
-    required_tokens = {
-        "types": (
-            "pub const PARAM_OWNERSHIP_BORROW",
-            "pub const PARAM_OWNERSHIP_MUT_BORROW",
-            "pub const PARAM_OWNERSHIP_MOVE",
-            "pub const PARAM_OWNERSHIP_UNKNOWN",
-            "pub const RETURN_OWNERSHIP_OWNED",
-            "pub const RETURN_OWNERSHIP_BORROWED",
-            "pub const RETURN_OWNERSHIP_UNKNOWN",
-            "pub const CALLABLE_RESULT_ROLE_FRESH_OWNED_SLOT",
-            "pub struct CallableOwnershipDescriptor",
-            "pub struct CallableTransferLevel",
-            "pub struct CallableOwnershipState",
-            "pub struct OwnershipShape",
-            "pub struct OwnershipMetadata",
-            "pub next_ownership_term: Int",
-            "pub fn normalize_callable_ownership_descriptor(",
-            "pub fn validate_shadow_ownership_metadata(",
-            "pub fn clone_shadow_callable_identity(",
-            "pub fn set_shadow_callable_result_role(",
-            "FnType { params: List<Type>, return_type: Type, effects: EffectRow,\n"
-            "             ownership_term: Int }",
-        ),
-        "env": (
-            "pub ownership_metadata: OwnershipMetadata",
-            "ownership_metadata: new_ownership_metadata()",
-            "pub fn register_exact_shadow_callable_scheme(",
-            "pub fn replace_exact_shadow_callable_scheme(",
-            "helper never allocates a DefId",
-            "ownership_term: ownership_term",
-        ),
-        "hir": (
-            "pub ownership_mode: Int",
-            "callee_def_id: Int?",
-            "callable_result_def_id: Int?",
-            "Lambda { def_id: Int",
-            "pub fn is_synthetic_callable_def_id(",
-            "HIR callable result is outside its synthetic DefId namespace",
-            "pub struct HEffectOp",
-            "pub struct HTraitMethod",
-            "pub struct HSigMember",
-            "pub ownership_metadata: OwnershipMetadata",
-            "validate_shadow_ownership_metadata(program.ownership_metadata)",
-        ),
-        "infer": (
-            "fn register_default_callable_binder(",
-            "callable_result_def_id: remap_default_optional_def_id(",
-            "def_id: remap_default_def_id(def_id, remap)",
-            "clone_shadow_callable_identity(",
-            "fresh_shadow_callable_def_id(ctx)",
-            "shadow_callable_result(",
-            "callee_def_id: callee_scheme.def_id",
-            "CALLABLE_SOURCE_SYNTHETIC",
-        ),
-        "infer_decl": (
-            "def_id: op.def_id",
-            "name: m.name, def_id: m.def_id",
-            "delegate wrapper scheme has no exact DefId",
-            "def_id: some(wrapper_def_id)",
-            "callable_result_def_id: call_result.1",
-            "registration_override: TypeScheme?",
-        ),
-        "infer_ctx": (
-            "pub next_shadow_callable_ordinal: Int",
-            "pub fn fresh_shadow_callable_def_id(",
-            "pub fn shadow_callable_result(",
-            "returned_callable_result_role_by_def_id.get(producer)",
-            "fn register_exact_shadow_alias(",
-            "CALLABLE_SOURCE_ALIAS",
-            "some(producer_def_id)",
-            "callable_result_role_by_def_id.get(producer_def_id)",
-        ),
-        "infer_register": (
-            "fn interface_callable_term(",
-            "fn registered_interface_callable_term(",
-            "CallableOwnershipDescriptor {",
-            "prefix_params: shadow_param_modes(params)",
-            "fn interface_force_params(",
-            "fn establish_shadow_callable_scheme(",
-            "CALLABLE_SOURCE_CONSERVATIVE_INTERFACE",
-            "some(trait_method.def_id)",
-            "field_scheme.def_id",
-            "pub fn exact_prelude_extern_ownership(",
-            "pub fn exact_prelude_extern_result_role(",
-        ),
-        "checker": (
-            "fn hydrate_exact_shadow_callable(",
-            "fn hydrate_shadow_type(",
-            "fn shadow_value_callable_view(",
-            "let hydrated_value_ty = hydrate_shadow_type(",
-            "fn assert_same_origin_shadow_callable(",
-            "exported callable metadata was stripped",
-            "same-origin imported callable contract differs",
-            "CALLABLE_DYNAMIC_TERM_BASE",
-            "producer_def_id: Int?",
-            "replace_exact_shadow_callable_scheme(",
-            "exact_prelude_extern_result_role(name)",
-        ),
-        "exports": (
-            "pub ownership_metadata: OwnershipMetadata",
-            "ownership_metadata: hprogram.ownership_metadata",
-            "let exact_scheme = match env.lookup(origin)",
-            "values.insert(local_name, exact_scheme)",
-            "match env.lookup(exact_identity)",
-        ),
-        "builtins": (
-            "fn exact_builtin_callable_scheme(",
-            "fn builtin_trait_method(",
-            "fn builtin_effect_op(",
-            "CALLABLE_SOURCE_BUILTIN",
-        ),
-        "derive": (
-            "register_exact_shadow_callable_scheme(",
-            "CALLABLE_SOURCE_SYNTHETIC",
-        ),
-        "zonk": (
-            "ownership_term: ownership_term",
-            "callee_def_id: callee_def_id",
-            "callable_result_def_id: callable_result_def_id",
-            "def_id: def_id",
-        ),
-        "andor": ("ownership_metadata: program.ownership_metadata",),
-        "dict": ("ownership_metadata: program.ownership_metadata",),
-        "perceus": ("ownership_metadata: program.ownership_metadata",),
-        "compiler_mod": ("ownership_metadata: hir.ownership_metadata",),
-        "cexpr": (
-            "callee_def_id: none",
-            "callable_result_def_id: none",
-            "ownership_mode: PARAM_OWNERSHIP_UNKNOWN",
-        ),
-    }
-    for label, tokens in required_tokens.items():
-        source = sources[label]
-        for token in tokens:
-            if token not in source:
-                errors.append(
-                    f"{label}: missing S1 shadow transport contract {token!r}")
-
-    if "pub struct FnMeta" in sources["types"]:
-        errors.append("types: S1 must use flat FnType ownership transport")
-    if sources["builtins"].count(
-            "ownership_term: CALLABLE_UNKNOWN") != 0:
-        errors.append(
-            "builtins: exact callable table regained an Unknown contract")
-    if len(re.findall(
-            r"(?<!registered_)\binterface_callable_term\(",
-            sources["infer_register"])) != 3:
-        errors.append(
-            "infer_register: an executable interface bypassed exact descriptor registration")
-    for forbidden_name in (
-        "new_local_callable_scheme", "localize_imported_callable_scheme",
-        "callable_by_name", "ownership_by_name",
-    ):
-        if any(forbidden_name in sources[label] for label in (
-                "env", "infer_ctx", "infer_register", "checker", "exports")):
-            errors.append(
-                f"ownership authority revived forbidden name path {forbidden_name!r}")
-    for label in (
-        "env", "hir", "infer", "infer_decl", "infer_ctx",
-        "infer_helpers", "infer_register", "checker", "exports",
-        "builtins", "derive", "zonk", "andor", "dict", "perceus",
-    ):
-        if "CALLABLE_SOURCE_BODY_INFERRED" in sources[label]:
-            errors.append(
-                f"{label}: BODY_INFERRED provenance appeared before S2 solver")
-
-    transport_specs = (
-        ("Type::FnType", ("ownership_term",)),
-        ("HExpr::Call", ("callee_def_id", "callable_result_def_id")),
-        ("HExpr::Lambda", ("def_id",)),
-        ("HParam", ("ownership_mode",)),
-        ("HProgram", ("ownership_metadata",)),
-        ("HEffectOp", ("def_id",)),
-        ("HTraitMethod", ("def_id",)),
-        ("HSigMember", ("def_id",)),
-    )
-    transport_labels = (
-        "env", "hir", "infer", "infer_decl", "infer_ctx",
-        "infer_helpers", "infer_register", "checker", "exports",
-        "builtins", "derive", "zonk", "andor", "dict", "perceus",
-        "compiler_mod", "cexpr",
-    )
-    for label in transport_labels:
-        masked = mask_ring_strings_and_comments(sources[label])
-        for marker, fields in transport_specs:
-            pattern = re.compile(rf"\b{re.escape(marker)}\s*\{{")
-            for match in pattern.finditer(masked):
-                prefix = masked[max(0, match.start() - 12):match.start()]
-                if marker == "HProgram" and re.search(r"->\s*$", prefix):
-                    continue
-                open_index = masked.find("{", match.start(), match.end())
-                try:
-                    close_index = matching_delimiter(
-                        masked, open_index, "{", "}")
-                except ValueError as exc:
-                    errors.append(f"{label}: {marker}: {exc}")
-                    continue
-                body = masked[open_index + 1:close_index]
-                if ".." in body:
-                    continue
-                missing = [
-                    field for field in fields
-                    if re.search(
-                        rf"\b{re.escape(field)}\b\s*(?::|,|$)", body
-                    ) is None
-                ]
-                if missing:
-                    line = masked.count("\n", 0, match.start()) + 1
-                    errors.append(
-                        f"{label}:{line}: {marker} drops shadow field(s) "
-                        + ", ".join(missing))
-
-    fresh_term_body, fresh_term_error = extract_ring_function_body(
-        sources["types"], "fresh_ownership_term")
-    if fresh_term_error:
-        errors.append(fresh_term_error)
-    elif "next_def_id" in fresh_term_body or "fresh_def_id" in fresh_term_body:
-        errors.append("ownership-term counter is coupled to source DefId allocation")
-
-    fresh_id_body, fresh_id_error = extract_ring_function_body(
-        sources["infer_ctx"], "fresh_shadow_callable_def_id")
-    if fresh_id_error:
-        errors.append(fresh_id_error)
-    elif "next_shadow_callable_ordinal" not in fresh_id_body or "fresh_def_id" in fresh_id_body:
-        errors.append("synthetic callable identity perturbs source DefId numbering")
-
-    alias_body, alias_error = extract_ring_function_body(
-        sources["infer_ctx"], "register_exact_shadow_alias")
-    if alias_error:
-        errors.append(alias_error)
-    elif not all(token in alias_body for token in (
-            "CALLABLE_SOURCE_ALIAS", "some(producer_def_id), forces")):
-        errors.append("exact import alias lost its canonical producer edge")
-
-    diamond_body, diamond_error = extract_ring_function_body(
-        sources["checker"], "assert_same_origin_shadow_callable")
-    if diamond_error:
-        errors.append(diamond_error)
-    elif "local_term != exported_term" not in diamond_body:
-        errors.append("same-origin diamond lost callable contract comparison")
-
-    prelude_body, prelude_error = extract_ring_function_body(
-        sources["infer_register"], "exact_prelude_extern_ownership")
-    if prelude_error:
-        errors.append(prelude_error)
-    else:
-        for token in (
-            'name == "ring_slot_take"',
-            "CALLABLE_FIRST_MUT_BORROW_OWNED",
-            'name == "ring_slot_write"',
-            "CALLABLE_MUT_BORROW_MOVE_OWNED",
-            'name == "ring_slot_move"',
-            "CALLABLE_SLOT_MOVE_OWNED",
-        ):
-            if token not in prelude_body:
-                errors.append(
-                    f"exact prelude ownership table missing {token!r}")
-    result_role_body, result_role_error = extract_ring_function_body(
-        sources["infer_register"], "exact_prelude_extern_result_role")
-    if result_role_error:
-        errors.append(result_role_error)
-    elif not all(token in result_role_body for token in (
-            'name == "ring_slot_read"', 'name == "ring_slot_take"',
-            "CALLABLE_RESULT_ROLE_FRESH_OWNED_SLOT")):
-        errors.append("exact prelude result-role table is incomplete")
-
-    ctor_body, ctor_error = extract_ring_function_body(
-        sources["exports"], "variant_ctor_scheme")
-    if ctor_error:
-        errors.append(ctor_error)
-    elif not all(token in ctor_body for token in (
-            "variant_ctor_name(def.name, variant.name)",
-            "env.lookup(exact_identity)",
-            "canonical enum constructor scheme is missing")):
-        errors.append("enum export rebuilt a constructor without exact metadata")
-
-    for function_name in ("types_equal", "type_to_string"):
-        body, extract_error = extract_ring_function_body(
-            sources["types"], function_name)
-        if extract_error:
-            errors.append(extract_error)
-        elif "ownership_term" in body:
-            errors.append(
-                f"types.{function_name} made S1 ownership publicly observable")
-    unify_body, unify_error = extract_ring_function_body(
-        sources["unify"], "unify")
-    if unify_error:
-        errors.append(unify_error)
-    elif "ownership_term" in unify_body:
-        errors.append("unify made S1 ownership affect type acceptance")
-
-    semantic_consumer_tokens = (
-        "callable_by_def_id", "callable_state_by_def_id",
-        "callable_result_role_by_def_id", "ownership_shapes",
-        "ownership_term", "ownership_mode",
-    )
-    for label in ("perceus", "verify"):
-        for token in semantic_consumer_tokens:
-            if token in sources[label]:
-                errors.append(
-                    f"{label}: S1 shadow metadata gained a semantic consumer {token!r}")
-    cexpr_masked = mask_ring_strings_and_comments(sources["cexpr"])
-    for token in semantic_consumer_tokens[:-1]:
-        if token in cexpr_masked:
-            errors.append(
-                f"cexpr: S1 shadow metadata gained a codegen consumer {token!r}")
-    if cexpr_masked.count("ownership_mode") != 1:
-        errors.append(
-            "cexpr: ownership_mode must appear only as a synthetic neutral fill")
-
-    combined = "\n".join(sources[label] for label in (
-        "types", "env", "hir", "infer", "infer_decl", "infer_ctx",
-        "infer_helpers", "infer_register", "checker", "exports",
-        "builtins", "derive", "unify", "zonk", "andor", "dict",
-        "perceus", "compiler_mod", "cctx", "cgen", "cexpr", "verify",
-    ))
-    for token in ("HExpr::Take", "Take {", "ownership_plan_program"):
-        if token in combined:
-            errors.append(f"S1 imported forbidden active ownership token {token!r}")
-    if (REPO / "compiler" / "ownership.ring").exists():
-        errors.append("S1 must not create the ownership planner module")
-    if "check_drop_moves(assembled, ctx.sink)" not in sources["checker"]:
-        errors.append("checker replaced the current drop-move authority in S1")
-
-    fixture = sources.get("ownership_fixture", "")
-    if not all(token in fixture for token in (
-            "constructor: fn(Int) -> Option<Int>",
-            "fn choose(flag: Bool) -> Option<Int>",
-            "let defaulted = fn(",
-    )):
-        errors.append("S1 explicit Option<T> transport fixture is incomplete")
-    if re.search(r"\b(?:Resource|Map<[^>]+>|[A-Za-z_][A-Za-z0-9_]*)\?", fixture):
-        errors.append("S1 fixture introduced forbidden T? syntax")
-    fixture_contracts = {
-        "ownership_method_fixture": (
-            "fn touch(mut value: Int)",
-            "fn touch(self, value: Int) -> Int",
-            "fn write(self, mut value: Int)",
-        ),
-        "ownership_delegate_fixture": (
-            "delegate inner: Writer",
-            "fn write(mut value: Int)",
-            "print(outer.write())",
-        ),
-        "ownership_diamond_leaf": ("pub fn bump(mut value: Int)",),
-        "ownership_diamond_left": ("bump as inc_left",),
-        "ownership_diamond_right": ("bump as inc_right",),
-        "ownership_diamond_facade": (
-            "inc_left as first", "inc_right as second",
-        ),
-        "ownership_diamond_main": ("use facade::{first, second}",),
-    }
-    for label, tokens in fixture_contracts.items():
-        source = sources.get(label, "")
-        for token in tokens:
-            if token not in source:
-                errors.append(f"{label}: missing S1 fixture contract {token!r}")
-        if re.search(
-                r"\b(?:Resource|Map<[^>]+>|[A-Za-z_][A-Za-z0-9_]*)\?",
-                source):
-            errors.append(f"{label}: introduced forbidden T? syntax")
-    return errors
-
-
 def identity_checkpoint_contract_errors(
     sources: dict[str, str],
-    *, include_shadow_transport: bool = True,
 ) -> List[str]:
     """Lock the behavior-preserving I-prime exact-slot transport."""
     errors: List[str] = []
     errors.extend(identity_ledger_contract_errors(sources))
-    if include_shadow_transport:
-        errors.extend(ownership_shadow_transport_contract_errors(sources))
     required_tokens = {
         "hir": (
             "pub struct HPatternBinding",
@@ -6591,12 +6219,12 @@ def identity_checkpoint_contract_errors(
             errors.append(
                 f"{function_name}: HIR extracts pattern IDs before authority")
 
-    # S1 adds inert A-prime metadata on top of I-prime.  S-prime cleanup and
-    # active A-prime planning/Take consumers remain outside this checkpoint.
+    # I-prime is identity only: the S-prime producer split and A-prime Take /
+    # ownership metadata must remain absent from this checkpoint.
     forbidden = {
         "perceus": ("DROP_PRODUCER_NOOP_NONE", "is_option_none_ctor_ident"),
         "hir": (
-            "Take {", "pub dict_param: Str",
+            "OwnershipMetadata", "Take {", "pub dict_param: Str",
             "Call { dict_name: Str",
         ),
         "cctx": ("exact_value_names", "name_only_values"),
@@ -6985,24 +6613,16 @@ def default_body_identity_generated_c_errors(
 
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
-        "types": REPO / "compiler" / "types.ring",
-        "env": REPO / "compiler" / "env.ring",
         "hir": REPO / "compiler" / "hir.ring",
         "infer": REPO / "compiler" / "infer.ring",
         "infer_decl": REPO / "compiler" / "infer_decl.ring",
         "checker": REPO / "compiler" / "checker.ring",
         "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
         "infer_helpers": REPO / "compiler" / "infer_helpers.ring",
-        "unify": REPO / "compiler" / "unify.ring",
         "zonk": REPO / "compiler" / "zonk.ring",
         "derive": REPO / "compiler" / "derive.ring",
-        "builtins": REPO / "compiler" / "builtins.ring",
-        "infer_register": REPO / "compiler" / "infer_register.ring",
-        "exports": REPO / "compiler" / "exports.ring",
-        "andor": REPO / "compiler" / "andor_lower.ring",
         "dict": REPO / "compiler" / "dict_lower.ring",
         "perceus": REPO / "compiler" / "perceus.ring",
-        "compiler_mod": REPO / "compiler" / "compiler_mod.ring",
         "cctx": REPO / "compiler" / "codegen_c_ctx.ring",
         "cgen": REPO / "compiler" / "codegen_c.ring",
         "cexpr": REPO / "compiler" / "codegen_c_expr.ring",
@@ -7013,37 +6633,6 @@ def identity_checkpoint_source_errors() -> List[str]:
             REPO / "tests" / "cases" / "provenance_b_capture_identity.ring"
         ),
         "provenance_contract": REPO / "tests" / "test_provenance_b_contract.py",
-        "ownership_fixture": (
-            REPO / "tests" / "cases" / "ownership_shadow_transport.ring"
-        ),
-        "ownership_method_fixture": (
-            REPO / "tests" / "cases" /
-            "ownership_shadow_method_identity.ring"
-        ),
-        "ownership_delegate_fixture": (
-            REPO / "tests" / "cases" /
-            "ownership_shadow_delegate_identity.ring"
-        ),
-        "ownership_diamond_leaf": (
-            REPO / "tests" / "cases" / "modules" /
-            "ownership_shadow_reexport_diamond" / "leaf.ring"
-        ),
-        "ownership_diamond_left": (
-            REPO / "tests" / "cases" / "modules" /
-            "ownership_shadow_reexport_diamond" / "left.ring"
-        ),
-        "ownership_diamond_right": (
-            REPO / "tests" / "cases" / "modules" /
-            "ownership_shadow_reexport_diamond" / "right.ring"
-        ),
-        "ownership_diamond_facade": (
-            REPO / "tests" / "cases" / "modules" /
-            "ownership_shadow_reexport_diamond" / "facade.ring"
-        ),
-        "ownership_diamond_main": (
-            REPO / "tests" / "cases" / "modules" /
-            "ownership_shadow_reexport_diamond" / "main.ring"
-        ),
     }
     sources: dict[str, str] = {}
     errors: List[str] = []
@@ -7398,101 +6987,8 @@ def identity_checkpoint_source_errors() -> List[str]:
             continue
         mutated = dict(sources)
         mutated[source_name] = sources[source_name].replace(anchor, replacement, 1)
-        if not identity_checkpoint_contract_errors(
-                mutated, include_shadow_transport=False):
+        if not identity_checkpoint_contract_errors(mutated):
             errors.append(f"mutation {label} escaped exact-slot source oracle")
-
-    shadow_mutations = (
-        ("flat ownership term", "types",
-         "effects: EffectRow,\n             ownership_term: Int",
-         "effects: EffectRow"),
-        ("HParam ownership mode", "hir",
-         "pub ownership_mode: Int", "pub ownership_mode_removed: Int"),
-        ("Call callee identity", "hir",
-         "callee_def_id: Int?", "callee_identity_removed: Int?"),
-        ("Call result identity", "hir",
-         "callable_result_def_id: Int?", "callable_result_removed: Int?"),
-        ("lambda identity", "hir",
-         "Lambda { def_id: Int", "Lambda { removed_def_id: Int"),
-        ("program metadata", "hir",
-         "pub ownership_metadata: OwnershipMetadata",
-         "pub ownership_metadata_removed: OwnershipMetadata"),
-        ("default callable-result freshening", "infer",
-         "callable_result_def_id: remap_default_optional_def_id(",
-         "callable_result_def_id: none //"),
-        ("default callable metadata clone", "infer",
-         "clone_shadow_callable_identity(",
-         "clone_shadow_callable_identity_removed("),
-        ("alias canonical producer", "infer_ctx",
-         "some(producer_def_id), forces)", "none, forces)"),
-        ("synthetic callable counter separation", "infer_ctx",
-         "ctx.next_shadow_callable_ordinal + 1",
-         "ctx.env.fresh_def_id()"),
-        ("effect callable DefId", "infer_decl",
-         "name: op.name, def_id: op.def_id",
-         "name: op.name, def_id: ctx.env.fresh_def_id()"),
-        ("trait callable DefId", "infer_decl",
-         "name: m.name, def_id: m.def_id",
-         "name: m.name, def_id: ctx.env.fresh_def_id()"),
-        ("delegate registered DefId", "infer_decl",
-         "def_id: some(wrapper_def_id)",
-         "def_id: some(ctx.env.fresh_def_id())"),
-        ("same-origin conflict guard", "checker",
-         "local_term != exported_term",
-         "false"),
-        ("export metadata strip", "exports",
-         "ownership_metadata: hprogram.ownership_metadata",
-         "ownership_metadata: new_ownership_metadata()"),
-        ("re-export local exact scheme", "exports",
-         "values.insert(local_name, exact_scheme)",
-         "values.insert(local_name, scheme)"),
-        ("nested callable term hydration", "checker",
-         "let hydrated_value_ty = hydrate_shadow_type(",
-         "let hydrated_value_ty = identity_shadow_type("),
-        ("const getter callable view", "checker",
-         "fn shadow_value_callable_view(",
-         "fn shadow_value_callable_view_removed("),
-        ("prelude exact override", "checker",
-         "replace_exact_shadow_callable_scheme(\n"
-         "                                ctx.env, scheme,",
-         "register_exact_shadow_callable_scheme(\n"
-         "                                ctx.env, scheme,"),
-        ("prelude slot result role", "checker",
-         "exact_prelude_extern_result_role(name)",
-         "CALLABLE_RESULT_ROLE_NONE"),
-        ("enum constructor exact export", "exports",
-         "match env.lookup(exact_identity)",
-         "match none"),
-        ("slot write ownership table", "infer_register",
-         "return CALLABLE_MUT_BORROW_MOVE_OWNED",
-         "return CALLABLE_BORROW_OWNED"),
-        ("mixed interface descriptor", "infer_register",
-         "prefix_params: shadow_param_modes(params)",
-         "prefix_params: []"),
-        ("Perceus semantic consumer", "perceus",
-         "ownership_metadata: program.ownership_metadata",
-         "ownership_metadata: program.ownership_metadata // callable_by_def_id"),
-        ("public type equality neutrality", "types",
-         "Type::FnType { params: pa, return_type: ra, effects: ea, .. }",
-         "Type::FnType { params: pa, return_type: ra, effects: ea, ownership_term: oa }"),
-        ("unify acceptance neutrality", "unify",
-         "Type::FnType { params: pa, return_type: ra, effects: ea, .. }",
-         "Type::FnType { params: pa, return_type: ra, effects: ea, ownership_term: oa }"),
-        ("active Take exclusion", "hir",
-         "Clone { inner: HExpr", "Take { inner: HExpr"),
-        ("explicit Option fixture", "ownership_fixture",
-         "fn choose(flag: Bool) -> Option<Int>",
-         "fn choose(flag: Bool) -> LegacyOptional<Int>"),
-    )
-    for label, source_name, anchor, replacement in shadow_mutations:
-        if sources[source_name].count(anchor) < 1:
-            errors.append(f"S1 mutation {label}: anchor missing")
-            continue
-        mutated = dict(sources)
-        mutated[source_name] = sources[source_name].replace(
-            anchor, replacement, 1)
-        if not ownership_shadow_transport_contract_errors(mutated):
-            errors.append(f"S1 mutation {label} escaped shadow source oracle")
     return errors
 
 
