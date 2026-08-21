@@ -155,9 +155,6 @@ C_LINE_BUILD_CASES = (
     ),
 )
 EXTERN_RC_FIXTURE = "tests/cases/structural/extern_handle_rc.ring"
-OPTION_CLEANUP_FIXTURE = (
-    "tests/cases/structural/ownership_option_map_exit.ring"
-)
 STRUCTURAL_ORACLE_FIXTURES = {
     "backend.c_line_directives": tuple(
         fixture
@@ -165,9 +162,6 @@ STRUCTURAL_ORACLE_FIXTURES = {
         for fixture in fixtures
     ),
     "backend.extern_handle_rc_structural": (EXTERN_RC_FIXTURE,),
-    "backend.ownership_option_cleanup_structural": (
-        OPTION_CLEANUP_FIXTURE,
-    ),
 }
 
 # Subdirectories within tests/cases/ that also contain negative test cases.
@@ -5314,144 +5308,6 @@ def identity_ledger_contract_errors(
     return errors
 
 
-def run_option_cleanup_oracle(ring_exe: str, temp_root: Path,
-                              phase_case: Optional[str] = None) -> List[str]:
-    """Inspect exact-none W4/exit cleanup and fail-closed admissions."""
-    c_path, _, error = build_c_artifacts_fresh(
-        ring_exe, OPTION_CLEANUP_FIXTURE, temp_root, no_c_lines=True,
-        phase_case=phase_case)
-    if error:
-        return [error]
-    try:
-        c_source = c_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        return [f"cannot read generated Option-cleanup C: {exc}"]
-
-    errors: List[str] = []
-    eligible = {
-        "ring_cleanup_fresh_bool_tail": (2, 1),
-        "ring_cleanup_nested_fresh_tail": (2, 1),
-        "ring_cleanup_normal_and_early": (3, 2),
-        "ring_cleanup_payload_borrow": (2, 1),
-    }
-    ineligible = (
-        "ring_cleanup_borrowed_bool_tail",
-        "ring_cleanup_borrowed_bool_block",
-        "ring_cleanup_borrowed_str_block",
-        "ring_cleanup_borrowed_int_tail",
-        "ring_cleanup_borrowed_field_tail",
-        "ring_cleanup_borrow_return_call_tail",
-        "ring_cleanup_unrelated_list_tail",
-        "ring_cleanup_move_resource_tail",
-        "ring_cleanup_boxed_control",
-        "ring_cleanup_contains_extern_control",
-        "ring_cleanup_opaque_call_write",
-    )
-
-    for symbol, (expected_drops, expected_returns) in eligible.items():
-        body, extract_error = extract_c_function_body(c_source, symbol)
-        if extract_error:
-            errors.append(extract_error)
-            continue
-        masked = mask_c_strings_and_comments(body)
-        drops = list(re.finditer(
-            r"\bring_drop\s*\(\s*r_wrapped\s*\)\s*;", masked))
-        assignments = list(re.finditer(
-            r"(?m)^[ \t]*r_wrapped\s*=", masked))
-        returns = list(re.finditer(r"(?m)^[ \t]*return\b", masked))
-        if len(drops) != expected_drops:
-            errors.append(
-                f"{symbol} wrapper Drop count {len(drops)} != "
-                f"{expected_drops}")
-        if len(returns) != expected_returns:
-            errors.append(
-                f"{symbol} return count {len(returns)} != {expected_returns}")
-        if len(assignments) < 2:
-            errors.append(f"{symbol} has no wrapper reassignment")
-        else:
-            prior_drops = [drop for drop in drops
-                           if drop.start() < assignments[1].start()]
-            if not prior_drops or (
-                    prior_drops[-1].start() < assignments[0].start()):
-                errors.append(
-                    f"{symbol} wrapper reassignment lacks preceding W4 Drop")
-        events = sorted(
-            [(item.start(), "drop") for item in drops]
-            + [(item.start(), "assign") for item in assignments]
-        )
-        for returned in returns:
-            preceding = [kind for position, kind in events
-                         if position < returned.start()]
-            if not preceding or preceding[-1] != "drop":
-                errors.append(
-                    f"{symbol} return lacks its final wrapper exit Drop")
-
-    for symbol in ineligible:
-        body, extract_error = extract_c_function_body(c_source, symbol)
-        if extract_error:
-            errors.append(extract_error)
-            continue
-        masked = mask_c_strings_and_comments(body)
-        drop_count = len(re.findall(
-            r"\bring_drop\s*\(\s*r_wrapped\s*\)\s*;", masked))
-        if drop_count != 0:
-            errors.append(
-                f"{symbol} ineligible wrapper unexpectedly has "
-                f"{drop_count} Drops")
-        if symbol != "ring_cleanup_boxed_control" and "r___rc_scope_" in masked:
-            errors.append(
-                f"{symbol} ineligible tail gained a cleanup scope hoist")
-
-    shadow_body, extract_error = extract_c_function_body(
-        c_source, "ring_cleanup_same_name_exact_slots")
-    if extract_error:
-        errors.append(extract_error)
-    else:
-        shadow_drops = re.findall(
-            r"\bring_drop\s*\(\s*(r_wrapped[A-Za-z0-9_]*)\s*\)\s*;",
-            mask_c_strings_and_comments(shadow_body),
-        )
-        shadow_slots = set(shadow_drops)
-        if len(shadow_drops) != 4 or len(shadow_slots) != 2 or any(
-                shadow_drops.count(slot) != 2 for slot in shadow_slots):
-            errors.append(
-                "same-name exact Option slots must have two distinct W4/exit "
-                f"Drop pairs; found {shadow_drops}")
-
-    masked_c = mask_c_strings_and_comments(c_source)
-    unsafe_symbols = re.findall(
-        r"\b(?:void\s*\*|void)\s+"
-        r"([A-Za-z_][A-Za-z0-9_]*cleanup_unsafe_ident_write)\s*\(",
-        masked_c,
-    )
-    if len(unsafe_symbols) != 1:
-        errors.append(
-            "unsafe-write structural function symbol count "
-            f"{len(unsafe_symbols)} != 1")
-    else:
-        unsafe_body, extract_error = extract_c_function_body(
-            c_source, unsafe_symbols[0])
-        if extract_error:
-            errors.append(extract_error)
-        elif re.search(
-                r"\bring_drop\s*\(\s*r_wrapped[A-Za-z0-9_]*\s*\)",
-                mask_c_strings_and_comments(unsafe_body)):
-            errors.append("unsafe Ident write was admitted to Option cleanup")
-
-    payload, extract_error = extract_c_function_body(
-        c_source, "ring_cleanup_payload_borrow")
-    if extract_error:
-        errors.append(extract_error)
-    else:
-        masked_payload = mask_c_strings_and_comments(payload)
-        if re.search(r"\bring_drop\s*\(\s*r_value\s*\)", masked_payload):
-            errors.append("borrowed Option payload is dropped separately")
-        if re.search(r"\br_value\s*=\s*(?:NULL|nullptr|0)\s*;",
-                     masked_payload):
-            errors.append("borrowed Option payload slot is cleared")
-    return errors
-
-
 def identity_checkpoint_contract_errors(
     sources: dict[str, str],
 ) -> List[str]:
@@ -6363,15 +6219,14 @@ def identity_checkpoint_contract_errors(
             errors.append(
                 f"{function_name}: HIR extracts pattern IDs before authority")
 
-    # I-prime is accepted and S-prime is now the active checkpoint.  A-prime
-    # callable/Take metadata must remain absent until its later atomic stage.
+    # I-prime is identity only: the S-prime producer split and A-prime Take /
+    # ownership metadata must remain absent from this checkpoint.
     forbidden = {
-        "perceus": ("OwnershipMetadata", "HExpr::Take"),
+        "perceus": ("DROP_PRODUCER_NOOP_NONE", "is_option_none_ctor_ident"),
         "hir": (
             "OwnershipMetadata", "Take {", "pub dict_param: Str",
             "Call { dict_name: Str",
         ),
-        "verify": ("OwnershipMetadata", "HExpr::Take", "Take {"),
         "cctx": ("exact_value_names", "name_only_values"),
         "cexpr": (
             'starts_with("__ring_dictlocal_")',
@@ -6756,187 +6611,6 @@ def default_body_identity_generated_c_errors(
     return errors
 
 
-def option_cleanup_source_errors(sources: dict[str, str]) -> List[str]:
-    """Lock S′ exact-none admission and independent verifier recovery."""
-    errors: List[str] = []
-    hir = sources["hir"]
-    perceus = sources["perceus"]
-    verify = sources["verify"]
-
-    helper_body, helper_error = extract_ring_function_body(
-        hir, "is_option_none_ctor_ident")
-    if helper_error:
-        errors.append(helper_error)
-    elif not all(token in helper_body for token in (
-            "resolved_name, def_id: some(_), ty, ..",
-            "name == BUILTIN_OPTION",
-            'variant_ctor_name(BUILTIN_OPTION, "none")')):
-        errors.append("exact Option::none helper lost type/resolved identity")
-
-    owner_body, owner_error = extract_ring_function_body(
-        perceus, "is_owner_bearing")
-    if owner_error:
-        errors.append(owner_error)
-    elif not all(token in owner_body for token in (
-            "let option_none_ctor = is_option_none_ctor_ident(expr)",
-            "!nullary_variant_ctor && !option_none_ctor")):
-        errors.append("Perceus owner reads do not exclude exact Option::none")
-
-    verify_expr_body, verify_expr_error = extract_ring_function_body(
-        verify, "v_expr")
-    if verify_expr_error:
-        errors.append(verify_expr_error)
-    elif not all(token in verify_expr_body for token in (
-            "let option_none_ctor = is_option_none_ctor_ident(expr)",
-            "if option_none_ctor {",
-            "CLS_EXCLUDED")):
-        errors.append("verifier expression account is not Option::none-neutral")
-
-    merge_body, merge_error = extract_ring_function_body(
-        perceus, "merge_droppable_branch_classes")
-    if merge_error:
-        errors.append(merge_error)
-    elif not all(token in merge_body for token in (
-            "if class == DROP_PRODUCER_OPAQUE",
-            "else if saw_owned",
-            "DROP_PRODUCER_NOOP_NONE")):
-        errors.append("Perceus OWNED/NOOP_NONE/OPAQUE merge contract drifted")
-
-    verify_merge_body, verify_merge_error = extract_ring_function_body(
-        verify, "v_merge_droppable_branch_classes")
-    if verify_merge_error:
-        errors.append(verify_merge_error)
-    elif not all(token in verify_merge_body for token in (
-            "if class == V_DROP_PRODUCER_OPAQUE",
-            "else if saw_owned",
-            "V_DROP_PRODUCER_NOOP_NONE")):
-        errors.append("verifier V_OWNED/V_NOOP_NONE/V_OPAQUE merge drifted")
-
-    tail_body, tail_error = extract_ring_function_body(
-        perceus, "escape_is_noop_on_reachable_tail")
-    if tail_error:
-        errors.append(tail_error)
-    elif not all(token in tail_body for token in (
-            "HExpr::Call { .. } | HExpr::TryCatch { .. } |",
-            "HExpr::UnsafeBlock { body, .. }",
-            "_ => !is_owner_bearing(expr)")):
-        errors.append("Perceus safe-tail gate is not transparent/fail-closed")
-
-    candidate_body, candidate_error = extract_ring_function_body(
-        perceus, "option_none_cleanup_base_candidate")
-    if candidate_error:
-        errors.append(candidate_error)
-    elif not all(token in candidate_body for token in (
-            "HStmt::Var { name, def_id: some(id), ty, init, .. }",
-            "!boxed.contains(id)",
-            "type_is_physical_rc_eligible(ty, externs)",
-            "is_option_none_ctor_ident(init)")):
-        errors.append("S′ direct-Var exact candidate boundary drifted")
-
-    write_body, write_error = extract_ring_function_body(
-        perceus, "option_cleanup_stmt_writes_are_safe")
-    if write_error:
-        errors.append(write_error)
-    elif not all(token in write_body for token in (
-            "id == target_def_id",
-            "nested_callable ||",
-            "option_write_producer_class(value, externs) ==",
-            "DROP_PRODUCER_OPAQUE")):
-        errors.append("Perceus all-writes exact producer veto drifted")
-
-    verify_tail_body, verify_tail_error = extract_ring_function_body(
-        verify, "v_escape_is_noop_on_reachable_tail")
-    if verify_tail_error:
-        errors.append(verify_tail_error)
-    elif not all(token in verify_tail_body for token in (
-            "HExpr::Clone { inner, .. } => if reject_synthetic_clone",
-            "v_original_block_tail(stmts, tail)",
-            "_ => !v_tail_is_owner_bearing(expr)")):
-        errors.append("verifier borrowed synthetic tail can self-prove")
-
-    verify_write_body, verify_write_error = extract_ring_function_body(
-        verify, "v_option_write_producer_class")
-    if verify_write_error:
-        errors.append(verify_write_error)
-    elif not all(token in verify_write_body for token in (
-            "is_synthetic_rc_def_id(id)",
-            "v_block_local_init(enclosing_stmts, id)",
-            "HExpr::Clone { inner, .. } => if peel_clone",
-            "V_DROP_PRODUCER_OPAQUE")):
-        errors.append("verifier W4 producer backtrace is not independent")
-
-    verify_scan_body, verify_scan_error = extract_ring_function_body(
-        verify, "v_option_stmt_writes_are_safe")
-    if verify_scan_error:
-        errors.append(verify_scan_error)
-    elif not all(token in verify_scan_body for token in (
-            "id == target_def_id",
-            "v_option_write_producer_class(",
-            "value, enclosing_stmts, externs, true, 0")):
-        errors.append("verifier exact W4 scan bypasses recovered producer")
-
-    catch_match = re.search(
-        r"let\s+arm_result\s*=\s*v_cf_branch\(arm\.body, mode, ctx\).*?"
-        r"if\s+!arm_result\.1\s*\{.*?"
-        r"ctx\.kinds\[ci\]\s*==\s*K_OPTION_CLEANUP.*?"
-        r"snap_arm\[ci\]\s*!=\s*snap0\[ci\]",
-        mask_ring_strings_and_comments(verify), re.DOTALL)
-    if catch_match is None:
-        errors.append("catch audit lost normally-returning K_OPTION state check")
-
-    for label, source, anchor, replacement, required_after in (
-        (
-            "borrowed-tail Clone peel", verify,
-            "HExpr::Clone { inner, .. } => if reject_synthetic_clone {",
-            "HExpr::Clone { inner, .. } => if false {",
-            "HExpr::Clone { inner, .. } => if reject_synthetic_clone",
-        ),
-        (
-            "W4 synthetic producer backtrace", verify,
-            "if is_synthetic_rc_def_id(id) {\n"
-            "                match v_block_local_init(enclosing_stmts, id)",
-            "if false {\n"
-            "                match v_block_local_init(enclosing_stmts, id)",
-            "if is_synthetic_rc_def_id(id) {\n"
-            "                match v_block_local_init(enclosing_stmts, id)",
-        ),
-    ):
-        if source.count(anchor) != 1:
-            errors.append(f"{label} mutation anchor count {source.count(anchor)} != 1")
-        else:
-            mutated = source.replace(anchor, replacement, 1)
-            if required_after in mutated and required_after not in replacement:
-                errors.append(f"{label} deletion mutation escaped source gate")
-
-    try:
-        runtime_fixture = (
-            REPO / "tests" / "cases" /
-            "ownership_option_branch_cleanup.ring"
-        ).read_text(encoding="utf-8")
-        structural_fixture = (
-            REPO / "tests" / "cases" / "structural" /
-            "ownership_option_map_exit.ring"
-        ).read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        errors.append(f"cannot read S′ fixtures: {exc}")
-        return errors
-    if runtime_fixture.count(
-            "let mut wrapped: Option<Resource> = none") < 8:
-        errors.append("runtime S′ matrix lost exact-none slots")
-    for token in (
-            "fn option_shadow()", "wrapped = opaque_option(140)",
-            "fn option_catch_borrow()"):
-        if token not in runtime_fixture:
-            errors.append(f"runtime S′ fixture missing {token!r}")
-    for token in (
-            "fn cleanup_unsafe_ident_write(",
-            "wrapped = cleanup_opaque_value(20)",
-            "fn cleanup_same_name_exact_slots()"):
-        if token not in structural_fixture:
-            errors.append(f"structural S′ fixture missing {token!r}")
-    return errors
-
-
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
         "hir": REPO / "compiler" / "hir.ring",
@@ -6970,7 +6644,6 @@ def identity_checkpoint_source_errors() -> List[str]:
     if errors:
         return errors
     errors.extend(identity_checkpoint_contract_errors(sources))
-    errors.extend(option_cleanup_source_errors(sources))
     errors.extend(identity_ledger_mutation_matrix_errors())
     errors.extend(identity_stdout_canonicalization_errors())
 
@@ -7307,14 +6980,6 @@ def identity_checkpoint_source_errors() -> List[str]:
          "HExpr::ListLit { elements, .. } |\n"
          "        HExpr::TupleLit { elements, .. } =>\n"
          "            collect_default_expr_value_binders(ctx, elements, remap)"),
-        ("S-prime borrowed-tail synthetic Clone peel", "verify",
-         "HExpr::Clone { inner, .. } => if reject_synthetic_clone {",
-         "HExpr::Clone { inner, .. } => if false {"),
-        ("S-prime W4 exact producer backtrace", "verify",
-         "if is_synthetic_rc_def_id(id) {\n"
-         "                match v_block_local_init(enclosing_stmts, id)",
-         "if false {\n"
-         "                match v_block_local_init(enclosing_stmts, id)"),
     )
     for label, source_name, anchor, replacement in mutations:
         if sources[source_name].count(anchor) < 1:
@@ -7322,15 +6987,8 @@ def identity_checkpoint_source_errors() -> List[str]:
             continue
         mutated = dict(sources)
         mutated[source_name] = sources[source_name].replace(anchor, replacement, 1)
-        identity_errors = identity_checkpoint_contract_errors(mutated)
-        option_errors = (
-            option_cleanup_source_errors(mutated)
-            if source_name in {"hir", "perceus", "verify"}
-            else []
-        )
-        if not identity_errors and not option_errors:
-            errors.append(
-                f"mutation {label} escaped exact-slot/S-prime source oracle")
+        if not identity_checkpoint_contract_errors(mutated):
+            errors.append(f"mutation {label} escaped exact-slot source oracle")
     return errors
 
 
@@ -7529,7 +7187,7 @@ def identity_checkpoint_errors() -> Tuple[List[str], str]:
 
 def run_structural(ring_exe: str, collector: ResultCollector, *,
                    name_filter: Optional[str] = None) -> None:
-    """Run generated-C source-map, extern-handle, and S′ cleanup oracles."""
+    """Run generated-C source-map and extern-handle ownership oracles."""
     suite = "structural"
     integrity_errors = structural_fixture_integrity_errors()
     if integrity_errors:
@@ -7561,24 +7219,12 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         or matches_filter(EXTERN_RC_FIXTURE, name_filter)
     ):
         jobs.append((feature_id, "extern", EXTERN_RC_FIXTURE, (EXTERN_RC_FIXTURE,)))
-    feature_id = "backend.ownership_option_cleanup_structural"
-    if (
-        matches_filter(feature_id, name_filter)
-        or matches_filter(OPTION_CLEANUP_FIXTURE, name_filter)
-    ):
-        jobs.append((
-            feature_id, "option-cleanup", OPTION_CLEANUP_FIXTURE,
-            (OPTION_CLEANUP_FIXTURE,),
-        ))
     with tempfile.TemporaryDirectory(prefix="ring_structural_") as tmpdir:
         temp_root = Path(tmpdir)
         for label, kind, entry, fixtures in jobs:
             if kind == "line":
                 errors = run_c_line_oracle(
                     ring_exe, temp_root, entry, fixtures, label)
-            elif kind == "option-cleanup":
-                errors = run_option_cleanup_oracle(
-                    ring_exe, temp_root, label)
             else:
                 errors = run_extern_rc_oracle(ring_exe, temp_root, label)
             if errors:
@@ -8518,63 +8164,6 @@ def run_rc(ring_exe: str, collector: ResultCollector, *,
         RcInvocationContract(
             "option-temporary live", "tests/cases/verify_rc/option_temp_leak.ring",
             ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "cleanup-active Option live",
-            "tests/cases/ownership_option_branch_cleanup.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "cleanup-active Option missing first W4",
-            "tests/cases/ownership_option_branch_cleanup.ring",
-            ("--verify-rc", "--rc-mutate=missing-option-reassign-drop"),
-            False, fatal_exact=1,
-            finding_counts=(("leak-option-reassign", 1),),
-            finding_lines=(("leak-option-reassign", (62,)),),
-        ),
-        RcInvocationContract(
-            "cleanup-active Option missing rearmed W4",
-            "tests/cases/ownership_option_branch_cleanup.ring",
-            ("--verify-rc", "--rc-mutate=missing-option-rearmed-drop"),
-            False, fatal_exact=1,
-            finding_counts=(("leak-option-reassign", 1),),
-            finding_lines=(("leak-option-reassign", (63,)),),
-        ),
-        RcInvocationContract(
-            "cleanup-active Option missing exit Drop",
-            "tests/cases/ownership_option_branch_cleanup.ring",
-            ("--verify-rc", "--rc-mutate=missing-option-exit-drop"),
-            False, fatal_exact=1,
-            finding_counts=(("leak-option-exit", 1),),
-            finding_lines=(("leak-option-exit", (55,)),),
-        ),
-        RcInvocationContract(
-            "cleanup-active Option borrowed-tail false admission",
-            "tests/cases/ownership_option_branch_cleanup.ring",
-            ("--verify-rc", "--rc-mutate=force-option-tail-eligible"),
-            False, fatal_exact=1,
-            finding_counts=(("uaf-option-tail-admission", 1),),
-            finding_lines=(("uaf-option-tail-admission", (151,)),),
-        ),
-        RcInvocationContract(
-            "cleanup-active Option OPAQUE-write false admission",
-            "tests/cases/ownership_option_branch_cleanup.ring",
-            ("--verify-rc", "--rc-mutate=force-option-write-eligible"),
-            False, fatal_exact=1,
-            finding_counts=(("uaf-option-opaque-write", 1),),
-            finding_lines=(("uaf-option-opaque-write", (164,)),),
-        ),
-        RcInvocationContract(
-            "cleanup-active Option catch-arm live",
-            "tests/cases/verify_rc/option_cleanup_catch_take.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "cleanup-active Option catch-arm state mutation",
-            "tests/cases/verify_rc/option_cleanup_catch_take.ring",
-            ("--verify-rc", "--rc-mutate=inject-option-catch-drop"),
-            False, fatal_exact=1,
-            finding_counts=(("rc-imbalance", 1),),
         ),
         RcInvocationContract(
             "option-temporary skip-anf mutation", "tests/cases/verify_rc/option_temp_leak.ring",

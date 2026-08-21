@@ -16,10 +16,8 @@ use hir::{HDecl, HStmt, HExpr, HParam, HProgram, HMatchArm,
     HStructFieldInit, HStringInterpPart, HEffectHandler, HEffectOp,
     hexpr_type, hexpr_span, hexpr_effects,
     is_rc_excluded_type, type_contains_extern_handle,
-    type_is_physical_rc_eligible,
     is_borrow_returning_call, is_user_drop_type,
-    is_nullary_variant_ctor_ident, is_option_none_ctor_ident,
-    is_materialized_fn_value,
+    is_nullary_variant_ctor_ident, is_materialized_fn_value,
     is_exact_direct_call_ident,
     slot_read_identity, slot_take_identity, slot_write_identity,
     synthetic_def_id, SYNTHETIC_ANF_DEF_ID_BASE,
@@ -73,16 +71,6 @@ pub fn perceus_transform(program: HProgram) -> HProgram {
 //                   HIR validation must fail loud before verification/codegen.
 //   "drop-capture" — insert a Drop of an exact outer capture inside its
 //                   nested callable; verifier must reject the borrowed slot.
-//   "missing-option-reassign-drop" / "missing-option-rearmed-drop"
-//                 — omit the first/second cleanup-active Option W4 Drop.
-//   "missing-option-exit-drop"
-//                 — omit the first cleanup-active Option exit Drop.
-//   "force-option-tail-eligible"
-//                 — admit one borrowed-tail candidate; verifier must reject it.
-//   "force-option-write-eligible"
-//                 — admit one OPAQUE-write candidate; verifier must reject it.
-//   "inject-option-catch-drop"
-//                 — prepend one exact outer Option Drop to a catch arm.
 // Reached only via the `--rc-mutate=` CLI flag (verify path); the build/run
 // pipelines call perceus_transform and cannot be mutated.
 pub fn perceus_transform_mutated(program: HProgram, mutate: Str) -> HProgram {
@@ -113,16 +101,7 @@ pub fn perceus_transform_mutated(program: HProgram, mutate: Str) -> HProgram {
     // Drop is suppressed for them — a boxed write mutates `cell.value`, it does
     // NOT consume/free the shared cell pointer.
     let drops = rc_program.drop_types
-    // Index 0 is the ordinary RC gensym. Remaining cells are test-only,
-    // single-shot mutation controls kept outside semantic HIR metadata.
-    let mut rc_counter: List<Int> = [0,
-        if mutate == "missing-option-reassign-drop" { 1 }
-        else if mutate == "missing-option-rearmed-drop" { 2 }
-        else { 0 },
-        if mutate == "missing-option-exit-drop" { 1 } else { 0 },
-        if mutate == "force-option-tail-eligible" { 1 } else { 0 },
-        if mutate == "force-option-write-eligible" { 1 } else { 0 },
-        if mutate == "inject-option-catch-drop" { 1 } else { 0 }]
+    let mut rc_counter: List<Int> = [0]
     let new_decls = transform_decls(rc_program.decls,
         rc_program.boxed_vars, externs, drops, rc_counter)
     let mutated_decls = if mutate == "drop-params" { mutate_drop_params(new_decls) } else { new_decls }
@@ -1365,9 +1344,7 @@ fn transform_decl(
 
 struct OwnedSlot {
     name: Str,
-    def_id: Int,
-    // Exact direct `var Option = none` admitted by both bounded S′ proofs.
-    option_none_cleanup: Bool
+    def_id: Int
 }
 
 fn mutate_strip_identity_def_id(
@@ -1572,13 +1549,11 @@ fn is_owner_bearing(expr: HExpr) -> Bool {
         return false
     }
     let nullary_variant_ctor = is_nullary_variant_ctor_ident(expr)
-    let option_none_ctor = is_option_none_ctor_ident(expr)
     match expr {
         // Ordinary identifiers read an existing owner.  A fieldless variant is
         // the one Ident-shaped exception: codegen calls a constructor, so the
         // result is fresh and must move without an escape Clone.
-        HExpr::Ident { .. } =>
-            !nullary_variant_ctor && !option_none_ctor,
+        HExpr::Ident { .. } => nullary_variant_ctor == false,
         HExpr::FieldAccess { .. } => true,
         // B-104 D1 rule ③: `s[i]` on a Str is NOT owner-bearing — ring_str_get
         // returns a FRESH 1-char string (new ring_alloc, verified), so an escape
@@ -1887,13 +1862,8 @@ fn rc_block_root(body: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<I
 
 // Process a block's statement list + tail.  Returns (new_stmts, new_tail).
 fn rc_block_inner(stmts: List<HStmt>, tail: HExpr?, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<Str>, drop_types: Set<Str>, mut gensym: List<Int>, loop_base: Int) -> (List<HStmt>, HExpr?) {
-    let tail_for_gate = tail
-    let tail_for_transform = tail
-    let option_cleanup_def_ids = option_none_cleanup_def_ids(
-        stmts, tail_for_gate, boxed, externs, gensym)
     // Bindings defined directly by these statements (not nested loop/branch scopes).
-    let block_locals = direct_block_locals(
-        stmts, option_cleanup_def_ids, externs)
+    let block_locals = direct_block_locals(stmts, externs)
 
     // The owned set visible to each statement = enclosing owned ++ the bindings of
     // THIS block declared BEFORE that statement.  This must be built INCREMENTALLY
@@ -1920,8 +1890,7 @@ fn rc_block_inner(stmts: List<HStmt>, tail: HExpr?, escape: Bool, owned: List<Ow
         for ns in rc_stmt(s, visible_owned, boxed, externs, drop_types, gensym, loop_base) { new_stmts.push(ns) }
         // After processing, this statement's own droppable binding (if any, and not
         // already owned by an enclosing scope) becomes visible to later statements.
-        for n in stmt_droppable_locals(
-                s, option_cleanup_def_ids, externs) {
+        for n in stmt_droppable_locals(s, externs) {
             if !owned_contains(visible_owned, n) { visible_owned.push(n) }
         }
     }
@@ -1985,7 +1954,7 @@ fn rc_block_inner(stmts: List<HStmt>, tail: HExpr?, escape: Bool, owned: List<Ow
     let tail_escape = if own_block_locals.len() > 0 { true } else { escape }
 
     // The tail sees every block-local (all `let`s precede the tail).
-    let new_tail = match tail_for_transform {
+    let new_tail = match tail {
         some(t) => some(rc_escape_or_value(t, tail_escape, visible_owned, boxed, externs, drop_types, gensym, loop_base)),
         none => none,
     }
@@ -1997,7 +1966,7 @@ fn rc_block_inner(stmts: List<HStmt>, tail: HExpr?, escape: Bool, owned: List<Ow
         // / double-free on the diverging path).
         ((new_stmts, new_tail))
     } else {
-        let drops = drops_for(own_block_locals, gensym)
+        let drops = drops_for(own_block_locals)
         match new_tail {
             some(t) => {
                 // Hoist the tail so the drops run AFTER it is evaluated.
@@ -2046,502 +2015,6 @@ fn fresh_scope_tmp(mut gensym: List<Int>) -> (Str, Int) {
         synthetic_def_id(SYNTHETIC_RC_DEF_ID_BASE, ordinal))
 }
 
-// S′ changes a block from borrowed-tail to escaped-tail only when that change
-// cannot insert a new Clone on any reachable value path.  Direct calls and
-// effect control remain opaque without A′ callable ownership metadata.
-fn escape_is_noop_on_reachable_tail(expr: HExpr) -> Bool {
-    if expr_diverges(expr) { return true }
-    match expr {
-        HExpr::Clone { .. } => true,
-        HExpr::IfExpr { then_branch, else_branch, .. } => {
-            if !escape_is_noop_on_reachable_tail(then_branch) {
-                return false
-            }
-            match else_branch {
-                some(other) => escape_is_noop_on_reachable_tail(other),
-                none => true
-            }
-        },
-        HExpr::MatchExpr { arms, .. } => {
-            for arm in arms {
-                let body_reachable = match arm.guard {
-                    some(guard) => !expr_diverges(guard),
-                    none => true
-                }
-                if body_reachable &&
-                   !escape_is_noop_on_reachable_tail(arm.body) {
-                    return false
-                }
-            }
-            true
-        },
-        HExpr::Block { tail, .. } => match tail {
-            some(value) => escape_is_noop_on_reachable_tail(value),
-            none => true
-        },
-        HExpr::UnsafeBlock { body, .. } =>
-            escape_is_noop_on_reachable_tail(body),
-        HExpr::Call { .. } | HExpr::TryCatch { .. } |
-        HExpr::HandleExpr { .. } | HExpr::EffectOp { .. } => false,
-        _ => !is_owner_bearing(expr)
-    }
-}
-
-const DROP_PRODUCER_OWNED: Int = 0
-const DROP_PRODUCER_NOOP_NONE: Int = 1
-const DROP_PRODUCER_OPAQUE: Int = 2
-
-// OPAQUE dominates; diverging branches contribute no value; OWNED combined
-// only with exact none stays OWNED; all exact-none values stay neutral.
-fn merge_droppable_branch_classes(classes: List<Option<Int>>) -> Int {
-    let mut saw_value = false
-    let mut saw_owned = false
-    for maybe_class in classes {
-        match maybe_class {
-            some(class) => {
-                saw_value = true
-                if class == DROP_PRODUCER_OPAQUE {
-                    return DROP_PRODUCER_OPAQUE
-                }
-                if class == DROP_PRODUCER_OWNED { saw_owned = true }
-            },
-            none => {}
-        }
-    }
-    if !saw_value {
-        DROP_PRODUCER_OPAQUE
-    } else if saw_owned {
-        DROP_PRODUCER_OWNED
-    } else {
-        DROP_PRODUCER_NOOP_NONE
-    }
-}
-
-fn option_write_branch_producer_class(
-    body: HExpr, externs: Set<Str>
-) -> Option<Int> {
-    if expr_diverges(body) {
-        none
-    } else {
-        match body {
-            HExpr::Block { tail, .. } => match tail {
-                some(value) => some(option_write_producer_class(
-                    value, externs)),
-                none => some(DROP_PRODUCER_OPAQUE)
-            },
-            _ => some(option_write_producer_class(body, externs))
-        }
-    }
-}
-
-// Stricter than ordinary binding droppability: an S′ reassignment accepts
-// only an obvious fresh top-level producer or exact none.  Reads, projections,
-// ordinary calls and effect/control values remain OPAQUE.  Constructor calls
-// are the sole Call-shaped exception because their resolved enum identity is
-// already a shared HIR/codegen ownership contract.
-fn option_write_producer_class(
-    init: HExpr, externs: Set<Str>
-) -> Int {
-    if !type_is_physical_rc_eligible(hexpr_type(init), externs) {
-        return DROP_PRODUCER_OPAQUE
-    }
-    if is_option_none_ctor_ident(init) {
-        return DROP_PRODUCER_NOOP_NONE
-    }
-    match init {
-        HExpr::IfExpr { then_branch, else_branch, .. } => match else_branch {
-            some(other) => merge_droppable_branch_classes([
-                option_write_branch_producer_class(then_branch, externs),
-                option_write_branch_producer_class(other, externs)
-            ]),
-            none => DROP_PRODUCER_OPAQUE
-        },
-        HExpr::MatchExpr { arms, .. } => {
-            let mut classes: List<Option<Int>> = []
-            for arm in arms {
-                let body_reachable = match arm.guard {
-                    some(guard) => !expr_diverges(guard),
-                    none => true
-                }
-                if body_reachable {
-                    classes.push(option_write_branch_producer_class(
-                        arm.body, externs))
-                } else {
-                    classes.push(none)
-                }
-            }
-            merge_droppable_branch_classes(classes)
-        },
-        HExpr::Block { tail, .. } => match tail {
-            some(value) => option_write_producer_class(value, externs),
-            none => DROP_PRODUCER_OPAQUE
-        },
-        HExpr::UnsafeBlock { body, .. } =>
-            option_write_producer_class(body, externs),
-        HExpr::Call { callee, ty, .. } => {
-            if is_variant_constructor_call(callee, ty) {
-                DROP_PRODUCER_OWNED
-            } else {
-                DROP_PRODUCER_OPAQUE
-            }
-        },
-        HExpr::Ident { .. } => {
-            if is_nullary_variant_ctor_ident(init) {
-                DROP_PRODUCER_OWNED
-            } else {
-                DROP_PRODUCER_OPAQUE
-            }
-        },
-        HExpr::StructLit { .. } |
-        HExpr::NamedVariantConstruct { .. } |
-        HExpr::ListLit { .. } | HExpr::TupleLit { .. } |
-        HExpr::RangeExpr { .. } | HExpr::Lambda { .. } |
-        HExpr::StringInterp { .. } | HExpr::DictConstruct { .. } |
-        HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
-        HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
-        HExpr::BinOp { .. } | HExpr::UnaryOp { .. } |
-        HExpr::Clone { .. } => DROP_PRODUCER_OWNED,
-        _ => DROP_PRODUCER_OPAQUE
-    }
-}
-
-// Bounded single-slot write census.  It follows only HIR nodes reachable from
-// this direct block and compares assignment targets by exact DefId, so a
-// same-spelled shadow cannot authorize or veto the candidate.  A write from a
-// nested callable is always rejected even if its RHS looks fresh; such a slot
-// must have been boxed/capture-planned by a stronger authority.
-fn option_cleanup_expr_writes_are_safe(
-    expr: HExpr, target_def_id: Int, externs: Set<Str>,
-    nested_callable: Bool
-) -> Bool {
-    match expr {
-        HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
-        HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
-        HExpr::Ident { .. } | HExpr::DictConstruct { .. } => true,
-        HExpr::BinOp { left, right, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                left, target_def_id, externs, nested_callable) &&
-            option_cleanup_expr_writes_are_safe(
-                right, target_def_id, externs, nested_callable),
-        HExpr::UnaryOp { operand, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                operand, target_def_id, externs, nested_callable),
-        HExpr::Call { callee, args, .. } => {
-            if !option_cleanup_expr_writes_are_safe(
-                    callee, target_def_id, externs, nested_callable) {
-                return false
-            }
-            for arg in args {
-                if !option_cleanup_expr_writes_are_safe(
-                        arg, target_def_id, externs, nested_callable) {
-                    return false
-                }
-            }
-            true
-        },
-        HExpr::FieldAccess { receiver, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                receiver, target_def_id, externs, nested_callable),
-        HExpr::StructLit { fields, spread, .. } |
-        HExpr::NamedVariantConstruct { fields, spread, .. } => {
-            for field in fields {
-                if !option_cleanup_expr_writes_are_safe(
-                        field.value, target_def_id, externs,
-                        nested_callable) {
-                    return false
-                }
-            }
-            match spread {
-                some(value) => option_cleanup_expr_writes_are_safe(
-                    value, target_def_id, externs, nested_callable),
-                none => true
-            }
-        },
-        HExpr::MatchExpr { scrutinee, arms, .. } => {
-            if !option_cleanup_expr_writes_are_safe(
-                    scrutinee, target_def_id, externs, nested_callable) {
-                return false
-            }
-            for arm in arms {
-                match arm.guard {
-                    some(guard) => if !option_cleanup_expr_writes_are_safe(
-                            guard, target_def_id, externs,
-                            nested_callable) {
-                        return false
-                    },
-                    none => {}
-                }
-                let body_reachable = match arm.guard {
-                    some(guard) => !expr_diverges(guard),
-                    none => true
-                }
-                if body_reachable &&
-                   !option_cleanup_expr_writes_are_safe(
-                        arm.body, target_def_id, externs,
-                        nested_callable) {
-                    return false
-                }
-            }
-            true
-        },
-        HExpr::Block { stmts, tail, .. } =>
-            option_cleanup_stmts_writes_are_safe(
-                stmts, tail, target_def_id, externs, nested_callable),
-        HExpr::IfExpr { condition, then_branch, else_branch, .. } => {
-            if !option_cleanup_expr_writes_are_safe(
-                    condition, target_def_id, externs, nested_callable) ||
-               !option_cleanup_expr_writes_are_safe(
-                    then_branch, target_def_id, externs, nested_callable) {
-                return false
-            }
-            match else_branch {
-                some(other) => option_cleanup_expr_writes_are_safe(
-                    other, target_def_id, externs, nested_callable),
-                none => true
-            }
-        },
-        HExpr::StringInterp { parts, .. } => {
-            for part in parts {
-                match part {
-                    HStringInterpPart::Expression(value) =>
-                        if !option_cleanup_expr_writes_are_safe(
-                                value, target_def_id, externs,
-                                nested_callable) {
-                            return false
-                        },
-                    HStringInterpPart::Literal(_) => {}
-                }
-            }
-            true
-        },
-        HExpr::TryCatch { body, arms, .. } => {
-            if !option_cleanup_expr_writes_are_safe(
-                    body, target_def_id, externs, nested_callable) {
-                return false
-            }
-            for arm in arms {
-                match arm.guard {
-                    some(guard) => if !option_cleanup_expr_writes_are_safe(
-                            guard, target_def_id, externs,
-                            nested_callable) {
-                        return false
-                    },
-                    none => {}
-                }
-                let body_reachable = match arm.guard {
-                    some(guard) => !expr_diverges(guard),
-                    none => true
-                }
-                if body_reachable &&
-                   !option_cleanup_expr_writes_are_safe(
-                        arm.body, target_def_id, externs,
-                        nested_callable) {
-                    return false
-                }
-            }
-            true
-        },
-        HExpr::HandleExpr { body, handlers, .. } => {
-            if !option_cleanup_expr_writes_are_safe(
-                    body, target_def_id, externs, nested_callable) {
-                return false
-            }
-            for handler in handlers {
-                if !option_cleanup_expr_writes_are_safe(
-                        handler.body, target_def_id, externs, true) {
-                    return false
-                }
-            }
-            true
-        },
-        HExpr::Lambda { body, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                body, target_def_id, externs, true),
-        HExpr::EffectOp { args, .. } => {
-            for arg in args {
-                if !option_cleanup_expr_writes_are_safe(
-                        arg, target_def_id, externs,
-                        nested_callable) {
-                    return false
-                }
-            }
-            true
-        },
-        HExpr::RangeExpr { start, end, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                start, target_def_id, externs, nested_callable) &&
-            option_cleanup_expr_writes_are_safe(
-                end, target_def_id, externs, nested_callable),
-        HExpr::ListLit { elements, .. } |
-        HExpr::TupleLit { elements, .. } => {
-            for element in elements {
-                if !option_cleanup_expr_writes_are_safe(
-                        element, target_def_id, externs,
-                        nested_callable) {
-                    return false
-                }
-            }
-            true
-        },
-        HExpr::IndexExpr { receiver, index, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                receiver, target_def_id, externs, nested_callable) &&
-            option_cleanup_expr_writes_are_safe(
-                index, target_def_id, externs, nested_callable),
-        HExpr::Clone { inner, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                inner, target_def_id, externs, nested_callable),
-        HExpr::ReturnExpr { value, .. } => match value {
-            some(result) => option_cleanup_expr_writes_are_safe(
-                result, target_def_id, externs, nested_callable),
-            none => true
-        },
-        HExpr::UnsafeBlock { body, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                body, target_def_id, externs, nested_callable)
-    }
-}
-
-fn option_cleanup_stmt_writes_are_safe(
-    stmt: HStmt, target_def_id: Int, externs: Set<Str>,
-    nested_callable: Bool
-) -> Bool {
-    match stmt {
-        HStmt::Let { init, .. } | HStmt::Var { init, .. } |
-        HStmt::ExprStmt { expr: init, .. } |
-        HStmt::LetDestructure { init, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                init, target_def_id, externs, nested_callable),
-        HStmt::Assign { target, value, .. } => {
-            let writes_target = match target {
-                HExpr::Ident { def_id: some(id), .. } =>
-                    id == target_def_id,
-                _ => false
-            }
-            if writes_target &&
-               (nested_callable ||
-                option_write_producer_class(value, externs) ==
-                    DROP_PRODUCER_OPAQUE) {
-                return false
-            }
-            option_cleanup_expr_writes_are_safe(
-                target, target_def_id, externs, nested_callable) &&
-            option_cleanup_expr_writes_are_safe(
-                value, target_def_id, externs, nested_callable)
-        },
-        HStmt::Return { value, .. } => match value {
-            some(result) => option_cleanup_expr_writes_are_safe(
-                result, target_def_id, externs, nested_callable),
-            none => true
-        },
-        HStmt::While { condition, body, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                condition, target_def_id, externs, nested_callable) &&
-            option_cleanup_expr_writes_are_safe(
-                body, target_def_id, externs, nested_callable),
-        HStmt::ForIn { iterable, body, .. } =>
-            option_cleanup_expr_writes_are_safe(
-                iterable, target_def_id, externs, nested_callable) &&
-            option_cleanup_expr_writes_are_safe(
-                body, target_def_id, externs, nested_callable),
-        HStmt::IfLet { expr, then_block, else_block, .. } => {
-            if !option_cleanup_expr_writes_are_safe(
-                    expr, target_def_id, externs, nested_callable) ||
-               !option_cleanup_expr_writes_are_safe(
-                    then_block, target_def_id, externs,
-                    nested_callable) {
-                return false
-            }
-            match else_block {
-                some(other) => option_cleanup_expr_writes_are_safe(
-                    other, target_def_id, externs, nested_callable),
-                none => true
-            }
-        },
-        HStmt::Break { .. } | HStmt::Continue { .. } |
-        HStmt::Drop { .. } => true
-    }
-}
-
-fn option_cleanup_stmts_writes_are_safe(
-    stmts: List<HStmt>, tail: Option<HExpr>, target_def_id: Int,
-    externs: Set<Str>, nested_callable: Bool
-) -> Bool {
-    let mut reaches_next = true
-    for stmt in stmts {
-        if reaches_next {
-            if !option_cleanup_stmt_writes_are_safe(
-                    stmt, target_def_id, externs, nested_callable) {
-                return false
-            }
-            if stmt_diverges(stmt) { reaches_next = false }
-        }
-    }
-    if reaches_next {
-        match tail {
-            some(value) => option_cleanup_expr_writes_are_safe(
-                value, target_def_id, externs, nested_callable),
-            none => true
-        }
-    } else {
-        true
-    }
-}
-
-fn option_none_cleanup_base_candidate(
-    stmt: HStmt, boxed: Set<Int>, externs: Set<Str>
-) -> Option<Int> {
-    match stmt {
-        HStmt::Var { name, def_id: some(id), ty, init, .. } => {
-            if !rc_name_skippable(name) && !boxed.contains(id) &&
-               type_is_physical_rc_eligible(ty, externs) &&
-               is_option_none_ctor_ident(init) {
-                some(id)
-            } else {
-                none
-            }
-        },
-        _ => none
-    }
-}
-
-fn option_none_cleanup_def_ids(
-    stmts: List<HStmt>, tail: Option<HExpr>, boxed: Set<Int>,
-    externs: Set<Str>, mut gensym: List<Int>
-) -> Set<Int> {
-    let mut out: Set<Int> = set_new()
-    let base_tail_safe = match tail {
-        some(value) => escape_is_noop_on_reachable_tail(value),
-        none => true
-    }
-    let mut reaches_next = true
-    for stmt in stmts {
-        if reaches_next {
-            match option_none_cleanup_base_candidate(
-                    stmt, boxed, externs) {
-                some(def_id) => {
-                    let base_writes_safe =
-                        option_cleanup_stmts_writes_are_safe(
-                            stmts, tail, def_id, externs, false)
-                    let force_tail = !base_tail_safe && base_writes_safe &&
-                        gensym.get(3) == some(1)
-                    if force_tail { gensym.set(3, 0) }
-                    let tail_safe = base_tail_safe || force_tail
-                    let force_write = tail_safe && !base_writes_safe &&
-                        gensym.get(4) == some(1)
-                    if force_write { gensym.set(4, 0) }
-                    if tail_safe && (base_writes_safe || force_write) {
-                        out.insert(def_id)
-                    }
-                },
-                none => {}
-            }
-            if stmt_diverges(stmt) { reaches_next = false }
-        }
-    }
-    out
-}
-
 // Direct (non-nested) OWNED-AND-DROPPABLE bindings introduced by a statement
 // list.  A `let`/`var` is scope-end-dropped only when its initialiser is
 // GUARANTEED to be a fresh, unshared owned value:
@@ -2560,13 +2033,11 @@ fn option_none_cleanup_def_ids(
 // (LetDestructure / for-in / match-if-let patterns) project BORROWS and are never
 // dropped (handled by their exclusion from `owned`).
 fn direct_block_locals(
-    stmts: List<HStmt>, option_cleanup_def_ids: Set<Int>,
-    externs: Set<Str>
+    stmts: List<HStmt>, externs: Set<Str>
 ) -> List<OwnedSlot> {
     let mut out: List<OwnedSlot> = []
     for s in stmts {
-        for n in stmt_droppable_locals(
-                s, option_cleanup_def_ids, externs) {
+        for n in stmt_droppable_locals(s, externs) {
             if !owned_contains(out, n) { out.push(n) }
         }
     }
@@ -2578,7 +2049,7 @@ fn direct_block_locals(
 // the visible-owned set incrementally (a binding is only droppable from its `let`
 // onward — see rc_block_inner).
 fn stmt_droppable_locals(
-    s: HStmt, option_cleanup_def_ids: Set<Int>, externs: Set<Str>
+    s: HStmt, externs: Set<Str>
 ) -> List<OwnedSlot> {
     match s {
         HStmt::Let { name, def_id, init, .. } => {
@@ -2593,24 +2064,17 @@ fn stmt_droppable_locals(
                     none => panic(
                         "unreachable: cleanup-visible let has no exact DefId")
                 }
-                [OwnedSlot { name: name, def_id: id,
-                    option_none_cleanup: false }]
+                [OwnedSlot { name: name, def_id: id }]
             } else { [] }
         },
         HStmt::Var { name, def_id, init, .. } => {
-            let cleanup_none = match def_id {
-                some(id) => option_cleanup_def_ids.contains(id),
-                none => false
-            }
-            if !rc_name_skippable(name) &&
-               (is_droppable_init(init, externs) || cleanup_none) {
+            if !rc_name_skippable(name) && is_droppable_init(init, externs) {
                 let id = match def_id {
                     some(value) => value,
                     none => panic(
                         "unreachable: cleanup-visible var has no exact DefId")
                 }
-                [OwnedSlot { name: name, def_id: id,
-                    option_none_cleanup: cleanup_none }]
+                [OwnedSlot { name: name, def_id: id }]
             } else { [] }
         },
         _ => [],
@@ -2628,71 +2092,7 @@ fn stmt_droppable_locals(
 // 248) both classify HExpr variants.  See the SYNC NOTE on
 // anf_should_materialize for the shared/divergent variant table.
 // When adding a NEW HExpr variant, update BOTH functions.
-fn droppable_branch_producer_class(
-    body: HExpr, externs: Set<Str>
-) -> Option<Int> {
-    if expr_diverges(body) {
-        none
-    } else {
-        match body {
-            HExpr::Block { tail, .. } => match tail {
-                some(value) => some(droppable_producer_class(
-                    value, externs)),
-                none => some(DROP_PRODUCER_OPAQUE)
-            },
-            _ => some(droppable_producer_class(body, externs))
-        }
-    }
-}
-
-fn droppable_producer_class(init: HExpr, externs: Set<Str>) -> Int {
-    if !type_is_physical_rc_eligible(hexpr_type(init), externs) {
-        return DROP_PRODUCER_OPAQUE
-    }
-    if is_option_none_ctor_ident(init) {
-        return DROP_PRODUCER_NOOP_NONE
-    }
-    match init {
-        HExpr::IfExpr { then_branch, else_branch, .. } => match else_branch {
-            some(other) => merge_droppable_branch_classes([
-                droppable_branch_producer_class(then_branch, externs),
-                droppable_branch_producer_class(other, externs)
-            ]),
-            none => DROP_PRODUCER_OPAQUE
-        },
-        HExpr::MatchExpr { arms, .. } => {
-            let mut classes: List<Option<Int>> = []
-            for arm in arms {
-                let body_reachable = match arm.guard {
-                    some(guard) => !expr_diverges(guard),
-                    none => true
-                }
-                if body_reachable {
-                    classes.push(droppable_branch_producer_class(
-                        arm.body, externs))
-                } else {
-                    classes.push(none)
-                }
-            }
-            merge_droppable_branch_classes(classes)
-        },
-        HExpr::Block { tail, .. } => match tail {
-            some(value) => droppable_producer_class(value, externs),
-            none => DROP_PRODUCER_OPAQUE
-        },
-        _ => if is_droppable_leaf_init(init, externs) {
-            DROP_PRODUCER_OWNED
-        } else {
-            DROP_PRODUCER_OPAQUE
-        }
-    }
-}
-
 fn is_droppable_init(init: HExpr, externs: Set<Str>) -> Bool {
-    droppable_producer_class(init, externs) == DROP_PRODUCER_OWNED
-}
-
-fn is_droppable_leaf_init(init: HExpr, externs: Set<Str>) -> Bool {
     // B-104 D1 rule ② (Unit) + rule ① (extern, audit #139), both TYPE-level:
     //   ② a Unit-typed binding is never dropped: Unit has no value semantics
     //     (checker-guaranteed), and at the LLVM ABI a Unit-typed builtin call
@@ -2833,9 +2233,24 @@ fn is_droppable_leaf_init(init: HExpr, externs: Set<Str>) -> Bool {
         // branch tails whose phi yielded a borrow VERBATIM — was retired by
         // B-104 D7's andor_lower: And/Or no longer exist at this stage, and
         // the recursion remains solely for the effect-value tails.)
-        HExpr::IfExpr { .. } | HExpr::MatchExpr { .. } |
-        HExpr::Block { .. } => panic(
-            "unreachable: control-flow droppability bypassed producer lattice"),
+        HExpr::IfExpr { then_branch, else_branch, .. } => {
+            match else_branch {
+                // No else → the if is statement-typed (Unit value), not a fresh owned
+                // value worth dropping; conservatively not droppable.
+                none => false,
+                some(eb) => is_droppable_branch_value(then_branch, externs) && is_droppable_branch_value(eb, externs),
+            }
+        },
+        HExpr::MatchExpr { arms, .. } => {
+            let mut all = arms.len() > 0
+            for arm in arms {
+                if is_droppable_branch_value(arm.body, externs) == false { all = false }
+            }
+            all
+        },
+        HExpr::Block { tail, .. } => {
+            match tail { some(t) => is_droppable_init(t, externs), none => false }
+        },
         // B-104 D4: a dict construction (dict_lower's `let __ring_dictlocal_N`
         // init) is a FRESH TUPLE-of-closures the binding solely owns — the
         // scope-end drop (runtime drop_dict, typeid DICT_DYN) reclaims it.  Its
@@ -2845,6 +2260,22 @@ fn is_droppable_leaf_init(init: HExpr, externs: Set<Str>) -> Bool {
         // EffectOp / HandleExpr / TryCatch: value may alias resumed/handler state or
         // sit on an abort path (B-002) — conservatively NOT dropped (leak, crash-free).
         _ => false,
+    }
+}
+
+// Whether a branch / arm body (a Block, or a bare single-expr body) yields a
+// DROPPABLE owned value.  A diverging branch (return/break/continue) yields no
+// value to the enclosing binding, so it never vetoes droppability.  Otherwise the
+// branch value is its tail expression, classified by is_droppable_init (recursing
+// through nested control flow; an EffectOp-family tail → not droppable).
+fn is_droppable_branch_value(body: HExpr, externs: Set<Str>) -> Bool {
+    if expr_diverges(body) {
+        true
+    } else {
+        match body {
+            HExpr::Block { tail, .. } => match tail { some(t) => is_droppable_init(t, externs), none => false },
+            _ => is_droppable_init(body, externs),
+        }
     }
 }
 
@@ -2862,76 +2293,14 @@ fn loop_scoped_owned(
     }
 }
 
-fn emit_option_reassign_drop(
-    slot: OwnedSlot, mut gensym: List<Int>
-) -> Bool {
-    if !slot.option_none_cleanup { return true }
-    match gensym.get(1) {
-        some(ordinal) => if ordinal > 0 {
-            gensym.set(1, ordinal - 1)
-            ordinal != 1
-        } else { true },
-        none => true
-    }
-}
-
-fn emit_option_exit_drop(
-    slot: OwnedSlot, mut gensym: List<Int>
-) -> Bool {
-    if !slot.option_none_cleanup { return true }
-    if gensym.get(2) == some(1) {
-        gensym.set(2, 0)
-        false
-    } else {
-        true
-    }
-}
-
-fn inject_option_catch_drop(
-    body: HExpr, owned: List<OwnedSlot>, mut gensym: List<Int>
-) -> HExpr {
-    if gensym.get(5) != some(1) { return body }
-    let mut target: Option<OwnedSlot> = none
-    for slot in owned {
-        if target.is_none() && slot.option_none_cleanup {
-            target = some(slot)
-        }
-    }
-    match target {
-        some(slot) => {
-            gensym.set(5, 0)
-            let injected_drop = HStmt::Drop { name: slot.name,
-                def_id: slot.def_id, ty: Type::UnitType,
-                span: synthetic_span() }
-            let body_ty = hexpr_type(body)
-            let body_effects = hexpr_effects(body)
-            let body_span = hexpr_span(body)
-            match body {
-                HExpr::Block { stmts, .. } => {
-                    let mut injected: List<HStmt> = [injected_drop]
-                    for stmt in stmts { injected.push(stmt) }
-                    HExpr::Block { ..body, stmts: injected }
-                },
-                _ => HExpr::Block { stmts: [injected_drop],
-                    tail: some(body), ty: body_ty,
-                    effects: body_effects, span: body_span }
-            }
-        },
-        none => body
-    }
-}
-
-// Build a Drop stmt list in reverse declaration order.  Only S′ slots consult
-// the test-only exit mutation; ordinary cleanup remains byte-for-byte governed
-// by the existing path.
-fn drops_for(names: List<OwnedSlot>, mut gensym: List<Int>) -> List<HStmt> {
+// Build a Drop stmt list for a name list (skipping `_`), in the given order.
+fn drops_for(names: List<OwnedSlot>) -> List<HStmt> {
     let mut out: List<HStmt> = []
     let mut index = names.len()
     while index > 0 {
         index = index - 1
         match names.get(index) {
-            some(slot) => if !rc_name_skippable(slot.name) &&
-                              emit_option_exit_drop(slot, gensym) {
+            some(slot) => if !rc_name_skippable(slot.name) {
                 out.push(HStmt::Drop { name: slot.name,
                     def_id: slot.def_id, ty: Type::UnitType,
                     span: synthetic_span() })
@@ -2975,24 +2344,14 @@ fn block_diverges(stmts: List<HStmt>, tail: HExpr?) -> Bool {
 //     other holders still reference.
 //   - non-scalar lvalues (struct/list/string/Option, FieldAccess/IndexExpr targets):
 //     interior borrows may alias the old value; needs stronger analysis (later wave).
-fn reassign_drop_slot(
-    target: HExpr, owned: List<OwnedSlot>, boxed: Set<Int>
-) -> Option<OwnedSlot> {
+fn scalar_reassign_drop_def_id(target: HExpr, boxed: Set<Int>) -> Int? {
     match target {
         HExpr::Ident { def_id: some(did), ty, .. } => {
-            if boxed.contains(did) { return none }
-            match owned_find_def_id(owned, did) {
-                some(slot) => {
-                    if is_scalar_type(ty) || slot.option_none_cleanup {
-                        some(slot)
-                    } else {
-                        none
-                    }
-                },
-                none => none
-            }
+            if !boxed.contains(did) && is_scalar_type(ty) {
+                some(did)
+            } else { none }
         },
-        _ => none
+        _ => none,
     }
 }
 
@@ -3045,7 +2404,10 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
             // VERBATIM — was retired by B-104 D7's andor_lower: the lowered
             // IfExpr init Clone-wraps borrow arm tails, so such a binding now
             // OWNS its value and the reassign drop is balanced.)
-            let w4_target = reassign_drop_slot(target, owned, boxed)
+            let w4_target = match scalar_reassign_drop_def_id(target, boxed) {
+                some(def_id) => owned_find_def_id(owned, def_id),
+                none => none,
+            }
             match w4_target {
                 some(drop_slot) => {
                     let (tmp, tmp_def_id) = fresh_scope_tmp(gensym)
@@ -3056,18 +2418,15 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
                         dict_closure_dicts: none, ty: vt,
                         effects: hexpr_effects(value), span: hexpr_span(value)
                     }
-                    let mut out: List<HStmt> = []
-                    out.push(HStmt::Let { name: tmp,
-                        name_span: synthetic_span(), def_id: some(tmp_def_id),
-                        ty: vt, init: new_value, span: synthetic_span() })
-                    if emit_option_reassign_drop(drop_slot, gensym) {
-                        out.push(HStmt::Drop { name: drop_slot.name,
+                    [
+                        HStmt::Let { name: tmp, name_span: synthetic_span(),
+                            def_id: some(tmp_def_id),
+                            ty: vt, init: new_value, span: synthetic_span() },
+                        HStmt::Drop { name: drop_slot.name,
                             def_id: drop_slot.def_id, ty: Type::UnitType,
-                            span: synthetic_span() })
-                    }
-                    out.push(HStmt::Assign {
-                        target: target, value: tmp_id, span: span })
-                    out
+                            span: synthetic_span() },
+                        HStmt::Assign { target: target, value: tmp_id, span: span },
+                    ]
                 },
                 none => [HStmt::Assign { target: target, value: new_value, span: span }],
             }
@@ -3096,7 +2455,7 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
                     out.push(HStmt::Let { name: tmp, name_span: synthetic_span(),
                         def_id: some(tmp_def_id), ty: tt, init: new_v,
                         span: synthetic_span() })
-                    for d in drops_for(owned, gensym) { out.push(d) }
+                    for d in drops_for(owned) { out.push(d) }
                     let tmp_id = HExpr::Ident { name: tmp, resolved_name: none,
                         def_id: some(tmp_def_id),
                         dict_closure_dicts: none, ty: tt, effects: te, span: ts }
@@ -3106,7 +2465,7 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
                 none => {
                     // void return — drop all owned locals in scope.
                     let mut out: List<HStmt> = []
-                    for d in drops_for(owned, gensym) { out.push(d) }
+                    for d in drops_for(owned) { out.push(d) }
                     out.push(HStmt::Return { value: none, span: span })
                     out
                 },
@@ -3158,19 +2517,13 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
         // into code that still uses them.
         HStmt::Break { span } => {
             let mut out: List<HStmt> = []
-            for d in drops_for(
-                    loop_scoped_owned(owned, loop_base), gensym) {
-                out.push(d)
-            }
+            for d in drops_for(loop_scoped_owned(owned, loop_base)) { out.push(d) }
             out.push(HStmt::Break { span: span })
             out
         },
         HStmt::Continue { span } => {
             let mut out: List<HStmt> = []
-            for d in drops_for(
-                    loop_scoped_owned(owned, loop_base), gensym) {
-                out.push(d)
-            }
+            for d in drops_for(loop_scoped_owned(owned, loop_base)) { out.push(d) }
             out.push(HStmt::Continue { span: span })
             out
         },
@@ -3399,11 +2752,9 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                     none => none,
                 }
                 let new_body_arm = rc_block_root(arm.body, escape, owned, boxed, externs, drop_types, gensym, loop_base)
-                let mutated_body_arm = inject_option_catch_drop(
-                    new_body_arm, owned, gensym)
                 new_arms.push(HMatchArm { pattern: arm.pattern,
                     bindings: arm.bindings, guard: new_guard,
-                    body: mutated_body_arm, span: arm.span })
+                    body: new_body_arm, span: arm.span })
             }
             HExpr::TryCatch { body: new_body, arms: new_arms, ty: ty, effects: effects, span: span }
         },
@@ -3505,7 +2856,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 out.push(HStmt::Let { name: tmp, name_span: synthetic_span(),
                     def_id: some(tmp_def_id), ty: tt, init: new_v,
                     span: synthetic_span() })
-                for d in drops_for(owned, gensym) { out.push(d) }
+                for d in drops_for(owned) { out.push(d) }
                 let tmp_id = HExpr::Ident { name: tmp, resolved_name: none,
                     def_id: some(tmp_def_id),
                     dict_closure_dicts: none, ty: tt, effects: te, span: ts }
@@ -3515,7 +2866,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             },
             none => {
                 let mut out: List<HStmt> = []
-                for d in drops_for(owned, gensym) { out.push(d) }
+                for d in drops_for(owned) { out.push(d) }
                 let ret_expr = HExpr::ReturnExpr { value: none, ty: ty, effects: effects, span: span }
                 HExpr::Block { stmts: out, tail: some(ret_expr),
                     ty: ty, effects: effects, span: span }

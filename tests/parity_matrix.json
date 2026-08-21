@@ -516,14 +516,6 @@
       "reason": "Symbol- and brace-anchored generated-C inspection proves raw handles are RC-excluded while paired owned controls retain exact dup/drop behavior."
     },
     {
-      "feature_id": "backend.ownership_option_cleanup_structural",
-      "evidence": ["tests/cases/structural/ownership_option_map_exit.ring"],
-      "oracle": "generated-c-option-cleanup-exit-structural",
-      "lane": ["c-structural"],
-      "status": "covered",
-      "reason": "Generated-C inspection requires exact-slot W4 plus one wrapper Drop per reachable exit for bounded safe-tail Option::none vars, rejects borrowed-tail and OPAQUE-write admission, and preserves borrowed payload slots."
-    },
-    {
       "feature_id": "backend.frontend_check_only",
       "evidence": ["tests/cases/error_occurs_check.ring"],
       "oracle": "diagnostic-substring",
