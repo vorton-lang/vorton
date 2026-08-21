@@ -15,7 +15,7 @@
 
 **近期 break 审核门**：任何修改公开语法、签名、ABI 或可观察语义的 item，在实现前必须标成“已拍板 clean break”“等待 decision dossier”或“仅内部、非 breaking”之一。已拍板的 #268/#269 ownership 真值与 B-167 调用点 evidence 采用一次性切换；旧 ownership 猜测/传播路径和创建处 evidence ABI 必须在各自原子变更中删除，不形成双轨。B-168/B-169 的探针结论，以及 B-152、B-156、B-171、B-133 和 `io` effect 拆分等潜在用户面变化，在进入实现前显式核对 break 边界；需要新的公开语义决定时仍提交 dossier。每个已拍板 break 的验收都必须列出被删除的旧路径、同步迁移的仓内消费者/规范/测试，并在旧形式仍可表达时用负例证明它不会经 alias、fallback 或旧 ABI 继续生效。
 
-Canonical dependency chain：`#268/#269 -> B-176/B-180 -> B-190 -> remaining correctness/ABI -> B-183 -> B-174/B-177/B-175`。
+Canonical dependency chain：`#268/#269 -> B-176/B-180 -> B-190 -> remaining correctness/ABI -> B-183 -> B-191 -> B-174/B-177/B-175`。
 
 B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（check/test/bootstrap 全绿）完成；worktree/ref/WIP、authority、paired-session、push/CI 与 health 约束已转为 `docs/workflow.md` / `docs/repository-health.json` 的持续门，活动历史只留 Git。
 `B-176` 保持 queued；B-180 只保留 runner anchor-object cache，compiler lane 继续冻结到 #268/#269 fixed point 闭环。
@@ -37,7 +37,7 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 4. **B-190 全仓简化**：B-180完成并吸收B-187文档盘点后，以固定snapshot做一次有界过度设计复核与减法refactor；不做rewrite-for-perfection。
 5. **Remaining correctness / ABI freeze**：处理 B-162、B-164、#263、#264、#239、#244、#267、#257，再走 B-168 → B-169 → B-167 → B-152 → B-002，并完成 unsafe/Str 等 candidate gate。
 6. **B-183 repository identity / GitHub workflow**：放在 technical ABI/ownership/failure fixed point 之后、产品化之前；不再晚于 B-174 才处理。
-7. **Preview candidate**：B-174 → B-177 → B-175；随后 B-181、B-178/B-016、B-111 等证据与工具面按依赖推进。发布后能力继续按既有优先级。
+7. **Preview candidate**：B-191 clean-break 删除 `T?` → B-174 → B-177 → B-175；随后 B-181、B-178/B-016、B-111 等证据与工具面按依赖推进。发布后能力继续按既有优先级。
 
 B-180 不得以早期 developer-unblock checkpoint 绕过 #268/#269 final fixed point；其已证明的 runner anchor-object cache 可保留，所有 compiler candidates 冻结。B-176 只有在最新 main 可重放完整 baseline 后才算完成。
 
@@ -768,6 +768,25 @@ B-111 回答语言层的核心赌注；本项随后验证仓库层的有界主�
 async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评估 stackless/CPS、stackful fiber、线程池阻塞垫脚石；归档 JS generator 不作为答案。以原型核实跨 await ownership/drop、HOF、C ABI/FFI、跨平台、scope/cancel，给出推荐/否决与反证，写回 design §8 并重写 B-007。本项不改 main 行为。
 
 ## 语法增强
+
+### B-191 删除 `T?` Option 纯缩写语法糖 [design-align] [P2] [M] [judgment] [queued] [after: B-180] [before: B-174]
+
+> **2026-08-22 用户决定，已拍板 clean break**：Ring 不保留仅减少字符、无独立建模/认知/验证/组合价值的纯缩写语法糖；少写几个字符或 token 对 LLM 不构成充分收益。`T?` 与 `Option<T>` 语义完全相同，却增加第二种类型拼写及 nullable / error-propagation 跨语言歧义，因此删除。该项不打断 #268/#269 或 B-176/B-180；性能专项完成后执行，并在 preview CLI/product surface 前关闭。
+
+**范围 / 文件**：
+
+- `compiler/parser.ring`、`compiler/ast.ring`、`compiler/infer_ctx.ring`：删除类型位置的 `?` 后缀与只服务该糖的 `TypeExpr::OptionType` 路径；`Option<T>` 继续解析到现有 builtin Option enum。`TkQuestion` 若仍被 open effect tail `?e` 等现行语法使用则保留，不做无关 token 清理。
+- `compiler/types.ring` 及 formatter/diagnostic/inspection consumers：canonical type display 改为 `Option<T>`，不得再把显式源码或推断结果打印成 `T?`。
+- 原子迁移 `compiler/*.ring`、`std/*.ring`、examples、tests 与 `docs/lang-spec/{syntax,type-system,stdlib}.md`；同步当前 design/philosophy/CLAUDE 的实现状态。历史 Git 文本与专用负例不作“残留”误报。
+
+**约束**：不改变 `Option<T>`、`some`/`none`、match、RC/ownership、ABI 或 runtime 表示；不增加 deprecated alias、warning-only 过渡、formatter fallback 或双 parser 路径。迁移 commit 中旧形式必须立即 hard-fail，并给出单轮可修的 `Option<...>` 建议。不得把本项与 Option runtime/cleanup、nullable/null、新 Option API 或其他语法清理混做。
+
+**验收**：
+
+- `Int?`、`List<T>?`、`(K, V)?` 及 qualified 形态均稳定 parse error，诊断建议对应 `Option<...>`；`Option<Int>`、`Option<(K, V)>`、`Option<Option<T>>`、`Option<fn(Int) -> Str>` 与跨模块形态全绿。
+- formatter、human/LLM diagnostics、module signatures、inspection/golden 不再发射 `T?`；仓内活动源码/规范除专用负例与本 item 说明外无旧拼写。
+- 仓内消费者、公开规范、examples 与测试同一 clean-break commit 迁移；无 alias/fallback，`Option<T>` 行为与生成 C/runtime 输出不变。
+- 完整 C e2e/golden/RC/structural/parity/self-compile、targeted parser/diagnostic negative matrix、double bootstrap 与 tracked `dist-c` literal fixed point通过；独立 reviewer 主动检查 `?e` 等非目标问号语法未被误删。
 
 ## 基础设施
 

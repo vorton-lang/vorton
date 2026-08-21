@@ -206,13 +206,15 @@ Ring 的错误处理基于一个核心洞察：**错误有生命周期——诞�
 - **`catch` 是就地恢复** —— 捕获 fail effect 并提供替代值，总是消除 fail effect
 - **`Option<T>` 是独立的数据类型** —— 表达"有或没有"，通过 `to_fail()` 进入 effect 世界
 
+> **公开类型拼写（2026-08-22 用户决定）**：最终只保留显式 `Option<T>`。当前编译器接受的 `T?` 是历史纯缩写语法糖，不提供独立语义；在 B-180 性能专项后由 B-191 做未发布期 clean break，并在 preview 产品面前完成。迁移前不新增或扩张 `T?` 用法，当前实现事实仍以 lang-spec 与可执行 parser 为准。
+
 ```
-// Option 是数据类型，T? 是 Option<T> 的糖
+// Option 是显式数据类型；没有 nullable/null 语义
 enum Option<T> { some(T), none }
 
 struct User {
     name:     Str,
-    nickname: Str?,               // 数据层面的"有或没有"
+    nickname: Option<Str>,         // 数据层面的"有或没有"
 }
 
 // Option → 值：unwrap 方法
@@ -1353,7 +1355,7 @@ let g = f              // rc+1（Rc 本身是非 Drop 类型），两边都活
 // 最后一个 Rc 引用消亡时，内部 File 的 Drop 执行
 ```
 
-非 Drop 类型天然 rc+1 共享，不需要 Rc。Rc 只在"需要共享一个 Drop 类型"时使用。`Weak<T>` 配合 `Rc<T>` 打破循环引用（`.downgrade()` / `.upgrade() -> T?`）。
+非 Drop 类型天然 rc+1 共享，不需要 Rc。Rc 只在"需要共享一个 Drop 类型"时使用。`Weak<T>` 配合 `Rc<T>` 打破循环引用（`.downgrade()` / `.upgrade() -> Option<T>`）。
 
 **`.clone()` = 递归深拷贝**（Rust Clone trait 语义）：
 
@@ -1870,6 +1872,7 @@ HIR 契约 → Ring passes（RC/reuse、bounds、specialize、dead effect）
 | 2026-06-12 | B-111 优先级（D-7）：层 0 判据（公理④「LLM 写 Ring 优于 TS」）至今零测量、缺测量仪 | B-111 P2→P1，地位等价公理⑥的 B-089 锚点；只改优先级不动排程（B-104 里程碑照旧先行）。条目见 backlog B-111 | 规则 2（层 0 判据） | B-111 验收 |
 | 2026-06-15 | 字符串编码模型：code point API 与既有后端行为失真 | 选 A（UTF-8 字节串）：`len`=字节数 O(1)、`chars()`/`char_count()` 提供 code point API；否决 B（code point）理由=O(n) len + 需 ByteStr 补位违反⑧。§1.7 已修正，实现归 B-133 | ⑥⑦⑧（5/7 判据 A 胜出） | B-133 按 backlog 的 C/native、Unicode 与 FFI gate 验收 |
 | 2026-06-24 | 层 0 重构：④ 原名「无人回路 × 全场景」绑定 LLM 叙事——核心 claim 应比 agent 窗口更根本 | ④ 改名「不信任程序员 · 编译器是最终权威」；「无人回路 × 全场景」降为渐近表达；出发点从「agent 验证瓶颈」回溯到「程序员不可信是永恒事实」（C/Rust/Ring 三角定位）；LLM-first 降格为推论；核心赌注分两层 | 元决策 | — |
+| 2026-08-22 | 纯缩写语法糖准入与历史 `T?`：少写字符是否足以换取第二种公开类型拼写 | 否。语法糖必须提供独立建模/认知/验证/组合价值；`Option<T>` 为唯一目标拼写，`T?` 由 B-191 在 B-180 后、B-174 前 clean break 删除；当前 correctness/性能主线不被打断 | ⑧（层 2 策略，用户方向） | B-191 的负例、仓内原子迁移与 self-host fixed point |
 
 ## 状态真值
 
