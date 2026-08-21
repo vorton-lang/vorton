@@ -1,13 +1,10 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant,
     INT, FLOAT, STR, BOOL, UNIT, NEVER, ANY, EMPTY_ROW,
     PARAM_OWNERSHIP_UNKNOWN, CALLABLE_UNKNOWN,
-    CALLABLE_SOURCE_SYNTHETIC, CALLABLE_SOURCE_ALIAS,
-    CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
+    CALLABLE_SOURCE_SYNTHETIC,
     fresh_ownership_term, shadow_callable_param_ownership,
     shadow_callable_term_for_def_id,
-    callable_owning_transfer_levels,
-    record_shadow_callable_with_transfer_levels,
-    clone_shadow_callable_identity,
+    record_shadow_callable, clone_shadow_callable_identity,
     type_to_string, make_option_type, is_option_type, option_inner,
     type_to_builtin_name, effect_row, nominal_display_name}
 use ast::{Program, Decl, Expr, Stmt, Param, MatchArm, StructFieldInit,
@@ -41,7 +38,6 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     register_callable_value_shadow,
     pending_dict_checkpoint, has_pending_dicts_since,
     fresh_shadow_callable_def_id, shadow_callable_result,
-    register_bound_callable_shadow,
     remove_fail_effect,
     generalize, free_type_vars, resolve_relative_qualifier}
 use exhaustive::{check_exhaustive}
@@ -535,16 +531,7 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 generalize(ctx.env, resolved, s)
             }
             ctx.env.bind(name, scheme)
-            let producer_def_id = match init_r.hexpr {
-                HExpr::Ident { def_id, .. } => def_id,
-                HExpr::Lambda { def_id, .. } => some(def_id),
-                HExpr::Call { callable_result_def_id, .. } =>
-                    callable_result_def_id,
-                _ => none
-            }
-            let bound_scheme = register_bound_callable_shadow(
-                ctx, name, CALLABLE_SOURCE_ALIAS,
-                producer_def_id, false)
+            let bound_scheme = ctx.env.lookup(name)
             let bound_def_id: Int? = match bound_scheme {
                 some(bs) => {
                     match bs.def_id {
@@ -560,13 +547,7 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 none => none
             }
             StmtResult {
-                hstmt: HStmt::Let { name: name, name_span: name_span,
-                    def_id: bound_def_id,
-                    ty: match bound_scheme {
-                        some(value) => value.ty,
-                        none => resolved
-                    },
-                    init: init_r.hexpr, span: span },
+                hstmt: HStmt::Let { name: name, name_span: name_span, def_id: bound_def_id, ty: resolved, init: init_r.hexpr, span: span },
                 subst: s,
                 effects: init_r.effects
             }
@@ -588,16 +569,7 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 none => {}
             }
             ctx.env.bind_mono(name, apply_subst(s, var_type))
-            let producer_def_id = match init_r.hexpr {
-                HExpr::Ident { def_id, .. } => def_id,
-                HExpr::Lambda { def_id, .. } => some(def_id),
-                HExpr::Call { callable_result_def_id, .. } =>
-                    callable_result_def_id,
-                _ => none
-            }
-            let var_scheme = register_bound_callable_shadow(
-                ctx, name, CALLABLE_SOURCE_ALIAS,
-                producer_def_id, false)
+            let var_scheme = ctx.env.lookup(name)
             match var_scheme {
                 some(vs) => {
                     match vs.def_id {
@@ -609,9 +581,7 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                         none => {}
                     }
                     StmtResult {
-                        hstmt: HStmt::Var { name: name, name_span: name_span,
-                            def_id: vs.def_id, ty: vs.ty,
-                            init: init_r.hexpr, span: span },
+                        hstmt: HStmt::Var { name: name, name_span: name_span, def_id: vs.def_id, ty: apply_subst(s, var_type), init: init_r.hexpr, span: span },
                         subst: s,
                         effects: init_r.effects
                     }
@@ -775,10 +745,7 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                                     _ => ctx.env.fresh_var()
                                 }
                                 ctx.env.bind_mono(dname, elem_t)
-                                let dscheme = register_bound_callable_shadow(
-                                    ctx, dname,
-                                    CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-                                    none, false)
+                                let dscheme = ctx.env.lookup(dname)
                                 match dscheme {
                                     some(ds) => {
                                         match (ds.def_id, destr.spans.get(di)) {
@@ -801,10 +768,6 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 },
                 none => {
                     ctx.env.bind_mono(binding, element_type)
-                    let _ = register_bound_callable_shadow(
-                        ctx, binding,
-                        CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-                        none, false)
                 }
             }
             let binding_scheme = ctx.env.lookup(binding)
@@ -887,10 +850,7 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                                 match p {
                                     Pattern::Binding { name, span: pspan } => {
                                         ctx.env.bind_mono(name, elem_type)
-                                        let bscheme = register_bound_callable_shadow(
-                                            ctx, name,
-                                            CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-                                            none, false)
+                                        let bscheme = ctx.env.lookup(name)
                                         match bscheme {
                                             some(bs) => {
                                                 match bs.def_id {
@@ -2741,9 +2701,7 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
                 "Unknown effect: ${effect_display}",
                 span, DiagnosticContext::OtherContext { detail: some("effect '${effect_display}' not found") })
             return InferResult {
-                hexpr: HExpr::EffectOp { effect_name: effect_name,
-                    op_name: op_name, op_def_id: -1, args: [],
-                    ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2761,9 +2719,7 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
                 "Effect ${effect_display} has no operation ${op_name}",
                 span, DiagnosticContext::OtherContext { detail: some("no operation '${op_name}' on effect '${effect_display}'") })
             return InferResult {
-                hexpr: HExpr::EffectOp { effect_name: canonical_effect_name,
-                    op_name: op_name, op_def_id: -1, args: [],
-                    ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2833,9 +2789,7 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
     s = me.1
 
     InferResult {
-        hexpr: HExpr::EffectOp { effect_name: canonical_effect_name,
-            op_name: op_name, op_def_id: op.def_id,
-            args: hargs, ty: inst_ret, effects: effects, span: span },
+        hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, args: hargs, ty: inst_ret, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -3852,10 +3806,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     }
                 }
                 ctx.env.bind_mono(p.name, pt)
-                let param_scheme = match register_bound_callable_shadow(
-                        ctx, p.name,
-                        CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-                        none, true) {
+                let param_scheme = match ctx.env.lookup(p.name) {
                     some(value) => value,
                     none => panic(
                         "unreachable: handler parameter is missing")
@@ -3866,7 +3817,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                         "unreachable: handler parameter has no exact DefId")
                 }
                 ctx.env.record_def_span(param_def_id, p.span)
-                hparams.push(HParam { name: p.name, ty: param_scheme.ty,
+                hparams.push(HParam { name: p.name, ty: pt,
                     def_id: some(param_def_id), is_mutable: false,
                     ownership_mode: shadow_callable_param_ownership(
                         ctx.env.types.ownership_metadata,
@@ -3904,13 +3855,11 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                         some(od) => some(od.def_id),
                         none => none
                     }
-                    let resume_levels = callable_owning_transfer_levels(
-                        ctx.env.types.ownership_metadata, resume_type)
-                    record_shadow_callable_with_transfer_levels(
+                    record_shadow_callable(
                         ctx.env.types.ownership_metadata,
                         resume_def_id, resume_ownership_term,
                         CALLABLE_SOURCE_SYNTHETIC, 1,
-                        producer_def_id, resume_levels)
+                        producer_def_id, [false])
                     ctx.env.record_def_span(resume_def_id, handler.span)
                     resume_binding = some(HPatternBinding {
                         name: rn, def_id: resume_def_id, ty: resume_type
@@ -3999,13 +3948,8 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     none => {}
                 }
             }
-            let handler_op_def_id = match op_def {
-                some(od) => od.def_id,
-                none => panic("unreachable: effect handler has no registered operation DefId")
-            }
             hhandlers.push(HEffectHandler {
                 effect_name: canonical_effect_name, op_name: handler.op_name,
-                op_def_id: handler_op_def_id,
                 params: hparams, resume_binding: resume_binding,
                 body: hbr.hexpr
             })
@@ -4096,13 +4040,9 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
             none => {}
         }
         ctx.env.bind_mono(p.name, pt)
-        let lam_scheme = register_bound_callable_shadow(
-            ctx, p.name, CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-            none, true)
-        let mut exact_pt = pt
+        let lam_scheme = ctx.env.lookup(p.name)
         match lam_scheme {
             some(ls) => {
-                exact_pt = ls.ty
                 match ls.def_id {
                     some(did) => {
                         ctx.env.record_def_span(did, p.span)
@@ -4117,7 +4057,7 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                     none => {}
                 }
                 hparams.push(HParam {
-                    name: p.name, ty: exact_pt, def_id: ls.def_id,
+                    name: p.name, ty: pt, def_id: ls.def_id,
                     is_mutable: p.is_mutable,
                     ownership_mode: PARAM_OWNERSHIP_UNKNOWN
                 })
@@ -4130,7 +4070,7 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                 })
             }
         }
-        param_types.push(exact_pt)
+        param_types.push(pt)
         pi = pi + 1
     }
 
@@ -4159,13 +4099,13 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                     ownership_mode: hp.ownership_mode
                 })
             }
-            let lambda_levels = callable_owning_transfer_levels(
-                ctx.env.types.ownership_metadata, fn_type)
-            record_shadow_callable_with_transfer_levels(
+            let mut force_params: List<Bool> = []
+            for _param in final_hparams { force_params.push(false) }
+            record_shadow_callable(
                 ctx.env.types.ownership_metadata,
                 lambda_def_id, lambda_ownership_term,
                 CALLABLE_SOURCE_SYNTHETIC,
-                final_hparams.len(), none, lambda_levels)
+                final_hparams.len(), none, force_params)
 
             InferResult {
                 hexpr: HExpr::Lambda {

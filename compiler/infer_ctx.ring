@@ -3,14 +3,8 @@ use types::{Type, Effect, EffectRow, RecordField, StructField,
     type_to_string, nominal_display_name, types_equal, make_option_type, type_to_builtin_name,
     row_merge, effects_match_kind, CALLABLE_UNKNOWN,
     CALLABLE_SOURCE_SYNTHETIC, CALLABLE_SOURCE_ALIAS,
-    CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
     fresh_ownership_term,
-    with_callable_ownership_term, callable_interface_transfer_levels,
-    callable_owning_transfer_levels,
-    clone_callable_transfer_levels,
-    record_shadow_callable_with_transfer_levels,
-    shadow_callable_result_role_spine,
-    set_shadow_callable_result_role_spine}
+    with_callable_ownership_term, record_shadow_callable}
 use ast::{Span, Pattern, TypeExpr, RecordTypeField, NamedPatternField, span_zero, EffectExpr,
     UseDecl, UseImport}
 use hir::{HExpr, HStmt, HParam, DictRef, ValueBindingKind,
@@ -25,8 +19,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     new_type_env, mono,
     apply_subst, apply_subst_row, apply_subst_map, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
-    instantiate_impl_dict_requirements,
-    register_exact_shadow_callable_scheme_with_transfer_levels}
+    instantiate_impl_dict_requirements}
 use unify::{UnificationError, empty_subst, unify, occurs_in, unify_effect_params}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     NamespaceKind}
@@ -1182,26 +1175,17 @@ pub fn shadow_callable_result(
             }
             let exact_ty = with_callable_ownership_term(ty, term)
             let def_id = fresh_shadow_callable_def_id(ctx)
-            let levels = callable_owning_transfer_levels(
-                ctx.env.types.ownership_metadata, exact_ty)
-            record_shadow_callable_with_transfer_levels(
+            let mut forces: List<Bool> = []
+            for _param in params { forces.push(false) }
+            record_shadow_callable(
                 ctx.env.types.ownership_metadata, def_id, term,
                 CALLABLE_SOURCE_SYNTHETIC, params.len(),
-                producer_def_id, levels)
+                producer_def_id, forces)
             match producer_def_id {
-                some(producer) => match shadow_callable_result_role_spine(
-                        ctx.env.types.ownership_metadata, producer) {
-                    some(producer_spine) => {
-                        let mut result_spine: List<Int> = []
-                        let mut index = 1
-                        while index < producer_spine.len() {
-                            result_spine.push(producer_spine.get(index).unwrap())
-                            index = index + 1
-                        }
-                        set_shadow_callable_result_role_spine(
-                            ctx.env.types.ownership_metadata,
-                            def_id, result_spine)
-                    },
+                some(producer) => match ctx.env.types.ownership_metadata.
+                    returned_callable_result_role_by_def_id.get(producer) {
+                    some(role) => ctx.env.types.ownership_metadata.
+                        callable_result_role_by_def_id.insert(def_id, role),
                     none => {}
                 },
                 none => {}
@@ -1220,103 +1204,41 @@ fn register_exact_shadow_alias(
            alias_scheme.def_id, producer_scheme.def_id) {
         (Type::FnType { params, ownership_term, .. },
          Type::FnType { .. }, some(alias_def_id), some(producer_def_id)) => {
-            let producer_state = match ctx.env.types.ownership_metadata.
+            let mut forces: List<Bool> = []
+            match ctx.env.types.ownership_metadata.
                 callable_state_by_def_id.get(producer_def_id) {
-                some(state) => state,
-                none => panic("unreachable: exact shadow alias producer has no transfer spine")
+                some(state) => match state.transfer_levels.first() {
+                    some(level) => {
+                        for force in level.force_params {
+                            forces.push(force)
+                        }
+                    },
+                    none => {}
+                },
+                none => {}
             }
-            record_shadow_callable_with_transfer_levels(
+            while forces.len() < params.len() { forces.push(false) }
+            record_shadow_callable(
                 ctx.env.types.ownership_metadata,
                 alias_def_id, ownership_term,
                 CALLABLE_SOURCE_ALIAS, params.len(),
-                some(producer_def_id), clone_callable_transfer_levels(
-                    producer_state.transfer_levels))
-            match shadow_callable_result_role_spine(
-                    ctx.env.types.ownership_metadata, producer_def_id) {
-                some(spine) => set_shadow_callable_result_role_spine(
-                    ctx.env.types.ownership_metadata, alias_def_id, spine),
-                none => panic("unreachable: exact shadow alias producer has no role spine")
+                some(producer_def_id), forces)
+            match ctx.env.types.ownership_metadata.
+                callable_result_role_by_def_id.get(producer_def_id) {
+                some(role) => ctx.env.types.ownership_metadata.
+                    callable_result_role_by_def_id.insert(
+                        alias_def_id, role),
+                none => {}
+            }
+            match ctx.env.types.ownership_metadata.
+                returned_callable_result_role_by_def_id.get(producer_def_id) {
+                some(role) => ctx.env.types.ownership_metadata.
+                    returned_callable_result_role_by_def_id.insert(
+                        alias_def_id, role),
+                none => {}
             }
         },
         _ => {}
-    }
-}
-
-pub fn register_bound_callable_shadow(
-    mut ctx: InferCtx, name: Str, source: Int,
-    producer_def_id: Int?, force_move_params: Bool
-) -> TypeScheme? {
-    match ctx.env.lookup(name) {
-        some(scheme) => match scheme.ty {
-            Type::FnType { .. } => {
-                let mut exact_scheme = scheme
-                let levels = match producer_def_id {
-                    some(producer) => match ctx.env.types.ownership_metadata.
-                        callable_state_by_def_id.get(producer) {
-                        some(state) => {
-                            let producer_term = ctx.env.types.ownership_metadata.
-                                callable_by_def_id.get(producer).unwrap()
-                            exact_scheme = TypeScheme {
-                                ..scheme,
-                                ty: with_callable_ownership_term(
-                                    scheme.ty, producer_term)
-                            }
-                            clone_callable_transfer_levels(
-                                state.transfer_levels)
-                        },
-                        none => panic("unreachable: callable binding producer has no metadata")
-                    },
-                    none => if force_move_params {
-                        callable_interface_transfer_levels(
-                            ctx.env.types.ownership_metadata, scheme.ty)
-                    } else {
-                        callable_owning_transfer_levels(
-                            ctx.env.types.ownership_metadata, scheme.ty)
-                    }
-                }
-                let exact = register_exact_shadow_callable_scheme_with_transfer_levels(
-                    ctx.env, exact_scheme, source, producer_def_id, levels)
-                ctx.env.rebind(name, exact)
-                match producer_def_id {
-                    some(producer) => match shadow_callable_result_role_spine(
-                            ctx.env.types.ownership_metadata, producer) {
-                        some(spine) => set_shadow_callable_result_role_spine(
-                            ctx.env.types.ownership_metadata,
-                            exact.def_id.unwrap(), spine),
-                        none => panic("unreachable: callable binding producer has no role spine")
-                    },
-                    none => {}
-                }
-                some(exact)
-            },
-            _ => some(scheme)
-        },
-        none => none
-    }
-}
-
-pub fn register_callable_shadow_def_id(
-    mut ctx: InferCtx, def_id: Int, ty: Type, source: Int,
-    producer_def_id: Int?, force_move_params: Bool
-) -> Type {
-    match ty {
-        Type::FnType { .. } => {
-            let levels = if force_move_params {
-                callable_interface_transfer_levels(
-                    ctx.env.types.ownership_metadata, ty)
-            } else {
-                callable_owning_transfer_levels(
-                    ctx.env.types.ownership_metadata, ty)
-            }
-            register_exact_shadow_callable_scheme_with_transfer_levels(
-                ctx.env,
-                TypeScheme {
-                    ty: ty, type_vars: [], bounds: [],
-                    def_id: some(def_id)
-                },
-                source, producer_def_id, levels).ty
-        },
-        _ => ty
     }
 }
 
@@ -2567,10 +2489,7 @@ pub fn bind_pattern(mut ctx: InferCtx, pattern: Pattern, expected_type: Type, su
         Pattern::Wildcard { .. } => subst,
         Pattern::Binding { name, span } => {
             ctx.env.bind_mono(name, apply_subst(subst, expected_type))
-            let exact_binding = register_bound_callable_shadow(
-                ctx, name, CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-                none, false)
-            match exact_binding {
+            match ctx.env.lookup(name) {
                 some(scheme) => match scheme.def_id {
                     some(did) => ctx.env.record_def_span(did, span),
                     none => {}

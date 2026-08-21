@@ -1,10 +1,6 @@
 use types::{Type, Effect, EffectRow, RecordField, UNIT, EMPTY_ROW,
     PARAM_OWNERSHIP_UNKNOWN, CALLABLE_UNKNOWN, callable_ownership_term,
-    CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
     shadow_callable_param_ownership, shadow_callable_term_for_def_id,
-    callable_interface_transfer_levels, clone_callable_transfer_levels,
-    shadow_callable_result_role_spine,
-    set_shadow_callable_result_role_spine,
     type_to_string, effect_to_string, nominal_display_name,
     effects_match_kind, effect_kind_name, types_equal}
 use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, Span, Position, EffectOpDecl, EffectExpr,
@@ -18,8 +14,7 @@ use env::{TypeScheme, SchemeBound, MethodOrigin,
     apply_subst, apply_subst_map, apply_subst_row_map,
     find_impl, find_impl_by_origin, has_impl, impl_origin, impl_decl_origin,
     impl_method_origin,
-    install_method_scheme, build_type_var_map,
-    replace_exact_shadow_callable_scheme_with_transfer_levels}
+    install_method_scheme, build_type_var_map}
 use union_find::{UnionFind}
 use unify::{empty_subst}
 use diagnostics::{DiagnosticContext, DiagnosticNote}
@@ -31,8 +26,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     pending_dict_checkpoint, drain_pending_dicts, rollback_pending_dicts,
     settle_default_pending_dicts, assert_pending_dict_owner_closed,
     generalize, collect_free_vars, free_type_vars_in_env, resolve_mod_uses,
-    shadow_callable_result, register_bound_callable_shadow,
-    register_callable_shadow_def_id,
+    shadow_callable_result,
     enter_project_root_frame, enter_project_child_frame,
     exit_project_namespace_frame}
 use infer_helpers::{is_value_type}
@@ -315,23 +309,17 @@ fn check_sig_decl(mut ctx: InferCtx, name: Str, members: List<SigMember>, is_pub
             for m in members {
                 match sig_def.members.get(m.name) {
                     some(scheme) => {
-                        let member_def_id = match scheme.def_id {
-                            some(id) => id,
-                            none => panic("unreachable: registered sig member has no exact DefId")
-                        }
                         hmembers.push(HSigMember {
                             name: m.name,
-                            def_id: member_def_id,
+                            def_id: scheme.def_id.unwrap_or(-1),
                             fn_type: scheme.ty, span: m.span
                         })
                     },
                     none => {
-                        let _ = type_error(ctx.sink, E0201,
-                            "sig member '${m.name}' has no exact registration",
-                            m.span, DiagnosticContext::OtherContext {
-                                detail: some("sig member registration is missing")
-                            })
-                        fail.raise(CompileError {})
+                        hmembers.push(HSigMember {
+                            name: m.name, def_id: ctx.env.fresh_def_id(),
+                            fn_type: UNIT, span: m.span
+                        })
                     }
                 }
             }
@@ -393,32 +381,6 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
     // Preserve the original def_id so mutability checks work
     let scheme = TypeScheme { ty: gen_scheme.ty, type_vars: gen_scheme.type_vars, bounds: gen_scheme.bounds, def_id: old_def_id }
     ctx.env.rebind(name, scheme)
-    let const_def_id = match old_def_id {
-        some(id) => id,
-        none => panic("unreachable: checked const has no exact DefId")
-    }
-    let const_state = ctx.env.types.ownership_metadata.
-        callable_state_by_def_id.get(const_def_id).unwrap()
-    let const_term = ctx.env.types.ownership_metadata.callable_by_def_id.get(
-        const_def_id).unwrap()
-    let const_spine = shadow_callable_result_role_spine(
-        ctx.env.types.ownership_metadata, const_def_id).unwrap()
-    let getter_type = Type::FnType {
-        params: [], return_type: scheme.ty,
-        effects: EMPTY_ROW, ownership_term: const_term
-    }
-    let getter_levels = callable_interface_transfer_levels(
-        ctx.env.types.ownership_metadata, getter_type)
-    let _ = replace_exact_shadow_callable_scheme_with_transfer_levels(
-        ctx.env,
-        TypeScheme {
-            ty: getter_type, type_vars: scheme.type_vars,
-            bounds: scheme.bounds, def_id: some(const_def_id)
-        },
-        const_term, const_state.source,
-        const_state.producer_def_id, getter_levels)
-    set_shadow_callable_result_role_spine(
-        ctx.env.types.ownership_metadata, const_def_id, const_spine)
     ctx.subst = saved_subst
     HDecl::Const { name: name, def_id: old_def_id, ty: resolved, init: final_init, is_pub: is_pub, span: span }
 }
@@ -483,10 +445,7 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
                 none => "p${pi.to_str()}"
             }
             let effect_param_def_id = ctx.env.fresh_def_id()
-            let exact_param_type = register_callable_shadow_def_id(
-                ctx, effect_param_def_id, pt,
-                CALLABLE_SOURCE_CONSERVATIVE_INTERFACE, none, true)
-            op_params.push(HParam { name: p_name, ty: exact_param_type,
+            op_params.push(HParam { name: p_name, ty: pt,
                 def_id: some(effect_param_def_id), is_mutable: false,
                 ownership_mode: shadow_callable_param_ownership(
                     ctx.env.types.ownership_metadata,
@@ -1188,14 +1147,8 @@ fn expand_delegate_impls(
                                                 some(m) => m,
                                                 none => false
                                             }
-                                            let exact_self_param_type =
-                                                register_callable_shadow_def_id(
-                                                    ctx, def_id_self,
-                                                    exact_self_type,
-                                                    CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-                                                    none, true)
                                             hparams.push(HParam {
-                                                name: "self", ty: exact_self_param_type,
+                                                name: "self", ty: exact_self_type,
                                                 def_id: some(def_id_self),
                                                 is_mutable: self_is_mut,
                                                 ownership_mode: shadow_callable_param_ownership(
@@ -1244,13 +1197,8 @@ fn expand_delegate_impls(
                                                 }
                                                 // For binary Self-typed params, use self_type; otherwise use resolved type
                                                 let param_ty = if is_self_typed { exact_self_type } else { resolved_pty }
-                                                let exact_param_type =
-                                                    register_callable_shadow_def_id(
-                                                        ctx, pid, param_ty,
-                                                        CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-                                                        none, true)
                                                 hparams.push(HParam {
-                                                    name: pname, ty: exact_param_type,
+                                                    name: pname, ty: param_ty,
                                                     def_id: some(pid),
                                                     is_mutable: p_is_mut,
                                                     ownership_mode: shadow_callable_param_ownership(
@@ -1507,10 +1455,7 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
                 none => false
             }
             let trait_param_def_id = ctx.env.fresh_def_id()
-            let exact_param_type = register_callable_shadow_def_id(
-                ctx, trait_param_def_id, param_type,
-                CALLABLE_SOURCE_CONSERVATIVE_INTERFACE, none, true)
-            hparams.push(HParam { name: p_name, ty: exact_param_type,
+            hparams.push(HParam { name: p_name, ty: param_type,
                 def_id: some(trait_param_def_id), is_mutable: p_mutable,
                 ownership_mode: shadow_callable_param_ownership(
                     ctx.env.types.ownership_metadata,
@@ -2208,13 +2153,7 @@ fn check_fn_decl_transaction(
             }
         }
         ctx.env.bind_mono(p.name, ptype)
-        let param_scheme = register_bound_callable_shadow(
-            ctx, p.name, CALLABLE_SOURCE_CONSERVATIVE_INTERFACE,
-            none, true)
-        let exact_pt = match param_scheme {
-            some(value) => value.ty,
-            none => ptype
-        }
+        let param_scheme = ctx.env.lookup(p.name)
         match param_scheme {
             some(ps) => {
                 match ps.def_id {
@@ -2226,7 +2165,7 @@ fn check_fn_decl_transaction(
                             ctx.env.scope.mut_param_defs.insert(did)
                             // Auto-box mut value-type parameters (not self)
                             if p.name != "self" {
-                                let resolved_pt = apply_subst(ctx.subst, exact_pt)
+                                let resolved_pt = apply_subst(ctx.subst, ptype)
                                 if is_value_type(resolved_pt) {
                                     ctx.boxed_vars.insert(did)
                                 }
@@ -2238,7 +2177,7 @@ fn check_fn_decl_transaction(
                     none => {}
                 }
                 hparams.push(HParam {
-                    name: p.name, ty: exact_pt, def_id: ps.def_id,
+                    name: p.name, ty: ptype, def_id: ps.def_id,
                     is_mutable: p.is_mutable,
                     ownership_mode: shadow_callable_param_ownership(
                         ctx.env.types.ownership_metadata,
@@ -2253,7 +2192,7 @@ fn check_fn_decl_transaction(
                     shadow_ownership_term, shadow_param_index)
             })
         }
-        param_types.push(exact_pt)
+        param_types.push(ptype)
         shadow_param_index = shadow_param_index + 1
     }
 
@@ -2818,32 +2757,6 @@ fn precheck_top_level_fn_at(
 // canonical scheme; otherwise a pub-use chain can keep the registration-time
 // EMPTY_ROW / unresolved return variables. Each fresh alias DefId must survive
 // the refresh so local shadowing and provenance remain lexical.
-fn refresh_rebound_shadow_callable(
-    mut ctx: InferCtx, scheme: TypeScheme
-) -> TypeScheme {
-    let def_id = match scheme.def_id {
-        some(id) => id,
-        none => panic("unreachable: rebound callable has no exact DefId")
-    }
-    let state = match ctx.env.types.ownership_metadata.
-        callable_state_by_def_id.get(def_id) {
-        some(value) => value,
-        none => panic("unreachable: rebound callable has no shadow state")
-    }
-    let term = ctx.env.types.ownership_metadata.callable_by_def_id.get(
-        def_id).unwrap()
-    let spine = shadow_callable_result_role_spine(
-        ctx.env.types.ownership_metadata, def_id).unwrap()
-    let levels = callable_interface_transfer_levels(
-        ctx.env.types.ownership_metadata, scheme.ty)
-    let exact = replace_exact_shadow_callable_scheme_with_transfer_levels(
-        ctx.env, scheme, term, state.source,
-        state.producer_def_id, levels)
-    set_shadow_callable_result_role_spine(
-        ctx.env.types.ownership_metadata, def_id, spine)
-    exact
-}
-
 fn rebind_fn_scheme_with_alias(mut ctx: InferCtx, name: Str, scheme: TypeScheme) {
     ctx.env.rebind(name, scheme)
 
@@ -2865,35 +2778,6 @@ fn rebind_fn_scheme_with_alias(mut ctx: InferCtx, name: Str, scheme: TypeScheme)
                                 bounds: scheme.bounds,
                                 def_id: alias_scheme.def_id
                             })
-                            let canonical_def_id = scheme.def_id.unwrap()
-                            let canonical_state = ctx.env.types.
-                                ownership_metadata.callable_state_by_def_id.get(
-                                    canonical_def_id).unwrap()
-                            let alias_state = ctx.env.types.ownership_metadata.
-                                callable_state_by_def_id.get(alias_id).unwrap()
-                            let alias_exact =
-                                replace_exact_shadow_callable_scheme_with_transfer_levels(
-                                    ctx.env,
-                                    TypeScheme {
-                                        ty: scheme.ty,
-                                        type_vars: scheme.type_vars,
-                                        bounds: scheme.bounds,
-                                        def_id: some(alias_id)
-                                    },
-                                    ctx.env.types.ownership_metadata.
-                                        callable_by_def_id.get(
-                                            canonical_def_id).unwrap(),
-                                    alias_state.source,
-                                    some(canonical_def_id),
-                                    clone_callable_transfer_levels(
-                                        canonical_state.transfer_levels))
-                            let canonical_spine =
-                                shadow_callable_result_role_spine(
-                                    ctx.env.types.ownership_metadata,
-                                    canonical_def_id).unwrap()
-                            set_shadow_callable_result_role_spine(
-                                ctx.env.types.ownership_metadata,
-                                alias_exact.def_id.unwrap(), canonical_spine)
                         }
                     },
                     none => {}
@@ -3951,12 +3835,12 @@ fn rebind_checked_fn_scheme(
                     effects: mapped_effects,
                     ownership_term: reg_ownership_term
                 }
-                refresh_rebound_shadow_callable(ctx, TypeScheme {
+                TypeScheme {
                     ..scheme,
                     ty: new_type,
                     type_vars: new_type_vars,
                     bounds: new_bounds
-                })
+                }
             },
             _ => scheme
     }

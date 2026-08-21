@@ -484,8 +484,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
         HExpr::HandleExpr { body, handlers, ty, effects, span } => {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
-                new_handlers.push(HEffectHandler { effect_name: h.effect_name,
-                    op_name: h.op_name, op_def_id: h.op_def_id,
+                new_handlers.push(HEffectHandler { effect_name: h.effect_name, op_name: h.op_name,
                     params: h.params, resume_binding: h.resume_binding,
                     body: dl_expr(h.body, defs, seen, counter) })
             }
@@ -495,13 +494,10 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             HExpr::Lambda { def_id: def_id,
                 params: params, return_type: return_type,
                 body: dl_expr(body, defs, seen, counter), ty: ty, effects: effects, span: span },
-        HExpr::EffectOp { effect_name, op_name, op_def_id,
-                          args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(dl_expr(a, defs, seen, counter)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
-                op_def_id: op_def_id, args: new_args,
-                ty: ty, effects: effects, span: span }
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args, ty: ty, effects: effects, span: span }
         },
         HExpr::RangeExpr { start, end, inclusive, ty, effects, span } =>
             HExpr::RangeExpr { start: dl_expr(start, defs, seen, counter),

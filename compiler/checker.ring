@@ -1,20 +1,11 @@
 use types::{Type, Effect, EffectRow, RecordField, StructField, EnumVariant,
-    OwnershipMetadata,
-    CallableTransferLevel, OwnershipShape,
-    UNIT, EMPTY_ROW, CALLABLE_UNKNOWN,
+    OwnershipMetadata, CallableOwnershipDescriptor,
+    OwnershipShape, UNIT, EMPTY_ROW, CALLABLE_UNKNOWN,
     CALLABLE_DYNAMIC_TERM_BASE,
-    CALLABLE_SOURCE_BUILTIN, CALLABLE_SOURCE_ALIAS,
+    CALLABLE_SOURCE_BUILTIN,
     fresh_ownership_term, with_callable_ownership_term,
     normalize_callable_ownership_descriptor,
-    intern_callable_ownership_descriptor,
-    callable_transfer_levels_equal,
-    callable_interface_transfer_levels, callable_owning_transfer_levels,
-    shadow_callable_result_role_spine,
-    shadow_callable_param_ownership,
-    shadow_callable_return_ownership,
     set_shadow_callable_result_role,
-    set_shadow_callable_result_role_spine,
-    record_shadow_callable_with_transfer_levels,
     nominal_display_name, types_equal}
 use ast::{Program, Decl, UseDecl, UseImport, Span, TypeParam, span_zero}
 use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImplFact,
@@ -29,9 +20,8 @@ use env::{TypeEnv, TypeScheme, SigDef, EffectDef, EffectOpDef,
     StructDef, EnumDef, TypeAliasDef, AssocTypeDef,
     ImplEntry, TraitDef, TraitMethodDef,
     new_type_env, add_impl, find_impl, install_method_scheme,
-    impl_method_origin,
-    register_exact_shadow_callable_scheme_with_transfer_levels,
-    replace_exact_shadow_callable_scheme_with_transfer_levels}
+    impl_method_origin, register_exact_shadow_callable_scheme,
+    replace_exact_shadow_callable_scheme}
 use builtins::{register_builtins, register_hof_intrinsics}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
 use dict_lower::{lower_dicts}
@@ -147,24 +137,14 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                             none => panic(
                                 "unreachable: prelude extern registration is missing")
                         }
+                        let mut owning_forces: List<Bool> = []
+                        for _param in params { owning_forces.push(false) }
                         let exact_source = exact_prelude_extern_source(name)
                         let exact = if exact_source == CALLABLE_SOURCE_BUILTIN {
-                            let exact_term = exact_prelude_extern_ownership(
-                                name, params)
-                            let exact_type = with_callable_ownership_term(
-                                scheme.ty, exact_term)
-                            let levels = if name == "ring_slot_dealloc" {
-                                callable_interface_transfer_levels(
-                                    ctx.env.types.ownership_metadata,
-                                    exact_type)
-                            } else {
-                                callable_owning_transfer_levels(
-                                    ctx.env.types.ownership_metadata,
-                                    exact_type)
-                            }
-                            replace_exact_shadow_callable_scheme_with_transfer_levels(
-                                ctx.env, TypeScheme { ..scheme, ty: exact_type },
-                                exact_term, exact_source, none, levels)
+                            replace_exact_shadow_callable_scheme(
+                                ctx.env, scheme,
+                                exact_prelude_extern_ownership(name, params),
+                                exact_source, none, owning_forces)
                         } else {
                             scheme
                         }
@@ -641,20 +621,25 @@ fn shadow_bool_lists_equal(a: List<Bool>, b: List<Bool>) -> Bool {
     true
 }
 
-fn shadow_role_spines_equal(a: List<Int>?, b: List<Int>?) -> Bool {
-    match (a, b) {
-        (some(left), some(right)) => {
-            if left.len() != right.len() { return false }
-            let mut index = 0
-            while index < left.len() {
-                if left.get(index) != right.get(index) { return false }
-                index = index + 1
-            }
-            true
-        },
-        (none, none) => true,
-        _ => false
+fn shadow_descriptors_equal(
+    a: CallableOwnershipDescriptor,
+    b: CallableOwnershipDescriptor
+) -> Bool {
+    let left = normalize_callable_ownership_descriptor(a)
+    let right = normalize_callable_ownership_descriptor(b)
+    if left.rest_param != right.rest_param ||
+       left.result != right.result ||
+       left.prefix_params.len() != right.prefix_params.len() {
+        return false
     }
+    let mut index = 0
+    while index < left.prefix_params.len() {
+        if left.prefix_params.get(index) != right.prefix_params.get(index) {
+            return false
+        }
+        index = index + 1
+    }
+    true
 }
 
 fn shadow_shapes_equal(a: OwnershipShape, b: OwnershipShape) -> Bool {
@@ -670,144 +655,6 @@ fn shadow_shapes_equal(a: OwnershipShape, b: OwnershipShape) -> Bool {
         index = index + 1
     }
     true
-}
-
-fn shadow_transfer_spines_semantically_equal(
-    local_metadata: OwnershipMetadata,
-    local_levels: List<CallableTransferLevel>,
-    exported_metadata: OwnershipMetadata,
-    exported_levels: List<CallableTransferLevel>
-) -> Bool {
-    if local_levels.len() != exported_levels.len() { return false }
-    let mut level_index = 0
-    while level_index < local_levels.len() {
-        match (local_levels.get(level_index),
-               exported_levels.get(level_index)) {
-            (some(local), some(exported)) => {
-                if !shadow_bool_lists_equal(
-                        local.force_params, exported.force_params) ||
-                   shadow_callable_return_ownership(
-                        local_metadata, local.ownership_term) !=
-                   shadow_callable_return_ownership(
-                        exported_metadata, exported.ownership_term) {
-                    return false
-                }
-                let mut param_index = 0
-                while param_index < local.force_params.len() {
-                    if shadow_callable_param_ownership(
-                            local_metadata, local.ownership_term,
-                            param_index) !=
-                       shadow_callable_param_ownership(
-                            exported_metadata, exported.ownership_term,
-                            param_index) {
-                        return false
-                    }
-                    param_index = param_index + 1
-                }
-            },
-            _ => return false
-        }
-        level_index = level_index + 1
-    }
-    true
-}
-
-fn canonical_shadow_alias_producer(
-    metadata: OwnershipMetadata, def_id: Int, mut visited: Set<Int>
-) -> Int {
-    if visited.contains(def_id) {
-        panic("unreachable: shadow alias producer cycle at DefId ${def_id}")
-    }
-    visited.insert(def_id)
-    let state = match metadata.callable_state_by_def_id.get(def_id) {
-        some(value) => value,
-        none => panic("unreachable: shadow alias DefId ${def_id} has no state")
-    }
-    if state.source != CALLABLE_SOURCE_ALIAS { return def_id }
-    let producer = match state.producer_def_id {
-        some(value) => value,
-        none => panic("unreachable: shadow alias DefId ${def_id} has no producer")
-    }
-    let producer_state = match metadata.callable_state_by_def_id.get(producer) {
-        some(value) => value,
-        none => panic("unreachable: shadow alias producer DefId ${producer} has no state")
-    }
-    if !metadata.callable_by_def_id.contains_key(def_id) ||
-       !metadata.callable_by_def_id.contains_key(producer) ||
-       !metadata.callable_result_role_spine_by_def_id.contains_key(def_id) ||
-       !metadata.callable_result_role_spine_by_def_id.contains_key(producer) {
-        panic("unreachable: shadow alias producer contract is incomplete")
-    }
-    if metadata.callable_by_def_id.get(def_id) !=
-           metadata.callable_by_def_id.get(producer) ||
-       state.arity != producer_state.arity ||
-       !callable_transfer_levels_equal(
-            state.transfer_levels, producer_state.transfer_levels) ||
-       !shadow_role_spines_equal(
-            metadata.callable_result_role_spine_by_def_id.get(def_id),
-            metadata.callable_result_role_spine_by_def_id.get(producer)) {
-        panic("unreachable: shadow alias wrapper differs from exact producer")
-    }
-    canonical_shadow_alias_producer(metadata, producer, visited)
-}
-
-fn shadow_producers_semantically_equal_inner(
-    local_metadata: OwnershipMetadata, local_def_id: Int?,
-    exported_metadata: OwnershipMetadata, exported_def_id: Int?,
-    mut local_seen: Set<Int>, mut exported_seen: Set<Int>
-) -> Bool {
-    match (local_def_id, exported_def_id) {
-        (none, none) => true,
-        (some(local_id), some(exported_id)) => {
-            let canonical_local = canonical_shadow_alias_producer(
-                local_metadata, local_id, set_new())
-            let canonical_exported = canonical_shadow_alias_producer(
-                exported_metadata, exported_id, set_new())
-            if local_seen.contains(canonical_local) ||
-               exported_seen.contains(canonical_exported) {
-                panic("unreachable: shadow canonical producer cycle")
-            }
-            local_seen.insert(canonical_local)
-            exported_seen.insert(canonical_exported)
-            let local_state = match local_metadata.
-                callable_state_by_def_id.get(canonical_local) {
-                some(value) => value,
-                none => return false
-            }
-            let exported_state = match exported_metadata.
-                callable_state_by_def_id.get(canonical_exported) {
-                some(value) => value,
-                none => return false
-            }
-            if local_state.source != exported_state.source ||
-               local_state.arity != exported_state.arity ||
-               !shadow_transfer_spines_semantically_equal(
-                    local_metadata, local_state.transfer_levels,
-                    exported_metadata, exported_state.transfer_levels) ||
-                !shadow_role_spines_equal(
-                    local_metadata.callable_result_role_spine_by_def_id.get(
-                        canonical_local),
-                    exported_metadata.callable_result_role_spine_by_def_id.get(
-                        canonical_exported)) {
-                return false
-            }
-            shadow_producers_semantically_equal_inner(
-                local_metadata, local_state.producer_def_id,
-                exported_metadata, exported_state.producer_def_id,
-                local_seen, exported_seen)
-        },
-        _ => false
-    }
-}
-
-fn shadow_producers_semantically_equal(
-    local_metadata: OwnershipMetadata, local_def_id: Int?,
-    exported_metadata: OwnershipMetadata, exported_def_id: Int?
-) -> Bool {
-    shadow_producers_semantically_equal_inner(
-        local_metadata, local_def_id,
-        exported_metadata, exported_def_id,
-        set_new(), set_new())
 }
 
 fn merge_imported_shadow_shapes(
@@ -833,14 +680,6 @@ fn hydrate_shadow_term(
     mut ctx: InferCtx, exported: OwnershipMetadata,
     term: Int, mut term_remap: Map<Int, Int>
 ) -> Int {
-    if term < 0 {
-        let descriptor = match exported.callable_descriptors.get(term) {
-            some(value) => value,
-            none => panic("unreachable: exported callable descriptor was stripped")
-        }
-        return intern_callable_ownership_descriptor(
-            ctx.env.types.ownership_metadata, descriptor)
-    }
     if term >= 0 && term < CALLABLE_DYNAMIC_TERM_BASE {
         return term
     }
@@ -861,61 +700,6 @@ fn hydrate_shadow_term(
             local
         }
     }
-}
-
-fn hydrate_shadow_transfer_levels(
-    mut ctx: InferCtx, exported: OwnershipMetadata,
-    levels: List<CallableTransferLevel>,
-    mut term_remap: Map<Int, Int>
-) -> List<CallableTransferLevel> {
-    let mut result: List<CallableTransferLevel> = []
-    for level in levels {
-        let mut forces: List<Bool> = []
-        for force in level.force_params { forces.push(force) }
-        result.push(CallableTransferLevel {
-            ownership_term: hydrate_shadow_term(
-                ctx, exported, level.ownership_term, term_remap),
-            force_params: forces
-        })
-    }
-    result
-}
-
-fn hydrate_shadow_metadata_identity(
-    mut ctx: InferCtx, exported: OwnershipMetadata,
-    exported_def_id: Int, mut term_remap: Map<Int, Int>,
-    mut def_id_remap: Map<Int, Int>
-) -> Int {
-    match def_id_remap.get(exported_def_id) {
-        some(local) => return local,
-        none => {}
-    }
-    let state = match exported.callable_state_by_def_id.get(exported_def_id) {
-        some(value) => value,
-        none => panic("unreachable: exported producer metadata was stripped")
-    }
-    let exported_term = exported.callable_by_def_id.get(
-        exported_def_id).unwrap()
-    let local_def_id = ctx.env.fresh_def_id()
-    def_id_remap.insert(exported_def_id, local_def_id)
-    let local_producer = match state.producer_def_id {
-        some(producer) => some(hydrate_shadow_metadata_identity(
-            ctx, exported, producer, term_remap, def_id_remap)),
-        none => none
-    }
-    let local_term = hydrate_shadow_term(
-        ctx, exported, exported_term, term_remap)
-    let levels = hydrate_shadow_transfer_levels(
-        ctx, exported, state.transfer_levels, term_remap)
-    record_shadow_callable_with_transfer_levels(
-        ctx.env.types.ownership_metadata,
-        local_def_id, local_term, state.source, state.arity,
-        local_producer, levels)
-    set_shadow_callable_result_role_spine(
-        ctx.env.types.ownership_metadata, local_def_id,
-        exported.callable_result_role_spine_by_def_id.get(
-            exported_def_id).unwrap())
-    local_def_id
 }
 
 fn hydrate_shadow_effect(
@@ -1077,8 +861,7 @@ fn shadow_value_callable_view(
 fn hydrate_exact_shadow_callable(
     mut ctx: InferCtx, exported: OwnershipMetadata,
     scheme: TypeScheme, exact_local_def_id: Int?,
-    producer_def_id: Int?, mut term_remap: Map<Int, Int>,
-    mut def_id_remap: Map<Int, Int>
+    producer_def_id: Int?, mut term_remap: Map<Int, Int>
 ) -> TypeScheme {
     let exported_def_id = match scheme.def_id {
         some(id) => id,
@@ -1096,17 +879,15 @@ fn hydrate_exact_shadow_callable(
         Type::FnType { params, .. } => params,
         _ => panic("unreachable: exported callable scheme is not a function")
     }
-    if state.arity != params.len() || state.transfer_levels.len() == 0 ||
+    if state.arity != params.len() || state.transfer_levels.len() != 1 ||
        !exported.callable_result_role_by_def_id.contains_key(exported_def_id) ||
        !exported.returned_callable_result_role_by_def_id.contains_key(
-            exported_def_id) ||
-       !exported.callable_result_role_spine_by_def_id.contains_key(
             exported_def_id) {
         panic("unreachable: exported callable shadow metadata is incomplete")
     }
-    let direct_transfer = state.transfer_levels.first().unwrap()
-    if direct_transfer.ownership_term != exported_term ||
-       direct_transfer.force_params.len() != params.len() {
+    let transfer = state.transfer_levels.first().unwrap()
+    if transfer.ownership_term != exported_term ||
+       transfer.force_params.len() != params.len() {
         panic("unreachable: exported callable transfer metadata differs")
     }
 
@@ -1116,50 +897,29 @@ fn hydrate_exact_shadow_callable(
         Type::FnType { ownership_term, .. } => ownership_term,
         _ => panic("unreachable: hydrated callable is not a function")
     }
-    let local_def_id = match (exact_local_def_id,
-                              def_id_remap.get(exported_def_id)) {
-        (some(id), some(existing)) => {
-            if id != existing {
-                panic("unreachable: imported callable DefId mapping drifted")
-            }
-            id
-        },
-        (some(id), none) => {
-            def_id_remap.insert(exported_def_id, id)
-            id
-        },
-        (none, some(existing)) => existing,
-        (none, none) => {
-            let id = ctx.env.fresh_def_id()
-            def_id_remap.insert(exported_def_id, id)
-            id
-        }
+    let local_def_id = match exact_local_def_id {
+        some(id) => id,
+        none => ctx.env.fresh_def_id()
     }
-    let hydrated_producer = match state.producer_def_id {
-        some(producer) => some(hydrate_shadow_metadata_identity(
-            ctx, exported, producer, term_remap, def_id_remap)),
-        none => none
-    }
-    match producer_def_id {
-        some(expected) => if hydrated_producer != some(expected) {
-            panic("unreachable: imported callable producer mapping differs")
-        },
-        none => {}
-    }
-    let hydrated_levels = hydrate_shadow_transfer_levels(
-        ctx, exported, state.transfer_levels, term_remap)
-    let exact = register_exact_shadow_callable_scheme_with_transfer_levels(
+    let mut force_params: List<Bool> = []
+    for force in transfer.force_params { force_params.push(force) }
+    let exact = register_exact_shadow_callable_scheme(
         ctx.env,
         TypeScheme {
             ..scheme,
             ty: with_callable_ownership_term(hydrated_type, local_term),
             def_id: some(local_def_id)
         },
-        state.source, hydrated_producer, hydrated_levels)
-    set_shadow_callable_result_role_spine(
-        ctx.env.types.ownership_metadata, local_def_id,
-        exported.callable_result_role_spine_by_def_id.get(
+        state.source, producer_def_id, force_params)
+    ctx.env.types.ownership_metadata.callable_result_role_by_def_id.insert(
+        local_def_id,
+        exported.callable_result_role_by_def_id.get(
             exported_def_id).unwrap())
+    ctx.env.types.ownership_metadata.
+        returned_callable_result_role_by_def_id.insert(
+            local_def_id,
+            exported.returned_callable_result_role_by_def_id.get(
+                exported_def_id).unwrap())
     exact
 }
 
@@ -1172,10 +932,47 @@ fn assert_same_origin_shadow_callable(
     }
     let local_def_id = local_scheme.def_id.unwrap_or(-1)
     let exported_def_id = exported_scheme.def_id.unwrap_or(-1)
-    if !shadow_producers_semantically_equal(
-            ctx.env.types.ownership_metadata, some(local_def_id),
-            exported, some(exported_def_id)) {
-        panic("unreachable: same-origin normalized callable metadata differs")
+    let local_state = ctx.env.types.ownership_metadata.
+        callable_state_by_def_id.get(local_def_id).unwrap()
+    let exported_state = exported.callable_state_by_def_id.get(
+        exported_def_id).unwrap()
+    let local_term = ctx.env.types.ownership_metadata.callable_by_def_id.get(
+        local_def_id).unwrap()
+    let exported_term = exported.callable_by_def_id.get(
+        exported_def_id).unwrap()
+    if local_state.arity != exported_state.arity ||
+       local_state.transfer_levels.len() != 1 ||
+       exported_state.transfer_levels.len() != 1 {
+        panic("unreachable: same-origin imported callable arity differs")
+    }
+    let local_level = local_state.transfer_levels.first().unwrap()
+    let exported_level = exported_state.transfer_levels.first().unwrap()
+    if !shadow_bool_lists_equal(
+        local_level.force_params, exported_level.force_params) {
+        panic("unreachable: same-origin imported transfer strength differs")
+    }
+    if ctx.env.types.ownership_metadata.callable_result_role_by_def_id.get(
+            local_def_id) !=
+       exported.callable_result_role_by_def_id.get(exported_def_id) ||
+       ctx.env.types.ownership_metadata.
+            returned_callable_result_role_by_def_id.get(local_def_id) !=
+       exported.returned_callable_result_role_by_def_id.get(exported_def_id) {
+        panic("unreachable: same-origin imported callable result role differs")
+    }
+    if local_term < CALLABLE_DYNAMIC_TERM_BASE &&
+       exported_term < CALLABLE_DYNAMIC_TERM_BASE &&
+       local_term != exported_term {
+        panic("unreachable: same-origin imported callable contract differs")
+    }
+    match (ctx.env.types.ownership_metadata.callable_descriptors.get(local_term),
+           exported.callable_descriptors.get(exported_term)) {
+        (some(left), some(right)) => {
+            if !shadow_descriptors_equal(left, right) {
+                panic("unreachable: same-origin imported descriptor differs")
+            }
+        },
+        (none, none) => {},
+        _ => panic("unreachable: same-origin imported descriptor was stripped")
     }
 }
 
@@ -1192,7 +989,6 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
     for mod_ in exports {
         merge_imported_shadow_shapes(ctx, mod_.ownership_metadata)
         let mut ownership_term_remap: Map<Int, Int> = map_new()
-        let mut ownership_def_id_remap: Map<Int, Int> = map_new()
         let mut exact_impl_methods: Map<Str, Map<Str, TypeScheme>> = map_new()
         let mut method_targets = mod_.impl_methods.entries()
         method_targets.sort_by(compare_by_first)
@@ -1229,8 +1025,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                         let hydrated = hydrate_exact_shadow_callable(
                             ctx, mod_.ownership_metadata,
                             exported_scheme, none, none,
-                            ownership_term_remap,
-                            ownership_def_id_remap)
+                            ownership_term_remap)
                         hydrated_method_schemes.insert(key, hydrated)
                         hydrated
                     }
@@ -1291,17 +1086,8 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                     let hydrated_value_ty = hydrate_shadow_type(
                         ctx, mod_.ownership_metadata,
                         scheme.ty, ownership_term_remap)
-                    let reused_def_id = match exported_callable_view.ty {
-                        Type::FnType { .. } => match exported_callable_view.def_id {
-                            some(exported_id) => ownership_def_id_remap.get(
-                                exported_id),
-                            none => none
-                        },
-                        _ => none
-                    }
                     ctx.env.bind(origin, TypeScheme {
-                        ..scheme, ty: hydrated_value_ty,
-                        def_id: reused_def_id
+                        ..scheme, ty: hydrated_value_ty, def_id: none
                     })
                     match exported_callable_view.ty {
                         Type::FnType { .. } => {
@@ -1311,8 +1097,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                                 ctx, mod_.ownership_metadata,
                                 exported_callable_view,
                                 some(local_def_id), none,
-                                ownership_term_remap,
-                                ownership_def_id_remap)
+                                ownership_term_remap)
                             ctx.env.rebind(origin, TypeScheme {
                                 ..bound,
                                 ty: if is_const_getter {
@@ -1432,8 +1217,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                     none => hydrate_exact_shadow_callable(
                         ctx, mod_.ownership_metadata,
                         exported_scheme, none, none,
-                        ownership_term_remap,
-                        ownership_def_id_remap)
+                        ownership_term_remap)
                 }
                 let exact_parts = match exact_scheme.ty {
                     Type::FnType { params, return_type, .. } =>
@@ -1485,8 +1269,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                     none => hydrate_exact_shadow_callable(
                         ctx, mod_.ownership_metadata,
                         exported_scheme, none, none,
-                        ownership_term_remap,
-                        ownership_def_id_remap)
+                        ownership_term_remap)
                 }
                 let exact_method = TraitMethodDef {
                     ..method,
@@ -1536,8 +1319,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                         let hydrated = hydrate_exact_shadow_callable(
                             ctx, mod_.ownership_metadata,
                             exported_scheme, none, none,
-                            ownership_term_remap,
-                            ownership_def_id_remap)
+                            ownership_term_remap)
                         hydrated_sig_schemes.insert(key, hydrated)
                         hydrated
                     }
@@ -1566,8 +1348,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                         let hydrated = hydrate_exact_shadow_callable(
                             ctx, mod_.ownership_metadata,
                             exported_scheme, none, none,
-                            ownership_term_remap,
-                            ownership_def_id_remap)
+                            ownership_term_remap)
                         hydrated_method_schemes.insert(key, hydrated)
                         hydrated
                     }

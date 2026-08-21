@@ -1,11 +1,11 @@
 use types::{Type, EffectRow, StructField, EnumVariant,
     INT, STR, BOOL, EMPTY_ROW, CALLABLE_BORROW_OWNED,
-    CALLABLE_SOURCE_SYNTHETIC, callable_owning_transfer_levels}
+    CALLABLE_SOURCE_SYNTHETIC}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     ImplEntry, ImplDictBound, MethodOrigin,
     add_impl, has_impl, find_impl, install_method_scheme,
     instantiate_impl_dict_requirements,
-    register_exact_shadow_callable_scheme_with_transfer_levels}
+    register_exact_shadow_callable_scheme}
 use ast::{Span, DeriveAttribute, span_zero}
 use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
@@ -1281,18 +1281,22 @@ fn register_trait_methods(
     entries.sort_by(compare_by_first)
     for entry in entries {
         let (method_name, scheme) = entry
-        match scheme.ty {
-            Type::FnType { .. } => {},
+        let arity = match scheme.ty {
+            Type::FnType { params, .. } => params.len(),
             _ => panic("unreachable: derived method is not callable")
         }
-        let levels = callable_owning_transfer_levels(
-            env.types.ownership_metadata, scheme.ty)
-        let exact = register_exact_shadow_callable_scheme_with_transfer_levels(
+        let mut forces: List<Bool> = []
+        let mut index = 0
+        while index < arity {
+            forces.push(false)
+            index = index + 1
+        }
+        let exact = register_exact_shadow_callable_scheme(
             env,
             TypeScheme {
                 ..scheme, def_id: some(env.fresh_def_id())
             },
-            CALLABLE_SOURCE_SYNTHETIC, none, levels)
+            CALLABLE_SOURCE_SYNTHETIC, none, forces)
         methods.insert(method_name, exact)
     }
 }

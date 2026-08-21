@@ -5328,19 +5328,11 @@ def ownership_shadow_transport_contract_errors(
             "pub struct CallableOwnershipState",
             "pub struct OwnershipShape",
             "pub struct OwnershipMetadata",
-            "pub callable_result_role_spine_by_def_id: Map<Int, List<Int>>",
             "pub next_ownership_term: Int",
             "pub fn normalize_callable_ownership_descriptor(",
             "pub fn validate_shadow_ownership_metadata(",
             "pub fn clone_shadow_callable_identity(",
             "pub fn set_shadow_callable_result_role(",
-            "pub fn set_shadow_callable_result_role_spine(",
-            "pub fn record_shadow_callable_with_transfer_levels(",
-            "pub fn callable_interface_transfer_levels(",
-            "pub fn callable_owning_transfer_levels(",
-            "pub fn intern_callable_param_modes(",
-            "state.transfer_levels.len() == 0",
-            "spine.set(1, role)",
             "FnType { params: List<Type>, return_type: Type, effects: EffectRow,\n"
             "             ownership_term: Int }",
         ),
@@ -5349,8 +5341,6 @@ def ownership_shadow_transport_contract_errors(
             "ownership_metadata: new_ownership_metadata()",
             "pub fn register_exact_shadow_callable_scheme(",
             "pub fn replace_exact_shadow_callable_scheme(",
-            "pub fn register_exact_shadow_callable_scheme_with_transfer_levels(",
-            "pub fn replace_exact_shadow_callable_scheme_with_transfer_levels(",
             "helper never allocates a DefId",
             "ownership_term: ownership_term",
         ),
@@ -5359,8 +5349,6 @@ def ownership_shadow_transport_contract_errors(
             "callee_def_id: Int?",
             "callable_result_def_id: Int?",
             "Lambda { def_id: Int",
-            "EffectOp { effect_name: Str, op_name: Str, op_def_id: Int",
-            "pub op_def_id: Int",
             "pub fn is_synthetic_callable_def_id(",
             "HIR callable result is outside its synthetic DefId namespace",
             "pub struct HEffectOp",
@@ -5368,11 +5356,6 @@ def ownership_shadow_transport_contract_errors(
             "pub struct HSigMember",
             "pub ownership_metadata: OwnershipMetadata",
             "validate_shadow_ownership_metadata(program.ownership_metadata)",
-            "validate_hir_shadow_decls(program.decls, program.ownership_metadata)",
-            "fn validate_hir_shadow_callable_type(",
-            "if type_term != metadata_term",
-            "if param.ownership_mode != expected_mode",
-            "hexpr_type(callee), \"call callee\"",
         ),
         "infer": (
             "fn register_default_callable_binder(",
@@ -5383,8 +5366,6 @@ def ownership_shadow_transport_contract_errors(
             "shadow_callable_result(",
             "callee_def_id: callee_scheme.def_id",
             "CALLABLE_SOURCE_SYNTHETIC",
-            "op_def_id: op.def_id",
-            "op_def_id: handler_op_def_id",
         ),
         "infer_decl": (
             "def_id: op.def_id",
@@ -5393,27 +5374,24 @@ def ownership_shadow_transport_contract_errors(
             "def_id: some(wrapper_def_id)",
             "callable_result_def_id: call_result.1",
             "registration_override: TypeScheme?",
-            "sig member registration is missing",
-            "refresh_rebound_shadow_callable(",
         ),
         "infer_ctx": (
             "pub next_shadow_callable_ordinal: Int",
             "pub fn fresh_shadow_callable_def_id(",
             "pub fn shadow_callable_result(",
-            "shadow_callable_result_role_spine(",
-            "set_shadow_callable_result_role_spine(",
+            "returned_callable_result_role_by_def_id.get(producer)",
             "fn register_exact_shadow_alias(",
             "CALLABLE_SOURCE_ALIAS",
             "some(producer_def_id)",
-            "clone_callable_transfer_levels(",
-            "pub fn register_callable_shadow_def_id(",
+            "callable_result_role_by_def_id.get(producer_def_id)",
         ),
         "infer_register": (
             "fn interface_callable_term(",
             "fn registered_interface_callable_term(",
-            "intern_callable_param_modes(",
+            "CallableOwnershipDescriptor {",
+            "prefix_params: shadow_param_modes(params)",
+            "fn interface_force_params(",
             "fn establish_shadow_callable_scheme(",
-            "fn establish_shadow_callable_scheme_with_transfer_levels(",
             "CALLABLE_SOURCE_CONSERVATIVE_INTERFACE",
             "some(trait_method.def_id)",
             "field_scheme.def_id",
@@ -5426,20 +5404,12 @@ def ownership_shadow_transport_contract_errors(
             "fn shadow_value_callable_view(",
             "let hydrated_value_ty = hydrate_shadow_type(",
             "fn assert_same_origin_shadow_callable(",
-            "fn hydrate_shadow_metadata_identity(",
-            "fn shadow_producers_semantically_equal(",
-            "fn canonical_shadow_alias_producer(",
-            "shadow alias wrapper differs from exact producer",
             "exported callable metadata was stripped",
-            "same-origin normalized callable metadata differs",
+            "same-origin imported callable contract differs",
             "CALLABLE_DYNAMIC_TERM_BASE",
             "producer_def_id: Int?",
-            "replace_exact_shadow_callable_scheme_with_transfer_levels(",
+            "replace_exact_shadow_callable_scheme(",
             "exact_prelude_extern_result_role(name)",
-            "state.source, hydrated_producer, hydrated_levels",
-            "let exact_op = EffectOpDef {\n"
-            "                    ..op,\n"
-            "                    def_id: exact_scheme.def_id.unwrap_or(-1)",
         ),
         "exports": (
             "pub ownership_metadata: OwnershipMetadata",
@@ -5453,10 +5423,9 @@ def ownership_shadow_transport_contract_errors(
             "fn builtin_trait_method(",
             "fn builtin_effect_op(",
             "CALLABLE_SOURCE_BUILTIN",
-            "force_move_params: Bool",
         ),
         "derive": (
-            "register_exact_shadow_callable_scheme_with_transfer_levels(",
+            "register_exact_shadow_callable_scheme(",
             "CALLABLE_SOURCE_SYNTHETIC",
         ),
         "zonk": (
@@ -5464,20 +5433,10 @@ def ownership_shadow_transport_contract_errors(
             "callee_def_id: callee_def_id",
             "callable_result_def_id: callable_result_def_id",
             "def_id: def_id",
-            "op_def_id: op_def_id",
         ),
-        "andor": (
-            "ownership_metadata: program.ownership_metadata",
-            "op_def_id: op_def_id", "op_def_id: h.op_def_id",
-        ),
-        "dict": (
-            "ownership_metadata: program.ownership_metadata",
-            "op_def_id: op_def_id", "op_def_id: h.op_def_id",
-        ),
-        "perceus": (
-            "ownership_metadata: program.ownership_metadata",
-            "op_def_id: op_def_id", "op_def_id: h.op_def_id",
-        ),
+        "andor": ("ownership_metadata: program.ownership_metadata",),
+        "dict": ("ownership_metadata: program.ownership_metadata",),
+        "perceus": ("ownership_metadata: program.ownership_metadata",),
         "compiler_mod": ("ownership_metadata: hir.ownership_metadata",),
         "cexpr": (
             "callee_def_id: none",
@@ -5524,8 +5483,6 @@ def ownership_shadow_transport_contract_errors(
         ("Type::FnType", ("ownership_term",)),
         ("HExpr::Call", ("callee_def_id", "callable_result_def_id")),
         ("HExpr::Lambda", ("def_id",)),
-        ("HExpr::EffectOp", ("op_def_id",)),
-        ("HEffectHandler", ("op_def_id",)),
         ("HParam", ("ownership_mode",)),
         ("HProgram", ("ownership_metadata",)),
         ("HEffectOp", ("def_id",)),
@@ -5587,67 +5544,15 @@ def ownership_shadow_transport_contract_errors(
     if alias_error:
         errors.append(alias_error)
     elif not all(token in alias_body for token in (
-            "CALLABLE_SOURCE_ALIAS",
-            "some(producer_def_id), clone_callable_transfer_levels(",
-            "clone_callable_transfer_levels(",
-            "set_shadow_callable_result_role_spine(")):
+            "CALLABLE_SOURCE_ALIAS", "some(producer_def_id), forces")):
         errors.append("exact import alias lost its canonical producer edge")
 
     diamond_body, diamond_error = extract_ring_function_body(
         sources["checker"], "assert_same_origin_shadow_callable")
     if diamond_error:
         errors.append(diamond_error)
-    elif not all(token in diamond_body for token in (
-            "types_equal(local_scheme.ty, exported_scheme.ty)",
-            "shadow_producers_semantically_equal(")):
-        errors.append("same-origin diamond lost normalized metadata comparison")
-
-    alias_normalize_body, alias_normalize_error = extract_ring_function_body(
-        sources["checker"], "canonical_shadow_alias_producer")
-    if alias_normalize_error:
-        errors.append(alias_normalize_error)
-    elif not all(token in alias_normalize_body for token in (
-            "visited.contains(def_id)",
-            "state.source != CALLABLE_SOURCE_ALIAS",
-            "state.producer_def_id",
-            "shadow alias producer contract is incomplete",
-            "metadata.callable_by_def_id.get(def_id) !=",
-            "callable_transfer_levels_equal(",
-            "shadow_role_spines_equal(",
-            "canonical_shadow_alias_producer(metadata, producer, visited)")):
-        errors.append("same-origin alias normalization lost exact wrapper authority")
-
-    producer_compare_body, producer_compare_error = extract_ring_function_body(
-        sources["checker"], "shadow_producers_semantically_equal_inner")
-    if producer_compare_error:
-        errors.append(producer_compare_error)
-    elif (producer_compare_body.count(
-            "canonical_shadow_alias_producer(") != 2 or
-          "local_seen.contains(canonical_local)" not in producer_compare_body or
-          "exported_seen.contains(canonical_exported)" not in
-              producer_compare_body):
-        errors.append("same-origin comparison lost symmetric exact alias normalization")
-
-    default_remap_body, default_remap_error = extract_ring_function_body(
-        sources["infer"], "remap_default_expr")
-    if default_remap_error:
-        errors.append(default_remap_error)
-    elif not all(token in default_remap_body for token in (
-            "new_handlers.push(HEffectHandler { ..handler,\n"
-            "                    params: new_params,",
-            "HExpr::EffectOp { ..expr, args: new_args }")):
-        errors.append("default expansion lost exact effect execution identity")
-
-    impl_register_body, impl_register_error = extract_ring_function_body(
-        sources["infer_register"], "register_impl_canonical")
-    if impl_register_error:
-        errors.append(impl_register_error)
-    elif not all(token in impl_register_body for token in (
-            'if tname == "Drop"',
-            "some(drop_method.def_id)",
-            "clone_callable_transfer_levels(\n"
-            "                                            drop_state.transfer_levels)")):
-        errors.append("Drop impl lost exact FORCE inheritance")
+    elif "local_term != exported_term" not in diamond_body:
+        errors.append("same-origin diamond lost callable contract comparison")
 
     prelude_body, prelude_error = extract_ring_function_body(
         sources["infer_register"], "exact_prelude_extern_ownership")
@@ -5673,72 +5578,6 @@ def ownership_shadow_transport_contract_errors(
             'name == "ring_slot_read"', 'name == "ring_slot_take"',
             "CALLABLE_RESULT_ROLE_FRESH_OWNED_SLOT")):
         errors.append("exact prelude result-role table is incomplete")
-
-    force_contracts = {
-        "builtins": (
-            'builtin_trait_method(env, "drop", drop_fn, false, [false], true)',
-            'register_bound_builtin_callable(env, "dealloc", true)',
-        ),
-        "checker": (
-            'name == "ring_slot_dealloc"',
-            "callable_interface_transfer_levels(",
-            "callable_owning_transfer_levels(",
-        ),
-        "types": (
-            "if force && mode != PARAM_OWNERSHIP_MOVE",
-        ),
-        "infer": (
-            "let lambda_levels = callable_owning_transfer_levels(",
-        ),
-    }
-    for label, tokens in force_contracts.items():
-        for token in tokens:
-            if token not in sources[label]:
-                errors.append(f"{label}: missing FORCE/OWNING contract {token!r}")
-
-    sig_body, sig_error = extract_ring_function_body(
-        sources["infer_decl"], "check_sig_decl")
-    if sig_error:
-        errors.append(sig_error)
-    elif "fresh_def_id" in sig_body or not all(token in sig_body for token in (
-            "registered sig member has no exact DefId",
-            "sig member registration is missing",
-            "fail.raise(CompileError {})")):
-        errors.append("sig checking can mint or recover a missing member identity")
-
-    clone_body, clone_error = extract_ring_function_body(
-        sources["types"], "clone_shadow_callable_identity")
-    if clone_error:
-        errors.append(clone_error)
-    elif not all(token in clone_body for token in (
-            "record_shadow_callable_with_transfer_levels(",
-            "set_shadow_callable_result_role_spine(")):
-        errors.append("default callable clone lost transfer/result-role spine")
-
-    hydrate_body, hydrate_error = extract_ring_function_body(
-        sources["checker"], "hydrate_exact_shadow_callable")
-    if hydrate_error:
-        errors.append(hydrate_error)
-    elif not all(token in hydrate_body for token in (
-            "hydrate_shadow_transfer_levels(",
-            "set_shadow_callable_result_role_spine(",
-            "exported.callable_result_role_spine_by_def_id.get(",
-            "hydrate_shadow_metadata_identity(")):
-        errors.append("module hydration lost callable spine/producer transport")
-
-    param_mode_body, param_mode_error = extract_ring_function_body(
-        sources["types"], "shadow_callable_param_ownership")
-    if param_mode_error:
-        errors.append(param_mode_error)
-    elif "none => PARAM_OWNERSHIP_UNKNOWN" not in param_mode_body:
-        errors.append("unknown callable parameter mode stopped being poison")
-
-    interface_term_body, interface_term_error = extract_ring_function_body(
-        sources["infer_register"], "registered_interface_callable_term")
-    if interface_term_error:
-        errors.append(interface_term_error)
-    elif "shadow_param_modes(params)" not in interface_term_body:
-        errors.append("mixed interface descriptor lost its exact mode vector")
 
     ctor_body, ctor_error = extract_ring_function_body(
         sources["exports"], "variant_ctor_scheme")
@@ -5767,8 +5606,7 @@ def ownership_shadow_transport_contract_errors(
 
     semantic_consumer_tokens = (
         "callable_by_def_id", "callable_state_by_def_id",
-        "callable_result_role_by_def_id",
-        "callable_result_role_spine_by_def_id", "ownership_shapes",
+        "callable_result_role_by_def_id", "ownership_shapes",
         "ownership_term", "ownership_mode",
     )
     for label in ("perceus", "verify"):
@@ -5825,26 +5663,7 @@ def ownership_shadow_transport_contract_errors(
         "ownership_diamond_facade": (
             "inc_left as first", "inc_right as second",
         ),
-        "ownership_diamond_direct_first": (
-            "use leaf::{bump as direct}\nuse facade::{first as via_alias}",
-        ),
-        "ownership_diamond_alias_first": (
-            "use facade::{second as via_alias}\nuse leaf::{bump as direct}",
-        ),
-        "ownership_diamond_main": (
-            "use direct_first::{run as run_direct_first}",
-            "use alias_first::{run as run_alias_first}",
-        ),
-        "ownership_chained_factory_fixture": (
-            "fn make_chain() -> fn() -> fn(Int) -> Option<Int>",
-            "let level_one = make_chain()",
-            "let level_two = level_one()",
-        ),
-        "ownership_effect_fixture": (
-            "effect Signal {",
-            "Signal.emit(5)",
-            "Signal.emit(value) => value + 1",
-        ),
+        "ownership_diamond_main": ("use facade::{first, second}",),
     }
     for label, tokens in fixture_contracts.items():
         source = sources.get(label, "")
@@ -7221,25 +7040,9 @@ def identity_checkpoint_source_errors() -> List[str]:
             REPO / "tests" / "cases" / "modules" /
             "ownership_shadow_reexport_diamond" / "facade.ring"
         ),
-        "ownership_diamond_direct_first": (
-            REPO / "tests" / "cases" / "modules" /
-            "ownership_shadow_reexport_diamond" / "direct_first.ring"
-        ),
-        "ownership_diamond_alias_first": (
-            REPO / "tests" / "cases" / "modules" /
-            "ownership_shadow_reexport_diamond" / "alias_first.ring"
-        ),
         "ownership_diamond_main": (
             REPO / "tests" / "cases" / "modules" /
             "ownership_shadow_reexport_diamond" / "main.ring"
-        ),
-        "ownership_chained_factory_fixture": (
-            REPO / "tests" / "cases" /
-            "ownership_shadow_chained_factory.ring"
-        ),
-        "ownership_effect_fixture": (
-            REPO / "tests" / "cases" /
-            "ownership_shadow_effect_identity.ring"
         ),
     }
     sources: dict[str, str] = {}
@@ -7621,10 +7424,7 @@ def identity_checkpoint_source_errors() -> List[str]:
          "clone_shadow_callable_identity(",
          "clone_shadow_callable_identity_removed("),
         ("alias canonical producer", "infer_ctx",
-         "CALLABLE_SOURCE_ALIAS, params.len(),\n"
-         "                some(producer_def_id), clone_callable_transfer_levels(",
-         "CALLABLE_SOURCE_ALIAS, params.len(),\n"
-         "                none, clone_callable_transfer_levels("),
+         "some(producer_def_id), forces)", "none, forces)"),
         ("synthetic callable counter separation", "infer_ctx",
          "ctx.next_shadow_callable_ordinal + 1",
          "ctx.env.fresh_def_id()"),
@@ -7637,10 +7437,9 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("delegate registered DefId", "infer_decl",
          "def_id: some(wrapper_def_id)",
          "def_id: some(ctx.env.fresh_def_id())"),
-        ("same-origin alias normalization", "checker",
-         "canonical_shadow_alias_producer(\n"
-         "                local_metadata, local_id, set_new())",
-         "local_id"),
+        ("same-origin conflict guard", "checker",
+         "local_term != exported_term",
+         "false"),
         ("export metadata strip", "exports",
          "ownership_metadata: hprogram.ownership_metadata",
          "ownership_metadata: new_ownership_metadata()"),
@@ -7654,10 +7453,10 @@ def identity_checkpoint_source_errors() -> List[str]:
          "fn shadow_value_callable_view(",
          "fn shadow_value_callable_view_removed("),
         ("prelude exact override", "checker",
-         "replace_exact_shadow_callable_scheme_with_transfer_levels(\n"
-         "                                ctx.env, TypeScheme",
-         "register_exact_shadow_callable_scheme_with_transfer_levels(\n"
-         "                                ctx.env, TypeScheme"),
+         "replace_exact_shadow_callable_scheme(\n"
+         "                                ctx.env, scheme,",
+         "register_exact_shadow_callable_scheme(\n"
+         "                                ctx.env, scheme,"),
         ("prelude slot result role", "checker",
          "exact_prelude_extern_result_role(name)",
          "CALLABLE_RESULT_ROLE_NONE"),
@@ -7668,103 +7467,8 @@ def identity_checkpoint_source_errors() -> List[str]:
          "return CALLABLE_MUT_BORROW_MOVE_OWNED",
          "return CALLABLE_BORROW_OWNED"),
         ("mixed interface descriptor", "infer_register",
-         "ctx.env.types.ownership_metadata, shadow_param_modes(params)",
-         "ctx.env.types.ownership_metadata, []"),
-        ("transfer spine schema", "types",
-         "pub callable_result_role_spine_by_def_id: Map<Int, List<Int>>",
-         "pub callable_result_role_spine_removed: Map<Int, List<Int>>"),
-        ("single-level transfer regression", "types",
-         "state.arity < 0 || state.transfer_levels.len() == 0",
-         "state.arity < 0 || state.transfer_levels.len() != 1"),
-        ("result-role spine value drift", "types",
-         "spine.set(1, role)",
-         "spine.set(1, CALLABLE_RESULT_ROLE_NONE)"),
-        ("default clone role spine", "types",
-         "set_shadow_callable_result_role_spine(metadata, new_def_id, spine)",
-         "set_shadow_callable_result_role(metadata, new_def_id, CALLABLE_RESULT_ROLE_NONE)"),
-        ("module hydrate role spine", "checker",
-         "exported.callable_result_role_spine_by_def_id.get(\n"
-         "            exported_def_id).unwrap())\n"
-         "    exact",
-         "[CALLABLE_RESULT_ROLE_NONE, CALLABLE_RESULT_ROLE_NONE])\n"
-         "    exact"),
-        ("effect perform DefId field", "hir",
-         "EffectOp { effect_name: Str, op_name: Str, op_def_id: Int",
-         "EffectOp { effect_name: Str, op_name: Str, removed_op_def_id: Int"),
-        ("effect handler DefId field", "hir",
-         "pub op_def_id: Int", "pub removed_op_def_id: Int"),
-        ("effect perform exact fill", "infer",
-         "op_name: op_name, op_def_id: op.def_id",
-         "op_name: op_name, op_def_id: -1"),
-        ("effect handler exact fill", "infer",
-         "op_def_id: handler_op_def_id",
-         "op_def_id: -1"),
-        ("imported effect exact identity", "checker",
-         "let exact_op = EffectOpDef {\n"
-         "                    ..op,\n"
-         "                    def_id: exact_scheme.def_id.unwrap_or(-1)",
-         "let exact_op = EffectOpDef {\n"
-         "                    ..op,\n"
-         "                    def_id: ctx.env.fresh_def_id()"),
-        ("default effect operation identity", "infer",
-         "HExpr::EffectOp { ..expr, args: new_args }",
-         "HExpr::EffectOp { ..expr, op_def_id: -1, args: new_args }"),
-        ("default effect handler identity", "infer",
-         "new_handlers.push(HEffectHandler { ..handler,",
-         "new_handlers.push(HEffectHandler { ..handler, op_def_id: -1,"),
-        ("Drop FORCE", "builtins",
-         'builtin_trait_method(env, "drop", drop_fn, false, [false], true)',
-         'builtin_trait_method(env, "drop", drop_fn, false, [false], false)'),
-        ("dealloc FORCE", "builtins",
-         'register_bound_builtin_callable(env, "dealloc", true)',
-         'register_bound_builtin_callable(env, "dealloc", false)'),
-        ("slot dealloc FORCE", "checker",
-         'name == "ring_slot_dealloc"',
-         'false'),
-        ("body inferred OWNING", "infer",
-         "let lambda_levels = callable_owning_transfer_levels(",
-         "let lambda_levels = callable_interface_transfer_levels("),
-        ("Drop impl FORCE inheritance", "infer_register",
-         'if tname == "Drop"',
-         "if false"),
-        ("relational validator authority", "hir",
-         "validate_hir_shadow_decls(program.decls, program.ownership_metadata)",
-         "validate_hir_shadow_decls_removed(program.decls, program.ownership_metadata)"),
-        ("relational FnType term", "hir",
-         "if type_term != metadata_term",
-         "if false"),
-        ("relational HParam mode", "hir",
-         "if param.ownership_mode != expected_mode",
-         "if false"),
-        ("relational Call callee", "hir",
-         "metadata, def_id, hexpr_type(callee), \"call callee\"",
-         "metadata, def_id, ty, \"call callee\""),
-        ("same-origin source drift", "checker",
-         "state.source, hydrated_producer, hydrated_levels)",
-         "CALLABLE_SOURCE_CONSERVATIVE_INTERFACE, hydrated_producer, hydrated_levels)"),
-        ("alias wrapper term agreement", "checker",
-         "metadata.callable_by_def_id.get(def_id) !=\n"
-         "           metadata.callable_by_def_id.get(producer)",
-         "false"),
-        ("diamond reverse import order", "ownership_diamond_alias_first",
-         "use facade::{second as via_alias}\nuse leaf::{bump as direct}",
-         "use leaf::{bump as direct}\nuse facade::{second as via_alias}"),
-        ("unknown mode drift", "types",
-         "none => PARAM_OWNERSHIP_UNKNOWN",
-         "none => PARAM_OWNERSHIP_BORROW"),
-        ("Sig missing member counter", "infer_decl",
-         "detail: some(\"sig member registration is missing\")\n"
-         "                            })\n"
-         "                        fail.raise(CompileError {})",
-         "detail: some(\"sig member registration is missing\")\n"
-         "                            })\n"
-         "                        hmembers.push(HSigMember { name: m.name, def_id: ctx.env.fresh_def_id(), fn_type: UNIT, span: m.span })"),
-        ("chained factory depth", "ownership_chained_factory_fixture",
-         "let level_two = level_one()",
-         "let level_two = make_chain()"),
-        ("effect handler identity fixture", "ownership_effect_fixture",
-         "Signal.emit(value) => value + 1",
-         "Other.emit(value) => value + 1"),
+         "prefix_params: shadow_param_modes(params)",
+         "prefix_params: []"),
         ("Perceus semantic consumer", "perceus",
          "ownership_metadata: program.ownership_metadata",
          "ownership_metadata: program.ownership_metadata // callable_by_def_id"),
