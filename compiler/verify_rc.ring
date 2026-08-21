@@ -666,17 +666,6 @@ fn v_original_block_tail(
     }
 }
 
-fn v_block_tail_is_synthetic(
-    stmts: List<HStmt>, tail: Option<HExpr>
-) -> Bool {
-    match tail {
-        some(HExpr::Ident { def_id: some(id), .. }) =>
-            is_synthetic_rc_def_id(id) &&
-            v_block_local_init(stmts, id).is_some(),
-        _ => false
-    }
-}
-
 // Independent verifier-side owner decision.  In particular every Call stays
 // fail-closed here; the verifier does not borrow Perceus's S′ admission answer.
 fn v_tail_is_owner_bearing(expr: HExpr) -> Bool {
@@ -745,12 +734,11 @@ fn v_escape_is_noop_on_reachable_tail(
 }
 
 fn v_block_option_tail_is_safe(
-    stmts: List<HStmt>, tail: Option<HExpr>, mode: Int
+    stmts: List<HStmt>, tail: Option<HExpr>
 ) -> Bool {
-    let synthetic = v_block_tail_is_synthetic(stmts, tail)
     match v_original_block_tail(stmts, tail) {
         some(value) => v_escape_is_noop_on_reachable_tail(
-            value, synthetic && mode == M_BORROWED),
+            value, true),
         none => true
     }
 }
@@ -1158,11 +1146,11 @@ fn v_option_cleanup_base_candidate(
 }
 
 fn v_option_cleanup_def_ids(
-    stmts: List<HStmt>, tail: Option<HExpr>, mode: Int,
-    boxed: Set<Int>, externs: Set<Str>
+    stmts: List<HStmt>, tail: Option<HExpr>, boxed: Set<Int>,
+    externs: Set<Str>
 ) -> Set<Int> {
     let mut out: Set<Int> = set_new()
-    let tail_safe = v_block_option_tail_is_safe(stmts, tail, mode)
+    let tail_safe = v_block_option_tail_is_safe(stmts, tail)
     let mut reaches_next = true
     for stmt in stmts {
         if reaches_next {
@@ -1192,11 +1180,11 @@ fn v_block_has_direct_drop(stmts: List<HStmt>, def_id: Int) -> Bool {
 }
 
 fn v_option_rejected_def_ids(
-    stmts: List<HStmt>, tail: Option<HExpr>, mode: Int,
-    boxed: Set<Int>, externs: Set<Str>, reject_tail: Bool
+    stmts: List<HStmt>, tail: Option<HExpr>, boxed: Set<Int>,
+    externs: Set<Str>, reject_tail: Bool
 ) -> Set<Int> {
     let mut out: Set<Int> = set_new()
-    let tail_safe = v_block_option_tail_is_safe(stmts, tail, mode)
+    let tail_safe = v_block_option_tail_is_safe(stmts, tail)
     let mut reaches_next = true
     for stmt in stmts {
         if reaches_next {
@@ -1812,11 +1800,11 @@ fn v_block(block: HExpr, mode: Int, mut ctx: VCtx) -> (Int, Bool) {
     match block {
         HExpr::Block { stmts, tail, .. } => {
             let option_cleanup_def_ids = v_option_cleanup_def_ids(
-                stmts, tail, mode, ctx.boxed, ctx.externs)
+                stmts, tail, ctx.boxed, ctx.externs)
             let option_rejected_tail_def_ids = v_option_rejected_def_ids(
-                stmts, tail, mode, ctx.boxed, ctx.externs, true)
+                stmts, tail, ctx.boxed, ctx.externs, true)
             let option_rejected_write_def_ids = v_option_rejected_def_ids(
-                stmts, tail, mode, ctx.boxed, ctx.externs, false)
+                stmts, tail, ctx.boxed, ctx.externs, false)
             v_push_frame(ctx)
             let mut diverged = false
             for s in stmts {

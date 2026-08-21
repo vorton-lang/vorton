@@ -6762,6 +6762,7 @@ def option_cleanup_source_errors(sources: dict[str, str]) -> List[str]:
     hir = sources["hir"]
     perceus = sources["perceus"]
     verify = sources["verify"]
+    runner = sources["runner"]
 
     helper_body, helper_error = extract_ring_function_body(
         hir, "is_option_none_ctor_ident")
@@ -6852,7 +6853,20 @@ def option_cleanup_source_errors(sources: dict[str, str]) -> List[str]:
             "HExpr::Clone { inner, .. } => if reject_synthetic_clone",
             "v_original_block_tail(stmts, tail)",
             "_ => !v_tail_is_owner_bearing(expr)")):
-        errors.append("verifier borrowed synthetic tail can self-prove")
+        errors.append("verifier RC-produced tail Clone can self-prove")
+
+    block_tail_body, block_tail_error = extract_ring_function_body(
+        verify, "v_block_option_tail_is_safe")
+    if block_tail_error:
+        errors.append(block_tail_error)
+    elif (
+        "v_original_block_tail(stmts, tail)" not in block_tail_body
+        or "value, true" not in block_tail_body
+        or "mode == M_BORROWED" in block_tail_body
+        or "v_block_tail_is_synthetic" in verify
+    ):
+        errors.append(
+            "verifier candidate gate does not peel every RC-produced top-level Clone")
 
     verify_write_body, verify_write_error = extract_ring_function_body(
         verify, "v_option_write_producer_class")
@@ -6883,6 +6897,14 @@ def option_cleanup_source_errors(sources: dict[str, str]) -> List[str]:
         mask_ring_strings_and_comments(verify), re.DOTALL)
     if catch_match is None:
         errors.append("catch audit lost normally-returning K_OPTION state check")
+
+    negative_tail_contract = (
+        '"cleanup-active Option negative-tail live",\n'
+        '            "tests/cases/structural/ownership_option_map_exit.ring",\n'
+        '            ("--verify-rc",), True, fatal_exact=0'
+    )
+    if negative_tail_contract not in runner:
+        errors.append("negative-tail live RC contract is missing")
 
     for label, source, anchor, replacement, required_after in (
         (
@@ -8525,6 +8547,11 @@ def run_rc(ring_exe: str, collector: ResultCollector, *,
             ("--verify-rc",), True, fatal_exact=0,
         ),
         RcInvocationContract(
+            "cleanup-active Option negative-tail live",
+            "tests/cases/structural/ownership_option_map_exit.ring",
+            ("--verify-rc",), True, fatal_exact=0,
+        ),
+        RcInvocationContract(
             "cleanup-active Option missing first W4",
             "tests/cases/ownership_option_branch_cleanup.ring",
             ("--verify-rc", "--rc-mutate=missing-option-reassign-drop"),
@@ -8665,7 +8692,10 @@ def run_rc(ring_exe: str, collector: ResultCollector, *,
     fixture_files = {
         normalized_repo_path(path) for path in RC_NEG_DIR.glob("*.ring")
     } if RC_NEG_DIR.is_dir() else set()
-    contracted_files = {contract.fixture for contract in rc_contracts}
+    contracted_files = {
+        contract.fixture for contract in rc_contracts
+        if contract.fixture.startswith("tests/cases/verify_rc/")
+    }
     if fixture_files != contracted_files:
         missing = sorted(fixture_files - contracted_files)
         stale = sorted(contracted_files - fixture_files)
