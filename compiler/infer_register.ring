@@ -1,5 +1,6 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant,
-    EMPTY_ROW, effects_same_kind, type_to_builtin_name, type_to_string, effect_to_string, nominal_display_name}
+    EMPTY_ROW, CALLABLE_UNKNOWN, effects_same_kind, type_to_builtin_name,
+    type_to_string, effect_to_string, nominal_display_name}
 use ast::{Decl, Span, TypeParam, Param, TypeExpr, EffectOpDecl, StructFieldDecl,
     EnumVariantDecl, NamedEnumField, TypeBound, span_zero, EffectExpr, SigMember,
     UseDecl, UseImport, DeriveAttribute}
@@ -18,6 +19,17 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     enter_project_root_frame, enter_project_child_frame,
     refresh_project_namespace_frame, exit_project_namespace_frame}
 use infer_helpers::{is_value_type}
+
+// Registries without a value binding allocate their exact DefId once here.
+// This is identity transport only: no ownership term or producer is derived.
+fn ensure_registered_callable_identity(
+    mut ctx: InferCtx, scheme: TypeScheme
+) -> TypeScheme {
+    match scheme.def_id {
+        some(_) => scheme,
+        none => TypeScheme { ..scheme, def_id: some(ctx.env.fresh_def_id()) }
+    }
+}
 
 // ============================================================
 // Public entry points
@@ -1451,7 +1463,9 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                 } else if variant.fields.len() == 0 {
                     bind_variant_constructor(ctx, binding_name, enum_type, tv_ids)
                 } else {
-                    let fn_type = Type::FnType { params: variant.fields, return_type: enum_type, effects: EMPTY_ROW }
+                    let fn_type = Type::FnType { params: variant.fields,
+                        return_type: enum_type, effects: EMPTY_ROW,
+                        ownership_term: CALLABLE_UNKNOWN }
                     if tv_ids.len() > 0 {
                         ctx.env.bind(binding_name, TypeScheme { ty: fn_type, type_vars: tv_ids, bounds: [], def_id: none })
                     } else {
@@ -1527,7 +1541,9 @@ fn register_effect(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, o
         }
         let ret = resolve_type_expr(ctx, op.return_type)
         let op_has_default = op.body.is_some()
-        effect_ops.push(EffectOpDef { name: op.name, params: param_types, return_type: ret, has_default: op_has_default })
+        effect_ops.push(EffectOpDef { name: op.name,
+            def_id: ctx.env.fresh_def_id(), params: param_types,
+            return_type: ret, has_default: op_has_default })
     }
     let mut all_defaults = true
     for eop in effect_ops {
@@ -1704,8 +1720,14 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
                     some(de) => resolve_declared_effects(ctx, de),
                     none => EMPTY_ROW
                 }
-                let fn_type = Type::FnType { params: param_types, return_type: ret, effects: method_effects }
-                trait_methods.push(TraitMethodDef { name: mname, ty: fn_type, has_default: !is_abstract, param_mutabilities: param_muts, method_type_params: method_tps })
+                let fn_type = Type::FnType { params: param_types,
+                    return_type: ret, effects: method_effects,
+                    ownership_term: CALLABLE_UNKNOWN }
+                trait_methods.push(TraitMethodDef { name: mname,
+                    def_id: ctx.env.fresh_def_id(), ty: fn_type,
+                    has_default: !is_abstract,
+                    param_mutabilities: param_muts,
+                    method_type_params: method_tps })
             },
             _ => {}
         }
@@ -1985,11 +2007,12 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
                            !impl_method_names.contains(trait_method.name) {
                             exact_method_schemes.insert(
                                 trait_method.name,
-                                specialize_trait_method_scheme(
+                                ensure_registered_callable_identity(ctx,
+                                    specialize_trait_method_scheme(
                                     trait_def, trait_method, impl_self_type,
                                     trait_type_args, impl_tv_ids,
                                     assoc_type_map,
-                                    impl_bounds.scheme_bounds))
+                                    impl_bounds.scheme_bounds)))
                         }
                     }
 
@@ -2107,11 +2130,13 @@ fn register_impl_method(
         some(de) => resolve_declared_effects(ctx, de),
         none => infer_hof_effect_row(param_types)
     }
-    let fn_type = Type::FnType { params: param_types, return_type: ret, effects: impl_m_effects }
+    let fn_type = Type::FnType { params: param_types,
+        return_type: ret, effects: impl_m_effects,
+        ownership_term: CALLABLE_UNKNOWN }
     collect_effect_tail_vars(fn_type, all_tvs)
     let scheme = TypeScheme {
         ty: fn_type, type_vars: all_tvs,
-        bounds: impl_scheme_bounds, def_id: none
+        bounds: impl_scheme_bounds, def_id: some(ctx.env.fresh_def_id())
     }
 
     // Track mut self methods
@@ -2203,7 +2228,7 @@ fn specialize_delegate_method_scheme(
 ) -> TypeScheme {
     let mapped_type = apply_subst_map(field_var_map, field_scheme.ty)
     let specialized_type = match mapped_type {
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, ownership_term } => {
             let mut forwarded_params: List<Type> = []
             let mut first = true
             for param in params {
@@ -2217,7 +2242,8 @@ fn specialize_delegate_method_scheme(
             Type::FnType {
                 params: forwarded_params,
                 return_type: return_type,
-                effects: effects
+                effects: effects,
+                ownership_term: ownership_term
             }
         },
         _ => mapped_type
@@ -2596,11 +2622,12 @@ fn register_delegate_traits(
                                     }
                                     match resolved_method_scheme {
                                         some(field_scheme) => {
-                                            let scheme = specialize_delegate_method_scheme(
+                                            let scheme = ensure_registered_callable_identity(
+                                                ctx, specialize_delegate_method_scheme(
                                                 ctx, field_scheme, field_var_map,
                                                 self_type, impl_tv_ids,
                                                 impl_scheme_bounds,
-                                                wrapper_fn_bounds, span)
+                                                wrapper_fn_bounds, span))
                                             exact_method_schemes.insert(tm.name, scheme)
                                             let _ = install_method_scheme(
                                                 ctx.env.trait_reg, ctx.sink,
@@ -2715,7 +2742,7 @@ fn expand_effect_exprs(mut ctx: InferCtx, decl_effects: List<EffectExpr>, mut ex
 
 fn collect_effect_tail_vars(ty: Type, mut vars: List<Int>) {
     match ty {
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             match effects.tail {
                 some(t_id) => {
                     if !vars.contains(t_id) { vars.push(t_id) }
@@ -2896,7 +2923,9 @@ fn register_fn_common(
         some(de) => resolve_declared_effects(ctx, de),
         none => infer_hof_effect_row(param_types)
     }
-    let fn_type = Type::FnType { params: param_types, return_type: ret, effects: effects }
+    let fn_type = Type::FnType { params: param_types,
+        return_type: ret, effects: effects,
+        ownership_term: CALLABLE_UNKNOWN }
     collect_effect_tail_vars(fn_type, type_vars)
 
     let mut fn_bounds_list: List<FnBound> = []
@@ -3083,8 +3112,12 @@ fn register_sig(mut ctx: InferCtx, name: Str, members: List<SigMember>, is_pub: 
             some(rt) => resolve_type_expr(ctx, rt),
             none => ctx.env.fresh_var()
         }
-        let fn_type = Type::FnType { params: param_types, return_type: ret, effects: EMPTY_ROW }
-        sig_members.insert(m.name, TypeScheme { ty: fn_type, type_vars: type_vars, bounds: [], def_id: none })
+        let fn_type = Type::FnType { params: param_types,
+            return_type: ret, effects: EMPTY_ROW,
+            ownership_term: CALLABLE_UNKNOWN }
+        sig_members.insert(m.name, TypeScheme { ty: fn_type,
+            type_vars: type_vars, bounds: [],
+            def_id: some(ctx.env.fresh_def_id()) })
         ctx.type_param_scope = msaved
     }
     ctx.type_param_scope = saved

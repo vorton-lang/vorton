@@ -241,6 +241,7 @@ fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         mod_path_stack: [],
         use_aliases: map_new(),
         value_binding_kinds: map_new(),
+        next_callable_identity_ordinal: 0,
         boxed_vars: set_new(),
         lambda_depth: 0,
         var_lambda_depth: map_new(),
@@ -314,7 +315,12 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     // B-104 D7: lower `&&`/`||` to if-else (andor_lower), then B-104 D4:
     // first-class the dict evidence (static singleton set + local
     // constructions for dynamic wrapped dicts) — both before perceus/codegen.
-    let assembled = HProgram { decls: all_decls, derived_impls: hprogram.derived_impls, boxed_vars: hprogram.boxed_vars, static_dicts: [], extern_type_names: hprogram.extern_type_names, drop_types: hprogram.drop_types }
+    let assembled = HProgram { decls: all_decls,
+        derived_impls: hprogram.derived_impls,
+        boxed_vars: hprogram.boxed_vars, static_dicts: [],
+        extern_type_names: hprogram.extern_type_names,
+        drop_types: hprogram.drop_types,
+        effect_op_identities: hprogram.effect_op_identities }
     let has_errors = ctx.sink.has_errors()
     // B-002p1: check for use-after-move on Drop types (before lowering)
     if !has_errors && assembled.drop_types.len() > 0 {
@@ -545,7 +551,12 @@ pub fn check_module(
     let mut all_decls = list_clone(prelude_hdecls)
     for d in hprogram.decls { all_decls.push(d) }
     // B-104 D7 + D4: see check() above.
-    let assembled = HProgram { decls: all_decls, derived_impls: hprogram.derived_impls, boxed_vars: hprogram.boxed_vars, static_dicts: [], extern_type_names: hprogram.extern_type_names, drop_types: hprogram.drop_types }
+    let assembled = HProgram { decls: all_decls,
+        derived_impls: hprogram.derived_impls,
+        boxed_vars: hprogram.boxed_vars, static_dicts: [],
+        extern_type_names: hprogram.extern_type_names,
+        drop_types: hprogram.drop_types,
+        effect_op_identities: hprogram.effect_op_identities }
     let has_errors = ctx.sink.has_errors()
     // B-002p1: check for use-after-move on Drop types (before lowering)
     if !has_errors && assembled.drop_types.len() > 0 {

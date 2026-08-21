@@ -1,5 +1,6 @@
 use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam}
-use types::{Type, EffectRow, StructField, EnumVariant, RecordField}
+use types::{Type, Effect, EffectRow, StructField, EnumVariant, RecordField,
+    PARAM_OWNERSHIP_UNKNOWN, CALLABLE_UNKNOWN}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
@@ -18,18 +19,52 @@ pub use builtin_methods::{CELL_METHODS, STR_METHODS, INT_METHODS, FLOAT_METHODS,
 pub const SYNTHETIC_DICT_DEF_ID_BASE: Int = 0 - 3000000000
 pub const SYNTHETIC_ANF_DEF_ID_BASE: Int = 0 - 4000000000
 pub const SYNTHETIC_RC_DEF_ID_BASE: Int = 0 - 5000000000
+pub const SYNTHETIC_CALLABLE_DEF_ID_BASE: Int = 0 - 2000000000
 pub const SYNTHETIC_DEF_ID_NAMESPACE_SIZE: Int = 1000000000
 
 pub fn synthetic_def_id(base: Int, ordinal: Int) -> Int {
+    if base != SYNTHETIC_CALLABLE_DEF_ID_BASE &&
+       base != SYNTHETIC_DICT_DEF_ID_BASE &&
+       base != SYNTHETIC_ANF_DEF_ID_BASE &&
+       base != SYNTHETIC_RC_DEF_ID_BASE {
+        panic("unreachable: unknown synthetic DefId domain")
+    }
     if ordinal <= 0 || ordinal >= SYNTHETIC_DEF_ID_NAMESPACE_SIZE {
         panic("unreachable: synthetic DefId namespace exhausted")
     }
-    base - ordinal
+    let def_id = base - ordinal
+    let mut domains = 0
+    if is_synthetic_callable_def_id(def_id) { domains = domains + 1 }
+    if is_synthetic_dict_def_id(def_id) { domains = domains + 1 }
+    if is_synthetic_anf_def_id(def_id) { domains = domains + 1 }
+    if is_synthetic_rc_def_id(def_id) { domains = domains + 1 }
+    if domains != 1 {
+        panic("unreachable: overlapping synthetic DefId domains")
+    }
+    def_id
 }
 
 pub fn is_synthetic_dict_def_id(def_id: Int) -> Bool {
     def_id < SYNTHETIC_DICT_DEF_ID_BASE &&
         def_id > SYNTHETIC_DICT_DEF_ID_BASE -
+            SYNTHETIC_DEF_ID_NAMESPACE_SIZE
+}
+
+pub fn is_synthetic_callable_def_id(def_id: Int) -> Bool {
+    def_id < SYNTHETIC_CALLABLE_DEF_ID_BASE &&
+        def_id > SYNTHETIC_CALLABLE_DEF_ID_BASE -
+            SYNTHETIC_DEF_ID_NAMESPACE_SIZE
+}
+
+pub fn is_synthetic_anf_def_id(def_id: Int) -> Bool {
+    def_id < SYNTHETIC_ANF_DEF_ID_BASE &&
+        def_id > SYNTHETIC_ANF_DEF_ID_BASE -
+            SYNTHETIC_DEF_ID_NAMESPACE_SIZE
+}
+
+pub fn is_synthetic_rc_def_id(def_id: Int) -> Bool {
+    def_id < SYNTHETIC_RC_DEF_ID_BASE &&
+        def_id > SYNTHETIC_RC_DEF_ID_BASE -
             SYNTHETIC_DEF_ID_NAMESPACE_SIZE
 }
 
@@ -161,7 +196,9 @@ pub struct HParam {
     pub name: Str,
     pub ty: Type,
     pub def_id: Int?,
-    pub is_mutable: Bool
+    pub is_mutable: Bool,
+    // Representation-only until the atomic ownership planner activates.
+    pub ownership_mode: Int
 }
 
 // B-104 D4 (#151): dict evidence is FIRST-CLASS in HIR.  Three reference forms:
@@ -263,6 +300,7 @@ pub struct HMatchArm {
 pub struct HEffectHandler {
     pub effect_name: Str,
     pub op_name: Str,
+    pub op_def_id: Int,
     pub params: List<HParam>,
     pub resume_binding: HPatternBinding?,
     pub body: HExpr
@@ -293,7 +331,7 @@ pub enum HExpr {
     Ident { name: Str, resolved_name: Str?, def_id: Int?, dict_closure_dicts: List<DictRef>?, ty: Type, effects: EffectRow, span: Span },
     BinOp { op: BinOp, left: HExpr, right: HExpr, eq_dispatch: TraitDispatch?, ord_dispatch: TraitDispatch?, ty: Type, effects: EffectRow, span: Span },
     UnaryOp { op: UnaryOp, operand: HExpr, ty: Type, effects: EffectRow, span: Span },
-    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, ty: Type, effects: EffectRow, span: Span },
+    Call { callee: HExpr, callee_def_id: Int?, callable_result_def_id: Int?, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, ty: Type, effects: EffectRow, span: Span },
     FieldAccess { receiver: HExpr, field: Str, ty: Type, effects: EffectRow, span: Span },
     StructLit { name: Str, type_args: List<Type>, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
     NamedVariantConstruct { enum_name: Str, variant_name: Str, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
@@ -303,8 +341,8 @@ pub enum HExpr {
     StringInterp { parts: List<HStringInterpPart>, ty: Type, effects: EffectRow, span: Span },
     TryCatch { body: HExpr, arms: List<HMatchArm>, ty: Type, effects: EffectRow, span: Span },
     HandleExpr { body: HExpr, handlers: List<HEffectHandler>, ty: Type, effects: EffectRow, span: Span },
-    Lambda { params: List<HParam>, return_type: Type, body: HExpr, ty: Type, effects: EffectRow, span: Span },
-    EffectOp { effect_name: Str, op_name: Str, args: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
+    Lambda { def_id: Int, params: List<HParam>, return_type: Type, body: HExpr, ty: Type, effects: EffectRow, span: Span },
+    EffectOp { effect_name: Str, op_name: Str, op_def_id: Int, args: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
     RangeExpr { start: HExpr, end: HExpr, inclusive: Bool, ty: Type, effects: EffectRow, span: Span },
     ListLit { elements: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
     TupleLit { elements: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
@@ -372,6 +410,7 @@ pub struct HEnumVariant {
 
 pub struct HEffectOp {
     pub name: Str,
+    pub def_id: Int,
     pub params: List<HParam>,
     pub return_type: Type,
     pub has_default: Bool,
@@ -380,6 +419,7 @@ pub struct HEffectOp {
 
 pub struct HTraitMethod {
     pub name: Str,
+    pub def_id: Int,
     pub params: List<HParam>,
     pub return_type: Type,
     pub effects: EffectRow,
@@ -400,6 +440,7 @@ pub struct HAssocType {
 
 pub struct HSigMember {
     pub name: Str,
+    pub def_id: Int,
     pub fn_type: Type,
     pub span: Span
 }
@@ -482,7 +523,9 @@ pub struct HProgram {
     pub extern_type_names: Set<Str>,
     // B-002p1: types with user `impl Drop` — perceus skips dup (move semantics),
     // codegen calls user drop body in ring_drop_T, move checker prevents UAM.
-    pub drop_types: Set<Str>
+    pub drop_types: Set<Str>,
+    // Flat registration inventory only; never an ownership/alias graph.
+    pub effect_op_identities: Map<Str, Int>
 }
 
 // Definition identity is a cross-pass invariant.  Validate immediately after
@@ -490,17 +533,66 @@ pub struct HProgram {
 // cannot degrade into a backend spelling lookup.
 pub fn validate_hir_binder_def_ids(program: HProgram) {
     let mut seen: Set<Int> = set_new()
-    validate_hir_decls(program.decls, seen)
+    collect_hir_effect_op_ids(program.decls, program.effect_op_identities)
+    validate_hir_decls(
+        program.decls, seen, program.effect_op_identities)
 }
 
 struct HirValidationScope {
     names: List<Str>,
     def_ids: List<Int>,
-    frames: List<Int>
+    frames: List<Int>,
+    effect_op_ids: Map<Str, Int>
 }
 
-fn new_hir_validation_scope() -> HirValidationScope {
-    HirValidationScope { names: [], def_ids: [], frames: [] }
+fn new_hir_validation_scope(
+    effect_op_ids: Map<Str, Int>
+) -> HirValidationScope {
+    HirValidationScope {
+        names: [], def_ids: [], frames: [],
+        effect_op_ids: effect_op_ids
+    }
+}
+
+pub fn exact_effect_op_key(effect_name: Str, op_name: Str) -> Str {
+    "${effect_name}::${op_name}"
+}
+
+fn validate_hir_effect_op_identity(
+    effect_op_ids: Map<Str, Int>, effect_name: Str,
+    op_name: Str, def_id: Int
+) {
+    if def_id < 0 {
+        panic("HIR effect operation '${effect_name}.${op_name}' has invalid DefId ${def_id}")
+    }
+    let key = exact_effect_op_key(effect_name, op_name)
+    match effect_op_ids.get(key) {
+        some(expected) => if expected != def_id {
+            panic("HIR effect operation '${effect_name}.${op_name}' DefId differs from canonical identity")
+        },
+        none => panic(
+            "HIR effect operation '${effect_name}.${op_name}' has no registration identity")
+    }
+}
+
+fn collect_hir_effect_op_ids(
+    decls: List<HDecl>, mut effect_op_ids: Map<Str, Int>
+) {
+    for decl in decls {
+        match decl {
+            HDecl::Effect { name, ops, .. } => {
+                for op in ops {
+                    validate_hir_effect_op_identity(
+                        effect_op_ids, name, op.name, op.def_id)
+                }
+            },
+            HDecl::Impl { methods, .. } =>
+                collect_hir_effect_op_ids(methods, effect_op_ids),
+            HDecl::ModBlock { decls, .. } =>
+                collect_hir_effect_op_ids(decls, effect_op_ids),
+            _ => {}
+        }
+    }
 }
 
 fn push_hir_validation_scope(mut scope: HirValidationScope) {
@@ -588,11 +680,76 @@ fn required_hir_def_id(def_id: Int?, label: Str) -> Int {
     }
 }
 
+fn validate_inert_effect_row(row: EffectRow) {
+    for eff in row.effects {
+        match eff {
+            Effect::FailEffect { error_type } =>
+                validate_inert_type(error_type),
+            Effect::MutEffect { state_type } =>
+                validate_inert_type(state_type),
+            Effect::CustomEffect { type_args, .. } => {
+                for arg in type_args { validate_inert_type(arg) }
+            },
+            Effect::IoEffect | Effect::UnsafeEffect => {}
+        }
+    }
+}
+
+fn validate_inert_type(ty: Type) {
+    match ty {
+        Type::FnType { params, return_type, effects,
+                       ownership_term } => {
+            if ownership_term != CALLABLE_UNKNOWN {
+                panic("HIR callable type activated ownership before planner")
+            }
+            for param in params { validate_inert_type(param) }
+            validate_inert_type(return_type)
+            validate_inert_effect_row(effects)
+        },
+        Type::StructType { type_params, .. } => {
+            for param in type_params { validate_inert_type(param) }
+        },
+        Type::EnumType { type_params, .. } => {
+            for param in type_params { validate_inert_type(param) }
+        },
+        Type::GenericType { base, args } => {
+            validate_inert_type(base)
+            for arg in args { validate_inert_type(arg) }
+        },
+        Type::RecordType { fields, .. } => {
+            for field in fields { validate_inert_type(field.ty) }
+        },
+        Type::EffectRowType { effects, .. } => {
+            for eff in effects {
+                match eff {
+                    Effect::FailEffect { error_type } =>
+                        validate_inert_type(error_type),
+                    Effect::MutEffect { state_type } =>
+                        validate_inert_type(state_type),
+                    Effect::CustomEffect { type_args, .. } => {
+                        for arg in type_args { validate_inert_type(arg) }
+                    },
+                    Effect::IoEffect | Effect::UnsafeEffect => {}
+                }
+            }
+        },
+        Type::TupleType { elements } => {
+            for element in elements { validate_inert_type(element) }
+        },
+        Type::PtrType { pointee } => validate_inert_type(pointee),
+        _ => {}
+    }
+}
+
 fn validate_hir_params(
     params: List<HParam>, mut seen: Set<Int>,
     mut scope: HirValidationScope, label: Str
 ) {
     for param in params {
+        validate_inert_type(param.ty)
+        if param.ownership_mode != PARAM_OWNERSHIP_UNKNOWN {
+            panic("HIR ${label} parameter '${param.name}' has active ownership before planner")
+        }
         let id = required_hir_def_id(
             param.def_id, "${label} parameter '${param.name}'")
         validate_hir_binder(seen, id,
@@ -636,6 +793,7 @@ fn validate_hir_pattern_bindings(
     collect_hir_pattern_names(pattern, pattern_names)
     let mut metadata_names: Set<Str> = set_new()
     for binding in bindings {
+        validate_inert_type(binding.ty)
         if !pattern_names.contains(binding.name) {
             panic("HIR ${label} metadata names non-binding '${binding.name}'")
         }
@@ -670,9 +828,10 @@ fn validate_hir_arm(
 }
 
 fn validate_hir_local_binding(
-    name: Str, def_id: Int?, init: HExpr,
+    name: Str, def_id: Int?, ty: Type, init: HExpr,
     mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
+    validate_inert_type(ty)
     validate_hir_expr(init, seen, scope)
     if name != "_" {
         let id = required_hir_def_id(
@@ -686,12 +845,12 @@ fn validate_hir_stmt(
     stmt: HStmt, mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
     match stmt {
-        HStmt::Let { name, def_id, init, .. } =>
+        HStmt::Let { name, def_id, ty, init, .. } =>
             validate_hir_local_binding(
-                name, def_id, init, seen, scope),
-        HStmt::Var { name, def_id, init, .. } =>
+                name, def_id, ty, init, seen, scope),
+        HStmt::Var { name, def_id, ty, init, .. } =>
             validate_hir_local_binding(
-                name, def_id, init, seen, scope),
+                name, def_id, ty, init, seen, scope),
         HStmt::Assign { target, value, .. } => {
             validate_hir_expr(target, seen, scope)
             validate_hir_expr(value, seen, scope)
@@ -737,6 +896,7 @@ fn validate_hir_stmt(
         HStmt::LetDestructure { bindings, init, .. } => {
             validate_hir_expr(init, seen, scope)
             for binding in bindings {
+                validate_inert_type(binding.ty)
                 if binding.name != "_" {
                     let id = required_hir_def_id(binding.def_id,
                         "destructure binding '${binding.name}'")
@@ -759,8 +919,10 @@ fn validate_hir_stmt(
                 none => {}
             }
         },
-        HStmt::Drop { name, def_id, .. } =>
-            validate_hir_drop_reference(scope, name, def_id),
+        HStmt::Drop { name, def_id, ty, .. } => {
+            validate_inert_type(ty)
+            validate_hir_drop_reference(scope, name, def_id)
+        },
         HStmt::Break { .. } | HStmt::Continue { .. } => {}
     }
 }
@@ -789,6 +951,8 @@ fn validate_hir_expr_values(
 fn validate_hir_expr(
     expr: HExpr, mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
+    validate_inert_type(hexpr_type(expr))
+    validate_inert_effect_row(hexpr_effects(expr))
     match expr {
         HExpr::Ident { name, def_id, .. } =>
             validate_hir_local_reference(
@@ -799,7 +963,34 @@ fn validate_hir_expr(
         },
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
-        HExpr::Call { callee, args, .. } => {
+        HExpr::Call { callee, callee_def_id, callable_result_def_id,
+                      args, ty, .. } => {
+            let direct_callee_def_id = match callee {
+                HExpr::Ident { def_id, .. } => def_id,
+                HExpr::Lambda { def_id, .. } => some(def_id),
+                HExpr::Call { callable_result_def_id, .. } =>
+                    callable_result_def_id,
+                _ => none
+            }
+            match direct_callee_def_id {
+                some(expected) => if callee_def_id != some(expected) {
+                    panic("HIR Call exact callee identity differs from its producer")
+                },
+                none => {}
+            }
+            match (ty, callable_result_def_id) {
+                (Type::FnType { .. }, some(id)) => {
+                    if !is_synthetic_callable_def_id(id) {
+                        panic("HIR callable result is outside its synthetic DefId namespace")
+                    }
+                    validate_hir_binder(seen, id, "callable result")
+                },
+                (Type::FnType { .. }, none) =>
+                    panic("HIR callable result has no exact DefId"),
+                (_, some(_)) =>
+                    panic("HIR non-callable result carries a callable DefId"),
+                (_, none) => {}
+            }
             validate_hir_expr(callee, seen, scope)
             for arg in args { validate_hir_expr(arg, seen, scope) }
         },
@@ -850,6 +1041,9 @@ fn validate_hir_expr(
         HExpr::HandleExpr { body, handlers, .. } => {
             validate_hir_expr(body, seen, scope)
             for handler in handlers {
+                validate_hir_effect_op_identity(
+                    scope.effect_op_ids, handler.effect_name,
+                    handler.op_name, handler.op_def_id)
                 let label = "handler '${handler.effect_name}.${handler.op_name}'"
                 push_hir_validation_scope(scope)
                 validate_hir_params(handler.params, seen, scope, label)
@@ -866,13 +1060,19 @@ fn validate_hir_expr(
                 pop_hir_validation_scope(scope)
             }
         },
-        HExpr::Lambda { params, body, .. } => {
+        HExpr::Lambda { def_id, params, body, .. } => {
+            if !is_synthetic_callable_def_id(def_id) {
+                panic("HIR lambda is outside its synthetic DefId namespace")
+            }
+            validate_hir_binder(seen, def_id, "lambda")
             push_hir_validation_scope(scope)
             validate_hir_params(params, seen, scope, "lambda")
             validate_hir_expr(body, seen, scope)
             pop_hir_validation_scope(scope)
         },
-        HExpr::EffectOp { args, .. } => {
+        HExpr::EffectOp { effect_name, op_name, op_def_id, args, .. } => {
+            validate_hir_effect_op_identity(
+                scope.effect_op_ids, effect_name, op_name, op_def_id)
             for arg in args { validate_hir_expr(arg, seen, scope) }
         },
         HExpr::RangeExpr { start, end, .. } => {
@@ -901,28 +1101,37 @@ fn validate_hir_expr(
     }
 }
 
-fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
+fn validate_hir_decls(
+    decls: List<HDecl>, mut seen: Set<Int>, effect_op_ids: Map<Str, Int>
+) {
     for decl in decls {
         match decl {
-            HDecl::Fn { name, def_id, params, body, .. } => {
+            HDecl::Fn { name, def_id, params, return_type,
+                        effects, body, .. } => {
+                validate_inert_type(return_type)
+                validate_inert_effect_row(effects)
                 match def_id {
                     some(id) => validate_hir_binder(
                         seen, id, "function '${name}'"),
                     none => {}
                 }
-                let mut scope = new_hir_validation_scope()
+                let mut scope = new_hir_validation_scope(effect_op_ids)
                 validate_hir_params(
                     params, seen, scope, "function '${name}'")
                 validate_hir_expr(body, seen, scope)
             },
-            HDecl::Impl { methods, .. } => validate_hir_decls(methods, seen),
+            HDecl::Impl { methods, .. } =>
+                validate_hir_decls(methods, seen, effect_op_ids),
             HDecl::Effect { name, ops, .. } => {
                 for op in ops {
+                    validate_inert_type(op.return_type)
+                    validate_hir_binder(seen, op.def_id,
+                        "effect operation '${name}.${op.name}'")
+                    let mut scope = new_hir_validation_scope(effect_op_ids)
+                    validate_hir_params(op.params, seen, scope,
+                        "effect operation '${name}.${op.name}'")
                     match op.default_body {
                         some(body) => {
-                            let mut scope = new_hir_validation_scope()
-                            validate_hir_params(op.params, seen, scope,
-                                "effect default '${name}.${op.name}'")
                             validate_hir_expr(body, seen, scope)
                         },
                         none => {}
@@ -930,36 +1139,67 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                 }
             },
             HDecl::Test { body, .. } => {
-                let mut scope = new_hir_validation_scope()
+                let mut scope = new_hir_validation_scope(effect_op_ids)
                 validate_hir_expr(body, seen, scope)
             },
             HDecl::Trait { name, methods, .. } => {
                 for method in methods {
+                    validate_inert_type(method.return_type)
+                    validate_inert_effect_row(method.effects)
+                    validate_hir_binder(seen, method.def_id,
+                        "trait method '${name}.${method.name}'")
+                    let mut scope = new_hir_validation_scope(effect_op_ids)
+                    validate_hir_params(method.params, seen, scope,
+                        "trait method '${name}.${method.name}'")
                     match method.body {
                         some(body) => {
-                            let mut scope = new_hir_validation_scope()
-                            validate_hir_params(method.params, seen, scope,
-                                "trait default '${name}.${method.name}'")
                             validate_hir_expr(body, seen, scope)
                         },
                         none => {}
                     }
                 }
             },
-            HDecl::Const { name, def_id, init, .. } => {
+            HDecl::Const { name, def_id, ty, init, .. } => {
+                validate_inert_type(ty)
                 match def_id {
                     some(id) => validate_hir_binder(
                         seen, id, "const '${name}'"),
                     none => {}
                 }
-                let mut scope = new_hir_validation_scope()
+                let mut scope = new_hir_validation_scope(effect_op_ids)
                 validate_hir_expr(init, seen, scope)
             },
             HDecl::ModBlock { decls: inner, .. } =>
-                validate_hir_decls(inner, seen),
-            HDecl::Struct { .. } | HDecl::Enum { .. } |
-            HDecl::ExternFn { .. } | HDecl::ExternType { .. } |
-            HDecl::TypeAlias { .. } | HDecl::Sig { .. } => {}
+                validate_hir_decls(inner, seen, effect_op_ids),
+            HDecl::Struct { fields, .. } => {
+                for field in fields { validate_inert_type(field.ty) }
+            },
+            HDecl::Enum { variants, .. } => {
+                for variant in variants {
+                    for field in variant.fields {
+                        validate_inert_type(field)
+                    }
+                }
+            },
+            HDecl::ExternFn { params, return_type, effects, .. } => {
+                validate_inert_type(return_type)
+                validate_inert_effect_row(effects)
+                for param in params {
+                    validate_inert_type(param.ty)
+                    if param.ownership_mode != PARAM_OWNERSHIP_UNKNOWN {
+                        panic("HIR extern parameter activated ownership before planner")
+                    }
+                }
+            },
+            HDecl::ExternType { .. } => {},
+            HDecl::Sig { name, members, .. } => {
+                for member in members {
+                    validate_inert_type(member.fn_type)
+                    validate_hir_binder(seen, member.def_id,
+                        "sig member '${name}.${member.name}'")
+                }
+            },
+            HDecl::TypeAlias { ty, .. } => validate_inert_type(ty)
         }
     }
 }

@@ -1,4 +1,4 @@
-use types::{Type, EnumVariant, EMPTY_ROW}
+use types::{Type, EnumVariant, EMPTY_ROW, CALLABLE_UNKNOWN}
 use ast::{Program, Decl, UseDecl, UseImport, NamedImport}
 use hir::{HProgram, HDecl, ValueBindingKind, ModuleImplFact, compare_by_first,
     variant_ctor_name}
@@ -134,7 +134,8 @@ fn variant_ctor_scheme(def: EnumDef, variant: EnumVariant) -> TypeScheme {
     let ctor_type = if variant.field_names.is_some() || variant.fields.len() == 0 {
         enum_type
     } else {
-        Type::FnType { params: variant.fields, return_type: enum_type, effects: EMPTY_ROW }
+        Type::FnType { params: variant.fields, return_type: enum_type,
+            effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
     }
     TypeScheme {
         ty: ctor_type,

@@ -111,7 +111,8 @@ pub fn perceus_transform_mutated(program: HProgram, mutate: Str) -> HProgram {
         boxed_vars: rc_program.boxed_vars,
         static_dicts: rc_program.static_dicts,
         extern_type_names: rc_program.extern_type_names,
-        drop_types: rc_program.drop_types
+        drop_types: rc_program.drop_types,
+        effect_op_identities: rc_program.effect_op_identities
     }
     validate_hir_binder_def_ids(transformed)
     transformed
@@ -217,7 +218,8 @@ fn anf_normalize(program: HProgram, externs: Set<Str>) -> HProgram {
         boxed_vars: program.boxed_vars,
         static_dicts: program.static_dicts,
         extern_type_names: program.extern_type_names,
-        drop_types: program.drop_types
+        drop_types: program.drop_types,
+        effect_op_identities: program.effect_op_identities
     }
 }
 
@@ -273,7 +275,8 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
                     none => none,
                 }
                 new_ops.push(HEffectOp {
-                    name: op.name, params: op.params, return_type: op.return_type,
+                    name: op.name, def_id: op.def_id,
+                    params: op.params, return_type: op.return_type,
                     has_default: op.has_default, default_body: new_default_body
                 })
             }
@@ -917,7 +920,9 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, ty, effects, span } => {
+        HExpr::Call { callee, callee_def_id, callable_result_def_id,
+                      args, type_args, resolved_dicts, dict_dispatch,
+                      ty, effects, span } => {
             // Callee is a borrow read (FieldAccess receiver / Ident) — normalise its
             // subexprs but it is not itself a materialisable value.
             let new_callee = anf_callee(callee, hoists, externs, counter)
@@ -938,7 +943,10 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             for a in args {
                 new_args.push(anf_operand(a, hoists, externs, counter))
             }
-            HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
+            HExpr::Call { callee: new_callee,
+                callee_def_id: callee_def_id,
+                callable_result_def_id: callable_result_def_id,
+                args: new_args, type_args: type_args,
                 resolved_dicts: resolved_dicts, dict_dispatch: dict_dispatch,
                 ty: ty, effects: effects, span: span }
         },
@@ -1131,6 +1139,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 let h_body = anf_block_expr(h.body, externs, counter)
                 new_handlers.push(HEffectHandler {
                     effect_name: h.effect_name, op_name: h.op_name,
+                    op_def_id: h.op_def_id,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
@@ -1138,15 +1147,17 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             HExpr::HandleExpr { body: new_body, handlers: new_handlers, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Lambda { params, return_type, body, ty, effects, span } => {
+        HExpr::Lambda { def_id, params, return_type, body, ty, effects, span } => {
             // The lambda body is its own function scope.  Captures are dup'd by
             // gen_lambda; perceus handles the body.  Normalise the body in place.
-            HExpr::Lambda { params: params, return_type: return_type,
+            HExpr::Lambda { def_id: def_id,
+                params: params, return_type: return_type,
                 body: anf_block_expr(body, externs, counter),
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, op_def_id,
+                          args, ty, effects, span } => {
             // B-104 D1 Stage 2 — EFFECT-OP ARG position (closes the W1-era
             // conservative hold-out).  Args are BORROW-passed to the handler
             // closure (gen_effect_op → gen_closure_call; closure params are
@@ -1168,7 +1179,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             //     never released).
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(anf_operand(a, hoists, externs, counter)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args,
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                op_def_id: op_def_id, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -1290,7 +1302,8 @@ fn transform_decl(
                     none => none,
                 }
                 new_ops.push(HEffectOp {
-                    name: op.name, params: op.params, return_type: op.return_type,
+                    name: op.name, def_id: op.def_id,
+                    params: op.params, return_type: op.return_type,
                     has_default: op.has_default, default_body: new_default_body
                 })
             }
@@ -1372,7 +1385,8 @@ fn mutate_strip_identity_def_id(
         boxed_vars: program.boxed_vars,
         static_dicts: program.static_dicts,
         extern_type_names: program.extern_type_names,
-        drop_types: program.drop_types }
+        drop_types: program.drop_types,
+        effect_op_identities: program.effect_op_identities }
 }
 
 fn mutate_strip_identity_expr(
@@ -1440,7 +1454,8 @@ fn mutate_drop_identity_capture(program: HProgram) -> HProgram {
         boxed_vars: program.boxed_vars,
         static_dicts: program.static_dicts,
         extern_type_names: program.extern_type_names,
-        drop_types: program.drop_types }
+        drop_types: program.drop_types,
+        effect_op_identities: program.effect_op_identities }
 }
 
 fn mutate_capture_drop_body(body: HExpr, mut changed: List<Bool>) -> HExpr {
@@ -2604,7 +2619,9 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, ty, effects, span } => {
+        HExpr::Call { callee, callee_def_id, callable_result_def_id,
+                      args, type_args, resolved_dicts, dict_dispatch,
+                      ty, effects, span } => {
             // Callee is a borrow.  Arguments BORROW by default (the callee does not
             // drop them — point 4) EXCEPT two ownership-taking sinks:
             //   1. a known container-sink (push/insert/set): the value escapes into
@@ -2634,7 +2651,10 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 new_args.push(new_a)
                 i = i + 1
             }
-            HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
+            HExpr::Call { callee: new_callee,
+                callee_def_id: callee_def_id,
+                callable_result_def_id: callable_result_def_id,
+                args: new_args, type_args: type_args,
                 resolved_dicts: resolved_dicts, dict_dispatch: dict_dispatch,
                 ty: ty, effects: effects, span: span }
         },
@@ -2777,6 +2797,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 let h_body = rc_block_root(h.body, true, [], boxed, externs, drop_types, gensym, 0 - 1)
                 new_handlers.push(HEffectHandler {
                     effect_name: h.effect_name, op_name: h.op_name,
+                    op_def_id: h.op_def_id,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
@@ -2784,7 +2805,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             HExpr::HandleExpr { body: new_body, handlers: new_handlers, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Lambda { params, return_type, body, ty, effects, span } => {
+        HExpr::Lambda { def_id, params, return_type, body, ty, effects, span } => {
             // Conservative closure model (B-098 all-owned captures): every captured
             // outer owned local is DUP'd at CONSTRUCTION by gen_lambda (the env
             // takes its own reference), released when the env dies (B-084
@@ -2794,16 +2815,19 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             // its own fresh function scope (params borrow, tail = return = escape,
             // no enclosing owned locals — captures come through the env).
             let new_body = rc_block_root(body, true, [], boxed, externs, drop_types, gensym, 0 - 1)
-            HExpr::Lambda { params: params, return_type: return_type, body: new_body,
+            HExpr::Lambda { def_id: def_id,
+                params: params, return_type: return_type, body: new_body,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, op_def_id,
+                          args, ty, effects, span } => {
             // Effect-op args: treat like ordinary call args — borrow (the handler
             // closure receives them; full effect-arg ownership is B-096 scope).
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(rc_expr(a, false, owned, boxed, externs, drop_types, gensym, loop_base)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args,
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                op_def_id: op_def_id, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 

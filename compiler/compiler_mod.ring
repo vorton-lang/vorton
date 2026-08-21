@@ -366,7 +366,8 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                             boxed_vars: hir.boxed_vars,
                             static_dicts: hir.static_dicts,
                             extern_type_names: filtered,
-                            drop_types: hir.drop_types
+                            drop_types: hir.drop_types,
+                            effect_op_identities: hir.effect_op_identities
                         })
                     },
                     _ => {},

@@ -49,7 +49,8 @@ pub fn lower_andor(program: HProgram) -> HProgram {
         boxed_vars: program.boxed_vars,
         static_dicts: program.static_dicts,
         extern_type_names: program.extern_type_names,
-        drop_types: program.drop_types
+        drop_types: program.drop_types,
+        effect_op_identities: program.effect_op_identities
     }
 }
 
@@ -84,7 +85,8 @@ fn al_decl(d: HDecl) -> HDecl {
                     some(b) => some(al_expr(b)),
                     none => none,
                 }
-                new_methods.push(HTraitMethod { name: tm.name, params: tm.params,
+                new_methods.push(HTraitMethod { name: tm.name,
+                    def_id: tm.def_id, params: tm.params,
                     return_type: tm.return_type, effects: tm.effects, has_default: tm.has_default, body: new_body })
             }
             HDecl::Trait { name: name, type_params: type_params, methods: new_methods,
@@ -102,7 +104,8 @@ fn al_decl(d: HDecl) -> HDecl {
                     none => none,
                 }
                 new_ops.push(HEffectOp {
-                    name: op.name, params: op.params, return_type: op.return_type,
+                    name: op.name, def_id: op.def_id,
+                    params: op.params, return_type: op.return_type,
                     has_default: op.has_default, default_body: new_default_body
                 })
             }
@@ -163,11 +166,16 @@ fn al_expr(e: HExpr) -> HExpr {
         },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: al_expr(operand), ty: ty, effects: effects, span: span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, ty, effects, span } => {
+        HExpr::Call { callee, callee_def_id, callable_result_def_id,
+                      args, type_args, resolved_dicts, dict_dispatch,
+                      ty, effects, span } => {
             let new_callee = al_expr(callee)
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(al_expr(a)) }
-            HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
+            HExpr::Call { callee: new_callee,
+                callee_def_id: callee_def_id,
+                callable_result_def_id: callable_result_def_id,
+                args: new_args, type_args: type_args,
                 resolved_dicts: resolved_dicts, dict_dispatch: dict_dispatch,
                 ty: ty, effects: effects, span: span }
         },
@@ -232,19 +240,24 @@ fn al_expr(e: HExpr) -> HExpr {
         HExpr::HandleExpr { body, handlers, ty, effects, span } => {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
-                new_handlers.push(HEffectHandler { effect_name: h.effect_name, op_name: h.op_name,
+                new_handlers.push(HEffectHandler { effect_name: h.effect_name,
+                    op_name: h.op_name, op_def_id: h.op_def_id,
                     params: h.params, resume_binding: h.resume_binding,
                     body: al_expr(h.body) })
             }
             HExpr::HandleExpr { body: al_expr(body), handlers: new_handlers, ty: ty, effects: effects, span: span }
         },
-        HExpr::Lambda { params, return_type, body, ty, effects, span } =>
-            HExpr::Lambda { params: params, return_type: return_type,
+        HExpr::Lambda { def_id, params, return_type, body, ty, effects, span } =>
+            HExpr::Lambda { def_id: def_id,
+                params: params, return_type: return_type,
                 body: al_expr(body), ty: ty, effects: effects, span: span },
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, op_def_id,
+                          args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(al_expr(a)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args, ty: ty, effects: effects, span: span }
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                op_def_id: op_def_id, args: new_args,
+                ty: ty, effects: effects, span: span }
         },
         HExpr::RangeExpr { start, end, inclusive, ty, effects, span } =>
             HExpr::RangeExpr { start: al_expr(start),

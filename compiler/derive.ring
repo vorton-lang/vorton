@@ -1,5 +1,5 @@
 use types::{Type, EffectRow, StructField, EnumVariant,
-    INT, STR, BOOL, EMPTY_ROW}
+    INT, STR, BOOL, EMPTY_ROW, CALLABLE_UNKNOWN}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     ImplEntry, ImplDictBound, MethodOrigin,
     add_impl, has_impl, find_impl, install_method_scheme,
@@ -1185,7 +1185,8 @@ fn register_derived_impl(
     }
 
     let method_names = get_method_names(trait_name)
-    register_trait_methods(methods, trait_name, self_type, type_var_ids, scheme_bounds)
+    register_trait_methods(
+        env, methods, trait_name, self_type, type_var_ids, scheme_bounds)
 
     let origin = "<derive>:${di.type_name}:${trait_name}"
     let exact = map_clone(methods)
@@ -1236,6 +1237,7 @@ fn build_self_type(env: TypeEnv, type_name: Str, type_kind: TypeKind, type_param
 }
 
 fn register_trait_methods(
+    mut env: TypeEnv,
     mut methods: Map<Str, TypeScheme>,
     trait_name: Str,
     self_type: Type,
@@ -1244,30 +1246,37 @@ fn register_trait_methods(
 ) {
     match trait_name {
         "Eq" => {
-            let eq_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW }
-            methods.insert("eq", TypeScheme { ty: eq_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
-            let ne_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW }
-            methods.insert("ne", TypeScheme { ty: ne_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            let eq_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
+            methods.insert("eq", TypeScheme { ty: eq_fn, type_vars: type_var_ids,
+                bounds: bounds, def_id: some(env.fresh_def_id()) })
+            let ne_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
+            methods.insert("ne", TypeScheme { ty: ne_fn, type_vars: type_var_ids,
+                bounds: bounds, def_id: some(env.fresh_def_id()) })
         },
         "Clone" => {
-            let clone_fn = Type::FnType { params: [self_type], return_type: self_type, effects: EMPTY_ROW }
-            methods.insert("clone", TypeScheme { ty: clone_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            let clone_fn = Type::FnType { params: [self_type], return_type: self_type, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
+            methods.insert("clone", TypeScheme { ty: clone_fn, type_vars: type_var_ids,
+                bounds: bounds, def_id: some(env.fresh_def_id()) })
         },
         "Ord" => {
-            let cmp_fn = Type::FnType { params: [self_type, self_type], return_type: INT, effects: EMPTY_ROW }
-            methods.insert("cmp", TypeScheme { ty: cmp_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            let cmp_fn = Type::FnType { params: [self_type, self_type], return_type: INT, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
+            methods.insert("cmp", TypeScheme { ty: cmp_fn, type_vars: type_var_ids,
+                bounds: bounds, def_id: some(env.fresh_def_id()) })
         },
         "Debug" => {
-            let debug_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW }
-            methods.insert("debug", TypeScheme { ty: debug_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            let debug_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
+            methods.insert("debug", TypeScheme { ty: debug_fn, type_vars: type_var_ids,
+                bounds: bounds, def_id: some(env.fresh_def_id()) })
         },
         "Hash" => {
-            let hash_fn = Type::FnType { params: [self_type], return_type: INT, effects: EMPTY_ROW }
-            methods.insert("hash", TypeScheme { ty: hash_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            let hash_fn = Type::FnType { params: [self_type], return_type: INT, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
+            methods.insert("hash", TypeScheme { ty: hash_fn, type_vars: type_var_ids,
+                bounds: bounds, def_id: some(env.fresh_def_id()) })
         },
         "Json" => {
-            let json_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW }
-            methods.insert("to_json", TypeScheme { ty: json_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            let json_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
+            methods.insert("to_json", TypeScheme { ty: json_fn, type_vars: type_var_ids,
+                bounds: bounds, def_id: some(env.fresh_def_id()) })
         },
         _ => {},
     }

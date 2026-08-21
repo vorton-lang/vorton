@@ -28,6 +28,63 @@ pub struct RecordField {
     pub ty: Type
 }
 
+// A-prime S1 representation only.  These tags are carried inertly until the
+// later atomic ownership planner builds and freezes their semantic graph.
+pub const PARAM_OWNERSHIP_BORROW: Int = 0
+pub const PARAM_OWNERSHIP_MUT_BORROW: Int = 1
+pub const PARAM_OWNERSHIP_MOVE: Int = 2
+pub const PARAM_OWNERSHIP_UNKNOWN: Int = 3
+
+pub const RETURN_OWNERSHIP_OWNED: Int = 0
+pub const RETURN_OWNERSHIP_BORROWED: Int = 1
+pub const RETURN_OWNERSHIP_UNKNOWN: Int = 2
+
+pub const CALLABLE_RESULT_ROLE_NONE: Int = 0
+pub const CALLABLE_RESULT_ROLE_FRESH_OWNED_SLOT: Int = 1
+pub const CALLABLE_RESULT_ROLE_UNKNOWN: Int = 2
+
+pub const CALLABLE_SOURCE_BODY_INFERRED: Int = 0
+pub const CALLABLE_SOURCE_DECLARED: Int = 1
+pub const CALLABLE_SOURCE_BUILTIN: Int = 2
+pub const CALLABLE_SOURCE_CONSERVATIVE_INTERFACE: Int = 3
+pub const CALLABLE_SOURCE_ALIAS: Int = 4
+pub const CALLABLE_SOURCE_SYNTHETIC: Int = 5
+
+pub const CALLABLE_BORROW_OWNED: Int = 0
+pub const CALLABLE_MOVE_OWNED: Int = 1
+pub const CALLABLE_UNKNOWN: Int = 2
+pub const CALLABLE_FIRST_MUT_BORROW_OWNED: Int = 3
+pub const CALLABLE_BORROW_BORROWED: Int = 4
+pub const CALLABLE_MUT_MOVE_OWNED: Int = 5
+pub const CALLABLE_BORROW_MOVE_BORROWED: Int = 6
+pub const CALLABLE_MOVE_BORROW_OWNED: Int = 7
+pub const CALLABLE_BORROW_MUT_BORROW_OWNED: Int = 8
+pub const CALLABLE_MUT_BORROW_MOVE_OWNED: Int = 9
+pub const CALLABLE_SLOT_MOVE_OWNED: Int = 10
+
+pub struct CallableOwnershipDescriptor {
+    pub prefix_params: List<Int>,
+    pub rest_param: Int,
+    pub result: Int
+}
+
+pub struct CallableTransferLevel {
+    pub ownership_term: Int,
+    pub force_params: List<Bool>
+}
+
+pub struct CallableOwnershipState {
+    pub source: Int,
+    pub producer_def_id: Int?,
+    pub transfer_levels: List<CallableTransferLevel>
+}
+
+pub struct OwnershipShape {
+    pub direct_drop: Bool,
+    pub may_own: Bool,
+    pub param_deps: List<Bool>
+}
+
 pub enum Type {
     IntType,
     FloatType,
@@ -37,7 +94,8 @@ pub enum Type {
     NeverType,
     AnyType,
     TypeVar { id: Int, name: Str? },
-    FnType { params: List<Type>, return_type: Type, effects: EffectRow },
+    FnType { params: List<Type>, return_type: Type, effects: EffectRow,
+             ownership_term: Int },
     StructType { name: Str, type_params: List<Type> },
     EnumType { name: Str, type_params: List<Type> },
     GenericType { base: Type, args: List<Type> },
@@ -309,8 +367,8 @@ pub fn types_equal(a: Type, b: Type) -> Bool {
             Type::TypeVar { id: id_b, .. } => id_a == id_b,
             _ => false
         },
-        Type::FnType { params: pa, return_type: ra, effects: ea } => match b {
-            Type::FnType { params: pb, return_type: rb, effects: eb } =>
+        Type::FnType { params: pa, return_type: ra, effects: ea, .. } => match b {
+            Type::FnType { params: pb, return_type: rb, effects: eb, .. } =>
                 type_lists_equal(pa, pb) && types_equal(ra, rb)
                     && effects_list_equal(ea.effects, eb.effects)
                     // Open effect row tails are compared by exact TypeVar ID (structural equality).
@@ -386,7 +444,7 @@ pub fn type_to_string(t: Type) -> Str {
             some(n) => n,
             none => "?${id.to_str()}"
         },
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             let ps = params.map(fn(p) { type_to_string(p) }).join(", ")
             let ret = type_to_string(return_type)
             let eff = effect_row_to_string(effects)

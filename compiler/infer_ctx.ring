@@ -1,12 +1,13 @@
 use types::{Type, Effect, EffectRow, RecordField, StructField,
     INT, FLOAT, STR, BOOL, UNIT, NEVER, ANY, EMPTY_ROW,
     type_to_string, nominal_display_name, types_equal, make_option_type, type_to_builtin_name,
-    row_merge, effects_match_kind}
+    row_merge, effects_match_kind, CALLABLE_UNKNOWN}
 use ast::{Span, Pattern, TypeExpr, RecordTypeField, NamedPatternField, span_zero, EffectExpr,
     UseDecl, UseImport}
 use hir::{HExpr, HStmt, HParam, DictRef, ValueBindingKind,
     trait_dict_name, trait_bound_param_name,
-    BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL, BUILTIN_OPTION, compare_by_first}
+    BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL, BUILTIN_OPTION,
+    SYNTHETIC_CALLABLE_DEF_ID_BASE, synthetic_def_id, compare_by_first}
 use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink, Severity, Suggestion, make_diag, make_diagnostic}
 use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
 use union_find::{UnionFind, new_union_find, uf_find}
@@ -147,6 +148,8 @@ pub struct InferCtx {
     // as LocalBorrow; neither a FnType nor a spelling may manufacture direct
     // callable/const-getter provenance.
     pub value_binding_kinds: Map<Int, ValueBindingKind>,
+    // Disjoint from env.ids.next_def_id and every lowering namespace.
+    pub next_callable_identity_ordinal: Int,
     pub boxed_vars: Set<Int>,
     pub lambda_depth: Int,
     pub var_lambda_depth: Map<Int, Int>,
@@ -194,6 +197,7 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         mod_path_stack: [],
         use_aliases: map_new(),
         value_binding_kinds: map_new(),
+        next_callable_identity_ordinal: 0,
         boxed_vars: set_new(),
         lambda_depth: 0,
         var_lambda_depth: map_new(),
@@ -983,7 +987,7 @@ pub fn collect_free_vars(t: Type, mut result: Set<Int>) {
         Type::AnyType => {},
         Type::ErrorType => {},
         Type::TypeVar { id, .. } => { result.insert(id) },
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             for p in params { collect_free_vars(p, result) }
             collect_free_vars(return_type, result)
             match effects.tail {
@@ -1100,8 +1104,10 @@ pub fn generalize(env: TypeEnv, t: Type, subst: UnionFind) -> TypeScheme {
 pub fn update_fn_effects(mut env: TypeEnv, name: Str, effects: EffectRow) {
     match env.lookup(name) {
         some(scheme) => match scheme.ty {
-            Type::FnType { params, return_type, .. } => {
-                let new_type = Type::FnType { params: params, return_type: return_type, effects: effects }
+            Type::FnType { params, return_type, ownership_term, .. } => {
+                let new_type = Type::FnType { params: params,
+                    return_type: return_type, effects: effects,
+                    ownership_term: ownership_term }
                 env.rebind(name, TypeScheme { ..scheme, ty: new_type })
             },
             _ => {}
@@ -1142,6 +1148,24 @@ pub fn variant_ctor_origin(ctx: InferCtx, scheme: TypeScheme) -> Str? {
     match scheme.def_id {
         some(def_id) => ctx.env.types.variant_ctor_origins.get(def_id),
         none => none
+    }
+}
+
+pub fn fresh_callable_identity_def_id(mut ctx: InferCtx) -> Int {
+    let ordinal = ctx.next_callable_identity_ordinal + 1
+    ctx.next_callable_identity_ordinal = ordinal
+    synthetic_def_id(SYNTHETIC_CALLABLE_DEF_ID_BASE, ordinal)
+}
+
+// Representation-only identity: no ownership term, source, producer, or role
+// is inferred here.  The later atomic planner derives those relations from HIR.
+pub fn exact_callable_result_identity(
+    mut ctx: InferCtx, ty: Type
+) -> (Type, Int?) {
+    match ty {
+        Type::FnType { .. } =>
+            (ty, some(fresh_callable_identity_def_id(ctx))),
+        _ => (ty, none)
     }
 }
 
@@ -1198,7 +1222,7 @@ pub fn value_binding_kind(ctx: InferCtx, def_id: Int?) -> ValueBindingKind {
 fn type_has_error(t: Type) -> Bool {
     match t {
         Type::ErrorType => true,
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             for p in params { if type_has_error(p) { return true } }
             if type_has_error(return_type) { return true }
             for eff in effects.effects {
@@ -1971,7 +1995,8 @@ pub fn resolve_type_expr(mut ctx: InferCtx, texpr: TypeExpr) -> Type {
                 let tail_id = ctx.env.fresh_var_id()
                 EffectRow { effects: [], tail: some(tail_id) }
             }
-            Type::FnType { params: resolved_params, return_type: ret, effects: eff_row }
+            Type::FnType { params: resolved_params, return_type: ret,
+                effects: eff_row, ownership_term: CALLABLE_UNKNOWN }
         },
         TypeExpr::OptionType { inner, .. } =>
             make_option_type(resolve_type_expr(ctx, inner)),

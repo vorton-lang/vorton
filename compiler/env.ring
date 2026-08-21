@@ -77,6 +77,7 @@ pub fn lookup_variant(def: EnumDef, name: Str) -> EnumVariant? {
 
 pub struct EffectOpDef {
     pub name: Str,
+    pub def_id: Int,
     pub params: List<Type>,
     pub return_type: Type,
     pub has_default: Bool
@@ -99,6 +100,7 @@ pub struct EffectDef {
 
 pub struct TraitMethodDef {
     pub name: Str,
+    pub def_id: Int,
     pub ty: Type,
     pub has_default: Bool,
     pub param_mutabilities: List<Bool>,
@@ -482,6 +484,9 @@ pub fn install_method_scheme(
     target_type: Str, method_name: Str,
     scheme: TypeScheme, incoming: MethodOrigin
 ) -> Bool {
+    if scheme.def_id.is_none() {
+        panic("unreachable: registered method scheme has no exact DefId")
+    }
     let mut methods = match reg.impl_methods.get(target_type) {
         some(existing) => existing,
         none => {
@@ -623,11 +628,12 @@ pub fn apply_subst_map(subst: Map<Int, Type>, t: Type) -> Type {
         Type::NeverType => Type::NeverType,
         Type::AnyType => Type::AnyType,
         Type::TypeVar { id, .. } => chase_type_var_map(subst, id, 0),
-        Type::FnType { params, return_type, effects } =>
+        Type::FnType { params, return_type, effects, ownership_term } =>
             Type::FnType {
                 params: params.map(fn(p) { apply_subst_map(subst, p) }),
                 return_type: apply_subst_map(subst, return_type),
-                effects: apply_subst_row_map(subst, effects)
+                effects: apply_subst_row_map(subst, effects),
+                ownership_term: ownership_term
             },
         Type::StructType { name, type_params } =>
             Type::StructType {
@@ -826,11 +832,11 @@ fn collect_var_mappings(
             },
         Type::FnType {
             params: source_params, return_type: source_return,
-            effects: source_effects
+            effects: source_effects, ..
         } => match target_type {
             Type::FnType {
                 params: target_params, return_type: target_return,
-                effects: target_effects
+                effects: target_effects, ..
             } => {
                 let mut i = 0
                 while i < source_params.len() && i < target_params.len() {
@@ -950,7 +956,7 @@ pub fn build_scheme_var_map(
 fn collect_type_var_ids(t: Type, mut result: Set<Int>) {
     match t {
         Type::TypeVar { id, .. } => { result.insert(id) },
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             for param in params { collect_type_var_ids(param, result) }
             collect_type_var_ids(return_type, result)
             match effects.tail {
@@ -1098,11 +1104,12 @@ pub fn apply_subst(subst: UnionFind, t: Type) -> Type {
                 Type::TypeVar { id: root, name: name }
             }
         },
-        Type::FnType { params, return_type, effects } =>
+        Type::FnType { params, return_type, effects, ownership_term } =>
             Type::FnType {
                 params: params.map(fn(p) { apply_subst(subst, p) }),
                 return_type: apply_subst(subst, return_type),
-                effects: apply_subst_row(subst, effects)
+                effects: apply_subst_row(subst, effects),
+                ownership_term: ownership_term
             },
         Type::StructType { name, type_params } =>
             Type::StructType {
