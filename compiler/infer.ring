@@ -1,5 +1,10 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant,
     INT, FLOAT, STR, BOOL, UNIT, NEVER, ANY, EMPTY_ROW,
+    PARAM_OWNERSHIP_UNKNOWN, CALLABLE_UNKNOWN,
+    CALLABLE_SOURCE_SYNTHETIC,
+    fresh_ownership_term, shadow_callable_param_ownership,
+    shadow_callable_term_for_def_id,
+    record_shadow_callable, clone_shadow_callable_identity,
     type_to_string, make_option_type, is_option_type, option_inner,
     type_to_builtin_name, effect_row, nominal_display_name}
 use ast::{Program, Decl, Expr, Stmt, Param, MatchArm, StructFieldInit,
@@ -32,6 +37,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     resolve_or_defer_dicts_from_scheme,
     register_callable_value_shadow,
     pending_dict_checkpoint, has_pending_dicts_since,
+    fresh_shadow_callable_def_id, shadow_callable_result,
     remove_fail_effect,
     generalize, free_type_vars, resolve_relative_qualifier}
 use exhaustive::{check_exhaustive}
@@ -1444,7 +1450,8 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
             let expected_fn = Type::FnType {
                 params: [apply_subst(s, recv_type), key_type],
                 return_type: apply_subst(s, result_ty),
-                effects: EffectRow { effects: [], tail: some(effect_tail) }
+                effects: EffectRow { effects: [], tail: some(effect_tail) },
+                ownership_term: CALLABLE_UNKNOWN
             }
             s = unify_at(ctx.sink, ctx.env, hexpr_type(callee), expected_fn, s, span)
 
@@ -1465,14 +1472,18 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 })
 
             let final_result_ty = apply_subst(s, result_ty)
+            let call_result = shadow_callable_result(
+                ctx, final_result_ty, callee_scheme.def_id)
             InferResult {
                 hexpr: HExpr::Call {
                     callee: callee,
+                    callee_def_id: callee_scheme.def_id,
+                    callable_result_def_id: call_result.1,
                     args: [recv_r.hexpr, idx_r.hexpr],
                     type_args: [],
                     resolved_dicts: resolved_dicts,
                     dict_dispatch: none,
-                    ty: final_result_ty,
+                    ty: call_result.0,
                     effects: combined_effects,
                     span: span
                 },
@@ -1592,6 +1603,15 @@ fn register_default_binder(
         },
         none => panic("default HIR ${label} has no exact DefId")
     }
+}
+
+fn register_default_callable_binder(
+    mut ctx: InferCtx, def_id: Int, mut remap: Map<Int, Int>, label: Str
+) {
+    if remap.contains_key(def_id) {
+        panic("default HIR repeats callable DefId ${def_id} at ${label}")
+    }
+    remap.insert(def_id, fresh_shadow_callable_def_id(ctx))
 }
 
 fn collect_default_param_binder(
@@ -1731,7 +1751,12 @@ fn collect_default_expr_binders(
         },
         HExpr::UnaryOp { operand, .. } =>
             collect_default_expr_binders(ctx, operand, remap),
-        HExpr::Call { callee, args, .. } => {
+        HExpr::Call { callee, callable_result_def_id, args, .. } => {
+            match callable_result_def_id {
+                some(def_id) => register_default_callable_binder(
+                    ctx, def_id, remap, "callable result"),
+                none => {}
+            }
             collect_default_expr_binders(ctx, callee, remap)
             for arg in args { collect_default_expr_binders(ctx, arg, remap) }
         },
@@ -1791,7 +1816,9 @@ fn collect_default_expr_binders(
                 collect_default_expr_binders(ctx, handler.body, remap)
             }
         },
-        HExpr::Lambda { params, body, .. } => {
+        HExpr::Lambda { def_id, params, body, .. } => {
+            register_default_callable_binder(
+                ctx, def_id, remap, "lambda")
             for param in params {
                 collect_default_param_binder(
                     ctx, param, remap, "lambda parameter")
@@ -1949,11 +1976,17 @@ fn remap_default_expr(expr: HExpr, remap: Map<Int, Int>) -> HExpr {
             right: remap_default_expr(right, remap) },
         HExpr::UnaryOp { operand, .. } => HExpr::UnaryOp { ..expr,
             operand: remap_default_expr(operand, remap) },
-        HExpr::Call { callee, args, .. } => {
+        HExpr::Call { callee, callee_def_id, callable_result_def_id,
+                      args, .. } => {
             let mut new_args: List<HExpr> = []
             for arg in args { new_args.push(remap_default_expr(arg, remap)) }
             HExpr::Call { ..expr,
-                callee: remap_default_expr(callee, remap), args: new_args }
+                callee: remap_default_expr(callee, remap),
+                callee_def_id: remap_default_optional_def_id(
+                    callee_def_id, remap),
+                callable_result_def_id: remap_default_optional_def_id(
+                    callable_result_def_id, remap),
+                args: new_args }
         },
         HExpr::FieldAccess { receiver, .. } => HExpr::FieldAccess { ..expr,
             receiver: remap_default_expr(receiver, remap) },
@@ -2042,12 +2075,14 @@ fn remap_default_expr(expr: HExpr, remap: Map<Int, Int>) -> HExpr {
                 body: remap_default_expr(body, remap),
                 handlers: new_handlers }
         },
-        HExpr::Lambda { params, body, .. } => {
+        HExpr::Lambda { def_id, params, body, .. } => {
             let mut new_params: List<HParam> = []
             for param in params {
                 new_params.push(remap_default_param(param, remap))
             }
-            HExpr::Lambda { ..expr, params: new_params,
+            HExpr::Lambda { ..expr,
+                def_id: remap_default_def_id(def_id, remap),
+                params: new_params,
                 body: remap_default_expr(body, remap) }
         },
         HExpr::EffectOp { args, .. } => {
@@ -2099,6 +2134,19 @@ fn freshen_default_argument_hir(
         let (old_id, fresh_id) = entry
         if ctx.boxed_vars.contains(old_id) {
             ctx.boxed_vars.insert(fresh_id)
+        }
+        if ctx.env.types.ownership_metadata.callable_by_def_id.contains_key(
+            old_id) {
+            let old_state = ctx.env.types.ownership_metadata.
+                callable_state_by_def_id.get(old_id).unwrap()
+            let producer = match old_state.producer_def_id {
+                some(old_producer) => some(remap_default_def_id(
+                    old_producer, remap)),
+                none => none
+            }
+            clone_shadow_callable_identity(
+                ctx.env.types.ownership_metadata,
+                old_id, fresh_id, producer)
         }
     }
     remap_default_expr(template, remap)
@@ -2191,7 +2239,8 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
     let expected_fn = Type::FnType {
         params: arg_types,
         return_type: ret_var,
-        effects: EffectRow { effects: [], tail: some(effect_tail) }
+        effects: EffectRow { effects: [], tail: some(effect_tail) },
+        ownership_term: CALLABLE_UNKNOWN
     }
 
     let callee_name_for_note: Str = match callee { Expr::Ident { name: cn, .. } => cn, _ => "<expression>" }
@@ -2244,6 +2293,18 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
     // associated type vars unified during check_assoc_constraints are
     // reflected in the result.
     let result_type = apply_subst(s, ret_var)
+    let callee_def_id = match callee_metadata {
+        some(metadata) => some(metadata.def_id),
+        none => match callee_r.hexpr {
+            HExpr::Ident { def_id, .. } => def_id,
+            HExpr::Lambda { def_id, .. } => some(def_id),
+            HExpr::Call { callable_result_def_id, .. } =>
+                callable_result_def_id,
+            _ => none
+        }
+    }
+    let call_result = shadow_callable_result(
+        ctx, result_type, callee_def_id)
 
     // Call-site pre-boxing consumes only exact DirectCallable metadata.
     match callee_metadata {
@@ -2289,9 +2350,12 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
 
     InferResult {
         hexpr: HExpr::Call {
-            callee: callee_r.hexpr, args: hargs, type_args: [],
+            callee: callee_r.hexpr,
+            callee_def_id: callee_def_id,
+            callable_result_def_id: call_result.1,
+            args: hargs, type_args: [],
             resolved_dicts: resolved_dicts, dict_dispatch: none,
-            ty: result_type, effects: effects, span: span
+            ty: call_result.0, effects: effects, span: span
         },
         subst: s, effects: effects
     }
@@ -2406,7 +2470,10 @@ fn infer_method_call_from_receiver(
     if method_type.is_none() {
         match type_to_builtin_name(recv_type) {
             some(type_name) => {
-                method_type = lookup_trait_method(ctx, type_name, method, span)
+                let result = lookup_trait_method(
+                    ctx, type_name, method, span)
+                method_type = result.method_type
+                method_scheme = result.method_scheme
             },
             none => {}
         }
@@ -2428,7 +2495,16 @@ fn infer_method_call_from_receiver(
                                 let tm = trait_def.methods.find(fn(m) { m.name == method })
                                 match tm {
                                     some(found_method) => {
-                                        method_type = some(ctx.env.instantiate(TypeScheme { ty: found_method.ty, type_vars: trait_def.type_param_vars, bounds: [], def_id: none }))
+                                        let trait_method_scheme = TypeScheme {
+                                            ty: found_method.ty,
+                                            type_vars: trait_def.type_param_vars,
+                                            bounds: [],
+                                            def_id: some(found_method.def_id)
+                                        }
+                                        method_type = some(ctx.env.instantiate(
+                                            trait_method_scheme))
+                                        method_scheme = some(
+                                            trait_method_scheme)
                                         dict_dispatch = some(DictDispatchInfo {
                                             dict_ref: DictRef::Simple(trait_bound_param_name(
                                                 fb.type_param_name, fb.trait_name)),
@@ -2591,13 +2667,22 @@ fn infer_method_call_from_receiver(
     // B-100 Fix 3: recompute result_type after dict resolution so
     // associated type unifications are visible.
     result_type = apply_subst(s, result_type)
+    let callee_def_id = match method_scheme {
+        some(scheme) => scheme.def_id,
+        none => none
+    }
+    let call_result = shadow_callable_result(
+        ctx, result_type, callee_def_id)
 
     let callee_type = match method_type { some(mt) => mt, none => ctx.env.fresh_var() }
     InferResult {
         hexpr: HExpr::Call {
             callee: HExpr::FieldAccess { receiver: recv_r.hexpr, field: method, ty: callee_type, effects: EMPTY_ROW, span: span },
+            callee_def_id: callee_def_id,
+            callable_result_def_id: call_result.1,
             args: hargs, type_args: [], resolved_dicts: resolved_dicts,
-            dict_dispatch: dict_dispatch, ty: result_type, effects: effects, span: span
+            dict_dispatch: dict_dispatch, ty: call_result.0,
+            effects: effects, span: span
         },
         subst: s, effects: effects
     }
@@ -3620,6 +3705,11 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 some(ed) => { op_def = ed.ops.find(fn(o) { o.name == handler.op_name }) },
                 none => {}
             }
+            let op_ownership_term = match op_def {
+                some(od) => shadow_callable_term_for_def_id(
+                    ctx.env.types.ownership_metadata, od.def_id),
+                none => CALLABLE_UNKNOWN
+            }
 
             // The instantiated fail.raise parameter is the single payload
             // contract shared by the handled body's concrete fail<E> row, the
@@ -3728,7 +3818,10 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 }
                 ctx.env.record_def_span(param_def_id, p.span)
                 hparams.push(HParam { name: p.name, ty: pt,
-                    def_id: some(param_def_id), is_mutable: false })
+                    def_id: some(param_def_id), is_mutable: false,
+                    ownership_mode: shadow_callable_param_ownership(
+                        ctx.env.types.ownership_metadata,
+                        op_ownership_term, hi) })
                 hi = hi + 1
             }
 
@@ -3740,9 +3833,12 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                         none => ctx.env.fresh_var()
                     }
                     let resume_ret = ctx.env.fresh_var()
+                    let resume_ownership_term = fresh_ownership_term(
+                        ctx.env.types.ownership_metadata)
                     let resume_type = Type::FnType {
                         params: [resume_param], return_type: resume_ret,
-                        effects: EMPTY_ROW
+                        effects: EMPTY_ROW,
+                        ownership_term: resume_ownership_term
                     }
                     ctx.env.bind_mono(rn, resume_type)
                     let resume_scheme = match ctx.env.lookup(rn) {
@@ -3755,6 +3851,15 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                         none => panic(
                             "unreachable: handler resume binding has no exact DefId")
                     }
+                    let producer_def_id = match op_def {
+                        some(od) => some(od.def_id),
+                        none => none
+                    }
+                    record_shadow_callable(
+                        ctx.env.types.ownership_metadata,
+                        resume_def_id, resume_ownership_term,
+                        CALLABLE_SOURCE_SYNTHETIC, 1,
+                        producer_def_id, [false])
                     ctx.env.record_def_span(resume_def_id, handler.span)
                     resume_binding = some(HPatternBinding {
                         name: rn, def_id: resume_def_id, ty: resume_type
@@ -3908,6 +4013,9 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
 // ============================================================
 
 fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, subst: UnionFind, expected_param_types: List<Type>?) -> InferResult {
+    let lambda_def_id = fresh_shadow_callable_def_id(ctx)
+    let lambda_ownership_term = fresh_ownership_term(
+        ctx.env.types.ownership_metadata)
     ctx.env.push_scope()
     ctx.lambda_depth = ctx.lambda_depth + 1
     let mut s = subst
@@ -3948,10 +4056,18 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                     },
                     none => {}
                 }
-                hparams.push(HParam { name: p.name, ty: pt, def_id: ls.def_id, is_mutable: p.is_mutable })
+                hparams.push(HParam {
+                    name: p.name, ty: pt, def_id: ls.def_id,
+                    is_mutable: p.is_mutable,
+                    ownership_mode: PARAM_OWNERSHIP_UNKNOWN
+                })
             },
             none => {
-                hparams.push(HParam { name: p.name, ty: pt, def_id: none, is_mutable: p.is_mutable })
+                hparams.push(HParam {
+                    name: p.name, ty: pt, def_id: none,
+                    is_mutable: p.is_mutable,
+                    ownership_mode: PARAM_OWNERSHIP_UNKNOWN
+                })
             }
         }
         param_types.push(pt)
@@ -3969,15 +4085,31 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
             for pt in param_types { applied_params.push(apply_subst(s, pt)) }
             let applied_ret = apply_subst(s, hexpr_type(body_r.hexpr))
 
-            let fn_type = Type::FnType { params: applied_params, return_type: applied_ret, effects: body_r.effects }
+            let fn_type = Type::FnType {
+                params: applied_params, return_type: applied_ret,
+                effects: body_r.effects,
+                ownership_term: lambda_ownership_term
+            }
 
             let mut final_hparams: List<HParam> = []
             for hp in hparams {
-                final_hparams.push(HParam { name: hp.name, ty: apply_subst(s, hp.ty), def_id: hp.def_id, is_mutable: hp.is_mutable })
+                final_hparams.push(HParam {
+                    name: hp.name, ty: apply_subst(s, hp.ty),
+                    def_id: hp.def_id, is_mutable: hp.is_mutable,
+                    ownership_mode: hp.ownership_mode
+                })
             }
+            let mut force_params: List<Bool> = []
+            for _param in final_hparams { force_params.push(false) }
+            record_shadow_callable(
+                ctx.env.types.ownership_metadata,
+                lambda_def_id, lambda_ownership_term,
+                CALLABLE_SOURCE_SYNTHETIC,
+                final_hparams.len(), none, force_params)
 
             InferResult {
                 hexpr: HExpr::Lambda {
+                    def_id: lambda_def_id,
                     params: final_hparams, return_type: applied_ret,
                     body: body_r.hexpr, ty: fn_type, effects: EMPTY_ROW, span: span
                 },

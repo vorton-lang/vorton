@@ -1,4 +1,8 @@
-use types::{Type, Effect, EffectRow, RecordField, UNIT, EMPTY_ROW, type_to_string, effect_to_string, nominal_display_name, effects_match_kind, effect_kind_name, types_equal}
+use types::{Type, Effect, EffectRow, RecordField, UNIT, EMPTY_ROW,
+    PARAM_OWNERSHIP_UNKNOWN, CALLABLE_UNKNOWN, callable_ownership_term,
+    shadow_callable_param_ownership, shadow_callable_term_for_def_id,
+    type_to_string, effect_to_string, nominal_display_name,
+    effects_match_kind, effect_kind_name, types_equal}
 use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, Span, Position, EffectOpDecl, EffectExpr,
     UseDecl, SigMember}
 use hir::{HDecl, HParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssocType,
@@ -22,6 +26,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     pending_dict_checkpoint, drain_pending_dicts, rollback_pending_dicts,
     settle_default_pending_dicts, assert_pending_dict_owner_closed,
     generalize, collect_free_vars, free_type_vars_in_env, resolve_mod_uses,
+    shadow_callable_result,
     enter_project_root_frame, enter_project_child_frame,
     exit_project_namespace_frame}
 use infer_helpers::{is_value_type}
@@ -78,7 +83,8 @@ fn check_decl_inner(
         Decl::Trait { name, type_params, methods, is_pub, span, .. } =>
             check_trait_decl(ctx, name, type_params, methods, is_pub, span),
         Decl::ExternFn { name, type_params, params, return_type, declared_effects, is_pub, span } =>
-            check_extern_fn_decl(ctx, name, type_params, params, declared_effects, is_pub, span),
+            check_extern_fn_decl(ctx, name, type_params, params,
+                declared_effects, is_pub, span, none),
         Decl::ExternType { name, type_params, is_pub, span } =>
             HDecl::ExternType { name: name, type_params: type_params, is_pub: is_pub, span: span },
         Decl::TypeAlias { name, is_pub, span, .. } => {
@@ -303,10 +309,17 @@ fn check_sig_decl(mut ctx: InferCtx, name: Str, members: List<SigMember>, is_pub
             for m in members {
                 match sig_def.members.get(m.name) {
                     some(scheme) => {
-                        hmembers.push(HSigMember { name: m.name, fn_type: scheme.ty, span: m.span })
+                        hmembers.push(HSigMember {
+                            name: m.name,
+                            def_id: scheme.def_id.unwrap_or(-1),
+                            fn_type: scheme.ty, span: m.span
+                        })
                     },
                     none => {
-                        hmembers.push(HSigMember { name: m.name, fn_type: UNIT, span: m.span })
+                        hmembers.push(HSigMember {
+                            name: m.name, def_id: ctx.env.fresh_def_id(),
+                            fn_type: UNIT, span: m.span
+                        })
                     }
                 }
             }
@@ -419,6 +432,8 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
     let mut hops: List<HEffectOp> = []
     let mut oi = 0
     for op in def.ops {
+        let ownership_term = shadow_callable_term_for_def_id(
+            ctx.env.types.ownership_metadata, op.def_id)
         let mut op_params: List<HParam> = []
         let mut pi = 0
         for pt in op.params {
@@ -431,7 +446,10 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
             }
             let effect_param_def_id = ctx.env.fresh_def_id()
             op_params.push(HParam { name: p_name, ty: pt,
-                def_id: some(effect_param_def_id), is_mutable: false })
+                def_id: some(effect_param_def_id), is_mutable: false,
+                ownership_mode: shadow_callable_param_ownership(
+                    ctx.env.types.ownership_metadata,
+                    ownership_term, pi) })
             pi = pi + 1
         }
         // Type-check default body if present
@@ -490,7 +508,11 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
             },
             none => {},
         }
-        hops.push(HEffectOp { name: op.name, params: op_params, return_type: op.return_type, has_default: op.has_default, default_body: default_body })
+        hops.push(HEffectOp {
+            name: op.name, def_id: op.def_id,
+            params: op_params, return_type: op.return_type,
+            has_default: op.has_default, default_body: default_body
+        })
         oi = oi + 1
     }
 
@@ -749,8 +771,13 @@ fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: L
     let mut hmethods: List<HDecl> = []
     for method in ordered_methods {
         match method {
-            Decl::ExternFn { name, type_params: mtps, params, return_type, declared_effects, is_pub, span: mspan } =>
-                hmethods.push(check_extern_fn_decl(ctx, name, mtps, params, declared_effects, is_pub, mspan)),
+            Decl::ExternFn { name, type_params: mtps, params, return_type, declared_effects, is_pub, span: mspan } => {
+                let registration_scheme = registered_impl_method_scheme(
+                    ctx, target_type, trait_name, origin, name)
+                hmethods.push(check_extern_fn_decl(
+                    ctx, name, mtps, params, declared_effects,
+                    is_pub, mspan, registration_scheme))
+            },
             Decl::Fn { name, type_params: mtps, params, return_type, declared_effects, body, is_pub, span: mspan, .. } => {
                 let registration_scheme = registered_impl_method_scheme(
                     ctx, target_type, trait_name, origin, name)
@@ -1073,8 +1100,21 @@ fn expand_delegate_impls(
                                             field_entry.method_schemes.get(tm.name),
                                         none => none
                                     }
+                                    let wrapper_scheme = match resolved_method_scheme {
+                                        some(value) => value,
+                                        none => panic("unreachable: delegate wrapper has no exact registered scheme")
+                                    }
+                                    let wrapper_def_id = match wrapper_scheme.def_id {
+                                        some(id) => id,
+                                        none => panic("unreachable: delegate wrapper scheme has no exact DefId")
+                                    }
+                                    let wrapper_term = callable_ownership_term(
+                                        wrapper_scheme.ty).unwrap_or(
+                                            CALLABLE_UNKNOWN)
                                     match tm.ty {
-                                        Type::FnType { params: trait_params, return_type: trait_ret_ty, effects: trait_eff } => {
+                                        Type::FnType { params: trait_params,
+                                                       return_type: trait_ret_ty,
+                                                       effects: trait_eff, .. } => {
                                             // Use resolved return type and effects from field type's method
                                             // if available (concrete assoc types), else fall back to trait def
                                             let ret_ty = match resolved_method_scheme {
@@ -1107,7 +1147,14 @@ fn expand_delegate_impls(
                                                 some(m) => m,
                                                 none => false
                                             }
-                                            hparams.push(HParam { name: "self", ty: exact_self_type, def_id: some(def_id_self), is_mutable: self_is_mut })
+                                            hparams.push(HParam {
+                                                name: "self", ty: exact_self_type,
+                                                def_id: some(def_id_self),
+                                                is_mutable: self_is_mut,
+                                                ownership_mode: shadow_callable_param_ownership(
+                                                    ctx.env.types.ownership_metadata,
+                                                    wrapper_term, 0)
+                                            })
 
                                             // Determine the trait's Self type (first param) for binary method detection
                                             let trait_self_type = match trait_params.first() {
@@ -1150,7 +1197,14 @@ fn expand_delegate_impls(
                                                 }
                                                 // For binary Self-typed params, use self_type; otherwise use resolved type
                                                 let param_ty = if is_self_typed { exact_self_type } else { resolved_pty }
-                                                hparams.push(HParam { name: pname, ty: param_ty, def_id: some(pid), is_mutable: p_is_mut })
+                                                hparams.push(HParam {
+                                                    name: pname, ty: param_ty,
+                                                    def_id: some(pid),
+                                                    is_mutable: p_is_mut,
+                                                    ownership_mode: shadow_callable_param_ownership(
+                                                        ctx.env.types.ownership_metadata,
+                                                        wrapper_term, pi)
+                                                })
 
                                                 if is_self_typed {
                                                     // Forward: __p0.field (access the delegated field from the arg)
@@ -1228,12 +1282,20 @@ fn expand_delegate_impls(
                                                 let mut dict_args: List<HExpr> = []
                                                 dict_args.push(field_access)
                                                 dict_args.extend(forward_args)
+                                                let callee_def_id = match field_method_scheme {
+                                                    some(scheme) => scheme.def_id,
+                                                    none => some(tm.def_id)
+                                                }
+                                                let call_result = shadow_callable_result(
+                                                    ctx, ret_ty, callee_def_id)
                                                 HExpr::Call {
                                                     callee: HExpr::Ident {
                                                         name: dict_name, resolved_name: none, def_id: none,
                                                         dict_closure_dicts: none,
                                                         ty: tm.ty, effects: EMPTY_ROW, span: span
                                                     },
+                                                    callee_def_id: callee_def_id,
+                                                    callable_result_def_id: call_result.1,
                                                     args: dict_args,
                                                     type_args: [],
                                                     resolved_dicts: [],
@@ -1241,7 +1303,7 @@ fn expand_delegate_impls(
                                                         dict_ref: DictRef::Static(dict_name),
                                                         method: tm.name
                                                     }),
-                                                    ty: ret_ty,
+                                                    ty: call_result.0,
                                                     effects: eff,
                                                     span: span
                                                 }
@@ -1268,13 +1330,21 @@ fn expand_delegate_impls(
                                                 }
 
                                                 // Build: self.field.method(args...) — as Call with UFCS callee
+                                                let callee_def_id = match field_method_scheme {
+                                                    some(scheme) => scheme.def_id,
+                                                    none => some(tm.def_id)
+                                                }
+                                                let call_result = shadow_callable_result(
+                                                    ctx, ret_ty, callee_def_id)
                                                 HExpr::Call {
                                                     callee: method_access,
+                                                    callee_def_id: callee_def_id,
+                                                    callable_result_def_id: call_result.1,
                                                     args: forward_args,
                                                     type_args: [],
                                                     resolved_dicts: resolved_forward_dicts,
                                                     dict_dispatch: none,
-                                                    ty: ret_ty,
+                                                    ty: call_result.0,
                                                     effects: eff,
                                                     span: span
                                                 }
@@ -1282,7 +1352,7 @@ fn expand_delegate_impls(
 
                                             trait_hmethods.push(HDecl::Fn {
                                                 name: tm.name,
-                                                def_id: some(ctx.env.fresh_def_id()),
+                                                def_id: some(wrapper_def_id),
                                                 // #77: Copy method type_params from trait method declaration
                                                 type_params: tm.method_type_params,
                                                 params: hparams,
@@ -1366,6 +1436,8 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
             Type::FnType { effects, .. } => effects,
             _ => EMPTY_ROW
         }
+        let ownership_term = callable_ownership_term(m.ty).unwrap_or(
+            CALLABLE_UNKNOWN)
         let ast_params = match ast_method {
             some(am) => match am { Decl::Fn { params, .. } => some(params), _ => none },
             none => none
@@ -1384,7 +1456,10 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
             }
             let trait_param_def_id = ctx.env.fresh_def_id()
             hparams.push(HParam { name: p_name, ty: param_type,
-                def_id: some(trait_param_def_id), is_mutable: p_mutable })
+                def_id: some(trait_param_def_id), is_mutable: p_mutable,
+                ownership_mode: shadow_callable_param_ownership(
+                    ctx.env.types.ownership_metadata,
+                    ownership_term, pi) })
             pi = pi + 1
         }
 
@@ -1411,7 +1486,12 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
             }
         }
 
-        hmethods.push(HTraitMethod { name: m.name, params: hparams, return_type: fn_ret, effects: fn_effects, has_default: m.has_default, body: method_body })
+        hmethods.push(HTraitMethod {
+            name: m.name, def_id: m.def_id,
+            params: hparams, return_type: fn_ret,
+            effects: fn_effects, has_default: m.has_default,
+            body: method_body
+        })
     }
 
     // Build HAssocType list from trait def
@@ -1571,13 +1651,23 @@ fn find_ast_fn_by_name(methods: List<Decl>, name: Str) -> Decl? {
     })
 }
 
-fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, params: List<Param>, declared_effects: List<EffectExpr>?, is_pub: Bool, span: Span) -> HDecl {
-    let scheme = match ctx.env.lookup(name) {
-        some(s) => s,
-        none => {
-            let _ = type_error(ctx.sink, E0201, "extern fn not found: ${name}", span,
-                DiagnosticContext::OtherContext { detail: some("extern fn '${name}' was not registered") })
-            fail.raise(CompileError {})
+fn check_extern_fn_decl(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    params: List<Param>, declared_effects: List<EffectExpr>?,
+    is_pub: Bool, span: Span, registration_override: TypeScheme?
+) -> HDecl {
+    let scheme = match registration_override {
+        some(value) => value,
+        none => match ctx.env.lookup(name) {
+            some(value) => value,
+            none => {
+                let _ = type_error(ctx.sink, E0201,
+                    "extern fn not found: ${name}", span,
+                    DiagnosticContext::OtherContext {
+                        detail: some("extern fn '${name}' was not registered")
+                    })
+                fail.raise(CompileError {})
+            }
         }
     }
     let fn_params: List<Type> = match scheme.ty {
@@ -1588,6 +1678,8 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
         Type::FnType { return_type, .. } => return_type,
         _ => UNIT
     }
+    let ownership_term = callable_ownership_term(scheme.ty).unwrap_or(
+        CALLABLE_UNKNOWN)
     let mut hparams: List<HParam> = []
     let mut i = 0
     for p in params {
@@ -1595,7 +1687,13 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
         // Preserve the declared mutability as project-link metadata. Genuine
         // FFI marshalling ignores this field, while an exact internal extern
         // forward must distinguish `mut T` from `T`.
-        hparams.push(HParam { name: p.name, ty: ptype, def_id: none, is_mutable: p.is_mutable })
+        hparams.push(HParam {
+            name: p.name, ty: ptype, def_id: none,
+            is_mutable: p.is_mutable,
+            ownership_mode: shadow_callable_param_ownership(
+                ctx.env.types.ownership_metadata,
+                ownership_term, i)
+        })
         i = i + 1
     }
     let extern_effects = match declared_effects {
@@ -1831,7 +1929,7 @@ fn capture_assoc_rebind_provenance(
         Type::FnType {
             params: registration_params,
             return_type: registration_return,
-            effects: registration_effects
+            effects: registration_effects, ..
         } => {
             // First map each check-time owner (T/U/...) back to the corresponding
             // registration-time owner using the ordinary function shape.
@@ -1983,6 +2081,11 @@ fn check_fn_decl_transaction(
         some(scheme) => some(scheme),
         none => ctx.env.lookup(name)
     }
+    let shadow_ownership_term = match registration_scheme {
+        some(scheme) => callable_ownership_term(scheme.ty).unwrap_or(
+            CALLABLE_UNKNOWN),
+        none => CALLABLE_UNKNOWN
+    }
     let provenance_key = match rebind_identity {
         some(identity) => identity,
         none => name
@@ -2037,6 +2140,7 @@ fn check_fn_decl_transaction(
 
     let mut hparams: List<HParam> = []
     let mut param_types: List<Type> = []
+    let mut shadow_param_index = 0
     for p in params {
         let ptype = match p.type_annotation {
             some(ta) => resolve_type_expr(ctx, ta),
@@ -2072,11 +2176,24 @@ fn check_fn_decl_transaction(
                     },
                     none => {}
                 }
-                hparams.push(HParam { name: p.name, ty: ptype, def_id: ps.def_id, is_mutable: p.is_mutable })
+                hparams.push(HParam {
+                    name: p.name, ty: ptype, def_id: ps.def_id,
+                    is_mutable: p.is_mutable,
+                    ownership_mode: shadow_callable_param_ownership(
+                        ctx.env.types.ownership_metadata,
+                        shadow_ownership_term, shadow_param_index)
+                })
             },
-            none => hparams.push(HParam { name: p.name, ty: ptype, def_id: none, is_mutable: p.is_mutable })
+            none => hparams.push(HParam {
+                name: p.name, ty: ptype, def_id: none,
+                is_mutable: p.is_mutable,
+                ownership_mode: shadow_callable_param_ownership(
+                    ctx.env.types.ownership_metadata,
+                    shadow_ownership_term, shadow_param_index)
+            })
         }
         param_types.push(ptype)
+        shadow_param_index = shadow_param_index + 1
     }
 
     // B-069: Infer default value expressions and store in hparams
@@ -2847,7 +2964,7 @@ fn audit_fail_payload_type(
                 ctx, fn_name, id, name, mapping, original_scheme_vars,
                 unsafe_vars, diagnosed_vars, span
             ),
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             for param in params {
                 audit_fail_payload_type(
                     ctx, fn_name, param, mapping, original_scheme_vars,
@@ -2963,7 +3080,7 @@ fn audit_fail_payload_type(
 fn type_contains_exact(ty: Type, needle: Type) -> Bool {
     if types_equal(ty, needle) { return true }
     match ty {
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             for param in params {
                 if type_contains_exact(param, needle) { return true }
             }
@@ -3116,7 +3233,7 @@ fn audit_fail_rows_in_type(
     span: Span
 ) {
     match ty {
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             audit_fail_row(
                 ctx, fn_name, effects, mapping, original_scheme_vars,
                 unsafe_vars, diagnosed_vars, span
@@ -3205,10 +3322,14 @@ fn rebind_param_fn_rows(
 ) -> Type {
     match (reg_ty, check_ty) {
         (Type::TypeVar { id, name },
-         Type::FnType { params: check_params, return_type: check_ret, effects: check_effects }) => {
+         Type::FnType { params: check_params, return_type: check_ret,
+                        effects: check_effects,
+                        ownership_term: check_ownership_term }) => {
             let registered = Type::TypeVar { id: id, name: name }
             let checked = Type::FnType {
-                params: check_params, return_type: check_ret, effects: check_effects
+                params: check_params, return_type: check_ret,
+                effects: check_effects,
+                ownership_term: check_ownership_term
             }
             if original_type_vars.contains(id) {
                 report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
@@ -3256,13 +3377,21 @@ fn rebind_param_fn_rows(
             }
             registered
         },
-        (Type::FnType { params: reg_params, return_type: reg_ret, effects: reg_effects },
-         Type::FnType { params: check_params, return_type: check_ret, effects: check_effects }) => {
+        (Type::FnType { params: reg_params, return_type: reg_ret,
+                        effects: reg_effects,
+                        ownership_term: reg_ownership_term },
+         Type::FnType { params: check_params, return_type: check_ret,
+                        effects: check_effects,
+                        ownership_term: check_ownership_term }) => {
             let registered = Type::FnType {
-                params: reg_params, return_type: reg_ret, effects: reg_effects
+                params: reg_params, return_type: reg_ret,
+                effects: reg_effects,
+                ownership_term: reg_ownership_term
             }
             let checked = Type::FnType {
-                params: check_params, return_type: check_ret, effects: check_effects
+                params: check_params, return_type: check_ret,
+                effects: check_effects,
+                ownership_term: check_ownership_term
             }
             if reg_params.len() != check_params.len() {
                 report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
@@ -3309,7 +3438,8 @@ fn rebind_param_fn_rows(
             Type::FnType {
                 params: rebound_params,
                 return_type: rebound_ret,
-                effects: mapped_effects
+                effects: mapped_effects,
+                ownership_term: reg_ownership_term
             }
         },
         (Type::StructType { name: reg_name, type_params: reg_args },
@@ -3516,7 +3646,9 @@ fn rebind_checked_fn_scheme(
         }
     }
     match scheme.ty {
-            Type::FnType { params: reg_params, return_type: reg_ret, effects: reg_effects } => {
+            Type::FnType { params: reg_params, return_type: reg_ret,
+                           effects: reg_effects,
+                           ownership_term: reg_ownership_term } => {
                 // Build mapping: check-time var id → registration-time var id
                 // by comparing resolved params with registered params position-by-position.
                 let mut var_mapping: Map<Int, Type> = map_new()
@@ -3699,7 +3831,9 @@ fn rebind_checked_fn_scheme(
                 }
 
                 let new_type = Type::FnType {
-                    params: mapped_params, return_type: mapped_ret, effects: mapped_effects
+                    params: mapped_params, return_type: mapped_ret,
+                    effects: mapped_effects,
+                    ownership_term: reg_ownership_term
                 }
                 TypeScheme {
                     ..scheme,
@@ -3764,8 +3898,8 @@ fn build_var_mapping(
         (Type::TypeVar { id: check_id, .. }, _) => {
             record_var_mapping(check_id, reg_ty, mapping, conflicts)
         },
-        (Type::FnType { params: cp, return_type: cr, effects: ce },
-         Type::FnType { params: rp, return_type: rr, effects: re }) => {
+        (Type::FnType { params: cp, return_type: cr, effects: ce, .. },
+         Type::FnType { params: rp, return_type: rr, effects: re, .. }) => {
             let mut i = 0
             for c in cp {
                 match rp.get(i) {
@@ -4202,7 +4336,7 @@ fn check_registered_body(
             }
         }
     }
-    HProgram { decls: hdecls, derived_impls: derived_impls, boxed_vars: ctx.boxed_vars, static_dicts: [], extern_type_names: extern_names, drop_types: ctx.drop_types }
+    HProgram { decls: hdecls, derived_impls: derived_impls, boxed_vars: ctx.boxed_vars, static_dicts: [], extern_type_names: extern_names, drop_types: ctx.drop_types, ownership_metadata: ctx.env.types.ownership_metadata }
 }
 
 pub fn resolve_type_expr_public(mut ctx: InferCtx, texpr: TypeExpr) -> Type {

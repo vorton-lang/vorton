@@ -1,9 +1,11 @@
 use types::{Type, EffectRow, StructField, EnumVariant,
-    INT, STR, BOOL, EMPTY_ROW}
+    INT, STR, BOOL, EMPTY_ROW, CALLABLE_BORROW_OWNED,
+    CALLABLE_SOURCE_SYNTHETIC}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     ImplEntry, ImplDictBound, MethodOrigin,
     add_impl, has_impl, find_impl, install_method_scheme,
-    instantiate_impl_dict_requirements}
+    instantiate_impl_dict_requirements,
+    register_exact_shadow_callable_scheme}
 use ast::{Span, DeriveAttribute, span_zero}
 use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
@@ -1185,7 +1187,9 @@ fn register_derived_impl(
     }
 
     let method_names = get_method_names(trait_name)
-    register_trait_methods(methods, trait_name, self_type, type_var_ids, scheme_bounds)
+    register_trait_methods(
+        env, methods, trait_name, self_type,
+        type_var_ids, scheme_bounds)
 
     let origin = "<derive>:${di.type_name}:${trait_name}"
     let exact = map_clone(methods)
@@ -1236,6 +1240,7 @@ fn build_self_type(env: TypeEnv, type_name: Str, type_kind: TypeKind, type_param
 }
 
 fn register_trait_methods(
+    mut env: TypeEnv,
     mut methods: Map<Str, TypeScheme>,
     trait_name: Str,
     self_type: Type,
@@ -1244,32 +1249,55 @@ fn register_trait_methods(
 ) {
     match trait_name {
         "Eq" => {
-            let eq_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW }
+            let eq_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW, ownership_term: CALLABLE_BORROW_OWNED }
             methods.insert("eq", TypeScheme { ty: eq_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
-            let ne_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW }
+            let ne_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW, ownership_term: CALLABLE_BORROW_OWNED }
             methods.insert("ne", TypeScheme { ty: ne_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
         },
         "Clone" => {
-            let clone_fn = Type::FnType { params: [self_type], return_type: self_type, effects: EMPTY_ROW }
+            let clone_fn = Type::FnType { params: [self_type], return_type: self_type, effects: EMPTY_ROW, ownership_term: CALLABLE_BORROW_OWNED }
             methods.insert("clone", TypeScheme { ty: clone_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
         },
         "Ord" => {
-            let cmp_fn = Type::FnType { params: [self_type, self_type], return_type: INT, effects: EMPTY_ROW }
+            let cmp_fn = Type::FnType { params: [self_type, self_type], return_type: INT, effects: EMPTY_ROW, ownership_term: CALLABLE_BORROW_OWNED }
             methods.insert("cmp", TypeScheme { ty: cmp_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
         },
         "Debug" => {
-            let debug_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW }
+            let debug_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW, ownership_term: CALLABLE_BORROW_OWNED }
             methods.insert("debug", TypeScheme { ty: debug_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
         },
         "Hash" => {
-            let hash_fn = Type::FnType { params: [self_type], return_type: INT, effects: EMPTY_ROW }
+            let hash_fn = Type::FnType { params: [self_type], return_type: INT, effects: EMPTY_ROW, ownership_term: CALLABLE_BORROW_OWNED }
             methods.insert("hash", TypeScheme { ty: hash_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
         },
         "Json" => {
-            let json_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW }
+            let json_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW, ownership_term: CALLABLE_BORROW_OWNED }
             methods.insert("to_json", TypeScheme { ty: json_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
         },
         _ => {},
+    }
+
+    let mut entries = methods.entries()
+    entries.sort_by(compare_by_first)
+    for entry in entries {
+        let (method_name, scheme) = entry
+        let arity = match scheme.ty {
+            Type::FnType { params, .. } => params.len(),
+            _ => panic("unreachable: derived method is not callable")
+        }
+        let mut forces: List<Bool> = []
+        let mut index = 0
+        while index < arity {
+            forces.push(false)
+            index = index + 1
+        }
+        let exact = register_exact_shadow_callable_scheme(
+            env,
+            TypeScheme {
+                ..scheme, def_id: some(env.fresh_def_id())
+            },
+            CALLABLE_SOURCE_SYNTHETIC, none, forces)
+        methods.insert(method_name, exact)
     }
 }
 

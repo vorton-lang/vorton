@@ -1,12 +1,16 @@
 use types::{Type, Effect, EffectRow, RecordField, StructField,
     INT, FLOAT, STR, BOOL, UNIT, NEVER, ANY, EMPTY_ROW,
     type_to_string, nominal_display_name, types_equal, make_option_type, type_to_builtin_name,
-    row_merge, effects_match_kind}
+    row_merge, effects_match_kind, CALLABLE_UNKNOWN,
+    CALLABLE_SOURCE_SYNTHETIC, CALLABLE_SOURCE_ALIAS,
+    fresh_ownership_term,
+    with_callable_ownership_term, record_shadow_callable}
 use ast::{Span, Pattern, TypeExpr, RecordTypeField, NamedPatternField, span_zero, EffectExpr,
     UseDecl, UseImport}
 use hir::{HExpr, HStmt, HParam, DictRef, ValueBindingKind,
     trait_dict_name, trait_bound_param_name,
-    BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL, BUILTIN_OPTION, compare_by_first}
+    BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL, BUILTIN_OPTION,
+    SYNTHETIC_CALLABLE_DEF_ID_BASE, synthetic_def_id, compare_by_first}
 use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink, Severity, Suggestion, make_diag, make_diagnostic}
 use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
 use union_find::{UnionFind, new_union_find, uf_find}
@@ -147,6 +151,8 @@ pub struct InferCtx {
     // as LocalBorrow; neither a FnType nor a spelling may manufacture direct
     // callable/const-getter provenance.
     pub value_binding_kinds: Map<Int, ValueBindingKind>,
+    // Disjoint from env.ids.next_def_id; S1 identities cannot perturb I′.
+    pub next_shadow_callable_ordinal: Int,
     pub boxed_vars: Set<Int>,
     pub lambda_depth: Int,
     pub var_lambda_depth: Map<Int, Int>,
@@ -194,6 +200,7 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         mod_path_stack: [],
         use_aliases: map_new(),
         value_binding_kinds: map_new(),
+        next_shadow_callable_ordinal: 0,
         boxed_vars: set_new(),
         lambda_depth: 0,
         var_lambda_depth: map_new(),
@@ -983,7 +990,7 @@ pub fn collect_free_vars(t: Type, mut result: Set<Int>) {
         Type::AnyType => {},
         Type::ErrorType => {},
         Type::TypeVar { id, .. } => { result.insert(id) },
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             for p in params { collect_free_vars(p, result) }
             collect_free_vars(return_type, result)
             match effects.tail {
@@ -1100,8 +1107,10 @@ pub fn generalize(env: TypeEnv, t: Type, subst: UnionFind) -> TypeScheme {
 pub fn update_fn_effects(mut env: TypeEnv, name: Str, effects: EffectRow) {
     match env.lookup(name) {
         some(scheme) => match scheme.ty {
-            Type::FnType { params, return_type, .. } => {
-                let new_type = Type::FnType { params: params, return_type: return_type, effects: effects }
+            Type::FnType { params, return_type, ownership_term, .. } => {
+                let new_type = Type::FnType { params: params,
+                    return_type: return_type, effects: effects,
+                    ownership_term: ownership_term }
                 env.rebind(name, TypeScheme { ..scheme, ty: new_type })
             },
             _ => {}
@@ -1142,6 +1151,94 @@ pub fn variant_ctor_origin(ctx: InferCtx, scheme: TypeScheme) -> Str? {
     match scheme.def_id {
         some(def_id) => ctx.env.types.variant_ctor_origins.get(def_id),
         none => none
+    }
+}
+
+pub fn fresh_shadow_callable_def_id(mut ctx: InferCtx) -> Int {
+    let ordinal = ctx.next_shadow_callable_ordinal + 1
+    ctx.next_shadow_callable_ordinal = ordinal
+    synthetic_def_id(SYNTHETIC_CALLABLE_DEF_ID_BASE, ordinal)
+}
+
+// Give a callable-valued expression result its own exact synthetic identity.
+// The negative namespace and ownership-term counter are both disjoint from
+// source binder DefIds, preserving I′ numbering and generated-name stability.
+pub fn shadow_callable_result(
+    mut ctx: InferCtx, ty: Type, producer_def_id: Int?
+) -> (Type, Int?) {
+    match ty {
+        Type::FnType { params, ownership_term, .. } => {
+            let term = if ownership_term == CALLABLE_UNKNOWN {
+                fresh_ownership_term(ctx.env.types.ownership_metadata)
+            } else {
+                ownership_term
+            }
+            let exact_ty = with_callable_ownership_term(ty, term)
+            let def_id = fresh_shadow_callable_def_id(ctx)
+            let mut forces: List<Bool> = []
+            for _param in params { forces.push(false) }
+            record_shadow_callable(
+                ctx.env.types.ownership_metadata, def_id, term,
+                CALLABLE_SOURCE_SYNTHETIC, params.len(),
+                producer_def_id, forces)
+            match producer_def_id {
+                some(producer) => match ctx.env.types.ownership_metadata.
+                    returned_callable_result_role_by_def_id.get(producer) {
+                    some(role) => ctx.env.types.ownership_metadata.
+                        callable_result_role_by_def_id.insert(def_id, role),
+                    none => {}
+                },
+                none => {}
+            }
+            (exact_ty, some(def_id))
+        },
+        _ => (ty, none)
+    }
+}
+
+fn register_exact_shadow_alias(
+    mut ctx: InferCtx, alias_scheme: TypeScheme,
+    producer_scheme: TypeScheme
+) {
+    match (alias_scheme.ty, producer_scheme.ty,
+           alias_scheme.def_id, producer_scheme.def_id) {
+        (Type::FnType { params, ownership_term, .. },
+         Type::FnType { .. }, some(alias_def_id), some(producer_def_id)) => {
+            let mut forces: List<Bool> = []
+            match ctx.env.types.ownership_metadata.
+                callable_state_by_def_id.get(producer_def_id) {
+                some(state) => match state.transfer_levels.first() {
+                    some(level) => {
+                        for force in level.force_params {
+                            forces.push(force)
+                        }
+                    },
+                    none => {}
+                },
+                none => {}
+            }
+            while forces.len() < params.len() { forces.push(false) }
+            record_shadow_callable(
+                ctx.env.types.ownership_metadata,
+                alias_def_id, ownership_term,
+                CALLABLE_SOURCE_ALIAS, params.len(),
+                some(producer_def_id), forces)
+            match ctx.env.types.ownership_metadata.
+                callable_result_role_by_def_id.get(producer_def_id) {
+                some(role) => ctx.env.types.ownership_metadata.
+                    callable_result_role_by_def_id.insert(
+                        alias_def_id, role),
+                none => {}
+            }
+            match ctx.env.types.ownership_metadata.
+                returned_callable_result_role_by_def_id.get(producer_def_id) {
+                some(role) => ctx.env.types.ownership_metadata.
+                    returned_callable_result_role_by_def_id.insert(
+                        alias_def_id, role),
+                none => {}
+            }
+        },
+        _ => {}
     }
 }
 
@@ -1198,7 +1295,7 @@ pub fn value_binding_kind(ctx: InferCtx, def_id: Int?) -> ValueBindingKind {
 fn type_has_error(t: Type) -> Bool {
     match t {
         Type::ErrorType => true,
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             for p in params { if type_has_error(p) { return true } }
             if type_has_error(return_type) { return true }
             for eff in effects.effects {
@@ -1971,7 +2068,8 @@ pub fn resolve_type_expr(mut ctx: InferCtx, texpr: TypeExpr) -> Type {
                 let tail_id = ctx.env.fresh_var_id()
                 EffectRow { effects: [], tail: some(tail_id) }
             }
-            Type::FnType { params: resolved_params, return_type: ret, effects: eff_row }
+            Type::FnType { params: resolved_params, return_type: ret,
+                effects: eff_row, ownership_term: CALLABLE_UNKNOWN }
         },
         TypeExpr::OptionType { inner, .. } =>
             make_option_type(resolve_type_expr(ctx, inner)),
@@ -3089,6 +3187,13 @@ pub fn bind_exact_import_alias(
                         bounds: live_scheme.bounds,
                         def_id: none
                     })
+                    match ctx.env.lookup(alias_name) {
+                        some(alias_scheme) =>
+                            register_exact_shadow_alias(
+                                ctx, alias_scheme, live_scheme),
+                        none => panic(
+                            "unreachable: exact import alias was not bound")
+                    }
                     record_value_origin(ctx, alias_name, exact_origin)
                     match source_kind {
                         ValueBindingKind::DirectCallable =>

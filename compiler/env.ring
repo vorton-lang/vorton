@@ -1,5 +1,8 @@
-use types::{Type, Effect, EffectRow, StructField, EnumVariant, RecordField, INT,
-    effects_match_kind, nominal_display_name}
+use types::{Type, Effect, EffectRow, StructField, EnumVariant, RecordField,
+    OwnershipMetadata, INT, effects_match_kind, nominal_display_name,
+    CALLABLE_UNKNOWN, fresh_ownership_term, with_callable_ownership_term,
+    record_shadow_callable, replace_shadow_callable,
+    new_ownership_metadata}
 use union_find::{UnionFind, uf_find, uf_lookup}
 use ast::{Span, EffectExpr, TypeParam, DeriveAttribute}
 use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
@@ -77,6 +80,7 @@ pub fn lookup_variant(def: EnumDef, name: Str) -> EnumVariant? {
 
 pub struct EffectOpDef {
     pub name: Str,
+    pub def_id: Int,
     pub params: List<Type>,
     pub return_type: Type,
     pub has_default: Bool
@@ -99,6 +103,7 @@ pub struct EffectDef {
 
 pub struct TraitMethodDef {
     pub name: Str,
+    pub def_id: Int,
     pub ty: Type,
     pub has_default: Bool,
     pub param_mutabilities: List<Bool>,
@@ -215,7 +220,9 @@ pub struct TypeRegistry {
     pub variant_ctor_origins: Map<Int, Str>,
     pub type_aliases: Map<Str, TypeAliasDef>,
     pub sigs: Map<Str, SigDef>,
-    pub effect_aliases: Map<Str, EffectAliasDef>
+    pub effect_aliases: Map<Str, EffectAliasDef>,
+    // S1 shadow-only; no checker/lowering decision consumes this bundle.
+    pub ownership_metadata: OwnershipMetadata
 }
 
 pub struct TraitRegistry {
@@ -260,6 +267,64 @@ pub fn mono(ty: Type) -> TypeScheme {
     TypeScheme { ty: ty, type_vars: [], bounds: [], def_id: none }
 }
 
+// Attach shadow ownership to an already-authoritative callable scheme.  This
+// helper never allocates a DefId: source registrations, imported aliases, and
+// synthetic HIR must establish their exact identity before calling it.
+pub fn register_exact_shadow_callable_scheme(
+    mut env: TypeEnv, scheme: TypeScheme, source: Int,
+    producer_def_id: Int?, force_params: List<Bool>
+) -> TypeScheme {
+    let def_id = match scheme.def_id {
+        some(id) => id,
+        none => panic("unreachable: shadow callable scheme has no exact DefId")
+    }
+    match scheme.ty {
+        Type::FnType { params, ownership_term, .. } => {
+            if force_params.len() != params.len() {
+                panic("unreachable: shadow callable force arity mismatch")
+            }
+            let term = if ownership_term == CALLABLE_UNKNOWN {
+                fresh_ownership_term(env.types.ownership_metadata)
+            } else {
+                ownership_term
+            }
+            let ty = with_callable_ownership_term(scheme.ty, term)
+            record_shadow_callable(
+                env.types.ownership_metadata, def_id, term, source,
+                params.len(), producer_def_id, force_params)
+            TypeScheme { ..scheme, ty: ty }
+        },
+        _ => panic("unreachable: shadow callable scheme is not a function")
+    }
+}
+
+pub fn replace_exact_shadow_callable_scheme(
+    mut env: TypeEnv, scheme: TypeScheme, ownership_term: Int,
+    source: Int, producer_def_id: Int?, force_params: List<Bool>
+) -> TypeScheme {
+    let def_id = match scheme.def_id {
+        some(id) => id,
+        none => panic("unreachable: exact shadow override has no DefId")
+    }
+    match scheme.ty {
+        Type::FnType { params, .. } => {
+            if params.len() != force_params.len() {
+                panic("unreachable: exact shadow override arity mismatch")
+            }
+            replace_shadow_callable(
+                env.types.ownership_metadata,
+                def_id, ownership_term, source,
+                params.len(), producer_def_id, force_params)
+            TypeScheme {
+                ..scheme,
+                ty: with_callable_ownership_term(
+                    scheme.ty, ownership_term)
+            }
+        },
+        _ => panic("unreachable: exact shadow override is not callable")
+    }
+}
+
 pub fn new_type_env() -> TypeEnv {
     let initial_scope = Scope { variables: map_new() }
     TypeEnv {
@@ -272,7 +337,8 @@ pub fn new_type_env() -> TypeEnv {
             variant_ctor_origins: map_new(),
             type_aliases: map_new(),
             sigs: map_new(),
-            effect_aliases: map_new()
+            effect_aliases: map_new(),
+            ownership_metadata: new_ownership_metadata()
         },
         trait_reg: TraitRegistry {
             traits: map_new(),
@@ -623,11 +689,12 @@ pub fn apply_subst_map(subst: Map<Int, Type>, t: Type) -> Type {
         Type::NeverType => Type::NeverType,
         Type::AnyType => Type::AnyType,
         Type::TypeVar { id, .. } => chase_type_var_map(subst, id, 0),
-        Type::FnType { params, return_type, effects } =>
+        Type::FnType { params, return_type, effects, ownership_term } =>
             Type::FnType {
                 params: params.map(fn(p) { apply_subst_map(subst, p) }),
                 return_type: apply_subst_map(subst, return_type),
-                effects: apply_subst_row_map(subst, effects)
+                effects: apply_subst_row_map(subst, effects),
+                ownership_term: ownership_term
             },
         Type::StructType { name, type_params } =>
             Type::StructType {
@@ -826,11 +893,11 @@ fn collect_var_mappings(
             },
         Type::FnType {
             params: source_params, return_type: source_return,
-            effects: source_effects
+            effects: source_effects, ..
         } => match target_type {
             Type::FnType {
                 params: target_params, return_type: target_return,
-                effects: target_effects
+                effects: target_effects, ..
             } => {
                 let mut i = 0
                 while i < source_params.len() && i < target_params.len() {
@@ -950,7 +1017,7 @@ pub fn build_scheme_var_map(
 fn collect_type_var_ids(t: Type, mut result: Set<Int>) {
     match t {
         Type::TypeVar { id, .. } => { result.insert(id) },
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             for param in params { collect_type_var_ids(param, result) }
             collect_type_var_ids(return_type, result)
             match effects.tail {
@@ -1098,11 +1165,12 @@ pub fn apply_subst(subst: UnionFind, t: Type) -> Type {
                 Type::TypeVar { id: root, name: name }
             }
         },
-        Type::FnType { params, return_type, effects } =>
+        Type::FnType { params, return_type, effects, ownership_term } =>
             Type::FnType {
                 params: params.map(fn(p) { apply_subst(subst, p) }),
                 return_type: apply_subst(subst, return_type),
-                effects: apply_subst_row(subst, effects)
+                effects: apply_subst_row(subst, effects),
+                ownership_term: ownership_term
             },
         Type::StructType { name, type_params } =>
             Type::StructType {

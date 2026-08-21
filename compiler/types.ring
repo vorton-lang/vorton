@@ -28,6 +28,429 @@ pub struct RecordField {
     pub ty: Type
 }
 
+// A′ S1 shadow schema.  These values are transported and validated but have no
+// semantic consumer until the later atomic activation commit.
+pub const PARAM_OWNERSHIP_BORROW: Int = 0
+pub const PARAM_OWNERSHIP_MUT_BORROW: Int = 1
+pub const PARAM_OWNERSHIP_MOVE: Int = 2
+pub const PARAM_OWNERSHIP_UNKNOWN: Int = 3
+
+pub const RETURN_OWNERSHIP_OWNED: Int = 0
+pub const RETURN_OWNERSHIP_BORROWED: Int = 1
+pub const RETURN_OWNERSHIP_UNKNOWN: Int = 2
+
+pub const CALLABLE_RESULT_ROLE_NONE: Int = 0
+pub const CALLABLE_RESULT_ROLE_FRESH_OWNED_SLOT: Int = 1
+pub const CALLABLE_RESULT_ROLE_UNKNOWN: Int = 2
+
+pub const CALLABLE_SOURCE_BODY_INFERRED: Int = 0
+pub const CALLABLE_SOURCE_DECLARED: Int = 1
+pub const CALLABLE_SOURCE_BUILTIN: Int = 2
+pub const CALLABLE_SOURCE_CONSERVATIVE_INTERFACE: Int = 3
+pub const CALLABLE_SOURCE_ALIAS: Int = 4
+pub const CALLABLE_SOURCE_SYNTHETIC: Int = 5
+
+pub const CALLABLE_BORROW_OWNED: Int = 0
+pub const CALLABLE_MOVE_OWNED: Int = 1
+pub const CALLABLE_UNKNOWN: Int = 2
+pub const CALLABLE_FIRST_MUT_BORROW_OWNED: Int = 3
+pub const CALLABLE_BORROW_BORROWED: Int = 4
+pub const CALLABLE_MUT_MOVE_OWNED: Int = 5
+pub const CALLABLE_BORROW_MOVE_BORROWED: Int = 6
+pub const CALLABLE_MOVE_BORROW_OWNED: Int = 7
+pub const CALLABLE_BORROW_MUT_BORROW_OWNED: Int = 8
+pub const CALLABLE_MUT_BORROW_MOVE_OWNED: Int = 9
+pub const CALLABLE_SLOT_MOVE_OWNED: Int = 10
+pub const CALLABLE_DYNAMIC_TERM_BASE: Int = 11
+pub const CALLABLE_DYNAMIC_TERM_LIMIT: Int = 4000000000000000000
+
+pub struct CallableOwnershipDescriptor {
+    pub prefix_params: List<Int>,
+    pub rest_param: Int,
+    pub result: Int
+}
+
+// FORCE is carried independently from the public Borrow/MutBorrow/Move mode.
+// `force_params[i] == false` means an inferred OWNING edge.
+pub struct CallableTransferLevel {
+    pub ownership_term: Int,
+    pub force_params: List<Bool>
+}
+
+pub struct CallableOwnershipState {
+    pub source: Int,
+    pub arity: Int,
+    pub producer_def_id: Int?,
+    pub transfer_levels: List<CallableTransferLevel>
+}
+
+pub struct OwnershipShape {
+    pub direct_drop: Bool,
+    pub may_own: Bool,
+    pub param_deps: List<Bool>
+}
+
+pub struct OwnershipMetadata {
+    pub callable_descriptors: Map<Int, CallableOwnershipDescriptor>,
+    pub callable_by_def_id: Map<Int, Int>,
+    pub callable_state_by_def_id: Map<Int, CallableOwnershipState>,
+    pub callable_result_role_by_def_id: Map<Int, Int>,
+    pub returned_callable_result_role_by_def_id: Map<Int, Int>,
+    pub ownership_shapes: Map<Str, OwnershipShape>,
+    // Disjoint from env.ids.next_def_id: shadow inference must not perturb I′.
+    pub next_ownership_term: Int
+}
+
+pub fn new_ownership_metadata() -> OwnershipMetadata {
+    OwnershipMetadata {
+        callable_descriptors: map_new(),
+        callable_by_def_id: map_new(),
+        callable_state_by_def_id: map_new(),
+        callable_result_role_by_def_id: map_new(),
+        returned_callable_result_role_by_def_id: map_new(),
+        ownership_shapes: map_new(),
+        next_ownership_term: CALLABLE_DYNAMIC_TERM_BASE
+    }
+}
+
+pub fn fresh_ownership_term(mut metadata: OwnershipMetadata) -> Int {
+    let result = metadata.next_ownership_term
+    if result < CALLABLE_DYNAMIC_TERM_BASE ||
+       result >= CALLABLE_DYNAMIC_TERM_LIMIT {
+        panic("unreachable: shadow ownership term namespace exhausted")
+    }
+    metadata.next_ownership_term = result + 1
+    result
+}
+
+pub fn shadow_callable_param_ownership(
+    metadata: OwnershipMetadata, ownership_term: Int, index: Int
+) -> Int {
+    if ownership_term == CALLABLE_BORROW_OWNED ||
+       ownership_term == CALLABLE_BORROW_BORROWED {
+        return PARAM_OWNERSHIP_BORROW
+    }
+    if ownership_term == CALLABLE_MOVE_OWNED {
+        return PARAM_OWNERSHIP_MOVE
+    }
+    if ownership_term == CALLABLE_FIRST_MUT_BORROW_OWNED {
+        return if index == 0 {
+            PARAM_OWNERSHIP_MUT_BORROW
+        } else {
+            PARAM_OWNERSHIP_BORROW
+        }
+    }
+    if ownership_term == CALLABLE_MUT_MOVE_OWNED {
+        if index == 0 { return PARAM_OWNERSHIP_MUT_BORROW }
+        if index == 1 { return PARAM_OWNERSHIP_MOVE }
+        return PARAM_OWNERSHIP_UNKNOWN
+    }
+    if ownership_term == CALLABLE_BORROW_MOVE_BORROWED {
+        if index == 0 { return PARAM_OWNERSHIP_BORROW }
+        if index == 1 { return PARAM_OWNERSHIP_MOVE }
+        return PARAM_OWNERSHIP_UNKNOWN
+    }
+    if ownership_term == CALLABLE_MOVE_BORROW_OWNED {
+        if index == 0 { return PARAM_OWNERSHIP_MOVE }
+        if index == 1 { return PARAM_OWNERSHIP_BORROW }
+        return PARAM_OWNERSHIP_UNKNOWN
+    }
+    if ownership_term == CALLABLE_BORROW_MUT_BORROW_OWNED {
+        if index == 0 || index == 2 { return PARAM_OWNERSHIP_BORROW }
+        if index == 1 { return PARAM_OWNERSHIP_MUT_BORROW }
+        return PARAM_OWNERSHIP_UNKNOWN
+    }
+    if ownership_term == CALLABLE_MUT_BORROW_MOVE_OWNED {
+        if index == 0 { return PARAM_OWNERSHIP_MUT_BORROW }
+        if index == 1 { return PARAM_OWNERSHIP_BORROW }
+        if index == 2 { return PARAM_OWNERSHIP_MOVE }
+        return PARAM_OWNERSHIP_UNKNOWN
+    }
+    if ownership_term == CALLABLE_SLOT_MOVE_OWNED {
+        if index == 0 || index == 2 {
+            return PARAM_OWNERSHIP_MUT_BORROW
+        }
+        if index == 1 || index == 3 || index == 4 {
+            return PARAM_OWNERSHIP_BORROW
+        }
+        return PARAM_OWNERSHIP_UNKNOWN
+    }
+    match metadata.callable_descriptors.get(ownership_term) {
+        some(descriptor) => match descriptor.prefix_params.get(index) {
+            some(mode) => mode,
+            none => if descriptor.rest_param >= 0 {
+                descriptor.rest_param
+            } else {
+                PARAM_OWNERSHIP_UNKNOWN
+            }
+        },
+        none => PARAM_OWNERSHIP_UNKNOWN
+    }
+}
+
+pub fn shadow_callable_return_ownership(
+    metadata: OwnershipMetadata, ownership_term: Int
+) -> Int {
+    if ownership_term == CALLABLE_UNKNOWN {
+        return RETURN_OWNERSHIP_UNKNOWN
+    }
+    if ownership_term == CALLABLE_BORROW_BORROWED ||
+       ownership_term == CALLABLE_BORROW_MOVE_BORROWED {
+        return RETURN_OWNERSHIP_BORROWED
+    }
+    if ownership_term >= CALLABLE_BORROW_OWNED &&
+       ownership_term < CALLABLE_DYNAMIC_TERM_BASE {
+        return RETURN_OWNERSHIP_OWNED
+    }
+    match metadata.callable_descriptors.get(ownership_term) {
+        some(descriptor) => descriptor.result,
+        none => RETURN_OWNERSHIP_UNKNOWN
+    }
+}
+
+pub fn shadow_callable_term_for_def_id(
+    metadata: OwnershipMetadata, def_id: Int
+) -> Int {
+    metadata.callable_by_def_id.get(def_id).unwrap_or(CALLABLE_UNKNOWN)
+}
+
+fn valid_param_ownership(mode: Int) -> Bool {
+    mode >= PARAM_OWNERSHIP_BORROW && mode <= PARAM_OWNERSHIP_UNKNOWN
+}
+
+fn valid_return_ownership(mode: Int) -> Bool {
+    mode >= RETURN_OWNERSHIP_OWNED && mode <= RETURN_OWNERSHIP_UNKNOWN
+}
+
+pub fn normalize_callable_ownership_descriptor(
+    descriptor: CallableOwnershipDescriptor
+) -> CallableOwnershipDescriptor {
+    if descriptor.rest_param < -1 ||
+       (descriptor.rest_param >= 0 &&
+        !valid_param_ownership(descriptor.rest_param)) {
+        panic("unreachable: invalid shadow callable rest ownership")
+    }
+    if !valid_return_ownership(descriptor.result) {
+        panic("unreachable: invalid shadow callable return ownership")
+    }
+    for mode in descriptor.prefix_params {
+        if !valid_param_ownership(mode) {
+            panic("unreachable: invalid shadow callable parameter ownership")
+        }
+    }
+    descriptor
+}
+
+pub fn record_shadow_callable(
+    mut metadata: OwnershipMetadata, def_id: Int, ownership_term: Int,
+    source: Int, arity: Int, producer_def_id: Int?,
+    force_params: List<Bool>
+) {
+    if def_id == -1 || arity < 0 ||
+       (ownership_term < 0 &&
+        !metadata.callable_descriptors.contains_key(ownership_term)) ||
+       force_params.len() != arity ||
+       source < CALLABLE_SOURCE_BODY_INFERRED ||
+       source > CALLABLE_SOURCE_SYNTHETIC {
+        panic("unreachable: invalid shadow callable identity")
+    }
+    match metadata.callable_state_by_def_id.get(def_id) {
+        some(existing) => {
+            let existing_level = match existing.transfer_levels.first() {
+                some(level) => level,
+                none => panic("unreachable: existing shadow callable has no transfer level")
+            }
+            let mut forces_match = existing_level.force_params.len() ==
+                force_params.len()
+            let mut force_index = 0
+            while forces_match && force_index < force_params.len() {
+                if existing_level.force_params.get(force_index) !=
+                   force_params.get(force_index) {
+                    forces_match = false
+                }
+                force_index = force_index + 1
+            }
+            if existing.arity != arity ||
+               existing.source != source ||
+               existing.producer_def_id != producer_def_id ||
+               existing_level.ownership_term != ownership_term ||
+               !forces_match ||
+               metadata.callable_by_def_id.get(def_id) !=
+                    some(ownership_term) {
+                panic("unreachable: conflicting exact shadow callable contract")
+            }
+        },
+        none => {
+            metadata.callable_by_def_id.insert(def_id, ownership_term)
+            metadata.callable_state_by_def_id.insert(def_id,
+                CallableOwnershipState {
+                    source: source, arity: arity,
+                    producer_def_id: producer_def_id,
+                    transfer_levels: [CallableTransferLevel {
+                        ownership_term: ownership_term,
+                        force_params: force_params
+                    }]
+                })
+            metadata.callable_result_role_by_def_id.insert(
+                def_id, CALLABLE_RESULT_ROLE_UNKNOWN)
+            metadata.returned_callable_result_role_by_def_id.insert(
+                def_id, CALLABLE_RESULT_ROLE_UNKNOWN)
+        }
+    }
+}
+
+// Narrow exact-identity override for a registration that becomes trusted only
+// after provenance resolution (currently prelude runtime bridges).  It never
+// changes the DefId and is not a name-based consumer API.
+pub fn replace_shadow_callable(
+    mut metadata: OwnershipMetadata, def_id: Int, ownership_term: Int,
+    source: Int, arity: Int, producer_def_id: Int?,
+    force_params: List<Bool>
+) {
+    if def_id == -1 || arity < 0 || force_params.len() != arity ||
+       source < CALLABLE_SOURCE_BODY_INFERRED ||
+       source > CALLABLE_SOURCE_SYNTHETIC ||
+       (ownership_term < 0 &&
+        !metadata.callable_descriptors.contains_key(ownership_term)) {
+        panic("unreachable: invalid exact shadow callable override")
+    }
+    metadata.callable_by_def_id.insert(def_id, ownership_term)
+    metadata.callable_state_by_def_id.insert(def_id,
+        CallableOwnershipState {
+            source: source, arity: arity,
+            producer_def_id: producer_def_id,
+            transfer_levels: [CallableTransferLevel {
+                ownership_term: ownership_term,
+                force_params: force_params
+            }]
+        })
+    if !metadata.callable_result_role_by_def_id.contains_key(def_id) {
+        metadata.callable_result_role_by_def_id.insert(
+            def_id, CALLABLE_RESULT_ROLE_UNKNOWN)
+    }
+    if !metadata.returned_callable_result_role_by_def_id.contains_key(def_id) {
+        metadata.returned_callable_result_role_by_def_id.insert(
+            def_id, CALLABLE_RESULT_ROLE_UNKNOWN)
+    }
+}
+
+pub fn set_shadow_callable_result_role(
+    mut metadata: OwnershipMetadata, def_id: Int, role: Int
+) {
+    if role < CALLABLE_RESULT_ROLE_NONE ||
+       role > CALLABLE_RESULT_ROLE_UNKNOWN ||
+       !metadata.callable_by_def_id.contains_key(def_id) {
+        panic("unreachable: invalid shadow callable result role")
+    }
+    metadata.callable_result_role_by_def_id.insert(def_id, role)
+}
+
+pub fn validate_shadow_ownership_metadata(metadata: OwnershipMetadata) {
+    if metadata.next_ownership_term < CALLABLE_DYNAMIC_TERM_BASE ||
+       metadata.next_ownership_term > CALLABLE_DYNAMIC_TERM_LIMIT {
+        panic("unreachable: shadow ownership counter regressed")
+    }
+    for entry in metadata.callable_by_def_id.entries() {
+        let (def_id, term) = entry
+        if (term < 0 && !metadata.callable_descriptors.contains_key(term)) ||
+           !metadata.callable_state_by_def_id.contains_key(def_id) ||
+           !metadata.callable_result_role_by_def_id.contains_key(def_id) ||
+           !metadata.returned_callable_result_role_by_def_id.contains_key(def_id) {
+            panic("unreachable: incomplete exact shadow callable metadata")
+        }
+        match metadata.callable_state_by_def_id.get(def_id) {
+            some(state) => {
+                if state.source < CALLABLE_SOURCE_BODY_INFERRED ||
+                   state.source > CALLABLE_SOURCE_SYNTHETIC ||
+                   state.arity < 0 || state.transfer_levels.len() != 1 {
+                    panic("unreachable: invalid exact shadow callable state")
+                }
+                match state.transfer_levels.first() {
+                    some(level) => {
+                        if level.ownership_term != term ||
+                           level.force_params.len() != state.arity {
+                            panic("unreachable: invalid shadow transfer level")
+                        }
+                    },
+                    none => panic("unreachable: missing shadow transfer level")
+                }
+            },
+            none => panic("unreachable: missing exact shadow callable state")
+        }
+        let result_role = metadata.callable_result_role_by_def_id.get(
+            def_id).unwrap_or(CALLABLE_RESULT_ROLE_UNKNOWN)
+        let returned_role = metadata.returned_callable_result_role_by_def_id.get(
+            def_id).unwrap_or(CALLABLE_RESULT_ROLE_UNKNOWN)
+        if result_role < CALLABLE_RESULT_ROLE_NONE ||
+           result_role > CALLABLE_RESULT_ROLE_UNKNOWN ||
+           returned_role < CALLABLE_RESULT_ROLE_NONE ||
+           returned_role > CALLABLE_RESULT_ROLE_UNKNOWN {
+            panic("unreachable: invalid shadow callable result role")
+        }
+    }
+    for entry in metadata.callable_state_by_def_id.entries() {
+        let (def_id, _) = entry
+        if !metadata.callable_by_def_id.contains_key(def_id) {
+            panic("unreachable: orphan shadow callable state")
+        }
+    }
+    for entry in metadata.callable_result_role_by_def_id.entries() {
+        let (def_id, _) = entry
+        if !metadata.callable_by_def_id.contains_key(def_id) {
+            panic("unreachable: orphan shadow callable result role")
+        }
+    }
+    for entry in metadata.returned_callable_result_role_by_def_id.entries() {
+        let (def_id, _) = entry
+        if !metadata.callable_by_def_id.contains_key(def_id) {
+            panic("unreachable: orphan returned callable result role")
+        }
+    }
+    for entry in metadata.callable_descriptors.entries() {
+        let (_, descriptor) = entry
+        let _ = normalize_callable_ownership_descriptor(descriptor)
+    }
+    for entry in metadata.ownership_shapes.entries() {
+        let (_, shape) = entry
+        if shape.direct_drop && !shape.may_own {
+            panic("unreachable: direct Drop shadow shape does not own")
+        }
+    }
+}
+
+pub fn clone_shadow_callable_identity(
+    mut metadata: OwnershipMetadata, old_def_id: Int, new_def_id: Int,
+    remapped_producer_def_id: Int?
+) {
+    let term = match metadata.callable_by_def_id.get(old_def_id) {
+        some(value) => value,
+        none => panic("unreachable: cloned callable identity has no contract")
+    }
+    let state = match metadata.callable_state_by_def_id.get(old_def_id) {
+        some(value) => value,
+        none => panic("unreachable: cloned callable identity has no state")
+    }
+    let level = match state.transfer_levels.first() {
+        some(value) => value,
+        none => panic("unreachable: cloned callable identity has no transfer level")
+    }
+    let mut forces: List<Bool> = []
+    for force in level.force_params { forces.push(force) }
+    record_shadow_callable(
+        metadata, new_def_id, term, state.source, state.arity,
+        remapped_producer_def_id, forces)
+    match metadata.callable_result_role_by_def_id.get(old_def_id) {
+        some(role) => metadata.callable_result_role_by_def_id.insert(
+            new_def_id, role),
+        none => {}
+    }
+    match metadata.returned_callable_result_role_by_def_id.get(old_def_id) {
+        some(role) => metadata.returned_callable_result_role_by_def_id.insert(
+            new_def_id, role),
+        none => {}
+    }
+}
+
 pub enum Type {
     IntType,
     FloatType,
@@ -37,7 +460,8 @@ pub enum Type {
     NeverType,
     AnyType,
     TypeVar { id: Int, name: Str? },
-    FnType { params: List<Type>, return_type: Type, effects: EffectRow },
+    FnType { params: List<Type>, return_type: Type, effects: EffectRow,
+             ownership_term: Int },
     StructType { name: Str, type_params: List<Type> },
     EnumType { name: Str, type_params: List<Type> },
     GenericType { base: Type, args: List<Type> },
@@ -46,6 +470,23 @@ pub enum Type {
     TupleType { elements: List<Type> },
     PtrType { pointee: Type },
     ErrorType
+}
+
+pub fn callable_ownership_term(ty: Type) -> Int? {
+    match ty {
+        Type::FnType { ownership_term, .. } => some(ownership_term),
+        _ => none
+    }
+}
+
+pub fn with_callable_ownership_term(ty: Type, term: Int) -> Type {
+    match ty {
+        Type::FnType { params, return_type, effects, .. } => Type::FnType {
+            params: params, return_type: return_type, effects: effects,
+            ownership_term: term
+        },
+        _ => ty
+    }
 }
 
 pub enum Effect {
@@ -309,8 +750,8 @@ pub fn types_equal(a: Type, b: Type) -> Bool {
             Type::TypeVar { id: id_b, .. } => id_a == id_b,
             _ => false
         },
-        Type::FnType { params: pa, return_type: ra, effects: ea } => match b {
-            Type::FnType { params: pb, return_type: rb, effects: eb } =>
+        Type::FnType { params: pa, return_type: ra, effects: ea, .. } => match b {
+            Type::FnType { params: pb, return_type: rb, effects: eb, .. } =>
                 type_lists_equal(pa, pb) && types_equal(ra, rb)
                     && effects_list_equal(ea.effects, eb.effects)
                     // Open effect row tails are compared by exact TypeVar ID (structural equality).
@@ -386,7 +827,7 @@ pub fn type_to_string(t: Type) -> Str {
             some(n) => n,
             none => "?${id.to_str()}"
         },
-        Type::FnType { params, return_type, effects } => {
+        Type::FnType { params, return_type, effects, .. } => {
             let ps = params.map(fn(p) { type_to_string(p) }).join(", ")
             let ret = type_to_string(return_type)
             let eff = effect_row_to_string(effects)
