@@ -33,6 +33,12 @@ pub fn is_synthetic_dict_def_id(def_id: Int) -> Bool {
             SYNTHETIC_DEF_ID_NAMESPACE_SIZE
 }
 
+pub fn is_synthetic_rc_def_id(def_id: Int) -> Bool {
+    def_id < SYNTHETIC_RC_DEF_ID_BASE &&
+        def_id > SYNTHETIC_RC_DEF_ID_BASE -
+            SYNTHETIC_DEF_ID_NAMESPACE_SIZE
+}
+
 // Callable values installed directly by builtins.ring rather than parsed from
 // a Decl. Checker provenance and both native backends must consume this one
 // list so a newly added checker-only callable cannot drift across phases.
@@ -1014,6 +1020,27 @@ pub fn is_exact_direct_call_ident(expr: HExpr) -> Bool {
     }
 }
 
+// Option::none is also constructor-shaped HIR, but codegen returns the exact
+// immortal runtime singleton rather than allocating a fresh enum box.  The
+// resolved_name is checker provenance keyed by the constructor's exact DefId;
+// neither a source spelling nor the leaf name alone is sufficient authority.
+pub fn is_option_none_ctor_ident(expr: HExpr) -> Bool {
+    match expr {
+        HExpr::Ident {
+            resolved_name, def_id: some(_), ty, ..
+        } => match resolved_name {
+            some(rn) => match ty {
+                Type::EnumType { name, .. } =>
+                    name == BUILTIN_OPTION &&
+                    rn == variant_ctor_name(BUILTIN_OPTION, "none"),
+                _ => false
+            },
+            none => false
+        },
+        _ => false
+    }
+}
+
 pub fn is_materialized_fn_value(expr: HExpr) -> Bool {
     match expr {
         HExpr::Ident { dict_closure_dicts, .. } => dict_closure_dicts.is_some(),
@@ -1388,6 +1415,16 @@ pub fn type_contains_extern_handle(ty: Type, externs: Set<Str>) -> Bool {
         let mut visited: Set<Str> = set_new()
         type_contains_extern_rec(ty, externs, visited)
     }
+}
+
+// Physical RC eligibility is shared by the exact-none cleanup planner and its
+// verifier.  It deliberately says nothing about logical ownership transfer:
+// it only proves that ring_dup/ring_drop may touch this value safely.
+pub fn type_is_physical_rc_eligible(
+    ty: Type, externs: Set<Str>
+) -> Bool {
+    !is_rc_excluded_type(ty, externs) &&
+    !type_contains_extern_handle(ty, externs)
 }
 
 fn type_contains_extern_rec(ty: Type, externs: Set<Str>, mut visited: Set<Str>) -> Bool {

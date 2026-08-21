@@ -102,8 +102,10 @@ use types::{Type}
 use hir::{HDecl, HStmt, HExpr, HParam, HProgram, HMatchArm, HStructFieldInit,
     HStringInterpPart, HEffectHandler, hexpr_type, hexpr_span,
     is_rc_excluded_type, type_contains_extern_handle,
+    type_is_physical_rc_eligible, is_synthetic_rc_def_id,
     is_borrow_returning_call, is_fresh_owned_bool_value,
-    is_nullary_variant_ctor_ident, is_materialized_fn_value,
+    is_nullary_variant_ctor_ident, is_option_none_ctor_ident,
+    is_materialized_fn_value,
     is_exact_direct_call_ident}
 use perceus::{rc_name_skippable, is_str_index, is_unresolved_var_type,
     sink_arg_indices, is_variant_constructor_call, expr_diverges, stmt_diverges,
@@ -126,6 +128,8 @@ const K_OWNED: Int = 0       // droppable owned local — exactly-once consumpti
 const K_BORROW: Int = 1      // param / pattern projection / for-in binding / destructure
 const K_NONOWNED: Int = 2    // local the pass deliberately does not drop
 const K_CAPTURE: Int = 3     // outer exact binding, borrowed in nested callable
+const K_OPTION_CLEANUP: Int = 4 // exact S′ `var Option = none` cleanup slot
+const K_OPTION_REJECTED: Int = 5 // test-mutated false admission, already fatal
 
 // Binding states (owned bindings)
 const S_LIVE: Int = 0
@@ -460,7 +464,100 @@ fn v_type_excluded(ty: Type, externs: Set<Str>) -> Bool {
 // `Ident => true` arm means "owner-bearing, will be Clone-wrapped at the
 // escape"; post-RC that Clone is visible directly.)  KEEP IN SYNC with
 // perceus.is_droppable_init — a drift shows up as self-verify findings.
+const V_DROP_PRODUCER_OWNED: Int = 0
+const V_DROP_PRODUCER_NOOP_NONE: Int = 1
+const V_DROP_PRODUCER_OPAQUE: Int = 2
+
+fn v_merge_droppable_branch_classes(classes: List<Option<Int>>) -> Int {
+    let mut saw_value = false
+    let mut saw_owned = false
+    for maybe_class in classes {
+        match maybe_class {
+            some(class) => {
+                saw_value = true
+                if class == V_DROP_PRODUCER_OPAQUE {
+                    return V_DROP_PRODUCER_OPAQUE
+                }
+                if class == V_DROP_PRODUCER_OWNED { saw_owned = true }
+            },
+            none => {}
+        }
+    }
+    if !saw_value {
+        V_DROP_PRODUCER_OPAQUE
+    } else if saw_owned {
+        V_DROP_PRODUCER_OWNED
+    } else {
+        V_DROP_PRODUCER_NOOP_NONE
+    }
+}
+
+fn v_droppable_branch_producer_class(
+    body: HExpr, externs: Set<Str>
+) -> Option<Int> {
+    if expr_diverges(body) {
+        none
+    } else {
+        some(v_droppable_producer_class(body, externs))
+    }
+}
+
+fn v_droppable_producer_class(init: HExpr, externs: Set<Str>) -> Int {
+    if !type_is_physical_rc_eligible(hexpr_type(init), externs) {
+        return V_DROP_PRODUCER_OPAQUE
+    }
+    if is_option_none_ctor_ident(init) {
+        return V_DROP_PRODUCER_NOOP_NONE
+    }
+    match init {
+        HExpr::IfExpr { then_branch, else_branch, .. } => match else_branch {
+            some(other) => v_merge_droppable_branch_classes([
+                v_droppable_branch_producer_class(then_branch, externs),
+                v_droppable_branch_producer_class(other, externs)
+            ]),
+            none => V_DROP_PRODUCER_OPAQUE
+        },
+        HExpr::MatchExpr { arms, .. } => {
+            let mut classes: List<Option<Int>> = []
+            for arm in arms {
+                let body_reachable = match arm.guard {
+                    some(guard) => !expr_diverges(guard),
+                    none => true
+                }
+                if body_reachable {
+                    classes.push(v_droppable_branch_producer_class(
+                        arm.body, externs))
+                } else {
+                    classes.push(none)
+                }
+            }
+            v_merge_droppable_branch_classes(classes)
+        },
+        HExpr::Block { stmts, tail, .. } => match tail {
+            some(value) => match value {
+                HExpr::Ident { def_id: some(id), .. } =>
+                    match v_block_local_init(stmts, id) {
+                        some(original) => v_droppable_producer_class(
+                            original, externs),
+                        none => v_droppable_producer_class(value, externs)
+                    },
+                _ => v_droppable_producer_class(value, externs)
+            },
+            none => V_DROP_PRODUCER_OPAQUE
+        },
+        _ => if v_droppable_leaf_init(init, externs) {
+            V_DROP_PRODUCER_OWNED
+        } else {
+            V_DROP_PRODUCER_OPAQUE
+        }
+    }
+}
+
 fn v_droppable_init(init: HExpr, externs: Set<Str>) -> Bool {
+    v_droppable_producer_class(init, externs) == V_DROP_PRODUCER_OWNED
+}
+
+fn v_droppable_leaf_init(init: HExpr, externs: Set<Str>) -> Bool {
     let ty = hexpr_type(init)
     if is_rc_excluded_type(ty, externs) {
         return false
@@ -510,54 +607,19 @@ fn v_droppable_init(init: HExpr, externs: Set<Str>) -> Bool {
         // here is eager arith/compare with a fresh boxed result.
         HExpr::BinOp { .. } => true,
         HExpr::UnaryOp { .. } => true,
-        HExpr::IfExpr { then_branch, else_branch, .. } => {
-            match else_branch {
-                none => false,
-                some(eb) => v_droppable_branch(then_branch, externs) && v_droppable_branch(eb, externs),
-            }
-        },
-        HExpr::MatchExpr { arms, .. } => {
-            let mut all = arms.len() > 0
-            for arm in arms {
-                if v_droppable_branch(arm.body, externs) == false { all = false }
-            }
-            all
-        },
-        HExpr::Block { stmts, tail, .. } => {
-            match tail {
-                some(t) => match t {
-                    // POST-RC hoisted tail: classify the hoist binding's init.
-                    HExpr::Ident { def_id, .. } => match def_id {
-                        some(id) => match v_block_local_init(stmts, id) {
-                            some(hi) => v_droppable_init(hi, externs),
-                            none => true
-                        },
-                        none => false
-                    },
-                    _ => v_droppable_init(t, externs),
-                },
-                none => false,
-            }
-        },
+        HExpr::IfExpr { .. } | HExpr::MatchExpr { .. } |
+        HExpr::Block { .. } => panic(
+            "unreachable: verifier control-flow droppability bypassed producer lattice"),
         _ => false,
-    }
-}
-
-fn v_droppable_branch(body: HExpr, externs: Set<Str>) -> Bool {
-    if expr_diverges(body) {
-        true
-    } else {
-        match body {
-            HExpr::Block { .. } => v_droppable_init(body, externs),
-            _ => v_droppable_init(body, externs),
-        }
     }
 }
 
 // The init of the exact direct Let/Var binding `def_id` in a statement list
 // (post-RC hoist resolution; mirrors hir.block_local_init).
-fn v_block_local_init(stmts: List<HStmt>, def_id: Int) -> HExpr? {
-    let mut found: HExpr? = none
+fn v_block_local_init(
+    stmts: List<HStmt>, def_id: Int
+) -> Option<HExpr> {
+    let mut found: Option<HExpr> = none
     for s in stmts {
         match s {
             HStmt::Let { def_id: some(id), init, .. } => {
@@ -570,6 +632,593 @@ fn v_block_local_init(stmts: List<HStmt>, def_id: Int) -> HExpr? {
         }
     }
     found
+}
+
+fn v_resolve_synthetic_rc_expr(
+    stmts: List<HStmt>, value: HExpr, depth: Int
+) -> HExpr {
+    if depth > 64 { return value }
+    match value {
+        HExpr::Ident { def_id: some(id), .. } => {
+            if is_synthetic_rc_def_id(id) {
+                match v_block_local_init(stmts, id) {
+                    some(init) => v_resolve_synthetic_rc_expr(
+                        stmts, init, depth + 1),
+                    none => value
+                }
+            } else {
+                value
+            }
+        },
+        _ => value
+    }
+}
+
+// Recover the exact producer preceding an RC tail/W4 hoist.  The bounded depth
+// guard makes a malformed synthetic cycle fail closed rather than self-prove.
+fn v_original_block_tail(
+    stmts: List<HStmt>, tail: Option<HExpr>
+) -> Option<HExpr> {
+    match tail {
+        some(value) => some(v_resolve_synthetic_rc_expr(
+            stmts, value, 0)),
+        none => none
+    }
+}
+
+fn v_block_tail_is_synthetic(
+    stmts: List<HStmt>, tail: Option<HExpr>
+) -> Bool {
+    match tail {
+        some(HExpr::Ident { def_id: some(id), .. }) =>
+            is_synthetic_rc_def_id(id) &&
+            v_block_local_init(stmts, id).is_some(),
+        _ => false
+    }
+}
+
+// Independent verifier-side owner decision.  In particular every Call stays
+// fail-closed here; the verifier does not borrow Perceus's S′ admission answer.
+fn v_tail_is_owner_bearing(expr: HExpr) -> Bool {
+    if is_materialized_fn_value(expr) { return false }
+    let nullary_variant_ctor = is_nullary_variant_ctor_ident(expr)
+    let option_none_ctor = is_option_none_ctor_ident(expr)
+    match expr {
+        HExpr::Ident { .. } =>
+            !nullary_variant_ctor && !option_none_ctor,
+        HExpr::FieldAccess { .. } => true,
+        HExpr::IndexExpr { receiver, .. } => !is_str_index(receiver),
+        HExpr::Call { .. } => true,
+        _ => false
+    }
+}
+
+fn v_escape_is_noop_on_reachable_tail(
+    expr: HExpr, reject_synthetic_clone: Bool
+) -> Bool {
+    if expr_diverges(expr) { return true }
+    match expr {
+        HExpr::Clone { inner, .. } => if reject_synthetic_clone {
+            v_escape_is_noop_on_reachable_tail(
+                inner, reject_synthetic_clone)
+        } else {
+            true
+        },
+        HExpr::IfExpr { then_branch, else_branch, .. } => {
+            if !v_escape_is_noop_on_reachable_tail(
+                    then_branch, reject_synthetic_clone) {
+                return false
+            }
+            match else_branch {
+                some(other) => v_escape_is_noop_on_reachable_tail(
+                    other, reject_synthetic_clone),
+                none => true
+            }
+        },
+        HExpr::MatchExpr { arms, .. } => {
+            for arm in arms {
+                let body_reachable = match arm.guard {
+                    some(guard) => !expr_diverges(guard),
+                    none => true
+                }
+                if body_reachable &&
+                   !v_escape_is_noop_on_reachable_tail(
+                        arm.body, reject_synthetic_clone) {
+                    return false
+                }
+            }
+            true
+        },
+        HExpr::Block { stmts, tail, .. } =>
+            match v_original_block_tail(stmts, tail) {
+                some(value) => v_escape_is_noop_on_reachable_tail(
+                    value, reject_synthetic_clone),
+                none => true
+            },
+        HExpr::UnsafeBlock { body, .. } =>
+            v_escape_is_noop_on_reachable_tail(
+                body, reject_synthetic_clone),
+        HExpr::Call { .. } | HExpr::TryCatch { .. } |
+        HExpr::HandleExpr { .. } | HExpr::EffectOp { .. } => false,
+        _ => !v_tail_is_owner_bearing(expr)
+    }
+}
+
+fn v_block_option_tail_is_safe(
+    stmts: List<HStmt>, tail: Option<HExpr>, mode: Int
+) -> Bool {
+    let synthetic = v_block_tail_is_synthetic(stmts, tail)
+    match v_original_block_tail(stmts, tail) {
+        some(value) => v_escape_is_noop_on_reachable_tail(
+            value, synthetic && mode == M_BORROWED),
+        none => true
+    }
+}
+
+fn v_option_write_branch_producer_class(
+    body: HExpr, enclosing_stmts: List<HStmt>, externs: Set<Str>,
+    peel_clone: Bool, depth: Int
+) -> Option<Int> {
+    if expr_diverges(body) {
+        none
+    } else {
+        some(v_option_write_producer_class(
+            body, enclosing_stmts, externs, peel_clone, depth + 1))
+    }
+}
+
+fn v_option_write_producer_class(
+    init: HExpr, enclosing_stmts: List<HStmt>, externs: Set<Str>,
+    peel_clone: Bool, depth: Int
+) -> Int {
+    if depth > 64 { return V_DROP_PRODUCER_OPAQUE }
+    if !type_is_physical_rc_eligible(hexpr_type(init), externs) {
+        return V_DROP_PRODUCER_OPAQUE
+    }
+    if is_option_none_ctor_ident(init) {
+        return V_DROP_PRODUCER_NOOP_NONE
+    }
+    match init {
+        HExpr::Ident { def_id: some(id), .. } => {
+            if is_synthetic_rc_def_id(id) {
+                match v_block_local_init(enclosing_stmts, id) {
+                    some(original) => v_option_write_producer_class(
+                        original, enclosing_stmts, externs, true, depth + 1),
+                    none => V_DROP_PRODUCER_OPAQUE
+                }
+            } else if is_nullary_variant_ctor_ident(init) {
+                V_DROP_PRODUCER_OWNED
+            } else {
+                V_DROP_PRODUCER_OPAQUE
+            }
+        },
+        HExpr::Ident { .. } => if is_nullary_variant_ctor_ident(init) {
+            V_DROP_PRODUCER_OWNED
+        } else {
+            V_DROP_PRODUCER_OPAQUE
+        },
+        HExpr::Clone { inner, .. } => if peel_clone {
+            v_option_write_producer_class(
+                inner, enclosing_stmts, externs, peel_clone, depth + 1)
+        } else {
+            V_DROP_PRODUCER_OWNED
+        },
+        HExpr::IfExpr { then_branch, else_branch, .. } => match else_branch {
+            some(other) => v_merge_droppable_branch_classes([
+                v_option_write_branch_producer_class(
+                    then_branch, enclosing_stmts, externs,
+                    peel_clone, depth),
+                v_option_write_branch_producer_class(
+                    other, enclosing_stmts, externs,
+                    peel_clone, depth)
+            ]),
+            none => V_DROP_PRODUCER_OPAQUE
+        },
+        HExpr::MatchExpr { arms, .. } => {
+            let mut classes: List<Option<Int>> = []
+            for arm in arms {
+                let body_reachable = match arm.guard {
+                    some(guard) => !expr_diverges(guard),
+                    none => true
+                }
+                if body_reachable {
+                    classes.push(v_option_write_branch_producer_class(
+                        arm.body, enclosing_stmts, externs,
+                        peel_clone, depth))
+                } else {
+                    classes.push(none)
+                }
+            }
+            v_merge_droppable_branch_classes(classes)
+        },
+        HExpr::Block { stmts, tail, .. } =>
+            match v_original_block_tail(stmts, tail) {
+                some(value) => v_option_write_producer_class(
+                    value, stmts, externs, peel_clone, depth + 1),
+                none => V_DROP_PRODUCER_OPAQUE
+            },
+        HExpr::UnsafeBlock { body, .. } =>
+            v_option_write_producer_class(
+                body, enclosing_stmts, externs, peel_clone, depth + 1),
+        HExpr::Call { callee, ty, .. } => {
+            if is_variant_constructor_call(callee, ty) {
+                V_DROP_PRODUCER_OWNED
+            } else {
+                V_DROP_PRODUCER_OPAQUE
+            }
+        },
+        HExpr::StructLit { .. } |
+        HExpr::NamedVariantConstruct { .. } |
+        HExpr::ListLit { .. } | HExpr::TupleLit { .. } |
+        HExpr::RangeExpr { .. } | HExpr::Lambda { .. } |
+        HExpr::StringInterp { .. } | HExpr::DictConstruct { .. } |
+        HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
+        HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
+        HExpr::BinOp { .. } | HExpr::UnaryOp { .. } =>
+            V_DROP_PRODUCER_OWNED,
+        _ => V_DROP_PRODUCER_OPAQUE
+    }
+}
+
+fn v_option_expr_writes_are_safe(
+    expr: HExpr, target_def_id: Int, externs: Set<Str>,
+    nested_callable: Bool
+) -> Bool {
+    match expr {
+        HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
+        HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
+        HExpr::Ident { .. } | HExpr::DictConstruct { .. } => true,
+        HExpr::BinOp { left, right, .. } =>
+            v_option_expr_writes_are_safe(
+                left, target_def_id, externs, nested_callable) &&
+            v_option_expr_writes_are_safe(
+                right, target_def_id, externs, nested_callable),
+        HExpr::UnaryOp { operand, .. } =>
+            v_option_expr_writes_are_safe(
+                operand, target_def_id, externs, nested_callable),
+        HExpr::Call { callee, args, .. } => {
+            if !v_option_expr_writes_are_safe(
+                    callee, target_def_id, externs, nested_callable) {
+                return false
+            }
+            for arg in args {
+                if !v_option_expr_writes_are_safe(
+                        arg, target_def_id, externs, nested_callable) {
+                    return false
+                }
+            }
+            true
+        },
+        HExpr::FieldAccess { receiver, .. } =>
+            v_option_expr_writes_are_safe(
+                receiver, target_def_id, externs, nested_callable),
+        HExpr::StructLit { fields, spread, .. } |
+        HExpr::NamedVariantConstruct { fields, spread, .. } => {
+            for field in fields {
+                if !v_option_expr_writes_are_safe(
+                        field.value, target_def_id, externs,
+                        nested_callable) {
+                    return false
+                }
+            }
+            match spread {
+                some(value) => v_option_expr_writes_are_safe(
+                    value, target_def_id, externs, nested_callable),
+                none => true
+            }
+        },
+        HExpr::MatchExpr { scrutinee, arms, .. } => {
+            if !v_option_expr_writes_are_safe(
+                    scrutinee, target_def_id, externs, nested_callable) {
+                return false
+            }
+            for arm in arms {
+                match arm.guard {
+                    some(guard) => if !v_option_expr_writes_are_safe(
+                            guard, target_def_id, externs,
+                            nested_callable) {
+                        return false
+                    },
+                    none => {}
+                }
+                let body_reachable = match arm.guard {
+                    some(guard) => !expr_diverges(guard),
+                    none => true
+                }
+                if body_reachable &&
+                   !v_option_expr_writes_are_safe(
+                        arm.body, target_def_id, externs,
+                        nested_callable) {
+                    return false
+                }
+            }
+            true
+        },
+        HExpr::Block { stmts, tail, .. } =>
+            v_option_stmts_writes_are_safe(
+                stmts, tail, target_def_id, externs, nested_callable),
+        HExpr::IfExpr { condition, then_branch, else_branch, .. } => {
+            if !v_option_expr_writes_are_safe(
+                    condition, target_def_id, externs, nested_callable) ||
+               !v_option_expr_writes_are_safe(
+                    then_branch, target_def_id, externs, nested_callable) {
+                return false
+            }
+            match else_branch {
+                some(other) => v_option_expr_writes_are_safe(
+                    other, target_def_id, externs, nested_callable),
+                none => true
+            }
+        },
+        HExpr::StringInterp { parts, .. } => {
+            for part in parts {
+                match part {
+                    HStringInterpPart::Expression(value) =>
+                        if !v_option_expr_writes_are_safe(
+                                value, target_def_id, externs,
+                                nested_callable) {
+                            return false
+                        },
+                    HStringInterpPart::Literal(_) => {}
+                }
+            }
+            true
+        },
+        HExpr::TryCatch { body, arms, .. } => {
+            if !v_option_expr_writes_are_safe(
+                    body, target_def_id, externs, nested_callable) {
+                return false
+            }
+            for arm in arms {
+                match arm.guard {
+                    some(guard) => if !v_option_expr_writes_are_safe(
+                            guard, target_def_id, externs,
+                            nested_callable) {
+                        return false
+                    },
+                    none => {}
+                }
+                let body_reachable = match arm.guard {
+                    some(guard) => !expr_diverges(guard),
+                    none => true
+                }
+                if body_reachable &&
+                   !v_option_expr_writes_are_safe(
+                        arm.body, target_def_id, externs,
+                        nested_callable) {
+                    return false
+                }
+            }
+            true
+        },
+        HExpr::HandleExpr { body, handlers, .. } => {
+            if !v_option_expr_writes_are_safe(
+                    body, target_def_id, externs, nested_callable) {
+                return false
+            }
+            for handler in handlers {
+                if !v_option_expr_writes_are_safe(
+                        handler.body, target_def_id, externs, true) {
+                    return false
+                }
+            }
+            true
+        },
+        HExpr::Lambda { body, .. } =>
+            v_option_expr_writes_are_safe(
+                body, target_def_id, externs, true),
+        HExpr::EffectOp { args, .. } => {
+            for arg in args {
+                if !v_option_expr_writes_are_safe(
+                        arg, target_def_id, externs,
+                        nested_callable) {
+                    return false
+                }
+            }
+            true
+        },
+        HExpr::RangeExpr { start, end, .. } =>
+            v_option_expr_writes_are_safe(
+                start, target_def_id, externs, nested_callable) &&
+            v_option_expr_writes_are_safe(
+                end, target_def_id, externs, nested_callable),
+        HExpr::ListLit { elements, .. } |
+        HExpr::TupleLit { elements, .. } => {
+            for element in elements {
+                if !v_option_expr_writes_are_safe(
+                        element, target_def_id, externs,
+                        nested_callable) {
+                    return false
+                }
+            }
+            true
+        },
+        HExpr::IndexExpr { receiver, index, .. } =>
+            v_option_expr_writes_are_safe(
+                receiver, target_def_id, externs, nested_callable) &&
+            v_option_expr_writes_are_safe(
+                index, target_def_id, externs, nested_callable),
+        HExpr::Clone { inner, .. } =>
+            v_option_expr_writes_are_safe(
+                inner, target_def_id, externs, nested_callable),
+        HExpr::ReturnExpr { value, .. } => match value {
+            some(result) => v_option_expr_writes_are_safe(
+                result, target_def_id, externs, nested_callable),
+            none => true
+        },
+        HExpr::UnsafeBlock { body, .. } =>
+            v_option_expr_writes_are_safe(
+                body, target_def_id, externs, nested_callable)
+    }
+}
+
+fn v_option_stmt_writes_are_safe(
+    stmt: HStmt, enclosing_stmts: List<HStmt>, target_def_id: Int,
+    externs: Set<Str>, nested_callable: Bool
+) -> Bool {
+    match stmt {
+        HStmt::Let { init, .. } | HStmt::Var { init, .. } |
+        HStmt::ExprStmt { expr: init, .. } |
+        HStmt::LetDestructure { init, .. } =>
+            v_option_expr_writes_are_safe(
+                init, target_def_id, externs, nested_callable),
+        HStmt::Assign { target, value, .. } => {
+            let writes_target = match target {
+                HExpr::Ident { def_id: some(id), .. } =>
+                    id == target_def_id,
+                _ => false
+            }
+            if writes_target &&
+               (nested_callable ||
+                v_option_write_producer_class(
+                    value, enclosing_stmts, externs, true, 0) ==
+                    V_DROP_PRODUCER_OPAQUE) {
+                return false
+            }
+            v_option_expr_writes_are_safe(
+                target, target_def_id, externs, nested_callable) &&
+            v_option_expr_writes_are_safe(
+                value, target_def_id, externs, nested_callable)
+        },
+        HStmt::Return { value, .. } => match value {
+            some(result) => v_option_expr_writes_are_safe(
+                result, target_def_id, externs, nested_callable),
+            none => true
+        },
+        HStmt::While { condition, body, .. } =>
+            v_option_expr_writes_are_safe(
+                condition, target_def_id, externs, nested_callable) &&
+            v_option_expr_writes_are_safe(
+                body, target_def_id, externs, nested_callable),
+        HStmt::ForIn { iterable, body, .. } =>
+            v_option_expr_writes_are_safe(
+                iterable, target_def_id, externs, nested_callable) &&
+            v_option_expr_writes_are_safe(
+                body, target_def_id, externs, nested_callable),
+        HStmt::IfLet { expr, then_block, else_block, .. } => {
+            if !v_option_expr_writes_are_safe(
+                    expr, target_def_id, externs, nested_callable) ||
+               !v_option_expr_writes_are_safe(
+                    then_block, target_def_id, externs,
+                    nested_callable) {
+                return false
+            }
+            match else_block {
+                some(other) => v_option_expr_writes_are_safe(
+                    other, target_def_id, externs, nested_callable),
+                none => true
+            }
+        },
+        HStmt::Break { .. } | HStmt::Continue { .. } |
+        HStmt::Drop { .. } => true
+    }
+}
+
+fn v_option_stmts_writes_are_safe(
+    stmts: List<HStmt>, tail: Option<HExpr>, target_def_id: Int,
+    externs: Set<Str>, nested_callable: Bool
+) -> Bool {
+    let mut reaches_next = true
+    for stmt in stmts {
+        if reaches_next {
+            if !v_option_stmt_writes_are_safe(
+                    stmt, stmts, target_def_id, externs,
+                    nested_callable) {
+                return false
+            }
+            if stmt_diverges(stmt) { reaches_next = false }
+        }
+    }
+    if reaches_next {
+        match tail {
+            some(value) => v_option_expr_writes_are_safe(
+                value, target_def_id, externs, nested_callable),
+            none => true
+        }
+    } else {
+        true
+    }
+}
+
+fn v_option_cleanup_base_candidate(
+    stmt: HStmt, boxed: Set<Int>, externs: Set<Str>
+) -> Option<Int> {
+    match stmt {
+        HStmt::Var { name, def_id: some(id), ty, init, .. } => {
+            if !rc_name_skippable(name) && !boxed.contains(id) &&
+               type_is_physical_rc_eligible(ty, externs) &&
+               is_option_none_ctor_ident(init) {
+                some(id)
+            } else {
+                none
+            }
+        },
+        _ => none
+    }
+}
+
+fn v_option_cleanup_def_ids(
+    stmts: List<HStmt>, tail: Option<HExpr>, mode: Int,
+    boxed: Set<Int>, externs: Set<Str>
+) -> Set<Int> {
+    let mut out: Set<Int> = set_new()
+    let tail_safe = v_block_option_tail_is_safe(stmts, tail, mode)
+    let mut reaches_next = true
+    for stmt in stmts {
+        if reaches_next {
+            match v_option_cleanup_base_candidate(stmt, boxed, externs) {
+                some(def_id) => if tail_safe &&
+                    v_option_stmts_writes_are_safe(
+                        stmts, tail, def_id, externs, false) {
+                    out.insert(def_id)
+                },
+                none => {}
+            }
+            if stmt_diverges(stmt) { reaches_next = false }
+        }
+    }
+    out
+}
+
+fn v_block_has_direct_drop(stmts: List<HStmt>, def_id: Int) -> Bool {
+    for stmt in stmts {
+        match stmt {
+            HStmt::Drop { def_id: dropped, .. } =>
+                if dropped == def_id { return true },
+            _ => {}
+        }
+    }
+    false
+}
+
+fn v_option_rejected_def_ids(
+    stmts: List<HStmt>, tail: Option<HExpr>, mode: Int,
+    boxed: Set<Int>, externs: Set<Str>, reject_tail: Bool
+) -> Set<Int> {
+    let mut out: Set<Int> = set_new()
+    let tail_safe = v_block_option_tail_is_safe(stmts, tail, mode)
+    let mut reaches_next = true
+    for stmt in stmts {
+        if reaches_next {
+            match v_option_cleanup_base_candidate(stmt, boxed, externs) {
+                some(def_id) => {
+                    let writes_safe = v_option_stmts_writes_are_safe(
+                        stmts, tail, def_id, externs, false)
+                    let rejected = if reject_tail {
+                        !tail_safe
+                    } else {
+                        tail_safe && !writes_safe
+                    }
+                    if rejected && v_block_has_direct_drop(stmts, def_id) {
+                        out.insert(def_id)
+                    }
+                },
+                none => {}
+            }
+            if stmt_diverges(stmt) { reaches_next = false }
+        }
+    }
+    out
 }
 
 // ============================================================
@@ -631,6 +1280,7 @@ fn v_cond(expr: HExpr, mut ctx: VCtx) {
 
 fn v_expr(expr: HExpr, mode: Int, mut ctx: VCtx) -> Int {
     let nullary_variant_ctor = is_nullary_variant_ctor_ident(expr)
+    let option_none_ctor = is_option_none_ctor_ident(expr)
     let materialized_fn_value = is_materialized_fn_value(expr)
     match expr {
         HExpr::IntLit { ty, .. } => v_cls_of_fresh(ty, ctx.externs),
@@ -642,7 +1292,10 @@ fn v_expr(expr: HExpr, mode: Int, mut ctx: VCtx) -> Int {
             // Inference represents a fieldless enum construction as an Ident,
             // but both native backends call its zero-argument constructor.  It
             // is therefore a fresh owned production, not a binding/global read.
-            if nullary_variant_ctor || materialized_fn_value {
+            if option_none_ctor {
+                // The exact immortal Option::none constructor is RC-neutral.
+                CLS_EXCLUDED
+            } else if nullary_variant_ctor || materialized_fn_value {
                 v_cls_of_fresh(ty, ctx.externs)
             } else {
                 v_ident(name, def_id, ty, span, mode, ctx)
@@ -874,17 +1527,28 @@ fn v_expr(expr: HExpr, mode: Int, mut ctx: VCtx) -> Int {
                     some(g) => { v_cond(g, ctx) },
                     none => {},
                 }
-                v_cf_branch(arm.body, mode, ctx)
+                let arm_result = v_cf_branch(arm.body, mode, ctx)
                 v_pop_frame(ctx)
-                // #167: detect catch arm altering enclosing binding state
-                let snap_arm = v_snapshot(ctx)
-                let mut ci = 0
-                while ci < snap0.len() && ci < snap_arm.len() {
-                    if snap0[ci] == S_LIVE && snap_arm[ci] != S_LIVE {
-                        v_report(ctx, "rc-imbalance", true,
-                            "catch arm drops/moves enclosing owned binding '${ctx.names[ci]}' — scope-end will double-free (#167 class)", arm.span)
+                if !arm_result.1 {
+                    // Only a normally returning catch arm rejoins the outer
+                    // scope.  It must preserve both ordinary and K_OPTION state;
+                    // diverging arms already perform their own exact exits.
+                    let snap_arm = v_snapshot(ctx)
+                    let mut ci = 0
+                    while ci < snap0.len() && ci < snap_arm.len() {
+                        let ordinary_owned_changed =
+                            ctx.kinds[ci] == K_OWNED &&
+                            snap0[ci] == S_LIVE && snap_arm[ci] != S_LIVE
+                        let option_cleanup_changed =
+                            ctx.kinds[ci] == K_OPTION_CLEANUP &&
+                            snap_arm[ci] != snap0[ci]
+                        if ordinary_owned_changed || option_cleanup_changed {
+                            v_report(ctx, "rc-imbalance", true,
+                                "catch arm changes enclosing cleanup state for exact binding '${ctx.names[ci]}'",
+                                arm.span)
+                        }
+                        ci = ci + 1
                     }
-                    ci = ci + 1
                 }
             }
             v_restore(ctx, snap_body)
@@ -925,6 +1589,12 @@ fn v_expr(expr: HExpr, mode: Int, mut ctx: VCtx) -> Int {
                 if ctx.kinds[i] == K_OWNED && ctx.states[i] == S_LIVE {
                     v_report(ctx, "leak-return", true,
                         "owned binding '${ctx.names[i]}' is live (not dropped) at this return", span)
+                }
+                if ctx.kinds[i] == K_OPTION_CLEANUP &&
+                   ctx.states[i] != S_DROPPED {
+                    v_report(ctx, "leak-option-exit", true,
+                        "cleanup-active Option binding '${ctx.names[i]}' has no exit Drop at this return",
+                        span)
                 }
                 i = i + 1
             }
@@ -978,6 +1648,17 @@ fn v_ident(
             }
             0 - 1
         }
+    }
+    if idx >= 0 && (ctx.kinds[idx] == K_OPTION_CLEANUP ||
+                    ctx.kinds[idx] == K_OPTION_REJECTED) {
+        if ctx.states[idx] != S_LIVE {
+            v_report(ctx, "uaf-use-after-drop", true,
+                "read of cleanup-active Option '${name}' after its exact slot was Dropped",
+                span)
+        }
+        // A bare slot read is still a borrow.  Perceus must materialize an
+        // independent Clone at every consuming edge.
+        return CLS_BORROW
     }
     // An exact owned producer (slot read/take or Clone<TypeVar>) can bind an
     // unnamed TypeVar.  Binding provenance is stronger than the generic
@@ -1057,14 +1738,20 @@ fn v_cf_class(ty: Type, results: List<(Int, Bool)>, mode: Int, ctx: VCtx) -> Int
         return CLS_OPAQUE
     }
     let mut all_owned = true
+    let mut any_owned = false
     let mut any = false
     for r in results {
         if r.1 == false {
             any = true
+            if r.0 == CLS_OWNED { any_owned = true }
             if r.0 != CLS_OWNED && r.0 != CLS_EXCLUDED { all_owned = false }
         }
     }
-    if any && all_owned { CLS_OWNED } else { CLS_OPAQUE }
+    if any && all_owned {
+        if any_owned { CLS_OWNED } else { CLS_EXCLUDED }
+    } else {
+        CLS_OPAQUE
+    }
 }
 
 // Two-way branch state merge (if/else, if-let).
@@ -1124,11 +1811,21 @@ fn v_handler_scope(h: HEffectHandler, mut ctx: VCtx) {
 fn v_block(block: HExpr, mode: Int, mut ctx: VCtx) -> (Int, Bool) {
     match block {
         HExpr::Block { stmts, tail, .. } => {
+            let option_cleanup_def_ids = v_option_cleanup_def_ids(
+                stmts, tail, mode, ctx.boxed, ctx.externs)
+            let option_rejected_tail_def_ids = v_option_rejected_def_ids(
+                stmts, tail, mode, ctx.boxed, ctx.externs, true)
+            let option_rejected_write_def_ids = v_option_rejected_def_ids(
+                stmts, tail, mode, ctx.boxed, ctx.externs, false)
             v_push_frame(ctx)
             let mut diverged = false
             for s in stmts {
                 if diverged == false {
-                    if v_stmt(s, ctx) { diverged = true }
+                    if v_stmt(s, option_cleanup_def_ids,
+                            option_rejected_tail_def_ids,
+                            option_rejected_write_def_ids, ctx) {
+                        diverged = true
+                    }
                 }
             }
             let mut cls = CLS_EXCLUDED
@@ -1211,18 +1908,67 @@ fn v_check_frame_leaks(mut ctx: VCtx) {
             v_report(ctx, "leak-binding", true,
                 "owned binding '${ctx.names[i]}' is never consumed (no drop/move) on the fall-through path", ctx.spans[i])
         }
+        if ctx.kinds[i] == K_OPTION_CLEANUP &&
+           ctx.states[i] != S_DROPPED {
+            v_report(ctx, "leak-option-exit", true,
+                "cleanup-active Option binding '${ctx.names[i]}' has no exit Drop on the fall-through path",
+                ctx.spans[i])
+        }
         i = i + 1
     }
 }
 
-fn v_stmt(stmt: HStmt, mut ctx: VCtx) -> Bool {
+fn v_stmt(
+    stmt: HStmt, option_cleanup_def_ids: Set<Int>,
+    option_rejected_tail_def_ids: Set<Int>,
+    option_rejected_write_def_ids: Set<Int>, mut ctx: VCtx
+) -> Bool {
     match stmt {
         HStmt::Let { name, def_id, init, span, .. } => {
             v_let_like(name, def_id, init, span, ctx)
             false
         },
         HStmt::Var { name, def_id, init, span, .. } => {
-            v_let_like(name, def_id, init, span, ctx)
+            let option_cleanup = match def_id {
+                some(id) => option_cleanup_def_ids.contains(id),
+                none => false
+            }
+            let rejected_tail = match def_id {
+                some(id) => option_rejected_tail_def_ids.contains(id),
+                none => false
+            }
+            let rejected_write = match def_id {
+                some(id) => option_rejected_write_def_ids.contains(id),
+                none => false
+            }
+            if option_cleanup || rejected_tail || rejected_write {
+                let _ = v_consume(init, ctx)
+                let exact_def_id = v_required_def_id(
+                    def_id, "Option cleanup binding '${name}'")
+                let bind_span = if span.file == "<perceus>" {
+                    hexpr_span(init)
+                } else {
+                    span
+                }
+                if rejected_tail {
+                    v_report(ctx, "uaf-option-tail-admission", true,
+                        "cleanup-active Option '${name}' was admitted through a borrowed/opaque tail",
+                        bind_span)
+                }
+                if rejected_write {
+                    v_report(ctx, "uaf-option-opaque-write", true,
+                        "cleanup-active Option '${name}' has an OPAQUE exact-slot assignment producer",
+                        bind_span)
+                }
+                let kind = if option_cleanup {
+                    K_OPTION_CLEANUP
+                } else {
+                    K_OPTION_REJECTED
+                }
+                v_bind(ctx, name, exact_def_id, kind, bind_span)
+            } else {
+                v_let_like(name, def_id, init, span, ctx)
+            }
             false
         },
         HStmt::Assign { target, value, span } => {
@@ -1248,6 +1994,12 @@ fn v_stmt(stmt: HStmt, mut ctx: VCtx) -> Bool {
                 if ctx.kinds[i] == K_OWNED && ctx.states[i] == S_LIVE {
                     v_report(ctx, "leak-return", true,
                         "owned binding '${ctx.names[i]}' is live (not dropped) at this return", span)
+                }
+                if ctx.kinds[i] == K_OPTION_CLEANUP &&
+                   ctx.states[i] != S_DROPPED {
+                    v_report(ctx, "leak-option-exit", true,
+                        "cleanup-active Option binding '${ctx.names[i]}' has no exit Drop at this return",
+                        span)
                 }
                 i = i + 1
             }
@@ -1424,6 +2176,20 @@ fn v_assign(target: HExpr, value: HExpr, span: Span, mut ctx: VCtx) {
             if idx < 0 {
                 return
             }
+            if ctx.kinds[idx] == K_OPTION_CLEANUP ||
+               ctx.kinds[idx] == K_OPTION_REJECTED {
+                if ctx.states[idx] != S_DROPPED {
+                    if ctx.kinds[idx] == K_OPTION_CLEANUP {
+                        v_report(ctx, "leak-option-reassign", true,
+                            "cleanup-active Option '${name}' is assigned before its exact old slot is Dropped",
+                            span)
+                    }
+                }
+                // Drop -> Assign re-arms the same exact slot.  A later W4 or
+                // scope exit must consume this new value exactly once.
+                ctx.states.set(idx, S_LIVE)
+                return
+            }
             if ctx.kinds[idx] == K_BORROW {
                 v_report(ctx, "x-overwrite-param", false,
                     "assignment to borrowed binding '${name}' overwrites a value owned elsewhere (documented)", span)
@@ -1490,6 +2256,17 @@ fn v_drop(name: Str, def_id: Int, span: Span, mut ctx: VCtx) {
             "Drop of '${name}' which is not in scope", span)
         return
     }
+    if ctx.kinds[idx] == K_OPTION_CLEANUP ||
+       ctx.kinds[idx] == K_OPTION_REJECTED {
+        if ctx.states[idx] == S_DROPPED {
+            v_report(ctx, "uaf-double-drop", true,
+                "second Drop of cleanup-active Option '${name}' on the same path",
+                span)
+            return
+        }
+        ctx.states.set(idx, S_DROPPED)
+        return
+    }
     if ctx.kinds[idx] == K_BORROW || ctx.kinds[idx] == K_CAPTURE {
         v_report(ctx, "uaf-drop-borrow", true,
             "Drop of borrowed binding '${name}' (param/pattern/for-in projection) — frees a reference owned elsewhere", span)
@@ -1527,6 +2304,12 @@ fn v_check_loop_exit(mut ctx: VCtx, span: Span, what: Str) {
         if ctx.kinds[i] == K_OWNED && ctx.states[i] == S_LIVE {
             v_report(ctx, "leak-loop-exit", true,
                 "owned binding '${ctx.names[i]}' is live (not dropped) at this ${what}", span)
+        }
+        if ctx.kinds[i] == K_OPTION_CLEANUP &&
+           ctx.states[i] != S_DROPPED {
+            v_report(ctx, "leak-option-exit", true,
+                "cleanup-active Option binding '${ctx.names[i]}' has no exit Drop at this ${what}",
+                span)
         }
         i = i + 1
     }

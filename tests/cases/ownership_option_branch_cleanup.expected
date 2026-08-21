@@ -1,0 +1,49 @@
+true
+drop 10
+false
+true
+drop 20
+false
+true
+true
+true
+drop 30
+drop 40
+true
+true
+true
+drop 50
+resource early
+drop 51
+true
+drop 60
+map early
+drop 61
+true
+drop 70
+false
+false
+true
+drop 80
+drop 80
+drop 81
+true
+drop 82
+drop 90
+true
+drop 100
+true
+drop 101
+true
+true
+drop 111
+true
+drop 110
+true
+drop 120
+borrowed str
+true
+true
+true
+drop 130
+done
