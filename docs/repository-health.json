@@ -39,7 +39,7 @@
       "name": "codex/ownership-sprime-first",
       "role": "authority",
       "active_items": ["#268", "#269"],
-      "checkpoint": "dc91b3ae2945e2310b2e67049a30b34565718997"
+      "checkpoint": "c473baaa3463a8f1595e338eb77cacb1eace2e1f"
     },
     {
       "name": "codex/b176-workflow-throughput",
