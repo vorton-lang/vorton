@@ -39,6 +39,8 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **实施硬门**：旧d5/17/df1/37a4/a7 S1候选与sealed packet只作反例/evidence，不作seed或逐点返修；a7 one-shot已user-directed终止且inconclusive。新authority从最新main建立，先固定完整type-state pipeline、typed identity、neutral normalization、ExecutableInventory与“Planner后零binder”structural/mutation contract；所有组件只可在同一authority group渐进checkpoint，未形成完整ResourcePlanner时不得merge行为改变到main。最终验收必须覆盖direct/named owning sink、struct/variant/list/tuple/range/slot、function value/HOF/factory、trait/effect/sig/default/delegate/derive、reexport/diamond/extern bridge、generic recursive shape、loop/catch/handler、none→some overwrite、partial move与single/project parity；随后12 GiB source-built fixed point、完整RC/ASan/self-host/full与exact CI全绿才关闭#268/#269。
 
+> **Compiler-wide staged IR adoption（2026-08-22 用户批准）**：总架构固定为 `AST -> ResolvedAST -> TypedHIR -> CoreHIR -> FinalHIR -> RcHIR -> AbiIR -> mechanical C11`，但不新增平行 P0 或一次性 rewrite。当前 #268/#269 只建立后续可共用的 exact identity、typed carrier、ExecutableInventory、neutral normalization、freeze/validator 与 RcHIR 骨架；不得用 ownership-only side map 抢先形成第二套前端。以后 B-180 仅在测量支持时消费稳定 stage hash/cache，B-168/B-169/B-167 在既有顺序中把 control/evidence/call ABI 放入 CoreHIR/FinalHIR/AbiIR，B-152 把 RIIR/FFI representation 收口到 AbiIR；其他 item 同理按其现有优先级迁入唯一层。每个 cutover 必须原子迁移消费者并删除旧 name/type/backend fallback，B-190 只清理已有迁移证据支持的遗留 authority；上述约束不改变七道门顺序、公开语义/ABI或原验收门。
+
 3. **B-176/B-180 反馈速度**：在 post-ownership 最新 main 重做 baseline；runner 与 compiler 分 checkpoint，但原 2x 量化验收不变。compiler 只允许一个 profile-guided wave。
 4. **B-190 全仓简化**：B-180完成并吸收B-187文档盘点后，以固定snapshot做一次有界过度设计复核与减法refactor；不做rewrite-for-perfection。
 5. **Remaining correctness / ABI freeze**：处理 B-162、B-164、#263、#264、#239、#244、#267、#257，再走 B-168 → B-169 → B-167 → B-152 → B-002，并完成 unsafe/Str 等 candidate gate。
@@ -858,7 +860,7 @@ async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评�
 
 ### B-162 Perceus FieldAccess scalar reassign 不消费旧 boxed scalar [bugfix] [P1] [M] [judgment] [queued]
 
-FieldAccess overwrite 不消费旧 boxed scalar，造成线性泄漏。优先在共享 HIR/Perceus 定义 overwrite；若 C emitter materialize load/drop/store，必须 verifier 可见、不复制 ownership，且 target 只求值一次。本项不与 unboxing 混做。
+FieldAccess overwrite 不消费旧 boxed scalar，造成线性泄漏。优先在共享 FinalHIR/ResourcePlanner/RcHIR 定义 overwrite；AbiIR/C emitter 只 materialize 已验证的 load/drop/store，不能复制 ownership authority，且 target 只求值一次。本项不与 unboxing 混做。
 
 **验收**：FieldAccess/嵌套 lvalue 对旧值恰好消费一次，Ident 不回归；verifier 可见，循环不线性增长；完整 C e2e/RC/ASan/self-host/fixed point 通过。
 

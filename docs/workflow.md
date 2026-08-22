@@ -9,9 +9,9 @@
 1. **唯一配对**：同一仓库默认恰有一个 Discussion session 与一个 Steward session。启动时先用 runtime 的任务发现能力复用同 cwd/repository 的既有 counterpart；不得因标题或摘要变化重复创建。counterpart 确实缺失且用户的双 session standing direction 仍有效时，才创建一个缺失 session；runtime 不支持时以 Steward Inbox 作 durable fallback。
 2. **Discussion 职责**：持有用户对话、公开方向、high-level 路线、用户保留决定、阶段验收定义与方向监督。它可做只读事实核验并写治理真值，但不实现编译器、runtime 或测试功能，也不替 Steward处理普通工程取舍。
 3. **Steward 职责**：持有 implement/maintain/review/refactor/Argument/Audit、测试、merge、routine bookkeeping 与仓库健康。它在既定路线内自主推进，不因 Discussion 休眠而停机。
-4. **双向消息**：Discussion 在用户 verdict 已写入真值并 commit 后，向 Steward 发送 commit SHA、约束、被阻塞/解锁 item 与优先级；Steward 只在用户保留决定、路线/依赖漂移、新 critical 改变主线、跨 session 里程碑、全局阻塞或仓库健康风险需要用户可见时唤醒 Discussion。普通实现状态、命令等待、局部 blocker 与 review 往返不得唤醒 Discussion。
+4. **双向消息**：Discussion 通常在用户 verdict 已写入真值并 commit 后，向 Steward 发送 commit SHA、约束、被阻塞/解锁 item 与优先级。若用户已明确批准、Discussion 治理文件与 isolated authority 实现范围无路径重叠，Discussion 可先发送一条 exact provisional packet，允许 Steward 在隔离 worktree 并行实现；治理 commit 仍必须在 review/merge/main mutation 前完成并由 authority 吸收，provisional packet 不得扩大用户 verdict、授权 main 写入或替代 durable 真值。Steward 只在用户保留决定、路线/依赖漂移、新 critical 改变主线、跨 session 里程碑、全局阻塞或仓库健康风险需要用户可见时唤醒 Discussion。普通实现状态、命令等待、局部 blocker 与 review 往返不得唤醒 Discussion。
 5. **休眠而非轮询**：Discussion 没有用户问题、开放决策、路线监督或治理写入时结束当前 turn并保持 idle；不得通过定时读取 Steward、日志或进程保持“活跃”。Steward 的触发消息或新的用户输入负责唤醒它。Discussion 需要状态时读取一次 compact task snapshot，不尾随实现日志。
-6. **main mutation lease**：任何时刻只有一个 session 可写/commit/checkout/merge main。Discussion 写治理前必须向 Steward申请 lease；Steward 披露 dirty 状态、形成安全 checkpoint/备份并明确让出。lease 期间 Steward可在隔离 worktree继续实现或只读等待 CI，但不得变更 main。Discussion 只提交声明范围内的治理/skill 文件，完成后把 SHA 发给 Steward并明确释放 lease。未获确认时只可在外部草稿中准备，不得并发改共享 checkout。
+6. **main mutation lease**：任何时刻只有一个 session 可写/commit/checkout/merge main；lease 只串行化 shared main，不冻结其他 worktree，非 holder 不得变更 main。Discussion 写治理前必须向 Steward申请 lease；Steward 披露 main 与 authority dirty 状态、命令和路径重叠，形成必要 checkpoint/备份并明确让出。范围无交集时，lease 期间 Steward 应在隔离 worktree 继续实现/commit，Discussion 同时在 main 提交声明范围内的治理/skill 文件；双方只需互报 base、scope 与合流顺序。Discussion 完成后把 SHA 发给 Steward并明确释放，authority 在 review/merge 前吸收该 governance commit。只有路径重叠、同一生成物或共享状态会互相覆盖时才冻结冲突侧；未获 lease 时 Discussion 只可在外部草稿准备，不得并发改 shared main。
 7. **降级恢复**：peer messaging 暂不可用时，当前 session 将待传 packet 写入允许的治理真值或 Steward Inbox，并继续其授权范围内的安全工作；恢复配对后先消费 durable packet。不得因为 counterpart 离线扩大权限或丢弃未决状态。
 
 ## 1. 运行契约
@@ -146,6 +146,19 @@
 5. 简单化不授权忽略已复现 bug、静默失败、公开保证、真实外部边界或降低测试/可移植性；这些仍按既有 correctness 门处理。
 
 定期 refactor 在路线图指定窗口和有证据的风险节点集中执行；日常实现不以“顺手清理”为由扩大任务。
+
+### 4.3.2 宏观架构监督门
+
+“最小充分”必须先建立在正确问题层级上，不能把默认局部修复当成架构判断。出现以下任一信号时，在继续实现或补新 case 前先做一次 bounded whole-pipeline architecture check：
+
+- 同一语义事实由 resolver、checker/type-effect、lowering、ownership/RC、verifier、ABI/codegen 中两个以上阶段分别重建、猜测或 fallback；
+- 修复需要跨语义阶段新增 side map、共享 counter、字符串 identity、后段 binder/executable body，或改变 lowering/freeze 顺序；
+- 多个 finding、连续返修或不同表面反例归因到同一缺失不变量，即使尚未满足“连续两轮 review blocker”的方向止损阈值；
+- 候选本质上是 compiler-wide IR、pass/ABI/trust-boundary overhaul，或会显著改变长期维护面与投入。
+
+检查必须产出：① current 端到端管线；②每项关键事实首次可知、唯一 authority 与最终消费者；③“局部缺陷 / 系统性边界缺失”的明确判定；④局部方案与分层/overhaul 方案的真实比较；⑤若属系统性问题，固定 IR/组件边界、输入输出契约、不变量、迁移/删除旧 authority 与可证伪验收。禁止在没有该判定时让用户靠主动指出 overhaul 才发现宏观方案。
+
+已批准总架构能唯一决定的内部迁移仍由 Steward 自主实施；若检查提出新的全局 IR/管线、长期路线重排、显著投入或其他用户保留决定，Discussion 必须用宏观图和紧凑决策包交给用户监督后再实施。用户监督针对方向、抽象和里程碑，不等于同步查看原始日志、普通 review 往返或暂停其他无冲突工作。
 
 ### 4.4 执行与并发
 
@@ -306,10 +319,12 @@ python .agents/scripts/audit_ledger.py --repo <repo> record --trigger-id <stable
 1. **当前总门**：只给 canonical 路线中的当前 gate 与子阶段，不用局部 commit 流水替代；
 2. **已获得的 durable claim**：只列已有可恢复 commit / receipt / CI / fixed-point 证据支持、后续可以依赖的结论；没有新结论时明确写无，不把 WIP 或一次偶然通过升级成 claim；
 3. **下一道可证伪验收门**：写清下一个会改变阶段状态的 pass/fail 条件，不展开普通实现步骤；
-4. **全局风险**：列当前 critical、资源/TCB/仓库健康风险与 claim 边界，不混入局部 review 往返；
+4. **全局风险**：列当前 critical、资源/TCB/仓库健康风险与 claim 边界，并明确当前 blocker 是局部实现缺陷还是系统性架构缺口、是否出现 duplicate-authority/overhaul 信号；不混入局部 review 往返；
 5. **需要用户拍板**：只列开放的用户保留决定、推荐与影响；没有则明确写无。
 
 专门的用户保留决策 packet 仍按 §7 立即呈现，不为了凑宏观五段而埋到状态摘要末尾。Steward 向 Discussion 提供宏观状态或跨 session handoff 时使用同一字段，使新 session 无需读取实现日志即可恢复控制面。
+
+用户主动提高 check-in 频率时，每次摘要都必须重新核对 canonical route、IR/authority 边界与“局部或系统性”判断；不得只报局部 commit/测试进度，也不得等用户先提出 overhaul 才审视大方向。该监督仍由用户输入或跨 session 触发消息唤醒，不改成 Discussion 轮询实现日志。
 
 默认不报告 subagent/命令等待、普通实现取舍、工具过程、原始日志或逐文件实现流水；包括：
 

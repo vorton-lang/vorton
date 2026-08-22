@@ -1658,7 +1658,7 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 **C11 主路径的长期契约**：
 
 - 发射标准 C11 单翻译单元，调用 clang；不依赖 clang 私有语法，保留 gcc/MSVC 作为去相关验证信道。
-- 值表示、typeid、closure、dictionary、effect evidence 与 runtime ABI 由共享 HIR 契约决定；后端不得按类型叶名、字符串或声明顺序自行猜测。
+- 值表示、typeid、closure、dictionary、effect evidence 与 runtime ABI 由共享分层 IR 与 AbiIR 契约决定；后端不得按类型叶名、字符串或声明顺序自行猜测。
 - 字符串常量携带显式长度并保持 binary-safe；`#line` 默认开启，生成 C 与 bootstrap 固定点要求字节确定。
 - 整数算术使用显式 wrap/除零规则，避免 C signed-overflow UB；Float 比较保持既定 ordered NaN 语义。
 - match/catch 按源码 arm 顺序，穷尽失败 fail loud；Drop、cleanup 与 evidence 生命周期在嵌套函数边界隔离，并由共享 RC/verifier 契约审计。
@@ -1765,7 +1765,7 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 当前性能路线分两类，不再混用一份 baseline：
 
 1. **开发反馈性能**：B-176 测 `ring check`、RC/self-verify、runner/clang 调度与 self-compile，B-180 以 2× wall-time 改善为退出门；可以优化编译器算法、缓存和有界并行，但不得减少测试覆盖或吞掉原始失败。
-2. **生成程序性能**：B-181 测 runtime、内存/分配和产物尺寸，再决定 Perceus reuse、dict 缓存等优化；仍以 backend-neutral HIR/Perceus → C11/clang 为主，见 §14.6。
+2. **生成程序性能**：B-181 测 runtime、内存/分配和产物尺寸，再决定 RcHIR reuse、dict 缓存等优化；仍以 backend-neutral TypedHIR/CoreHIR/FinalHIR/RcHIR → AbiIR → C11/clang 为主，见 §14.6。
 
 退役实现的性能分析只留 Git 历史。两类工作都记录 cold/warm、CPU/RSS、compiler/anchor/toolchain 指纹，禁止用并行 wall-time、编译器构建优化或 microbenchmark 混报产品 runtime 收益。
 
@@ -1823,7 +1823,7 @@ native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only
 
 ### 14.4 关键技术路径
 
-- **C11 → clang native** 是唯一产品主路径；Linux 的 gcc/MSVC 等只作为生成 C 的去相关验证信道。语义优化必须尽量在 backend-neutral HIR/Perceus 层完成，避免重新把语言语义绑定到某一 codegen。
+- **C11 → clang native** 是唯一产品主路径；Linux 的 gcc/MSVC 等只作为生成 C 的去相关验证信道。语义优化必须在对应的 backend-neutral TypedHIR/CoreHIR/FinalHIR/RcHIR 层完成，避免重新把语言语义绑定到某一 codegen。
 - **Perceus 引用计数** 替换 GC。无停顿、确定性析构、函数式代码可就地复用已死对象的内存。语言设计无需修改——Perceus 是编译器优化，用户代码不感知。
 - **Evidence passing** 替换 generator effect handler。同样是编译器优化，用户代码不感知。
 
@@ -1835,11 +1835,12 @@ native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only
 
 ### 14.6 后端中立的双层优化架构
 
-effect、linearity、refinement 与 purity 必须先在 HIR 消费；C/clang 或未来后端只能继续利用可安全降为标准属性、`assume` 或受控代码形态的子集。
+effect、linearity、refinement 与 purity 必须先在相应的 typed/core/final/RcHIR 层消费；C/clang 或未来后端只能继续利用可安全降为标准属性、`assume` 或受控代码形态的子集。
 
 ```text
-HIR 契约 → Ring passes（RC/reuse、bounds、specialize、dead effect）
-         → C11 受控形态/属性 → clang → native
+TypedHIR / CoreHIR / FinalHIR 契约
+→ Ring passes（RC/reuse、bounds、specialize、dead effect）
+→ AbiIR / C11 受控形态与属性 → clang → native
 ```
 
 | 静态事实 | Ring 层责任 | 下游可选提示 |
@@ -1856,7 +1857,39 @@ HIR 契约 → Ring passes（RC/reuse、bounds、specialize、dead effect）
 
 ## 15. 编译器实现
 
-编译器已用 Ring 自举；前端、Perceus RC 与静态 verifier 共享，C11 codegen 生成 tracked `dist-c` 固定点。长期后端契约以 §10.4 为准；历史 TypeScript/JS/LLVM 翻译过程与里程碑留在 Git/tag，不在设计真值重复维护。
+编译器已用 Ring 自举；当前 main 仍经 legacy HIR → Perceus RC → static verifier → C11 codegen 生成 tracked `dist-c` 固定点，迁移终态由下述分层架构固定。长期后端契约以 §10.4 为准；历史 TypeScript/JS/LLVM 翻译过程与里程碑留在 Git/tag，不在设计真值重复维护。
+
+### 15.1 分层 IR 总架构（2026-08-22 用户批准）
+
+§7.3.1 的 FinalHIR / ResourcePlanner / RcHIR 不是 ownership 专用补丁，而是编译器总分层的第一个落地消费者。每项语义事实只能由信息首次完备的最高层产生一次，以 typed carrier 单向传递；下游不得按字符串、类型叶名、声明顺序或 backend fallback 重新解释，上游也不得因下游需要而回跑 resolver、type/effect inference 或 instance selection。
+
+```text
+Source
+→ AST
+→ ResolvedAST
+→ TypedHIR
+→ CoreHIR
+→ FinalHIR
+→ RcHIR
+→ AbiIR
+→ mechanical C11 serialization
+→ clang / native
+```
+
+| 层 | 冻结契约；通过后下游不得重做 |
+|---|---|
+| `AST` | 忠实保存表面语法、注释所需形状与 Span；不承载名字、类型或后端结论。 |
+| `ResolvedAST` | 每个声明、引用、member、constructor、effect op、import/re-export 与 extern bridge 都携带 exact `SymbolRef`；下游不再查询 resolver 或按叶名回退。 |
+| `TypedHIR` | HM inference metavariable 已收敛（显式量化参数除外），类型、effect row、callee/impl/associated-type 选择与公开 module interface 已固定；ownership mode 可仍为 symbolic contract，但不得回写普通 type/effect 结果。 |
+| `CoreHIR` | 所有隐式可执行语义已 elaborated：default、delegate、derive、protocol for-in、short-circuit、trait dictionary、effect evidence、closure/capture、constructor/intrinsic/default-specialization 均成为 explicit body、typed edge 或 `IntrinsicContract`；共享 `ExecutableInventory` 封闭。此层仍不含资源操作。 |
+| `FinalHIR` | ownership-neutral ANF、pattern decision/projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 已建立；project-wide identity、binder、call/alias/capture graph 冻结，后续新增 node/binder 是 internal error。 |
+| `RcHIR` | 唯一 ResourcePlanner 输出 `Clone/Take/Drop/Cleanup` 与 ranked certificate；binder set 与 FinalHIR 相同，资源语义完全显式。 |
+| `AbiIR` | 只把已验证语义降为 typeid/tag/field layout、symbol、prototype、closure/dict/evidence layout、drop glue、extern 与 failure ABI；不得新增调用、控制边、owner 或语言 fallback。 |
+| `C11` | 对 AbiIR 做确定性序列化并调用工具链；不再选择方法、求 effect closure、解释 pattern、生成未规划 executable body 或分配语义 identity。 |
+
+**隐式行为时点**：纯拼写糖可在 AST/CoreHIR 内展开，不必为每个 pass 新建永久 IR；exhaustiveness matrix、call graph、CFG 等可作为所属层的 finite plan/certificate。凡会改变求值顺序、调用图、effect、capture、binder、控制边或 executable inventory 的行为，必须在 FinalHIR freeze 前显式化；freeze 后只允许资源操作与机器表示下降。每个跨层节点保留 `OriginRef`，使诊断能回到源码而不迫使低层保留表面语法。
+
+**渐进迁移而非平行重写**：#268/#269 先建立通用 typed identity、executable inventory、neutral normalization、FinalHIR/RcHIR 与 validator 骨架；后续 type/effect/evidence、failure/control、RIIR/FFI、optimization 各自在既有 backlog 里迁入其唯一所属层。一个事实切换到新层时必须原子迁移全部消费者并删除旧 fallback/side map；禁止长期双写、shadow authority 或以“兼容”保留旧解释路径。B-190 负责在相应消费者已迁移并有证据后删除遗留重复 authority，不把本架构变成一次无界全仓 rewrite。
 
 **Koka 作为参考实现**：Effect 推断（`InferEffect.hs`）和 evidence passing（`Evidence.hs`）的算法翻译自 Koka 编译器（MIT 许可）。Perceus 引用计数已翻译其 POPL'21 实现落地（§7.11）。
 
