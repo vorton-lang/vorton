@@ -8,7 +8,8 @@ use ast::{Program, Decl, Expr, Stmt, Param, MatchArm, StructFieldInit,
     EffectOpDecl}
 use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HPatternBinding,
-    HStructFieldInit, HStringInterpPart, HProgram, DerivedImpl,
+    HStructFieldInit, HNominalStructFieldInit, HFieldAccessKind,
+    HStringInterpPart, HProgram, DerivedImpl,
     TraitDispatch, DictDispatchInfo, DictRef, TraitBound,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod,
     HForInDestructure, HLetDestructureBinding, ValueBindingKind,
@@ -2033,7 +2034,10 @@ fn infer_method_call_from_receiver(
     let callee_type = match method_type { some(mt) => mt, none => ctx.env.fresh_var() }
     InferResult {
         hexpr: HExpr::Call {
-            callee: HExpr::FieldAccess { receiver: recv_r.hexpr, field: method, ty: callee_type, effects: EMPTY_ROW, span: span },
+            callee: HExpr::FieldAccess {
+                receiver: recv_r.hexpr, field: method,
+                access_kind: HFieldAccessKind::Method,
+                ty: callee_type, effects: EMPTY_ROW, span: span },
             args: hargs, type_args: [], resolved_dicts: resolved_dicts,
             dict_dispatch: dict_dispatch, ty: result_type, effects: effects, span: span
         },
@@ -2157,6 +2161,7 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
     let recv_type = apply_subst(s, hexpr_type(recv_r.hexpr))
 
     let mut field_type: Type = ctx.env.fresh_var()
+    let mut access_kind = HFieldAccessKind::ErrorRecovery
     match recv_type {
         Type::StructType { name, type_params, .. } => {
             match ctx.env.types.structs.get(name) {
@@ -2164,6 +2169,10 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
                     let f = struct_def.fields.find(fn(f_) { f_.name == field })
                     match f {
                         some(found_field) => {
+                            access_kind = HFieldAccessKind::NominalField {
+                                owner_ref: struct_def.owner_ref,
+                                field_ref: found_field.field_ref
+                            }
                             let mut inst_map: Map<Int, Type> = map_new()
                             let mut fi = 0
                             while fi < struct_def.type_param_vars.len() && fi < type_params.len() {
@@ -2186,6 +2195,7 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
             }
         },
         Type::RecordType { fields: rec_fields, tail, .. } => {
+            access_kind = HFieldAccessKind::RecordField
             let f = rec_fields.find(fn(f_) { f_.name == field })
             match f {
                 some(found_field) => { field_type = found_field.ty },
@@ -2198,6 +2208,7 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
             }
         },
         Type::TupleType { elements } => {
+            access_kind = HFieldAccessKind::TupleField
             match parse_int(field) {
                 none => { let _ = type_error(ctx.sink, E0304,
                     "Cannot access named field '${field}' on tuple type; use .0, .1, etc.",
@@ -2224,7 +2235,10 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
     }
 
     InferResult {
-        hexpr: HExpr::FieldAccess { receiver: recv_r.hexpr, field: field, ty: field_type, effects: recv_r.effects, span: span },
+        hexpr: HExpr::FieldAccess {
+            receiver: recv_r.hexpr, field: field,
+            access_kind: access_kind, ty: field_type,
+            effects: recv_r.effects, span: span },
         subst: s, effects: recv_r.effects
     }
 }
@@ -2252,7 +2266,9 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
                             "Cannot use '${q}' — relative path exceeds module nesting depth",
                             span, DiagnosticContext::OtherContext { detail: some("relative path out of scope") })
                         return InferResult {
-                            hexpr: HExpr::StructLit { name: name, type_args: [], fields: [], spread: none, ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                            hexpr: HExpr::IntLit {
+                                value: 0, ty: Type::ErrorType,
+                                effects: EMPTY_ROW, span: span },
                             subst: subst, effects: EMPTY_ROW
                         }
                     }
@@ -2348,7 +2364,9 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
             let _ = type_error(ctx.sink, E0203, "Unknown struct: ${name}", span,
                 DiagnosticContext::OtherContext { detail: some("unknown struct '${name}'") })
             return InferResult {
-                hexpr: HExpr::StructLit { name: name, type_args: [], fields: [], spread: none, ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::IntLit {
+                    value: 0, ty: Type::ErrorType,
+                    effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2373,7 +2391,7 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
 
     let mut s = subst
     let mut effects: EffectRow = EMPTY_ROW
-    let mut hfields: List<HStructFieldInit> = []
+    let mut hfields: List<HNominalStructFieldInit> = []
 
     let mut hspread: HExpr? = none
     match spread {
@@ -2405,12 +2423,16 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
                     DiagnosticNote { message: "provided value has type '${type_to_string(apply_subst(s, hexpr_type(fr.hexpr)))}'", span: some(hexpr_span(fr.hexpr)) }
                 ]
                 s = unify_at_noted(ctx.sink, ctx.env, hexpr_type(fr.hexpr), ft, s, span, field_notes)
+                hfields.push(HNominalStructFieldInit {
+                    name: field.name,
+                    field_ref: df.field_ref,
+                    value: fr.hexpr
+                })
             },
             none => { let _ = type_error(ctx.sink, E0203,
                 "Struct '${name}' has no field '${field.name}'",
                 field.span, DiagnosticContext::MissingField { field: field.name, ty: name, available: none }) }
         }
-        hfields.push(HStructFieldInit { name: field.name, value: fr.hexpr })
     }
 
     if spread.is_none() {
@@ -2430,7 +2452,10 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
     }
 
     InferResult {
-        hexpr: HExpr::StructLit { name: struct_def.name, type_args: [], fields: hfields, spread: hspread, ty: struct_type, effects: effects, span: span },
+        hexpr: HExpr::StructLit {
+            name: struct_def.name, owner_ref: struct_def.owner_ref,
+            type_args: [], fields: hfields, spread: hspread,
+            ty: struct_type, effects: effects, span: span },
         subst: s, effects: effects
     }
 }

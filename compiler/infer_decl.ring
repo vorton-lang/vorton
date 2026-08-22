@@ -2,10 +2,11 @@ use types::{Type, Effect, EffectRow, RecordField, UNIT, EMPTY_ROW, type_to_strin
 use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, Span, Position, EffectOpDecl, EffectExpr,
     UseDecl}
 use hir::{HDecl, HParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssocType,
-    HStructField, HEnumVariant, HEffectOp, HTraitMethod,
+    HStructField, HEnumVariant, HEffectOp, HTraitMethod, HFieldAccessKind,
     DictDispatchInfo, DictRef, trait_dict_name,
     hexpr_type, hexpr_effects, hexpr_span,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
+use ir_identity::{NominalFieldRef}
 use env::{TypeScheme, SchemeBound, MethodOrigin,
     apply_subst, apply_subst_map, apply_subst_row_map,
     find_impl, find_impl_by_origin, has_impl, impl_origin, impl_decl_origin,
@@ -361,9 +362,15 @@ fn check_struct_decl(ctx: InferCtx, name: Str, type_params: List<TypeParam>, is_
     }
     let mut hfields: List<HStructField> = []
     for f in def.fields {
-        hfields.push(HStructField { name: f.name, ty: f.ty, is_pub: f.is_pub })
+        hfields.push(HStructField {
+            name: f.name, ty: f.ty, is_pub: f.is_pub,
+            field_ref: f.field_ref, span: f.span
+        })
     }
-    HDecl::Struct { name: name, type_params: type_params, fields: hfields, is_pub: is_pub, span: span }
+    HDecl::Struct {
+        name: name, owner_ref: def.owner_ref,
+        type_params: type_params, fields: hfields,
+        is_pub: is_pub, span: span }
 }
 
 fn check_enum_decl(ctx: InferCtx, name: Str, type_params: List<TypeParam>, is_pub: Bool, span: Span) -> HDecl {
@@ -835,14 +842,20 @@ fn expand_delegate_impls(
         none => { result },  // Error already reported in Pass 1
         some(struct_def) => {
             let mut field_type: Type? = none
+            let mut delegated_field_ref: NominalFieldRef? = none
             for f in struct_def.fields {
                 if f.name == field {
                     field_type = some(f.ty)
+                    delegated_field_ref = some(f.field_ref)
                 }
             }
             match field_type {
                 none => { result },  // Error already reported in Pass 1
                 some(ft) => {
+                    let exact_field_ref = match delegated_field_ref {
+                        some(value) => value,
+                        none => panic("delegate expansion lost exact field ref")
+                    }
                     // Build self_type (same logic as check_impl_decl)
                     let self_type = if type_params.len() > 0 {
                         let mut impl_tp_types: List<Type> = []
@@ -1139,6 +1152,10 @@ fn expand_delegate_impls(
                                                     forward_args.push(HExpr::FieldAccess {
                                                         receiver: arg_ident,
                                                         field: field,
+                                                        access_kind: HFieldAccessKind::NominalField {
+                                                            owner_ref: struct_def.owner_ref,
+                                                            field_ref: exact_field_ref
+                                                        },
                                                         ty: resolved_ft,
                                                         effects: EMPTY_ROW,
                                                         span: span
@@ -1161,6 +1178,10 @@ fn expand_delegate_impls(
                                                     ty: exact_self_type, effects: EMPTY_ROW, span: span
                                                 },
                                                 field: field,
+                                                access_kind: HFieldAccessKind::NominalField {
+                                                    owner_ref: struct_def.owner_ref,
+                                                    field_ref: exact_field_ref
+                                                },
                                                 ty: resolved_ft,
                                                 effects: EMPTY_ROW,
                                                 span: span
@@ -1239,6 +1260,7 @@ fn expand_delegate_impls(
                                                 let method_access = HExpr::FieldAccess {
                                                     receiver: field_access,
                                                     field: tm.name,
+                                                    access_kind: HFieldAccessKind::Method,
                                                     ty: tm.ty,
                                                     effects: EMPTY_ROW,
                                                     span: span

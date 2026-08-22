@@ -17,6 +17,7 @@ use types::{Type, EffectRow, EMPTY_ROW, type_to_builtin_name, BUILTIN_RANGE}
 use ast::{BinOp, UnaryOp, Pattern, LiteralValue, NamedPatternField, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
+    HNominalStructFieldInit, HFieldAccessKind,
     HEffectHandler, HEffectOp, DictRef,
     TraitDispatch, DictDispatchInfo, effect_op_slot,
     hexpr_type, hexpr_effects, is_fresh_owned_bool_value, variant_ctor_name, compare_by_first,
@@ -111,8 +112,8 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
         HExpr::UnaryOp { op, operand, ty, .. } => gen_c_unaryop(ctx, op, operand, ty),
         HExpr::Call { callee, args, resolved_dicts, dict_dispatch, ty, .. } =>
             gen_c_call(ctx, callee, args, resolved_dicts, dict_dispatch, ty),
-        HExpr::FieldAccess { receiver, field, ty, .. } =>
-            gen_c_field_access(ctx, receiver, field, ty),
+        HExpr::FieldAccess { receiver, field, access_kind, ty, .. } =>
+            gen_c_field_access(ctx, receiver, field, access_kind, ty),
         HExpr::StructLit { name, fields, spread, .. } =>
             gen_c_struct_lit(ctx, name, fields, spread),
         HExpr::NamedVariantConstruct { enum_name, variant_name, fields, spread, .. } =>
@@ -3204,7 +3205,19 @@ fn gen_c_method_call(mut ctx: CCtx, recv: Str, recv_type: Type, method: Str, arg
 // struct/enum (slot read).  Ports of gen_field_access / gen_record_field_access.
 // ============================================================
 
-fn gen_c_field_access(mut ctx: CCtx, receiver: HExpr, field: Str, ty: Type) -> Str {
+fn reject_c_error_field_access(kind: HFieldAccessKind) {
+    match kind {
+        HFieldAccessKind::ErrorRecovery =>
+            panic("C codegen: ErrorRecovery field access reached backend"),
+        _ => {}
+    }
+}
+
+fn gen_c_field_access(
+    mut ctx: CCtx, receiver: HExpr, field: Str,
+    access_kind: HFieldAccessKind, ty: Type
+) -> Str {
+    reject_c_error_field_access(access_kind)
     let recv_val = gen_c_expr(ctx, receiver)
     let recv_type = hexpr_type(receiver)
     match recv_type {
@@ -3305,7 +3318,10 @@ fn gen_c_record_field_access(mut ctx: CCtx, recv_val: Str, field: Str) -> Str {
 // ((void**)ptr)[i]; allocated via ring_alloc with the struct's typeid.
 // ============================================================
 
-fn gen_c_struct_lit(mut ctx: CCtx, name: Str, fields: List<HStructFieldInit>, spread: HExpr?) -> Str {
+fn gen_c_struct_lit(
+    mut ctx: CCtx, name: Str,
+    fields: List<HNominalStructFieldInit>, spread: HExpr?
+) -> Str {
     match ctx.struct_types.get(name) {
         some(info) => {
             rt_use(ctx, "ring_alloc", 2)
@@ -4449,7 +4465,8 @@ fn emit_c_assign(mut ctx: CCtx, target: HExpr, value: HExpr) {
                 none => panic("C codegen: assign to undefined variable '${name}'"),
             }
         },
-        HExpr::FieldAccess { receiver, field, .. } => {
+        HExpr::FieldAccess { receiver, field, access_kind, .. } => {
+            reject_c_error_field_access(access_kind)
             // Port of emit_assign's FieldAccess arm: locate the field slot in
             // the struct layout and overwrite it (RC balance is the Perceus
             // pass's responsibility — HIR carries the surrounding dups/drops).

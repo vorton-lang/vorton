@@ -16,15 +16,22 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     resolve_dict_ref_for_type,
     resolve_mod_uses, bind_exact_import_alias,
     enter_project_root_frame, enter_project_child_frame,
-    refresh_project_namespace_frame, exit_project_namespace_frame}
+    refresh_project_namespace_frame, exit_project_namespace_frame,
+    enter_struct_identity_root_frame, enter_struct_identity_child_frame,
+    exit_struct_identity_frame, take_struct_identity_fact,
+    stage_struct_identity_completion, take_struct_identity_completion,
+    close_struct_identity_ledger}
 use infer_helpers::{is_value_type}
+use resolver::{StructIdentityFact}
 
 // ============================================================
 // Public entry points
 // ============================================================
 
-pub fn register_decl_public(mut ctx: InferCtx, decl: Decl) {
-    register_decl(ctx, decl)
+pub fn register_decl_public(
+    mut ctx: InferCtx, decl: Decl, decl_index: Int
+) {
+    register_decl(ctx, decl, decl_index)
 }
 
 pub fn insert_mod_aliases(mut ctx: InferCtx, mod_name: Str, decls: List<Decl>, guard: Bool) {
@@ -431,17 +438,20 @@ fn register_mod_block_items_legacy(
     let simple_name = segments.get(segments.len() - 1).unwrap_or(mod_name)
     ctx.mod_path_stack.push(simple_name)
     resolve_mod_uses(ctx, mod_uses, false)
+    let indexed = index_decls(mod_decls)
 
     // Pass 1a: register struct/enum types first
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::Struct { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             },
             Decl::Enum { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             },
             _ => {}
         }
@@ -449,11 +459,12 @@ fn register_mod_block_items_legacy(
     // Incremental aliases: struct/enum short names available for trait bounds
     insert_mod_aliases(ctx, mod_name, mod_decls, true)
     // Pass 1b-1: traits -- alias after each so supertraits resolve by short name (#83)
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::Trait { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
                 // Incremental alias: makes this trait's short name available
                 // for subsequent traits' supertrait lookup (#83)
                 insert_mod_aliases(ctx, mod_name, mod_decls, true)
@@ -464,11 +475,12 @@ fn register_mod_block_items_legacy(
     // Pass 1b-2: effects must exist under their short names before effect
     // alias bodies are canonicalized. Otherwise `{Signal}` is stored raw and
     // can later rebind to a consumer's same-spelled effect.
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::Effect { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             },
             _ => {}
         }
@@ -476,22 +488,24 @@ fn register_mod_block_items_legacy(
     insert_mod_aliases(ctx, mod_name, mod_decls, true)
     // Pass 1b-3: effect aliases remain source ordered so an earlier alias may
     // feed a later alias, but every body sees all concrete effects above.
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::EffectAlias { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
                 insert_mod_aliases(ctx, mod_name, mod_decls, true)
             },
             _ => {}
         }
     }
     // Pass 1b-4: opaque extern types.
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::ExternType { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             },
             _ => {}
         }
@@ -500,11 +514,12 @@ fn register_mod_block_items_legacy(
     // resolves its parameter/return types. Refresh short aliases after each
     // declaration so source-ordered alias chains can feed the next alias;
     // functions remain declaration-order independent from all aliases.
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::TypeAlias { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
                 insert_mod_aliases(ctx, mod_name, mod_decls, true)
             },
             _ => {}
@@ -513,8 +528,8 @@ fn register_mod_block_items_legacy(
     // Final aliases: all names available for remaining declarations
     insert_mod_aliases(ctx, mod_name, mod_decls, true)
     // Pass 2: register everything else (functions, impls, consts, etc.)
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::Struct { .. } => {},
             Decl::Enum { .. } => {},
             Decl::Trait { .. } => {},
@@ -524,14 +539,16 @@ fn register_mod_block_items_legacy(
             Decl::TypeAlias { .. } => {},
             Decl::ModBlock { .. } => {},
             _ => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             }
         }
     }
-    for d in order_inline_mod_blocks(mod_decls) {
-        let prefixed = prefix_decl_name(mod_name, d)
-        register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+    for item in order_indexed_inline_mod_blocks(indexed) {
+        let prefixed = prefix_decl_name(mod_name, item.decl)
+        register_mod_item(ctx, prefixed, item.decl_index,
+            deferred_struct_names, deferred_enum_names)
     }
     let _ = ctx.mod_path_stack.pop()
 }
@@ -546,14 +563,16 @@ fn register_project_mod_local_item(
         // the raw source definition here so frame refresh can install and
         // later remove the exact leaf/display alias.
         Decl::ExternType { name, type_params, .. } => {
-            register_project_extern_type(ctx, name, type_params)
+            register_project_extern_type(
+                ctx, name, type_params, item.decl_index)
         },
         Decl::ModBlock { .. } =>
             panic("unreachable: project ModBlock reached local phase dispatcher"),
         _ => {
             let prefixed = prefix_decl_name(mod_name, item.decl)
             register_phase1(
-                ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                ctx, prefixed, deferred_struct_names, deferred_enum_names,
+                item.decl_index)
         }
     }
     refresh_project_namespace_frame(ctx)
@@ -572,6 +591,7 @@ fn register_project_mod_block_phase(
     if !enter_project_child_frame(ctx, decl_index) {
         panic("unreachable: resolver plan missing inline registration frame")
     }
+    enter_struct_identity_child_frame(ctx, decl_index)
     project_push_mod_path(ctx, mod_name)
     let indexed = index_decls(mod_decls)
 
@@ -600,6 +620,7 @@ fn register_project_mod_block_phase(
     }
 
     let _ = ctx.mod_path_stack.pop()
+    exit_struct_identity_frame(ctx)
     let _ = exit_project_namespace_frame(ctx)
 }
 
@@ -618,22 +639,28 @@ fn register_mod_block_items(
 // Dispatch a single declaration to the appropriate registration function.
 // When deferred lists are provided, operates in phase1 mode; otherwise in register_decl mode.
 fn register_mod_item(
-    mut ctx: InferCtx, decl: Decl,
+    mut ctx: InferCtx, decl: Decl, decl_index: Int,
     deferred_struct_names: List<Str>?, deferred_enum_names: List<Str>?
 ) {
     match deferred_struct_names {
         some(dsn) => match deferred_enum_names {
-            some(den) => register_phase1(ctx, decl, dsn, den),
-            none => register_decl(ctx, decl)
+            some(den) => register_phase1(ctx, decl, dsn, den, decl_index),
+            none => register_decl(ctx, decl, decl_index)
         },
-        none => register_decl(ctx, decl)
+        none => register_decl(ctx, decl, decl_index)
     }
 }
 
-fn register_phase1(mut ctx: InferCtx, decl: Decl, mut deferred_struct_names: List<Str>, mut deferred_enum_names: List<Str>) {
+fn register_phase1(
+    mut ctx: InferCtx, decl: Decl,
+    mut deferred_struct_names: List<Str>,
+    mut deferred_enum_names: List<Str>, decl_index: Int
+) {
     match decl {
         Decl::Struct { name, type_params, fields, derive_attrs, span, .. } => {
-            preregister_struct(ctx, name, type_params, derive_attrs)
+            preregister_struct(
+                ctx, name, type_params, derive_attrs,
+                decl_index, fields.len())
             deferred_struct_names.push(name)
         },
         Decl::Enum { name, type_params, variants, derive_attrs, span, .. } => {
@@ -641,9 +668,11 @@ fn register_phase1(mut ctx: InferCtx, decl: Decl, mut deferred_struct_names: Lis
             deferred_enum_names.push(name)
         },
         Decl::ModBlock { name: mod_name, uses: mod_uses, decls: mod_decls, .. } => {
+            enter_struct_identity_child_frame(ctx, decl_index)
             register_mod_block_items(ctx, mod_name, mod_uses, mod_decls, some(deferred_struct_names), some(deferred_enum_names))
+            exit_struct_identity_frame(ctx)
         },
-        _ => register_decl(ctx, decl)
+        _ => register_decl(ctx, decl, decl_index)
     }
 }
 
@@ -676,6 +705,7 @@ fn register_phase2_enum(mut ctx: InferCtx, decl: Decl) {
 }
 
 pub fn register_decls_two_phase(mut ctx: InferCtx, decls: List<Decl>) {
+    enter_struct_identity_root_frame(ctx)
     ctx.file_extern_types = set_new()
     for decl in decls {
         match decl {
@@ -686,10 +716,10 @@ pub fn register_decls_two_phase(mut ctx: InferCtx, decls: List<Decl>) {
     let mut deferred_struct_names: List<Str> = []
     let mut deferred_enum_names: List<Str> = []
 
-    for decl in decls {
+    for item in index_decls(decls) {
         let result = some(register_phase1(
-            ctx, decl, deferred_struct_names,
-            deferred_enum_names)) catch { _ => none }
+            ctx, item.decl, deferred_struct_names,
+            deferred_enum_names, item.decl_index)) catch { _ => none }
     }
 
     for decl in decls {
@@ -703,6 +733,8 @@ pub fn register_decls_two_phase(mut ctx: InferCtx, decls: List<Decl>) {
     for decl in decls {
         register_phase3_delegate(ctx, decl)
     }
+    exit_struct_identity_frame(ctx)
+    close_struct_identity_ledger(ctx)
 }
 
 // Register a resolver file-module under canonical declaration identities while
@@ -718,12 +750,14 @@ fn register_project_root_local_item(
         // Do not route project externs through the legacy visible registry:
         // the root frame installs that spelling transactionally.
         Decl::ExternType { name, type_params, .. } =>
-            register_project_extern_type(ctx, name, type_params),
+            register_project_extern_type(
+                ctx, name, type_params, item.decl_index),
         Decl::ModBlock { .. } =>
             panic("unreachable: project ModBlock reached root local dispatcher"),
         _ => register_phase1(
             ctx, item.decl,
-            deferred_struct_names, deferred_enum_names)
+            deferred_struct_names, deferred_enum_names,
+            item.decl_index)
     }
     refresh_project_namespace_frame(ctx)
 }
@@ -863,6 +897,7 @@ fn register_project_module_decls_two_phase(
     if !enter_project_root_frame(ctx) {
         panic("unreachable: resolver plan missing file root registration frame")
     }
+    enter_struct_identity_root_frame(ctx)
 
     let mut deferred_struct_names: List<Str> = []
     let mut deferred_enum_names: List<Str> = []
@@ -899,7 +934,9 @@ fn register_project_module_decls_two_phase(
         register_project_phase3_delegate(ctx, item)
     }
     refresh_project_namespace_frame(ctx)
+    exit_struct_identity_frame(ctx)
     let _ = exit_project_namespace_frame(ctx)
+    close_struct_identity_ledger(ctx)
 
     let mut result: List<Decl> = []
     for item in qualified { result.push(item.decl) }
@@ -918,8 +955,14 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
             _ => {}
         }
     }
-    let mut qualified: List<Decl> = []
-    for decl in decls { qualified.push(module_prefix_decl_name(module_prefix, decl)) }
+    let mut qualified: List<IndexedDecl> = []
+    for item in index_decls(decls) {
+        qualified.push(IndexedDecl {
+            decl_index: item.decl_index,
+            decl: module_prefix_decl_name(module_prefix, item.decl)
+        })
+    }
+    enter_struct_identity_root_frame(ctx)
 
     let mut deferred_struct_names: List<Str> = []
     let mut deferred_enum_names: List<Str> = []
@@ -927,10 +970,10 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
     // Nominal declarations must all exist before any field/payload/signature is
     // resolved.  Their alias keys are display names; StructDef/EnumDef.name is
     // already canonical and therefore drives unification and backend metadata.
-    for decl in qualified {
-        match decl {
-            Decl::Struct { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
-            Decl::Enum { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
+    for item in qualified {
+        match item.decl {
+            Decl::Struct { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
+            Decl::Enum { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
             _ => {}
         }
     }
@@ -938,10 +981,10 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
 
     // Match inline-module registration ordering: traits first, then effects and
     // opaque/type declarations, then values and impls.
-    for decl in qualified {
-        match decl {
+    for item in qualified {
+        match item.decl {
             Decl::Trait { .. } => {
-                register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names)
+                register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index)
                 insert_file_module_aliases(ctx, module_prefix, decls, false)
             },
             _ => {}
@@ -950,51 +993,55 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
     // Install all concrete effects before canonicalizing any effect-alias body.
     // The alias body must capture this module's exact effect identity rather
     // than retain a raw leaf that a downstream decoy can rebind.
-    for decl in qualified {
-        match decl {
-            Decl::Effect { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
+    for item in qualified {
+        match item.decl {
+            Decl::Effect { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
             _ => {}
         }
     }
     insert_file_module_aliases(ctx, module_prefix, decls, false)
-    for decl in qualified {
-        match decl {
+    for item in qualified {
+        match item.decl {
             Decl::EffectAlias { .. } => {
-                register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names)
+                register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index)
                 insert_file_module_aliases(ctx, module_prefix, decls, false)
             },
             _ => {}
         }
     }
-    for decl in qualified {
-        match decl {
-            Decl::ExternType { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
-            Decl::TypeAlias { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
+    for item in qualified {
+        match item.decl {
+            Decl::ExternType { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
+            Decl::TypeAlias { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
             _ => {}
         }
     }
     insert_file_module_aliases(ctx, module_prefix, decls, false)
-    for decl in qualified {
-        match decl {
+    for item in qualified {
+        match item.decl {
             Decl::Struct { .. } => {}, Decl::Enum { .. } => {}, Decl::Trait { .. } => {},
             Decl::Effect { .. } => {}, Decl::EffectAlias { .. } => {},
             Decl::ExternType { .. } => {}, Decl::TypeAlias { .. } => {},
             Decl::ModBlock { .. } => {},
-            _ => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names)
+            _ => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index)
         }
     }
-    for decl in order_inline_mod_blocks(qualified) {
-        register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names)
+    for item in order_indexed_inline_mod_blocks(qualified) {
+        register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index)
     }
 
-    for decl in qualified { register_phase2_struct(ctx, decl) }
-    for decl in qualified { register_phase2_enum(ctx, decl) }
-    for decl in qualified { register_phase3_delegate(ctx, decl) }
+    for item in qualified { register_phase2_struct(ctx, item.decl) }
+    for item in qualified { register_phase2_enum(ctx, item.decl) }
+    for item in qualified { register_phase3_delegate(ctx, item.decl) }
 
     // Value schemes exist only after the final registration pass.  Binding the
     // short alias and recording its canonical origin makes HExpr::Ident exact.
     insert_file_module_aliases(ctx, module_prefix, decls, true)
-    qualified
+    exit_struct_identity_frame(ctx)
+    close_struct_identity_ledger(ctx)
+    let mut result: List<Decl> = []
+    for item in qualified { result.push(item.decl) }
+    result
 }
 
 fn insert_file_module_aliases(mut ctx: InferCtx, module_prefix: Str, decls: List<Decl>, include_values: Bool) {
@@ -1297,7 +1344,13 @@ fn register_phase3_delegate(mut ctx: InferCtx, decl: Decl) {
 // Struct registration
 // ============================================================
 
-fn preregister_struct(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, derive_attrs: List<DeriveAttribute>) {
+fn preregister_struct(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    derive_attrs: List<DeriveAttribute>, decl_index: Int,
+    field_count: Int
+) {
+    let identity = take_struct_identity_fact(
+        ctx, decl_index, false, field_count)
     let mut tp_names: List<Str> = []
     let mut tp_vars: List<Int> = []
     for tp in type_params {
@@ -1306,13 +1359,20 @@ fn preregister_struct(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>
         match tv { Type::TypeVar { id, .. } => { tp_vars.push(id) }, _ => {} }
         ctx.type_param_scope.insert(tp.name, tv)
     }
-    let def = StructDef { name: name, type_params: tp_names, type_param_vars: tp_vars, fields: [], derive_attrs: derive_attrs, is_extern: false }
+    let def = StructDef { name: name, owner_ref: identity.owner_ref,
+        type_params: tp_names, type_param_vars: tp_vars, fields: [],
+        derive_attrs: derive_attrs, is_extern: false }
     ctx.env.types.structs.insert(name, def)
+    stage_struct_identity_completion(ctx, identity)
 }
 
 fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructFieldDecl>) {
     match ctx.env.types.structs.get(name) {
         some(def) => {
+            let identity = take_struct_identity_completion(ctx, def.owner_ref)
+            if identity.fields.len() != fields.len() {
+                panic("struct identity ledger: field completion arity mismatch")
+            }
             let saved = map_clone(ctx.type_param_scope)
             let mut i = 0
             while i < def.type_params.len() {
@@ -1323,12 +1383,22 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
                 }
                 i = i + 1
             }
-            for f in fields {
-                def.fields.push(StructField {
-                    name: f.name,
-                    ty: resolve_type_expr(ctx, f.type_annotation),
-                    is_pub: f.is_pub
-                })
+            for field_index in 0..fields.len() {
+                match (fields.get(field_index), identity.fields.get(field_index)) {
+                    (some(f), some(field_identity)) => {
+                        if field_identity.field_index != field_index {
+                            panic("struct identity ledger: field index drifted")
+                        }
+                        def.fields.push(StructField {
+                            name: f.name,
+                            ty: resolve_type_expr(ctx, f.type_annotation),
+                            is_pub: f.is_pub,
+                            field_ref: field_identity.field_ref,
+                            span: f.span
+                        })
+                    },
+                    _ => panic("struct identity ledger: missing field identity")
+                }
             }
             ctx.type_param_scope = saved
         },
@@ -2961,8 +3031,9 @@ fn register_extern_fn(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>
 
 fn register_extern_type_common(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
-    install_visible_name: Bool
+    install_visible_name: Bool, decl_index: Int
 ) {
+    let identity = take_struct_identity_fact(ctx, decl_index, true, 0)
     let mut tp_names: List<Str> = []
     let saved = map_clone(ctx.type_param_scope)
     let mut tp_vars: List<Int> = []
@@ -2976,7 +3047,9 @@ fn register_extern_type_common(
     // is_extern: true marks this as an opaque FFI type so trait derivation skips
     // it (B-074). An opaque type has no fields to compare/clone/order/debug, and
     // a derived dict would reference a non-existent runtime constructor.
-    let def = StructDef { name: name, type_params: tp_names, type_param_vars: tp_vars, fields: [], derive_attrs: [], is_extern: true }
+    let def = StructDef { name: name, owner_ref: identity.owner_ref,
+        type_params: tp_names, type_param_vars: tp_vars, fields: [],
+        derive_attrs: [], is_extern: true }
     if install_visible_name {
         ctx.env.types.structs.insert(name, def)
     }
@@ -2984,13 +3057,15 @@ fn register_extern_type_common(
 }
 
 fn register_project_extern_type(
-    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, decl_index: Int
 ) {
-    register_extern_type_common(ctx, name, type_params, false)
+    register_extern_type_common(ctx, name, type_params, false, decl_index)
 }
 
-fn register_extern_type(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>) {
-    register_extern_type_common(ctx, name, type_params, true)
+fn register_extern_type(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, decl_index: Int
+) {
+    register_extern_type_common(ctx, name, type_params, true, decl_index)
 }
 
 fn register_type_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, type_expr: TypeExpr) {
@@ -3075,10 +3150,12 @@ fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypePar
 // Dispatch: register individual declaration
 // ============================================================
 
-fn register_decl(mut ctx: InferCtx, decl: Decl) {
+fn register_decl(mut ctx: InferCtx, decl: Decl, decl_index: Int) {
     match decl {
         Decl::Struct { name, type_params, fields, derive_attrs, span, .. } => {
-            preregister_struct(ctx, name, type_params, derive_attrs)
+            preregister_struct(
+                ctx, name, type_params, derive_attrs,
+                decl_index, fields.len())
             complete_struct_fields(ctx, name, fields)
         },
         Decl::Enum { name, type_params, variants, derive_attrs, span, .. } => {
@@ -3097,7 +3174,7 @@ fn register_decl(mut ctx: InferCtx, decl: Decl) {
         Decl::ExternFn { name, type_params, params, return_type, declared_effects, span, .. } =>
             register_extern_fn(ctx, name, type_params, params, return_type, declared_effects, span),
         Decl::ExternType { name, type_params, .. } =>
-            register_extern_type(ctx, name, type_params),
+            register_extern_type(ctx, name, type_params, decl_index),
         Decl::TypeAlias { name, type_params, type_expr, .. } =>
             register_type_alias(ctx, name, type_params, type_expr),
         Decl::Const { name, type_annotation, span, .. } =>
@@ -3107,7 +3184,9 @@ fn register_decl(mut ctx: InferCtx, decl: Decl) {
         Decl::Delegate { .. } => {},  // Only valid inside impl blocks, handled by register_impl
         Decl::AssocType { .. } => {},  // Only valid inside trait/impl blocks
         Decl::ModBlock { name: mod_name, uses: mod_uses, decls: mod_decls, .. } => {
+            enter_struct_identity_child_frame(ctx, decl_index)
             register_mod_block_items(ctx, mod_name, mod_uses, mod_decls, none, none)
+            exit_struct_identity_frame(ctx)
         }
     }
 }

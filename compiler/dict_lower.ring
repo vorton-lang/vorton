@@ -39,6 +39,7 @@
 use ast::{Span}
 use types::{Type, EffectRow, EMPTY_ROW}
 use hir::{HProgram, HDecl, HStmt, HExpr, HMatchArm, HStructFieldInit,
+    HNominalStructFieldInit,
     HStringInterpPart, HEffectHandler, HEffectOp, HTraitMethod,
     DictRef, TraitDispatch, DictDispatchInfo,
     HDictDef, DerivedImpl, DerivedField, DerivedVariant, FieldAction,
@@ -181,8 +182,10 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             HDecl::Trait { name: name, type_params: type_params, methods: new_methods,
                 supertraits: supertraits, assoc_types: assoc_types, is_pub: is_pub, span: span }
         },
-        HDecl::Struct { name, type_params, fields, is_pub, span } =>
-            HDecl::Struct { name: name, type_params: type_params, fields: fields, is_pub: is_pub, span: span },
+        HDecl::Struct { name, owner_ref, type_params, fields, is_pub, span } =>
+            HDecl::Struct { name: name, owner_ref: owner_ref,
+                type_params: type_params, fields: fields,
+                is_pub: is_pub, span: span },
         HDecl::Enum { name, type_params, variants, is_pub, span } =>
             HDecl::Enum { name: name, type_params: type_params, variants: variants, is_pub: is_pub, span: span },
         HDecl::Effect { name, type_params, ops, is_pub, span } => {
@@ -413,18 +416,24 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 HExpr::Block { stmts: lets, tail: some(call), ty: ty, effects: effects, span: span }
             }
         },
-        HExpr::FieldAccess { receiver, field, ty, effects, span } =>
-            HExpr::FieldAccess { receiver: dl_expr(receiver, defs, seen, counter), field: field, ty: ty, effects: effects, span: span },
-        HExpr::StructLit { name, type_args, fields, spread, ty, effects, span } => {
-            let mut new_fields: List<HStructFieldInit> = []
+        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } =>
+            HExpr::FieldAccess { receiver: dl_expr(receiver, defs, seen, counter),
+                field: field, access_kind: access_kind,
+                ty: ty, effects: effects, span: span },
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread, ty, effects, span } => {
+            let mut new_fields: List<HNominalStructFieldInit> = []
             for f in fields {
-                new_fields.push(HStructFieldInit { name: f.name, value: dl_expr(f.value, defs, seen, counter) })
+                new_fields.push(HNominalStructFieldInit {
+                    name: f.name, field_ref: f.field_ref,
+                    value: dl_expr(f.value, defs, seen, counter) })
             }
             let new_spread = match spread {
                 some(s) => some(dl_expr(s, defs, seen, counter)),
                 none => none,
             }
-            HExpr::StructLit { name: name, type_args: type_args, fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
+            HExpr::StructLit { name: name, owner_ref: owner_ref,
+                type_args: type_args, fields: new_fields,
+                spread: new_spread, ty: ty, effects: effects, span: span }
         },
         HExpr::NamedVariantConstruct { enum_name, variant_name, fields, spread, ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []

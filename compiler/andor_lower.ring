@@ -36,6 +36,7 @@
 use ast::{Span, BinOp}
 use types::{Type, EffectRow, EMPTY_ROW}
 use hir::{HProgram, HDecl, HStmt, HExpr, HMatchArm, HStructFieldInit,
+    HNominalStructFieldInit,
     HStringInterpPart, HEffectHandler, HEffectOp, HTraitMethod}
 
 pub fn lower_andor(program: HProgram) -> HProgram {
@@ -90,8 +91,10 @@ fn al_decl(d: HDecl) -> HDecl {
             HDecl::Trait { name: name, type_params: type_params, methods: new_methods,
                 supertraits: supertraits, assoc_types: assoc_types, is_pub: is_pub, span: span }
         },
-        HDecl::Struct { name, type_params, fields, is_pub, span } =>
-            HDecl::Struct { name: name, type_params: type_params, fields: fields, is_pub: is_pub, span: span },
+        HDecl::Struct { name, owner_ref, type_params, fields, is_pub, span } =>
+            HDecl::Struct { name: name, owner_ref: owner_ref,
+                type_params: type_params, fields: fields,
+                is_pub: is_pub, span: span },
         HDecl::Enum { name, type_params, variants, is_pub, span } =>
             HDecl::Enum { name: name, type_params: type_params, variants: variants, is_pub: is_pub, span: span },
         HDecl::Effect { name, type_params, ops, is_pub, span } => {
@@ -169,18 +172,23 @@ fn al_expr(e: HExpr) -> HExpr {
                 resolved_dicts: resolved_dicts, dict_dispatch: dict_dispatch,
                 ty: ty, effects: effects, span: span }
         },
-        HExpr::FieldAccess { receiver, field, ty, effects, span } =>
-            HExpr::FieldAccess { receiver: al_expr(receiver), field: field, ty: ty, effects: effects, span: span },
-        HExpr::StructLit { name, type_args, fields, spread, ty, effects, span } => {
-            let mut new_fields: List<HStructFieldInit> = []
+        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } =>
+            HExpr::FieldAccess { receiver: al_expr(receiver), field: field,
+                access_kind: access_kind, ty: ty, effects: effects, span: span },
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread, ty, effects, span } => {
+            let mut new_fields: List<HNominalStructFieldInit> = []
             for f in fields {
-                new_fields.push(HStructFieldInit { name: f.name, value: al_expr(f.value) })
+                new_fields.push(HNominalStructFieldInit {
+                    name: f.name, field_ref: f.field_ref,
+                    value: al_expr(f.value) })
             }
             let new_spread = match spread {
                 some(s) => some(al_expr(s)),
                 none => none,
             }
-            HExpr::StructLit { name: name, type_args: type_args, fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
+            HExpr::StructLit { name: name, owner_ref: owner_ref,
+                type_args: type_args, fields: new_fields,
+                spread: new_spread, ty: ty, effects: effects, span: span }
         },
         HExpr::NamedVariantConstruct { enum_name, variant_name, fields, spread, ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []

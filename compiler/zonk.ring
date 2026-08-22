@@ -2,7 +2,8 @@ use types::{Type, Effect, EffectRow, StructField, RecordField,
     type_to_string}
 use ast::{Pattern, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
-    HStructFieldInit, HStringInterpPart, HForInDestructure,
+    HStructFieldInit, HNominalStructFieldInit,
+    HStringInterpPart, HForInDestructure,
     HLetDestructureBinding, HPatternBinding, ValueBindingKind, TraitDispatch,
     hexpr_type, hexpr_effects, hexpr_span}
 use union_find::{UnionFind}
@@ -252,17 +253,22 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 dict_dispatch: dict_dispatch,
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::FieldAccess { receiver, field, .. } =>
-            HExpr::FieldAccess { receiver: zonk_expr(ctx, receiver), field: field, ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::StructLit { name, type_args, fields, spread, .. } => {
+        HExpr::FieldAccess { receiver, field, access_kind, .. } =>
+            HExpr::FieldAccess { receiver: zonk_expr(ctx, receiver),
+                field: field, access_kind: access_kind,
+                ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread, .. } => {
             let z_spread = match spread {
                 some(s) => some(zonk_expr(ctx, s)),
                 none => none,
             }
             HExpr::StructLit {
                 name: name,
+                owner_ref: owner_ref,
                 type_args: type_args.map(fn(t) { zonk_type(ctx, t) }),
-                fields: fields.map(fn(f) { HStructFieldInit { name: f.name, value: zonk_expr(ctx, f.value) } }),
+                fields: fields.map(fn(f) { HNominalStructFieldInit {
+                    name: f.name, field_ref: f.field_ref,
+                    value: zonk_expr(ctx, f.value) } }),
                 spread: z_spread,
                 ty: z_ty, effects: z_eff, span: z_span
             }

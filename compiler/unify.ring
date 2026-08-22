@@ -390,7 +390,10 @@ fn unify_struct_with_record(st: Type, rt: Type, subst: UnionFind, mut env: TypeE
                         }
                         fi = fi + 1
                     }
-                    struct_def.fields.map(fn(f) { StructField { name: f.name, ty: apply_subst_map(inst_map, f.ty), is_pub: f.is_pub } })
+                    struct_def.fields.map(fn(f) { StructField {
+                        name: f.name, ty: apply_subst_map(inst_map, f.ty),
+                        is_pub: f.is_pub, field_ref: f.field_ref, span: f.span
+                    } })
                 },
                 none => {
                     let empty: List<StructField> = []

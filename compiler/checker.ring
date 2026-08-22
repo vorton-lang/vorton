@@ -8,23 +8,26 @@ use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImpl
     prelude_extern_identity,
     is_nullary_variant_ctor_ident}
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, new_collecting_sink, make_diag}
-use env::{TypeEnv, TypeScheme,
-    new_type_env, add_impl, find_impl, install_method_scheme}
+use env::{TypeEnv, TypeScheme, add_impl, find_impl, install_method_scheme}
 use builtins::{register_builtins, register_hof_intrinsics}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
 use dict_lower::{lower_dicts}
 use andor_lower::{lower_andor}
-use infer_ctx::{InferCtx, type_error, record_value_origin, record_variant_ctor_origin,
-    record_value_binding_kind, install_project_namespace_plan}
+use infer_ctx::{InferCtx, new_infer_ctx as new_base_infer_ctx,
+    type_error, record_value_origin, record_variant_ctor_origin,
+    record_value_binding_kind, install_project_namespace_plan,
+    install_struct_identity_ledger, enter_struct_identity_root_frame,
+    exit_struct_identity_frame, close_struct_identity_ledger}
 use infer_register::{register_decl_public}
 use exports::{ModuleExports, TypeDef}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
     ImportIssueKind, NamespaceKind, first_duplicate_direct_declaration,
-    duplicate_direct_declaration_diagnostic}
+    duplicate_direct_declaration_diagnostic,
+    single_namespace_file_key, resolve_single_namespace_plan,
+    prelude_namespace_file_key, resolve_prelude_namespace_plan}
 use codes::{E0504, E0702, E0703, E0704, E0705, E0707, E0801}
 use parser::{parse}
 use union_find::{UnionFind}
-use unify::{empty_subst}
 
 pub struct CheckResult {
     pub program: HProgram,
@@ -115,11 +118,28 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                     let source = read_file(file_path)
                     let prelude_sink = new_collecting_sink()
                     let ast = parse(source, file_path, prelude_sink)
+                    let mut canonical_decls: List<Decl> = []
                     for decl in ast.decls {
-                        let canonical_decl = canonicalize_prelude_decl(decl)
-                        register_decl_public(ctx, canonical_decl)
+                        canonical_decls.push(canonicalize_prelude_decl(decl))
+                    }
+                    let canonical_program = Program {
+                        uses: ast.uses,
+                        decls: canonical_decls,
+                        span: ast.span
+                    }
+                    let prelude_plan = resolve_prelude_namespace_plan(
+                        file_path, canonical_program)
+                    install_struct_identity_ledger(
+                        ctx, prelude_namespace_file_key(file_path), prelude_plan)
+                    enter_struct_identity_root_frame(ctx)
+                    for decl_index in 0..canonical_decls.len() {
+                        let canonical_decl = canonical_decls.get(
+                            decl_index).unwrap()
+                        register_decl_public(ctx, canonical_decl, decl_index)
                         all_prelude_decls.push(canonical_decl)
                     }
+                    exit_struct_identity_frame(ctx)
+                    close_struct_identity_ledger(ctx)
                 }
             }
             // Install the source-level API spelling as an alias of the exact
@@ -243,40 +263,9 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
 }
 
 fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
-    let mut env = new_type_env()
-    register_builtins(env, sink)
-    register_hof_intrinsics(env, sink)
-
-    let mut ctx = InferCtx {
-        env: env,
-        subst: empty_subst(),
-        sink: sink,
-        type_param_scope: map_new(),
-        current_fn_return_type: none,
-        current_fn_bounds: [],
-        fn_bounds_stack: [],
-        pending_dict_obligations: [],
-        loop_depth: 0,
-        mod_path_stack: [],
-        use_aliases: map_new(),
-        value_binding_kinds: map_new(),
-        boxed_vars: set_new(),
-        lambda_depth: 0,
-        var_lambda_depth: map_new(),
-        fn_mut_params: map_new(),
-        file_extern_types: set_new(),
-        effect_default_deps: map_new(),
-        qualified_assoc_scope: map_new(),
-        rebind_assoc_provenance: map_new(),
-        mod_unsafe_allowed: false,
-        drop_types: set_new(),
-        project_namespace_file_key: none,
-        project_namespace_root_frame: none,
-        project_namespace_child_frames: map_new(),
-        project_namespace_bindings: map_new(),
-        project_namespace_ctor_enums: map_new(),
-        project_namespace_frame_stack: []
-    }
+    let mut ctx = new_base_infer_ctx(sink)
+    register_builtins(ctx.env, sink)
+    register_hof_intrinsics(ctx.env, sink)
     // These bindings are created only by register_builtins above. Record their
     // freshly allocated DefIds now; later same-spelled locals cannot inherit
     // this provenance. `some` remains on the independent variant-ctor path.
@@ -329,6 +318,9 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         none => {}
     }
     let prelude_hdecls = load_prelude(ctx)
+    install_struct_identity_ledger(
+        ctx, single_namespace_file_key(program),
+        resolve_single_namespace_plan(program))
     let hprogram = infer_check(ctx, program)
     let mut impl_facts: List<ModuleImplFact> = []
     collect_module_impl_facts(hprogram.decls, true, impl_facts)
@@ -568,6 +560,7 @@ pub fn check_module(
     let prelude_hdecls = load_prelude(ctx)
     inject_module_exports(ctx, module_exports)
     let _ = install_project_namespace_plan(ctx, module_key, namespace_plan)
+    install_struct_identity_ledger(ctx, module_key, namespace_plan)
     report_namespace_plan_issues(ctx, module_key, program, namespace_plan)
     let hprogram = check_module_identity(ctx, program, module_prefix)
     let mut impl_facts: List<ModuleImplFact> = []

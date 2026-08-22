@@ -83,7 +83,10 @@ fn instantiate_struct_fields(env: TypeEnv, name: Str, type_params: List<Type>) -
             if inst_map.len() == 0 { return struct_def.fields }
             let mut result: List<StructField> = []
             for f in struct_def.fields {
-                result.push(StructField { name: f.name, ty: apply_subst_map(inst_map, f.ty), is_pub: f.is_pub })
+                result.push(StructField {
+                    name: f.name, ty: apply_subst_map(inst_map, f.ty),
+                    is_pub: f.is_pub, field_ref: f.field_ref, span: f.span
+                })
             }
             result
         },

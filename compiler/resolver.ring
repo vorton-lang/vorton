@@ -1,4 +1,4 @@
-use ast::{Program, Decl, UseDecl, UseImport, Span, Position}
+use ast::{Program, Decl, UseDecl, UseImport, StructFieldDecl, Span, Position}
 use parser::{parse}
 use diagnostics::{CollectingSink, Diagnostic, DiagnosticNote, Severity, DiagnosticContext,
     new_collecting_sink, make_diag}
@@ -6,8 +6,9 @@ use formatter::{format_human, format_llm}
 use hir::{compare_by_first, module_item_identity, variant_ctor_name}
 use codes::{E0207, E0702, E0704, E0705}
 use ir_identity::{
-    SymbolRef, make_symbol_ref,
+    SymbolRef, NominalFieldRef, make_symbol_ref, make_nominal_field_ref,
     namespace_value, namespace_nominal, namespace_trait, namespace_effect,
+    namespace_member,
     namespace_kind_same,
     symbol_ref_origin_module_key, symbol_ref_namespace_kind,
     symbol_ref_canonical_payload, symbol_ref_declaration_site_path,
@@ -299,6 +300,20 @@ pub struct EnumVariantFactGroup {
     pub constructors: List<NamespaceSeed>
 }
 
+pub struct StructFieldIdentityFact {
+    pub field_index: Int,
+    pub field_ref: NominalFieldRef
+}
+
+pub struct StructIdentityFact {
+    pub file_key: Str,
+    pub frame_index: Int,
+    pub decl_index: Int,
+    pub owner_ref: SymbolRef,
+    pub fields: List<StructFieldIdentityFact>,
+    pub is_extern: Bool
+}
+
 // Kept parallel to the worklist fact table so later consumers never have to
 // infer declaration-vs-import identity from a payload, owner, or AstSite.
 enum NamespaceFactProvenance {
@@ -480,6 +495,7 @@ pub struct ModuleNamespaceCensus {
     // lookup is by SymbolRef; canonical payload strings are compatibility
     // projections only and never decide identity.
     pub enum_variant_facts: List<EnumVariantFactGroup>,
+    pub struct_identities: List<StructIdentityFact>,
     pub imports: List<ImportObligation>,
     pub physical_dependencies: List<PhysicalDependencyObligation>,
     pub issues: List<ImportIssue>
@@ -489,6 +505,7 @@ pub struct ResolvedNamespacePlan {
     pub frames: List<ModuleFramePlan>,
     pub bindings: List<ResolvedNamespaceBinding>,
     pub enum_variant_facts: List<EnumVariantFactGroup>,
+    pub struct_identities: List<StructIdentityFact>,
     pub imports: List<ImportObligation>,
     pub physical_dependencies: List<PhysicalDependencyObligation>,
     pub issues: List<ImportIssue>
@@ -603,6 +620,13 @@ fn source_declaration_site_path(site: AstSite) -> Str {
     "frame:${site.frame_index}|item:${site.item_index}"
 }
 
+fn source_struct_field_site_path(site: AstSite, field_index: Int) -> Str {
+    if field_index < 0 {
+        panic("namespace invariant violated: negative struct field index")
+    }
+    "${source_declaration_site_path(site)}|field:${field_index}|kind:struct-field"
+}
+
 // This is the only resolver authority allowed to construct a SymbolRef.
 // Imports, projections, enum relations, diamonds, and cycles transport the
 // exact value returned here instead of replaying identity from a spelling.
@@ -613,7 +637,8 @@ fn source_seed_symbol(
     origin_site: AstSite,
     namespace: NamespaceKind,
     canonical_payload: Str,
-    existing: Option<SymbolRef>
+    existing: Option<SymbolRef>,
+    field_index: Int
 ) -> SymbolRef {
     if origin_site.use_index != -1 ||
        origin_site.frame_index < 0 || origin_site.item_index < 0 ||
@@ -622,15 +647,23 @@ fn source_seed_symbol(
        decl_index != origin_site.item_index {
         panic("namespace invariant violated: source seed/site mismatch")
     }
-    let declaration_site_path = source_declaration_site_path(origin_site)
-    let identity_namespace = match namespace {
-        NamespaceKind::Value => namespace_value(),
-        NamespaceKind::Struct => namespace_nominal(),
-        NamespaceKind::Enum => namespace_nominal(),
-        NamespaceKind::TypeAlias => namespace_nominal(),
-        NamespaceKind::Effect => namespace_effect(),
-        NamespaceKind::EffectAlias => namespace_effect(),
-        NamespaceKind::Trait => namespace_trait()
+    let declaration_site_path = if field_index >= 0 {
+        source_struct_field_site_path(origin_site, field_index)
+    } else {
+        source_declaration_site_path(origin_site)
+    }
+    let identity_namespace = if field_index >= 0 {
+        namespace_member()
+    } else {
+        match namespace {
+            NamespaceKind::Value => namespace_value(),
+            NamespaceKind::Struct => namespace_nominal(),
+            NamespaceKind::Enum => namespace_nominal(),
+            NamespaceKind::TypeAlias => namespace_nominal(),
+            NamespaceKind::Effect => namespace_effect(),
+            NamespaceKind::EffectAlias => namespace_effect(),
+            NamespaceKind::Trait => namespace_trait()
+        }
     }
     match existing {
         none => make_symbol_ref(
@@ -670,7 +703,7 @@ fn append_namespace_seed(
     }
     let symbol = source_seed_symbol(
         frame.file_key, frame.frame_index, decl_index, origin_site,
-        namespace, canonical_payload, existing_symbol)
+        namespace, canonical_payload, existing_symbol, -1)
     seeds.push(NamespaceSeed {
         file_key: frame.file_key,
         frame_index: frame.frame_index,
@@ -733,6 +766,58 @@ fn append_enum_variant_fact_group(
     })
 }
 
+fn append_struct_identity_fact(
+    fact: StructIdentityFact, mut facts: List<StructIdentityFact>
+) {
+    for existing in facts {
+        if existing.file_key == fact.file_key &&
+           existing.frame_index == fact.frame_index &&
+           existing.decl_index == fact.decl_index {
+            panic("namespace invariant violated: duplicate struct identity site")
+        }
+    }
+    facts.push(fact)
+}
+
+fn collect_struct_identity_fact(
+    frame: ModuleFramePlan, decl_index: Int,
+    owner_ref: SymbolRef, canonical_payload: Str,
+    fields: List<StructFieldDecl>, is_extern: Bool,
+    mut facts: List<StructIdentityFact>
+) {
+    let origin_site = AstSite {
+        file_key: frame.file_key,
+        frame_index: frame.frame_index,
+        use_index: -1,
+        item_index: decl_index
+    }
+    let mut field_facts: List<StructFieldIdentityFact> = []
+    for field_index in 0..fields.len() {
+        match fields.get(field_index) {
+            some(field) => {
+                let member = source_seed_symbol(
+                    frame.file_key, frame.frame_index, decl_index, origin_site,
+                    NamespaceKind::Struct,
+                    "${canonical_payload}::${field.name}", none, field_index)
+                field_facts.push(StructFieldIdentityFact {
+                    field_index: field_index,
+                    field_ref: make_nominal_field_ref(
+                        owner_ref, member, field_index)
+                })
+            },
+            none => {}
+        }
+    }
+    append_struct_identity_fact(StructIdentityFact {
+        file_key: frame.file_key,
+        frame_index: frame.frame_index,
+        decl_index: decl_index,
+        owner_ref: owner_ref,
+        fields: field_facts,
+        is_extern: is_extern
+    }, facts)
+}
+
 fn enum_variant_constructors(
     groups: List<EnumVariantFactGroup>, enum_symbol: SymbolRef
 ) -> Option<List<NamespaceSeed>> {
@@ -749,7 +834,8 @@ fn collect_decl_seed(
     decl_index: Int,
     decl: Decl,
     mut seeds: List<NamespaceSeed>,
-    mut enum_variant_facts: List<EnumVariantFactGroup>
+    mut enum_variant_facts: List<EnumVariantFactGroup>,
+    mut struct_identities: List<StructIdentityFact>
 ) {
     match decl {
         Decl::Fn { name, is_pub, .. } => {
@@ -767,16 +853,24 @@ fn collect_decl_seed(
                 declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
-        Decl::Struct { name, is_pub, .. } => {
-            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Struct,
-                declaration_payload(frame, name, false), none, is_pub,
+        Decl::Struct { name, fields, is_pub, .. } => {
+            let payload = declaration_payload(frame, name, false)
+            let owner_ref = append_namespace_seed(frame, decl_index, name, NamespaceKind::Struct,
+                payload, none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
+            collect_struct_identity_fact(
+                frame, decl_index, owner_ref, payload,
+                fields, false, struct_identities)
         },
         Decl::ExternType { name, is_pub, .. } => {
             // Extern types intentionally retain their raw ABI spelling.
-            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Struct,
-                declaration_payload(frame, name, true), none, is_pub,
+            let payload = declaration_payload(frame, name, true)
+            let owner_ref = append_namespace_seed(frame, decl_index, name, NamespaceKind::Struct,
+                payload, none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
+            collect_struct_identity_fact(
+                frame, decl_index, owner_ref, payload,
+                [], true, struct_identities)
         },
         Decl::Enum { name, variants, is_pub, .. } => {
             let enum_payload = declaration_payload(frame, name, false)
@@ -1099,6 +1193,7 @@ fn collect_frame_contents(
     frame_site_indices: Map<Str, Int>,
     mut seeds: List<NamespaceSeed>,
     mut enum_variant_facts: List<EnumVariantFactGroup>,
+    mut struct_identities: List<StructIdentityFact>,
     mut imports: List<ImportObligation>,
     mut physical_dependencies: List<PhysicalDependencyObligation>,
     mut issues: List<ImportIssue>
@@ -1130,7 +1225,8 @@ fn collect_frame_contents(
         match decls.get(decl_index) {
             some(decl) => {
                 collect_decl_seed(
-                    frame, decl_index, decl, seeds, enum_variant_facts)
+                    frame, decl_index, decl, seeds, enum_variant_facts,
+                    struct_identities)
                 match decl {
                     Decl::ModBlock { name, uses: nested_uses, decls: nested_decls, .. } => {
                         // Duplicate inline ModBlocks intentionally share a
@@ -1145,7 +1241,7 @@ fn collect_frame_contents(
                                     collect_frame_contents(
                                         child_frame, nested_uses, nested_decls,
                                         frames, frame_site_indices, seeds,
-                                        enum_variant_facts, imports,
+                                        enum_variant_facts, struct_identities, imports,
                                         physical_dependencies, issues)
                                 },
                                 none => {}
@@ -1192,6 +1288,7 @@ pub fn census_module_namespaces(
     }
     let mut seeds: List<NamespaceSeed> = []
     let mut enum_variant_facts: List<EnumVariantFactGroup> = []
+    let mut struct_identities: List<StructIdentityFact> = []
     let mut imports: List<ImportObligation> = []
     let mut physical_dependencies: List<PhysicalDependencyObligation> = []
     let mut issues: List<ImportIssue> = []
@@ -1202,7 +1299,7 @@ pub fn census_module_namespaces(
             collect_frame_contents(
                 root_frame, program.uses, program.decls,
                 frames, frame_site_indices,
-                seeds, enum_variant_facts, imports,
+                seeds, enum_variant_facts, struct_identities, imports,
                 physical_dependencies, issues)
         },
         none => {}
@@ -1214,10 +1311,54 @@ pub fn census_module_namespaces(
         frames: frames,
         seeds: seeds,
         enum_variant_facts: enum_variant_facts,
+        struct_identities: struct_identities,
         imports: imports,
         physical_dependencies: physical_dependencies,
         issues: issues
     }
+}
+
+fn stable_source_basename(file: Str, fallback: Str) -> Str {
+    if file == "" || file == "<unknown>" || file == "<memory>" {
+        return fallback
+    }
+    let basename = path_basename(file).replace(".ring", "")
+    if basename == "" || basename == "." || basename == "<unknown>" {
+        fallback
+    } else {
+        basename
+    }
+}
+
+pub fn single_namespace_file_key(program: Program) -> Str {
+    module_key([
+        "$single$", stable_source_basename(
+            program.span.file, "$virtual-source$")
+    ])
+}
+
+pub fn resolve_single_namespace_plan(program: Program) -> ResolvedNamespacePlan {
+    resolve_namespace_plan([census_module_namespaces([
+        "$single$", stable_source_basename(
+            program.span.file, "$virtual-source$")
+    ], program)])
+}
+
+pub fn prelude_namespace_file_key(file: Str) -> Str {
+    module_key([
+        "$prelude$", stable_source_basename(file, "$invalid-prelude$")
+    ])
+}
+
+pub fn resolve_prelude_namespace_plan(
+    file: Str, program: Program
+) -> ResolvedNamespacePlan {
+    if file == "" {
+        panic("namespace invariant violated: prelude file key is empty")
+    }
+    resolve_namespace_plan([census_module_namespaces([
+        "$prelude$", stable_source_basename(file, "$invalid-prelude$")
+    ], program)])
 }
 
 // ============================================================
@@ -4644,6 +4785,7 @@ pub fn resolve_namespace_plan(
     let mut exact_frames: Map<Str, ModuleFramePlan> = map_new()
     let mut source_owners: Set<Str> = set_new()
     let mut enum_variant_facts: List<EnumVariantFactGroup> = []
+    let mut struct_identities: List<StructIdentityFact> = []
 
     for census in censuses {
         for frame in census.frames {
@@ -4656,6 +4798,9 @@ pub fn resolve_namespace_plan(
             append_enum_variant_fact_group(
                 group.enum_symbol, group.constructors,
                 enum_variant_facts)
+        }
+        for fact in census.struct_identities {
+            append_struct_identity_fact(fact, struct_identities)
         }
         imports.extend(census.imports)
         physical_dependencies.extend(census.physical_dependencies)
@@ -4884,6 +5029,7 @@ pub fn resolve_namespace_plan(
         frames: frames,
         bindings: bindings,
         enum_variant_facts: enum_variant_facts,
+        struct_identities: struct_identities,
         imports: imports,
         physical_dependencies: physical_dependencies,
         issues: issues

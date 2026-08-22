@@ -18,8 +18,8 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     instantiate_impl_dict_requirements}
 use unify::{UnificationError, empty_subst, unify, occurs_in, unify_effect_params}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
-    NamespaceKind}
-use ir_identity::{symbol_ref_canonical_payload}
+    StructIdentityFact, NamespaceKind}
+use ir_identity::{SymbolRef, symbol_ref_canonical_payload, symbol_ref_same}
 
 // ============================================================
 // InferResult — return type for expression inference
@@ -166,6 +166,14 @@ pub struct InferCtx {
     pub project_namespace_bindings: Map<Int, List<ResolvedNamespaceBinding>>,
     pub project_namespace_ctor_enums: Map<Str, Str>,
     pub project_namespace_frame_stack: List<ProjectNamespaceFrameState>
+    // F2-U1b registration-only structural ledger. It is installed from the
+    // resolver plan, consumed exactly once, and cleared before typed HIR use.
+    struct_identity_file_key: Str?,
+    struct_identity_root_frame: Int?,
+    struct_identity_child_frames: Map<Str, Int>,
+    struct_identity_frame_stack: List<Int>,
+    struct_identity_unconsumed: List<StructIdentityFact>,
+    struct_identity_pending: List<StructIdentityFact>
 }
 
 pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
@@ -197,7 +205,13 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         project_namespace_child_frames: map_new(),
         project_namespace_bindings: map_new(),
         project_namespace_ctor_enums: map_new(),
-        project_namespace_frame_stack: []
+        project_namespace_frame_stack: [],
+        struct_identity_file_key: none,
+        struct_identity_root_frame: none,
+        struct_identity_child_frames: map_new(),
+        struct_identity_frame_stack: [],
+        struct_identity_unconsumed: [],
+        struct_identity_pending: []
     }
 }
 
@@ -333,6 +347,9 @@ fn apply_project_namespace_binding(
             match source {
                 none => false,
                 some(def) => {
+                    if !symbol_ref_same(binding.symbol, def.owner_ref) {
+                        panic("project hydration: struct owner identity mismatch")
+                    }
                     state.journal.push(ProjectNamespaceUndo::Struct {
                         name: binding.exposed_name,
                         previous: ctx.env.types.structs.get(binding.exposed_name)
@@ -2984,6 +3001,164 @@ pub fn bind_exact_import_alias(
         none => {}
     }
     found
+}
+
+pub fn install_struct_identity_ledger(
+    mut ctx: InferCtx, file_key: Str, plan: ResolvedNamespacePlan
+) {
+    if ctx.struct_identity_file_key.is_some() ||
+       ctx.struct_identity_frame_stack.len() != 0 ||
+       ctx.struct_identity_unconsumed.len() != 0 ||
+       ctx.struct_identity_pending.len() != 0 {
+        panic("struct identity ledger: prior ledger is still active")
+    }
+    ctx.struct_identity_file_key = some(file_key)
+    ctx.struct_identity_root_frame = none
+    ctx.struct_identity_child_frames = map_new()
+    for frame in plan.frames {
+        if frame.file_key == file_key {
+            if frame.parent_frame_index < 0 {
+                if ctx.struct_identity_root_frame.is_some() {
+                    panic("struct identity ledger: duplicate root frame")
+                }
+                ctx.struct_identity_root_frame = some(frame.frame_index)
+            } else {
+                let key = project_child_site_key(
+                    frame.parent_frame_index, frame.decl_index)
+                if ctx.struct_identity_child_frames.contains_key(key) {
+                    panic("struct identity ledger: duplicate child frame")
+                }
+                ctx.struct_identity_child_frames.insert(key, frame.frame_index)
+            }
+        }
+    }
+    for fact in plan.struct_identities {
+        if fact.file_key == file_key {
+            for existing in ctx.struct_identity_unconsumed {
+                if existing.frame_index == fact.frame_index &&
+                   existing.decl_index == fact.decl_index {
+                    panic("struct identity ledger: duplicate declaration site")
+                }
+            }
+            ctx.struct_identity_unconsumed.push(fact)
+        }
+    }
+    if ctx.struct_identity_root_frame.is_none() {
+        panic("struct identity ledger: missing root frame")
+    }
+}
+
+pub fn enter_struct_identity_root_frame(mut ctx: InferCtx) {
+    if ctx.struct_identity_frame_stack.len() != 0 {
+        panic("struct identity ledger: root entered while active")
+    }
+    match ctx.struct_identity_root_frame {
+        some(frame) => ctx.struct_identity_frame_stack.push(frame),
+        none => panic("struct identity ledger: missing installed root")
+    }
+}
+
+pub fn enter_struct_identity_child_frame(mut ctx: InferCtx, decl_index: Int) {
+    let parent = match ctx.struct_identity_frame_stack.get(
+        ctx.struct_identity_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("struct identity ledger: child entered without parent")
+    }
+    match ctx.struct_identity_child_frames.get(
+        project_child_site_key(parent, decl_index)) {
+        some(frame) => ctx.struct_identity_frame_stack.push(frame),
+        none => panic("struct identity ledger: missing child frame")
+    }
+}
+
+pub fn exit_struct_identity_frame(mut ctx: InferCtx) {
+    if ctx.struct_identity_frame_stack.pop().is_none() {
+        panic("struct identity ledger: frame exit underflow")
+    }
+}
+
+pub fn take_struct_identity_fact(
+    mut ctx: InferCtx, decl_index: Int,
+    is_extern: Bool, field_count: Int
+) -> StructIdentityFact {
+    let frame_index = match ctx.struct_identity_frame_stack.get(
+        ctx.struct_identity_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("struct identity ledger: declaration outside frame")
+    }
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let mut found: StructIdentityFact? = none
+    let mut remaining: List<StructIdentityFact> = []
+    for fact in ctx.struct_identity_unconsumed {
+        if fact.file_key == file_key && fact.frame_index == frame_index &&
+           fact.decl_index == decl_index {
+            if found.is_some() {
+                panic("struct identity ledger: duplicate consume match")
+            }
+            found = some(fact)
+        } else {
+            remaining.push(fact)
+        }
+    }
+    ctx.struct_identity_unconsumed = remaining
+    let fact = match found {
+        some(value) => value,
+        none => panic("struct identity ledger: missing declaration fact")
+    }
+    if fact.is_extern != is_extern || fact.fields.len() != field_count {
+        panic("struct identity ledger: declaration shape mismatch")
+    }
+    fact
+}
+
+pub fn stage_struct_identity_completion(
+    mut ctx: InferCtx, fact: StructIdentityFact
+) {
+    if fact.is_extern {
+        panic("struct identity ledger: extern fact cannot await fields")
+    }
+    for pending in ctx.struct_identity_pending {
+        if symbol_ref_same(pending.owner_ref, fact.owner_ref) {
+            panic("struct identity ledger: duplicate pending owner")
+        }
+    }
+    ctx.struct_identity_pending.push(fact)
+}
+
+pub fn take_struct_identity_completion(
+    mut ctx: InferCtx, owner_ref: SymbolRef
+) -> StructIdentityFact {
+    let mut found: StructIdentityFact? = none
+    let mut remaining: List<StructIdentityFact> = []
+    for fact in ctx.struct_identity_pending {
+        if symbol_ref_same(fact.owner_ref, owner_ref) {
+            if found.is_some() {
+                panic("struct identity ledger: duplicate pending completion")
+            }
+            found = some(fact)
+        } else {
+            remaining.push(fact)
+        }
+    }
+    ctx.struct_identity_pending = remaining
+    match found {
+        some(value) => value,
+        none => panic("struct identity ledger: missing pending completion")
+    }
+}
+
+pub fn close_struct_identity_ledger(mut ctx: InferCtx) {
+    if ctx.struct_identity_frame_stack.len() != 0 ||
+       ctx.struct_identity_unconsumed.len() != 0 ||
+       ctx.struct_identity_pending.len() != 0 {
+        panic("struct identity ledger: registration did not close")
+    }
+    ctx.struct_identity_file_key = none
+    ctx.struct_identity_root_frame = none
+    ctx.struct_identity_child_frames = map_new()
+    ctx.struct_identity_frame_stack = []
+    ctx.struct_identity_unconsumed = []
+    ctx.struct_identity_pending = []
 }
 
 fn bind_raw_extern_type_alias(mut ctx: InferCtx, alias_name: Str, abi_name: Str) -> Bool {

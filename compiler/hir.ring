@@ -1,5 +1,7 @@
 use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam}
 use types::{Type, EffectRow, StructField, EnumVariant, RecordField}
+use ir_identity::{SymbolRef, NominalFieldRef, symbol_ref_same,
+    nominal_field_ref_owner, nominal_field_ref_index}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
@@ -244,6 +246,20 @@ pub struct HStructFieldInit {
     pub value: HExpr
 }
 
+pub struct HNominalStructFieldInit {
+    pub name: Str,
+    pub field_ref: NominalFieldRef,
+    pub value: HExpr
+}
+
+pub enum HFieldAccessKind {
+    NominalField { owner_ref: SymbolRef, field_ref: NominalFieldRef },
+    RecordField,
+    TupleField,
+    Method,
+    ErrorRecovery
+}
+
 // Pattern AST preserves source shape.  This parallel transport is the exact
 // lexical slot contract consumed by RC verification and native lowering.
 pub struct HPatternBinding {
@@ -294,8 +310,8 @@ pub enum HExpr {
     BinOp { op: BinOp, left: HExpr, right: HExpr, eq_dispatch: TraitDispatch?, ord_dispatch: TraitDispatch?, ty: Type, effects: EffectRow, span: Span },
     UnaryOp { op: UnaryOp, operand: HExpr, ty: Type, effects: EffectRow, span: Span },
     Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, ty: Type, effects: EffectRow, span: Span },
-    FieldAccess { receiver: HExpr, field: Str, ty: Type, effects: EffectRow, span: Span },
-    StructLit { name: Str, type_args: List<Type>, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
+    FieldAccess { receiver: HExpr, field: Str, access_kind: HFieldAccessKind, ty: Type, effects: EffectRow, span: Span },
+    StructLit { name: Str, owner_ref: SymbolRef, type_args: List<Type>, fields: List<HNominalStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
     NamedVariantConstruct { enum_name: Str, variant_name: Str, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
     MatchExpr { scrutinee: HExpr, arms: List<HMatchArm>, ty: Type, effects: EffectRow, span: Span },
     Block { stmts: List<HStmt>, tail: HExpr?, ty: Type, effects: EffectRow, span: Span },
@@ -361,7 +377,9 @@ pub enum HStmt {
 pub struct HStructField {
     pub name: Str,
     pub ty: Type,
-    pub is_pub: Bool
+    pub is_pub: Bool,
+    pub field_ref: NominalFieldRef,
+    pub span: Span
 }
 
 pub struct HEnumVariant {
@@ -400,7 +418,7 @@ pub struct HAssocType {
 
 pub enum HDecl {
     Fn { name: Str, def_id: Int?, type_params: List<TypeParam>, params: List<HParam>, return_type: Type, effects: EffectRow, body: HExpr, is_pub: Bool, trait_bounds: List<TraitBound>, span: Span },
-    Struct { name: Str, type_params: List<TypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
+    Struct { name: Str, owner_ref: SymbolRef, type_params: List<TypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
     Enum { name: Str, type_params: List<TypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
     Impl { target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
     Effect { name: Str, type_params: List<TypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
@@ -771,6 +789,39 @@ fn validate_hir_field_values(
     }
 }
 
+fn validate_hir_nominal_field_values(
+    owner_ref: SymbolRef, fields: List<HNominalStructFieldInit>, spread: HExpr?,
+    mut seen: Set<Int>, mut scope: HirValidationScope
+) {
+    for field in fields {
+        if !symbol_ref_same(
+                owner_ref, nominal_field_ref_owner(field.field_ref)) {
+            panic("HIR identity: struct literal field owner drifted")
+        }
+        validate_hir_expr(field.value, seen, scope)
+    }
+    match spread {
+        some(value) => validate_hir_expr(value, seen, scope),
+        none => {}
+    }
+}
+
+fn validate_hir_field_access_kind(kind: HFieldAccessKind) {
+    match kind {
+        HFieldAccessKind::NominalField { owner_ref, field_ref } => {
+            if !symbol_ref_same(
+                    owner_ref, nominal_field_ref_owner(field_ref)) {
+                panic("HIR identity: nominal field owner relation drifted")
+            }
+        },
+        HFieldAccessKind::RecordField |
+        HFieldAccessKind::TupleField |
+        HFieldAccessKind::Method => {},
+        HFieldAccessKind::ErrorRecovery =>
+            panic("HIR identity: ErrorRecovery field access reached successful HIR")
+    }
+}
+
 fn validate_hir_expr_values(
     values: List<HExpr>, mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
@@ -796,10 +847,13 @@ fn validate_hir_expr(
             validate_hir_expr(callee, seen, scope)
             for arg in args { validate_hir_expr(arg, seen, scope) }
         },
-        HExpr::FieldAccess { receiver, .. } =>
-            validate_hir_expr(receiver, seen, scope),
-        HExpr::StructLit { fields, spread, .. } =>
-            validate_hir_field_values(fields, spread, seen, scope),
+        HExpr::FieldAccess { receiver, access_kind, .. } => {
+            validate_hir_field_access_kind(access_kind)
+            validate_hir_expr(receiver, seen, scope)
+        },
+        HExpr::StructLit { owner_ref, fields, spread, .. } =>
+            validate_hir_nominal_field_values(
+                owner_ref, fields, spread, seen, scope),
         HExpr::NamedVariantConstruct { fields, spread, .. } =>
             validate_hir_field_values(fields, spread, seen, scope),
         HExpr::MatchExpr { scrutinee, arms, .. } => {
@@ -950,7 +1004,23 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
             },
             HDecl::ModBlock { decls: inner, .. } =>
                 validate_hir_decls(inner, seen),
-            HDecl::Struct { .. } | HDecl::Enum { .. } |
+            HDecl::Struct { owner_ref, fields, .. } => {
+                for field_index in 0..fields.len() {
+                    match fields.get(field_index) {
+                        some(field) => {
+                            if !symbol_ref_same(
+                                    owner_ref,
+                                    nominal_field_ref_owner(field.field_ref)) ||
+                               nominal_field_ref_index(field.field_ref) !=
+                                    field_index {
+                                panic("HIR identity: struct field relation drifted")
+                            }
+                        },
+                        none => {}
+                    }
+                }
+            },
+            HDecl::Enum { .. } |
             HDecl::ExternFn { .. } | HDecl::ExternType { .. } |
             HDecl::TypeAlias { .. } => {}
         }

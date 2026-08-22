@@ -5,6 +5,7 @@ use ast::{Span, EffectExpr, TypeParam, DeriveAttribute}
 use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
     make_diag}
 use codes::{E0504}
+use ir_identity::{SymbolRef}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -49,6 +50,7 @@ pub fn exact_scheme_value_origin(
 
 pub struct StructDef {
     pub name: Str,
+    pub owner_ref: SymbolRef,
     pub type_params: List<Str>,
     pub type_param_vars: List<Int>,
     pub fields: List<StructField>,

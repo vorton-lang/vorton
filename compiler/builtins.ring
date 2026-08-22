@@ -12,6 +12,8 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
 use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
+use ir_identity::{make_symbol_ref, make_nominal_field_ref,
+    namespace_nominal, namespace_member}
 
 // ============================================================
 // Struct for open_row return value
@@ -245,11 +247,21 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
     // Register Cell struct definition
     let cell_t_id = env.fresh_var_id()
     let cell_t = Type::TypeVar { id: cell_t_id, name: none }
+    let cell_owner = make_symbol_ref(
+        "$builtin", namespace_nominal(), BUILTIN_CELL, "builtin:Cell")
+    let cell_member = make_symbol_ref(
+        "$builtin", namespace_member(), "${BUILTIN_CELL}::value",
+        "builtin:Cell|field:0|kind:struct-field")
     env.types.structs.insert(BUILTIN_CELL, StructDef {
         name: BUILTIN_CELL,
+        owner_ref: cell_owner,
         type_params: ["T"],
         type_param_vars: [cell_t_id],
-        fields: [StructField { name: "value", ty: cell_t, is_pub: true }],
+        fields: [StructField {
+            name: "value", ty: cell_t, is_pub: true,
+            field_ref: make_nominal_field_ref(cell_owner, cell_member, 0),
+            span: span_zero()
+        }],
         derive_attrs: [],
         is_extern: false
     })

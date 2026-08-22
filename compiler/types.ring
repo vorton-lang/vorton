@@ -1,3 +1,6 @@
+use ast::{Span}
+use ir_identity::{NominalFieldRef}
+
 pub const BUILTIN_INT: Str = "Int"
 pub const BUILTIN_FLOAT: Str = "Float"
 pub const BUILTIN_STR: Str = "Str"
@@ -14,7 +17,9 @@ pub const BUILTIN_PTR: Str = "Ptr"
 pub struct StructField {
     pub name: Str,
     pub ty: Type,
-    pub is_pub: Bool
+    pub is_pub: Bool,
+    pub field_ref: NominalFieldRef,
+    pub span: Span
 }
 
 pub struct EnumVariant {

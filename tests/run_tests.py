@@ -5697,10 +5697,6 @@ def identity_checkpoint_contract_errors(
          "HStmt::Var { name, def_id, init, .. }",
          "validate_hir_local_binding("),
         ("hir", "validate_hir_expr",
-         "HExpr::StructLit { fields, spread, .. }",
-         "HExpr::NamedVariantConstruct { fields, spread, .. }",
-         "validate_hir_field_values("),
-        ("hir", "validate_hir_expr",
          "HExpr::ListLit { elements, .. }",
          "HExpr::TupleLit { elements, .. }",
          "validate_hir_expr_values("),
@@ -7548,6 +7544,7 @@ F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
 F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
 F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
+F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 31
 
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
@@ -8663,6 +8660,251 @@ def resolver_identity_u1a_source_check_errors(ring_exe: str) -> List[str]:
     return errors
 
 
+F2_U1B_PATHS = {
+    "identity": REPO / "compiler" / "ir_identity.ring",
+    "resolver": REPO / "compiler" / "resolver.ring",
+    "types": REPO / "compiler" / "types.ring",
+    "env": REPO / "compiler" / "env.ring",
+    "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
+    "infer_register": REPO / "compiler" / "infer_register.ring",
+    "checker": REPO / "compiler" / "checker.ring",
+    "exports": REPO / "compiler" / "exports.ring",
+    "hir": REPO / "compiler" / "hir.ring",
+    "infer": REPO / "compiler" / "infer.ring",
+    "zonk": REPO / "compiler" / "zonk.ring",
+    "andor": REPO / "compiler" / "andor_lower.ring",
+    "dict": REPO / "compiler" / "dict_lower.ring",
+    "perceus": REPO / "compiler" / "perceus.ring",
+    "unify": REPO / "compiler" / "unify.ring",
+    "exhaustive": REPO / "compiler" / "exhaustive.ring",
+    "codegen": REPO / "compiler" / "codegen_c_expr.ring",
+}
+
+
+def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
+    """Cheap U1b source relations; candidate behavior remains external."""
+    errors: List[str] = []
+    struct_field_fields, field_error = _f0_struct_fields(
+        sources["types"], "StructField")
+    if field_error:
+        errors.append(field_error)
+    elif struct_field_fields is not None and [
+            name for _, name in struct_field_fields] != [
+                "name", "ty", "is_pub", "field_ref", "span"]:
+        errors.append("F2 U1b StructField identity/span inventory drifted")
+    struct_def_fields, def_error = _f0_struct_fields(
+        sources["env"], "StructDef")
+    if def_error:
+        errors.append(def_error)
+    elif struct_def_fields is not None and [
+            name for _, name in struct_def_fields] != [
+                "name", "owner_ref", "type_params", "type_param_vars",
+                "fields", "derive_attrs", "is_extern"]:
+        errors.append("F2 U1b StructDef owner inventory drifted")
+
+    required_relations = (
+        ("identity", "make_nominal_field_ref",
+         "symbol_ref_origin_module_key(owner) !="),
+        ("identity", "make_nominal_field_ref",
+         "symbol_ref_canonical_payload(member).starts_with("),
+        ("identity", "make_nominal_field_ref",
+         "symbol_ref_declaration_site_path(member) !="),
+        ("identity", "make_nominal_field_ref",
+         '"${symbol_ref_declaration_site_path(owner)}|field:${field_index}|kind:struct-field"'),
+        ("resolver", "source_seed_symbol",
+         "source_struct_field_site_path(origin_site, field_index)"),
+        ("resolver", "collect_struct_identity_fact", "none, field_index)"),
+        ("resolver", "resolve_namespace_plan",
+         "append_struct_identity_fact(fact, struct_identities)"),
+        ("resolver", "single_namespace_file_key",
+         'stable_source_basename(\n            program.span.file, "$virtual-source$")'),
+        ("infer_ctx", "install_struct_identity_ledger",
+         "existing.frame_index == fact.frame_index"),
+        ("infer_ctx", "take_struct_identity_fact",
+         'none => panic("struct identity ledger: missing declaration fact")'),
+        ("infer_ctx", "close_struct_identity_ledger",
+         "ctx.struct_identity_unconsumed.len() != 0"),
+        ("infer_ctx", "apply_project_namespace_binding",
+         "if !symbol_ref_same(binding.symbol, def.owner_ref)"),
+        ("infer_register", "complete_struct_fields",
+         "field_ref: field_identity.field_ref"),
+        ("infer_register", "complete_struct_fields",
+         "take_struct_identity_completion(ctx, def.owner_ref)"),
+        ("checker", "check", "resolve_single_namespace_plan(program)"),
+        ("checker", "load_prelude", "resolve_prelude_namespace_plan("),
+        ("checker", "load_prelude", "file_path, canonical_program"),
+        ("exports", "copy_exported_name", "types.insert(local_name, def)"),
+        ("hir", "validate_hir_field_access_kind",
+         "owner_ref, nominal_field_ref_owner(field_ref)"),
+        ("hir", "validate_hir_field_access_kind",
+         'panic("HIR identity: ErrorRecovery field access reached successful HIR")'),
+        ("infer", "infer_field_access", "field_ref: found_field.field_ref"),
+        ("zonk", "zonk_expr", "access_kind: access_kind"),
+        ("zonk", "zonk_expr", "field_ref: f.field_ref"),
+        ("andor", "al_expr", "access_kind: access_kind"),
+        ("andor", "al_decl", "owner_ref: owner_ref"),
+        ("dict", "dl_expr", "field_ref: f.field_ref"),
+        ("dict", "dl_decl", "owner_ref: owner_ref"),
+        ("perceus", "anf_lvalue", "access_kind: access_kind"),
+        ("perceus", "anf_expr", "field_ref: f.field_ref"),
+        ("perceus", "rc_expr", "field_ref: f.field_ref"),
+        ("unify", "unify_struct_with_record", "field_ref: f.field_ref"),
+        ("codegen", "gen_c_field_access",
+         "reject_c_error_field_access(access_kind)"),
+    )
+    for source_name, function_name, token in required_relations:
+        _f2_u1a_require_function_token(
+            sources[source_name], source_name, function_name, token, errors)
+
+    hir_masked = mask_ring_strings_and_comments(sources["hir"])
+    for token in (
+            "pub enum HFieldAccessKind", "NominalField { owner_ref:",
+            "RecordField", "TupleField", "Method", "ErrorRecovery",
+            "owner_ref: SymbolRef", "field_ref: NominalFieldRef"):
+        if token not in sources["hir"]:
+            errors.append(f"F2 U1b HIR schema misses {token!r}")
+    if re.search(r"StructType\s*\{[^}\n]*owner_ref", sources["types"]):
+        errors.append("F2 U1b leaked owner identity into Type::StructType")
+    if re.search(r"Map\s*<\s*Str\s*,\s*SymbolRef\s*>",
+                 mask_ring_strings_and_comments(sources["infer_ctx"])):
+        errors.append("F2 U1b gained post-registration name/ref side map")
+    for source_name in (
+            "infer_ctx", "infer_register", "checker", "exports", "hir", "infer",
+            "zonk", "unify", "exhaustive", "codegen"):
+        if "make_symbol_ref(" in sources[source_name]:
+            errors.append(
+                f"F2 U1b {source_name} remints resolver identity")
+    if sources["resolver"].count("make_symbol_ref(") != 1:
+        errors.append("F2 U1b resolver SymbolRef producer count drifted")
+    if "nominal_field_ref_" in sources["codegen"]:
+        errors.append("F2 U1b backend semantically reads nominal identity")
+    if "HFieldAccessKind::ErrorRecovery" not in hir_masked:
+        errors.append("F2 U1b successful-HIR ErrorRecovery rejection drifted")
+    return errors
+
+
+F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
+    ("identity", "make_nominal_field_ref",
+     "symbol_ref_origin_module_key(owner) !=", "false &&"),
+    ("identity", "make_nominal_field_ref",
+     "symbol_ref_canonical_payload(member).starts_with(", "false &&("),
+    ("identity", "make_nominal_field_ref",
+     'symbol_ref_declaration_site_path(member) !=', "false &&"),
+    ("resolver", "source_seed_symbol",
+     "source_struct_field_site_path(origin_site, field_index)",
+     "source_declaration_site_path(origin_site)"),
+    ("resolver", "collect_struct_identity_fact", "none, field_index)",
+     "none, 0)"),
+    ("resolver", "resolve_namespace_plan",
+     "append_struct_identity_fact(fact, struct_identities)",
+     "discard_struct_identity_fact(fact)"),
+    ("resolver", "single_namespace_file_key",
+     'stable_source_basename(\n            program.span.file, "$virtual-source$")',
+     "program.span.file"),
+    ("infer_ctx", "install_struct_identity_ledger",
+     "existing.frame_index == fact.frame_index", "false"),
+    ("infer_ctx", "take_struct_identity_fact",
+     'none => panic("struct identity ledger: missing declaration fact")',
+     "none => StructIdentityFact {}"),
+    ("infer_ctx", "close_struct_identity_ledger",
+     "ctx.struct_identity_unconsumed.len() != 0", "false"),
+    ("infer_ctx", "apply_project_namespace_binding",
+     "if !symbol_ref_same(binding.symbol, def.owner_ref)", "if false"),
+    ("infer_register", "complete_struct_fields",
+     "field_ref: field_identity.field_ref",
+     "field_ref: identity.fields.get(0).unwrap().field_ref"),
+    ("infer_register", "complete_struct_fields",
+     "take_struct_identity_completion(ctx, def.owner_ref)",
+     "missing_struct_identity_completion(ctx, def.owner_ref)"),
+    ("checker", "check", "resolve_single_namespace_plan(program)",
+     "missing_single_namespace_plan(program)"),
+    ("checker", "load_prelude", "resolve_prelude_namespace_plan(",
+     "missing_prelude_namespace_plan("),
+    ("checker", "load_prelude", "file_path, canonical_program",
+     "file_path, ast"),
+    ("exports", "copy_exported_name", "types.insert(local_name, def)",
+     "types.insert(local_name, remint_type_def(def))"),
+    ("hir", "validate_hir_field_access_kind",
+     "owner_ref, nominal_field_ref_owner(field_ref)",
+     "owner_ref, owner_ref"),
+    ("hir", "validate_hir_field_access_kind",
+     'panic("HIR identity: ErrorRecovery field access reached successful HIR")',
+     "{}"),
+    ("infer", "infer_field_access", "field_ref: found_field.field_ref",
+     "field_ref: missing_field_ref"),
+    ("zonk", "zonk_expr", "access_kind: access_kind",
+     "access_kind: HFieldAccessKind::ErrorRecovery"),
+    ("zonk", "zonk_expr", "field_ref: f.field_ref",
+     "field_ref: fields.get(0).unwrap().field_ref"),
+    ("andor", "al_expr", "access_kind: access_kind",
+     "access_kind: HFieldAccessKind::ErrorRecovery"),
+    ("andor", "al_decl", "owner_ref: owner_ref",
+     "owner_ref: missing_owner_ref"),
+    ("dict", "dl_expr", "field_ref: f.field_ref",
+     "field_ref: fields.get(0).unwrap().field_ref"),
+    ("dict", "dl_decl", "owner_ref: owner_ref",
+     "owner_ref: missing_owner_ref"),
+    ("perceus", "anf_lvalue", "access_kind: access_kind",
+     "access_kind: HFieldAccessKind::ErrorRecovery"),
+    ("perceus", "anf_expr", "field_ref: f.field_ref",
+     "field_ref: fields.get(0).unwrap().field_ref"),
+    ("perceus", "rc_expr", "field_ref: f.field_ref",
+     "field_ref: fields.get(0).unwrap().field_ref"),
+    ("unify", "unify_struct_with_record", "field_ref: f.field_ref",
+     "field_ref: struct_def.fields.get(0).unwrap().field_ref"),
+    ("codegen", "gen_c_field_access",
+     "reject_c_error_field_access(access_kind)", "discard_field_kind(access_kind)"),
+)
+
+
+def nominal_field_u1b_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    try:
+        for name, path in F2_U1B_PATHS.items():
+            sources[name] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read F2 U1b compiler sources: {exc}"]
+    errors = nominal_field_u1b_contract_errors(sources)
+    if errors:
+        return errors
+    count = 0
+    for source_name, function_name, anchor, replacement in (
+            F2_U1B_SOURCE_CONTRACT_MUTATIONS):
+        count += 1
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(
+                f"F2 U1b source mutation {source_name}.{function_name}: "
+                f"{mutation_error}")
+            continue
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source or ""
+        if not nominal_field_u1b_contract_errors(mutated):
+            errors.append(
+                f"F2 U1b source mutation escaped: "
+                f"{source_name}.{function_name} {anchor!r}")
+    if count != F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT:
+        errors.append(
+            f"F2 U1b source mutation count was {count}, expected "
+            f"{F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT}")
+    return errors
+
+
+def nominal_field_u1b_source_check_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(ring_exe))
+    for source_path in (F2_U1B_PATHS["identity"], F2_U1B_PATHS["hir"]):
+        error = _f1_run_ring_check(ring_exe, source_path, environment)
+        if error:
+            errors.append(error)
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across F2 U1b checks")
+    return errors
+
+
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
         "hir": REPO / "compiler" / "hir.ring",
@@ -9242,6 +9484,23 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
     # This permanent gate covers cheap source structure and parse/typecheck
     # only.  Candidate behavior requires an external source-built compiler
     # packet running the targeted project fixtures.
+    nominal_field_label = "compiler.nominal_field_identity_u1b_source_contract"
+    if matches_filter(nominal_field_label, name_filter):
+        nominal_field_errors = nominal_field_u1b_source_errors()
+        if not nominal_field_errors:
+            nominal_field_errors.extend(
+                nominal_field_u1b_source_check_errors(ring_exe))
+        detail = (
+            f"source_contract_mutations="
+            f"{F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT}; "
+            "pinned_source_checks=2; actual_fixtures=2; "
+            "candidate_behavior=not_evaluated; "
+            "behavior_gate=external_source_built_candidate_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not nominal_field_errors else TestResult.FAIL,
+            suite, nominal_field_label,
+            "; ".join([detail, *nominal_field_errors])))
+
     resolver_identity_label = "compiler.resolver_identity_u1a_source_contract"
     if matches_filter(resolver_identity_label, name_filter):
         resolver_identity_errors = resolver_identity_u1a_source_errors()

@@ -13,7 +13,8 @@
 
 use ast::{Span, Position, Pattern, BinOp}
 use hir::{HDecl, HStmt, HExpr, HParam, HProgram, HMatchArm,
-    HStructFieldInit, HStringInterpPart, HEffectHandler, HEffectOp,
+    HStructFieldInit, HNominalStructFieldInit,
+    HStringInterpPart, HEffectHandler, HEffectOp,
     hexpr_type, hexpr_span, hexpr_effects,
     is_rc_excluded_type, type_contains_extern_handle,
     is_borrow_returning_call, is_user_drop_type,
@@ -849,9 +850,10 @@ fn anf_cond_in_own_scope(cond: HExpr, externs: Set<Str>, mut counter: List<Int>)
 // never materialise — a write destination is a place, not an owned value.
 fn anf_lvalue(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter: List<Int>) -> HExpr {
     match expr {
-        HExpr::FieldAccess { receiver, field, ty, effects, span } => {
+        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } => {
             HExpr::FieldAccess { receiver: anf_lvalue(receiver, hoists, externs, counter),
-                field: field, ty: ty, effects: effects, span: span }
+                field: field, access_kind: access_kind,
+                ty: ty, effects: effects, span: span }
         },
         HExpr::IndexExpr { receiver, index, ty, effects, span } => {
             // The index expression IS a read operand — it can be materialised.
@@ -942,7 +944,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::FieldAccess { receiver, field, ty, effects, span } => {
+        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } => {
             // B-104 D1 Stage 2 — RECEIVER position: a FRESH-OWNED receiver
             // (`f(x).method()`, `make().field`, `s.char_at(i).unwrap_or("")`'s
             // char_at Option — the lexer per-char leak) was read in place and
@@ -969,7 +971,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             // Evaluation order preserved: the receiver's hoist precedes the
             // args' hoists (anf_callee runs before the args loop in the Call arm).
             HExpr::FieldAccess { receiver: anf_operand(receiver, hoists, externs, counter),
-                field: field, ty: ty, effects: effects, span: span }
+                field: field, access_kind: access_kind,
+                ty: ty, effects: effects, span: span }
         },
 
         HExpr::IndexExpr { receiver, index, ty, effects, span } => {
@@ -982,19 +985,22 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::StructLit { name, type_args, fields, spread, ty, effects, span } => {
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread, ty, effects, span } => {
             // Each field value escapes into the struct → tail/escape position; its
             // OWN nested subexprs hoist, but the field value itself is not
             // materialised (it is stored directly into the struct by the RC pass).
-            let mut new_fields: List<HStructFieldInit> = []
+            let mut new_fields: List<HNominalStructFieldInit> = []
             for f in fields {
-                new_fields.push(HStructFieldInit { name: f.name, value: anf_tail_value(f.value, hoists, externs, counter) })
+                new_fields.push(HNominalStructFieldInit {
+                    name: f.name, field_ref: f.field_ref,
+                    value: anf_tail_value(f.value, hoists, externs, counter) })
             }
             let new_spread = match spread {
                 some(s) => some(anf_borrow(s, hoists, externs, counter)),
                 none => none,
             }
-            HExpr::StructLit { name: name, type_args: type_args, fields: new_fields,
+            HExpr::StructLit { name: name, owner_ref: owner_ref,
+                type_args: type_args, fields: new_fields,
                 spread: new_spread, ty: ty, effects: effects, span: span }
         },
 
@@ -2637,19 +2643,22 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::FieldAccess { receiver, field, ty, effects, span } => {
+        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } => {
             // Read: receiver is a borrow.  (If this field access itself escapes,
             // rc_escape wraps the whole node in Clone before we get here in value
             // position — so here the result is just a borrow.)
             HExpr::FieldAccess { receiver: rc_expr(receiver, false, owned, boxed, externs, drop_types, gensym, loop_base),
-                field: field, ty: ty, effects: effects, span: span }
+                field: field, access_kind: access_kind,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::StructLit { name, type_args, fields, spread, ty, effects, span } => {
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread, ty, effects, span } => {
             // Each field value escapes into the new struct (the struct owns it).
-            let mut new_fields: List<HStructFieldInit> = []
+            let mut new_fields: List<HNominalStructFieldInit> = []
             for f in fields {
-                new_fields.push(HStructFieldInit { name: f.name, value: rc_escape(f.value, owned, boxed, externs, drop_types, gensym, loop_base) })
+                new_fields.push(HNominalStructFieldInit {
+                    name: f.name, field_ref: f.field_ref,
+                    value: rc_escape(f.value, owned, boxed, externs, drop_types, gensym, loop_base) })
             }
             // Spread copies the source struct's field pointers into the new struct
             // (codegen does a raw field-pointer copy without dup), so the spread
@@ -2659,7 +2668,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 some(s) => some(rc_expr(s, false, owned, boxed, externs, drop_types, gensym, loop_base)),
                 none => none,
             }
-            HExpr::StructLit { name: name, type_args: type_args, fields: new_fields,
+            HExpr::StructLit { name: name, owner_ref: owner_ref,
+                type_args: type_args, fields: new_fields,
                 spread: new_spread, ty: ty, effects: effects, span: span }
         },
 
