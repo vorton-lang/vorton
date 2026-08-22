@@ -180,6 +180,7 @@ fn al_expr(e: HExpr) -> HExpr {
             for f in fields {
                 new_fields.push(HNominalStructFieldInit {
                     name: f.name, field_ref: f.field_ref,
+                    field_index: f.field_index,
                     value: al_expr(f.value) })
             }
             let new_spread = match spread {

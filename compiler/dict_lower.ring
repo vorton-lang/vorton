@@ -425,6 +425,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             for f in fields {
                 new_fields.push(HNominalStructFieldInit {
                     name: f.name, field_ref: f.field_ref,
+                    field_index: f.field_index,
                     value: dl_expr(f.value, defs, seen, counter) })
             }
             let new_spread = match spread {

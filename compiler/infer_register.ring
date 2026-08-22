@@ -18,11 +18,15 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     enter_project_root_frame, enter_project_child_frame,
     refresh_project_namespace_frame, exit_project_namespace_frame,
     enter_struct_identity_root_frame, enter_struct_identity_child_frame,
-    exit_struct_identity_frame, take_struct_identity_fact,
-    stage_struct_identity_completion, take_struct_identity_completion,
+    exit_struct_identity_frame, peek_struct_identity_fact,
+    commit_struct_identity_fact, peek_struct_identity_completion,
+    commit_struct_identity_completion,
     close_struct_identity_ledger}
 use infer_helpers::{is_value_type}
 use resolver::{StructIdentityFact}
+use ir_identity::{make_registered_nominal_ref,
+    registered_nominal_ref_symbol, nominal_field_ref_name,
+    nominal_field_ref_index}
 
 // ============================================================
 // Public entry points
@@ -1349,7 +1353,7 @@ fn preregister_struct(
     derive_attrs: List<DeriveAttribute>, decl_index: Int,
     field_count: Int
 ) {
-    let identity = take_struct_identity_fact(
+    let identity = peek_struct_identity_fact(
         ctx, decl_index, false, field_count)
     let mut tp_names: List<Str> = []
     let mut tp_vars: List<Int> = []
@@ -1359,17 +1363,19 @@ fn preregister_struct(
         match tv { Type::TypeVar { id, .. } => { tp_vars.push(id) }, _ => {} }
         ctx.type_param_scope.insert(tp.name, tv)
     }
-    let def = StructDef { name: name, owner_ref: identity.owner_ref,
+    let def = StructDef { name: name,
+        owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
         type_params: tp_names, type_param_vars: tp_vars, fields: [],
         derive_attrs: derive_attrs, is_extern: false }
+    commit_struct_identity_fact(ctx, identity, true)
     ctx.env.types.structs.insert(name, def)
-    stage_struct_identity_completion(ctx, identity)
 }
 
 fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructFieldDecl>) {
     match ctx.env.types.structs.get(name) {
         some(def) => {
-            let identity = take_struct_identity_completion(ctx, def.owner_ref)
+            let identity = peek_struct_identity_completion(
+                ctx, registered_nominal_ref_symbol(def.owner_ref))
             if identity.fields.len() != fields.len() {
                 panic("struct identity ledger: field completion arity mismatch")
             }
@@ -1383,24 +1389,40 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
                 }
                 i = i + 1
             }
+            let mut resolved_fields: List<StructField> = []
+            let mut resolution_failed = false
             for field_index in 0..fields.len() {
                 match (fields.get(field_index), identity.fields.get(field_index)) {
                     (some(f), some(field_identity)) => {
-                        if field_identity.field_index != field_index {
-                            panic("struct identity ledger: field index drifted")
+                        if field_identity.field_index != field_index ||
+                           nominal_field_ref_index(field_identity.field_ref) !=
+                                field_index ||
+                           nominal_field_ref_name(field_identity.field_ref) !=
+                                f.name {
+                            panic("struct identity ledger: field relation drifted")
                         }
-                        def.fields.push(StructField {
-                            name: f.name,
-                            ty: resolve_type_expr(ctx, f.type_annotation),
-                            is_pub: f.is_pub,
-                            field_ref: field_identity.field_ref,
-                            span: f.span
-                        })
+                        let resolved = some(resolve_type_expr(
+                            ctx, f.type_annotation)) catch { _ => none }
+                        match resolved {
+                            some(field_type) => resolved_fields.push(StructField {
+                                name: f.name,
+                                ty: field_type,
+                                is_pub: f.is_pub,
+                                field_ref: field_identity.field_ref,
+                                field_index: field_index,
+                                span: f.span
+                            }),
+                            none => { resolution_failed = true }
+                        }
                     },
                     _ => panic("struct identity ledger: missing field identity")
                 }
             }
             ctx.type_param_scope = saved
+            if resolution_failed { fail.raise(CompileError {}) }
+            let mut committed_def = def
+            commit_struct_identity_completion(ctx, identity)
+            committed_def.fields = resolved_fields
         },
         none => {}
     }
@@ -3033,7 +3055,7 @@ fn register_extern_type_common(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
     install_visible_name: Bool, decl_index: Int
 ) {
-    let identity = take_struct_identity_fact(ctx, decl_index, true, 0)
+    let identity = peek_struct_identity_fact(ctx, decl_index, true, 0)
     let mut tp_names: List<Str> = []
     let saved = map_clone(ctx.type_param_scope)
     let mut tp_vars: List<Int> = []
@@ -3047,9 +3069,11 @@ fn register_extern_type_common(
     // is_extern: true marks this as an opaque FFI type so trait derivation skips
     // it (B-074). An opaque type has no fields to compare/clone/order/debug, and
     // a derived dict would reference a non-existent runtime constructor.
-    let def = StructDef { name: name, owner_ref: identity.owner_ref,
+    let def = StructDef { name: name,
+        owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
         type_params: tp_names, type_param_vars: tp_vars, fields: [],
         derive_attrs: [], is_extern: true }
+    commit_struct_identity_fact(ctx, identity, false)
     if install_visible_name {
         ctx.env.types.structs.insert(name, def)
     }

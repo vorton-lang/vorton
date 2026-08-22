@@ -19,6 +19,7 @@ pub struct StructField {
     pub ty: Type,
     pub is_pub: Bool,
     pub field_ref: NominalFieldRef,
+    pub field_index: Int,
     pub span: Span
 }
 

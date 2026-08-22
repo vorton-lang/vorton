@@ -7544,7 +7544,7 @@ F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
 F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
 F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
-F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 31
+F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 40
 
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
@@ -8663,6 +8663,7 @@ def resolver_identity_u1a_source_check_errors(ring_exe: str) -> List[str]:
 F2_U1B_PATHS = {
     "identity": REPO / "compiler" / "ir_identity.ring",
     "resolver": REPO / "compiler" / "resolver.ring",
+    "builtins": REPO / "compiler" / "builtins.ring",
     "types": REPO / "compiler" / "types.ring",
     "env": REPO / "compiler" / "env.ring",
     "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
@@ -8690,7 +8691,7 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
         errors.append(field_error)
     elif struct_field_fields is not None and [
             name for _, name in struct_field_fields] != [
-                "name", "ty", "is_pub", "field_ref", "span"]:
+                "name", "ty", "is_pub", "field_ref", "field_index", "span"]:
         errors.append("F2 U1b StructField identity/span inventory drifted")
     struct_def_fields, def_error = _f0_struct_fields(
         sources["env"], "StructDef")
@@ -8701,12 +8702,31 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
                 "name", "owner_ref", "type_params", "type_param_vars",
                 "fields", "derive_attrs", "is_extern"]:
         errors.append("F2 U1b StructDef owner inventory drifted")
+    registered_fields, registered_error = _f0_struct_fields(
+        sources["identity"], "RegisteredNominalRef")
+    if registered_error:
+        errors.append(registered_error)
+    elif registered_fields is not None and [
+            name for _, name in registered_fields] != ["symbol", "display_name"]:
+        errors.append("F2 U1b registered nominal inventory drifted")
+    nominal_fields, nominal_error = _f0_struct_fields(
+        sources["identity"], "NominalFieldRef")
+    if nominal_error:
+        errors.append(nominal_error)
+    elif nominal_fields is not None and [
+            name for _, name in nominal_fields] != [
+                "owner", "member", "field_index", "field_name"]:
+        errors.append("F2 U1b nominal field inventory drifted")
 
     required_relations = (
+        ("identity", "make_registered_nominal_ref",
+         "display_name == \"\""),
         ("identity", "make_nominal_field_ref",
          "symbol_ref_origin_module_key(owner) !="),
         ("identity", "make_nominal_field_ref",
-         "symbol_ref_canonical_payload(member).starts_with("),
+         "symbol_ref_canonical_payload(member) !="),
+        ("identity", "make_nominal_field_ref",
+         '"${symbol_ref_canonical_payload(owner)}::${field_name}"'),
         ("identity", "make_nominal_field_ref",
          "symbol_ref_declaration_site_path(member) !="),
         ("identity", "make_nominal_field_ref",
@@ -8720,25 +8740,54 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
          'stable_source_basename(\n            program.span.file, "$virtual-source$")'),
         ("infer_ctx", "install_struct_identity_ledger",
          "existing.frame_index == fact.frame_index"),
-        ("infer_ctx", "take_struct_identity_fact",
+        ("infer_ctx", "peek_struct_identity_fact",
          'none => panic("struct identity ledger: missing declaration fact")'),
+        ("infer_ctx", "commit_struct_identity_fact",
+         'panic("struct identity ledger: commit fact mismatch")'),
+        ("infer_ctx", "peek_struct_identity_completion",
+         'panic("struct identity ledger: duplicate pending completion")'),
+        ("infer_ctx", "commit_struct_identity_completion",
+         'panic("struct identity ledger: completion commit mismatch")'),
         ("infer_ctx", "close_struct_identity_ledger",
          "ctx.struct_identity_unconsumed.len() != 0"),
         ("infer_ctx", "apply_project_namespace_binding",
-         "if !symbol_ref_same(binding.symbol, def.owner_ref)"),
+         "registered_nominal_ref_symbol(def.owner_ref)"),
         ("infer_register", "complete_struct_fields",
          "field_ref: field_identity.field_ref"),
         ("infer_register", "complete_struct_fields",
-         "take_struct_identity_completion(ctx, def.owner_ref)"),
+         "peek_struct_identity_completion("),
+        ("infer_register", "complete_struct_fields",
+         "commit_struct_identity_completion(ctx, identity)"),
+        ("infer_register", "preregister_struct",
+         "peek_struct_identity_fact("),
+        ("infer_register", "preregister_struct",
+         "commit_struct_identity_fact(ctx, identity, true)"),
+        ("infer_register", "register_extern_type_common",
+         "commit_struct_identity_fact(ctx, identity, false)"),
+        ("infer_register", "complete_struct_fields",
+         "resolved_fields.push(StructField {"),
         ("checker", "check", "resolve_single_namespace_plan(program)"),
         ("checker", "load_prelude", "resolve_prelude_namespace_plan("),
         ("checker", "load_prelude", "file_path, canonical_program"),
         ("exports", "copy_exported_name", "types.insert(local_name, def)"),
         ("hir", "validate_hir_field_access_kind",
-         "owner_ref, nominal_field_ref_owner(field_ref)"),
+         "registered_nominal_ref_symbol(owner_ref)"),
+        ("hir", "validate_hir_field_access_kind",
+         "field != nominal_field_ref_name(field_ref)"),
+        ("hir", "validate_hir_field_access_kind",
+         "Type::StructType { name, .. }"),
+        ("hir", "validate_hir_field_access_kind",
+         "if name != registered_nominal_ref_display_name(owner_ref)"),
         ("hir", "validate_hir_field_access_kind",
          'panic("HIR identity: ErrorRecovery field access reached successful HIR")'),
         ("infer", "infer_field_access", "field_ref: found_field.field_ref"),
+        ("infer", "infer_field_access", "field_index: found_field.field_index"),
+        ("infer", "infer_field_access",
+         "access_kind = HFieldAccessKind::NominalField {"),
+        ("infer", "infer_field_access", "owner_ref: struct_def.owner_ref"),
+        ("infer", "infer_struct_lit", "owner_ref: struct_def.owner_ref"),
+        ("builtins", "register_cell",
+         "make_registered_nominal_ref(cell_owner, BUILTIN_CELL)"),
         ("zonk", "zonk_expr", "access_kind: access_kind"),
         ("zonk", "zonk_expr", "field_ref: f.field_ref"),
         ("andor", "al_expr", "access_kind: access_kind"),
@@ -8756,11 +8805,37 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
         _f2_u1a_require_function_token(
             sources[source_name], source_name, function_name, token, errors)
 
+    for source_name, function_name, ordered_tokens in (
+        ("infer_register", "preregister_struct", (
+            "peek_struct_identity_fact(", "let def = StructDef {",
+            "commit_struct_identity_fact(ctx, identity, true)",
+            "ctx.env.types.structs.insert(name, def)")),
+        ("infer_register", "register_extern_type_common", (
+            "peek_struct_identity_fact(", "let def = StructDef {",
+            "commit_struct_identity_fact(ctx, identity, false)",
+            "ctx.env.types.extern_structs.insert(name, def)")),
+        ("infer_register", "complete_struct_fields", (
+            "peek_struct_identity_completion(",
+            "let mut resolved_fields: List<StructField> = []",
+            "commit_struct_identity_completion(ctx, identity)",
+            "committed_def.fields = resolved_fields")),
+    ):
+        body, body_error = extract_ring_function_body(
+            sources[source_name], function_name)
+        if body_error:
+            errors.append(body_error)
+            continue
+        positions = [body.find(token) for token in ordered_tokens]
+        if any(position < 0 for position in positions) or positions != sorted(positions):
+            errors.append(
+                f"F2 U1b {function_name} atomic order drifted")
+
     hir_masked = mask_ring_strings_and_comments(sources["hir"])
     for token in (
             "pub enum HFieldAccessKind", "NominalField { owner_ref:",
             "RecordField", "TupleField", "Method", "ErrorRecovery",
-            "owner_ref: SymbolRef", "field_ref: NominalFieldRef"):
+            "owner_ref: RegisteredNominalRef", "field_ref: NominalFieldRef",
+            "field_index: Int"):
         if token not in sources["hir"]:
             errors.append(f"F2 U1b HIR schema misses {token!r}")
     if re.search(r"StructType\s*\{[^}\n]*owner_ref", sources["types"]):
@@ -8780,14 +8855,21 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
         errors.append("F2 U1b backend semantically reads nominal identity")
     if "HFieldAccessKind::ErrorRecovery" not in hir_masked:
         errors.append("F2 U1b successful-HIR ErrorRecovery rejection drifted")
+    for forbidden in (
+            "take_struct_identity_fact", "take_struct_identity_completion",
+            "stage_struct_identity_completion", "def.fields.push("):
+        if forbidden in sources["infer_ctx"] or forbidden in sources["infer_register"]:
+            errors.append(f"F2 U1b retained non-atomic ledger path {forbidden!r}")
     return errors
 
 
 F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
+    ("identity", "make_registered_nominal_ref",
+     "display_name == \"\"", "false"),
     ("identity", "make_nominal_field_ref",
      "symbol_ref_origin_module_key(owner) !=", "false &&"),
     ("identity", "make_nominal_field_ref",
-     "symbol_ref_canonical_payload(member).starts_with(", "false &&("),
+     "symbol_ref_canonical_payload(member) !=", "false &&"),
     ("identity", "make_nominal_field_ref",
      'symbol_ref_declaration_site_path(member) !=', "false &&"),
     ("resolver", "source_seed_symbol",
@@ -8803,19 +8885,26 @@ F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
      "program.span.file"),
     ("infer_ctx", "install_struct_identity_ledger",
      "existing.frame_index == fact.frame_index", "false"),
-    ("infer_ctx", "take_struct_identity_fact",
+    ("infer_ctx", "peek_struct_identity_fact",
      'none => panic("struct identity ledger: missing declaration fact")',
      "none => StructIdentityFact {}"),
+    ("infer_ctx", "commit_struct_identity_fact",
+     'panic("struct identity ledger: commit fact mismatch")', "{}"),
     ("infer_ctx", "close_struct_identity_ledger",
      "ctx.struct_identity_unconsumed.len() != 0", "false"),
     ("infer_ctx", "apply_project_namespace_binding",
-     "if !symbol_ref_same(binding.symbol, def.owner_ref)", "if false"),
+     "registered_nominal_ref_symbol(def.owner_ref)", "binding.symbol"),
     ("infer_register", "complete_struct_fields",
      "field_ref: field_identity.field_ref",
      "field_ref: identity.fields.get(0).unwrap().field_ref"),
     ("infer_register", "complete_struct_fields",
-     "take_struct_identity_completion(ctx, def.owner_ref)",
-     "missing_struct_identity_completion(ctx, def.owner_ref)"),
+     "peek_struct_identity_completion(",
+     "early_commit_struct_identity_completion("),
+    ("infer_register", "preregister_struct",
+     "peek_struct_identity_fact(", "early_commit_struct_identity_fact("),
+    ("infer_register", "complete_struct_fields",
+     "resolved_fields.push(StructField {",
+     "committed_def.fields.push(StructField {"),
     ("checker", "check", "resolve_single_namespace_plan(program)",
      "missing_single_namespace_plan(program)"),
     ("checker", "load_prelude", "resolve_prelude_namespace_plan(",
@@ -8825,13 +8914,25 @@ F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
     ("exports", "copy_exported_name", "types.insert(local_name, def)",
      "types.insert(local_name, remint_type_def(def))"),
     ("hir", "validate_hir_field_access_kind",
-     "owner_ref, nominal_field_ref_owner(field_ref)",
-     "owner_ref, owner_ref"),
+     "field != nominal_field_ref_name(field_ref)", "false"),
+    ("hir", "validate_hir_field_access_kind",
+     "if name != registered_nominal_ref_display_name(owner_ref)",
+     "if false"),
     ("hir", "validate_hir_field_access_kind",
      'panic("HIR identity: ErrorRecovery field access reached successful HIR")',
      "{}"),
     ("infer", "infer_field_access", "field_ref: found_field.field_ref",
      "field_ref: missing_field_ref"),
+    ("infer", "infer_field_access",
+     "access_kind = HFieldAccessKind::NominalField {",
+     "access_kind = HFieldAccessKind::RecordField"),
+    ("infer", "infer_field_access", "owner_ref: struct_def.owner_ref",
+     "owner_ref: wrong_owner_ref"),
+    ("infer", "infer_struct_lit", "owner_ref: struct_def.owner_ref",
+     "owner_ref: wrong_owner_ref"),
+    ("builtins", "register_cell",
+     "make_registered_nominal_ref(cell_owner, BUILTIN_CELL)",
+     "make_registered_nominal_ref(cell_owner, \"WrongCell\")"),
     ("zonk", "zonk_expr", "access_kind: access_kind",
      "access_kind: HFieldAccessKind::ErrorRecovery"),
     ("zonk", "zonk_expr", "field_ref: f.field_ref",

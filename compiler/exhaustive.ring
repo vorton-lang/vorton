@@ -85,7 +85,8 @@ fn instantiate_struct_fields(env: TypeEnv, name: Str, type_params: List<Type>) -
             for f in struct_def.fields {
                 result.push(StructField {
                     name: f.name, ty: apply_subst_map(inst_map, f.ty),
-                    is_pub: f.is_pub, field_ref: f.field_ref, span: f.span
+                    is_pub: f.is_pub, field_ref: f.field_ref,
+                    field_index: f.field_index, span: f.span
                 })
             }
             result

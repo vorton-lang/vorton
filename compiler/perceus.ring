@@ -993,6 +993,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             for f in fields {
                 new_fields.push(HNominalStructFieldInit {
                     name: f.name, field_ref: f.field_ref,
+                    field_index: f.field_index,
                     value: anf_tail_value(f.value, hoists, externs, counter) })
             }
             let new_spread = match spread {
@@ -2658,6 +2659,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             for f in fields {
                 new_fields.push(HNominalStructFieldInit {
                     name: f.name, field_ref: f.field_ref,
+                    field_index: f.field_index,
                     value: rc_escape(f.value, owned, boxed, externs, drop_types, gensym, loop_base) })
             }
             // Spread copies the source struct's field pointers into the new struct

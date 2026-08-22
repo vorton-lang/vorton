@@ -6,7 +6,7 @@ use hir::{HDecl, HParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssoc
     DictDispatchInfo, DictRef, trait_dict_name,
     hexpr_type, hexpr_effects, hexpr_span,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
-use ir_identity::{NominalFieldRef}
+use ir_identity::{NominalFieldRef, nominal_field_ref_index}
 use env::{TypeScheme, SchemeBound, MethodOrigin,
     apply_subst, apply_subst_map, apply_subst_row_map,
     find_impl, find_impl_by_origin, has_impl, impl_origin, impl_decl_origin,
@@ -364,7 +364,8 @@ fn check_struct_decl(ctx: InferCtx, name: Str, type_params: List<TypeParam>, is_
     for f in def.fields {
         hfields.push(HStructField {
             name: f.name, ty: f.ty, is_pub: f.is_pub,
-            field_ref: f.field_ref, span: f.span
+            field_ref: f.field_ref, field_index: f.field_index,
+            span: f.span
         })
     }
     HDecl::Struct {
@@ -1154,7 +1155,9 @@ fn expand_delegate_impls(
                                                         field: field,
                                                         access_kind: HFieldAccessKind::NominalField {
                                                             owner_ref: struct_def.owner_ref,
-                                                            field_ref: exact_field_ref
+                                                            field_ref: exact_field_ref,
+                                                            field_index: nominal_field_ref_index(
+                                                                exact_field_ref)
                                                         },
                                                         ty: resolved_ft,
                                                         effects: EMPTY_ROW,
@@ -1180,7 +1183,9 @@ fn expand_delegate_impls(
                                                 field: field,
                                                 access_kind: HFieldAccessKind::NominalField {
                                                     owner_ref: struct_def.owner_ref,
-                                                    field_ref: exact_field_ref
+                                                    field_ref: exact_field_ref,
+                                                    field_index: nominal_field_ref_index(
+                                                        exact_field_ref)
                                                 },
                                                 ty: resolved_ft,
                                                 effects: EMPTY_ROW,

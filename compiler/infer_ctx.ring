@@ -19,7 +19,8 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
 use unify::{UnificationError, empty_subst, unify, occurs_in, unify_effect_params}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     StructIdentityFact, NamespaceKind}
-use ir_identity::{SymbolRef, symbol_ref_canonical_payload, symbol_ref_same}
+use ir_identity::{SymbolRef, symbol_ref_canonical_payload, symbol_ref_same,
+    nominal_field_ref_same, registered_nominal_ref_symbol}
 
 // ============================================================
 // InferResult — return type for expression inference
@@ -347,7 +348,9 @@ fn apply_project_namespace_binding(
             match source {
                 none => false,
                 some(def) => {
-                    if !symbol_ref_same(binding.symbol, def.owner_ref) {
+                    if !symbol_ref_same(
+                            binding.symbol,
+                            registered_nominal_ref_symbol(def.owner_ref)) {
                         panic("project hydration: struct owner identity mismatch")
                     }
                     state.journal.push(ProjectNamespaceUndo::Struct {
@@ -3077,8 +3080,33 @@ pub fn exit_struct_identity_frame(mut ctx: InferCtx) {
     }
 }
 
-pub fn take_struct_identity_fact(
-    mut ctx: InferCtx, decl_index: Int,
+fn struct_identity_fact_same(
+    left: StructIdentityFact, right: StructIdentityFact
+) -> Bool {
+    if left.file_key != right.file_key ||
+       left.frame_index != right.frame_index ||
+       left.decl_index != right.decl_index ||
+       left.is_extern != right.is_extern ||
+       !symbol_ref_same(left.owner_ref, right.owner_ref) ||
+       left.fields.len() != right.fields.len() {
+        return false
+    }
+    for field_index in 0..left.fields.len() {
+        match (left.fields.get(field_index), right.fields.get(field_index)) {
+            (some(a), some(b)) => {
+                if a.field_index != b.field_index ||
+                   !nominal_field_ref_same(a.field_ref, b.field_ref) {
+                    return false
+                }
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+pub fn peek_struct_identity_fact(
+    ctx: InferCtx, decl_index: Int,
     is_extern: Bool, field_count: Int
 ) -> StructIdentityFact {
     let frame_index = match ctx.struct_identity_frame_stack.get(
@@ -3088,7 +3116,6 @@ pub fn take_struct_identity_fact(
     }
     let file_key = ctx.struct_identity_file_key.unwrap_or("")
     let mut found: StructIdentityFact? = none
-    let mut remaining: List<StructIdentityFact> = []
     for fact in ctx.struct_identity_unconsumed {
         if fact.file_key == file_key && fact.frame_index == frame_index &&
            fact.decl_index == decl_index {
@@ -3096,11 +3123,8 @@ pub fn take_struct_identity_fact(
                 panic("struct identity ledger: duplicate consume match")
             }
             found = some(fact)
-        } else {
-            remaining.push(fact)
         }
     }
-    ctx.struct_identity_unconsumed = remaining
     let fact = match found {
         some(value) => value,
         none => panic("struct identity ledger: missing declaration fact")
@@ -3111,40 +3135,69 @@ pub fn take_struct_identity_fact(
     fact
 }
 
-pub fn stage_struct_identity_completion(
-    mut ctx: InferCtx, fact: StructIdentityFact
+pub fn commit_struct_identity_fact(
+    mut ctx: InferCtx, fact: StructIdentityFact, await_fields: Bool
 ) {
-    if fact.is_extern {
-        panic("struct identity ledger: extern fact cannot await fields")
+    if await_fields == fact.is_extern {
+        panic("struct identity ledger: invalid completion mode")
     }
-    for pending in ctx.struct_identity_pending {
-        if symbol_ref_same(pending.owner_ref, fact.owner_ref) {
-            panic("struct identity ledger: duplicate pending owner")
+    let mut matches = 0
+    let mut remaining: List<StructIdentityFact> = []
+    for existing in ctx.struct_identity_unconsumed {
+        if struct_identity_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
         }
     }
-    ctx.struct_identity_pending.push(fact)
+    if matches != 1 {
+        panic("struct identity ledger: commit fact mismatch")
+    }
+    if await_fields {
+        for pending in ctx.struct_identity_pending {
+            if symbol_ref_same(pending.owner_ref, fact.owner_ref) {
+                panic("struct identity ledger: duplicate pending owner")
+            }
+        }
+    }
+    ctx.struct_identity_unconsumed = remaining
+    if await_fields { ctx.struct_identity_pending.push(fact) }
 }
 
-pub fn take_struct_identity_completion(
-    mut ctx: InferCtx, owner_ref: SymbolRef
+pub fn peek_struct_identity_completion(
+    ctx: InferCtx, owner_ref: SymbolRef
 ) -> StructIdentityFact {
     let mut found: StructIdentityFact? = none
-    let mut remaining: List<StructIdentityFact> = []
     for fact in ctx.struct_identity_pending {
         if symbol_ref_same(fact.owner_ref, owner_ref) {
             if found.is_some() {
                 panic("struct identity ledger: duplicate pending completion")
             }
             found = some(fact)
-        } else {
-            remaining.push(fact)
         }
     }
-    ctx.struct_identity_pending = remaining
     match found {
         some(value) => value,
         none => panic("struct identity ledger: missing pending completion")
     }
+}
+
+pub fn commit_struct_identity_completion(
+    mut ctx: InferCtx, fact: StructIdentityFact
+) {
+    let mut matches = 0
+    let mut remaining: List<StructIdentityFact> = []
+    for pending in ctx.struct_identity_pending {
+        if struct_identity_fact_same(pending, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(pending)
+        }
+    }
+    if matches != 1 {
+        panic("struct identity ledger: completion commit mismatch")
+    }
+    ctx.struct_identity_pending = remaining
 }
 
 pub fn close_struct_identity_ledger(mut ctx: InferCtx) {

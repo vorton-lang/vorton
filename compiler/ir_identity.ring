@@ -250,26 +250,67 @@ pub fn symbol_ref_same(left: SymbolRef, right: SymbolRef) -> Bool {
         left.declaration_site_path == right.declaration_site_path
 }
 
+// Registration gives a resolver-produced nominal a local typed display name
+// without changing or reconstructing its source identity.
+pub struct RegisteredNominalRef {
+    symbol: SymbolRef,
+    display_name: Str
+}
+
+pub fn make_registered_nominal_ref(
+    symbol: SymbolRef, display_name: Str
+) -> RegisteredNominalRef {
+    if display_name == "" || !namespace_kind_same(
+            symbol_ref_namespace_kind(symbol), namespace_nominal()) {
+        panic("IR identity: invalid registered nominal relation")
+    }
+    RegisteredNominalRef {
+        symbol: symbol,
+        display_name: display_name
+    }
+}
+
+pub fn registered_nominal_ref_symbol(
+    value: RegisteredNominalRef
+) -> SymbolRef {
+    value.symbol
+}
+
+pub fn registered_nominal_ref_display_name(
+    value: RegisteredNominalRef
+) -> Str {
+    value.display_name
+}
+
+pub fn registered_nominal_ref_same(
+    left: RegisteredNominalRef, right: RegisteredNominalRef
+) -> Bool {
+    symbol_ref_same(left.symbol, right.symbol) &&
+        left.display_name == right.display_name
+}
+
 // A nominal field is one atomic typed relation: downstream stages may copy
 // it, but cannot pair an arbitrary member with an unrelated nominal owner.
 pub struct NominalFieldRef {
     owner: SymbolRef,
     member: SymbolRef,
-    field_index: Int
+    field_index: Int,
+    field_name: Str
 }
 
 pub fn make_nominal_field_ref(
-    owner: SymbolRef, member: SymbolRef, field_index: Int
+    owner: SymbolRef, member: SymbolRef,
+    field_index: Int, field_name: Str
 ) -> NominalFieldRef {
-    if field_index < 0 ||
+    if field_index < 0 || field_name == "" ||
        !namespace_kind_same(
             symbol_ref_namespace_kind(owner), namespace_nominal()) ||
        !namespace_kind_same(
             symbol_ref_namespace_kind(member), namespace_member()) ||
        symbol_ref_origin_module_key(owner) !=
             symbol_ref_origin_module_key(member) ||
-       !symbol_ref_canonical_payload(member).starts_with(
-            "${symbol_ref_canonical_payload(owner)}::") ||
+       symbol_ref_canonical_payload(member) !=
+            "${symbol_ref_canonical_payload(owner)}::${field_name}" ||
        symbol_ref_declaration_site_path(member) !=
             "${symbol_ref_declaration_site_path(owner)}|field:${field_index}|kind:struct-field" {
         panic("IR identity: invalid nominal field relation")
@@ -277,7 +318,8 @@ pub fn make_nominal_field_ref(
     NominalFieldRef {
         owner: owner,
         member: member,
-        field_index: field_index
+        field_index: field_index,
+        field_name: field_name
     }
 }
 
@@ -293,12 +335,17 @@ pub fn nominal_field_ref_index(value: NominalFieldRef) -> Int {
     value.field_index
 }
 
+pub fn nominal_field_ref_name(value: NominalFieldRef) -> Str {
+    value.field_name
+}
+
 pub fn nominal_field_ref_same(
     left: NominalFieldRef, right: NominalFieldRef
 ) -> Bool {
     symbol_ref_same(left.owner, right.owner) &&
         symbol_ref_same(left.member, right.member) &&
-        left.field_index == right.field_index
+        left.field_index == right.field_index &&
+        left.field_name == right.field_name
 }
 
 pub struct ModuleBodyRef {

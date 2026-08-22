@@ -2171,7 +2171,8 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
                         some(found_field) => {
                             access_kind = HFieldAccessKind::NominalField {
                                 owner_ref: struct_def.owner_ref,
-                                field_ref: found_field.field_ref
+                                field_ref: found_field.field_ref,
+                                field_index: found_field.field_index
                             }
                             let mut inst_map: Map<Int, Type> = map_new()
                             let mut fi = 0
@@ -2426,6 +2427,7 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
                 hfields.push(HNominalStructFieldInit {
                     name: field.name,
                     field_ref: df.field_ref,
+                    field_index: df.field_index,
                     value: fr.hexpr
                 })
             },

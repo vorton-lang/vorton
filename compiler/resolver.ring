@@ -802,7 +802,7 @@ fn collect_struct_identity_fact(
                 field_facts.push(StructFieldIdentityFact {
                     field_index: field_index,
                     field_ref: make_nominal_field_ref(
-                        owner_ref, member, field_index)
+                        owner_ref, member, field_index, field.name)
                 })
             },
             none => {}

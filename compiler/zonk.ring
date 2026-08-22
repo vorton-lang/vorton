@@ -268,6 +268,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 type_args: type_args.map(fn(t) { zonk_type(ctx, t) }),
                 fields: fields.map(fn(f) { HNominalStructFieldInit {
                     name: f.name, field_ref: f.field_ref,
+                    field_index: f.field_index,
                     value: zonk_expr(ctx, f.value) } }),
                 spread: z_spread,
                 ty: z_ty, effects: z_eff, span: z_span
