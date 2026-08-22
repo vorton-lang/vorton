@@ -1155,6 +1155,12 @@ pub use config
 
 `pub` 可见性在多文件模式下强制执行，单文件模式不强制（向后兼容）。
 
+### 6.2a Inline module 声明唯一性（2026-08-22 用户决定）
+
+Ring 0.1 不支持 partial/reopened inline module。同一 direct parent scope 的 module namespace 中，`mod name { ... }` 只能有一个 source declaration；第二个同名 `mod` 在其 AstSite 直接报 `E0207 Duplicate definition`，不得因两段具有相同 canonical owner/payload 而合并，也不得把 source duplicate 降为 `E0707 Ambiguous import`。不同 parent 下的同名 leaf（例如 `outer::inner` 与顶层 `inner`）仍是不同 logical module。
+
+Import、re-export 与 same-origin diamond 是同一既有 declaration 的重复 delivery，可按 exact origin 幂等复用，不属于 source declaration reopening。多个 `impl` block 也不是 partial module，继续服从既有 impl/coherence 规则。若公开发布后出现跨文件 aggregation、generated extension 或 conditional compilation 等真实需求，必须以显式 `partial mod`、`namespace` 或 extension 设计重新立项；不能让普通重复 `mod` 静默获得第二种含义。
+
 ### 6.3 未来方向 ⚠️ 设计愿景，尚未实现
 
 - `sig` 模块签名（OCaml/SML 风格接口）

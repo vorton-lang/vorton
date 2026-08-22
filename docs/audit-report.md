@@ -40,6 +40,16 @@
 
 发现者：B-107 merge 独立 review
 
+### #270 重复 inline module 被合并为同一 source declaration authority [medium] [judgment] [open]
+
+U1a source-built targeted evidence 确认：baseline 错误接受 reopened inline module 中重复的 Enum、Struct 与 TypeAlias direct declaration；candidate 已能拒绝，但把同一 source module 的不同 AstSite 报成 `E0707 Ambiguous import`，尚未闭合正确 authority/diagnostic。Fn duplicate 在 baseline 已有 `E0207`，证明各声明类别当前不一致。旧 targeted packet 因无效 derived probe 在 baseline 先失败，只保留 sealed partial evidence；v2 不得与其拼接为 acceptance。
+
+**用户语义裁决（2026-08-22）**：0.1 不支持 partial/reopened inline module。同一 parent scope 的第二个同名 ModBlock 本身必须在 resolver source census 报 `E0207 Duplicate definition`，不得进入 member/payload merge；不同 parent 同 leaf 合法。Import、re-export、same-origin diamond 是 exact origin 的重复 delivery，多个 impl block 服从既有 coherence，均不属于 partial module。
+
+**修复/验收方向**：在真实 parser/resolver 的 source census 建立按 parent + module namespace + direct name + AstSite 的唯一性门，删除 multi-frame same-owner 作为合法输入的假设；随后覆盖单一合法 module 内部全部 direct declaration 类别与 delivery 反例。Python 字符串/token 扫描不得成为语义 oracle。只有 fresh source-built candidate、targeted project matrix 与 identity 重核通过后才接受行为 claim；不得以当前 candidate 的 E0707 或旧 15 项 partial PASS 关闭 finding。
+
+发现者：U1a typed identity / resolver source-census review
+
 ## Runtime
 
 

@@ -167,6 +167,34 @@ fn main() {
 
 嵌套模块中的 `pub` 控制对外层的可见性——内层模块需要 `pub` 才能被外层模块之外访问，内层的声明也需要 `pub`。
 
+### 声明唯一性（不支持 partial module）
+
+同一 direct parent scope 中，每个 inline module 名称只能声明一次：
+
+```ring
+mod tools {
+    pub fn first() -> Int { 1 }
+}
+
+mod tools {                         // E0207: Duplicate definition
+    pub fn second() -> Int { 2 }
+}
+```
+
+重复的第二个 `mod tools` 本身就是错误；编译器不会把两个 block 合并后再检查其成员。一个合法 module block 内，同一 namespace 的 direct declaration 同样必须唯一。
+
+相同 leaf 位于不同 parent 时是不同 logical module，因此合法：
+
+```ring
+mod outer {
+    mod inner {}
+}
+
+mod inner {}
+```
+
+`use`、`pub use` 与 same-origin diamond 只是把既有 declaration delivery 到其他 scope；同一 exact origin 的重复 delivery 可以幂等复用，不构成重复 source declaration。多个 `impl` block 也不属于 partial module，按 impl/coherence 规则独立处理。
+
 ### `mod` 块内的 `use` 声明
 
 `mod` 块内部可以使用 `use` 导入外部模块的符号，也可以使用 `super::`/`self::` 相对路径（见上文）：
@@ -281,6 +309,7 @@ sig Serializable {
 
 | 错误码 | 描述 |
 |--------|------|
+| E0207 | 同一 scope/namespace 中的重复 source declaration（包括重复 inline `mod`） |
 | E0405 | Capability 限制违反（`mod requires` 中使用了不允许的 effect） |
 | E0701 | 导入非 pub 符号 |
 | E0702 | 模块未找到 |
@@ -288,6 +317,7 @@ sig Serializable {
 | E0704 | 循环依赖 |
 | E0705 | 重复导入 / 相对路径超出模块嵌套深度 |
 | E0706 | `use` 不在文件顶部 |
+| E0707 | 来自不同 origin 的导入歧义；不用于 source duplicate |
 | E0708 | 项目内 `extern fn` forward declaration 匹配到多个实现 |
 
 ## 限制
