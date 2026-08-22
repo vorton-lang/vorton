@@ -7434,9 +7434,8 @@ F1_SCOPE_GUARD_COUNT = 14
 
 F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
 F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
-F2_U1A_SEMANTIC_MUTATION_COUNT = 56
+F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 56
 F2_U1A_SCOPE_GUARD_COUNT = 8
-F2_U1A_FIXTURE_COUNT = 10
 
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
@@ -8033,7 +8032,7 @@ def ir_inventory_f1_compile_errors(ring_exe: str) -> List[str]:
     return errors
 
 
-F2_U1A_FUNCTION_MUTATIONS = (
+F2_U1A_SOURCE_CONTRACT_MUTATIONS = (
     # Resolver source-site and exact namespace construction.
     ("resolver", "source_declaration_site_path", "site.use_index != -1",
      "false"),
@@ -8227,6 +8226,13 @@ def _f2_u1a_call_escaped_function_allowlist(
 def resolver_identity_u1a_contract_errors(
     resolver_source: str, infer_ctx_source: str,
 ) -> List[str]:
+    """Cheap layout-sensitive source guards, not semantic acceptance.
+
+    These checks intentionally do not duplicate the Ring parser and make no
+    claim that formatting-equivalent rewrites cannot evade them.  U1a behavior
+    is accepted only from a source-built candidate running targeted project
+    fixtures in an external Steward evidence packet.
+    """
     errors: List[str] = []
     resolver_masked = mask_ring_strings_and_comments(resolver_source)
     infer_masked = mask_ring_strings_and_comments(infer_ctx_source)
@@ -8282,7 +8288,8 @@ def resolver_identity_u1a_contract_errors(
             errors.append(f"F2 U1a resolver import misses {token!r}")
 
     seen_relations: set[Tuple[str, str, str]] = set()
-    for source_name, function_name, token, _ in F2_U1A_FUNCTION_MUTATIONS:
+    for source_name, function_name, token, _ in (
+            F2_U1A_SOURCE_CONTRACT_MUTATIONS):
         relation = (source_name, function_name, token)
         if relation in seen_relations:
             continue
@@ -8334,20 +8341,22 @@ def resolver_identity_u1a_contract_errors(
     return errors
 
 
-def resolver_identity_u1a_semantic_mutation_errors(
+def resolver_identity_u1a_source_contract_mutation_errors(
     resolver_source: str, infer_ctx_source: str,
 ) -> Tuple[List[str], int]:
+    """Exercise inexpensive source-contract regressions only."""
     errors: List[str] = []
     count = 0
     for source_name, function_name, anchor, replacement in (
-            F2_U1A_FUNCTION_MUTATIONS):
+            F2_U1A_SOURCE_CONTRACT_MUTATIONS):
         count += 1
         source = resolver_source if source_name == "resolver" else infer_ctx_source
         mutated, mutation_error = _f0_mutate_function_once(
             source, function_name, anchor, replacement)
         if mutation_error:
             errors.append(
-                f"F2 U1a semantic mutation {source_name}.{function_name}: "
+                f"F2 U1a source-contract mutation "
+                f"{source_name}.{function_name}: "
                 f"{mutation_error}")
             continue
         assert mutated is not None
@@ -8358,7 +8367,8 @@ def resolver_identity_u1a_semantic_mutation_errors(
             source_name, function_name, anchor)
         if findings != [expected]:
             errors.append(
-                f"F2 U1a semantic mutation {source_name}.{function_name} "
+                f"F2 U1a source-contract mutation "
+                f"{source_name}.{function_name} "
                 f"findings were {findings!r}, expected only {expected!r}")
 
     custom_mutations = (
@@ -8404,7 +8414,7 @@ def resolver_identity_u1a_semantic_mutation_errors(
         source = resolver_source if source_name == "resolver" else infer_ctx_source
         if source.count(anchor) != 1:
             errors.append(
-                f"F2 U1a semantic mutation {label} anchor count was "
+                f"F2 U1a source-contract mutation {label} anchor count was "
                 f"{source.count(anchor)}")
             continue
         mutated = source.replace(anchor, replacement, 1)
@@ -8413,7 +8423,7 @@ def resolver_identity_u1a_semantic_mutation_errors(
             mutated if source_name == "infer_ctx" else infer_ctx_source)
         if len(findings) != 1 or not findings[0].startswith(expected_prefix):
             errors.append(
-                f"F2 U1a semantic mutation {label} findings were "
+                f"F2 U1a source-contract mutation {label} findings were "
                 f"{findings!r}, expected one {expected_prefix!r}")
 
     enum_lookup_anchor = "symbol_ref_same(group.enum_symbol, enum_symbol)"
@@ -8434,14 +8444,15 @@ def resolver_identity_u1a_semantic_mutation_errors(
             enum_lookup_anchor, replacement)
         if mutation_error:
             errors.append(
-                f"F2 U1a semantic mutation enum {label}: {mutation_error}")
+                f"F2 U1a source-contract mutation enum {label}: "
+                f"{mutation_error}")
             continue
         assert mutated is not None
         findings = resolver_identity_u1a_contract_errors(
             mutated, infer_ctx_source)
         if findings != [expected]:
             errors.append(
-                f"F2 U1a semantic mutation enum {label} findings were "
+                f"F2 U1a source-contract mutation enum {label} findings were "
                 f"{findings!r}, expected only {expected!r}")
 
     count += 1
@@ -8463,10 +8474,10 @@ def resolver_identity_u1a_semantic_mutation_errors(
                 f"F2 U1a diagnostic-decision mutation findings were "
                 f"{findings!r}, expected only {expected!r}")
 
-    if count != F2_U1A_SEMANTIC_MUTATION_COUNT:
+    if count != F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT:
         errors.append(
-            f"F2 U1a semantic mutation count was {count}, expected "
-            f"{F2_U1A_SEMANTIC_MUTATION_COUNT}")
+            f"F2 U1a source-contract mutation count was {count}, expected "
+            f"{F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT}")
     return errors, count
 
 
@@ -8498,6 +8509,7 @@ def resolver_identity_u1a_scope_guard_errors(
 
 
 def resolver_identity_u1a_source_errors() -> List[str]:
+    """Run non-authoritative U1a source contracts and scope guards."""
     try:
         resolver_source = F2_U1A_RESOLVER_PATH.read_text(encoding="utf-8")
         infer_ctx_source = F2_U1A_INFER_CTX_PATH.read_text(encoding="utf-8")
@@ -8507,7 +8519,7 @@ def resolver_identity_u1a_source_errors() -> List[str]:
         resolver_source, infer_ctx_source)
     if errors:
         return errors
-    mutation_errors, _ = resolver_identity_u1a_semantic_mutation_errors(
+    mutation_errors, _ = resolver_identity_u1a_source_contract_mutation_errors(
         resolver_source, infer_ctx_source)
     guard_errors, _ = resolver_identity_u1a_scope_guard_errors(
         resolver_source, infer_ctx_source)
@@ -8516,7 +8528,8 @@ def resolver_identity_u1a_source_errors() -> List[str]:
     return errors
 
 
-def resolver_identity_u1a_compile_errors(ring_exe: str) -> List[str]:
+def resolver_identity_u1a_source_check_errors(ring_exe: str) -> List[str]:
+    """Parse/typecheck the two sources; this is not candidate behavior."""
     errors: List[str] = []
     compiler = Path(ring_exe)
     before = _sha256_file(compiler)
@@ -8529,77 +8542,17 @@ def resolver_identity_u1a_compile_errors(ring_exe: str) -> List[str]:
             errors="strict", check=False, timeout=120)
         if completed.returncode != 0:
             errors.append(
-                f"pinned Ring check failed for {display_path(source_path)}: "
+                f"pinned Ring source check failed for "
+                f"{display_path(source_path)}: "
                 f"exit={completed.returncode} stdout={completed.stdout!r} "
                 f"stderr={completed.stderr!r}")
         elif completed.stdout.strip() != "OK":
             errors.append(
-                f"pinned Ring check output drifted for "
+                f"pinned Ring source check output drifted for "
                 f"{display_path(source_path)}: stdout={completed.stdout!r}")
     if _sha256_file(compiler) != before:
-        errors.append("pinned Ring compiler changed across F2 U1a checks")
-    return errors
-
-
-F2_U1A_POSITIVE_FIXTURES = (
-    "diamond_dep",
-    "import_enum",
-    "module_type_alias_reexport",
-    "project_namespace_enum_relation_value_order",
-    "project_namespace_growth_acyclic",
-    "plan_namespace_empty_growth_cycle",
-)
-F2_U1A_NEGATIVE_FIXTURES = (
-    "error_namespace_growth_duplicate_exact",
-    "error_namespace_named_enum_exact_import_collision",
-    "error_namespace_value_discovery_order",
-    "error_namespace_wildcard_value_ambiguity",
-)
-
-
-def resolver_identity_u1a_fixture_errors(ring_exe: str) -> List[str]:
-    errors: List[str] = []
-    count = 0
-    for case_name in F2_U1A_POSITIVE_FIXTURES:
-        count += 1
-        source_path = MODULES_DIR / case_name / "main.ring"
-        try:
-            completed = ring_check(
-                ring_exe, str(source_path), phase_suite="structural",
-                phase_case=f"f2-u1a:{case_name}")
-        except subprocess.TimeoutExpired:
-            errors.append(f"F2 U1a positive fixture timed out: {case_name}")
-            continue
-        if completed.returncode != 0 or completed.stdout.strip() != "OK":
-            errors.append(
-                f"F2 U1a positive fixture failed: {case_name}; "
-                f"exit={completed.returncode} stdout={completed.stdout!r} "
-                f"stderr={completed.stderr!r}")
-    for case_name in F2_U1A_NEGATIVE_FIXTURES:
-        count += 1
-        case_dir = MODULES_DIR / case_name
-        source_path = case_dir / "main.ring"
-        contract = (case_dir / "main.error").read_text(encoding="utf-8")
-        try:
-            completed = ring_check(
-                ring_exe, str(source_path), phase_suite="structural",
-                phase_case=f"f2-u1a:{case_name}")
-        except subprocess.TimeoutExpired:
-            errors.append(f"F2 U1a negative fixture timed out: {case_name}")
-            continue
-        combined = (completed.stdout or "") + (completed.stderr or "")
-        contract_failure = error_contract_failure(contract, combined)
-        if completed.returncode == 0:
-            errors.append(
-                f"F2 U1a negative fixture unexpectedly passed: {case_name}")
-        elif contract_failure is not None:
-            errors.append(
-                f"F2 U1a negative fixture drifted: {case_name}; "
-                f"{contract_failure}")
-    if count != F2_U1A_FIXTURE_COUNT:
         errors.append(
-            f"F2 U1a fixture count was {count}, expected "
-            f"{F2_U1A_FIXTURE_COUNT}")
+            "pinned Ring compiler changed across F2 U1a source checks")
     return errors
 
 
@@ -9188,19 +9141,21 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
                 TestResult.FAIL, suite, f"fixture validation {index}", error))
         return
 
-    resolver_identity_label = "compiler.resolver_identity_u1a"
+    # This permanent gate covers cheap source structure and parse/typecheck
+    # only.  Candidate behavior requires an external source-built compiler
+    # packet running the targeted project fixtures.
+    resolver_identity_label = "compiler.resolver_identity_u1a_source_contract"
     if matches_filter(resolver_identity_label, name_filter):
         resolver_identity_errors = resolver_identity_u1a_source_errors()
         if not resolver_identity_errors:
             resolver_identity_errors.extend(
-                resolver_identity_u1a_compile_errors(ring_exe))
-        if not resolver_identity_errors:
-            resolver_identity_errors.extend(
-                resolver_identity_u1a_fixture_errors(ring_exe))
+                resolver_identity_u1a_source_check_errors(ring_exe))
         detail = (
-            f"semantic_mutations={F2_U1A_SEMANTIC_MUTATION_COUNT}; "
+            f"source_contract_mutations="
+            f"{F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT}; "
             f"scope_guards={F2_U1A_SCOPE_GUARD_COUNT}; "
-            f"fixtures={F2_U1A_FIXTURE_COUNT}; pinned_ring_checks=2")
+            "pinned_source_checks=2; candidate_behavior=not_evaluated; "
+            "behavior_gate=external_source_built_candidate_packet")
         collector.add(TestResult(
             TestResult.PASS if not resolver_identity_errors else TestResult.FAIL,
             suite, resolver_identity_label,
