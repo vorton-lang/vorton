@@ -19,8 +19,8 @@ use infer_ctx::{InferCtx, type_error, record_value_origin, record_variant_ctor_o
 use infer_register::{register_decl_public}
 use exports::{ModuleExports, TypeDef}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
-    ImportIssueKind, NamespaceKind, first_duplicate_mod_block,
-    duplicate_mod_block_diagnostic}
+    ImportIssueKind, NamespaceKind, first_duplicate_direct_declaration,
+    duplicate_direct_declaration_diagnostic}
 use codes::{E0504, E0702, E0703, E0704, E0705, E0707, E0801}
 use parser::{parse}
 use union_find::{UnionFind}
@@ -44,7 +44,7 @@ pub struct CheckResult {
     pub impl_facts: List<ModuleImplFact>
 }
 
-fn duplicate_mod_block_error_result(ctx: InferCtx) -> CheckResult {
+fn duplicate_direct_declaration_error_result(ctx: InferCtx) -> CheckResult {
     CheckResult {
         program: HProgram {
             decls: [],
@@ -323,10 +323,10 @@ fn collect_module_impl_facts(
 
 pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     let mut ctx = new_infer_ctx(sink)
-    match first_duplicate_mod_block(program) {
+    match first_duplicate_direct_declaration(program) {
         some(duplicate) => {
-            ctx.sink.report(duplicate_mod_block_diagnostic(duplicate))
-            return duplicate_mod_block_error_result(ctx)
+            ctx.sink.report(duplicate_direct_declaration_diagnostic(duplicate))
+            return duplicate_direct_declaration_error_result(ctx)
         },
         none => {}
     }
@@ -563,9 +563,9 @@ pub fn check_module(
     // applies the same AST authority before constructing resolver frames.
     // Fail closed here without publishing a second diagnostic if an internal
     // caller bypasses that gate.
-    match first_duplicate_mod_block(program) {
+    match first_duplicate_direct_declaration(program) {
         some(_) => panic(
-            "unreachable: project checker received duplicate inline module"),
+            "unreachable: project checker received duplicate direct declaration"),
         none => {}
     }
     let mut ctx = new_infer_ctx(sink)

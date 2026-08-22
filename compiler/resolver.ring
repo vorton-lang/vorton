@@ -108,34 +108,129 @@ pub struct NamespaceSeed {
     pub is_projection: Bool
 }
 
-// Ring 0.1 has one direct inline-module declaration per parent scope.  Keep
-// the exact first and duplicate source spans separate from namespace identity
-// so both single-file and project entry points report the same source error
-// before any duplicate fragment can enter resolver frame construction.
-pub struct DuplicateModBlock {
+// Source declaration cardinality is decided once, before registration and
+// before project namespace construction.  This namespace is intentionally
+// finer than IR identity's nominal/effect axes because it mirrors the current
+// resolver lookup tables exactly.
+pub enum DirectDeclarationNamespace {
+    Value,
+    Struct,
+    Enum,
+    TypeAlias,
+    Effect,
+    EffectAlias,
+    Trait,
+    Module
+}
+
+struct DirectDeclarationSite {
+    namespace: DirectDeclarationNamespace,
+    name: Str,
+    span: Span
+}
+
+pub struct DuplicateDirectDeclaration {
+    pub namespace: DirectDeclarationNamespace,
     pub name: Str,
     pub first_span: Span,
     pub duplicate_span: Span
 }
 
-fn first_duplicate_mod_block_in_scope(
+fn direct_declaration_namespace_key(
+    namespace: DirectDeclarationNamespace
+) -> Str {
+    match namespace {
+        DirectDeclarationNamespace::Value => "value",
+        DirectDeclarationNamespace::Struct => "struct",
+        DirectDeclarationNamespace::Enum => "enum",
+        DirectDeclarationNamespace::TypeAlias => "type-alias",
+        DirectDeclarationNamespace::Effect => "effect",
+        DirectDeclarationNamespace::EffectAlias => "effect-alias",
+        DirectDeclarationNamespace::Trait => "trait",
+        DirectDeclarationNamespace::Module => "module"
+    }
+}
+
+fn direct_declaration_site(decl: Decl) -> DirectDeclarationSite? {
+    match decl {
+        Decl::Fn { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::Value,
+            name: name, span: span
+        }),
+        Decl::ExternFn { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::Value,
+            name: name, span: span
+        }),
+        Decl::Const { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::Value,
+            name: name, span: span
+        }),
+        Decl::Struct { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::Struct,
+            name: name, span: span
+        }),
+        Decl::ExternType { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::Struct,
+            name: name, span: span
+        }),
+        Decl::Enum { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::Enum,
+            name: name, span: span
+        }),
+        Decl::TypeAlias { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::TypeAlias,
+            name: name, span: span
+        }),
+        Decl::Effect { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::Effect,
+            name: name, span: span
+        }),
+        Decl::EffectAlias { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::EffectAlias,
+            name: name, span: span
+        }),
+        Decl::Trait { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::Trait,
+            name: name, span: span
+        }),
+        Decl::ModBlock { name, span, .. } => some(DirectDeclarationSite {
+            namespace: DirectDeclarationNamespace::Module,
+            name: name, span: span
+        }),
+        // Impl/Test are not named source declarations.  Sig is deliberately
+        // absent: its surface is being removed in the next independent unit.
+        // Delegate/AssocType are member forms, not direct module bindings.
+        _ => none
+    }
+}
+
+fn first_duplicate_direct_declaration_in_scope(
     decls: List<Decl>
-) -> DuplicateModBlock? {
-    // The map is deliberately fresh for every direct declaration list:
-    // outer::inner and root::inner are different module declarations.
-    let mut seen: Map<Str, Span> = map_new()
+) -> DuplicateDirectDeclaration? {
+    // The census is deliberately fresh for every direct declaration list:
+    // same-leaf declarations under different parents are independent.
+    let mut seen: Map<Str, DirectDeclarationSite> = map_new()
     for decl in decls {
-        match decl {
-            Decl::ModBlock { name, decls: nested, span, .. } => {
-                match seen.get(name) {
-                    some(first_span) => return some(DuplicateModBlock {
-                        name: name,
-                        first_span: first_span,
-                        duplicate_span: span
-                    }),
-                    none => { seen.insert(name, span) }
+        match direct_declaration_site(decl) {
+            some(site) => {
+                let key = "${direct_declaration_namespace_key(
+                    site.namespace)}|${site.name}"
+                match seen.get(key) {
+                    some(existing) => return some(
+                        DuplicateDirectDeclaration {
+                            namespace: site.namespace,
+                            name: site.name,
+                            first_span: existing.span,
+                            duplicate_span: site.span
+                        }),
+                    none => { seen.insert(key, site) }
                 }
-                match first_duplicate_mod_block_in_scope(nested) {
+            },
+            none => {}
+        }
+        match decl {
+            Decl::ModBlock { decls: nested, .. } => {
+                match first_duplicate_direct_declaration_in_scope(nested) {
                     some(duplicate) => return some(duplicate),
                     none => {}
                 }
@@ -146,22 +241,56 @@ fn first_duplicate_mod_block_in_scope(
     none
 }
 
-pub fn first_duplicate_mod_block(program: Program) -> DuplicateModBlock? {
-    first_duplicate_mod_block_in_scope(program.decls)
+pub fn first_duplicate_direct_declaration(
+    program: Program
+) -> DuplicateDirectDeclaration? {
+    first_duplicate_direct_declaration_in_scope(program.decls)
 }
 
-pub fn duplicate_mod_block_diagnostic(
-    duplicate: DuplicateModBlock
+fn direct_declaration_namespace_is_module(
+    namespace: DirectDeclarationNamespace
+) -> Bool {
+    match namespace {
+        DirectDeclarationNamespace::Module => true,
+        _ => false
+    }
+}
+
+fn direct_declaration_namespace_is_effect_alias(
+    namespace: DirectDeclarationNamespace
+) -> Bool {
+    match namespace {
+        DirectDeclarationNamespace::EffectAlias => true,
+        _ => false
+    }
+}
+
+pub fn duplicate_direct_declaration_diagnostic(
+    duplicate: DuplicateDirectDeclaration
 ) -> Diagnostic {
+    let is_module = direct_declaration_namespace_is_module(
+        duplicate.namespace)
+    let message = if is_module {
+        "Duplicate definition: module '${duplicate.name}' is already defined"
+    } else if direct_declaration_namespace_is_effect_alias(
+            duplicate.namespace) {
+        "Duplicate definition: effect alias '${duplicate.name}' is already defined"
+    } else {
+        "Duplicate definition: '${duplicate.name}' is already defined"
+    }
     let mut diagnostic = make_diag(
         E0207, Severity::SevError,
-        "Duplicate definition: module '${duplicate.name}' is already defined",
+        message,
         duplicate.duplicate_span,
         DiagnosticContext::OtherContext {
-            detail: some("duplicate inline module declaration")
+            detail: some("duplicate direct source declaration")
         })
     diagnostic.notes.push(DiagnosticNote {
-        message: "first module declaration is here",
+        message: if is_module {
+            "first module declaration is here"
+        } else {
+            "first declaration is here"
+        },
         span: some(duplicate.first_span)
     })
     diagnostic
@@ -4847,10 +4976,11 @@ pub fn build_module_graph(entry_file: Str, error_format: Str) -> ModuleGraph? {
                             }
                             return none
                         }
-                        match first_duplicate_mod_block(ast) {
+                        match first_duplicate_direct_declaration(ast) {
                             some(duplicate) => {
                                 resolve_sink.report(
-                                    duplicate_mod_block_diagnostic(duplicate))
+                                    duplicate_direct_declaration_diagnostic(
+                                        duplicate))
                                 if error_format == "llm" {
                                     eprintln(format_llm(
                                         resolve_sink.diagnostics(),
