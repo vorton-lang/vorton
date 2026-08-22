@@ -1248,35 +1248,35 @@ fn register_trait_methods(
         "Eq" => {
             let eq_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
             methods.insert("eq", TypeScheme { ty: eq_fn, type_vars: type_var_ids,
-                bounds: bounds, def_id: some(env.fresh_def_id()) })
+                bounds: bounds, def_id: some(env.fresh_member_registration_def_id()) })
             let ne_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
             methods.insert("ne", TypeScheme { ty: ne_fn, type_vars: type_var_ids,
-                bounds: bounds, def_id: some(env.fresh_def_id()) })
+                bounds: bounds, def_id: some(env.fresh_member_registration_def_id()) })
         },
         "Clone" => {
             let clone_fn = Type::FnType { params: [self_type], return_type: self_type, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
             methods.insert("clone", TypeScheme { ty: clone_fn, type_vars: type_var_ids,
-                bounds: bounds, def_id: some(env.fresh_def_id()) })
+                bounds: bounds, def_id: some(env.fresh_member_registration_def_id()) })
         },
         "Ord" => {
             let cmp_fn = Type::FnType { params: [self_type, self_type], return_type: INT, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
             methods.insert("cmp", TypeScheme { ty: cmp_fn, type_vars: type_var_ids,
-                bounds: bounds, def_id: some(env.fresh_def_id()) })
+                bounds: bounds, def_id: some(env.fresh_member_registration_def_id()) })
         },
         "Debug" => {
             let debug_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
             methods.insert("debug", TypeScheme { ty: debug_fn, type_vars: type_var_ids,
-                bounds: bounds, def_id: some(env.fresh_def_id()) })
+                bounds: bounds, def_id: some(env.fresh_member_registration_def_id()) })
         },
         "Hash" => {
             let hash_fn = Type::FnType { params: [self_type], return_type: INT, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
             methods.insert("hash", TypeScheme { ty: hash_fn, type_vars: type_var_ids,
-                bounds: bounds, def_id: some(env.fresh_def_id()) })
+                bounds: bounds, def_id: some(env.fresh_member_registration_def_id()) })
         },
         "Json" => {
             let json_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW, ownership_term: CALLABLE_UNKNOWN }
             methods.insert("to_json", TypeScheme { ty: json_fn, type_vars: type_var_ids,
-                bounds: bounds, def_id: some(env.fresh_def_id()) })
+                bounds: bounds, def_id: some(env.fresh_member_registration_def_id()) })
         },
         _ => {},
     }

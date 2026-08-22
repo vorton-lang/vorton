@@ -40,7 +40,7 @@ fn install_builtin_method_map(
         let exact_scheme = match scheme.def_id {
             some(_) => scheme,
             none => TypeScheme {
-                ..scheme, def_id: some(env.fresh_def_id())
+                ..scheme, def_id: some(env.fresh_member_registration_def_id())
             }
         }
         let _ = install_method_scheme(
@@ -109,7 +109,7 @@ fn add_builtin_impl(
                             type_var_ids, map_new(), scheme_bounds)
                         exact.insert(method_name, TypeScheme {
                             ..specialized,
-                            def_id: some(env.fresh_def_id())
+                            def_id: some(env.fresh_member_registration_def_id())
                         })
                     },
                     none => {}
@@ -226,9 +226,9 @@ fn register_effects(mut env: TypeEnv) {
         type_params: [],
         type_param_vars: [],
         ops: [
-            EffectOpDef { name: "read", def_id: env.fresh_def_id(),
+            EffectOpDef { name: "read", def_id: env.fresh_member_registration_def_id(),
                 params: [STR], return_type: STR, has_default: false },
-            EffectOpDef { name: "write", def_id: env.fresh_def_id(),
+            EffectOpDef { name: "write", def_id: env.fresh_member_registration_def_id(),
                 params: [STR, STR], return_type: UNIT, has_default: false }
         ],
         built_in_kind: some(BuiltInKind::BkIo),
@@ -243,7 +243,7 @@ fn register_effects(mut env: TypeEnv) {
         type_params: ["E"],
         type_param_vars: [fail_t_id],
         ops: [
-            EffectOpDef { name: "raise", def_id: env.fresh_def_id(),
+            EffectOpDef { name: "raise", def_id: env.fresh_member_registration_def_id(),
                 params: [fail_t], return_type: NEVER, has_default: false }
         ],
         built_in_kind: some(BuiltInKind::BkFail),
@@ -462,9 +462,9 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "eq", def_id: env.fresh_def_id(),
+            TraitMethodDef { name: "eq", def_id: env.fresh_member_registration_def_id(),
                 ty: eq_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] },
-            TraitMethodDef { name: "ne", def_id: env.fresh_def_id(),
+            TraitMethodDef { name: "ne", def_id: env.fresh_member_registration_def_id(),
                 ty: ne_fn, has_default: true, param_mutabilities: [false, false], method_type_params: [] }
         ],
         supertraits: [],
@@ -503,7 +503,7 @@ fn register_clone_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "clone", def_id: env.fresh_def_id(),
+            TraitMethodDef { name: "clone", def_id: env.fresh_member_registration_def_id(),
                 ty: clone_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ],
         supertraits: [],
@@ -545,7 +545,7 @@ fn register_drop_trait(mut env: TypeEnv) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "drop", def_id: env.fresh_def_id(),
+            TraitMethodDef { name: "drop", def_id: env.fresh_member_registration_def_id(),
                 ty: drop_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ],
         supertraits: [],
@@ -579,7 +579,7 @@ fn register_ord_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "cmp", def_id: env.fresh_def_id(),
+            TraitMethodDef { name: "cmp", def_id: env.fresh_member_registration_def_id(),
                 ty: cmp_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] }
         ],
         supertraits: [],
@@ -606,7 +606,7 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "debug", def_id: env.fresh_def_id(),
+            TraitMethodDef { name: "debug", def_id: env.fresh_member_registration_def_id(),
                 ty: debug_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ],
         supertraits: [],
@@ -663,7 +663,7 @@ fn register_hash_trait(mut env: TypeEnv, sink: CollectingSink) {
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "hash", def_id: env.fresh_def_id(),
+            TraitMethodDef { name: "hash", def_id: env.fresh_member_registration_def_id(),
                 ty: hash_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ],
         supertraits: [],

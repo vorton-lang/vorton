@@ -20,14 +20,16 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     refresh_project_namespace_frame, exit_project_namespace_frame}
 use infer_helpers::{is_value_type}
 
-// Registries without a value binding allocate their exact DefId once here.
-// This is identity transport only: no ownership term or producer is derived.
-fn ensure_registered_callable_identity(
-    mut ctx: InferCtx, scheme: TypeScheme
+// A new registry member is a new semantic producer. Aliases/re-exports must
+// instead preserve or localize an already exact member and never call this.
+fn mint_new_member_registration_identity(
+    mut ctx: InferCtx, scheme: TypeScheme, label: Str
 ) -> TypeScheme {
     match scheme.def_id {
-        some(_) => scheme,
-        none => TypeScheme { ..scheme, def_id: some(ctx.env.fresh_def_id()) }
+        some(_) => panic(
+            "unreachable: ${label} already carries a member-registration DefId"),
+        none => TypeScheme { ..scheme,
+            def_id: some(ctx.env.fresh_member_registration_def_id()) }
     }
 }
 
@@ -1542,7 +1544,7 @@ fn register_effect(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, o
         let ret = resolve_type_expr(ctx, op.return_type)
         let op_has_default = op.body.is_some()
         effect_ops.push(EffectOpDef { name: op.name,
-            def_id: ctx.env.fresh_def_id(), params: param_types,
+            def_id: ctx.env.fresh_member_registration_def_id(), params: param_types,
             return_type: ret, has_default: op_has_default })
     }
     let mut all_defaults = true
@@ -1724,7 +1726,7 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
                     return_type: ret, effects: method_effects,
                     ownership_term: CALLABLE_UNKNOWN }
                 trait_methods.push(TraitMethodDef { name: mname,
-                    def_id: ctx.env.fresh_def_id(), ty: fn_type,
+                    def_id: ctx.env.fresh_member_registration_def_id(), ty: fn_type,
                     has_default: !is_abstract,
                     param_mutabilities: param_muts,
                     method_type_params: method_tps })
@@ -2007,12 +2009,13 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
                            !impl_method_names.contains(trait_method.name) {
                             exact_method_schemes.insert(
                                 trait_method.name,
-                                ensure_registered_callable_identity(ctx,
+                                mint_new_member_registration_identity(ctx,
                                     specialize_trait_method_scheme(
                                     trait_def, trait_method, impl_self_type,
                                     trait_type_args, impl_tv_ids,
                                     assoc_type_map,
-                                    impl_bounds.scheme_bounds)))
+                                    impl_bounds.scheme_bounds),
+                                    "omitted default method"))
                         }
                     }
 
@@ -2136,7 +2139,8 @@ fn register_impl_method(
     collect_effect_tail_vars(fn_type, all_tvs)
     let scheme = TypeScheme {
         ty: fn_type, type_vars: all_tvs,
-        bounds: impl_scheme_bounds, def_id: some(ctx.env.fresh_def_id())
+        bounds: impl_scheme_bounds,
+        def_id: some(ctx.env.fresh_member_registration_def_id())
     }
 
     // Track mut self methods
@@ -2622,12 +2626,13 @@ fn register_delegate_traits(
                                     }
                                     match resolved_method_scheme {
                                         some(field_scheme) => {
-                                            let scheme = ensure_registered_callable_identity(
+                                            let scheme = mint_new_member_registration_identity(
                                                 ctx, specialize_delegate_method_scheme(
                                                 ctx, field_scheme, field_var_map,
                                                 self_type, impl_tv_ids,
                                                 impl_scheme_bounds,
-                                                wrapper_fn_bounds, span))
+                                                wrapper_fn_bounds, span),
+                                                "delegate wrapper method")
                                             exact_method_schemes.insert(tm.name, scheme)
                                             let _ = install_method_scheme(
                                                 ctx.env.trait_reg, ctx.sink,
@@ -3117,7 +3122,7 @@ fn register_sig(mut ctx: InferCtx, name: Str, members: List<SigMember>, is_pub: 
             ownership_term: CALLABLE_UNKNOWN }
         sig_members.insert(m.name, TypeScheme { ty: fn_type,
             type_vars: type_vars, bounds: [],
-            def_id: some(ctx.env.fresh_def_id()) })
+            def_id: some(ctx.env.fresh_member_registration_def_id()) })
         ctx.type_param_scope = msaved
     }
     ctx.type_param_scope = saved

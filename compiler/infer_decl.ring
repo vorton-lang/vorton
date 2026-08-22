@@ -1105,10 +1105,23 @@ fn expand_delegate_impls(
                                         none => panic(
                                             "unreachable: delegate wrapper has no exact registered scheme")
                                     }
-                                    let wrapper_def_id = match wrapper_scheme.def_id {
-                                        some(id) => id,
-                                        none => panic(
-                                            "unreachable: delegate wrapper scheme has no exact DefId")
+                                    let wrapper_def_id =
+                                        ctx.env.require_member_registration_def_id(
+                                            wrapper_scheme.def_id,
+                                            "delegate wrapper scheme")
+                                    let forwarded_member_def_id = match field_method_scheme {
+                                        some(scheme) =>
+                                            ctx.env.require_member_registration_def_id(
+                                                scheme.def_id,
+                                                "delegate forwarded field method"),
+                                        none =>
+                                            ctx.env.require_member_registration_def_id(
+                                                some(tm.def_id),
+                                                "delegate forwarded trait method")
+                                    }
+                                    if wrapper_def_id == forwarded_member_def_id {
+                                        panic(
+                                            "unreachable: delegate wrapper and forwarded member share a DefId")
                                     }
                                     match tm.ty {
                                         Type::FnType { params: trait_params,
@@ -1274,10 +1287,6 @@ fn expand_delegate_impls(
                                                 let mut dict_args: List<HExpr> = []
                                                 dict_args.push(field_access)
                                                 dict_args.extend(forward_args)
-                                                let callee_def_id = match field_method_scheme {
-                                                    some(scheme) => scheme.def_id,
-                                                    none => some(tm.def_id)
-                                                }
                                                 let call_result =
                                                     exact_callable_result_identity(
                                                         ctx, ret_ty)
@@ -1287,7 +1296,7 @@ fn expand_delegate_impls(
                                                         dict_closure_dicts: none,
                                                         ty: tm.ty, effects: EMPTY_ROW, span: span
                                                     },
-                                                    callee_def_id: callee_def_id,
+                                                    callee_def_id: some(forwarded_member_def_id),
                                                     callable_result_def_id: call_result.1,
                                                     args: dict_args,
                                                     type_args: [],
@@ -1323,16 +1332,12 @@ fn expand_delegate_impls(
                                                 }
 
                                                 // Build: self.field.method(args...) — as Call with UFCS callee
-                                                let callee_def_id = match field_method_scheme {
-                                                    some(scheme) => scheme.def_id,
-                                                    none => some(tm.def_id)
-                                                }
                                                 let call_result =
                                                     exact_callable_result_identity(
                                                         ctx, ret_ty)
                                                 HExpr::Call {
                                                     callee: method_access,
-                                                    callee_def_id: callee_def_id,
+                                                    callee_def_id: some(forwarded_member_def_id),
                                                     callable_result_def_id: call_result.1,
                                                     args: forward_args,
                                                     type_args: [],
@@ -1344,6 +1349,14 @@ fn expand_delegate_impls(
                                                 }
                                             }
 
+                                            // Preserve the exact d48 lexical
+                                            // sequence: the old wrapper HDecl
+                                            // minted one otherwise-unused
+                                            // source DefId here. The HDecl now
+                                            // uses its member registration ID,
+                                            // but later generated-C source
+                                            // ordinals must remain unchanged.
+                                            ctx.env.reserve_legacy_delegate_hdecl_def_id()
                                             trait_hmethods.push(HDecl::Fn {
                                                 name: tm.name,
                                                 def_id: some(wrapper_def_id),

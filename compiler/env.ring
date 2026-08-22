@@ -5,6 +5,8 @@ use ast::{Span, EffectExpr, TypeParam, DeriveAttribute}
 use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
     make_diag}
 use codes::{E0504}
+use hir::{SYNTHETIC_MEMBER_DEF_ID_BASE, synthetic_def_id,
+    is_synthetic_member_def_id}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -240,7 +242,10 @@ pub struct ScopeManager {
 
 pub struct IdGen {
     pub next_type_var_id: Int,
-    pub next_def_id: Int
+    pub next_def_id: Int,
+    // Registration-only identities are module-local and disjoint from both
+    // lexical source DefIds and InferCtx's Lambda/call-result namespace.
+    pub next_member_registration_ordinal: Int
 }
 
 // ============================================================
@@ -294,7 +299,8 @@ pub fn new_type_env() -> TypeEnv {
         },
         ids: IdGen {
             next_type_var_id: 0,
-            next_def_id: 0
+            next_def_id: 0,
+            next_member_registration_ordinal: 0
         }
     }
 }
@@ -322,6 +328,34 @@ impl TypeEnv {
         let id = self.ids.next_def_id
         self.ids.next_def_id = id + 1
         id
+    }
+
+    pub fn fresh_member_registration_def_id(mut self) -> Int {
+        let ordinal = self.ids.next_member_registration_ordinal + 1
+        self.ids.next_member_registration_ordinal = ordinal
+        synthetic_def_id(SYNTHETIC_MEMBER_DEF_ID_BASE, ordinal)
+    }
+
+    pub fn require_member_registration_def_id(
+        self, def_id: Int?, label: Str
+    ) -> Int {
+        match def_id {
+            some(id) => {
+                if !is_synthetic_member_def_id(id) {
+                    panic("unreachable: ${label} is outside the member-registration DefId namespace")
+                }
+                id
+            },
+            none => panic("unreachable: ${label} has no exact member-registration DefId")
+        }
+    }
+
+    // d48 allocated one otherwise-unused lexical DefId at the exact point
+    // where each successful delegate wrapper HDecl was emitted. Generated C
+    // exposes later source ordinals, so representation-only S1 must preserve
+    // that historical sequence without attaching the tombstone to HIR/maps.
+    pub fn reserve_legacy_delegate_hdecl_def_id(mut self) {
+        self.ids.next_def_id = self.ids.next_def_id + 1
     }
 
     pub fn push_scope(mut self) {
@@ -484,8 +518,13 @@ pub fn install_method_scheme(
     target_type: Str, method_name: Str,
     scheme: TypeScheme, incoming: MethodOrigin
 ) -> Bool {
-    if scheme.def_id.is_none() {
-        panic("unreachable: registered method scheme has no exact DefId")
+    let _ = match scheme.def_id {
+        some(id) => if is_synthetic_member_def_id(id) {
+            id
+        } else {
+            panic("unreachable: registered method scheme is outside the member-registration DefId namespace")
+        },
+        none => panic("unreachable: registered method scheme has no exact DefId")
     }
     let mut methods = match reg.impl_methods.get(target_type) {
         some(existing) => existing,

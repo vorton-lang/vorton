@@ -16,6 +16,7 @@ pub use builtin_methods::{CELL_METHODS, STR_METHODS, INT_METHODS, FLOAT_METHODS,
 // Source and pattern/default binders use the checker's non-negative DefId
 // allocator.  Later lowering passes use disjoint negative namespaces so a
 // synthetic binding can never alias source HIR or another pass's binding.
+pub const SYNTHETIC_MEMBER_DEF_ID_BASE: Int = 0 - 1000000000
 pub const SYNTHETIC_DICT_DEF_ID_BASE: Int = 0 - 3000000000
 pub const SYNTHETIC_ANF_DEF_ID_BASE: Int = 0 - 4000000000
 pub const SYNTHETIC_RC_DEF_ID_BASE: Int = 0 - 5000000000
@@ -23,7 +24,8 @@ pub const SYNTHETIC_CALLABLE_DEF_ID_BASE: Int = 0 - 2000000000
 pub const SYNTHETIC_DEF_ID_NAMESPACE_SIZE: Int = 1000000000
 
 pub fn synthetic_def_id(base: Int, ordinal: Int) -> Int {
-    if base != SYNTHETIC_CALLABLE_DEF_ID_BASE &&
+    if base != SYNTHETIC_MEMBER_DEF_ID_BASE &&
+       base != SYNTHETIC_CALLABLE_DEF_ID_BASE &&
        base != SYNTHETIC_DICT_DEF_ID_BASE &&
        base != SYNTHETIC_ANF_DEF_ID_BASE &&
        base != SYNTHETIC_RC_DEF_ID_BASE {
@@ -34,6 +36,7 @@ pub fn synthetic_def_id(base: Int, ordinal: Int) -> Int {
     }
     let def_id = base - ordinal
     let mut domains = 0
+    if is_synthetic_member_def_id(def_id) { domains = domains + 1 }
     if is_synthetic_callable_def_id(def_id) { domains = domains + 1 }
     if is_synthetic_dict_def_id(def_id) { domains = domains + 1 }
     if is_synthetic_anf_def_id(def_id) { domains = domains + 1 }
@@ -42,6 +45,12 @@ pub fn synthetic_def_id(base: Int, ordinal: Int) -> Int {
         panic("unreachable: overlapping synthetic DefId domains")
     }
     def_id
+}
+
+pub fn is_synthetic_member_def_id(def_id: Int) -> Bool {
+    def_id < SYNTHETIC_MEMBER_DEF_ID_BASE &&
+        def_id > SYNTHETIC_MEMBER_DEF_ID_BASE -
+            SYNTHETIC_DEF_ID_NAMESPACE_SIZE
 }
 
 pub fn is_synthetic_dict_def_id(def_id: Int) -> Bool {
@@ -535,7 +544,7 @@ pub fn validate_hir_binder_def_ids(program: HProgram) {
     let mut seen: Set<Int> = set_new()
     collect_hir_effect_op_ids(program.decls, program.effect_op_identities)
     validate_hir_decls(
-        program.decls, seen, program.effect_op_identities)
+        program.decls, seen, program.effect_op_identities, false)
 }
 
 struct HirValidationScope {
@@ -562,8 +571,8 @@ fn validate_hir_effect_op_identity(
     effect_op_ids: Map<Str, Int>, effect_name: Str,
     op_name: Str, def_id: Int
 ) {
-    if def_id < 0 {
-        panic("HIR effect operation '${effect_name}.${op_name}' has invalid DefId ${def_id}")
+    if !is_synthetic_member_def_id(def_id) {
+        panic("HIR effect operation '${effect_name}.${op_name}' is outside the member-registration DefId namespace")
     }
     let key = exact_effect_op_key(effect_name, op_name)
     match effect_op_ids.get(key) {
@@ -667,6 +676,37 @@ fn validate_hir_drop_reference(
 }
 
 fn validate_hir_binder(mut seen: Set<Int>, def_id: Int, label: Str) {
+    let allowed = def_id >= 0 ||
+        is_synthetic_dict_def_id(def_id) ||
+        is_synthetic_anf_def_id(def_id) ||
+        is_synthetic_rc_def_id(def_id)
+    if !allowed {
+        panic("HIR ${label} is outside the source/lowering DefId namespaces")
+    }
+    if seen.contains(def_id) {
+        panic("HIR binder DefId collision ${def_id} at ${label}")
+    }
+    seen.insert(def_id)
+}
+
+fn validate_hir_member_binder(
+    mut seen: Set<Int>, def_id: Int, label: Str
+) {
+    if !is_synthetic_member_def_id(def_id) {
+        panic("HIR ${label} is outside the member-registration DefId namespace")
+    }
+    if seen.contains(def_id) {
+        panic("HIR binder DefId collision ${def_id} at ${label}")
+    }
+    seen.insert(def_id)
+}
+
+fn validate_hir_callable_binder(
+    mut seen: Set<Int>, def_id: Int, label: Str
+) {
+    if !is_synthetic_callable_def_id(def_id) {
+        panic("HIR ${label} is outside the callable-value DefId namespace")
+    }
     if seen.contains(def_id) {
         panic("HIR binder DefId collision ${def_id} at ${label}")
     }
@@ -980,10 +1020,8 @@ fn validate_hir_expr(
             }
             match (ty, callable_result_def_id) {
                 (Type::FnType { .. }, some(id)) => {
-                    if !is_synthetic_callable_def_id(id) {
-                        panic("HIR callable result is outside its synthetic DefId namespace")
-                    }
-                    validate_hir_binder(seen, id, "callable result")
+                    validate_hir_callable_binder(
+                        seen, id, "callable result")
                 },
                 (Type::FnType { .. }, none) =>
                     panic("HIR callable result has no exact DefId"),
@@ -1061,10 +1099,7 @@ fn validate_hir_expr(
             }
         },
         HExpr::Lambda { def_id, params, body, .. } => {
-            if !is_synthetic_callable_def_id(def_id) {
-                panic("HIR lambda is outside its synthetic DefId namespace")
-            }
-            validate_hir_binder(seen, def_id, "lambda")
+            validate_hir_callable_binder(seen, def_id, "lambda")
             push_hir_validation_scope(scope)
             validate_hir_params(params, seen, scope, "lambda")
             validate_hir_expr(body, seen, scope)
@@ -1102,7 +1137,8 @@ fn validate_hir_expr(
 }
 
 fn validate_hir_decls(
-    decls: List<HDecl>, mut seen: Set<Int>, effect_op_ids: Map<Str, Int>
+    decls: List<HDecl>, mut seen: Set<Int>, effect_op_ids: Map<Str, Int>,
+    member_function_context: Bool
 ) {
     for decl in decls {
         match decl {
@@ -1111,8 +1147,13 @@ fn validate_hir_decls(
                 validate_inert_type(return_type)
                 validate_inert_effect_row(effects)
                 match def_id {
-                    some(id) => validate_hir_binder(
-                        seen, id, "function '${name}'"),
+                    some(id) => if member_function_context {
+                        validate_hir_member_binder(
+                            seen, id, "impl member '${name}'")
+                    } else {
+                        validate_hir_binder(
+                            seen, id, "function '${name}'")
+                    },
                     none => {}
                 }
                 let mut scope = new_hir_validation_scope(effect_op_ids)
@@ -1121,11 +1162,12 @@ fn validate_hir_decls(
                 validate_hir_expr(body, seen, scope)
             },
             HDecl::Impl { methods, .. } =>
-                validate_hir_decls(methods, seen, effect_op_ids),
+                validate_hir_decls(
+                    methods, seen, effect_op_ids, true),
             HDecl::Effect { name, ops, .. } => {
                 for op in ops {
                     validate_inert_type(op.return_type)
-                    validate_hir_binder(seen, op.def_id,
+                    validate_hir_member_binder(seen, op.def_id,
                         "effect operation '${name}.${op.name}'")
                     let mut scope = new_hir_validation_scope(effect_op_ids)
                     validate_hir_params(op.params, seen, scope,
@@ -1146,7 +1188,7 @@ fn validate_hir_decls(
                 for method in methods {
                     validate_inert_type(method.return_type)
                     validate_inert_effect_row(method.effects)
-                    validate_hir_binder(seen, method.def_id,
+                    validate_hir_member_binder(seen, method.def_id,
                         "trait method '${name}.${method.name}'")
                     let mut scope = new_hir_validation_scope(effect_op_ids)
                     validate_hir_params(method.params, seen, scope,
@@ -1170,7 +1212,9 @@ fn validate_hir_decls(
                 validate_hir_expr(init, seen, scope)
             },
             HDecl::ModBlock { decls: inner, .. } =>
-                validate_hir_decls(inner, seen, effect_op_ids),
+                validate_hir_decls(
+                    inner, seen, effect_op_ids,
+                    member_function_context),
             HDecl::Struct { fields, .. } => {
                 for field in fields { validate_inert_type(field.ty) }
             },
@@ -1195,7 +1239,7 @@ fn validate_hir_decls(
             HDecl::Sig { name, members, .. } => {
                 for member in members {
                     validate_inert_type(member.fn_type)
-                    validate_hir_binder(seen, member.def_id,
+                    validate_hir_member_binder(seen, member.def_id,
                         "sig member '${name}.${member.name}'")
                 }
             },
