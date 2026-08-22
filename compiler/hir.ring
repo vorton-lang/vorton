@@ -1,6 +1,7 @@
-use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam}
+use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam, TypeBound, TypeExpr,
+    EffectExpr, AssocConstraint}
 use types::{Type, Effect, EffectRow, StructField, EnumVariant, RecordField,
-    PARAM_OWNERSHIP_UNKNOWN, CALLABLE_UNKNOWN}
+    PARAM_OWNERSHIP_UNKNOWN, CALLABLE_UNKNOWN, types_equal}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
@@ -542,9 +543,204 @@ pub struct HProgram {
 // cannot degrade into a backend spelling lookup.
 pub fn validate_hir_binder_def_ids(program: HProgram) {
     let mut seen: Set<Int> = set_new()
+    let mut extern_replays: Map<Str, HExternReplayDescriptor> = map_new()
     collect_hir_effect_op_ids(program.decls, program.effect_op_identities)
     validate_hir_decls(
-        program.decls, seen, program.effect_op_identities, false)
+        program.decls, seen, program.effect_op_identities,
+        extern_replays, false)
+}
+
+struct HExternReplayDescriptor {
+    def_id: Int,
+    name: Str,
+    abi_name: Str,
+    type_params: List<TypeParam>,
+    params: List<HParam>,
+    return_type: Type,
+    effects: EffectRow,
+    is_pub: Bool,
+    member_context: Bool
+}
+
+fn hir_optional_str_same(a: Str?, b: Str?) -> Bool {
+    match (a, b) {
+        (some(left), some(right)) => left == right,
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn hir_ast_type_expr_lists_same(
+    left: List<TypeExpr>, right: List<TypeExpr>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if !hir_ast_type_expr_same(a, b) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn hir_ast_effect_expr_lists_same(
+    left: List<EffectExpr>, right: List<EffectExpr>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.name != b.name ||
+                    !hir_ast_type_expr_lists_same(a.type_args, b.type_args) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn hir_ast_type_expr_same(left: TypeExpr, right: TypeExpr) -> Bool {
+    match (left, right) {
+        (TypeExpr::Named { name: an, qualifier: aq, type_args: aa, .. },
+         TypeExpr::Named { name: bn, qualifier: bq, type_args: ba, .. }) =>
+            an == bn && hir_optional_str_same(aq, bq) &&
+                hir_ast_type_expr_lists_same(aa, ba),
+        (TypeExpr::FnType { params: ap, return_type: ar, effects: ae, .. },
+         TypeExpr::FnType { params: bp, return_type: br, effects: be, .. }) =>
+            hir_ast_type_expr_lists_same(ap, bp) &&
+                hir_ast_type_expr_same(ar, br) &&
+                hir_ast_effect_expr_lists_same(ae, be),
+        (TypeExpr::OptionType { inner: ai, .. },
+         TypeExpr::OptionType { inner: bi, .. }) =>
+            hir_ast_type_expr_same(ai, bi),
+        (TypeExpr::RecordType { fields: af, rest: ar, .. },
+         TypeExpr::RecordType { fields: bf, rest: br, .. }) => {
+            if af.len() != bf.len() || !hir_optional_str_same(ar, br) {
+                return false
+            }
+            let mut index = 0
+            while index < af.len() {
+                match (af.get(index), bf.get(index)) {
+                    (some(a), some(b)) => if a.name != b.name ||
+                            !hir_ast_type_expr_same(a.ty, b.ty) {
+                        return false
+                    },
+                    _ => return false
+                }
+                index = index + 1
+            }
+            true
+        },
+        (TypeExpr::TupleType { elements: ae, .. },
+         TypeExpr::TupleType { elements: be, .. }) =>
+            hir_ast_type_expr_lists_same(ae, be),
+        _ => false
+    }
+}
+
+fn hir_ast_assoc_constraints_same(
+    left: List<AssocConstraint>, right: List<AssocConstraint>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.name != b.name ||
+                    !hir_ast_type_expr_same(a.ty, b.ty) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn hir_ast_type_bounds_same(
+    left: List<TypeBound>, right: List<TypeBound>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.trait_name != b.trait_name ||
+                    !hir_ast_type_expr_lists_same(a.type_args, b.type_args) ||
+                    !hir_ast_assoc_constraints_same(
+                        a.assoc_constraints, b.assoc_constraints) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn hir_ast_type_params_same(
+    left: List<TypeParam>, right: List<TypeParam>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.name != b.name ||
+                    !hir_ast_type_bounds_same(a.bounds, b.bounds) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn hir_extern_params_same(left: List<HParam>, right: List<HParam>) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.name != b.name ||
+                    a.def_id.is_some() || b.def_id.is_some() ||
+                    a.is_mutable != b.is_mutable ||
+                    a.ownership_mode != PARAM_OWNERSHIP_UNKNOWN ||
+                    b.ownership_mode != PARAM_OWNERSHIP_UNKNOWN ||
+                    !types_equal(a.ty, b.ty) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn hir_extern_signatures_same(
+    left: HExternReplayDescriptor,
+    right: HExternReplayDescriptor
+) -> Bool {
+    let left_params = left.params.map(fn(param) { param.ty })
+    let right_params = right.params.map(fn(param) { param.ty })
+    let left_fn = Type::FnType {
+        params: left_params, return_type: left.return_type,
+        effects: left.effects, ownership_term: CALLABLE_UNKNOWN
+    }
+    let right_fn = Type::FnType {
+        params: right_params, return_type: right.return_type,
+        effects: right.effects, ownership_term: CALLABLE_UNKNOWN
+    }
+    left.def_id == right.def_id &&
+        left.name == right.name && left.abi_name == right.abi_name &&
+        left.is_pub == right.is_pub &&
+        left.member_context == right.member_context &&
+        hir_ast_type_params_same(left.type_params, right.type_params) &&
+        hir_extern_params_same(left.params, right.params) &&
+        types_equal(left_fn, right_fn)
 }
 
 struct HirValidationScope {
@@ -699,6 +895,58 @@ fn validate_hir_source_binder(
         panic("HIR binder DefId collision ${def_id} at ${label}")
     }
     seen.insert(def_id)
+}
+
+fn validate_hir_extern_decl(
+    mut seen: Set<Int>,
+    mut extern_replays: Map<Str, HExternReplayDescriptor>,
+    name: Str, abi_name: Str, def_id: Int?,
+    type_params: List<TypeParam>, params: List<HParam>,
+    return_type: Type, effects: EffectRow,
+    is_pub: Bool, member_context: Bool
+) {
+    let id = match def_id {
+        some(value) => value,
+        none => panic("HIR extern function '${name}' has no exact DefId")
+    }
+    let replay_eligible = !member_context &&
+        name == prelude_extern_identity(abi_name)
+    if !replay_eligible {
+        if member_context {
+            validate_hir_member_binder(
+                seen, id, "extern impl member '${name}'")
+        } else {
+            validate_hir_source_binder(
+                seen, id, "extern function '${name}'")
+        }
+        return
+    }
+    if id < 0 {
+        panic("HIR prelude extern replay '${name}' is outside the source DefId namespace")
+    }
+    let current = HExternReplayDescriptor {
+        def_id: id, name: name, abi_name: abi_name,
+        type_params: type_params, params: params,
+        return_type: return_type, effects: effects,
+        is_pub: is_pub, member_context: member_context
+    }
+    match extern_replays.get(name) {
+        some(existing) => {
+            if !seen.contains(id) {
+                panic("HIR prelude extern replay ledger is missing its seen DefId")
+            }
+            if !hir_extern_signatures_same(existing, current) {
+                panic("HIR prelude extern replay '${name}' differs from its first declaration")
+            }
+        },
+        none => {
+            // If another binder already owns this ID, the ordinary collision
+            // check fires before the extern ledger can authorize any replay.
+            validate_hir_source_binder(
+                seen, id, "prelude extern function '${name}'")
+            extern_replays.insert(name, current)
+        }
+    }
 }
 
 fn validate_hir_member_binder(
@@ -1174,6 +1422,7 @@ fn validate_hir_expr(
 
 fn validate_hir_decls(
     decls: List<HDecl>, mut seen: Set<Int>, effect_op_ids: Map<Str, Int>,
+    mut extern_replays: Map<Str, HExternReplayDescriptor>,
     member_function_context: Bool
 ) {
     for decl in decls {
@@ -1199,7 +1448,8 @@ fn validate_hir_decls(
             },
             HDecl::Impl { methods, .. } =>
                 validate_hir_decls(
-                    methods, seen, effect_op_ids, true),
+                    methods, seen, effect_op_ids,
+                    extern_replays, true),
             HDecl::Effect { name, ops, .. } => {
                 for op in ops {
                     validate_inert_type(op.return_type)
@@ -1250,6 +1500,7 @@ fn validate_hir_decls(
             HDecl::ModBlock { decls: inner, .. } =>
                 validate_hir_decls(
                     inner, seen, effect_op_ids,
+                    extern_replays,
                     member_function_context),
             HDecl::Struct { fields, .. } => {
                 for field in fields { validate_inert_type(field.ty) }
@@ -1261,18 +1512,13 @@ fn validate_hir_decls(
                     }
                 }
             },
-            HDecl::ExternFn { name, def_id, params,
-                              return_type, effects, .. } => {
-                match def_id {
-                    some(id) => if member_function_context {
-                        validate_hir_member_binder(
-                            seen, id, "extern impl member '${name}'")
-                    } else {
-                        validate_hir_source_binder(
-                            seen, id, "extern function '${name}'")
-                    },
-                    none => panic("HIR extern function '${name}' has no exact DefId")
-                }
+            HDecl::ExternFn { name, abi_name, def_id, type_params,
+                              params, return_type, effects, is_pub, .. } => {
+                validate_hir_extern_decl(
+                    seen, extern_replays,
+                    name, abi_name, def_id, type_params, params,
+                    return_type, effects, is_pub,
+                    member_function_context)
                 validate_inert_type(return_type)
                 validate_inert_effect_row(effects)
                 for param in params {

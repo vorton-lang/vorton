@@ -1,5 +1,6 @@
 use types::{Type, UNIT, nominal_display_name}
-use ast::{Program, Decl, UseDecl, UseImport, Span, TypeParam, span_zero}
+use ast::{Program, Decl, UseDecl, UseImport, Span, TypeParam, TypeBound,
+    TypeExpr, EffectExpr, Param, AssocConstraint, span_zero}
 use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImplFact,
     HStringInterpPart, HEffectHandler, ValueBindingKind,
     CHECKER_ONLY_EXTERN_CALLABLES,
@@ -73,6 +74,227 @@ fn canonicalize_prelude_decl(decl: Decl) -> Decl {
     }
 }
 
+struct RawPreludeExternContract {
+    canonical_key: Str,
+    abi_name: Str,
+    type_params: List<TypeParam>,
+    params: List<Param>,
+    return_type: TypeExpr?,
+    declared_effects: List<EffectExpr>?,
+    is_pub: Bool
+}
+
+fn optional_str_same(a: Str?, b: Str?) -> Bool {
+    match (a, b) {
+        (some(left), some(right)) => left == right,
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn raw_type_expr_lists_same(
+    left: List<TypeExpr>, right: List<TypeExpr>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if !raw_type_expr_same(a, b) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn raw_effect_expr_lists_same(
+    left: List<EffectExpr>, right: List<EffectExpr>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.name != b.name ||
+                    !raw_type_expr_lists_same(a.type_args, b.type_args) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn raw_type_expr_same(left: TypeExpr, right: TypeExpr) -> Bool {
+    match (left, right) {
+        (TypeExpr::Named { name: an, qualifier: aq, type_args: aa, .. },
+         TypeExpr::Named { name: bn, qualifier: bq, type_args: ba, .. }) =>
+            an == bn && optional_str_same(aq, bq) &&
+                raw_type_expr_lists_same(aa, ba),
+        (TypeExpr::FnType { params: ap, return_type: ar, effects: ae, .. },
+         TypeExpr::FnType { params: bp, return_type: br, effects: be, .. }) =>
+            raw_type_expr_lists_same(ap, bp) && raw_type_expr_same(ar, br) &&
+                raw_effect_expr_lists_same(ae, be),
+        (TypeExpr::OptionType { inner: ai, .. },
+         TypeExpr::OptionType { inner: bi, .. }) =>
+            raw_type_expr_same(ai, bi),
+        (TypeExpr::RecordType { fields: af, rest: ar, .. },
+         TypeExpr::RecordType { fields: bf, rest: br, .. }) => {
+            if af.len() != bf.len() || !optional_str_same(ar, br) {
+                return false
+            }
+            let mut index = 0
+            while index < af.len() {
+                match (af.get(index), bf.get(index)) {
+                    (some(a), some(b)) => if a.name != b.name ||
+                            !raw_type_expr_same(a.ty, b.ty) {
+                        return false
+                    },
+                    _ => return false
+                }
+                index = index + 1
+            }
+            true
+        },
+        (TypeExpr::TupleType { elements: ae, .. },
+         TypeExpr::TupleType { elements: be, .. }) =>
+            raw_type_expr_lists_same(ae, be),
+        _ => false
+    }
+}
+
+fn raw_assoc_constraints_same(
+    left: List<AssocConstraint>, right: List<AssocConstraint>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.name != b.name ||
+                    !raw_type_expr_same(a.ty, b.ty) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn raw_type_bounds_same(
+    left: List<TypeBound>, right: List<TypeBound>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.trait_name != b.trait_name ||
+                    !raw_type_expr_lists_same(a.type_args, b.type_args) ||
+                    !raw_assoc_constraints_same(
+                        a.assoc_constraints, b.assoc_constraints) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn raw_type_params_same(
+    left: List<TypeParam>, right: List<TypeParam>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.name != b.name ||
+                    !raw_type_bounds_same(a.bounds, b.bounds) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn raw_optional_type_expr_same(left: TypeExpr?, right: TypeExpr?) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => raw_type_expr_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn raw_optional_effects_same(
+    left: List<EffectExpr>?, right: List<EffectExpr>?
+) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => raw_effect_expr_lists_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn raw_params_same(left: List<Param>, right: List<Param>) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => {
+                if a.name != b.name || a.is_mutable != b.is_mutable ||
+                   !raw_optional_type_expr_same(
+                       a.type_annotation, b.type_annotation) {
+                    return false
+                }
+                // Extern params have no ownership annotation in AST, so their
+                // ownership mode is implicitly UNKNOWN. Defaults are forbidden
+                // from replay rather than compared as executable expressions.
+                if a.default_value.is_some() || b.default_value.is_some() {
+                    return false
+                }
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn raw_prelude_extern_contract(decl: Decl) -> RawPreludeExternContract? {
+    match decl {
+        Decl::ExternFn { name, type_params, params, return_type,
+                         declared_effects, is_pub, .. } =>
+            some(RawPreludeExternContract {
+                canonical_key: prelude_extern_identity(name),
+                abi_name: name,
+                type_params: type_params,
+                params: params,
+                return_type: return_type,
+                declared_effects: declared_effects,
+                is_pub: is_pub
+            }),
+        _ => none
+    }
+}
+
+fn raw_prelude_extern_contracts_same(
+    left: RawPreludeExternContract,
+    right: RawPreludeExternContract
+) -> Bool {
+    left.canonical_key == right.canonical_key &&
+        left.abi_name == right.abi_name &&
+        left.is_pub == right.is_pub &&
+        raw_type_params_same(left.type_params, right.type_params) &&
+        raw_params_same(left.params, right.params) &&
+        raw_optional_type_expr_same(left.return_type, right.return_type) &&
+        raw_optional_effects_same(
+            left.declared_effects, right.declared_effects)
+}
+
 fn find_std_dir() -> Str? {
     let candidates = [
         path_resolve(path_join(path_dirname(path_resolve(".")), "std")),
@@ -86,6 +308,7 @@ fn find_std_dir() -> Str? {
 
 fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
     let mut prelude_hdecls: List<HDecl> = []
+    let mut raw_extern_contracts: Map<Str, RawPreludeExternContract> = map_new()
     match find_std_dir() {
         some(std_dir) => {
             // Phase 1: collect and register all prelude declarations
@@ -98,6 +321,20 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                     let ast = parse(source, file_path, prelude_sink)
                     for decl in ast.decls {
                         let canonical_decl = canonicalize_prelude_decl(decl)
+                        match raw_prelude_extern_contract(canonical_decl) {
+                            some(contract) => match raw_extern_contracts.get(
+                                contract.canonical_key) {
+                                some(existing) => if
+                                        !raw_prelude_extern_contracts_same(
+                                            existing, contract) {
+                                    panic(
+                                        "unreachable: conflicting duplicate prelude extern '${contract.abi_name}'")
+                                },
+                                none => raw_extern_contracts.insert(
+                                    contract.canonical_key, contract)
+                            },
+                            none => {}
+                        }
                         register_decl_public(ctx, canonical_decl)
                         all_prelude_decls.push(canonical_decl)
                     }
