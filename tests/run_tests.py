@@ -6611,10 +6611,58 @@ def default_body_identity_generated_c_errors(
     return errors
 
 
+IR_IDENTITY_F0_PATH = REPO / "compiler" / "ir_identity.ring"
 RESOURCE_MODEL_F0_PATH = REPO / "compiler" / "resource_model.ring"
+F0_SEMANTIC_MUTATION_COUNT = 47
+F0_SCOPE_GUARD_COUNT = 9
 
 
-def _resource_const_list_span(
+def _f0_function_span(
+    source: str, function_name: str,
+) -> Tuple[Optional[Tuple[int, int]], Optional[str]]:
+    masked = mask_ring_strings_and_comments(source)
+    pattern = re.compile(
+        rf"\bfn\s+{re.escape(function_name)}\s*"
+        rf"\([^{{}}]*\)[^{{}}\n]*\{{")
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1:
+        return None, f"F0 function {function_name} found {len(matches)} times"
+    open_index = masked.rfind("{", matches[0].start(), matches[0].end())
+    try:
+        close_index = matching_delimiter(masked, open_index, "{", "}")
+    except ValueError as exc:
+        return None, f"F0 function {function_name}: {exc}"
+    return (open_index + 1, close_index), None
+
+
+def _f0_function_body(
+    source: str, function_name: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    span, error = _f0_function_span(source, function_name)
+    if error:
+        return None, error
+    assert span is not None
+    return source[span[0]:span[1]], None
+
+
+def _f0_mutate_function_once(
+    source: str, function_name: str, anchor: str, replacement: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    span, error = _f0_function_span(source, function_name)
+    if error:
+        return None, error
+    assert span is not None
+    body = source[span[0]:span[1]]
+    count = body.count(anchor)
+    if count != 1:
+        return None, (
+            f"F0 function {function_name} mutation anchor matched {count} times")
+    return (
+        source[:span[0]] + body.replace(anchor, replacement, 1) +
+        source[span[1]:], None)
+
+
+def _f0_const_list_span(
     source: str, name: str,
 ) -> Tuple[Optional[Tuple[int, int]], Optional[str]]:
     masked = mask_ring_strings_and_comments(source)
@@ -6622,325 +6670,267 @@ def _resource_const_list_span(
         rf"\bconst\s+{re.escape(name)}\s*:\s*List<(?:Int|Bool)>\s*=\s*\[")
     matches = list(pattern.finditer(masked))
     if len(matches) != 1:
-        return None, f"resource model const {name} found {len(matches)} times"
+        return None, f"F0 const {name} found {len(matches)} times"
     open_index = masked.rfind("[", matches[0].start(), matches[0].end())
     try:
         close_index = matching_delimiter(masked, open_index, "[", "]")
     except ValueError as exc:
-        return None, f"resource model const {name}: {exc}"
+        return None, f"F0 const {name}: {exc}"
     return (open_index + 1, close_index), None
 
 
-def _resource_int_list(
+def _f0_int_list(
     source: str, name: str,
 ) -> Tuple[Optional[List[int]], Optional[str]]:
-    span, error = _resource_const_list_span(source, name)
+    span, error = _f0_const_list_span(source, name)
     if error:
         return None, error
     assert span is not None
-    body = source[span[0]:span[1]]
     values: List[int] = []
-    for raw in body.split(","):
+    for raw in source[span[0]:span[1]].split(","):
         token = raw.strip()
         if not token:
             continue
         if re.fullmatch(r"[0-9]+", token) is None:
-            return None, f"resource model const {name} has non-Int token {token!r}"
+            return None, f"F0 const {name} has non-Int token {token!r}"
         values.append(int(token))
     return values, None
 
 
-def _resource_bool_list(
+def _f0_bool_list(
     source: str, name: str,
 ) -> Tuple[Optional[List[bool]], Optional[str]]:
-    span, error = _resource_const_list_span(source, name)
+    span, error = _f0_const_list_span(source, name)
     if error:
         return None, error
     assert span is not None
-    body = source[span[0]:span[1]]
     values: List[bool] = []
-    for raw in body.split(","):
+    for raw in source[span[0]:span[1]].split(","):
         token = raw.strip()
         if not token:
             continue
         if token not in {"true", "false"}:
-            return None, f"resource model const {name} has non-Bool token {token!r}"
+            return None, f"F0 const {name} has non-Bool token {token!r}"
         values.append(token == "true")
     return values, None
 
 
-def _replace_resource_const_list(
+def _f0_replace_const_list(
     source: str, name: str, values: List[object],
 ) -> Tuple[Optional[str], Optional[str]]:
-    span, error = _resource_const_list_span(source, name)
+    span, error = _f0_const_list_span(source, name)
     if error:
         return None, error
     assert span is not None
-    rendered = ", ".join(
+    body = ", ".join(
         ("true" if value else "false") if isinstance(value, bool)
         else str(value)
-        for value in values
-    )
-    return source[:span[0]] + rendered + source[span[1]:], None
+        for value in values)
+    return source[:span[0]] + body + source[span[1]:], None
 
 
-def _resource_struct_fields(
+def _f0_struct_fields(
     source: str, name: str,
-) -> Tuple[Optional[List[str]], Optional[str]]:
+) -> Tuple[Optional[List[Tuple[bool, str]]], Optional[str]]:
     masked = mask_ring_strings_and_comments(source)
     pattern = re.compile(rf"\bpub\s+struct\s+{re.escape(name)}\s*\{{")
     matches = list(pattern.finditer(masked))
     if len(matches) != 1:
-        return None, f"resource model struct {name} found {len(matches)} times"
+        return None, f"F0 struct {name} found {len(matches)} times"
     open_index = masked.rfind("{", matches[0].start(), matches[0].end())
     try:
         close_index = matching_delimiter(masked, open_index, "{", "}")
     except ValueError as exc:
-        return None, f"resource model struct {name}: {exc}"
+        return None, f"F0 struct {name}: {exc}"
     body = masked[open_index + 1:close_index]
-    return re.findall(r"\bpub\s+([A-Za-z_][A-Za-z0-9_]*)\s*:", body), None
+    fields = [
+        (match.group(1) is not None, match.group(2))
+        for match in re.finditer(
+            r"(?m)^\s*(?:(pub)\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", body)
+    ]
+    return fields, None
 
 
-def _mutate_resource_function_body_once(
-    source: str, function_name: str, anchor: str, replacement: str,
-) -> Tuple[Optional[str], Optional[str]]:
-    masked = mask_ring_strings_and_comments(source)
-    pattern = re.compile(
-        rf"\bfn\s+{re.escape(function_name)}\s*"
-        rf"\([^{{}}]*\)[^{{}}\n]*\{{")
-    matches = list(pattern.finditer(masked))
-    if len(matches) != 1:
-        return None, (
-            f"resource model function {function_name} found {len(matches)} times")
-    open_index = masked.rfind("{", matches[0].start(), matches[0].end())
-    try:
-        close_index = matching_delimiter(masked, open_index, "{", "}")
-    except ValueError as exc:
-        return None, f"resource model function {function_name}: {exc}"
-    body = source[open_index + 1:close_index]
-    count = body.count(anchor)
-    if count != 1:
-        return None, (
-            f"resource model function {function_name} mutation anchor "
-            f"matched {count} times")
-    mutated_body = body.replace(anchor, replacement, 1)
-    return (
-        source[:open_index + 1] + mutated_body + source[close_index:], None)
-
-
-def _resource_lattice_errors(
+def _f0_lattice_errors(
     label: str, table: List[int], ranks: List[int], count: int,
 ) -> List[str]:
     errors: List[str] = []
     if len(table) != count * count:
-        return [f"{label} join table has {len(table)} cells, expected {count * count}"]
+        return [f"{label} join table has {len(table)} cells"]
     if len(ranks) != count:
-        return [f"{label} rank table has {len(ranks)} cells, expected {count}"]
+        return [f"{label} rank table has {len(ranks)} cells"]
     if any(value < 0 or value >= count for value in table):
-        return [f"{label} join table contains an invalid tag"]
-    if any(rank < 0 for rank in ranks):
-        return [f"{label} rank table contains a negative rank"]
+        return [f"{label} join table contains invalid tag"]
 
     def join(left: int, right: int) -> int:
         return table[left * count + right]
-
-    for value in range(count):
-        if join(value, value) != value:
-            errors.append(f"{label} join is not idempotent at {value}")
-        if join(0, value) != value or join(value, 0) != value:
-            errors.append(f"{label} tag 0 is not Bottom at {value}")
-        if join(count - 1, value) != count - 1 or join(
-                value, count - 1) != count - 1:
-            errors.append(f"{label} final tag is not top at {value}")
-    for left in range(count):
-        for right in range(count):
-            if join(left, right) != join(right, left):
-                errors.append(
-                    f"{label} join is not commutative at {left},{right}")
-            result = join(left, right)
-            if ranks[result] < ranks[left] or ranks[result] < ranks[right]:
-                errors.append(
-                    f"{label} rank decreases at {left},{right}")
-            for third in range(count):
-                if join(join(left, right), third) != join(
-                        left, join(right, third)):
-                    errors.append(
-                        f"{label} join is not associative at "
-                        f"{left},{right},{third}")
 
     def leq(left: int, right: int) -> bool:
         return join(left, right) == right
 
     for left in range(count):
-        if not leq(left, left):
-            errors.append(f"{label} order is not reflexive at {left}")
+        if join(left, left) != left:
+            errors.append(f"{label} join is not idempotent at {left}")
+        if join(0, left) != left or join(left, 0) != left:
+            errors.append(f"{label} tag 0 is not Bottom at {left}")
         for right in range(count):
+            if join(left, right) != join(right, left):
+                errors.append(f"{label} join is not commutative at {left},{right}")
+            result = join(left, right)
+            if ranks[result] < ranks[left] or ranks[result] < ranks[right]:
+                errors.append(f"{label} rank decreases at {left},{right}")
             if leq(left, right) and leq(right, left) and left != right:
-                errors.append(
-                    f"{label} order is not antisymmetric at {left},{right}")
+                errors.append(f"{label} order is not antisymmetric at {left},{right}")
             for third in range(count):
-                if leq(left, right) and leq(right, third) and not leq(
-                        left, third):
+                if join(join(left, right), third) != join(
+                        left, join(right, third)):
                     errors.append(
-                        f"{label} order is not transitive at "
-                        f"{left},{right},{third}")
+                        f"{label} join is not associative at {left},{right},{third}")
+                if leq(left, right) and leq(right, third) and not leq(left, third):
+                    errors.append(
+                        f"{label} order is not transitive at {left},{right},{third}")
     return errors
 
 
-def resource_model_f0_contract_errors(source: str) -> List[str]:
-    """Validate the inert F0 model from its real Ring representation."""
+def _f0_require_function_tokens(
+    source: str, function_name: str, tokens: Tuple[str, ...],
+    errors: List[str],
+) -> str:
+    body, body_error = _f0_function_body(source, function_name)
+    if body_error:
+        errors.append(body_error)
+        return ""
+    assert body is not None
+    for token in tokens:
+        if token not in body:
+            errors.append(f"F0 {function_name} misses relation {token!r}")
+    return body
+
+
+def ir_identity_f0_contract_errors(source: str) -> List[str]:
     errors: List[str] = []
     masked = mask_ring_strings_and_comments(source)
-
     if re.search(r"(?m)^\s*use\s+", masked):
-        errors.append("resource F0 imports another compiler module")
+        errors.append("IR identity F0 imports another compiler module")
     for forbidden in (
-        "OwnershipMetadata", "FnMeta", "HExpr", "IdentityCounter",
-        "next_identity", "fresh_identity", "identity_name_fallback",
-        "resolver_lookup", "resource_model_plan", "hash_identity",
-        "ResourceCertificate", "pub fn plan_resource_model",
-        "pub fn verify_resource_model",
+        "ParamMode", "SlotFlow", "LogicalOwnershipShape", "PhysicalRcShape",
+        "IdentityManifest", "ModelStage", "NormalizedResourceModel",
+        "FinalFrozenResourceModel", "PlannedResourceModel",
+        "VerifiedResourceModel", "ProjectionPath", "OwnershipMetadata",
+        "FnMeta", "HExpr", "IdentityCounter", "next_identity",
+        "fresh_identity", "identity_name_fallback", "hash_identity",
+        "resolver_lookup",
     ):
         if forbidden in masked:
-            errors.append(f"resource F0 gained forbidden authority {forbidden!r}")
+            errors.append(f"IR identity F0 gained forbidden authority {forbidden!r}")
 
-    expected_structs = {
+    private_structs = {
         "SymbolRef": [
             "origin_module_key", "namespace_kind", "canonical_payload",
-            "declaration_site_path",
-        ],
+            "declaration_site_path"],
         "ModuleBodyRef": ["origin_module_key", "declaration_site_path"],
+        "PathOwnerRef": ["value"],
         "PathRef": ["owner", "normalized_child_path", "role"],
+        "SlotRef": ["value"],
+        "CalleeRef": ["value"],
         "GlobalNominalRef": ["symbol", "kind"],
-        "IdentityManifest": [
-            "source_snapshot_hash", "resolver_input_hash",
-            "normalized_input_hash", "symbols", "paths", "slots",
-        ],
-        "LogicalOwnershipShape": [
-            "direct_drop", "may_unique", "param_deps"],
-        "PhysicalRcShape": [
-            "physical_rc", "boxing", "drop_glue",
-            "foreign_containment", "param_deps"],
-        "TransferDemand": ["mode", "force"],
-        "SlotFlowTransition": ["flow", "requires_finding"],
     }
-    for name, expected in expected_structs.items():
-        fields, field_error = _resource_struct_fields(source, name)
+    for name, expected_names in private_structs.items():
+        fields, field_error = _f0_struct_fields(source, name)
         if field_error:
             errors.append(field_error)
-        elif fields != expected:
-            errors.append(
-                f"resource model {name} fields were {fields!r}, "
-                f"expected {expected!r}")
-
-    required_declarations = (
-        "pub enum PathOwnerRef", "SymbolOwner(SymbolRef)",
-        "ModuleBodyOwner(ModuleBodyRef)",
-        "pub enum SlotRef", "Source { origin_module_key: Str, "
-        "domain: SlotDomain, def_id: Int }", "Synthetic(PathRef)",
-        "pub enum CalleeRef", "Named(SymbolRef)", "Local(SlotRef)",
-        "Dynamic(PathRef)",
-        "pub struct NormalizedResourceModel",
-        "pub struct FinalFrozenResourceModel",
-        "pub struct PlannedResourceModel",
-        "pub struct VerifiedResourceModel",
-    )
-    for token in required_declarations:
-        if token not in source:
-            errors.append(f"resource F0 misses typed declaration {token!r}")
-
-    function_contracts = {
-        "symbol_ref_same": (
-            "left.origin_module_key == right.origin_module_key",
-            "namespace_kind_same(left.namespace_kind, right.namespace_kind)",
-            "left.canonical_payload == right.canonical_payload",
-            "left.declaration_site_path == right.declaration_site_path",
-        ),
-        "path_ref_same": (
-            "path_owner_ref_same(left.owner, right.owner)",
-            "string_list_same(",
-            "left.normalized_child_path, right.normalized_child_path",
-            "path_role_same(left.role, right.role)",
-        ),
-        "slot_ref_same": (
-            "am == bm", "slot_domain_same(ad, bd)", "ai == bi",
-            "path_ref_same(a, b)", "_ => false",
-        ),
-        "callee_ref_same": (
-            "CalleeRef::Named", "symbol_ref_same(a, b)",
-            "CalleeRef::Local", "slot_ref_same(a, b)",
-            "CalleeRef::Dynamic", "path_ref_same(a, b)", "_ => false",
-        ),
-        "global_nominal_ref_same": (
-            "symbol_ref_same(left.symbol, right.symbol)",
-            "left.kind.tag == right.kind.tag",
-        ),
-        "validate_slot_ref": (
-            "slot_domain_from_tag(slot_domain_tag(domain))",
-            "slot_domain_is_lexical(checked)", "def_id < 0", "def_id >= 0",
-        ),
-        "require_same_slot": (
-            "validate_slot_ref(left)", "validate_slot_ref(right)",
-            "if !slot_ref_same(left, right)",
-        ),
-        "model_stage_can_advance": (
-            "MODEL_STAGE_NEXT_TAGS.get(from_tag)",
-            "expected < MODEL_STAGE_COUNT && expected == to_tag",
-        ),
-        "param_mode_join": (
-            "left_tag * PARAM_MODE_COUNT + right_tag",
-            "PARAM_MODE_JOIN_TAGS.get(index)",
-            "param_mode_from_tag(tag)",
-        ),
-        "transfer_demand_join": (
-            "mode: param_mode_join(left.mode, right.mode)",
-            "force: left.force || right.force",
-        ),
-        "bool_list_join": (
-            "if left.len() != right.len()", "result.push(a || b)",
-        ),
-        "logical_ownership_shape_join": (
-            "validate_logical_ownership_shape(left)",
-            "validate_logical_ownership_shape(right)",
-            "direct_drop: left.direct_drop || right.direct_drop",
-            "may_unique: left.may_unique || right.may_unique",
-            "bool_list_join(left.param_deps, right.param_deps)",
-        ),
-        "physical_rc_shape_join": (
-            "physical_rc: left.physical_rc || right.physical_rc",
-            "boxing: left.boxing || right.boxing",
-            "drop_glue: left.drop_glue || right.drop_glue",
-            "left.foreign_containment || right.foreign_containment",
-            "bool_list_join(left.param_deps, right.param_deps)",
-        ),
-        "slot_flow_join": (
-            "left_tag * SLOT_FLOW_COUNT + right_tag",
-            "SLOT_FLOW_JOIN_TAGS.get(index)", "slot_flow_from_tag(tag)",
-        ),
-        "slot_flow_after_assignment": (
-            "SLOT_FLOW_ASSIGNMENT_TAGS.get(slot_flow_tag(flow))",
-        ),
-        "slot_flow_take": (
-            "SLOT_FLOW_TAKE_TAGS.get(tag)",
-            "SLOT_FLOW_TAKE_FINDINGS.get(tag)",
-            "requires_finding: finding",
-        ),
-    }
-    bodies: dict[str, str] = {}
-    for name, tokens in function_contracts.items():
-        body, body_error = extract_ring_function_body(source, name)
-        if body_error:
-            errors.append(body_error)
             continue
-        assert body is not None
-        bodies[name] = body
-        for token in tokens:
-            if token not in body:
-                errors.append(
-                    f"resource model {name} misses relation {token!r}")
+        assert fields is not None
+        if [field for _, field in fields] != expected_names:
+            errors.append(f"IR identity {name} field inventory drifted: {fields!r}")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"IR identity {name} exposes forgeable public fields")
 
-    symbol_body = bodies.get("symbol_ref_same", "")
-    observed_symbol_fields = {
+    required_internal_carriers = (
+        "enum PathOwnerValue", "SymbolOwnerValue(SymbolRef)",
+        "ModuleBodyOwnerValue(ModuleBodyRef)", "enum SlotRefValue",
+        "SourceSlotValue {", "SyntheticSlotValue(PathRef)",
+        "enum CalleeRefValue", "NamedCalleeValue(SymbolRef)",
+        "LocalCalleeValue(SlotRef)", "DynamicCalleeValue(PathRef)",
+    )
+    for token in required_internal_carriers:
+        if token not in source:
+            errors.append(f"IR identity F0 misses private carrier {token!r}")
+    for accessor in (
+            "pub fn symbol_ref_origin_module_key(",
+            "pub fn symbol_ref_namespace_kind(",
+            "pub fn symbol_ref_canonical_payload(",
+            "pub fn symbol_ref_declaration_site_path(",
+            "pub fn path_owner_ref_symbol(",
+            "pub fn path_owner_ref_module_body(",
+            "pub fn path_ref_owner(",
+            "pub fn path_ref_normalized_child_path(",
+            "pub fn path_ref_role(",
+            "pub fn slot_ref_source_origin_module_key(",
+            "pub fn slot_ref_source_domain(",
+            "pub fn slot_ref_source_def_id(",
+            "pub fn slot_ref_synthetic_path(",
+            "pub fn callee_ref_named_symbol(",
+            "pub fn callee_ref_local_slot(",
+            "pub fn callee_ref_dynamic_path(",
+            "pub fn global_nominal_ref_symbol(",
+            "pub fn global_nominal_ref_kind("):
+        if accessor not in source:
+            errors.append(f"IR identity F0 misses accessor {accessor!r}")
+
+    symbol_body = _f0_require_function_tokens(source, "symbol_ref_same", (
+        "left.origin_module_key == right.origin_module_key",
+        "namespace_kind_same(left.namespace_kind, right.namespace_kind)",
+        "left.canonical_payload == right.canonical_payload",
+        "left.declaration_site_path == right.declaration_site_path",
+    ), errors)
+    _f0_require_function_tokens(source, "module_body_ref_same", (
+        "left.origin_module_key == right.origin_module_key",
+        "left.declaration_site_path == right.declaration_site_path",
+    ), errors)
+    _f0_require_function_tokens(source, "path_ref_same", (
+        "path_owner_ref_same(left.owner, right.owner)",
+        "string_list_same(",
+        "left.normalized_child_path, right.normalized_child_path",
+        "path_role_same(left.role, right.role)",
+    ), errors)
+    _f0_require_function_tokens(source, "slot_ref_same", (
+        "am == bm", "slot_domain_same(ad, bd)", "ai == bi",
+        "path_ref_same(a, b)", "_ => false",
+    ), errors)
+    _f0_require_function_tokens(source, "callee_ref_same", (
+        "NamedCalleeValue", "symbol_ref_same(a, b)",
+        "LocalCalleeValue", "slot_ref_same(a, b)",
+        "DynamicCalleeValue", "path_ref_same(a, b)", "_ => false",
+    ), errors)
+    _f0_require_function_tokens(source, "global_nominal_ref_same", (
+        "symbol_ref_same(left.symbol, right.symbol)",
+        "nominal_kind_same(left.kind, right.kind)",
+    ), errors)
+
+    constructor_contracts = {
+        "make_symbol_ref": (
+            'origin_module_key == ""', 'canonical_payload == ""',
+            'declaration_site_path == ""', "panic(",
+            "namespace_kind_from_tag(",
+            "namespace_kind_tag(namespace_kind)"),
+        "make_module_body_ref": (
+            'origin_module_key == ""', 'declaration_site_path == ""', "panic("),
+        "make_path_ref": (
+            "validate_normalized_child_path(normalized_child_path)",
+            "path_role_from_tag(path_role_tag(role))",
+            "normalized_child_path: copy_string_list(normalized_child_path)"),
+        "make_source_slot_ref": (
+            'origin_module_key == ""',
+            "slot_domain_from_tag(slot_domain_tag(domain))",
+            "slot_domain_is_lexical(checked_domain)", "def_id < 0",
+            "def_id >= 0", "panic("),
+        "require_same_slot": ("if !slot_ref_same(left, right)", "panic("),
+    }
+    for function_name, tokens in constructor_contracts.items():
+        _f0_require_function_tokens(source, function_name, tokens, errors)
+
+    observed_fields = {
         field for field, token in {
             "origin_module_key":
                 "left.origin_module_key == right.origin_module_key",
@@ -6952,243 +6942,459 @@ def resource_model_f0_contract_errors(source: str) -> List[str]:
                 "left.declaration_site_path == right.declaration_site_path",
         }.items() if token in symbol_body
     }
-    left_symbol = {
+    left = {
         "origin_module_key": "module-a", "namespace_kind": 0,
-        "canonical_payload": "same", "declaration_site_path": "decl/0",
-    }
-    right_symbol = dict(left_symbol)
-    right_symbol["origin_module_key"] = "module-b"
-    if all(left_symbol[field] == right_symbol[field]
-           for field in observed_symbol_fields):
-        errors.append("SymbolRef accepts the same payload from a different module")
+        "canonical_payload": "shared-name", "declaration_site_path": "decl/0"}
+    right = dict(left)
+    right["origin_module_key"] = "module-b"
+    if all(left[field] == right[field] for field in observed_fields):
+        errors.append("SymbolRef accepts same spelling from a different module")
+    return errors
 
-    param_join, param_join_error = _resource_int_list(
-        source, "PARAM_MODE_JOIN_TAGS")
-    param_ranks, param_rank_error = _resource_int_list(
-        source, "PARAM_MODE_RANKS")
-    if param_join_error:
-        errors.append(param_join_error)
+
+def resource_lattice_f0_contract_errors(source: str) -> List[str]:
+    errors: List[str] = []
+    masked = mask_ring_strings_and_comments(source)
+    if re.search(r"(?m)^\s*use\s+", masked):
+        errors.append("resource lattice F0 imports another compiler module")
+    for forbidden in (
+        "SymbolRef", "PathRef", "SlotRef", "CalleeRef", "GlobalNominalRef",
+        "IdentityManifest", "ModelStage", "NormalizedResourceModel",
+        "FinalFrozenResourceModel", "PlannedResourceModel",
+        "VerifiedResourceModel", "OwnershipMetadata", "FnMeta", "HExpr",
+        "resource_model_plan", "ResourceCertificate",
+    ):
+        if forbidden in masked:
+            errors.append(f"resource lattice F0 gained forbidden authority {forbidden!r}")
+
+    for name, expected_names in {
+        "TransferDemand": ["mode", "force"],
+        "LogicalOwnershipShape": ["direct_drop", "may_unique", "param_deps"],
+        "PhysicalRcShape": [
+            "physical_rc", "boxing", "drop_glue", "foreign_containment",
+            "param_deps"],
+        "SlotFlowTransition": ["flow", "requires_finding"],
+    }.items():
+        fields, field_error = _f0_struct_fields(source, name)
+        if field_error:
+            errors.append(field_error)
+            continue
+        assert fields is not None
+        if [field for _, field in fields] != expected_names:
+            errors.append(f"resource lattice {name} field inventory drifted")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"resource lattice {name} exposes forgeable public fields")
+
+    param_table, param_table_error = _f0_int_list(source, "PARAM_MODE_JOIN_TAGS")
+    param_ranks, param_rank_error = _f0_int_list(source, "PARAM_MODE_RANKS")
+    if param_table_error:
+        errors.append(param_table_error)
     if param_rank_error:
         errors.append(param_rank_error)
-    if param_join is not None and param_ranks is not None:
-        errors.extend(_resource_lattice_errors(
-            "ParamMode", param_join, param_ranks, 5))
-        if param_ranks != [0, 1, 1, 1, 2]:
-            errors.append("ParamMode finite ranks drifted")
-        for left in range(1, 4):
-            for right in range(1, 4):
-                expected = left if left == right else 4
-                if param_join[left * 5 + right] != expected:
+    expected_param_table = [max(left, right) for left in range(5) for right in range(5)]
+    if param_table is not None and param_ranks is not None:
+        errors.extend(_f0_lattice_errors(
+            "ParamMode", param_table, param_ranks, 5))
+        if param_table != expected_param_table:
+            errors.append("ParamMode is not the strict Bottom<Borrow<MutBorrow<Own chain")
+        if param_ranks != [0, 1, 2, 3, 4]:
+            errors.append("ParamMode ranks drifted")
+        for left in range(4):
+            for right in range(4):
+                if param_table[left * 5 + right] == 4:
+                    errors.append("normal ParamMode join creates Conflict")
+
+    _f0_require_function_tokens(source, "make_transfer_demand", (
+        "param_mode_from_tag(param_mode_tag(mode))",
+        "if force && !param_mode_same(checked_mode, param_mode_own())",
+        "panic(",
+    ), errors)
+    _f0_require_function_tokens(source, "transfer_demand_join", (
+        "let joined_mode = param_mode_join(left.mode, right.mode)",
+        "if param_mode_is_conflict(joined_mode)",
+        "left.force || right.force", "make_transfer_demand(",
+        "joined_mode, joined_force",
+    ), errors)
+    _f0_require_function_tokens(source, "transfer_demand_same", (
+        "param_mode_same(left.mode, right.mode)",
+        "left.force == right.force",
+    ), errors)
+    _f0_require_function_tokens(source, "transfer_demand_leq", (
+        "transfer_demand_same(transfer_demand_join(left, right), right)",
+    ), errors)
+    _f0_require_function_tokens(source, "transfer_demand_rank", (
+        "if param_mode_is_conflict(value.mode) { return 5 }",
+        "if value.force { 1 } else { 0 }",
+        "param_mode_rank(value.mode) + force_rank",
+    ), errors)
+
+    transfer_states = [
+        (0, False), (1, False), (2, False),
+        (3, False), (3, True), (4, False)]
+
+    def transfer_join(
+        left: Tuple[int, bool], right: Tuple[int, bool],
+    ) -> Tuple[int, bool]:
+        mode = max(left[0], right[0])
+        force = False if mode == 4 else left[1] or right[1]
+        return mode, force
+
+    transfer_ranks = {
+        state: (5 if state[0] == 4 else state[0] + (1 if state[1] else 0))
+        for state in transfer_states
+    }
+    for left in transfer_states:
+        if transfer_join(left, left) != left:
+            errors.append(f"TransferDemand join is not idempotent at {left!r}")
+        for right in transfer_states:
+            joined = transfer_join(left, right)
+            if joined not in transfer_ranks:
+                errors.append(f"TransferDemand join is not total at {left!r},{right!r}")
+                continue
+            if joined != transfer_join(right, left):
+                errors.append(f"TransferDemand join is not commutative at {left!r},{right!r}")
+            if transfer_ranks[joined] < transfer_ranks[left] or (
+                    transfer_ranks[joined] < transfer_ranks[right]):
+                errors.append(f"TransferDemand rank decreases at {left!r},{right!r}")
+            for third in transfer_states:
+                if transfer_join(joined, third) != transfer_join(
+                        left, transfer_join(right, third)):
                     errors.append(
-                        f"ParamMode incomparable join {left},{right} "
-                        f"does not yield {expected}")
+                        f"TransferDemand join is not associative at "
+                        f"{left!r},{right!r},{third!r}")
 
-    slot_join, slot_join_error = _resource_int_list(
-        source, "SLOT_FLOW_JOIN_TAGS")
-    slot_ranks, slot_rank_error = _resource_int_list(
-        source, "SLOT_FLOW_RANKS")
-    if slot_join_error:
-        errors.append(slot_join_error)
-    if slot_rank_error:
-        errors.append(slot_rank_error)
-    if slot_join is not None and slot_ranks is not None:
-        errors.extend(_resource_lattice_errors(
-            "SlotFlow", slot_join, slot_ranks, 4))
-        if slot_ranks != [0, 1, 1, 2]:
-            errors.append("SlotFlow finite ranks drifted")
-        if slot_join[1 * 4 + 2] != 3:
-            errors.append("SlotFlow Live/Moved join is not MaybeMoved")
-
-    assignment, assignment_error = _resource_int_list(
-        source, "SLOT_FLOW_ASSIGNMENT_TAGS")
-    take_tags, take_tag_error = _resource_int_list(
-        source, "SLOT_FLOW_TAKE_TAGS")
-    take_findings, take_finding_error = _resource_bool_list(
-        source, "SLOT_FLOW_TAKE_FINDINGS")
-    for error in (assignment_error, take_tag_error, take_finding_error):
-        if error:
-            errors.append(error)
-    if assignment is not None and assignment != [1, 1, 1, 1]:
-        errors.append("SlotFlow assignment does not reset every state to Live")
-    if take_tags is not None and take_tags != [0, 2, 2, 3]:
-        errors.append("SlotFlow Take state transitions drifted")
-    if take_findings is not None and take_findings != [True, False, True, True]:
-        errors.append("SlotFlow Take finding flags drifted")
-
-    stage_next, stage_error = _resource_int_list(
-        source, "MODEL_STAGE_NEXT_TAGS")
-    if stage_error:
-        errors.append(stage_error)
-    elif stage_next != [1, 2, 3, 4]:
-        errors.append("resource model stage order permits a skip or rollback")
-
-    for function_name in (
-            "namespace_kind_from_tag", "path_role_from_tag",
-            "slot_domain_from_tag", "nominal_kind_from_tag",
-            "model_stage_from_tag", "param_mode_from_tag",
-            "slot_flow_from_tag"):
-        body, body_error = extract_ring_function_body(source, function_name)
-        if body_error:
-            errors.append(body_error)
-        elif "panic(" not in body or "if tag <" not in body:
-            errors.append(
-                f"resource model {function_name} does not fail loud on invalid tag")
-
-    logical_body = bodies.get("logical_ownership_shape_join", "")
+    bool_join_body = _f0_require_function_tokens(source, "bool_list_join", (
+        "if left.len() != right.len()", "result.push(a || b)",
+    ), errors)
+    logical_body = _f0_require_function_tokens(
+        source, "logical_ownership_shape_join", (
+            "make_logical_ownership_shape(",
+            "left.direct_drop || right.direct_drop",
+            "left.may_unique || right.may_unique",
+            "bool_list_join(left.param_deps, right.param_deps)"), errors)
+    _f0_require_function_tokens(source, "make_logical_ownership_shape", (
+        "if direct_drop && !may_unique", "panic(",
+        "param_deps: copy_bool_list(param_deps)",
+    ), errors)
+    physical_body = _f0_require_function_tokens(
+        source, "physical_rc_shape_join", (
+            "make_physical_rc_shape(",
+            "left.physical_rc || right.physical_rc",
+            "left.boxing || right.boxing",
+            "left.drop_glue || right.drop_glue",
+            "left.foreign_containment || right.foreign_containment",
+            "bool_list_join(left.param_deps, right.param_deps)"), errors)
+    _f0_require_function_tokens(source, "make_physical_rc_shape", (
+        "param_deps: copy_bool_list(param_deps)",
+    ), errors)
+    if not bool_join_body:
+        errors.append("resource shape list join authority is missing")
     if any(token in logical_body for token in (
             "physical_rc", "boxing", "drop_glue", "foreign_containment")):
         errors.append("logical ownership shape reads physical RC state")
-    physical_body = bodies.get("physical_rc_shape_join", "")
     if "direct_drop" in physical_body or "may_unique" in physical_body:
         errors.append("physical RC shape reads logical ownership state")
-    if "force" in bodies.get("param_mode_join", ""):
-        errors.append("ParamMode lattice absorbed the FORCE bit")
 
-    type_state_tokens = (
-        "model: NormalizedResourceModel\n) -> FinalFrozenResourceModel",
-        "model: FinalFrozenResourceModel\n) -> PlannedResourceModel",
-        "model: PlannedResourceModel\n) -> VerifiedResourceModel",
-    )
-    compact_source = source.replace("\r\n", "\n")
-    for token in type_state_tokens:
-        if token not in compact_source:
-            errors.append(f"resource F0 misses type-state edge {token!r}")
-    for forbidden_transition in (
-            "thaw_resource_model", "unplan_resource_model",
-            "unverify_resource_model"):
-        if forbidden_transition in masked:
-            errors.append(
-                f"resource F0 exposes backward stage edge {forbidden_transition}")
+    slot_table, slot_table_error = _f0_int_list(source, "SLOT_FLOW_JOIN_TAGS")
+    slot_ranks, slot_rank_error = _f0_int_list(source, "SLOT_FLOW_RANKS")
+    assignment, assignment_error = _f0_int_list(
+        source, "SLOT_FLOW_ASSIGNMENT_TAGS")
+    take_tags, take_tag_error = _f0_int_list(source, "SLOT_FLOW_TAKE_TAGS")
+    take_findings, take_finding_error = _f0_bool_list(
+        source, "SLOT_FLOW_TAKE_FINDINGS")
+    for error in (
+            slot_table_error, slot_rank_error, assignment_error,
+            take_tag_error, take_finding_error):
+        if error:
+            errors.append(error)
+    expected_slot_table = [
+        0, 1, 2, 3, 4,
+        1, 1, 4, 4, 4,
+        2, 4, 2, 4, 4,
+        3, 4, 4, 3, 4,
+        4, 4, 4, 4, 4,
+    ]
+    if slot_table is not None and slot_ranks is not None:
+        errors.extend(_f0_lattice_errors(
+            "SlotFlow", slot_table, slot_ranks, 5))
+        if slot_table != expected_slot_table:
+            errors.append("SlotFlow Unreachable/reachable join table drifted")
+        if slot_ranks != [0, 1, 1, 1, 2]:
+            errors.append("SlotFlow ranks drifted")
+    if assignment is not None and assignment != [0, 2, 2, 2, 2]:
+        errors.append("SlotFlow assignment transition drifted")
+    if take_tags is not None and take_tags != [0, 1, 3, 3, 4]:
+        errors.append("SlotFlow Take state transition drifted")
+    if take_findings is not None and take_findings != [False, True, False, True, True]:
+        errors.append("SlotFlow Take finding flags drifted")
     return errors
 
 
-def resource_model_f0_mutation_errors(source: str) -> List[str]:
+def _f0_semantic_mutation_errors(
+    identity_source: str, resource_source: str,
+) -> Tuple[List[str], int]:
     errors: List[str] = []
-    function_mutations = (
-        ("SymbolRef module", "symbol_ref_same",
+    count = 0
+    identity_mutations = (
+        ("Symbol module", "symbol_ref_same",
          "left.origin_module_key == right.origin_module_key", "true"),
-        ("SymbolRef namespace", "symbol_ref_same",
-         "namespace_kind_same(left.namespace_kind, right.namespace_kind)",
-         "true"),
-        ("SymbolRef payload", "symbol_ref_same",
+        ("Symbol namespace", "symbol_ref_same",
+         "namespace_kind_same(left.namespace_kind, right.namespace_kind)", "true"),
+        ("Symbol payload", "symbol_ref_same",
          "left.canonical_payload == right.canonical_payload", "true"),
-        ("SymbolRef declaration site", "symbol_ref_same",
+        ("Symbol declaration site", "symbol_ref_same",
          "left.declaration_site_path == right.declaration_site_path", "true"),
-        ("PathRef owner", "path_ref_same",
+        ("module-body module", "module_body_ref_same",
+         "left.origin_module_key == right.origin_module_key", "true"),
+        ("module-body site", "module_body_ref_same",
+         "left.declaration_site_path == right.declaration_site_path", "true"),
+        ("path owner", "path_ref_same",
          "path_owner_ref_same(left.owner, right.owner)", "true"),
-        ("PathRef child path", "path_ref_same",
+        ("path child", "path_ref_same",
          "string_list_same(\n            left.normalized_child_path, "
          "right.normalized_child_path)", "true"),
-        ("PathRef role", "path_ref_same",
+        ("path role", "path_ref_same",
          "path_role_same(left.role, right.role)", "true"),
-        ("SlotRef domain", "slot_ref_same",
-         "slot_domain_same(ad, bd)", "true"),
-        ("SlotRef module", "slot_ref_same", "am == bm", "true"),
-        ("SlotRef DefId", "slot_ref_same", "ai == bi", "true"),
-        ("Global nominal kind", "global_nominal_ref_same",
-         "left.kind.tag == right.kind.tag", "true"),
-        ("domain mismatch fail-loud", "require_same_slot",
+        ("slot module", "slot_ref_same", "am == bm", "true"),
+        ("slot domain", "slot_ref_same", "slot_domain_same(ad, bd)", "true"),
+        ("slot DefId", "slot_ref_same", "ai == bi", "true"),
+        ("slot synthetic path", "slot_ref_same",
+         "path_ref_same(a, b)", "true"),
+        ("named callee", "callee_ref_same", "symbol_ref_same(a, b)", "true"),
+        ("local callee", "callee_ref_same", "slot_ref_same(a, b)", "true"),
+        ("global nominal kind", "global_nominal_ref_same",
+         "nominal_kind_same(left.kind, right.kind)", "true"),
+        ("incomplete Symbol constructor", "make_symbol_ref",
+         "if origin_module_key == \"\" || canonical_payload == \"\" ||\n"
+         "       declaration_site_path == \"\"", "if false"),
+        ("incomplete module-body constructor", "make_module_body_ref",
+         "if origin_module_key == \"\" || declaration_site_path == \"\"",
+         "if false"),
+        ("unnormalized path constructor", "make_path_ref",
+         "validate_normalized_child_path(normalized_child_path)",
+         "let _ = normalized_child_path"),
+        ("path constructor aliases input", "make_path_ref",
+         "normalized_child_path: copy_string_list(normalized_child_path)",
+         "normalized_child_path: normalized_child_path"),
+        ("source slot module", "make_source_slot_ref",
+         "if origin_module_key == \"\"", "if false"),
+        ("source slot domain", "make_source_slot_ref",
+         "if slot_domain_is_lexical(checked_domain)", "if false"),
+        ("same-slot fail closed", "require_same_slot",
          "if !slot_ref_same(left, right)", "if false"),
-        ("lexical/synthetic sign split", "validate_slot_ref",
-         "if slot_domain_is_lexical(checked)", "if false"),
-        ("stage exact successor", "model_stage_can_advance",
-         "expected < MODEL_STAGE_COUNT && expected == to_tag",
-         "expected < MODEL_STAGE_COUNT && expected <= to_tag"),
-        ("invalid ParamMode tag", "param_mode_from_tag",
-         "if tag < PARAM_MODE_BOTTOM || tag >= PARAM_MODE_COUNT", "if false"),
-        ("shape arity check", "bool_list_join",
-         "if left.len() != right.len()", "if false"),
-        ("logical reads physical", "logical_ownership_shape_join",
-         "validate_logical_ownership_shape(left)",
-         "let physical_rc = left.may_unique\n    "
-         "validate_logical_ownership_shape(left)"),
-        ("physical reads logical", "physical_rc_shape_join",
-         "PhysicalRcShape {", "let may_unique = left.physical_rc\n    "
-         "PhysicalRcShape {"),
-        ("FORCE enters ParamMode", "param_mode_join",
-         "let left_tag = param_mode_tag(left)",
-         "let force = false\n    let left_tag = param_mode_tag(left)"),
-        ("FORCE join deleted", "transfer_demand_join",
-         "force: left.force || right.force", "force: left.force"),
     )
-    for label, function_name, anchor, replacement in function_mutations:
-        mutated, mutation_error = _mutate_resource_function_body_once(
-            source, function_name, anchor, replacement)
+    for label, function_name, anchor, replacement in identity_mutations:
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            identity_source, function_name, anchor, replacement)
         if mutation_error:
-            errors.append(f"resource F0 mutation {label}: {mutation_error}")
-            continue
-        assert mutated is not None
-        findings = resource_model_f0_contract_errors(mutated)
-        if not findings:
-            errors.append(f"resource F0 mutation escaped: {label}")
+            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
+        elif not ir_identity_f0_contract_errors(mutated or ""):
+            errors.append(f"F0 semantic mutation escaped: {label}")
 
-    list_mutations = (
-        ("ParamMode wrong Conflict", "PARAM_MODE_JOIN_TAGS", 7, 1),
-        ("ParamMode wrong Bottom", "PARAM_MODE_JOIN_TAGS", 3, 0),
-        ("ParamMode wrong top rank", "PARAM_MODE_RANKS", 4, 1),
-        ("SlotFlow Live/Moved", "SLOT_FLOW_JOIN_TAGS", 6, 1),
-        ("SlotFlow assignment reset", "SLOT_FLOW_ASSIGNMENT_TAGS", 2, 2),
-        ("SlotFlow Take state", "SLOT_FLOW_TAKE_TAGS", 1, 1),
-        ("stage rollback", "MODEL_STAGE_NEXT_TAGS", 2, 1),
+    resource_mutations = (
+        ("FORCE invalid pair", "make_transfer_demand",
+         "if force && !param_mode_same(checked_mode, param_mode_own())",
+         "if false"),
+        ("FORCE join", "transfer_demand_join",
+         "left.force || right.force", "left.force"),
+        ("Conflict absorbs FORCE", "transfer_demand_join",
+         "if param_mode_is_conflict(joined_mode)", "if false"),
+        ("FORCE equality", "transfer_demand_same",
+         "left.force == right.force", "true"),
+        ("FORCE order", "transfer_demand_leq",
+         "transfer_demand_same(transfer_demand_join(left, right), right)",
+         "param_mode_leq(left.mode, right.mode)"),
+        ("FORCE rank", "transfer_demand_rank",
+         "if value.force { 1 } else { 0 }", "0"),
+        ("shape arity", "bool_list_join",
+         "if left.len() != right.len()", "if false"),
+        ("logical direct-drop invariant", "make_logical_ownership_shape",
+         "if direct_drop && !may_unique", "if false"),
+        ("logical dependency alias", "make_logical_ownership_shape",
+         "param_deps: copy_bool_list(param_deps)",
+         "param_deps: param_deps"),
+        ("physical dependency alias", "make_physical_rc_shape",
+         "param_deps: copy_bool_list(param_deps)",
+         "param_deps: param_deps"),
     )
-    for label, name, index, replacement in list_mutations:
-        values, value_error = _resource_int_list(source, name)
+    for label, function_name, anchor, replacement in resource_mutations:
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            resource_source, function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
+        elif not resource_lattice_f0_contract_errors(mutated or ""):
+            errors.append(f"F0 semantic mutation escaped: {label}")
+
+    cross_axis_mutations = (
+        ("logical consumes physical axis",
+         "left: LogicalOwnershipShape, right: LogicalOwnershipShape\n"
+         ") -> LogicalOwnershipShape",
+         "left: LogicalOwnershipShape, right: LogicalOwnershipShape,\n"
+         "    physical: PhysicalRcShape\n) -> LogicalOwnershipShape",
+         "left.may_unique || right.may_unique",
+         "left.may_unique || right.may_unique || physical.physical_rc"),
+        ("physical consumes logical axis",
+         "left: PhysicalRcShape, right: PhysicalRcShape\n"
+         ") -> PhysicalRcShape",
+         "left: PhysicalRcShape, right: PhysicalRcShape,\n"
+         "    logical: LogicalOwnershipShape\n) -> PhysicalRcShape",
+         "left.physical_rc || right.physical_rc",
+         "left.physical_rc || right.physical_rc || logical.may_unique"),
+    )
+    for label, signature, new_signature, anchor, replacement in (
+            cross_axis_mutations):
+        count += 1
+        if resource_source.count(signature) != 1 or resource_source.count(anchor) < 1:
+            errors.append(f"F0 semantic mutation {label}: anchor missing")
+            continue
+        mutated = resource_source.replace(signature, new_signature, 1)
+        mutated = mutated.replace(anchor, replacement, 1)
+        if not resource_lattice_f0_contract_errors(mutated):
+            errors.append(f"F0 semantic mutation escaped: {label}")
+
+    int_mutations = (
+        ("Param Borrow/MutBorrow chain", "PARAM_MODE_JOIN_TAGS", 7, 4),
+        ("Param Borrow/Own chain", "PARAM_MODE_JOIN_TAGS", 8, 4),
+        ("Param rank chain", "PARAM_MODE_RANKS", 2, 1),
+        ("Unreachable join", "SLOT_FLOW_JOIN_TAGS", 2, 4),
+        ("reachable distinct join", "SLOT_FLOW_JOIN_TAGS", 7, 2),
+        ("Unreachable assignment", "SLOT_FLOW_ASSIGNMENT_TAGS", 0, 2),
+        ("Moved assignment", "SLOT_FLOW_ASSIGNMENT_TAGS", 3, 3),
+        ("Unreachable Take state", "SLOT_FLOW_TAKE_TAGS", 0, 1),
+        ("Live Take state", "SLOT_FLOW_TAKE_TAGS", 2, 2),
+    )
+    for label, name, index, replacement in int_mutations:
+        count += 1
+        values, value_error = _f0_int_list(resource_source, name)
         if value_error:
-            errors.append(f"resource F0 mutation {label}: {value_error}")
+            errors.append(f"F0 semantic mutation {label}: {value_error}")
             continue
         assert values is not None
         values[index] = replacement
-        mutated, mutation_error = _replace_resource_const_list(
-            source, name, values)
+        mutated, mutation_error = _f0_replace_const_list(
+            resource_source, name, values)
         if mutation_error:
-            errors.append(f"resource F0 mutation {label}: {mutation_error}")
-            continue
-        assert mutated is not None
-        if not resource_model_f0_contract_errors(mutated):
-            errors.append(f"resource F0 mutation escaped: {label}")
+            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
+        elif not resource_lattice_f0_contract_errors(mutated or ""):
+            errors.append(f"F0 semantic mutation escaped: {label}")
 
-    findings, finding_error = _resource_bool_list(
-        source, "SLOT_FLOW_TAKE_FINDINGS")
-    if finding_error:
-        errors.append(f"resource F0 mutation Take finding: {finding_error}")
-    else:
-        assert findings is not None
-        findings[2] = False
-        mutated, mutation_error = _replace_resource_const_list(
-            source, "SLOT_FLOW_TAKE_FINDINGS", findings)
-        if mutation_error:
-            errors.append(f"resource F0 mutation Take finding: {mutation_error}")
-        elif not resource_model_f0_contract_errors(mutated):
-            errors.append("resource F0 mutation escaped: Take finding")
-
-    appended_mutations = (
-        ("shared identity counter",
-         "\nstruct IdentityCounter { next_identity: Int }\n"),
-        ("name fallback",
-         "\nfn identity_name_fallback(value: Str) -> Str { value }\n"),
-        ("ownership graph",
-         "\nstruct OwnershipMetadata { entries: List<Int> }\n"),
-        ("planner",
-         "\nfn resource_model_plan() {}\n"),
-        ("HIR storage",
-         "\nstruct StoredTree { value: HExpr }\n"),
-        ("hash implementation",
-         "\nfn hash_identity(value: Str) -> Str { value }\n"),
+    bool_mutations = (
+        ("Unreachable Take finding", 0, True),
+        ("Empty Take finding", 1, False),
     )
-    for label, suffix in appended_mutations:
-        if not resource_model_f0_contract_errors(source + suffix):
-            errors.append(f"resource F0 mutation escaped: {label}")
-    return errors
+    for label, index, replacement in bool_mutations:
+        count += 1
+        values, value_error = _f0_bool_list(
+            resource_source, "SLOT_FLOW_TAKE_FINDINGS")
+        if value_error:
+            errors.append(f"F0 semantic mutation {label}: {value_error}")
+            continue
+        assert values is not None
+        values[index] = replacement
+        mutated, mutation_error = _f0_replace_const_list(
+            resource_source, "SLOT_FLOW_TAKE_FINDINGS", values)
+        if mutation_error:
+            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
+        elif not resource_lattice_f0_contract_errors(mutated or ""):
+            errors.append(f"F0 semantic mutation escaped: {label}")
+
+    count += 1
+    stage_mutation = identity_source + (
+        "\npub struct IdentityManifest { stage_hash: Str }\n"
+        "pub struct ModelStage { tag: Int }\n")
+    if not ir_identity_f0_contract_errors(stage_mutation):
+        errors.append("F0 semantic mutation escaped: parallel stage API")
+    if count != F0_SEMANTIC_MUTATION_COUNT:
+        errors.append(
+            f"F0 semantic mutation count was {count}, "
+            f"expected {F0_SEMANTIC_MUTATION_COUNT}")
+    return errors, count
+
+
+def _f0_scope_guard_errors(
+    identity_source: str, resource_source: str,
+) -> Tuple[List[str], int]:
+    errors: List[str] = []
+    guards = (
+        ("identity imports checker", "identity", "\nuse checker::{check}\n"),
+        ("identity counter", "identity",
+         "\nstruct IdentityCounter { next_identity: Int }\n"),
+        ("identity name fallback", "identity",
+         "\nfn identity_name_fallback(value: Str) -> Str { value }\n"),
+        ("identity hash", "identity",
+         "\nfn hash_identity(value: Str) -> Str { value }\n"),
+        ("resource imports Perceus", "resource",
+         "\nuse perceus::{perceus_transform}\n"),
+        ("resource planner", "resource", "\nfn resource_model_plan() {}\n"),
+        ("resource stores HIR", "resource",
+         "\nstruct StoredTree { value: HExpr }\n"),
+        ("resource certificate", "resource",
+         "\nstruct ResourceCertificate { rank: Int }\n"),
+        ("premature projection path", "identity",
+         "\nstruct ProjectionPath { steps: List<Str> }\n"),
+    )
+    count = 0
+    for label, target, suffix in guards:
+        count += 1
+        if target == "identity":
+            findings = ir_identity_f0_contract_errors(identity_source + suffix)
+        else:
+            findings = resource_lattice_f0_contract_errors(
+                resource_source + suffix)
+        if not findings:
+            errors.append(f"F0 scope guard escaped: {label}")
+    if count != F0_SCOPE_GUARD_COUNT:
+        errors.append(
+            f"F0 scope guard count was {count}, expected {F0_SCOPE_GUARD_COUNT}")
+    return errors, count
 
 
 def resource_model_f0_source_errors() -> List[str]:
+    errors: List[str] = []
     try:
-        source = RESOURCE_MODEL_F0_PATH.read_text(encoding="utf-8")
+        identity_source = IR_IDENTITY_F0_PATH.read_text(encoding="utf-8")
+        resource_source = RESOURCE_MODEL_F0_PATH.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        return [f"cannot read {display_path(RESOURCE_MODEL_F0_PATH)}: {exc}"]
-    errors = resource_model_f0_contract_errors(source)
-    if not errors:
-        errors.extend(resource_model_f0_mutation_errors(source))
+        return [f"cannot read F0 compiler sources: {exc}"]
+    errors.extend(ir_identity_f0_contract_errors(identity_source))
+    errors.extend(resource_lattice_f0_contract_errors(resource_source))
+    if errors:
+        return errors
+    semantic_errors, _ = _f0_semantic_mutation_errors(
+        identity_source, resource_source)
+    guard_errors, _ = _f0_scope_guard_errors(identity_source, resource_source)
+    errors.extend(semantic_errors)
+    errors.extend(guard_errors)
+    return errors
+
+
+def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(ring_exe))
+    for source_path in (IR_IDENTITY_F0_PATH, RESOURCE_MODEL_F0_PATH):
+        completed = subprocess.run(
+            [ring_exe, "check", str(source_path)],
+            cwd=REPO, env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="strict", check=False,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            errors.append(
+                f"pinned Ring check failed for {display_path(source_path)}: "
+                f"exit={completed.returncode} stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}")
+        elif completed.stdout.strip() != "OK" or completed.stderr:
+            errors.append(
+                f"pinned Ring check output drifted for "
+                f"{display_path(source_path)}: stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}")
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across F0 checks")
     return errors
 
 
@@ -7780,11 +7986,15 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
     resource_label = "compiler.resource_model_f0"
     if matches_filter(resource_label, name_filter):
         resource_errors = resource_model_f0_source_errors()
-        resource_detail = "inert source/mutation authority; 34 isolated mutations"
+        if not resource_errors:
+            resource_errors.extend(resource_model_f0_compile_errors(ring_exe))
+        detail = (
+            f"semantic_mutations={F0_SEMANTIC_MUTATION_COUNT}; "
+            f"scope_guards={F0_SCOPE_GUARD_COUNT}; pinned_ring_checks=2")
         collector.add(TestResult(
             TestResult.PASS if not resource_errors else TestResult.FAIL,
             suite, resource_label,
-            "; ".join([resource_detail, *resource_errors])))
+            "; ".join([detail, *resource_errors])))
 
     identity_label = "compiler.identity_checkpoint"
     if matches_filter(identity_label, name_filter):
