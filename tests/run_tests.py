@@ -2332,6 +2332,53 @@ def discover_module_positive(modules_dir: Path) -> List[Path]:
     return cases
 
 
+def discover_module_check_positive(modules_dir: Path) -> List[Path]:
+    """Find explicit check-only modules with no runtime/error companion."""
+    if not modules_dir.is_dir():
+        return []
+    cases = []
+    for directory in sorted(modules_dir.iterdir()):
+        if not directory.is_dir():
+            continue
+        main = directory / "main.ring"
+        marker = directory / "main.check"
+        expected = directory / "main.expected"
+        error = directory / "main.error"
+        if (
+            main.is_file()
+            and marker.is_file()
+            and not expected.exists()
+            and not error.exists()
+        ):
+            cases.append(main)
+    return cases
+
+
+def module_check_positive_discovery_errors(modules_dir: Path) -> List[str]:
+    """Validate explicit marker ownership for the generic check-only lane."""
+    errors: List[str] = []
+    discovered = discover_module_check_positive(modules_dir)
+    required = modules_dir / "plan_namespace_empty_growth_cycle" / "main.ring"
+    if required not in discovered:
+        errors.append(
+            "plan_namespace_empty_growth_cycle is absent from module check-only discovery")
+    for main in discovered:
+        case_dir = main.parent
+        marker = case_dir / "main.check"
+        if (case_dir / "main.expected").exists() or (case_dir / "main.error").exists():
+            errors.append(
+                f"{case_dir.name}: check-only marker overlaps another module lane")
+        try:
+            contract = marker.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"{case_dir.name}: cannot read main.check: {exc}")
+        else:
+            if contract != "OK\n":
+                errors.append(
+                    f"{case_dir.name}: main.check must be the exact OK contract")
+    return errors
+
+
 def discover_module_negative(modules_dir: Path) -> List[Path]:
     """Return sorted list of module main.ring files that have main.error."""
     if not modules_dir.is_dir():
@@ -2784,6 +2831,14 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
     """Run the E2E test suite."""
     suite = "e2e"
 
+    module_check_errors = module_check_positive_discovery_errors(MODULES_DIR)
+    if module_check_errors:
+        for index, error in enumerate(module_check_errors, 1):
+            collector.add(TestResult(
+                TestResult.FAIL, suite,
+                f"module-check-discovery:{index}", error))
+        return
+
     # --- Positive single-file cases ---
     positive = discover_positive_cases(CASES_DIR)
     # Also include cases from subdirectories (negative/, errors/) that have .expected
@@ -2931,6 +2986,31 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
                 collector.add(TestResult(
                     TestResult.FAIL, suite, f"mod:{mod_name}",
                     f"expected {exp_repr}, got {act_repr}"))
+
+    # --- Explicit module check-only positive ---
+    for main_file in discover_module_check_positive(MODULES_DIR):
+        mod_name = main_file.parent.name
+        label = f"mod-check:{mod_name}"
+        if not matches_filter(label, name_filter):
+            continue
+        try:
+            result = ring_check(
+                ring_exe, str(main_file), phase_suite=suite,
+                phase_case=label)
+        except subprocess.TimeoutExpired:
+            collector.add(TestResult(
+                TestResult.FAIL, suite, label, "check timed out"))
+            continue
+        failure = None
+        if result.returncode != 0:
+            failure = f"expected exit 0, got {result.returncode}"
+        elif result.stdout != "OK\n":
+            failure = f"expected exact stdout 'OK\\n', got {result.stdout!r}"
+        elif result.stderr != "":
+            failure = f"expected empty stderr, got {result.stderr!r}"
+        collector.add(TestResult(
+            TestResult.PASS if failure is None else TestResult.FAIL,
+            suite, label, failure or ""))
 
     # --- Module negative ---
     mod_negative = discover_module_negative(MODULES_DIR)
