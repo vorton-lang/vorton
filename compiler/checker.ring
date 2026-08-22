@@ -19,7 +19,8 @@ use infer_ctx::{InferCtx, type_error, record_value_origin, record_variant_ctor_o
 use infer_register::{register_decl_public}
 use exports::{ModuleExports, TypeDef}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
-    ImportIssueKind, NamespaceKind}
+    ImportIssueKind, NamespaceKind, first_duplicate_mod_block,
+    duplicate_mod_block_diagnostic}
 use codes::{E0504, E0702, E0703, E0704, E0705, E0707, E0801}
 use parser::{parse}
 use union_find::{UnionFind}
@@ -41,6 +42,24 @@ pub struct CheckResult {
     // module's own HIR before prelude decls are prepended, so exports never
     // have to re-resolve an impl target against the rolled-back environment.
     pub impl_facts: List<ModuleImplFact>
+}
+
+fn duplicate_mod_block_error_result(ctx: InferCtx) -> CheckResult {
+    CheckResult {
+        program: HProgram {
+            decls: [],
+            derived_impls: [],
+            boxed_vars: set_new(),
+            static_dicts: [],
+            extern_type_names: set_new(),
+            drop_types: set_new()
+        },
+        env: ctx.env,
+        fn_mut_params: ctx.fn_mut_params,
+        value_origins: map_clone(ctx.use_aliases),
+        value_binding_kinds: map_clone(ctx.value_binding_kinds),
+        impl_facts: []
+    }
 }
 
 const STD_FILES: List<Str> =
@@ -304,6 +323,13 @@ fn collect_module_impl_facts(
 
 pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     let mut ctx = new_infer_ctx(sink)
+    match first_duplicate_mod_block(program) {
+        some(duplicate) => {
+            ctx.sink.report(duplicate_mod_block_diagnostic(duplicate))
+            return duplicate_mod_block_error_result(ctx)
+        },
+        none => {}
+    }
     let prelude_hdecls = load_prelude(ctx)
     let hprogram = infer_check(ctx, program)
     let mut impl_facts: List<ModuleImplFact> = []
@@ -533,6 +559,15 @@ pub fn check_module(
     namespace_plan: ResolvedNamespacePlan,
     module_exports: List<ModuleExports>, sink: CollectingSink
 ) -> CheckResult {
+    // Project compilation must have passed through build_module_graph, which
+    // applies the same AST authority before constructing resolver frames.
+    // Fail closed here without publishing a second diagnostic if an internal
+    // caller bypasses that gate.
+    match first_duplicate_mod_block(program) {
+        some(_) => panic(
+            "unreachable: project checker received duplicate inline module"),
+        none => {}
+    }
     let mut ctx = new_infer_ctx(sink)
     let prelude_hdecls = load_prelude(ctx)
     inject_module_exports(ctx, module_exports)

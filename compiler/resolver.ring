@@ -1,10 +1,10 @@
 use ast::{Program, Decl, UseDecl, UseImport, Span, Position}
 use parser::{parse}
-use diagnostics::{CollectingSink, Diagnostic, Severity, DiagnosticContext,
+use diagnostics::{CollectingSink, Diagnostic, DiagnosticNote, Severity, DiagnosticContext,
     new_collecting_sink, make_diag}
 use formatter::{format_human, format_llm}
 use hir::{compare_by_first, module_item_identity, variant_ctor_name}
-use codes::{E0702, E0704, E0705}
+use codes::{E0207, E0702, E0704, E0705}
 use ir_identity::{
     SymbolRef, make_symbol_ref,
     namespace_value, namespace_nominal, namespace_trait, namespace_effect,
@@ -106,6 +106,65 @@ pub struct NamespaceSeed {
     pub is_public: Bool,
     pub role: NamespaceSeedRole,
     pub is_projection: Bool
+}
+
+// Ring 0.1 has one direct inline-module declaration per parent scope.  Keep
+// the exact first and duplicate source spans separate from namespace identity
+// so both single-file and project entry points report the same source error
+// before any duplicate fragment can enter resolver frame construction.
+pub struct DuplicateModBlock {
+    pub name: Str,
+    pub first_span: Span,
+    pub duplicate_span: Span
+}
+
+fn first_duplicate_mod_block_in_scope(
+    decls: List<Decl>
+) -> DuplicateModBlock? {
+    // The map is deliberately fresh for every direct declaration list:
+    // outer::inner and root::inner are different module declarations.
+    let mut seen: Map<Str, Span> = map_new()
+    for decl in decls {
+        match decl {
+            Decl::ModBlock { name, decls: nested, span, .. } => {
+                match seen.get(name) {
+                    some(first_span) => return some(DuplicateModBlock {
+                        name: name,
+                        first_span: first_span,
+                        duplicate_span: span
+                    }),
+                    none => { seen.insert(name, span) }
+                }
+                match first_duplicate_mod_block_in_scope(nested) {
+                    some(duplicate) => return some(duplicate),
+                    none => {}
+                }
+            },
+            _ => {}
+        }
+    }
+    none
+}
+
+pub fn first_duplicate_mod_block(program: Program) -> DuplicateModBlock? {
+    first_duplicate_mod_block_in_scope(program.decls)
+}
+
+pub fn duplicate_mod_block_diagnostic(
+    duplicate: DuplicateModBlock
+) -> Diagnostic {
+    let mut diagnostic = make_diag(
+        E0207, Severity::SevError,
+        "Duplicate definition: module '${duplicate.name}' is already defined",
+        duplicate.duplicate_span,
+        DiagnosticContext::OtherContext {
+            detail: some("duplicate inline module declaration")
+        })
+    diagnostic.notes.push(DiagnosticNote {
+        message: "first module declaration is here",
+        span: some(duplicate.first_span)
+    })
+    diagnostic
 }
 
 pub struct EnumVariantFactGroup {
@@ -4778,7 +4837,7 @@ pub fn build_module_graph(entry_file: Str, error_format: Str) -> ModuleGraph? {
                 match modules.get(current_key) {
                     some(current_mod) => {
                         let source = read_file(current_mod.file_path)
-                        let resolve_sink = new_collecting_sink()
+                        let mut resolve_sink = new_collecting_sink()
                         let ast = parse(source, current_mod.file_path, resolve_sink)
                         if resolve_sink.has_errors() {
                             if error_format == "llm" {
@@ -4787,6 +4846,22 @@ pub fn build_module_graph(entry_file: Str, error_format: Str) -> ModuleGraph? {
                                 eprintln(format_human(resolve_sink.diagnostics(), source))
                             }
                             return none
+                        }
+                        match first_duplicate_mod_block(ast) {
+                            some(duplicate) => {
+                                resolve_sink.report(
+                                    duplicate_mod_block_diagnostic(duplicate))
+                                if error_format == "llm" {
+                                    eprintln(format_llm(
+                                        resolve_sink.diagnostics(),
+                                        current_mod.file_path))
+                                } else {
+                                    eprintln(format_human(
+                                        resolve_sink.diagnostics(), source))
+                                }
+                                return none
+                            },
+                            none => {}
                         }
                         // Surface parse warnings (non-error diagnostics) without failing the build
                         if resolve_sink.items.len() > 0 {

@@ -1,7 +1,5 @@
-error[E0707]: Ambiguous value name 'Clash': conflicting payloads 'main::same::First_Clash' and 'main::same::Second_Clash'
-error[E0707]: Ambiguous struct name 'Handle': conflicting payloads 'main::same::Handle' and 'Handle'
-use super::same::{Clash, Handle}
-!E0702
-!E0703
-!E0704
-!E0705
+error[E0207]: Duplicate definition: module 'same' is already defined
+first module declaration is here
+!E0707
+!Clash
+!Handle

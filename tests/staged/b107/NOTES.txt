@@ -17,9 +17,9 @@ Gate legend:
        (today the plan machinery only runs for multi-file module graphs).
 
 Positive fixtures (expected to turn green at the gate):
-  plan_namespace_duplicate_enum_relation      [G1] duplicate logical `mod same`
-      frames: enum relation via `pub use super::same::{Shared}` must merge
-      variant facts from both frames. Legacy path: E0201.
+  plan_namespace_duplicate_enum_relation      [G1] one legal `mod same` owns a
+      single enum relation whose two variants remain available through
+      `pub use super::same::{Shared}`. Legacy path: E0201.
   project_namespace_direct_enum_qualified     [G2] three-segment qualified
       `facade::State::Hit(17)` in a single file must resolve the exact member
       and never fall back to a root decoy fn. Legacy path: leaf fallback,
@@ -31,7 +31,8 @@ Positive fixtures (expected to turn green at the gate):
 Negative fixtures (expected to start failing with the new diagnostics at the
 gate; today the legacy path either accepts the program or reports a different
 code/shape):
-  error_namespace_duplicate_source_import     [G1] plan-format E0707
+  error_namespace_duplicate_source_import     no-partial-module E0207 at the
+      second direct `mod same`; its members must never seed the plan
   error_namespace_enum_member_exact_collision [G1][G2] exact E::V collision, E0707
   error_namespace_inline_ambiguity            [G1] plan-format E0707 payload list
   error_namespace_inline_missing_frame        [G1] E0702 (legacy: E0201)
@@ -39,7 +40,8 @@ code/shape):
   error_namespace_inline_obligation_scc       [G1] E0704 (legacy: E0201)
   error_namespace_inline_over_super           [G1] normalized E0705 message
   error_namespace_nonvalue_growth_cycle       [G1][G2] growth-guard E0704
-  error_namespace_projected_seed_collision    [G1][G2] projected seed E0707
+  error_namespace_projected_seed_collision    [G1][G2] one legal module with
+      a direct Struct/ExternType source collision, E0207 rather than E0707
   error_namespace_resolved_value_cycle        [G1] seedless cycle E0704
   error_namespace_value_growth_cycle          [G1][G2] growth-guard E0704
   error_namespace_value_witness_nonpollution  [G1] one exact E0704, no spray

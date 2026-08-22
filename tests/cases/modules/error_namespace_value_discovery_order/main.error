@@ -1,4 +1,4 @@
-error[E0707]: Ambiguous value name 'target::V': conflicting payloads 'other::V' and 'origin::V'
+error[E0707]: Ambiguous value name 'V': conflicting payloads 'other::V' and 'origin::V'
 pub use slow::{V}
 !pub use fast::{V}
 !E0703

@@ -1,16 +1,10 @@
 mod same {
     enum Shared {
         FirstOnly,
-    }
-
-    fn SecondOnly() -> Int { 10 }
-}
-
-mod same {
-    enum Shared {
         SecondOnly,
     }
 
+    fn SecondOnly() -> Int { 10 }
     fn FirstOnly() -> Int { 20 }
 }
 
