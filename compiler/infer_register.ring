@@ -21,7 +21,7 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
 use infer_helpers::{is_value_type}
 
 // A new registry member is a new semantic producer. Aliases/re-exports must
-// instead preserve or localize an already exact member and never call this.
+// preserve their already exact opaque member and never call this.
 fn mint_new_member_registration_identity(
     mut ctx: InferCtx, scheme: TypeScheme, label: Str
 ) -> TypeScheme {
