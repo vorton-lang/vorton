@@ -368,7 +368,7 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
     // otherwise a bounded module function reaches codegen without its DictRef.
     let zctx = ZonkCtx {
         subst: s, names: map_new(),
-        dict_resolver: some(ctx)
+        dict_resolver: some(ctx), identity_resolver: some(ctx)
     }
     let resolved = zonk_type(zctx, init_ty)
     let zonked_init = some(zonk_expr(zctx, init_r.hexpr)) catch { _ => none }
@@ -487,7 +487,8 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
                         // Zonk only after the owner obligation transaction.
                         let zctx = ZonkCtx {
                             subst: ctx.subst, names: map_new(),
-                            dict_resolver: some(ctx)
+                            dict_resolver: some(ctx),
+                            identity_resolver: some(ctx)
                         }
                         zonk_block(zctx, body_result.hexpr)
                     }) catch { _ => none }
@@ -1609,7 +1610,7 @@ fn check_trait_default_body(
             drain_pending_dicts(ctx, obligation_checkpoint, ctx.subst)
             let zctx = ZonkCtx {
                 subst: ctx.subst, names: map_new(),
-                dict_resolver: some(ctx)
+                dict_resolver: some(ctx), identity_resolver: some(ctx)
             }
             let result = some(zonk_block(zctx, br.hexpr))
             ctx.subst = saved_subst
@@ -1875,7 +1876,7 @@ fn check_fn_body(
 
     let zctx = ZonkCtx {
         subst: ctx.subst, names: local_names,
-        dict_resolver: some(ctx)
+        dict_resolver: some(ctx), identity_resolver: some(ctx)
     }
     let mut final_params: List<HParam> = []
     for hp in hparams { final_params.push(zonk_param(zctx, hp)) }
@@ -2251,7 +2252,7 @@ fn check_fn_decl_transaction(
         some(_) => {
             let zctx_defaults = ZonkCtx {
                 subst: ctx.subst, names: map_new(),
-                dict_resolver: none
+                dict_resolver: none, identity_resolver: some(ctx)
             }
             for dh in default_hexprs {
                 zonked_defaults.push(zonk_expr(zctx_defaults, dh))
@@ -2398,7 +2399,7 @@ fn check_test_decl(mut ctx: InferCtx, description: Str, body: Expr, span: Span) 
             drain_pending_dicts(ctx, obligation_checkpoint, ctx.subst)
             let zctx = ZonkCtx {
                 subst: ctx.subst, names: map_new(),
-                dict_resolver: some(ctx)
+                dict_resolver: some(ctx), identity_resolver: some(ctx)
             }
             let result = zonk_block(zctx, br.hexpr)
             ctx.subst = saved_subst

@@ -7,7 +7,8 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     hexpr_type, hexpr_effects, hexpr_span}
 use union_find::{UnionFind}
 use env::{apply_subst, apply_subst_row}
-use infer_ctx::{InferCtx, value_binding_kind, has_variant_ctor_origin_def_id}
+use infer_ctx::{InferCtx, value_binding_kind, has_variant_ctor_origin_def_id,
+    fresh_callable_identity_def_id}
 use infer_helpers::{resolve_value_ident}
 
 pub struct ZonkCtx {
@@ -16,7 +17,11 @@ pub struct ZonkCtx {
     // Present for checker-owned zonks.  Keeping it optional preserves zonk's
     // pure type-substitution use sites while allowing fully-unified function
     // VALUE identifiers to resolve their complete DictRef evidence once.
-    pub dict_resolver: InferCtx?
+    pub dict_resolver: InferCtx?,
+    // Identity finalization is independent from dictionary resolution.  A
+    // default template deliberately disables the latter but still needs exact
+    // callable IDs after its types are fixed.
+    pub identity_resolver: InferCtx?
 }
 
 pub fn zonk_type(ctx: ZonkCtx, t: Type) -> Type {
@@ -141,6 +146,34 @@ fn zonk_dispatch(ctx: ZonkCtx, dispatch: TraitDispatch?) -> TraitDispatch? {
     }
 }
 
+fn zonk_callable_result_def_id(
+    mut ctx: ZonkCtx, ty: Type, existing: Int?
+) -> Int? {
+    match ty {
+        Type::FnType { .. } => match existing {
+            some(def_id) => some(def_id),
+            none => match ctx.identity_resolver {
+                some(resolver) => some(fresh_callable_identity_def_id(resolver)),
+                none => panic(
+                    "zonk: callable Call result has no identity allocator")
+            }
+        },
+        _ => none
+    }
+}
+
+fn zonk_direct_callee_def_id(callee: HExpr, fallback: Int?) -> Int? {
+    match callee {
+        HExpr::Ident { def_id: some(def_id), .. } => some(def_id),
+        HExpr::Lambda { def_id, .. } => some(def_id),
+        HExpr::Call { callable_result_def_id: some(def_id), .. } =>
+            some(def_id),
+        // FieldAccess and name-only dictionary receivers may already carry an
+        // exact registration DefId.  Preserve it without resolving a spelling.
+        _ => fallback
+    }
+}
+
 pub fn zonk_block(ctx: ZonkCtx, block: HExpr) -> HExpr {
     match block {
         HExpr::Block { stmts, tail, ty, effects, span } => {
@@ -244,20 +277,26 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
         HExpr::UnaryOp { op, operand, .. } =>
             HExpr::UnaryOp { op: op, operand: zonk_expr(ctx, operand), ty: z_ty, effects: z_eff, span: z_span },
         HExpr::Call { callee, callee_def_id, callable_result_def_id,
-                      args, type_args, resolved_dicts, dict_dispatch, .. } =>
+                      args, type_args, resolved_dicts, dict_dispatch, .. } => {
+            let zonked_callee = zonk_direct_callee(ctx, callee)
+            let exact_callee_def_id = zonk_direct_callee_def_id(
+                zonked_callee, callee_def_id)
+            let exact_result_def_id = zonk_callable_result_def_id(
+                ctx, z_ty, callable_result_def_id)
             HExpr::Call {
                 // A syntactic Ident callee uses the direct ABI and gets its
                 // evidence from Call.resolved_dicts.  Every other recursive
                 // position is a value position and must form a real closure.
-                callee: zonk_direct_callee(ctx, callee),
-                callee_def_id: callee_def_id,
-                callable_result_def_id: callable_result_def_id,
+                callee: zonked_callee,
+                callee_def_id: exact_callee_def_id,
+                callable_result_def_id: exact_result_def_id,
                 args: args.map(fn(a) { zonk_expr(ctx, a) }),
                 type_args: type_args.map(fn(t) { zonk_type(ctx, t) }),
                 resolved_dicts: resolved_dicts,
                 dict_dispatch: dict_dispatch,
                 ty: z_ty, effects: z_eff, span: z_span
-            },
+            }
+        },
         HExpr::FieldAccess { receiver, field, .. } =>
             HExpr::FieldAccess { receiver: zonk_expr(ctx, receiver), field: field, ty: z_ty, effects: z_eff, span: z_span },
         HExpr::StructLit { name, type_args, fields, spread, .. } => {
