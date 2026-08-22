@@ -13,9 +13,9 @@
 
 **未发布期 clean-break 原则（2026-08-07 用户拍板）**：首次公开 preview/release 之前，一项公开语法、API、ABI 或语义变更一旦按授权边界拍板，就采用最简单的原子切换；兼容性本身不是增加 deprecated alias、双实现路径、旧 ABI fallback 或迁移 shim 的理由。仓内调用点、规范和测试在同一变更中整体迁移，并明确记录 break。此原则不授权降低 correctness、ownership/safety 或测试门槛，也不替代新语义本身的用户保留决定；首次公开发布后的版本兼容政策另行建立。
 
-**近期 break 审核门**：任何修改公开语法、签名、ABI 或可观察语义的 item，在实现前必须标成“已拍板 clean break”“等待 decision dossier”或“仅内部、非 breaking”之一。已拍板的 #268/#269 ownership 真值与 B-167 调用点 evidence 采用一次性切换；旧 ownership 猜测/传播路径和创建处 evidence ABI 必须在各自原子变更中删除，不形成双轨。B-168/B-169 的探针结论，以及 B-152、B-156、B-171、B-133 和 `io` effect 拆分等潜在用户面变化，在进入实现前显式核对 break 边界；需要新的公开语义决定时仍提交 dossier。每个已拍板 break 的验收都必须列出被删除的旧路径、同步迁移的仓内消费者/规范/测试，并在旧形式仍可表达时用负例证明它不会经 alias、fallback 或旧 ABI 继续生效。
+**近期 break 审核门**：任何修改公开语法、签名、ABI 或可观察语义的 item，在实现前必须标成“已拍板 clean break”“等待 decision dossier”或“仅内部、非 breaking”之一。已拍板的 #268/#269 ownership 真值、B-167 调用点 evidence与B-193~B-196的0.1 surface/effect边界均采用一次性切换；旧 ownership、default evidence、宽泛`io`/host fallback、effectful Drop与refinement placeholder必须在各自原子变更中删除，不形成双轨。B-168/B-169 的探针结论，以及 B-152、B-156、B-171、B-133 等潜在用户面变化在进入实现前仍显式核对 break 边界。每个已拍板 break 的验收都必须列出被删除的旧路径、同步迁移的仓内消费者/规范/测试，并用负例证明旧形式不会经 alias、fallback 或旧 ABI 继续生效。
 
-Canonical dependency chain：`#268/#269 -> B-176/B-180 -> B-190 -> remaining correctness/ABI -> B-183 -> B-191 -> B-174/B-177/B-175`。
+Canonical dependency chain：`#268/#269 -> B-176/B-180 -> B-190 -> B-193/B-194/B-195/B-196 -> remaining correctness/ABI -> B-183 -> B-191 -> B-174/B-177/B-175 -> post-0.1 B-072/B-197/B-198`。
 
 B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（check/test/bootstrap 全绿）完成；worktree/ref/WIP、authority、paired-session、push/CI 与 health 约束已转为 `docs/workflow.md` / `docs/repository-health.json` 的持续门，活动历史只留 Git。
 `B-176` 保持 queued；B-180 只保留 runner anchor-object cache，compiler lane 继续冻结到 #268/#269 fixed point 闭环。
@@ -35,21 +35,23 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **S′ 独立性反证与历史 checkpoint 重排（2026-08-22）**：最新 main 的 source-built S′ gen1 对 direct/named owning payload 均生成“source 进入 owning sink 后仍在 block exit Drop”的同型 C，focused runtime/RC/structural 全红；旧 a11 S′ 绿色依赖祖先 A′ `HExpr::Take` 保存值并清 source slot，不能作为独立 S′ 证据。实验 admission 层已可恢复撤回，I′ 完整保留。当时下一且仅下一 checkpoint 曾为 A′ atomic transfer authority：一次贯通 checker→HIR→Perceus→verifier→codegen 的 executable-HDecl inventory、transitive may-Drop、callable modes、CFG/显式 `Take`/source-clear；transfer canary 通过后才恢复 exact-none W4/exit、tail negatives、shadow/loop/catch。不得把 fresh-only ANF 子集、Option ctor 特判或局部 verifier 补丁冒充该 authority；其实现分层现由下述 FlowIR 架构取代。
 
-> **FlowIR Resource Planner architecture（2026-08-22 用户已理解并批准执行）**：本段supersede上段的实现分层但保留其反证。TypedHIR→CoreHIR先闭合trait/effect default body、delegate→ordinary ImplFn、derive/protocol/andor/dict与typed call/member/evidence；CoreHIR是semantic elaboration closure。FlowIR只做pattern decision/projection、neutral ANF、scope/control result与freeze；`SymbolRef/SlotRef/PathRef`分域且不使用共享counter表达member/callable语义。共享ExecutableInventory覆盖Fn/Impl/Trait/Effect/Test/Const/ModBlock/Lambda/handler、trait-default specialization、derived/constructor/dict/const getter、bodyless interface/extern与extern bridge；0.1不含函数default parameters或sig，delegate不形成专属root。ResourcePlanner以Logical OwnershipShape/Physical RcShape双轴、frozen callable graph与ephemeral CFG统一A′/S′，RcIR与ranked certificate完整显式；verifier证明least fixed point与路径守恒，codegen只消费verified RcIR。Single/project共用一条入口。
+> **FlowIR Resource Planner architecture（2026-08-22 用户已理解并批准执行）**：本段supersede上段的实现分层但保留其反证。TypedHIR→CoreHIR先闭合trait default body、delegate→ordinary ImplFn、derive/protocol/andor/dict与typed call/member/handled evidence；CoreHIR是semantic elaboration closure。FlowIR只做pattern decision/projection、neutral ANF、scope/control result与freeze；`SymbolRef/SlotRef/PathRef`分域且不使用共享counter表达member/callable语义。共享ExecutableInventory覆盖Fn/Impl/Trait/Effect/Test/Const/ModBlock/Lambda/handler、trait-default specialization、derived/constructor/dict/const getter、bodyless interface/extern与extern bridge；0.1不含函数default parameters、effect default body或sig，delegate不形成专属root。SystemEffectRef不进evidence/ExecutableInventory，只随exact host call进入AbiIR HostImport。ResourcePlanner以Logical OwnershipShape/Physical RcShape双轴、frozen callable graph与ephemeral CFG统一A′/S′，RcIR与ranked certificate完整显式；verifier证明least fixed point与路径守恒，codegen只消费verified RcIR。Single/project共用一条入口。
 
-> **实施硬门**：旧d5/17/df1/37a4/a7 S1候选与sealed packet只作反例/evidence，不作seed或逐点返修；a7 one-shot已user-directed终止且inconclusive。新authority从最新main建立，先固定完整type-state pipeline、typed identity、CoreHIR elaboration closure、neutral normalization、ExecutableInventory与“Planner后零binder”structural/mutation contract；所有组件只可在同一authority group渐进checkpoint，未形成完整ResourcePlanner时不得merge行为改变到main。最终验收必须覆盖direct/named owning sink、struct/variant/list/tuple/range/slot、function value/HOF/factory、trait/effect default、delegate-origin ordinary ImplFn、derive、reexport/diamond/extern bridge、generic recursive shape、loop/catch/handler、none→some overwrite、partial move与single/project parity；mutation必须杀死surface-only node、implicit executable obligation或resolver/type/effect/trait/backend fallback越过CoreHIR边界。随后12 GiB source-built fixed point、完整RC/ASan/self-host/full与exact CI全绿才关闭#268/#269。
+> **实施硬门**：旧d5/17/df1/37a4/a7 S1候选与sealed packet只作反例/evidence，不作seed或逐点返修；a7 one-shot已user-directed终止且inconclusive。新authority从最新main建立，先固定完整type-state pipeline、typed identity、CoreHIR elaboration closure、neutral normalization、ExecutableInventory与“Planner后零binder”structural/mutation contract；所有组件只可在同一authority group渐进checkpoint，未形成完整ResourcePlanner时不得merge行为改变到main。最终验收必须覆盖direct/named owning sink、struct/variant/list/tuple/range/slot、function value/HOF/factory、trait default、delegate-origin ordinary ImplFn、derive、handled effect、reexport/diamond/extern bridge、generic recursive shape、loop/catch/handler、none→some overwrite、partial move与single/project parity；mutation必须杀死surface-only node、implicit executable obligation、system→evidence、handled→HostImport或resolver/type/effect/trait/backend fallback越过CoreHIR边界。随后12 GiB source-built fixed point、完整RC/ASan/self-host/full与exact CI全绿才关闭#268/#269。
 
 > **Compiler-wide staged IR adoption（2026-08-22 用户批准；2026-08-23 naming clean break）**：总架构固定为 `AST -> ResolvedAST -> TypedHIR -> CoreHIR -> FlowIR -> RcIR -> AbiIR -> mechanical C11`，但不新增平行 P0 或一次性 rewrite。`FinalHIR`/`RcHIR`旧名不保留alias；FlowIR明确是first MIR/CFG-style operational IR，RcIR是其资源显式版本。当前 #268/#269 只建立后续可共用的 exact identity、typed carrier、ExecutableInventory、neutral normalization、freeze/validator 与 RcIR 骨架；不得用 ownership-only side map 抢先形成第二套前端。以后 B-180 仅在测量支持时消费稳定 stage hash/cache，B-168/B-169/B-167 在既有顺序中把 control/evidence/call ABI 放入 CoreHIR/FlowIR/AbiIR，B-152 把 RIIR/FFI representation 收口到 AbiIR；其他 item 同理按其现有优先级迁入唯一层。每个 cutover 必须原子迁移消费者并删除旧 name/type/backend fallback，B-190 只清理已有迁移证据支持的遗留 authority；上述约束不改变七道门顺序、公开语义/ABI或原验收门。
 
 > **U1a no-partial-inline-module gate（2026-08-22 用户决定）**：0.1 中同一 direct parent scope 的 `mod name` 只能声明一次，第二个 ModBlock 在 resolver source census 立即报 `E0207`；不同 AstSite 不能因 canonical payload 相同合并，`E0707` 只保留给不同 origin 的 import ambiguity。Import/re-export/same-origin diamond 仍幂等复用 exact origin，不同 parent 同 leaf 与多个 impl block 不受影响。仓内 compiler/std/examples 零迁移；3 个 active resolver fixture 机械合为单 block 或改成 duplicate-mod 负例，staged b107 probes 同步重写/退役。验收必须由 source-built exact candidate 的真实 parser/resolver 覆盖 duplicate ModBlock、单 block 内 Fn/Const/Extern/Struct/ExternType/Enum/TypeAlias/Effect/Alias/Trait direct duplicates 及 delivery 非回归；Python source scan 只作非权威 scope guard。未来若有真实大规模 consumer，以显式新 feature 重新设计，不保留隐藏兼容路径。
 
-> **0.1 surface simplification / CoreHIR closure（2026-08-23 用户决定）**：compiler/std/examples 对函数default parameters、sig placeholder与delegate surface的真实使用分别为0/0/0。0.1 clean break删除函数default parameter语法、call-site HIR template/freshen/remap以及只注册/transport `SigDef` 的sig全链；不影响trait/effect default body。Delegate因能表达组合关系而保留，但只在TypedHIR→CoreHIR一次展开成完整普通trait impl，手写同trait impl稳定E0509；CoreHIR后无delegate专属kind/authority。每个新surface feature必须提供唯一CoreHIR lowering或证明自身为canonical core，禁止把surface-only variant、待生成body/impl/evidence带入FlowIR/ResourcePlanner/backend。Sig只在post-0.1的B-192以完整module conformance重新设计，不允许register-only中间态。
+> **0.1 surface simplification / CoreHIR closure（2026-08-23 用户决定）**：compiler/std/examples 对函数default parameters、sig placeholder、refinement placeholder、user effect default body与delegate surface均无必须保留的真实consumer。0.1 clean break删除函数default parameter、只注册/transport `SigDef`、parse-and-discard `where`与user default evidence全链；trait default method不受影响。Delegate因能表达组合关系而保留，但只在TypedHIR→CoreHIR一次展开成普通trait impl。每个新surface feature必须提供唯一CoreHIR lowering或证明自身为canonical core，禁止把surface-only variant、待生成body/impl/evidence带入下游。Sig/refinement/default provider分别只按B-192/B-001/B-197的完整未来门重入。
+
+> **0.1 effect/capability batch（2026-08-23 用户批准）**：B-195以`SystemEffectRef(console/fs/process)`取代special `io`，system不进evidence、不可handle、无root handler，只经AbiIR HostImport/link provider；custom `HandledEffectRef`才显式handle。Host capability与`fail<E>`正交，std host extern漏标与`io.read`双authority原子收口。B-196令0.1用户Drop最终effect row为空且不建DropEffectSet；post-0.1 effectful destruction只在真实consumer下由B-198重审。B-072匿名sum既有语义继续批准但实现顺延post-0.1。
 
 3. **B-176/B-180 反馈速度**：在 post-ownership 最新 main 重做 baseline；runner 与 compiler 分 checkpoint，但原 2x 量化验收不变。compiler 只允许一个 profile-guided wave。
 4. **B-190 全仓简化**：B-180完成并吸收B-187文档盘点后，以固定snapshot做一次有界过度设计复核与减法refactor；不做rewrite-for-perfection。
-5. **Remaining correctness / ABI freeze**：处理 B-162、B-164、#263、#264、#239、#244、#267、#257，再走 B-168 → B-169 → B-167 → B-152 → B-002，并完成 unsafe/Str 等 candidate gate。
+5. **0.1 surface + Remaining correctness / ABI freeze**：先原子关闭 B-193/B-194/B-195/B-196；随后处理 B-162、B-164、#263、#264、#239、#244、#267、#257，再走 B-168 → B-169 → B-167 → B-152 → B-002，并完成 unsafe/Str 等 candidate gate。B-168/B-169只消费system/handled分域后的契约，不再设计root evidence。
 6. **B-183 repository identity / GitHub workflow**：放在 technical ABI/ownership/failure fixed point 之后、产品化之前；不再晚于 B-174 才处理。
-7. **Preview candidate**：B-191 clean-break 删除 `T?` → B-174 → B-177 → B-175；随后 B-181、B-178/B-016、B-111 等证据与工具面按依赖推进。发布后能力继续按既有优先级。
+7. **Preview candidate**：B-191 clean-break 删除 `T?` → B-174 → B-177 → B-175；随后 B-181、B-178/B-016、B-111 等证据与工具面按依赖推进。B-072/B-197/B-198只在0.1后按真实consumer与既有优先级重启。
 
 B-180 不得以早期 developer-unblock checkpoint 绕过 #268/#269 final fixed point；其已证明的 runner anchor-object cache 可保留，所有 compiler candidates 冻结。B-176 只有在最新 main 可重放完整 baseline 后才算完成。
 
@@ -58,7 +60,7 @@ B-180 不得以早期 developer-unblock checkpoint 绕过 #268/#269 final fixed 
 ## 类型系统
 
 
-### B-001 Refinement Types [feature] [P2] [XL] [judgment] [queued]
+### B-001 Refinement Types [feature] [P2] [XL] [judgment] [queued] [after: B-193]
 design.md 1.2。类型附带谓词，编译期静态验证 + 运行时检查兜底。
 
 ```ring
@@ -67,7 +69,7 @@ type Email = Str where it.matches(r"^[^@]+@[^@]+\.[^@]+$")
 fn divide(a: Float, b: Float where b != 0.0) -> Float { a / b }
 ```
 
-- **当前状态**：struct-field 位 `where` 可解析（tokens 消费后丢弃，W0002 warning）；**参数位 `where`（`fn f(x: Int where x > 0)`）连解析都未实现——硬 parse error E0103（2026-06-11 实测核定）。参数位 parser 支持归本项，不单独先行**（先做解析又只丢弃 = 再造一个「写了不生效」的静默面，正是公理 1 违例的制造机；2026-06-11 用户拍板）。checker 验证未实现
+- **当前状态 / 进入门**：refinement checker尚未实现。B-193先按2026-08-23用户决定删除struct-field `where`的parse-and-discard/W0002占位路径；完成后所有refinement clause在0.1均hard-fail，`where`仍保留未来关键字。本项不得先恢复parser/AST carrier：只有具名可判定片段、允许的runtime fallback、诊断与验证证据全部闭合时才原子开放语法和语义
 - **前置依赖**：Phase B 模块系统稳定后启动
 - **复杂度**：极大（SSA 约束传播 + 可选 Z3 集成）
 - **优先级**：Phase C 首要
@@ -82,7 +84,7 @@ fn divide(a: Float, b: Float where b != 0.0) -> Float { a / b }
   5. 相同输入、工具链与预算必须得到相同结果；缓存只按完整 proof fingerprint 命中，禁止把历史成功掩盖成当前成功
 - **新增验收锚点（2026-07-28）**：正例/反例之外，至少覆盖 overflow 模型差异、assumption 可见性、solver 缺失/unknown、资源预算耗尽、proof cache 失效、runtime fallback 可观察性；每例同时断言 verification IR 与 ledger 稳定
 
-### B-002 Drop / RAII Phase 2 [feature] [P1] [L] [judgment] [queued] [after: B-152+B-168]
+### B-002 Drop / RAII Phase 2 [feature] [P1] [L] [judgment] [queued] [after: B-152+B-168+B-196]
 
 Phase 1 的 scope-end Drop、move checker 和 drop glue 已完成；稳定语义见 design §7.6。当前只跟踪 C-native unwind 与 `Weak<T>`。
 
@@ -118,8 +120,10 @@ Phase 1 的 scope-end Drop、move checker 和 drop glue 已完成；稳定语义
 - 编译器自身（31+ 文件）在新 checker 下零错误 + double bootstrap 一致
 - 完整 C/native、checker 与自举回归通过
 
-### B-072 Union Type（匿名 enum 语法糖）[feature] [P2] [M] [judgment] [queued]
+### B-072 Union Type（匿名 enum 语法糖）[feature] [P3] [M] [judgment] [queued] [after: B-175] [deferred: post-0.1-release]
 `A | B | C` 作为匿名 enum 的语法糖。纯编译期展开，不引入子类型，HM 推断不受影响。详见 design.md 1.1b。
+
+> **2026-08-23 用户复核**：2026-05-25匿名sum与2026-06-15 match消歧两次裁决继续有效；该能力有结构等价、自动注入和错误组合价值，不属于纯缩写语法糖。它不是0.1 urgent特性，实施明确顺延到首次0.1发布后，不为preview增加surface/IR工作。
 
 **核心用例**：
 1. 错误组合：`fail<IoError | ParseError>` — 消除手写包装 enum 的 boilerplate
@@ -132,7 +136,7 @@ Phase 1 的 scope-end Drop、move checker 和 drop glue 已完成；稳定语义
 - 结构等价：两处 `Str | I64` = 同一类型
 - 调用点隐式包装：传 `Str` 到 `Str | I64` 时编译器自动插入构造
 
-**match 语法（2026-06-15 拍板）**：Union = 匿名 enum，variant 名 = 类型的非限定名，match 语法与普通 enum 完全一致（`Str(s) => ...`）。消歧规则：同名类型冲突时（如 `io.Error | parse.Error`）要求用户写具名 enum，不支持匿名 union 含同名 variant
+**match 语法（2026-06-15 拍板）**：Union = 匿名 enum，variant 名 = 类型的非限定名，match 语法与普通 enum 完全一致（`Str(s) => ...`）。消歧规则：同名类型冲突时（如 `fs.Error | parse.Error`）要求用户写具名 enum，不支持匿名 union 含同名 variant
 
 **涉及修改**：
 1. `parser.ring`：类型语法支持 `A | B`
@@ -286,7 +290,7 @@ B-116 先以 native probe 选 lowering；归档 JS generator/Promise 不属于 s
 
 **验收**：sync/production handler、nested scope、spawn/await、取消补偿正反例；scope 外 spawn 报错；退出不遗留任务/owned 资源；完整 native/RC/ASan/self-host 门通过。
 
-### B-156 extern fn 声明处 `requires {unsafe}` 签字检查 [feature] [P1] [M] [judgment] [queued]
+### B-156 extern fn 声明处 `requires {unsafe}` 签字检查 [feature] [P1] [M] [judgment] [queued] [after: B-195]
 
 > 2026-06-27 从 B-125 拆出。B-125 core 完成但 extern fn 签字检查推迟——当前无文件级 `requires` 语法（327 个 extern fn 声明分布在 19 个文件顶层，无 `mod` 块包装），需先设计文件级 `requires` 语法。
 
@@ -303,7 +307,7 @@ B-116 先以 native probe 选 lowering；归档 JS generator/Promise 不属于 s
 - 现有 std/ + compiler/ extern fn 全部通过（迁移后）
 - 自举一致
 
-### B-168 C-native abort/unwind 实现模型探针 [design-align] [P0] [M] [judgment] [queued] [after: B-180]
+### B-168 C-native abort/unwind 实现模型探针 [design-align] [P0] [M] [judgment] [queued] [after: B-180+B-195+B-196]
 
 > 2026-07-29 Discussion 用户拍板 P0/M、保持两候选中立实测。LLVM 已退役，B-002 Phase 2 原定的 `invoke`/`landingpad` 路径失效；现行 `setjmp`/`longjmp` 又已由 B-165 证明存在跨 catch 局部写入不可见问题。B-169/B-167 随后还会决定 effect/type evidence 的共享边界并改变 effectful function value evidence ABI，因此必须先确定共同的 C-native failure/control ABI，避免各项工作重复改写控制流、closure prototype 与 RC 证据面。
 
@@ -347,13 +351,14 @@ B-116 先以 native probe 选 lowering；归档 JS generator/Promise 不属于 s
 
 - trait/type-class evidence 回答“某个类型采用哪个实现”，默认要求静态可见、coherent、可终止的 instance resolution；
 - effect handler evidence 回答“当前词法/动态 handler scope 如何解释操作”，允许局部覆盖、effect 消除及受控的 abort/tail-resumptive 控制行为；
+- `console/fs/process`等SystemEffectRef只作静态HostImport capability，永不进入本项的evidence统一候选；任何候选把它们变为implicit/root handler即被B-195直接否决；
 - 可以共享编译器 substrate，但不得因实现统一而把普通 trait 调用误报为 effect、让 `Eq` 等 instance 被 handler 任意改写，或让 handler 退化成全局 instance；
 - effect row 与 trait bound 都是公开能力真值，任何优化或 lowering 不得静默丢失、合并或臆造 evidence。
 
 **内部实现调研**：
 
 1. 固定并比较三种真实候选：①共享 typed evidence substrate、保留两套表面语义；②两套 lowering 独立但以单一 typed interop contract 连接；③以 capability/implicit parameter 统一部分用户面。不得预选赢家，需主动攻击共享过度与分离过度两端。
-2. 核查 `TypeScheme`/trait bounds、effect rows、associated types、default trait methods/default effect ops 在 inference、generalization、SCC rebind、HIR lowering 与 module export 中的约束求解顺序；明确 principal-type、coherence、determinism 与 termination 条件。
+2. 核查 `TypeScheme`/trait bounds、effect rows、associated types、default trait methods/custom effect ops 在 inference、generalization、SCC rebind、HIR lowering 与 module export 中的约束求解顺序；明确 principal-type、coherence、determinism 与 termination 条件。
 3. 比较 dictionary 与 effect evidence 的 identity、参数排序、direct/indirect call prototype、closure capture、跨模块导出、泛型单态化、递归/互递归转发和默认 evidence 注入；判断哪些元数据必须成为 `hir.ring` 的共享契约，哪些必须保持分域。
 4. 明确 evidence 的 borrow/owned 生命周期及 Perceus/`verify_rc` 可审计边界；结合 B-168 的 normal/failure edge，证明 nested handler、early return、re-raise 与 callback 重入不漏传、不双 drop、不悬垂。
 5. 以 B-167 的外部 callback 调用点动态截获为硬案例，验证 trait-bounded callback 同时携带 dictionary + open effect tail 时不会形成两套不兼容 function-pointer ABI。
@@ -370,7 +375,7 @@ B-116 先以 native probe 选 lowering；归档 JS generator/Promise 不属于 s
 
 - `T: Show` + `fn(T) -> U with ?e` 的 callback 同时转发 dictionary 与 open effect tail；
 - `T: Iterable` 的 `T::Iter: Iterator` 嵌套 associated evidence，覆盖 `iter` / `next` dictionary、Item 一致性与跨模块转发；
-- default trait method 执行自定义 effect，default effect op 调用 trait method；
+- default trait method执行custom handled effect，handler arm调用trait method；
 - associated type 作为 effect op 的参数/返回值，含 owner-qualified 跨模块路径；
 - 外部创建 closure 进入 nested handler，覆盖 direct/indirect、泛型 HOF、递归/互递归与 re-export；
 - handler arm/catch arm 内的 trait dispatch、early return/re-raise 及 RC evidence 生命周期；
@@ -390,6 +395,8 @@ B-116 先以 native probe 选 lowering；归档 JS generator/Promise 不属于 s
 
 > 2026-07-28 Discussion 用户拍板“先 C 后 A”。audit #258 先以创建处词法 evidence 收口 checker soundness：handler 只消除显式 custom label，未知 open tail 原样向外传播。LLVM 已退役、`dist-c/` 已成为唯一 bootstrap 锚。**2026-07-29 前置更新**：B-168 必须先拍板 C-native failure/control ABI；B-169 随后固定 trait dictionary / effect evidence 的共享边界与用户面不变量。本项必须同时复用两者的 function-pointer、failure edge、typed evidence 与 RC 契约，不得另造平行 ABI。
 
+> **2026-08-23 system/handled 边界**：本项只处理`HandledEffectRef`的调用点evidence。`console/fs/process`等`SystemEffectRef`永不进入closure/evidence ABI，也不能被handler动态换绑；mock-fs等案例中的可替换抽象必须是用户custom effect，生产adapter再调用system API。
+
 **目标语义**：effectful function value 在调用点接收当前 effect evidence。外部创建的 callback 传入 `with_mock_clock` / `with_mock_fs` / `capture_logs` 等高阶 handler 后，其 effect 由调用点内层 handler 截获，而不是继续使用 callback 创建处的旧 evidence。静态 effect row 仍是 capability 真值；调用点只传递签名要求的 evidence，未知 open tail 必须逐项转发，不能被机械消除。
 
 **涉及修改**：
@@ -406,15 +413,57 @@ B-116 先以 native probe 选 lowering；归档 JS generator/Promise 不属于 s
 - RC verifier、定向 ASan、完整 C E2E/golden、自编译与 `dist-c` 文本固定点通过；CI bootstrap 在 clean clone 上通过。
 - main 不重新引入 LLVM-C、`dist-llvm` 或双后端兼容层；迁移说明明确记录 C → A 的行为变化。
 
+### B-194 删除用户 effect default operation body / 自动 evidence [design-align] [P1] [L] [judgment] [queued] [before: B-195+B-168]
+
+> **2026-08-23 用户决定，已拍板 clean break**：0.1 custom effect operation只有签名，必须由显式`handle...with`解释。删除op body、部分默认、自动default evidence与默认依赖图；trait default method不受影响。Default provider有真实价值，post-0.1由B-197重审，当前不永久否决。
+
+**范围**：parser/AST删除EffectOp body surface；checker/env/HIR删除`has_default`、default body检查/拓扑/循环与自动evidence发布；CoreHIR/ExecutableInventory/visitor不再把effect default当body root；legacy Perceus/verifier/codegen删除default body transport、global evidence init、main注入与fallback。退役相关诊断、fixtures、structural/mutation authority，不保留inert字段或兼容分支。
+
+**约束**：custom effect、tail-resumptive显式handler、effect alias、trait/effect identity与B-167目标继续保留。无body op在未处理时必须fail loud；不能把默认实现改名为隐藏stdlib/runtime fallback。当前compiler/std/examples无真实default-op consumer，tests按新边界原子迁移。
+
+**验收**：operation body稳定parse error并给显式handler建议；无default/evidence-init symbols、fields、visitor arms或main hook残留；显式custom handler正反例、nested/HOF/cross-module/evidence RC不回归；mutation杀死任何自动注入或未处理放行。完整C/full/RC/ASan/self-host/fixed-point与exact CI通过。
+
+### B-195 SystemEffectRef / HandledEffectRef 与 host capability 原子切换 [design-align] [P1] [L] [judgment] [queued] [after: B-194] [before: B-168+B-169+B-167+B-152+B-156+B-174]
+
+> **2026-08-23 用户决定，已拍板 clean break**：删除宽泛special`io`与root-handler设想。0.1 effect atom分为`SystemEffectRef(console/fs/process)`和`HandledEffectRef(custom)`；system不进evidence、不可handle、无main注入，只经AbiIR HostImport/link provider执行。Failure/mut/unsafe维持独立规则。
+
+**唯一authority / pipeline**：
+
+1. prelude/std host extern/intrinsic声明产生exact capability identity、callee/ABI symbol、参数返回与现行failure contract；当前无网络/时钟/随机API，不预造相应effect；
+2. ResolvedAST/TypedHIR保存typed effect class与SymbolRef，alias展开、re-export、HOF/open row不改变class；
+3. CoreHIR/FlowIR/RcIR中system call是普通exact call且零evidence，handled operation才进入call/evidence graph；
+4. AbiIR唯一生成HostImport；native C链接runtime symbol，未来WASM/embedded只替换provider，不在compiler/main建立root handler；
+5. `ring inspect`/module requires/未来package policy消费transitive system capability与exact HostOp清单，不冒充OS sandbox。
+
+**0.1 surface / 迁移**：初始`console`覆盖stdout/stderr，`fs`覆盖文件读写/exists/delete及依赖filesystem/cwd的resolve，`process`覆盖argv/cwd/exec/exit；纯path string操作保持纯。原`io.read/write`与无effect`std/fs`/`std/process`双路径收成一个公开operation authority，special`Effect::IoEffect`、`io`alias与按叶名runtime mapping全部删除。Capability与`fail<E>`正交；本项不凭空发明error payload，B-168按已枚举HostFailureInventory固定可恢复failure ABI。
+
+**验收**：system→evidence、system被handle、handled→HostImport、root/main注入、name fallback五类mutation全杀；全部host extern不再假纯，纯path负控不染effect；single/project/re-export/HOF/alias/module-requires/inspection一致；native HostImport exact，C emitter无host leaf switch。完整C/full/RC/ASan/self-host/fixed-point与Windows/Linux exact CI通过。
+
+### B-196 0.1 effect-free Drop 边界 [design-align] [P1] [M] [judgment] [queued] [before: B-168+B-002]
+
+> **2026-08-23 用户决定，已拍板 clean break**：0.1用户`Drop::drop`最终推断effect row必须为空；system/handled/fail/逃逸`mut<T>`均禁止。编译器生成的字段递归释放、RC deallocation与已验证intrinsic cleanup不属于用户body。0.1不建`DropEffectSet`或latent carrier；post-0.1由B-198重审。
+
+**范围**：Drop trait/impl检查从宽泛`with {io}`改为closed `{}`；任何推断effect给单轮可修诊断。迁移effectful Drop专项fixtures，保留pure Drop的auto-move、Clone冲突、顺序、提前drop与generated glue；B-168/B-002仍证明pure Drop在normal/return/break/catch/unwind全部路径恰好一次。
+
+**约束 / 验收**：不得通过不标extern、unsafe/root/system call或backend special-case隐藏effect；不新增empty DropEffect metadata。Pure generic/recursive/field Drop与StringBuilder继续工作；system/custom/fail/mut负例全拒绝；完整RC/ASan/full/self-host/fixed-point与exact CI通过。
+
+### B-197 Post-0.1 default effect provider 重新设计 [design-align] [P3] [M] [judgment] [queued] [after: B-175] [deferred: post-0.1-release]
+
+用户确认default provider有真实便利性，但0.1不为零consumer保留旧实现。首次0.1发布后正式重审，使用Logger/Storage/配置provider等具体场景比较operation内body、显式具名provider与普通wrapper/adapter；衡量用户概念、partial override、依赖可见性、CoreHIR closure、evidence生命周期和diagnostic。任何推荐均形成新的用户decision dossier；禁止直接恢复B-194删除的global init、checker hydration、默认依赖图或兼容surface。
+
+### B-198 Post-0.1 effectful destruction / latent contract 设计 [design-align] [P3] [L] [judgment] [queued] [after: B-175] [deferred: post-0.1-release+real-host-resource]
+
+只有真实File/Socket/Transaction等RAII consumer出现后启动。比较effectful Drop、显式`close()`+pure safety-net Drop及组合；若采用latent destruction contract，必须给出generic/recursive field effects的有限fixed point、ownership-mode依赖、TypedHIR freeze前effect可见性、all-exit ResourcePlanner witness、failure禁止/能力边界与AbiIR规则。不得在0.1预建`DropEffectSet`、空字段或让system HostImport从隐式Drop绕过effect row。
+
 ## RIIR
 
-### B-152 RIIR 标准库收尾 [feature] [P1] [L] [judgment] [queued]
+### B-152 RIIR 标准库收尾 [feature] [P1] [L] [judgment] [queued] [after: B-195]
 
 List/Map/Set/StringBuilder 与 Str runtime 布局 Step 1 已完成；只剩 Str Step 2 与 P5。
 
 **Str Step 2**：`Type::StrType` 收口为普通 StructType；`std/str.ring` 提供 Ring Str/Drop，方法迁 Ring，C 只留字面量/FFI 最小 bridge。保持 UTF-8 byte-string、显式长度、NUL 兼容、binary-safe 与 extern marshalling；不得按叶名猜 ABI；double bootstrap 证明固定点。
 
-**P5**：删除无 anchor 消费者的 shim/STL；runtime 改纯 C + clang，只留 RC/typeid/drop、IO/OS/process、fail/effect、Ptr/raw-memory 与初始化。
+**P5**：删除无 anchor 消费者的 shim/STL；runtime 改纯 C + clang，只留 RC/typeid/drop、AbiIR HostImport provider、fail/control、Ptr/raw-memory 与初始化。System effect分类不在runtime重建。
 
 **验收**：Str/插值/FFI/容器全绿；runtime 无 STL/placement-new/已迁移符号；完整 C e2e/golden/RC/ASan/self-host、double bootstrap 与 dist-c 固定点通过。
 
@@ -698,13 +747,13 @@ handle {
 - artifact 名、版本、target triple、toolchain requirements、SHA-256 与 provenance manifest 确定；同输入重建差异必须可解释；
 - 对 compiler/runtime/std/generated template 做 provenance inventory，贡献说明固定“提交即按同一双许可提供”；纯用户源码生成物不附加 Ring 许可，实际复制/链接的 runtime/std/template 仍由 manifest 明示相应 license/NOTICE。最终支持声明、tag 与 GitHub Release 仍属用户保留决定；完成许可 packaging 也不代用户发布。
 
-**发布阻断**：全部 critical finding 清零；当前排序列出的 silent wrong-code/heap/RC blockers 关闭；B-167/B-152/B-002/B-156/B-133 gate 完成；C-only 全量门和至少一轮 clean-clone CI 全绿；文档不得宣称 async/refinement/LSP 等未发货能力。
+**发布阻断**：全部 critical finding 清零；当前排序列出的 silent wrong-code/heap/RC blockers 关闭；B-193~B-196与B-167/B-152/B-002/B-156/B-133 gate 完成；C-only 全量门和至少一轮 clean-clone CI 全绿；文档不得宣称 async/refinement/default provider/effectful Drop/LSP 等未发货能力。
 
 ### B-177 版本化 agent inspection contract + bundled primer [feature] [P1] [L] [judgment] [queued] [after: B-174] [before: B-111]
 
 外部 agent-first 语言已把 query/check/test/run、稳定程序 identity 与版本匹配的语言 skills 作为 compiler 产品面。Ring 保持普通源码 + Git 为真值，不改成 graph-native 数据库；但必须让 agent 无需读完整实现即可取得可缓存、可校验的语义事实。
 
-**用户面 / 文件**：在 CLI 增加 `ring inspect --format=json`（planning 时可在不制造第二套概念的前提下核定最终命名），并随 release bundle 提供版本匹配的 Ring primer 与 std public signatures。输出至少包含 schema/compiler/source hash、module/import edge、public symbol stable identity、推断 type/effect/trait bound、capability/unsafe discharge 与诊断关联 span。
+**用户面 / 文件**：在 CLI 增加 `ring inspect --format=json`（planning 时可在不制造第二套概念的前提下核定最终命名），并随 release bundle 提供版本匹配的 Ring primer 与 std public signatures。输出至少包含 schema/compiler/source hash、module/import edge、public symbol stable identity、推断 type/effect/trait bound、展开后的SystemEffectRef/HandledEffectRef分类、exact HostOp清单、module capability/unsafe discharge与诊断关联span；system effect不得伪装成handler evidence。
 
 **约束**：canonical ordering、schema version 与内容 hash 稳定；陈旧缓存/源码 hash 不匹配 fail closed；只暴露 checker/HIR 的权威事实，不在 CLI 重做解析/推断；v1 只读，不引入 compiler-managed patch/write 或第二份程序数据库。Primer token 单独计量，必须由当前 compiler/spec 自动校验，不允许版本漂移。
 
@@ -746,7 +795,7 @@ source-map 支持 + 断点调试。
 3. **驱动循环**：headless 驱动被测模型——生成 → 编译（Ring 用 `--error-format=llm`；TS 用正式 TypeScript 7 native CLI，`strict=true`）→ 错误喂回 → 重试（上限 N 轮）→ 跑隐藏测试。两语言协议完全相同；每题 ×3 取均值压噪音。
 4. **指标**：首次编译通过率 / 到绿轮数 / 隐藏测试运行时错误率 / 总 token（design.md §11.3 前四项）。
 5. 被测模型 Sonnet 级（平均 agentic 代表 + 便宜可多跑；顶级模型硬实力会掩盖语言差异）。放 `eval/`，手动触发，不进 CI（烧 token）。
-6. **行为契约子集**：任务集中预注册一组 signature-only/API-use 题；只提供模块签名，不提供实现，覆盖纯函数误用、`io`、`fail<E>`、`mut` 与资源生命周期。TS 题提供语义等价的 `.d.ts`/文档，不额外泄漏答案。该子集直接测量「签名信息密度」，不得事后挑题。
+6. **行为契约子集**：任务集中预注册一组 signature-only/API-use 题；只提供模块签名，不提供实现，覆盖纯函数误用、`console/fs/process` system capability、custom handled effect、`fail<E>`、`mut` 与资源生命周期。TS 题提供语义等价的 `.d.ts`/文档，不额外泄漏答案。该子集直接测量「签名信息密度」，不得事后挑题。
 7. **可复现协议**：锁定并记录模型名/版本、system prompt、temperature、上下文和输出预算、Ring/TS compiler commit/version、TS config、机器环境、每轮完整 prompt/diagnostic/patch、token 与 wall-clock。onboarding primer token 单独报告，不得藏入免费上下文。
 8. **分析纪律**：预先固定主指标、重试上限与失败分类；报告均值同时给出原始样本和离散程度。结果允许为 Ring 无优势或更差，禁止只发布胜例；版本/协议不一致的 run 标 invalid，不与正式结果合并。
 
@@ -780,6 +829,14 @@ B-111 回答语言层的核心赌注；本项随后验证仓库层的有界主�
 async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评估 stackless/CPS、stackful fiber、线程池阻塞垫脚石；归档 JS generator 不作为答案。以原型核实跨 await ownership/drop、HOF、C ABI/FFI、跨平台、scope/cancel，给出推荐/否决与反证，写回 design §8 并重写 B-007。本项不改 main 行为。
 
 ## 语法增强
+
+### B-193 删除未生效的 refinement `where` 占位语法 [design-align] [P1] [S] [mechanical] [queued] [before: B-174+B-001]
+
+> **2026-08-23 用户决定，已拍板 clean break**：refinement尚未实现，0.1不接受“能解析、只报警告、但不验证”的field`where`。当前唯一进入parser的struct-field placeholder删除；未来B-001只有parser与真实refinement语义原子闭合时才重新加入。
+
+**范围**：`compiler/parser.ring`停止消费`where...`到逗号/右花括号并在clause起点给单轮可修hard error；删除只服务该路径的W0002及消费者；`where_clause_warning`改正式负例，覆盖普通/generic/多字段恢复。`where`继续为未来保留关键字，不变成普通标识符。
+
+**约束 / 验收**：不新增TypeExpr/AST/HIR/FlowIR carrier，不提前实现predicate、SMT、runtime check或const-generic refinement；不得保留warning/skip/documentation-only fallback。所有field/parameter refinement clause稳定hard-fail且不吞后续声明；无`where`代码不变。Targeted parser/diagnostic、完整C/full/self-host/fixed-point与workflow validator通过。
 
 ### B-191 删除 `T?` Option 纯缩写语法糖 [design-align] [P2] [M] [judgment] [queued] [after: B-180] [before: B-174]
 
@@ -830,6 +887,8 @@ async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评�
 首个 preview 允许以 entry `.ring` 文件作为 project root，不等待 registry；随后补 `ring.toml` + lockfile，把编译器/std 兼容、local/path/git dependency、feature/capability 与构建输入变为可复现真值。Registry、账号、签名服务与付费托管不在本项。
 
 **约束**：依赖以内容 hash 锁定，解析确定、离线可重放；manifest/lock 进入 project/source fingerprint；禁止 build script 隐式联网或执行未声明代码；同包多版本、cycle、checksum mismatch 与 compiler/std 不兼容 fail closed。包管理用户面遵守 lang-design 的“先可复现/内容寻址/锁定，再 registry”。
+
+System capability由B-195的transitive TypedHIR/inspection summary提供；manifest可声明依赖允许的`console/fs/process`集合并fail closed，但0.1不得把该静态政策宣传为OS sandbox。HandledEffectRef、fail、mut与unsafe保持各自规则，不进入HostImport许可列表。
 
 **验收**：local/path/git 正反例、transitive lock、离线 clean build、缓存失效、冲突/环/篡改诊断；Windows/Linux 相同 lock 得到相同依赖图与生成 C；现有无 manifest 单/多文件项目保持兼容。
 

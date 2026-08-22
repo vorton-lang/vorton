@@ -162,48 +162,13 @@
 
 > 以下设计方向已确定但未排入 backlog。实现前需以当前上下文重审，确认前提仍然成立。
 
-### 12.1 效果分类：`io` 效果杀死并拆分为原子效果
+### 12.1 效果分类：旧 `os/net` 草案已被 active 设计 supersede
 
-**状态：暂定。实现前与 B-007（async）及现行 `unsafe` / `mut<T>` 契约统一审视。**
+> **2026-08-23 用户完成实施前重审**：本节2026-06-23的`os/net`二分只是“实现前重新审视”的暂定方向，现由[`design.md` §2](design.md#2-effect-系统)、[`lang-spec/effects.md`](lang-spec/effects.md)与B-195的active真值取代，不再是实现候选。
 
-#### 动机
+最终0.1边界为：删除宽泛special `io`；只为当前真实API建立`SystemEffectRef(console/fs/process)`，system不可`handle`、不进evidence、无main/root handler，只经AbiIR HostImport与target link provider执行；用户custom `HandledEffectRef`才走显式handler。没有真实API时不预造`net/clock/random`，未来新增能力也不形成sub-effect层次或compiler name branch。
 
-旧 `io` 效果是一个语义不诚实的杂项——文件读写、网络通信、标准输出、环境变量、时钟、随机数、进程管理共用同一个效果标签。agent 从签名 `with {io}` 无法判断该函数是否跨信任边界（如联网发送数据）。
-
-真正安全关键的维度只有一个：**联网**。其余 OS 交互（读文件、打印、读环境变量）是程序运行的正常上下文，不值得独立追踪。
-
-#### 最终效果表
-
-| 效果 | 操作 | 说明 |
-|------|------|------|
-| `net` | `net.dial`, `net.listen`, `net.resolve` | 网络通信——唯一跨信任边界的 OS 效应 |
-| `os` | 其余全部 OS 效应：fs/stdin/stdout/stderr/env/clock/random/spawn… | 平台杂项——函数"运行在真实 OS 上"的标志 |
-| `fail<E>` | `fail.raise` | 不变 |
-| `mut<T>` | mutation marker | 现行多实例 effect；与参数位 `x: mut T`、闭包捕获互补 |
-| `async` | `async.await`, `async.spawn` | B-007 待实现 |
-| `unsafe` | 原语操作（alloc/dealloc/read/take/write/offset…） | 已实现；extern 声明签字检查留 B-156 |
-
-**`io` 效果从语言中彻底移除。** 不保留为简写、不做 sub-effect 层次、不做 bundle 展开。每个效果是独立存在、独立追踪的原子。
-
-**不建 sub-effect 层次**：`net` 不是 `os` 的子效果，两者无层次关系。当前效果系统（tail-resumptive + abort）不需要子类型；handler 按具体操作匹配，不需"处理某个效果分类"。保持效果平级最大化简单。
-
-#### 签名示例
-
-```ring
-fn fetch(url: Str) -> Data with {net}              // 只联网
-fn load_config() -> Config with {os}                // 读文件 + 读 env
-fn fetch_and_save() -> Unit with {net, os}          // 下载 + 写文件
-fn report() -> Unit with {os}                       // 只打印
-fn main() -> Unit with {}                           // 纯函数——零 OS 交互
-```
-
-#### 实施要点（实现时核定）
-
-- `os` 的操作集合：重新审视全部标准库 extern fn，按实际语义归类
-- `net` 是否需拆出 `net.dns` 子操作（DNS 解析有时独立于 TCP 连接）
-- `spawn` / `random` 是否从 `os` 独立（创建子进程/使用熵源是否特殊到需要独立可见）
-- formatter 策略：两项以内展开（`{fs, env}`），≥三项合并为 `{os}` 或始终展开——实现时按实证签名噪音决定
-- 迁移路径：按未发布期 clean-break 原则，在同一变更中把标准库、编译器、规范和测试原子迁移到 `{os}` / `{net}`；不保留旧 `io` 的 parser alias 或隐式映射。旧 `io` 直接报未知 effect，并可在诊断中提示选择 `os` 或 `net`
+旧草案中“联网是唯一值得独立追踪的宿主边界”与把filesystem/console/process合并进`os`的判断被本轮否决：这些能力对agent审计、module requires、inspection与未来package policy均有独立价值。历史推导只查Git；实施与验收以B-195为准。
 
 ### 12.2 `alloc` 效果：堆分配可见化
 

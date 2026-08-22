@@ -45,19 +45,17 @@ Param        ::= 'mut'? Ident (':' TypeExpr)?
 
 省略返回类型注解时由推断确定。省略参数类型注解时分配 fresh 类型变量。`mut` 前缀标记参数为可变（允许在函数体内重赋值），也适用于方法的 `mut self`。`with { ... }` 子句声明函数的 effect 签名。
 
-Ring 0.1 不支持函数默认参数；`Param` 后的 `= Expr` 是语法错误。需要默认行为时定义显式 wrapper 函数。该规则不影响 trait method 的默认 body 或 effect op 的默认 handler。
+Ring 0.1 不支持函数默认参数；`Param` 后的 `= Expr` 是语法错误。需要默认行为时定义显式 wrapper 函数。该规则不影响 trait method 的默认 body。Effect operation 在 0.1 同样不得带 body，具体边界见下文。
 
 ### Struct 声明
 
 ```ebnf
 StructDecl   ::= 'struct' Ident TypeParams? '{' StructField* '}'
 
-StructField  ::= 'pub'? Ident ':' TypeExpr WhereClause? ','?
-
-WhereClause  ::= 'where' ⟨消费 token 直到 ',' 或 '}'⟩
+StructField  ::= 'pub'? Ident ':' TypeExpr ','?
 ```
 
-字段上的 `where` 子句会被解析但不强制执行（为 refinement types 预留）。
+Ring 0.1 尚未实现 refinement types，字段、参数及其他类型位置均不接受 refinement `where` clause。`where` 在词法层继续保留为未来关键字；出现时必须 hard-fail 并提示删除 clause，不能消费后忽略、降为 warning 或充当 documentation-only annotation。B-001 将来只有在 parser 与实际验证语义原子完成时才重新开放该语法。
 
 ### Enum 声明
 
@@ -109,10 +107,10 @@ AssocTypeDecl ::= 'pub'? 'type' Ident (':' TypeBound ('+' TypeBound)*)? ('=' Typ
 ```ebnf
 EffectDecl   ::= 'effect' Ident TypeParams? '{' EffectOp* '}'
 
-EffectOp     ::= 'fn' Ident '(' Params ')' '->' TypeExpr (Block | ';' | ',')?
+EffectOp     ::= 'fn' Ident '(' Params ')' '->' TypeExpr (';' | ',')?
 ```
 
-当 `EffectOp` 带有 `Block` 时，该 block 作为默认 handler body。全部 op 都有默认 handler 的 effect 可省略 `handle...with`；显式 `handle` 可覆盖默认。
+Ring 0.1 的用户自定义 effect operation 只有签名，不允许 body。Custom effect 必须由显式 `handle...with` 提供解释；不存在自动 default evidence、部分默认或默认 body 依赖图。该能力因具有真实抽象价值而保留为 post-0.1 的重新设计议题，但旧实现不得作为兼容路径或直接恢复。
 
 ### Effect Alias 声明
 
@@ -120,7 +118,7 @@ EffectOp     ::= 'fn' Ident '(' Params ')' '->' TypeExpr (Block | ';' | ',')?
 EffectAliasDecl ::= 'effect' 'alias' Ident TypeParams? '=' EffectSet
 ```
 
-Effect alias 是 effect 集合的语法糖，如 `effect alias IO = {io, fail<Str>}`。支持泛型参数、循环检测和 `pub` 模块导出。
+Effect alias 给 effect 集合命名，如 `effect alias HostIO = {console, fs, process}` 或 `effect alias Fallible<E> = {fail<E>}`。支持泛型参数、循环检测和 `pub` 模块导出；展开后的 exact effect atoms 才是类型与 inspection 真值。
 
 ### Extern 声明
 
@@ -130,6 +128,8 @@ ExternDecl   ::= 'extern' ExternKind
 ExternKind   ::= 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation?  (* extern 函数 *)
                | 'type' Ident TypeParams?                                  (* opaque 类型 *)
 ```
+
+访问宿主的 `extern fn` 必须显式声明其 exact system effect 与正交的 `fail<E>` 契约；省略或写成纯函数不得作为 host operation 的隐式 fallback。具体 system effect 分类见 [Effect 系统](effects.md)。
 
 `extern fn` 声明由目标环境提供实现的函数，类型检查以声明签名为准。`extern type` 声明不公开结构的 opaque 类型；具体 ABI 与表示不属于语言语法规范。
 

@@ -12,7 +12,7 @@ Option<T> = some(T) | none
 
 `some` / `none`、安全解包与 HOF 方法由 core 环境提供。`?`、`catch` 和 `fail<E>` 的关系分别见[语法](syntax.md)与 [Effect 系统](effects.md)。
 
-`print`、`assert`、`panic`、进程退出和 JSON 字符串化等基础入口声明在 [`std/io.ring`](../../std/io.ring)。其中 `panic` 是不可恢复的终止；可恢复错误使用 `fail<E>`。
+`print`、`assert`、`panic` 与 JSON 字符串化等基础入口声明在 [`std/io.ring`](../../std/io.ring)。0.1 capability cutover 后，console 输出携带 `console`；进程退出归 `process`。`panic` 是不可恢复的终止；可恢复错误使用 `fail<E>`。B-195 完成前源码仍存在宽泛 `io` 与漏标 host extern 的过渡实现，不能把该现状当作终态规范。
 
 `json_stringify<T: Json>(value: T) -> Str` 只接受可取得 `Json` evidence 的类型。标准库为 `Int`、`Float`、`Bool`、`Str` 和 `List<T: Json>` 提供实现；用户 struct/enum 使用 `@derive(Json)` 显式请求结构化实现。Struct 输出按字段声明顺序组成对象；enum 输出以 `"_tag"` 保存 variant 名，随后按声明顺序输出 named 字段或 `_0`、`_1` 等 positional 字段。没有 `Json` evidence 的调用在编译期拒绝。
 
@@ -123,11 +123,13 @@ pub trait Iterable {
 
 | 模块 | 语义范围 |
 |------|----------|
-| [`std/fs.ring`](../../std/fs.ring) | 文件读取、写入、存在性与删除 |
-| [`std/path.ring`](../../std/path.ring) | 路径连接、规范化、目录名、文件名与扩展名 |
-| [`std/process.ring`](../../std/process.ring) | 参数、工作目录、退出、stderr 与同步子进程 |
+| [`std/fs.ring`](../../std/fs.ring) | 文件读取、写入、存在性与删除；携带 `fs`，可恢复失败按各operation的显式`fail<E>`契约另列 |
+| [`std/path.ring`](../../std/path.ring) | 纯路径拼接/目录名/文件名/扩展名；访问 cwd/filesystem 的 resolve 形态携带 `fs` |
+| [`std/process.ring`](../../std/process.ring) | 参数、工作目录、退出与同步子进程携带 `process`；stderr 输出携带 `console` |
 
-这些文件中的声明就是当前 API 真值；本规范不为 host ABI 或 runtime 表示另立一份契约。
+0.1 只建立已有真实 API 所需的 `console`、`fs`、`process`，不预造 `net`、`clock` 或 `random`。这些 system effect 是静态、不可 `handle` 的 effect atoms，不进入 evidence vector；宿主调用以 exact extern/intrinsic contract 进入 AbiIR HostImport。Native C 链接 runtime symbol，未来 WASM/嵌入式可替换链接 provider，但语言层不注入 root handler。需要动态 mock 时，程序声明 custom handled effect，并用显式 adapter handler把它翻译成上述 system API。
+
+每个 host operation 只有一个公开/typed authority；宽泛 `io.read` 与无 effect 的 `read_file` 之类双路径必须在 B-195 中原子收口。Capability 只说明访问哪类宿主能力，失败仍由独立 `fail<E>` 描述。规范不按 runtime symbol、叶名或后端映射重建这些事实。
 
 ## Mutation 与 effect
 

@@ -234,20 +234,20 @@ mod shapes {
 mod pure_logic requires {} {
     pub fn add(a: Int, b: Int) -> Int { a + b }
     pub fn double(x: Int) -> Int { x + x }
-    // 此模块内不能使用 io、fail 等任何 effect
+    // 此模块内不能使用 fs、fail 等任何 effect
 }
 ```
 
-`requires {}` 表示空 effect 集合——模块内只允许纯函数。任何尝试使用 `io`、`fail` 等 effect 的函数都会报错。
+`requires {}` 表示空 effect 集合——模块内只允许纯函数。任何尝试使用 system、handled、fail、mut 或 unsafe effect 的函数都会报错。
 
 #### 受限模块（指定 effect 子集）
 
 ```ring
-mod io_layer requires {io} {
-    pub fn greet(name: Str) -> Unit with {io} {
+mod console_layer requires {console} {
+    pub fn greet(name: Str) -> Unit with {console} {
         print("Hello, ${name}!")
     }
-    // 此模块内只允许 io effect，使用 fail 等其他 effect 会报错
+    // 此模块内只允许 console effect，使用 fs、process 或 fail 会报错
 }
 ```
 
@@ -255,6 +255,8 @@ mod io_layer requires {io} {
 
 - 检查覆盖模块内所有顶层函数和 impl 方法（包括 delegate 生成的实现）
 - 纯函数（无 effect）在任何 `requires` 集合中都合法——开放的 effect row 尾部不会被误判
+- `console` / `fs` / `process` 是 system effect：它们参与静态 capability 检查，但不能由 `handle` 消除，也不产生 handler evidence
+- 用户 custom effect 是 handled effect：它同样参与 `requires` 检查，并且必须在离开 `main` 前由显式 handler 消除
 - `mut<T>` marker effect 参与 capability 检查；`requires {}` 禁止修改参数或捕获状态等会让 mutation effect 逃逸的操作，局部 `let mut` 仍保持局部
 - `unsafe` 同时要求 `unsafe { ... }` discharge 与包含 `unsafe` 的模块许可
 
