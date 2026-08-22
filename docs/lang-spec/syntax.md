@@ -27,7 +27,6 @@ DeclKind     ::= FnDecl
                | TestDecl
                | ConstDecl
                | ModDecl
-               | SigDecl
 ```
 
 `pub` 修饰符控制多文件编译中的可见性。单文件模式下接受但不强制。
@@ -45,6 +44,8 @@ Param        ::= 'mut'? Ident (':' TypeExpr)?
 ```
 
 省略返回类型注解时由推断确定。省略参数类型注解时分配 fresh 类型变量。`mut` 前缀标记参数为可变（允许在函数体内重赋值），也适用于方法的 `mut self`。`with { ... }` 子句声明函数的 effect 签名。
+
+Ring 0.1 不支持函数默认参数；`Param` 后的 `= Expr` 是语法错误。需要默认行为时定义显式 wrapper 函数。该规则不影响 trait method 的默认 body 或 effect op 的默认 handler。
 
 ### Struct 声明
 
@@ -87,7 +88,7 @@ ImplMember   ::= 'pub'? FnDecl
                | 'pub'? AssocTypeDecl
 ```
 
-`impl Type { ... }` 定义固有方法。`impl Trait for Type { ... }` 实现 trait。Impl 块内可包含 `extern fn` 声明用于 FFI 方法绑定。`delegate field: Trait1, Trait2` 自动生成 trait 转发方法（替代继承的复用机制）。关联类型 `type Name = TypeExpr` 用于满足 trait 的关联类型要求。
+`impl Type { ... }` 定义固有方法。`impl Trait for Type { ... }` 实现 trait。Impl 块内可包含 `extern fn` 声明用于 FFI 方法绑定。`delegate field: Trait1, Trait2` 为每个 trait 自动生成完整普通 impl（替代继承的复用机制）；同一 target + trait 的手写 impl 与 delegate 冲突并报 E0509，不支持 partial override。关联类型 `type Name = TypeExpr` 用于满足 trait 的关联类型要求。
 
 ### Trait 声明
 
@@ -159,16 +160,6 @@ ModDecl      ::= 'mod' Ident ('requires' EffectSet)? '{' UseDecl* Decl* '}'
 ```
 
 内联模块块，支持嵌套（`mod a { mod b { ... } }`）。`requires` 子句限制模块内可用的 effect capability。模块内可包含 `use` 声明和任意声明。
-
-### Sig 块声明
-
-```ebnf
-SigDecl      ::= 'sig' Ident '{' SigMember* '}'
-
-SigMember    ::= 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation?
-```
-
-接口签名声明，定义模块的类型接口。
 
 ### Use 声明
 

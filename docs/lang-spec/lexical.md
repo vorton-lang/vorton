@@ -23,17 +23,17 @@ foo(x, y) // 一个表达式：函数调用
 
 ## 关键字
 
-以下 36 个标识符是保留关键字：
+以下 35 个标识符是保留关键字：
 
 ```
 fn     let    mut    const   struct  enum    match   impl
 effect handle with   if      else    catch   test    return
 for    in     pub    where   true    false   trait   try
 while  break  continue loop  use     as      extern  mod
-super  sig    requires unsafe
+super  requires unsafe
 ```
 
-注意：`type`、`delegate`、`self` 不是关键字——它们是标识符，在特定上下文中被 Parser 特殊解析。`try` 是保留关键字，使用时产生编译错误。
+注意：`type`、`delegate`、`self`、`sig` 不是关键字。`type`、`delegate`、`self` 在特定上下文中由 Parser 特殊解析；0.1 没有 `sig` 声明，因此 `sig` 是普通标识符。Post-0.1 若重新设计完整 module signature conformance，必须选择不破坏 0.1 标识符的 contextual/versioned syntax。`try` 是保留关键字，使用时产生编译错误。
 
 ## 运算符和定界符
 
