@@ -58,7 +58,7 @@ B-180 不得以早期 developer-unblock checkpoint 绕过 #268/#269 final fixed 
 ## 类型系统
 
 
-### B-001 Refinement Types [feature] [P2] [XL] [judgment] [queued] [after: B-193]
+### B-001 Refinement Types [feature] [P2] [XL] [judgment] [queued]
 design.md 1.2。类型附带谓词，编译期静态验证 + 运行时检查兜底。
 
 ```ring
@@ -67,7 +67,7 @@ type Email = Str where it.matches(r"^[^@]+@[^@]+\.[^@]+$")
 fn divide(a: Float, b: Float where b != 0.0) -> Float { a / b }
 ```
 
-- **当前状态 / 进入门**：refinement checker 尚未实现。B-193 先按 2026-08-23 用户决定删除 struct-field `where` 的 parse-and-discard / W0002 占位路径；完成后所有 refinement clause 在 0.1 均 hard-fail，`where` 仍保留为未来关键字。本项不得先恢复 parser/AST carrier：只有具名可判定片段、允许的 runtime fallback、诊断与验证证据全部闭合时才原子开放语法和语义
+- **当前状态**：struct-field 位 `where` 可解析（tokens 消费后丢弃，W0002 warning）；**参数位 `where`（`fn f(x: Int where x > 0)`）连解析都未实现——硬 parse error E0103（2026-06-11 实测核定）。参数位 parser 支持归本项，不单独先行**（先做解析又只丢弃 = 再造一个「写了不生效」的静默面，正是公理 1 违例的制造机；2026-06-11 用户拍板）。checker 验证未实现
 - **前置依赖**：Phase B 模块系统稳定后启动
 - **复杂度**：极大（SSA 约束传播 + 可选 Z3 集成）
 - **优先级**：Phase C 首要
@@ -780,21 +780,6 @@ B-111 回答语言层的核心赌注；本项随后验证仓库层的有界主�
 async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评估 stackless/CPS、stackful fiber、线程池阻塞垫脚石；归档 JS generator 不作为答案。以原型核实跨 await ownership/drop、HOF、C ABI/FFI、跨平台、scope/cancel，给出推荐/否决与反证，写回 design §8 并重写 B-007。本项不改 main 行为。
 
 ## 语法增强
-
-### B-193 删除未生效的 refinement `where` 占位语法 [design-align] [P1] [S] [mechanical] [queued] [before: B-174+B-001]
-
-> **2026-08-23 用户决定，已拍板 clean break**：refinement 尚未实现，0.1 不接受“能解析、只报警告、但不验证”的 field `where`。当前唯一可进入 parser 的 struct-field placeholder 必须删除；未来 B-001 只有在 parser 与真实 refinement 语义原子闭合时才可重新加入。
-
-**范围 / 文件**：
-
-- `compiler/parser.ring`：`StructField` 不再消费 `where ...` 到逗号/右花括号；在 `where` 处稳定报语法错误，并给出“0.1 尚不支持 refinement，请删除 clause”的单轮可修提示。
-- `compiler/codes.ring` 与诊断消费者：删除只服务该占位路径的 W0002；不存在其他消费者时不得保留 dormant warning authority。
-- `tests/cases/where_clause_warning.ring` 改成正式负例并覆盖普通、generic 与多字段边界；同步 parser/diagnostic golden。`compiler/std/examples` 当前无迁移。
-- `docs/lang-spec/syntax.md` 与 design/backlog 已先固定公开边界；实现收口时只同步可执行状态，不扩大 refinement 设计。
-
-**约束**：`where` token 本项继续作为未来保留关键字，不变成普通标识符；不新增 `TypeExpr`/AST/HIR/FlowIR refinement carrier，不做 predicate 求值、SMT、runtime check、const-generic refinement 或 B-001 的任何提前实现。不得把 hard error 降成 warning、跳过或 documentation-only annotation。
-
-**验收**：field `where` 的简单/嵌套/generic 形态均在 clause 起点 hard-fail，且诊断不吞掉后续字段或声明；参数位等既有未支持位置继续 hard-fail；W0002 与 parse-and-discard 路径无残留；无 `where` 的 struct/enum/type/trait 行为不变。targeted parser/diagnostic matrix、完整 C e2e/golden/structural/self-compile、tracked `dist-c` fixed point 与 workflow validator通过。
 
 ### B-191 删除 `T?` Option 纯缩写语法糖 [design-align] [P2] [M] [judgment] [queued] [after: B-180] [before: B-174]
 
