@@ -6613,7 +6613,7 @@ def default_body_identity_generated_c_errors(
 
 IR_IDENTITY_F0_PATH = REPO / "compiler" / "ir_identity.ring"
 RESOURCE_MODEL_F0_PATH = REPO / "compiler" / "resource_model.ring"
-F0_SEMANTIC_MUTATION_COUNT = 47
+F0_SEMANTIC_MUTATION_COUNT = 49
 F0_SCOPE_GUARD_COUNT = 9
 
 
@@ -6925,6 +6925,10 @@ def ir_identity_f0_contract_errors(source: str) -> List[str]:
             "slot_domain_from_tag(slot_domain_tag(domain))",
             "slot_domain_is_lexical(checked_domain)", "def_id < 0",
             "def_id >= 0", "panic("),
+        "make_global_nominal_ref": (
+            "if !namespace_kind_same(\n"
+            "            symbol_ref_namespace_kind(symbol), namespace_nominal())",
+        ),
         "require_same_slot": ("if !slot_ref_same(left, right)", "panic("),
     }
     for function_name, tokens in constructor_contracts.items():
@@ -7191,6 +7195,30 @@ def _f0_semantic_mutation_errors(
             errors.append(f"F0 semantic mutation {label}: {mutation_error}")
         elif not ir_identity_f0_contract_errors(mutated or ""):
             errors.append(f"F0 semantic mutation escaped: {label}")
+
+    nominal_namespace_relation = (
+        "if !namespace_kind_same(\n"
+        "            symbol_ref_namespace_kind(symbol), namespace_nominal())")
+    expected_nominal_finding = (
+        "F0 make_global_nominal_ref misses relation "
+        f"{nominal_namespace_relation!r}")
+    for label, replacement in (
+            ("GlobalNominal namespace check deleted", "if false"),
+            ("GlobalNominal accepts value namespace",
+             nominal_namespace_relation.replace(
+                 "namespace_nominal()", "namespace_value()"))):
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            identity_source, "make_global_nominal_ref",
+            nominal_namespace_relation, replacement)
+        if mutation_error:
+            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
+            continue
+        findings = ir_identity_f0_contract_errors(mutated or "")
+        if findings != [expected_nominal_finding]:
+            errors.append(
+                f"F0 semantic mutation {label} findings were {findings!r}, "
+                f"expected only {expected_nominal_finding!r}")
 
     resource_mutations = (
         ("FORCE invalid pair", "make_transfer_demand",

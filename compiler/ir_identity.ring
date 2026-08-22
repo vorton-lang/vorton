@@ -570,6 +570,10 @@ pub struct GlobalNominalRef {
 pub fn make_global_nominal_ref(
     symbol: SymbolRef, kind: NominalKind
 ) -> GlobalNominalRef {
+    if !namespace_kind_same(
+            symbol_ref_namespace_kind(symbol), namespace_nominal()) {
+        panic("IR identity: GlobalNominalRef symbol is not nominal")
+    }
     GlobalNominalRef {
         symbol: symbol,
         kind: nominal_kind_from_tag(nominal_kind_tag(kind))
