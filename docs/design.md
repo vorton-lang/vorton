@@ -119,7 +119,7 @@ fn load_config(path: Str) -> Config with {fail<IoError | ParseError>} {
 
 ### 1.2 Refinement Types
 
-> **实现现状（2026-06-11 实测核定）**：`where` 全链路未强制（编译时 W0002 提示）。struct-field 位可解析（tokens 丢弃）；**参数位（`fn f(x: Int where ...)`）连解析都未实现——硬 parse error E0103**。参数位 parser 支持与验证一并归 B-001，不单独先行（避免再造「写了不生效」的静默面）。
+> **0.1 surface 边界（2026-08-23 用户决定）**：refinement 尚未实现，语言不得保留“可解析但不验证”的占位语法。B-193 删除当前 struct-field `where` 的 token 消费与 W0002 路径；完成后 field、parameter 等 refinement clause 均稳定 hard-fail。`where` 继续保留为未来关键字，不在 0.1 变成普通标识符。B-001 将来必须把 parser、可判定静态验证、明确允许的 runtime fallback、诊断与验证证据原子闭合后才可重新开放该语法，禁止再次先 parse/transport、后补语义。
 
 类型附带谓词，编译器尽力静态检查，无法证明时插入运行时检查：
 

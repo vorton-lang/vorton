@@ -52,12 +52,10 @@ Ring 0.1 不支持函数默认参数；`Param` 后的 `= Expr` 是语法错误�
 ```ebnf
 StructDecl   ::= 'struct' Ident TypeParams? '{' StructField* '}'
 
-StructField  ::= 'pub'? Ident ':' TypeExpr WhereClause? ','?
-
-WhereClause  ::= 'where' ⟨消费 token 直到 ',' 或 '}'⟩
+StructField  ::= 'pub'? Ident ':' TypeExpr ','?
 ```
 
-字段上的 `where` 子句会被解析但不强制执行（为 refinement types 预留）。
+Ring 0.1 尚未实现 refinement types，字段、参数及其他类型位置均不接受 refinement `where` clause。`where` 在词法层继续保留为未来关键字；出现时编译器必须 hard-fail 并提示删除该 clause，不能消费后忽略、降为 warning 或把它当 documentation-only annotation。B-001 将来只有在 parser 与实际验证语义一并完成时才会重新开放该语法。
 
 ### Enum 声明
 
