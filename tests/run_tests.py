@@ -7539,9 +7539,9 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
 
 
 IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
-F1_EXECUTABLE_KIND_COUNT = 22
+F1_EXECUTABLE_KIND_COUNT = 21
 F1_BINDER_KIND_COUNT = 21
-F1_SEMANTIC_MUTATION_COUNT = 66
+F1_SEMANTIC_MUTATION_COUNT = 65
 F1_SCOPE_GUARD_COUNT = 14
 
 F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
@@ -7569,7 +7569,6 @@ F1_EXECUTABLE_KINDS = (
     ("bodyless_effect_operation", "EXECUTABLE_BODYLESS_EFFECT_OPERATION"),
     ("bodyless_interface_member", "EXECUTABLE_BODYLESS_INTERFACE_MEMBER"),
     ("extern_fn", "EXECUTABLE_EXTERN_FN"),
-    ("delegate", "EXECUTABLE_DELEGATE"),
     ("extern_bridge", "EXECUTABLE_EXTERN_BRIDGE"),
     ("builtin_intrinsic", "EXECUTABLE_BUILTIN_INTRINSIC"),
 )
@@ -7674,7 +7673,7 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         ), errors)
     if len(F1_EXECUTABLE_KINDS) != F1_EXECUTABLE_KIND_COUNT:
         errors.append("F1 executable kind test census is incomplete")
-    if "const EXECUTABLE_KIND_COUNT: Int = 22" not in source:
+    if "const EXECUTABLE_KIND_COUNT: Int = 21" not in source:
         errors.append("F1 executable kind count drifted")
 
     allowed_modes, allowed_error = _f0_int_list(
@@ -7701,31 +7700,31 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         2, 2, 0, 2, 2,
         1, 1, 1, 1,
-        0, 2, 2,
+        2, 2,
     ]
     expected_ref_forms = [
         0, 0, 0, 0, 1, 0, 1, 1, 1, 1,
         0, 0, 1, 0, 0,
         0, 0, 0, 0,
-        0, 0, 0,
+        0, 0,
     ]
     expected_namespaces = [
         0, 4, 4, 4, 5, 0, 5, 5, 5, 5,
         4, 0, 5, 0, 4,
         4, 4, 4, 0,
-        4, 0, 0,
+        0, 0,
     ]
     expected_executable_roles = [
         7, 7, 7, 7, 0, 7, 0, 1, 5, 1,
         7, 7, 6, 7, 7,
         7, 7, 7, 7,
-        7, 7, 7,
+        7, 7,
     ]
     expected_parent_forms = [
         0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
         0, 0, 2, 0, 0,
         0, 0, 0, 0,
-        0, 0, 0,
+        0, 0,
     ]
     if allowed_modes is not None and allowed_modes != expected_modes:
         errors.append("F1 executable kind/body-mode matrix drifted")
