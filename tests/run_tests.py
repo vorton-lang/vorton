@@ -5308,12 +5308,371 @@ def identity_ledger_contract_errors(
     return errors
 
 
+def representation_s1_contract_errors(
+    sources: dict[str, str],
+) -> List[str]:
+    """Lock A-prime S1 to inert representation and exact identity only."""
+    errors: List[str] = []
+
+    required_tokens = {
+        "types": (
+            "pub const PARAM_OWNERSHIP_UNKNOWN",
+            "pub const CALLABLE_UNKNOWN",
+            "pub struct CallableOwnershipDescriptor",
+            "pub struct CallableTransferLevel",
+            "pub struct CallableOwnershipState",
+            "pub struct OwnershipShape",
+            "FnType { params: List<Type>, return_type: Type, effects: EffectRow,\n"
+            "             ownership_term: Int }",
+        ),
+        "hir": (
+            "pub ownership_mode: Int",
+            "Call { callee: HExpr, callee_def_id: Int?, "
+            "callable_result_def_id: Int?",
+            "Lambda { def_id: Int",
+            "EffectOp { effect_name: Str, op_name: Str, op_def_id: Int",
+            "pub op_def_id: Int",
+            "pub effect_op_identities: Map<Str, Int>",
+            "SYNTHETIC_CALLABLE_DEF_ID_BASE",
+            "overlapping synthetic DefId domains",
+            "HIR Call exact callee identity differs from its producer",
+            "HIR callable result has no exact DefId",
+            "HIR non-callable result carries a callable DefId",
+            "DefId differs from canonical identity",
+            "activated ownership before planner",
+        ),
+        "infer_ctx": (
+            "pub next_callable_identity_ordinal: Int",
+            "pub fn fresh_callable_identity_def_id(",
+            "pub fn exact_callable_result_identity(",
+            "synthetic_def_id(SYNTHETIC_CALLABLE_DEF_ID_BASE, ordinal)",
+        ),
+        "infer": (
+            "fn register_default_callable_binder(",
+            "fresh_callable_identity_def_id(ctx)",
+            "callable_result_def_id: remap_default_optional_def_id(",
+            "def_id: remap_default_def_id(def_id, remap)",
+            "callee_def_id: callee_def_id",
+            "op_def_id: op.def_id",
+            "op_def_id: handler_op_def_id",
+            "let lambda_def_id = fresh_callable_identity_def_id(ctx)",
+        ),
+        "infer_decl": (
+            "registered sig member has no exact DefId",
+            "sig member registration is missing",
+            "delegate wrapper scheme has no exact DefId",
+            "def_id: some(wrapper_def_id)",
+            "def_id: op.def_id",
+            "name: m.name, def_id: m.def_id",
+            "effect_op_identities: effect_op_identities",
+            "dict_resolver: none, identity_resolver: some(ctx)",
+        ),
+        "infer_register": (
+            "fn ensure_registered_callable_identity(",
+            "def_id: ctx.env.fresh_def_id(), params: param_types",
+            "def_id: ctx.env.fresh_def_id(), ty: fn_type",
+            "def_id: some(ctx.env.fresh_def_id())",
+        ),
+        "env": (
+            "registered method scheme has no exact DefId",
+        ),
+        "builtins": (
+            "def_id: some(env.fresh_def_id())",
+            "def_id: env.fresh_def_id()",
+        ),
+        "zonk": (
+            "pub identity_resolver: InferCtx?",
+            "fn zonk_callable_result_def_id(",
+            "fn zonk_direct_callee_def_id(",
+            "callee_def_id: exact_callee_def_id",
+            "callable_result_def_id: exact_result_def_id",
+            "def_id: def_id",
+            "op_def_id: h.op_def_id",
+            "op_def_id: op_def_id",
+        ),
+        "andor": (
+            "def_id: tm.def_id", "def_id: op.def_id",
+            "callee_def_id: callee_def_id",
+            "callable_result_def_id: callable_result_def_id",
+            "op_def_id: h.op_def_id", "op_def_id: op_def_id",
+        ),
+        "dict": (
+            "def_id: tm.def_id", "def_id: op.def_id",
+            "callee_def_id: callee_def_id",
+            "callable_result_def_id: callable_result_def_id",
+            "op_def_id: h.op_def_id", "op_def_id: op_def_id",
+        ),
+        "perceus": (
+            "def_id: op.def_id",
+            "HExpr::Lambda { def_id: def_id,",
+            "callee_def_id: callee_def_id",
+            "callable_result_def_id: callable_result_def_id",
+            "op_def_id: h.op_def_id", "op_def_id: op_def_id",
+        ),
+        "compiler_mod": (
+            "effect_op_identities: hir.effect_op_identities",
+        ),
+        "cexpr": (
+            "callee_def_id: none",
+            "callable_result_def_id: none",
+            "ownership_mode: PARAM_OWNERSHIP_UNKNOWN",
+        ),
+    }
+    for label, tokens in required_tokens.items():
+        source = sources[label]
+        for token in tokens:
+            if token not in source:
+                errors.append(
+                    f"{label}: missing representation S1 contract {token!r}")
+
+    transport_specs = (
+        ("Type::FnType", ("ownership_term",)),
+        ("HExpr::Call", ("callee_def_id", "callable_result_def_id")),
+        ("HExpr::Lambda", ("def_id",)),
+        ("HExpr::EffectOp", ("op_def_id",)),
+        ("HEffectHandler", ("op_def_id",)),
+        ("HParam", ("ownership_mode",)),
+        ("HEffectOp", ("def_id",)),
+        ("HTraitMethod", ("def_id",)),
+        ("HSigMember", ("def_id",)),
+        ("HProgram", ("effect_op_identities",)),
+    )
+    for label in (
+        "types", "env", "hir", "infer", "infer_decl", "infer_ctx",
+        "infer_helpers", "infer_register", "builtins", "derive",
+        "exports", "unify", "zonk", "andor", "dict", "perceus",
+        "checker", "compiler_mod", "cexpr",
+    ):
+        masked = mask_ring_strings_and_comments(sources[label])
+        for marker, fields in transport_specs:
+            for match in re.finditer(rf"\b{re.escape(marker)}\s*\{{", masked):
+                prefix = masked[max(0, match.start() - 12):match.start()]
+                if marker == "HProgram" and re.search(r"->\s*$", prefix):
+                    continue
+                open_index = masked.find("{", match.start(), match.end())
+                try:
+                    close_index = matching_delimiter(
+                        masked, open_index, "{", "}")
+                except ValueError as exc:
+                    errors.append(f"{label}: {marker}: {exc}")
+                    continue
+                body = masked[open_index + 1:close_index]
+                if ".." in body:
+                    continue
+                missing = [
+                    field for field in fields
+                    if re.search(
+                        rf"\b{re.escape(field)}\b\s*(?::|,|$)", body
+                    ) is None
+                ]
+                if missing:
+                    line = masked.count("\n", 0, match.start()) + 1
+                    errors.append(
+                        f"{label}:{line}: {marker} drops representation "
+                        + ", ".join(missing))
+
+    active_sources = "\n".join(
+        sources[label] for label in (
+            "env", "hir", "infer", "infer_decl", "infer_ctx",
+            "infer_helpers", "infer_register", "builtins", "derive",
+            "exports", "unify", "zonk", "andor", "dict", "perceus",
+            "checker", "compiler_mod", "cexpr", "verify",
+        ))
+    for forbidden in (
+        "OwnershipMetadata", "ownership_metadata", "fresh_ownership_term",
+        "record_shadow", "clone_shadow", "hydrate_shadow",
+        "callable_result_role_by_def_id", "returned_callable_result_role",
+        "ownership_plan_program", "HExpr::Take", "Take {",
+    ):
+        if forbidden in active_sources:
+            errors.append(
+                f"representation S1 gained forbidden graph/consumer {forbidden!r}")
+    if (REPO / "compiler" / "ownership.ring").exists():
+        errors.append("representation S1 must not create ownership.ring")
+
+    non_unknown_terms = re.compile(
+        r"ownership_term\s*:\s*(?!CALLABLE_UNKNOWN\b|ownership_term\b|"
+        r"reg_ownership_term\b|check_ownership_term\b)"
+        r"([A-Za-z_][A-Za-z0-9_]*)")
+    for label in (
+        "env", "hir", "infer", "infer_decl", "infer_ctx",
+        "infer_helpers", "infer_register", "builtins", "derive",
+        "exports", "zonk",
+    ):
+        match = non_unknown_terms.search(
+            mask_ring_strings_and_comments(sources[label]))
+        if match:
+            errors.append(
+                f"{label}: callable ownership term is active as {match.group(1)!r}")
+
+    for label, function_name in (
+        ("types", "types_equal"),
+        ("types", "type_to_string"),
+        ("unify", "unify"),
+    ):
+        body, extract_error = extract_ring_function_body(
+            sources[label], function_name)
+        if extract_error:
+            errors.append(extract_error)
+        elif "ownership_term" in body:
+            errors.append(
+                f"{label}.{function_name} observes representation-only ownership")
+
+    counter_body, counter_error = extract_ring_function_body(
+        sources["infer_ctx"], "fresh_callable_identity_def_id")
+    if counter_error:
+        errors.append(counter_error)
+    elif ("next_callable_identity_ordinal" not in counter_body or
+          "fresh_def_id" in counter_body or "ownership" in counter_body):
+        errors.append("callable synthetic identity perturbs a source/ownership counter")
+
+    result_body, result_error = extract_ring_function_body(
+        sources["infer_ctx"], "exact_callable_result_identity")
+    if result_error:
+        errors.append(result_error)
+    elif not all(token in result_body for token in (
+            "Type::FnType { .. }",
+            "some(fresh_callable_identity_def_id(ctx))",
+            "_ => (ty, none)")) or any(token in result_body for token in (
+                "producer", "source", "ownership_term")):
+        errors.append("callable result identity is not an exact inert iff relation")
+
+    zonk_result_body, zonk_result_error = extract_ring_function_body(
+        sources["zonk"], "zonk_callable_result_def_id")
+    if zonk_result_error:
+        errors.append(zonk_result_error)
+    elif not all(token in zonk_result_body for token in (
+            "Type::FnType { .. }",
+            "some(def_id) => some(def_id)",
+            "some(resolver) => some(fresh_callable_identity_def_id(resolver))",
+            "_ => none")):
+        errors.append("final zonk callable-result identity is not idempotent iff")
+
+    zonk_callee_body, zonk_callee_error = extract_ring_function_body(
+        sources["zonk"], "zonk_direct_callee_def_id")
+    if zonk_callee_error:
+        errors.append(zonk_callee_error)
+    elif not all(token in zonk_callee_body for token in (
+            "HExpr::Ident { def_id: some(def_id), .. } => some(def_id)",
+            "HExpr::Lambda { def_id, .. } => some(def_id)",
+            "HExpr::Call { callable_result_def_id: some(def_id), .. }",
+            "_ => fallback")) or any(token in zonk_callee_body for token in (
+                ".lookup(", "ctx.env", "resolved_name")):
+        errors.append("final zonk callee identity re-resolves instead of transporting")
+
+    sig_body, sig_error = extract_ring_function_body(
+        sources["infer_decl"], "check_sig_decl")
+    if sig_error:
+        errors.append(sig_error)
+    elif "fresh_def_id" in sig_body or not all(token in sig_body for token in (
+            "registered sig member has no exact DefId",
+            "sig member registration is missing",
+            "fail.raise(CompileError {})")):
+        errors.append("Sig check can mint or recover a missing registration")
+
+    call_validator, call_validator_error = extract_ring_function_body(
+        sources["hir"], "validate_hir_expr")
+    if call_validator_error:
+        errors.append(call_validator_error)
+    elif not all(token in call_validator for token in (
+            "HExpr::Ident { def_id, .. } => def_id",
+            "HExpr::Lambda { def_id, .. } => some(def_id)",
+            "HExpr::Call { callable_result_def_id, .. }",
+            "callee_def_id != some(expected)",
+            "(Type::FnType { .. }, some(id))",
+            "(Type::FnType { .. }, none)",
+            "(_, some(_))")):
+        errors.append("HIR Call exactness/result iff relation is incomplete")
+
+    effect_validator, effect_validator_error = extract_ring_function_body(
+        sources["hir"], "validate_hir_effect_op_identity")
+    if effect_validator_error:
+        errors.append(effect_validator_error)
+    elif not all(token in effect_validator for token in (
+            "some(expected) => if expected != def_id",
+            "has no registration identity")):
+        errors.append("HIR effect identity is not tied to canonical registration")
+
+    default_collect, default_collect_error = extract_ring_function_body(
+        sources["infer"], "collect_default_expr_binders")
+    default_remap, default_remap_error = extract_ring_function_body(
+        sources["infer"], "remap_default_expr")
+    if default_collect_error:
+        errors.append(default_collect_error)
+    elif not all(token in default_collect for token in (
+            "register_default_callable_binder(",
+            '"callable result"', '"lambda"',
+            '"handler parameter"', '"handler resume')):
+        errors.append("default expansion does not inventory every exact identity")
+    if default_remap_error:
+        errors.append(default_remap_error)
+    elif not all(token in default_remap for token in (
+            "callee_def_id: remap_default_optional_def_id(",
+            "callable_result_def_id: remap_default_optional_def_id(",
+            "def_id: remap_default_def_id(def_id, remap)",
+            "HEffectHandler { ..handler,",
+            "HExpr::EffectOp { ..expr, args: new_args }")):
+        errors.append("default expansion loses exact or external identity")
+
+    for function_name in ("anf_expr", "rc_expr"):
+        body, extract_error = extract_ring_function_body(
+            sources["perceus"], function_name)
+        if extract_error:
+            errors.append(extract_error)
+        elif "HExpr::Lambda { def_id: def_id," not in body:
+            errors.append(
+                f"perceus.{function_name} loses Lambda exact identity")
+
+    fixture_contracts = {
+        "ownership_fixture": (
+            "constructor: fn(Int) -> Option<Int>",
+            "fn choose(flag: Bool) -> Option<Int>",
+            "let defaulted = fn(",
+        ),
+        "ownership_method_fixture": (
+            "fn touch(self, value: Int) -> Option<Int>",
+            "fn write(self, mut value: Int) -> Option<Int>",
+        ),
+        "ownership_delegate_fixture": (
+            "delegate inner: Writer",
+            "fn write(self) -> Option<Int>",
+        ),
+        "ownership_chained_fixture": (
+            "fn make_chain() -> fn() -> fn(Int) -> Option<Int>",
+            "let level_two = level_one()",
+        ),
+        "ownership_effect_fixture": (
+            "fn emit(value: Int) -> Option<Int>",
+            "Signal.emit(value) => some(value + 1)",
+        ),
+        "ownership_default_fixture": (
+            "callback: fn(Int) -> Option<Int> =",
+            "let produced = make_callback()",
+            "Signal.emit(inner) => match produced(inner)",
+            "print_result(use_default())",
+        ),
+    }
+    for label, tokens in fixture_contracts.items():
+        source = sources[label]
+        for token in tokens:
+            if token not in source:
+                errors.append(f"{label}: missing representation fixture {token!r}")
+        if re.search(
+                r"\b(?:Resource|Map<[^>]+>|[A-Za-z_][A-Za-z0-9_]*)\?",
+                source):
+            errors.append(f"{label}: introduced forbidden T? syntax")
+    return errors
+
+
 def identity_checkpoint_contract_errors(
     sources: dict[str, str],
+    *, include_representation_s1: bool = True,
 ) -> List[str]:
     """Lock the behavior-preserving I-prime exact-slot transport."""
     errors: List[str] = []
     errors.extend(identity_ledger_contract_errors(sources))
+    if include_representation_s1:
+        errors.extend(representation_s1_contract_errors(sources))
     required_tokens = {
         "hir": (
             "pub struct HPatternBinding",
@@ -5569,8 +5928,8 @@ def identity_checkpoint_contract_errors(
     # explicit arm that delegates to a common helper.
     crossing_split_inventory = (
         ("hir", "validate_hir_stmt",
-         "HStmt::Let { name, def_id, init, .. }",
-         "HStmt::Var { name, def_id, init, .. }",
+         "HStmt::Let { name, def_id, ty, init, .. }",
+         "HStmt::Var { name, def_id, ty, init, .. }",
          "validate_hir_local_binding("),
         ("hir", "validate_hir_expr",
          "HExpr::StructLit { fields, spread, .. }",
@@ -6613,16 +6972,24 @@ def default_body_identity_generated_c_errors(
 
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
+        "types": REPO / "compiler" / "types.ring",
+        "env": REPO / "compiler" / "env.ring",
         "hir": REPO / "compiler" / "hir.ring",
         "infer": REPO / "compiler" / "infer.ring",
         "infer_decl": REPO / "compiler" / "infer_decl.ring",
         "checker": REPO / "compiler" / "checker.ring",
         "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
         "infer_helpers": REPO / "compiler" / "infer_helpers.ring",
+        "infer_register": REPO / "compiler" / "infer_register.ring",
         "zonk": REPO / "compiler" / "zonk.ring",
+        "unify": REPO / "compiler" / "unify.ring",
+        "builtins": REPO / "compiler" / "builtins.ring",
         "derive": REPO / "compiler" / "derive.ring",
+        "exports": REPO / "compiler" / "exports.ring",
+        "andor": REPO / "compiler" / "andor_lower.ring",
         "dict": REPO / "compiler" / "dict_lower.ring",
         "perceus": REPO / "compiler" / "perceus.ring",
+        "compiler_mod": REPO / "compiler" / "compiler_mod.ring",
         "cctx": REPO / "compiler" / "codegen_c_ctx.ring",
         "cgen": REPO / "compiler" / "codegen_c.ring",
         "cexpr": REPO / "compiler" / "codegen_c_expr.ring",
@@ -6633,6 +7000,29 @@ def identity_checkpoint_source_errors() -> List[str]:
             REPO / "tests" / "cases" / "provenance_b_capture_identity.ring"
         ),
         "provenance_contract": REPO / "tests" / "test_provenance_b_contract.py",
+        "ownership_fixture": (
+            REPO / "tests" / "cases" / "ownership_shadow_transport.ring"
+        ),
+        "ownership_method_fixture": (
+            REPO / "tests" / "cases" /
+            "ownership_shadow_method_identity.ring"
+        ),
+        "ownership_delegate_fixture": (
+            REPO / "tests" / "cases" /
+            "ownership_shadow_delegate_identity.ring"
+        ),
+        "ownership_chained_fixture": (
+            REPO / "tests" / "cases" /
+            "ownership_shadow_chained_factory.ring"
+        ),
+        "ownership_effect_fixture": (
+            REPO / "tests" / "cases" /
+            "ownership_shadow_effect_identity.ring"
+        ),
+        "ownership_default_fixture": (
+            REPO / "tests" / "cases" /
+            "ownership_shadow_default_identity.ring"
+        ),
     }
     sources: dict[str, str] = {}
     errors: List[str] = []
@@ -6962,16 +7352,16 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("nested scope", "infer", "infer_scoped_block(ctx, expr, some(subst))",
          "infer_block(ctx, expr, some(subst))"),
         ("HIR crossing arm split", "hir",
-         "HStmt::Let { name, def_id, init, .. } =>\n"
+         "HStmt::Let { name, def_id, ty, init, .. } =>\n"
          "            validate_hir_local_binding(\n"
-         "                name, def_id, init, seen, scope),\n"
-         "        HStmt::Var { name, def_id, init, .. } =>\n"
+         "                name, def_id, ty, init, seen, scope),\n"
+         "        HStmt::Var { name, def_id, ty, init, .. } =>\n"
          "            validate_hir_local_binding(\n"
-         "                name, def_id, init, seen, scope)",
-         "HStmt::Let { name, def_id, init, .. } |\n"
-         "        HStmt::Var { name, def_id, init, .. } =>\n"
+         "                name, def_id, ty, init, seen, scope)",
+         "HStmt::Let { name, def_id, ty, init, .. } |\n"
+         "        HStmt::Var { name, def_id, ty, init, .. } =>\n"
          "            validate_hir_local_binding(\n"
-         "                name, def_id, init, seen, scope)"),
+         "                name, def_id, ty, init, seen, scope)"),
         ("default traversal crossing arm split", "infer",
          "HExpr::ListLit { elements, .. } =>\n"
          "            collect_default_expr_value_binders(ctx, elements, remap),\n"
@@ -6987,8 +7377,113 @@ def identity_checkpoint_source_errors() -> List[str]:
             continue
         mutated = dict(sources)
         mutated[source_name] = sources[source_name].replace(anchor, replacement, 1)
-        if not identity_checkpoint_contract_errors(mutated):
+        if not identity_checkpoint_contract_errors(
+                mutated, include_representation_s1=False):
             errors.append(f"mutation {label} escaped exact-slot source oracle")
+
+    representation_mutations = (
+        ("FnType representation field", "types",
+         "effects: EffectRow,\n             ownership_term: Int",
+         "effects: EffectRow"),
+        ("neutral callable term", "infer",
+         "ownership_term: CALLABLE_UNKNOWN }",
+         "ownership_term: CALLABLE_MOVE_OWNED }"),
+        ("HParam representation field", "hir",
+         "pub ownership_mode: Int", "pub removed_ownership_mode: Int"),
+        ("Call callee identity field", "hir",
+         "callee_def_id: Int?", "removed_callee_def_id: Int?"),
+        ("Call result identity field", "hir",
+         "callable_result_def_id: Int?",
+         "removed_callable_result_def_id: Int?"),
+        ("Lambda identity field", "hir",
+         "Lambda { def_id: Int", "Lambda { removed_def_id: Int"),
+        ("effect perform identity field", "hir",
+         "EffectOp { effect_name: Str, op_name: Str, op_def_id: Int",
+         "EffectOp { effect_name: Str, op_name: Str, removed_op_def_id: Int"),
+        ("effect handler identity field", "hir",
+         "pub op_def_id: Int", "pub removed_op_def_id: Int"),
+        ("effect declaration identity", "infer_decl",
+         "name: op.name, def_id: op.def_id",
+         "name: op.name, def_id: ctx.env.fresh_def_id()"),
+        ("trait declaration identity", "infer_decl",
+         "name: m.name, def_id: m.def_id",
+         "name: m.name, def_id: ctx.env.fresh_def_id()"),
+        ("sig declaration identity", "infer_decl",
+         "def_id: member_def_id",
+         "def_id: ctx.env.fresh_def_id()"),
+        ("synthetic counter separation", "infer_ctx",
+         "synthetic_def_id(SYNTHETIC_CALLABLE_DEF_ID_BASE, ordinal)",
+         "ctx.env.fresh_def_id()"),
+        ("callable result iff", "infer_ctx",
+         "_ => (ty, none)",
+         "_ => (ty, some(fresh_callable_identity_def_id(ctx)))"),
+        ("Call producer exactness", "hir",
+         "callee_def_id != some(expected)", "false"),
+        ("Call result type relation", "hir",
+         "(Type::FnType { .. }, none) =>",
+         "(_, none) =>"),
+        ("canonical effect relation", "hir",
+         "some(expected) => if expected != def_id",
+         "some(expected) => if false"),
+        ("default callable inventory", "infer",
+         "register_default_callable_binder(\n"
+         "                    ctx, def_id, remap, \"callable result\")",
+         "let _ = def_id"),
+        ("default callee remap", "infer",
+         "callee_def_id: remap_default_optional_def_id(",
+         "callee_def_id: identity_default_optional_def_id("),
+        ("default lambda remap", "infer",
+         "HExpr::Lambda { ..expr,\n"
+         "                def_id: remap_default_def_id(def_id, remap)",
+         "HExpr::Lambda { ..expr,\n"
+         "                def_id: def_id"),
+        ("delegate registration identity", "infer_decl",
+         "def_id: some(wrapper_def_id)",
+         "def_id: some(ctx.env.fresh_def_id())"),
+        ("Sig missing registration mint", "infer_decl",
+         "fail.raise(CompileError {})\n                    }",
+         "hmembers.push(HSigMember { name: m.name, def_id: ctx.env.fresh_def_id(), fn_type: UNIT, span: m.span })\n                    }"),
+        ("type equality neutrality", "types",
+         "Type::FnType { params: pa, return_type: ra, effects: ea, .. }",
+         "Type::FnType { params: pa, return_type: ra, effects: ea, ownership_term: oa }"),
+        ("type display neutrality", "types",
+         "Type::FnType { params, return_type, effects, .. }",
+         "Type::FnType { params, return_type, effects, ownership_term }"),
+        ("unify neutrality", "unify",
+         "Type::FnType { params: pa, return_type: ra, effects: ea, .. }",
+         "Type::FnType { params: pa, return_type: ra, effects: ea, ownership_term: oa }"),
+        ("zonk Call transport", "zonk",
+         "callee_def_id: exact_callee_def_id,\n"
+         "                callable_result_def_id: exact_result_def_id",
+         "callee_def_id: none,\n"
+         "                callable_result_def_id: none"),
+        ("late callable result finalization", "zonk",
+         "some(resolver) => some(fresh_callable_identity_def_id(resolver))",
+         "some(resolver) => none"),
+        ("callable result zonk idempotence", "zonk",
+         "some(def_id) => some(def_id)",
+         "some(def_id) => some(fresh_callable_identity_def_id(ctx.identity_resolver.unwrap()))"),
+        ("andor effect transport", "andor",
+         "op_name: h.op_name, op_def_id: h.op_def_id",
+         "op_name: h.op_name, op_def_id: -1"),
+        ("Perceus Lambda transport", "perceus",
+         "HExpr::Lambda { def_id: def_id,",
+         "HExpr::Lambda { def_id: 0,"),
+        ("metadata graph exclusion", "checker",
+         "fn check_drop_moves(program: HProgram, mut sink: CollectingSink)",
+         "fn check_drop_moves(program: HProgram, mut sink: CollectingSink) {\n"
+         "    let _ = OwnershipMetadata"),
+    )
+    for label, source_name, anchor, replacement in representation_mutations:
+        if sources[source_name].count(anchor) < 1:
+            errors.append(f"representation mutation {label}: anchor missing")
+            continue
+        mutated = dict(sources)
+        mutated[source_name] = sources[source_name].replace(
+            anchor, replacement, 1)
+        if not representation_s1_contract_errors(mutated):
+            errors.append(
+                f"representation mutation {label} escaped source oracle")
     return errors
 
 
