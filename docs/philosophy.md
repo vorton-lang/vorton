@@ -51,7 +51,7 @@
 
 函数的副作用（IO、失败、可变、异步）全部由 effect system 在类型层追踪。编译器全推断，只在模块边界处显式声明。
 
-可见性载体（2026-06-12 D-8 改写——原文「IDE 幽灵标注」对主受众失效：LLM agent 不用 IDE，读的是源码文本与编译器输出，且 LSP 尚不存在）：**主载体 = formatter 物化标注 + 模块签名 + `--error-format=llm`**；IDE 幽灵标注是人类适配层（LSP，B-016）。后果：formatter 等级系统是本条对 agent 兑现的唯一通道——原路线图「长期」区，待优先级专题讨论。`io` 效果粒度过粗（文件读/网络写/打印混一个效果，对 agent 安全性判断信号弱）记 lang-design §10 待议。
+可见性载体（2026-06-12 D-8 改写——原文「IDE 幽灵标注」对主受众失效：LLM agent 不用 IDE，读的是源码文本与编译器输出，且 LSP 尚不存在）：**主载体 = formatter 物化标注 + 模块签名 + `--error-format=llm`**；IDE 幽灵标注是人类适配层（LSP，B-016）。后果：formatter 等级系统是本条对 agent 兑现的唯一通道——原路线图「长期」区，待优先级专题讨论。**2026-08-23 用户裁决宿主能力边界**：宽泛 `io` 不进入 0.1 终态；当前真实 API 按 `console` / `fs` / `process` 三个 system effect 显式追踪。System effect 不可被 `handle`、不进入 handler evidence，也没有 main/root handler 注入；用户 custom effect 才是动态 handler abstraction。真实宿主访问在 AbiIR 以 exact HostImport 收口，失败仍以正交的 `fail<E>` 表达。
 
 ### 3. 推断为王，标注为仆（层 2 · 策略）
 
@@ -204,7 +204,7 @@ Option 世界（数据类型）          Fail 世界（effect）
 
 - 函数参数和返回类型可以不写——HM 推断 + 双向推断
 - Lambda 参数类型在 HOF 上下文中自动推断：`xs.map(fn(x) { x * 2 })`
-- Effect 完全推断——函数签名中的 `with { io, fail<E> }` 由编译器自动计算
+- Effect 完全推断——函数签名中的 `with { fs, fail<E> }` 等 system/custom/control effect 由编译器自动计算
 - Formatter 按等级预设自动补全标注（lv0/lv2 存储 + none…full 查看预设，design.md §3.2；等级系统细化待 D-8 专题），开发者控制详细度
 
 ### Trait = 行为，不是身份

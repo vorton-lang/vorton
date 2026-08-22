@@ -84,6 +84,8 @@ trait Collection {
 
 `A | B | C` 是匿名 enum 的语法糖。纯编译期展开，不引入子类型，HM 推断不受影响。
 
+> **排期边界（2026-08-23 用户复核）**：本节既有语义与 2026-06-15 的 match 消歧裁决继续有效。匿名 sum 提供结构等价、自动注入与错误类型组合，具有独立建模/组合价值，不属于 `T?` 一类纯缩写；但它不是 0.1 urgent 能力，B-072 明确顺延到首次 0.1 发布后实现。
+
 ```
 // 写法
 fn process(x: Str | I64) -> Str {
@@ -119,7 +121,7 @@ fn load_config(path: Str) -> Config with {fail<IoError | ParseError>} {
 
 ### 1.2 Refinement Types
 
-> **实现现状（2026-06-11 实测核定）**：`where` 全链路未强制（编译时 W0002 提示）。struct-field 位可解析（tokens 丢弃）；**参数位（`fn f(x: Int where ...)`）连解析都未实现——硬 parse error E0103**。参数位 parser 支持与验证一并归 B-001，不单独先行（避免再造「写了不生效」的静默面）。
+> **0.1 surface 边界（2026-08-23 用户决定）**：refinement 尚未实现，语言不得保留“可解析但不验证”的占位语法。B-193 删除当前 struct-field `where` 的 token 消费与 W0002 路径；完成后 field、parameter 等 refinement clause 均稳定 hard-fail。`where` 继续保留为未来关键字，不在 0.1 变成普通标识符。B-001 将来必须把 parser、可判定静态验证、明确允许的 runtime fallback、诊断与验证证据原子闭合后才可重新开放语法，禁止再次先 parse/transport、后补语义。
 
 类型附带谓词，编译器尽力静态检查，无法证明时插入运行时检查：
 
@@ -336,7 +338,7 @@ Refinement 是值级谓词——描述值本身的性质（`Int where it > 0`）
 #### Refinement × Effect（无冲突）
 
 - **Abort 路径**（`fail.raise`）：refined 值随栈帧一起销毁，无需特殊清理——refinement 是编译期信息，没有运行时资源
-- **Tail-resumptive 路径**（io/custom effect）：计算继续，refined 值不受影响
+- **Tail-resumptive 路径**（custom handled effect）：计算继续，refined 值不受影响；system effect不是 handler operation
 - **Handler resume 值**：handler 提供的恢复值必须满足恢复点的 refinement 约束（编译器检查）
 
 #### Ownership × Effect（RAII / Drop trait）
@@ -345,7 +347,7 @@ Refinement 是值级谓词——描述值本身的性质（`Int where it > 0`）
 
 ```
 trait Drop {
-    fn drop(mut self) with {io}   // 允许 io（flush 等），禁止 fail
+    fn drop(mut self)             // 0.1 必须 effect-free
 }
 ```
 
@@ -358,7 +360,7 @@ trait Drop {
 - 复合类型含 Drop 字段 → 自动 derive Drop
 - abort-unwind：语义目标是 fail/abort 穿越任意调用帧时逐帧执行 Drop、全路径 RAII；C-native 实现模型由 B-168 在 cleanup stack + `setjmp`/`longjmp` 与显式 failure-status/continuation lowering 之间实测拍板
 
-**不引入 `defer` 关键字**——RAII 覆盖了资源清理的所有场景。`Drop::drop` 禁止 `fail` effect，避免"清理时抛异常"问题。
+**不引入 `defer` 关键字**——RAII 覆盖资源清理。**0.1 clean break（2026-08-23 用户决定）**：用户 `Drop::drop` 的最终推断 effect row 必须为空；不仅禁止 `fail`，也禁止 system/handled effect 与逃逸 `mut<T>`。编译器生成的字段递归释放和已验证 intrinsic cleanup不属于用户 body。0.1 不建立 `DropEffectSet` 占位；effectful destructor 在 post-0.1 出现真实宿主资源 consumer 后由 B-198 重新设计。
 
 #### Ownership × async（Move 语义）
 
@@ -480,82 +482,32 @@ Ring 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2�
 
 ## 2. Effect 系统
 
-代数效果统一所有副作用。
+Effect row 统一描述副作用，但不同 effect class 拥有不同的执行与消除权。System effect 是静态宿主能力，custom handled effect 才走动态 handler/evidence；failure、mutation 与 unsafe各有专用规则。
 
-### 2.1 效果声明
+### 2.1 Effect class 与宿主能力
 
-```
-effect io {
-    fn read(path: Str) -> Bytes
-    fn write(path: Str, data: Bytes) -> Unit
-    fn net_get(url: Str) -> Bytes
-}
-
-effect fail<E> {
-    fn raise(error: E) -> Never
-}
-
-effect async {
-    fn spawn<T>(task: fn() -> T) -> Future<T>
-    fn await<T>(f: Future<T>) -> T
-}
-
-// mut<T> 是可多实例 marker effect；参数位 x: mut T 与闭包捕获是另一层 mutation 可见性
+```text
+EffectAtom
+├─ SystemEffectRef     console / fs / process
+├─ HandledEffectRef    用户 custom effect
+├─ FailEffect          fail<E>
+├─ MutEffect           mut<T>
+└─ UnsafeEffect        unsafe
 ```
 
-### 2.2 Default Handler（默认处理器）
+**System effect（2026-08-23 用户决定）**：0.1 只建立已有真实 API 所需的 `console`、`fs`、`process`。它们不进入 evidence、不可被 `handle`，也没有 root handler；host extern/intrinsic 以 exact contract进入 AbiIR HostImport，native/WASM/嵌入式只在链接 provider处不同。宽泛 special `io` 与 `io.read`/无 effect `read_file` 双authority由B-195原子删除。Capability 表示宿主访问类别，错误仍正交地写作 `fail<E>`。
 
-Effect 的 op 可以带 body，语法与 trait 默认方法一致——有 body = 有默认 handler，无 body = 必须显式 handle：
+**Handled effect**：用户 `effect` 声明产生 nominal operation set，进入 typed evidence并由显式 `handle...with` 消除。需要 mock host dependency 时，声明如 `FileAccess` 的 custom effect，再用普通 handler adapter翻译到 `fs` API；system call自身不动态截获。
 
-```
+### 2.2 0.1 无用户 default handler
+
+```ring
 effect Logger {
-    fn log(msg: Str) -> Unit {       // 有默认 handler
-        print(msg)
-    }
-}
-
-effect Storage {
-    fn read(key: Str) -> Str         // 无默认，必须 handle
-    fn write(key: Str, val: Str) -> Unit  // 无默认，必须 handle
-    fn log(msg: Str) -> Unit {       // 有默认，可选 handle
-        print("storage: ${msg}")
-    }
+    fn log(msg: Str) -> Unit
 }
 ```
 
-**语义规则：**
-
-1. **签名透明**：有默认的 effect 仍出现在函数签名中（`fn work() -> Unit with {Logger}`）。"效果即可见性"——默认 handler 消除的是 boilerplate，不是可见性。
-
-2. **部分默认**：`handle...with` 中显式 handle 的 op 覆盖默认，未写的 op 走默认。如果一个 op **没有默认且未 handle → 编译错误**。
-
-3. **全默认可省略 handle**：如果一个 effect 的所有 op 都有默认，调用者可以完全不写 `handle...with`，编译器自动注入默认 evidence。
-
-```
-// Logger 全部 op 有默认，无需 handle
-fn main() {
-    do_work()  // Logger.log 自动走 print(msg)
-}
-
-// Storage 部分 op 无默认，只 handle 无默认的
-handle {
-    work()
-} with {
-    Storage.read(k) => read_from_disk(k),
-    Storage.write(k, v) => write_to_disk(k, v),
-    // Storage.log 不写 → 走默认的 print
-}
-```
-
-**Default handler 的 effect 约束（中间版设计）：**
-
-Default handler body 可以使用：
-- 内置 effect（io / fail / mut）
-- 已有 default handler 的自定义 effect
-
-不允许使用无默认 handler 的自定义 effect（会产生无法解析的依赖）。编译器对 default handler 间的依赖做拓扑排序，检测循环时报编译错误。
-
-Default handler、部分覆盖、依赖排序与循环诊断均已实现；具体语法和诊断以语言规范与回归测试为准。
+0.1 effect operation只有签名，不允许 body；不存在自动default evidence、部分默认或默认依赖拓扑。该能力具有真实建模/人体工学价值，并非永久否决：B-197在post-0.1结合真实consumer比较operation body、显式具名provider与普通wrapper，但不得直接恢复旧checker/codegen authority。
 
 ### 2.3 Effect 推断
 
@@ -564,7 +516,7 @@ Default handler、部分覆盖、依赖排序与循环诊断均已实现；具�
 ```
 // 你写的：
 fn load_portfolio(path: Str) -> Portfolio {
-    let raw = io.read(path)
+    let raw = fs::read_file(path)
     let data = json.parse(raw)
     let weights = validate(data)
     Portfolio { weights, assets: data.assets }
@@ -572,7 +524,7 @@ fn load_portfolio(path: Str) -> Portfolio {
 
 // 编译器推断的完整签名（IDE hover 可见）：
 // fn load_portfolio(path: Str) -> Portfolio
-//     with {io, fail<ParseError | ValidationError>}
+//     with {fs, fail<ParseError | ValidationError>}
 ```
 
 ### 2.4 错误处理——生命周期模型
@@ -583,13 +535,13 @@ fn load_portfolio(path: Str) -> Portfolio {
 
 ```
 fn load_portfolio(path: Str) -> Portfolio {
-    let raw = io.read(path)       // io + fail 自动冒泡
+    let raw = fs::read_file(path) // fs + fail 自动冒泡
     let data = json.parse(raw)    // fail 自动冒泡
     validate(data)                 // fail 自动冒泡
 }
 ```
 
-80% 的错误处理到此结束。函数签名自动推断出 `with {io, fail<...>}`，调用方继续传播。
+80% 的错误处理到此结束。函数签名自动推断出 `with {fs, fail<...>}`，调用方继续传播。
 
 **阶段 2：就地恢复——`catch` 表达式**
 
@@ -639,23 +591,27 @@ handle {
     let result = complex_pipeline()
     save(result)
 } with {
-    io => perform,                          // 透传 io
-    fail(e: ValidationError) => log_and_skip(e),
+    Logger.log(msg) => print(msg),          // custom handled effect
 }
 ```
+
+`console` / `fs` / `process` 是 system effect，不能在此处被 `handle`；需要替换宿主依赖时，业务函数使用 custom effect，生产 adapter再调用system API。
 
 ### 2.5 Effect Handler 用于测试 Mock
 
 ```
+effect FileAccess {
+    fn read(path: Str) -> Str
+}
+
 test "load_portfolio parses correctly" {
     let mock_data = r#"{"weights": [25, 25, 25, 25], ...}"#
 
     handle {
-        let p = load_portfolio("fake.json")
+        let p = load_portfolio_via_file_access("fake.json")
         assert(p.weights.len() == 4)
     } with {
-        io.read(_path) => mock_data,
-        fail(e) => panic("unexpected: ${e}"),
+        FileAccess.read(_path) => mock_data,
     }
 }
 ```
@@ -664,16 +620,16 @@ test "load_portfolio parses correctly" {
 
 当前 handler 支持两种语义：
 
-- **Tail-resumptive**（已实现）：handler 返回值即 resume 值，计算继续。覆盖 mock、adapter、default provider 等场景。
+- **Tail-resumptive**（已实现）：handler 返回值即 resume 值，计算继续。覆盖 custom-effect mock 与 adapter 等场景。
 - **Abort**（已实现）：`fail.raise` 专用，handler 替换整个计算结果。
 
 ```
-// tail-resumptive：handler 返回值替代 io.read 的返回值，计算继续
+// tail-resumptive：handler 返回值替代 custom operation 的返回值，计算继续
 handle {
-    let data = io.read("config.toml")   // → "mock-data"
+    let data = FileAccess.read("config.toml") // → "mock-data"
     "got: ${data}"                       // → "got: mock-data"
 } with {
-    io.read(path) => "mock-data",
+    FileAccess.read(path) => "mock-data",
 }
 ```
 
@@ -693,13 +649,13 @@ handle {
 
 ```
 // IDE 模式 A：行尾幽灵文字
-let raw = io.read(path)           ░ io, fail<IoError> ░
+let raw = fs::read_file(path)     ░ fs, fail<FsError> ░
 let data = json.parse(raw)        ░ fail<ParseError> ░
 
 // IDE 模式 B：底色高亮
 // 纯表达式 = 无底色
 // fail 效果 = 淡黄底色
-// io 效果 = 淡蓝底色
+// system capability = 淡蓝底色
 // async 效果 = 淡紫底色
 ```
 
@@ -707,7 +663,7 @@ Formatter 可选将 effect 标注固化为源码注释：
 
 ```
 //: 前缀注释，formatter 自动维护
-let raw = io.read(path)           //: io, fail<IoError>
+let raw = fs::read_file(path)     //: fs, fail<FsError>
 let data = json.parse(raw)        //: fail<ParseError>
 ```
 
@@ -736,7 +692,7 @@ fn process(items) {
 
 **有 bounds 的函数标识符不泛化（2026-06-27）**：`let f = display`（display 有 trait bounds）使 f 单态——f 的类型在 let 点实例化，不保留多态性。即 `f(42); f("hello")` 不合法（f 已绑定到首次使用的具体类型）。这是 HM value restriction 的自然延伸：有 bounds 的函数赋值给变量后，bounds 无法在变量层面泛化。若未来需要"多态函数变量"需重新审视此设计。
 
-**函数默认参数（2026-08-23 用户决定）**：Ring 0.1 不支持 `fn f(x: T = expr)`。默认参数只省略调用点实参，显式 wrapper 函数可完整表达，却要求保存/复制 typed HIR template、freshen 全部 binder identity 并给每个下游阶段保留 default-specialization authority；compiler/std/examples 当前无 consumer。0.1 clean break 删除该语法与 call-site expansion，不影响 trait method default body 或 effect op default handler。未来若出现独立 API 建模价值，再作为新 feature 评估，不保留兼容路径。
+**函数默认参数（2026-08-23 用户决定）**：Ring 0.1 不支持 `fn f(x: T = expr)`。默认参数只省略调用点实参，显式 wrapper 函数可完整表达，却要求保存/复制 typed HIR template、freshen 全部 binder identity 并给每个下游阶段保留 default-specialization authority；compiler/std/examples 当前无 consumer。0.1 clean break 删除该语法与 call-site expansion，不影响 trait method default body。未来若出现独立 API 建模价值，再作为新 feature 评估，不保留兼容路径。
 
 ### 3.2 Formatter：标注密度管理器
 
@@ -760,7 +716,7 @@ Ring 采用两级标注模型管理源码的标注密度：
 | 标注项 | lv2 标注 | 说明 |
 |--------|:---:|------|
 | 函数返回类型 | ✅ | `fn f(...) -> Int` |
-| effect row | ✅ | `with {io, fail<E>}` |
+| effect row | ✅ | `with {fs, fail<E>}` |
 | move 参数（声明） | ✅ | `fn f(move x: T)` |
 | mut callsite | ✅ | `f(mut list)` |
 | 闭包 effect | ✅ | 闭包的 effect 签名 |
@@ -851,12 +807,12 @@ fn process(items) {
 }
 
 // preset = "review" — code review / 团队协作
-fn process(items: List<User>) -> List<Str> with {io} {
+fn process(items: List<User>) -> List<Str> with {console} {
     items.filter(fn(x: User) -> Bool { x.age > 18 }).map(fn(x: User) -> Str { x.name })
 }
 
 // preset = "audit" — 逐行审查，调用点 effect 可见
-fn process(items: List<User>) -> List<Str> with {io} {
+fn process(items: List<User>) -> List<Str> with {console} {
     items
         .filter(fn(x: User) -> Bool { x.age > 18 })  //: pure
         .map(fn(x: User) -> Str { x.name })           //: pure
@@ -1133,7 +1089,7 @@ pub struct Config {
 }
 
 pub fn load(path: Str) -> Config {
-    let raw = io.read(path)
+    let raw = fs::read_file(path)
     let table = toml.parse(raw)
     Config {
         db_url: table.get("db_url"),
@@ -1245,7 +1201,7 @@ let zs = xs.clone()    // 递归深拷贝，完全独立
 ```ring
 // extern fn 的 mut 标注
 extern fn sort_in_place(arr: mut List<Int>)          // mutates arr
-extern fn read_all(path: Str) -> Str / io             // path is readonly
+extern fn read_all(path: Str) -> Str / {fs, fail<FsError>} // path is readonly
 ```
 
 调用点 lv2 同步显示：`f(mut list)` / `f(move file)`。lv0 一律写 `f(x)`。
@@ -1271,7 +1227,7 @@ Parse / project Resolver / Type+Effect
 → mechanical C codegen
 ```
 
-**FlowIR 契约**：TypedHIR → CoreHIR 已完成 trait/effect default body、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 等全部 semantic elaboration；函数默认参数与 `sig` 不属于 0.1 surface。FlowIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait/Effect default、Test、Const、Lambda/handler、derived/intrinsic/constructor/drop/dict helper 等所有 executable body 或显式 contract 进入一个共享 `ExecutableInventory`。Neutral ANF 只保持同一 evaluation region 内的严格左到右求值，不跨 short-circuit、branch、loop/lambda、guard、catch/handle、unsafe 或 control-transfer 边界，也不产生 `Clone/Take/Drop/Cleanup`。FlowIR freeze 后任何阶段新增 binder 都是 internal error。
+**FlowIR 契约**：TypedHIR → CoreHIR 已完成 trait default、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 与 handled-effect evidence 等全部 semantic elaboration；函数默认参数、effect default body 与 `sig` 不属于 0.1 surface。FlowIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait default、Test、Const、Lambda/handler、derived/intrinsic/constructor/drop/dict helper 等所有 executable body 或显式 contract 进入一个共享 `ExecutableInventory`。System effect 只随exact call contract进入AbiIR HostImport，不成为executable handler root。Neutral ANF 只保持同一 evaluation region 内严格左到右求值，不跨 short-circuit、branch、loop/lambda、guard、catch/handle、unsafe 或 control-transfer 边界，也不产生 `Clone/Take/Drop/Cleanup`。FlowIR freeze 后任何阶段新增 binder 都是 internal error。
 
 **Identity**：具名 source/member 使用 resolver/registry 已选定 origin 构造的 typed `SymbolRef { origin_module_key, namespace_kind, canonical_payload, declaration_site_path }`；re-export 原样携带，same-origin diamond 自然相等，不消耗共享 source counter。局部槽使用 `SlotRef(module_key, domain, local_def_id)`；Lambda、call-result、ANF/result/projection 等 synthetic identity 使用 final normalized tree 的 owner+path `PathRef`，只服务 planner/certificate，不进入 C 名称。Static call 必须携带 `CalleeRef`；dynamic call 必须落到 exact callable slot，freeze 后缺 identity 直接 fatal，Planner 不查 name/resolver/FnType fallback。
 
@@ -1370,10 +1326,12 @@ impl Drop for FileHandle {
 - `impl Drop` 的类型在赋值时 auto-move（编译器推断，lv2 显示 `move`）
 - Drop 类型 rc 恒为 1（auto-move 保证唯一 owner）→ scope-end drop = rc 归零 = **与 Rust 析构时机完全一致**
 - Drop 类型不可 Clone（`impl Drop` 禁止 `impl Clone`——资源不可复制）
+- 0.1 用户 Drop body 的最终推断 effect row 必须为空；system/handled/fail/逃逸 mut均fail loud。词法 `unsafe` 即使被discharge，仍须满足模块许可
 - 当前无处在对象分配中保存析构所需的 runtime trait evidence，因此 `impl<T: Trait> Drop for Box<T>` 这类带 type-parameter bound 的实现必须在注册前 fail loud；不需要 runtime evidence 的无 bound `impl<T> Drop for Box<T>` 仍可使用。未来若支持前者，evidence 必须成为对象布局与 drop glue 的显式、可验证契约，不能在析构调用处填占位值。
 - Drop 顺序对齐 Rust：同 scope 逆序 / struct 字段声明序 / 容器元素序
 - `drop(x)` 提前释放
 - abort 路径（fail/catch）的 drop-aware unwind 保证全路径 RAII；当前 C 后端尚未兑现，B-168 先确定可审计、可移植的控制流模型，再由 B-002 Phase 2 实现
+- Effectful destructor与latent destruction contract不属于0.1；B-198只在真实File/Socket/Transaction consumer出现后重新Argument，不预建空`DropEffectSet`
 
 ### 7.7 `Rc<T>` 与 Clone
 
@@ -1611,7 +1569,7 @@ fn fetch_both() -> (Data, Data) with {async} {
 }
 
 // 生产环境：默认 async handler 驱动
-fn main() with {io, async} {
+fn main() with {console, async} {
     let result = fetch_both()
     print(result.debug())
 }
@@ -1780,11 +1738,11 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 
 详细分析见 [`docs/competitive-analysis.md`](competitive-analysis.md)。核心结论：
 
-截至 2026-07-28，尚未发现一个项目**同时交付** Ring 的完整默认路径：面向应用开发的低标注表面 + HM 类型/effect inference + `io/fail/mut` 行为签名 + tail-resumptive/abort handler + Perceus RC/native/自举 + 可测量的 agent 闭环。这里的差异是**组合与默认体验**，不是任何单项机制无人实现；也不能用搜索空集证明「无竞品」。
+截至 2026-07-28，尚未发现一个项目**同时交付** Ring 的完整默认路径：面向应用开发的低标注表面 + HM 类型/effect inference + system/fail/mut/handled-effect 行为签名 + tail-resumptive/abort handler + Perceus RC/native/自举 + 可测量的 agent 闭环。这里的差异是**组合与默认体验**，不是任何单项机制无人实现；也不能用搜索空集证明「无竞品」。
 
 最近邻必须按不同轴描述：Koka/Flix/Effekt 是 effect 与 handler 机制近邻，Unison 是 abilities + semantic codebase 近邻，MoonBit 是应用语言产品与实验性验证近邻，Zero 是 graph-native agent workflow 近邻，Verus 是权限/SMT/AI proof 近邻；TypeScript 7、Python 与 Rust 则构成强大的「够用就行」替代。Ring 对外定位因此收窄为：**把可推断的行为契约、确定性资源语义和 agent 验证闭环放在同一条 application-native 默认路径上，并用 B-111 的可复现实验证明收益。**
 
-当前已发货边界也必须诚实陈述：`io/fail/mut`、有限 handler、C11 native/self-host 与 tracked `dist-c` 已有；async 尚未实现，full AE 不计划实现，refinement 仍在 B-001，Drop abort-unwind/Weak 与 RIIR 收尾仍待 B-168/B-002/B-152。宣传材料不得把计划项写成现状，也不得把“C-only codegen 已完成”误写成“release 产品面已完成”。
+当前已发货边界也必须诚实陈述：旧宽泛 `io`、`fail/mut`、有限 handler、C11 native/self-host 与 tracked `dist-c` 已有；0.1 的 system/handled clean break 尚待 B-194/B-195/B-196，不能提前宣传为完成。Async 尚未实现，full AE 不计划实现，refinement 仍在 B-001，Drop abort-unwind/Weak 与 RIIR 收尾仍待 B-168/B-002/B-152。
 
 ---
 
@@ -1888,15 +1846,17 @@ Source
 | `AST` | 忠实保存表面语法、注释所需形状与 Span；不承载名字、类型或后端结论。 |
 | `ResolvedAST` | 每个声明、引用、member、constructor、effect op、import/re-export 与 extern bridge 都携带 exact `SymbolRef`；下游不再查询 resolver 或按叶名回退。 |
 | `TypedHIR` | HM inference metavariable 已收敛（显式量化参数除外），类型、effect row、callee/impl/associated-type 选择与公开 module interface 已固定；ownership mode 可仍为 symbolic contract，但不得回写普通 type/effect 结果。 |
-| `CoreHIR` | 所有语言级隐式语义已 elaborated：trait/effect default body、delegate-origin ordinary impl、derive、protocol for-in、short-circuit、trait dictionary、effect evidence、closure/capture、constructor/intrinsic/trait-default specialization 均成为 explicit body、typed edge 或 `IntrinsicContract`；共享 `ExecutableInventory` 封闭。函数默认参数与 `sig` 不在 0.1 surface。此层仍不含资源操作。 |
+| `CoreHIR` | 所有语言级隐式语义已 elaborated：trait default body、delegate-origin ordinary impl、derive、protocol for-in、short-circuit、trait dictionary、handled-effect evidence、closure/capture、constructor/intrinsic/trait-default specialization 均成为 explicit body、typed edge 或 `IntrinsicContract`；共享 `ExecutableInventory` 封闭。System effect只携带exact host call contract且不进入evidence。函数默认参数、effect default body与`sig`不在0.1 surface。此层仍不含资源操作。 |
 | `FlowIR` | ownership-neutral ANF、pattern decision/projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 已建立；project-wide identity、binder、call/alias/capture graph 冻结，后续新增 node/binder 是 internal error。 |
 | `RcIR` | 唯一 ResourcePlanner 输出 `Clone/Take/Drop/Cleanup` 与 ranked certificate；binder set 与 FlowIR 相同，资源语义完全显式。 |
-| `AbiIR` | 只把已验证语义降为 typeid/tag/field layout、symbol、prototype、closure/dict/evidence layout、drop glue、extern 与 failure ABI；不得新增调用、控制边、owner 或语言 fallback。 |
+| `AbiIR` | 只把已验证语义降为 typeid/tag/field layout、symbol、prototype、closure/dict/evidence layout、drop glue、exact HostImport、extern 与 failure ABI；不得新增调用、控制边、owner、effect class 或语言 fallback。 |
 | `C11` | 对 AbiIR 做确定性序列化并调用工具链；不再选择方法、求 effect closure、解释 pattern、生成未规划 executable body 或分配语义 identity。 |
 
 **术语与物理形态（2026-08-23 用户最终命名）**：`CoreHIR` 名称保留；它是广义 IR，也是最后的 Ring semantic representation，其物理形态仍是 structured typed expression/tree，而非 basic-block graph。原 `FinalHIR` clean break 命名为 `FlowIR`，原 `RcHIR` 命名为 `RcIR`；不保留alias或双口径。`CoreHIR → FlowIR` 是唯一 operational lowering：把 structured control、canonical typed pattern 与隐含 evaluation order 变为 fixed blocks/instructions/terminators，创建仅供执行编排的 ANF temp、scope/control result slot，以及 control/data/call/projection/capture/exit edge。它可以新增这些 administrative binder/block/edge，但不得新增语言级 operation、executable、impl、callee/evidence 选择或其他 semantic obligation。
 
 `FlowIR` 是第一层传统 MIR/CFG-style IR，但不要求 LLVM 式 SSA/phi，也不含 `Clone/Take/Drop/Cleanup`、目标 layout 或 ABI。FlowIR freeze 后，ResourcePlanner 不得创建或改变 semantic CFG、call graph 或 reachability；只可在既有 topology 上决定资源流，并把既有 edge 物化为保持相同端点/可达性的显式 cleanup sequence。`RcIR → AbiIR` 才继续进入资源已验证后的物理表示下降。
+
+**System / handled effect 生命周期（2026-08-23 用户决定）**：effect class在TypedHIR freeze前固定。`SystemEffectRef`（0.1为`console/fs/process`）只随exact extern/intrinsic call向下传递，不进入evidence vector、不能被`handle`、没有main/root handler；AbiIR将其变为HostImport，target仅选择native symbol、WASM import或embedded link provider。`HandledEffectRef`才进入call/evidence graph并必须显式handle；它不得直接降为HostImport。新增宿主能力必须由真实API产生，只增加typed declaration/HostImport provider，不增加按capability名字的compiler branch。Validator与mutation必须双向杀死system→evidence和handled→HostImport越界。
 
 **隐式行为时点**：纯拼写糖可在 AST/CoreHIR 内展开，不必为每个 pass 新建永久 IR；exhaustiveness matrix、call graph、CFG 等可作为所属层的 finite plan/certificate。凡会改变求值顺序、调用图、effect、capture、binder、控制边或 executable inventory 的行为，必须在 FlowIR freeze 前显式化；freeze 后只允许资源操作与机器表示下降。每个跨层节点保留 `OriginRef`，使诊断能回到源码而不迫使低层保留表面语法。
 
@@ -1942,6 +1902,7 @@ Source
 | 2026-06-15 | 字符串编码模型：code point API 与既有后端行为失真 | 选 A（UTF-8 字节串）：`len`=字节数 O(1)、`chars()`/`char_count()` 提供 code point API；否决 B（code point）理由=O(n) len + 需 ByteStr 补位违反⑧。§1.7 已修正，实现归 B-133 | ⑥⑦⑧（5/7 判据 A 胜出） | B-133 按 backlog 的 C/native、Unicode 与 FFI gate 验收 |
 | 2026-06-24 | 层 0 重构：④ 原名「无人回路 × 全场景」绑定 LLM 叙事——核心 claim 应比 agent 窗口更根本 | ④ 改名「不信任程序员 · 编译器是最终权威」；「无人回路 × 全场景」降为渐近表达；出发点从「agent 验证瓶颈」回溯到「程序员不可信是永恒事实」（C/Rust/Ring 三角定位）；LLM-first 降格为推论；核心赌注分两层 | 元决策 | — |
 | 2026-08-22 | 纯缩写语法糖准入与历史 `T?`：少写字符是否足以换取第二种公开类型拼写 | 否。语法糖必须提供独立建模/认知/验证/组合价值；`Option<T>` 为唯一目标拼写，`T?` 由 B-191 在 B-180 后、B-174 前 clean break 删除；当前 correctness/性能主线不被打断 | ⑧（层 2 策略，用户方向） | B-191 的负例、仓内原子迁移与 self-host fixed point |
+| 2026-08-23 | 0.1 effect/capability surface：宽泛 `io`、host root handler、user default operation body与隐式effectful Drop会形成重复authority并隐藏能力 | SystemEffectRef=`console/fs/process`且不进evidence/不可handle/无root；HandledEffectRef才显式handle；host call只经AbiIR HostImport。0.1删除user effect default body与effectful Drop，后两者在post-0.1有真实consumer时分别由B-197/B-198重审。Refinement占位语法同步删除；已批准匿名union语义保留但实现顺延post-0.1 | ②④⑤⑧（可见性、失真必须响、有限authority、一种写法） | B-193~B-198及system/handled crossing mutations |
 
 ## 状态真值
 
