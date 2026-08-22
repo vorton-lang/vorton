@@ -7429,7 +7429,7 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
 IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
 F1_EXECUTABLE_KIND_COUNT = 23
 F1_BINDER_KIND_COUNT = 21
-F1_SEMANTIC_MUTATION_COUNT = 69
+F1_SEMANTIC_MUTATION_COUNT = 67
 F1_SCOPE_GUARD_COUNT = 14
 
 F1_EXECUTABLE_KINDS = (
@@ -7521,6 +7521,9 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         errors.append("F1 gained forbidden resource operation")
     if ".sort" in masked or "sort_by" in masked:
         errors.append("F1 input order became identity through sorting")
+    source_binder_constructor_exposed = "pub fn make_binder_entry(" in masked
+    if source_binder_constructor_exposed:
+        errors.append("F1 exposes a source BinderEntry constructor before F2")
 
     for name, expected in {
         "ExecutableRef": ["value"],
@@ -7685,20 +7688,15 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     if binder_roles is not None and binder_roles != expected_binder_roles:
         errors.append("F1 binder kind/path-role matrix drifted")
 
-    _f1_require_function_tokens(source, "make_binder_entry", (
-        "if !executable_ref_contains_path(owner, site)",
-        "if !path_role_same(\n            path_ref_role(site), "
-        "binder_kind_expected_path_role(kind))",
-        "if !slot_ref_is_source(slot)",
-        "binder_kind_allows_dictionary_domain(kind)",
-        "if binder_kind_tag(kind) ==\n                BINDER_DICTIONARY_EVIDENCE_LOCAL",
-        "slot_domain_same(domain, slot_domain_lexical())",
-        "slot_domain_same(domain, slot_domain_dictionary())",
-        "if !domain_allowed",
-        "slot_ref_source_origin_module_key(slot) !=",
-        "if slot_ref_is_source(slot)",
-        "if !path_ref_same(slot_ref_synthetic_path(slot), site)",
-    ), errors)
+    if not source_binder_constructor_exposed:
+        _f1_require_function_tokens(source, "make_synthetic_binder_entry", (
+            "if binder_kind_is_source(kind)",
+            "if slot_ref_is_source(slot)",
+            "if !executable_ref_contains_path(owner, site)",
+            "if !path_role_same(\n            path_ref_role(site), "
+            "binder_kind_expected_path_role(kind))",
+            "if !path_ref_same(slot_ref_synthetic_path(slot), site)",
+        ), errors)
     _f1_require_function_tokens(source, "make_binder_manifest", (
         "if !executable_ref_same(left.owner, owner)",
         "if slot_ref_same(left.slot, right.slot)",
@@ -7799,23 +7797,16 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
          "child_path.len() == root_path.len() + 1", "child_path.len() > root_path.len()"),
         ("anonymous ContractOnly", "make_executable_entry",
          "!executable_ref_is_named(reference)", "false"),
-        ("source binder synthetic", "make_binder_entry",
-         "if !slot_ref_is_source(slot)", "if false"),
-        ("source binder domain", "make_binder_entry",
-         "if !domain_allowed", "if false"),
-        ("dictionary-local domain", "make_binder_entry",
-         "if binder_kind_tag(kind) ==\n                BINDER_DICTIONARY_EVIDENCE_LOCAL",
-         "if false"),
-        ("source binder owner", "make_binder_entry",
-         "slot_ref_source_origin_module_key(slot) !=", "false &&"),
-        ("binder site containment", "make_binder_entry",
+        ("source kind rejected", "make_synthetic_binder_entry",
+         "if binder_kind_is_source(kind)", "if false"),
+        ("source SlotRef rejected", "make_synthetic_binder_entry",
+         "if slot_ref_is_source(slot)", "if false"),
+        ("binder site containment", "make_synthetic_binder_entry",
          "if !executable_ref_contains_path(owner, site)", "if false"),
-        ("binder site role", "make_binder_entry",
+        ("binder site role", "make_synthetic_binder_entry",
          "if !path_role_same(\n            path_ref_role(site), "
          "binder_kind_expected_path_role(kind))", "if false"),
-        ("normalized binder source", "make_binder_entry",
-         "if slot_ref_is_source(slot)", "if false"),
-        ("synthetic binder site", "make_binder_entry",
+        ("synthetic binder site", "make_synthetic_binder_entry",
          "if !path_ref_same(slot_ref_synthetic_path(slot), site)", "if false"),
         ("manifest cross-owner", "make_binder_manifest",
          "if !executable_ref_same(left.owner, owner)", "if false"),
@@ -7859,6 +7850,20 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
             errors.append(
                 f"F1 semantic mutation {label} findings were {findings!r}, "
                 f"expected only {expected!r}")
+
+    count += 1
+    public_constructor_anchor = "pub fn make_synthetic_binder_entry("
+    if source.count(public_constructor_anchor) != 1:
+        errors.append("F1 semantic mutation public source constructor: anchor missing")
+    else:
+        mutated = source.replace(
+            public_constructor_anchor, "pub fn make_binder_entry(", 1)
+        findings = ir_inventory_f1_contract_errors(mutated)
+        expected = "F1 exposes a source BinderEntry constructor before F2"
+        if findings != [expected]:
+            errors.append(
+                f"F1 semantic mutation public source constructor findings were "
+                f"{findings!r}, expected only {expected!r}")
 
     table_mutations = (
         ("DropGlue body-mode", "EXECUTABLE_KIND_ALLOWED_MODE_TAGS", 14, 0,

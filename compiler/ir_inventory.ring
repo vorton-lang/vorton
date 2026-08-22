@@ -6,17 +6,15 @@
 // discovered, normalized, frozen, resource-planned, or verified.
 
 use ir_identity::{
-    SymbolRef, ModuleBodyRef, PathRef, PathOwnerRef, SlotRef, SlotDomain,
+    SymbolRef, ModuleBodyRef, PathRef, PathOwnerRef, SlotRef,
     PathRole, symbol_ref_same, symbol_ref_origin_module_key,
     symbol_ref_namespace_kind, namespace_kind_from_tag, namespace_kind_same,
     module_body_ref_same, module_body_ref_origin_module_key,
     path_ref_same, path_ref_owner, path_ref_normalized_child_path,
     path_ref_role, path_owner_ref_same, path_owner_ref_is_symbol,
     path_owner_ref_symbol, path_owner_ref_module_body,
-    slot_ref_same, slot_ref_is_source,
-    slot_ref_source_origin_module_key, slot_ref_source_domain,
-    slot_ref_synthetic_path, slot_domain_same, slot_domain_lexical,
-    slot_domain_dictionary, path_role_same, path_role_child,
+    slot_ref_same, slot_ref_is_source, slot_ref_synthetic_path,
+    path_role_same, path_role_child,
     path_role_declaration, path_role_parameter, path_role_result, path_role_capture,
     path_role_handler, path_role_synthetic, path_role_from_tag
 }
@@ -624,12 +622,6 @@ fn binder_kind_is_source(kind: BinderKind) -> Bool {
     tag <= BINDER_HANDLER_RESUME || tag == BINDER_DICTIONARY_EVIDENCE_LOCAL
 }
 
-fn binder_kind_allows_dictionary_domain(kind: BinderKind) -> Bool {
-    let tag = binder_kind_tag(kind)
-    tag == BINDER_SOURCE_PARAM || tag == BINDER_LAMBDA_PARAM ||
-        tag == BINDER_HANDLER_PARAM || tag == BINDER_DICTIONARY_EVIDENCE_LOCAL
-}
-
 fn binder_kind_expected_path_role(kind: BinderKind) -> PathRole {
     match BINDER_KIND_PATH_ROLE_TAGS.get(binder_kind_tag(kind)) {
         some(0) => path_role_declaration(),
@@ -651,9 +643,19 @@ pub struct BinderEntry {
     site: PathRef
 }
 
-pub fn make_binder_entry(
+// Source binder kinds remain an exhaustive declarative census, but F1 cannot
+// relate a source SlotRef to its structural site and executable owner.  Their
+// activation waits for one atomic typed producer in F2.  Consequently the
+// only public F1 constructor accepts normalized synthetic binders.
+pub fn make_synthetic_binder_entry(
     slot: SlotRef, owner: ExecutableRef, kind: BinderKind, site: PathRef
 ) -> BinderEntry {
+    if binder_kind_is_source(kind) {
+        panic("IR inventory: source BinderEntry activation is deferred")
+    }
+    if slot_ref_is_source(slot) {
+        panic("IR inventory: synthetic binder uses source SlotRef")
+    }
     if !executable_ref_contains_path(owner, site) {
         panic("IR inventory: binder site crosses executable owner")
     }
@@ -661,33 +663,8 @@ pub fn make_binder_entry(
             path_ref_role(site), binder_kind_expected_path_role(kind)) {
         panic("IR inventory: binder site role mismatch")
     }
-    if binder_kind_is_source(kind) {
-        if !slot_ref_is_source(slot) {
-            panic("IR inventory: source binder uses synthetic SlotRef")
-        }
-        let domain = slot_ref_source_domain(slot)
-        let domain_allowed = if binder_kind_tag(kind) ==
-                BINDER_DICTIONARY_EVIDENCE_LOCAL {
-            slot_domain_same(domain, slot_domain_dictionary())
-        } else {
-            slot_domain_same(domain, slot_domain_lexical()) ||
-                (binder_kind_allows_dictionary_domain(kind) &&
-                 slot_domain_same(domain, slot_domain_dictionary()))
-        }
-        if !domain_allowed {
-            panic("IR inventory: source binder uses forbidden slot domain")
-        }
-        if slot_ref_source_origin_module_key(slot) !=
-           executable_ref_origin_module_key(owner) {
-            panic("IR inventory: source binder crosses executable module owner")
-        }
-    } else {
-        if slot_ref_is_source(slot) {
-            panic("IR inventory: normalized binder uses source SlotRef")
-        }
-        if !path_ref_same(slot_ref_synthetic_path(slot), site) {
-            panic("IR inventory: synthetic binder slot/site mismatch")
-        }
+    if !path_ref_same(slot_ref_synthetic_path(slot), site) {
+        panic("IR inventory: synthetic binder slot/site mismatch")
     }
     BinderEntry { slot: slot, owner: owner, kind: kind, site: site }
 }
