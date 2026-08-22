@@ -2332,50 +2332,93 @@ def discover_module_positive(modules_dir: Path) -> List[Path]:
     return cases
 
 
-def discover_module_check_positive(modules_dir: Path) -> List[Path]:
-    """Find explicit check-only modules with no runtime/error companion."""
+def module_check_positive_census(
+    modules_dir: Path,
+) -> Tuple[List[Path], List[str]]:
+    """Validate every explicit marker before exposing any check-only case."""
     if not modules_dir.is_dir():
-        return []
-    cases = []
-    for directory in sorted(modules_dir.iterdir()):
-        if not directory.is_dir():
-            continue
+        return [], []
+    cases: List[Path] = []
+    errors: List[str] = []
+    markers = sorted(modules_dir.glob("*/main.check"))
+    for marker in markers:
+        directory = marker.parent
         main = directory / "main.ring"
-        marker = directory / "main.check"
         expected = directory / "main.expected"
         error = directory / "main.error"
+        valid = True
+        if marker.is_symlink() or not marker.is_file():
+            errors.append(f"{directory.name}: main.check is not a regular file")
+            valid = False
+        if main.is_symlink() or not main.is_file():
+            errors.append(f"{directory.name}: main.check has no sibling main.ring")
+            valid = False
         if (
-            main.is_file()
-            and marker.is_file()
-            and not expected.exists()
-            and not error.exists()
+            expected.exists() or expected.is_symlink()
+            or error.exists() or error.is_symlink()
         ):
+            errors.append(
+                f"{directory.name}: main.check overlaps main.expected/main.error")
+            valid = False
+        try:
+            contract = marker.read_bytes()
+        except OSError as exc:
+            errors.append(f"{directory.name}: cannot read main.check: {exc}")
+            valid = False
+        else:
+            if contract != b"OK\n":
+                errors.append(
+                    f"{directory.name}: main.check bytes must be exactly OK\\n")
+                valid = False
+        if valid:
             cases.append(main)
-    return cases
+    if errors:
+        return [], errors
+    return cases, []
+
+
+def discover_module_check_positive(modules_dir: Path) -> List[Path]:
+    """Return cases only after the complete explicit marker census passes."""
+    cases, errors = module_check_positive_census(modules_dir)
+    return [] if errors else cases
 
 
 def module_check_positive_discovery_errors(modules_dir: Path) -> List[str]:
     """Validate explicit marker ownership for the generic check-only lane."""
-    errors: List[str] = []
-    discovered = discover_module_check_positive(modules_dir)
+    discovered, errors = module_check_positive_census(modules_dir)
     required = modules_dir / "plan_namespace_empty_growth_cycle" / "main.ring"
-    if required not in discovered:
+    if not errors and required not in discovered:
         errors.append(
             "plan_namespace_empty_growth_cycle is absent from module check-only discovery")
-    for main in discovered:
-        case_dir = main.parent
-        marker = case_dir / "main.check"
-        if (case_dir / "main.expected").exists() or (case_dir / "main.error").exists():
-            errors.append(
-                f"{case_dir.name}: check-only marker overlaps another module lane")
-        try:
-            contract = marker.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            errors.append(f"{case_dir.name}: cannot read main.check: {exc}")
-        else:
-            if contract != "OK\n":
-                errors.append(
-                    f"{case_dir.name}: main.check must be the exact OK contract")
+    return errors
+
+
+def module_check_positive_discovery_unit_errors() -> List[str]:
+    """Exercise overlap and orphan marker rejection without invoking Ring."""
+    errors: List[str] = []
+    with tempfile.TemporaryDirectory(prefix="ring_module_check_discovery_") as tmp:
+        root = Path(tmp)
+        orphan = root / "orphan"
+        overlap = root / "overlap"
+        orphan.mkdir()
+        overlap.mkdir()
+        (orphan / "main.check").write_bytes(b"OK\n")
+        (overlap / "main.ring").write_text("fn main() {}\n", encoding="utf-8")
+        (overlap / "main.check").write_bytes(b"OK\n")
+        (overlap / "main.expected").write_text("unused\n", encoding="utf-8")
+        discovered, findings = module_check_positive_census(root)
+    expected = [
+        "orphan: main.check has no sibling main.ring",
+        "overlap: main.check overlaps main.expected/main.error",
+    ]
+    if discovered:
+        errors.append(
+            "invalid marker census exposed check-only cases: "
+            + ", ".join(path.parent.name for path in discovered))
+    if findings != expected:
+        errors.append(
+            f"module check-only discovery findings were {findings!r}, "
+            f"expected {expected!r}")
     return errors
 
 
@@ -2831,7 +2874,9 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
     """Run the E2E test suite."""
     suite = "e2e"
 
-    module_check_errors = module_check_positive_discovery_errors(MODULES_DIR)
+    module_check_errors = module_check_positive_discovery_unit_errors()
+    module_check_errors.extend(
+        module_check_positive_discovery_errors(MODULES_DIR))
     if module_check_errors:
         for index, error in enumerate(module_check_errors, 1):
             collector.add(TestResult(
