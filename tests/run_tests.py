@@ -5333,12 +5333,16 @@ def representation_s1_contract_errors(
             "EffectOp { effect_name: Str, op_name: Str, op_def_id: Int",
             "pub op_def_id: Int",
             "pub effect_op_identities: Map<Str, Int>",
+            "SYNTHETIC_MEMBER_DEF_ID_BASE",
             "SYNTHETIC_CALLABLE_DEF_ID_BASE",
+            "pub fn is_synthetic_member_def_id(",
             "overlapping synthetic DefId domains",
             "HIR Call exact callee identity differs from its producer",
             "HIR callable result has no exact DefId",
             "HIR non-callable result carries a callable DefId",
             "DefId differs from canonical identity",
+            "member-registration DefId namespace",
+            "callable-value DefId namespace",
             "activated ownership before planner",
         ),
         "infer_ctx": (
@@ -5363,25 +5367,37 @@ def representation_s1_contract_errors(
         "infer_decl": (
             "registered sig member has no exact DefId",
             "sig member registration is missing",
-            "delegate wrapper scheme has no exact DefId",
+            "ctx.env.require_member_registration_def_id(",
+            '"delegate wrapper scheme"',
             "def_id: some(wrapper_def_id)",
+            "callee_def_id: some(forwarded_member_def_id)",
+            "wrapper_def_id == forwarded_member_def_id",
+            "ctx.env.reserve_legacy_delegate_hdecl_def_id()",
             "def_id: op.def_id",
             "name: m.name, def_id: m.def_id",
             "effect_op_identities: effect_op_identities",
             "dict_resolver: none, identity_resolver: some(ctx)",
         ),
         "infer_register": (
-            "fn ensure_registered_callable_identity(",
-            "def_id: ctx.env.fresh_def_id(), params: param_types",
-            "def_id: ctx.env.fresh_def_id(), ty: fn_type",
-            "def_id: some(ctx.env.fresh_def_id())",
+            "fn mint_new_member_registration_identity(",
+            "def_id: ctx.env.fresh_member_registration_def_id(), params: param_types",
+            "def_id: ctx.env.fresh_member_registration_def_id(), ty: fn_type",
+            "def_id: some(ctx.env.fresh_member_registration_def_id())",
         ),
         "env": (
             "registered method scheme has no exact DefId",
+            "pub next_member_registration_ordinal: Int",
+            "pub fn fresh_member_registration_def_id(",
+            "pub fn require_member_registration_def_id(",
+            "pub fn reserve_legacy_delegate_hdecl_def_id(",
+            "self.ids.next_def_id = self.ids.next_def_id + 1",
         ),
         "builtins": (
-            "def_id: some(env.fresh_def_id())",
-            "def_id: env.fresh_def_id()",
+            "def_id: some(env.fresh_member_registration_def_id())",
+            "def_id: env.fresh_member_registration_def_id()",
+        ),
+        "derive": (
+            "def_id: some(env.fresh_member_registration_def_id())",
         ),
         "zonk": (
             "pub identity_resolver: InferCtx?",
@@ -5427,6 +5443,20 @@ def representation_s1_contract_errors(
             if token not in source:
                 errors.append(
                     f"{label}: missing representation S1 contract {token!r}")
+
+    hir_masked = mask_ring_strings_and_comments(sources["hir"])
+    expected_domain_bases = {
+        "SYNTHETIC_MEMBER_DEF_ID_BASE": "0 - 1000000000",
+        "SYNTHETIC_CALLABLE_DEF_ID_BASE": "0 - 2000000000",
+        "SYNTHETIC_DICT_DEF_ID_BASE": "0 - 3000000000",
+        "SYNTHETIC_ANF_DEF_ID_BASE": "0 - 4000000000",
+        "SYNTHETIC_RC_DEF_ID_BASE": "0 - 5000000000",
+    }
+    for name, value in expected_domain_bases.items():
+        if re.search(
+                rf"pub\s+const\s+{name}\s*:\s*Int\s*=\s*{re.escape(value)}\b",
+                hir_masked) is None:
+            errors.append(f"HIR identity domain base drifted: {name}")
 
     transport_specs = (
         ("Type::FnType", ("ownership_term",)),
@@ -5486,6 +5516,8 @@ def representation_s1_contract_errors(
         "record_shadow", "clone_shadow", "hydrate_shadow",
         "callable_result_role_by_def_id", "returned_callable_result_role",
         "ownership_plan_program", "HExpr::Take", "Take {",
+        "ExactMemberRef", "MemberExportRef", "localize_member_registration",
+        "member_registration_origins", "member_export_inventory",
     ):
         if forbidden in active_sources:
             errors.append(
@@ -5528,6 +5560,49 @@ def representation_s1_contract_errors(
     elif ("next_callable_identity_ordinal" not in counter_body or
           "fresh_def_id" in counter_body or "ownership" in counter_body):
         errors.append("callable synthetic identity perturbs a source/ownership counter")
+
+    member_counter_body, member_counter_error = extract_ring_function_body(
+        sources["env"], "fresh_member_registration_def_id")
+    if member_counter_error:
+        errors.append(member_counter_error)
+    elif not all(token in member_counter_body for token in (
+            "next_member_registration_ordinal",
+            "synthetic_def_id(SYNTHETIC_MEMBER_DEF_ID_BASE, ordinal)")) or any(
+                token in member_counter_body for token in (
+                    "fresh_def_id", "next_def_id",
+                    "next_callable_identity_ordinal", "ownership")):
+        errors.append("member registration identity perturbs another counter/domain")
+
+    for label in ("builtins", "infer_register", "derive"):
+        masked = mask_ring_strings_and_comments(sources[label])
+        if re.search(r"\bfresh_def_id\s*\(", masked):
+            errors.append(
+                f"{label}: registration-only path consumes the source DefId counter")
+
+    reserve_body, reserve_error = extract_ring_function_body(
+        sources["env"], "reserve_legacy_delegate_hdecl_def_id")
+    if reserve_error:
+        errors.append(reserve_error)
+    elif (reserve_body.count(
+            "self.ids.next_def_id = self.ids.next_def_id + 1") != 1 or any(
+                token in reserve_body for token in (
+                    "fresh_member_registration_def_id", "synthetic_def_id(",
+                    "return "))):
+        errors.append("delegate legacy reservation is not one source-only tombstone")
+
+    for label, function_name, required in (
+        ("env", "bind",
+         "none => TypeScheme { ..scheme, def_id: some(self.fresh_def_id()) }"),
+        ("infer_register", "register_fn_common", "ctx.env.bind("),
+        ("infer_register", "bind_variant_constructor", "ctx.env.bind("),
+    ):
+        body, extract_error = extract_ring_function_body(
+            sources[label], function_name)
+        if extract_error:
+            errors.append(extract_error)
+        elif required not in body or "fresh_member_registration_def_id" in body:
+            errors.append(
+                f"{label}.{function_name} no longer preserves ordinary source DefIds")
 
     result_body, result_error = extract_ring_function_body(
         sources["infer_ctx"], "exact_callable_result_identity")
@@ -5592,9 +5667,48 @@ def representation_s1_contract_errors(
     if effect_validator_error:
         errors.append(effect_validator_error)
     elif not all(token in effect_validator for token in (
+            "!is_synthetic_member_def_id(def_id)",
             "some(expected) => if expected != def_id",
-            "has no registration identity")):
+            "has no registration identity")) or any(token in effect_validator for token in (
+                "def_id < 0", "is_synthetic_callable_def_id(def_id)")):
         errors.append("HIR effect identity is not tied to canonical registration")
+
+    for function_name, required, forbidden in (
+        ("validate_hir_member_binder",
+         "!is_synthetic_member_def_id(def_id)",
+         "is_synthetic_callable_def_id(def_id)"),
+        ("validate_hir_callable_binder",
+         "!is_synthetic_callable_def_id(def_id)",
+         "is_synthetic_member_def_id(def_id)"),
+    ):
+        body, extract_error = extract_ring_function_body(
+            sources["hir"], function_name)
+        if extract_error:
+            errors.append(extract_error)
+        elif required not in body or forbidden in body:
+            errors.append(f"HIR {function_name} accepts the wrong identity domain")
+
+    ordinary_binder, ordinary_binder_error = extract_ring_function_body(
+        sources["hir"], "validate_hir_binder")
+    if ordinary_binder_error:
+        errors.append(ordinary_binder_error)
+    elif not all(token in ordinary_binder for token in (
+            "def_id >= 0", "is_synthetic_dict_def_id(def_id)",
+            "is_synthetic_anf_def_id(def_id)",
+            "is_synthetic_rc_def_id(def_id)")):
+        errors.append("HIR ordinary binder lost source/lowering domain isolation")
+
+    decl_validator, decl_validator_error = extract_ring_function_body(
+        sources["hir"], "validate_hir_decls")
+    if decl_validator_error:
+        errors.append(decl_validator_error)
+    elif not all(token in decl_validator for token in (
+            "if member_function_context {",
+            "effect_op_ids, true)",
+            "member_function_context)",
+            "validate_hir_member_binder(",
+            "validate_hir_binder(")):
+        errors.append("HIR declarations do not separate member/source binders")
 
     default_collect, default_collect_error = extract_ring_function_body(
         sources["infer"], "collect_default_expr_binders")
@@ -5697,6 +5811,78 @@ def representation_s1_contract_errors(
         elif "HExpr::Lambda { def_id: def_id," not in body:
             errors.append(
                 f"perceus.{function_name} loses Lambda exact identity")
+
+    delegate_body, delegate_body_error = extract_ring_function_body(
+        sources["infer_decl"], "expand_delegate_impls")
+    if delegate_body_error:
+        errors.append(delegate_body_error)
+    else:
+        delegate_required = (
+            "ctx.env.require_member_registration_def_id(",
+            "let forwarded_member_def_id = match field_method_scheme",
+            "if wrapper_def_id == forwarded_member_def_id",
+            "callee_def_id: some(forwarded_member_def_id)",
+            "def_id: some(wrapper_def_id)",
+            "ctx.env.reserve_legacy_delegate_hdecl_def_id()",
+        )
+        for token in delegate_required:
+            if token not in delegate_body:
+                errors.append(f"delegate exact member relation missing {token!r}")
+        if delegate_body.count(
+                "callee_def_id: some(forwarded_member_def_id)") != 2:
+            errors.append("delegate forwarded call does not use one exact member on both paths")
+        if delegate_body.count(
+                "ctx.env.reserve_legacy_delegate_hdecl_def_id()") != 1:
+            errors.append("delegate legacy reservation is not exactly once per wrapper loop")
+        call_index = delegate_body.find("let call_expr = if use_dict_dispatch")
+        reserve_index = delegate_body.find(
+            "ctx.env.reserve_legacy_delegate_hdecl_def_id()")
+        push_index = delegate_body.find("trait_hmethods.push(HDecl::Fn {")
+        if not (0 <= call_index < reserve_index < push_index):
+            errors.append("delegate legacy reservation moved away from the old HDecl mint point")
+        if "def_id: some(ctx.env.fresh_def_id())" in delegate_body:
+            errors.append("delegate HDecl regained a second source identity")
+
+    delegate_canaries = (
+        ("ownership_delegate_zero_canary", None, 0),
+        ("ownership_delegate_one_canary", "CounterOne", 1),
+        ("ownership_delegate_many_canary", "CounterMany", 2),
+    )
+    for label, trait_name, wrapper_count in delegate_canaries:
+        source = sources[label]
+        masked = mask_ring_strings_and_comments(source)
+        if "?" in masked:
+            errors.append(f"{label}: introduced forbidden T? syntax")
+        for_index = masked.find("for value in values")
+        if for_index < 0:
+            errors.append(f"{label}: missing protocol-for sequence canary")
+        delegate_matches = list(re.finditer(r"\bdelegate\s+inner\s*:", masked))
+        if wrapper_count == 0:
+            if delegate_matches:
+                errors.append(f"{label}: zero-wrapper canary contains a delegate")
+            continue
+        trait_match = re.search(
+            rf"\btrait\s+{re.escape(trait_name or '')}\s*\{{", masked)
+        if trait_match is None:
+            errors.append(f"{label}: missing exact delegate trait")
+            continue
+        trait_open = masked.find("{", trait_match.start(), trait_match.end())
+        try:
+            trait_close = matching_delimiter(masked, trait_open, "{", "}")
+        except ValueError as exc:
+            errors.append(f"{label}: malformed trait canary: {exc}")
+            continue
+        trait_body = masked[trait_open + 1:trait_close]
+        method_count = len(re.findall(r"\bfn\s+[A-Za-z_][A-Za-z0-9_]*\s*\(", trait_body))
+        if method_count != wrapper_count:
+            errors.append(
+                f"{label}: expected {wrapper_count} wrapper methods, found {method_count}")
+        if len(delegate_matches) != 1:
+            errors.append(f"{label}: expected one delegate declaration")
+        elif not (trait_close < delegate_matches[0].start() < for_index):
+            errors.append(f"{label}: protocol-for does not follow delegate wrappers")
+        if "Option<Int>" not in source:
+            errors.append(f"{label}: callable fixture must spell explicit Option<Int>")
 
     fixture_contracts = {
         "ownership_fixture": (
@@ -7117,6 +7303,18 @@ def identity_checkpoint_source_errors() -> List[str]:
             REPO / "tests" / "cases" / "modules" /
             "ownership_shadow_default_method_collision" / "main.ring"
         ),
+        "ownership_delegate_zero_canary": (
+            REPO / "tests" / "cases" /
+            "ownership_member_counter_delegate_zero.ring"
+        ),
+        "ownership_delegate_one_canary": (
+            REPO / "tests" / "cases" /
+            "ownership_member_counter_delegate_one.ring"
+        ),
+        "ownership_delegate_many_canary": (
+            REPO / "tests" / "cases" /
+            "ownership_member_counter_delegate_many.ring"
+        ),
     }
     sources: dict[str, str] = {}
     errors: List[str] = []
@@ -7508,6 +7706,54 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("synthetic counter separation", "infer_ctx",
          "synthetic_def_id(SYNTHETIC_CALLABLE_DEF_ID_BASE, ordinal)",
          "ctx.env.fresh_def_id()"),
+        ("member/callable domain overlap", "hir",
+         "pub const SYNTHETIC_MEMBER_DEF_ID_BASE: Int = 0 - 1000000000",
+         "pub const SYNTHETIC_MEMBER_DEF_ID_BASE: Int = 0 - 2000000000"),
+        ("member counter separation", "env",
+         "synthetic_def_id(SYNTHETIC_MEMBER_DEF_ID_BASE, ordinal)",
+         "self.fresh_def_id()"),
+        ("ordinary bind source sequence", "env",
+         "none => TypeScheme { ..scheme, def_id: some(self.fresh_def_id()) }",
+         "none => TypeScheme { ..scheme, def_id: some(self.fresh_member_registration_def_id()) }"),
+        ("builtin inherent member source pollution", "builtins",
+         "..scheme, def_id: some(env.fresh_member_registration_def_id())",
+         "..scheme, def_id: some(env.fresh_def_id())"),
+        ("builtin impl member source pollution", "builtins",
+         "..specialized,\n                            def_id: some(env.fresh_member_registration_def_id())",
+         "..specialized,\n                            def_id: some(env.fresh_def_id())"),
+        ("builtin effect member source pollution", "builtins",
+         "EffectOpDef { name: \"read\", def_id: env.fresh_member_registration_def_id()",
+         "EffectOpDef { name: \"read\", def_id: env.fresh_def_id()"),
+        ("builtin trait member source pollution", "builtins",
+         "TraitMethodDef { name: \"eq\", def_id: env.fresh_member_registration_def_id()",
+         "TraitMethodDef { name: \"eq\", def_id: env.fresh_def_id()"),
+        ("source effect member source pollution", "infer_register",
+         "def_id: ctx.env.fresh_member_registration_def_id(), params: param_types",
+         "def_id: ctx.env.fresh_def_id(), params: param_types"),
+        ("source trait member source pollution", "infer_register",
+         "def_id: ctx.env.fresh_member_registration_def_id(), ty: fn_type",
+         "def_id: ctx.env.fresh_def_id(), ty: fn_type"),
+        ("source impl member source pollution", "infer_register",
+         "bounds: impl_scheme_bounds,\n        def_id: some(ctx.env.fresh_member_registration_def_id())",
+         "bounds: impl_scheme_bounds,\n        def_id: some(ctx.env.fresh_def_id())"),
+        ("source sig member source pollution", "infer_register",
+         "def_id: some(ctx.env.fresh_member_registration_def_id()) })",
+         "def_id: some(ctx.env.fresh_def_id()) })"),
+        ("new member mint source pollution", "infer_register",
+         "def_id: some(ctx.env.fresh_member_registration_def_id()) }",
+         "def_id: some(ctx.env.fresh_def_id()) }"),
+        ("derive member source pollution", "derive",
+         "def_id: some(env.fresh_member_registration_def_id())",
+         "def_id: some(env.fresh_def_id())"),
+        ("effect accepts nonnegative member", "hir",
+         "if !is_synthetic_member_def_id(def_id) {",
+         "if def_id < 0 {"),
+        ("member binder accepts callable domain", "hir",
+         "if !is_synthetic_member_def_id(def_id) {\n        panic(\"HIR ${label} is outside the member-registration DefId namespace\")",
+         "if !is_synthetic_callable_def_id(def_id) {\n        panic(\"HIR ${label} is outside the member-registration DefId namespace\")"),
+        ("callable binder accepts member domain", "hir",
+         "if !is_synthetic_callable_def_id(def_id) {\n        panic(\"HIR ${label} is outside the callable-value DefId namespace\")",
+         "if !is_synthetic_member_def_id(def_id) {\n        panic(\"HIR ${label} is outside the callable-value DefId namespace\")"),
         ("callable result iff", "infer_ctx",
          "_ => (ty, none)",
          "_ => (ty, some(fresh_callable_identity_def_id(ctx)))"),
@@ -7600,6 +7846,50 @@ def identity_checkpoint_source_errors() -> List[str]:
         if not representation_s1_contract_errors(mutated):
             errors.append(
                 f"representation mutation {label} escaped source oracle")
+
+    reservation = "ctx.env.reserve_legacy_delegate_hdecl_def_id()"
+    reservation_source = sources["infer_decl"]
+    call_anchor = "let call_expr = if use_dict_dispatch"
+    write_anchor = (
+        "ctx.env.reserve_legacy_delegate_hdecl_def_id()\n"
+        "                                            trait_hmethods.push(HDecl::Fn {\n"
+        "                                                name: tm.name,\n"
+        "                                                def_id: some(wrapper_def_id)")
+    reservation_mutations: List[Tuple[str, str]] = []
+    if reservation_source.count(reservation) == 1:
+        reservation_mutations.append((
+            "delegate reservation deleted",
+            reservation_source.replace(reservation, "", 1)))
+        reservation_mutations.append((
+            "delegate reservation duplicated",
+            reservation_source.replace(
+                reservation, f"{reservation}\n                                            {reservation}", 1)))
+        without_reservation = reservation_source.replace(reservation, "", 1)
+        reservation_mutations.append((
+            "delegate reservation moved before body",
+            without_reservation.replace(
+                call_anchor,
+                f"{reservation}\n                                            {call_anchor}",
+                1)))
+    else:
+        errors.append("delegate reservation mutation anchor is not unique")
+    if reservation_source.count(write_anchor) == 1:
+        reservation_mutations.append((
+            "delegate reservation written into HDecl",
+            reservation_source.replace(
+                write_anchor,
+                "let reserved_source_def_id = ctx.env.fresh_def_id()\n"
+                "                                            trait_hmethods.push(HDecl::Fn {\n"
+                "                                                name: tm.name,\n"
+                "                                                def_id: some(reserved_source_def_id)",
+                1)))
+    else:
+        errors.append("delegate reservation write mutation anchor is not unique")
+    for label, mutated_source in reservation_mutations:
+        mutated = dict(sources)
+        mutated["infer_decl"] = mutated_source
+        if not representation_s1_contract_errors(mutated):
+            errors.append(f"representation mutation {label} escaped source oracle")
     return errors
 
 
