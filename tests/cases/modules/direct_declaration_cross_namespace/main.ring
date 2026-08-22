@@ -3,6 +3,13 @@ use dep::{tick}
 struct SharedName { value: Int }
 enum SharedName { Variant }
 type SharedName = Int
+fn SharedName() -> Int { 1 }
+trait SharedName {
+    fn trait_value(self) -> Int
+}
+mod SharedName {
+    pub fn module_value() -> Int { 2 }
+}
 
 effect SharedEffect {
     fn operation(value: Int) -> Int
