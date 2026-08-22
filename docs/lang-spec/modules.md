@@ -258,29 +258,6 @@ mod io_layer requires {io} {
 - `mut<T>` marker effect 参与 capability 检查；`requires {}` 禁止修改参数或捕获状态等会让 mutation effect 逃逸的操作，局部 `let mut` 仍保持局部
 - `unsafe` 同时要求 `unsafe { ... }` discharge 与包含 `unsafe` 的模块许可
 
-## `sig` 接口声明
-
-`sig` 块定义模块接口签名，声明一组函数的类型签名但不提供实现。
-
-### 语法
-
-```ring
-sig Serializable {
-    fn serialize<T>(value: T) -> Str
-    fn deserialize<T>(data: Str) -> T with {fail<Str>}
-}
-```
-
-`sig` 块包含一组 `fn` 签名声明，每个签名可以有：
-- 类型参数（泛型）
-- 参数列表（含类型标注）
-- 返回类型
-- Effect 标注（`with {effects}`）
-
-`sig` 块可以标记 `pub` 以控制可见性。
-
-> **注意**：当前 `sig` 仅进行类型注册（`register_sig` 生成 `SigDef`），不支持 `mod : SigName` 一致性检查。一致性验证是未来特性。
-
 ## 编译模型
 
 ### 自动检测
@@ -323,6 +300,6 @@ sig Serializable {
 ## 限制
 
 - 不支持 first-class modules
-- 不支持 `mod : SigName` 一致性检查（`sig` 仅做类型注册，不验证模块是否满足签名）
+- 0.1 不提供 `sig` 声明或 module-signature conformance；post-0.1 的 B-192 只有在真实 conformance 一并实现时才会重新设计该能力
 - 不支持跨文件相对路径（`super::`/`self::` 仅在 inline `mod` 块内可用）
 - LSP 当前不可用，因此跨文件跳转、引用查找与 hover 尚无受支持入口
