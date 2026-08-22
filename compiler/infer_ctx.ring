@@ -19,6 +19,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
 use unify::{UnificationError, empty_subst, unify, occurs_in, unify_effect_params}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     NamespaceKind}
+use ir_identity::{symbol_ref_canonical_payload}
 
 // ============================================================
 // InferResult — return type for expression inference
@@ -230,7 +231,9 @@ fn project_binding_key(binding: ResolvedNamespaceBinding) -> Str {
         NamespaceKind::Trait => "trait",
         NamespaceKind::Sig => "sig"
     }
-    "${namespace}|${binding.exposed_name}|${binding.payload}"
+    // This is only an application bucket for one already-resolved target
+    // frame.  Resolver SymbolRef remains the sole origin authority.
+    "${namespace}|${binding.exposed_name}"
 }
 
 fn current_scope_value(ctx: InferCtx, name: Str) -> TypeScheme? {
@@ -263,7 +266,9 @@ fn apply_project_value_binding(
     binding: ResolvedNamespaceBinding,
     mut state: ProjectNamespaceFrameState
 ) -> Bool {
-    match ctx.env.lookup(binding.payload) {
+    let canonical_payload =
+        symbol_ref_canonical_payload(binding.symbol)
+    match ctx.env.lookup(canonical_payload) {
         none => false,
         some(source_scheme) => {
             let previous = current_scope_value(ctx, binding.exposed_name)
@@ -281,7 +286,7 @@ fn apply_project_value_binding(
             })
 
             let ultimate = exact_scheme_value_origin(
-                ctx.use_aliases, source_scheme, binding.payload)
+                ctx.use_aliases, source_scheme, canonical_payload)
             ctx.use_aliases.insert(new_def_id, ultimate)
             ctx.value_binding_kinds.insert(
                 new_def_id, value_binding_kind(ctx, source_scheme.def_id))
@@ -301,7 +306,7 @@ fn apply_project_value_binding(
                 name: binding.exposed_name,
                 previous: previous_variant
             })
-            match ctx.project_namespace_ctor_enums.get(binding.payload) {
+            match ctx.project_namespace_ctor_enums.get(canonical_payload) {
                 some(enum_payload) => {
                     ctx.env.types.variant_to_enum.insert(
                         binding.exposed_name, enum_payload)
@@ -314,7 +319,7 @@ fn apply_project_value_binding(
                 name: binding.exposed_name,
                 previous: previous_mut
             })
-            let source_mut = match ctx.fn_mut_params.get(binding.payload) {
+            let source_mut = match ctx.fn_mut_params.get(canonical_payload) {
                 some(flags) => some(flags),
                 none => ctx.fn_mut_params.get(ultimate)
             }
@@ -332,12 +337,14 @@ fn apply_project_namespace_binding(
     binding: ResolvedNamespaceBinding,
     mut state: ProjectNamespaceFrameState
 ) -> Bool {
+    let canonical_payload =
+        symbol_ref_canonical_payload(binding.symbol)
     match binding.namespace {
         NamespaceKind::Value => apply_project_value_binding(ctx, binding, state),
         NamespaceKind::Struct => {
-            let source = match ctx.env.types.extern_structs.get(binding.payload) {
+            let source = match ctx.env.types.extern_structs.get(canonical_payload) {
                 some(def) => some(def),
-                none => ctx.env.types.structs.get(binding.payload)
+                none => ctx.env.types.structs.get(canonical_payload)
             }
             match source {
                 none => false,
@@ -351,7 +358,7 @@ fn apply_project_namespace_binding(
                 }
             }
         },
-        NamespaceKind::Enum => match ctx.env.types.enums.get(binding.payload) {
+        NamespaceKind::Enum => match ctx.env.types.enums.get(canonical_payload) {
             none => false,
             some(def) => {
                 state.journal.push(ProjectNamespaceUndo::Enum {
@@ -362,7 +369,7 @@ fn apply_project_namespace_binding(
                 true
             }
         },
-        NamespaceKind::TypeAlias => match ctx.env.types.type_aliases.get(binding.payload) {
+        NamespaceKind::TypeAlias => match ctx.env.types.type_aliases.get(canonical_payload) {
             none => false,
             some(def) => {
                 state.journal.push(ProjectNamespaceUndo::TypeAlias {
@@ -373,7 +380,7 @@ fn apply_project_namespace_binding(
                 true
             }
         },
-        NamespaceKind::Effect => match ctx.env.types.effects.get(binding.payload) {
+        NamespaceKind::Effect => match ctx.env.types.effects.get(canonical_payload) {
             none => false,
             some(def) => {
                 state.journal.push(ProjectNamespaceUndo::Effect {
@@ -384,7 +391,7 @@ fn apply_project_namespace_binding(
                 true
             }
         },
-        NamespaceKind::EffectAlias => match ctx.env.types.effect_aliases.get(binding.payload) {
+        NamespaceKind::EffectAlias => match ctx.env.types.effect_aliases.get(canonical_payload) {
             none => false,
             some(def) => {
                 state.journal.push(ProjectNamespaceUndo::EffectAlias {
@@ -395,7 +402,7 @@ fn apply_project_namespace_binding(
                 true
             }
         },
-        NamespaceKind::Trait => match ctx.env.trait_reg.traits.get(binding.payload) {
+        NamespaceKind::Trait => match ctx.env.trait_reg.traits.get(canonical_payload) {
             none => false,
             some(def) => {
                 state.journal.push(ProjectNamespaceUndo::Trait {
@@ -406,7 +413,7 @@ fn apply_project_namespace_binding(
                 true
             }
         },
-        NamespaceKind::Sig => match ctx.env.types.sigs.get(binding.payload) {
+        NamespaceKind::Sig => match ctx.env.types.sigs.get(canonical_payload) {
             none => false,
             some(def) => {
                 state.journal.push(ProjectNamespaceUndo::Sig {
@@ -506,10 +513,14 @@ pub fn install_project_namespace_plan(
             }
         }
     }
-    for entry in plan.enum_variant_facts.entries() {
-        let (enum_payload, ctor_facts) = entry
-        for ctor in ctor_facts {
-            ctx.project_namespace_ctor_enums.insert(ctor.payload, enum_payload)
+    for group in plan.enum_variant_facts {
+        let enum_payload =
+            symbol_ref_canonical_payload(group.enum_symbol)
+        for ctor in group.constructors {
+            let ctor_payload =
+                symbol_ref_canonical_payload(ctor.symbol)
+            ctx.project_namespace_ctor_enums.insert(
+                ctor_payload, enum_payload)
         }
     }
     ctx.project_namespace_root_frame.is_some()

@@ -7432,6 +7432,12 @@ F1_BINDER_KIND_COUNT = 21
 F1_SEMANTIC_MUTATION_COUNT = 67
 F1_SCOPE_GUARD_COUNT = 14
 
+F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
+F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
+F2_U1A_SEMANTIC_MUTATION_COUNT = 54
+F2_U1A_SCOPE_GUARD_COUNT = 8
+F2_U1A_FIXTURE_COUNT = 10
+
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
     ("impl_method", "EXECUTABLE_IMPL_METHOD"),
@@ -8027,6 +8033,520 @@ def ir_inventory_f1_compile_errors(ring_exe: str) -> List[str]:
     return errors
 
 
+F2_U1A_FUNCTION_MUTATIONS = (
+    # Resolver source-site and exact namespace construction.
+    ("resolver", "source_declaration_site_path", "site.use_index != -1",
+     "false"),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|use:${site.use_index}|item:${site.item_index}"'),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|item:${site.item_index}|owner:forged"'),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|item:${site.item_index}|name:forged"'),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|item:${site.item_index}|payload:forged"'),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|item:${site.item_index}|ordinal:${site.item_index}"'),
+    ("resolver", "source_seed_symbol",
+     "file_key != origin_site.file_key", "false"),
+    ("resolver", "source_seed_symbol",
+     "frame_index != origin_site.frame_index", "false"),
+    ("resolver", "source_seed_symbol",
+     "decl_index != origin_site.item_index", "false"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Value => namespace_value()",
+     "NamespaceKind::Value => namespace_nominal()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Struct => namespace_nominal()",
+     "NamespaceKind::Struct => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Enum => namespace_nominal()",
+     "NamespaceKind::Enum => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::TypeAlias => namespace_nominal()",
+     "NamespaceKind::TypeAlias => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Effect => namespace_effect()",
+     "NamespaceKind::Effect => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::EffectAlias => namespace_effect()",
+     "NamespaceKind::EffectAlias => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Trait => namespace_trait()",
+     "NamespaceKind::Trait => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Sig => namespace_signature()",
+     "NamespaceKind::Sig => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "symbol_ref_origin_module_key(symbol) != origin_site.file_key", "false"),
+    ("resolver", "source_seed_symbol", "!namespace_kind_same(",
+     "false && namespace_kind_same("),
+    ("resolver", "append_namespace_seed", "source_seed_symbol(",
+     "source_seed_symbol_missing("),
+    ("resolver", "append_namespace_seed",
+     "namespace: namespace,\n        symbol: symbol,\n        is_public: effective_public",
+     "namespace: namespace,\n        symbol: existing_symbol.unwrap(),\n        is_public: effective_public"),
+    ("resolver", "append_namespace_seed",
+     "namespace: namespace,\n            symbol: symbol,\n            is_public: true",
+     "namespace: namespace,\n            symbol: existing_symbol.unwrap(),\n            is_public: true"),
+    ("resolver", "append_enum_variant_fact_group",
+     "symbol_ref_same(group.enum_symbol, enum_symbol)", "false"),
+    ("resolver", "append_enum_variant_fact_group",
+     "symbol_ref_same(group.enum_symbol, enum_symbol)",
+     "symbol_ref_canonical_payload(group.enum_symbol) == "
+     "symbol_ref_canonical_payload(enum_symbol)"),
+    ("resolver", "enum_variant_constructors",
+     "symbol_ref_same(group.enum_symbol, enum_symbol)", "false"),
+    ("resolver", "claim_named_enum_relation_expansion",
+     "symbol_ref_same(expanded.enum_symbol, enum_symbol)", "false"),
+    ("resolver", "collect_decl_seed",
+     "symbol: ctor_symbol,\n                    is_public:",
+     "symbol: enum_symbol,\n                    is_public:"),
+    ("resolver", "collect_decl_seed", "some(ctor_symbol), is_pub",
+     "some(enum_symbol), is_pub"),
+    ("resolver", "binding_with_public", "symbol: binding.symbol",
+     "symbol: candidate.symbol"),
+    ("resolver", "add_namespace_fact",
+     "symbol_ref_same(existing.symbol, candidate.symbol)",
+     "existing.symbol == candidate.symbol"),
+    ("resolver", "add_namespace_fact",
+     "symbol_ref_same(existing.symbol, candidate.symbol)", "false"),
+    ("resolver", "reduce_value_lane", "symbol_ref_same(\n"
+     "                           existing.binding.symbol,\n"
+     "                           candidate.binding.symbol)",
+     "existing.binding.symbol == candidate.binding.symbol"),
+    ("resolver", "project_public_inline_fact", "symbol: fact.symbol",
+     "symbol: candidate.symbol"),
+    ("resolver", "deliver_namespace_fact", "symbol: fact.symbol",
+     "symbol: ctor.symbol"),
+    ("resolver", "materialize_structural_producer",
+     "ValueStructuralProducerSource::ImportCopyValue { .. } => match source {",
+     "ValueStructuralProducerSource::TerminalValue(_) => match source {"),
+    ("resolver", "materialize_structural_producer",
+     "ValueStructuralProducerSource::ProjectionCopyValue { .. } => match source {",
+     "ValueStructuralProducerSource::TerminalValue(_) => match source {"),
+    ("resolver", "append_distinct_symbol_ref",
+     "symbol_ref_same(existing, symbol)", "existing == symbol"),
+    ("resolver", "append_materialized_strong_ambiguity",
+     "!symbol_ref_same(\n"
+     "                                       left.binding.symbol,\n"
+     "                                       right.binding.symbol)",
+     "left.binding.symbol != right.binding.symbol"),
+    ("resolver", "materialize_structural_value_plan",
+     "symbol_ref_same(\n"
+     "                                                publication.binding.symbol,\n"
+     "                                                local.binding.symbol)",
+     "publication.binding.symbol == local.binding.symbol"),
+    ("resolver", "materialize_cycle_import_producer",
+     "materialize_value_binding(producer.target, symbol)",
+     "materialize_value_binding(producer.target, forged_symbol)"),
+    # InferCtx may only project an already-resolved symbol to legacy lookup.
+    ("infer_ctx", "apply_project_value_binding",
+     "symbol_ref_canonical_payload(binding.symbol)", "binding.exposed_name"),
+    ("infer_ctx", "apply_project_namespace_binding",
+     "symbol_ref_canonical_payload(binding.symbol)", "binding.exposed_name"),
+    ("infer_ctx", "install_project_namespace_plan",
+     "symbol_ref_canonical_payload(group.enum_symbol)", "group.enum_symbol"),
+    ("infer_ctx", "install_project_namespace_plan",
+     "symbol_ref_canonical_payload(ctor.symbol)", "ctor.exposed_name"),
+)
+
+
+def _f2_u1a_relation_finding(
+    source_name: str, function_name: str, token: str,
+) -> str:
+    return (
+        f"F2 U1a {source_name}.{function_name} misses relation {token!r}")
+
+
+def _f2_u1a_require_function_token(
+    source: str, source_name: str, function_name: str, token: str,
+    errors: List[str],
+) -> None:
+    body, body_error = _f0_function_body(source, function_name)
+    if body_error:
+        errors.append(body_error.replace(
+            "F0 function", f"F2 U1a {source_name} function"))
+        return
+    assert body is not None
+    if token not in body:
+        errors.append(_f2_u1a_relation_finding(
+            source_name, function_name, token))
+
+
+def _f2_u1a_struct_fields(
+    source: str, name: str, expected: List[str], errors: List[str],
+) -> None:
+    masked = mask_ring_strings_and_comments(source)
+    pattern = re.compile(
+        rf"\b(?:pub\s+)?struct\s+{re.escape(name)}\s*\{{")
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1:
+        errors.append(f"F2 U1a struct {name} found {len(matches)} times")
+        return
+    open_index = masked.rfind("{", matches[0].start(), matches[0].end())
+    try:
+        close_index = matching_delimiter(masked, open_index, "{", "}")
+    except ValueError as exc:
+        errors.append(f"F2 U1a struct {name}: {exc}")
+        return
+    body = masked[open_index + 1:close_index]
+    actual = [
+        match.group(1)
+        for match in re.finditer(
+            r"(?m)^\s*(?:pub\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", body)
+    ]
+    if actual != expected:
+        errors.append(
+            f"F2 U1a {name} field inventory drifted: {actual!r}")
+
+
+def resolver_identity_u1a_contract_errors(
+    resolver_source: str, infer_ctx_source: str,
+) -> List[str]:
+    errors: List[str] = []
+    resolver_masked = mask_ring_strings_and_comments(resolver_source)
+    infer_masked = mask_ring_strings_and_comments(infer_ctx_source)
+
+    _f2_u1a_struct_fields(resolver_source, "NamespaceSeed", [
+        "file_key", "frame_index", "decl_index", "origin_site", "owner",
+        "exposed_name", "namespace", "symbol", "is_public", "role",
+        "is_projection"], errors)
+    _f2_u1a_struct_fields(resolver_source, "ResolvedNamespaceBinding", [
+        "file_key", "frame_index", "owner", "exposed_name", "namespace",
+        "symbol", "is_public"], errors)
+    _f2_u1a_struct_fields(resolver_source, "EnumVariantFactGroup", [
+        "enum_symbol", "constructors"], errors)
+    _f2_u1a_struct_fields(resolver_source, "ValueBindingTarget", [
+        "file_key", "frame_index", "owner", "exposed_name", "is_public"],
+        errors)
+    _f2_u1a_struct_fields(resolver_source, "ValueStructuralProducer", [
+        "producer", "target", "occurrence", "source"], errors)
+    _f2_u1a_struct_fields(resolver_source, "ValueStructuralSlot", [
+        "target", "producers", "local_announced", "publication_announced",
+        "projection_registered", "has_public_seed_terminal",
+        "local_winner_index", "publication_winner_index"], errors)
+
+    for token in (
+            "TerminalValue(SymbolRef)", "ImportCopyValue {",
+            "ProjectionCopyValue {"):
+        if token not in resolver_masked:
+            errors.append(
+                f"F2 U1a payload-free Value source misses {token!r}")
+    if ".payload" in resolver_masked or "payload: \"\"" in resolver_source:
+        errors.append("F2 U1a resolver retained raw payload authority")
+
+    if resolver_source.count("make_symbol_ref(") != 1:
+        errors.append("F2 U1a resolver make_symbol_ref authority drifted")
+    source_seed_body, source_seed_error = _f0_function_body(
+        resolver_source, "source_seed_symbol")
+    if source_seed_error:
+        errors.append(source_seed_error.replace(
+            "F0 function", "F2 U1a resolver function"))
+    elif source_seed_body is not None and "make_symbol_ref(" not in source_seed_body:
+        errors.append("F2 U1a source seed helper no longer owns construction")
+
+    required_imports = (
+        "SymbolRef", "make_symbol_ref", "namespace_value",
+        "namespace_nominal", "namespace_trait", "namespace_effect",
+        "namespace_signature", "namespace_kind_same",
+        "symbol_ref_origin_module_key", "symbol_ref_namespace_kind",
+        "symbol_ref_canonical_payload", "symbol_ref_declaration_site_path",
+        "symbol_ref_same",
+    )
+    for token in required_imports:
+        if token not in resolver_source[:1200]:
+            errors.append(f"F2 U1a resolver import misses {token!r}")
+
+    seen_relations: set[Tuple[str, str, str]] = set()
+    for source_name, function_name, token, _ in F2_U1A_FUNCTION_MUTATIONS:
+        relation = (source_name, function_name, token)
+        if relation in seen_relations:
+            continue
+        seen_relations.add(relation)
+        source = resolver_source if source_name == "resolver" else infer_ctx_source
+        _f2_u1a_require_function_token(
+            source, source_name, function_name, token, errors)
+
+    for function_name in (
+            "add_namespace_fact", "reduce_value_lane",
+            "append_materialized_strong_ambiguity",
+            "append_distinct_symbol_ref", "materialize_structural_value_plan"):
+        body, body_error = _f0_function_body(resolver_source, function_name)
+        if body_error:
+            continue
+        assert body is not None
+        if "symbol_ref_canonical_payload" in body:
+            errors.append(
+                f"F2 U1a diagnostic projection entered {function_name} decision")
+
+    if "make_symbol_ref" in infer_masked:
+        errors.append("F2 U1a infer_ctx reconstructs SymbolRef")
+    if re.search(r"Map\s*<\s*Str\s*,\s*SymbolRef\s*>", infer_masked):
+        errors.append("F2 U1a infer_ctx gained typed origin side map")
+    key_body, key_error = _f0_function_body(
+        infer_ctx_source, "project_binding_key")
+    if key_error:
+        errors.append(key_error.replace(
+            "F0 function", "F2 U1a infer_ctx function"))
+    elif key_body is not None and (
+            "binding.symbol" in key_body or
+            "symbol_ref_canonical_payload" in key_body):
+        errors.append("F2 U1a project binding key became origin authority")
+
+    for forbidden in (
+            "CoreHIR", "FinalHIR", "RcHIR", "CalleeRef", "SourceBinder",
+            "source_binder", "member_identity", "single_namespace_cutover"):
+        if forbidden in resolver_masked or forbidden in infer_masked:
+            errors.append(f"F2 U1a exceeded resolver-origin scope via {forbidden!r}")
+    return errors
+
+
+def resolver_identity_u1a_semantic_mutation_errors(
+    resolver_source: str, infer_ctx_source: str,
+) -> Tuple[List[str], int]:
+    errors: List[str] = []
+    count = 0
+    for source_name, function_name, anchor, replacement in (
+            F2_U1A_FUNCTION_MUTATIONS):
+        count += 1
+        source = resolver_source if source_name == "resolver" else infer_ctx_source
+        mutated, mutation_error = _f0_mutate_function_once(
+            source, function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(
+                f"F2 U1a semantic mutation {source_name}.{function_name}: "
+                f"{mutation_error}")
+            continue
+        assert mutated is not None
+        findings = resolver_identity_u1a_contract_errors(
+            mutated if source_name == "resolver" else resolver_source,
+            mutated if source_name == "infer_ctx" else infer_ctx_source)
+        expected = _f2_u1a_relation_finding(
+            source_name, function_name, anchor)
+        if findings != [expected]:
+            errors.append(
+                f"F2 U1a semantic mutation {source_name}.{function_name} "
+                f"findings were {findings!r}, expected only {expected!r}")
+
+    custom_mutations = (
+        ("NamespaceSeed parallel payload", "resolver",
+         "pub symbol: SymbolRef,\n    pub is_public: Bool,",
+         "pub payload: Str,\n    pub is_public: Bool,",
+         "F2 U1a NamespaceSeed field inventory drifted"),
+        ("Resolved binding parallel payload", "resolver",
+         "pub symbol: SymbolRef,\n    pub is_public: Bool\n}",
+         "pub payload: Str,\n    pub is_public: Bool\n}",
+         "F2 U1a ResolvedNamespaceBinding field inventory drifted"),
+        ("Value target forged symbol", "resolver",
+         "struct ValueBindingTarget {\n    file_key: Str,",
+         "struct ValueBindingTarget {\n    symbol: SymbolRef,\n    file_key: Str,",
+         "F2 U1a ValueBindingTarget field inventory drifted"),
+        ("optional terminal symbol", "resolver",
+         "TerminalValue(SymbolRef)", "TerminalValue(Option<SymbolRef>)",
+         "F2 U1a payload-free Value source misses 'TerminalValue(SymbolRef)'"),
+        ("second resolver constructor", "resolver", "\nfn declaration_payload(",
+         "\nfn forged_symbol() { let _ = make_symbol_ref(\"\", namespace_value(), \"\", \"\") }\n\nfn declaration_payload(",
+         "F2 U1a resolver make_symbol_ref authority drifted"),
+        ("infer reverse construction", "infer_ctx", "\n// ============================================================\n// Error helper",
+         "\nfn infer_forged_symbol() { let _ = make_symbol_ref(\"\", namespace_value(), \"\", \"\") }\n\n"
+         "// ============================================================\n// Error helper",
+         "F2 U1a infer_ctx reconstructs SymbolRef"),
+        ("infer typed side index", "infer_ctx", "\n// ============================================================\n// Error helper",
+         "\nstruct InferOriginSideMap { values: Map<Str, SymbolRef> }\n\n"
+         "// ============================================================\n// Error helper",
+         "F2 U1a infer_ctx gained typed origin side map"),
+        ("application key consumes origin", "infer_ctx",
+         '"${namespace}|${binding.exposed_name}"',
+         '"${namespace}|${binding.exposed_name}|${symbol_ref_canonical_payload(binding.symbol)}"',
+         "F2 U1a project binding key became origin authority"),
+        ("cycle canonical collapse", "resolver",
+         "if symbol_ref_same(existing, symbol) { return }",
+         "if symbol_ref_same(existing, symbol) || "
+         "symbol_ref_canonical_payload(existing) == "
+         "symbol_ref_canonical_payload(symbol) { return }",
+         "F2 U1a diagnostic projection entered append_distinct_symbol_ref decision"),
+    )
+    for label, source_name, anchor, replacement, expected_prefix in custom_mutations:
+        count += 1
+        source = resolver_source if source_name == "resolver" else infer_ctx_source
+        if source.count(anchor) != 1:
+            errors.append(
+                f"F2 U1a semantic mutation {label} anchor count was "
+                f"{source.count(anchor)}")
+            continue
+        mutated = source.replace(anchor, replacement, 1)
+        findings = resolver_identity_u1a_contract_errors(
+            mutated if source_name == "resolver" else resolver_source,
+            mutated if source_name == "infer_ctx" else infer_ctx_source)
+        if len(findings) != 1 or not findings[0].startswith(expected_prefix):
+            errors.append(
+                f"F2 U1a semantic mutation {label} findings were "
+                f"{findings!r}, expected one {expected_prefix!r}")
+
+    count += 1
+    anchor = "if symbol_ref_same(existing.symbol, candidate.symbol) {"
+    injected = (
+        "if symbol_ref_canonical_payload(existing.symbol) == "
+        "symbol_ref_canonical_payload(candidate.symbol) ||\n"
+        "                   symbol_ref_same(existing.symbol, candidate.symbol) {")
+    if resolver_source.count(anchor) != 1:
+        errors.append("F2 U1a diagnostic-decision mutation anchor missing")
+    else:
+        mutated = resolver_source.replace(anchor, injected, 1)
+        findings = resolver_identity_u1a_contract_errors(
+            mutated, infer_ctx_source)
+        expected = "F2 U1a diagnostic projection entered add_namespace_fact decision"
+        if findings != [expected]:
+            errors.append(
+                f"F2 U1a diagnostic-decision mutation findings were "
+                f"{findings!r}, expected only {expected!r}")
+
+    if count != F2_U1A_SEMANTIC_MUTATION_COUNT:
+        errors.append(
+            f"F2 U1a semantic mutation count was {count}, expected "
+            f"{F2_U1A_SEMANTIC_MUTATION_COUNT}")
+    return errors, count
+
+
+def resolver_identity_u1a_scope_guard_errors(
+    resolver_source: str, infer_ctx_source: str,
+) -> Tuple[List[str], int]:
+    guards = (
+        ("CoreHIR", "\nstruct CoreHIR { nodes: Int }\n"),
+        ("FinalHIR", "\nstruct FinalHIR { nodes: Int }\n"),
+        ("RcHIR", "\nstruct RcHIR { nodes: Int }\n"),
+        ("CalleeRef", "\nstruct CalleeRef { value: Int }\n"),
+        ("source binder", "\nfn source_binder() {}\n"),
+        ("member identity", "\nfn member_identity() {}\n"),
+        ("single cutover", "\nfn single_namespace_cutover() {}\n"),
+        ("source binder carrier", "\nstruct SourceBinder { value: Int }\n"),
+    )
+    errors: List[str] = []
+    count = 0
+    for label, suffix in guards:
+        count += 1
+        if not resolver_identity_u1a_contract_errors(
+                resolver_source + suffix, infer_ctx_source):
+            errors.append(f"F2 U1a scope guard escaped: {label}")
+    if count != F2_U1A_SCOPE_GUARD_COUNT:
+        errors.append(
+            f"F2 U1a scope guard count was {count}, expected "
+            f"{F2_U1A_SCOPE_GUARD_COUNT}")
+    return errors, count
+
+
+def resolver_identity_u1a_source_errors() -> List[str]:
+    try:
+        resolver_source = F2_U1A_RESOLVER_PATH.read_text(encoding="utf-8")
+        infer_ctx_source = F2_U1A_INFER_CTX_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read F2 U1a compiler sources: {exc}"]
+    errors = resolver_identity_u1a_contract_errors(
+        resolver_source, infer_ctx_source)
+    if errors:
+        return errors
+    mutation_errors, _ = resolver_identity_u1a_semantic_mutation_errors(
+        resolver_source, infer_ctx_source)
+    guard_errors, _ = resolver_identity_u1a_scope_guard_errors(
+        resolver_source, infer_ctx_source)
+    errors.extend(mutation_errors)
+    errors.extend(guard_errors)
+    return errors
+
+
+def resolver_identity_u1a_compile_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(ring_exe))
+    for source_path in (F2_U1A_RESOLVER_PATH, F2_U1A_INFER_CTX_PATH):
+        completed = subprocess.run(
+            [ring_exe, "check", str(source_path)], cwd=REPO, env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+            errors="strict", check=False, timeout=120)
+        if completed.returncode != 0:
+            errors.append(
+                f"pinned Ring check failed for {display_path(source_path)}: "
+                f"exit={completed.returncode} stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}")
+        elif completed.stdout.strip() != "OK":
+            errors.append(
+                f"pinned Ring check output drifted for "
+                f"{display_path(source_path)}: stdout={completed.stdout!r}")
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across F2 U1a checks")
+    return errors
+
+
+F2_U1A_POSITIVE_FIXTURES = (
+    "diamond_dep",
+    "import_enum",
+    "module_type_alias_reexport",
+    "project_namespace_enum_relation_value_order",
+    "project_namespace_growth_acyclic",
+    "plan_namespace_empty_growth_cycle",
+)
+F2_U1A_NEGATIVE_FIXTURES = (
+    "error_namespace_growth_duplicate_exact",
+    "error_namespace_named_enum_exact_import_collision",
+    "error_namespace_value_discovery_order",
+    "error_namespace_wildcard_value_ambiguity",
+)
+
+
+def resolver_identity_u1a_fixture_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    count = 0
+    for case_name in F2_U1A_POSITIVE_FIXTURES:
+        count += 1
+        source_path = MODULES_DIR / case_name / "main.ring"
+        try:
+            completed = ring_check(
+                ring_exe, str(source_path), phase_suite="structural",
+                phase_case=f"f2-u1a:{case_name}")
+        except subprocess.TimeoutExpired:
+            errors.append(f"F2 U1a positive fixture timed out: {case_name}")
+            continue
+        if completed.returncode != 0 or completed.stdout.strip() != "OK":
+            errors.append(
+                f"F2 U1a positive fixture failed: {case_name}; "
+                f"exit={completed.returncode} stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}")
+    for case_name in F2_U1A_NEGATIVE_FIXTURES:
+        count += 1
+        case_dir = MODULES_DIR / case_name
+        source_path = case_dir / "main.ring"
+        contract = (case_dir / "main.error").read_text(encoding="utf-8")
+        try:
+            completed = ring_check(
+                ring_exe, str(source_path), phase_suite="structural",
+                phase_case=f"f2-u1a:{case_name}")
+        except subprocess.TimeoutExpired:
+            errors.append(f"F2 U1a negative fixture timed out: {case_name}")
+            continue
+        combined = (completed.stdout or "") + (completed.stderr or "")
+        contract_failure = error_contract_failure(contract, combined)
+        if completed.returncode == 0:
+            errors.append(
+                f"F2 U1a negative fixture unexpectedly passed: {case_name}")
+        elif contract_failure is not None:
+            errors.append(
+                f"F2 U1a negative fixture drifted: {case_name}; "
+                f"{contract_failure}")
+    if count != F2_U1A_FIXTURE_COUNT:
+        errors.append(
+            f"F2 U1a fixture count was {count}, expected "
+            f"{F2_U1A_FIXTURE_COUNT}")
+    return errors
+
+
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
         "hir": REPO / "compiler" / "hir.ring",
@@ -8611,6 +9131,24 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
             collector.add(TestResult(
                 TestResult.FAIL, suite, f"fixture validation {index}", error))
         return
+
+    resolver_identity_label = "compiler.resolver_identity_u1a"
+    if matches_filter(resolver_identity_label, name_filter):
+        resolver_identity_errors = resolver_identity_u1a_source_errors()
+        if not resolver_identity_errors:
+            resolver_identity_errors.extend(
+                resolver_identity_u1a_compile_errors(ring_exe))
+        if not resolver_identity_errors:
+            resolver_identity_errors.extend(
+                resolver_identity_u1a_fixture_errors(ring_exe))
+        detail = (
+            f"semantic_mutations={F2_U1A_SEMANTIC_MUTATION_COUNT}; "
+            f"scope_guards={F2_U1A_SCOPE_GUARD_COUNT}; "
+            f"fixtures={F2_U1A_FIXTURE_COUNT}; pinned_ring_checks=2")
+        collector.add(TestResult(
+            TestResult.PASS if not resolver_identity_errors else TestResult.FAIL,
+            suite, resolver_identity_label,
+            "; ".join([detail, *resolver_identity_errors])))
 
     inventory_label = "compiler.ir_inventory_f1"
     if matches_filter(inventory_label, name_filter):

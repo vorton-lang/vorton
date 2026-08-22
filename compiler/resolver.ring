@@ -5,6 +5,13 @@ use diagnostics::{CollectingSink, Diagnostic, Severity, DiagnosticContext,
 use formatter::{format_human, format_llm}
 use hir::{compare_by_first, module_item_identity, variant_ctor_name}
 use codes::{E0702, E0704, E0705}
+use ir_identity::{
+    SymbolRef, make_symbol_ref,
+    namespace_value, namespace_nominal, namespace_trait, namespace_effect,
+    namespace_signature, namespace_kind_same,
+    symbol_ref_origin_module_key, symbol_ref_namespace_kind,
+    symbol_ref_canonical_payload, symbol_ref_declaration_site_path,
+    symbol_ref_same}
 
 // ============================================================
 // Types
@@ -95,10 +102,15 @@ pub struct NamespaceSeed {
     pub owner: Str,
     pub exposed_name: Str,
     pub namespace: NamespaceKind,
-    pub payload: Str,
+    pub symbol: SymbolRef,
     pub is_public: Bool,
     pub role: NamespaceSeedRole,
     pub is_projection: Bool
+}
+
+pub struct EnumVariantFactGroup {
+    pub enum_symbol: SymbolRef,
+    pub constructors: List<NamespaceSeed>
 }
 
 // Kept parallel to the worklist fact table so later consumers never have to
@@ -163,24 +175,40 @@ struct ValueContribution {
     occurrence: NamespaceFactOccurrence
 }
 
-enum ValueStructuralProducerKind {
-    Terminal,
-    ImportCopy,
-    ProjectionCopy
+struct NamedEnumRelationExpansion {
+    obligation_index: Int,
+    enum_symbol: SymbolRef
+}
+
+struct ValueBindingTarget {
+    file_key: Str,
+    frame_index: Int,
+    owner: Str,
+    exposed_name: Str,
+    is_public: Bool
+}
+
+enum ValueStructuralProducerSource {
+    TerminalValue(SymbolRef),
+    ImportCopyValue {
+        source_slot_index: Int,
+        source_lane: NamespaceDeliveryLane,
+        obligation_index: Int
+    },
+    ProjectionCopyValue {
+        source_slot_index: Int
+    }
 }
 
 struct ValueStructuralProducer {
     producer: ValueProducerId,
-    binding: ResolvedNamespaceBinding,
+    target: ValueBindingTarget,
     occurrence: NamespaceFactOccurrence,
-    kind: ValueStructuralProducerKind,
-    source_slot_index: Int,
-    source_lane: NamespaceDeliveryLane,
-    obligation_index: Int
+    source: ValueStructuralProducerSource
 }
 
 struct ValueStructuralSlot {
-    binding_template: ResolvedNamespaceBinding,
+    target: ValueBindingTarget,
     producers: List<ValueStructuralProducer>,
     local_announced: Bool,
     publication_announced: Bool,
@@ -243,7 +271,7 @@ pub struct ResolvedNamespaceBinding {
     pub owner: Str,
     pub exposed_name: Str,
     pub namespace: NamespaceKind,
-    pub payload: Str,
+    pub symbol: SymbolRef,
     pub is_public: Bool
 }
 
@@ -262,10 +290,10 @@ pub struct ModuleNamespaceCensus {
     pub file_segments: List<Str>,
     pub frames: List<ModuleFramePlan>,
     pub seeds: List<NamespaceSeed>,
-    // Canonical enum payload -> its constructor Value facts.  This explicit
-    // relation lets named enum aliases carry constructors without decoding an
-    // internal identity string.
-    pub enum_variant_facts: Map<Str, List<NamespaceSeed>>,
+    // Exact enum declaration origin -> its constructor Value facts.  Relation
+    // lookup is by SymbolRef; canonical payload strings are compatibility
+    // projections only and never decide identity.
+    pub enum_variant_facts: List<EnumVariantFactGroup>,
     pub imports: List<ImportObligation>,
     pub physical_dependencies: List<PhysicalDependencyObligation>,
     pub issues: List<ImportIssue>
@@ -274,7 +302,7 @@ pub struct ModuleNamespaceCensus {
 pub struct ResolvedNamespacePlan {
     pub frames: List<ModuleFramePlan>,
     pub bindings: List<ResolvedNamespaceBinding>,
-    pub enum_variant_facts: Map<Str, List<NamespaceSeed>>,
+    pub enum_variant_facts: List<EnumVariantFactGroup>,
     pub imports: List<ImportObligation>,
     pub physical_dependencies: List<PhysicalDependencyObligation>,
     pub issues: List<ImportIssue>
@@ -382,16 +410,72 @@ fn effective_frame_public(frame: ModuleFramePlan, declared_public: Bool) -> Bool
     declared_public && (frame.frame_index == 0 || frame.is_public)
 }
 
+fn source_declaration_site_path(site: AstSite) -> Str {
+    if site.use_index != -1 || site.frame_index < 0 || site.item_index < 0 {
+        panic("namespace invariant violated: source declaration AstSite is invalid")
+    }
+    "frame:${site.frame_index}|item:${site.item_index}"
+}
+
+// This is the only resolver authority allowed to construct a SymbolRef.
+// Imports, projections, enum relations, diamonds, and cycles transport the
+// exact value returned here instead of replaying identity from a spelling.
+fn source_seed_symbol(
+    file_key: Str,
+    frame_index: Int,
+    decl_index: Int,
+    origin_site: AstSite,
+    namespace: NamespaceKind,
+    canonical_payload: Str,
+    existing: Option<SymbolRef>
+) -> SymbolRef {
+    if origin_site.use_index != -1 ||
+       origin_site.frame_index < 0 || origin_site.item_index < 0 ||
+       file_key != origin_site.file_key ||
+       frame_index != origin_site.frame_index ||
+       decl_index != origin_site.item_index {
+        panic("namespace invariant violated: source seed/site mismatch")
+    }
+    let declaration_site_path = source_declaration_site_path(origin_site)
+    let identity_namespace = match namespace {
+        NamespaceKind::Value => namespace_value(),
+        NamespaceKind::Struct => namespace_nominal(),
+        NamespaceKind::Enum => namespace_nominal(),
+        NamespaceKind::TypeAlias => namespace_nominal(),
+        NamespaceKind::Effect => namespace_effect(),
+        NamespaceKind::EffectAlias => namespace_effect(),
+        NamespaceKind::Trait => namespace_trait(),
+        NamespaceKind::Sig => namespace_signature()
+    }
+    match existing {
+        none => make_symbol_ref(
+            origin_site.file_key, identity_namespace,
+            canonical_payload, declaration_site_path),
+        some(symbol) => {
+            if symbol_ref_origin_module_key(symbol) != origin_site.file_key ||
+               !namespace_kind_same(
+                    symbol_ref_namespace_kind(symbol), identity_namespace) ||
+               symbol_ref_canonical_payload(symbol) != canonical_payload ||
+               symbol_ref_declaration_site_path(symbol) !=
+                    declaration_site_path {
+                panic("namespace invariant violated: reused source SymbolRef drifted")
+            }
+            symbol
+        }
+    }
+}
+
 fn append_namespace_seed(
     frame: ModuleFramePlan,
     decl_index: Int,
     exposed_name: Str,
     namespace: NamespaceKind,
-    payload: Str,
+    canonical_payload: Str,
+    existing_symbol: Option<SymbolRef>,
     is_public: Bool,
     role: NamespaceSeedRole,
     mut seeds: List<NamespaceSeed>
-) {
+) -> SymbolRef {
     let effective_public = effective_frame_public(frame, is_public)
     let origin_site = AstSite {
         file_key: frame.file_key,
@@ -399,6 +483,9 @@ fn append_namespace_seed(
         use_index: -1,
         item_index: decl_index
     }
+    let symbol = source_seed_symbol(
+        frame.file_key, frame.frame_index, decl_index, origin_site,
+        namespace, canonical_payload, existing_symbol)
     seeds.push(NamespaceSeed {
         file_key: frame.file_key,
         frame_index: frame.frame_index,
@@ -407,15 +494,15 @@ fn append_namespace_seed(
         owner: frame.owner,
         exposed_name: exposed_name,
         namespace: namespace,
-        payload: payload,
+        symbol: symbol,
         is_public: effective_public,
         role: role,
         is_projection: false
     })
 
     // A public declaration below a fully-public inline path is also a fact in
-    // the file-root namespace.  The payload stays canonical; only its exposed
-    // spelling changes.
+    // the file-root namespace.  Exact source identity stays unchanged; only
+    // the exposed spelling changes.
     if frame.frame_index != 0 && effective_public {
         seeds.push(NamespaceSeed {
             file_key: frame.file_key,
@@ -425,12 +512,51 @@ fn append_namespace_seed(
             owner: frame.root_owner,
             exposed_name: "${frame.inline_prefix}::${exposed_name}",
             namespace: namespace,
-            payload: payload,
+            symbol: symbol,
             is_public: true,
             role: role,
             is_projection: true
         })
     }
+    symbol
+}
+
+fn append_enum_variant_fact_group(
+    enum_symbol: SymbolRef,
+    constructors: List<NamespaceSeed>,
+    mut groups: List<EnumVariantFactGroup>
+) {
+    for group_index in 0..groups.len() {
+        match groups.get(group_index) {
+            some(group) => {
+                if symbol_ref_same(group.enum_symbol, enum_symbol) {
+                    let mut merged = list_clone(group.constructors)
+                    merged.extend(constructors)
+                    groups.set(group_index, EnumVariantFactGroup {
+                        enum_symbol: group.enum_symbol,
+                        constructors: merged
+                    })
+                    return
+                }
+            },
+            none => {}
+        }
+    }
+    groups.push(EnumVariantFactGroup {
+        enum_symbol: enum_symbol,
+        constructors: constructors
+    })
+}
+
+fn enum_variant_constructors(
+    groups: List<EnumVariantFactGroup>, enum_symbol: SymbolRef
+) -> Option<List<NamespaceSeed>> {
+    for group in groups {
+        if symbol_ref_same(group.enum_symbol, enum_symbol) {
+            return some(group.constructors)
+        }
+    }
+    none
 }
 
 fn collect_decl_seed(
@@ -438,42 +564,48 @@ fn collect_decl_seed(
     decl_index: Int,
     decl: Decl,
     mut seeds: List<NamespaceSeed>,
-    mut enum_variant_facts: Map<Str, List<NamespaceSeed>>
+    mut enum_variant_facts: List<EnumVariantFactGroup>
 ) {
     match decl {
         Decl::Fn { name, is_pub, .. } => {
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::Value,
-                declaration_payload(frame, name, false), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Value,
+                declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         Decl::ExternFn { name, is_pub, .. } => {
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::Value,
-                declaration_payload(frame, name, false), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Value,
+                declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         Decl::Const { name, is_pub, .. } => {
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::Value,
-                declaration_payload(frame, name, false), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Value,
+                declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         Decl::Struct { name, is_pub, .. } => {
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::Struct,
-                declaration_payload(frame, name, false), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Struct,
+                declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         Decl::ExternType { name, is_pub, .. } => {
             // Extern types intentionally retain their raw ABI spelling.
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::Struct,
-                declaration_payload(frame, name, true), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Struct,
+                declaration_payload(frame, name, true), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         Decl::Enum { name, variants, is_pub, .. } => {
             let enum_payload = declaration_payload(frame, name, false)
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::Enum,
-                enum_payload, is_pub, NamespaceSeedRole::DirectDecl, seeds)
+            let enum_symbol = append_namespace_seed(
+                frame, decl_index, name, NamespaceKind::Enum,
+                enum_payload, none, is_pub,
+                NamespaceSeedRole::DirectDecl, seeds)
             let mut ctor_facts: List<NamespaceSeed> = []
             for variant in variants {
                 let ctor_payload = variant_ctor_name(enum_payload, variant.name)
+                let ctor_symbol = append_namespace_seed(
+                    frame, decl_index, variant.name,
+                    NamespaceKind::Value, ctor_payload, none, is_pub,
+                    NamespaceSeedRole::EnumLeaf, seeds)
                 ctor_facts.push(NamespaceSeed {
                     file_key: frame.file_key,
                     frame_index: frame.frame_index,
@@ -487,51 +619,46 @@ fn collect_decl_seed(
                     owner: frame.owner,
                     exposed_name: variant.name,
                     namespace: NamespaceKind::Value,
-                    payload: ctor_payload,
+                    symbol: ctor_symbol,
                     is_public: effective_frame_public(frame, is_pub),
                     role: NamespaceSeedRole::EnumLeaf,
                     is_projection: false
                 })
-                append_namespace_seed(frame, decl_index, variant.name,
-                    NamespaceKind::Value, ctor_payload, is_pub,
-                    NamespaceSeedRole::EnumLeaf, seeds)
                 // Qualified enum-member lookup is an ordinary visible Value
                 // fact, not a consumer-side fallback from the Enum relation.
                 // Keeping it in the plan makes direct E::V collisions obey
                 // the same exact-frame Seed/import ledger as every other name.
-                append_namespace_seed(
+                let _ = append_namespace_seed(
                     frame, decl_index, "${name}::${variant.name}",
-                    NamespaceKind::Value, ctor_payload, is_pub,
+                    NamespaceKind::Value, ctor_payload, some(ctor_symbol), is_pub,
                     NamespaceSeedRole::EnumQualifiedMember, seeds)
             }
-            match enum_variant_facts.get(enum_payload) {
-                some(existing) => existing.extend(ctor_facts),
-                none => { enum_variant_facts.insert(enum_payload, ctor_facts) }
-            }
+            append_enum_variant_fact_group(
+                enum_symbol, ctor_facts, enum_variant_facts)
         },
         Decl::TypeAlias { name, is_pub, .. } => {
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::TypeAlias,
-                declaration_payload(frame, name, false), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::TypeAlias,
+                declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         Decl::Effect { name, is_pub, .. } => {
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::Effect,
-                declaration_payload(frame, name, false), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Effect,
+                declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         Decl::EffectAlias { name, is_pub, .. } => {
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::EffectAlias,
-                declaration_payload(frame, name, false), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::EffectAlias,
+                declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         Decl::Trait { name, is_pub, .. } => {
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::Trait,
-                declaration_payload(frame, name, false), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Trait,
+                declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         Decl::Sig { name, is_pub, .. } => {
-            append_namespace_seed(frame, decl_index, name, NamespaceKind::Sig,
-                declaration_payload(frame, name, false), is_pub,
+            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Sig,
+                declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
         // Impl/Test/Delegate/AssocType do not introduce namespace seeds.
@@ -791,7 +918,7 @@ fn collect_frame_contents(
     frames: List<ModuleFramePlan>,
     frame_site_indices: Map<Str, Int>,
     mut seeds: List<NamespaceSeed>,
-    mut enum_variant_facts: Map<Str, List<NamespaceSeed>>,
+    mut enum_variant_facts: List<EnumVariantFactGroup>,
     mut imports: List<ImportObligation>,
     mut physical_dependencies: List<PhysicalDependencyObligation>,
     mut issues: List<ImportIssue>
@@ -884,7 +1011,7 @@ pub fn census_module_namespaces(
         }
     }
     let mut seeds: List<NamespaceSeed> = []
-    let mut enum_variant_facts: Map<Str, List<NamespaceSeed>> = map_new()
+    let mut enum_variant_facts: List<EnumVariantFactGroup> = []
     let mut imports: List<ImportObligation> = []
     let mut physical_dependencies: List<PhysicalDependencyObligation> = []
     let mut issues: List<ImportIssue> = []
@@ -1011,20 +1138,20 @@ fn wildcard_subscription_key(owner: Str) -> Str {
     "${owner}|wildcard"
 }
 
-fn named_enum_relation_expansion_key(
-    obligation_index: Int, enum_payload: Str
-) -> Str {
-    "${obligation_index}|named-enum-relation|${enum_payload}"
-}
-
-pub fn claim_named_enum_relation_expansion(
-    obligation_index: Int, enum_payload: Str,
-    mut expanded_named_enum_relations: Set<Str>
+fn claim_named_enum_relation_expansion(
+    obligation_index: Int, enum_symbol: SymbolRef,
+    mut expanded_named_enum_relations: List<NamedEnumRelationExpansion>
 ) -> Bool {
-    let key = named_enum_relation_expansion_key(
-        obligation_index, enum_payload)
-    if expanded_named_enum_relations.contains(key) { return false }
-    expanded_named_enum_relations.insert(key)
+    for expanded in expanded_named_enum_relations {
+        if expanded.obligation_index == obligation_index &&
+           symbol_ref_same(expanded.enum_symbol, enum_symbol) {
+            return false
+        }
+    }
+    expanded_named_enum_relations.push(NamedEnumRelationExpansion {
+        obligation_index: obligation_index,
+        enum_symbol: enum_symbol
+    })
     true
 }
 
@@ -1080,7 +1207,7 @@ fn binding_with_public(
         owner: binding.owner,
         exposed_name: binding.exposed_name,
         namespace: binding.namespace,
-        payload: binding.payload,
+        symbol: binding.symbol,
         is_public: is_public
     }
 }
@@ -1111,15 +1238,13 @@ fn namespace_is_value(namespace: NamespaceKind) -> Bool {
 // publication for cross-file imports.  Both facts must be direct facts in one
 // exact source frame; qualified members and eager projections never qualify.
 fn private_direct_enum_leaf_shadow(
-    left: ResolvedNamespaceBinding,
+    left_is_public: Bool,
     left_occurrence: NamespaceFactOccurrence,
-    right: ResolvedNamespaceBinding,
+    right_is_public: Bool,
     right_occurrence: NamespaceFactOccurrence
 ) -> Bool {
     if !provenance_is_seed(left_occurrence.provenance) ||
        !provenance_is_seed(right_occurrence.provenance) ||
-       !namespace_is_value(left.namespace) ||
-       !namespace_is_value(right.namespace) ||
        left_occurrence.is_projection ||
        right_occurrence.is_projection {
         return false
@@ -1136,8 +1261,8 @@ fn private_direct_enum_leaf_shadow(
     let right_direct = seed_role_is_direct(right_occurrence.seed_role)
     let left_leaf = seed_role_is_enum_leaf(left_occurrence.seed_role)
     let right_leaf = seed_role_is_enum_leaf(right_occurrence.seed_role)
-    if left_direct && right_leaf { return !left.is_public }
-    if right_direct && left_leaf { return !right.is_public }
+    if left_direct && right_leaf { return !left_is_public }
+    if right_direct && left_leaf { return !right_is_public }
     false
 }
 
@@ -1148,15 +1273,11 @@ fn private_direct_enum_leaf_shadow(
 // same winner only when both facts came from the same exact origin frame.
 // Duplicate logical module frames have distinct origins and still collide.
 fn same_frame_seed_enum_leaf_shadow(
-    left: ResolvedNamespaceBinding,
     left_occurrence: NamespaceFactOccurrence,
-    right: ResolvedNamespaceBinding,
     right_occurrence: NamespaceFactOccurrence
 ) -> Bool {
     if !provenance_is_seed(left_occurrence.provenance) ||
        !provenance_is_seed(right_occurrence.provenance) ||
-       !namespace_is_value(left.namespace) ||
-       !namespace_is_value(right.namespace) ||
        !seed_role_is_enum_leaf(left_occurrence.seed_role) ||
        !seed_role_is_enum_leaf(right_occurrence.seed_role) ||
        left_occurrence.is_projection != right_occurrence.is_projection {
@@ -1247,24 +1368,18 @@ fn same_frame_compat_import_shadow(
 }
 
 fn same_frame_ordered_value_shadow(
-    left: ResolvedNamespaceBinding,
     left_occurrence: NamespaceFactOccurrence,
-    right: ResolvedNamespaceBinding,
     right_occurrence: NamespaceFactOccurrence
 ) -> Bool {
-    if !namespace_is_value(left.namespace) ||
-       !namespace_is_value(right.namespace) {
-        return false
-    }
     same_frame_seed_enum_leaf_shadow(
-        left, left_occurrence, right, right_occurrence) ||
+        left_occurrence, right_occurrence) ||
     same_frame_compat_import_shadow(
         left_occurrence, right_occurrence)
 }
 
 fn append_binding_ambiguity(
     key: Str,
-    existing_payload: Str,
+    existing_symbol: SymbolRef,
     candidate: ResolvedNamespaceBinding,
     occurrence: NamespaceFactOccurrence,
     mut ambiguous_keys: Set<Str>,
@@ -1279,7 +1394,9 @@ fn append_binding_ambiguity(
         source_name: candidate.exposed_name,
         local_name: candidate.exposed_name,
         namespace: candidate.namespace,
-        related_owners: [existing_payload, candidate.payload]
+        related_owners: [
+            symbol_ref_canonical_payload(existing_symbol),
+            symbol_ref_canonical_payload(candidate.symbol)]
     })
 }
 
@@ -1326,10 +1443,11 @@ fn append_import_ledger_ambiguities(
                     for index in 1..candidates.len() {
                         match candidates.get(index) {
                             some(candidate) => {
-                                if candidate.binding.payload !=
-                                   first.binding.payload {
+                                if !symbol_ref_same(
+                                        candidate.binding.symbol,
+                                        first.binding.symbol) {
                                     append_binding_ambiguity(
-                                        key, first.binding.payload,
+                                        key, first.binding.symbol,
                                         candidate.binding,
                                         candidate.occurrence,
                                         ambiguous_keys, issues)
@@ -1386,10 +1504,11 @@ fn add_namespace_fact(
                 let candidate_is_seed =
                     provenance_is_seed(occurrence.provenance)
                 let direct_shadow_pair = private_direct_enum_leaf_shadow(
-                    existing, existing_occurrence, candidate, occurrence)
+                    existing.is_public, existing_occurrence,
+                    candidate.is_public, occurrence)
                 let ordered_value_shadow_pair =
                     same_frame_ordered_value_shadow(
-                    existing, existing_occurrence, candidate, occurrence)
+                    existing_occurrence, occurrence)
                 let candidate_is_compat_enum_leaf =
                     occurrence_is_compat_enum_leaf(occurrence)
                 let candidate_ordered_value_is_later =
@@ -1404,9 +1523,8 @@ fn add_namespace_fact(
                     (some(current_publication),
                      some(current_publication_occurrence)) =>
                         same_frame_ordered_value_shadow(
-                            current_publication,
                             current_publication_occurrence,
-                            candidate, occurrence) &&
+                            occurrence) &&
                         site_is_before(
                             current_publication_occurrence.site,
                             occurrence.site),
@@ -1416,7 +1534,7 @@ fn add_namespace_fact(
                 let mut next_local_occurrence = existing_occurrence
                 let mut local_replaced = false
 
-                if existing.payload == candidate.payload {
+                if symbol_ref_same(existing.symbol, candidate.symbol) {
                     if candidate_is_seed && !existing_is_seed {
                         if !preloading_seeds {
                             panic(
@@ -1431,7 +1549,7 @@ fn add_namespace_fact(
                             panic(
                                 "namespace invariant violated: consumed Local lane occurrence cannot be replaced")
                         }
-                        // The payload is canonical-identical, but later
+                        // The declaration origin is exact-identical, but later
                         // relation comparisons must still see the active
                         // source-order occurrence.
                         next_local = candidate
@@ -1468,7 +1586,7 @@ fn add_namespace_fact(
                                         "namespace invariant violated: distinct Seed arrived after preload")
                                 }
                                 append_binding_ambiguity(
-                                    key, existing.payload, candidate, occurrence,
+                                    key, existing.symbol, candidate, occurrence,
                                     ambiguous_keys, issues)
                             },
                             (false, true) => {
@@ -1500,11 +1618,12 @@ fn add_namespace_fact(
                         match publication_binding {
                             none => {
                                 // A public candidate may publish the Local
-                                // payload, the enum side of the legal private
+                                // exact origin, the enum side of the legal private
                                 // DirectDecl/EnumLeaf split, or the sole public
                                 // contribution below a later private
                                 // compat/strong Local winner.
-                                if candidate.payload == next_local.payload ||
+                                if symbol_ref_same(
+                                       candidate.symbol, next_local.symbol) ||
                                    direct_shadow_pair ||
                                    ordered_value_shadow_pair {
                                     if candidate_is_seed && !preloading_seeds {
@@ -1518,7 +1637,9 @@ fn add_namespace_fact(
                                 }
                             },
                             some(existing_publication) => {
-                                if existing_publication.payload != candidate.payload &&
+                                if !symbol_ref_same(
+                                       existing_publication.symbol,
+                                       candidate.symbol) &&
                                    candidate_is_seed && !preloading_seeds {
                                     panic(
                                         "namespace invariant violated: late distinct Seed reached Publication lane")
@@ -1526,15 +1647,15 @@ fn add_namespace_fact(
                                 // Distinct publication collisions have already
                                 // been classified by Local precedence or the
                                 // Import ledger.  The first publication remains
-                                // stable; same-payload candidates need no update.
+                                // stable; same-origin candidates need no update.
                             }
                         }
                     }
                 }
 
                 let local_is_public = match next_publication {
-                    some(publication) =>
-                        publication.payload == next_local.payload,
+                    some(publication) => symbol_ref_same(
+                        publication.symbol, next_local.symbol),
                     none => false
                 }
                 bindings.set(
@@ -1643,7 +1764,7 @@ fn value_relation_producer(
 }
 
 fn value_projection_producer(
-    source: ResolvedNamespaceBinding
+    source: ValueBindingTarget
 ) -> ValueProducerId {
     ValueProducerId {
         key: "projection|${source.file_key}|${source.frame_index}|${source.exposed_name}|publication"
@@ -1656,15 +1777,94 @@ fn structural_value_import_producer(
     lane: NamespaceDeliveryLane
 ) -> ValueProducerId {
     ValueProducerId {
-        key: "import|${obligation_index}|${source_slot.binding_template.file_key}|${source_slot.binding_template.frame_index}|${source_slot.binding_template.exposed_name}|${delivery_lane_tag(lane)}"
+        key: "import|${obligation_index}|${source_slot.target.file_key}|${source_slot.target.frame_index}|${source_slot.target.exposed_name}|${delivery_lane_tag(lane)}"
+    }
+}
+
+fn value_binding_target(
+    file_key: Str, frame_index: Int, owner: Str,
+    exposed_name: Str, is_public: Bool
+) -> ValueBindingTarget {
+    ValueBindingTarget {
+        file_key: file_key,
+        frame_index: frame_index,
+        owner: owner,
+        exposed_name: exposed_name,
+        is_public: is_public
+    }
+}
+
+fn value_target_from_binding(
+    binding: ResolvedNamespaceBinding
+) -> ValueBindingTarget {
+    if !namespace_is_value(binding.namespace) {
+        panic("namespace invariant violated: non-Value structural target")
+    }
+    value_binding_target(
+        binding.file_key, binding.frame_index, binding.owner,
+        binding.exposed_name, binding.is_public)
+}
+
+fn materialize_value_binding(
+    target: ValueBindingTarget, symbol: SymbolRef
+) -> ResolvedNamespaceBinding {
+    ResolvedNamespaceBinding {
+        file_key: target.file_key,
+        frame_index: target.frame_index,
+        owner: target.owner,
+        exposed_name: target.exposed_name,
+        namespace: NamespaceKind::Value,
+        symbol: symbol,
+        is_public: target.is_public
+    }
+}
+
+fn structural_producer_source_slot_index(
+    producer: ValueStructuralProducer
+) -> Int {
+    match producer.source {
+        ValueStructuralProducerSource::ImportCopyValue {
+            source_slot_index, ..
+        } => source_slot_index,
+        ValueStructuralProducerSource::ProjectionCopyValue {
+            source_slot_index
+        } => source_slot_index,
+        ValueStructuralProducerSource::TerminalValue(_) => panic(
+            "namespace invariant violated: terminal Value has no source slot")
+    }
+}
+
+fn structural_producer_source_lane(
+    producer: ValueStructuralProducer
+) -> NamespaceDeliveryLane {
+    match producer.source {
+        ValueStructuralProducerSource::ImportCopyValue {
+            source_lane, ..
+        } => source_lane,
+        ValueStructuralProducerSource::ProjectionCopyValue { .. } =>
+            NamespaceDeliveryLane::Publication,
+        ValueStructuralProducerSource::TerminalValue(_) => panic(
+            "namespace invariant violated: terminal Value has no source lane")
+    }
+}
+
+fn structural_producer_obligation_index(
+    producer: ValueStructuralProducer
+) -> Int {
+    match producer.source {
+        ValueStructuralProducerSource::ImportCopyValue {
+            obligation_index, ..
+        } => obligation_index,
+        _ => panic(
+            "namespace invariant violated: non-import Value has no obligation")
     }
 }
 
 fn structural_producer_is_seed(
     producer: ValueStructuralProducer
 ) -> Bool {
-    match producer.kind {
-        ValueStructuralProducerKind::Terminal =>
+    match producer.source {
+        ValueStructuralProducerSource::TerminalValue(_) =>
             provenance_is_seed(producer.occurrence.provenance),
         _ => false
     }
@@ -1674,7 +1874,7 @@ fn structural_slot_has_public_producer(
     slot: ValueStructuralSlot
 ) -> Bool {
     for producer in slot.producers {
-        if producer.binding.is_public { return true }
+        if producer.target.is_public { return true }
     }
     false
 }
@@ -1687,9 +1887,9 @@ fn register_value_structural_producer(
     mut announcements: List<ValueLaneAnnouncement>
 ) -> Int {
     let key = namespace_binding_key(
-        producer.binding.file_key,
-        producer.binding.frame_index,
-        producer.binding.exposed_name,
+        producer.target.file_key,
+        producer.target.frame_index,
+        producer.target.exposed_name,
         NamespaceKind::Value)
     match slot_indices.get(key) {
         some(slot_index) => {
@@ -1706,7 +1906,7 @@ fn register_value_structural_producer(
                     producers.push(producer)
                     let has_public_seed_terminal =
                         slot.has_public_seed_terminal ||
-                        (producer.binding.is_public &&
+                        (producer.target.is_public &&
                          structural_producer_is_seed(producer))
                     let mut local_announced = slot.local_announced
                     let mut publication_announced =
@@ -1718,7 +1918,7 @@ fn register_value_structural_producer(
                             lane: NamespaceDeliveryLane::Local
                         })
                     }
-                    if announce && producer.binding.is_public &&
+                    if announce && producer.target.is_public &&
                        !had_public && !publication_announced {
                         publication_announced = true
                         announcements.push(ValueLaneAnnouncement {
@@ -1727,7 +1927,7 @@ fn register_value_structural_producer(
                         })
                     }
                     slots.set(slot_index, ValueStructuralSlot {
-                        binding_template: slot.binding_template,
+                        target: slot.target,
                         producers: producers,
                         local_announced: local_announced,
                         publication_announced: publication_announced,
@@ -1749,20 +1949,17 @@ fn register_value_structural_producer(
             let slot_index = slots.len()
             let local_announced = announce
             let publication_announced =
-                announce && producer.binding.is_public
+                announce && producer.target.is_public
             let has_public_seed_terminal =
-                producer.binding.is_public &&
+                producer.target.is_public &&
                 structural_producer_is_seed(producer)
             slots.push(ValueStructuralSlot {
-                binding_template: ResolvedNamespaceBinding {
-                    file_key: producer.binding.file_key,
-                    frame_index: producer.binding.frame_index,
-                    owner: producer.binding.owner,
-                    exposed_name: producer.binding.exposed_name,
-                    namespace: NamespaceKind::Value,
-                    payload: "",
-                    is_public: false
-                },
+                target: value_binding_target(
+                    producer.target.file_key,
+                    producer.target.frame_index,
+                    producer.target.owner,
+                    producer.target.exposed_name,
+                    false),
                 producers: [producer],
                 local_announced: local_announced,
                 publication_announced: publication_announced,
@@ -1812,7 +2009,7 @@ fn announce_preloaded_value_lanes(
                     })
                 }
                 slots.set(slot_index, ValueStructuralSlot {
-                    binding_template: slot.binding_template,
+                    target: slot.target,
                     producers: slot.producers,
                     local_announced: true,
                     publication_announced:
@@ -1840,7 +2037,7 @@ fn static_value_winner_index(
     for candidate_index in 0..producers.len() {
         match producers.get(candidate_index) {
             some(candidate) => {
-                if !public_only || candidate.binding.is_public {
+                if !public_only || candidate.target.is_public {
                     if winner_index < 0 {
                         winner_index = candidate_index
                     } else {
@@ -1852,15 +2049,13 @@ fn static_value_winner_index(
                                     structural_producer_is_seed(candidate)
                                 let direct_shadow_pair =
                                     private_direct_enum_leaf_shadow(
-                                        existing.binding,
+                                        existing.target.is_public,
                                         existing.occurrence,
-                                        candidate.binding,
+                                        candidate.target.is_public,
                                         candidate.occurrence)
                                 let ordered_shadow_pair =
                                     same_frame_ordered_value_shadow(
-                                        existing.binding,
                                         existing.occurrence,
-                                        candidate.binding,
                                         candidate.occurrence)
                                 let candidate_is_later =
                                     ordered_shadow_pair &&
@@ -1932,7 +2127,7 @@ fn canonicalize_value_structural_producers(
                 producers.sort_by(
                     compare_value_structural_producers)
                 slots.set(slot_index, ValueStructuralSlot {
-                    binding_template: slot.binding_template,
+                    target: slot.target,
                     producers: producers,
                     local_announced: slot.local_announced,
                     publication_announced:
@@ -1957,7 +2152,7 @@ fn select_static_value_winners(
         match slots.get(slot_index) {
             some(slot) => {
                 slots.set(slot_index, ValueStructuralSlot {
-                    binding_template: slot.binding_template,
+                    target: slot.target,
                     producers: slot.producers,
                     local_announced: slot.local_announced,
                     publication_announced:
@@ -1988,10 +2183,11 @@ fn refine_structural_projection_occurrences(
                 let mut producers = list_clone(slot.producers)
                 for producer_index in 0..producers.len() {
                     match producers.get(producer_index) {
-                        some(producer) => match producer.kind {
-                            ValueStructuralProducerKind::ProjectionCopy => {
-                                match slots.get(
-                                    producer.source_slot_index) {
+                        some(producer) => match producer.source {
+                            ValueStructuralProducerSource::ProjectionCopyValue {
+                                source_slot_index
+                            } => {
+                                match slots.get(source_slot_index) {
                                     some(source_slot) => {
                                         if source_slot.publication_winner_index <
                                            0 {
@@ -2012,8 +2208,8 @@ fn refine_structural_projection_occurrences(
                                                     ValueStructuralProducer {
                                                         producer:
                                                             producer.producer,
-                                                        binding:
-                                                            producer.binding,
+                                                        target:
+                                                            producer.target,
                                                         occurrence:
                                                             NamespaceFactOccurrence {
                                                                 provenance:
@@ -2023,22 +2219,16 @@ fn refine_structural_projection_occurrences(
                                                                 leaf_origin_site:
                                                                     source_winner.occurrence.leaf_origin_site,
                                                                 target_file_key:
-                                                                    producer.binding.file_key,
+                                                                    producer.target.file_key,
                                                                 target_frame_index:
-                                                                    producer.binding.frame_index,
+                                                                    producer.target.frame_index,
                                                                 seed_role:
                                                                     source_winner.occurrence.seed_role,
                                                                 is_projection:
                                                                     true
                                                             },
-                                                        kind:
-                                                            producer.kind,
-                                                        source_slot_index:
-                                                            producer.source_slot_index,
-                                                        source_lane:
-                                                            producer.source_lane,
-                                                        obligation_index:
-                                                            producer.obligation_index
+                                                        source:
+                                                            producer.source
                                                     })
                                             },
                                             none => {}
@@ -2053,7 +2243,7 @@ fn refine_structural_projection_occurrences(
                     }
                 }
                 slots.set(slot_index, ValueStructuralSlot {
-                    binding_template: slot.binding_template,
+                    target: slot.target,
                     producers: producers,
                     local_announced: slot.local_announced,
                     publication_announced:
@@ -2105,12 +2295,11 @@ fn reduce_value_lane(
                         value_contribution_is_seed(candidate)
                     let direct_shadow_pair =
                         private_direct_enum_leaf_shadow(
-                            existing.binding, existing.occurrence,
-                            candidate.binding, candidate.occurrence)
+                            existing.binding.is_public, existing.occurrence,
+                            candidate.binding.is_public, candidate.occurrence)
                     let ordered_shadow_pair =
                         same_frame_ordered_value_shadow(
-                            existing.binding, existing.occurrence,
-                            candidate.binding, candidate.occurrence)
+                            existing.occurrence, candidate.occurrence)
                     let candidate_is_later =
                         ordered_shadow_pair &&
                         site_is_before(
@@ -2118,12 +2307,14 @@ fn reduce_value_lane(
                             candidate.occurrence.site)
                     let mut replace = false
 
-                    if existing.binding.payload == candidate.binding.payload {
+                    if symbol_ref_same(
+                           existing.binding.symbol,
+                           candidate.binding.symbol) {
                         if candidate_is_seed && !existing_is_seed {
                             replace = true
                         } else if candidate_is_later {
                             // Preserve the active source-order occurrence even
-                            // when both producers share a canonical payload.
+                            // when both producers share one exact origin.
                             replace = true
                         }
                     } else if direct_shadow_pair || ordered_shadow_pair {
@@ -2140,7 +2331,7 @@ fn reduce_value_lane(
                             (true, true) => {
                                 if report_seed_collisions {
                                     append_binding_ambiguity(
-                                        key, existing.binding.payload,
+                                        key, existing.binding.symbol,
                                         candidate.binding,
                                         candidate.occurrence,
                                         ambiguous_keys, issues)
@@ -2195,7 +2386,7 @@ fn project_public_inline_fact(
                         owner: root_frame.owner,
                         exposed_name: "${frame.inline_prefix}::${fact.exposed_name}",
                         namespace: fact.namespace,
-                        payload: fact.payload,
+                        symbol: fact.symbol,
                         is_public: true
                     }, NamespaceFactOccurrence {
                         provenance: occurrence.provenance,
@@ -2225,9 +2416,9 @@ fn deliver_namespace_fact(
     imports: List<ImportObligation>,
     growth_guard: NamespaceGrowthGuard,
     mut blocked_growth_components: Set<Int>,
-    enum_variant_facts: Map<Str, List<NamespaceSeed>>,
+    enum_variant_facts: List<EnumVariantFactGroup>,
     mut resolved_obligations: Set<Int>,
-    mut expanded_named_enum_relations: Set<Str>,
+    mut expanded_named_enum_relations: List<NamedEnumRelationExpansion>,
     mut pending_named_enum_relation_facts:
         List<PendingNamedEnumRelationFact>,
     mut bindings: List<ResolvedNamespaceBinding>,
@@ -2251,7 +2442,8 @@ fn deliver_namespace_fact(
                 }
                 if lane_matches && import_can_see(fact, obligation) {
                     if block_namespace_growth_delivery(
-                        obligation_index, fact, lane, imports,
+                        obligation_index, fact.file_key, fact.frame_index,
+                        fact.exposed_name, fact.namespace, lane, imports,
                         growth_guard, blocked_growth_components,
                         resolved_obligations, issues) {
                         continue
@@ -2267,7 +2459,7 @@ fn deliver_namespace_fact(
                         owner: obligation.target_owner,
                         exposed_name: local_name,
                         namespace: fact.namespace,
-                        payload: fact.payload,
+                        symbol: fact.symbol,
                         is_public: obligation.is_public
                     }, NamespaceFactOccurrence {
                         provenance: import_provenance(obligation.selection),
@@ -2285,16 +2477,16 @@ fn deliver_namespace_fact(
                     // Named enum aliases import constructor leaves explicitly.
                     // This is distinct from source closure: the target owner
                     // intentionally differs from each canonical relation fact.
-                    // Duplicate exact source frames can share one canonical
-                    // payload, so claim the relation once per obligation and
-                    // payload instead of rescanning D constructors for each of
-                    // D same-payload source facts.
+                    // Claim the relation once per obligation and exact enum
+                    // declaration origin.  Canonical payload strings never
+                    // merge distinct source sites.
                     match (obligation.selection, fact.namespace) {
                         (ImportSelection::Named, NamespaceKind::Enum) => {
                             if claim_named_enum_relation_expansion(
-                                obligation_index, fact.payload,
+                                obligation_index, fact.symbol,
                                 expanded_named_enum_relations) {
-                                match enum_variant_facts.get(fact.payload) {
+                                match enum_variant_constructors(
+                                    enum_variant_facts, fact.symbol) {
                                     some(ctor_facts) => {
                                         for ctor in ctor_facts {
                                             let relation_provenance =
@@ -2312,7 +2504,7 @@ fn deliver_namespace_fact(
                                                     owner: obligation.target_owner,
                                                     exposed_name: ctor.exposed_name,
                                                     namespace: NamespaceKind::Value,
-                                                    payload: ctor.payload,
+                                                    symbol: ctor.symbol,
                                                     is_public: obligation.is_public
                                                 },
                                                 occurrence: NamespaceFactOccurrence {
@@ -2346,7 +2538,7 @@ fn deliver_namespace_fact(
                                                     exposed_name:
                                                         "${obligation.local_name}::${ctor.exposed_name}",
                                                     namespace: NamespaceKind::Value,
-                                                    payload: ctor.payload,
+                                                    symbol: ctor.symbol,
                                                     is_public: obligation.is_public
                                                 },
                                                 occurrence: NamespaceFactOccurrence {
@@ -2389,9 +2581,9 @@ fn propagate_namespace_event(
     imports: List<ImportObligation>,
     growth_guard: NamespaceGrowthGuard,
     mut blocked_growth_components: Set<Int>,
-    enum_variant_facts: Map<Str, List<NamespaceSeed>>,
+    enum_variant_facts: List<EnumVariantFactGroup>,
     mut resolved_obligations: Set<Int>,
-    mut expanded_named_enum_relations: Set<Str>,
+    mut expanded_named_enum_relations: List<NamedEnumRelationExpansion>,
     mut pending_named_enum_relation_facts:
         List<PendingNamedEnumRelationFact>,
     mut bindings: List<ResolvedNamespaceBinding>,
@@ -2458,9 +2650,9 @@ fn structural_projection_template_occurrence(
             site: first.occurrence.site,
             leaf_origin_site: none,
             target_file_key:
-                source_slot.binding_template.file_key,
+                source_slot.target.file_key,
             target_frame_index:
-                source_slot.binding_template.frame_index,
+                source_slot.target.frame_index,
             seed_role: none,
             is_projection: true
         },
@@ -2484,7 +2676,7 @@ fn deliver_structural_value_imports(
 ) {
     match slots.get(source_slot_index) {
         some(source_slot) => {
-            let source = source_slot.binding_template
+            let source = source_slot.target
             for obligation_index in obligation_indices {
                 match imports.get(obligation_index) {
                     some(obligation) => {
@@ -2496,7 +2688,9 @@ fn deliver_structural_value_imports(
                         }
                         if lane_matches {
                             if block_namespace_growth_delivery(
-                                obligation_index, source, source_lane,
+                                obligation_index, source.file_key,
+                                source.frame_index, source.exposed_name,
+                                NamespaceKind::Value, source_lane,
                                 imports, growth_guard,
                                 blocked_growth_components,
                                 resolved_obligations, issues) {
@@ -2516,16 +2710,12 @@ fn deliver_structural_value_imports(
                                         structural_value_import_producer(
                                             obligation_index,
                                             source_slot, source_lane),
-                                    binding: ResolvedNamespaceBinding {
-                                        file_key: obligation.file_key,
-                                        frame_index:
-                                            obligation.target_frame_index,
-                                        owner: obligation.target_owner,
-                                        exposed_name: local_name,
-                                        namespace: NamespaceKind::Value,
-                                        payload: "",
-                                        is_public: obligation.is_public
-                                    },
+                                    target: value_binding_target(
+                                        obligation.file_key,
+                                        obligation.target_frame_index,
+                                        obligation.target_owner,
+                                        local_name,
+                                        obligation.is_public),
                                     occurrence:
                                         NamespaceFactOccurrence {
                                             provenance:
@@ -2540,12 +2730,14 @@ fn deliver_structural_value_imports(
                                             seed_role: none,
                                             is_projection: false
                                         },
-                                    kind:
-                                        ValueStructuralProducerKind::ImportCopy,
-                                    source_slot_index:
-                                        source_slot_index,
-                                    source_lane: source_lane,
-                                    obligation_index: obligation_index
+                                    source:
+                                        ValueStructuralProducerSource::ImportCopyValue {
+                                            source_slot_index:
+                                                source_slot_index,
+                                            source_lane: source_lane,
+                                            obligation_index:
+                                                obligation_index
+                                        }
                                 },
                                 true, slots, slot_indices, announcements)
                         }
@@ -2569,7 +2761,7 @@ fn register_structural_value_projection(
         some(source_slot) => {
             if source_slot.projection_registered { return }
             slots.set(source_slot_index, ValueStructuralSlot {
-                binding_template: source_slot.binding_template,
+                target: source_slot.target,
                 producers: source_slot.producers,
                 local_announced: source_slot.local_announced,
                 publication_announced:
@@ -2583,11 +2775,11 @@ fn register_structural_value_projection(
             })
             // Public Seed projection was eagerly registered by census.  Since
             // every later producer is non-Seed, Seed precedence makes this
-            // classification final before payload solving.
+            // classification final before exact-origin solving.
             if source_slot.has_public_seed_terminal { return }
             match exact_frames.get(exact_frame_key(
-                source_slot.binding_template.file_key,
-                source_slot.binding_template.frame_index)) {
+                source_slot.target.file_key,
+                source_slot.target.frame_index)) {
                 some(source_frame) => {
                     if source_frame.frame_index == 0 ||
                        !source_frame.is_public {
@@ -2600,28 +2792,21 @@ fn register_structural_value_projection(
                                 ValueStructuralProducer {
                                     producer:
                                         value_projection_producer(
-                                            source_slot.binding_template),
-                                    binding: ResolvedNamespaceBinding {
-                                        file_key: root_frame.file_key,
-                                        frame_index:
-                                            root_frame.frame_index,
-                                        owner: root_frame.owner,
-                                        exposed_name:
-                                            "${source_frame.inline_prefix}::${source_slot.binding_template.exposed_name}",
-                                        namespace: NamespaceKind::Value,
-                                        payload: "",
-                                        is_public: true
-                                    },
+                                            source_slot.target),
+                                    target: value_binding_target(
+                                        root_frame.file_key,
+                                        root_frame.frame_index,
+                                        root_frame.owner,
+                                        "${source_frame.inline_prefix}::${source_slot.target.exposed_name}",
+                                        true),
                                     occurrence:
                                         structural_projection_template_occurrence(
                                             source_slot),
-                                    kind:
-                                        ValueStructuralProducerKind::ProjectionCopy,
-                                    source_slot_index:
-                                        source_slot_index,
-                                    source_lane:
-                                        NamespaceDeliveryLane::Publication,
-                                    obligation_index: -1
+                                    source:
+                                        ValueStructuralProducerSource::ProjectionCopyValue {
+                                            source_slot_index:
+                                                source_slot_index
+                                        }
                                 },
                                 true, slots, slot_indices, announcements)
                         },
@@ -2665,8 +2850,8 @@ fn close_structural_value_graph(
                         }
                         match named_subscriptions.get(
                             named_subscription_key(
-                                source_slot.binding_template.owner,
-                                source_slot.binding_template.exposed_name)) {
+                                source_slot.target.owner,
+                                source_slot.target.exposed_name)) {
                             some(obligation_indices) => {
                                 deliver_structural_value_imports(
                                     announcement.slot_index,
@@ -2681,7 +2866,7 @@ fn close_structural_value_graph(
                         }
                         match wildcard_subscriptions.get(
                             wildcard_subscription_key(
-                                source_slot.binding_template.owner)) {
+                                source_slot.target.owner)) {
                             some(obligation_indices) => {
                                 deliver_structural_value_imports(
                                     announcement.slot_index,
@@ -2722,8 +2907,8 @@ fn value_lane_node_key(
 fn structural_producer_is_copy(
     producer: ValueStructuralProducer
 ) -> Bool {
-    match producer.kind {
-        ValueStructuralProducerKind::Terminal => false,
+    match producer.source {
+        ValueStructuralProducerSource::TerminalValue(_) => false,
         _ => true
     }
 }
@@ -2732,52 +2917,39 @@ fn materialize_structural_producer(
     producer: ValueStructuralProducer,
     source: ValueContribution?
 ) -> ValueContribution? {
-    match producer.kind {
-        ValueStructuralProducerKind::Terminal =>
+    match producer.source {
+        ValueStructuralProducerSource::TerminalValue(symbol) =>
             some(ValueContribution {
                 producer: producer.producer,
-                binding: producer.binding,
+                binding: materialize_value_binding(
+                    producer.target, symbol),
                 occurrence: producer.occurrence
             }),
-        ValueStructuralProducerKind::ImportCopy => match source {
+        ValueStructuralProducerSource::ImportCopyValue { .. } => match source {
             some(source_contribution) => some(ValueContribution {
                 producer: producer.producer,
-                binding: ResolvedNamespaceBinding {
-                    file_key: producer.binding.file_key,
-                    frame_index: producer.binding.frame_index,
-                    owner: producer.binding.owner,
-                    exposed_name: producer.binding.exposed_name,
-                    namespace: NamespaceKind::Value,
-                    payload: source_contribution.binding.payload,
-                    is_public: producer.binding.is_public
-                },
+                binding: materialize_value_binding(
+                    producer.target, source_contribution.binding.symbol),
                 // An import is a provenance boundary.  It never leaks the
                 // upstream diagnostic site or projected classification.
                 occurrence: producer.occurrence
             }),
             none => none
         },
-        ValueStructuralProducerKind::ProjectionCopy => match source {
+        ValueStructuralProducerSource::ProjectionCopyValue { .. } => match source {
             some(source_contribution) => some(ValueContribution {
                 producer: producer.producer,
-                binding: ResolvedNamespaceBinding {
-                    file_key: producer.binding.file_key,
-                    frame_index: producer.binding.frame_index,
-                    owner: producer.binding.owner,
-                    exposed_name: producer.binding.exposed_name,
-                    namespace: NamespaceKind::Value,
-                    payload: source_contribution.binding.payload,
-                    is_public: true
-                },
+                binding: materialize_value_binding(
+                    producer.target, source_contribution.binding.symbol),
                 occurrence: NamespaceFactOccurrence {
                     provenance:
                         source_contribution.occurrence.provenance,
                     site: source_contribution.occurrence.site,
                     leaf_origin_site:
                         source_contribution.occurrence.leaf_origin_site,
-                    target_file_key: producer.binding.file_key,
+                    target_file_key: producer.target.file_key,
                     target_frame_index:
-                        producer.binding.frame_index,
+                        producer.target.frame_index,
                     seed_role:
                         source_contribution.occurrence.seed_role,
                     is_projection: true
@@ -2790,10 +2962,10 @@ fn materialize_structural_producer(
 
 fn materialize_cycle_import_producer(
     producer: ValueStructuralProducer,
-    payload: Str
+    symbol: SymbolRef
 ) -> ValueContribution {
-    if match producer.kind {
-        ValueStructuralProducerKind::ImportCopy => false,
+    if match producer.source {
+        ValueStructuralProducerSource::ImportCopyValue { .. } => false,
         _ => true
     } {
         panic(
@@ -2801,15 +2973,7 @@ fn materialize_cycle_import_producer(
     }
     ValueContribution {
         producer: producer.producer,
-        binding: ResolvedNamespaceBinding {
-            file_key: producer.binding.file_key,
-            frame_index: producer.binding.frame_index,
-            owner: producer.binding.owner,
-            exposed_name: producer.binding.exposed_name,
-            namespace: NamespaceKind::Value,
-            payload: payload,
-            is_public: producer.binding.is_public
-        },
+        binding: materialize_value_binding(producer.target, symbol),
         occurrence: producer.occurrence
     }
 }
@@ -2863,8 +3027,8 @@ fn build_value_lane_nodes(
                 some(producer) => {
                     if structural_producer_is_copy(producer) {
                         let source_key = value_lane_node_key(
-                            producer.source_slot_index,
-                            producer.source_lane)
+                            structural_producer_source_slot_index(producer),
+                            structural_producer_source_lane(producer))
                         if !node_indices.contains_key(source_key) {
                             panic(
                                 "namespace invariant violated: active Value copy source lane is absent")
@@ -2889,8 +3053,8 @@ fn value_lane_source_node_index(
     node_indices: Map<Str, Int>
 ) -> Int {
     node_indices.get(value_lane_node_key(
-        producer.source_slot_index,
-        producer.source_lane)).unwrap_or(-1)
+        structural_producer_source_slot_index(producer),
+        structural_producer_source_lane(producer))).unwrap_or(-1)
 }
 
 fn propagate_acyclic_value_lanes(
@@ -2918,8 +3082,8 @@ fn propagate_acyclic_value_lanes(
                             match slots.get(node.slot_index) {
                                 some(slot) => match slot.producers.get(
                                     node.winner_index) {
-                                    some(producer) => match producer.kind {
-                                        ValueStructuralProducerKind::Terminal => {
+                                    some(producer) => match producer.source {
+                                        ValueStructuralProducerSource::TerminalValue(_) => {
                                             solutions.set(
                                                 node_index,
                                                 materialize_structural_producer(
@@ -3019,19 +3183,22 @@ fn producer_eligible_for_lane(
     match lane {
         NamespaceDeliveryLane::Local => true,
         NamespaceDeliveryLane::Publication =>
-            producer.binding.is_public
+            producer.target.is_public
     }
 }
 
-fn append_distinct_payload(
-    payload: Str, mut payloads: List<Str>
+fn append_distinct_symbol_ref(
+    symbol: SymbolRef, mut symbols: List<SymbolRef>
 ) {
-    if !payloads.contains(payload) { payloads.push(payload) }
+    for existing in symbols {
+        if symbol_ref_same(existing, symbol) { return }
+    }
+    symbols.push(symbol)
 }
 
 fn resolve_active_cycle_component(
     component: List<Str>,
-    payload: Str,
+    symbol: SymbolRef,
     slots: List<ValueStructuralSlot>,
     nodes: List<ValueLaneNode>,
     node_indices: Map<Str, Int>,
@@ -3047,12 +3214,12 @@ fn resolve_active_cycle_component(
                 some(node) => match slots.get(node.slot_index) {
                     some(slot) => match slot.producers.get(
                         node.winner_index) {
-                        some(producer) => match producer.kind {
-                            ValueStructuralProducerKind::ImportCopy => {
+                        some(producer) => match producer.source {
+                            ValueStructuralProducerSource::ImportCopyValue { .. } => {
                                 solutions.set(
                                     node_index,
                                     some(materialize_cycle_import_producer(
-                                        producer, payload)))
+                                        producer, symbol)))
                                 import_anchor_count =
                                     import_anchor_count + 1
                             },
@@ -3144,8 +3311,9 @@ fn append_materialized_strong_ambiguity(
                                        right.binding.frame_index &&
                                    left.binding.exposed_name ==
                                        right.binding.exposed_name &&
-                                   left.binding.payload !=
-                                       right.binding.payload {
+                                   !symbol_ref_same(
+                                       left.binding.symbol,
+                                       right.binding.symbol) {
                                     let key = namespace_binding_key(
                                         left.binding.file_key,
                                         left.binding.frame_index,
@@ -3155,13 +3323,13 @@ fn append_materialized_strong_ambiguity(
                                         right.occurrence.site,
                                         left.occurrence.site) {
                                         append_binding_ambiguity(
-                                            key, right.binding.payload,
+                                            key, right.binding.symbol,
                                             left.binding,
                                             left.occurrence,
                                             ambiguous_keys, issues)
                                     } else {
                                         append_binding_ambiguity(
-                                            key, left.binding.payload,
+                                            key, left.binding.symbol,
                                             right.binding,
                                             right.occurrence,
                                             ambiguous_keys, issues)
@@ -3204,8 +3372,8 @@ fn append_active_value_cycle_issue(
                         some(node) => match slots.get(node.slot_index) {
                             some(slot) => match slot.producers.get(
                                 node.winner_index) {
-                                some(producer) => match producer.kind {
-                                    ValueStructuralProducerKind::ImportCopy => {
+                                some(producer) => match producer.source {
+                                    ValueStructuralProducerSource::ImportCopyValue { .. } => {
                                         match first_producer {
                                             none => {
                                                 first_producer =
@@ -3236,14 +3404,15 @@ fn append_active_value_cycle_issue(
     }
     match first_producer {
         some(producer) => {
-            match imports.get(producer.obligation_index) {
+            match imports.get(
+                structural_producer_obligation_index(producer)) {
                 some(obligation) => {
                     issues.push(ImportIssue {
                         kind: ImportIssueKind::UnresolvedImportCycle,
                         site: obligation.site,
                         source_owner: obligation.source_owner,
                         source_name: obligation.source_name,
-                        local_name: producer.binding.exposed_name,
+                        local_name: producer.target.exposed_name,
                         namespace: NamespaceKind::Value,
                         related_owners: related_nodes
                     })
@@ -3300,9 +3469,9 @@ fn solve_structural_value_lanes(
         cyclic_components, solutions, failed_nodes)
     if cyclic_components.len() == 0 { return }
 
-    // A losing copy can witness a canonical payload for an active copy SCC.
+    // A losing copy can witness an exact SymbolRef for an active copy SCC.
     // Collapse those witness dependencies separately so a failed/ambiguous
-    // predecessor never exports hypothetical payloads into a valid successor.
+    // predecessor never exports hypothetical origins into a valid successor.
     let mut witness_graph: Map<Str, List<Str>> = map_new()
     let mut witness_order: List<Str> = []
     let mut component_keys: Map<Int, Str> = map_new()
@@ -3446,7 +3615,7 @@ fn solve_structural_value_lanes(
                         group_active_components.get(
                             group_index).unwrap_or([])
                     let mut witnesses: List<ValueContribution> = []
-                    let mut payloads: List<Str> = []
+                    let mut symbols: List<SymbolRef> = []
                     for active_component in active_components {
                         match components.get(active_component) {
                             some(component) => {
@@ -3463,15 +3632,15 @@ fn solve_structural_value_lanes(
                                                     if producer_eligible_for_lane(
                                                         producer,
                                                         node.lane) {
-                                                        match producer.kind {
-                                                            ValueStructuralProducerKind::Terminal => {
+                                                        match producer.source {
+                                                            ValueStructuralProducerSource::TerminalValue(_) => {
                                                                 match materialize_structural_producer(
                                                                     producer,
                                                                     none) {
                                                                     some(witness) => {
-                                                                        append_distinct_payload(
-                                                                            witness.binding.payload,
-                                                                            payloads)
+                                                                        append_distinct_symbol_ref(
+                                                                            witness.binding.symbol,
+                                                                            symbols)
                                                                         witnesses.push(
                                                                             witness)
                                                                     },
@@ -3504,9 +3673,9 @@ fn solve_structural_value_lanes(
                                                                                 producer,
                                                                                 some(source)) {
                                                                                 some(witness) => {
-                                                                                    append_distinct_payload(
-                                                                                        witness.binding.payload,
-                                                                                        payloads)
+                                                                                    append_distinct_symbol_ref(
+                                                                                        witness.binding.symbol,
+                                                                                        symbols)
                                                                                     witnesses.push(
                                                                                         witness)
                                                                                 },
@@ -3531,23 +3700,27 @@ fn solve_structural_value_lanes(
                         }
                     }
 
-                    if payloads.len() == 1 {
-                        let payload =
-                            payloads.get(0).unwrap_or("")
-                        for active_component in active_components {
-                            match components.get(active_component) {
-                                some(component) => {
-                                    resolve_active_cycle_component(
-                                        component, payload, slots,
-                                        nodes, node_indices, solutions)
-                                },
-                                none => {}
-                            }
+                    if symbols.len() == 1 {
+                        match symbols.get(0) {
+                            some(symbol) => {
+                                for active_component in active_components {
+                                    match components.get(active_component) {
+                                        some(component) => {
+                                            resolve_active_cycle_component(
+                                                component, symbol, slots,
+                                                nodes, node_indices, solutions)
+                                        },
+                                        none => {}
+                                    }
+                                }
+                            },
+                            none => panic(
+                                "namespace invariant violated: exact Value witness missing")
                         }
                         group_status.set(group_index, 1)
                     } else {
                         let strong_conflict =
-                            if payloads.len() > 1 {
+                            if symbols.len() > 1 {
                                 append_materialized_strong_ambiguity(
                                     witnesses, ambiguous_keys, issues)
                             } else {
@@ -3631,13 +3804,13 @@ fn materialize_structural_value_plan(
                 }
                 if contributions.len() > 0 {
                     let key = namespace_binding_key(
-                        slot.binding_template.file_key,
-                        slot.binding_template.frame_index,
-                        slot.binding_template.exposed_name,
+                        slot.target.file_key,
+                        slot.target.frame_index,
+                        slot.target.exposed_name,
                         NamespaceKind::Value)
-                    // Winner selection was payload-free.  Reusing the legacy
+                    // Winner selection was origin-free.  Reusing the legacy
                     // reducer only for diagnostics preserves exact Seed
-                    // collision reporting without letting payloads influence
+                    // collision reporting without letting identities influence
                     // the already-fixed active graph.
                     let _ = reduce_value_lane(
                         contributions, false, true, key,
@@ -3663,8 +3836,9 @@ fn materialize_structural_value_plan(
                                     match solutions.get(
                                         publication_node_index) {
                                         some(some(publication)) =>
-                                            publication.binding.payload ==
-                                                local.binding.payload,
+                                            symbol_ref_same(
+                                                publication.binding.symbol,
+                                                local.binding.symbol),
                                         _ => false
                                     }
                                 } else {
@@ -4073,7 +4247,10 @@ fn build_namespace_growth_guard(
 
 fn block_namespace_growth_delivery(
     obligation_index: Int,
-    source: ResolvedNamespaceBinding,
+    source_file_key: Str,
+    source_frame_index: Int,
+    source_exposed_name: Str,
+    source_namespace: NamespaceKind,
     source_lane: NamespaceDeliveryLane,
     imports: List<ImportObligation>,
     guard: NamespaceGrowthGuard,
@@ -4082,8 +4259,8 @@ fn block_namespace_growth_delivery(
     mut issues: List<ImportIssue>
 ) -> Bool {
     let key = growth_delivery_edge_key(
-        obligation_index, source.file_key,
-        source.frame_index, source_lane)
+        obligation_index, source_file_key,
+        source_frame_index, source_lane)
     match guard.dangerous_edges.get(key) {
         none => false,
         some(components) => {
@@ -4110,9 +4287,9 @@ fn block_namespace_growth_delivery(
                                             ImportIssueKind::UnresolvedImportCycle,
                                         site: first.site,
                                         source_owner: first.source_owner,
-                                        source_name: source.exposed_name,
-                                        local_name: source.exposed_name,
-                                        namespace: source.namespace,
+                                        source_name: source_exposed_name,
+                                        local_name: source_exposed_name,
+                                        namespace: source_namespace,
                                         related_owners: nodes
                                     })
                                 },
@@ -4288,7 +4465,7 @@ pub fn resolve_namespace_plan(
     let mut issues: List<ImportIssue> = []
     let mut exact_frames: Map<Str, ModuleFramePlan> = map_new()
     let mut source_owners: Set<Str> = set_new()
-    let mut enum_variant_facts: Map<Str, List<NamespaceSeed>> = map_new()
+    let mut enum_variant_facts: List<EnumVariantFactGroup> = []
 
     for census in censuses {
         for frame in census.frames {
@@ -4297,12 +4474,10 @@ pub fn resolve_namespace_plan(
                 exact_frame_key(frame.file_key, frame.frame_index), frame)
             source_owners.insert(frame.owner)
         }
-        for entry in census.enum_variant_facts.entries() {
-            let (enum_payload, ctor_facts) = entry
-            match enum_variant_facts.get(enum_payload) {
-                some(existing) => existing.extend(ctor_facts),
-                none => { enum_variant_facts.insert(enum_payload, ctor_facts) }
-            }
+        for group in census.enum_variant_facts {
+            append_enum_variant_fact_group(
+                group.enum_symbol, group.constructors,
+                enum_variant_facts)
         }
         imports.extend(census.imports)
         physical_dependencies.extend(census.physical_dependencies)
@@ -4324,7 +4499,8 @@ pub fn resolve_namespace_plan(
     let mut named_subscriptions: Map<Str, List<Int>> = map_new()
     let mut wildcard_subscriptions: Map<Str, List<Int>> = map_new()
     let mut resolved_obligations: Set<Int> = set_new()
-    let mut expanded_named_enum_relations: Set<Str> = set_new()
+    let mut expanded_named_enum_relations:
+        List<NamedEnumRelationExpansion> = []
     let mut pending_named_enum_relation_facts:
         List<PendingNamedEnumRelationFact> = []
     for obligation_index in 0..imports.len() {
@@ -4373,15 +4549,9 @@ pub fn resolve_namespace_plan(
                 let _ = register_value_structural_producer(
                     ValueStructuralProducer {
                     producer: value_seed_producer(seed),
-                    binding: ResolvedNamespaceBinding {
-                        file_key: seed.file_key,
-                        frame_index: seed.frame_index,
-                        owner: seed.owner,
-                        exposed_name: seed.exposed_name,
-                        namespace: seed.namespace,
-                        payload: seed.payload,
-                        is_public: seed.is_public
-                    },
+                    target: value_binding_target(
+                        seed.file_key, seed.frame_index, seed.owner,
+                        seed.exposed_name, seed.is_public),
                     occurrence: NamespaceFactOccurrence {
                         provenance: NamespaceFactProvenance::Seed,
                         site: seed.origin_site,
@@ -4391,10 +4561,9 @@ pub fn resolve_namespace_plan(
                         seed_role: some(seed.role),
                         is_projection: seed.is_projection
                     },
-                    kind: ValueStructuralProducerKind::Terminal,
-                    source_slot_index: -1,
-                    source_lane: NamespaceDeliveryLane::Local,
-                    obligation_index: -1
+                    source:
+                        ValueStructuralProducerSource::TerminalValue(
+                            seed.symbol)
                 }, false, structural_value_slots,
                 structural_value_slot_indices, value_announcements)
             } else {
@@ -4404,7 +4573,7 @@ pub fn resolve_namespace_plan(
                     owner: seed.owner,
                     exposed_name: seed.exposed_name,
                     namespace: seed.namespace,
-                    payload: seed.payload,
+                    symbol: seed.symbol,
                     is_public: seed.is_public
                 }, NamespaceFactOccurrence {
                     provenance: NamespaceFactProvenance::Seed,
@@ -4500,12 +4669,10 @@ pub fn resolve_namespace_plan(
             producer:
                 value_relation_producer(
                     pending.binding, pending.occurrence),
-            binding: pending.binding,
+            target: value_target_from_binding(pending.binding),
             occurrence: pending.occurrence,
-            kind: ValueStructuralProducerKind::Terminal,
-            source_slot_index: -1,
-            source_lane: NamespaceDeliveryLane::Local,
-            obligation_index: -1
+            source: ValueStructuralProducerSource::TerminalValue(
+                pending.binding.symbol)
         }, false, structural_value_slots,
         structural_value_slot_indices, value_announcements)
     }
