@@ -920,7 +920,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, callee_def_id, callable_result_def_id,
+        HExpr::Call { callee, callee_def_id, member_callee_required,
+                      callable_result_def_id,
                       args, type_args, resolved_dicts, dict_dispatch,
                       ty, effects, span } => {
             // Callee is a borrow read (FieldAccess receiver / Ident) — normalise its
@@ -945,6 +946,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             }
             HExpr::Call { callee: new_callee,
                 callee_def_id: callee_def_id,
+                member_callee_required: member_callee_required,
                 callable_result_def_id: callable_result_def_id,
                 args: new_args, type_args: type_args,
                 resolved_dicts: resolved_dicts, dict_dispatch: dict_dispatch,
@@ -2619,7 +2621,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, callee_def_id, callable_result_def_id,
+        HExpr::Call { callee, callee_def_id, member_callee_required,
+                      callable_result_def_id,
                       args, type_args, resolved_dicts, dict_dispatch,
                       ty, effects, span } => {
             // Callee is a borrow.  Arguments BORROW by default (the callee does not
@@ -2653,6 +2656,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             }
             HExpr::Call { callee: new_callee,
                 callee_def_id: callee_def_id,
+                member_callee_required: member_callee_required,
                 callable_result_def_id: callable_result_def_id,
                 args: new_args, type_args: type_args,
                 resolved_dicts: resolved_dicts, dict_dispatch: dict_dispatch,

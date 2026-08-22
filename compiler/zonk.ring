@@ -276,7 +276,8 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
             HExpr::BinOp { op: op, left: zonk_expr(ctx, left), right: zonk_expr(ctx, right), eq_dispatch: zonk_dispatch(ctx, eq_dispatch), ord_dispatch: zonk_dispatch(ctx, ord_dispatch), ty: z_ty, effects: z_eff, span: z_span },
         HExpr::UnaryOp { op, operand, .. } =>
             HExpr::UnaryOp { op: op, operand: zonk_expr(ctx, operand), ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::Call { callee, callee_def_id, callable_result_def_id,
+        HExpr::Call { callee, callee_def_id, member_callee_required,
+                      callable_result_def_id,
                       args, type_args, resolved_dicts, dict_dispatch, .. } => {
             let zonked_callee = zonk_direct_callee(ctx, callee)
             let exact_callee_def_id = zonk_direct_callee_def_id(
@@ -289,6 +290,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 // position is a value position and must form a real closure.
                 callee: zonked_callee,
                 callee_def_id: exact_callee_def_id,
+                member_callee_required: member_callee_required,
                 callable_result_def_id: exact_result_def_id,
                 args: args.map(fn(a) { zonk_expr(ctx, a) }),
                 type_args: type_args.map(fn(t) { zonk_type(ctx, t) }),

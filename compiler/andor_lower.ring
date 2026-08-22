@@ -166,7 +166,8 @@ fn al_expr(e: HExpr) -> HExpr {
         },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: al_expr(operand), ty: ty, effects: effects, span: span },
-        HExpr::Call { callee, callee_def_id, callable_result_def_id,
+        HExpr::Call { callee, callee_def_id, member_callee_required,
+                      callable_result_def_id,
                       args, type_args, resolved_dicts, dict_dispatch,
                       ty, effects, span } => {
             let new_callee = al_expr(callee)
@@ -174,6 +175,7 @@ fn al_expr(e: HExpr) -> HExpr {
             for a in args { new_args.push(al_expr(a)) }
             HExpr::Call { callee: new_callee,
                 callee_def_id: callee_def_id,
+                member_callee_required: member_callee_required,
                 callable_result_def_id: callable_result_def_id,
                 args: new_args, type_args: type_args,
                 resolved_dicts: resolved_dicts, dict_dispatch: dict_dispatch,

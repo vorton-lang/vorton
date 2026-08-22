@@ -375,6 +375,7 @@ fn gen_c_extern_closure_wrapper(
     }
     let result = gen_c_expr(ctx, HExpr::Call {
         callee: synthetic_callee, callee_def_id: none,
+        member_callee_required: false,
         callable_result_def_id: none,
         args: synthetic_args, type_args: [],
         resolved_dicts: [], dict_dispatch: none, ty: return_type,

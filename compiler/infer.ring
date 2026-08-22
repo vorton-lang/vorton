@@ -1474,6 +1474,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 hexpr: HExpr::Call {
                     callee: callee,
                     callee_def_id: callee_scheme.def_id,
+                    member_callee_required: false,
                     callable_result_def_id: call_result.1,
                     args: [recv_r.hexpr, idx_r.hexpr],
                     type_args: [],
@@ -1999,8 +2000,8 @@ fn remap_default_expr(expr: HExpr, remap: Map<Int, Int>) -> HExpr {
             right: remap_default_expr(right, remap) },
         HExpr::UnaryOp { operand, .. } => HExpr::UnaryOp { ..expr,
             operand: remap_default_expr(operand, remap) },
-        HExpr::Call { callee, callee_def_id, callable_result_def_id,
-                      args, .. } => {
+        HExpr::Call { callee, callee_def_id, member_callee_required,
+                      callable_result_def_id, args, .. } => {
             let exact_callee_def_id = remap_default_call_callee_def_id(
                 callee, callee_def_id, remap)
             let mut new_args: List<HExpr> = []
@@ -2008,6 +2009,7 @@ fn remap_default_expr(expr: HExpr, remap: Map<Int, Int>) -> HExpr {
             HExpr::Call { ..expr,
                 callee: remap_default_expr(callee, remap),
                 callee_def_id: exact_callee_def_id,
+                member_callee_required: member_callee_required,
                 callable_result_def_id: remap_default_optional_def_id(
                     callable_result_def_id, remap),
                 args: new_args }
@@ -2362,6 +2364,7 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
         hexpr: HExpr::Call {
             callee: callee_r.hexpr,
             callee_def_id: callee_def_id,
+            member_callee_required: false,
             callable_result_def_id: call_result.1,
             args: hargs, type_args: [],
             resolved_dicts: resolved_dicts, dict_dispatch: none,
@@ -2688,6 +2691,7 @@ fn infer_method_call_from_receiver(
         hexpr: HExpr::Call {
             callee: HExpr::FieldAccess { receiver: recv_r.hexpr, field: method, ty: callee_type, effects: EMPTY_ROW, span: span },
             callee_def_id: callee_def_id,
+            member_callee_required: true,
             callable_result_def_id: call_result.1,
             args: hargs, type_args: [], resolved_dicts: resolved_dicts,
             dict_dispatch: dict_dispatch, ty: call_result.0,

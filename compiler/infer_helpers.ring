@@ -734,6 +734,7 @@ pub fn resolve_value_ident(mut ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExp
                         ctx, ty)
                     return HExpr::Call {
                         callee: getter, callee_def_id: def_id,
+                        member_callee_required: false,
                         callable_result_def_id: callable_result.1,
                         args: [], type_args: [],
                         resolved_dicts: [], dict_dispatch: none,

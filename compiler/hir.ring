@@ -340,7 +340,7 @@ pub enum HExpr {
     Ident { name: Str, resolved_name: Str?, def_id: Int?, dict_closure_dicts: List<DictRef>?, ty: Type, effects: EffectRow, span: Span },
     BinOp { op: BinOp, left: HExpr, right: HExpr, eq_dispatch: TraitDispatch?, ord_dispatch: TraitDispatch?, ty: Type, effects: EffectRow, span: Span },
     UnaryOp { op: UnaryOp, operand: HExpr, ty: Type, effects: EffectRow, span: Span },
-    Call { callee: HExpr, callee_def_id: Int?, callable_result_def_id: Int?, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, ty: Type, effects: EffectRow, span: Span },
+    Call { callee: HExpr, callee_def_id: Int?, member_callee_required: Bool, callable_result_def_id: Int?, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, ty: Type, effects: EffectRow, span: Span },
     FieldAccess { receiver: HExpr, field: Str, ty: Type, effects: EffectRow, span: Span },
     StructLit { name: Str, type_args: List<Type>, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
     NamedVariantConstruct { enum_name: Str, variant_name: Str, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
@@ -689,6 +689,18 @@ fn validate_hir_binder(mut seen: Set<Int>, def_id: Int, label: Str) {
     seen.insert(def_id)
 }
 
+fn validate_hir_source_binder(
+    mut seen: Set<Int>, def_id: Int, label: Str
+) {
+    if def_id < 0 {
+        panic("HIR ${label} is outside the source DefId namespace")
+    }
+    if seen.contains(def_id) {
+        panic("HIR binder DefId collision ${def_id} at ${label}")
+    }
+    seen.insert(def_id)
+}
+
 fn validate_hir_member_binder(
     mut seen: Set<Int>, def_id: Int, label: Str
 ) {
@@ -1003,8 +1015,8 @@ fn validate_hir_expr(
         },
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
-        HExpr::Call { callee, callee_def_id, callable_result_def_id,
-                      args, ty, .. } => {
+        HExpr::Call { callee, callee_def_id, member_callee_required,
+                      callable_result_def_id, args, ty, .. } => {
             let direct_callee_def_id = match callee {
                 HExpr::Ident { def_id, .. } => def_id,
                 HExpr::Lambda { def_id, .. } => some(def_id),
@@ -1012,11 +1024,35 @@ fn validate_hir_expr(
                     callable_result_def_id,
                 _ => none
             }
-            match direct_callee_def_id {
-                some(expected) => if callee_def_id != some(expected) {
-                    panic("HIR Call exact callee identity differs from its producer")
-                },
-                none => {}
+            if member_callee_required {
+                if direct_callee_def_id.is_some() {
+                    panic("HIR member Call callee unexpectedly provides a direct producer")
+                }
+                let member_callee_shape = match callee {
+                    HExpr::FieldAccess { .. } => true,
+                    HExpr::Ident { def_id: none, .. } => true,
+                    _ => false
+                }
+                if !member_callee_shape {
+                    panic("HIR member Call has an invalid callee shape")
+                }
+                match callee_def_id {
+                    some(id) => if !is_synthetic_member_def_id(id) {
+                        panic("HIR member Call callee is outside the member-registration DefId namespace")
+                    },
+                    none => panic("HIR member Call has no exact registration identity")
+                }
+            } else {
+                match direct_callee_def_id {
+                    some(expected) => if callee_def_id != some(expected) {
+                        panic("HIR Call exact callee identity differs from its producer")
+                    },
+                    none => match callee_def_id {
+                        some(_) => panic(
+                            "HIR dynamic Call without a direct producer carries a registration identity"),
+                        none => {}
+                    }
+                }
             }
             match (ty, callable_result_def_id) {
                 (Type::FnType { .. }, some(id)) => {
@@ -1151,7 +1187,7 @@ fn validate_hir_decls(
                         validate_hir_member_binder(
                             seen, id, "impl member '${name}'")
                     } else {
-                        validate_hir_binder(
+                        validate_hir_source_binder(
                             seen, id, "function '${name}'")
                     },
                     none => {}
@@ -1204,7 +1240,7 @@ fn validate_hir_decls(
             HDecl::Const { name, def_id, ty, init, .. } => {
                 validate_inert_type(ty)
                 match def_id {
-                    some(id) => validate_hir_binder(
+                    some(id) => validate_hir_source_binder(
                         seen, id, "const '${name}'"),
                     none => {}
                 }
@@ -1225,7 +1261,18 @@ fn validate_hir_decls(
                     }
                 }
             },
-            HDecl::ExternFn { params, return_type, effects, .. } => {
+            HDecl::ExternFn { name, def_id, params,
+                              return_type, effects, .. } => {
+                match def_id {
+                    some(id) => if member_function_context {
+                        validate_hir_member_binder(
+                            seen, id, "extern impl member '${name}'")
+                    } else {
+                        validate_hir_source_binder(
+                            seen, id, "extern function '${name}'")
+                    },
+                    none => panic("HIR extern function '${name}' has no exact DefId")
+                }
                 validate_inert_type(return_type)
                 validate_inert_effect_row(effects)
                 for param in params {

@@ -1297,6 +1297,7 @@ fn expand_delegate_impls(
                                                         ty: tm.ty, effects: EMPTY_ROW, span: span
                                                     },
                                                     callee_def_id: some(forwarded_member_def_id),
+                                                    member_callee_required: true,
                                                     callable_result_def_id: call_result.1,
                                                     args: dict_args,
                                                     type_args: [],
@@ -1338,6 +1339,7 @@ fn expand_delegate_impls(
                                                 HExpr::Call {
                                                     callee: method_access,
                                                     callee_def_id: some(forwarded_member_def_id),
+                                                    member_callee_required: true,
                                                     callable_result_def_id: call_result.1,
                                                     args: forward_args,
                                                     type_args: [],

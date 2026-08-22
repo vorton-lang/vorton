@@ -5328,7 +5328,7 @@ def representation_s1_contract_errors(
         "hir": (
             "pub ownership_mode: Int",
             "Call { callee: HExpr, callee_def_id: Int?, "
-            "callable_result_def_id: Int?",
+            "member_callee_required: Bool, callable_result_def_id: Int?",
             "Lambda { def_id: Int",
             "EffectOp { effect_name: Str, op_name: Str, op_def_id: Int",
             "pub op_def_id: Int",
@@ -5338,6 +5338,9 @@ def representation_s1_contract_errors(
             "pub fn is_synthetic_member_def_id(",
             "overlapping synthetic DefId domains",
             "HIR Call exact callee identity differs from its producer",
+            "HIR member Call has no exact registration identity",
+            "HIR dynamic Call without a direct producer carries a registration identity",
+            "HIR extern function '${name}' has no exact DefId",
             "HIR callable result has no exact DefId",
             "HIR non-callable result carries a callable DefId",
             "DefId differs from canonical identity",
@@ -5357,12 +5360,15 @@ def representation_s1_contract_errors(
             "fn remap_default_call_callee_def_id(",
             "fresh_callable_identity_def_id(ctx)",
             "callee_def_id: exact_callee_def_id",
+            "member_callee_required: member_callee_required",
             "callable_result_def_id: remap_default_optional_def_id(",
             "def_id: remap_default_def_id(def_id, remap)",
             "callee_def_id: callee_def_id",
             "op_def_id: op.def_id",
             "op_def_id: handler_op_def_id",
             "let lambda_def_id = fresh_callable_identity_def_id(ctx)",
+            "member_callee_required: false",
+            "member_callee_required: true",
         ),
         "infer_decl": (
             "registered sig member has no exact DefId",
@@ -5371,6 +5377,7 @@ def representation_s1_contract_errors(
             '"delegate wrapper scheme"',
             "def_id: some(wrapper_def_id)",
             "callee_def_id: some(forwarded_member_def_id)",
+            "member_callee_required: true",
             "wrapper_def_id == forwarded_member_def_id",
             "ctx.env.reserve_legacy_delegate_hdecl_def_id()",
             "def_id: op.def_id",
@@ -5404,6 +5411,7 @@ def representation_s1_contract_errors(
             "fn zonk_callable_result_def_id(",
             "fn zonk_direct_callee_def_id(",
             "callee_def_id: exact_callee_def_id",
+            "member_callee_required: member_callee_required",
             "callable_result_def_id: exact_result_def_id",
             "def_id: def_id",
             "op_def_id: h.op_def_id",
@@ -5412,12 +5420,14 @@ def representation_s1_contract_errors(
         "andor": (
             "def_id: tm.def_id", "def_id: op.def_id",
             "callee_def_id: callee_def_id",
+            "member_callee_required: member_callee_required",
             "callable_result_def_id: callable_result_def_id",
             "op_def_id: h.op_def_id", "op_def_id: op_def_id",
         ),
         "dict": (
             "def_id: tm.def_id", "def_id: op.def_id",
             "callee_def_id: callee_def_id",
+            "member_callee_required: member_callee_required",
             "callable_result_def_id: callable_result_def_id",
             "op_def_id: h.op_def_id", "op_def_id: op_def_id",
         ),
@@ -5425,6 +5435,7 @@ def representation_s1_contract_errors(
             "def_id: op.def_id",
             "HExpr::Lambda { def_id: def_id,",
             "callee_def_id: callee_def_id",
+            "member_callee_required: member_callee_required",
             "callable_result_def_id: callable_result_def_id",
             "op_def_id: h.op_def_id", "op_def_id: op_def_id",
         ),
@@ -5433,6 +5444,7 @@ def representation_s1_contract_errors(
         ),
         "cexpr": (
             "callee_def_id: none",
+            "member_callee_required: false",
             "callable_result_def_id: none",
             "ownership_mode: PARAM_OWNERSHIP_UNKNOWN",
         ),
@@ -5460,7 +5472,9 @@ def representation_s1_contract_errors(
 
     transport_specs = (
         ("Type::FnType", ("ownership_term",)),
-        ("HExpr::Call", ("callee_def_id", "callable_result_def_id")),
+        ("HExpr::Call", (
+            "callee_def_id", "member_callee_required",
+            "callable_result_def_id")),
         ("HExpr::Lambda", ("def_id",)),
         ("HExpr::EffectOp", ("op_def_id",)),
         ("HEffectHandler", ("op_def_id",)),
@@ -5653,14 +5667,57 @@ def representation_s1_contract_errors(
     if call_validator_error:
         errors.append(call_validator_error)
     elif not all(token in call_validator for token in (
+            "member_callee_required",
+            "if member_callee_required {",
             "HExpr::Ident { def_id, .. } => def_id",
             "HExpr::Lambda { def_id, .. } => some(def_id)",
             "HExpr::Call { callable_result_def_id, .. }",
+            "if direct_callee_def_id.is_some()",
+            "HExpr::FieldAccess { .. } => true",
+            "HExpr::Ident { def_id: none, .. } => true",
+            "if !member_callee_shape",
+            "some(id) => if !is_synthetic_member_def_id(id)",
+            'none => panic("HIR member Call has no exact registration identity")',
             "callee_def_id != some(expected)",
+            'some(_) => panic(\n                            "HIR dynamic Call without a direct producer carries a registration identity")',
             "(Type::FnType { .. }, some(id))",
             "(Type::FnType { .. }, none)",
             "(_, some(_))")):
         errors.append("HIR Call exactness/result iff relation is incomplete")
+    elif any(token in mask_ring_strings_and_comments(call_validator) for token in (
+            ".lookup(", "resolved_name", "method_name", "field ==")):
+        errors.append("HIR Call member provenance is re-inferred from spelling")
+
+    call_construction_contracts = (
+        ("infer", "infer_index_expr", "member_callee_required: false", 1),
+        ("infer", "infer_call", "member_callee_required: false", 1),
+        ("infer", "infer_method_call_from_receiver",
+         "member_callee_required: true", 1),
+        ("infer_helpers", "resolve_value_ident",
+         "member_callee_required: false", 1),
+        ("infer_decl", "expand_delegate_impls",
+         "member_callee_required: true", 2),
+        ("cexpr", "gen_c_extern_closure_wrapper",
+         "member_callee_required: false", 1),
+    )
+    for label, function_name, token, expected_count in call_construction_contracts:
+        body, extract_error = extract_ring_function_body(
+            sources[label], function_name)
+        if extract_error:
+            errors.append(extract_error)
+        elif body.count(token) != expected_count:
+            errors.append(
+                f"{label}.{function_name} has {body.count(token)} occurrences "
+                f"of {token!r}, expected {expected_count}")
+    if active_sources.count("member_callee_required: true") != 3:
+        errors.append("member Call authority is not limited to method/delegate constructors")
+    for label in (
+            "infer", "infer_decl", "infer_helpers", "zonk", "andor",
+            "dict", "perceus", "cexpr", "compiler_mod"):
+        if label != "hir" and re.search(
+                r"\bif\s+[^\n]*member_callee_required",
+                mask_ring_strings_and_comments(sources[label])):
+            errors.append(f"{label}: member Call provenance gained a semantic reader")
 
     effect_validator, effect_validator_error = extract_ring_function_body(
         sources["hir"], "validate_hir_effect_op_identity")
@@ -5707,8 +5764,30 @@ def representation_s1_contract_errors(
             "effect_op_ids, true)",
             "member_function_context)",
             "validate_hir_member_binder(",
-            "validate_hir_binder(")):
+            "validate_hir_source_binder(")):
         errors.append("HIR declarations do not separate member/source binders")
+
+    extern_decl_tokens = (
+        "HDecl::ExternFn { name, def_id, params,",
+        'validate_hir_member_binder(\n                            seen, id, "extern impl member',
+        'validate_hir_source_binder(\n                            seen, id, "extern function',
+        'none => panic("HIR extern function',
+    )
+    for token in extern_decl_tokens:
+        if token not in decl_validator:
+            errors.append(f"HIR ExternFn exact-domain contract missing {token!r}")
+
+    extern_constructor, extern_constructor_error = extract_ring_function_body(
+        sources["infer_decl"], "check_extern_fn_decl")
+    if extern_constructor_error:
+        errors.append(extern_constructor_error)
+    elif not all(token in extern_constructor for token in (
+            "def_id: scheme.def_id",
+            "def_id: none, is_mutable: p.is_mutable")) or any(
+                token in extern_constructor for token in (
+                    "fresh_def_id", "fresh_member_registration_def_id",
+                    "fresh_callable_identity_def_id")):
+        errors.append("ExternFn HIR does not preserve exact registration/source identity")
 
     default_collect, default_collect_error = extract_ring_function_body(
         sources["infer"], "collect_default_expr_binders")
@@ -5726,6 +5805,7 @@ def representation_s1_contract_errors(
     elif not all(token in default_remap for token in (
             "let exact_callee_def_id = remap_default_call_callee_def_id(",
             "callee_def_id: exact_callee_def_id",
+            "member_callee_required: member_callee_required",
             "callable_result_def_id: remap_default_optional_def_id(",
             "def_id: remap_default_def_id(def_id, remap)",
             "HEffectHandler { ..handler,",
@@ -5921,6 +6001,16 @@ def representation_s1_contract_errors(
             "let local = fn(inner: Int) -> Option<Int>",
             "let imported = provider().factory()",
             "print_result(use_default())",
+        ),
+        "ownership_callable_field_fixture": (
+            "callback: fn(Int) -> Option<Int>",
+            "(box.callback)(value)",
+            "fn apply_box(box: CallbackBox, value: Int) -> Option<Int>",
+        ),
+        "ownership_extern_member_fixture": (
+            "extern fn ring_probe_top(value: Int) -> Option<Int>",
+            "impl ExternProbe for ExternOwner {",
+            "extern fn ring_probe_member(self) -> Option<Int>",
         ),
     }
     for label, tokens in fixture_contracts.items():
@@ -7315,6 +7405,14 @@ def identity_checkpoint_source_errors() -> List[str]:
             REPO / "tests" / "cases" /
             "ownership_member_counter_delegate_many.ring"
         ),
+        "ownership_callable_field_fixture": (
+            REPO / "tests" / "cases" /
+            "ownership_callable_field_computed.ring"
+        ),
+        "ownership_extern_member_fixture": (
+            REPO / "tests" / "cases" /
+            "ownership_extern_member_identity.ring"
+        ),
     }
     sources: dict[str, str] = {}
     errors: List[str] = []
@@ -7684,6 +7782,8 @@ def identity_checkpoint_source_errors() -> List[str]:
          "pub ownership_mode: Int", "pub removed_ownership_mode: Int"),
         ("Call callee identity field", "hir",
          "callee_def_id: Int?", "removed_callee_def_id: Int?"),
+        ("Call member provenance field", "hir",
+         "member_callee_required: Bool", "removed_member_callee_required: Bool"),
         ("Call result identity field", "hir",
          "callable_result_def_id: Int?",
          "removed_callable_result_def_id: Int?"),
@@ -7759,6 +7859,42 @@ def identity_checkpoint_source_errors() -> List[str]:
          "_ => (ty, some(fresh_callable_identity_def_id(ctx)))"),
         ("Call producer exactness", "hir",
          "callee_def_id != some(expected)", "false"),
+        ("method member provenance disabled", "infer",
+         "member_callee_required: true,\n            callable_result_def_id: call_result.1",
+         "member_callee_required: false,\n            callable_result_def_id: call_result.1"),
+        ("computed function-field forced member", "infer",
+         "callee: callee_r.hexpr,\n            callee_def_id: callee_def_id,\n            member_callee_required: false",
+         "callee: callee_r.hexpr,\n            callee_def_id: callee_def_id,\n            member_callee_required: true"),
+        ("delegate member provenance disabled", "infer_decl",
+         "member_callee_required: true,\n                                                    callable_result_def_id",
+         "member_callee_required: false,\n                                                    callable_result_def_id"),
+        ("member Call validator deleted", "hir",
+         "if member_callee_required {",
+         "if false {"),
+        ("member Call shape validator deleted", "hir",
+         "if !member_callee_shape {",
+         "if false {"),
+        ("member Call accepts source ID", "hir",
+         "some(id) => if !is_synthetic_member_def_id(id) {\n                        panic(\"HIR member Call callee",
+         "some(id) => if id < 0 {\n                        panic(\"HIR member Call callee"),
+        ("member Call accepts callable ID", "hir",
+         "some(id) => if !is_synthetic_member_def_id(id) {\n                        panic(\"HIR member Call callee",
+         "some(id) => if !is_synthetic_callable_def_id(id) {\n                        panic(\"HIR member Call callee"),
+        ("member Call accepts dict ID", "hir",
+         "some(id) => if !is_synthetic_member_def_id(id) {\n                        panic(\"HIR member Call callee",
+         "some(id) => if !is_synthetic_dict_def_id(id) {\n                        panic(\"HIR member Call callee"),
+        ("member Call accepts ANF ID", "hir",
+         "some(id) => if !is_synthetic_member_def_id(id) {\n                        panic(\"HIR member Call callee",
+         "some(id) => if !is_synthetic_anf_def_id(id) {\n                        panic(\"HIR member Call callee"),
+        ("member Call accepts RC ID", "hir",
+         "some(id) => if !is_synthetic_member_def_id(id) {\n                        panic(\"HIR member Call callee",
+         "some(id) => if !is_synthetic_rc_def_id(id) {\n                        panic(\"HIR member Call callee"),
+        ("member Call accepts missing ID", "hir",
+         'none => panic("HIR member Call has no exact registration identity")',
+         "none => {}"),
+        ("dynamic Call accepts residual ID", "hir",
+         'some(_) => panic(\n                            "HIR dynamic Call without a direct producer carries a registration identity")',
+         "some(_) => {}"),
         ("Call result type relation", "hir",
          "(Type::FnType { .. }, none) =>",
          "(_, none) =>"),
@@ -7805,6 +7941,27 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("Sig missing registration mint", "infer_decl",
          "fail.raise(CompileError {})\n                    }",
          "hmembers.push(HSigMember { name: m.name, def_id: ctx.env.fresh_def_id(), fn_type: UNIT, span: m.span })\n                    }"),
+        ("ExternFn loses exact ID", "infer_decl",
+         "def_id: scheme.def_id, type_params: type_params",
+         "def_id: none, type_params: type_params"),
+        ("ExternFn params gain source ID", "infer_decl",
+         "def_id: none, is_mutable: p.is_mutable",
+         "def_id: some(ctx.env.fresh_def_id()), is_mutable: p.is_mutable"),
+        ("extern impl accepts source ID", "hir",
+         'validate_hir_member_binder(\n                            seen, id, "extern impl member',
+         'validate_hir_source_binder(\n                            seen, id, "extern impl member'),
+        ("extern impl accepts callable ID", "hir",
+         'validate_hir_member_binder(\n                            seen, id, "extern impl member',
+         'validate_hir_callable_binder(\n                            seen, id, "extern impl member'),
+        ("top extern accepts member ID", "hir",
+         'validate_hir_source_binder(\n                            seen, id, "extern function',
+         'validate_hir_member_binder(\n                            seen, id, "extern function'),
+        ("top extern accepts callable ID", "hir",
+         'validate_hir_source_binder(\n                            seen, id, "extern function',
+         'validate_hir_callable_binder(\n                            seen, id, "extern function'),
+        ("ExternFn accepts missing ID", "hir",
+         'none => panic("HIR extern function \'${name}\' has no exact DefId")',
+         "none => {}"),
         ("type equality neutrality", "types",
          "Type::FnType { params: pa, return_type: ra, effects: ea, .. }",
          "Type::FnType { params: pa, return_type: ra, effects: ea, ownership_term: oa }"),
@@ -7816,8 +7973,10 @@ def identity_checkpoint_source_errors() -> List[str]:
          "Type::FnType { params: pa, return_type: ra, effects: ea, ownership_term: oa }"),
         ("zonk Call transport", "zonk",
          "callee_def_id: exact_callee_def_id,\n"
+         "                member_callee_required: member_callee_required,\n"
          "                callable_result_def_id: exact_result_def_id",
          "callee_def_id: none,\n"
+         "                member_callee_required: false,\n"
          "                callable_result_def_id: none"),
         ("late callable result finalization", "zonk",
          "some(resolver) => some(fresh_callable_identity_def_id(resolver))",
