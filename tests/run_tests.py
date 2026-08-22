@@ -7428,9 +7428,9 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
 
 IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
 F1_EXECUTABLE_KIND_COUNT = 23
-F1_BINDER_KIND_COUNT = 20
-F1_SEMANTIC_MUTATION_COUNT = 60
-F1_SCOPE_GUARD_COUNT = 9
+F1_BINDER_KIND_COUNT = 21
+F1_SEMANTIC_MUTATION_COUNT = 69
+F1_SCOPE_GUARD_COUNT = 14
 
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
@@ -7472,6 +7472,7 @@ F1_BINDER_KINDS = (
     ("handler_resume", "BINDER_HANDLER_RESUME"),
     ("lambda_capture", "BINDER_LAMBDA_CAPTURE"),
     ("dictionary_evidence_local", "BINDER_DICTIONARY_EVIDENCE_LOCAL"),
+    ("generated_synthetic_parameter", "BINDER_GENERATED_SYNTHETIC_PARAMETER"),
     ("lambda_value", "BINDER_LAMBDA_VALUE"),
     ("call_result", "BINDER_CALL_RESULT"),
     ("pre_anf", "BINDER_PRE_ANF"),
@@ -7523,13 +7524,14 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
 
     for name, expected in {
         "ExecutableRef": ["value"],
+        "ExecutableParentRef": ["value"],
         "ExecutableKind": ["tag"],
         "ExecutableContractMode": ["tag"],
         "ExecutableContract": ["value"],
-        "ExecutableEntry": ["reference", "kind", "contract"],
+        "ExecutableEntry": ["reference", "parent", "kind", "contract"],
         "ExecutableInventory": ["entries"],
         "BinderKind": ["tag"],
-        "BinderEntry": ["slot", "owner", "kind"],
+        "BinderEntry": ["slot", "owner", "kind", "site"],
         "BinderManifest": ["owner", "entries"],
         "IrInventoryClosure": ["inventory", "manifests"],
     }.items():
@@ -7564,6 +7566,8 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         source, "EXECUTABLE_KIND_NAMESPACE_TAGS")
     executable_roles, executable_role_error = _f0_int_list(
         source, "EXECUTABLE_KIND_PATH_ROLE_TAGS")
+    parent_forms, parent_form_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_PARENT_FORM_TAGS")
     if allowed_error:
         errors.append(allowed_error)
     if ref_error:
@@ -7572,9 +7576,11 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         errors.append(namespace_error)
     if executable_role_error:
         errors.append(executable_role_error)
+    if parent_form_error:
+        errors.append(parent_form_error)
     expected_modes = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        2, 2, 2, 2, 2,
+        2, 2, 0, 2, 2,
         1, 1, 1, 1, 1,
         0, 2, 2,
     ]
@@ -7596,6 +7602,12 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         7, 7, 7, 7, 7,
         7, 7, 7,
     ]
+    expected_parent_forms = [
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+        0, 0, 2, 0, 0,
+        0, 0, 0, 0, 0,
+        0, 0, 0,
+    ]
     if allowed_modes is not None and allowed_modes != expected_modes:
         errors.append("F1 executable kind/body-mode matrix drifted")
     if ref_forms is not None and ref_forms != expected_ref_forms:
@@ -7605,18 +7617,36 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     if executable_roles is not None and (
             executable_roles != expected_executable_roles):
         errors.append("F1 executable kind/path-role matrix drifted")
+    if parent_forms is not None and parent_forms != expected_parent_forms:
+        errors.append("F1 executable kind/parent-form matrix drifted")
     if "pub fn executable_kind_drop_glue()" not in source:
         errors.append("F1 DropGlue executable kind is missing")
 
     _f1_require_function_tokens(source, "make_executable_entry", (
         "if !executable_kind_allows_mode(kind, mode)",
         "if expected_form != actual_form",
+        "if !executable_kind_allows_parent_form(kind, parent)",
+        "if !executable_parent_matches_reference(reference, parent)",
         "if !namespace_kind_same(",
-        "if !path_role_same(",
+        "if !path_role_same(\n                path_ref_role(path), "
+        "executable_kind_expected_path_role(kind))",
         "if executable_kind_same(kind, executable_kind_module_body())",
         "if path_owner_ref_is_symbol(path_ref_owner(path))",
-        "!executable_ref_owns_path(reference, executable_contract_body_path(contract))",
-        "!contract_symbol_matches_reference(reference, contract)",
+        "if !path_role_same(path_ref_role(body_path), path_role_child())",
+        "!path_is_direct_child_of_executable(reference, body_path)",
+        "!executable_ref_is_named(reference)",
+    ), errors)
+    _f1_require_function_tokens(source, "executable_parent_matches_reference", (
+        "if executable_parent_is_module_body(parent)",
+        "module_body_ref_same(",
+        "path_ref_normalized_child_path(path).len() == 1",
+        "path_is_direct_child_of_executable(\n            executable_parent, "
+        "executable_ref_anonymous_path(reference))",
+    ), errors)
+    _f1_require_function_tokens(source, "path_is_direct_child_of_executable", (
+        "path_ref_normalized_child_path(path).len() == 1",
+        "child_path.len() == root_path.len() + 1",
+        "string_path_has_prefix(child_path, root_path)",
     ), errors)
     _f1_require_function_tokens(source, "make_executable_inventory", (
         "if executable_ref_same(left.reference, right.reference)",
@@ -7626,13 +7656,8 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     _f1_require_function_tokens(source, "executable_inventory_entries", (
         "copy_executable_entries(value.entries)",
     ), errors)
-    _f1_require_function_tokens(source, "contract_symbol_matches_reference", (
-        "symbol_ref_same(executable_ref_named_symbol(reference), contract_symbol)",
-        "path_owner_ref_is_symbol(owner)",
-        "symbol_ref_same(path_owner_ref_symbol(owner), contract_symbol)",
-    ), errors)
     for token in (
-            "ConcreteBodyValue(PathRef)", "ContractOnlyValue(SymbolRef)",
+            "ConcreteBodyValue(PathRef)", "ContractOnlyValue",
             "make_concrete_body_contract", "make_contract_only"):
         if token not in source:
             errors.append(f"F1 two-mode body contract misses {token!r}")
@@ -7647,20 +7672,23 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         ), errors)
     if len(F1_BINDER_KINDS) != F1_BINDER_KIND_COUNT:
         errors.append("F1 binder kind test census is incomplete")
-    if "const BINDER_KIND_COUNT: Int = 20" not in source:
+    if "const BINDER_KIND_COUNT: Int = 21" not in source:
         errors.append("F1 binder kind count drifted")
     binder_roles, binder_role_error = _f0_int_list(
         source, "BINDER_KIND_PATH_ROLE_TAGS")
     if binder_role_error:
         errors.append(binder_role_error)
     expected_binder_roles = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        4, 0, 1, 3, 6, 1, 3, 3, 6,
+        2, 0, 0, 0, 0, 0, 0, 0, 2, 5, 5,
+        4, 0, 2, 1, 3, 6, 1, 3, 3, 6,
     ]
     if binder_roles is not None and binder_roles != expected_binder_roles:
         errors.append("F1 binder kind/path-role matrix drifted")
 
     _f1_require_function_tokens(source, "make_binder_entry", (
+        "if !executable_ref_contains_path(owner, site)",
+        "if !path_role_same(\n            path_ref_role(site), "
+        "binder_kind_expected_path_role(kind))",
         "if !slot_ref_is_source(slot)",
         "binder_kind_allows_dictionary_domain(kind)",
         "if binder_kind_tag(kind) ==\n                BINDER_DICTIONARY_EVIDENCE_LOCAL",
@@ -7669,8 +7697,7 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         "if !domain_allowed",
         "slot_ref_source_origin_module_key(slot) !=",
         "if slot_ref_is_source(slot)",
-        "if !executable_ref_owns_path(owner, path)",
-        "if !path_role_same(",
+        "if !path_ref_same(slot_ref_synthetic_path(slot), site)",
     ), errors)
     _f1_require_function_tokens(source, "make_binder_manifest", (
         "if !executable_ref_same(left.owner, owner)",
@@ -7683,9 +7710,10 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     _f1_require_function_tokens(source, "close_ir_inventory", (
         "if manifests.len() != inventory.entries.len()",
         "if manifests_have_duplicate_slot(manifests)",
-        "if !anonymous_executable_has_registered_root(inventory, entry)",
+        "if !executable_parent_is_registered(inventory, entry)",
         "if manifest_count_for_owner(manifests, entry.reference) != 1",
         "let manifest = manifest_for_owner(manifests, entry.reference)",
+        "if !binder_site_has_nearest_registered_owner(inventory, binder)",
         "manifest.entries.len() != 0",
         "if !inventory_contains_ref(inventory, manifest.owner)",
         "make_executable_inventory(inventory.entries)",
@@ -7694,13 +7722,15 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     _f1_require_function_tokens(source, "manifests_have_duplicate_slot", (
         "if slot_ref_same(existing, entry.slot) { return true }",
     ), errors)
-    _f1_require_function_tokens(source, "anonymous_executable_has_registered_root", (
-        "if executable_ref_is_named(entry.reference) { return true }",
-        "return inventory_contains_ref(",
-        "make_named_executable_ref(path_owner_ref_symbol(owner))",
-        "executable_kind_module_body()",
-        "module_body_ref_same(",
-        "string_path_has_prefix(",
+    _f1_require_function_tokens(source, "executable_parent_is_registered", (
+        "if executable_parent_is_module_body(entry.parent) { return true }",
+        "let parent_ref = executable_parent_executable(entry.parent)",
+        "executable_contract_mode_concrete_body()",
+    ), errors)
+    _f1_require_function_tokens(source, "binder_site_has_nearest_registered_owner", (
+        "if !inventory_contains_ref(inventory, binder.owner)",
+        "!executable_ref_contains_path(binder.owner, binder.site)",
+        "executable_ref_depth(candidate.reference) > owner_depth",
     ), errors)
     _f1_require_function_tokens(source, "ir_inventory_closure_inventory", (
         "make_executable_inventory(value.inventory.entries)",
@@ -7745,20 +7775,30 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
          "if !executable_kind_allows_mode(kind, mode)", "if false"),
         ("kind/ref form", "make_executable_entry",
          "if expected_form != actual_form", "if false"),
+        ("kind/parent form", "make_executable_entry",
+         "if !executable_kind_allows_parent_form(kind, parent)", "if false"),
         ("kind/namespace", "make_executable_entry",
          "if !namespace_kind_same(", "if false && namespace_kind_same("),
         ("kind/path role", "make_executable_entry",
-         "if !path_role_same(", "if false && path_role_same("),
+         "if !path_role_same(\n                path_ref_role(path), "
+         "executable_kind_expected_path_role(kind))",
+         "if false"),
+        ("immediate parent", "make_executable_entry",
+         "if !executable_parent_matches_reference(reference, parent)", "if false"),
+        ("parent relation helper", "executable_parent_matches_reference",
+         "path_is_direct_child_of_executable(\n            executable_parent, "
+         "executable_ref_anonymous_path(reference))", "true"),
         ("module-body owner", "make_executable_entry",
          "if path_owner_ref_is_symbol(path_ref_owner(path))", "if false"),
-        ("body path owner", "make_executable_entry",
-         "!executable_ref_owns_path(reference, executable_contract_body_path(contract))",
-         "false"),
-        ("ContractOnly relation", "make_executable_entry",
-         "!contract_symbol_matches_reference(reference, contract)", "false"),
-        ("ContractOnly relation helper", "contract_symbol_matches_reference",
-         "symbol_ref_same(executable_ref_named_symbol(reference), contract_symbol)",
-         "true"),
+        ("body path role", "make_executable_entry",
+         "if !path_role_same(path_ref_role(body_path), path_role_child())",
+         "if false"),
+        ("body direct child", "make_executable_entry",
+         "!path_is_direct_child_of_executable(reference, body_path)", "false"),
+        ("body direct-child helper", "path_is_direct_child_of_executable",
+         "child_path.len() == root_path.len() + 1", "child_path.len() > root_path.len()"),
+        ("anonymous ContractOnly", "make_executable_entry",
+         "!executable_ref_is_named(reference)", "false"),
         ("source binder synthetic", "make_binder_entry",
          "if !slot_ref_is_source(slot)", "if false"),
         ("source binder domain", "make_binder_entry",
@@ -7768,12 +7808,15 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
          "if false"),
         ("source binder owner", "make_binder_entry",
          "slot_ref_source_origin_module_key(slot) !=", "false &&"),
+        ("binder site containment", "make_binder_entry",
+         "if !executable_ref_contains_path(owner, site)", "if false"),
+        ("binder site role", "make_binder_entry",
+         "if !path_role_same(\n            path_ref_role(site), "
+         "binder_kind_expected_path_role(kind))", "if false"),
         ("normalized binder source", "make_binder_entry",
          "if slot_ref_is_source(slot)", "if false"),
-        ("normalized binder owner", "make_binder_entry",
-         "if !executable_ref_owns_path(owner, path)", "if false"),
-        ("normalized binder role", "make_binder_entry",
-         "if !path_role_same(", "if false && path_role_same("),
+        ("synthetic binder site", "make_binder_entry",
+         "if !path_ref_same(slot_ref_synthetic_path(slot), site)", "if false"),
         ("manifest cross-owner", "make_binder_manifest",
          "if !executable_ref_same(left.owner, owner)", "if false"),
         ("manifest duplicate slot", "make_binder_manifest",
@@ -7784,11 +7827,17 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
          "if manifests_have_duplicate_slot(manifests)", "if false"),
         ("global duplicate helper", "manifests_have_duplicate_slot",
          "if slot_ref_same(existing, entry.slot) { return true }", "if false {}"),
-        ("anonymous orphan", "close_ir_inventory",
-         "if !anonymous_executable_has_registered_root(inventory, entry)",
+        ("parent registration", "close_ir_inventory",
+         "if !executable_parent_is_registered(inventory, entry)",
          "if false"),
-        ("anonymous root helper", "anonymous_executable_has_registered_root",
-         "return inventory_contains_ref(", "return true || inventory_contains_ref("),
+        ("parent registration helper", "executable_parent_is_registered",
+         "executable_contract_mode_concrete_body()",
+         "executable_contract_mode_contract_only()"),
+        ("nearest binder owner", "close_ir_inventory",
+         "if !binder_site_has_nearest_registered_owner(inventory, binder)",
+         "if false"),
+        ("nearest binder helper", "binder_site_has_nearest_registered_owner",
+         "executable_ref_depth(candidate.reference) > owner_depth", "false"),
         ("missing manifest", "close_ir_inventory",
          "if manifest_count_for_owner(manifests, entry.reference) != 1",
          "if false"),
@@ -7820,9 +7869,23 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
          "F1 executable kind/namespace matrix drifted"),
         ("handler executable role", "EXECUTABLE_KIND_PATH_ROLE_TAGS", 8, 1,
          "F1 executable kind/path-role matrix drifted"),
+        ("lambda parent form", "EXECUTABLE_KIND_PARENT_FORM_TAGS", 7, 0,
+         "F1 executable kind/parent-form matrix drifted"),
         ("lambda-capture role", "BINDER_KIND_PATH_ROLE_TAGS", 11, 1,
          "F1 binder kind/path-role matrix drifted"),
-        ("call-result role", "BINDER_KIND_PATH_ROLE_TAGS", 14, 6,
+        ("source-param role", "BINDER_KIND_PATH_ROLE_TAGS", 0, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("lambda-param role", "BINDER_KIND_PATH_ROLE_TAGS", 8, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handler-param role", "BINDER_KIND_PATH_ROLE_TAGS", 9, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handler-resume role", "BINDER_KIND_PATH_ROLE_TAGS", 10, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("dictionary-local role", "BINDER_KIND_PATH_ROLE_TAGS", 12, 2,
+         "F1 binder kind/path-role matrix drifted"),
+        ("generated-param role", "BINDER_KIND_PATH_ROLE_TAGS", 13, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("call-result role", "BINDER_KIND_PATH_ROLE_TAGS", 15, 6,
          "F1 binder kind/path-role matrix drifted"),
     )
     for label, table_name, index, replacement, expected in table_mutations:
@@ -7839,26 +7902,6 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
             errors.append(f"F1 semantic mutation {label}: {mutation_error}")
             continue
         findings = ir_inventory_f1_contract_errors(mutated or "")
-        if findings != [expected]:
-            errors.append(
-                f"F1 semantic mutation {label} findings were {findings!r}, "
-                f"expected only {expected!r}")
-
-    appended_mutations = (
-        ("fake structural counts", "\nstruct FakeFreeze { node_count: Int }\n",
-         "F1 gained forbidden authority 'node_count'"),
-        ("premature binder equality", "\nfn binder_slot_set_same() {}\n",
-         "F1 gained forbidden authority 'binder_slot_set_same'"),
-        ("third body mode", "\nconst CONTRACT_INTRINSIC: Int = 2\n",
-         "F1 gained forbidden authority 'CONTRACT_INTRINSIC'"),
-        ("resource census claim", "\nstruct Ops { resource_op_count: Int }\n",
-         "F1 gained forbidden authority 'resource_op_count'"),
-        ("resource operation", "\nstruct ResourceOp { op: Take }\n",
-         "F1 gained forbidden resource operation"),
-    )
-    for label, suffix, expected in appended_mutations:
-        count += 1
-        findings = ir_inventory_f1_contract_errors(source + suffix)
         if findings != [expected]:
             errors.append(
                 f"F1 semantic mutation {label} findings were {findings!r}, "
@@ -7882,6 +7925,11 @@ def ir_inventory_f1_scope_guard_errors(source: str) -> Tuple[List[str], int]:
         ("name fallback", "\nfn name_fallback(value: Str) -> Str { value }\n"),
         ("legacy HIR scan", "\nstruct Legacy { value: HExpr }\n"),
         ("C symbol identity", "\nstruct CName { c_symbol: Str }\n"),
+        ("fake structural counts", "\nstruct FakeFreeze { node_count: Int }\n"),
+        ("premature binder equality", "\nfn binder_slot_set_same() {}\n"),
+        ("third body mode", "\nconst CONTRACT_INTRINSIC: Int = 2\n"),
+        ("resource census claim", "\nstruct Ops { resource_op_count: Int }\n"),
+        ("resource operation", "\nstruct ResourceOp { op: Take }\n"),
     )
     errors: List[str] = []
     count = 0

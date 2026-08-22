@@ -17,7 +17,7 @@ use ir_identity::{
     slot_ref_source_origin_module_key, slot_ref_source_domain,
     slot_ref_synthetic_path, slot_domain_same, slot_domain_lexical,
     slot_domain_dictionary, path_role_same, path_role_child,
-    path_role_declaration, path_role_result, path_role_capture,
+    path_role_declaration, path_role_parameter, path_role_result, path_role_capture,
     path_role_handler, path_role_synthetic, path_role_from_tag
 }
 
@@ -32,6 +32,50 @@ enum ExecutableRefValue {
 
 pub struct ExecutableRef {
     value: ExecutableRefValue
+}
+
+enum ExecutableParentValue {
+    ModuleBodyParentValue(ModuleBodyRef),
+    ExecutableParentValue(ExecutableRef)
+}
+
+pub struct ExecutableParentRef {
+    value: ExecutableParentValue
+}
+
+pub fn make_module_body_parent(value: ModuleBodyRef) -> ExecutableParentRef {
+    ExecutableParentRef {
+        value: ExecutableParentValue::ModuleBodyParentValue(value)
+    }
+}
+
+pub fn make_executable_parent(value: ExecutableRef) -> ExecutableParentRef {
+    ExecutableParentRef {
+        value: ExecutableParentValue::ExecutableParentValue(value)
+    }
+}
+
+pub fn executable_parent_is_module_body(value: ExecutableParentRef) -> Bool {
+    match value.value {
+        ExecutableParentValue::ModuleBodyParentValue(_) => true,
+        ExecutableParentValue::ExecutableParentValue(_) => false
+    }
+}
+
+pub fn executable_parent_module_body(value: ExecutableParentRef) -> ModuleBodyRef {
+    match value.value {
+        ExecutableParentValue::ModuleBodyParentValue(body) => body,
+        ExecutableParentValue::ExecutableParentValue(_) =>
+            panic("IR inventory: executable parent has no ModuleBodyRef")
+    }
+}
+
+pub fn executable_parent_executable(value: ExecutableParentRef) -> ExecutableRef {
+    match value.value {
+        ExecutableParentValue::ExecutableParentValue(executable) => executable,
+        ExecutableParentValue::ModuleBodyParentValue(_) =>
+            panic("IR inventory: module-body parent has no ExecutableRef")
+    }
 }
 
 pub fn make_named_executable_ref(symbol: SymbolRef) -> ExecutableRef {
@@ -118,18 +162,43 @@ fn string_path_has_prefix(path: List<Str>, prefix: List<Str>) -> Bool {
     true
 }
 
-fn executable_ref_owns_path(executable: ExecutableRef, path: PathRef) -> Bool {
+fn path_is_direct_child_of_executable(
+    executable: ExecutableRef, path: PathRef
+) -> Bool {
     match executable.value {
         ExecutableRefValue::NamedExecutableValue(symbol) => {
             let owner = path_ref_owner(path)
             path_owner_ref_is_symbol(owner) &&
-                symbol_ref_same(path_owner_ref_symbol(owner), symbol)
+                symbol_ref_same(path_owner_ref_symbol(owner), symbol) &&
+                path_ref_normalized_child_path(path).len() == 1
         },
-        ExecutableRefValue::AnonymousExecutableValue(root) =>
+        ExecutableRefValue::AnonymousExecutableValue(root) => {
+            let root_path = path_ref_normalized_child_path(root)
+            let child_path = path_ref_normalized_child_path(path)
             path_owner_ref_same(path_ref_owner(root), path_ref_owner(path)) &&
-                string_path_has_prefix(
-                    path_ref_normalized_child_path(path),
-                    path_ref_normalized_child_path(root))
+                child_path.len() == root_path.len() + 1 &&
+                string_path_has_prefix(child_path, root_path)
+        }
+    }
+}
+
+fn executable_ref_contains_path(
+    executable: ExecutableRef, path: PathRef
+) -> Bool {
+    match executable.value {
+        ExecutableRefValue::NamedExecutableValue(symbol) => {
+            let owner = path_ref_owner(path)
+            path_owner_ref_is_symbol(owner) &&
+                symbol_ref_same(path_owner_ref_symbol(owner), symbol) &&
+                path_ref_normalized_child_path(path).len() > 0
+        },
+        ExecutableRefValue::AnonymousExecutableValue(root) => {
+            let root_path = path_ref_normalized_child_path(root)
+            let child_path = path_ref_normalized_child_path(path)
+            path_owner_ref_same(path_ref_owner(root), path_ref_owner(path)) &&
+                child_path.len() > root_path.len() &&
+                string_path_has_prefix(child_path, root_path)
+        }
     }
 }
 
@@ -170,7 +239,7 @@ const CONTRACT_MODE_COUNT: Int = 2
 // Generated origins permit both because CoreHIR may elaborate a real body.
 const EXECUTABLE_KIND_ALLOWED_MODE_TAGS: List<Int> = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    2, 2, 2, 2, 2,
+    2, 2, 0, 2, 2,
     1, 1, 1, 1, 1,
     0, 2, 2
 ]
@@ -197,6 +266,12 @@ const EXECUTABLE_KIND_PATH_ROLE_TAGS: List<Int> = [
     7, 7, 6, 7, 7,
     7, 7, 7, 7, 7,
     7, 7, 7
+]
+const EXECUTABLE_KIND_PARENT_FORM_TAGS: List<Int> = [
+    0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+    0, 0, 2, 0, 0,
+    0, 0, 0, 0, 0,
+    0, 0, 0
 ]
 
 pub struct ExecutableKind { tag: Int }
@@ -265,7 +340,7 @@ pub fn executable_contract_mode_same(
 
 enum ExecutableContractValue {
     ConcreteBodyValue(PathRef),
-    ContractOnlyValue(SymbolRef)
+    ContractOnlyValue
 }
 
 pub struct ExecutableContract { value: ExecutableContractValue }
@@ -274,15 +349,15 @@ pub fn make_concrete_body_contract(body_path: PathRef) -> ExecutableContract {
     ExecutableContract { value: ExecutableContractValue::ConcreteBodyValue(body_path) }
 }
 
-pub fn make_contract_only(contract_symbol: SymbolRef) -> ExecutableContract {
-    ExecutableContract { value: ExecutableContractValue::ContractOnlyValue(contract_symbol) }
+pub fn make_contract_only() -> ExecutableContract {
+    ExecutableContract { value: ExecutableContractValue::ContractOnlyValue }
 }
 
 pub fn executable_contract_mode(value: ExecutableContract) -> ExecutableContractMode {
     match value.value {
         ExecutableContractValue::ConcreteBodyValue(_) =>
             executable_contract_mode_concrete_body(),
-        ExecutableContractValue::ContractOnlyValue(_) =>
+        ExecutableContractValue::ContractOnlyValue =>
             executable_contract_mode_contract_only()
     }
 }
@@ -290,16 +365,8 @@ pub fn executable_contract_mode(value: ExecutableContract) -> ExecutableContract
 pub fn executable_contract_body_path(value: ExecutableContract) -> PathRef {
     match value.value {
         ExecutableContractValue::ConcreteBodyValue(path) => path,
-        ExecutableContractValue::ContractOnlyValue(_) =>
+        ExecutableContractValue::ContractOnlyValue =>
             panic("IR inventory: ContractOnly has no body PathRef")
-    }
-}
-
-pub fn executable_contract_symbol(value: ExecutableContract) -> SymbolRef {
-    match value.value {
-        ExecutableContractValue::ContractOnlyValue(symbol) => symbol,
-        ExecutableContractValue::ConcreteBodyValue(_) =>
-            panic("IR inventory: ConcreteBody has no contract SymbolRef")
     }
 }
 
@@ -336,27 +403,50 @@ fn executable_kind_expected_path_role(kind: ExecutableKind) -> PathRole {
     }
 }
 
-fn contract_symbol_matches_reference(
-    reference: ExecutableRef, contract: ExecutableContract
+fn executable_kind_allows_parent_form(
+    kind: ExecutableKind, parent: ExecutableParentRef
 ) -> Bool {
-    let contract_symbol = executable_contract_symbol(contract)
-    if executable_ref_is_named(reference) {
-        symbol_ref_same(executable_ref_named_symbol(reference), contract_symbol)
-    } else {
-        let owner = path_ref_owner(executable_ref_anonymous_path(reference))
-        path_owner_ref_is_symbol(owner) &&
-            symbol_ref_same(path_owner_ref_symbol(owner), contract_symbol)
+    let actual = if executable_parent_is_module_body(parent) { 0 } else { 1 }
+    match EXECUTABLE_KIND_PARENT_FORM_TAGS.get(executable_kind_tag(kind)) {
+        some(expected) => expected == 2 || expected == actual,
+        none => panic("IR inventory: executable parent-form table is incomplete")
     }
 }
 
+
 pub struct ExecutableEntry {
     reference: ExecutableRef,
+    parent: ExecutableParentRef,
     kind: ExecutableKind,
     contract: ExecutableContract
 }
 
+fn executable_parent_matches_reference(
+    reference: ExecutableRef, parent: ExecutableParentRef
+) -> Bool {
+    if executable_parent_is_module_body(parent) {
+        let module_body = executable_parent_module_body(parent)
+        if executable_ref_origin_module_key(reference) !=
+           module_body_ref_origin_module_key(module_body) {
+            return false
+        }
+        if executable_ref_is_named(reference) { return true }
+        let path = executable_ref_anonymous_path(reference)
+        let owner = path_ref_owner(path)
+        return !path_owner_ref_is_symbol(owner) &&
+            module_body_ref_same(
+                path_owner_ref_module_body(owner), module_body) &&
+            path_ref_normalized_child_path(path).len() == 1
+    }
+    let executable_parent = executable_parent_executable(parent)
+    !executable_ref_is_named(reference) &&
+        path_is_direct_child_of_executable(
+            executable_parent, executable_ref_anonymous_path(reference))
+}
+
 pub fn make_executable_entry(
-    reference: ExecutableRef, kind: ExecutableKind,
+    reference: ExecutableRef, parent: ExecutableParentRef,
+    kind: ExecutableKind,
     contract: ExecutableContract
 ) -> ExecutableEntry {
     let mode = executable_contract_mode(contract)
@@ -371,6 +461,12 @@ pub fn make_executable_entry(
     }
     if expected_form != actual_form {
         panic("IR inventory: executable kind/ref form mismatch")
+    }
+    if !executable_kind_allows_parent_form(kind, parent) {
+        panic("IR inventory: executable kind/parent form mismatch")
+    }
+    if !executable_parent_matches_reference(reference, parent) {
+        panic("IR inventory: executable immediate parent mismatch")
     }
     if executable_ref_is_named(reference) {
         let expected_namespace = namespace_kind_from_tag(
@@ -388,25 +484,38 @@ pub fn make_executable_entry(
         }
     }
     if executable_kind_same(kind, executable_kind_module_body()) {
+        if !executable_parent_is_module_body(parent) {
+            panic("IR inventory: ModuleBody kind has a non-module parent")
+        }
         let path = executable_ref_anonymous_path(reference)
         if path_owner_ref_is_symbol(path_ref_owner(path)) {
             panic("IR inventory: ModuleBody kind has a symbol-owned path")
         }
     }
+    if executable_kind_same(kind, executable_kind_test()) &&
+       !executable_parent_is_module_body(parent) {
+        panic("IR inventory: Test kind has a non-module parent")
+    }
     if executable_contract_mode_same(
-            mode, executable_contract_mode_concrete_body()) &&
-       !executable_ref_owns_path(reference, executable_contract_body_path(contract)) {
-        panic("IR inventory: executable does not own its body path")
+            mode, executable_contract_mode_concrete_body()) {
+        let body_path = executable_contract_body_path(contract)
+        if !path_role_same(path_ref_role(body_path), path_role_child()) ||
+           !path_is_direct_child_of_executable(reference, body_path) {
+            panic("IR inventory: ConcreteBody is not an exact direct child")
+        }
     }
     if executable_contract_mode_same(
             mode, executable_contract_mode_contract_only()) &&
-       !contract_symbol_matches_reference(reference, contract) {
-        panic("IR inventory: ContractOnly symbol is unrelated to executable")
+       !executable_ref_is_named(reference) {
+        panic("IR inventory: anonymous executable cannot be ContractOnly")
     }
-    ExecutableEntry { reference: reference, kind: kind, contract: contract }
+    ExecutableEntry {
+        reference: reference, parent: parent, kind: kind, contract: contract
+    }
 }
 
 pub fn executable_entry_reference(value: ExecutableEntry) -> ExecutableRef { value.reference }
+pub fn executable_entry_parent(value: ExecutableEntry) -> ExecutableParentRef { value.parent }
 pub fn executable_entry_kind(value: ExecutableEntry) -> ExecutableKind { value.kind }
 pub fn executable_entry_contract(value: ExecutableEntry) -> ExecutableContract { value.contract }
 
@@ -460,18 +569,19 @@ const BINDER_HANDLER_PARAM: Int = 9
 const BINDER_HANDLER_RESUME: Int = 10
 const BINDER_LAMBDA_CAPTURE: Int = 11
 const BINDER_DICTIONARY_EVIDENCE_LOCAL: Int = 12
-const BINDER_LAMBDA_VALUE: Int = 13
-const BINDER_CALL_RESULT: Int = 14
-const BINDER_PRE_ANF: Int = 15
-const BINDER_PATTERN_PROJECTION: Int = 16
-const BINDER_SCOPE_RESULT: Int = 17
-const BINDER_CONTROL_RESULT: Int = 18
-const BINDER_ASSIGN_TEMP: Int = 19
-const BINDER_KIND_COUNT: Int = 20
+const BINDER_GENERATED_SYNTHETIC_PARAMETER: Int = 13
+const BINDER_LAMBDA_VALUE: Int = 14
+const BINDER_CALL_RESULT: Int = 15
+const BINDER_PRE_ANF: Int = 16
+const BINDER_PATTERN_PROJECTION: Int = 17
+const BINDER_SCOPE_RESULT: Int = 18
+const BINDER_CONTROL_RESULT: Int = 19
+const BINDER_ASSIGN_TEMP: Int = 20
+const BINDER_KIND_COUNT: Int = 21
 
 const BINDER_KIND_PATH_ROLE_TAGS: List<Int> = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    4, 0, 1, 3, 6, 1, 3, 3, 6
+    2, 0, 0, 0, 0, 0, 0, 0, 2, 5, 5,
+    4, 0, 2, 1, 3, 6, 1, 3, 3, 6
 ]
 
 pub struct BinderKind { tag: Int }
@@ -500,6 +610,7 @@ pub fn binder_kind_handler_param() -> BinderKind { binder_kind_from_tag(BINDER_H
 pub fn binder_kind_handler_resume() -> BinderKind { binder_kind_from_tag(BINDER_HANDLER_RESUME) }
 pub fn binder_kind_lambda_capture() -> BinderKind { binder_kind_from_tag(BINDER_LAMBDA_CAPTURE) }
 pub fn binder_kind_dictionary_evidence_local() -> BinderKind { binder_kind_from_tag(BINDER_DICTIONARY_EVIDENCE_LOCAL) }
+pub fn binder_kind_generated_synthetic_parameter() -> BinderKind { binder_kind_from_tag(BINDER_GENERATED_SYNTHETIC_PARAMETER) }
 pub fn binder_kind_lambda_value() -> BinderKind { binder_kind_from_tag(BINDER_LAMBDA_VALUE) }
 pub fn binder_kind_call_result() -> BinderKind { binder_kind_from_tag(BINDER_CALL_RESULT) }
 pub fn binder_kind_pre_anf() -> BinderKind { binder_kind_from_tag(BINDER_PRE_ANF) }
@@ -521,11 +632,14 @@ fn binder_kind_allows_dictionary_domain(kind: BinderKind) -> Bool {
 
 fn binder_kind_expected_path_role(kind: BinderKind) -> PathRole {
     match BINDER_KIND_PATH_ROLE_TAGS.get(binder_kind_tag(kind)) {
+        some(0) => path_role_declaration(),
         some(1) => path_role_child(),
+        some(2) => path_role_parameter(),
         some(3) => path_role_result(),
         some(4) => path_role_capture(),
+        some(5) => path_role_handler(),
         some(6) => path_role_synthetic(),
-        some(_) => panic("IR inventory: source binder has no synthetic role"),
+        some(_) => panic("IR inventory: binder has an invalid site role"),
         none => panic("IR inventory: binder role table is incomplete")
     }
 }
@@ -533,12 +647,20 @@ fn binder_kind_expected_path_role(kind: BinderKind) -> PathRole {
 pub struct BinderEntry {
     slot: SlotRef,
     owner: ExecutableRef,
-    kind: BinderKind
+    kind: BinderKind,
+    site: PathRef
 }
 
 pub fn make_binder_entry(
-    slot: SlotRef, owner: ExecutableRef, kind: BinderKind
+    slot: SlotRef, owner: ExecutableRef, kind: BinderKind, site: PathRef
 ) -> BinderEntry {
+    if !executable_ref_contains_path(owner, site) {
+        panic("IR inventory: binder site crosses executable owner")
+    }
+    if !path_role_same(
+            path_ref_role(site), binder_kind_expected_path_role(kind)) {
+        panic("IR inventory: binder site role mismatch")
+    }
     if binder_kind_is_source(kind) {
         if !slot_ref_is_source(slot) {
             panic("IR inventory: source binder uses synthetic SlotRef")
@@ -563,21 +685,17 @@ pub fn make_binder_entry(
         if slot_ref_is_source(slot) {
             panic("IR inventory: normalized binder uses source SlotRef")
         }
-        let path = slot_ref_synthetic_path(slot)
-        if !executable_ref_owns_path(owner, path) {
-            panic("IR inventory: normalized binder crosses executable owner")
-        }
-        if !path_role_same(
-                path_ref_role(path), binder_kind_expected_path_role(kind)) {
-            panic("IR inventory: normalized binder path role mismatch")
+        if !path_ref_same(slot_ref_synthetic_path(slot), site) {
+            panic("IR inventory: synthetic binder slot/site mismatch")
         }
     }
-    BinderEntry { slot: slot, owner: owner, kind: kind }
+    BinderEntry { slot: slot, owner: owner, kind: kind, site: site }
 }
 
 pub fn binder_entry_slot(value: BinderEntry) -> SlotRef { value.slot }
 pub fn binder_entry_owner(value: BinderEntry) -> ExecutableRef { value.owner }
 pub fn binder_entry_kind(value: BinderEntry) -> BinderKind { value.kind }
+pub fn binder_entry_site(value: BinderEntry) -> PathRef { value.site }
 
 fn copy_binder_entries(values: List<BinderEntry>) -> List<BinderEntry> {
     let mut result: List<BinderEntry> = []
@@ -674,38 +792,41 @@ fn manifests_have_duplicate_slot(manifests: List<BinderManifest>) -> Bool {
     false
 }
 
-fn anonymous_executable_has_registered_root(
+fn executable_parent_is_registered(
     inventory: ExecutableInventory, entry: ExecutableEntry
 ) -> Bool {
-    if executable_ref_is_named(entry.reference) { return true }
-    if executable_kind_same(entry.kind, executable_kind_test()) ||
-       executable_kind_same(entry.kind, executable_kind_module_body()) {
-        return true
-    }
-    let path = executable_ref_anonymous_path(entry.reference)
-    let owner = path_ref_owner(path)
-    if path_owner_ref_is_symbol(owner) {
-        return inventory_contains_ref(
-            inventory,
-            make_named_executable_ref(path_owner_ref_symbol(owner)))
-    }
-    let module_body = path_owner_ref_module_body(owner)
+    if executable_parent_is_module_body(entry.parent) { return true }
+    let parent_ref = executable_parent_executable(entry.parent)
     for candidate in inventory.entries {
-        if executable_kind_same(candidate.kind, executable_kind_module_body()) &&
-           !executable_ref_is_named(candidate.reference) {
-            let candidate_path = executable_ref_anonymous_path(candidate.reference)
-            let candidate_owner = path_ref_owner(candidate_path)
-            if !path_owner_ref_is_symbol(candidate_owner) &&
-               module_body_ref_same(
-                   path_owner_ref_module_body(candidate_owner), module_body) &&
-               string_path_has_prefix(
-                   path_ref_normalized_child_path(path),
-                   path_ref_normalized_child_path(candidate_path)) {
-                return true
-            }
+        if executable_ref_same(candidate.reference, parent_ref) {
+            return executable_contract_mode_same(
+                executable_contract_mode(candidate.contract),
+                executable_contract_mode_concrete_body())
         }
     }
     false
+}
+
+fn executable_ref_depth(value: ExecutableRef) -> Int {
+    if executable_ref_is_named(value) { return 0 }
+    path_ref_normalized_child_path(executable_ref_anonymous_path(value)).len()
+}
+
+fn binder_site_has_nearest_registered_owner(
+    inventory: ExecutableInventory, binder: BinderEntry
+) -> Bool {
+    if !inventory_contains_ref(inventory, binder.owner) ||
+       !executable_ref_contains_path(binder.owner, binder.site) {
+        return false
+    }
+    let owner_depth = executable_ref_depth(binder.owner)
+    for candidate in inventory.entries {
+        if executable_ref_contains_path(candidate.reference, binder.site) &&
+           executable_ref_depth(candidate.reference) > owner_depth {
+            return false
+        }
+    }
+    true
 }
 
 pub fn close_ir_inventory(
@@ -718,13 +839,18 @@ pub fn close_ir_inventory(
         panic("IR inventory: binder slot is shared across manifests")
     }
     for entry in inventory.entries {
-        if !anonymous_executable_has_registered_root(inventory, entry) {
-            panic("IR inventory: anonymous executable has no registered root")
+        if !executable_parent_is_registered(inventory, entry) {
+            panic("IR inventory: executable immediate parent is absent or bodyless")
         }
         if manifest_count_for_owner(manifests, entry.reference) != 1 {
             panic("IR inventory: executable lacks one unique binder manifest")
         }
         let manifest = manifest_for_owner(manifests, entry.reference)
+        for binder in manifest.entries {
+            if !binder_site_has_nearest_registered_owner(inventory, binder) {
+                panic("IR inventory: binder site owner is not nearest registered executable")
+            }
+        }
         if executable_contract_mode_same(
                 executable_contract_mode(entry.contract),
                 executable_contract_mode_contract_only()) &&
