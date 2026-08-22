@@ -1444,8 +1444,8 @@ def audit_ledger_process_self_test_errors() -> list[str]:
     return []
 
 
-def run_self_tests() -> list[str]:
-    """Exercise legacy/broken adapters and configs without repository writes."""
+def run_self_tests(*, include_audit_ledger_process: bool) -> list[str]:
+    """Exercise cheap fixtures and, when requested, process/Git integration."""
 
     failures: list[str] = []
     good_errors: list[str] = []
@@ -1482,7 +1482,8 @@ def run_self_tests() -> list[str]:
                 f"self-test good {contract.name} fixture rejected: "
                 f"{fixture_errors!r}"
             )
-    failures.extend(audit_ledger_process_self_test_errors())
+    if include_audit_ledger_process:
+        failures.extend(audit_ledger_process_self_test_errors())
     failures.extend(
         deterministic_failure(
             "open Audit lens helper fixture",
@@ -1852,7 +1853,7 @@ description: Execute one wave.
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if args == ["--self-test"]:
-        failures = run_self_tests()
+        failures = run_self_tests(include_audit_ledger_process=True)
         if failures:
             print("workflow validator self-test failed:")
             for failure in failures:
@@ -1868,7 +1869,9 @@ def main(argv: list[str] | None = None) -> int:
         print("usage: validate_workflow.py [--self-test]", file=sys.stderr)
         return 2
 
-    self_test_failures = run_self_tests()
+    self_test_failures = run_self_tests(
+        include_audit_ledger_process=False
+    )
     if self_test_failures:
         print("workflow validator internal self-test failed:")
         for failure in self_test_failures:
@@ -1888,7 +1891,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{backlog_count} active backlog items, "
         f"{audit_count} active audit items, "
         "2 steward adapters, 4 Codex roles, "
-        "25 negative fixtures, 2 durable-ledger regressions"
+        "25 fast negative fixtures; "
+        "run --self-test for 2 durable-ledger process regressions"
     )
     return 0
 
