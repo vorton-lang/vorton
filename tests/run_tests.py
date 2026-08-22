@@ -5377,7 +5377,11 @@ def representation_s1_contract_errors(
             "pub fn prelude_extern_identity(",
             "struct HExternReplayDescriptor",
             "fn hir_extern_signatures_same(",
+            "fn hir_exact_type_same(",
+            "fn hir_exact_effect_same(",
+            "fn hir_exact_effect_row_same(",
             "fn validate_hir_extern_decl(",
+            "fn validate_hir_extern_params(",
             "let mut extern_replays: Map<Str, HExternReplayDescriptor> = map_new()",
             "activated ownership before planner",
         ),
@@ -5526,24 +5530,61 @@ def representation_s1_contract_errors(
         "ring_str_as_ptr": 2,
         "ring_str_from_ptr": 2,
     }
+    expected_std_files = (
+        "io.ring", "iterator.ring", "list.ring", "map.ring", "set.ring",
+        "str.ring", "num.ring", "result.ring", "fs.ring", "path.ring",
+        "process.ring",
+    )
+    std_source_labels = {
+        "io.ring": "std_io",
+        "iterator.ring": "std_iterator",
+        "list.ring": "std_list",
+        "map.ring": "std_map",
+        "set.ring": "std_set",
+        "str.ring": "std_str",
+        "num.ring": "std_num",
+        "result.ring": "std_result",
+        "fs.ring": "std_fs",
+        "path.ring": "std_path",
+        "process.ring": "std_process",
+    }
+    std_files_match = re.search(
+        r"const\s+STD_FILES\s*:\s*List<Str>\s*=\s*\[(.*?)\]",
+        mask_ring_strings_and_comments(sources["checker"]), re.DOTALL)
+    scanned_std_files: tuple[str, ...] = ()
+    if std_files_match is None:
+        errors.append("checker STD_FILES inventory is missing")
+    else:
+        scanned_std_files = tuple(re.findall(
+            r'"([^"]+\.ring)"',
+            sources["checker"][std_files_match.start():std_files_match.end()]))
+        if scanned_std_files != expected_std_files:
+            errors.append(
+                f"checker STD_FILES inventory drifted: {scanned_std_files!r}")
+
     duplicate_counts: dict[str, int] = {}
     duplicate_files: dict[str, set[str]] = {}
     extern_decl_pattern = re.compile(
         r"(?m)^(?:pub\s+)?extern\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)")
-    for label in ("std_list", "std_map", "std_str"):
+    for file_name in scanned_std_files:
+        label = std_source_labels.get(file_name)
+        if label is None:
+            errors.append(f"checker STD_FILES has unpinned source {file_name!r}")
+            continue
         for match in extern_decl_pattern.finditer(sources[label]):
             name = match.group(1)
             duplicate_counts[name] = duplicate_counts.get(name, 0) + 1
-            duplicate_files.setdefault(name, set()).add(label)
+            duplicate_files.setdefault(name, set()).add(file_name)
     actual_duplicates = {
         name: count for name, count in duplicate_counts.items() if count > 1
     }
     if actual_duplicates != expected_duplicate_externs:
-        errors.append(
-            f"prelude duplicate extern census drifted: {actual_duplicates!r}")
+        errors.append("prelude duplicate extern census drifted")
     duplicate_decl_count = sum(actual_duplicates.values())
     duplicate_replay_count = sum(count - 1 for count in actual_duplicates.values())
-    if (len(actual_duplicates), duplicate_decl_count, duplicate_replay_count) != (
+    if actual_duplicates == expected_duplicate_externs and (
+            len(actual_duplicates), duplicate_decl_count,
+            duplicate_replay_count) != (
             13, 28, 15):
         errors.append(
             "prelude duplicate extern census is not 13 groups/28 decls/15 replays")
@@ -5612,16 +5653,28 @@ def representation_s1_contract_errors(
     if load_prelude_error:
         errors.append(load_prelude_error)
     else:
-        ledger_index = load_prelude_body.find(
-            "let mut raw_extern_contracts: Map<Str, RawPreludeExternContract> = map_new()")
-        compare_index = load_prelude_body.find(
-            "!raw_prelude_extern_contracts_same(")
-        register_index = load_prelude_body.find(
-            "register_decl_public(ctx, canonical_decl)")
-        append_index = load_prelude_body.find(
-            "all_prelude_decls.push(canonical_decl)")
-        if not (0 <= ledger_index < compare_index < register_index < append_index):
-            errors.append("prelude raw extern validation is not fail-first before registration")
+        register_token = "register_decl_public(ctx, canonical_decl)"
+        append_token = "all_prelude_decls.push(canonical_decl)"
+        register_count = load_prelude_body.count(register_token)
+        append_count = load_prelude_body.count(append_token)
+        if register_count != 1:
+            errors.append(
+                "prelude raw extern success path does not register exactly once")
+        elif append_count != 1:
+            errors.append(
+                "prelude raw extern success path does not append exactly once")
+        else:
+            ledger_index = load_prelude_body.find(
+                "let mut raw_extern_contracts: Map<Str, RawPreludeExternContract> = map_new()")
+            compare_index = load_prelude_body.find(
+                "!raw_prelude_extern_contracts_same(")
+            register_index = load_prelude_body.find(register_token)
+            append_index = load_prelude_body.find(append_token)
+            if not (
+                    0 <= ledger_index < compare_index <
+                    register_index < append_index):
+                errors.append(
+                    "prelude raw extern validation is not fail-first before registration")
         for token in (
                 "raw_extern_contracts.get(",
                 "raw_extern_contracts.insert(",
@@ -5638,7 +5691,8 @@ def representation_s1_contract_errors(
             "left.member_context == right.member_context",
             "hir_ast_type_params_same(left.type_params, right.type_params)",
             "hir_extern_params_same(left.params, right.params)",
-            "types_equal(left_fn, right_fn)",
+            "hir_exact_type_same(left.return_type, right.return_type)",
+            "hir_exact_effect_row_same(left.effects, right.effects)",
         ),
         "hir_extern_params_same": (
             "left.len() != right.len()", "a.name != b.name",
@@ -5646,14 +5700,63 @@ def representation_s1_contract_errors(
             "a.is_mutable != b.is_mutable",
             "a.ownership_mode != PARAM_OWNERSHIP_UNKNOWN",
             "b.ownership_mode != PARAM_OWNERSHIP_UNKNOWN",
-            "!types_equal(a.ty, b.ty)",
+            "!hir_exact_type_same(a.ty, b.ty)",
+        ),
+        "hir_exact_type_same": (
+            "Type::IntType", "Type::FloatType", "Type::StrType",
+            "Type::BoolType", "Type::UnitType", "Type::NeverType",
+            "Type::AnyType", "Type::TypeVar",
+            "ai == bi && hir_exact_optional_str_same(an, bn)",
+            "Type::FnType",
+            "left_ownership_term == right_ownership_term",
+            "hir_exact_effect_row_same(ae, be)",
+            "Type::StructType", "Type::EnumType", "Type::GenericType",
+            "Type::RecordType", "hir_exact_record_fields_same(af, bf)",
+            "hir_exact_optional_int_same(at, bt) &&\n"
+            "                hir_exact_optional_str_same(an, bn)",
+            "Type::EffectRowType", "Type::TupleType", "Type::PtrType",
+            "Type::ErrorType",
+        ),
+        "hir_exact_type_lists_same": (
+            "left.len() != right.len()", "right.get(index)",
+            "!hir_exact_type_same(a, b)",
+        ),
+        "hir_exact_effect_lists_same": (
+            "left.len() != right.len()", "right.get(index)",
+            "!hir_exact_effect_same(a, b)",
+        ),
+        "hir_exact_effect_same": (
+            "Effect::IoEffect", "Effect::FailEffect",
+            "hir_exact_type_same(a, b)", "Effect::MutEffect",
+            "Effect::CustomEffect", "an == bn",
+            "hir_exact_type_lists_same(aa, ba)", "Effect::UnsafeEffect",
+        ),
+        "hir_exact_effect_row_same": (
+            "hir_exact_effect_lists_same(left.effects, right.effects)",
+            "hir_exact_optional_int_same(left.tail, right.tail)",
+        ),
+        "hir_exact_optional_int_same": (
+            "(some(left), some(right)) => left == right",
+            "(none, none) => true", "_ => false",
+        ),
+        "hir_exact_optional_str_same": (
+            "(some(left), some(right)) => left == right",
+            "(none, none) => true", "_ => false",
+        ),
+        "hir_exact_record_fields_same": (
+            "left.len() != right.len()", "right.get(index)",
+            "a.name != b.name", "!hir_exact_type_same(a.ty, b.ty)",
+        ),
+        "validate_hir_extern_params": (
+            "validate_inert_type(param.ty)", "param.def_id.is_some()",
+            "param.ownership_mode != PARAM_OWNERSHIP_UNKNOWN",
         ),
         "hir_ast_type_params_same": (
             "left.len() != right.len()", "right.get(index)",
             "a.name != b.name", "hir_ast_type_bounds_same(a.bounds, b.bounds)",
         ),
         "validate_hir_extern_decl": (
-            "let replay_eligible = !member_context &&",
+            "let replay_eligible = root_context && !member_context &&",
             "name == prelude_extern_identity(abi_name)",
             "validate_hir_member_binder(", "validate_hir_source_binder(",
             "if id < 0", "extern_replays.get(name)",
@@ -5672,6 +5775,8 @@ def representation_s1_contract_errors(
             if token not in body:
                 errors.append(
                     f"hir.{function_name} misses extern replay relation {token!r}")
+    if re.search(r"\btypes_equal\b", sources["hir"]):
+        errors.append("HIR extern replay validator observes public types_equal")
     hir_extern_validator, hir_extern_validator_error = extract_ring_function_body(
         sources["hir"], "validate_hir_extern_decl")
     if hir_extern_validator_error:
@@ -5685,6 +5790,32 @@ def representation_s1_contract_errors(
                 "extern_replays.insert(name, current)") != 1 or
                 not (0 <= validate_index < insert_index)):
             errors.append("HIR extern replay first registration order drifted")
+        common_entry = (
+            "\n    validate_hir_extern_params(params, name)\n"
+            "    let id = match def_id")
+        if not hir_extern_validator.startswith(common_entry):
+            errors.append(
+                "HIR extern params are not validated at the common entry")
+
+    binder_validator, binder_validator_error = extract_ring_function_body(
+        sources["hir"], "validate_hir_binder_def_ids")
+    if binder_validator_error:
+        errors.append(binder_validator_error)
+    elif "extern_replays, false, true" not in binder_validator:
+        errors.append("HIR extern replay root context is not initialized exactly")
+
+    decl_validator_root, decl_validator_root_error = extract_ring_function_body(
+        sources["hir"], "validate_hir_decls")
+    if decl_validator_root_error:
+        errors.append(decl_validator_root_error)
+    else:
+        for token in (
+                "extern_replays, true, false",
+                "extern_replays,\n                    member_function_context, false",
+                "member_function_context, root_context"):
+            if token not in decl_validator_root:
+                errors.append(
+                    f"HIR extern replay root context transport misses {token!r}")
 
     transport_specs = (
         ("Type::FnType", ("ownership_term",)),
@@ -5757,7 +5888,8 @@ def representation_s1_contract_errors(
 
     non_unknown_terms = re.compile(
         r"ownership_term\s*:\s*(?!CALLABLE_UNKNOWN\b|ownership_term\b|"
-        r"reg_ownership_term\b|check_ownership_term\b)"
+        r"reg_ownership_term\b|check_ownership_term\b|"
+        r"left_ownership_term\b|right_ownership_term\b)"
         r"([A-Za-z_][A-Za-z0-9_]*)")
     for label in (
         "env", "hir", "infer", "infer_decl", "infer_ctx",
@@ -5988,8 +6120,6 @@ def representation_s1_contract_errors(
         errors.append(decl_validator_error)
     elif not all(token in decl_validator for token in (
             "if member_function_context {",
-            "extern_replays, true)",
-            "member_function_context)",
             "validate_hir_member_binder(",
             "validate_hir_source_binder(",
             "validate_hir_extern_decl(")):
@@ -7651,9 +7781,17 @@ def identity_checkpoint_source_errors() -> List[str]:
             REPO / "tests" / "cases" /
             "ownership_extern_member_identity.ring"
         ),
+        "std_io": REPO / "std" / "io.ring",
+        "std_iterator": REPO / "std" / "iterator.ring",
         "std_list": REPO / "std" / "list.ring",
         "std_map": REPO / "std" / "map.ring",
+        "std_set": REPO / "std" / "set.ring",
         "std_str": REPO / "std" / "str.ring",
+        "std_num": REPO / "std" / "num.ring",
+        "std_result": REPO / "std" / "result.ring",
+        "std_fs": REPO / "std" / "fs.ring",
+        "std_path": REPO / "std" / "path.ring",
+        "std_process": REPO / "std" / "process.ring",
     }
     sources: dict[str, str] = {}
     errors: List[str] = []
@@ -8268,7 +8406,7 @@ def identity_checkpoint_source_errors() -> List[str]:
          "checker.raw_prelude_extern_contracts_same"),
         ("raw effects", "checker", "raw_prelude_extern_contracts_same",
          "raw_optional_effects_same(\n            left.declared_effects, right.declared_effects)", "true",
-         "checker.raw_prelude_extern_contracts_same"),
+         "checker.raw_prelude_extern_contracts_same misses raw extern relation 'raw_optional_effects_same('"),
         ("raw generic name", "checker", "raw_type_params_same",
          "a.name != b.name", "false",
          "checker.raw_type_params_same"),
@@ -8286,13 +8424,13 @@ def identity_checkpoint_source_errors() -> List[str]:
          "checker.raw_type_bounds_same"),
         ("raw bound assoc", "checker", "raw_type_bounds_same",
          "!raw_assoc_constraints_same(\n                        a.assoc_constraints, b.assoc_constraints)", "false",
-         "checker.raw_type_bounds_same"),
+         "checker.raw_type_bounds_same misses raw extern relation 'raw_assoc_constraints_same('"),
         ("raw assoc name", "checker", "raw_assoc_constraints_same",
          "a.name != b.name", "false",
          "checker.raw_assoc_constraints_same"),
         ("raw assoc type", "checker", "raw_assoc_constraints_same",
          "!raw_type_expr_same(a.ty, b.ty)", "false",
-         "checker.raw_assoc_constraints_same"),
+         "checker.raw_assoc_constraints_same misses raw extern relation 'raw_type_expr_same(a.ty, b.ty)'"),
         ("raw param arity", "checker", "raw_params_same",
          "left.len() != right.len()", "false",
          "checker.raw_params_same"),
@@ -8301,7 +8439,7 @@ def identity_checkpoint_source_errors() -> List[str]:
          "checker.raw_params_same"),
         ("raw param type", "checker", "raw_params_same",
          "!raw_optional_type_expr_same(\n                       a.type_annotation, b.type_annotation)", "false",
-         "checker.raw_params_same"),
+         "checker.raw_params_same misses raw extern relation 'raw_optional_type_expr_same('"),
         ("raw param mutability", "checker", "raw_params_same",
          "a.is_mutable != b.is_mutable", "false",
          "checker.raw_params_same"),
@@ -8345,8 +8483,11 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("HIR replay params", "hir", "hir_extern_signatures_same",
          "hir_extern_params_same(left.params, right.params)", "true",
          "hir.hir_extern_signatures_same"),
-        ("HIR replay return/effect type", "hir", "hir_extern_signatures_same",
-         "types_equal(left_fn, right_fn)", "true",
+        ("HIR replay return type", "hir", "hir_extern_signatures_same",
+         "hir_exact_type_same(left.return_type, right.return_type)", "true",
+         "hir.hir_extern_signatures_same"),
+        ("HIR replay effect row", "hir", "hir_extern_signatures_same",
+         "hir_exact_effect_row_same(left.effects, right.effects)", "true",
          "hir.hir_extern_signatures_same"),
         ("HIR param arity", "hir", "hir_extern_params_same",
          "left.len() != right.len()", "false",
@@ -8364,10 +8505,11 @@ def identity_checkpoint_source_errors() -> List[str]:
          "a.ownership_mode != PARAM_OWNERSHIP_UNKNOWN", "false",
          "hir.hir_extern_params_same"),
         ("HIR param type", "hir", "hir_extern_params_same",
-         "!types_equal(a.ty, b.ty)", "false",
+         "!hir_exact_type_same(a.ty, b.ty)", "false",
          "hir.hir_extern_params_same"),
-        ("HIR replay eligibility context", "hir", "validate_hir_extern_decl",
-         "let replay_eligible = !member_context &&", "let replay_eligible =",
+        ("HIR replay nested root context", "hir", "validate_hir_extern_decl",
+         "let replay_eligible = root_context && !member_context &&",
+         "let replay_eligible = !member_context &&",
          "hir.validate_hir_extern_decl"),
         ("HIR replay eligibility name", "hir", "validate_hir_extern_decl",
          "name == prelude_extern_identity(abi_name)", "true",
@@ -8380,11 +8522,64 @@ def identity_checkpoint_source_errors() -> List[str]:
          "hir.validate_hir_extern_decl"),
         ("HIR replay comparator", "hir", "validate_hir_extern_decl",
          "if !hir_extern_signatures_same(existing, current)", "if false",
-         "hir.validate_hir_extern_decl"),
+         "hir.validate_hir_extern_decl misses extern replay relation '!hir_extern_signatures_same(existing, current)'"),
         ("HIR ordinary collision", "hir", "validate_hir_extern_decl",
          "validate_hir_source_binder(\n                seen, id, \"prelude extern function",
          "extern_replays.insert(name, current)\n            validate_hir_source_binder(\n                seen, id, \"prelude extern function",
          "HIR extern replay first registration order drifted"),
+        ("HIR exact TypeVar name", "hir", "hir_exact_type_same",
+         "ai == bi && hir_exact_optional_str_same(an, bn)",
+         "ai == bi",
+         "hir.hir_exact_type_same"),
+        ("HIR exact function ownership", "hir", "hir_exact_type_same",
+         "left_ownership_term == right_ownership_term &&\n"
+         "                hir_exact_type_lists_same(ap, bp)",
+         "hir_exact_type_lists_same(ap, bp)",
+         "hir.hir_exact_type_same misses extern replay relation 'left_ownership_term == right_ownership_term'"),
+        ("HIR exact record tail name", "hir", "hir_exact_type_same",
+         "hir_exact_optional_int_same(at, bt) &&\n"
+         "                hir_exact_optional_str_same(an, bn)",
+         "hir_exact_optional_int_same(at, bt)",
+         "hir.hir_exact_type_same"),
+        ("HIR exact record field order", "hir", "hir_exact_record_fields_same",
+         "right.get(index)", "right.get(0)",
+         "hir.hir_exact_record_fields_same"),
+        ("HIR exact effect order", "hir", "hir_exact_effect_lists_same",
+         "right.get(index)", "right.get(0)",
+         "hir.hir_exact_effect_lists_same"),
+        ("HIR exact effect-row tail", "hir", "hir_exact_effect_row_same",
+         "hir_exact_optional_int_same(left.tail, right.tail)", "true",
+         "hir.hir_exact_effect_row_same"),
+        ("HIR exact optional Int", "hir", "hir_exact_optional_int_same",
+         "(some(left), some(right)) => left == right",
+         "(some(_), some(_)) => true",
+         "hir.hir_exact_optional_int_same"),
+        ("HIR exact optional Str", "hir", "hir_exact_optional_str_same",
+         "(some(left), some(right)) => left == right",
+         "(some(_), some(_)) => true",
+         "hir.hir_exact_optional_str_same"),
+        ("HIR extern param type validation", "hir",
+         "validate_hir_extern_params",
+         "validate_inert_type(param.ty)", "let _ = param.ty",
+         "hir.validate_hir_extern_params"),
+        ("HIR extern param DefId validation", "hir",
+         "validate_hir_extern_params",
+         "if param.def_id.is_some()", "if false",
+         "hir.validate_hir_extern_params misses extern replay relation 'param.def_id.is_some()'"),
+        ("HIR extern param ownership validation", "hir",
+         "validate_hir_extern_params",
+         "if param.ownership_mode != PARAM_OWNERSHIP_UNKNOWN", "if false",
+         "hir.validate_hir_extern_params misses extern replay relation 'param.ownership_mode != PARAM_OWNERSHIP_UNKNOWN'"),
+        ("HIR root initialization", "hir", "validate_hir_binder_def_ids",
+         "extern_replays, false, true", "extern_replays, false, false",
+         "HIR extern replay root context is not initialized exactly"),
+        ("HIR impl clears root context", "hir", "validate_hir_decls",
+         "extern_replays, true, false", "extern_replays, true, true",
+         "HIR extern replay root context transport misses 'extern_replays, true, false'"),
+        ("HIR ModBlock clears root context", "hir", "validate_hir_decls",
+         "extern_replays,\n                    member_function_context, false",
+         "extern_replays,\n                    member_function_context, root_context",
+         "HIR extern replay root context transport misses 'extern_replays,\\n                    member_function_context, false'"),
     )
     for label, source_name, function_name, anchor, replacement, expected in (
             extern_relation_mutations):
@@ -8397,10 +8592,95 @@ def identity_checkpoint_source_errors() -> List[str]:
         mutated = dict(sources)
         mutated[source_name] = mutated_source
         findings = representation_s1_contract_errors(mutated)
-        if not any(expected in finding for finding in findings):
+        if expected == f"{source_name}.{function_name}":
+            relation = (
+                "raw extern relation" if source_name == "checker"
+                else "extern replay relation")
+            expected = (
+                f"{source_name}.{function_name} misses {relation} "
+                f"{anchor!r}")
+        if findings != [expected]:
             errors.append(
-                f"extern relation mutation {label} lacked finding {expected!r}: "
-                f"{findings!r}")
+                f"extern relation mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
+
+    common_entry_anchor = "validate_hir_extern_params(params, name)"
+    for label, replacement in (
+        ("unique top extern skips common param validation",
+         "if root_context { validate_hir_extern_params(params, name) }"),
+        ("first prelude extern skips common param validation",
+         "if extern_replays.contains(name) { "
+         "validate_hir_extern_params(params, name) }"),
+        ("impl extern skips common param validation",
+         "if !member_context { validate_hir_extern_params(params, name) }"),
+    ):
+        mutated_source, mutation_error = mutate_ring_function_body_once(
+            sources["hir"], "validate_hir_extern_decl",
+            common_entry_anchor, replacement)
+        if mutation_error:
+            errors.append(f"extern relation mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated["hir"] = mutated_source
+        findings = representation_s1_contract_errors(mutated)
+        expected = "HIR extern params are not validated at the common entry"
+        if findings != [expected]:
+            errors.append(
+                f"extern relation mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
+
+    for label, anchor, replacement, expected in (
+        ("prelude registration skipped",
+         "register_decl_public(ctx, canonical_decl)", "",
+         "prelude raw extern success path does not register exactly once"),
+        ("prelude registration doubled",
+         "register_decl_public(ctx, canonical_decl)",
+         "register_decl_public(ctx, canonical_decl)\n"
+         "                        register_decl_public(ctx, canonical_decl)",
+         "prelude raw extern success path does not register exactly once"),
+        ("prelude HDecl append skipped",
+         "all_prelude_decls.push(canonical_decl)", "",
+         "prelude raw extern success path does not append exactly once"),
+        ("prelude HDecl append doubled",
+         "all_prelude_decls.push(canonical_decl)",
+         "all_prelude_decls.push(canonical_decl)\n"
+         "                        all_prelude_decls.push(canonical_decl)",
+         "prelude raw extern success path does not append exactly once"),
+    ):
+        mutated_source, mutation_error = mutate_ring_function_body_once(
+            sources["checker"], "load_prelude", anchor, replacement)
+        if mutation_error:
+            errors.append(f"extern relation mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated["checker"] = mutated_source
+        findings = representation_s1_contract_errors(mutated)
+        if findings != [expected]:
+            errors.append(
+                f"extern relation mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
+
+    for label, anchor, replacement in (
+        ("prelude duplicate census removes replay",
+         "extern fn ring_slot_alloc", "extern fn ring_slot_alloc_removed"),
+        ("prelude duplicate census adds replay",
+         "extern fn ring_slot_swap", "extern fn ring_slot_alloc"),
+    ):
+        if sources["std_list"].count(anchor) != 1:
+            errors.append(
+                f"extern relation mutation {label}: anchor is not unique")
+            continue
+        mutated = dict(sources)
+        mutated["std_list"] = sources["std_list"].replace(
+            anchor, replacement, 1)
+        findings = representation_s1_contract_errors(mutated)
+        expected = "prelude duplicate extern census drifted"
+        if findings != [expected]:
+            errors.append(
+                f"extern relation mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
 
     for function_name in ("anf_expr", "rc_expr"):
         mutated_source, mutation_error = mutate_ring_function_body_once(

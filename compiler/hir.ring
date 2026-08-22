@@ -1,7 +1,7 @@
 use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam, TypeBound, TypeExpr,
     EffectExpr, AssocConstraint}
 use types::{Type, Effect, EffectRow, StructField, EnumVariant, RecordField,
-    PARAM_OWNERSHIP_UNKNOWN, CALLABLE_UNKNOWN, types_equal}
+    PARAM_OWNERSHIP_UNKNOWN, CALLABLE_UNKNOWN}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
@@ -547,7 +547,7 @@ pub fn validate_hir_binder_def_ids(program: HProgram) {
     collect_hir_effect_op_ids(program.decls, program.effect_op_identities)
     validate_hir_decls(
         program.decls, seen, program.effect_op_identities,
-        extern_replays, false)
+        extern_replays, false, true)
 }
 
 struct HExternReplayDescriptor {
@@ -562,10 +562,142 @@ struct HExternReplayDescriptor {
     member_context: Bool
 }
 
-fn hir_optional_str_same(a: Str?, b: Str?) -> Bool {
+fn hir_exact_optional_int_same(a: Int?, b: Int?) -> Bool {
     match (a, b) {
         (some(left), some(right)) => left == right,
         (none, none) => true,
+        _ => false
+    }
+}
+
+fn hir_exact_optional_str_same(a: Str?, b: Str?) -> Bool {
+    match (a, b) {
+        (some(left), some(right)) => left == right,
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn hir_exact_type_lists_same(
+    left: List<Type>, right: List<Type>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if !hir_exact_type_same(a, b) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn hir_exact_effect_lists_same(
+    left: List<Effect>, right: List<Effect>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if !hir_exact_effect_same(a, b) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn hir_exact_effect_same(left: Effect, right: Effect) -> Bool {
+    match (left, right) {
+        (Effect::IoEffect, Effect::IoEffect) => true,
+        (Effect::FailEffect { error_type: a },
+         Effect::FailEffect { error_type: b }) =>
+            hir_exact_type_same(a, b),
+        (Effect::MutEffect { state_type: a },
+         Effect::MutEffect { state_type: b }) =>
+            hir_exact_type_same(a, b),
+        (Effect::CustomEffect { name: an, type_args: aa },
+         Effect::CustomEffect { name: bn, type_args: ba }) =>
+            an == bn && hir_exact_type_lists_same(aa, ba),
+        (Effect::UnsafeEffect, Effect::UnsafeEffect) => true,
+        _ => false
+    }
+}
+
+fn hir_exact_effect_row_same(left: EffectRow, right: EffectRow) -> Bool {
+    hir_exact_effect_lists_same(left.effects, right.effects) &&
+        hir_exact_optional_int_same(left.tail, right.tail)
+}
+
+fn hir_exact_record_fields_same(
+    left: List<RecordField>, right: List<RecordField>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.name != b.name ||
+                    !hir_exact_type_same(a.ty, b.ty) {
+                return false
+            },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn hir_exact_type_same(left: Type, right: Type) -> Bool {
+    match (left, right) {
+        (Type::IntType, Type::IntType) => true,
+        (Type::FloatType, Type::FloatType) => true,
+        (Type::StrType, Type::StrType) => true,
+        (Type::BoolType, Type::BoolType) => true,
+        (Type::UnitType, Type::UnitType) => true,
+        (Type::NeverType, Type::NeverType) => true,
+        (Type::AnyType, Type::AnyType) => true,
+        (Type::TypeVar { id: ai, name: an },
+         Type::TypeVar { id: bi, name: bn }) =>
+            ai == bi && hir_exact_optional_str_same(an, bn),
+        (Type::FnType { params: ap, return_type: ar, effects: ae,
+                        ownership_term: left_ownership_term },
+         Type::FnType { params: bp, return_type: br, effects: be,
+                        ownership_term: right_ownership_term }) =>
+            left_ownership_term == right_ownership_term &&
+                hir_exact_type_lists_same(ap, bp) &&
+                hir_exact_type_same(ar, br) &&
+                hir_exact_effect_row_same(ae, be),
+        (Type::StructType { name: an, type_params: aa },
+         Type::StructType { name: bn, type_params: ba }) =>
+            an == bn && hir_exact_type_lists_same(aa, ba),
+        (Type::EnumType { name: an, type_params: aa },
+         Type::EnumType { name: bn, type_params: ba }) =>
+            an == bn && hir_exact_type_lists_same(aa, ba),
+        (Type::GenericType { base: ab, args: aa },
+         Type::GenericType { base: bb, args: ba }) =>
+            hir_exact_type_same(ab, bb) &&
+                hir_exact_type_lists_same(aa, ba),
+        (Type::RecordType { fields: af, tail: at, tail_name: an },
+         Type::RecordType { fields: bf, tail: bt, tail_name: bn }) =>
+            hir_exact_record_fields_same(af, bf) &&
+                hir_exact_optional_int_same(at, bt) &&
+                hir_exact_optional_str_same(an, bn),
+        (Type::EffectRowType { effects: ae, tail: at },
+         Type::EffectRowType { effects: be, tail: bt }) =>
+            hir_exact_effect_lists_same(ae, be) &&
+                hir_exact_optional_int_same(at, bt),
+        (Type::TupleType { elements: ae },
+         Type::TupleType { elements: be }) =>
+            hir_exact_type_lists_same(ae, be),
+        (Type::PtrType { pointee: ap },
+         Type::PtrType { pointee: bp }) =>
+            hir_exact_type_same(ap, bp),
+        (Type::ErrorType, Type::ErrorType) => true,
         _ => false
     }
 }
@@ -609,7 +741,7 @@ fn hir_ast_type_expr_same(left: TypeExpr, right: TypeExpr) -> Bool {
     match (left, right) {
         (TypeExpr::Named { name: an, qualifier: aq, type_args: aa, .. },
          TypeExpr::Named { name: bn, qualifier: bq, type_args: ba, .. }) =>
-            an == bn && hir_optional_str_same(aq, bq) &&
+            an == bn && hir_exact_optional_str_same(aq, bq) &&
                 hir_ast_type_expr_lists_same(aa, ba),
         (TypeExpr::FnType { params: ap, return_type: ar, effects: ae, .. },
          TypeExpr::FnType { params: bp, return_type: br, effects: be, .. }) =>
@@ -621,7 +753,8 @@ fn hir_ast_type_expr_same(left: TypeExpr, right: TypeExpr) -> Bool {
             hir_ast_type_expr_same(ai, bi),
         (TypeExpr::RecordType { fields: af, rest: ar, .. },
          TypeExpr::RecordType { fields: bf, rest: br, .. }) => {
-            if af.len() != bf.len() || !hir_optional_str_same(ar, br) {
+            if af.len() != bf.len() ||
+                    !hir_exact_optional_str_same(ar, br) {
                 return false
             }
             let mut index = 0
@@ -710,7 +843,7 @@ fn hir_extern_params_same(left: List<HParam>, right: List<HParam>) -> Bool {
                     a.is_mutable != b.is_mutable ||
                     a.ownership_mode != PARAM_OWNERSHIP_UNKNOWN ||
                     b.ownership_mode != PARAM_OWNERSHIP_UNKNOWN ||
-                    !types_equal(a.ty, b.ty) {
+                    !hir_exact_type_same(a.ty, b.ty) {
                 return false
             },
             _ => return false
@@ -724,23 +857,14 @@ fn hir_extern_signatures_same(
     left: HExternReplayDescriptor,
     right: HExternReplayDescriptor
 ) -> Bool {
-    let left_params = left.params.map(fn(param) { param.ty })
-    let right_params = right.params.map(fn(param) { param.ty })
-    let left_fn = Type::FnType {
-        params: left_params, return_type: left.return_type,
-        effects: left.effects, ownership_term: CALLABLE_UNKNOWN
-    }
-    let right_fn = Type::FnType {
-        params: right_params, return_type: right.return_type,
-        effects: right.effects, ownership_term: CALLABLE_UNKNOWN
-    }
     left.def_id == right.def_id &&
         left.name == right.name && left.abi_name == right.abi_name &&
         left.is_pub == right.is_pub &&
         left.member_context == right.member_context &&
         hir_ast_type_params_same(left.type_params, right.type_params) &&
         hir_extern_params_same(left.params, right.params) &&
-        types_equal(left_fn, right_fn)
+        hir_exact_type_same(left.return_type, right.return_type) &&
+        hir_exact_effect_row_same(left.effects, right.effects)
 }
 
 struct HirValidationScope {
@@ -903,13 +1027,14 @@ fn validate_hir_extern_decl(
     name: Str, abi_name: Str, def_id: Int?,
     type_params: List<TypeParam>, params: List<HParam>,
     return_type: Type, effects: EffectRow,
-    is_pub: Bool, member_context: Bool
+    is_pub: Bool, member_context: Bool, root_context: Bool
 ) {
+    validate_hir_extern_params(params, name)
     let id = match def_id {
         some(value) => value,
         none => panic("HIR extern function '${name}' has no exact DefId")
     }
-    let replay_eligible = !member_context &&
+    let replay_eligible = root_context && !member_context &&
         name == prelude_extern_identity(abi_name)
     if !replay_eligible {
         if member_context {
@@ -945,6 +1070,18 @@ fn validate_hir_extern_decl(
             validate_hir_source_binder(
                 seen, id, "prelude extern function '${name}'")
             extern_replays.insert(name, current)
+        }
+    }
+}
+
+fn validate_hir_extern_params(params: List<HParam>, name: Str) {
+    for param in params {
+        validate_inert_type(param.ty)
+        if param.def_id.is_some() {
+            panic("HIR extern function '${name}' parameter '${param.name}' carries a DefId")
+        }
+        if param.ownership_mode != PARAM_OWNERSHIP_UNKNOWN {
+            panic("HIR extern function '${name}' parameter '${param.name}' activated ownership before planner")
         }
     }
 }
@@ -1423,7 +1560,7 @@ fn validate_hir_expr(
 fn validate_hir_decls(
     decls: List<HDecl>, mut seen: Set<Int>, effect_op_ids: Map<Str, Int>,
     mut extern_replays: Map<Str, HExternReplayDescriptor>,
-    member_function_context: Bool
+    member_function_context: Bool, root_context: Bool
 ) {
     for decl in decls {
         match decl {
@@ -1449,7 +1586,7 @@ fn validate_hir_decls(
             HDecl::Impl { methods, .. } =>
                 validate_hir_decls(
                     methods, seen, effect_op_ids,
-                    extern_replays, true),
+                    extern_replays, true, false),
             HDecl::Effect { name, ops, .. } => {
                 for op in ops {
                     validate_inert_type(op.return_type)
@@ -1501,7 +1638,7 @@ fn validate_hir_decls(
                 validate_hir_decls(
                     inner, seen, effect_op_ids,
                     extern_replays,
-                    member_function_context),
+                    member_function_context, false),
             HDecl::Struct { fields, .. } => {
                 for field in fields { validate_inert_type(field.ty) }
             },
@@ -1518,15 +1655,9 @@ fn validate_hir_decls(
                     seen, extern_replays,
                     name, abi_name, def_id, type_params, params,
                     return_type, effects, is_pub,
-                    member_function_context)
+                    member_function_context, root_context)
                 validate_inert_type(return_type)
                 validate_inert_effect_row(effects)
-                for param in params {
-                    validate_inert_type(param.ty)
-                    if param.ownership_mode != PARAM_OWNERSHIP_UNKNOWN {
-                        panic("HIR extern parameter activated ownership before planner")
-                    }
-                }
             },
             HDecl::ExternType { .. } => {},
             HDecl::Sig { name, members, .. } => {
