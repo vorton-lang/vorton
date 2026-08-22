@@ -7426,6 +7426,554 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
     return errors
 
 
+IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
+F1_EXECUTABLE_KIND_COUNT = 23
+F1_BINDER_KIND_COUNT = 20
+F1_SEMANTIC_MUTATION_COUNT = 60
+F1_SCOPE_GUARD_COUNT = 9
+
+F1_EXECUTABLE_KINDS = (
+    ("fn", "EXECUTABLE_FN"),
+    ("impl_method", "EXECUTABLE_IMPL_METHOD"),
+    ("trait_default", "EXECUTABLE_TRAIT_DEFAULT"),
+    ("effect_default", "EXECUTABLE_EFFECT_DEFAULT"),
+    ("test", "EXECUTABLE_TEST"),
+    ("const_initializer", "EXECUTABLE_CONST_INITIALIZER"),
+    ("module_body", "EXECUTABLE_MODULE_BODY"),
+    ("lambda", "EXECUTABLE_LAMBDA"),
+    ("handler", "EXECUTABLE_HANDLER"),
+    ("default_specialization", "EXECUTABLE_DEFAULT_SPECIALIZATION"),
+    ("derived_impl", "EXECUTABLE_DERIVED_IMPL"),
+    ("constructor", "EXECUTABLE_CONSTRUCTOR"),
+    ("dict_helper", "EXECUTABLE_DICT_HELPER"),
+    ("const_getter", "EXECUTABLE_CONST_GETTER"),
+    ("drop_glue", "EXECUTABLE_DROP_GLUE"),
+    ("bodyless_trait_member", "EXECUTABLE_BODYLESS_TRAIT_MEMBER"),
+    ("bodyless_effect_operation", "EXECUTABLE_BODYLESS_EFFECT_OPERATION"),
+    ("bodyless_interface_member", "EXECUTABLE_BODYLESS_INTERFACE_MEMBER"),
+    ("extern_fn", "EXECUTABLE_EXTERN_FN"),
+    ("sig_member", "EXECUTABLE_SIG_MEMBER"),
+    ("delegate", "EXECUTABLE_DELEGATE"),
+    ("extern_bridge", "EXECUTABLE_EXTERN_BRIDGE"),
+    ("builtin_intrinsic", "EXECUTABLE_BUILTIN_INTRINSIC"),
+)
+
+F1_BINDER_KINDS = (
+    ("source_param", "BINDER_SOURCE_PARAM"),
+    ("let", "BINDER_LET"),
+    ("var", "BINDER_VAR"),
+    ("for", "BINDER_FOR"),
+    ("destructure", "BINDER_DESTRUCTURE"),
+    ("match_pattern", "BINDER_MATCH_PATTERN"),
+    ("if_let_pattern", "BINDER_IF_LET_PATTERN"),
+    ("catch_pattern", "BINDER_CATCH_PATTERN"),
+    ("lambda_param", "BINDER_LAMBDA_PARAM"),
+    ("handler_param", "BINDER_HANDLER_PARAM"),
+    ("handler_resume", "BINDER_HANDLER_RESUME"),
+    ("lambda_capture", "BINDER_LAMBDA_CAPTURE"),
+    ("dictionary_evidence_local", "BINDER_DICTIONARY_EVIDENCE_LOCAL"),
+    ("lambda_value", "BINDER_LAMBDA_VALUE"),
+    ("call_result", "BINDER_CALL_RESULT"),
+    ("pre_anf", "BINDER_PRE_ANF"),
+    ("pattern_projection", "BINDER_PATTERN_PROJECTION"),
+    ("scope_result", "BINDER_SCOPE_RESULT"),
+    ("control_result", "BINDER_CONTROL_RESULT"),
+    ("assign_temp", "BINDER_ASSIGN_TEMP"),
+)
+
+
+def _f1_require_function_tokens(
+    source: str, function_name: str, tokens: Tuple[str, ...],
+    errors: List[str],
+) -> str:
+    body, body_error = _f0_function_body(source, function_name)
+    if body_error:
+        errors.append(body_error.replace("F0 function", "F1 function"))
+        return ""
+    assert body is not None
+    for token in tokens:
+        if token not in body:
+            errors.append(f"F1 {function_name} misses relation {token!r}")
+    return body
+
+
+def ir_inventory_f1_contract_errors(source: str) -> List[str]:
+    errors: List[str] = []
+    masked = mask_ring_strings_and_comments(source)
+    imports = re.findall(r"(?m)^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)", masked)
+    if imports != ["ir_identity"]:
+        errors.append(f"F1 import authority drifted: {imports!r}")
+    for forbidden in (
+        "resolver", "checker", "codegen", "perceus", "verify_rc",
+        "OwnershipMetadata", "FnMeta", "HExpr", "HDecl", "Type::FnType",
+        "IdentityCounter", "next_identity", "fresh_identity", "name_fallback",
+        "display_name", "c_symbol", "FinalHirFreezeFacts", "node_count",
+        "edge_count", "region_count", "resource_op_count",
+        "binder_slot_set_same", "ResourcePlanner", "ResourceCertificate",
+        "RcHIR", "AbiIR", "CONTRACT_INTRINSIC", "Other", "Unknown",
+    ):
+        if forbidden in masked:
+            errors.append(f"F1 gained forbidden authority {forbidden!r}")
+    if re.search(r"(?m)^\s*(?:pub\s+)?(?:name|span|display|c_name)\s*:", masked):
+        errors.append("F1 identity stores a raw name/span/display/C field")
+    if re.search(r"\b(?:Clone|Take|Drop|Cleanup)\b", masked):
+        errors.append("F1 gained forbidden resource operation")
+    if ".sort" in masked or "sort_by" in masked:
+        errors.append("F1 input order became identity through sorting")
+
+    for name, expected in {
+        "ExecutableRef": ["value"],
+        "ExecutableKind": ["tag"],
+        "ExecutableContractMode": ["tag"],
+        "ExecutableContract": ["value"],
+        "ExecutableEntry": ["reference", "kind", "contract"],
+        "ExecutableInventory": ["entries"],
+        "BinderKind": ["tag"],
+        "BinderEntry": ["slot", "owner", "kind"],
+        "BinderManifest": ["owner", "entries"],
+        "IrInventoryClosure": ["inventory", "manifests"],
+    }.items():
+        fields, field_error = _f0_struct_fields(source, name)
+        if field_error:
+            errors.append(field_error.replace("F0 struct", "F1 struct"))
+            continue
+        assert fields is not None
+        if [field for _, field in fields] != expected:
+            errors.append(f"F1 {name} private field inventory drifted")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"F1 {name} exposes forgeable public fields")
+
+    for index, (function_suffix, constant_name) in enumerate(F1_EXECUTABLE_KINDS):
+        const_token = f"const {constant_name}: Int = {index}"
+        if const_token not in source:
+            errors.append(f"F1 executable kind census misses {const_token!r}")
+        function_name = f"executable_kind_{function_suffix}"
+        _f1_require_function_tokens(source, function_name, (
+            f"executable_kind_from_tag({constant_name})",
+        ), errors)
+    if len(F1_EXECUTABLE_KINDS) != F1_EXECUTABLE_KIND_COUNT:
+        errors.append("F1 executable kind test census is incomplete")
+    if "const EXECUTABLE_KIND_COUNT: Int = 23" not in source:
+        errors.append("F1 executable kind count drifted")
+
+    allowed_modes, allowed_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_ALLOWED_MODE_TAGS")
+    ref_forms, ref_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_REF_FORM_TAGS")
+    namespaces, namespace_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_NAMESPACE_TAGS")
+    executable_roles, executable_role_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_PATH_ROLE_TAGS")
+    if allowed_error:
+        errors.append(allowed_error)
+    if ref_error:
+        errors.append(ref_error)
+    if namespace_error:
+        errors.append(namespace_error)
+    if executable_role_error:
+        errors.append(executable_role_error)
+    expected_modes = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        2, 2, 2, 2, 2,
+        1, 1, 1, 1, 1,
+        0, 2, 2,
+    ]
+    expected_ref_forms = [
+        0, 0, 0, 0, 1, 0, 1, 1, 1, 1,
+        0, 0, 1, 0, 0,
+        0, 0, 0, 0, 0,
+        0, 0, 0,
+    ]
+    expected_namespaces = [
+        0, 5, 5, 5, 6, 0, 6, 6, 6, 6,
+        5, 0, 6, 0, 5,
+        5, 5, 5, 0, 4,
+        5, 0, 0,
+    ]
+    expected_executable_roles = [
+        7, 7, 7, 7, 0, 7, 0, 1, 5, 1,
+        7, 7, 6, 7, 7,
+        7, 7, 7, 7, 7,
+        7, 7, 7,
+    ]
+    if allowed_modes is not None and allowed_modes != expected_modes:
+        errors.append("F1 executable kind/body-mode matrix drifted")
+    if ref_forms is not None and ref_forms != expected_ref_forms:
+        errors.append("F1 executable kind/ref-form matrix drifted")
+    if namespaces is not None and namespaces != expected_namespaces:
+        errors.append("F1 executable kind/namespace matrix drifted")
+    if executable_roles is not None and (
+            executable_roles != expected_executable_roles):
+        errors.append("F1 executable kind/path-role matrix drifted")
+    if "pub fn executable_kind_drop_glue()" not in source:
+        errors.append("F1 DropGlue executable kind is missing")
+
+    _f1_require_function_tokens(source, "make_executable_entry", (
+        "if !executable_kind_allows_mode(kind, mode)",
+        "if expected_form != actual_form",
+        "if !namespace_kind_same(",
+        "if !path_role_same(",
+        "if executable_kind_same(kind, executable_kind_module_body())",
+        "if path_owner_ref_is_symbol(path_ref_owner(path))",
+        "!executable_ref_owns_path(reference, executable_contract_body_path(contract))",
+        "!contract_symbol_matches_reference(reference, contract)",
+    ), errors)
+    _f1_require_function_tokens(source, "make_executable_inventory", (
+        "if executable_ref_same(left.reference, right.reference)",
+        'panic("IR inventory: duplicate executable reference")',
+        "copy_executable_entries(entries)",
+    ), errors)
+    _f1_require_function_tokens(source, "executable_inventory_entries", (
+        "copy_executable_entries(value.entries)",
+    ), errors)
+    _f1_require_function_tokens(source, "contract_symbol_matches_reference", (
+        "symbol_ref_same(executable_ref_named_symbol(reference), contract_symbol)",
+        "path_owner_ref_is_symbol(owner)",
+        "symbol_ref_same(path_owner_ref_symbol(owner), contract_symbol)",
+    ), errors)
+    for token in (
+            "ConcreteBodyValue(PathRef)", "ContractOnlyValue(SymbolRef)",
+            "make_concrete_body_contract", "make_contract_only"):
+        if token not in source:
+            errors.append(f"F1 two-mode body contract misses {token!r}")
+
+    for index, (function_suffix, constant_name) in enumerate(F1_BINDER_KINDS):
+        const_token = f"const {constant_name}: Int = {index}"
+        if const_token not in source:
+            errors.append(f"F1 binder kind census misses {const_token!r}")
+        function_name = f"binder_kind_{function_suffix}"
+        _f1_require_function_tokens(source, function_name, (
+            f"binder_kind_from_tag({constant_name})",
+        ), errors)
+    if len(F1_BINDER_KINDS) != F1_BINDER_KIND_COUNT:
+        errors.append("F1 binder kind test census is incomplete")
+    if "const BINDER_KIND_COUNT: Int = 20" not in source:
+        errors.append("F1 binder kind count drifted")
+    binder_roles, binder_role_error = _f0_int_list(
+        source, "BINDER_KIND_PATH_ROLE_TAGS")
+    if binder_role_error:
+        errors.append(binder_role_error)
+    expected_binder_roles = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        4, 0, 1, 3, 6, 1, 3, 3, 6,
+    ]
+    if binder_roles is not None and binder_roles != expected_binder_roles:
+        errors.append("F1 binder kind/path-role matrix drifted")
+
+    _f1_require_function_tokens(source, "make_binder_entry", (
+        "if !slot_ref_is_source(slot)",
+        "binder_kind_allows_dictionary_domain(kind)",
+        "if binder_kind_tag(kind) ==\n                BINDER_DICTIONARY_EVIDENCE_LOCAL",
+        "slot_domain_same(domain, slot_domain_lexical())",
+        "slot_domain_same(domain, slot_domain_dictionary())",
+        "if !domain_allowed",
+        "slot_ref_source_origin_module_key(slot) !=",
+        "if slot_ref_is_source(slot)",
+        "if !executable_ref_owns_path(owner, path)",
+        "if !path_role_same(",
+    ), errors)
+    _f1_require_function_tokens(source, "make_binder_manifest", (
+        "if !executable_ref_same(left.owner, owner)",
+        "if slot_ref_same(left.slot, right.slot)",
+        "copy_binder_entries(entries)",
+    ), errors)
+    _f1_require_function_tokens(source, "binder_manifest_entries", (
+        "copy_binder_entries(value.entries)",
+    ), errors)
+    _f1_require_function_tokens(source, "close_ir_inventory", (
+        "if manifests.len() != inventory.entries.len()",
+        "if manifests_have_duplicate_slot(manifests)",
+        "if !anonymous_executable_has_registered_root(inventory, entry)",
+        "if manifest_count_for_owner(manifests, entry.reference) != 1",
+        "let manifest = manifest_for_owner(manifests, entry.reference)",
+        "manifest.entries.len() != 0",
+        "if !inventory_contains_ref(inventory, manifest.owner)",
+        "make_executable_inventory(inventory.entries)",
+        "copy_binder_manifests(manifests)",
+    ), errors)
+    _f1_require_function_tokens(source, "manifests_have_duplicate_slot", (
+        "if slot_ref_same(existing, entry.slot) { return true }",
+    ), errors)
+    _f1_require_function_tokens(source, "anonymous_executable_has_registered_root", (
+        "if executable_ref_is_named(entry.reference) { return true }",
+        "return inventory_contains_ref(",
+        "make_named_executable_ref(path_owner_ref_symbol(owner))",
+        "executable_kind_module_body()",
+        "module_body_ref_same(",
+        "string_path_has_prefix(",
+    ), errors)
+    _f1_require_function_tokens(source, "ir_inventory_closure_inventory", (
+        "make_executable_inventory(value.inventory.entries)",
+    ), errors)
+    _f1_require_function_tokens(source, "ir_inventory_closure_manifests", (
+        "copy_binder_manifests(value.manifests)",
+    ), errors)
+    return errors
+
+
+def _f1_expected_relation_finding(function_name: str, token: str) -> str:
+    return f"F1 {function_name} misses relation {token!r}"
+
+
+def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], int]:
+    errors: List[str] = []
+    count = 0
+
+    for index, (function_suffix, constant_name) in enumerate(F1_EXECUTABLE_KINDS):
+        function_name = f"executable_kind_{function_suffix}"
+        anchor = f"executable_kind_from_tag({constant_name})"
+        replacement_constant = F1_EXECUTABLE_KINDS[(index + 1) % len(
+            F1_EXECUTABLE_KINDS)][1]
+        mutated, mutation_error = _f0_mutate_function_once(
+            source, function_name, anchor,
+            f"executable_kind_from_tag({replacement_constant})")
+        count += 1
+        if mutation_error:
+            errors.append(f"F1 semantic mutation {function_suffix}: {mutation_error}")
+            continue
+        findings = ir_inventory_f1_contract_errors(mutated or "")
+        expected = _f1_expected_relation_finding(function_name, anchor)
+        if findings != [expected]:
+            errors.append(
+                f"F1 semantic mutation {function_suffix} findings were "
+                f"{findings!r}, expected only {expected!r}")
+
+    function_mutations = (
+        ("duplicate executable", "make_executable_inventory",
+         "if executable_ref_same(left.reference, right.reference)", "if false"),
+        ("kind/body mode", "make_executable_entry",
+         "if !executable_kind_allows_mode(kind, mode)", "if false"),
+        ("kind/ref form", "make_executable_entry",
+         "if expected_form != actual_form", "if false"),
+        ("kind/namespace", "make_executable_entry",
+         "if !namespace_kind_same(", "if false && namespace_kind_same("),
+        ("kind/path role", "make_executable_entry",
+         "if !path_role_same(", "if false && path_role_same("),
+        ("module-body owner", "make_executable_entry",
+         "if path_owner_ref_is_symbol(path_ref_owner(path))", "if false"),
+        ("body path owner", "make_executable_entry",
+         "!executable_ref_owns_path(reference, executable_contract_body_path(contract))",
+         "false"),
+        ("ContractOnly relation", "make_executable_entry",
+         "!contract_symbol_matches_reference(reference, contract)", "false"),
+        ("ContractOnly relation helper", "contract_symbol_matches_reference",
+         "symbol_ref_same(executable_ref_named_symbol(reference), contract_symbol)",
+         "true"),
+        ("source binder synthetic", "make_binder_entry",
+         "if !slot_ref_is_source(slot)", "if false"),
+        ("source binder domain", "make_binder_entry",
+         "if !domain_allowed", "if false"),
+        ("dictionary-local domain", "make_binder_entry",
+         "if binder_kind_tag(kind) ==\n                BINDER_DICTIONARY_EVIDENCE_LOCAL",
+         "if false"),
+        ("source binder owner", "make_binder_entry",
+         "slot_ref_source_origin_module_key(slot) !=", "false &&"),
+        ("normalized binder source", "make_binder_entry",
+         "if slot_ref_is_source(slot)", "if false"),
+        ("normalized binder owner", "make_binder_entry",
+         "if !executable_ref_owns_path(owner, path)", "if false"),
+        ("normalized binder role", "make_binder_entry",
+         "if !path_role_same(", "if false && path_role_same("),
+        ("manifest cross-owner", "make_binder_manifest",
+         "if !executable_ref_same(left.owner, owner)", "if false"),
+        ("manifest duplicate slot", "make_binder_manifest",
+         "if slot_ref_same(left.slot, right.slot)", "if false"),
+        ("closure census", "close_ir_inventory",
+         "if manifests.len() != inventory.entries.len()", "if false"),
+        ("global duplicate slot", "close_ir_inventory",
+         "if manifests_have_duplicate_slot(manifests)", "if false"),
+        ("global duplicate helper", "manifests_have_duplicate_slot",
+         "if slot_ref_same(existing, entry.slot) { return true }", "if false {}"),
+        ("anonymous orphan", "close_ir_inventory",
+         "if !anonymous_executable_has_registered_root(inventory, entry)",
+         "if false"),
+        ("anonymous root helper", "anonymous_executable_has_registered_root",
+         "return inventory_contains_ref(", "return true || inventory_contains_ref("),
+        ("missing manifest", "close_ir_inventory",
+         "if manifest_count_for_owner(manifests, entry.reference) != 1",
+         "if false"),
+        ("ContractOnly binders", "close_ir_inventory",
+         "manifest.entries.len() != 0", "false"),
+        ("manifest owner absent", "close_ir_inventory",
+         "if !inventory_contains_ref(inventory, manifest.owner)", "if false"),
+    )
+    for label, function_name, anchor, replacement in function_mutations:
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            source, function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"F1 semantic mutation {label}: {mutation_error}")
+            continue
+        findings = ir_inventory_f1_contract_errors(mutated or "")
+        expected = _f1_expected_relation_finding(function_name, anchor)
+        if findings != [expected]:
+            errors.append(
+                f"F1 semantic mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
+
+    table_mutations = (
+        ("DropGlue body-mode", "EXECUTABLE_KIND_ALLOWED_MODE_TAGS", 14, 0,
+         "F1 executable kind/body-mode matrix drifted"),
+        ("dict-helper ref form", "EXECUTABLE_KIND_REF_FORM_TAGS", 12, 0,
+         "F1 executable kind/ref-form matrix drifted"),
+        ("Fn namespace", "EXECUTABLE_KIND_NAMESPACE_TAGS", 0, 5,
+         "F1 executable kind/namespace matrix drifted"),
+        ("handler executable role", "EXECUTABLE_KIND_PATH_ROLE_TAGS", 8, 1,
+         "F1 executable kind/path-role matrix drifted"),
+        ("lambda-capture role", "BINDER_KIND_PATH_ROLE_TAGS", 11, 1,
+         "F1 binder kind/path-role matrix drifted"),
+        ("call-result role", "BINDER_KIND_PATH_ROLE_TAGS", 14, 6,
+         "F1 binder kind/path-role matrix drifted"),
+    )
+    for label, table_name, index, replacement, expected in table_mutations:
+        count += 1
+        values, value_error = _f0_int_list(source, table_name)
+        if value_error:
+            errors.append(f"F1 semantic mutation {label}: {value_error}")
+            continue
+        assert values is not None
+        values[index] = replacement
+        mutated, mutation_error = _f0_replace_const_list(
+            source, table_name, values)
+        if mutation_error:
+            errors.append(f"F1 semantic mutation {label}: {mutation_error}")
+            continue
+        findings = ir_inventory_f1_contract_errors(mutated or "")
+        if findings != [expected]:
+            errors.append(
+                f"F1 semantic mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
+
+    appended_mutations = (
+        ("fake structural counts", "\nstruct FakeFreeze { node_count: Int }\n",
+         "F1 gained forbidden authority 'node_count'"),
+        ("premature binder equality", "\nfn binder_slot_set_same() {}\n",
+         "F1 gained forbidden authority 'binder_slot_set_same'"),
+        ("third body mode", "\nconst CONTRACT_INTRINSIC: Int = 2\n",
+         "F1 gained forbidden authority 'CONTRACT_INTRINSIC'"),
+        ("resource census claim", "\nstruct Ops { resource_op_count: Int }\n",
+         "F1 gained forbidden authority 'resource_op_count'"),
+        ("resource operation", "\nstruct ResourceOp { op: Take }\n",
+         "F1 gained forbidden resource operation"),
+    )
+    for label, suffix, expected in appended_mutations:
+        count += 1
+        findings = ir_inventory_f1_contract_errors(source + suffix)
+        if findings != [expected]:
+            errors.append(
+                f"F1 semantic mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
+
+    if count != F1_SEMANTIC_MUTATION_COUNT:
+        errors.append(
+            f"F1 semantic mutation count was {count}, "
+            f"expected {F1_SEMANTIC_MUTATION_COUNT}")
+    return errors, count
+
+
+def ir_inventory_f1_scope_guard_errors(source: str) -> Tuple[List[str], int]:
+    guards = (
+        ("resolver import", "\nuse resolver::{resolve_namespace_plan}\n"),
+        ("checker import", "\nuse checker::{check}\n"),
+        ("codegen import", "\nuse codegen_c::{generate_c}\n"),
+        ("Perceus import", "\nuse perceus::{perceus_transform}\n"),
+        ("verifier import", "\nuse verify_rc::{verify_rc_program}\n"),
+        ("shared counter", "\nstruct IdentityCounter { next_identity: Int }\n"),
+        ("name fallback", "\nfn name_fallback(value: Str) -> Str { value }\n"),
+        ("legacy HIR scan", "\nstruct Legacy { value: HExpr }\n"),
+        ("C symbol identity", "\nstruct CName { c_symbol: Str }\n"),
+    )
+    errors: List[str] = []
+    count = 0
+    for label, suffix in guards:
+        count += 1
+        if not ir_inventory_f1_contract_errors(source + suffix):
+            errors.append(f"F1 scope guard escaped: {label}")
+    if count != F1_SCOPE_GUARD_COUNT:
+        errors.append(
+            f"F1 scope guard count was {count}, expected {F1_SCOPE_GUARD_COUNT}")
+    return errors, count
+
+
+def ir_inventory_f1_source_errors() -> List[str]:
+    try:
+        source = IR_INVENTORY_F1_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read {display_path(IR_INVENTORY_F1_PATH)}: {exc}"]
+    errors = ir_inventory_f1_contract_errors(source)
+    if errors:
+        return errors
+    semantic_errors, _ = ir_inventory_f1_semantic_mutation_errors(source)
+    guard_errors, _ = ir_inventory_f1_scope_guard_errors(source)
+    errors.extend(semantic_errors)
+    errors.extend(guard_errors)
+    return errors
+
+
+def _f1_run_ring_check(
+    ring_exe: str, source_path: Path, environment: dict[str, str],
+) -> Optional[str]:
+    completed = subprocess.run(
+        [ring_exe, "check", str(source_path)], cwd=REPO, env=environment,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="strict",
+        check=False, timeout=120)
+    if completed.returncode != 0:
+        return (
+            f"pinned Ring check failed for {source_path}: "
+            f"exit={completed.returncode} stdout={completed.stdout!r} "
+            f"stderr={completed.stderr!r}")
+    if completed.stdout.strip() != "OK" or completed.stderr:
+        return (
+            f"pinned Ring check output drifted for {source_path}: "
+            f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+    return None
+
+
+def ir_inventory_f1_compile_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    compiler_before = _sha256_file(compiler)
+    source = IR_INVENTORY_F1_PATH.read_text(encoding="utf-8")
+    identity_source = IR_IDENTITY_F0_PATH.read_text(encoding="utf-8")
+    environment = dict(_controlled_environment(ring_exe))
+
+    original_error = _f1_run_ring_check(
+        ring_exe, IR_INVENTORY_F1_PATH, environment)
+    if original_error:
+        errors.append(original_error)
+
+    anchor = "executable_kind_from_tag(EXECUTABLE_DROP_GLUE)"
+    mutated, mutation_error = _f0_mutate_function_once(
+        source, "executable_kind_drop_glue", anchor,
+        "executable_kind_from_tag(EXECUTABLE_CONSTRUCTOR)")
+    if mutation_error:
+        errors.append(f"F1 material mutation could not be built: {mutation_error}")
+    else:
+        assert mutated is not None
+        expected = _f1_expected_relation_finding(
+            "executable_kind_drop_glue", anchor)
+        findings = ir_inventory_f1_contract_errors(mutated)
+        if findings != [expected]:
+            errors.append(
+                f"F1 material mutation findings were {findings!r}, "
+                f"expected only {expected!r}")
+        with tempfile.TemporaryDirectory(prefix="ring_ir_inventory_f1_") as temp:
+            compiler_dir = Path(temp) / "compiler"
+            compiler_dir.mkdir(parents=False, exist_ok=False)
+            identity_path = compiler_dir / "ir_identity.ring"
+            inventory_path = compiler_dir / "ir_inventory.ring"
+            identity_path.write_text(identity_source, encoding="utf-8", newline="\n")
+            inventory_path.write_text(mutated, encoding="utf-8", newline="\n")
+            mutation_check_error = _f1_run_ring_check(
+                ring_exe, inventory_path, environment)
+            if mutation_check_error:
+                errors.append(mutation_check_error)
+    if _sha256_file(compiler) != compiler_before:
+        errors.append("pinned Ring compiler changed across F1 checks")
+    return errors
+
+
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
         "hir": REPO / "compiler" / "hir.ring",
@@ -8010,6 +8558,21 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
             collector.add(TestResult(
                 TestResult.FAIL, suite, f"fixture validation {index}", error))
         return
+
+    inventory_label = "compiler.ir_inventory_f1"
+    if matches_filter(inventory_label, name_filter):
+        inventory_errors = ir_inventory_f1_source_errors()
+        if not inventory_errors:
+            inventory_errors.extend(ir_inventory_f1_compile_errors(ring_exe))
+        detail = (
+            f"executable_kinds={F1_EXECUTABLE_KIND_COUNT}; "
+            f"binder_kinds={F1_BINDER_KIND_COUNT}; "
+            f"semantic_mutations={F1_SEMANTIC_MUTATION_COUNT}; "
+            f"scope_guards={F1_SCOPE_GUARD_COUNT}; pinned_ring_checks=2")
+        collector.add(TestResult(
+            TestResult.PASS if not inventory_errors else TestResult.FAIL,
+            suite, inventory_label,
+            "; ".join([detail, *inventory_errors])))
 
     resource_label = "compiler.resource_model_f0"
     if matches_filter(resource_label, name_filter):
