@@ -11,5 +11,5 @@ method=0
 const=0
 trait-default=0
 effect-default=0
-param-default=0
-callable-default=ok
+explicit-param=0
+callable-argument=ok

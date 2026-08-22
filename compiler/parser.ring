@@ -11,7 +11,7 @@ use ast::{
 }
 use lexer::{TokenKind, Token, Lexer, new_lexer, token_kind_value}
 use diagnostics::{CollectingSink, Severity, DiagnosticContext, new_collecting_sink, make_diag, make_diagnostic}
-use codes::{E0101, E0103, E0104, E0105, E0106, E0706, W0002}
+use codes::{E0101, E0103, E0104, E0105, E0706, W0002}
 
 extern fn __ring_raise_fail(msg: Str) -> Never with {fail}
 
@@ -2377,24 +2377,6 @@ if self.check(TokenKind::TkIntLit) {
             if self.check(TokenKind::TkRParen) { break }
             params.push(self.parse_param())
         }
-        // Validate: non-default params must not follow default params
-        let mut seen_default = false
-        for p in params {
-            match p.default_value {
-                some(_) => { seen_default = true },
-                none => {
-                    if seen_default {
-                        self.sink.report(make_diag(
-                            E0106,
-                            Severity::SevError,
-                            "Non-default parameter '${p.name}' after default parameter",
-                            p.span,
-                            DiagnosticContext::ParseError { token: p.name, expected: none }
-                        ))
-                    }
-                }
-            }
-        }
         params
     }
 
@@ -2410,11 +2392,7 @@ if self.check(TokenKind::TkIntLit) {
         if self.try_consume(TokenKind::TkColon) {
             type_annotation = some(self.parse_type_expr())
         }
-        let mut default_value: Expr? = none
-        if self.try_consume(TokenKind::TkEq) {
-            default_value = some(self.parse_expr())
-        }
         let end = self.current_span_start()
-        Param { name: name, is_mutable: is_mutable, type_annotation: type_annotation, default_value: default_value, span: self.make_span(start, end) }
+        Param { name: name, is_mutable: is_mutable, type_annotation: type_annotation, span: self.make_span(start, end) }
     }
 }

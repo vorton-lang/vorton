@@ -78,13 +78,13 @@ fn invoke_factory(factory: fn() -> Set<Int>) -> Int {
     factory().len()
 }
 
-fn default_set_count(value: Set<Int> = set_from([])) -> Int {
+fn set_count(value: Set<Int>) -> Int {
     value.len()
 }
 
-fn default_hash_count(
+fn hash_count(
     value: Int,
-    callback: fn(Int) -> Int = hash_value
+    callback: fn(Int) -> Int
 ) -> Int {
     callback(value)
 }
@@ -117,10 +117,10 @@ fn main() {
     let metric = Metric {}
     print("trait-default=${metric.empty_count()}")
     print("effect-default=${DefaultMetric.empty_count()}")
-    print("param-default=${default_set_count()}")
-    let default_hash = default_hash_count(9)
-    assert(default_hash == hash_value(9), "ground callable default evidence")
-    print("callable-default=ok")
+    print("explicit-param=${set_count(set_from([]))}")
+    let explicit_hash = hash_count(9, hash_value)
+    assert(explicit_hash == hash_value(9), "ground callable argument evidence")
+    print("callable-argument=ok")
 
     if false {
         // map_get_panic registers before the result annotation constrains the

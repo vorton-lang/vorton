@@ -34,18 +34,12 @@ pub struct LiveSchemeBinding {
     live_scheme: TypeScheme
 }
 
-pub struct CalleeDefaults {
-    min_arity: Int,
-    values: List<HExpr>
-}
-
 pub struct CalleeMetadata {
     def_id: Int,
     binding_key: Str,
     ultimate_origin: Str,
     kind: ValueBindingKind,
     live_scheme: TypeScheme,
-    defaults: CalleeDefaults?,
     mut_flags: List<Bool>?
 }
 
@@ -642,21 +636,9 @@ pub fn resolve_callee_metadata(ctx: InferCtx, callee: HExpr) -> CalleeMetadata? 
                         none => binding.binding_key
                     }
 
-                    let mut defaults: CalleeDefaults? = none
                     let mut mut_flags: List<Bool>? = none
                     match kind {
                         ValueBindingKind::DirectCallable => {
-                            defaults = match (
-                                ctx.fn_min_arity.get(ultimate_origin),
-                                ctx.fn_defaults.get(ultimate_origin)
-                            ) {
-                                (some(min_arity), some(values)) =>
-                                    some(CalleeDefaults {
-                                        min_arity: min_arity,
-                                        values: values
-                                    }),
-                                _ => none
-                            }
                             mut_flags = match ctx.fn_mut_params.get(ultimate_origin) {
                                 some(flags) => some(flags),
                                 none => match ctx.fn_mut_params.get(binding.binding_key) {
@@ -674,7 +656,6 @@ pub fn resolve_callee_metadata(ctx: InferCtx, callee: HExpr) -> CalleeMetadata? 
                         ultimate_origin: ultimate_origin,
                         kind: kind,
                         live_scheme: binding.live_scheme,
-                        defaults: defaults,
                         mut_flags: mut_flags
                     })
                 },

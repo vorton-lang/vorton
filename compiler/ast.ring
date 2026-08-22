@@ -112,7 +112,6 @@ pub struct Param {
     pub name: Str,
     pub is_mutable: Bool,
     pub type_annotation: TypeExpr?,
-    pub default_value: Expr?,
     pub span: Span
 }
 

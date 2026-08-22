@@ -59,8 +59,7 @@ pub struct AssocRebindEntry {
 pub enum PendingDictPurpose {
     DirectCallPublish { output_slot: List<DictRef> },
     ExternCallValidate,
-    CallableValueShadow,
-    DefaultCallableValueShadow
+    CallableValueShadow
 }
 
 pub struct PendingDictObligation {
@@ -89,12 +88,6 @@ enum DictEvidenceResolution {
     Resolved { dict_ref: DictRef },
     Pending,
     Missing { suppress_diagnostic: Bool }
-}
-
-enum DefaultEvidenceSettlement {
-    Valid,
-    Invalid,
-    Pending
 }
 
 // ============================================================
@@ -160,11 +153,6 @@ pub struct InferCtx {
     // Function identity -> owner-qualified associated-type provenance captured
     // before check_fn_decl restores its transient scopes.
     pub rebind_assoc_provenance: Map<Str, List<AssocRebindEntry>>,
-    // B-069: Default parameter support
-    // fn_defaults: function name -> list of default-value HExprs (one per default param, in order)
-    pub fn_defaults: Map<Str, List<HExpr>>,
-    // fn_min_arity: function name -> minimum number of required (non-default) params
-    pub fn_min_arity: Map<Str, Int>,
     // B-125: whether the current module context allows unsafe blocks
     pub mod_unsafe_allowed: Bool,
     // B-002p1: types with user `impl Drop` — collected during impl checking
@@ -202,8 +190,6 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         effect_default_deps: map_new(),
         qualified_assoc_scope: map_new(),
         rebind_assoc_provenance: map_new(),
-        fn_defaults: map_new(),
-        fn_min_arity: map_new(),
         mod_unsafe_allowed: false,
         drop_types: set_new(),
         project_namespace_file_key: none,
@@ -1470,11 +1456,7 @@ fn purpose_reports_assoc_mismatch(purpose: PendingDictPurpose) -> Bool {
     match purpose {
         PendingDictPurpose::DirectCallPublish { .. } => true,
         PendingDictPurpose::ExternCallValidate => true,
-        PendingDictPurpose::CallableValueShadow => false,
-        // A default is shared definition metadata.  Its nested settlement is
-        // the sole definition-time owner, so it must report concrete assoc
-        // mismatches even when no caller ever omits the argument.
-        PendingDictPurpose::DefaultCallableValueShadow => true
+        PendingDictPurpose::CallableValueShadow => false
     }
 }
 
@@ -1482,10 +1464,7 @@ fn purpose_reports_drain_failure(purpose: PendingDictPurpose) -> Bool {
     match purpose {
         PendingDictPurpose::DirectCallPublish { .. } => true,
         PendingDictPurpose::ExternCallValidate => true,
-        PendingDictPurpose::CallableValueShadow => false,
-        // Default shadows are normally consumed by their nested settlement
-        // boundary.  Fail closed if one ever reaches the outer owner drain.
-        PendingDictPurpose::DefaultCallableValueShadow => true
+        PendingDictPurpose::CallableValueShadow => false
     }
 }
 
@@ -1501,8 +1480,7 @@ fn publish_resolved_dicts(
             for dict_ref in dicts { output.push(dict_ref) }
         },
         PendingDictPurpose::ExternCallValidate => {},
-        PendingDictPurpose::CallableValueShadow => {},
-        PendingDictPurpose::DefaultCallableValueShadow => {}
+        PendingDictPurpose::CallableValueShadow => {}
     }
 }
 
@@ -1559,20 +1537,9 @@ pub fn resolve_or_defer_dicts_from_scheme(
 // fixed point, so ordinary shadow failures stay silent until final zonk.
 pub fn register_callable_value_shadow(
     mut ctx: InferCtx, scheme: TypeScheme, callee_type: Type,
-    s: UnionFind, span: Span, is_default: Bool
+    s: UnionFind, span: Span
 ) {
     if scheme.bounds.len() == 0 { return }
-    if is_default {
-        ctx.pending_dict_obligations.push(PendingDictObligation {
-            scheme: scheme,
-            callee_type: callee_type,
-            fn_bounds: [],
-            span: span,
-            purpose: PendingDictPurpose::DefaultCallableValueShadow
-        })
-        return
-    }
-
     match resolve_scheme_evidence(
         ctx.sink, ctx.env, ctx.current_fn_bounds,
         scheme, callee_type, s, span, false
@@ -1699,153 +1666,6 @@ pub fn drain_pending_dicts(
             }
         }
     }
-}
-
-fn dict_ref_is_dynamic(dict_ref: DictRef) -> Bool {
-    match dict_ref {
-        DictRef::Simple(_) => true,
-        DictRef::Wrapped { inner_dicts, .. } => {
-            for inner in inner_dicts {
-                if dict_ref_is_dynamic(inner) { return true }
-            }
-            false
-        },
-        DictRef::Static(_) => false
-    }
-}
-
-fn settle_default_obligation(
-    mut ctx: InferCtx, obligation: PendingDictObligation,
-    s: UnionFind
-) -> DefaultEvidenceSettlement {
-    match resolve_scheme_evidence(
-        ctx.sink, ctx.env, obligation.fn_bounds,
-        obligation.scheme, obligation.callee_type, s,
-        obligation.span,
-        purpose_reports_assoc_mismatch(obligation.purpose)
-    ) {
-        SchemeEvidenceResolution::Resolved { dicts, assoc_mismatch } => {
-            if assoc_mismatch {
-                return DefaultEvidenceSettlement::Invalid
-            }
-            let mut has_dynamic = false
-            let mut i = 0
-            for dict_ref in dicts {
-                if dict_ref_is_dynamic(dict_ref) {
-                    has_dynamic = true
-                    match obligation.scheme.bounds.get(i) {
-                        some(bound) => {
-                            let trait_display =
-                                nominal_display_name(bound.trait_name)
-                            let _ = type_error(ctx.sink, E0503,
-                                "Generic default value requires caller-specific '${trait_display}' evidence, which is not supported",
-                                obligation.span,
-                                DiagnosticContext::TraitError {
-                                    detail: "bound-dependent evidence in generic defaults is unsupported"
-                                })
-                        },
-                        none => {}
-                    }
-                }
-                i = i + 1
-            }
-            if !has_dynamic {
-                publish_resolved_dicts(obligation.purpose, dicts)
-                DefaultEvidenceSettlement::Valid
-            } else {
-                DefaultEvidenceSettlement::Invalid
-            }
-        },
-        SchemeEvidenceResolution::Missing { failures } => {
-            report_evidence_failures(ctx.sink, failures, obligation.span)
-            DefaultEvidenceSettlement::Invalid
-        },
-        SchemeEvidenceResolution::Pending { .. } =>
-            DefaultEvidenceSettlement::Pending
-    }
-}
-
-fn report_default_pending_failures(
-    sink: CollectingSink, failures: List<EvidenceFailure>, span: Span
-) {
-    for failure in failures {
-        if !failure.suppress_diagnostic {
-            let trait_display = nominal_display_name(failure.trait_name)
-            let _ = type_error(sink, E0503,
-                "Generic default value requires caller-specific '${trait_display}' evidence, which is not supported",
-                span, DiagnosticContext::TraitError {
-                    detail: "bound-dependent evidence in generic defaults is unsupported"
-                })
-        }
-    }
-}
-
-// Default expressions are copied into fn_defaults and later reused by many
-// callers.  Ground/static pending evidence may be settled after the parameter
-// annotation, but caller-specific dynamic evidence must fail closed instead
-// of publishing a shared mutable output slot into that metadata.
-pub fn settle_default_pending_dicts(
-    mut ctx: InferCtx, checkpoint: Int, s: UnionFind
-) -> Bool {
-    if checkpoint > ctx.pending_dict_obligations.len() {
-        panic("unreachable: invalid pending dictionary checkpoint")
-    }
-    let mut remaining = ctx.pending_dict_obligations.slice(
-        checkpoint, ctx.pending_dict_obligations.len())
-    ctx.pending_dict_obligations =
-        ctx.pending_dict_obligations.slice(0, checkpoint)
-    let max_attempts = pending_evidence_attempt_budget(remaining)
-    let mut attempt = 0
-    let mut valid = true
-    while remaining.len() > 0 && attempt < max_attempts {
-        let mut next: List<PendingDictObligation> = []
-        for obligation in remaining {
-            match settle_default_obligation(ctx, obligation, s) {
-                DefaultEvidenceSettlement::Valid => {},
-                DefaultEvidenceSettlement::Invalid => { valid = false },
-                DefaultEvidenceSettlement::Pending => next.push(obligation)
-            }
-        }
-        remaining = next
-        attempt = attempt + 1
-    }
-    for obligation in remaining {
-        match resolve_scheme_evidence(
-            ctx.sink, ctx.env, obligation.fn_bounds,
-            obligation.scheme, obligation.callee_type, s,
-            obligation.span,
-            purpose_reports_assoc_mismatch(obligation.purpose)
-        ) {
-            SchemeEvidenceResolution::Resolved { assoc_mismatch, .. } => {
-                // This can only happen if the last pass's associated
-                // constraints unlocked the obligation.
-                if assoc_mismatch {
-                    // resolve_scheme_evidence has already emitted the single
-                    // authoritative E0513 for this definition owner.
-                    valid = false
-                } else {
-                    match settle_default_obligation(ctx, obligation, s) {
-                        DefaultEvidenceSettlement::Valid => {},
-                        DefaultEvidenceSettlement::Invalid => { valid = false },
-                        DefaultEvidenceSettlement::Pending => {
-                            panic("unreachable: resolved default became pending")
-                        }
-                    }
-                }
-            },
-            SchemeEvidenceResolution::Missing { failures } => {
-                report_evidence_failures(
-                    ctx.sink, failures, obligation.span)
-                valid = false
-            },
-            SchemeEvidenceResolution::Pending { failures } => {
-                report_default_pending_failures(
-                    ctx.sink, failures, obligation.span)
-                valid = false
-            }
-        }
-    }
-    valid
 }
 
 // Check associated type constraints on a bound against an impl entry's actual

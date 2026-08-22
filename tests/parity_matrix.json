@@ -620,7 +620,7 @@
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
-      "reason": "Declaration-owned call obligations retain one monomorphic instantiation through later annotations, tail and explicit returns, branches, lambdas, declared-effect payloads (including trait-default methods), map indexing, methods, defaults, consts, trait defaults, effects, and tests before atomically publishing dictionaries; exact DefId/live-scheme callable-value shadows contribute associated-type constraints without publishing evidence, and a single reverse-ordered five-bound chain exercises the finite evidence-site fixed point under the C-native backend."
+      "reason": "Declaration-owned call obligations retain one monomorphic instantiation through later annotations, tail and explicit returns, branches, lambdas, declared-effect payloads (including trait-default methods), map indexing, methods, consts, trait defaults, effects, and tests before atomically publishing dictionaries; exact DefId/live-scheme callable-value shadows contribute associated-type constraints without publishing evidence, and a single reverse-ordered five-bound chain exercises the finite evidence-site fixed point under the C-native backend."
     },
     {
       "feature_id": "backend.frontend_pending_trait_obligation_fail_closed",
@@ -632,16 +632,12 @@
         "tests/cases/errors/pending_trait_failure_rollback.ring",
         "tests/cases/errors/pending_trait_extern_validation.ring",
         "tests/cases/errors/pending_trait_extern_late_success.ring",
-        "tests/cases/errors/pending_trait_generic_default_unsupported.ring",
-        "tests/cases/errors/pending_trait_callable_default_unsupported.ring",
-        "tests/cases/errors/pending_trait_callable_default_assoc_mismatch_unused.ring",
-        "tests/cases/errors/pending_trait_callable_default_assoc_mismatch_used.ring",
         "tests/cases/errors/pending_trait_callable_value_no_source.ring"
       ],
       "oracle": "diagnostic-substring",
       "lane": ["check"],
       "status": "covered",
-      "reason": "The checker rejects no-source and concrete missing call evidence, conflicting later uses, partial multi-bound resolution, invalid extern callers, caller-specific call or callable-value defaults, and definition-owned default callable associated-type mismatches whether used or unused; ordinary callable-value shadows stay diagnostic-silent so final zonk remains the no-source authority, a localized trait-default recovery exercises the hard owner-exit pending-suffix invariant, and a check-only extern case proves late successful validation without requiring a foreign link target."
+      "reason": "The checker rejects no-source and concrete missing call evidence, conflicting later uses, partial multi-bound resolution, and invalid extern callers; ordinary callable-value shadows stay diagnostic-silent so final zonk remains the no-source authority, a localized trait-default recovery exercises the hard owner-exit pending-suffix invariant, and a check-only extern case proves late successful validation without requiring a foreign link target."
     },
     {
       "feature_id": "collections.set_struct_eq",

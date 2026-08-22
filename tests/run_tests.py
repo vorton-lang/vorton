@@ -5458,7 +5458,6 @@ def identity_checkpoint_contract_errors(
         "infer": (
             "fn infer_scoped_block(",
             "fn exact_pattern_bindings(",
-            "freshen_default_argument_hir(ctx, dh)",
             "bindings: pattern_bindings",
             "resume_binding: resume_binding",
             "dict_ref: DictRef::Simple(trait_bound_param_name(",
@@ -5705,18 +5704,6 @@ def identity_checkpoint_contract_errors(
          "HExpr::ListLit { elements, .. }",
          "HExpr::TupleLit { elements, .. }",
          "validate_hir_expr_values("),
-        ("infer", "collect_default_stmt_binders",
-         "HStmt::Let { name, def_id, init, .. }",
-         "HStmt::Var { name, def_id, init, .. }",
-         "collect_default_local_binder("),
-        ("infer", "collect_default_expr_binders",
-         "HExpr::StructLit { fields, spread, .. }",
-         "HExpr::NamedVariantConstruct { fields, spread, .. }",
-         "collect_default_field_binders("),
-        ("infer", "collect_default_expr_binders",
-         "HExpr::ListLit { elements, .. }",
-         "HExpr::TupleLit { elements, .. }",
-         "collect_default_expr_value_binders("),
     )
     crossing_bodies: dict[tuple[str, str], str] = {}
     for label, function_name, left, right, helper in crossing_split_inventory:
@@ -8716,7 +8703,6 @@ def identity_checkpoint_source_errors() -> List[str]:
     mutations = (
         ("Drop DefId", "hir", "Drop { name: Str, def_id: Int, ty: Type, span: Span }",
          "Drop { name: Str, ty: Type, span: Span }"),
-        ("default freshening", "infer", "freshen_default_argument_hir(ctx, dh)", "dh"),
         ("assignment exact slot", "cexpr", "c_exact_value_slot(ctx, name, exact_def_id)",
          "ctx.named_values.get(name)"),
         ("exact local closure call", "cexpr",
@@ -9038,14 +9024,6 @@ def identity_checkpoint_source_errors() -> List[str]:
          "        HStmt::Var { name, def_id, init, .. } =>\n"
          "            validate_hir_local_binding(\n"
          "                name, def_id, init, seen, scope)"),
-        ("default traversal crossing arm split", "infer",
-         "HExpr::ListLit { elements, .. } =>\n"
-         "            collect_default_expr_value_binders(ctx, elements, remap),\n"
-         "        HExpr::TupleLit { elements, .. } =>\n"
-         "            collect_default_expr_value_binders(ctx, elements, remap)",
-         "HExpr::ListLit { elements, .. } |\n"
-         "        HExpr::TupleLit { elements, .. } =>\n"
-         "            collect_default_expr_value_binders(ctx, elements, remap)"),
     )
     for label, source_name, anchor, replacement in mutations:
         if sources[source_name].count(anchor) < 1:

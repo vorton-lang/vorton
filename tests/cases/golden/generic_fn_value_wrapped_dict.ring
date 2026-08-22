@@ -148,13 +148,13 @@ fn identity<Renamed>(value: Renamed) -> Renamed {
     value
 }
 
-fn default_ground(value: Int, f: fn(Int) -> Int = plus_one) -> Int {
+fn apply_ground(value: Int, f: fn(Int) -> Int) -> Int {
     f(value)
 }
 
-fn default_generic<Outer>(
+fn apply_generic_identity<Outer>(
     value: Outer,
-    f: fn(Outer) -> Outer = identity
+    f: fn(Outer) -> Outer
 ) -> Outer {
     f(value)
 }
@@ -163,7 +163,7 @@ fn forty_two() -> Int {
     42
 }
 
-fn default_zero(f: fn() -> Int = forty_two) -> Int {
+fn apply_zero(f: fn() -> Int) -> Int {
     f()
 }
 
@@ -218,12 +218,12 @@ fn main() {
     assert(dynamic_wrapper_callee(Wrap { value: 29 }) == hash_one(29),
         "dynamic wrapped-dict Block materialises as an immediate callee")
 
-    assert(default_ground(40) == 41,
-        "ground callable default resolves")
-    assert(default_generic("renamed") == "renamed",
-        "generic callable default resolves after renamed parameter substitution")
-    assert(default_zero() == 42,
-        "zero-argument callable default resolves")
+    assert(apply_ground(40, plus_one) == 41,
+        "ground callable argument resolves")
+    assert(apply_generic_identity("renamed", identity) == "renamed",
+        "generic callable argument resolves after renamed parameter substitution")
+    assert(apply_zero(forty_two) == 42,
+        "zero-argument callable argument resolves")
 
     assert(local_print_shadow(plus_one, 50) == 51,
         "local print binding fails closed instead of becoming builtin extern")

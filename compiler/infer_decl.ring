@@ -20,7 +20,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     unify_at, unify_at_noted, update_fn_effects,
     resolve_type_expr, resolve_self_type, resolve_dicts_from_scheme,
     pending_dict_checkpoint, drain_pending_dicts, rollback_pending_dicts,
-    settle_default_pending_dicts, assert_pending_dict_owner_closed,
+    assert_pending_dict_owner_closed,
     generalize, collect_free_vars, free_type_vars_in_env, resolve_mod_uses,
     enter_project_root_frame, enter_project_child_frame,
     exit_project_namespace_frame}
@@ -30,8 +30,7 @@ use infer_register::{register_decls_two_phase, register_module_decls_two_phase,
     collect_all_supertraits, inject_assoc_types_from_bounds,
     resolve_trait_identity, resolve_nominal_identity}
 use infer::{infer_block, infer_expr,
-    register_bounded_callable_value_shadows,
-    register_default_bounded_callable_value_shadows}
+    register_bounded_callable_value_shadows}
 use zonk::{ZonkCtx, zonk_type, zonk_row, zonk_param, zonk_block, zonk_expr}
 use derive::{run_derive_pass}
 use scc::{build_call_graph, tarjan_scc, collect_registered_fn_names, collect_self_method_callees}
@@ -1949,12 +1948,6 @@ fn check_fn_decl_transaction(
     registration_override: TypeScheme?, rebind_identity: Str?,
     obligation_checkpoint: Int
 ) -> HDecl {
-    // This check owns the declaration's default metadata. Clear both halves
-    // before entering transient scopes so impl-method seeds or earlier SCC
-    // prechecks with the same spelling cannot leak into this owner.
-    ctx.fn_defaults.remove(name)
-    ctx.fn_min_arity.remove(name)
-
     // Save the registration scheme before entering the parameter scope: a
     // parameter is allowed to have the same spelling as its function.
     let registration_scheme = match registration_override {
@@ -2057,64 +2050,6 @@ fn check_fn_decl_transaction(
         param_types.push(ptype)
     }
 
-    // B-069: Infer default value expressions and store in hparams
-    let mut default_hexprs: List<HExpr> = []
-    let mut default_evidence_valid = true
-    let mut min_arity = params.len()
-    let mut pi = 0
-    for p in params {
-        match p.default_value {
-            some(dv) => {
-                let default_obligation_checkpoint =
-                    pending_dict_checkpoint(ctx)
-                // Generic defaults are shared metadata, not one caller
-                // instantiation.  Hide caller-specific bound dictionaries
-                // while checking them: ground/static evidence still resolves,
-                // while dynamic evidence becomes an explicit pending failure.
-                let saved_default_bounds = ctx.current_fn_bounds
-                ctx.current_fn_bounds = []
-                let default_result = some(
-                    infer_expr(ctx, dv, ctx.subst)) catch { _ => none }
-                ctx.current_fn_bounds = saved_default_bounds
-                let dv_result = match default_result {
-                    some(result) => result,
-                    none => fail.raise(CompileError {})
-                }
-                ctx.subst = dv_result.subst
-                // Unify default value type with param type
-                match param_types.get(pi) {
-                    some(pt) => {
-                        ctx.subst = unify_at(ctx.sink, ctx.env, hexpr_type(dv_result.hexpr), pt, ctx.subst, p.span)
-                    },
-                    none => {}
-                }
-                // Check that default value is pure (no effects)
-                let dv_effects = dv_result.effects
-                if dv_effects.effects.len() > 0 {
-                    let _ = type_error(ctx.sink, E0404,
-                        "Default parameter value for '${p.name}' must be a pure expression (no effects)",
-                        p.span,
-                        DiagnosticContext::OtherContext { detail: some("default parameter effect") })
-                }
-                register_default_bounded_callable_value_shadows(
-                    ctx, dv_result.hexpr, ctx.subst)
-                if !settle_default_pending_dicts(
-                    ctx, default_obligation_checkpoint, ctx.subst) {
-                    default_evidence_valid = false
-                }
-                assert_pending_dict_owner_closed(
-                    ctx, default_obligation_checkpoint)
-                default_hexprs.push(dv_result.hexpr)
-                if min_arity == params.len() {
-                    // First default param sets the min arity
-                    min_arity = pi
-                }
-            },
-            none => {}
-        }
-        pi = pi + 1
-    }
-
     let saved_fn_return = ctx.current_fn_return_type
     let expected_ret = match return_type {
         some(rt) => resolve_type_expr(ctx, rt),
@@ -2137,24 +2072,6 @@ fn check_fn_decl_transaction(
         )
     ) catch { _ => none }
 
-    // Default expressions share the function's type variables, but their
-    // dictionary evidence belongs to each CALLER instantiation.  Zonk only
-    // types/effects here and preserve unresolved function-value provenance;
-    // caller final-zonk resolves DictRefs with its substitution and bounds.
-    let mut zonked_defaults: List<HExpr> = []
-    match try_result {
-        some(_) => {
-            let zctx_defaults = ZonkCtx {
-                subst: ctx.subst, names: map_new(),
-                dict_resolver: none
-            }
-            for dh in default_hexprs {
-                zonked_defaults.push(zonk_expr(zctx_defaults, dh))
-            }
-        },
-        none => {},
-    }
-
     // Save complete bounds (inherited + own) before pop
     let complete_fn_bounds = ctx.current_fn_bounds
 
@@ -2169,30 +2086,6 @@ fn check_fn_decl_transaction(
     let fn_result = match try_result {
         some(r) => r,
         none => fail.raise(CompileError {})
-    }
-    // Invalid default evidence has already produced its precise E0503.  Abort
-    // only after restoring all transient owner scopes, and never publish the
-    // shared fn_defaults value that carried caller-owned inference variables.
-    if !default_evidence_valid {
-        // Phase 1 has already made a top-level declaration visible to later
-        // bodies.  Replace that preregistered scheme with ErrorType before
-        // recovery continues: otherwise later calls reinterpret the omitted
-        // default as a required parameter and cascade with E0301 / bound
-        // failures.  Impl methods use their origin-keyed registration path and
-        // are rolled back by the enclosing impl owner, so do not rebind an
-        // unrelated same-spelled global here.
-        if rebind_identity.is_none() {
-            match registration_scheme {
-                some(scheme) => ctx.env.rebind(name, TypeScheme {
-                    ty: Type::ErrorType,
-                    type_vars: [],
-                    bounds: [],
-                    def_id: scheme.def_id
-                }),
-                none => {}
-            }
-        }
-        fail.raise(CompileError {})
     }
     let final_params = fn_result.params
     let final_ret = fn_result.ret
@@ -2264,12 +2157,6 @@ fn check_fn_decl_transaction(
         fi = fi + 1
     }
     ctx.fn_mut_params.insert(name, mut_flags)
-
-    // B-069: Register default parameter info for call-site expansion
-    if zonked_defaults.len() > 0 {
-        ctx.fn_defaults.insert(name, zonked_defaults)
-        ctx.fn_min_arity.insert(name, min_arity)
-    }
 
     HDecl::Fn {
         name: name, def_id: fn_def_id, type_params: type_params,
