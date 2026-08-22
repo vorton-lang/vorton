@@ -1894,6 +1894,10 @@ Source
 | `AbiIR` | 只把已验证语义降为 typeid/tag/field layout、symbol、prototype、closure/dict/evidence layout、drop glue、extern 与 failure ABI；不得新增调用、控制边、owner 或语言 fallback。 |
 | `C11` | 对 AbiIR 做确定性序列化并调用工具链；不再选择方法、求 effect closure、解释 pattern、生成未规划 executable body 或分配语义 identity。 |
 
+**术语与物理形态（2026-08-23 用户澄清）**：现有名称保持不变。`CoreHIR` 是广义 IR，也是最后的 Ring semantic representation；其物理形态仍是 structured typed expression/tree，而非 basic-block graph。`CoreHIR → FinalHIR` 是唯一 operational lowering：把 structured control、canonical typed pattern 与隐含 evaluation order 变为 fixed blocks/instructions/terminators，创建仅供执行编排的 ANF temp、scope/control result slot，以及 control/data/call/projection/capture/exit edge。它可以新增这些 administrative binder/block/edge，但不得新增语言级 operation、executable、impl、callee/evidence 选择或其他 semantic obligation。
+
+`FinalHIR` 是第一层传统 MIR/CFG-style IR，但不要求 LLVM 式 SSA/phi，也不含 `Clone/Take/Drop/Cleanup`、目标 layout 或 ABI。FinalHIR freeze 后，ResourcePlanner 不得创建或改变 semantic CFG、call graph 或 reachability；只可在既有 topology 上决定资源流，并把既有 edge 物化为保持相同端点/可达性的显式 cleanup sequence。`RcHIR → AbiIR` 才继续进入资源已验证后的物理表示下降。
+
 **隐式行为时点**：纯拼写糖可在 AST/CoreHIR 内展开，不必为每个 pass 新建永久 IR；exhaustiveness matrix、call graph、CFG 等可作为所属层的 finite plan/certificate。凡会改变求值顺序、调用图、effect、capture、binder、控制边或 executable inventory 的行为，必须在 FinalHIR freeze 前显式化；freeze 后只允许资源操作与机器表示下降。每个跨层节点保留 `OriginRef`，使诊断能回到源码而不迫使低层保留表面语法。
 
 **CoreHIR semantic elaboration closure（2026-08-23 用户决定）**：CoreHIR 是大多数语言 feature 的统一去糖终点，不是允许下游继续补语义的中转层。每个新 surface feature 必须给出唯一 TypedHIR → CoreHIR lowering，或明确证明自身就是 canonical core construct；否则不得进入实现。CoreHIR validator 必须拒绝 surface-only variant、未选择的 callee/impl/evidence、待生成 executable/body 与其他 implicit obligation。CoreHIR 之后不得再读取 AST/source spelling、调用 resolver/type/effect/trait selection，或在 verifier/codegen 临时生成语言级行为。FinalHIR 仅规范化 evaluation/control/pattern 并冻结 binder/node/edge，RcHIR 仅显式化资源操作，AbiIR 仅显式化 representation/ABI。
