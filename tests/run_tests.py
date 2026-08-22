@@ -7434,7 +7434,7 @@ F1_SCOPE_GUARD_COUNT = 14
 
 F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
 F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
-F2_U1A_SEMANTIC_MUTATION_COUNT = 54
+F2_U1A_SEMANTIC_MUTATION_COUNT = 56
 F2_U1A_SCOPE_GUARD_COUNT = 8
 F2_U1A_FIXTURE_COUNT = 10
 
@@ -8098,8 +8098,7 @@ F2_U1A_FUNCTION_MUTATIONS = (
      "symbol_ref_same(group.enum_symbol, enum_symbol)", "false"),
     ("resolver", "append_enum_variant_fact_group",
      "symbol_ref_same(group.enum_symbol, enum_symbol)",
-     "symbol_ref_canonical_payload(group.enum_symbol) == "
-     "symbol_ref_canonical_payload(enum_symbol)"),
+     "symbol_ref_same(group.enum_symbol, group.enum_symbol)"),
     ("resolver", "enum_variant_constructors",
      "symbol_ref_same(group.enum_symbol, enum_symbol)", "false"),
     ("resolver", "claim_named_enum_relation_expansion",
@@ -8113,13 +8112,14 @@ F2_U1A_FUNCTION_MUTATIONS = (
      "symbol: candidate.symbol"),
     ("resolver", "add_namespace_fact",
      "symbol_ref_same(existing.symbol, candidate.symbol)",
-     "existing.symbol == candidate.symbol"),
+     "symbol_ref_same(candidate.symbol, candidate.symbol)"),
     ("resolver", "add_namespace_fact",
      "symbol_ref_same(existing.symbol, candidate.symbol)", "false"),
     ("resolver", "reduce_value_lane", "symbol_ref_same(\n"
      "                           existing.binding.symbol,\n"
      "                           candidate.binding.symbol)",
-     "existing.binding.symbol == candidate.binding.symbol"),
+     "symbol_ref_same(candidate.binding.symbol, "
+     "candidate.binding.symbol)"),
     ("resolver", "project_public_inline_fact", "symbol: fact.symbol",
      "symbol: candidate.symbol"),
     ("resolver", "deliver_namespace_fact", "symbol: fact.symbol",
@@ -8131,17 +8131,18 @@ F2_U1A_FUNCTION_MUTATIONS = (
      "ValueStructuralProducerSource::ProjectionCopyValue { .. } => match source {",
      "ValueStructuralProducerSource::TerminalValue(_) => match source {"),
     ("resolver", "append_distinct_symbol_ref",
-     "symbol_ref_same(existing, symbol)", "existing == symbol"),
+     "symbol_ref_same(existing, symbol)", "symbol_ref_same(symbol, symbol)"),
     ("resolver", "append_materialized_strong_ambiguity",
      "!symbol_ref_same(\n"
      "                                       left.binding.symbol,\n"
      "                                       right.binding.symbol)",
-     "left.binding.symbol != right.binding.symbol"),
+     "!symbol_ref_same(left.binding.symbol, left.binding.symbol)"),
     ("resolver", "materialize_structural_value_plan",
      "symbol_ref_same(\n"
      "                                                publication.binding.symbol,\n"
      "                                                local.binding.symbol)",
-     "publication.binding.symbol == local.binding.symbol"),
+     "symbol_ref_same(publication.binding.symbol, "
+     "publication.binding.symbol)"),
     ("resolver", "materialize_cycle_import_producer",
      "materialize_value_binding(producer.target, symbol)",
      "materialize_value_binding(producer.target, forged_symbol)"),
@@ -8204,6 +8205,23 @@ def _f2_u1a_struct_fields(
     if actual != expected:
         errors.append(
             f"F2 U1a {name} field inventory drifted: {actual!r}")
+
+
+def _f2_u1a_call_escaped_function_allowlist(
+    source: str, call_token: str, allowed_functions: Tuple[str, ...],
+) -> bool:
+    allowed_spans: List[Tuple[int, int]] = []
+    for function_name in allowed_functions:
+        span, span_error = _f0_function_span(source, function_name)
+        if span_error is not None or span is None:
+            continue
+        allowed_spans.append(span)
+    # Ring string interpolation contains executable expressions.  Scan raw
+    # source so an accessor hidden inside "${...}" cannot evade the allowlist.
+    for match in re.finditer(re.escape(call_token), source):
+        if not any(start <= match.start() < end for start, end in allowed_spans):
+            return True
+    return False
 
 
 def resolver_identity_u1a_contract_errors(
@@ -8273,30 +8291,39 @@ def resolver_identity_u1a_contract_errors(
         _f2_u1a_require_function_token(
             source, source_name, function_name, token, errors)
 
-    for function_name in (
-            "add_namespace_fact", "reduce_value_lane",
-            "append_materialized_strong_ambiguity",
-            "append_distinct_symbol_ref", "materialize_structural_value_plan"):
-        body, body_error = _f0_function_body(resolver_source, function_name)
-        if body_error:
-            continue
-        assert body is not None
-        if "symbol_ref_canonical_payload" in body:
-            errors.append(
-                f"F2 U1a diagnostic projection entered {function_name} decision")
+    if _f2_u1a_call_escaped_function_allowlist(
+            resolver_source, "symbol_ref_canonical_payload(",
+            ("source_seed_symbol", "append_binding_ambiguity")):
+        errors.append(
+            "F2 U1a resolver canonical payload call escaped function allowlist")
+    if re.search(
+            r"(?:[A-Za-z_][A-Za-z0-9_.]*\.(?:symbol|enum_symbol)|"
+            r"[A-Za-z_][A-Za-z0-9_]*(?:_symbol|symbol))\s*(?:==|!=)|"
+            r"(?:==|!=)\s*(?:[A-Za-z_][A-Za-z0-9_.]*\."
+            r"(?:symbol|enum_symbol)|[A-Za-z_][A-Za-z0-9_]*"
+            r"(?:_symbol|symbol))\b",
+            resolver_source):
+        errors.append("F2 U1a resolver used raw SymbolRef equality")
 
     if "make_symbol_ref" in infer_masked:
         errors.append("F2 U1a infer_ctx reconstructs SymbolRef")
     if re.search(r"Map\s*<\s*Str\s*,\s*SymbolRef\s*>", infer_masked):
         errors.append("F2 U1a infer_ctx gained typed origin side map")
+    if _f2_u1a_call_escaped_function_allowlist(
+            infer_ctx_source, "symbol_ref_canonical_payload(",
+            ("apply_project_value_binding",
+             "apply_project_namespace_binding",
+             "install_project_namespace_plan")):
+        errors.append(
+            "F2 U1a infer_ctx canonical payload call escaped function allowlist")
     key_body, key_error = _f0_function_body(
         infer_ctx_source, "project_binding_key")
     if key_error:
         errors.append(key_error.replace(
             "F0 function", "F2 U1a infer_ctx function"))
     elif key_body is not None and (
-            "binding.symbol" in key_body or
-            "symbol_ref_canonical_payload" in key_body):
+            "binding.symbol" in key_body and
+            "symbol_ref_canonical_payload" not in key_body):
         errors.append("F2 U1a project binding key became origin authority")
 
     for forbidden in (
@@ -8364,13 +8391,13 @@ def resolver_identity_u1a_semantic_mutation_errors(
         ("application key consumes origin", "infer_ctx",
          '"${namespace}|${binding.exposed_name}"',
          '"${namespace}|${binding.exposed_name}|${symbol_ref_canonical_payload(binding.symbol)}"',
-         "F2 U1a project binding key became origin authority"),
+         "F2 U1a infer_ctx canonical payload call escaped function allowlist"),
         ("cycle canonical collapse", "resolver",
          "if symbol_ref_same(existing, symbol) { return }",
          "if symbol_ref_same(existing, symbol) || "
          "symbol_ref_canonical_payload(existing) == "
          "symbol_ref_canonical_payload(symbol) { return }",
-         "F2 U1a diagnostic projection entered append_distinct_symbol_ref decision"),
+         "F2 U1a resolver canonical payload call escaped function allowlist"),
     )
     for label, source_name, anchor, replacement, expected_prefix in custom_mutations:
         count += 1
@@ -8389,6 +8416,34 @@ def resolver_identity_u1a_semantic_mutation_errors(
                 f"F2 U1a semantic mutation {label} findings were "
                 f"{findings!r}, expected one {expected_prefix!r}")
 
+    enum_lookup_anchor = "symbol_ref_same(group.enum_symbol, enum_symbol)"
+    enum_fallback_mutations = (
+        ("canonical payload fallback",
+         enum_lookup_anchor + " ||\n"
+         "           symbol_ref_canonical_payload(group.enum_symbol) ==\n"
+         "               symbol_ref_canonical_payload(enum_symbol)",
+         "F2 U1a resolver canonical payload call escaped function allowlist"),
+        ("raw SymbolRef fallback",
+         enum_lookup_anchor + " || group.enum_symbol == enum_symbol",
+         "F2 U1a resolver used raw SymbolRef equality"),
+    )
+    for label, replacement, expected in enum_fallback_mutations:
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            resolver_source, "enum_variant_constructors",
+            enum_lookup_anchor, replacement)
+        if mutation_error:
+            errors.append(
+                f"F2 U1a semantic mutation enum {label}: {mutation_error}")
+            continue
+        assert mutated is not None
+        findings = resolver_identity_u1a_contract_errors(
+            mutated, infer_ctx_source)
+        if findings != [expected]:
+            errors.append(
+                f"F2 U1a semantic mutation enum {label} findings were "
+                f"{findings!r}, expected only {expected!r}")
+
     count += 1
     anchor = "if symbol_ref_same(existing.symbol, candidate.symbol) {"
     injected = (
@@ -8401,7 +8456,8 @@ def resolver_identity_u1a_semantic_mutation_errors(
         mutated = resolver_source.replace(anchor, injected, 1)
         findings = resolver_identity_u1a_contract_errors(
             mutated, infer_ctx_source)
-        expected = "F2 U1a diagnostic projection entered add_namespace_fact decision"
+        expected = (
+            "F2 U1a resolver canonical payload call escaped function allowlist")
         if findings != [expected]:
             errors.append(
                 f"F2 U1a diagnostic-decision mutation findings were "
