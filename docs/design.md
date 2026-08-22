@@ -1079,7 +1079,7 @@ admin.log("login")  // 转发到 User 的 Loggable 实现
 
 `delegate field: Trait...` 为每个 trait 生成一个完整普通 impl（含 associated type、泛型 bound 与 effect/evidence 转发）。同一 target + trait 已有手写 impl 时稳定报 `E0509`；不支持“delegate 后再按方法 partial override”。需要定制任一方法时，改写该 trait 的完整显式 impl。
 
-**实现边界（2026-08-23 用户决定）**：delegate source directive 只允许存活到 TypedHIR；TypedHIR → CoreHIR 一次展开为普通 ImplFn body、associated binding 与 `OriginRef`。CoreHIR、ExecutableInventory、FinalHIR、ResourcePlanner、RcHIR、AbiIR、verifier 与 codegen 不得出现 delegate 专属 executable kind、identity 或 fallback。
+**实现边界（2026-08-23 用户决定）**：delegate source directive 只允许存活到 TypedHIR；TypedHIR → CoreHIR 一次展开为普通 ImplFn body、associated binding 与 `OriginRef`。CoreHIR、ExecutableInventory、FlowIR、ResourcePlanner、RcIR、AbiIR、verifier 与 codegen 不得出现 delegate 专属 executable kind、identity 或 fallback。
 
 ### 5.4 Row Poly + Trait 交叉
 
@@ -1256,7 +1256,7 @@ extern fn read_all(path: Str) -> Str / io             // path is readonly
 
 函数类型中同样标注约定：`fn(T)` = borrow，`fn(mut T)` = mutable，`fn(move T)` = move。
 
-#### 7.3.1 Final-HIR 单一 Resource Planner（2026-08-22 用户理解并批准）
+#### 7.3.1 FlowIR 单一 Resource Planner（2026-08-22 用户理解并批准）
 
 本节取代 2026-08-06 A′ 的实现分层，但不改变上文公开参数语义。此前实际尝试把 ownership authority 放在 checker 一侧，同时仍允许后续 lowering 与 Perceus ANF/RC 补造 cleanup-visible 槽，迫使 checker、Perceus、verifier 与 codegen 分别猜 ownership；`some(Resource)` 的 source slot 在 planner 之后才成为 `__anf`，因此出现接管后仍 Drop 的 double-drop。终态只允许一条无回边流水线：
 
@@ -1264,14 +1264,14 @@ extern fn read_all(path: Str) -> Str / io             // path is readonly
 Parse / project Resolver / Type+Effect
 → 全部语义 lowering
 → ownership-neutral ANF + pattern projection + scope-result normalization
-→ project-wide FinalHIR identity/binder freeze
+→ project-wide FlowIR identity/binder freeze
 → ONE ResourcePlanner
-→ RcHIR + ranked ResourceCertificate
+→ RcIR + ranked ResourceCertificate
 → certificate verifier
 → mechanical C codegen
 ```
 
-**FinalHIR 契约**：TypedHIR → CoreHIR 已完成 trait/effect default body、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 等全部 semantic elaboration；函数默认参数与 `sig` 不属于 0.1 surface。FinalHIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait/Effect default、Test、Const、Lambda/handler、derived/intrinsic/constructor/drop/dict helper 等所有 executable body 或显式 contract 进入一个共享 `ExecutableInventory`。Neutral ANF 只保持同一 evaluation region 内的严格左到右求值，不跨 short-circuit、branch、loop/lambda、guard、catch/handle、unsafe 或 control-transfer 边界，也不产生 `Clone/Take/Drop/Cleanup`。FinalHIR freeze 后任何阶段新增 HIR binder 都是 internal error。
+**FlowIR 契约**：TypedHIR → CoreHIR 已完成 trait/effect default body、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 等全部 semantic elaboration；函数默认参数与 `sig` 不属于 0.1 surface。FlowIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait/Effect default、Test、Const、Lambda/handler、derived/intrinsic/constructor/drop/dict helper 等所有 executable body 或显式 contract 进入一个共享 `ExecutableInventory`。Neutral ANF 只保持同一 evaluation region 内的严格左到右求值，不跨 short-circuit、branch、loop/lambda、guard、catch/handle、unsafe 或 control-transfer 边界，也不产生 `Clone/Take/Drop/Cleanup`。FlowIR freeze 后任何阶段新增 binder 都是 internal error。
 
 **Identity**：具名 source/member 使用 resolver/registry 已选定 origin 构造的 typed `SymbolRef { origin_module_key, namespace_kind, canonical_payload, declaration_site_path }`；re-export 原样携带，same-origin diamond 自然相等，不消耗共享 source counter。局部槽使用 `SlotRef(module_key, domain, local_def_id)`；Lambda、call-result、ANF/result/projection 等 synthetic identity 使用 final normalized tree 的 owner+path `PathRef`，只服务 planner/certificate，不进入 C 名称。Static call 必须携带 `CalleeRef`；dynamic call 必须落到 exact callable slot，freeze 后缺 identity 直接 fatal，Planner 不查 name/resolver/FnType fallback。
 
@@ -1283,11 +1283,11 @@ Parse / project Resolver / Type+Effect
 
 **A′ 与 S′ 统一**：exact source clear、overwrite old-value Drop、exact-none 与 scope/early-exit cleanup属于同一个 slot-state machine，不再有独立 S′ producer/tail analysis。所有可能 physical-own 的 storage 在 normalization 预建并初始化为空；Assign 固定为“完整求值 RHS → ownership转入预建 temp → Drop旧target → temp写入target → 清temp ownership”，RHS divergence无后继。`Take` 固定为保存 exact source 值并立即清空 source；normal/return/break/continue/current-frame catch/handler exit按逆词法序显式 cleanup。`ring_drop(NULL)`、tagged scalar与never-drop `Option::none`均no-op；Extern/Ptr/NoDrop仍由Physical RcShape排除。
 
-**Planner 后职责**：RcHIR 的 binder set 与 FinalHIR 完全相同，资源操作全部显式；旧 Perceus 不再是独立 ownership pass，不造 `__anf/__rc_scope`、不猜 fresh/escape/sink/producer。Verifier不运行resolver或第二solver：certificate记录frozen graph hash、seeds、final cells、每次提升的rule/premises/严格较低rank、CFG states与每个RC op witness；检查全部约束与有限推导两侧，从而证明 claimed 解恰是least fixed point，并验证每条路径的owner守恒。Codegen只接受verified RcHIR，机械lower `Clone`、`Take(save; source=NULL)`、`Drop`与cleanup。
+**Planner 后职责**：RcIR 的 binder set 与 FlowIR 完全相同，资源操作全部显式；旧 Perceus 不再是独立 ownership pass，不造 `__anf/__rc_scope`、不猜 fresh/escape/sink/producer。Verifier不运行resolver或第二solver：certificate记录frozen graph hash、seeds、final cells、每次提升的rule/premises/严格较低rank、CFG states与每个RC op witness；检查全部约束与有限推导两侧，从而证明 claimed 解恰是least fixed point，并验证每条路径的owner守恒。Codegen只接受verified RcIR，机械lower `Clone`、`Take(save; source=NULL)`、`Drop`与cleanup。
 
-**终止性与入口统一**：FinalHIR的type/callable/edge/slot/CFG集合有限且solve前冻结；shape bit只升一次，param mode最多升两次，FORCE只升一次，result与CFG格有限，固定worklist必停，无timeout或任意fuel。Single-file包装为单节点ModuleGraph，和project共享prelude/intrinsic inventory、identity freeze、Planner、certificate verifier与codegen入口；`ModuleKey`属于identity，prefix只影响输出符号。
+**终止性与入口统一**：FlowIR的type/callable/edge/slot/CFG集合有限且solve前冻结；shape bit只升一次，param mode最多升两次，FORCE只升一次，result与CFG格有限，固定worklist必停，无timeout或任意fuel。Single-file包装为单节点ModuleGraph，和project共享prelude/intrinsic inventory、identity freeze、Planner、certificate verifier与codegen入口；`ModuleKey`属于identity，prefix只影响输出符号。
 
-**现行能力边界保持**：普通closure/可逃逸tail-resumptive handler不得捕获may-unique-own外部binding；未解析TypeVar fail closed；partial move拒绝。B-168固定failure/control ABI前，任何必须跨现行`setjmp`边界修改外层cleanup-visible slot的Take继续fail loud；跨帧abort unwind由B-168/B-002以同一FinalHIR/ResourcePlanner failure edge续接，不冒充本checkpoint已完成。
+**现行能力边界保持**：普通closure/可逃逸tail-resumptive handler不得捕获may-unique-own外部binding；未解析TypeVar fail closed；partial move拒绝。B-168固定failure/control ABI前，任何必须跨现行`setjmp`边界修改外层cleanup-visible slot的Take继续fail loud；跨帧abort unwind由B-168/B-002以同一FlowIR/ResourcePlanner failure edge续接，不冒充本checkpoint已完成。
 
 ### 7.4 别名追踪与 mutation 安全
 
@@ -1772,7 +1772,7 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 当前性能路线分两类，不再混用一份 baseline：
 
 1. **开发反馈性能**：B-176 测 `ring check`、RC/self-verify、runner/clang 调度与 self-compile，B-180 以 2× wall-time 改善为退出门；可以优化编译器算法、缓存和有界并行，但不得减少测试覆盖或吞掉原始失败。
-2. **生成程序性能**：B-181 测 runtime、内存/分配和产物尺寸，再决定 RcHIR reuse、dict 缓存等优化；仍以 backend-neutral TypedHIR/CoreHIR/FinalHIR/RcHIR → AbiIR → C11/clang 为主，见 §14.6。
+2. **生成程序性能**：B-181 测 runtime、内存/分配和产物尺寸，再决定 RcIR reuse、dict 缓存等优化；仍以 backend-neutral TypedHIR/CoreHIR/FlowIR/RcIR → AbiIR → C11/clang 为主，见 §14.6。
 
 退役实现的性能分析只留 Git 历史。两类工作都记录 cold/warm、CPU/RSS、compiler/anchor/toolchain 指纹，禁止用并行 wall-time、编译器构建优化或 microbenchmark 混报产品 runtime 收益。
 
@@ -1830,7 +1830,7 @@ native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only
 
 ### 14.4 关键技术路径
 
-- **C11 → clang native** 是唯一产品主路径；Linux 的 gcc/MSVC 等只作为生成 C 的去相关验证信道。语义优化必须在对应的 backend-neutral TypedHIR/CoreHIR/FinalHIR/RcHIR 层完成，避免重新把语言语义绑定到某一 codegen。
+- **C11 → clang native** 是唯一产品主路径；Linux 的 gcc/MSVC 等只作为生成 C 的去相关验证信道。语义优化必须在对应的 backend-neutral TypedHIR/CoreHIR/FlowIR/RcIR 层完成，避免重新把语言语义绑定到某一 codegen。
 - **Perceus 引用计数** 替换 GC。无停顿、确定性析构、函数式代码可就地复用已死对象的内存。语言设计无需修改——Perceus 是编译器优化，用户代码不感知。
 - **Evidence passing** 替换 generator effect handler。同样是编译器优化，用户代码不感知。
 
@@ -1842,10 +1842,10 @@ native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only
 
 ### 14.6 后端中立的双层优化架构
 
-effect、linearity、refinement 与 purity 必须先在相应的 typed/core/final/RcHIR 层消费；C/clang 或未来后端只能继续利用可安全降为标准属性、`assume` 或受控代码形态的子集。
+effect、linearity、refinement 与 purity 必须先在相应的 TypedHIR/CoreHIR/FlowIR/RcIR 层消费；C/clang 或未来后端只能继续利用可安全降为标准属性、`assume` 或受控代码形态的子集。
 
 ```text
-TypedHIR / CoreHIR / FinalHIR 契约
+TypedHIR / CoreHIR / FlowIR 契约
 → Ring passes（RC/reuse、bounds、specialize、dead effect）
 → AbiIR / C11 受控形态与属性 → clang → native
 ```
@@ -1868,7 +1868,7 @@ TypedHIR / CoreHIR / FinalHIR 契约
 
 ### 15.1 分层 IR 总架构（2026-08-22 用户批准）
 
-§7.3.1 的 FinalHIR / ResourcePlanner / RcHIR 不是 ownership 专用补丁，而是编译器总分层的第一个落地消费者。每项语义事实只能由信息首次完备的最高层产生一次，以 typed carrier 单向传递；下游不得按字符串、类型叶名、声明顺序或 backend fallback 重新解释，上游也不得因下游需要而回跑 resolver、type/effect inference 或 instance selection。
+§7.3.1 的 FlowIR / ResourcePlanner / RcIR 不是 ownership 专用补丁，而是编译器总分层的第一个落地消费者。每项语义事实只能由信息首次完备的最高层产生一次，以 typed carrier 单向传递；下游不得按字符串、类型叶名、声明顺序或 backend fallback 重新解释，上游也不得因下游需要而回跑 resolver、type/effect inference 或 instance selection。
 
 ```text
 Source
@@ -1876,8 +1876,8 @@ Source
 → ResolvedAST
 → TypedHIR
 → CoreHIR
-→ FinalHIR
-→ RcHIR
+→ FlowIR
+→ RcIR
 → AbiIR
 → mechanical C11 serialization
 → clang / native
@@ -1889,20 +1889,20 @@ Source
 | `ResolvedAST` | 每个声明、引用、member、constructor、effect op、import/re-export 与 extern bridge 都携带 exact `SymbolRef`；下游不再查询 resolver 或按叶名回退。 |
 | `TypedHIR` | HM inference metavariable 已收敛（显式量化参数除外），类型、effect row、callee/impl/associated-type 选择与公开 module interface 已固定；ownership mode 可仍为 symbolic contract，但不得回写普通 type/effect 结果。 |
 | `CoreHIR` | 所有语言级隐式语义已 elaborated：trait/effect default body、delegate-origin ordinary impl、derive、protocol for-in、short-circuit、trait dictionary、effect evidence、closure/capture、constructor/intrinsic/trait-default specialization 均成为 explicit body、typed edge 或 `IntrinsicContract`；共享 `ExecutableInventory` 封闭。函数默认参数与 `sig` 不在 0.1 surface。此层仍不含资源操作。 |
-| `FinalHIR` | ownership-neutral ANF、pattern decision/projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 已建立；project-wide identity、binder、call/alias/capture graph 冻结，后续新增 node/binder 是 internal error。 |
-| `RcHIR` | 唯一 ResourcePlanner 输出 `Clone/Take/Drop/Cleanup` 与 ranked certificate；binder set 与 FinalHIR 相同，资源语义完全显式。 |
+| `FlowIR` | ownership-neutral ANF、pattern decision/projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 已建立；project-wide identity、binder、call/alias/capture graph 冻结，后续新增 node/binder 是 internal error。 |
+| `RcIR` | 唯一 ResourcePlanner 输出 `Clone/Take/Drop/Cleanup` 与 ranked certificate；binder set 与 FlowIR 相同，资源语义完全显式。 |
 | `AbiIR` | 只把已验证语义降为 typeid/tag/field layout、symbol、prototype、closure/dict/evidence layout、drop glue、extern 与 failure ABI；不得新增调用、控制边、owner 或语言 fallback。 |
 | `C11` | 对 AbiIR 做确定性序列化并调用工具链；不再选择方法、求 effect closure、解释 pattern、生成未规划 executable body 或分配语义 identity。 |
 
-**术语与物理形态（2026-08-23 用户澄清）**：现有名称保持不变。`CoreHIR` 是广义 IR，也是最后的 Ring semantic representation；其物理形态仍是 structured typed expression/tree，而非 basic-block graph。`CoreHIR → FinalHIR` 是唯一 operational lowering：把 structured control、canonical typed pattern 与隐含 evaluation order 变为 fixed blocks/instructions/terminators，创建仅供执行编排的 ANF temp、scope/control result slot，以及 control/data/call/projection/capture/exit edge。它可以新增这些 administrative binder/block/edge，但不得新增语言级 operation、executable、impl、callee/evidence 选择或其他 semantic obligation。
+**术语与物理形态（2026-08-23 用户最终命名）**：`CoreHIR` 名称保留；它是广义 IR，也是最后的 Ring semantic representation，其物理形态仍是 structured typed expression/tree，而非 basic-block graph。原 `FinalHIR` clean break 命名为 `FlowIR`，原 `RcHIR` 命名为 `RcIR`；不保留alias或双口径。`CoreHIR → FlowIR` 是唯一 operational lowering：把 structured control、canonical typed pattern 与隐含 evaluation order 变为 fixed blocks/instructions/terminators，创建仅供执行编排的 ANF temp、scope/control result slot，以及 control/data/call/projection/capture/exit edge。它可以新增这些 administrative binder/block/edge，但不得新增语言级 operation、executable、impl、callee/evidence 选择或其他 semantic obligation。
 
-`FinalHIR` 是第一层传统 MIR/CFG-style IR，但不要求 LLVM 式 SSA/phi，也不含 `Clone/Take/Drop/Cleanup`、目标 layout 或 ABI。FinalHIR freeze 后，ResourcePlanner 不得创建或改变 semantic CFG、call graph 或 reachability；只可在既有 topology 上决定资源流，并把既有 edge 物化为保持相同端点/可达性的显式 cleanup sequence。`RcHIR → AbiIR` 才继续进入资源已验证后的物理表示下降。
+`FlowIR` 是第一层传统 MIR/CFG-style IR，但不要求 LLVM 式 SSA/phi，也不含 `Clone/Take/Drop/Cleanup`、目标 layout 或 ABI。FlowIR freeze 后，ResourcePlanner 不得创建或改变 semantic CFG、call graph 或 reachability；只可在既有 topology 上决定资源流，并把既有 edge 物化为保持相同端点/可达性的显式 cleanup sequence。`RcIR → AbiIR` 才继续进入资源已验证后的物理表示下降。
 
-**隐式行为时点**：纯拼写糖可在 AST/CoreHIR 内展开，不必为每个 pass 新建永久 IR；exhaustiveness matrix、call graph、CFG 等可作为所属层的 finite plan/certificate。凡会改变求值顺序、调用图、effect、capture、binder、控制边或 executable inventory 的行为，必须在 FinalHIR freeze 前显式化；freeze 后只允许资源操作与机器表示下降。每个跨层节点保留 `OriginRef`，使诊断能回到源码而不迫使低层保留表面语法。
+**隐式行为时点**：纯拼写糖可在 AST/CoreHIR 内展开，不必为每个 pass 新建永久 IR；exhaustiveness matrix、call graph、CFG 等可作为所属层的 finite plan/certificate。凡会改变求值顺序、调用图、effect、capture、binder、控制边或 executable inventory 的行为，必须在 FlowIR freeze 前显式化；freeze 后只允许资源操作与机器表示下降。每个跨层节点保留 `OriginRef`，使诊断能回到源码而不迫使低层保留表面语法。
 
-**CoreHIR semantic elaboration closure（2026-08-23 用户决定）**：CoreHIR 是大多数语言 feature 的统一去糖终点，不是允许下游继续补语义的中转层。每个新 surface feature 必须给出唯一 TypedHIR → CoreHIR lowering，或明确证明自身就是 canonical core construct；否则不得进入实现。CoreHIR validator 必须拒绝 surface-only variant、未选择的 callee/impl/evidence、待生成 executable/body 与其他 implicit obligation。CoreHIR 之后不得再读取 AST/source spelling、调用 resolver/type/effect/trait selection，或在 verifier/codegen 临时生成语言级行为。FinalHIR 仅规范化 evaluation/control/pattern 并冻结 binder/node/edge，RcHIR 仅显式化资源操作，AbiIR 仅显式化 representation/ABI。
+**CoreHIR semantic elaboration closure（2026-08-23 用户决定）**：CoreHIR 是大多数语言 feature 的统一去糖终点，不是允许下游继续补语义的中转层。每个新 surface feature 必须给出唯一 TypedHIR → CoreHIR lowering，或明确证明自身就是 canonical core construct；否则不得进入实现。CoreHIR validator 必须拒绝 surface-only variant、未选择的 callee/impl/evidence、待生成 executable/body 与其他 implicit obligation。CoreHIR 之后不得再读取 AST/source spelling、调用 resolver/type/effect/trait selection，或在 verifier/codegen 临时生成语言级行为。FlowIR 仅规范化 evaluation/control/pattern 并冻结 binder/node/edge，RcIR 仅显式化资源操作，AbiIR 仅显式化 representation/ABI。
 
-**渐进迁移而非平行重写**：#268/#269 先建立通用 typed identity、executable inventory、neutral normalization、FinalHIR/RcHIR 与 validator 骨架；后续 type/effect/evidence、failure/control、RIIR/FFI、optimization 各自在既有 backlog 里迁入其唯一所属层。一个事实切换到新层时必须原子迁移全部消费者并删除旧 fallback/side map；禁止长期双写、shadow authority 或以“兼容”保留旧解释路径。B-190 负责在相应消费者已迁移并有证据后删除遗留重复 authority，不把本架构变成一次无界全仓 rewrite。
+**渐进迁移而非平行重写**：#268/#269 先建立通用 typed identity、executable inventory、neutral normalization、FlowIR/RcIR 与 validator 骨架；后续 type/effect/evidence、failure/control、RIIR/FFI、optimization 各自在既有 backlog 里迁入其唯一所属层。一个事实切换到新层时必须原子迁移全部消费者并删除旧 fallback/side map；禁止长期双写、shadow authority 或以“兼容”保留旧解释路径。B-190 负责在相应消费者已迁移并有证据后删除遗留重复 authority，不把本架构变成一次无界全仓 rewrite。
 
 **Koka 作为参考实现**：Effect 推断（`InferEffect.hs`）和 evidence passing（`Evidence.hs`）的算法翻译自 Koka 编译器（MIT 许可）。Perceus 引用计数已翻译其 POPL'21 实现落地（§7.11）。
 
