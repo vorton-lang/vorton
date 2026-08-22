@@ -7638,10 +7638,10 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         "resolver", "checker", "codegen", "perceus", "verify_rc",
         "OwnershipMetadata", "FnMeta", "HExpr", "HDecl", "Type::FnType",
         "IdentityCounter", "next_identity", "fresh_identity", "name_fallback",
-        "display_name", "c_symbol", "FinalHirFreezeFacts", "node_count",
+        "display_name", "c_symbol", "FlowIrFreezeFacts", "node_count",
         "edge_count", "region_count", "resource_op_count",
         "binder_slot_set_same", "ResourcePlanner", "ResourceCertificate",
-        "RcHIR", "AbiIR", "CONTRACT_INTRINSIC", "Other", "Unknown",
+        "RcIR", "AbiIR", "CONTRACT_INTRINSIC", "Other", "Unknown",
     ):
         if forbidden in masked:
             errors.append(f"F1 gained forbidden authority {forbidden!r}")
@@ -8459,7 +8459,7 @@ def resolver_identity_u1a_contract_errors(
         errors.append("F2 U1a project binding key became origin authority")
 
     for forbidden in (
-            "CoreHIR", "FinalHIR", "RcHIR", "CalleeRef", "SourceBinder",
+            "CoreHIR", "FlowIR", "RcIR", "CalleeRef", "SourceBinder",
             "source_binder", "member_identity", "single_namespace_cutover"):
         if forbidden in resolver_masked or forbidden in infer_masked:
             errors.append(f"F2 U1a exceeded resolver-origin scope via {forbidden!r}")
@@ -8611,8 +8611,8 @@ def resolver_identity_u1a_scope_guard_errors(
 ) -> Tuple[List[str], int]:
     guards = (
         ("CoreHIR", "\nstruct CoreHIR { nodes: Int }\n"),
-        ("FinalHIR", "\nstruct FinalHIR { nodes: Int }\n"),
-        ("RcHIR", "\nstruct RcHIR { nodes: Int }\n"),
+        ("FlowIR", "\nstruct FlowIR { nodes: Int }\n"),
+        ("RcIR", "\nstruct RcIR { nodes: Int }\n"),
         ("CalleeRef", "\nstruct CalleeRef { value: Int }\n"),
         ("source binder", "\nfn source_binder() {}\n"),
         ("member identity", "\nfn member_identity() {}\n"),
