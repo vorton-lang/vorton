@@ -5618,17 +5618,76 @@ def representation_s1_contract_errors(
             "HExpr::EffectOp { ..expr, args: new_args }")):
         errors.append("default expansion loses exact or external identity")
 
+    direct_callee_body, direct_callee_error = extract_ring_function_body(
+        sources["infer"], "default_direct_callee_def_id")
+    if direct_callee_error:
+        errors.append(direct_callee_error)
+    else:
+        direct_masked = mask_ring_strings_and_comments(direct_callee_body)
+        exact_direct_arms = (
+            "HExpr::Ident { def_id: some(def_id), .. } => some(def_id)",
+            "HExpr::Lambda { def_id, .. } => some(def_id)",
+            "HExpr::Call { callable_result_def_id: some(def_id), .. } =>\n"
+            "            some(def_id)",
+            "_ => none",
+        )
+        for arm in exact_direct_arms:
+            if direct_masked.count(arm) != 1:
+                errors.append(
+                    f"default direct-callee classifier arm {arm!r} matched "
+                    f"{direct_masked.count(arm)} times")
+        direct_variants = re.findall(r"\bHExpr::([A-Za-z0-9_]+)\s*\{", direct_masked)
+        if direct_variants != ["Ident", "Lambda", "Call"]:
+            errors.append(
+                "default direct-callee classifier accepts variants outside "
+                f"Ident/Lambda/Call: {direct_variants!r}")
+        for forbidden in (
+                "resolved_name", "FieldAccess", ".lookup(", "ctx.env",
+                "name_only", "name-only", "dict_closure"):
+            if forbidden in direct_masked:
+                errors.append(
+                    f"default direct-callee classifier uses forbidden {forbidden!r}")
+
     default_callee_body, default_callee_error = extract_ring_function_body(
         sources["infer"], "remap_default_call_callee_def_id")
     if default_callee_error:
         errors.append(default_callee_error)
-    elif not all(token in default_callee_body for token in (
-            "default_direct_callee_def_id(callee)",
-            "callee_def_id != some(producer_def_id)",
+    else:
+        remap_masked = mask_ring_strings_and_comments(default_callee_body)
+        exact_remap_relations = (
+            "match default_direct_callee_def_id(callee)",
+            "some(producer_def_id) =>",
+            "if callee_def_id != some(producer_def_id)",
             "some(remap_default_def_id(producer_def_id, remap))",
-            "none => callee_def_id")) or any(token in default_callee_body for token in (
-                ".lookup(", "resolved_name")):
-        errors.append("default Call callee remap is not producer-proven")
+            "none => callee_def_id",
+        )
+        for relation in exact_remap_relations:
+            if remap_masked.count(relation) != 1:
+                errors.append(
+                    f"default callee remap relation {relation!r} matched "
+                    f"{remap_masked.count(relation)} times")
+        if remap_masked.count("remap_default_def_id(") != 1:
+            errors.append("default callee remap has more than one local remap path")
+        if default_callee_body.count(
+                'panic("default Call callee identity differs from direct producer")') != 1:
+            errors.append("default callee consistency assertion is not fail-loud")
+        for forbidden in (
+                "remap_default_optional_def_id", ".lookup(", "ctx.env",
+                "resolved_name", "name_only", "name-only"):
+            if forbidden in remap_masked:
+                errors.append(
+                    f"default callee remap uses forbidden {forbidden!r}")
+
+    callable_binder_body, callable_binder_error = extract_ring_function_body(
+        sources["infer"], "register_default_callable_binder")
+    if callable_binder_error:
+        errors.append(callable_binder_error)
+    elif not all(token in callable_binder_body for token in (
+            "if remap.contains_key(def_id)",
+            "remap.insert(def_id, fresh_callable_identity_def_id(ctx))")) or any(
+                token in callable_binder_body for token in (
+                    "remap.insert(def_id, def_id)", "fresh_def_id")):
+        errors.append("default callable binder can reuse or mint in the wrong domain")
 
     for function_name in ("anf_expr", "rc_expr"):
         body, extract_error = extract_ring_function_body(
@@ -5688,31 +5747,6 @@ def representation_s1_contract_errors(
                 source):
             errors.append(f"{label}: introduced forbidden T? syntax")
 
-    # Relationship oracle for the reviewed integer-collision counterexample.
-    # A foreign method fallback and a local binder may share the same positive
-    # integer; only a callee-proven local producer follows the remap.
-    foreign_method_id = 41
-    expansion_one = {41: 101, 50: 150}
-    expansion_two = {41: 102, 50: 250}
-
-    def remap_model(kind: str, producer: int | None,
-                    fallback: int | None, remap: dict[int, int]) -> int | None:
-        if kind in {"ident", "lambda", "call-result"}:
-            if producer is None or fallback != producer:
-                raise ValueError("direct producer identity mismatch")
-            return remap.get(producer, producer)
-        return fallback
-
-    for remap in (expansion_one, expansion_two):
-        if remap_model("field", None, foreign_method_id, remap) != foreign_method_id:
-            errors.append("default FieldAccess fallback followed integer collision")
-        if remap_model("name-only", None, foreign_method_id, remap) != foreign_method_id:
-            errors.append("default name-only fallback followed integer collision")
-    if remap_model("lambda", 41, 41, expansion_one) == remap_model(
-            "lambda", 41, 41, expansion_two):
-        errors.append("default local callable identities are not expansion-fresh")
-    if expansion_one[50] == expansion_two[50]:
-        errors.append("default callable result identities are not expansion-fresh")
     return errors
 
 
@@ -7489,12 +7523,31 @@ def identity_checkpoint_source_errors() -> List[str]:
          "register_default_callable_binder(\n"
          "                    ctx, def_id, remap, \"callable result\")",
          "let _ = def_id"),
+        ("default name-only false producer", "infer",
+         "HExpr::Call { callable_result_def_id: some(def_id), .. } =>\n"
+         "            some(def_id),\n"
+         "        _ => none",
+         "HExpr::Call { callable_result_def_id: some(def_id), .. } =>\n"
+         "            some(def_id),\n"
+         "        HExpr::Ident { resolved_name: some(_), def_id: none, .. } =>\n"
+         "            some(0),\n"
+         "        _ => none"),
+        ("default producer assertion false", "infer",
+         "if callee_def_id != some(producer_def_id)",
+         "if false"),
         ("default fallback collision isolation", "infer",
          "none => callee_def_id",
          "none => remap_default_optional_def_id(callee_def_id, remap)"),
         ("default direct producer remap", "infer",
          "some(remap_default_def_id(producer_def_id, remap))",
          "some(producer_def_id)"),
+        ("default callable result preserved", "infer",
+         "callable_result_def_id: remap_default_optional_def_id(\n"
+         "                    callable_result_def_id, remap)",
+         "callable_result_def_id: callable_result_def_id"),
+        ("default callable binder reused", "infer",
+         "remap.insert(def_id, fresh_callable_identity_def_id(ctx))",
+         "remap.insert(def_id, def_id)"),
         ("default lambda remap", "infer",
          "HExpr::Lambda { ..expr,\n"
          "                def_id: remap_default_def_id(def_id, remap)",
