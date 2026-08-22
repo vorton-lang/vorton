@@ -3085,6 +3085,34 @@ def extract_ring_function_body(
     return source[open_index + 1:close_index], None
 
 
+def mutate_ring_function_body_once(
+    source: str,
+    function_name: str,
+    anchor: str,
+    replacement: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Apply one mutation strictly inside one named Ring function body."""
+    masked = mask_ring_strings_and_comments(source)
+    pattern = re.compile(
+        rf"\bfn\s+{re.escape(function_name)}\s*"
+        rf"\([^{{}}]*\)[^{{}}\n]*\{{")
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1:
+        return None, f"Ring function {function_name} found {len(matches)} times"
+    open_index = masked.rfind("{", matches[0].start(), matches[0].end())
+    try:
+        close_index = matching_delimiter(masked, open_index, "{", "}")
+    except ValueError as exc:
+        return None, f"Ring function {function_name}: {exc}"
+    body = source[open_index + 1:close_index]
+    count = body.count(anchor)
+    if count != 1:
+        return None, (
+            f"Ring function {function_name} mutation anchor matched {count} times")
+    mutated_body = body.replace(anchor, replacement, 1)
+    return source[:open_index + 1] + mutated_body + source[close_index:], None
+
+
 EXTERN_FIXTURE_CONTRACTS = (
     (
         "raw extern type",
@@ -5755,6 +5783,17 @@ def representation_s1_contract_errors(
             "is_synthetic_rc_def_id(def_id)")):
         errors.append("HIR ordinary binder lost source/lowering domain isolation")
 
+    source_binder, source_binder_error = extract_ring_function_body(
+        sources["hir"], "validate_hir_source_binder")
+    if source_binder_error:
+        errors.append(source_binder_error)
+    elif not all(token in source_binder for token in (
+            "if def_id < 0",
+            'panic("HIR ${label} is outside the source DefId namespace")',
+            "if seen.contains(def_id)",
+            "seen.insert(def_id)")):
+        errors.append("HIR source binder does not fail closed on domain/collision")
+
     decl_validator, decl_validator_error = extract_ring_function_body(
         sources["hir"], "validate_hir_decls")
     if decl_validator_error:
@@ -5888,9 +5927,14 @@ def representation_s1_contract_errors(
             sources["perceus"], function_name)
         if extract_error:
             errors.append(extract_error)
-        elif "HExpr::Lambda { def_id: def_id," not in body:
-            errors.append(
-                f"perceus.{function_name} loses Lambda exact identity")
+        else:
+            if "HExpr::Lambda { def_id: def_id," not in body:
+                errors.append(
+                    f"perceus.{function_name} loses Lambda exact identity")
+            if body.count(
+                    "member_callee_required: member_callee_required") != 1:
+                errors.append(
+                    f"perceus.{function_name} loses Call member provenance")
 
     delegate_body, delegate_body_error = extract_ring_function_body(
         sources["infer_decl"], "expand_delegate_impls")
@@ -8005,6 +8049,45 @@ def identity_checkpoint_source_errors() -> List[str]:
         if not representation_s1_contract_errors(mutated):
             errors.append(
                 f"representation mutation {label} escaped source oracle")
+
+    for function_name in ("anf_expr", "rc_expr"):
+        mutated_source, mutation_error = mutate_ring_function_body_once(
+            sources["perceus"], function_name,
+            "member_callee_required: member_callee_required",
+            "member_callee_required: false")
+        label = f"perceus {function_name} Call member transport"
+        if mutation_error:
+            errors.append(f"representation mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated["perceus"] = mutated_source
+        findings = representation_s1_contract_errors(mutated)
+        expected = f"perceus.{function_name} loses Call member provenance"
+        if findings != [expected]:
+            errors.append(
+                f"representation mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
+
+    for label, replacement in (
+        ("source binder guard deleted", "if false"),
+        ("source binder accepts negative", "if def_id >= 0"),
+    ):
+        mutated_source, mutation_error = mutate_ring_function_body_once(
+            sources["hir"], "validate_hir_source_binder",
+            "if def_id < 0", replacement)
+        if mutation_error:
+            errors.append(f"representation mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated["hir"] = mutated_source
+        findings = representation_s1_contract_errors(mutated)
+        expected = "HIR source binder does not fail closed on domain/collision"
+        if findings != [expected]:
+            errors.append(
+                f"representation mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
 
     reservation = "ctx.env.reserve_legacy_delegate_hdecl_def_id()"
     reservation_source = sources["infer_decl"]
