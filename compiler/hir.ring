@@ -398,12 +398,6 @@ pub struct HAssocType {
     pub concrete: Type?
 }
 
-pub struct HSigMember {
-    pub name: Str,
-    pub fn_type: Type,
-    pub span: Span
-}
-
 pub enum HDecl {
     Fn { name: Str, def_id: Int?, type_params: List<TypeParam>, params: List<HParam>, return_type: Type, effects: EffectRow, body: HExpr, is_pub: Bool, trait_bounds: List<TraitBound>, span: Span },
     Struct { name: Str, type_params: List<TypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
@@ -416,8 +410,7 @@ pub enum HDecl {
     ExternType { name: Str, type_params: List<TypeParam>, is_pub: Bool, span: Span },
     TypeAlias { name: Str, ty: Type, is_pub: Bool, span: Span },
     Const { name: Str, def_id: Int?, ty: Type, init: HExpr, is_pub: Bool, span: Span },
-    ModBlock { name: Str, decls: List<HDecl>, is_pub: Bool, span: Span },
-    Sig { name: Str, members: List<HSigMember>, is_pub: Bool, span: Span }
+    ModBlock { name: Str, decls: List<HDecl>, is_pub: Bool, span: Span }
 }
 
 pub enum FieldAction {
@@ -959,7 +952,7 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                 validate_hir_decls(inner, seen),
             HDecl::Struct { .. } | HDecl::Enum { .. } |
             HDecl::ExternFn { .. } | HDecl::ExternType { .. } |
-            HDecl::TypeAlias { .. } | HDecl::Sig { .. } => {}
+            HDecl::TypeAlias { .. } => {}
         }
     }
 }

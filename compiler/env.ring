@@ -183,12 +183,6 @@ pub struct FnBound {
     pub trait_name: Str
 }
 
-pub struct SigDef {
-    pub name: Str,
-    pub members: Map<Str, TypeScheme>,
-    pub is_pub: Bool
-}
-
 // ============================================================
 // Scope
 // ============================================================
@@ -214,7 +208,6 @@ pub struct TypeRegistry {
     // freshness is classified separately in shared HIR helpers.
     pub variant_ctor_origins: Map<Int, Str>,
     pub type_aliases: Map<Str, TypeAliasDef>,
-    pub sigs: Map<Str, SigDef>,
     pub effect_aliases: Map<Str, EffectAliasDef>
 }
 
@@ -271,7 +264,6 @@ pub fn new_type_env() -> TypeEnv {
             variant_to_enum: map_new(),
             variant_ctor_origins: map_new(),
             type_aliases: map_new(),
-            sigs: map_new(),
             effect_aliases: map_new()
         },
         trait_reg: TraitRegistry {

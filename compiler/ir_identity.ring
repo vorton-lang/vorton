@@ -13,8 +13,7 @@ const NAMESPACE_VALUE: Int = 0
 const NAMESPACE_NOMINAL: Int = 1
 const NAMESPACE_TRAIT: Int = 2
 const NAMESPACE_EFFECT: Int = 3
-const NAMESPACE_SIGNATURE: Int = 4
-const NAMESPACE_MEMBER: Int = 5
+const NAMESPACE_MEMBER: Int = 4
 
 pub struct NamespaceKind {
     tag: Int
@@ -34,10 +33,6 @@ pub fn namespace_trait() -> NamespaceKind {
 
 pub fn namespace_effect() -> NamespaceKind {
     NamespaceKind { tag: NAMESPACE_EFFECT }
-}
-
-pub fn namespace_signature() -> NamespaceKind {
-    NamespaceKind { tag: NAMESPACE_SIGNATURE }
 }
 
 pub fn namespace_member() -> NamespaceKind {

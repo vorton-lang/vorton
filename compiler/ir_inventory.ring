@@ -223,11 +223,10 @@ const EXECUTABLE_BODYLESS_TRAIT_MEMBER: Int = 15
 const EXECUTABLE_BODYLESS_EFFECT_OPERATION: Int = 16
 const EXECUTABLE_BODYLESS_INTERFACE_MEMBER: Int = 17
 const EXECUTABLE_EXTERN_FN: Int = 18
-const EXECUTABLE_SIG_MEMBER: Int = 19
-const EXECUTABLE_DELEGATE: Int = 20
-const EXECUTABLE_EXTERN_BRIDGE: Int = 21
-const EXECUTABLE_BUILTIN_INTRINSIC: Int = 22
-const EXECUTABLE_KIND_COUNT: Int = 23
+const EXECUTABLE_DELEGATE: Int = 19
+const EXECUTABLE_EXTERN_BRIDGE: Int = 20
+const EXECUTABLE_BUILTIN_INTRINSIC: Int = 21
+const EXECUTABLE_KIND_COUNT: Int = 22
 
 const CONTRACT_CONCRETE_BODY: Int = 0
 const CONTRACT_ONLY: Int = 1
@@ -238,7 +237,7 @@ const CONTRACT_MODE_COUNT: Int = 2
 const EXECUTABLE_KIND_ALLOWED_MODE_TAGS: List<Int> = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     2, 2, 0, 2, 2,
-    1, 1, 1, 1, 1,
+    1, 1, 1, 1,
     0, 2, 2
 ]
 
@@ -247,28 +246,28 @@ const REF_FORM_ANONYMOUS: Int = 1
 const EXECUTABLE_KIND_REF_FORM_TAGS: List<Int> = [
     0, 0, 0, 0, 1, 0, 1, 1, 1, 1,
     0, 0, 1, 0, 0,
-    0, 0, 0, 0, 0,
+    0, 0, 0, 0,
     0, 0, 0
 ]
 
-// Namespace tag 6 and path-role tag 7 are table-local sentinels for the
+// Namespace tag 5 and path-role tag 7 are table-local sentinels for the
 // opposite ref form; they are never converted to a typed identity tag.
 const EXECUTABLE_KIND_NAMESPACE_TAGS: List<Int> = [
-    0, 5, 5, 5, 6, 0, 6, 6, 6, 6,
-    5, 0, 6, 0, 5,
-    5, 5, 5, 0, 4,
-    5, 0, 0
+    0, 4, 4, 4, 5, 0, 5, 5, 5, 5,
+    4, 0, 5, 0, 4,
+    4, 4, 4, 0,
+    4, 0, 0
 ]
 const EXECUTABLE_KIND_PATH_ROLE_TAGS: List<Int> = [
     7, 7, 7, 7, 0, 7, 0, 1, 5, 1,
     7, 7, 6, 7, 7,
-    7, 7, 7, 7, 7,
+    7, 7, 7, 7,
     7, 7, 7
 ]
 const EXECUTABLE_KIND_PARENT_FORM_TAGS: List<Int> = [
     0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
     0, 0, 2, 0, 0,
-    0, 0, 0, 0, 0,
+    0, 0, 0, 0,
     0, 0, 0
 ]
 
@@ -310,7 +309,6 @@ pub fn executable_kind_bodyless_trait_member() -> ExecutableKind { executable_ki
 pub fn executable_kind_bodyless_effect_operation() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_BODYLESS_EFFECT_OPERATION) }
 pub fn executable_kind_bodyless_interface_member() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_BODYLESS_INTERFACE_MEMBER) }
 pub fn executable_kind_extern_fn() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_EXTERN_FN) }
-pub fn executable_kind_sig_member() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_SIG_MEMBER) }
 pub fn executable_kind_delegate() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_DELEGATE) }
 pub fn executable_kind_extern_bridge() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_EXTERN_BRIDGE) }
 pub fn executable_kind_builtin_intrinsic() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_BUILTIN_INTRINSIC) }

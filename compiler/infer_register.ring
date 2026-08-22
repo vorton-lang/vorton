@@ -1,10 +1,10 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant,
     EMPTY_ROW, effects_same_kind, type_to_builtin_name, type_to_string, effect_to_string, nominal_display_name}
 use ast::{Decl, Span, TypeParam, Param, TypeExpr, EffectOpDecl, StructFieldDecl,
-    EnumVariantDecl, NamedEnumField, TypeBound, span_zero, EffectExpr, SigMember,
+    EnumVariantDecl, NamedEnumField, TypeBound, span_zero, EffectExpr,
     UseDecl, UseImport, DeriveAttribute}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, EnumDef, EffectDef, EffectOpDef,
-    TraitDef, TraitMethodDef, ImplEntry, ImplDictBound, TypeAliasDef, FnBound, SigDef,
+    TraitDef, TraitMethodDef, ImplEntry, ImplDictBound, TypeAliasDef, FnBound,
     EffectAliasDef, AssocTypeDef, MethodOrigin, mono, apply_subst, apply_subst_effect_map,
     apply_subst_map, add_impl, has_impl, find_impl, impl_origin, impl_decl_origin,
     install_method_scheme, specialize_trait_method_scheme, build_type_var_map}
@@ -102,15 +102,6 @@ pub fn insert_mod_aliases(mut ctx: InferCtx, mod_name: Str, decls: List<Decl>, g
                     }
                 }
             },
-            Decl::Sig { name, .. } => {
-                let qualified = "${mod_name}::${name}"
-                if !guard || !ctx.env.types.sigs.contains_key(name) {
-                    match ctx.env.types.sigs.get(qualified) {
-                        some(def) => { ctx.env.types.sigs.insert(name, def) },
-                        none => {}
-                    }
-                }
-            },
             _ => {}
         }
     }
@@ -135,8 +126,6 @@ pub fn prefix_decl_name(mod_name: Str, decl: Decl) -> Decl {
         Decl::Const { name, type_annotation, init, is_pub, span } =>
             Decl::Const { name: "${mod_name}::${name}", type_annotation: type_annotation, init: init,
                          is_pub: is_pub, span: span },
-        Decl::Sig { name, members, is_pub, span } =>
-            Decl::Sig { name: "${mod_name}::${name}", members: members, is_pub: is_pub, span: span },
         Decl::Impl { target_type, type_params, trait_name, methods, span } => {
             let prefixed_target = if target_type.contains("::") {
                 target_type
@@ -195,8 +184,6 @@ pub fn module_prefix_decl_name(module_prefix: Str, decl: Decl) -> Decl {
         Decl::Const { name, type_annotation, init, is_pub, span } =>
             Decl::Const { name: module_item_identity(module_prefix, name), type_annotation: type_annotation, init: init,
                          is_pub: is_pub, span: span },
-        Decl::Sig { name, members, is_pub, span } =>
-            Decl::Sig { name: module_item_identity(module_prefix, name), members: members, is_pub: is_pub, span: span },
         Decl::Impl { target_type, type_params, trait_name, methods, span } => {
             // Keep the source spelling until registration.  At that point all
             // local/imported aliases are installed, so the target can be
@@ -254,7 +241,7 @@ enum ProjectRegistrationPhase {
     EffectPhase,
     EffectAliasPhase,
     ExternTypePhase,
-    TypeAliasSigPhase,
+    TypeAliasPhase,
     ValuePhase,
 }
 
@@ -282,16 +269,15 @@ fn project_decl_matches_phase(
             Decl::ExternType { .. } => true,
             _ => false
         },
-        ProjectRegistrationPhase::TypeAliasSigPhase => match decl {
-            // Keep aliases and signatures in one source-ordered frame pass.
-            Decl::TypeAlias { .. } | Decl::Sig { .. } => true,
+        ProjectRegistrationPhase::TypeAliasPhase => match decl {
+            Decl::TypeAlias { .. } => true,
             _ => false
         },
         ProjectRegistrationPhase::ValuePhase => match decl {
             Decl::Struct { .. } | Decl::Enum { .. } |
             Decl::Trait { .. } | Decl::Effect { .. } |
             Decl::EffectAlias { .. } | Decl::ExternType { .. } |
-            Decl::TypeAlias { .. } | Decl::Sig { .. } |
+            Decl::TypeAlias { .. } |
             Decl::ModBlock { .. } => false,
             _ => true
         }
@@ -510,18 +496,13 @@ fn register_mod_block_items_legacy(
             _ => {}
         }
     }
-    // Pass 1b-5: aliases/signatures must exist before any value declaration
+    // Pass 1b-5: aliases must exist before any value declaration
     // resolves its parameter/return types. Refresh short aliases after each
     // declaration so source-ordered alias chains can feed the next alias;
     // functions remain declaration-order independent from all aliases.
     for d in mod_decls {
         match d {
             Decl::TypeAlias { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
-                insert_mod_aliases(ctx, mod_name, mod_decls, true)
-            },
-            Decl::Sig { .. } => {
                 let prefixed = prefix_decl_name(mod_name, d)
                 register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
                 insert_mod_aliases(ctx, mod_name, mod_decls, true)
@@ -541,7 +522,6 @@ fn register_mod_block_items_legacy(
             Decl::EffectAlias { .. } => {},
             Decl::ExternType { .. } => {},
             Decl::TypeAlias { .. } => {},
-            Decl::Sig { .. } => {},
             Decl::ModBlock { .. } => {},
             _ => {
                 let prefixed = prefix_decl_name(mod_name, d)
@@ -904,7 +884,7 @@ fn register_project_module_decls_two_phase(
         ProjectRegistrationPhase::ExternTypePhase)
     register_project_root_phase(
         ctx, qualified, deferred_struct_names, deferred_enum_names,
-        ProjectRegistrationPhase::TypeAliasSigPhase)
+        ProjectRegistrationPhase::TypeAliasPhase)
     register_project_root_phase(
         ctx, qualified, deferred_struct_names, deferred_enum_names,
         ProjectRegistrationPhase::ValuePhase)
@@ -990,7 +970,6 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
         match decl {
             Decl::ExternType { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
             Decl::TypeAlias { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
-            Decl::Sig { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
             _ => {}
         }
     }
@@ -999,7 +978,7 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
         match decl {
             Decl::Struct { .. } => {}, Decl::Enum { .. } => {}, Decl::Trait { .. } => {},
             Decl::Effect { .. } => {}, Decl::EffectAlias { .. } => {},
-            Decl::ExternType { .. } => {}, Decl::TypeAlias { .. } => {}, Decl::Sig { .. } => {},
+            Decl::ExternType { .. } => {}, Decl::TypeAlias { .. } => {},
             Decl::ModBlock { .. } => {},
             _ => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names)
         }
@@ -1060,12 +1039,6 @@ fn insert_file_module_aliases(mut ctx: InferCtx, module_prefix: Str, decls: List
                 let canonical = module_item_identity(module_prefix, name)
                 match ctx.env.types.type_aliases.get(canonical) {
                     some(def) => { ctx.env.types.type_aliases.insert(name, def) }, none => {}
-                }
-            },
-            Decl::Sig { name, .. } => {
-                let canonical = module_item_identity(module_prefix, name)
-                match ctx.env.types.sigs.get(canonical) {
-                    some(def) => { ctx.env.types.sigs.insert(name, def) }, none => {}
                 }
             },
             Decl::Fn { name, .. } => {
@@ -1188,13 +1161,6 @@ fn insert_inline_display_aliases(
                     none => match ctx.env.types.structs.get(name) {
                         some(def) => { ctx.env.types.structs.insert(display, def) }, none => {}
                     }
-                }
-            },
-            Decl::Sig { name, .. } => {
-                let display = "${display_mod}::${name}"
-                let canonical = "${canonical_mod}::${name}"
-                match ctx.env.types.sigs.get(canonical) {
-                    some(def) => { ctx.env.types.sigs.insert(display, def) }, none => {}
                 }
             },
             Decl::Fn { name, .. } => {
@@ -3061,36 +3027,6 @@ fn register_const(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, span
     record_value_binding_kind(ctx, name, ValueBindingKind::ConstGetter)
 }
 
-fn register_sig(mut ctx: InferCtx, name: Str, members: List<SigMember>, is_pub: Bool) {
-    let saved = map_clone(ctx.type_param_scope)
-    let mut sig_members: Map<Str, TypeScheme> = map_new()
-    for m in members {
-        let mut type_vars: List<Int> = []
-        let msaved = map_clone(ctx.type_param_scope)
-        for tp in m.type_params {
-            let tv = ctx.env.fresh_var()
-            match tv { Type::TypeVar { id, .. } => { type_vars.push(id) }, _ => {} }
-            ctx.type_param_scope.insert(tp.name, tv)
-        }
-        let mut param_types: List<Type> = []
-        for p in m.params {
-            match p.type_annotation {
-                some(ta) => param_types.push(resolve_type_expr(ctx, ta)),
-                none => param_types.push(ctx.env.fresh_var())
-            }
-        }
-        let ret = match m.return_type {
-            some(rt) => resolve_type_expr(ctx, rt),
-            none => ctx.env.fresh_var()
-        }
-        let fn_type = Type::FnType { params: param_types, return_type: ret, effects: EMPTY_ROW }
-        sig_members.insert(m.name, TypeScheme { ty: fn_type, type_vars: type_vars, bounds: [], def_id: none })
-        ctx.type_param_scope = msaved
-    }
-    ctx.type_param_scope = saved
-    ctx.env.types.sigs.insert(name, SigDef { name: name, members: sig_members, is_pub: is_pub })
-}
-
 // ============================================================
 // Effect alias registration
 // ============================================================
@@ -3166,8 +3102,6 @@ fn register_decl(mut ctx: InferCtx, decl: Decl) {
             register_type_alias(ctx, name, type_params, type_expr),
         Decl::Const { name, type_annotation, span, .. } =>
             register_const(ctx, name, type_annotation, span),
-        Decl::Sig { name, members, is_pub, .. } =>
-            register_sig(ctx, name, members, is_pub),
         Decl::EffectAlias { name, type_params, effects, span, .. } =>
             register_effect_alias(ctx, name, type_params, effects, span),
         Decl::Delegate { .. } => {},  // Only valid inside impl blocks, handled by register_impl

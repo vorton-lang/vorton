@@ -11,7 +11,7 @@ use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink,
 use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
 use union_find::{UnionFind, new_union_find, uf_find}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
-    StructDef, EnumDef, TypeAliasDef, EffectDef, EffectAliasDef, TraitDef, SigDef,
+    StructDef, EnumDef, TypeAliasDef, EffectDef, EffectAliasDef, TraitDef,
     new_type_env, mono,
     apply_subst, apply_subst_row, apply_subst_map, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
@@ -119,7 +119,6 @@ pub enum ProjectNamespaceUndo {
     Effect { name: Str, previous: EffectDef? },
     EffectAlias { name: Str, previous: EffectAliasDef? },
     Trait { name: Str, previous: TraitDef? },
-    Sig { name: Str, previous: SigDef? },
     VariantToEnum { name: Str, previous: Str? },
     FnMutParams { name: Str, previous: List<Bool>? }
 }
@@ -228,8 +227,7 @@ fn project_binding_key(binding: ResolvedNamespaceBinding) -> Str {
         NamespaceKind::TypeAlias => "type-alias",
         NamespaceKind::Effect => "effect",
         NamespaceKind::EffectAlias => "effect-alias",
-        NamespaceKind::Trait => "trait",
-        NamespaceKind::Sig => "sig"
+        NamespaceKind::Trait => "trait"
     }
     // This is only an application bucket for one already-resolved target
     // frame.  Resolver SymbolRef remains the sole origin authority.
@@ -412,17 +410,6 @@ fn apply_project_namespace_binding(
                 ctx.env.trait_reg.traits.insert(binding.exposed_name, def)
                 true
             }
-        },
-        NamespaceKind::Sig => match ctx.env.types.sigs.get(canonical_payload) {
-            none => false,
-            some(def) => {
-                state.journal.push(ProjectNamespaceUndo::Sig {
-                    name: binding.exposed_name,
-                    previous: ctx.env.types.sigs.get(binding.exposed_name)
-                })
-                ctx.env.types.sigs.insert(binding.exposed_name, def)
-                true
-            }
         }
     }
 }
@@ -461,10 +448,6 @@ fn restore_project_namespace_undo(mut ctx: InferCtx, undo: ProjectNamespaceUndo)
         ProjectNamespaceUndo::Trait { name, previous } => match previous {
             some(def) => { ctx.env.trait_reg.traits.insert(name, def) },
             none => { ctx.env.trait_reg.traits.remove(name) }
-        },
-        ProjectNamespaceUndo::Sig { name, previous } => match previous {
-            some(def) => { ctx.env.types.sigs.insert(name, def) },
-            none => { ctx.env.types.sigs.remove(name) }
         },
         ProjectNamespaceUndo::VariantToEnum { name, previous } => match previous {
             some(enum_name) => { ctx.env.types.variant_to_enum.insert(name, enum_name) },
@@ -3175,15 +3158,6 @@ pub fn bind_exact_import_alias(
         some(def) => {
             if alias_name != source_identity {
                 ctx.env.trait_reg.traits.insert(alias_name, def)
-            }
-            found = true
-        },
-        none => {}
-    }
-    match ctx.env.types.sigs.get(source_identity) {
-        some(def) => {
-            if alias_name != source_identity {
-                ctx.env.types.sigs.insert(alias_name, def)
             }
             found = true
         },

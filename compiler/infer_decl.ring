@@ -1,8 +1,8 @@
 use types::{Type, Effect, EffectRow, RecordField, UNIT, EMPTY_ROW, type_to_string, effect_to_string, nominal_display_name, effects_match_kind, effect_kind_name, types_equal}
 use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, Span, Position, EffectOpDecl, EffectExpr,
-    UseDecl, SigMember}
+    UseDecl}
 use hir::{HDecl, HParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssocType,
-    HStructField, HEnumVariant, HEffectOp, HTraitMethod, HSigMember,
+    HStructField, HEnumVariant, HEffectOp, HTraitMethod,
     DictDispatchInfo, DictRef, trait_dict_name,
     hexpr_type, hexpr_effects, hexpr_span,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
@@ -94,8 +94,6 @@ fn check_decl_inner(
             check_mod_decl(
                 ctx, name, uses, decls, required_effects,
                 is_pub, span, frame_decl_index),
-        Decl::Sig { name, members, is_pub, span } =>
-            check_sig_decl(ctx, name, members, is_pub, span),
         Decl::EffectAlias { name, is_pub, span, .. } =>
             HDecl::TypeAlias { name: name, ty: UNIT, is_pub: is_pub, span: span },
         Decl::Delegate { span, .. } =>
@@ -294,26 +292,6 @@ fn check_effects_capability(mut ctx: InferCtx, name: Str, effects: EffectRow, ca
     //      per-effect check on that caller's declaration.
     //   This is why E0408 ("Open effect row in capability-restricted module")
     //   is defined but never emitted.
-}
-
-fn check_sig_decl(mut ctx: InferCtx, name: Str, members: List<SigMember>, is_pub: Bool, span: Span) -> HDecl {
-    let mut hmembers: List<HSigMember> = []
-    match ctx.env.types.sigs.get(name) {
-        some(sig_def) => {
-            for m in members {
-                match sig_def.members.get(m.name) {
-                    some(scheme) => {
-                        hmembers.push(HSigMember { name: m.name, fn_type: scheme.ty, span: m.span })
-                    },
-                    none => {
-                        hmembers.push(HSigMember { name: m.name, fn_type: UNIT, span: m.span })
-                    }
-                }
-            }
-        },
-        none => {}
-    }
-    HDecl::Sig { name: name, members: hmembers, is_pub: is_pub, span: span }
 }
 
 fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, init: Expr, is_pub: Bool, span: Span) -> HDecl {
@@ -4114,7 +4092,7 @@ fn check_registered_body(
     let mut checked: Set<Int> = set_new()
 
     // Phase 1: Check non-fn/non-impl declarations in source order.
-    // These (struct, enum, effect, trait, extern, const, type-alias, sig, test, mod)
+    // These (struct, enum, effect, trait, extern, const, type-alias, test, mod)
     // do not participate in the fn call graph.
     let mut di = 0
     for decl in program.decls {

@@ -283,7 +283,6 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
         HDecl::ExternFn { .. } => decl,
         HDecl::ExternType { .. } => decl,
         HDecl::TypeAlias { .. } => decl,
-        HDecl::Sig { .. } => decl,
     }
 }
 
@@ -1300,7 +1299,6 @@ fn transform_decl(
         HDecl::ExternFn { .. } => decl,
         HDecl::ExternType { .. } => decl,
         HDecl::TypeAlias { .. } => decl,
-        HDecl::Sig { .. } => decl,
     }
 }
 

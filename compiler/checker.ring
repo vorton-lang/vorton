@@ -8,7 +8,7 @@ use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImpl
     prelude_extern_identity,
     is_nullary_variant_ctor_ident}
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, new_collecting_sink, make_diag}
-use env::{TypeEnv, TypeScheme, SigDef,
+use env::{TypeEnv, TypeScheme,
     new_type_env, add_impl, find_impl, install_method_scheme}
 use builtins::{register_builtins, register_hof_intrinsics}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
@@ -374,8 +374,7 @@ fn namespace_kind_name(namespace: NamespaceKind) -> Str {
         NamespaceKind::TypeAlias => "type alias",
         NamespaceKind::Effect => "effect",
         NamespaceKind::EffectAlias => "effect alias",
-        NamespaceKind::Trait => "trait",
-        NamespaceKind::Sig => "sig"
+        NamespaceKind::Trait => "trait"
     }
 }
 
@@ -393,7 +392,6 @@ fn namespace_decl_span(decl: Decl) -> Span {
         Decl::TypeAlias { span, .. } => span,
         Decl::Const { span, .. } => span,
         Decl::ModBlock { span, .. } => span,
-        Decl::Sig { span, .. } => span,
         Decl::EffectAlias { span, .. } => span,
         Decl::Delegate { span, .. } => span,
         Decl::AssocType { span, .. } => span
@@ -709,14 +707,6 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
         for entry in sorted_traits {
             let (name, tdef) = entry
             ctx.env.trait_reg.traits.insert(tdef.name, tdef)
-        }
-        let mut sorted_sigs = mod_.sigs.entries()
-        sorted_sigs.sort_by(compare_by_first)
-        for entry in sorted_sigs {
-            let (_, sigdef) = entry
-            // Resolver bindings consume canonical payload identities. Display
-            // and leaf aliases are transactional namespace-frame overlays.
-            ctx.env.types.sigs.insert(sigdef.name, sigdef)
         }
         for impl_ in mod_.trait_impls {
             match find_impl(

@@ -125,7 +125,7 @@ fn collect_decl_edges(decl: Decl, registered_fns: Set<Str>, mut graph: Map<Str, 
                 collect_decl_edges(prefixed, registered_fns, graph, impl_node)
             }
         },
-        // Test, Struct, Enum, Effect, Trait, ExternFn, ExternType, TypeAlias, Const, Sig,
+        // Test, Struct, Enum, Effect, Trait, ExternFn, ExternType, TypeAlias, Const,
         // EffectAlias, Delegate, AssocType — no fn bodies to scan
         _ => {}
     }

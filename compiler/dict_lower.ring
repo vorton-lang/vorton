@@ -205,8 +205,6 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             HDecl::ExternType { name: name, type_params: type_params, is_pub: is_pub, span: span },
         HDecl::TypeAlias { name, ty, is_pub, span } =>
             HDecl::TypeAlias { name: name, ty: ty, is_pub: is_pub, span: span },
-        HDecl::Sig { name, members, is_pub, span } =>
-            HDecl::Sig { name: name, members: members, is_pub: is_pub, span: span },
     }
 }
 

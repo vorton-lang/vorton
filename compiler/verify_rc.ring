@@ -257,7 +257,6 @@ fn verify_decls(decls: List<HDecl>, boxed: Set<Int>, externs: Set<Str>, mut find
             HDecl::ExternFn { .. } => {},
             HDecl::ExternType { .. } => {},
             HDecl::TypeAlias { .. } => {},
-            HDecl::Sig { .. } => {},
         }
     }
 }

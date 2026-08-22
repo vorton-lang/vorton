@@ -8,7 +8,7 @@ use codes::{E0207, E0702, E0704, E0705}
 use ir_identity::{
     SymbolRef, make_symbol_ref,
     namespace_value, namespace_nominal, namespace_trait, namespace_effect,
-    namespace_signature, namespace_kind_same,
+    namespace_kind_same,
     symbol_ref_origin_module_key, symbol_ref_namespace_kind,
     symbol_ref_canonical_payload, symbol_ref_declaration_site_path,
     symbol_ref_same}
@@ -46,8 +46,7 @@ pub enum NamespaceKind {
     TypeAlias,
     Effect,
     EffectAlias,
-    Trait,
-    Sig
+    Trait
 }
 
 pub enum ImportSelection {
@@ -197,9 +196,8 @@ fn direct_declaration_site(decl: Decl) -> DirectDeclarationSite? {
             namespace: DirectDeclarationNamespace::Module,
             name: name, span: span
         }),
-        // Impl/Test are not named source declarations.  Sig is deliberately
-        // absent: its surface is being removed in the next independent unit.
-        // Delegate/AssocType are member forms, not direct module bindings.
+        // Impl/Test are not named source declarations. Delegate/AssocType are
+        // member forms, not direct module bindings.
         _ => none
     }
 }
@@ -632,8 +630,7 @@ fn source_seed_symbol(
         NamespaceKind::TypeAlias => namespace_nominal(),
         NamespaceKind::Effect => namespace_effect(),
         NamespaceKind::EffectAlias => namespace_effect(),
-        NamespaceKind::Trait => namespace_trait(),
-        NamespaceKind::Sig => namespace_signature()
+        NamespaceKind::Trait => namespace_trait()
     }
     match existing {
         none => make_symbol_ref(
@@ -841,11 +838,6 @@ fn collect_decl_seed(
         },
         Decl::Trait { name, is_pub, .. } => {
             let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Trait,
-                declaration_payload(frame, name, false), none, is_pub,
-                NamespaceSeedRole::DirectDecl, seeds)
-        },
-        Decl::Sig { name, is_pub, .. } => {
-            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Sig,
                 declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
@@ -1240,8 +1232,7 @@ fn namespace_tag(namespace: NamespaceKind) -> Str {
         NamespaceKind::TypeAlias => "type-alias",
         NamespaceKind::Effect => "effect",
         NamespaceKind::EffectAlias => "effect-alias",
-        NamespaceKind::Trait => "trait",
-        NamespaceKind::Sig => "sig"
+        NamespaceKind::Trait => "trait"
     }
 }
 
@@ -1263,8 +1254,7 @@ fn namespace_registration_rank(namespace: NamespaceKind) -> Int {
         NamespaceKind::TypeAlias => 3,
         NamespaceKind::Effect => 4,
         NamespaceKind::EffectAlias => 5,
-        NamespaceKind::Trait => 6,
-        NamespaceKind::Sig => 7
+        NamespaceKind::Trait => 6
     }
 }
 

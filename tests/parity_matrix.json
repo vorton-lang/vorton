@@ -414,15 +414,6 @@
       "reason": "Inline module declarations and qualified references execute."
     },
     {
-      "feature_id": "HDecl.Sig",
-      "evidence": ["tests/cases/sig_basic.ring"],
-      "oracle": "handwritten-golden+c-native",
-      "lane": ["e2e-c"],
-      "status": "covered",
-      "reason": "Signature declarations compile in the C-native pipeline alongside executable code."
-    },
-
-    {
       "feature_id": "Pattern.Wildcard",
       "evidence": ["tests/cases/golden/c_backend_step4.ring"],
       "oracle": "c-native-golden",

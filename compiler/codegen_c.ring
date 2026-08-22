@@ -318,7 +318,6 @@ fn collect_c_module_names_rec(decls: List<HDecl>, mut names: Set<Str>) {
             HDecl::Effect { name, .. } => { names.insert(name) },
             HDecl::ModBlock { decls: md, .. } => { collect_c_module_names_rec(md, names) },
             HDecl::Test { .. } => {},
-            HDecl::Sig { .. } => {},
         }
     }
 }
@@ -621,7 +620,6 @@ fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?
             },
             HDecl::ExternType { .. } => {},
             HDecl::TypeAlias { .. } => {},
-            HDecl::Sig { .. } => {},
         }
     }
 }
@@ -848,7 +846,6 @@ fn emit_c_decl(mut ctx: CCtx, decl: HDecl) {
         HDecl::ModBlock { decls: md, .. } => {
             for sub in md { emit_c_decl(ctx, sub) }
         },
-        HDecl::Sig { .. } => {},
     }
 }
 
