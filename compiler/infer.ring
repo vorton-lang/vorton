@@ -1868,6 +1868,33 @@ fn remap_default_optional_def_id(
     }
 }
 
+fn default_direct_callee_def_id(callee: HExpr) -> Int? {
+    match callee {
+        HExpr::Ident { def_id: some(def_id), .. } => some(def_id),
+        HExpr::Lambda { def_id, .. } => some(def_id),
+        HExpr::Call { callable_result_def_id: some(def_id), .. } =>
+            some(def_id),
+        _ => none
+    }
+}
+
+fn remap_default_call_callee_def_id(
+    callee: HExpr, callee_def_id: Int?, remap: Map<Int, Int>
+) -> Int? {
+    match default_direct_callee_def_id(callee) {
+        some(producer_def_id) => {
+            if callee_def_id != some(producer_def_id) {
+                panic("default Call callee identity differs from direct producer")
+            }
+            some(remap_default_def_id(producer_def_id, remap))
+        },
+        // FieldAccess, name-only Ident, and other registration fallbacks are
+        // opaque here.  Their exact ID was captured earlier and must survive
+        // even when its integer collides with a default-local binder.
+        none => callee_def_id
+    }
+}
+
 fn remap_default_param(param: HParam, remap: Map<Int, Int>) -> HParam {
     HParam { ..param,
         def_id: remap_default_optional_def_id(param.def_id, remap) }
@@ -1974,12 +2001,13 @@ fn remap_default_expr(expr: HExpr, remap: Map<Int, Int>) -> HExpr {
             operand: remap_default_expr(operand, remap) },
         HExpr::Call { callee, callee_def_id, callable_result_def_id,
                       args, .. } => {
+            let exact_callee_def_id = remap_default_call_callee_def_id(
+                callee, callee_def_id, remap)
             let mut new_args: List<HExpr> = []
             for arg in args { new_args.push(remap_default_expr(arg, remap)) }
             HExpr::Call { ..expr,
                 callee: remap_default_expr(callee, remap),
-                callee_def_id: remap_default_optional_def_id(
-                    callee_def_id, remap),
+                callee_def_id: exact_callee_def_id,
                 callable_result_def_id: remap_default_optional_def_id(
                     callable_result_def_id, remap),
                 args: new_args }

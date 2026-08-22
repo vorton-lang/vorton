@@ -5349,7 +5349,10 @@ def representation_s1_contract_errors(
         ),
         "infer": (
             "fn register_default_callable_binder(",
+            "fn default_direct_callee_def_id(",
+            "fn remap_default_call_callee_def_id(",
             "fresh_callable_identity_def_id(ctx)",
+            "callee_def_id: exact_callee_def_id",
             "callable_result_def_id: remap_default_optional_def_id(",
             "def_id: remap_default_def_id(def_id, remap)",
             "callee_def_id: callee_def_id",
@@ -5607,12 +5610,25 @@ def representation_s1_contract_errors(
     if default_remap_error:
         errors.append(default_remap_error)
     elif not all(token in default_remap for token in (
-            "callee_def_id: remap_default_optional_def_id(",
+            "let exact_callee_def_id = remap_default_call_callee_def_id(",
+            "callee_def_id: exact_callee_def_id",
             "callable_result_def_id: remap_default_optional_def_id(",
             "def_id: remap_default_def_id(def_id, remap)",
             "HEffectHandler { ..handler,",
             "HExpr::EffectOp { ..expr, args: new_args }")):
         errors.append("default expansion loses exact or external identity")
+
+    default_callee_body, default_callee_error = extract_ring_function_body(
+        sources["infer"], "remap_default_call_callee_def_id")
+    if default_callee_error:
+        errors.append(default_callee_error)
+    elif not all(token in default_callee_body for token in (
+            "default_direct_callee_def_id(callee)",
+            "callee_def_id != some(producer_def_id)",
+            "some(remap_default_def_id(producer_def_id, remap))",
+            "none => callee_def_id")) or any(token in default_callee_body for token in (
+                ".lookup(", "resolved_name")):
+        errors.append("default Call callee remap is not producer-proven")
 
     for function_name in ("anf_expr", "rc_expr"):
         body, extract_error = extract_ring_function_body(
@@ -5651,6 +5667,16 @@ def representation_s1_contract_errors(
             "Signal.emit(inner) => match produced(inner)",
             "print_result(use_default())",
         ),
+        "ownership_collision_leaf": (
+            "fn factory(self) -> fn(Int) -> Option<Int>",
+            "pub fn provider() -> Provider",
+        ),
+        "ownership_collision_main": (
+            "callback: fn(Int) -> Option<Int> =",
+            "let local = fn(inner: Int) -> Option<Int>",
+            "let imported = provider().factory()",
+            "print_result(use_default())",
+        ),
     }
     for label, tokens in fixture_contracts.items():
         source = sources[label]
@@ -5661,6 +5687,32 @@ def representation_s1_contract_errors(
                 r"\b(?:Resource|Map<[^>]+>|[A-Za-z_][A-Za-z0-9_]*)\?",
                 source):
             errors.append(f"{label}: introduced forbidden T? syntax")
+
+    # Relationship oracle for the reviewed integer-collision counterexample.
+    # A foreign method fallback and a local binder may share the same positive
+    # integer; only a callee-proven local producer follows the remap.
+    foreign_method_id = 41
+    expansion_one = {41: 101, 50: 150}
+    expansion_two = {41: 102, 50: 250}
+
+    def remap_model(kind: str, producer: int | None,
+                    fallback: int | None, remap: dict[int, int]) -> int | None:
+        if kind in {"ident", "lambda", "call-result"}:
+            if producer is None or fallback != producer:
+                raise ValueError("direct producer identity mismatch")
+            return remap.get(producer, producer)
+        return fallback
+
+    for remap in (expansion_one, expansion_two):
+        if remap_model("field", None, foreign_method_id, remap) != foreign_method_id:
+            errors.append("default FieldAccess fallback followed integer collision")
+        if remap_model("name-only", None, foreign_method_id, remap) != foreign_method_id:
+            errors.append("default name-only fallback followed integer collision")
+    if remap_model("lambda", 41, 41, expansion_one) == remap_model(
+            "lambda", 41, 41, expansion_two):
+        errors.append("default local callable identities are not expansion-fresh")
+    if expansion_one[50] == expansion_two[50]:
+        errors.append("default callable result identities are not expansion-fresh")
     return errors
 
 
@@ -7023,6 +7075,14 @@ def identity_checkpoint_source_errors() -> List[str]:
             REPO / "tests" / "cases" /
             "ownership_shadow_default_identity.ring"
         ),
+        "ownership_collision_leaf": (
+            REPO / "tests" / "cases" / "modules" /
+            "ownership_shadow_default_method_collision" / "leaf.ring"
+        ),
+        "ownership_collision_main": (
+            REPO / "tests" / "cases" / "modules" /
+            "ownership_shadow_default_method_collision" / "main.ring"
+        ),
     }
     sources: dict[str, str] = {}
     errors: List[str] = []
@@ -7429,9 +7489,12 @@ def identity_checkpoint_source_errors() -> List[str]:
          "register_default_callable_binder(\n"
          "                    ctx, def_id, remap, \"callable result\")",
          "let _ = def_id"),
-        ("default callee remap", "infer",
-         "callee_def_id: remap_default_optional_def_id(",
-         "callee_def_id: identity_default_optional_def_id("),
+        ("default fallback collision isolation", "infer",
+         "none => callee_def_id",
+         "none => remap_default_optional_def_id(callee_def_id, remap)"),
+        ("default direct producer remap", "infer",
+         "some(remap_default_def_id(producer_def_id, remap))",
+         "some(producer_def_id)"),
         ("default lambda remap", "infer",
          "HExpr::Lambda { ..expr,\n"
          "                def_id: remap_default_def_id(def_id, remap)",
