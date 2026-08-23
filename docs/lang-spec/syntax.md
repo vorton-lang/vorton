@@ -5,10 +5,11 @@ Ring 的完整 EBNF 文法。产生式按类别分组。可选元素用 `?`，�
 ## 程序
 
 ```ebnf
-Program      ::= UseDecl* Decl*
+Program      ::= FileRequires? UseDecl* Decl*
+FileRequires ::= 'requires' EffectSet
 ```
 
-程序是一系列 `use` 声明后跟其他声明。`use` 声明必须出现在所有其他声明之前。
+文件是一个隐式模块。可选的 `requires {effects}` 文件头必须是第一项非注释语法、每文件至多一次；其后是一系列 `use` 声明和其他声明。`use` 声明仍必须出现在所有普通声明之前。文件头与 inline `mod name requires {effects}` 使用同一 capability 语义，详见[模块系统](modules.md#capability-限制requires)。
 
 ## 声明
 

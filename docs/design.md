@@ -499,6 +499,8 @@ EffectAtom
 
 **Handled effect**：用户 `effect` 声明产生 nominal operation set，进入 typed evidence并由显式 `handle...with` 消除。需要 mock host dependency 时，声明如 `FileAccess` 的 custom effect，再用普通 handler adapter翻译到 `fs` API；system call自身不动态截获。
 
+**Allocation-effect boundary（2026-08-23 用户决定）**：0.1 不建立 `AllocEffect`，也不预留 OOM profile、effect carrier 或空 metadata。现有 `alloc<T>()` 是 `unsafe` raw-memory 原语，不代表普通 List/Map/Str 分配会进入 effect row。只有 post-0.1 出现真实 no-heap、real-time 或 embedded consumer 后，才重新 Argument 分配可见性、OOM 语义与 allocator contract；不能从旧研究草案直接恢复 `with {alloc}`。
+
 ### 2.2 0.1 无用户 default handler
 
 ```ring
@@ -787,7 +789,7 @@ preset = "api"
 # pub_fn = true         # pub 函数 with {...}
 # internal_fn = false   # 内部函数 effect 签名
 # callsite = false      # 调用点 //: effect 冒泡标注
-# module_capability = false  # mod requires {...}
+# module_capability = false  # file / inline mod requires {...}
 
 [annotations.mut]
 # callsite = false      # 调用点 mut 参数标记：increment(mut n)
@@ -1118,13 +1120,27 @@ Ring 0.1 不支持 partial/reopened inline module。同一 direct parent scope �
 
 Import、re-export 与 same-origin diamond 是同一既有 declaration 的重复 delivery，可按 exact origin 幂等复用，不属于 source declaration reopening。多个 `impl` block 也不是 partial module，继续服从既有 impl/coherence 规则。若公开发布后出现跨文件 aggregation、generated extension 或 conditional compilation 等真实需求，必须以显式 `partial mod`、`namespace` 或 extension 设计重新立项；不能让普通重复 `mod` 静默获得第二种含义。
 
+### 6.2b 文件模块 capability header（2026-08-23 用户决定）
+
+文件本身是隐式模块。0.1 允许一个可选的 `requires {effects}` 文件头；它必须是文件中第一项非注释语法、每文件至多一次，并与 inline `mod name requires {effects}` 使用同一 capability checker：
+
+```ring
+requires {unsafe}
+
+use std::ptr
+extern fn ring_raw_alloc(count: Int) -> Ptr<Int>
+```
+
+存在 header 时，它是该文件模块的 effect ceiling；`requires {}` 表示纯文件模块。省略 header 时，普通 system/handled/fail/mut 不增加额外 ceiling，但 `unsafe` 从不隐式授权：使用或 discharge unsafe 原语、以及声明 `extern fn`，都要求有效的文件/inline-module `requires` 集合显式包含 `unsafe`。`unsafe {}` 仍是逐块责任签字，header 不能替代它；extern 声明本身是 ABI 签字，调用点保持 safe。拒绝再增加逐声明 `unsafe extern fn` 第二套授权语法。实现与仓内迁移由 B-156 跟踪。
+
 ### 6.3 未来方向 ⚠️ 设计愿景，尚未实现
 
 - 完整 module signature conformance（post-0.1，B-192）：0.1 删除当前只注册 `SigDef`、不约束任何 module 的 `sig` placeholder；未来只有连同真实 `mod/module : Signature` conformance 一起才可重新加入
 - 一等模块（模块作为值传递）
 - ~~`inline mod` 块~~ ✅ 已实现（`pub mod name { ... }` 嵌套命名空间，声明自动加前缀 `mod_name::decl_name`）
 - 相对路径导入（`super::`/`self::`）
-- ~~Capability 限制~~ ✅ 已实现（`mod name requires {effects} { ... }` 语法，E0405 检查函数推断 effect 是否在 requires 集合内）
+- ~~Inline module capability 限制~~ ✅ 已实现（`mod name requires {effects} { ... }` 语法，E0405 检查函数推断 effect 是否在 requires 集合内）
+- 文件模块 capability header（0.1，B-156）：`requires {effects}` 已拍板，尚未实现
 
 ---
 
@@ -1454,7 +1470,7 @@ Tail-resumptive handler arm 会被物化进 effect evidence；该 evidence 又�
 **形态 = `unsafe` effect**：unsafe 原语操作产生 `unsafe` effect，签名可见、自动冒泡。不可被普通 handler 处理——唯一消除方式是 discharge。
 
 **Discharge 模型 = 两级，关键字与 Rust 一致（2026-06-11 用户拍板）**：
-- **模块级 = 许可**：`mod name requires {unsafe}`（复用 mod capability 语法）——未声明的模块内不可使用 unsafe 原语；
+- **模块级 = 许可**：文件模块用第一项 `requires {unsafe}` header，inline module 用 `mod name requires {unsafe}`；未显式授权的模块内不可使用 unsafe 原语；
 - **块级 = 责任**：`unsafe { ... }` 吸收块内 unsafe effect，块 = 作者签字「此处不变量已人工验证」，等价 Rust unsafe block。安全封装因此成立：std 容器内部 unsafe、pub 签名纯净；
 - 配套 `ring audit unsafe`：列出全代码库 discharge 点。
 
@@ -1491,7 +1507,7 @@ buffer 内的值 = RC 世界之外、所有权由封装作者人工记账。拆�
 
 **相对 Rust 的三处简化（明确不做）**：① 无 `MaybeUninit`——Rust 需要它是因为 safe 区要能持有未初始化值，Ring 的未初始化内存只活在 Ptr 后面、永不以值形态进安全区，「read 前已 init」即签字内容；② 无泛型 `transmute`——99% 用例 = 指针 reinterpret（走 cast）+ 标量 bits 互转（具体 intrinsic 按需提供），最危险的门开最窄；③ v1 无 volatile/atomic——§8 并发定型后随 B-007 系再议。
 
-**extern fn 边界 = 声明处签字**：extern fn 声明要求所在模块 `requires {unsafe}`，声明 = 签字「签名忠实于 C 实现」，调用点 safe（与现状 std extern 调用兼容；Rust 2024 `unsafe extern` 同方向）。**`extern type` 与 `Ptr<T>` 并存两层**：extern type = 不透明句柄（不可 deref/offset，持有传递天然 safe）；`Ptr<T>` = 可算术可解引用的真指针。大量 FFI 永远停留在句柄层，分层本身是缩小 unsafe 面的杠杆。
+**extern fn 边界 = 声明处签字**：extern fn 声明要求所在文件 header 或 inline module clause 的有效 `requires` 集合显式包含 `unsafe`，声明 = 签字「签名忠实于 C 实现」，调用点 safe（与现状 std extern 调用兼容；Rust 2024 `unsafe extern` 同方向）。**`extern type` 与 `Ptr<T>` 并存两层**：extern type = 不透明句柄（不可 deref/offset，持有传递天然 safe）；`Ptr<T>` = 可算术可解引用的真指针。大量 FFI 永远停留在句柄层，分层本身是缩小 unsafe 面的杠杆。
 
 **跨界移交 = per-type 三件套，不做泛型 `addr_of`**：泛型「对任意安全值取指针」把引擎私有的值表示（box 布局/unboxing/单例化——B-104 D4 dict、D6 none/const 均在动）变成可观测 API，「优化不可观测」被堵死。跨界走容器显式 API：`List<T>::from_raw_parts(p, len, cap)`（移交进 RC 世界）/ `list.into_raw_parts()`（移交出，consume）/ `list.as_ptr()`（borrow 性质，指针有效期 ≤ 宿主存活 = 签字内容）；Str 同构。FFI 调用保活无需新机制（实参 borrow 语义已覆盖）。
 

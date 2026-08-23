@@ -47,6 +47,8 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **0.1 effect/capability batch（2026-08-23 用户批准）**：B-195以`SystemEffectRef(console/fs/process)`取代special `io`，system不进evidence、不可handle、无root handler，只经AbiIR HostImport/link provider；custom `HandledEffectRef`才显式handle。Host capability与`fail<E>`正交，std host extern漏标与`io.read`双authority原子收口。B-196令0.1用户Drop最终effect row为空且不建DropEffectSet；post-0.1 effectful destruction只在真实consumer下由B-198重审。B-072匿名sum既有语义继续批准但实现顺延post-0.1。
 
+> **0.1 file capability / allocation-effect boundary（2026-08-23 用户批准）**：文件是隐式模块，B-156新增唯一第一项`requires {effects}` header并复用inline-module capability checker；无header不隐式授权unsafe，extern声明要求有效requires集合含unsafe，拒绝逐声明`unsafe extern fn`第二语法。0.1不建立`AllocEffect`、OOM profile或占位carrier；现有unsafe `alloc<T>()` raw-memory intrinsic不变，分配可见性只在post-0.1出现真实no-heap/real-time/embedded consumer后重新Argument，不为它预建backlog item。
+
 3. **B-176/B-180 反馈速度**：在 post-ownership 最新 main 重做 baseline；runner 与 compiler 分 checkpoint，但原 2x 量化验收不变。compiler 只允许一个 profile-guided wave。
 4. **B-190 全仓简化**：B-180完成并吸收B-187文档盘点后，以固定snapshot做一次有界过度设计复核与减法refactor；不做rewrite-for-perfection。
 5. **0.1 surface + Remaining correctness / ABI freeze**：先原子关闭 B-193/B-194/B-195/B-196；随后处理 B-162、B-164、#263、#264、#239、#244、#267、#257，再走 B-168 → B-169 → B-167 → B-152 → B-002，并完成 unsafe/Str 等 candidate gate。B-168/B-169只消费system/handled分域后的契约，不再设计root evidence。
@@ -292,20 +294,23 @@ B-116 先以 native probe 选 lowering；归档 JS generator/Promise 不属于 s
 
 ### B-156 extern fn 声明处 `requires {unsafe}` 签字检查 [feature] [P1] [M] [judgment] [queued] [after: B-195]
 
-> 2026-06-27 从 B-125 拆出。B-125 core 完成但 extern fn 签字检查推迟——当前无文件级 `requires` 语法（327 个 extern fn 声明分布在 19 个文件顶层，无 `mod` 块包装），需先设计文件级 `requires` 语法。
+> **2026-08-23 用户决定，已拍板 clean break**：文件本身是隐式模块。0.1新增一个可选文件头`requires {effects}`，必须是第一项非注释语法、每文件至多一次，并与`mod name requires {effects}`共享同一解析、typed capability与checker authority。拒绝逐声明`unsafe extern fn`第二套语法。立项时current main census为78个extern fn/10个文件；实施时重新机械census，不把旧327/19计数当迁移真值。
 
-**前置**：文件级 `requires` 语法设计
+**公开语义**：
 
-**涉及修改**：
-1. Parser：文件级 `requires { effects }` 语法（文件开头，声明之前）
-2. Checker：extern fn 声明所在模块必须有 `requires {unsafe}`
-3. 19 个文件批量迁移（加文件级 `requires {unsafe}`）
-4. `ring audit unsafe` 子命令（列全代码库 discharge 点 + extern 声明点）
+1. `Program ::= FileRequires? UseDecl* Decl*`，`FileRequires ::= 'requires' EffectSet`；header晚于`use`/声明或重复出现均稳定报错。
+2. 有header时，它是文件模块的effect ceiling，`requires {}`表示纯模块；无header时system/handled/fail/mut不增加额外ceiling，但unsafe许可从不隐式获得。
+3. unsafe原语仍必须由`unsafe {}`逐块discharge；header只提供模块许可，不能替代责任签字。
+4. 每个`extern fn`声明要求其有效文件/inline-module requires集合显式包含`unsafe`。声明是ABI签字，调用点保持safe；extern type不因本项变成unsafe操作。
+
+**范围 / 唯一authority**：`compiler/parser.ring`/AST与模块resolver/checker建立文件header并把它运输为与inline mod相同的typed capability fact；B-195后的SystemEffectRef/HandledEffectRef/fail/mut/unsafe全部复用同一集合检查。仓内compiler/std/examples/tests按实际推断effect迁移header；不能给所有文件机械只写`{unsafe}`而误拒其真实console/fs/process/fail/mut。`ring audit unsafe`枚举文件/inline capability许可、unsafe discharge block与extern声明，禁止另建extern叶名白名单或backend fallback。
 
 **验收标准**：
-- 无 `requires {unsafe}` 的文件中 extern fn 声明 → 编译错误
-- 现有 std/ + compiler/ extern fn 全部通过（迁移后）
-- 自举一致
+
+- header第一项/重复/late/empty/qualified/custom effect的parser与human/LLM诊断矩阵；无header普通effect正控、`requires {}`与受限集合负控、single/project/inline nesting一致；
+- 无显式unsafe许可的unsafe block或extern fn声明稳定失败；有许可的raw-memory与全部仓内extern声明通过，普通extern调用点不染unsafe；
+- mutation杀死header skip、unsafe隐式授权、extern特判、file/inline双checker与system→handler evidence；inspection/audit只消费typed capability authority；
+- 完整C e2e/golden/RC/structural/parity/self-compile、targeted audit output、double bootstrap与tracked`dist-c`literal fixed point通过，workflow validator与exact CI全绿。
 
 ### B-168 C-native abort/unwind 实现模型探针 [design-align] [P0] [M] [judgment] [queued] [after: B-180+B-195+B-196]
 

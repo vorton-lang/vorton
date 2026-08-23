@@ -224,9 +224,22 @@ mod shapes {
 }
 ```
 
-### Capability 限制（`mod requires`）
+### Capability 限制（`requires`）
 
-`mod requires {effects}` 语法限制模块内所有函数可以使用的 effect 集合。编译器在类型检查阶段验证：模块内的函数如果使用了不在 `requires` 集合中的 effect，报 E0405 错误。
+文件本身是隐式模块。文件模块使用第一项 `requires {effects}` header，inline module 使用 `mod name requires {effects}` clause；两者限制模块内所有函数可以使用的 effect 集合，并由同一 typed capability checker 验证。模块内函数使用不在有效 `requires` 集合中的 effect 时，报 E0405。
+
+#### 文件模块 header
+
+```ring
+requires {unsafe}
+
+use std::ptr
+extern fn ring_raw_alloc(count: Int) -> Ptr<Int>
+```
+
+文件 header 必须是第一项非注释语法、每文件至多一次，并位于全部 `use` 与声明之前。有 header 时，它是文件模块的 effect ceiling；省略 header 时，普通 system/handled/fail/mut 不增加额外 ceiling，但 `unsafe` 许可从不隐式获得。使用或 discharge unsafe 原语、以及声明 `extern fn`，都要求有效文件/inline-module `requires` 集合显式包含 `unsafe`。
+
+Header只提供模块许可：unsafe原语仍必须位于`unsafe {}`责任块。Extern声明本身是“签名忠实于C实现”的ABI签字，调用extern函数不向调用点传播unsafe。Ring不提供逐声明`unsafe extern fn`第二套授权语法。
 
 #### 纯模块（无 effect）
 
@@ -258,7 +271,7 @@ mod console_layer requires {console} {
 - `console` / `fs` / `process` 是 system effect：它们参与静态 capability 检查，但不能由 `handle` 消除，也不产生 handler evidence
 - 用户 custom effect 是 handled effect：它同样参与 `requires` 检查，并且必须在离开 `main` 前由显式 handler 消除
 - `mut<T>` marker effect 参与 capability 检查；`requires {}` 禁止修改参数或捕获状态等会让 mutation effect 逃逸的操作，局部 `let mut` 仍保持局部
-- `unsafe` 同时要求 `unsafe { ... }` discharge 与包含 `unsafe` 的模块许可
+- `unsafe` 同时要求 `unsafe { ... }` discharge 与包含 `unsafe` 的文件header或inline-module许可；`extern fn`声明也要求该显式许可
 
 ## 编译模型
 
@@ -289,7 +302,7 @@ mod console_layer requires {console} {
 | 错误码 | 描述 |
 |--------|------|
 | E0207 | 同一 scope/namespace 中的重复 source declaration（包括重复 inline `mod`） |
-| E0405 | Capability 限制违反（`mod requires` 中使用了不允许的 effect） |
+| E0405 | Capability 限制或许可违反（文件/inline `requires` 中使用了不允许的 effect，或缺少显式 unsafe 许可） |
 | E0701 | 导入非 pub 符号 |
 | E0702 | 模块未找到 |
 | E0703 | 模块中无此符号 |
