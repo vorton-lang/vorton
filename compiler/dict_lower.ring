@@ -154,10 +154,10 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 return_type: return_type, effects: effects,
                 body: dl_expr(body, defs, seen, counter),
                 is_pub: is_pub, trait_bounds: trait_bounds, span: span },
-        HDecl::Impl { target_type, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
+        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
             for m in methods { new_methods.push(dl_decl(m, defs, seen, counter)) }
-            HDecl::Impl { target_type: target_type,
+            HDecl::Impl { target_type: target_type, owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
                 type_params: type_params, trait_name: trait_name,
                 methods: new_methods, assoc_types: assoc_types, span: span }
@@ -192,9 +192,9 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             HDecl::Struct { name: name, owner_ref: owner_ref,
                 type_params: type_params, fields: fields,
                 is_pub: is_pub, span: span },
-        HDecl::Enum { name, type_params, variants, is_pub, span } =>
-            HDecl::Enum { name: name, type_params: type_params, variants: variants, is_pub: is_pub, span: span },
-        HDecl::Effect { name, type_params, ops, is_pub, span } => {
+        HDecl::Enum { name, owner_ref, type_params, variants, is_pub, span } =>
+            HDecl::Enum { name: name, owner_ref: owner_ref, type_params: type_params, variants: variants, is_pub: is_pub, span: span },
+        HDecl::Effect { name, owner_ref, handled_ref, type_params, ops, is_pub, span } => {
             let mut new_ops: List<HEffectOp> = []
             for op in ops {
                 let new_default_body = match op.default_body {
@@ -202,11 +202,12 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                     none => none,
                 }
                 new_ops.push(HEffectOp {
-                    name: op.name, params: op.params, return_type: op.return_type,
+                    name: op.name, operation_ref: op.operation_ref,
+                    params: op.params, return_type: op.return_type,
                     has_default: op.has_default, default_body: new_default_body
                 })
             }
-            HDecl::Effect { name: name, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
+            HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
         HDecl::ExternFn { name, abi_name, def_id, type_params, params, return_type, effects, is_pub, span } =>
             HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id, type_params: type_params, params: params, return_type: return_type, effects: effects, is_pub: is_pub, span: span },
@@ -443,16 +444,16 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 type_args: type_args, fields: new_fields,
                 spread: new_spread, ty: ty, effects: effects, span: span }
         },
-        HExpr::NamedVariantConstruct { enum_name, variant_name, fields, spread, ty, effects, span } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []
             for f in fields {
-                new_fields.push(HStructFieldInit { name: f.name, value: dl_expr(f.value, defs, seen, counter) })
+                new_fields.push(HStructFieldInit { name: f.name, field_ref: f.field_ref, value: dl_expr(f.value, defs, seen, counter) })
             }
             let new_spread = match spread {
                 some(s) => some(dl_expr(s, defs, seen, counter)),
                 none => none,
             }
-            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
+            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, variant_ref: variant_ref, fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
         },
         HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
             HExpr::MatchExpr { scrutinee: dl_expr(scrutinee, defs, seen, counter),
@@ -500,10 +501,10 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
         HExpr::Lambda { params, return_type, body, ty, effects, span } =>
             HExpr::Lambda { params: params, return_type: return_type,
                 body: dl_expr(body, defs, seen, counter), ty: ty, effects: effects, span: span },
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, operation_ref, args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(dl_expr(a, defs, seen, counter)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args, ty: ty, effects: effects, span: span }
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: new_args, ty: ty, effects: effects, span: span }
         },
         HExpr::RangeExpr { start, end, inclusive, ty, effects, span } =>
             HExpr::RangeExpr { start: dl_expr(start, defs, seen, counter),

@@ -8617,12 +8617,12 @@ def core_hir_c0_live_consumer_errors(
                 errors.append(f"C0 live consumer misses {token!r}")
 
     checker_source = compiler_sources.get("checker.ring", "")
-    new_ctx_body, new_ctx_error = _f0_function_body(
-        checker_source, "new_infer_ctx")
-    if new_ctx_error:
-        errors.append(new_ctx_error.replace("F0 function", "C0 consumer"))
-    elif new_ctx_body is not None and (
-            "validate_builtin_method_core_shadow(ctx.env)" not in new_ctx_body):
+    load_body, load_error = _f0_function_body(
+        checker_source, "load_prelude")
+    if load_error:
+        errors.append(load_error.replace("F0 function", "C0 consumer"))
+    elif load_body is not None and (
+            "validate_builtin_method_core_shadow(ctx.env)" not in load_body):
         errors.append("C0 shared checker consumer is missing")
     return errors
 
@@ -8975,11 +8975,9 @@ def builtin_method_intrinsic_contract_errors(
     ):
         if re.sub(r"\s+", "", token) not in shadow_normalized:
             errors.append(f"B-201 Core shadow misses {token!r}")
-    new_ctx = _b201_function_body(checker, "new_infer_ctx", errors)
-    register_pos = new_ctx.find("register_builtins(ctx.env, sink)")
-    shadow_pos = new_ctx.find("validate_builtin_method_core_shadow(ctx.env)")
-    if register_pos < 0 or shadow_pos <= register_pos:
-        errors.append("B-201 checker does not consume shadow after registration")
+    load_prelude = _b201_function_body(checker, "load_prelude", errors)
+    if "validate_builtin_method_core_shadow(ctx.env)" not in load_prelude:
+        errors.append("B-201 checker does not consume shadow after prelude registration")
 
     method_ctor = _b201_function_body(
         hir, "make_intrinsic_method_call_ref", errors)
@@ -9126,14 +9124,14 @@ def builtin_method_intrinsic_mutation_errors(
          "make_contract_only()", "make_concrete_body_contract(make_path_ref(path_owner_for_module_body(module_body), [\"x\"], path_role_child()))"),
         ("shadow manifest", "builtins.ring", "validate_builtin_method_core_shadow",
          "make_binder_manifest(executable, [])", "make_binder_manifest(executable, [bad])"),
-        ("checker consumer", "checker.ring", "new_infer_ctx",
+        ("checker consumer", "checker.ring", "load_prelude",
          "validate_builtin_method_core_shadow(ctx.env)", "()"),
         ("call signature kind", "hir.ring", "make_intrinsic_method_call_ref",
          "Type::FnType { .. }", "_"),
         ("call intrinsic equality", "hir.ring", "method_call_ref_same",
          "intrinsic_ref_same(a, b)", "true"),
-        ("HIR validation", "hir.ring", "validate_hir_expr",
-         "method_call_ref_signature(exact_method)", "ty"),
+        ("HIR validation", "hir.ring", None,
+         "method_ref: MethodCallRef?", "method_ref: IntrinsicRef?"),
         ("impl lookup", "infer_helpers.ring", "lookup_impl_method",
          "intrinsic_ref: owner.method_intrinsics.get(method)", "intrinsic_ref: none"),
         ("trait lookup", "infer_helpers.ring", "lookup_trait_method",
@@ -10198,7 +10196,7 @@ def trait_method_identity_u1c_contract_errors(
     elif fact_fields is not None:
         if [name for _, name in fact_fields] != [
                 "file_key", "frame_index", "decl_index", "owner_ref",
-                "methods"]:
+                "methods", "assoc_members"]:
             errors.append("trait identity fact inventory drifted")
         if not all(is_public for is_public, _ in fact_fields):
             errors.append("trait identity fact is not transportable")
@@ -10351,20 +10349,21 @@ def trait_method_identity_u1c_contract_errors(
     elif trait_def_fields is not None and [
             name for _, name in trait_def_fields] != [
                 "name", "owner_ref", "type_params", "type_param_vars",
-                "methods", "supertraits", "assoc_types"]:
+                "methods", "supertraits", "assoc_types", "contract"]:
         errors.append("TraitDef registered owner inventory drifted")
 
     register_body = _trait_method_function_body(
         sources, "register", "register_trait", errors)
     register_tokens = (
-        "let identity = peek_trait_identity_fact(ctx, decl_index, method_count)",
+        "let identity = peek_trait_identity_fact(\n        ctx, decl_index, method_count, assoc_count)",
         "identity.methods.get(callable_slot_index)",
         "trait_method_ref_trait(method_ref), identity.owner_ref",
         "trait_method_ref_source_member_index(method_ref) !=",
         "trait_method_ref_callable_slot_index(method_ref) !=",
         "trait_method_ref_name(method_ref) != identity_method_name",
         "method_ref: method_ref",
-        "owner_ref: make_registered_trait_ref(identity.owner_ref, name)",
+        "let registered_owner = make_registered_trait_ref(identity.owner_ref, name)",
+        "contract: contract",
         "commit_trait_identity_fact(ctx, identity)",
     )
     for token in register_tokens:
@@ -10391,7 +10390,7 @@ def trait_method_identity_u1c_contract_errors(
             "source_member_index != callable_slot_index",
             "source/slot ordering drifted", "make_trait_method_ref(")):
         errors.append("builtin trait method bypasses typed relation")
-    if builtins.count("make_registered_trait_ref(owner_ref,") != 6:
+    if builtins.count("install_builtin_trait_contract(") != 7:
         errors.append("builtin registered trait census drifted")
 
     hmethod_fields, hmethod_error = _f0_struct_fields(hir, "HTraitMethod")
@@ -10728,7 +10727,8 @@ def impl_provider_u1c1_contract_errors(
 
     fact_schemas = (
         ("SourceImplProviderFact", [
-            "file_key", "frame_index", "decl_index", "provider_ref"]),
+            "file_key", "frame_index", "decl_index", "provider_ref",
+            "methods"]),
         ("DelegateProviderFact", [
             "file_key", "frame_index", "parent_decl_index",
             "source_member_index", "parent_provider_ref", "provider_ref"]),
@@ -10835,15 +10835,18 @@ def impl_provider_u1c1_contract_errors(
         ("NominalDerivedProviderPlan", [
             "implicit_provider_ref", "explicit_providers"]),
         ("EnumDef", [
-            "name", "type_params", "type_param_vars", "variants",
+            "name", "owner_ref", "type_params", "type_param_vars",
+            "variants", "variant_refs", "variant_field_refs",
             "derive_attrs", "derived_provider_plan", "variant_index"]),
         ("ImplEntry", [
             "trait_name", "target_type_name", "type_params",
             "type_param_vars", "predicates", "method_names", "assoc_types",
-            "method_schemes", "provider_ref", "trait_ref", "delegate_plan",
+            "method_schemes", "method_refs", "method_intrinsics",
+            "provider_ref", "trait_ref", "owner_ref", "delegate_plan",
             "origin", "span", "owner_state"]),
         ("MethodOrigin", [
-            "origin", "trait_name", "provider_ref", "trait_ref", "span"]),
+            "origin", "trait_name", "provider_ref", "trait_ref",
+            "method_ref", "span"]),
     )
     for struct_name, expected_fields in env_schemas:
         fields, field_error = _f0_struct_fields(env, struct_name)
@@ -10858,18 +10861,18 @@ def impl_provider_u1c1_contract_errors(
     for token in (
         "match (entry.trait_name, entry.trait_ref)",
         "registered_trait_ref_symbol(def.owner_ref), trait_ref",
-        "entry.provider_ref.is_some()",
+        "entry.owner_ref.is_some()",
         "provisional prelude published provider",
-        "entry.provider_ref.is_none()", "final owner has no provider",
+        "match\n                (entry.provider_ref, entry.owner_ref)",
+        "impl owner: final owner lacks typed identity",
     ):
         if token not in validate_body:
             errors.append(f"impl provider state validator misses {token!r}")
     key_body = _trait_method_function_body(
         sources, "env", "impl_entry_exact_key_same", errors)
     for token in (
-        "left.target_type_name != right.target_type_name",
-        "optional_symbol_ref_same(left.trait_ref, right.trait_ref)",
-        "impl_provider_ref_same(a, b)",
+        "match (left.owner_ref, right.owner_ref)",
+        "impl_owner_ref_same(a, b)",
     ):
         if token not in key_body:
             errors.append(f"impl exact owner key misses {token!r}")
@@ -10877,16 +10880,14 @@ def impl_provider_u1c1_contract_errors(
         sources, "env", "install_method_core", errors)
     for token in (
         "find_impl_by_provider(", "incoming.trait_ref, incoming.provider_ref",
-        "owner.origin != incoming.origin",
         "optional_symbol_ref_same(owner.trait_ref, incoming.trait_ref)",
-        "existing.provider_ref, incoming.provider_ref",
+        "impl_method_ref_same(",
     ):
         if token not in install_body:
             errors.append(f"method origin provider closure misses {token!r}")
     add_body = _trait_method_function_body(
         sources, "env", "add_impl", errors)
-    if ("impl_entry_exact_key_same(existing, entry)" not in add_body or
-            "legacy origin aliases distinct typed owners" not in add_body):
+    if "impl_entry_exact_key_same(existing, entry)" not in add_body:
         errors.append("registry add_impl does not use the typed owner key")
 
     ledger_functions = (
@@ -11001,7 +11002,7 @@ def impl_provider_u1c1_contract_errors(
         builtins, "BUILTIN_PROVIDER_ORDINALS")
     if ordinal_error:
         errors.append(ordinal_error)
-    elif ordinals != list(range(10)):
+    elif ordinals != list(range(13)):
         errors.append(f"builtin provider ordinal table drifted: {ordinals!r}")
     site_body = _trait_method_function_body(
         sources, "builtins", "builtin_impl_provider_site_from_tag", errors)
@@ -11076,8 +11077,8 @@ def impl_provider_u1c1_contract_errors(
     rebind_body = _trait_method_function_body(
         sources, "decl", "store_rebound_impl_method_scheme", errors)
     for token in (
-        "let owner = match find_impl_by_origin(",
-        "let provider_ref = match owner.provider_ref",
+        "let owner = match find_impl_by_provider(",
+        "let provider_ref = impl_owner_ref_provider(owner_ref)",
         "provider_ref: provider_ref, trait_ref: owner.trait_ref",
     ):
         if token not in rebind_body:
@@ -11158,17 +11159,19 @@ def impl_provider_u1c1_mutation_errors(
         ("close derive facts", "ctx", "close_struct_identity_ledger",
          "ctx.nominal_derived_provider_unconsumed.len() != 0", "false"),
         ("provisional provider", "env", "validate_impl_entry",
-         "entry.provider_ref.is_some()", "false"),
+         "entry.owner_ref.is_some()", "false"),
         ("final provider", "env", "validate_impl_entry",
-         "entry.provider_ref.is_none()", "false"),
+         "match\n                (entry.provider_ref, entry.owner_ref)",
+         "match (entry.provider_ref, none)"),
         ("exact trait relation", "env", "validate_impl_entry",
          "registered_trait_ref_symbol(def.owner_ref), trait_ref", "trait_ref, trait_ref"),
         ("owner key target", "env", "impl_entry_exact_key_same",
-         "left.target_type_name != right.target_type_name", "false"),
+         "match (left.owner_ref, right.owner_ref)",
+         "match (none, right.owner_ref)"),
         ("owner key trait", "env", "impl_entry_exact_key_same",
-         "!optional_symbol_ref_same(left.trait_ref, right.trait_ref)", "false"),
+         "impl_owner_ref_same(a, b)", "true"),
         ("owner key provider", "env", "impl_entry_exact_key_same",
-         "impl_provider_ref_same(a, b)", "true"),
+         "impl_owner_ref_same(a, b)", "impl_owner_ref_same(a, a)"),
         ("method owner lookup", "env", "install_method_core",
          "find_impl_by_provider(", "find_impl_by_origin("),
         ("method exact trait", "env", "install_method_core",
@@ -11213,7 +11216,8 @@ def impl_provider_u1c1_mutation_errors(
          "implicit_derive_provider(ut)",
          "explicit_derive_request(ut, trait_name).unwrap().provider_ref"),
         ("rebind provider copy", "decl", "store_rebound_impl_method_scheme",
-         "let provider_ref = match owner.provider_ref", "let provider_ref = none"),
+         "let provider_ref = impl_owner_ref_provider(owner_ref)",
+         "let provider_ref = impl_owner_ref_provider(wrong_owner_ref)"),
     )
     killed = 0
     for label, source_name, function_name, anchor, replacement in mutations:
@@ -11273,7 +11277,8 @@ def impl_provider_u1c2_contract_errors(
     errors: List[str] = []
     hir = sources["hir"]
     impl_schema = (
-        "Impl { target_type: Str, provider_ref: ImplProviderRef, "
+        "Impl { target_type: Str, owner_ref: ImplOwnerRef, "
+        "provider_ref: ImplProviderRef, "
         "trait_ref: SymbolRef?, type_params: List<TypeParam>, "
         "trait_name: Str?, methods: List<HDecl>")
     if impl_schema not in hir:
@@ -11283,7 +11288,7 @@ def impl_provider_u1c2_contract_errors(
         errors.append(fact_error)
     elif fact_fields is not None and [
             name for _, name in fact_fields] != [
-                "target", "provider_ref", "trait_ref", "owner_origin",
+                "target", "provider_ref", "trait_ref", "owner_ref",
                 "method_names", "is_top_level"]:
         errors.append("impl provider carrier: ModuleImplFact inventory drifted")
     if "is_trait_impl" in hir:
@@ -11348,7 +11353,7 @@ def impl_provider_u1c2_contract_errors(
         sources, "checker", "collect_module_impl_facts", errors)
     for token in (
         "find_impl_by_provider(", "provider_ref: provider_ref",
-        "trait_ref: trait_ref", "owner_origin: owner.origin",
+        "trait_ref: trait_ref", "owner_ref: owner_ref",
     ):
         if token not in collect_body:
             errors.append(f"ModuleImplFact collector misses {token!r}")
@@ -11375,7 +11380,7 @@ def impl_provider_u1c2_contract_errors(
         sources, "exports", "export_impl_facts", errors)
     for token in (
         "find_impl_by_provider(", "fact.trait_ref, fact.provider_ref",
-        "owner.origin != fact.owner_origin",
+        "impl_owner_ref_same(",
         "impl_entry_exact_key_same(seen, owner)",
         "method_origin_matches_owner(",
     ):
@@ -11384,8 +11389,7 @@ def impl_provider_u1c2_contract_errors(
     origin_same = _trait_method_function_body(
         sources, "exports", "method_origin_same", errors)
     for token in (
-        "impl_provider_ref_same(left.provider_ref, right.provider_ref)",
-        "optional_symbol_ref_same(left.trait_ref, right.trait_ref)",
+        "impl_method_ref_same(left.method_ref, right.method_ref)",
     ):
         if token not in origin_same:
             errors.append(f"MethodOrigin typed equality misses {token!r}")
@@ -11393,7 +11397,7 @@ def impl_provider_u1c2_contract_errors(
         sources, "checker", "inject_module_exports", errors)
     for token in (
         "find_impl_by_provider(", "origin.trait_ref, origin.provider_ref",
-        "owner.origin != origin.origin",
+        "impl_method_ref_same(",
     ):
         if token not in inject_body:
             errors.append(f"hydration typed owner closure misses {token!r}")
@@ -11453,7 +11457,7 @@ def impl_provider_u1c2_mutation_errors(
          "fact.trait_ref, fact.provider_ref",
          "fact.trait_ref, wrong_provider_ref"),
         ("MethodOrigin provider", "exports", "method_origin_same",
-         "impl_provider_ref_same(left.provider_ref, right.provider_ref)",
+         "impl_method_ref_same(left.method_ref, right.method_ref)",
          "true"),
         ("hydration provider", "checker", "inject_module_exports",
          "origin.trait_ref, origin.provider_ref",

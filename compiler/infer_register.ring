@@ -6,6 +6,10 @@ use ast::{Decl, Span, TypeParam, Param, TypeExpr, EffectOpDecl, StructFieldDecl,
     UseDecl, UseImport, DeriveAttribute}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, EnumDef, EffectDef, EffectOpDef,
     TraitDef, TraitMethodDef, ImplEntry, ImplMethodSchemeCore,
+    RegisteredTraitMethodContract, RegisteredTraitAssocContract,
+    make_registered_trait_method_contract,
+    make_registered_trait_assoc_contract,
+    make_registered_trait_contract,
     ExplicitDerivedProviderPlan, NominalDerivedProviderPlan,
     DelegateChildProviderPlan, DelegatePlanState,
     make_delegate_child_provider_plan,
@@ -26,6 +30,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     impl_predicate_assoc_constraints, impl_assoc_predicate_name,
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
     ImplOwnerState, impl_owner_is_provisional,
+    impl_target_symbol,
     specialize_trait_method_scheme, build_type_var_map,
     delegate_plan_not_applicable, delegate_plan_pending,
     delegate_plan_final,
@@ -43,21 +48,35 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     exit_struct_identity_frame, peek_struct_identity_fact,
     commit_struct_identity_fact, peek_struct_identity_completion,
     commit_struct_identity_completion,
+    commit_complete_nominal_identity_fact,
+    peek_enum_identity_group, commit_enum_identity_group,
+    peek_effect_identity_fact, commit_effect_identity_fact,
     peek_trait_identity_fact, commit_trait_identity_fact,
     peek_source_impl_provider_fact, commit_source_impl_provider_fact,
+    publish_impl_check_owner,
     peek_delegate_provider_fact, commit_delegate_provider_fact,
     peek_nominal_derived_provider_fact,
     commit_nominal_derived_provider_fact,
     close_struct_identity_ledger}
 use infer_helpers::{is_value_type}
-use resolver::{StructIdentityFact, DelegateProviderFact}
+use resolver::{StructIdentityFact, DelegateProviderFact,
+    ImplMethodIdentityFact}
 use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
     registered_nominal_ref_symbol, nominal_field_ref_name,
     nominal_field_ref_index, symbol_ref_same,
     trait_method_ref_trait,
     trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index, trait_method_ref_name,
-    ImplProviderRef, SymbolRef, impl_provider_ref_same,
+    variant_ref_owner, variant_ref_source_index,
+    variant_field_ref_variant, variant_field_ref_index,
+    registered_nominal_ref_same, variant_ref_same,
+    ImplProviderRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
+    HandledEffectRef, handled_effect_ref_same,
+    make_impl_owner_ref, make_impl_method_ref,
+    impl_provider_ref_site, path_ref_owner, path_ref_normalized_child_path,
+    path_owner_ref_module_body, module_body_ref_origin_module_key,
+    make_symbol_ref, namespace_member,
+    impl_provider_ref_same,
     registered_trait_ref_symbol}
 
 // ============================================================
@@ -701,7 +720,8 @@ fn register_phase1(
         },
         Decl::Enum { name, type_params, variants, derive_attrs, span, .. } => {
             preregister_enum(
-                ctx, name, type_params, derive_attrs, span, decl_index)
+                ctx, name, type_params, variants,
+                derive_attrs, span, decl_index)
             deferred_enum_names.push(name)
         },
         Decl::ModBlock { name: mod_name, uses: mod_uses, decls: mod_decls, .. } => {
@@ -1643,12 +1663,25 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
 
 fn preregister_enum(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
-    derive_attrs: List<DeriveAttribute>, span: Span, decl_index: Int
+    variants: List<EnumVariantDecl>, derive_attrs: List<DeriveAttribute>,
+    span: Span, decl_index: Int
 ) {
     let derived_provider_plan = consume_nominal_derived_provider_plan(
         ctx, decl_index, derive_attrs)
     validate_type_param_bound_shapes(
         ctx, type_params, BoundShapeContext::OrdinaryBound, span)
+    let identity = peek_struct_identity_fact(ctx, decl_index, false, 0)
+    let mut variant_field_counts: List<Int> = []
+    for variant in variants {
+        variant_field_counts.push(match variant.named_fields {
+            some(named) => if named.len() > 0 {
+                named.len()
+            } else { variant.fields.len() },
+            none => variant.fields.len()
+        })
+    }
+    let enum_identity = peek_enum_identity_group(
+        ctx, identity.owner_ref, variant_field_counts)
     let mut tp_names: List<Str> = []
     let mut tv_ids: List<Int> = []
     for tp in type_params {
@@ -1658,11 +1691,21 @@ fn preregister_enum(
         ctx.type_param_scope.insert(tp.name, tv)
     }
     let def = EnumDef {
-        name: name, type_params: tp_names, type_param_vars: tv_ids,
+        name: name,
+        owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
+        type_params: tp_names, type_param_vars: tv_ids,
         variants: [], derive_attrs: derive_attrs,
+        variant_refs: enum_identity.variants.map(fn(variant) {
+            variant.variant_ref
+        }),
+        variant_field_refs: enum_identity.variants.map(fn(variant) {
+            variant.fields
+        }),
         derived_provider_plan: some(derived_provider_plan),
         variant_index: map_new()
     }
+    commit_complete_nominal_identity_fact(ctx, identity)
+    commit_enum_identity_group(ctx, enum_identity)
     ctx.env.types.enums.insert(name, def)
 }
 
@@ -1687,6 +1730,30 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
 
             let mut vi = 0
             for v in variants {
+                let variant_ref = def.variant_refs.get(vi).unwrap()
+                if variant_ref_source_index(variant_ref) != vi ||
+                   !registered_nominal_ref_same(
+                        variant_ref_owner(variant_ref), def.owner_ref) {
+                    panic("enum identity ledger: variant owner/order drifted")
+                }
+                let expected_fields = def.variant_field_refs.get(vi).unwrap()
+                let actual_field_count = match v.named_fields {
+                    some(named) => if named.len() > 0 {
+                        named.len()
+                    } else { v.fields.len() },
+                    none => v.fields.len()
+                }
+                if expected_fields.len() != actual_field_count {
+                    panic("enum identity ledger: variant payload census drifted")
+                }
+                for field_index in 0..expected_fields.len() {
+                    let field_ref = expected_fields.get(field_index).unwrap()
+                    if variant_field_ref_index(field_ref) != field_index ||
+                       !variant_ref_same(
+                            variant_field_ref_variant(field_ref), variant_ref) {
+                        panic("enum identity ledger: payload field order drifted")
+                    }
+                }
                 match v.named_fields {
                     some(nf) => {
                         if nf.len() > 0 {
@@ -1787,10 +1854,11 @@ fn bind_variant_constructor(mut ctx: InferCtx, variant_name: Str, enum_type: Typ
 
 fn register_effect(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
-    ops: List<EffectOpDecl>, span: Span
+    ops: List<EffectOpDecl>, span: Span, decl_index: Int
 ) {
     validate_type_param_bound_shapes(
         ctx, type_params, BoundShapeContext::OrdinaryBound, span)
+    let identity = peek_effect_identity_fact(ctx, decl_index, ops.len())
     let saved = map_clone(ctx.type_param_scope)
     let mut tp_names: List<Str> = []
     let mut tp_vars: List<Int> = []
@@ -1801,6 +1869,7 @@ fn register_effect(
         ctx.type_param_scope.insert(tp.name, tv)
     }
     let mut effect_ops: List<EffectOpDef> = []
+    let mut op_index = 0
     for op in ops {
         let mut param_types: List<Type> = []
         for p in op.params {
@@ -1811,7 +1880,13 @@ fn register_effect(
         }
         let ret = resolve_type_expr(ctx, op.return_type)
         let op_has_default = op.body.is_some()
-        effect_ops.push(EffectOpDef { name: op.name, params: param_types, return_type: ret, has_default: op_has_default })
+        effect_ops.push(EffectOpDef {
+            name: op.name,
+            operation_ref: some(identity.operations.get(op_index).unwrap()),
+            params: param_types, return_type: ret,
+            has_default: op_has_default
+        })
+        op_index = op_index + 1
     }
     let mut all_defaults = true
     for eop in effect_ops {
@@ -1819,7 +1894,14 @@ fn register_effect(
     }
     if effect_ops.len() == 0 { all_defaults = false }
     ctx.type_param_scope = saved
-    ctx.env.types.effects.insert(name, EffectDef { name: name, type_params: tp_names, type_param_vars: tp_vars, ops: effect_ops, built_in_kind: none, all_have_defaults: all_defaults })
+    commit_effect_identity_fact(ctx, identity)
+    ctx.env.types.effects.insert(name, EffectDef {
+        name: name, owner_ref: some(identity.owner_ref),
+        handled_ref: some(identity.handled_ref),
+        type_params: tp_names, type_param_vars: tp_vars,
+        ops: effect_ops, built_in_kind: none,
+        all_have_defaults: all_defaults
+    })
 }
 
 // ============================================================
@@ -1943,19 +2025,29 @@ pub fn resolve_nominal_identity(ctx: InferCtx, type_name: Str) -> Str {
     }
 }
 
+fn push_unique_symbol(mut values: List<SymbolRef>, value: SymbolRef) {
+    for existing in values {
+        if symbol_ref_same(existing, value) { return }
+    }
+    values.push(value)
+}
+
 fn register_trait(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
     supertraits: List<TypeBound>, methods: List<Decl>, span: Span,
     decl_index: Int
 ) {
     let mut method_count = 0
+    let mut assoc_count = 0
     for method in methods {
         match method {
             Decl::Fn { .. } => { method_count = method_count + 1 },
+            Decl::AssocType { .. } => { assoc_count = assoc_count + 1 },
             _ => {}
         }
     }
-    let identity = peek_trait_identity_fact(ctx, decl_index, method_count)
+    let identity = peek_trait_identity_fact(
+        ctx, decl_index, method_count, assoc_count)
     let mut identity_callable_slot_index = 0
     for identity_source_member_index in 0..methods.len() {
         match methods.get(identity_source_member_index) {
@@ -2006,6 +2098,15 @@ fn register_trait(
             supertrait_names.push(resolve_trait_identity(ctx, st.trait_name))
         }
     }
+    let mut dict_obligations: List<SymbolRef> = []
+    for supertrait_name in supertrait_names {
+        match ctx.env.trait_reg.traits.get(supertrait_name) {
+            some(supertrait_def) => push_unique_symbol(
+                dict_obligations,
+                registered_trait_ref_symbol(supertrait_def.owner_ref)),
+            none => {}
+        }
+    }
 
     // Detect cyclic supertrait inheritance via DFS
     for st_name in supertrait_names {
@@ -2038,6 +2139,7 @@ fn register_trait(
 
     // Collect associated types first, inject into type_param_scope
     let mut assoc_type_defs: List<AssocTypeDef> = []
+    let mut assoc_slot_index = 0
     for method in methods {
         match method {
             Decl::AssocType { name: aname, bounds: abounds, value: avalue, .. } => {
@@ -2056,10 +2158,20 @@ fn register_trait(
                     some(v) => some(resolve_type_expr(ctx, v)),
                     none => none
                 }
-                assoc_type_defs.push(AssocTypeDef { name: aname, bounds: bound_names, default_type: default_ty, var_id: at_var_id })
+                let member_ref = identity.assoc_members.get(
+                    assoc_slot_index).unwrap()
+                assoc_type_defs.push(AssocTypeDef {
+                    name: aname, member_ref: member_ref,
+                    bounds: bound_names, default_type: default_ty,
+                    var_id: at_var_id
+                })
+                assoc_slot_index = assoc_slot_index + 1
             },
             _ => {}
         }
+    }
+    if assoc_slot_index != identity.assoc_members.len() {
+        panic("trait identity ledger: associated member census drifted")
     }
 
     // Inject Self into type_param_scope so Self::Item resolves in trait method signatures
@@ -2075,6 +2187,7 @@ fn register_trait(
     }
 
     let mut trait_methods: List<TraitMethodDef> = []
+    let mut handled_effect_obligations: List<HandledEffectRef> = []
     let mut callable_slot_index = 0
     for source_member_index in 0..methods.len() {
         let method = methods.get(source_member_index).unwrap()
@@ -2087,6 +2200,18 @@ fn register_trait(
                 validate_type_param_bound_shapes(
                     ctx, method_tps,
                     BoundShapeContext::ImplMethodBound, span)
+                for method_type_param in method_tps {
+                    for bound in method_type_param.bounds {
+                        match ctx.env.trait_reg.traits.get(
+                                resolve_trait_identity(ctx, bound.trait_name)) {
+                            some(bound_trait) => push_unique_symbol(
+                                dict_obligations,
+                                registered_trait_ref_symbol(
+                                    bound_trait.owner_ref)),
+                            none => {}
+                        }
+                    }
+                }
                 let mut param_types: List<Type> = []
                 let mut param_muts: List<Bool> = []
                 for p in params {
@@ -2109,6 +2234,30 @@ fn register_trait(
                     some(de) => resolve_declared_effects(ctx, de),
                     none => EMPTY_ROW
                 }
+                for method_effect in method_effects.effects {
+                    match method_effect {
+                        Effect::CustomEffect { name: effect_name, .. } =>
+                            match ctx.env.types.effects.get(effect_name) {
+                                some(effect_def) => match effect_def.handled_ref {
+                                    some(effect_ref) => {
+                                        let mut seen_effect = false
+                                        for existing in handled_effect_obligations {
+                                            if handled_effect_ref_same(
+                                                    existing, effect_ref) {
+                                                seen_effect = true
+                                            }
+                                        }
+                                        if !seen_effect {
+                                            handled_effect_obligations.push(effect_ref)
+                                        }
+                                    },
+                                    none => {}
+                                },
+                                none => {}
+                            },
+                        _ => {}
+                    }
+                }
                 let fn_type = Type::FnType { params: param_types, return_type: ret, effects: method_effects }
                 trait_methods.push(TraitMethodDef {
                     name: mname, method_ref: method_ref, ty: fn_type,
@@ -2124,12 +2273,39 @@ fn register_trait(
 
     ctx.type_param_scope = saved
     ctx.qualified_assoc_scope = saved_qualified_assoc
+    let registered_owner = make_registered_trait_ref(identity.owner_ref, name)
+    let mut method_contracts: List<RegisteredTraitMethodContract> = []
+    for method in trait_methods {
+        method_contracts.push(make_registered_trait_method_contract(
+            method.method_ref, method.ty, method.has_default,
+            method.param_mutabilities))
+    }
+    let mut assoc_contracts: List<RegisteredTraitAssocContract> = []
+    for assoc in assoc_type_defs {
+        let mut bound_refs: List<SymbolRef> = []
+        for bound_name in assoc.bounds {
+            match ctx.env.trait_reg.traits.get(bound_name) {
+                some(bound_trait) => push_unique_symbol(
+                    bound_refs,
+                    registered_trait_ref_symbol(bound_trait.owner_ref)),
+                none => {}
+            }
+        }
+        assoc_contracts.push(make_registered_trait_assoc_contract(
+            assoc.member_ref,
+            Type::TypeVar { id: assoc.var_id, name: some(assoc.name) },
+            assoc.default_type, bound_refs))
+    }
+    let contract = make_registered_trait_contract(
+        registered_owner, method_contracts, assoc_contracts,
+        handled_effect_obligations, dict_obligations)
     ctx.env.trait_reg.traits.insert(name, TraitDef {
         name: name,
-        owner_ref: make_registered_trait_ref(identity.owner_ref, name),
+        owner_ref: registered_owner,
         type_params: tp_names, type_param_vars: tp_vars,
         methods: trait_methods, supertraits: supertrait_names,
-        assoc_types: assoc_type_defs
+        assoc_types: assoc_type_defs,
+        contract: contract
     })
 }
 
@@ -2169,11 +2345,49 @@ fn exact_trait_ref(ctx: InferCtx, trait_name: Str?) -> SymbolRef? {
     }
 }
 
+fn impl_provider_module_key(provider: ImplProviderRef) -> Str {
+    module_body_ref_origin_module_key(path_owner_ref_module_body(
+        path_ref_owner(impl_provider_ref_site(provider))))
+}
+
+fn generated_impl_method_member(
+    provider: ImplProviderRef, discriminator: Str
+) -> SymbolRef {
+    let module_key = impl_provider_module_key(provider)
+    let provider_path = path_ref_normalized_child_path(
+        impl_provider_ref_site(provider)).join("/")
+    make_symbol_ref(
+        module_key, namespace_member(),
+        "impl-generated-member:${provider_path}:${discriminator}",
+        "provider:${provider_path}|${discriminator}")
+}
+
 fn register_impl(
     mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
     trait_name: Str?, methods: List<Decl>, span: Span, decl_index: Int
 ) {
     let provider_fact = peek_source_impl_provider_fact(ctx, decl_index)
+    let mut fact_slot = 0
+    for source_member_index in 0..methods.len() {
+        match methods.get(source_member_index) {
+            some(Decl::Fn { name, .. }) => {
+                let method_fact = match provider_fact.methods.get(fact_slot) {
+                    some(value) => value,
+                    none => panic("impl method identity ledger: method is missing")
+                }
+                if method_fact.source_member_index != source_member_index ||
+                   method_fact.callable_slot_index != fact_slot ||
+                   method_fact.name != name {
+                    panic("impl method identity ledger: source order drifted")
+                }
+                fact_slot = fact_slot + 1
+            },
+            _ => {}
+        }
+    }
+    if fact_slot != provider_fact.methods.len() {
+        panic("impl method identity ledger: extra method fact")
+    }
     commit_source_impl_provider_fact(ctx, provider_fact)
     let mut has_delegate = false
     for source_member_index in 0..methods.len() {
@@ -2190,15 +2404,24 @@ fn register_impl(
     register_impl_canonical(
         ctx, resolve_nominal_identity(ctx, target_type), type_params,
         trait_name, methods, span, provider_fact.provider_ref,
-        delegate_plan)
+        provider_fact.methods, decl_index, delegate_plan)
 }
 
 fn register_impl_canonical(
     mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
     trait_name: Str?, methods: List<Decl>, span: Span,
     provider_ref: ImplProviderRef,
+    method_identity_facts: List<ImplMethodIdentityFact>,
+    decl_index: Int,
     delegate_plan: DelegatePlanState
 ) {
+    for source_member in methods {
+        match source_member {
+            Decl::ExternFn { .. } => panic(
+                "impl registration: forbidden extern member crossed parser"),
+            _ => {}
+        }
+    }
     let resolved_trait_name = match trait_name {
         some(name) => some(resolve_trait_identity(ctx, name)), none => none
     }
@@ -2470,6 +2693,56 @@ fn register_impl_canonical(
         for tp in type_params { tp_names.push(tp.name) }
         let mut explicit_method_names = declared_method_names.to_list()
         explicit_method_names.sort()
+        let target_ref = match impl_target_symbol(ctx.env, target_type) {
+            some(symbol) => symbol,
+            none => panic("impl owner: exact target symbol is missing")
+        }
+        let owner_ref = make_impl_owner_ref(
+            target_ref, provider_ref, resolved_trait_ref)
+        publish_impl_check_owner(ctx, decl_index, owner_ref)
+        let mut exact_method_refs: Map<Str, ImplMethodRef> = map_new()
+        for fact in method_identity_facts {
+            if exact_method_schemes.contains_key(fact.name) &&
+               !exact_method_refs.contains_key(fact.name) {
+                exact_method_refs.insert(fact.name, make_impl_method_ref(
+                    owner_ref, fact.member_ref,
+                    fact.source_member_index,
+                    fact.callable_slot_index, fact.name))
+            }
+        }
+        let mut sorted_method_cores = exact_method_schemes.entries()
+        sorted_method_cores.sort_by(compare_by_first)
+        let mut generated_index = 0
+        for method_entry in sorted_method_cores {
+            let (method_name, _) = method_entry
+            if !exact_method_refs.contains_key(method_name) {
+                let mut discriminator = "generated:${generated_index}"
+                match resolved_trait_name {
+                    some(trait_identity) => match
+                            ctx.env.trait_reg.traits.get(trait_identity) {
+                        some(trait_def) => match trait_def.methods.find(fn(method) {
+                            method.name == method_name
+                        }) {
+                            some(method) => {
+                                discriminator = "default:${trait_method_ref_source_member_index(
+                                    method.method_ref)}:${trait_method_ref_callable_slot_index(
+                                    method.method_ref)}"
+                            },
+                            none => {}
+                        },
+                        none => {}
+                    },
+                    none => {}
+                }
+                let callable_index = method_identity_facts.len() + generated_index
+                exact_method_refs.insert(method_name, make_impl_method_ref(
+                    owner_ref,
+                    generated_impl_method_member(provider_ref, discriminator),
+                    methods.len() + generated_index,
+                    callable_index, method_name))
+                generated_index = generated_index + 1
+            }
+        }
         let owner_entry = ImplEntry {
             trait_name: resolved_trait_name,
             target_type_name: target_type,
@@ -2479,9 +2752,11 @@ fn register_impl_canonical(
             method_names: explicit_method_names,
             assoc_types: map_clone(assoc_type_map),
             method_schemes: map_clone(exact_method_schemes),
+            method_refs: exact_method_refs,
             method_intrinsics: map_new(),
             provider_ref: some(provider_ref),
             trait_ref: resolved_trait_ref,
+            owner_ref: some(owner_ref),
             delegate_plan: delegate_plan,
             origin: origin, span: span,
             owner_state: ImplOwnerState::FinalOwner
@@ -2504,6 +2779,7 @@ fn register_impl_canonical(
                     trait_name: resolved_trait_name,
                     provider_ref: provider_ref,
                     trait_ref: resolved_trait_ref,
+                    method_ref: exact_method_refs.get(method_name).unwrap(),
                     span: span
                 })
         }
@@ -3043,6 +3319,38 @@ fn register_delegate_traits(
 
                                 let mut method_names = exact_method_schemes.keys()
                                 method_names.sort()
+                                let delegate_trait_ref =
+                                    registered_trait_ref_symbol(
+                                        reg_trait_def.owner_ref)
+                                let delegate_target_ref = match
+                                        impl_target_symbol(ctx.env, target_type) {
+                                    some(symbol) => symbol,
+                                    none => panic(
+                                        "delegate owner: exact target symbol is missing")
+                                }
+                                let delegate_owner_ref = make_impl_owner_ref(
+                                    delegate_target_ref, provider_ref,
+                                    some(delegate_trait_ref))
+                                let mut exact_method_refs:
+                                    Map<Str, ImplMethodRef> = map_new()
+                                for tm in reg_trait_def.methods {
+                                    if exact_method_schemes.contains_key(tm.name) {
+                                        let source_index =
+                                            trait_method_ref_source_member_index(
+                                                tm.method_ref)
+                                        let callable_index =
+                                            trait_method_ref_callable_slot_index(
+                                                tm.method_ref)
+                                        exact_method_refs.insert(
+                                            tm.name, make_impl_method_ref(
+                                                delegate_owner_ref,
+                                                generated_impl_method_member(
+                                                    provider_ref,
+                                                    "delegate:${source_index}:${callable_index}"),
+                                                source_index, callable_index,
+                                                tm.name))
+                                    }
+                                }
 
                                 add_impl(ctx.env.trait_reg, ImplEntry {
                                     trait_name: some(reg_tname),
@@ -3053,10 +3361,11 @@ fn register_delegate_traits(
                                     method_names: method_names,
                                     assoc_types: map_clone(field_assoc_types),
                                     method_schemes: map_clone(exact_method_schemes),
+                                    method_refs: exact_method_refs,
                                     method_intrinsics: map_new(),
                                     provider_ref: some(provider_ref),
-                                    trait_ref: some(registered_trait_ref_symbol(
-                                        reg_trait_def.owner_ref)),
+                                    trait_ref: some(delegate_trait_ref),
+                                    owner_ref: some(delegate_owner_ref),
                                     delegate_plan: delegate_plan_not_applicable(),
                                     origin: origin,
                                     span: span,
@@ -3074,9 +3383,9 @@ fn register_delegate_traits(
                                             origin: origin,
                                             trait_name: some(reg_tname),
                                             provider_ref: provider_ref,
-                                            trait_ref: some(
-                                                registered_trait_ref_symbol(
-                                                    reg_trait_def.owner_ref)),
+                                            trait_ref: some(delegate_trait_ref),
+                                            method_ref: exact_method_refs.get(
+                                                method_name).unwrap(),
                                             span: span
                                         })
                                 }
@@ -3587,11 +3896,12 @@ fn register_decl(mut ctx: InferCtx, decl: Decl, decl_index: Int) {
         },
         Decl::Enum { name, type_params, variants, derive_attrs, span, .. } => {
             preregister_enum(
-                ctx, name, type_params, derive_attrs, span, decl_index)
+                ctx, name, type_params, variants,
+                derive_attrs, span, decl_index)
             complete_enum_variants(ctx, name, type_params, variants)
         },
         Decl::Effect { name, type_params, ops, span, .. } =>
-            register_effect(ctx, name, type_params, ops, span),
+            register_effect(ctx, name, type_params, ops, span, decl_index),
         Decl::Impl { target_type, type_params, trait_name, methods, span } =>
             register_impl(
                 ctx, target_type, type_params, trait_name, methods, span,

@@ -240,11 +240,12 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
                 trait_bounds: trait_bounds, span: span
             }
         },
-        HDecl::Impl { target_type, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
+        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
             for m in methods { new_methods.push(anf_decl(m, externs, counter)) }
             HDecl::Impl {
-                target_type: target_type, type_params: type_params,
+                target_type: target_type, owner_ref: owner_ref,
+                type_params: type_params,
                 provider_ref: provider_ref, trait_ref: trait_ref,
                 trait_name: trait_name, methods: new_methods,
                 assoc_types: assoc_types, span: span
@@ -267,7 +268,7 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
         },
         HDecl::Struct { .. } => decl,
         HDecl::Enum { .. } => decl,
-        HDecl::Effect { name, type_params, ops, is_pub, span } => {
+        HDecl::Effect { name, owner_ref, handled_ref, type_params, ops, is_pub, span } => {
             let mut new_ops: List<HEffectOp> = []
             for op in ops {
                 let new_default_body = match op.default_body {
@@ -275,11 +276,12 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
                     none => none,
                 }
                 new_ops.push(HEffectOp {
-                    name: op.name, params: op.params, return_type: op.return_type,
+                    name: op.name, operation_ref: op.operation_ref,
+                    params: op.params, return_type: op.return_type,
                     has_default: op.has_default, default_body: new_default_body
                 })
             }
-            HDecl::Effect { name: name, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
+            HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
         HDecl::Trait { .. } => decl,
         HDecl::ExternFn { .. } => decl,
@@ -1007,16 +1009,16 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 spread: new_spread, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::NamedVariantConstruct { enum_name, variant_name, fields, spread, ty, effects, span } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []
             for f in fields {
-                new_fields.push(HStructFieldInit { name: f.name, value: anf_tail_value(f.value, hoists, externs, counter) })
+                new_fields.push(HStructFieldInit { name: f.name, field_ref: f.field_ref, value: anf_tail_value(f.value, hoists, externs, counter) })
             }
             let new_spread = match spread {
                 some(s) => some(anf_borrow(s, hoists, externs, counter)),
                 none => none,
             }
-            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name,
+            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, variant_ref: variant_ref,
                 fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
         },
 
@@ -1154,7 +1156,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, operation_ref, args, ty, effects, span } => {
             // B-104 D1 Stage 2 — EFFECT-OP ARG position (closes the W1-era
             // conservative hold-out).  Args are BORROW-passed to the handler
             // closure (gen_effect_op → gen_closure_call; closure params are
@@ -1176,7 +1178,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             //     never released).
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(anf_operand(a, hoists, externs, counter)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args,
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -1258,11 +1260,12 @@ fn transform_decl(
                 body: new_body, is_pub: is_pub, trait_bounds: trait_bounds, span: span
             }
         },
-        HDecl::Impl { target_type, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
+        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
             let new_methods = transform_decls(
                 methods, boxed, externs, drop_types, gensym)
             HDecl::Impl {
-                target_type: target_type, type_params: type_params,
+                target_type: target_type, owner_ref: owner_ref,
+                type_params: type_params,
                 provider_ref: provider_ref, trait_ref: trait_ref,
                 trait_name: trait_name, methods: new_methods,
                 assoc_types: assoc_types, span: span
@@ -1290,7 +1293,7 @@ fn transform_decl(
         // Non-function declarations pass through unchanged
         HDecl::Struct { .. } => decl,
         HDecl::Enum { .. } => decl,
-        HDecl::Effect { name, type_params, ops, is_pub, span } => {
+        HDecl::Effect { name, owner_ref, handled_ref, type_params, ops, is_pub, span } => {
             let mut new_ops: List<HEffectOp> = []
             for op in ops {
                 let new_default_body = match op.default_body {
@@ -1299,11 +1302,12 @@ fn transform_decl(
                     none => none,
                 }
                 new_ops.push(HEffectOp {
-                    name: op.name, params: op.params, return_type: op.return_type,
+                    name: op.name, operation_ref: op.operation_ref,
+                    params: op.params, return_type: op.return_type,
                     has_default: op.has_default, default_body: new_default_body
                 })
             }
-            HDecl::Effect { name: name, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
+            HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
         HDecl::Trait { .. } => decl,
         HDecl::ExternFn { .. } => decl,
@@ -2679,16 +2683,16 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 spread: new_spread, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::NamedVariantConstruct { enum_name, variant_name, fields, spread, ty, effects, span } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []
             for f in fields {
-                new_fields.push(HStructFieldInit { name: f.name, value: rc_escape(f.value, owned, boxed, externs, drop_types, gensym, loop_base) })
+                new_fields.push(HStructFieldInit { name: f.name, field_ref: f.field_ref, value: rc_escape(f.value, owned, boxed, externs, drop_types, gensym, loop_base) })
             }
             let new_spread = match spread {
                 some(s) => some(rc_expr(s, false, owned, boxed, externs, drop_types, gensym, loop_base)),
                 none => none,
             }
-            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name,
+            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, variant_ref: variant_ref,
                 fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
         },
 
@@ -2812,12 +2816,12 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, operation_ref, args, ty, effects, span } => {
             // Effect-op args: treat like ordinary call args — borrow (the handler
             // closure receives them; full effect-arg ownership is B-096 scope).
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(rc_expr(a, false, owned, boxed, externs, drop_types, gensym, loop_base)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args,
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 

@@ -19,16 +19,25 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     impl_method_core_as_scheme, frozen_impl_predicates,
     impl_predicate_subject_type_var, impl_predicate_trait_name,
     impl_predicate_assoc_constraints, impl_assoc_predicate_name,
-    impl_assoc_predicate_type, instantiate_impl_runtime_requirements}
+    impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
+    registered_trait_contract_owner}
 use unify::{UnificationError, empty_subst, unify, occurs_in, unify_effect_params}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
-    StructIdentityFact, TraitIdentityFact, SourceImplProviderFact,
+    StructIdentityFact, TraitIdentityFact, EnumVariantFactGroup,
+    EffectIdentityFact,
+    SourceImplProviderFact,
     DelegateProviderFact, NominalDerivedProviderPlanFact, NamespaceKind}
-use ir_identity::{SymbolRef, symbol_ref_canonical_payload, symbol_ref_same,
-    ImplProviderRef, impl_provider_ref_same,
+use ir_identity::{SymbolRef, symbol_ref_canonical_payload,
+    symbol_ref_origin_module_key, symbol_ref_same,
+    ImplProviderRef, ImplOwnerRef,
+    impl_provider_ref_same, impl_owner_ref_same,
     nominal_field_ref_same, trait_method_ref_same,
+    registered_nominal_ref_same, variant_ref_same,
+    variant_field_ref_same,
+    handled_effect_ref_same,
     registered_nominal_ref_symbol, registered_trait_ref_symbol,
-    registered_trait_ref_display_name}
+    registered_trait_ref_display_name, registered_trait_ref_same}
+use ir_inventory::{effect_operation_ref_same}
 
 // ============================================================
 // InferResult — return type for expression inference
@@ -193,10 +202,18 @@ pub struct InferCtx {
     struct_identity_unconsumed: List<StructIdentityFact>,
     struct_identity_pending: List<StructIdentityFact>,
     trait_identity_unconsumed: List<TraitIdentityFact>,
+    enum_identity_unconsumed: List<EnumVariantFactGroup>,
+    effect_identity_unconsumed: List<EffectIdentityFact>,
     source_impl_provider_unconsumed: List<SourceImplProviderFact>,
     delegate_provider_unconsumed: List<DelegateProviderFact>,
     nominal_derived_provider_unconsumed:
-        List<NominalDerivedProviderPlanFact>
+        List<NominalDerivedProviderPlanFact>,
+    // Registration-issued AST-site index for the repeated effect/main HIR
+    // checks. Values are opaque owner refs; no target/name/span is replayed.
+    impl_check_root_frames: Map<Str, Int>,
+    impl_check_child_frames: Map<Str, Int>,
+    impl_check_frame_stack: List<(Str, Int)>,
+    impl_check_owners: Map<Str, ImplOwnerRef>
 }
 
 pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
@@ -236,9 +253,15 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         struct_identity_unconsumed: [],
         struct_identity_pending: [],
         trait_identity_unconsumed: [],
+        enum_identity_unconsumed: [],
+        effect_identity_unconsumed: [],
         source_impl_provider_unconsumed: [],
         delegate_provider_unconsumed: [],
-        nominal_derived_provider_unconsumed: []
+        nominal_derived_provider_unconsumed: [],
+        impl_check_root_frames: map_new(),
+        impl_check_child_frames: map_new(),
+        impl_check_frame_stack: [],
+        impl_check_owners: map_new()
     }
 }
 
@@ -391,6 +414,11 @@ fn apply_project_namespace_binding(
         NamespaceKind::Enum => match ctx.env.types.enums.get(canonical_payload) {
             none => false,
             some(def) => {
+                if !symbol_ref_same(
+                        binding.symbol,
+                        registered_nominal_ref_symbol(def.owner_ref)) {
+                    panic("project hydration: enum owner identity mismatch")
+                }
                 state.journal.push(ProjectNamespaceUndo::Enum {
                     name: binding.exposed_name,
                     previous: ctx.env.types.enums.get(binding.exposed_name)
@@ -413,6 +441,15 @@ fn apply_project_namespace_binding(
         NamespaceKind::Effect => match ctx.env.types.effects.get(canonical_payload) {
             none => false,
             some(def) => {
+                match def.owner_ref {
+                    some(owner) => if !symbol_ref_same(
+                            binding.symbol, owner) ||
+                            def.handled_ref.is_none() {
+                        panic("project hydration: effect owner identity mismatch")
+                    },
+                    none => panic(
+                        "project hydration: source effect has no exact owner")
+                }
                 state.journal.push(ProjectNamespaceUndo::Effect {
                     name: binding.exposed_name,
                     previous: ctx.env.types.effects.get(binding.exposed_name)
@@ -439,7 +476,10 @@ fn apply_project_namespace_binding(
                         binding.symbol,
                         registered_trait_ref_symbol(def.owner_ref)) ||
                    registered_trait_ref_display_name(def.owner_ref) !=
-                        def.name || def.name != canonical_payload {
+                        def.name || def.name != canonical_payload ||
+                   !registered_trait_ref_same(
+                        registered_trait_contract_owner(def.contract),
+                        def.owner_ref) {
                     panic("project hydration: trait owner identity mismatch")
                 }
                 state.journal.push(ProjectNamespaceUndo::Trait {
@@ -3338,9 +3378,14 @@ pub fn install_struct_identity_ledger(
        ctx.struct_identity_unconsumed.len() != 0 ||
        ctx.struct_identity_pending.len() != 0 ||
        ctx.trait_identity_unconsumed.len() != 0 ||
+       ctx.enum_identity_unconsumed.len() != 0 ||
+       ctx.effect_identity_unconsumed.len() != 0 ||
+       ctx.effect_identity_unconsumed.len() != 0 ||
+       ctx.enum_identity_unconsumed.len() != 0 ||
        ctx.source_impl_provider_unconsumed.len() != 0 ||
        ctx.delegate_provider_unconsumed.len() != 0 ||
-       ctx.nominal_derived_provider_unconsumed.len() != 0 {
+       ctx.nominal_derived_provider_unconsumed.len() != 0 ||
+       ctx.impl_check_frame_stack.len() != 0 {
         panic("struct identity ledger: prior ledger is still active")
     }
     ctx.struct_identity_file_key = some(file_key)
@@ -3353,6 +3398,10 @@ pub fn install_struct_identity_ledger(
                     panic("struct identity ledger: duplicate root frame")
                 }
                 ctx.struct_identity_root_frame = some(frame.frame_index)
+                if ctx.impl_check_root_frames.contains_key(file_key) {
+                    panic("impl check index: duplicate file root")
+                }
+                ctx.impl_check_root_frames.insert(file_key, frame.frame_index)
             } else {
                 let key = project_child_site_key(
                     frame.parent_frame_index, frame.decl_index)
@@ -3360,6 +3409,12 @@ pub fn install_struct_identity_ledger(
                     panic("struct identity ledger: duplicate child frame")
                 }
                 ctx.struct_identity_child_frames.insert(key, frame.frame_index)
+                let check_key = "${file_key}|${key}"
+                if ctx.impl_check_child_frames.contains_key(check_key) {
+                    panic("impl check index: duplicate child frame")
+                }
+                ctx.impl_check_child_frames.insert(
+                    check_key, frame.frame_index)
             }
         }
     }
@@ -3382,6 +3437,27 @@ pub fn install_struct_identity_ledger(
                 }
             }
             ctx.trait_identity_unconsumed.push(fact)
+        }
+    }
+    for group in plan.enum_variant_facts {
+        if symbol_ref_origin_module_key(group.enum_symbol) == file_key {
+            for existing in ctx.enum_identity_unconsumed {
+                if symbol_ref_same(
+                        existing.enum_symbol, group.enum_symbol) {
+                    panic("enum identity ledger: duplicate declaration owner")
+                }
+            }
+            ctx.enum_identity_unconsumed.push(group)
+        }
+    }
+    for fact in plan.effect_identities {
+        if fact.file_key == file_key {
+            for existing in ctx.effect_identity_unconsumed {
+                if symbol_ref_same(existing.owner_ref, fact.owner_ref) {
+                    panic("effect identity ledger: duplicate declaration owner")
+                }
+            }
+            ctx.effect_identity_unconsumed.push(fact)
         }
     }
     for fact in plan.source_impl_providers {
@@ -3544,6 +3620,30 @@ pub fn commit_struct_identity_fact(
     if await_fields { ctx.struct_identity_pending.push(fact) }
 }
 
+// Enum declarations and other fieldless normal nominals close at their
+// resolver-issued declaration site in one step.  They must never enter the
+// struct field-completion queue merely to preserve exact owner identity.
+pub fn commit_complete_nominal_identity_fact(
+    mut ctx: InferCtx, fact: StructIdentityFact
+) {
+    if fact.is_extern || fact.fields.len() != 0 {
+        panic("nominal identity ledger: direct completion shape is invalid")
+    }
+    let mut matches = 0
+    let mut remaining: List<StructIdentityFact> = []
+    for existing in ctx.struct_identity_unconsumed {
+        if struct_identity_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("nominal identity ledger: direct completion mismatch")
+    }
+    ctx.struct_identity_unconsumed = remaining
+}
+
 pub fn peek_struct_identity_completion(
     ctx: InferCtx, owner_ref: SymbolRef
 ) -> StructIdentityFact {
@@ -3587,7 +3687,8 @@ fn trait_identity_fact_same(
        left.frame_index != right.frame_index ||
        left.decl_index != right.decl_index ||
        !symbol_ref_same(left.owner_ref, right.owner_ref) ||
-       left.methods.len() != right.methods.len() {
+       left.methods.len() != right.methods.len() ||
+       left.assoc_members.len() != right.assoc_members.len() {
         return false
     }
     for method_index in 0..left.methods.len() {
@@ -3598,11 +3699,19 @@ fn trait_identity_fact_same(
             _ => return false
         }
     }
+    for assoc_index in 0..left.assoc_members.len() {
+        if !symbol_ref_same(
+                left.assoc_members.get(assoc_index).unwrap(),
+                right.assoc_members.get(assoc_index).unwrap()) {
+            return false
+        }
+    }
     true
 }
 
 pub fn peek_trait_identity_fact(
-    ctx: InferCtx, decl_index: Int, method_count: Int
+    ctx: InferCtx, decl_index: Int,
+    method_count: Int, assoc_count: Int
 ) -> TraitIdentityFact {
     let frame_index = match ctx.struct_identity_frame_stack.get(
         ctx.struct_identity_frame_stack.len() - 1) {
@@ -3624,7 +3733,8 @@ pub fn peek_trait_identity_fact(
         some(value) => value,
         none => panic("trait identity ledger: missing declaration fact")
     }
-    if fact.methods.len() != method_count {
+    if fact.methods.len() != method_count ||
+       fact.assoc_members.len() != assoc_count {
         panic("trait identity ledger: declaration shape mismatch")
     }
     fact
@@ -3648,6 +3758,143 @@ pub fn commit_trait_identity_fact(
     ctx.trait_identity_unconsumed = remaining
 }
 
+fn enum_identity_group_same(
+    left: EnumVariantFactGroup, right: EnumVariantFactGroup
+) -> Bool {
+    if !symbol_ref_same(left.enum_symbol, right.enum_symbol) ||
+       !registered_nominal_ref_same(left.owner_ref, right.owner_ref) ||
+       left.variants.len() != right.variants.len() {
+        return false
+    }
+    for variant_index in 0..left.variants.len() {
+        let a = left.variants.get(variant_index).unwrap()
+        let b = right.variants.get(variant_index).unwrap()
+        if !variant_ref_same(a.variant_ref, b.variant_ref) ||
+           a.fields.len() != b.fields.len() {
+            return false
+        }
+        for field_index in 0..a.fields.len() {
+            if !variant_field_ref_same(
+                    a.fields.get(field_index).unwrap(),
+                    b.fields.get(field_index).unwrap()) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+pub fn peek_enum_identity_group(
+    ctx: InferCtx, owner_ref: SymbolRef,
+    variant_field_counts: List<Int>
+) -> EnumVariantFactGroup {
+    let mut found: EnumVariantFactGroup? = none
+    for group in ctx.enum_identity_unconsumed {
+        if symbol_ref_same(group.enum_symbol, owner_ref) {
+            if found.is_some() {
+                panic("enum identity ledger: duplicate consume match")
+            }
+            found = some(group)
+        }
+    }
+    let group = match found {
+        some(value) => value,
+        none => panic("enum identity ledger: declaration fact is missing")
+    }
+    if group.variants.len() != variant_field_counts.len() {
+        panic("enum identity ledger: variant census changed")
+    }
+    for index in 0..variant_field_counts.len() {
+        if group.variants.get(index).unwrap().fields.len() !=
+           variant_field_counts.get(index).unwrap_or(-1) {
+            panic("enum identity ledger: payload field census changed")
+        }
+    }
+    group
+}
+
+pub fn commit_enum_identity_group(
+    mut ctx: InferCtx, group: EnumVariantFactGroup
+) {
+    let mut matches = 0
+    let mut remaining: List<EnumVariantFactGroup> = []
+    for existing in ctx.enum_identity_unconsumed {
+        if enum_identity_group_same(existing, group) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("enum identity ledger: commit mismatch")
+    }
+    ctx.enum_identity_unconsumed = remaining
+}
+
+fn effect_identity_fact_same(
+    left: EffectIdentityFact, right: EffectIdentityFact
+) -> Bool {
+    if left.file_key != right.file_key ||
+       left.frame_index != right.frame_index ||
+       left.decl_index != right.decl_index ||
+       !symbol_ref_same(left.owner_ref, right.owner_ref) ||
+       !handled_effect_ref_same(left.handled_ref, right.handled_ref) ||
+       left.operations.len() != right.operations.len() {
+        return false
+    }
+    for index in 0..left.operations.len() {
+        if !effect_operation_ref_same(
+                left.operations.get(index).unwrap(),
+                right.operations.get(index).unwrap()) {
+            return false
+        }
+    }
+    true
+}
+
+pub fn peek_effect_identity_fact(
+    ctx: InferCtx, decl_index: Int, op_count: Int
+) -> EffectIdentityFact {
+    let frame_index = current_provider_identity_frame(ctx)
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let mut found: EffectIdentityFact? = none
+    for fact in ctx.effect_identity_unconsumed {
+        if fact.file_key == file_key && fact.frame_index == frame_index &&
+           fact.decl_index == decl_index {
+            if found.is_some() {
+                panic("effect identity ledger: duplicate consume match")
+            }
+            found = some(fact)
+        }
+    }
+    let fact = match found {
+        some(value) => value,
+        none => panic("effect identity ledger: declaration fact is missing")
+    }
+    if fact.operations.len() != op_count {
+        panic("effect identity ledger: operation census changed")
+    }
+    fact
+}
+
+pub fn commit_effect_identity_fact(
+    mut ctx: InferCtx, fact: EffectIdentityFact
+) {
+    let mut matches = 0
+    let mut remaining: List<EffectIdentityFact> = []
+    for existing in ctx.effect_identity_unconsumed {
+        if effect_identity_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("effect identity ledger: commit mismatch")
+    }
+    ctx.effect_identity_unconsumed = remaining
+}
+
 fn current_provider_identity_frame(ctx: InferCtx) -> Int {
     match ctx.struct_identity_frame_stack.get(
         ctx.struct_identity_frame_stack.len() - 1) {
@@ -3656,13 +3903,95 @@ fn current_provider_identity_frame(ctx: InferCtx) -> Int {
     }
 }
 
+fn impl_check_site_key(
+    file_key: Str, frame_index: Int, decl_index: Int
+) -> Str {
+    "${file_key}|${frame_index}|${decl_index}"
+}
+
+pub fn publish_impl_check_owner(
+    mut ctx: InferCtx, decl_index: Int, owner_ref: ImplOwnerRef
+) {
+    let frame_index = current_provider_identity_frame(ctx)
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let key = impl_check_site_key(file_key, frame_index, decl_index)
+    match ctx.impl_check_owners.get(key) {
+        some(existing) => if !impl_owner_ref_same(existing, owner_ref) {
+            panic("impl check index: source site changed owner")
+        },
+        none => ctx.impl_check_owners.insert(key, owner_ref)
+    }
+}
+
+pub fn enter_impl_check_root_frame(mut ctx: InferCtx, file_key: Str) {
+    if ctx.impl_check_frame_stack.len() != 0 {
+        panic("impl check index: root entered while active")
+    }
+    match ctx.impl_check_root_frames.get(file_key) {
+        some(frame) => ctx.impl_check_frame_stack.push((file_key, frame)),
+        none => panic("impl check index: root frame is missing")
+    }
+}
+
+pub fn enter_impl_check_child_frame(
+    mut ctx: InferCtx, decl_index: Int
+) {
+    let parent = match ctx.impl_check_frame_stack.get(
+        ctx.impl_check_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("impl check index: child entered without parent")
+    }
+    match ctx.impl_check_child_frames.get(
+            "${parent.0}|${project_child_site_key(parent.1, decl_index)}") {
+        some(frame) => ctx.impl_check_frame_stack.push((parent.0, frame)),
+        none => panic("impl check index: child frame is missing")
+    }
+}
+
+pub fn exit_impl_check_frame(mut ctx: InferCtx) {
+    if ctx.impl_check_frame_stack.pop().is_none() {
+        panic("impl check index: frame exit underflow")
+    }
+}
+
+pub fn impl_check_owner(
+    ctx: InferCtx, decl_index: Int
+) -> ImplOwnerRef {
+    let frame = match ctx.impl_check_frame_stack.get(
+        ctx.impl_check_frame_stack.len() - 1) {
+        some(value) => value,
+        none => panic("impl check index: declaration outside frame")
+    }
+    match ctx.impl_check_owners.get(
+            impl_check_site_key(frame.0, frame.1, decl_index)) {
+        some(owner) => owner,
+        none => panic("impl check index: source owner is missing")
+    }
+}
+
 fn source_impl_provider_fact_same(
     left: SourceImplProviderFact, right: SourceImplProviderFact
 ) -> Bool {
-    left.file_key == right.file_key &&
-        left.frame_index == right.frame_index &&
-        left.decl_index == right.decl_index &&
-        impl_provider_ref_same(left.provider_ref, right.provider_ref)
+    if left.file_key != right.file_key ||
+       left.frame_index != right.frame_index ||
+       left.decl_index != right.decl_index ||
+       !impl_provider_ref_same(left.provider_ref, right.provider_ref) ||
+       left.methods.len() != right.methods.len() {
+        return false
+    }
+    for index in 0..left.methods.len() {
+        match (left.methods.get(index), right.methods.get(index)) {
+            (some(a), some(b)) => if
+                a.source_member_index != b.source_member_index ||
+                a.callable_slot_index != b.callable_slot_index ||
+                a.name != b.name ||
+                !symbol_ref_same(a.member_ref, b.member_ref) {
+                return false
+            },
+            _ => return false
+        }
+    }
+    true
 }
 
 pub fn peek_source_impl_provider_fact(
@@ -3851,6 +4180,8 @@ pub fn close_struct_identity_ledger(mut ctx: InferCtx) {
     ctx.struct_identity_unconsumed = []
     ctx.struct_identity_pending = []
     ctx.trait_identity_unconsumed = []
+    ctx.enum_identity_unconsumed = []
+    ctx.effect_identity_unconsumed = []
     ctx.source_impl_provider_unconsumed = []
     ctx.delegate_provider_unconsumed = []
     ctx.nominal_derived_provider_unconsumed = []

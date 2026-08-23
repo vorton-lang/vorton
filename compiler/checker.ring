@@ -33,6 +33,7 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
     prelude_namespace_file_key, resolve_prelude_namespace_plan}
 use codes::{E0504, E0702, E0703, E0704, E0705, E0707, E0801}
 use parser::{parse}
+use ir_identity::{impl_owner_ref_same, impl_method_ref_same}
 use union_find::{UnionFind}
 
 pub struct CheckResult {
@@ -112,12 +113,18 @@ fn find_std_dir() -> Str? {
     none
 }
 
+struct PreludeDeclSite {
+    decl: Decl,
+    file_key: Str,
+    decl_index: Int
+}
+
 fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
     let mut prelude_hdecls: List<HDecl> = []
     match find_std_dir() {
         some(std_dir) => {
             // Phase 1: collect and register all prelude declarations
-            let mut all_prelude_decls: List<Decl> = []
+            let mut all_prelude_decls: List<PreludeDeclSite> = []
             for file in (STD_FILES) {
                 let file_path = path_join(std_dir, file)
                 if file_exists(file_path) {
@@ -142,7 +149,11 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                         let canonical_decl = canonical_decls.get(
                             decl_index).unwrap()
                         register_decl_public(ctx, canonical_decl, decl_index)
-                        all_prelude_decls.push(canonical_decl)
+                        all_prelude_decls.push(PreludeDeclSite {
+                            decl: canonical_decl,
+                            file_key: prelude_namespace_file_key(file_path),
+                            decl_index: decl_index
+                        })
                     }
                     exit_struct_identity_frame(ctx)
                     close_struct_identity_ledger(ctx)
@@ -165,8 +176,8 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
             // to their final exact DefIds. Give every top-level prelude extern
             // an unspellable semantic identity; later user fn/const bindings
             // receive distinct DefIds and cannot collide in backend registries.
-            for decl in all_prelude_decls {
-                match decl {
+            for site in all_prelude_decls {
+                match site.decl {
                     Decl::ExternFn { name, .. } => {
                         record_value_origin(ctx, name,
                             prelude_extern_identity(name))
@@ -178,24 +189,28 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
             // ExternFn declarations also become HDecl metadata: unlike impl
             // extern methods, their first-class values need an exact
             // declaration identity -> ABI leaf mapping in both backends.
-            for decl in all_prelude_decls {
+            for site in all_prelude_decls {
+                let decl = site.decl
                 match decl {
                     Decl::Struct { .. } => {
-                        let result = some(check_prelude_decl(ctx, decl)) catch { _ => none }
+                        let result = some(check_prelude_decl(
+                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
                         match result {
                             some(hd) => { prelude_hdecls.push(hd) },
                             none => {}
                         }
                     },
                     Decl::Enum { .. } => {
-                        let result = some(check_prelude_decl(ctx, decl)) catch { _ => none }
+                        let result = some(check_prelude_decl(
+                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
                         match result {
                             some(hd) => { prelude_hdecls.push(hd) },
                             none => {}
                         }
                     },
                     Decl::Trait { .. } => {
-                        let result = some(check_prelude_decl(ctx, decl)) catch { _ => none }
+                        let result = some(check_prelude_decl(
+                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
                         match result {
                             some(hd) => { prelude_hdecls.push(hd) },
                             none => {}
@@ -217,7 +232,9 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                 methods: fn_methods,
                                 span: span
                             }
-                            let result = some(check_prelude_decl(ctx, filtered_decl)) catch { _ => none }
+                            let result = some(check_prelude_decl(
+                                ctx, filtered_decl,
+                                site.file_key, site.decl_index)) catch { _ => none }
                             match result {
                                 some(hd) => { prelude_hdecls.push(hd) },
                                 none => {}
@@ -225,14 +242,16 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                         }
                     },
                     Decl::Fn { .. } => {
-                        let result = some(check_prelude_decl(ctx, decl)) catch { _ => none }
+                        let result = some(check_prelude_decl(
+                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
                         match result {
                             some(hd) => { prelude_hdecls.push(hd) },
                             none => {}
                         }
                     },
                     Decl::ExternFn { .. } => {
-                        let result = some(check_prelude_decl(ctx, decl)) catch { _ => none }
+                        let result = some(check_prelude_decl(
+                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
                         match result {
                             some(HDecl::ExternFn {
                                 name, abi_name, def_id, type_params, params,
@@ -269,6 +288,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
             assert_no_provisional_impl_owners(ctx.env.trait_reg)
         },
     }
+    validate_builtin_method_core_shadow(ctx.env)
     prelude_hdecls
 }
 
@@ -276,7 +296,6 @@ fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
     let mut ctx = new_base_infer_ctx(sink)
     register_builtins(ctx.env, sink)
     register_hof_intrinsics(ctx.env, sink)
-    validate_builtin_method_core_shadow(ctx.env)
     // These bindings are created only by register_builtins above. Record their
     // freshly allocated DefIds now; later same-spelled locals cannot inherit
     // this provenance. `some` remains on the independent variant-ctor path.
@@ -304,13 +323,18 @@ fn validate_impl_carriers(
     for decl in decls {
         match decl {
             HDecl::Impl {
-                target_type, provider_ref, trait_ref, trait_name, methods, ..
+                target_type, owner_ref, provider_ref, trait_ref, trait_name, methods, ..
             } => match find_impl_by_provider(
                 env.trait_reg, target_type, trait_ref, provider_ref
             ) {
                 some(owner) => {
                     if !impl_trait_name_same(owner.trait_name, trait_name) ||
-                       !optional_symbol_ref_same(owner.trait_ref, trait_ref) {
+                       !optional_symbol_ref_same(owner.trait_ref, trait_ref) ||
+                       match owner.owner_ref {
+                           some(registered) => !impl_owner_ref_same(
+                               registered, owner_ref),
+                           none => true
+                       } {
                         panic("impl HIR: typed owner relation changed")
                     }
                     for method in methods {
@@ -340,7 +364,7 @@ fn collect_module_impl_facts(
     for decl in decls {
         match decl {
             HDecl::Impl {
-                target_type, provider_ref, trait_ref, trait_name, methods, ..
+                target_type, owner_ref, provider_ref, trait_ref, trait_name, methods, ..
             } => {
                 let mut method_names: List<Str> = []
                 for m in methods {
@@ -358,7 +382,12 @@ fn collect_module_impl_facts(
                             if !impl_trait_name_same(
                                     owner.trait_name, trait_name) ||
                                !optional_symbol_ref_same(
-                                    owner.trait_ref, trait_ref) {
+                                    owner.trait_ref, trait_ref) ||
+                               match owner.owner_ref {
+                                   some(registered) => !impl_owner_ref_same(
+                                       registered, owner_ref),
+                                   none => true
+                               } {
                                 panic("module impl fact: typed owner relation changed")
                             }
                             for method_name in method_names {
@@ -370,7 +399,7 @@ fn collect_module_impl_facts(
                                 target: target_type,
                                 provider_ref: provider_ref,
                                 trait_ref: trait_ref,
-                                owner_origin: owner.origin,
+                                owner_ref: owner_ref,
                                 method_names: method_names,
                                 is_top_level: is_top_level
                             })
@@ -650,7 +679,8 @@ pub fn check_module(
     let _ = install_project_namespace_plan(ctx, module_key, namespace_plan)
     install_struct_identity_ledger(ctx, module_key, namespace_plan)
     report_namespace_plan_issues(ctx, module_key, program, namespace_plan)
-    let hprogram = check_module_identity(ctx, program, module_prefix)
+    let hprogram = check_module_identity(
+        ctx, program, module_prefix, module_key)
     // Project-wide builtin derived descriptors have one physical carrier and
     // are assembled by compiler_mod only after every module has crossed the
     // dictionary-lowering boundary.  Per-module checking validates user
@@ -817,8 +847,13 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                     origin.trait_ref, origin.provider_ref
                 ) {
                     some(owner) => {
-                        if owner.origin != origin.origin {
-                            panic("impl hydration: legacy origin changed")
+                        match owner.method_refs.get(method_name) {
+                            some(method_ref) => if !impl_method_ref_same(
+                                    method_ref, origin.method_ref) {
+                                panic("impl hydration: exact method changed")
+                            },
+                            none => panic(
+                                "impl hydration: owner method identity is missing")
                         }
                         let core = match owner.method_schemes.get(method_name) {
                             some(found) => found,

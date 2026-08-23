@@ -6,10 +6,25 @@ use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
     make_diag}
 use codes::{E0504}
 use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
+    ImplOwnerRef, ImplMethodRef,
+    HandledEffectRef,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
-    registered_trait_ref_symbol, impl_provider_ref_same, intrinsic_ref_same,
+    VariantRef, VariantFieldRef,
+    registered_nominal_ref_symbol, registered_trait_ref_symbol,
+    make_symbol_ref, namespace_nominal,
+    symbol_ref_canonical_payload, symbol_ref_origin_module_key,
+    make_impl_owner_ref, impl_owner_ref_target, impl_owner_ref_provider,
+    impl_owner_ref_trait, impl_owner_ref_same,
+    impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
+    trait_method_ref_trait, trait_method_ref_source_member_index,
+    trait_method_ref_callable_slot_index, trait_method_ref_same,
+    handled_effect_ref_same,
+    symbol_ref_namespace_kind, namespace_kind_same,
+    namespace_member, namespace_trait,
+    impl_provider_ref_same, intrinsic_ref_same,
     impl_provider_ref_kind, impl_provider_kind_same,
     impl_provider_kind_source, impl_provider_kind_delegate}
+use ir_inventory::{EffectOperationRef}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -78,9 +93,12 @@ pub struct StructDef {
 
 pub struct EnumDef {
     pub name: Str,
+    pub owner_ref: RegisteredNominalRef,
     pub type_params: List<Str>,
     pub type_param_vars: List<Int>,
     pub variants: List<EnumVariant>,
+    pub variant_refs: List<VariantRef>,
+    pub variant_field_refs: List<List<VariantFieldRef>>,
     pub derive_attrs: List<DeriveAttribute>,
     pub derived_provider_plan: NominalDerivedProviderPlan?,
     pub variant_index: Map<Str, Int>
@@ -95,6 +113,7 @@ pub fn lookup_variant(def: EnumDef, name: Str) -> EnumVariant? {
 
 pub struct EffectOpDef {
     pub name: Str,
+    pub operation_ref: EffectOperationRef?,
     pub params: List<Type>,
     pub return_type: Type,
     pub has_default: Bool
@@ -104,6 +123,8 @@ pub enum BuiltInKind { BkIo, BkFail, BkMut }
 
 pub struct EffectDef {
     pub name: Str,
+    pub owner_ref: SymbolRef?,
+    pub handled_ref: HandledEffectRef?,
     pub type_params: List<Str>,
     pub type_param_vars: List<Int>,
     pub ops: List<EffectOpDef>,
@@ -126,6 +147,7 @@ pub struct TraitMethodDef {
 
 pub struct AssocTypeDef {
     pub name: Str,
+    pub member_ref: SymbolRef,
     pub bounds: List<Str>,        // trait name bounds
     pub default_type: Type?,      // trait-level default value
     pub var_id: Int               // type variable ID used in trait method signatures
@@ -138,7 +160,8 @@ pub struct TraitDef {
     pub type_param_vars: List<Int>,
     pub methods: List<TraitMethodDef>,
     pub supertraits: List<Str>,
-    pub assoc_types: List<AssocTypeDef>
+    pub assoc_types: List<AssocTypeDef>,
+    pub contract: RegisteredTraitContract
 }
 
 // One fully typed associated constraint on an impl-owner predicate.  The
@@ -148,6 +171,179 @@ pub struct ImplAssocPredicate {
     name: Str,
     ty: Type
 }
+
+pub struct RegisteredTraitMethodContract {
+    method_ref: TraitMethodRef,
+    signature: Type,
+    has_default: Bool,
+    param_mutabilities: List<Bool>
+}
+
+pub fn make_registered_trait_method_contract(
+    method_ref: TraitMethodRef, signature: Type,
+    has_default: Bool, param_mutabilities: List<Bool>
+) -> RegisteredTraitMethodContract {
+    match signature {
+        Type::FnType { params, .. } => if
+                params.len() != param_mutabilities.len() {
+            panic("trait contract: method mutability arity differs")
+        },
+        _ => panic("trait contract: method signature is not callable")
+    }
+    RegisteredTraitMethodContract {
+        method_ref: method_ref, signature: signature,
+        has_default: has_default,
+        param_mutabilities: param_mutabilities.map(fn(value) { value })
+    }
+}
+pub fn registered_trait_method_ref(
+    value: RegisteredTraitMethodContract
+) -> TraitMethodRef { value.method_ref }
+pub fn registered_trait_method_signature(
+    value: RegisteredTraitMethodContract
+) -> Type { value.signature }
+pub fn registered_trait_method_has_default(
+    value: RegisteredTraitMethodContract
+) -> Bool { value.has_default }
+pub fn registered_trait_method_mutabilities(
+    value: RegisteredTraitMethodContract
+) -> List<Bool> { value.param_mutabilities.map(fn(item) { item }) }
+
+pub struct RegisteredTraitAssocContract {
+    member: SymbolRef,
+    value_type: Type,
+    default_type: Type?,
+    bound_traits: List<SymbolRef>
+}
+pub fn make_registered_trait_assoc_contract(
+    member: SymbolRef, value_type: Type, default_type: Type?,
+    bound_traits: List<SymbolRef>
+) -> RegisteredTraitAssocContract {
+    if !namespace_kind_same(
+            symbol_ref_namespace_kind(member), namespace_member()) {
+        panic("trait contract: associated item is not a member")
+    }
+    for bound in bound_traits {
+        if !namespace_kind_same(
+                symbol_ref_namespace_kind(bound), namespace_trait()) {
+            panic("trait contract: associated bound is not a trait")
+        }
+    }
+    RegisteredTraitAssocContract {
+        member: member, value_type: value_type,
+        default_type: default_type,
+        bound_traits: bound_traits.map(fn(item) { item })
+    }
+}
+pub fn registered_trait_assoc_member(
+    value: RegisteredTraitAssocContract
+) -> SymbolRef { value.member }
+pub fn registered_trait_assoc_type(
+    value: RegisteredTraitAssocContract
+) -> Type { value.value_type }
+pub fn registered_trait_assoc_default(
+    value: RegisteredTraitAssocContract
+) -> Type? { value.default_type }
+pub fn registered_trait_assoc_bounds(
+    value: RegisteredTraitAssocContract
+) -> List<SymbolRef> { value.bound_traits.map(fn(item) { item }) }
+
+pub struct RegisteredTraitContract {
+    owner: RegisteredTraitRef,
+    methods: List<RegisteredTraitMethodContract>,
+    assoc_items: List<RegisteredTraitAssocContract>,
+    handled_effect_obligations: List<HandledEffectRef>,
+    dict_obligations: List<SymbolRef>
+}
+
+pub fn make_registered_trait_contract(
+    owner: RegisteredTraitRef,
+    methods: List<RegisteredTraitMethodContract>,
+    assoc_items: List<RegisteredTraitAssocContract>,
+    handled_effect_obligations: List<HandledEffectRef>,
+    dict_obligations: List<SymbolRef>
+) -> RegisteredTraitContract {
+    let owner_symbol = registered_trait_ref_symbol(owner)
+    let mut previous_source_index = -1
+    for method_index in 0..methods.len() {
+        let method = methods.get(method_index).unwrap()
+        let method_ref = method.method_ref
+        let source_index = trait_method_ref_source_member_index(method_ref)
+        if !symbol_ref_same(trait_method_ref_trait(method_ref), owner_symbol) ||
+           trait_method_ref_callable_slot_index(method_ref) != method_index ||
+           source_index <= previous_source_index {
+            panic("trait contract: method order/owner drifted")
+        }
+        previous_source_index = source_index
+    }
+    for assoc_index in 0..assoc_items.len() {
+        let assoc = assoc_items.get(assoc_index).unwrap()
+        if symbol_ref_origin_module_key(assoc.member) !=
+           symbol_ref_origin_module_key(owner_symbol) {
+            panic("trait contract: associated member crosses owner module")
+        }
+        for right_index in assoc_index + 1..assoc_items.len() {
+            if symbol_ref_same(
+                    assoc.member,
+                    assoc_items.get(right_index).unwrap().member) {
+                panic("trait contract: associated member repeats")
+            }
+        }
+    }
+    for effect_index in 0..handled_effect_obligations.len() {
+        for right_index in effect_index + 1..handled_effect_obligations.len() {
+            if handled_effect_ref_same(
+                    handled_effect_obligations.get(effect_index).unwrap(),
+                    handled_effect_obligations.get(right_index).unwrap()) {
+                panic("trait contract: handled effect obligation repeats")
+            }
+        }
+    }
+    for dict_index in 0..dict_obligations.len() {
+        let obligation = dict_obligations.get(dict_index).unwrap()
+        if !namespace_kind_same(
+                symbol_ref_namespace_kind(obligation), namespace_trait()) {
+            panic("trait contract: dictionary obligation is not a trait")
+        }
+        for right_index in dict_index + 1..dict_obligations.len() {
+            if symbol_ref_same(
+                    obligation,
+                    dict_obligations.get(right_index).unwrap()) {
+                panic("trait contract: dictionary obligation repeats")
+            }
+        }
+    }
+    RegisteredTraitContract {
+        owner: owner,
+        methods: methods.map(fn(item) { item }),
+        assoc_items: assoc_items.map(fn(item) { item }),
+        handled_effect_obligations:
+            handled_effect_obligations.map(fn(item) { item }),
+        dict_obligations: dict_obligations.map(fn(item) { item })
+    }
+}
+
+pub fn registered_trait_contract_owner(
+    value: RegisteredTraitContract
+) -> RegisteredTraitRef { value.owner }
+pub fn registered_trait_contract_methods(
+    value: RegisteredTraitContract
+) -> List<RegisteredTraitMethodContract> {
+    value.methods.map(fn(item) { item })
+}
+pub fn registered_trait_contract_assoc_items(
+    value: RegisteredTraitContract
+) -> List<RegisteredTraitAssocContract> {
+    value.assoc_items.map(fn(item) { item })
+}
+pub fn registered_trait_contract_handled_effects(
+    value: RegisteredTraitContract
+) -> List<HandledEffectRef> {
+    value.handled_effect_obligations.map(fn(item) { item })
+}
+pub fn registered_trait_contract_dict_obligations(
+    value: RegisteredTraitContract
+) -> List<SymbolRef> { value.dict_obligations.map(fn(item) { item }) }
 
 pub fn make_impl_assoc_predicate(name: Str, ty: Type) -> ImplAssocPredicate {
     if name == "" {
@@ -566,12 +762,17 @@ pub struct ImplEntry {
     // Trait/inherent method cores live only on their owning entry. The flat
     // ordinary-call view is a MethodOrigin index, never a second scheme map.
     pub method_schemes: Map<Str, ImplMethodSchemeCore>,
+    // Registration-issued executable members.  Final owners carry one exact
+    // ImplMethodRef for every method core; provisional prelude reservations
+    // carry none until their source owner finalizes.
+    pub method_refs: Map<Str, ImplMethodRef>,
     // Exact builtin method semantic identity.  The owning method scheme is
     // the sole signature payload; this map may only relate that core to one
     // fixed IntrinsicRef.
     pub method_intrinsics: Map<Str, IntrinsicRef>,
     pub provider_ref: ImplProviderRef?,
     pub trait_ref: SymbolRef?,
+    pub owner_ref: ImplOwnerRef?,
     pub delegate_plan: DelegatePlanState,
     // Stable across export/re-export hydration.  Distinct source impl blocks
     // must never be collapsed merely because target/trait spellings match.
@@ -585,6 +786,7 @@ pub struct MethodOrigin {
     pub trait_name: Str?,
     pub provider_ref: ImplProviderRef,
     pub trait_ref: SymbolRef?,
+    pub method_ref: ImplMethodRef,
     pub span: Span
 }
 
@@ -712,6 +914,41 @@ pub fn new_type_env() -> TypeEnv {
         ids: IdGen {
             next_type_var_id: 0,
             next_def_id: 0
+        }
+    }
+}
+
+fn builtin_impl_target_symbol(type_name: Str) -> SymbolRef? {
+    let site = match type_name {
+        "Int" => some("builtin:type:0"),
+        "Float" => some("builtin:type:1"),
+        "Str" => some("builtin:type:2"),
+        "Bool" => some("builtin:type:3"),
+        "Unit" => some("builtin:type:4"),
+        "Never" => some("builtin:type:5"),
+        "Ptr" => some("builtin:type:6"),
+        "List" => some("builtin:type:7"),
+        "Map" => some("builtin:type:8"),
+        "Set" => some("builtin:type:9"),
+        "Cell" => some("builtin:type:10"),
+        "Option" => some("builtin:type:11"),
+        _ => none
+    }
+    match site {
+        some(path) => some(make_symbol_ref(
+            "$builtin", namespace_nominal(), type_name, path)),
+        none => none
+    }
+}
+
+// One typed target lookup shared by registration, export and Core assembly.
+// No caller may mint a target identity from the spelling that failed here.
+pub fn impl_target_symbol(env: TypeEnv, type_name: Str) -> SymbolRef? {
+    match env.types.structs.get(type_name) {
+        some(def) => some(registered_nominal_ref_symbol(def.owner_ref)),
+        none => match env.types.enums.get(type_name) {
+            some(def) => some(registered_nominal_ref_symbol(def.owner_ref)),
+            none => builtin_impl_target_symbol(type_name)
         }
     }
 }
@@ -943,6 +1180,16 @@ fn optional_impl_provider_ref_same(
     }
 }
 
+fn optional_impl_owner_ref_same(
+    left: ImplOwnerRef?, right: ImplOwnerRef?
+) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => impl_owner_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
 fn int_list_same(left: List<Int>, right: List<Int>) -> Bool {
     if left.len() != right.len() { return false }
     for index in 0..left.len() {
@@ -984,6 +1231,22 @@ fn method_core_map_same(
         let (name, core) = entry
         match right.get(name) {
             some(other) => if !impl_method_core_same(core, other) {
+                return false
+            },
+            none => return false
+        }
+    }
+    true
+}
+
+fn method_ref_map_same(
+    left: Map<Str, ImplMethodRef>, right: Map<Str, ImplMethodRef>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    for entry in left.entries() {
+        let (name, method_ref) = entry
+        match right.get(name) {
+            some(other) => if !impl_method_ref_same(method_ref, other) {
                 return false
             },
             none => return false
@@ -1046,6 +1309,7 @@ fn impl_entry_owner_shape_same(left: ImplEntry, right: ImplEntry) -> Bool {
     left.target_type_name == right.target_type_name &&
         optional_string_same(left.trait_name, right.trait_name) &&
         optional_symbol_ref_same(left.trait_ref, right.trait_ref) &&
+        optional_impl_owner_ref_same(left.owner_ref, right.owner_ref) &&
         string_list_same(left.type_params, right.type_params) &&
         int_list_same(left.type_param_vars, right.type_param_vars) &&
         frozen_impl_predicate_set_same(left.predicates, right.predicates) &&
@@ -1075,26 +1339,21 @@ fn impl_owner_span_same(left: Span, right: Span) -> Bool {
 // dedupe uses this shared invariant after target+origin match; it may never
 // treat that opaque token pair as proof that the structural owner is equal.
 pub fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
-    left.origin == right.origin &&
-        optional_impl_provider_ref_same(
+    optional_impl_provider_ref_same(
             left.provider_ref, right.provider_ref) &&
         impl_entry_owner_shape_same(left, right) &&
         string_list_same(left.method_names, right.method_names) &&
         method_core_map_same(left.method_schemes, right.method_schemes) &&
+        method_ref_map_same(left.method_refs, right.method_refs) &&
         method_intrinsic_map_same(
             left.method_intrinsics, right.method_intrinsics) &&
         delegate_plan_state_same(left.delegate_plan, right.delegate_plan) &&
-        impl_owner_span_same(left.span, right.span) &&
         impl_owner_state_same(left.owner_state, right.owner_state)
 }
 
 pub fn impl_entry_exact_key_same(left: ImplEntry, right: ImplEntry) -> Bool {
-    if left.target_type_name != right.target_type_name ||
-       !optional_symbol_ref_same(left.trait_ref, right.trait_ref) {
-        return false
-    }
-    match (left.provider_ref, right.provider_ref) {
-        (some(a), some(b)) => impl_provider_ref_same(a, b),
+    match (left.owner_ref, right.owner_ref) {
+        (some(a), some(b)) => impl_owner_ref_same(a, b),
         _ => false
     }
 }
@@ -1108,6 +1367,20 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
         let (method_name, _) = intrinsic_entry
         if !entry.method_schemes.contains_key(method_name) {
             panic("impl owner: intrinsic has no method core")
+        }
+    }
+    for method_entry in entry.method_refs.entries() {
+        let (method_name, method_ref) = method_entry
+        if !entry.method_schemes.contains_key(method_name) ||
+           method_name != impl_method_ref_name(method_ref) {
+            panic("impl owner: exact method relation lost its core/name")
+        }
+        match entry.owner_ref {
+            some(owner) => if !impl_owner_ref_same(
+                    impl_method_ref_owner(method_ref), owner) {
+                panic("impl owner: exact method crosses owner")
+            },
+            none => panic("impl owner: method ref has no typed owner")
         }
     }
     let mut type_param_names: Set<Str> = set_new()
@@ -1227,13 +1500,27 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
             if !entry.origin.starts_with("<std-predecl>:") {
                 panic("impl owner: only std predecls may remain provisional")
             }
-            if entry.method_names.len() != 0 ||
-               entry.method_schemes.len() != 0 {
+            if entry.owner_ref.is_some() ||
+               entry.method_names.len() != 0 ||
+               entry.method_schemes.len() != 0 ||
+               entry.method_refs.len() != 0 {
                 panic("impl owner: provisional prelude owner published methods")
             }
         },
-        ImplOwnerState::FinalOwner => if entry.provider_ref.is_none() {
-            panic("impl owner: final owner has no provider")
+        ImplOwnerState::FinalOwner => match
+                (entry.provider_ref, entry.owner_ref) {
+            (some(provider), some(owner)) => {
+                if !impl_provider_ref_same(
+                        impl_owner_ref_provider(owner), provider) ||
+                   !optional_symbol_ref_same(
+                        impl_owner_ref_trait(owner), entry.trait_ref) ||
+                   symbol_ref_canonical_payload(
+                        impl_owner_ref_target(owner)) != entry.target_type_name ||
+                   entry.method_refs.len() != entry.method_schemes.len() {
+                    panic("impl owner: typed owner/method closure drifted")
+                }
+            },
+            _ => panic("impl owner: final owner lacks typed identity")
         }
     }
 }
@@ -1310,8 +1597,7 @@ pub fn install_method_core(
         some(found) => found,
         none => panic("impl method index: owner entry is missing")
     }
-    if owner.origin != incoming.origin ||
-       !optional_string_same(owner.trait_name, incoming.trait_name) ||
+    if !optional_string_same(owner.trait_name, incoming.trait_name) ||
        !optional_symbol_ref_same(owner.trait_ref, incoming.trait_ref) {
         panic("impl method index: owner trait mismatch")
     }
@@ -1320,6 +1606,15 @@ pub fn install_method_core(
             panic("impl method index: core differs from owner")
         },
         none => panic("impl method index: owner has no method core")
+    }
+    match (owner.method_refs.get(method_name), owner.owner_ref) {
+        (some(stored_ref), some(owner_ref)) => if
+                !impl_method_ref_same(stored_ref, incoming.method_ref) ||
+                !impl_owner_ref_same(
+                    impl_method_ref_owner(stored_ref), owner_ref) {
+            panic("impl method index: exact member differs from owner")
+        },
+        _ => panic("impl method index: owner has no exact method relation")
     }
     let mut origins = match reg.method_origins.get(target_type) {
         some(existing) => existing,
@@ -1332,10 +1627,8 @@ pub fn install_method_core(
 
     match origins.get(method_name) {
         some(existing) => {
-            if impl_provider_ref_same(
-                    existing.provider_ref, incoming.provider_ref) &&
-               optional_symbol_ref_same(
-                    existing.trait_ref, incoming.trait_ref) {
+            if impl_method_ref_same(
+                    existing.method_ref, incoming.method_ref) {
                 origins.insert(method_name, incoming)
                 true
             } else {
@@ -1373,8 +1666,6 @@ pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {
                     if !impl_entry_final_same(existing, entry) {
                         panic("impl owner: same-provider replay changed frozen entry")
                     }
-                } else if existing.origin == entry.origin {
-                    panic("impl owner: legacy origin aliases distinct typed owners")
                 }
             }
             if !matched {
@@ -1567,19 +1858,23 @@ pub fn find_impl_by_origin(
 }
 
 pub fn replace_impl_method_core(
-    mut reg: TraitRegistry, type_name: Str, origin: Str,
+    mut reg: TraitRegistry, type_name: Str, owner_ref: ImplOwnerRef,
     method_name: Str, core: ImplMethodSchemeCore
 ) {
     let mut matches = 0
     match reg.trait_impls.get(type_name) {
         some(impls) => {
             for entry in impls {
-                if entry.origin == origin {
-                    matches = matches + 1
-                    if !entry.method_schemes.contains_key(method_name) {
-                        panic("impl method core: replacement target is missing")
-                    }
-                    entry.method_schemes.insert(method_name, core)
+                match entry.owner_ref {
+                    some(candidate) => if impl_owner_ref_same(
+                            candidate, owner_ref) {
+                        matches = matches + 1
+                        if !entry.method_schemes.contains_key(method_name) {
+                            panic("impl method core: replacement target is missing")
+                        }
+                        entry.method_schemes.insert(method_name, core)
+                    },
+                    none => {}
                 }
             }
         },

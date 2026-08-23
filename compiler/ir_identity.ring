@@ -381,6 +381,133 @@ pub fn nominal_field_ref_same(
         left.field_name == right.field_name
 }
 
+// Resolver-issued enum variant identity.  The member payload is site-derived;
+// no downstream stage may reconstruct it from a variant spelling.
+pub struct VariantRef {
+    owner: RegisteredNominalRef,
+    member: SymbolRef,
+    source_variant_index: Int
+}
+
+pub fn make_variant_ref(
+    owner: RegisteredNominalRef, member: SymbolRef,
+    source_variant_index: Int
+) -> VariantRef {
+    let owner_symbol = registered_nominal_ref_symbol(owner)
+    if source_variant_index < 0 ||
+       !namespace_kind_same(
+            symbol_ref_namespace_kind(member), namespace_member()) ||
+       symbol_ref_origin_module_key(member) !=
+            symbol_ref_origin_module_key(owner_symbol) ||
+       symbol_ref_declaration_site_path(member) !=
+            "${symbol_ref_declaration_site_path(owner_symbol)}|variant:${source_variant_index}" {
+        panic("IR identity: invalid enum variant relation")
+    }
+    VariantRef {
+        owner: owner, member: member,
+        source_variant_index: source_variant_index
+    }
+}
+
+pub fn variant_ref_owner(value: VariantRef) -> RegisteredNominalRef {
+    value.owner
+}
+pub fn variant_ref_member(value: VariantRef) -> SymbolRef { value.member }
+pub fn variant_ref_source_index(value: VariantRef) -> Int {
+    value.source_variant_index
+}
+pub fn variant_ref_same(left: VariantRef, right: VariantRef) -> Bool {
+    registered_nominal_ref_same(left.owner, right.owner) &&
+        symbol_ref_same(left.member, right.member) &&
+        left.source_variant_index == right.source_variant_index
+}
+
+pub struct VariantFieldRef {
+    variant: VariantRef,
+    member: SymbolRef,
+    field_index: Int
+}
+
+pub fn make_variant_field_ref(
+    variant: VariantRef, member: SymbolRef, field_index: Int
+) -> VariantFieldRef {
+    let variant_member = variant_ref_member(variant)
+    if field_index < 0 || !namespace_kind_same(
+            symbol_ref_namespace_kind(member), namespace_member()) ||
+       symbol_ref_origin_module_key(member) !=
+            symbol_ref_origin_module_key(variant_member) ||
+       symbol_ref_declaration_site_path(member) !=
+            "${symbol_ref_declaration_site_path(variant_member)}|field:${field_index}" {
+        panic("IR identity: invalid enum payload field relation")
+    }
+    VariantFieldRef {
+        variant: variant, member: member, field_index: field_index
+    }
+}
+
+pub fn variant_field_ref_variant(value: VariantFieldRef) -> VariantRef {
+    value.variant
+}
+pub fn variant_field_ref_member(value: VariantFieldRef) -> SymbolRef {
+    value.member
+}
+pub fn variant_field_ref_index(value: VariantFieldRef) -> Int {
+    value.field_index
+}
+pub fn variant_field_ref_same(
+    left: VariantFieldRef, right: VariantFieldRef
+) -> Bool {
+    variant_ref_same(left.variant, right.variant) &&
+        symbol_ref_same(left.member, right.member) &&
+        left.field_index == right.field_index
+}
+
+pub struct HandledEffectRef { effect_symbol: SymbolRef }
+
+pub fn make_handled_effect_ref(effect_symbol: SymbolRef) -> HandledEffectRef {
+    if !namespace_kind_same(
+            symbol_ref_namespace_kind(effect_symbol), namespace_effect()) ||
+       symbol_ref_origin_module_key(effect_symbol) == "$system" {
+        panic("IR identity: invalid handled effect domain")
+    }
+    HandledEffectRef { effect_symbol: effect_symbol }
+}
+pub fn handled_effect_ref_symbol(value: HandledEffectRef) -> SymbolRef {
+    value.effect_symbol
+}
+pub fn handled_effect_ref_same(
+    left: HandledEffectRef, right: HandledEffectRef
+) -> Bool { symbol_ref_same(left.effect_symbol, right.effect_symbol) }
+
+const SYSTEM_EFFECT_CONSOLE: Int = 0
+const SYSTEM_EFFECT_FS: Int = 1
+const SYSTEM_EFFECT_PROCESS: Int = 2
+const SYSTEM_EFFECT_COUNT: Int = 3
+
+pub struct SystemEffectRef { tag: Int }
+
+fn system_effect_ref_from_tag(tag: Int) -> SystemEffectRef {
+    if tag < SYSTEM_EFFECT_CONSOLE || tag >= SYSTEM_EFFECT_COUNT {
+        panic("IR identity: invalid system effect")
+    }
+    SystemEffectRef { tag: tag }
+}
+pub fn system_effect_console() -> SystemEffectRef {
+    system_effect_ref_from_tag(SYSTEM_EFFECT_CONSOLE)
+}
+pub fn system_effect_fs() -> SystemEffectRef {
+    system_effect_ref_from_tag(SYSTEM_EFFECT_FS)
+}
+pub fn system_effect_process() -> SystemEffectRef {
+    system_effect_ref_from_tag(SYSTEM_EFFECT_PROCESS)
+}
+pub fn system_effect_ref_tag(value: SystemEffectRef) -> Int {
+    system_effect_ref_from_tag(value.tag).tag
+}
+pub fn system_effect_ref_same(
+    left: SystemEffectRef, right: SystemEffectRef
+) -> Bool { system_effect_ref_tag(left) == system_effect_ref_tag(right) }
+
 // One source trait method is a closed relation between its exact trait
 // declaration, exact member declaration, raw AST member site, and callable
 // dictionary slot.  Source-member and callable-slot indexes are intentionally
@@ -836,6 +963,115 @@ pub fn impl_provider_ref_same(
 ) -> Bool {
     path_ref_same(left.site, right.site) &&
         impl_provider_kind_same(left.kind, right.kind)
+}
+
+// The exact registry owner key.  Target and trait are typed identities rather
+// than strings, and the provider remains the sole producer-site authority.
+pub struct ImplOwnerRef {
+    target: SymbolRef,
+    provider: ImplProviderRef,
+    trait_ref: SymbolRef?
+}
+
+pub fn make_impl_owner_ref(
+    target: SymbolRef, provider: ImplProviderRef, trait_ref: SymbolRef?
+) -> ImplOwnerRef {
+    if !namespace_kind_same(
+            symbol_ref_namespace_kind(target), namespace_nominal()) {
+        panic("IR identity: impl target is not nominal")
+    }
+    match trait_ref {
+        some(trait_symbol) => if !namespace_kind_same(
+                symbol_ref_namespace_kind(trait_symbol), namespace_trait()) {
+            panic("IR identity: impl trait ref is not a trait")
+        },
+        none => {}
+    }
+    // Revalidate the provider form at the typed owner boundary.
+    let checked_provider = make_impl_provider_ref(
+        impl_provider_ref_site(provider), impl_provider_ref_kind(provider))
+    ImplOwnerRef {
+        target: target, provider: checked_provider, trait_ref: trait_ref
+    }
+}
+
+pub fn impl_owner_ref_target(value: ImplOwnerRef) -> SymbolRef {
+    value.target
+}
+pub fn impl_owner_ref_provider(value: ImplOwnerRef) -> ImplProviderRef {
+    value.provider
+}
+pub fn impl_owner_ref_trait(value: ImplOwnerRef) -> SymbolRef? {
+    value.trait_ref
+}
+pub fn impl_owner_ref_same(left: ImplOwnerRef, right: ImplOwnerRef) -> Bool {
+    if !symbol_ref_same(left.target, right.target) ||
+       !impl_provider_ref_same(left.provider, right.provider) {
+        return false
+    }
+    match (left.trait_ref, right.trait_ref) {
+        (some(a), some(b)) => symbol_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+// One exact executable member produced by an ImplOwnerRef.  The raw source
+// index includes associated/delegate members; callable_slot_index counts only
+// executable members.  This preserves source order without a name scan.
+pub struct ImplMethodRef {
+    owner: ImplOwnerRef,
+    member: SymbolRef,
+    source_member_index: Int,
+    callable_slot_index: Int,
+    name: Str
+}
+
+pub fn make_impl_method_ref(
+    owner: ImplOwnerRef, member: SymbolRef,
+    source_member_index: Int, callable_slot_index: Int, name: Str
+) -> ImplMethodRef {
+    if !namespace_kind_same(
+            symbol_ref_namespace_kind(member), namespace_member()) ||
+       source_member_index < 0 || callable_slot_index < 0 ||
+       source_member_index < callable_slot_index || name == "" {
+        panic("IR identity: invalid impl method relation")
+    }
+    let provider_site = impl_provider_ref_site(
+        impl_owner_ref_provider(owner))
+    let provider_module = module_body_ref_origin_module_key(
+        path_owner_ref_module_body(path_ref_owner(provider_site)))
+    if symbol_ref_origin_module_key(member) != provider_module {
+        panic("IR identity: impl method crosses provider module")
+    }
+    ImplMethodRef {
+        owner: owner, member: member,
+        source_member_index: source_member_index,
+        callable_slot_index: callable_slot_index, name: name
+    }
+}
+
+pub fn impl_method_ref_owner(value: ImplMethodRef) -> ImplOwnerRef {
+    value.owner
+}
+pub fn impl_method_ref_member(value: ImplMethodRef) -> SymbolRef {
+    value.member
+}
+pub fn impl_method_ref_source_member_index(value: ImplMethodRef) -> Int {
+    value.source_member_index
+}
+pub fn impl_method_ref_callable_slot_index(value: ImplMethodRef) -> Int {
+    value.callable_slot_index
+}
+pub fn impl_method_ref_name(value: ImplMethodRef) -> Str { value.name }
+pub fn impl_method_ref_same(
+    left: ImplMethodRef, right: ImplMethodRef
+) -> Bool {
+    impl_owner_ref_same(left.owner, right.owner) &&
+        symbol_ref_same(left.member, right.member) &&
+        left.source_member_index == right.source_member_index &&
+        left.callable_slot_index == right.callable_slot_index &&
+        left.name == right.name
 }
 
 enum SlotRefValue {

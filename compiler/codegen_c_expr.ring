@@ -21,12 +21,16 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HNominalStructFieldInit, HFieldAccessKind,
     HEffectHandler, HEffectOp, DictRef,
     TraitDispatch, DictDispatchInfo, MethodCallRef,
-    method_call_ref_intrinsic, method_call_ref_signature, effect_op_slot,
+    method_call_ref_is_intrinsic, method_call_ref_is_concrete,
+    method_call_ref_intrinsic, method_call_ref_impl,
+    method_call_ref_signature, effect_op_slot,
     hexpr_type, hexpr_effects, is_fresh_owned_bool_value, variant_ctor_name, compare_by_first,
     trait_dict_name, trait_bound_param_name, evidence_param_name,
     effect_name_from_evidence_param, is_extern_handle_type,
     slot_bridge_runtime_name, is_synthetic_dict_def_id}
 use ir_identity::{builtin_method_site_tag, intrinsic_ref_site,
+    impl_method_ref_owner, impl_method_ref_name,
+    impl_owner_ref_target, symbol_ref_canonical_payload,
     BUILTIN_METHOD_STR_LEN, BUILTIN_METHOD_STR_CONTAINS,
     BUILTIN_METHOD_STR_STARTS_WITH, BUILTIN_METHOD_STR_ENDS_WITH,
     BUILTIN_METHOD_STR_SLICE, BUILTIN_METHOD_STR_TRIM,
@@ -2771,8 +2775,28 @@ fn gen_c_call(mut ctx: CCtx, callee: HExpr, args: List<HExpr>, resolved_dicts: L
 
     match method_ref {
         some(exact_method) => {
-            let raw = gen_c_intrinsic_method_call(
-                ctx, callee, exact_method, arg_vals)
+            let raw = if method_call_ref_is_intrinsic(exact_method) {
+                gen_c_intrinsic_method_call(
+                    ctx, callee, exact_method, arg_vals)
+            } else if method_call_ref_is_concrete(exact_method) {
+                let (receiver_expr, receiver_type) = match callee {
+                    HExpr::FieldAccess { receiver, .. } =>
+                        (receiver, hexpr_type(receiver)),
+                    _ => panic(
+                        "C codegen: concrete method has no receiver")
+                }
+                let receiver = gen_c_expr(ctx, receiver_expr)
+                let method_identity = method_call_ref_impl(exact_method)
+                let target_name = symbol_ref_canonical_payload(
+                    impl_owner_ref_target(
+                        impl_method_ref_owner(method_identity)))
+                gen_c_method_call(
+                    ctx, receiver, receiver_type, target_name,
+                    impl_method_ref_name(method_identity),
+                    arg_vals, dict_vals)
+            } else {
+                panic("C codegen: bound method reached direct call path")
+            }
             return if is_unit_type(result_ty) { "RING_UNIT" } else { raw }
         },
         none => {}
@@ -2878,9 +2902,9 @@ fn gen_c_call(mut ctx: CCtx, callee: HExpr, args: List<HExpr>, resolved_dicts: L
             gen_c_direct_call(ctx, call_name, arg_vals, dict_vals)
         },
         HExpr::FieldAccess { receiver, field, .. } => {
-            let recv_val = gen_c_expr(ctx, receiver)
-            let recv_type = hexpr_type(receiver)
-            gen_c_method_call(ctx, recv_val, recv_type, field, arg_vals, dict_vals)
+            let _ = receiver
+            let _ = field
+            panic("C codegen: method call lost exact MethodCallRef")
         },
         _ => {
             // Closure value call through the uniform {fn_ptr, env} ABI.
@@ -3116,18 +3140,11 @@ fn gen_c_ptr_method(mut ctx: CCtx, recv: Str, recv_type: Type, method: Str, args
     c_stub_expr(ctx, "Ptr method (${method})")
 }
 
-fn gen_c_method_call(mut ctx: CCtx, recv: Str, recv_type: Type, method: Str, args: List<Str>, dict_vals: List<Str>) -> Str {
-    let type_name = match type_to_builtin_name(recv_type) {
-        some(n) => n,
-        none => {
-            match recv_type {
-                Type::StructType { name, .. } => name,
-                Type::EnumType { name, .. } => name,
-                _ => "Unknown",
-            }
-        },
-    }
-
+fn gen_c_method_call(
+    mut ctx: CCtx, recv: Str, recv_type: Type,
+    type_name: Str, method: Str,
+    args: List<Str>, dict_vals: List<Str>
+) -> Str {
     if type_name == "Ptr" {
         return gen_c_ptr_method(ctx, recv, recv_type, method, args)
     }

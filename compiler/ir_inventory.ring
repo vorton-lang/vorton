@@ -7,8 +7,12 @@
 
 use ir_identity::{
     SymbolRef, ModuleBodyRef, PathRef, PathOwnerRef, SlotRef,
+    HandledEffectRef, SystemEffectRef,
     PathRole, symbol_ref_same, symbol_ref_origin_module_key,
     symbol_ref_namespace_kind, namespace_kind_from_tag, namespace_kind_same,
+    namespace_member,
+    handled_effect_ref_symbol, handled_effect_ref_same,
+    system_effect_ref_same,
     module_body_ref_same, module_body_ref_origin_module_key,
     path_ref_same, path_ref_owner, path_ref_normalized_child_path,
     path_ref_role, path_owner_ref_same, path_owner_ref_is_symbol,
@@ -143,6 +147,81 @@ pub fn executable_ref_origin_module_key(value: ExecutableRef) -> Str {
         ExecutableRefValue::AnonymousExecutableValue(path) =>
             path_owner_origin_module_key(path_ref_owner(path))
     }
+}
+
+pub struct EffectOperationRef {
+    handled_effect: HandledEffectRef,
+    member: SymbolRef,
+    source_op_index: Int,
+    callable: ExecutableRef
+}
+
+pub fn make_effect_operation_ref(
+    handled_effect: HandledEffectRef, member: SymbolRef,
+    source_op_index: Int, callable: ExecutableRef
+) -> EffectOperationRef {
+    let effect_symbol = handled_effect_ref_symbol(handled_effect)
+    if source_op_index < 0 || !namespace_kind_same(
+            symbol_ref_namespace_kind(member), namespace_member()) ||
+       symbol_ref_origin_module_key(member) !=
+            symbol_ref_origin_module_key(effect_symbol) ||
+       !executable_ref_is_named(callable) ||
+       !symbol_ref_same(executable_ref_named_symbol(callable), member) {
+        panic("IR inventory: invalid handled effect operation relation")
+    }
+    EffectOperationRef {
+        handled_effect: handled_effect, member: member,
+        source_op_index: source_op_index, callable: callable
+    }
+}
+pub fn effect_operation_ref_effect(
+    value: EffectOperationRef
+) -> HandledEffectRef { value.handled_effect }
+pub fn effect_operation_ref_member(value: EffectOperationRef) -> SymbolRef {
+    value.member
+}
+pub fn effect_operation_ref_source_index(value: EffectOperationRef) -> Int {
+    value.source_op_index
+}
+pub fn effect_operation_ref_callable(
+    value: EffectOperationRef
+) -> ExecutableRef { value.callable }
+pub fn effect_operation_ref_same(
+    left: EffectOperationRef, right: EffectOperationRef
+) -> Bool {
+    handled_effect_ref_same(left.handled_effect, right.handled_effect) &&
+        symbol_ref_same(left.member, right.member) &&
+        left.source_op_index == right.source_op_index &&
+        executable_ref_same(left.callable, right.callable)
+}
+
+// Host capability calls are a disjoint AbiIR-bound relation.  They can never
+// be constructed as a handled effect operation or enter evidence.
+pub struct SystemHostCallableRef {
+    system_effect: SystemEffectRef,
+    callable: ExecutableRef
+}
+pub fn make_system_host_callable_ref(
+    system_effect: SystemEffectRef, callable: ExecutableRef
+) -> SystemHostCallableRef {
+    if !executable_ref_is_named(callable) {
+        panic("IR inventory: system host callable is not named")
+    }
+    SystemHostCallableRef {
+        system_effect: system_effect, callable: callable
+    }
+}
+pub fn system_host_callable_effect(
+    value: SystemHostCallableRef
+) -> SystemEffectRef { value.system_effect }
+pub fn system_host_callable_executable(
+    value: SystemHostCallableRef
+) -> ExecutableRef { value.callable }
+pub fn system_host_callable_same(
+    left: SystemHostCallableRef, right: SystemHostCallableRef
+) -> Bool {
+    system_effect_ref_same(left.system_effect, right.system_effect) &&
+        executable_ref_same(left.callable, right.callable)
 }
 
 fn string_path_has_prefix(path: List<Str>, prefix: List<Str>) -> Bool {

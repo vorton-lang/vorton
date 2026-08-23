@@ -12,6 +12,7 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HStringInterpPart, HProgram, DerivedImpl,
     TraitDispatch, DictDispatchInfo, DictRef, TraitBound,
     MethodCallRef, make_intrinsic_method_call_ref,
+    make_concrete_method_call_ref, make_bound_method_call_ref,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod,
     HForInDestructure, HLetDestructureBinding, ValueBindingKind,
     trait_bound_param_name,
@@ -49,7 +50,7 @@ use infer_helpers::{MethodLookupResult, StmtResult,
     check_expr_is_let_def, get_expr_def_id, is_mut_method_call, check_receiver_mutability,
     lookup_impl_method, lookup_trait_method,
     rewrite_bare_enum_bindings}
-use ir_identity::{IntrinsicRef}
+use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef}
 
 // ============================================================
 // Block inference (from infer-stmt.ts)
@@ -423,6 +424,7 @@ struct MethodCallSelection {
     method_type: Type?,
     method_core: ImplMethodSchemeCore?,
     impl_owner: ImplEntry?,
+    impl_method_ref: ImplMethodRef?,
     dict_dispatch: DictDispatchInfo?,
     intrinsic_ref: IntrinsicRef?
 }
@@ -441,6 +443,7 @@ fn select_for_protocol_method(
         method_type: some(registered_method),
         method_core: some(impl_core),
         impl_owner: some(impl_entry),
+        impl_method_ref: impl_entry.method_refs.get(method),
         dict_dispatch: none,
         intrinsic_ref: impl_entry.method_intrinsics.get(method)
     }
@@ -1814,14 +1817,18 @@ fn infer_method_call_from_receiver(
     let mut method_type: Type? = none
     let mut method_core: ImplMethodSchemeCore? = none
     let mut impl_owner: ImplEntry? = none
+    let mut impl_method_ref: ImplMethodRef? = none
     let mut dict_dispatch: DictDispatchInfo? = none
     let mut intrinsic_ref: IntrinsicRef? = none
+    let mut bound_method_ref: TraitMethodRef? = none
+    let mut bound_receiver_mutable = false
 
     match selection {
         some(selected) => {
             method_type = selected.method_type
             method_core = selected.method_core
             impl_owner = selected.impl_owner
+            impl_method_ref = selected.impl_method_ref
             dict_dispatch = selected.dict_dispatch
             intrinsic_ref = selected.intrinsic_ref
         },
@@ -1836,6 +1843,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_core = r.method_core
                 impl_owner = r.impl_owner
+                impl_method_ref = r.impl_method_ref
                 intrinsic_ref = r.intrinsic_ref
             },
             Type::EnumType { name, .. } => {
@@ -1843,6 +1851,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_core = r.method_core
                 impl_owner = r.impl_owner
+                impl_method_ref = r.impl_method_ref
                 intrinsic_ref = r.intrinsic_ref
             },
             _ => {}
@@ -1857,6 +1866,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_core = r.method_core
                 impl_owner = r.impl_owner
+                impl_method_ref = r.impl_method_ref
                 intrinsic_ref = r.intrinsic_ref
             },
             none => {}
@@ -1871,6 +1881,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_core = r.method_core
                 impl_owner = r.impl_owner
+                impl_method_ref = r.impl_method_ref
                 intrinsic_ref = r.intrinsic_ref
             },
             none => {}
@@ -1894,6 +1905,12 @@ fn infer_method_call_from_receiver(
                                 match tm {
                                     some(found_method) => {
                                         method_type = some(ctx.env.instantiate(TypeScheme { ty: found_method.ty, type_vars: trait_def.type_param_vars, bounds: [], def_id: none }))
+                                        bound_method_ref = some(found_method.method_ref)
+                                        bound_receiver_mutable = match
+                                                found_method.param_mutabilities.first() {
+                                            some(value) => value,
+                                            none => false
+                                        }
                                         dict_dispatch = some(DictDispatchInfo {
                                             dict_ref: DictRef::Simple(trait_bound_param_name(
                                                 fb.type_param_name, fb.trait_name)),
@@ -2054,7 +2071,16 @@ fn infer_method_call_from_receiver(
     let exact_method_ref: MethodCallRef? = match intrinsic_ref {
         some(intrinsic) => some(make_intrinsic_method_call_ref(
             intrinsic, callee_type)),
-        none => none
+        none => match impl_method_ref {
+            some(concrete) => some(make_concrete_method_call_ref(
+                concrete, callee_type,
+                is_mut_method_call(ctx, recv_type, method))),
+            none => match bound_method_ref {
+                some(bound) => some(make_bound_method_call_ref(
+                    bound, callee_type, bound_receiver_mutable)),
+                none => none
+            }
+        }
     }
     InferResult {
         hexpr: HExpr::Call {
@@ -2083,7 +2109,7 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
                 "Unknown effect: ${effect_display}",
                 span, DiagnosticContext::OtherContext { detail: some("effect '${effect_display}' not found") })
             return InferResult {
-                hexpr: HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: none, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2101,7 +2127,7 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
                 "Effect ${effect_display} has no operation ${op_name}",
                 span, DiagnosticContext::OtherContext { detail: some("no operation '${op_name}' on effect '${effect_display}'") })
             return InferResult {
-                hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, operation_ref: none, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2171,7 +2197,7 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
     s = me.1
 
     InferResult {
-        hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, args: hargs, ty: inst_ret, effects: effects, span: span },
+        hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, operation_ref: op.operation_ref, args: hargs, ty: inst_ret, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -2508,6 +2534,13 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
     let mut s = subst
     let mut effects: EffectRow = EMPTY_ROW
     let mut hfields: List<HStructFieldInit> = []
+    let variant_index = enum_def.variant_index.get(variant_name).unwrap_or(-1)
+    if variant_index < 0 {
+        panic("variant identity: registered variant index is missing")
+    }
+    let exact_variant_ref = enum_def.variant_refs.get(variant_index).unwrap()
+    let exact_field_refs = enum_def.variant_field_refs.get(
+        variant_index).unwrap()
 
     let mut hspread: HExpr? = none
     match spread {
@@ -2543,7 +2576,15 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
                 "Variant '${variant_name}' has no field '${field.name}'",
                 field.span, DiagnosticContext::MissingField { field: field.name, ty: variant_name, available: none }) }
         }
-        hfields.push(HStructFieldInit { name: field.name, value: fr.hexpr })
+        let exact_field_index = match field_idx {
+            some(index) => index,
+            none => panic("variant identity: named field index is missing")
+        }
+        hfields.push(HStructFieldInit {
+            name: field.name,
+            field_ref: exact_field_refs.get(exact_field_index).unwrap(),
+            value: fr.hexpr
+        })
     }
 
     if spread.is_none() {
@@ -2563,6 +2604,7 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
     InferResult {
         hexpr: HExpr::NamedVariantConstruct {
             enum_name: enum_name, variant_name: variant_name,
+            variant_ref: exact_variant_ref,
             fields: hfields, spread: hspread, ty: enum_type, effects: effects, span: span
         },
         subst: s, effects: effects

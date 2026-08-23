@@ -4,9 +4,14 @@ use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, Span, Position, Effec
 use hir::{HDecl, HParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssocType,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod, HFieldAccessKind,
     DictDispatchInfo, DictRef, trait_dict_name,
+    make_intrinsic_method_call_ref, make_concrete_method_call_ref,
+    make_bound_method_call_ref,
     hexpr_type, hexpr_effects, hexpr_span,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
 use ir_identity::{NominalFieldRef, nominal_field_ref_index, symbol_ref_same,
+    ImplOwnerRef, impl_owner_ref_provider, impl_owner_ref_trait,
+    impl_owner_ref_same,
+    impl_method_ref_member, symbol_ref_declaration_site_path,
     registered_trait_ref_symbol, trait_method_ref_trait,
     trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index, trait_method_ref_name}
@@ -14,14 +19,13 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     MethodOrigin, ImplEntry,
     ImplMethodSchemeCore,
     apply_subst, apply_subst_map, apply_subst_row_map,
-    find_impl, find_impl_by_origin, find_impl_by_provider,
+    find_impl, find_impl_by_provider,
     find_impls_by_provider, find_delegate_child_provider_plan,
     optional_symbol_ref_same,
     delegate_child_provider_ref,
     delegate_child_provider_produced_owner_count,
     delegate_child_provider_had_semantic_error,
-    has_impl, impl_origin, impl_decl_origin,
-    impl_method_origin,
+    has_impl, impl_origin,
     install_method_core, replace_impl_method_core,
     impl_method_core_as_scheme, impl_method_core_from_scheme,
     build_type_var_map}
@@ -38,8 +42,11 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     assert_pending_dict_owner_closed,
     generalize, collect_free_vars, free_type_vars_in_env, resolve_mod_uses,
     enter_project_root_frame, enter_project_child_frame,
-    exit_project_namespace_frame}
+    exit_project_namespace_frame,
+    enter_impl_check_root_frame, enter_impl_check_child_frame,
+    exit_impl_check_frame, impl_check_owner}
 use infer_helpers::{is_value_type}
+use resolver::{single_namespace_file_key}
 use infer_register::{register_decls_two_phase, register_module_decls_two_phase,
     resolve_declared_effects, prefix_decl_name, insert_mod_aliases,
     collect_all_supertraits, inject_assoc_types_from_bounds,
@@ -84,7 +91,9 @@ fn check_decl_inner(
         Decl::Effect { name, type_params, ops, is_pub, span } =>
             check_effect_decl(ctx, name, type_params, ops, is_pub, span),
         Decl::Impl { target_type, type_params, trait_name, methods, span } =>
-            check_impl_decl(ctx, target_type, type_params, trait_name, methods, span),
+            check_impl_decl(
+                ctx, target_type, type_params, trait_name, methods, span,
+                frame_decl_index.unwrap_or(-1)),
         Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span, .. } =>
             check_fn_decl(ctx, name, type_params, params, return_type,
                 declared_effects, body, is_pub, span, none, none, none),
@@ -230,6 +239,11 @@ fn check_mod_decl(
     is_pub: Bool, span: Span, frame_decl_index: Int?
 ) -> HDecl {
     let project_active = ctx.project_namespace_file_key.is_some()
+    let impl_decl_index = frame_decl_index.unwrap_or(-1)
+    if impl_decl_index < 0 {
+        panic("impl check index: inline module declaration index is missing")
+    }
+    enter_impl_check_child_frame(ctx, impl_decl_index)
     let mut entered_project_frame = false
     if project_active {
         entered_project_frame = match frame_decl_index {
@@ -254,6 +268,7 @@ fn check_mod_decl(
             if entered_project_frame {
                 let _ = exit_project_namespace_frame(ctx)
             }
+            exit_impl_check_frame(ctx)
             fail.raise(CompileError {})
         }
     }
@@ -262,6 +277,7 @@ fn check_mod_decl(
     if entered_project_frame {
         let _ = exit_project_namespace_frame(ctx)
     }
+    exit_impl_check_frame(ctx)
     result
 }
 
@@ -403,10 +419,21 @@ fn check_enum_decl(ctx: InferCtx, name: Str, type_params: List<TypeParam>, is_pu
         }
     }
     let mut hvariants: List<HEnumVariant> = []
-    for v in def.variants {
-        hvariants.push(HEnumVariant { name: v.name, fields: v.fields, field_names: v.field_names })
+    for variant_index in 0..def.variants.len() {
+        let v = def.variants.get(variant_index).unwrap()
+        hvariants.push(HEnumVariant {
+            name: v.name,
+            variant_ref: def.variant_refs.get(variant_index).unwrap(),
+            fields: v.fields,
+            field_refs: def.variant_field_refs.get(variant_index).unwrap(),
+            field_names: v.field_names
+        })
     }
-    HDecl::Enum { name: name, type_params: type_params, variants: hvariants, is_pub: is_pub, span: span }
+    HDecl::Enum {
+        name: name, owner_ref: def.owner_ref,
+        type_params: type_params, variants: hvariants,
+        is_pub: is_pub, span: span
+    }
 }
 
 fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, ast_ops: List<EffectOpDecl>, is_pub: Bool, span: Span) -> HDecl {
@@ -493,7 +520,11 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
             },
             none => {},
         }
-        hops.push(HEffectOp { name: op.name, params: op_params, return_type: op.return_type, has_default: op.has_default, default_body: default_body })
+        hops.push(HEffectOp {
+            name: op.name, operation_ref: op.operation_ref,
+            params: op_params, return_type: op.return_type,
+            has_default: op.has_default, default_body: default_body
+        })
         oi = oi + 1
     }
 
@@ -546,17 +577,30 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
         }
     }
 
-    HDecl::Effect { name: name, type_params: type_params, ops: hops, is_pub: is_pub, span: span }
+    HDecl::Effect {
+        name: name, owner_ref: def.owner_ref, handled_ref: def.handled_ref,
+        type_params: type_params, ops: hops, is_pub: is_pub, span: span
+    }
 }
 
 fn registered_impl_method_scheme(
     ctx: InferCtx, target_type: Str, trait_name: Str?,
-    origin: Str, method_name: Str
+    owner_ref: ImplOwnerRef, method_name: Str
 ) -> TypeScheme? {
-    match find_impl_by_origin(ctx.env.trait_reg, target_type, origin) {
-        some(entry) => match entry.method_schemes.get(method_name) {
-            some(core) => some(impl_method_core_as_scheme(core)),
-            none => none
+    let _ = trait_name
+    match find_impl_by_provider(
+            ctx.env.trait_reg, target_type,
+            impl_owner_ref_trait(owner_ref),
+            impl_owner_ref_provider(owner_ref)) {
+        some(entry) => match entry.owner_ref {
+            some(found_owner) => if !impl_owner_ref_same(
+                    found_owner, owner_ref) {
+                panic("impl method scheme: typed owner changed")
+            } else { match entry.method_schemes.get(method_name) {
+                some(core) => some(impl_method_core_as_scheme(core)),
+                none => none
+            } },
+            none => panic("impl method scheme: final owner has no identity")
         },
         none => none
     }
@@ -564,44 +608,81 @@ fn registered_impl_method_scheme(
 
 fn store_rebound_impl_method_scheme(
     mut ctx: InferCtx, target_type: Str, trait_name: Str?,
-    origin: Str, method_name: Str, scheme: TypeScheme, span: Span
+    owner_ref: ImplOwnerRef, method_name: Str, scheme: TypeScheme, span: Span
 ) {
-    let owner = match find_impl_by_origin(
-        ctx.env.trait_reg, target_type, origin) {
-        some(entry) => entry,
+    let owner = match find_impl_by_provider(
+        ctx.env.trait_reg, target_type,
+        impl_owner_ref_trait(owner_ref),
+        impl_owner_ref_provider(owner_ref)) {
+        some(entry) => match entry.owner_ref {
+            some(found_owner) => if impl_owner_ref_same(
+                    found_owner, owner_ref) { entry } else {
+                panic("impl method rebind: typed owner changed")
+            },
+            none => panic("impl method rebind: final owner has no identity")
+        },
         none => panic("impl method rebind: selected owner disappeared")
     }
-    let provider_ref = match owner.provider_ref {
-        some(value) => value,
-        none => panic("impl method rebind: final owner has no provider")
-    }
+    let provider_ref = impl_owner_ref_provider(owner_ref)
     let core = impl_method_core_from_scheme(scheme)
     replace_impl_method_core(
-        ctx.env.trait_reg, target_type, origin, method_name, core)
+        ctx.env.trait_reg, target_type, owner_ref, method_name, core)
     let _ = install_method_core(
         ctx.env.trait_reg, ctx.sink,
         target_type, method_name, core,
         MethodOrigin {
-            origin: origin, trait_name: trait_name,
+            origin: owner.origin, trait_name: trait_name,
             provider_ref: provider_ref, trait_ref: owner.trait_ref,
+            method_ref: owner.method_refs.get(method_name).unwrap(),
             span: span
         })
 }
 
-fn check_impl_decl(mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<Decl>, span: Span) -> HDecl {
+fn check_impl_decl(
+    mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
+    trait_name: Str?, methods: List<Decl>, span: Span, decl_index: Int
+) -> HDecl {
+    if decl_index < 0 {
+        panic("impl checking: source declaration index is missing")
+    }
+    let selected_owner = impl_check_owner(ctx, decl_index)
     let canonical_target = resolve_nominal_identity(ctx, target_type)
     let canonical_trait = match trait_name {
         some(name) => some(resolve_trait_identity(ctx, name)), none => none
     }
-    check_impl_decl_canonical(ctx, canonical_target, type_params, canonical_trait, methods, span)
+    check_impl_decl_canonical(
+        ctx, canonical_target, type_params, canonical_trait, methods, span,
+        selected_owner)
 }
 
-fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<Decl>, span: Span) -> HDecl {
-    let origin = impl_decl_origin(target_type, trait_name, type_params, span)
-    let impl_owner = match find_impl_by_origin(
-        ctx.env.trait_reg, target_type, origin) {
-        some(entry) => entry,
+fn check_impl_decl_canonical(
+    mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
+    trait_name: Str?, methods: List<Decl>, span: Span,
+    selected_owner: ImplOwnerRef
+) -> HDecl {
+    for source_member in methods {
+        match source_member {
+            Decl::ExternFn { .. } => panic(
+                "impl checking: forbidden extern member crossed parser"),
+            _ => {}
+        }
+    }
+    let impl_owner = match find_impl_by_provider(
+        ctx.env.trait_reg, target_type,
+        impl_owner_ref_trait(selected_owner),
+        impl_owner_ref_provider(selected_owner)) {
+        some(entry) => match entry.owner_ref {
+            some(owner_ref) => if impl_owner_ref_same(
+                    owner_ref, selected_owner) { entry } else {
+                panic("impl checking: selected owner identity changed")
+            },
+            none => panic("impl checking: final owner has no typed identity")
+        },
         none => fail.raise(CompileError {})
+    }
+    if !optional_symbol_ref_same(
+            impl_owner.trait_ref, impl_owner_ref_trait(selected_owner)) {
+        panic("impl checking: selected owner trait changed")
     }
     if impl_owner.type_param_vars.len() != type_params.len() ||
        impl_owner.type_params.len() != type_params.len() {
@@ -747,8 +828,13 @@ fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: L
         match method {
             Decl::Fn { name, type_params: mtps, params, return_type, declared_effects, body, is_pub, span: mspan, .. } => {
                 let registration_scheme = registered_impl_method_scheme(
-                    ctx, target_type, trait_name, origin, name)
-                let rebind_identity = impl_method_origin(origin, name)
+                    ctx, target_type, trait_name, selected_owner, name)
+                let exact_method = match impl_owner.method_refs.get(name) {
+                    some(method_ref) => method_ref,
+                    none => panic("impl checking: method has no exact identity")
+                }
+                let rebind_identity = symbol_ref_declaration_site_path(
+                    impl_method_ref_member(exact_method))
                 let hdecl = check_fn_decl(
                     ctx, name, mtps, params, return_type, declared_effects,
                     body, is_pub, mspan, some(impl_self_type),
@@ -772,7 +858,7 @@ fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: L
                                 ctx, rebind_identity, scheme,
                                 mparams, mret, meffects, checked_span)
                             store_rebound_impl_method_scheme(
-                                ctx, target_type, trait_name, origin,
+                                ctx, target_type, trait_name, selected_owner,
                                 mname, rebound, checked_span)
                         }
                         none => {}
@@ -841,8 +927,13 @@ fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: L
         some(value) => value,
         none => panic("impl HIR: selected final owner has no provider")
     }
+    let owner_ref = match impl_owner.owner_ref {
+        some(value) => value,
+        none => panic("impl HIR: selected final owner has no typed identity")
+    }
     HDecl::Impl {
         target_type: target_type,
+        owner_ref: owner_ref,
         provider_ref: provider_ref, trait_ref: impl_owner.trait_ref,
         type_params: type_params, trait_name: trait_name,
         methods: hmethods, assoc_types: hassoc_types, span: span
@@ -1298,7 +1389,11 @@ fn expand_delegate_impls(
                                                     dict_dispatch: some(DictDispatchInfo {
                                                         dict_ref: DictRef::Static(dict_name),
                                                         method: tm.name
-                                                    }), method_ref: none,
+                                                    }),
+                                                    method_ref: some(
+                                                        make_bound_method_call_ref(
+                                                            tm.method_ref, tm.ty,
+                                                            tm.param_mutabilities.first().unwrap_or(false))),
                                                     ty: ret_ty,
                                                     effects: eff,
                                                     span: span
@@ -1328,12 +1423,32 @@ fn expand_delegate_impls(
                                                 }
 
                                                 // Build: self.field.method(args...) — as Call with UFCS callee
+                                                let exact_forward_ref = match field_impl {
+                                                    some(field_owner) => match
+                                                            field_owner.method_intrinsics.get(tm.name) {
+                                                        some(intrinsic) =>
+                                                            make_intrinsic_method_call_ref(
+                                                                intrinsic, tm.ty),
+                                                        none => match
+                                                                field_owner.method_refs.get(tm.name) {
+                                                            some(method_ref) =>
+                                                                make_concrete_method_call_ref(
+                                                                    method_ref, tm.ty,
+                                                                    tm.param_mutabilities.first().unwrap_or(false)),
+                                                            none => panic(
+                                                                "delegate HIR: field owner lost exact method")
+                                                        }
+                                                    },
+                                                    none => panic(
+                                                        "delegate HIR: field owner is missing")
+                                                }
                                                 HExpr::Call {
                                                     callee: method_access,
                                                     args: forward_args,
                                                     type_args: [],
                                                     resolved_dicts: resolved_forward_dicts,
-                                                    dict_dispatch: none, method_ref: none,
+                                                    dict_dispatch: none,
+                                                    method_ref: some(exact_forward_ref),
                                                     ty: ret_ty,
                                                     effects: eff,
                                                     span: span
@@ -1378,8 +1493,15 @@ fn expand_delegate_impls(
                                     none => panic(
                                         "delegate HIR: final owner has no provider")
                                 }
+                                let selected_delegate_ref = match
+                                        selected_delegate_owner.owner_ref {
+                                    some(owner) => owner,
+                                    none => panic(
+                                        "delegate HIR: final owner has no typed identity")
+                                }
                                 result.push(HDecl::Impl {
                                     target_type: target_type,
+                                    owner_ref: selected_delegate_ref,
                                     provider_ref: selected_delegate_provider,
                                     trait_ref: selected_delegate_owner.trait_ref,
                                     type_params: type_params,
@@ -4020,21 +4142,28 @@ fn dfs_detect_cycle(mut ctx: InferCtx, name: Str, mut state: Map<Str, Int>, mut 
 
 pub fn check(mut ctx: InferCtx, program: Program) -> HProgram {
     register_decls_two_phase(ctx, program.decls)
-    check_registered(ctx, program)
+    let file_key = single_namespace_file_key(program)
+    check_registered(ctx, program, file_key)
 }
 
-pub fn check_module_identity(mut ctx: InferCtx, program: Program, module_prefix: Str) -> HProgram {
+pub fn check_module_identity(
+    mut ctx: InferCtx, program: Program,
+    module_prefix: Str, file_key: Str
+) -> HProgram {
     let qualified_decls = register_module_decls_two_phase(ctx, module_prefix, program.decls)
     let qualified = Program { uses: program.uses, decls: qualified_decls, span: program.span }
-    check_registered(ctx, qualified)
+    check_registered(ctx, qualified, file_key)
 }
 
-fn check_registered(mut ctx: InferCtx, program: Program) -> HProgram {
+fn check_registered(
+    mut ctx: InferCtx, program: Program, file_key: Str
+) -> HProgram {
     // Derive mutates canonical registries. Complete it before the lexical root
     // overlay snapshots any payload, so frame aliases always observe the
     // authoritative post-derive definitions.
     let derived_impls = run_derive_pass(ctx.env, ctx.sink)
     let project_active = ctx.project_namespace_file_key.is_some()
+    enter_impl_check_root_frame(ctx, file_key)
     let mut entered_project_frame = false
     if project_active {
         entered_project_frame = enter_project_root_frame(ctx)
@@ -4047,11 +4176,13 @@ fn check_registered(mut ctx: InferCtx, program: Program) -> HProgram {
         if entered_project_frame {
             let _ = exit_project_namespace_frame(ctx)
         }
+        exit_impl_check_frame(ctx)
         fail.raise(CompileError {})
     } }
     if entered_project_frame {
         let _ = exit_project_namespace_frame(ctx)
     }
+    exit_impl_check_frame(ctx)
     result
 }
 
@@ -4063,13 +4194,17 @@ fn check_registered_body(
     // Without this, callers defined before impl blocks see EMPTY_ROW effects from Pass 1.
     // The main pass re-checks with correct effects visible.
     // DiagnosticSink deduplication (by code+span) prevents double error reporting.
+    let mut effect_decl_index = 0
     for decl in program.decls {
         match decl {
             Decl::Impl { target_type, type_params, trait_name, methods, span } => {
-                let _ = some(check_impl_decl(ctx, target_type, type_params, trait_name, methods, span)) catch { _ => none }
+                let _ = some(check_impl_decl(
+                    ctx, target_type, type_params, trait_name,
+                    methods, span, effect_decl_index)) catch { _ => none }
             },
             _ => {}
         }
+        effect_decl_index = effect_decl_index + 1
     }
 
     // B-122: Build SCC for fn/impl declaration ordering.
@@ -4226,12 +4361,19 @@ pub fn resolve_type_expr_public(mut ctx: InferCtx, texpr: TypeExpr) -> Type {
     resolve_type_expr(ctx, texpr)
 }
 
-pub fn check_prelude_decl(mut ctx: InferCtx, decl: Decl) -> HDecl {
+pub fn check_prelude_decl(
+    mut ctx: InferCtx, decl: Decl, file_key: Str, decl_index: Int
+) -> HDecl {
     // Note: check_decl uses fail.raise internally. Due to the known limitation
     // where cross-module effect propagation doesn't work (effects registered as
     // EMPTY_ROW in Pass 1), we must explicitly surface the fail effect here so
     // callers pass the __ring_ev_fail evidence.
-    let result = check_decl(ctx, decl, none)
+    enter_impl_check_root_frame(ctx, file_key)
+    let result = some(check_decl(ctx, decl, some(decl_index))) catch { _ => {
+        exit_impl_check_frame(ctx)
+        fail.raise(CompileError {})
+    } }
+    exit_impl_check_frame(ctx)
     if false { fail.raise(CompileError {}) }
-    result
+    result.unwrap()
 }

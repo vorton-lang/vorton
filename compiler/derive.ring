@@ -12,6 +12,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_predicate_subject_param_index, frozen_impl_predicates,
     impl_assoc_predicate_name, impl_assoc_predicate_type,
     apply_subst_map,
+    impl_target_symbol,
     ImplOwnerState, impl_owner_is_provisional,
     delegate_plan_not_applicable}
 use builtins::{builtin_option_derived_owners}
@@ -20,7 +21,12 @@ use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
 use hir::{DerivedImpl, DerivedField, DerivedVariant, FieldAction, DictRef,
     TraitBound, TypeKind, trait_dict_name, trait_bound_param_name, compare_by_first}
-use ir_identity::{SymbolRef, ImplProviderRef,
+use ir_identity::{SymbolRef, ImplProviderRef, ImplOwnerRef, ImplMethodRef,
+    make_impl_owner_ref, make_impl_method_ref,
+    make_symbol_ref, namespace_member,
+    impl_provider_ref_site, path_ref_owner,
+    path_owner_ref_module_body, module_body_ref_origin_module_key,
+    path_ref_normalized_child_path,
     symbol_ref_same, impl_provider_ref_same,
     impl_provider_ref_kind, impl_provider_kind_same,
     impl_provider_kind_builtin, impl_provider_kind_derived,
@@ -1573,6 +1579,38 @@ fn resolve_type_arg_dict(
 // Register derived impl
 // ================================================================
 
+fn derived_impl_method_refs(
+    env: TypeEnv, type_name: Str, provider_ref: ImplProviderRef,
+    trait_ref: SymbolRef, exact: Map<Str, ImplMethodSchemeCore>
+) -> (ImplOwnerRef, Map<Str, ImplMethodRef>) {
+    let target_ref = match impl_target_symbol(env, type_name) {
+        some(symbol) => symbol,
+        none => panic("derive impl owner: exact target symbol is missing")
+    }
+    let owner_ref = make_impl_owner_ref(
+        target_ref, provider_ref, some(trait_ref))
+    let provider_path = path_ref_normalized_child_path(
+        impl_provider_ref_site(provider_ref)).join("/")
+    let module_key = module_body_ref_origin_module_key(
+        path_owner_ref_module_body(path_ref_owner(
+            impl_provider_ref_site(provider_ref))))
+    let mut refs: Map<Str, ImplMethodRef> = map_new()
+    let mut entries = exact.entries()
+    entries.sort_by(compare_by_first)
+    let mut callable_slot = 0
+    for entry in entries {
+        let (method_name, _) = entry
+        let member = make_symbol_ref(
+            module_key, namespace_member(),
+            "derived-impl-member:${provider_path}:${callable_slot}",
+            "provider:${provider_path}|method:${callable_slot}")
+        refs.insert(method_name, make_impl_method_ref(
+            owner_ref, member, callable_slot, callable_slot, method_name))
+        callable_slot = callable_slot + 1
+    }
+    (owner_ref, refs)
+}
+
 fn register_derived_impl(
     mut env: TypeEnv, sink: CollectingSink,
     di: DerivedImpl, span: Span
@@ -1634,6 +1672,10 @@ fn register_derived_impl(
     if !symbol_ref_same(trait_ref, di.trait_ref) {
         panic("derive impl descriptor changed registered trait")
     }
+    let identity = derived_impl_method_refs(
+        env, di.type_name, provider_ref, trait_ref, exact)
+    let owner_ref = identity.0
+    let method_refs = identity.1
     let owner = ImplEntry {
         trait_name: some(trait_name),
         target_type_name: di.type_name,
@@ -1643,9 +1685,11 @@ fn register_derived_impl(
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: exact,
+        method_refs: method_refs,
         method_intrinsics: map_new(),
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
+        owner_ref: some(owner_ref),
         delegate_plan: delegate_plan_not_applicable(),
         origin: origin,
         span: span,
@@ -1664,6 +1708,7 @@ fn register_derived_impl(
                 trait_name: some(trait_name),
                 provider_ref: provider_ref,
                 trait_ref: some(trait_ref),
+                method_ref: method_refs.get(method_name).unwrap(),
                 span: span
             })
     }

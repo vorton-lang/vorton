@@ -7,7 +7,8 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef, ImplEntr
     exact_scheme_value_origin, find_impl_by_provider,
     impl_entry_exact_key_same, impl_entry_final_same,
     optional_symbol_ref_same}
-use ir_identity::{impl_provider_ref_same}
+use ir_identity::{impl_provider_ref_same, impl_owner_ref_same,
+    impl_method_ref_name, impl_method_ref_same}
 use infer_register::{prefix_decl_name, module_prefix_decl_name}
 
 // ============================================================
@@ -609,27 +610,12 @@ fn optional_impl_trait_same(left: Str?, right: Str?) -> Bool {
     }
 }
 
-fn method_origin_span_same(left: MethodOrigin, right: MethodOrigin) -> Bool {
-    left.span.file == right.span.file &&
-    left.span.start.line == right.span.start.line &&
-    left.span.start.column == right.span.start.column &&
-    left.span.start.offset == right.span.start.offset &&
-    left.span.end.line == right.span.end.line &&
-    left.span.end.column == right.span.end.column &&
-    left.span.end.offset == right.span.end.offset
-}
-
 fn method_origin_same(left: MethodOrigin, right: MethodOrigin) -> Bool {
-    left.origin == right.origin &&
-    optional_impl_trait_same(left.trait_name, right.trait_name) &&
-    impl_provider_ref_same(left.provider_ref, right.provider_ref) &&
-    optional_symbol_ref_same(left.trait_ref, right.trait_ref) &&
-    method_origin_span_same(left, right)
+    impl_method_ref_same(left.method_ref, right.method_ref)
 }
 
 fn method_origin_matches_owner(origin: MethodOrigin, owner: ImplEntry) -> Bool {
-    if origin.origin != owner.origin ||
-       !optional_impl_trait_same(origin.trait_name, owner.trait_name) ||
+    if !optional_impl_trait_same(origin.trait_name, owner.trait_name) ||
        !optional_symbol_ref_same(origin.trait_ref, owner.trait_ref) {
         return false
     }
@@ -638,13 +624,12 @@ fn method_origin_matches_owner(origin: MethodOrigin, owner: ImplEntry) -> Bool {
                 origin.provider_ref, provider) { return false },
         none => return false
     }
-    origin.span.file == owner.span.file &&
-    origin.span.start.line == owner.span.start.line &&
-    origin.span.start.column == owner.span.start.column &&
-    origin.span.start.offset == owner.span.start.offset &&
-    origin.span.end.line == owner.span.end.line &&
-    origin.span.end.column == owner.span.end.column &&
-    origin.span.end.offset == owner.span.end.offset
+    match owner.method_refs.get(
+            impl_method_ref_name(origin.method_ref)) {
+        some(method_ref) => impl_method_ref_same(
+            method_ref, origin.method_ref),
+        none => false
+    }
 }
 
 fn append_owner_method_indexes(
@@ -716,8 +701,12 @@ fn export_impl_facts(
             some(found) => found,
             none => panic("impl export closure: exact fact owner is missing")
         }
-        if owner.origin != fact.owner_origin ||
-           !optional_symbol_ref_same(owner.trait_ref, fact.trait_ref) {
+        if !optional_symbol_ref_same(owner.trait_ref, fact.trait_ref) ||
+           match owner.owner_ref {
+               some(registered) => !impl_owner_ref_same(
+                   registered, fact.owner_ref),
+               none => true
+           } {
             panic("impl export closure: fact owner relation changed")
         }
         for seen in seen_fact_owners {

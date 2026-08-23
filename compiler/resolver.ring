@@ -1,4 +1,5 @@
-use ast::{Program, Decl, UseDecl, UseImport, StructFieldDecl, DeriveAttribute,
+use ast::{Program, Decl, UseDecl, UseImport, StructFieldDecl, EffectOpDecl,
+    DeriveAttribute,
     Span, Position}
 use parser::{parse}
 use diagnostics::{CollectingSink, Diagnostic, DiagnosticNote, Severity, DiagnosticContext,
@@ -8,7 +9,13 @@ use hir::{compare_by_first, module_item_identity, variant_ctor_name}
 use codes::{E0207, E0702, E0704, E0705}
 use ir_identity::{
     SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
+    RegisteredNominalRef, VariantRef, VariantFieldRef,
+    HandledEffectRef,
     make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
+    make_registered_nominal_ref, make_variant_ref, make_variant_field_ref,
+    make_handled_effect_ref,
+    handled_effect_ref_same,
+    registered_nominal_ref_same, variant_ref_same, variant_field_ref_same,
     make_module_body_ref, path_owner_for_module_body, make_path_ref,
     path_role_declaration, path_role_synthetic,
     make_impl_provider_ref, impl_provider_kind_source,
@@ -19,6 +26,8 @@ use ir_identity::{
     symbol_ref_origin_module_key, symbol_ref_namespace_kind,
     symbol_ref_canonical_payload, symbol_ref_declaration_site_path,
     symbol_ref_same}
+use ir_inventory::{EffectOperationRef, make_named_executable_ref,
+    make_effect_operation_ref, effect_operation_ref_same}
 
 // ============================================================
 // Types
@@ -301,8 +310,15 @@ pub fn duplicate_direct_declaration_diagnostic(
     diagnostic
 }
 
+pub struct EnumVariantIdentityFact {
+    pub variant_ref: VariantRef,
+    pub fields: List<VariantFieldRef>
+}
+
 pub struct EnumVariantFactGroup {
     pub enum_symbol: SymbolRef,
+    pub owner_ref: RegisteredNominalRef,
+    pub variants: List<EnumVariantIdentityFact>,
     pub constructors: List<NamespaceSeed>
 }
 
@@ -325,14 +341,32 @@ pub struct TraitIdentityFact {
     pub frame_index: Int,
     pub decl_index: Int,
     pub owner_ref: SymbolRef,
-    pub methods: List<TraitMethodRef>
+    pub methods: List<TraitMethodRef>,
+    pub assoc_members: List<SymbolRef>
+}
+
+pub struct EffectIdentityFact {
+    pub file_key: Str,
+    pub frame_index: Int,
+    pub decl_index: Int,
+    pub owner_ref: SymbolRef,
+    pub handled_ref: HandledEffectRef,
+    pub operations: List<EffectOperationRef>
+}
+
+pub struct ImplMethodIdentityFact {
+    pub source_member_index: Int,
+    pub callable_slot_index: Int,
+    pub member_ref: SymbolRef,
+    pub name: Str
 }
 
 pub struct SourceImplProviderFact {
     pub file_key: Str,
     pub frame_index: Int,
     pub decl_index: Int,
-    pub provider_ref: ImplProviderRef
+    pub provider_ref: ImplProviderRef,
+    pub methods: List<ImplMethodIdentityFact>
 }
 
 pub struct DelegateProviderFact {
@@ -540,6 +574,7 @@ pub struct ModuleNamespaceCensus {
     pub enum_variant_facts: List<EnumVariantFactGroup>,
     pub struct_identities: List<StructIdentityFact>,
     pub trait_identities: List<TraitIdentityFact>,
+    pub effect_identities: List<EffectIdentityFact>,
     pub source_impl_providers: List<SourceImplProviderFact>,
     pub delegate_providers: List<DelegateProviderFact>,
     pub nominal_derived_providers: List<NominalDerivedProviderPlanFact>,
@@ -554,6 +589,7 @@ pub struct ResolvedNamespacePlan {
     pub enum_variant_facts: List<EnumVariantFactGroup>,
     pub struct_identities: List<StructIdentityFact>,
     pub trait_identities: List<TraitIdentityFact>,
+    pub effect_identities: List<EffectIdentityFact>,
     pub source_impl_providers: List<SourceImplProviderFact>,
     pub delegate_providers: List<DelegateProviderFact>,
     pub nominal_derived_providers: List<NominalDerivedProviderPlanFact>,
@@ -791,7 +827,8 @@ fn append_namespace_seed(
 }
 
 fn append_enum_variant_fact_group(
-    enum_symbol: SymbolRef,
+    enum_symbol: SymbolRef, owner_ref: RegisteredNominalRef,
+    variants: List<EnumVariantIdentityFact>,
     constructors: List<NamespaceSeed>,
     mut groups: List<EnumVariantFactGroup>
 ) {
@@ -799,10 +836,37 @@ fn append_enum_variant_fact_group(
         match groups.get(group_index) {
             some(group) => {
                 if symbol_ref_same(group.enum_symbol, enum_symbol) {
+                    if !registered_nominal_ref_same(
+                            group.owner_ref, owner_ref) ||
+                       group.variants.len() != variants.len() {
+                        panic("namespace invariant violated: enum identity replay drifted")
+                    }
+                    for variant_index in 0..variants.len() {
+                        let existing_variant = group.variants.get(
+                            variant_index).unwrap()
+                        let incoming_variant = variants.get(
+                            variant_index).unwrap()
+                        if !variant_ref_same(
+                                existing_variant.variant_ref,
+                                incoming_variant.variant_ref) ||
+                           existing_variant.fields.len() !=
+                                incoming_variant.fields.len() {
+                            panic("namespace invariant violated: enum variant replay drifted")
+                        }
+                        for field_index in 0..incoming_variant.fields.len() {
+                            if !variant_field_ref_same(
+                                    existing_variant.fields.get(field_index).unwrap(),
+                                    incoming_variant.fields.get(field_index).unwrap()) {
+                                panic("namespace invariant violated: enum field replay drifted")
+                            }
+                        }
+                    }
                     let mut merged = list_clone(group.constructors)
                     merged.extend(constructors)
                     groups.set(group_index, EnumVariantFactGroup {
                         enum_symbol: group.enum_symbol,
+                        owner_ref: group.owner_ref,
+                        variants: group.variants,
                         constructors: merged
                     })
                     return
@@ -813,6 +877,8 @@ fn append_enum_variant_fact_group(
     }
     groups.push(EnumVariantFactGroup {
         enum_symbol: enum_symbol,
+        owner_ref: owner_ref,
+        variants: variants,
         constructors: constructors
     })
 }
@@ -888,6 +954,7 @@ fn collect_trait_identity_fact(
     mut facts: List<TraitIdentityFact>
 ) {
     let mut method_refs: List<TraitMethodRef> = []
+    let mut assoc_members: List<SymbolRef> = []
     let mut callable_slot_index = 0
     for source_member_index in 0..methods.len() {
         match methods.get(source_member_index) {
@@ -897,6 +964,12 @@ fn collect_trait_identity_fact(
                     callable_slot_index, name))
                 callable_slot_index = callable_slot_index + 1
             },
+            some(Decl::AssocType { .. }) => {
+                assoc_members.push(make_symbol_ref(
+                    frame.file_key, namespace_member(),
+                    "${symbol_ref_canonical_payload(owner_ref)}|assoc:${source_member_index}",
+                    "${symbol_ref_declaration_site_path(owner_ref)}|assoc:${source_member_index}"))
+            },
             _ => {}
         }
     }
@@ -905,7 +978,44 @@ fn collect_trait_identity_fact(
         frame_index: frame.frame_index,
         decl_index: decl_index,
         owner_ref: owner_ref,
-        methods: method_refs
+        methods: method_refs,
+        assoc_members: assoc_members
+    }, facts)
+}
+
+fn append_effect_identity_fact(
+    fact: EffectIdentityFact, mut facts: List<EffectIdentityFact>
+) {
+    for existing in facts {
+        if existing.file_key == fact.file_key &&
+           existing.frame_index == fact.frame_index &&
+           existing.decl_index == fact.decl_index {
+            panic("namespace invariant violated: duplicate effect identity site")
+        }
+    }
+    facts.push(fact)
+}
+
+fn collect_effect_identity_fact(
+    frame: ModuleFramePlan, decl_index: Int,
+    owner_ref: SymbolRef, ops: List<EffectOpDecl>,
+    mut facts: List<EffectIdentityFact>
+) {
+    let handled_ref = make_handled_effect_ref(owner_ref)
+    let mut operations: List<EffectOperationRef> = []
+    for op_index in 0..ops.len() {
+        let member = make_symbol_ref(
+            frame.file_key, namespace_member(),
+            "${symbol_ref_canonical_payload(owner_ref)}|op:${op_index}",
+            "${symbol_ref_declaration_site_path(owner_ref)}|op:${op_index}")
+        operations.push(make_effect_operation_ref(
+            handled_ref, member, op_index,
+            make_named_executable_ref(member)))
+    }
+    append_effect_identity_fact(EffectIdentityFact {
+        file_key: frame.file_key, frame_index: frame.frame_index,
+        decl_index: decl_index, owner_ref: owner_ref,
+        handled_ref: handled_ref, operations: operations
     }, facts)
 }
 
@@ -1018,11 +1128,31 @@ fn collect_impl_provider_facts(
 ) {
     let source = source_provider_ref(
         frame, ["decl:${decl_index}", "impl"], true)
+    let mut method_facts: List<ImplMethodIdentityFact> = []
+    let mut callable_slot_index = 0
+    for source_member_index in 0..methods.len() {
+        match methods.get(source_member_index) {
+            some(Decl::Fn { name, .. }) => {
+                method_facts.push(ImplMethodIdentityFact {
+                    source_member_index: source_member_index,
+                    callable_slot_index: callable_slot_index,
+                    member_ref: make_symbol_ref(
+                        frame.file_key, namespace_member(),
+                        "impl-member:${frame.frame_index}:${decl_index}:${source_member_index}",
+                        "frame:${frame.frame_index}|decl:${decl_index}|impl-member:${source_member_index}"),
+                    name: name
+                })
+                callable_slot_index = callable_slot_index + 1
+            },
+            _ => {}
+        }
+    }
     append_source_impl_provider_fact(SourceImplProviderFact {
         file_key: frame.file_key,
         frame_index: frame.frame_index,
         decl_index: decl_index,
-        provider_ref: source
+        provider_ref: source,
+        methods: method_facts
     }, source_facts)
     for source_member_index in 0..methods.len() {
         match methods.get(source_member_index) {
@@ -1060,6 +1190,7 @@ fn collect_decl_seed(
     mut enum_variant_facts: List<EnumVariantFactGroup>,
     mut struct_identities: List<StructIdentityFact>,
     mut trait_identities: List<TraitIdentityFact>,
+    mut effect_identities: List<EffectIdentityFact>,
     mut source_impl_providers: List<SourceImplProviderFact>,
     mut delegate_providers: List<DelegateProviderFact>,
     mut nominal_derived_providers: List<NominalDerivedProviderPlanFact>
@@ -1108,8 +1239,42 @@ fn collect_decl_seed(
                 frame, decl_index, name, NamespaceKind::Enum,
                 enum_payload, none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
+            // Enum owners use the same exact nominal ledger as structs.  There
+            // are no struct-field identities to attach, so registration
+            // consumes this fact atomically instead of opening a field phase.
+            collect_struct_identity_fact(
+                frame, decl_index, enum_symbol, enum_payload,
+                [], false, struct_identities)
             let mut ctor_facts: List<NamespaceSeed> = []
-            for variant in variants {
+            let registered_enum = make_registered_nominal_ref(
+                enum_symbol, enum_payload)
+            let mut variant_identity_facts: List<EnumVariantIdentityFact> = []
+            for variant_index in 0..variants.len() {
+                let variant = variants.get(variant_index).unwrap()
+                let variant_member = make_symbol_ref(
+                    frame.file_key, namespace_member(),
+                    "${enum_payload}|variant:${variant_index}",
+                    "${symbol_ref_declaration_site_path(enum_symbol)}|variant:${variant_index}")
+                let variant_ref = make_variant_ref(
+                    registered_enum, variant_member, variant_index)
+                let field_count = match variant.named_fields {
+                    some(named) => if named.len() > 0 {
+                        named.len()
+                    } else { variant.fields.len() },
+                    none => variant.fields.len()
+                }
+                let mut field_refs: List<VariantFieldRef> = []
+                for field_index in 0..field_count {
+                    let field_member = make_symbol_ref(
+                        frame.file_key, namespace_member(),
+                        "${enum_payload}|variant:${variant_index}|field:${field_index}",
+                        "${symbol_ref_declaration_site_path(variant_member)}|field:${field_index}")
+                    field_refs.push(make_variant_field_ref(
+                        variant_ref, field_member, field_index))
+                }
+                variant_identity_facts.push(EnumVariantIdentityFact {
+                    variant_ref: variant_ref, fields: field_refs
+                })
                 let ctor_payload = variant_ctor_name(enum_payload, variant.name)
                 let ctor_symbol = append_namespace_seed(
                     frame, decl_index, variant.name,
@@ -1143,7 +1308,8 @@ fn collect_decl_seed(
                     NamespaceSeedRole::EnumQualifiedMember, seeds)
             }
             append_enum_variant_fact_group(
-                enum_symbol, ctor_facts, enum_variant_facts)
+                enum_symbol, registered_enum,
+                variant_identity_facts, ctor_facts, enum_variant_facts)
             collect_nominal_derived_provider_fact(
                 frame, decl_index, derive_attrs,
                 nominal_derived_providers)
@@ -1153,10 +1319,13 @@ fn collect_decl_seed(
                 declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
-        Decl::Effect { name, is_pub, .. } => {
-            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Effect,
+        Decl::Effect { name, ops, is_pub, .. } => {
+            let owner_ref = append_namespace_seed(
+                frame, decl_index, name, NamespaceKind::Effect,
                 declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
+            collect_effect_identity_fact(
+                frame, decl_index, owner_ref, ops, effect_identities)
         },
         Decl::EffectAlias { name, is_pub, .. } => {
             let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::EffectAlias,
@@ -1434,6 +1603,7 @@ fn collect_frame_contents(
     mut enum_variant_facts: List<EnumVariantFactGroup>,
     mut struct_identities: List<StructIdentityFact>,
     mut trait_identities: List<TraitIdentityFact>,
+    mut effect_identities: List<EffectIdentityFact>,
     mut source_impl_providers: List<SourceImplProviderFact>,
     mut delegate_providers: List<DelegateProviderFact>,
     mut nominal_derived_providers: List<NominalDerivedProviderPlanFact>,
@@ -1469,7 +1639,7 @@ fn collect_frame_contents(
             some(decl) => {
                 collect_decl_seed(
                     frame, decl_index, decl, seeds, enum_variant_facts,
-                    struct_identities, trait_identities,
+                    struct_identities, trait_identities, effect_identities,
                     source_impl_providers, delegate_providers,
                     nominal_derived_providers)
                 match decl {
@@ -1487,7 +1657,8 @@ fn collect_frame_contents(
                                         child_frame, nested_uses, nested_decls,
                                         frames, frame_site_indices, seeds,
                                         enum_variant_facts, struct_identities,
-                                        trait_identities, source_impl_providers,
+                                        trait_identities, effect_identities,
+                                        source_impl_providers,
                                         delegate_providers,
                                         nominal_derived_providers, imports,
                                         physical_dependencies, issues)
@@ -1538,6 +1709,7 @@ pub fn census_module_namespaces(
     let mut enum_variant_facts: List<EnumVariantFactGroup> = []
     let mut struct_identities: List<StructIdentityFact> = []
     let mut trait_identities: List<TraitIdentityFact> = []
+    let mut effect_identities: List<EffectIdentityFact> = []
     let mut source_impl_providers: List<SourceImplProviderFact> = []
     let mut delegate_providers: List<DelegateProviderFact> = []
     let mut nominal_derived_providers:
@@ -1553,7 +1725,7 @@ pub fn census_module_namespaces(
                 root_frame, program.uses, program.decls,
                 frames, frame_site_indices,
                 seeds, enum_variant_facts, struct_identities,
-                trait_identities, source_impl_providers,
+                trait_identities, effect_identities, source_impl_providers,
                 delegate_providers, nominal_derived_providers, imports,
                 physical_dependencies, issues)
         },
@@ -1568,6 +1740,7 @@ pub fn census_module_namespaces(
         enum_variant_facts: enum_variant_facts,
         struct_identities: struct_identities,
         trait_identities: trait_identities,
+        effect_identities: effect_identities,
         source_impl_providers: source_impl_providers,
         delegate_providers: delegate_providers,
         nominal_derived_providers: nominal_derived_providers,
@@ -5046,6 +5219,7 @@ pub fn resolve_namespace_plan(
     let mut enum_variant_facts: List<EnumVariantFactGroup> = []
     let mut struct_identities: List<StructIdentityFact> = []
     let mut trait_identities: List<TraitIdentityFact> = []
+    let mut effect_identities: List<EffectIdentityFact> = []
     let mut source_impl_providers: List<SourceImplProviderFact> = []
     let mut delegate_providers: List<DelegateProviderFact> = []
     let mut nominal_derived_providers:
@@ -5060,7 +5234,8 @@ pub fn resolve_namespace_plan(
         }
         for group in census.enum_variant_facts {
             append_enum_variant_fact_group(
-                group.enum_symbol, group.constructors,
+                group.enum_symbol, group.owner_ref,
+                group.variants, group.constructors,
                 enum_variant_facts)
         }
         for fact in census.struct_identities {
@@ -5068,6 +5243,9 @@ pub fn resolve_namespace_plan(
         }
         for fact in census.trait_identities {
             append_trait_identity_fact(fact, trait_identities)
+        }
+        for fact in census.effect_identities {
+            append_effect_identity_fact(fact, effect_identities)
         }
         for fact in census.source_impl_providers {
             append_source_impl_provider_fact(fact, source_impl_providers)
@@ -5308,6 +5486,7 @@ pub fn resolve_namespace_plan(
         enum_variant_facts: enum_variant_facts,
         struct_identities: struct_identities,
         trait_identities: trait_identities,
+        effect_identities: effect_identities,
         source_impl_providers: source_impl_providers,
         delegate_providers: delegate_providers,
         nominal_derived_providers: nominal_derived_providers,

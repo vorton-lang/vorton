@@ -6,7 +6,10 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     HStringInterpPart, HForInDestructure,
     HLetDestructureBinding, HPatternBinding, ValueBindingKind, TraitDispatch,
     MethodCallRef, make_intrinsic_method_call_ref,
-    method_call_ref_intrinsic, method_call_ref_signature,
+    make_concrete_method_call_ref, make_bound_method_call_ref,
+    method_call_ref_is_intrinsic, method_call_ref_is_concrete,
+    method_call_ref_intrinsic, method_call_ref_impl, method_call_ref_bound,
+    method_call_ref_signature, method_call_ref_receiver_mutable,
     hexpr_type, hexpr_effects, hexpr_span}
 use union_find::{UnionFind}
 use env::{apply_subst, apply_subst_row}
@@ -31,9 +34,21 @@ fn zonk_method_call_ref(
     ctx: ZonkCtx, value: MethodCallRef?
 ) -> MethodCallRef? {
     match value {
-        some(exact) => some(make_intrinsic_method_call_ref(
-            method_call_ref_intrinsic(exact),
-            zonk_type(ctx, method_call_ref_signature(exact)))),
+        some(exact) => {
+            let signature = zonk_type(ctx, method_call_ref_signature(exact))
+            if method_call_ref_is_intrinsic(exact) {
+                some(make_intrinsic_method_call_ref(
+                    method_call_ref_intrinsic(exact), signature))
+            } else if method_call_ref_is_concrete(exact) {
+                some(make_concrete_method_call_ref(
+                    method_call_ref_impl(exact), signature,
+                    method_call_ref_receiver_mutable(exact)))
+            } else {
+                some(make_bound_method_call_ref(
+                    method_call_ref_bound(exact), signature,
+                    method_call_ref_receiver_mutable(exact)))
+            }
+        },
         none => none
     }
 }
@@ -288,14 +303,15 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 ty: z_ty, effects: z_eff, span: z_span
             }
         },
-        HExpr::NamedVariantConstruct { enum_name, variant_name, fields, spread, .. } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, .. } => {
             let z_spread = match spread {
                 some(s) => some(zonk_expr(ctx, s)),
                 none => none,
             }
             HExpr::NamedVariantConstruct {
                 enum_name: enum_name, variant_name: variant_name,
-                fields: fields.map(fn(f) { HStructFieldInit { name: f.name, value: zonk_expr(ctx, f.value) } }),
+                variant_ref: variant_ref,
+                fields: fields.map(fn(f) { HStructFieldInit { name: f.name, field_ref: f.field_ref, value: zonk_expr(ctx, f.value) } }),
                 spread: z_spread,
                 ty: z_ty, effects: z_eff, span: z_span
             }
@@ -396,8 +412,8 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 body: zonk_expr(ctx, body),
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::EffectOp { effect_name, op_name, args, .. } =>
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: args.map(fn(a) { zonk_expr(ctx, a) }), ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::EffectOp { effect_name, op_name, operation_ref, args, .. } =>
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: args.map(fn(a) { zonk_expr(ctx, a) }), ty: z_ty, effects: z_eff, span: z_span },
         HExpr::RangeExpr { start, end, inclusive, .. } =>
             HExpr::RangeExpr { start: zonk_expr(ctx, start), end: zonk_expr(ctx, end), inclusive: inclusive, ty: z_ty, effects: z_eff, span: z_span },
         HExpr::ListLit { elements, .. } =>

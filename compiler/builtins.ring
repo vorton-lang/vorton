@@ -7,25 +7,37 @@ use types::{Type, Effect, EffectRow, StructField, EnumVariant,
     make_option_type, make_map_type}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     EffectDef, EffectOpDef, BuiltInKind, TraitDef, TraitMethodDef,
+    AssocTypeDef,
+    RegisteredTraitMethodContract, RegisteredTraitAssocContract,
+    make_registered_trait_method_contract,
+    make_registered_trait_assoc_contract,
+    make_registered_trait_contract,
     ImplEntry, ImplMethodSchemeCore, TypedImplPredicate,
     FrozenImplPredicateSet,
     MethodOrigin, mono, add_impl, install_method_core,
     make_impl_method_scheme_core, make_typed_impl_predicate,
+    impl_method_core_as_scheme,
     direct_impl_predicate_provenance, freeze_impl_predicate_set,
     frozen_impl_predicates, impl_predicate_subject_type_var,
     impl_predicate_trait_name, ImplOwnerState,
     find_impl_by_origin, find_impl_by_provider, impl_owner_is_provisional,
+    impl_target_symbol,
     finalize_provisional_impl_owner,
     specialize_trait_method_scheme, delegate_plan_not_applicable}
 use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
 use ir_identity::{SymbolRef, TraitMethodRef,
-    ImplProviderRef, IntrinsicRef, BuiltinMethodSite,
+    ImplProviderRef, ImplOwnerRef, ImplMethodRef,
+    IntrinsicRef, BuiltinMethodSite,
     make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
+    make_symbol_origin_ref,
+    VariantRef, VariantFieldRef, make_variant_ref, make_variant_field_ref,
     make_registered_nominal_ref, make_registered_trait_ref,
     make_module_body_ref, path_owner_for_module_body, make_path_ref,
     path_role_synthetic, make_impl_provider_ref,
+    make_impl_owner_ref, make_impl_method_ref,
+    impl_provider_ref_site, path_ref_normalized_child_path,
     impl_provider_kind_builtin, registered_trait_ref_symbol,
     builtin_method_site_from_tag, builtin_method_site_tag,
     make_builtin_method_intrinsic_ref, intrinsic_ref_same,
@@ -57,6 +69,21 @@ use ir_inventory::{ExecutableEntry, ExecutableInventory, BinderManifest,
     executable_inventory_count}
 use core_hir::{make_core_program, core_program_body_count,
     core_program_inventory, core_program_manifests}
+use core_expr::{CoreTypeRef, CoreTypeGraph, CoreCallableContract,
+    make_core_type_ref, make_core_type_graph,
+    core_type_ref_index, make_core_callable_contract}
+use flow_ir::{FlowTypeNode, FlowTypeRef, FlowNominalFieldFact,
+    FlowGenericParamFact, FlowResourceDependencyEdge,
+    FlowSemanticRole,
+    make_flow_type_ref, make_flow_int_type_node,
+    make_flow_float_type_node, make_flow_str_type_node,
+    make_flow_bool_type_node, make_flow_unit_type_node,
+    make_flow_never_type_node, make_flow_struct_type_node,
+    make_flow_enum_type_node, make_flow_callable_type_node,
+    make_flow_parameter_type_node, make_flow_generic_param_fact,
+    flow_type_seed_unique,
+    make_flow_call_contract, flow_callable_mode_contract_only,
+    flow_semantic_role_read, make_fresh_flow_value_origin}
 
 // ============================================================
 // Struct for open_row return value
@@ -79,6 +106,53 @@ struct BuiltinPredicateSpec {
 fn builtin_trait_symbol(name: Str) -> SymbolRef {
     make_symbol_ref(
         "$builtin", namespace_trait(), name, "builtin:trait:${name}")
+}
+
+fn install_builtin_trait_contract(
+    mut env: TypeEnv, name: Str, owner_symbol: SymbolRef,
+    type_params: List<Str>, type_param_vars: List<Int>,
+    methods: List<TraitMethodDef>, supertraits: List<Str>,
+    assoc_types: List<AssocTypeDef>
+) {
+    let owner_ref = make_registered_trait_ref(owner_symbol, name)
+    let mut method_contracts: List<RegisteredTraitMethodContract> = []
+    for method in methods {
+        method_contracts.push(make_registered_trait_method_contract(
+            method.method_ref, method.ty, method.has_default,
+            method.param_mutabilities))
+    }
+    let mut assoc_contracts: List<RegisteredTraitAssocContract> = []
+    for assoc in assoc_types {
+        let mut bound_refs: List<SymbolRef> = []
+        for bound_name in assoc.bounds {
+            match env.trait_reg.traits.get(bound_name) {
+                some(bound_trait) => bound_refs.push(
+                    registered_trait_ref_symbol(bound_trait.owner_ref)),
+                none => {}
+            }
+        }
+        assoc_contracts.push(make_registered_trait_assoc_contract(
+            assoc.member_ref,
+            Type::TypeVar { id: assoc.var_id, name: some(assoc.name) },
+            assoc.default_type, bound_refs))
+    }
+    let mut dict_obligations: List<SymbolRef> = []
+    for supertrait in supertraits {
+        match env.trait_reg.traits.get(supertrait) {
+            some(def) => dict_obligations.push(
+                registered_trait_ref_symbol(def.owner_ref)),
+            none => {}
+        }
+    }
+    let contract = make_registered_trait_contract(
+        owner_ref, method_contracts, assoc_contracts,
+        [], dict_obligations)
+    env.trait_reg.traits.insert(name, TraitDef {
+        name: name, owner_ref: owner_ref,
+        type_params: type_params, type_param_vars: type_param_vars,
+        methods: methods, supertraits: supertraits,
+        assoc_types: assoc_types, contract: contract
+    })
 }
 
 fn builtin_trait_method(
@@ -167,6 +241,35 @@ fn install_intrinsic(
         builtin_method_site_from_tag(tag)))
 }
 
+fn builtin_impl_identity(
+    env: TypeEnv, target_type_name: Str, provider_ref: ImplProviderRef,
+    trait_ref: SymbolRef?, cores: Map<Str, ImplMethodSchemeCore>
+) -> (ImplOwnerRef, Map<Str, ImplMethodRef>) {
+    let target_ref = match impl_target_symbol(env, target_type_name) {
+        some(symbol) => symbol,
+        none => panic("builtin impl owner: exact target symbol is missing")
+    }
+    let owner_ref = make_impl_owner_ref(
+        target_ref, provider_ref, trait_ref)
+    let provider_path = path_ref_normalized_child_path(
+        impl_provider_ref_site(provider_ref)).join("/")
+    let mut refs: Map<Str, ImplMethodRef> = map_new()
+    let mut entries = cores.entries()
+    entries.sort_by(compare_by_first)
+    let mut callable_slot = 0
+    for entry in entries {
+        let (method_name, _) = entry
+        let member = make_symbol_ref(
+            "$builtin", namespace_member(),
+            "builtin-impl-member:${provider_path}:${callable_slot}",
+            "provider:${provider_path}|method:${callable_slot}")
+        refs.insert(method_name, make_impl_method_ref(
+            owner_ref, member, callable_slot, callable_slot, method_name))
+        callable_slot = callable_slot + 1
+    }
+    (owner_ref, refs)
+}
+
 fn builtin_impl_trait_ref(env: TypeEnv, trait_name: Str?) -> SymbolRef? {
     match trait_name {
         some(name) => match env.trait_reg.traits.get(name) {
@@ -249,6 +352,10 @@ fn install_builtin_method_owner(
     method_names.sort()
     let provider_ref = builtin_impl_provider(provider_site)
     let trait_ref = builtin_impl_trait_ref(env, trait_name)
+    let identity = builtin_impl_identity(
+        env, target_type_name, provider_ref, trait_ref, cores)
+    let owner_ref = identity.0
+    let method_refs = identity.1
     let owner = ImplEntry {
         trait_name: trait_name,
         target_type_name: target_type_name,
@@ -258,9 +365,11 @@ fn install_builtin_method_owner(
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: map_clone(cores),
+        method_refs: method_refs,
         method_intrinsics: map_clone(method_intrinsics),
         provider_ref: some(provider_ref),
         trait_ref: trait_ref,
+        owner_ref: some(owner_ref),
         delegate_plan: delegate_plan_not_applicable(),
         origin: origin,
         span: span,
@@ -292,6 +401,7 @@ fn install_builtin_method_owner(
                 trait_name: trait_name,
                 provider_ref: provider_ref,
                 trait_ref: trait_ref,
+                method_ref: method_refs.get(method_name).unwrap(),
                 span: span
             })
     }
@@ -312,9 +422,11 @@ fn seed_std_hof_owner(
         method_names: [],
         assoc_types: map_new(),
         method_schemes: map_new(),
+        method_refs: map_new(),
         method_intrinsics: map_new(),
         provider_ref: none,
         trait_ref: none,
+        owner_ref: none,
         delegate_plan: delegate_plan_not_applicable(),
         origin: origin,
         span: span_zero(),
@@ -394,6 +506,10 @@ fn add_builtin_impl(
         },
         none => {}
     }
+    let identity = builtin_impl_identity(
+        env, target_type_name, provider_ref, some(trait_ref), exact)
+    let owner_ref = identity.0
+    let method_refs = identity.1
     add_impl(env.trait_reg, ImplEntry {
         trait_name: some(trait_name),
         target_type_name: target_type_name,
@@ -403,9 +519,11 @@ fn add_builtin_impl(
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: map_clone(exact),
+        method_refs: method_refs,
         method_intrinsics: map_new(),
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
+        owner_ref: some(owner_ref),
         delegate_plan: delegate_plan_not_applicable(),
         origin: origin,
         span: span,
@@ -422,6 +540,7 @@ fn add_builtin_impl(
                 trait_name: some(trait_name),
                 provider_ref: provider_ref,
                 trait_ref: some(trait_ref),
+                method_ref: method_refs.get(method_name).unwrap(),
                 span: span
             })
     }
@@ -717,6 +836,145 @@ fn registered_intrinsic_count(env: TypeEnv, intrinsic: IntrinsicRef) -> Int {
     count
 }
 
+fn registered_intrinsic_scheme(
+    env: TypeEnv, intrinsic: IntrinsicRef
+) -> TypeScheme {
+    let mut found: TypeScheme? = none
+    for map_entry in env.trait_reg.trait_impls.entries() {
+        let (_, owners) = map_entry
+        for owner in owners {
+            for method_entry in owner.method_intrinsics.entries() {
+                let (method_name, candidate) = method_entry
+                if intrinsic_ref_same(candidate, intrinsic) {
+                    let core = match owner.method_schemes.get(method_name) {
+                        some(value) => value,
+                        none => panic(
+                            "builtin method Core shadow: exact core is missing")
+                    }
+                    if found.is_some() {
+                        panic("builtin method Core shadow: core is not unique")
+                    }
+                    found = some(impl_method_core_as_scheme(core))
+                }
+            }
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("builtin method Core shadow: core was not registered")
+    }
+}
+
+fn append_builtin_core_type(
+    env: TypeEnv, owner: SymbolRef, scheme_vars: List<Int>,
+    ty: Type, mut nodes: List<FlowTypeNode>
+) -> CoreTypeRef {
+    match ty {
+        Type::IntType => {
+            let reference = make_flow_type_ref(nodes.len())
+            nodes.push(make_flow_int_type_node(reference))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        Type::FloatType => {
+            let reference = make_flow_type_ref(nodes.len())
+            nodes.push(make_flow_float_type_node(reference))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        Type::StrType => {
+            let reference = make_flow_type_ref(nodes.len())
+            nodes.push(make_flow_str_type_node(reference))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        Type::BoolType => {
+            let reference = make_flow_type_ref(nodes.len())
+            nodes.push(make_flow_bool_type_node(reference))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        Type::UnitType => {
+            let reference = make_flow_type_ref(nodes.len())
+            nodes.push(make_flow_unit_type_node(reference))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        Type::NeverType => {
+            let reference = make_flow_type_ref(nodes.len())
+            nodes.push(make_flow_never_type_node(reference))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        Type::TypeVar { id, .. } => {
+            let parameter_index = scheme_vars.index_of(id).unwrap_or(-1)
+            if parameter_index < 0 || scheme_vars.len() == 0 {
+                panic("builtin method Core shadow: unbound type variable")
+            }
+            let parameter = make_flow_generic_param_fact(
+                owner, parameter_index, scheme_vars.len(), [])
+            let reference = make_flow_type_ref(nodes.len())
+            nodes.push(make_flow_parameter_type_node(reference, parameter))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        Type::StructType { name, type_params } => {
+            let mut arguments: List<FlowTypeRef> = []
+            for argument in type_params {
+                let core_ref = append_builtin_core_type(
+                    env, owner, scheme_vars, argument, nodes)
+                arguments.push(make_flow_type_ref(
+                    core_type_ref_index(core_ref)))
+            }
+            let nominal = match impl_target_symbol(env, name) {
+                some(symbol) => symbol,
+                none => panic(
+                    "builtin method Core shadow: struct owner is missing")
+            }
+            let reference = make_flow_type_ref(nodes.len())
+            let fields: List<FlowNominalFieldFact> = []
+            let parameters: List<FlowGenericParamFact> = []
+            let edges: List<FlowResourceDependencyEdge> = []
+            nodes.push(make_flow_struct_type_node(
+                reference, nominal, arguments, fields,
+                flow_type_seed_unique(), none, parameters, edges))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        Type::EnumType { name, type_params } => {
+            let mut arguments: List<FlowTypeRef> = []
+            for argument in type_params {
+                let core_ref = append_builtin_core_type(
+                    env, owner, scheme_vars, argument, nodes)
+                arguments.push(make_flow_type_ref(
+                    core_type_ref_index(core_ref)))
+            }
+            let nominal = match impl_target_symbol(env, name) {
+                some(symbol) => symbol,
+                none => panic(
+                    "builtin method Core shadow: enum owner is missing")
+            }
+            let reference = make_flow_type_ref(nodes.len())
+            let fields: List<FlowNominalFieldFact> = []
+            let parameters: List<FlowGenericParamFact> = []
+            let edges: List<FlowResourceDependencyEdge> = []
+            nodes.push(make_flow_enum_type_node(
+                reference, nominal, arguments, fields,
+                flow_type_seed_unique(), none, parameters, edges))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        Type::FnType { params, return_type, .. } => {
+            let mut parameters: List<FlowTypeRef> = []
+            for param in params {
+                let core_ref = append_builtin_core_type(
+                    env, owner, scheme_vars, param, nodes)
+                parameters.push(make_flow_type_ref(
+                    core_type_ref_index(core_ref)))
+            }
+            let result_ref = append_builtin_core_type(
+                env, owner, scheme_vars, return_type, nodes)
+            let reference = make_flow_type_ref(nodes.len())
+            nodes.push(make_flow_callable_type_node(
+                reference, parameters,
+                make_flow_type_ref(core_type_ref_index(result_ref))))
+            make_core_type_ref(nodes.len() - 1)
+        },
+        _ => panic("builtin method Core shadow: unsupported exact type")
+    }
+}
+
 // Live C0/B-201 producer+consumer.  It closes the exact ContractOnly builtin
 // method inventory on every checker construction and then discards the shadow;
 // ordinary compilation still consumes the same registry owner payload.
@@ -725,6 +983,8 @@ pub fn validate_builtin_method_core_shadow(env: TypeEnv) {
         "$builtin", "builtin:method-sites")
     let mut entries: List<ExecutableEntry> = []
     let mut manifests: List<BinderManifest> = []
+    let mut type_nodes: List<FlowTypeNode> = []
+    let mut callables: List<CoreCallableContract> = []
     for tag in 0..BUILTIN_METHOD_SITE_COUNT {
         let intrinsic = builtin_method_intrinsic(
             builtin_method_site_from_tag(tag))
@@ -737,9 +997,42 @@ pub fn validate_builtin_method_core_shadow(env: TypeEnv) {
             executable, make_module_body_parent(module_body),
             executable_kind_builtin_intrinsic(), make_contract_only()))
         manifests.push(make_binder_manifest(executable, []))
+        let scheme = registered_intrinsic_scheme(env, intrinsic)
+        match scheme.ty {
+            Type::FnType { params, return_type, .. } => {
+                let mut parameter_types: List<CoreTypeRef> = []
+                let mut flow_parameter_types: List<FlowTypeRef> = []
+                let mut parameter_roles: List<FlowSemanticRole> = []
+                for param in params {
+                    let param_ref = append_builtin_core_type(
+                        env, intrinsic_ref_symbol(intrinsic),
+                        scheme.type_vars, param, type_nodes)
+                    parameter_types.push(param_ref)
+                    flow_parameter_types.push(make_flow_type_ref(
+                        core_type_ref_index(param_ref)))
+                    parameter_roles.push(flow_semantic_role_read())
+                }
+                let result_type = append_builtin_core_type(
+                    env, intrinsic_ref_symbol(intrinsic),
+                    scheme.type_vars, return_type, type_nodes)
+                let semantic_contract = make_flow_call_contract(
+                    flow_parameter_types, parameter_roles,
+                    make_flow_type_ref(core_type_ref_index(result_type)),
+                    flow_semantic_role_read(),
+                    make_fresh_flow_value_origin())
+                callables.push(make_core_callable_contract(
+                    executable,
+                    make_symbol_origin_ref(intrinsic_ref_symbol(intrinsic)),
+                    parameter_types, [], result_type,
+                    flow_callable_mode_contract_only(),
+                    semantic_contract, []))
+            },
+            _ => panic("builtin method Core shadow: core is not callable")
+        }
     }
     let program = make_core_program(
-        [], make_executable_inventory(entries), manifests)
+        make_core_type_graph(type_nodes), callables, [], [],
+        make_executable_inventory(entries), manifests)
     if core_program_body_count(program) != 0 ||
        executable_inventory_count(core_program_inventory(program)) !=
             BUILTIN_METHOD_SITE_COUNT ||
@@ -765,11 +1058,12 @@ fn register_effects(mut env: TypeEnv) {
     // io effect
     env.types.effects.insert("io", EffectDef {
         name: "io",
+        owner_ref: none, handled_ref: none,
         type_params: [],
         type_param_vars: [],
         ops: [
-            EffectOpDef { name: "read", params: [STR], return_type: STR, has_default: false },
-            EffectOpDef { name: "write", params: [STR, STR], return_type: UNIT, has_default: false }
+            EffectOpDef { name: "read", operation_ref: none, params: [STR], return_type: STR, has_default: false },
+            EffectOpDef { name: "write", operation_ref: none, params: [STR, STR], return_type: UNIT, has_default: false }
         ],
         built_in_kind: some(BuiltInKind::BkIo),
         all_have_defaults: false
@@ -780,10 +1074,11 @@ fn register_effects(mut env: TypeEnv) {
     let fail_t = Type::TypeVar { id: fail_t_id, name: none }
     env.types.effects.insert("fail", EffectDef {
         name: "fail",
+        owner_ref: none, handled_ref: none,
         type_params: ["E"],
         type_param_vars: [fail_t_id],
         ops: [
-            EffectOpDef { name: "raise", params: [fail_t], return_type: NEVER, has_default: false }
+            EffectOpDef { name: "raise", operation_ref: none, params: [fail_t], return_type: NEVER, has_default: false }
         ],
         built_in_kind: some(BuiltInKind::BkFail),
         all_have_defaults: false
@@ -891,14 +1186,33 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
     let mut option_vi: Map<Str, Int> = map_new()
     option_vi.insert("some", 0)
     option_vi.insert("none", 1)
+    let option_owner = make_symbol_ref(
+        "$builtin", namespace_nominal(), BUILTIN_OPTION, "builtin:Option")
+    let option_registered = make_registered_nominal_ref(
+        option_owner, BUILTIN_OPTION)
+    let some_member = make_symbol_ref(
+        "$builtin", namespace_member(), "Option|variant:0",
+        "builtin:Option|variant:0")
+    let none_member = make_symbol_ref(
+        "$builtin", namespace_member(), "Option|variant:1",
+        "builtin:Option|variant:1")
+    let some_ref = make_variant_ref(option_registered, some_member, 0)
+    let none_ref = make_variant_ref(option_registered, none_member, 1)
+    let some_field_member = make_symbol_ref(
+        "$builtin", namespace_member(), "Option|variant:0|field:0",
+        "builtin:Option|variant:0|field:0")
     env.types.enums.insert(BUILTIN_OPTION, EnumDef {
         name: BUILTIN_OPTION,
+        owner_ref: option_registered,
         type_params: ["T"],
         type_param_vars: [option_t_id],
         variants: [
             EnumVariant { name: "some", fields: [option_t], field_names: none },
             EnumVariant { name: "none", fields: [], field_names: none }
         ],
+        variant_refs: [some_ref, none_ref],
+        variant_field_refs: [[make_variant_field_ref(
+            some_ref, some_field_member, 0)], []],
         derive_attrs: [],
         derived_provider_plan: none,
         variant_index: option_vi
@@ -1023,18 +1337,11 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
     let ne_fn = Type::FnType { params: [self_var, self_var], return_type: BOOL, effects: EMPTY_ROW }
 
     let owner_ref = builtin_trait_symbol("Eq")
-    env.trait_reg.traits.insert("Eq", TraitDef {
-        name: "Eq",
-        owner_ref: make_registered_trait_ref(owner_ref, "Eq"),
-        type_params: [],
-        type_param_vars: [self_var_id],
-        methods: [
+    install_builtin_trait_contract(
+        env, "Eq", owner_ref, [], [self_var_id], [
             TraitMethodDef { name: "eq", method_ref: builtin_trait_method(owner_ref, 0, 0, "eq"), ty: eq_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] },
             TraitMethodDef { name: "ne", method_ref: builtin_trait_method(owner_ref, 1, 1, "ne"), ty: ne_fn, has_default: true, param_mutabilities: [false, false], method_type_params: [] }
-        ],
-        supertraits: [],
-        assoc_types: []
-    })
+        ], [], [])
 
     // Register Eq impls for primitive types
     for prim in ["Int", "Float", "Str", "Bool"] {
@@ -1064,17 +1371,10 @@ fn register_clone_trait(mut env: TypeEnv, sink: CollectingSink) {
     let clone_fn = Type::FnType { params: [self_var], return_type: self_var, effects: EMPTY_ROW }
 
     let owner_ref = builtin_trait_symbol("Clone")
-    env.trait_reg.traits.insert("Clone", TraitDef {
-        name: "Clone",
-        owner_ref: make_registered_trait_ref(owner_ref, "Clone"),
-        type_params: [],
-        type_param_vars: [self_var_id],
-        methods: [
+    install_builtin_trait_contract(
+        env, "Clone", owner_ref, [], [self_var_id], [
             TraitMethodDef { name: "clone", method_ref: builtin_trait_method(owner_ref, 0, 0, "clone"), ty: clone_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
-        ],
-        supertraits: [],
-        assoc_types: []
-    })
+        ], [], [])
 
     // Primitive impls
     for prim in ["Int", "Float", "Str", "Bool"] {
@@ -1102,22 +1402,14 @@ fn register_drop_trait(mut env: TypeEnv) {
     let self_var_id = env.fresh_var_id()
     let self_var = Type::TypeVar { id: self_var_id, name: none }
 
-    // drop(self) -> Unit, with {io} effect (allows flush/log/close)
-    let io_row = EffectRow { effects: [Effect::IoEffect], tail: none }
-    let drop_fn = Type::FnType { params: [self_var], return_type: UNIT, effects: io_row }
+    // Ring 0.1 Drop is effect-free on every path.
+    let drop_fn = Type::FnType { params: [self_var], return_type: UNIT, effects: EMPTY_ROW }
 
     let owner_ref = builtin_trait_symbol("Drop")
-    env.trait_reg.traits.insert("Drop", TraitDef {
-        name: "Drop",
-        owner_ref: make_registered_trait_ref(owner_ref, "Drop"),
-        type_params: [],
-        type_param_vars: [self_var_id],
-        methods: [
+    install_builtin_trait_contract(
+        env, "Drop", owner_ref, [], [self_var_id], [
             TraitMethodDef { name: "drop", method_ref: builtin_trait_method(owner_ref, 0, 0, "drop"), ty: drop_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
-        ],
-        supertraits: [],
-        assoc_types: []
-    })
+        ], [], [])
 }
 
 // ============================================================
@@ -1142,17 +1434,10 @@ fn register_ord_trait(mut env: TypeEnv, sink: CollectingSink) {
     let cmp_fn = Type::FnType { params: [self_var, self_var], return_type: INT, effects: EMPTY_ROW }
 
     let owner_ref = builtin_trait_symbol("Ord")
-    env.trait_reg.traits.insert("Ord", TraitDef {
-        name: "Ord",
-        owner_ref: make_registered_trait_ref(owner_ref, "Ord"),
-        type_params: [],
-        type_param_vars: [self_var_id],
-        methods: [
+    install_builtin_trait_contract(
+        env, "Ord", owner_ref, [], [self_var_id], [
             TraitMethodDef { name: "cmp", method_ref: builtin_trait_method(owner_ref, 0, 0, "cmp"), ty: cmp_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] }
-        ],
-        supertraits: [],
-        assoc_types: []
-    })
+        ], [], [])
 
     for prim in ["Int", "Float", "Str", "Bool"] {
         add_builtin_impl(env, sink, "Ord", prim, [], [], [], ["cmp"])
@@ -1170,17 +1455,10 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
     let debug_fn = Type::FnType { params: [self_var], return_type: STR, effects: EMPTY_ROW }
 
     let owner_ref = builtin_trait_symbol("Debug")
-    env.trait_reg.traits.insert("Debug", TraitDef {
-        name: "Debug",
-        owner_ref: make_registered_trait_ref(owner_ref, "Debug"),
-        type_params: [],
-        type_param_vars: [self_var_id],
-        methods: [
+    install_builtin_trait_contract(
+        env, "Debug", owner_ref, [], [self_var_id], [
             TraitMethodDef { name: "debug", method_ref: builtin_trait_method(owner_ref, 0, 0, "debug"), ty: debug_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
-        ],
-        supertraits: [],
-        assoc_types: []
-    })
+        ], [], [])
 
     // Primitive impls
     for prim in ["Int", "Float", "Str", "Bool"] {
@@ -1228,17 +1506,10 @@ fn register_hash_trait(mut env: TypeEnv, sink: CollectingSink) {
     let hash_fn = Type::FnType { params: [self_var], return_type: INT, effects: EMPTY_ROW }
 
     let owner_ref = builtin_trait_symbol("Hash")
-    env.trait_reg.traits.insert("Hash", TraitDef {
-        name: "Hash",
-        owner_ref: make_registered_trait_ref(owner_ref, "Hash"),
-        type_params: [],
-        type_param_vars: [self_var_id],
-        methods: [
+    install_builtin_trait_contract(
+        env, "Hash", owner_ref, [], [self_var_id], [
             TraitMethodDef { name: "hash", method_ref: builtin_trait_method(owner_ref, 0, 0, "hash"), ty: hash_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
-        ],
-        supertraits: [],
-        assoc_types: []
-    })
+        ], [], [])
 
     for prim in ["Int", "Str", "Bool"] {
         add_builtin_impl(env, sink, "Hash", prim, [], [], [], ["hash"])

@@ -61,10 +61,10 @@ fn al_decl(d: HDecl) -> HDecl {
                 return_type: return_type, effects: effects,
                 body: al_expr(body),
                 is_pub: is_pub, trait_bounds: trait_bounds, span: span },
-        HDecl::Impl { target_type, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
+        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
             for m in methods { new_methods.push(al_decl(m)) }
-            HDecl::Impl { target_type: target_type,
+            HDecl::Impl { target_type: target_type, owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
                 type_params: type_params, trait_name: trait_name,
                 methods: new_methods, assoc_types: assoc_types, span: span }
@@ -99,9 +99,9 @@ fn al_decl(d: HDecl) -> HDecl {
             HDecl::Struct { name: name, owner_ref: owner_ref,
                 type_params: type_params, fields: fields,
                 is_pub: is_pub, span: span },
-        HDecl::Enum { name, type_params, variants, is_pub, span } =>
-            HDecl::Enum { name: name, type_params: type_params, variants: variants, is_pub: is_pub, span: span },
-        HDecl::Effect { name, type_params, ops, is_pub, span } => {
+        HDecl::Enum { name, owner_ref, type_params, variants, is_pub, span } =>
+            HDecl::Enum { name: name, owner_ref: owner_ref, type_params: type_params, variants: variants, is_pub: is_pub, span: span },
+        HDecl::Effect { name, owner_ref, handled_ref, type_params, ops, is_pub, span } => {
             let mut new_ops: List<HEffectOp> = []
             for op in ops {
                 let new_default_body = match op.default_body {
@@ -109,11 +109,12 @@ fn al_decl(d: HDecl) -> HDecl {
                     none => none,
                 }
                 new_ops.push(HEffectOp {
-                    name: op.name, params: op.params, return_type: op.return_type,
+                    name: op.name, operation_ref: op.operation_ref,
+                    params: op.params, return_type: op.return_type,
                     has_default: op.has_default, default_body: new_default_body
                 })
             }
-            HDecl::Effect { name: name, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
+            HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
         HDecl::ExternFn { name, abi_name, def_id, type_params, params, return_type, effects, is_pub, span } =>
             HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id, type_params: type_params, params: params, return_type: return_type, effects: effects, is_pub: is_pub, span: span },
@@ -196,16 +197,16 @@ fn al_expr(e: HExpr) -> HExpr {
                 type_args: type_args, fields: new_fields,
                 spread: new_spread, ty: ty, effects: effects, span: span }
         },
-        HExpr::NamedVariantConstruct { enum_name, variant_name, fields, spread, ty, effects, span } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []
             for f in fields {
-                new_fields.push(HStructFieldInit { name: f.name, value: al_expr(f.value) })
+                new_fields.push(HStructFieldInit { name: f.name, field_ref: f.field_ref, value: al_expr(f.value) })
             }
             let new_spread = match spread {
                 some(s) => some(al_expr(s)),
                 none => none,
             }
-            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
+            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, variant_ref: variant_ref, fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
         },
         HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
             HExpr::MatchExpr { scrutinee: al_expr(scrutinee),
@@ -253,10 +254,10 @@ fn al_expr(e: HExpr) -> HExpr {
         HExpr::Lambda { params, return_type, body, ty, effects, span } =>
             HExpr::Lambda { params: params, return_type: return_type,
                 body: al_expr(body), ty: ty, effects: effects, span: span },
-        HExpr::EffectOp { effect_name, op_name, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, operation_ref, args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(al_expr(a)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: new_args, ty: ty, effects: effects, span: span }
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: new_args, ty: ty, effects: effects, span: span }
         },
         HExpr::RangeExpr { start, end, inclusive, ty, effects, span } =>
             HExpr::RangeExpr { start: al_expr(start),

@@ -1,16 +1,28 @@
 use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam}
 use types::{Type, EffectRow, StructField, EnumVariant, RecordField, types_equal}
 use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
-    IntrinsicRef, intrinsic_ref_same,
+    ImplOwnerRef,
+    VariantRef, VariantFieldRef,
+    HandledEffectRef,
+    ImplMethodRef, IntrinsicRef,
+    intrinsic_ref_same, impl_method_ref_same, trait_method_ref_same,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     nominal_field_ref_owner, nominal_field_ref_index,
     nominal_field_ref_name, registered_nominal_ref_symbol,
+    registered_nominal_ref_same,
     registered_nominal_ref_display_name,
     registered_trait_ref_symbol, registered_trait_ref_display_name,
     trait_method_ref_trait, trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index,
-    trait_method_ref_name, impl_provider_ref_kind,
+    trait_method_ref_name, impl_owner_ref_provider, impl_owner_ref_trait,
+    variant_ref_owner, variant_ref_source_index,
+    variant_field_ref_variant, variant_field_ref_index,
+    variant_ref_same,
+    handled_effect_ref_same,
+    impl_provider_ref_same, impl_provider_ref_kind,
     impl_provider_kind_tag}
+use ir_inventory::{EffectOperationRef, effect_operation_ref_effect,
+    effect_operation_ref_source_index}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
@@ -77,12 +89,7 @@ pub struct ModuleImplFact {
     pub target: Str,
     pub provider_ref: ImplProviderRef,
     pub trait_ref: SymbolRef?,
-    // Exact registered ImplEntry identity captured from TraitRegistry while
-    // checking. This Str is an opaque transition token until the aggregate
-    // typed owner identity replaces it: export/hydration may only copy and
-    // compare it, never parse, concatenate, cache as ABI, or reconstruct it
-    // from target, method spelling, or Span.
-    pub owner_origin: Str,
+    pub owner_ref: ImplOwnerRef,
     // fn-method names in declaration order (delegates excluded upstream by
     // HIR construction only when they do not lower to HDecl::Fn).
     pub method_names: List<Str>,
@@ -259,15 +266,23 @@ pub struct DictDispatchInfo {
 
 pub struct HStructFieldInit {
     pub name: Str,
+    pub field_ref: VariantFieldRef,
     pub value: HExpr
 }
 
-// Exact 0.1 runtime-backed method identity.  Inference selects the fixed
-// IntrinsicRef and freezes its instantiated callable signature together; every
-// later pass transports this relation without reconstructing it from names.
+// Exact 0.1 method selection.  Concrete, bound and runtime-intrinsic calls
+// share one carrier so CoreHIR and every operational pass receive the selected
+// identity and instantiated signature without replaying method lookup.
+enum MethodCallRefValue {
+    IntrinsicMethodValue(IntrinsicRef),
+    ConcreteMethodValue(ImplMethodRef),
+    BoundMethodValue(TraitMethodRef)
+}
+
 pub struct MethodCallRef {
-    intrinsic: IntrinsicRef,
-    signature: Type
+    value: MethodCallRefValue,
+    signature: Type,
+    receiver_mutable: Bool
 }
 
 pub fn make_intrinsic_method_call_ref(
@@ -275,25 +290,104 @@ pub fn make_intrinsic_method_call_ref(
 ) -> MethodCallRef {
     match signature {
         Type::FnType { .. } => MethodCallRef {
-            intrinsic: intrinsic, signature: signature
+            value: MethodCallRefValue::IntrinsicMethodValue(intrinsic),
+            signature: signature, receiver_mutable: false
         },
         _ => panic("HIR method call: intrinsic signature is not callable")
     }
 }
 
 pub fn method_call_ref_intrinsic(value: MethodCallRef) -> IntrinsicRef {
-    value.intrinsic
+    match value.value {
+        MethodCallRefValue::IntrinsicMethodValue(intrinsic) => intrinsic,
+        _ => panic("HIR method call: non-intrinsic has no IntrinsicRef")
+    }
+}
+
+pub fn make_concrete_method_call_ref(
+    method: ImplMethodRef, signature: Type, receiver_mutable: Bool
+) -> MethodCallRef {
+    match signature {
+        Type::FnType { .. } => MethodCallRef {
+            value: MethodCallRefValue::ConcreteMethodValue(method),
+            signature: signature, receiver_mutable: receiver_mutable
+        },
+        _ => panic("HIR method call: concrete signature is not callable")
+    }
+}
+
+pub fn make_bound_method_call_ref(
+    method: TraitMethodRef, signature: Type, receiver_mutable: Bool
+) -> MethodCallRef {
+    match signature {
+        Type::FnType { .. } => MethodCallRef {
+            value: MethodCallRefValue::BoundMethodValue(method),
+            signature: signature, receiver_mutable: receiver_mutable
+        },
+        _ => panic("HIR method call: bound signature is not callable")
+    }
+}
+
+pub fn method_call_ref_is_intrinsic(value: MethodCallRef) -> Bool {
+    match value.value {
+        MethodCallRefValue::IntrinsicMethodValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn method_call_ref_is_concrete(value: MethodCallRef) -> Bool {
+    match value.value {
+        MethodCallRefValue::ConcreteMethodValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn method_call_ref_is_bound(value: MethodCallRef) -> Bool {
+    match value.value {
+        MethodCallRefValue::BoundMethodValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn method_call_ref_impl(value: MethodCallRef) -> ImplMethodRef {
+    match value.value {
+        MethodCallRefValue::ConcreteMethodValue(method) => method,
+        _ => panic("HIR method call: non-concrete has no ImplMethodRef")
+    }
+}
+
+pub fn method_call_ref_bound(value: MethodCallRef) -> TraitMethodRef {
+    match value.value {
+        MethodCallRefValue::BoundMethodValue(method) => method,
+        _ => panic("HIR method call: non-bound has no TraitMethodRef")
+    }
 }
 
 pub fn method_call_ref_signature(value: MethodCallRef) -> Type {
     value.signature
 }
 
+pub fn method_call_ref_receiver_mutable(value: MethodCallRef) -> Bool {
+    value.receiver_mutable
+}
+
 pub fn method_call_ref_same(
     left: MethodCallRef, right: MethodCallRef
 ) -> Bool {
-    intrinsic_ref_same(left.intrinsic, right.intrinsic) &&
-        types_equal(left.signature, right.signature)
+    let identity_same = match (left.value, right.value) {
+        (MethodCallRefValue::IntrinsicMethodValue(a),
+         MethodCallRefValue::IntrinsicMethodValue(b)) =>
+            intrinsic_ref_same(a, b),
+        (MethodCallRefValue::ConcreteMethodValue(a),
+         MethodCallRefValue::ConcreteMethodValue(b)) =>
+            impl_method_ref_same(a, b),
+        (MethodCallRefValue::BoundMethodValue(a),
+         MethodCallRefValue::BoundMethodValue(b)) =>
+            trait_method_ref_same(a, b),
+        _ => false
+    }
+    identity_same && types_equal(left.signature, right.signature) &&
+        left.receiver_mutable == right.receiver_mutable
 }
 
 pub struct HNominalStructFieldInit {
@@ -364,7 +458,7 @@ pub enum HExpr {
     Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, method_ref: MethodCallRef?, ty: Type, effects: EffectRow, span: Span },
     FieldAccess { receiver: HExpr, field: Str, access_kind: HFieldAccessKind, ty: Type, effects: EffectRow, span: Span },
     StructLit { name: Str, owner_ref: RegisteredNominalRef, type_args: List<Type>, fields: List<HNominalStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
-    NamedVariantConstruct { enum_name: Str, variant_name: Str, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
+    NamedVariantConstruct { enum_name: Str, variant_name: Str, variant_ref: VariantRef, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
     MatchExpr { scrutinee: HExpr, arms: List<HMatchArm>, ty: Type, effects: EffectRow, span: Span },
     Block { stmts: List<HStmt>, tail: HExpr?, ty: Type, effects: EffectRow, span: Span },
     IfExpr { condition: HExpr, then_branch: HExpr, else_branch: HExpr?, ty: Type, effects: EffectRow, span: Span },
@@ -372,7 +466,7 @@ pub enum HExpr {
     TryCatch { body: HExpr, arms: List<HMatchArm>, ty: Type, effects: EffectRow, span: Span },
     HandleExpr { body: HExpr, handlers: List<HEffectHandler>, ty: Type, effects: EffectRow, span: Span },
     Lambda { params: List<HParam>, return_type: Type, body: HExpr, ty: Type, effects: EffectRow, span: Span },
-    EffectOp { effect_name: Str, op_name: Str, args: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
+    EffectOp { effect_name: Str, op_name: Str, operation_ref: EffectOperationRef?, args: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
     RangeExpr { start: HExpr, end: HExpr, inclusive: Bool, ty: Type, effects: EffectRow, span: Span },
     ListLit { elements: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
     TupleLit { elements: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
@@ -437,12 +531,15 @@ pub struct HStructField {
 
 pub struct HEnumVariant {
     pub name: Str,
+    pub variant_ref: VariantRef,
     pub fields: List<Type>,
+    pub field_refs: List<VariantFieldRef>,
     pub field_names: List<Str>?
 }
 
 pub struct HEffectOp {
     pub name: Str,
+    pub operation_ref: EffectOperationRef?,
     pub params: List<HParam>,
     pub return_type: Type,
     pub has_default: Bool,
@@ -473,9 +570,9 @@ pub struct HAssocType {
 pub enum HDecl {
     Fn { name: Str, def_id: Int?, type_params: List<TypeParam>, params: List<HParam>, return_type: Type, effects: EffectRow, body: HExpr, is_pub: Bool, trait_bounds: List<TraitBound>, span: Span },
     Struct { name: Str, owner_ref: RegisteredNominalRef, type_params: List<TypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
-    Enum { name: Str, type_params: List<TypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
-    Impl { target_type: Str, provider_ref: ImplProviderRef, trait_ref: SymbolRef?, type_params: List<TypeParam>, trait_name: Str?, methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
-    Effect { name: Str, type_params: List<TypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
+    Enum { name: Str, owner_ref: RegisteredNominalRef, type_params: List<TypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
+    Impl { target_type: Str, owner_ref: ImplOwnerRef, provider_ref: ImplProviderRef, trait_ref: SymbolRef?, type_params: List<TypeParam>, trait_name: Str?, methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
+    Effect { name: Str, owner_ref: SymbolRef?, handled_ref: HandledEffectRef?, type_params: List<TypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
     Test { description: Str, body: HExpr, span: Span },
     Trait { name: Str, owner_ref: RegisteredTraitRef, type_params: List<TypeParam>, methods: List<HTraitMethod>, supertraits: List<Str>, assoc_types: List<HAssocType>, is_pub: Bool, span: Span },
     ExternFn { name: Str, abi_name: Str, def_id: Int?, type_params: List<TypeParam>, params: List<HParam>, return_type: Type, effects: EffectRow, is_pub: Bool, span: Span },
@@ -845,6 +942,26 @@ fn validate_hir_field_values(
     }
 }
 
+fn validate_hir_variant_field_values(
+    variant_ref: VariantRef, fields: List<HStructFieldInit>, spread: HExpr?,
+    mut seen: Set<Int>, mut scope: HirValidationScope
+) {
+    let mut field_indices: Set<Int> = set_new()
+    for field in fields {
+        if !variant_ref_same(
+                variant_field_ref_variant(field.field_ref), variant_ref) ||
+           field_indices.contains(variant_field_ref_index(field.field_ref)) {
+            panic("HIR identity: variant literal field relation drifted")
+        }
+        field_indices.insert(variant_field_ref_index(field.field_ref))
+        validate_hir_expr(field.value, seen, scope)
+    }
+    match spread {
+        some(value) => validate_hir_expr(value, seen, scope),
+        none => {}
+    }
+}
+
 fn validate_hir_nominal_field_values(
     name: Str, owner_ref: RegisteredNominalRef,
     fields: List<HNominalStructFieldInit>, spread: HExpr?,
@@ -926,19 +1043,40 @@ fn validate_hir_expr(
         },
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
-        HExpr::Call { callee, args, method_ref, .. } => {
-            match method_ref {
-                some(exact_method) => match callee {
-                    HExpr::FieldAccess {
-                        access_kind: HFieldAccessKind::Method, ty, ..
-                    } => if !types_equal(
-                            method_call_ref_signature(exact_method), ty) {
-                        panic("HIR method call: exact signature drifted")
+        HExpr::Call { callee, args, dict_dispatch, method_ref, .. } => {
+            match dict_dispatch {
+                some(_) => match method_ref {
+                    some(exact_method) => if
+                            !method_call_ref_is_bound(exact_method) {
+                        panic("HIR method call: dictionary dispatch is not bound")
+                    } else if !types_equal(
+                            method_call_ref_signature(exact_method),
+                            hexpr_type(callee)) {
+                        panic("HIR method call: bound signature drifted")
                     },
-                    _ => panic(
-                        "HIR method call: intrinsic ref has no Method callee")
+                    none => panic(
+                        "HIR method call: dictionary dispatch has no exact trait member")
                 },
-                none => {}
+                none => match callee {
+                HExpr::FieldAccess {
+                    access_kind: HFieldAccessKind::Method, ty, ..
+                } => match method_ref {
+                    some(exact_method) => {
+                        if method_call_ref_is_bound(exact_method) {
+                            panic("HIR method call: bound member lacks dictionary")
+                        }
+                        if !types_equal(
+                                method_call_ref_signature(exact_method), ty) {
+                            panic("HIR method call: exact signature drifted")
+                        }
+                    },
+                    none => panic(
+                        "HIR method call: Method callee has no exact identity")
+                },
+                _ => if method_ref.is_some() {
+                    panic("HIR method call: exact identity has no Method callee")
+                }
+                }
             }
             validate_hir_expr(callee, seen, scope)
             for arg in args { validate_hir_expr(arg, seen, scope) }
@@ -950,8 +1088,10 @@ fn validate_hir_expr(
         HExpr::StructLit { name, owner_ref, fields, spread, .. } =>
             validate_hir_nominal_field_values(
                 name, owner_ref, fields, spread, seen, scope),
-        HExpr::NamedVariantConstruct { fields, spread, .. } =>
-            validate_hir_field_values(fields, spread, seen, scope),
+        HExpr::NamedVariantConstruct {
+            variant_ref, fields, spread, ..
+        } => validate_hir_variant_field_values(
+            variant_ref, fields, spread, seen, scope),
         HExpr::MatchExpr { scrutinee, arms, .. } => {
             validate_hir_expr(scrutinee, seen, scope)
             for arm in arms {
@@ -1015,7 +1155,11 @@ fn validate_hir_expr(
             validate_hir_expr(body, seen, scope)
             pop_hir_validation_scope(scope)
         },
-        HExpr::EffectOp { args, .. } => {
+        HExpr::EffectOp { effect_name, operation_ref, args, .. } => {
+            if effect_name != "io" && effect_name != "fail" &&
+               effect_name != "mut" && operation_ref.is_none() {
+                panic("HIR identity: handled effect call has no exact operation")
+            }
             for arg in args { validate_hir_expr(arg, seen, scope) }
         },
         HExpr::RangeExpr { start, end, .. } => {
@@ -1058,16 +1202,65 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     params, seen, scope, "function '${name}'")
                 validate_hir_expr(body, seen, scope)
             },
-            HDecl::Impl { provider_ref, trait_name, trait_ref, methods, .. } => {
+            HDecl::Impl { owner_ref, provider_ref, trait_name, trait_ref, methods, .. } => {
                 let _ = impl_provider_kind_tag(
                     impl_provider_ref_kind(provider_ref))
                 if trait_name.is_some() != trait_ref.is_some() {
                     panic("HIR identity: impl trait name/ref presence drifted")
                 }
+                if !impl_provider_ref_same(
+                        impl_owner_ref_provider(owner_ref), provider_ref) {
+                    panic("HIR identity: impl owner/provider drifted")
+                }
+                match (impl_owner_ref_trait(owner_ref), trait_ref) {
+                    (some(a), some(b)) => if !symbol_ref_same(a, b) {
+                        panic("HIR identity: impl owner/trait drifted")
+                    },
+                    (none, none) => {},
+                    _ => panic("HIR identity: impl owner trait presence drifted")
+                }
                 validate_hir_decls(methods, seen)
             },
-            HDecl::Effect { name, ops, .. } => {
-                for op in ops {
+            HDecl::Enum { owner_ref, variants, .. } => {
+                for variant_index in 0..variants.len() {
+                    let variant = variants.get(variant_index).unwrap()
+                    if variant_ref_source_index(variant.variant_ref) !=
+                            variant_index ||
+                       !registered_nominal_ref_same(
+                            variant_ref_owner(variant.variant_ref), owner_ref) ||
+                       variant.fields.len() != variant.field_refs.len() {
+                        panic("HIR identity: enum variant relation drifted")
+                    }
+                    for field_index in 0..variant.field_refs.len() {
+                        let field_ref = variant.field_refs.get(field_index).unwrap()
+                        if variant_field_ref_index(field_ref) != field_index ||
+                           !variant_ref_same(
+                                variant_field_ref_variant(field_ref),
+                                variant.variant_ref) {
+                            panic("HIR identity: enum payload field relation drifted")
+                        }
+                    }
+                }
+            },
+            HDecl::Effect { name, owner_ref, handled_ref, ops, .. } => {
+                if owner_ref.is_some() != handled_ref.is_some() {
+                    panic("HIR identity: effect owner/domain presence drifted")
+                }
+                for op_index in 0..ops.len() {
+                    let op = ops.get(op_index).unwrap()
+                    match (handled_ref, op.operation_ref) {
+                        (some(effect_ref), some(operation_ref)) => {
+                            if !handled_effect_ref_same(
+                                    effect_operation_ref_effect(operation_ref),
+                                    effect_ref) ||
+                               effect_operation_ref_source_index(operation_ref) !=
+                                    op_index {
+                                panic("HIR identity: effect operation relation drifted")
+                            }
+                        },
+                        (none, none) => {},
+                        _ => panic("HIR identity: effect operation domain drifted")
+                    }
                     match op.default_body {
                         some(body) => {
                             let mut scope = new_hir_validation_scope()
