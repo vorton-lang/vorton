@@ -10236,8 +10236,20 @@ def impl_provider_u1c1_contract_errors(
         errors.append("derive remints provider identity")
     if derive.count("implicit_derive_provider(ut)") != 2:
         errors.append("implicit derived owners do not share the nominal provider")
-    if "explicit_derive_request(\n                            ut, \"Json\").unwrap().provider_ref" not in derive:
-        errors.append("explicit Json owner does not copy its attr provider")
+    json_body = _trait_method_function_body(
+        sources, "derive", "derive_json_trait", errors)
+    for token in (
+        "let provider_ref = explicit_derive_request(",
+        "env, ut, plan, provider_ref",
+        'env, ut, "Json", known, provider_ref',
+        "some(di.trait_ref), di.provider_ref",
+        "finalize_derived_impl(",
+    ):
+        if token not in json_body:
+            errors.append(
+                f"explicit Json descriptor provider chain misses {token!r}")
+    if json_body.count("let provider_ref = explicit_derive_request(") != 2:
+        errors.append("explicit Json descriptor provider census drifted")
 
     rebind_body = _trait_method_function_body(
         sources, "decl", "store_rebound_impl_method_scheme", errors)
@@ -10696,6 +10708,387 @@ def impl_provider_u1c2_source_errors() -> List[str]:
         return errors
     errors.extend(impl_provider_u1c2_mutation_errors(sources))
     errors.extend(impl_provider_u1c2_scope_errors(sources))
+    return errors
+
+
+F2_DERIVED_IMPL_CARRIER_PATHS = {
+    "hir": REPO / "compiler" / "hir.ring",
+    "derive": REPO / "compiler" / "derive.ring",
+    "builtins": REPO / "compiler" / "builtins.ring",
+    "checker": REPO / "compiler" / "checker.ring",
+    "project": REPO / "compiler" / "compiler_mod.ring",
+    "dict": REPO / "compiler" / "dict_lower.ring",
+    "codegen": REPO / "compiler" / "codegen_c.ring",
+}
+F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT = 30
+
+
+def derived_impl_carrier_u1c4_contract_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    hir = sources["hir"]
+    derive = sources["derive"]
+    builtins = sources["builtins"]
+    checker = sources["checker"]
+    project = sources["project"]
+    codegen = sources["codegen"]
+
+    fields, field_error = _f0_struct_fields(hir, "DerivedImpl")
+    if field_error:
+        errors.append(field_error)
+    elif fields is not None and [name for _, name in fields] != [
+            "provider_ref", "trait_ref", "type_name", "trait_name",
+            "type_params", "bounds", "type_kind", "struct_fields",
+            "enum_variants"]:
+        errors.append("derived impl carrier inventory drifted")
+    if ("pub struct DerivedImpl {\n"
+            "    pub provider_ref: ImplProviderRef,\n"
+            "    pub trait_ref: SymbolRef," not in hir):
+        errors.append("derived impl carrier identity types drifted")
+
+    register = _trait_method_function_body(
+        sources, "derive", "register_derived_impl", errors)
+    for token in (
+        "let trait_name = di.trait_name",
+        "let provider_ref = di.provider_ref",
+        "registered_derive_trait_ref(env, trait_name)",
+        "!symbol_ref_same(trait_ref, di.trait_ref)",
+        "provider_ref: some(provider_ref)",
+        "trait_ref: some(trait_ref)",
+    ):
+        if token not in register:
+            errors.append(f"derived owner registration misses {token!r}")
+
+    finalize = _trait_method_function_body(
+        sources, "derive", "finalize_derived_impl", errors)
+    for token in (
+        "let owner_provider = match owner.provider_ref",
+        "let owner_trait = match owner.trait_ref",
+        "!impl_provider_ref_same(owner_provider, di.provider_ref)",
+        "!symbol_ref_same(owner_trait, di.trait_ref)",
+        "derived_runtime_bounds_from_owner(owner)",
+        "provider_ref: owner_provider",
+        "trait_ref: owner_trait",
+    ):
+        if token not in finalize:
+            errors.append(f"derived descriptor finalizer misses {token!r}")
+
+    json_body = _trait_method_function_body(
+        sources, "derive", "derive_json_trait", errors)
+    for token in (
+        "let provider_ref = explicit_derive_request(",
+        "find_impl_by_provider(",
+        "some(di.trait_ref), di.provider_ref",
+        "finalize_derived_impl(",
+    ):
+        if token not in json_body:
+            errors.append(f"Json derived descriptor misses {token!r}")
+    if "find_impl(\n                        env.trait_reg, ut.name, \"Json\")" in json_body:
+        errors.append("Json derived descriptor falls back to trait name lookup")
+
+    owner_match = _trait_method_function_body(
+        sources, "derive", "derived_impl_matches_owner", errors)
+    for token in (
+        "impl_provider_ref_same(", "symbol_ref_same(",
+        "owner.target_type_name == di.type_name",
+        "string_lists_same(owner.type_params, di.type_params)",
+        "derived_runtime_bounds_from_owner(owner), di.bounds",
+    ):
+        if token not in owner_match:
+            errors.append(f"derived descriptor owner relation misses {token!r}")
+    validate = _trait_method_function_body(
+        sources, "derive", "validate_derived_impls", errors)
+    for token in (
+        "derived_impl_key_same(existing, di)",
+        "find_impl_by_provider(",
+        "some(di.trait_ref), di.provider_ref",
+        "derived_impl_matches_owner(di, owner)",
+        "impl_provider_kind_builtin()",
+        "impl_provider_kind_derived()",
+        "if matches != 1",
+    ):
+        if token not in validate:
+            errors.append(f"derived descriptor validator misses {token!r}")
+
+    census = (
+        'const BUILTIN_OPTION_DERIVED_TRAITS: List<Str> = '
+        '["Eq", "Debug", "Clone"]')
+    if census not in builtins:
+        errors.append("builtin Option derived owner census drifted")
+    builtin_owners = _trait_method_function_body(
+        sources, "builtins", "builtin_option_derived_owners", errors)
+    for token in (
+        "require_builtin_option_derived_owner(env, trait_name)",
+        "find_impl_by_provider(",
+        "some(ord_ref), provider_ref",
+        ").is_some()",
+        "builtin Option derived owner census gained Ord",
+    ):
+        if token not in builtin_owners:
+            errors.append(f"builtin Option owner census misses {token!r}")
+    require_builtin = _trait_method_function_body(
+        sources, "builtins", "require_builtin_option_derived_owner", errors)
+    for token in (
+        "find_impl_by_provider(",
+        "some(trait_ref), provider_ref",
+        "builtin Option derived owner is missing",
+    ):
+        if token not in require_builtin:
+            errors.append(f"builtin Option exact owner lookup misses {token!r}")
+    option_descriptor = _trait_method_function_body(
+        sources, "derive", "builtin_option_derived_impl", errors)
+    for token in (
+        "derived_runtime_bounds_from_owner(owner)",
+        "if bounds.len() != 1",
+        'bound.type_param != "T" || bound.trait_name != trait_name',
+        '"Eq" => some([', '"Debug" => some([', '"Clone" => none',
+        "provider_ref: provider_ref", "trait_ref: trait_ref",
+    ):
+        if token not in option_descriptor:
+            errors.append(f"builtin Option descriptor misses {token!r}")
+    option_list = _trait_method_function_body(
+        sources, "derive", "builtin_option_derived_impls", errors)
+    for token in (
+        "result.len() != 3",
+        'result.get(0).unwrap().trait_name != "Eq"',
+        'result.get(1).unwrap().trait_name != "Debug"',
+        'result.get(2).unwrap().trait_name != "Clone"',
+    ):
+        if token not in option_list:
+            errors.append(f"builtin Option descriptor order misses {token!r}")
+    prepend = _trait_method_function_body(
+        sources, "derive", "prepend_builtin_option_derived_impls", errors)
+    for token in (
+        "builtin_option_derived_impls(env)",
+        "derived_impl_key_same(builtin_di, existing_di)",
+        "builtin Option derived descriptors assembled twice",
+        "for builtin_di in builtin_impls { result.push(builtin_di) }",
+        "for existing_di in existing { result.push(existing_di) }",
+    ):
+        if token not in prepend:
+            errors.append(f"builtin Option prepend misses {token!r}")
+
+    single = _trait_method_function_body(
+        sources, "checker", "check", errors)
+    single_prepend = single.find("prepend_builtin_option_derived_impls(")
+    single_validate = single.find("validate_derived_impls(")
+    single_lower = single.find("lower_dicts(lower_andor(assembled))")
+    if min(single_prepend, single_validate, single_lower) < 0 or not (
+            single_prepend < single_validate < single_lower):
+        errors.append("single checker derived assembly order drifted")
+    module_check = _trait_method_function_body(
+        sources, "checker", "check_module", errors)
+    if "prepend_builtin_option_derived_impls(" in module_check:
+        errors.append("check_module publishes per-module builtin descriptors")
+    module_validate = module_check.find("validate_derived_impls(")
+    module_lower = module_check.find("lower_dicts(lower_andor(assembled))")
+    if min(module_validate, module_lower) < 0 or module_validate > module_lower:
+        errors.append("module checker derived validation order drifted")
+
+    project_assembly = _trait_method_function_body(
+        sources, "project", "assemble_project_builtin_derived_impls", errors)
+    for token in (
+        "graph.topo_order.get(0)",
+        "prepend_builtin_option_derived_impls(",
+        "validate_derived_impls(env, derived_impls)",
+        "derived_impls: derived_impls",
+    ):
+        if token not in project_assembly:
+            errors.append(f"project derived assembly misses {token!r}")
+    for forbidden in ("graph.entry", "entry_key", "for key in graph.topo_order"):
+        if forbidden in project_assembly:
+            errors.append(
+                f"project derived assembly is not one physical carrier: {forbidden!r}")
+    phases = _trait_method_function_body(
+        sources, "project", "compile_phases", errors)
+    if phases.count("assemble_project_builtin_derived_impls(") != 1:
+        errors.append("project derived assembly call census drifted")
+    assembly_at = phases.find("assemble_project_builtin_derived_impls(")
+    module_insert_at = phases.find("module_hirs.insert(key, result.program)")
+    extern_union_at = phases.find("let mut global_externs: Set<Str>")
+    if min(assembly_at, module_insert_at, extern_union_at) < 0 or not (
+            module_insert_at < assembly_at < extern_union_at):
+        errors.append("project derived assembly phase drifted")
+
+    dict_body = _trait_method_function_body(
+        sources, "dict", "dl_derived_impl", errors)
+    for token in ("provider_ref: di.provider_ref", "trait_ref: di.trait_ref"):
+        if token not in dict_body:
+            errors.append(f"dict lowering loses derived carrier {token!r}")
+
+    codegen_masked = mask_ring_strings_and_comments(codegen)
+    for forbidden in (
+        "emit_c_builtin_derived_impls", "c_option_some_variant",
+        "c_option_none_variant", "provider_ref", "trait_ref",
+    ):
+        if forbidden in codegen_masked:
+            errors.append(f"C backend retains derived authority {forbidden!r}")
+    if "DerivedImpl {" in codegen_masked:
+        errors.append("C backend constructs a derived descriptor")
+    if codegen_masked.count(
+            "emit_c_derived_impls(ctx, program.derived_impls)") != 1:
+        errors.append("single C backend derived list consumption drifted")
+    if codegen_masked.count(
+            "emit_c_derived_impl_bodies(ctx, program.derived_impls)") != 1:
+        errors.append("project C backend derived list consumption drifted")
+    return errors
+
+
+def derived_impl_carrier_u1c4_mutation_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("register provider carrier", "derive", "register_derived_impl",
+         "let provider_ref = di.provider_ref", "let provider_ref = owner.provider_ref.unwrap()"),
+        ("register trait relation", "derive", "register_derived_impl",
+         "!symbol_ref_same(trait_ref, di.trait_ref)", "false"),
+        ("final provider copy", "derive", "finalize_derived_impl",
+         "provider_ref: owner_provider", "provider_ref: di.provider_ref"),
+        ("final trait copy", "derive", "finalize_derived_impl",
+         "trait_ref: owner_trait", "trait_ref: di.trait_ref"),
+        ("final frozen bounds", "derive", "finalize_derived_impl",
+         "let bounds = derived_runtime_bounds_from_owner(owner)", "let bounds = di.bounds"),
+        ("Json typed owner", "derive", "derive_json_trait",
+         "find_impl_by_provider(", "find_impl("),
+        ("validator typed owner", "derive", "validate_derived_impls",
+         "find_impl_by_provider(", "find_impl("),
+        ("validator owner relation", "derive", "validate_derived_impls",
+         "derived_impl_matches_owner(di, owner)", "true"),
+        ("validator bounds", "derive", "derived_impl_matches_owner",
+         "derived_runtime_bounds_from_owner(owner), di.bounds", "di.bounds, di.bounds"),
+        ("validator provider domain", "derive", "validate_derived_impls",
+         "kind, impl_provider_kind_derived()", "kind, impl_provider_kind_builtin()"),
+        ("builtin owner typed lookup", "builtins", "require_builtin_option_derived_owner",
+         "find_impl_by_provider(", "find_impl("),
+        ("builtin Ord absence", "builtins", "builtin_option_derived_owners",
+         ").is_some()", ").is_none()"),
+        ("Option exact predicate", "derive", "builtin_option_derived_impl",
+         "if bounds.len() != 1", "if false"),
+        ("Option Clone shape", "derive", "builtin_option_derived_impl",
+         '"Clone" => none', '"Clone" => some([])'),
+        ("Option order", "derive", "builtin_option_derived_impls",
+         'result.get(1).unwrap().trait_name != "Debug"',
+         'result.get(1).unwrap().trait_name != "Ord"'),
+        ("double assembly", "derive", "prepend_builtin_option_derived_impls",
+         "derived_impl_key_same(builtin_di, existing_di)", "false"),
+        ("single prepend", "checker", "check",
+         "prepend_builtin_option_derived_impls(", "builtin_option_derived_impls("),
+        ("single validation", "checker", "check",
+         "validate_derived_impls(ctx.env, derived_impls)", "{}"),
+        ("module validation", "checker", "check_module",
+         "validate_derived_impls(ctx.env, hprogram.derived_impls)",
+         "prepend_builtin_option_derived_impls(ctx.env, hprogram.derived_impls)"),
+        ("project physical carrier", "project", "assemble_project_builtin_derived_impls",
+         "graph.topo_order.get(0)", "graph.topo_order.get(graph.topo_order.len() - 1)"),
+        ("project prepend", "project", "assemble_project_builtin_derived_impls",
+         "prepend_builtin_option_derived_impls(", "builtin_option_derived_impls("),
+        ("project validation", "project", "assemble_project_builtin_derived_impls",
+         "validate_derived_impls(env, derived_impls)", "{}"),
+        ("project assembly call", "project", "compile_phases",
+         "assemble_project_builtin_derived_impls(", "validate_project_builtin_derived_impls("),
+        ("dict provider transport", "dict", "dl_derived_impl",
+         "provider_ref: di.provider_ref", "provider_ref: broken_provider"),
+        ("dict trait transport", "dict", "dl_derived_impl",
+         "trait_ref: di.trait_ref", "trait_ref: broken_trait"),
+    )
+    killed = 0
+    for label, source_name, function_name, anchor, replacement in mutations:
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"derived carrier mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source
+        if not derived_impl_carrier_u1c4_contract_errors(mutated):
+            errors.append(f"derived carrier mutation escaped: {label}")
+        else:
+            killed += 1
+
+    manual_mutations = (
+        ("provider schema optional", "hir",
+         "pub struct DerivedImpl {\n    pub provider_ref: ImplProviderRef,",
+         "pub struct DerivedImpl {\n    pub provider_ref: ImplProviderRef?,"),
+        ("trait schema optional", "hir",
+         "pub struct DerivedImpl {\n    pub provider_ref: ImplProviderRef,\n    pub trait_ref: SymbolRef,",
+         "pub struct DerivedImpl {\n    pub provider_ref: ImplProviderRef,\n    pub trait_ref: SymbolRef?,"),
+        ("Option Ord census", "builtins",
+         '["Eq", "Debug", "Clone"]', '["Eq", "Debug", "Ord", "Clone"]'),
+        ("backend builtin emitter", "codegen",
+         "emit_c_derived_impls(ctx, program.derived_impls)",
+         "emit_c_builtin_derived_impls(ctx)\n    emit_c_derived_impls(ctx, program.derived_impls)"),
+        ("backend descriptor constructor", "codegen",
+         "struct CDerivedFn {", "fn forged() { let _ = DerivedImpl { } }\nstruct CDerivedFn {"),
+    )
+    for label, source_name, anchor, replacement in manual_mutations:
+        source = sources[source_name]
+        if source.count(anchor) != 1:
+            errors.append(
+                f"derived carrier mutation {label}: anchor count "
+                f"was {source.count(anchor)}")
+            continue
+        mutated = dict(sources)
+        mutated[source_name] = source.replace(anchor, replacement, 1)
+        if not derived_impl_carrier_u1c4_contract_errors(mutated):
+            errors.append(f"derived carrier mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT:
+        errors.append(
+            f"derived carrier killed {killed} mutations, expected "
+            f"{F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT}")
+    return errors
+
+
+def derived_impl_carrier_u1c4_fixture_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe).resolve(strict=True)
+    compiler_before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(str(compiler)))
+    negative = CASES_DIR / "error_option_ord_unavailable.ring"
+    if negative not in discover_negative_cases(CASES_DIR):
+        errors.append("Option Ord negative fixture is not runner-discovered")
+    else:
+        try:
+            completed = subprocess.run(
+                [str(compiler), "check", str(negative)],
+                cwd=REPO, env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="strict",
+                check=False, timeout=120)
+        except subprocess.TimeoutExpired:
+            errors.append("Option Ord negative fixture timed out")
+        else:
+            if completed.returncode == 0:
+                errors.append("Option Ord negative unexpectedly passed")
+            else:
+                contract = negative.with_suffix(".error").read_text(
+                    encoding="utf-8")
+                combined = (completed.stdout or "") + (completed.stderr or "")
+                contract_error = error_contract_failure(contract, combined)
+                if contract_error is not None:
+                    errors.append(
+                        "Option Ord negative contract failed: "
+                        f"{contract_error}; output={combined[:300]!r}")
+    if _sha256_file(compiler) != compiler_before:
+        errors.append("pinned Ring compiler changed across derived fixtures")
+    return errors
+
+
+def derived_impl_carrier_u1c4_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    try:
+        for name, path in F2_DERIVED_IMPL_CARRIER_PATHS.items():
+            sources[name] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read derived impl carrier sources: {exc}"]
+    errors = derived_impl_carrier_u1c4_contract_errors(sources)
+    if errors:
+        return errors
+    errors.extend(derived_impl_carrier_u1c4_mutation_errors(sources))
     return errors
 
 
@@ -12443,6 +12836,21 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
             TestResult.PASS if not provider_carrier_errors else TestResult.FAIL,
             suite, provider_carrier_label,
             "; ".join([detail, *provider_carrier_errors])))
+
+    derived_carrier_label = "compiler.derived_impl_identity_u1c4_source_contract"
+    if matches_filter(derived_carrier_label, name_filter):
+        derived_carrier_errors = derived_impl_carrier_u1c4_source_errors()
+        if not derived_carrier_errors:
+            derived_carrier_errors.extend(
+                derived_impl_carrier_u1c4_fixture_errors(ring_exe))
+        detail = (
+            f"isolated_mutations={F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT}; "
+            "builtin_option_owners=3; proper_negatives=1; "
+            "positive_runtime=aggregate_source_built_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not derived_carrier_errors else TestResult.FAIL,
+            suite, derived_carrier_label,
+            "; ".join([detail, *derived_carrier_errors])))
 
     delegate_plan_label = "compiler.delegate_provider_plan_u1c3_source_contract"
     if matches_filter(delegate_plan_label, name_filter):
