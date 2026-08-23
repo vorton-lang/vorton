@@ -8,7 +8,8 @@ use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImpl
     prelude_extern_identity,
     is_nullary_variant_ctor_ident}
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, new_collecting_sink, make_diag}
-use env::{TypeEnv, TypeScheme, add_impl, find_impl, install_method_scheme}
+use env::{TypeEnv, TypeScheme, add_impl, find_impl, find_impl_by_origin,
+    install_method_core, assert_no_provisional_impl_owners}
 use builtins::{register_builtins, register_hof_intrinsics}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
 use dict_lower::{lower_dicts}
@@ -142,6 +143,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                     close_struct_identity_ledger(ctx)
                 }
             }
+            assert_no_provisional_impl_owners(ctx.env.trait_reg)
             // Install the source-level API spelling as an alias of the exact
             // canonical scheme/DefId. record_value_origin makes ordinary
             // explicit calls use the same backend-safe canonical identity too.
@@ -197,7 +199,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                     Decl::Impl { target_type, type_params, trait_name, methods, span } => {
                         // Filter to only Fn methods — ExternFn methods are already handled
                         // by the runtime and cannot be looked up via check_extern_fn_decl
-                        // because they're registered in impl_methods_map, not the main scope.
+                        // because they are registered on impl owners, not the main scope.
                         let mut fn_methods: List<Decl> = []
                         for m in methods {
                             match m { Decl::Fn { .. } => { fn_methods.push(m) }, _ => {} }
@@ -700,48 +702,47 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
             ctx.env.trait_reg.traits.insert(tdef.name, tdef)
         }
         for impl_ in mod_.trait_impls {
-            match find_impl(
-                ctx.env.trait_reg,
-                impl_.target_type_name,
-                impl_.trait_name) {
-                some(existing) => {
-                    if existing.origin != impl_.origin {
-                        let _ = type_error(ctx.sink, E0504,
-                            "Duplicate impl '${nominal_display_name(impl_.trait_name)}' for '${nominal_display_name(impl_.target_type_name)}' from distinct dependency origins",
-                            impl_.span, DiagnosticContext::TraitError {
-                                detail: "duplicate imported target/trait implementation"
-                            })
-                    }
+            match impl_.trait_name {
+                some(trait_name) => match find_impl(
+                    ctx.env.trait_reg,
+                    impl_.target_type_name, trait_name) {
+                    some(existing) => {
+                        if existing.origin != impl_.origin {
+                            let _ = type_error(ctx.sink, E0504,
+                                "Duplicate impl '${nominal_display_name(trait_name)}' for '${nominal_display_name(impl_.target_type_name)}' from distinct dependency origins",
+                                impl_.span, DiagnosticContext::TraitError {
+                                    detail: "duplicate imported target/trait implementation"
+                                })
+                        }
+                    },
+                    none => {}
                 },
                 none => {}
             }
             add_impl(ctx.env.trait_reg, impl_)
         }
-        let mut sorted_impl_methods = mod_.impl_methods.entries()
-        sorted_impl_methods.sort_by(compare_by_first)
-        for entry in sorted_impl_methods {
-            let (type_name, methods) = entry
-            let exported_origins = mod_.method_origins.get(type_name)
-            let mut sorted_meths = methods.entries()
-            sorted_meths.sort_by(compare_by_first)
-            for mentry in sorted_meths {
-                let (method_name, scheme) = mentry
-                match exported_origins {
-                    some(origins) => match origins.get(method_name) {
-                        some(origin) => {
-                            let _ = install_method_scheme(
+        let mut sorted_method_origins = mod_.method_origins.entries()
+        sorted_method_origins.sort_by(compare_by_first)
+        for entry in sorted_method_origins {
+            let (type_name, origins) = entry
+            let mut sorted_origins = origins.entries()
+            sorted_origins.sort_by(compare_by_first)
+            for origin_entry in sorted_origins {
+                let (method_name, origin) = origin_entry
+                match find_impl_by_origin(
+                    ctx.env.trait_reg, type_name, origin.origin
+                ) {
+                    some(owner) => match owner.method_schemes.get(method_name) {
+                        some(core) => {
+                            let _ = install_method_core(
                                 ctx.env.trait_reg, ctx.sink,
-                                type_name, method_name, scheme, origin)
+                                type_name, method_name, core, origin)
                         },
-                        none => {
-                            report_hydrated_method_collision(
-                                ctx, type_name, method_name, span_zero())
-                        }
+                        none => report_hydrated_method_collision(
+                            ctx, type_name, method_name, origin.span)
                     },
-                    none => {
-                        report_hydrated_method_collision(
-                            ctx, type_name, method_name, span_zero())
-                    }
+                    none => report_hydrated_method_collision(
+                        ctx, type_name, method_name, origin.span)
                 }
             }
         }

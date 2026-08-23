@@ -7,11 +7,15 @@ use hir::{HDecl, HParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssoc
     hexpr_type, hexpr_effects, hexpr_span,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
 use ir_identity::{NominalFieldRef, nominal_field_ref_index}
-use env::{TypeScheme, SchemeBound, MethodOrigin,
+use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
+    MethodOrigin, ImplEntry,
+    ImplMethodSchemeCore,
     apply_subst, apply_subst_map, apply_subst_row_map,
     find_impl, find_impl_by_origin, has_impl, impl_origin, impl_decl_origin,
     impl_method_origin,
-    install_method_scheme, build_type_var_map}
+    install_method_core, replace_impl_method_core,
+    impl_method_core_as_scheme, impl_method_core_from_scheme,
+    build_type_var_map}
 use union_find::{UnionFind}
 use unify::{empty_subst}
 use diagnostics::{DiagnosticContext, DiagnosticNote}
@@ -20,6 +24,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     type_error, type_error_with_notes,
     unify_at, unify_at_noted, update_fn_effects,
     resolve_type_expr, resolve_self_type, resolve_dicts_from_scheme,
+    resolve_dicts_from_impl_owner,
     pending_dict_checkpoint, drain_pending_dicts, rollback_pending_dicts,
     assert_pending_dict_owner_closed,
     generalize, collect_free_vars, free_type_vars_in_env, resolve_mod_uses,
@@ -29,6 +34,7 @@ use infer_helpers::{is_value_type}
 use infer_register::{register_decls_two_phase, register_module_decls_two_phase,
     resolve_declared_effects, prefix_decl_name, insert_mod_aliases,
     collect_all_supertraits, inject_assoc_types_from_bounds,
+    impl_owner_fn_bounds,
     resolve_trait_identity, resolve_nominal_identity}
 use infer::{infer_block, infer_expr,
     register_bounded_callable_value_shadows}
@@ -535,26 +541,12 @@ fn registered_impl_method_scheme(
     ctx: InferCtx, target_type: Str, trait_name: Str?,
     origin: Str, method_name: Str
 ) -> TypeScheme? {
-    match trait_name {
-        some(_) => match find_impl_by_origin(
-            ctx.env.trait_reg, target_type, origin) {
-            some(entry) => entry.method_schemes.get(method_name),
+    match find_impl_by_origin(ctx.env.trait_reg, target_type, origin) {
+        some(entry) => match entry.method_schemes.get(method_name) {
+            some(core) => some(impl_method_core_as_scheme(core)),
             none => none
         },
-        none => match ctx.env.trait_reg.method_origins.get(target_type) {
-            some(origins) => match origins.get(method_name) {
-                some(method_origin_) => {
-                    if method_origin_.origin == origin {
-                        match ctx.env.trait_reg.impl_methods.get(target_type) {
-                            some(methods) => methods.get(method_name),
-                            none => none
-                        }
-                    } else { none }
-                },
-                none => none
-            },
-            none => none
-        }
+        none => none
     }
 }
 
@@ -562,18 +554,12 @@ fn store_rebound_impl_method_scheme(
     mut ctx: InferCtx, target_type: Str, trait_name: Str?,
     origin: Str, method_name: Str, scheme: TypeScheme, span: Span
 ) {
-    match trait_name {
-        some(_) => match find_impl_by_origin(
-            ctx.env.trait_reg, target_type, origin) {
-            some(entry) => entry.method_schemes.insert(method_name, scheme),
-            none => {}
-        },
-        none => {}
-    }
-
-    let _ = install_method_scheme(
+    let core = impl_method_core_from_scheme(scheme)
+    replace_impl_method_core(
+        ctx.env.trait_reg, target_type, origin, method_name, core)
+    let _ = install_method_core(
         ctx.env.trait_reg, ctx.sink,
-        target_type, method_name, scheme,
+        target_type, method_name, core,
         MethodOrigin {
             origin: origin, trait_name: trait_name, span: span
         })
@@ -589,11 +575,29 @@ fn check_impl_decl(mut ctx: InferCtx, target_type: Str, type_params: List<TypePa
 
 fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<Decl>, span: Span) -> HDecl {
     let origin = impl_decl_origin(target_type, trait_name, type_params, span)
+    let impl_owner = match find_impl_by_origin(
+        ctx.env.trait_reg, target_type, origin) {
+        some(entry) => entry,
+        none => fail.raise(CompileError {})
+    }
+    if impl_owner.type_param_vars.len() != type_params.len() ||
+       impl_owner.type_params.len() != type_params.len() {
+        panic("impl checking: owner type-parameter arity mismatch")
+    }
     let saved_tp_scope = map_clone(ctx.type_param_scope)
     let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
-    for tp in type_params {
-        let tv = ctx.env.fresh_var()
-        ctx.type_param_scope.insert(tp.name, tv)
+    for index in 0..type_params.len() {
+        match (type_params.get(index), impl_owner.type_param_vars.get(index),
+               impl_owner.type_params.get(index)) {
+            (some(tp), some(id), some(owner_name)) => {
+                if tp.name != owner_name {
+                    panic("impl checking: owner type-parameter order mismatch")
+                }
+                ctx.type_param_scope.insert(
+                    tp.name, Type::TypeVar { id: id, name: some(tp.name) })
+            },
+            _ => panic("impl checking: owner type-parameter mapping is incomplete")
+        }
     }
 
     let impl_self_type = if type_params.len() > 0 {
@@ -619,31 +623,15 @@ fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: L
     ctx.type_param_scope.insert("Self", impl_self_type)
 
     let saved_impl_bounds = ctx.current_fn_bounds
-    let mut impl_bounds: List<FnBoundsEntry> = []
-    for tp in type_params {
-        match ctx.type_param_scope.get(tp.name) {
-            some(tv) => match tv {
-                Type::TypeVar { id, .. } => {
-                    for bound in tp.bounds {
-                        let bound_trait = resolve_trait_identity(ctx, bound.trait_name)
-                        impl_bounds.push(FnBoundsEntry {
-                            type_param_var_id: id, trait_name: bound_trait, type_param_name: tp.name
-                        })
-                        // Expand supertrait bounds
-                        let supers = collect_all_supertraits(ctx, bound_trait)
-                        for st_name in supers {
-                            impl_bounds.push(FnBoundsEntry {
-                                type_param_var_id: id, trait_name: st_name, type_param_name: tp.name
-                            })
-                        }
-                    }
-                },
-                _ => {}
-            },
-            none => {}
+    let impl_bounds = impl_owner_fn_bounds(impl_owner)
+    ctx.current_fn_bounds = impl_bounds
+    for bound in ctx.current_fn_bounds {
+        for constraint in bound.assoc_constraints {
+            ctx.qualified_assoc_scope.insert(
+                "${bound.type_param_name}::${constraint.name}",
+                constraint.ty)
         }
     }
-    ctx.current_fn_bounds = impl_bounds
 
     // Collect associated types from impl
     let mut hassoc_types: List<HAssocType> = []
@@ -921,7 +909,10 @@ fn expand_delegate_impls(
                                         exact_entries.sort_by(compare_by_first)
                                         for exact_entry in exact_entries {
                                             if !found_exact_self {
-                                                let (_, exact_scheme) = exact_entry
+                                                let (_, exact_core) = exact_entry
+                                                let exact_scheme =
+                                                    impl_method_core_as_scheme(
+                                                        exact_core)
                                                 match exact_scheme.ty {
                                                     Type::FnType { params, .. } =>
                                                         match params.first() {
@@ -970,7 +961,10 @@ fn expand_delegate_impls(
                                             field_entry.method_schemes.entries()
                                         field_methods.sort_by(compare_by_first)
                                         for field_method in field_methods {
-                                            let (_, field_scheme) = field_method
+                                            let (_, field_core) = field_method
+                                            let field_scheme =
+                                                impl_method_core_as_scheme(
+                                                    field_core)
                                             match field_scheme.ty {
                                                 Type::FnType { params, .. } =>
                                                     match params.first() {
@@ -1000,32 +994,15 @@ fn expand_delegate_impls(
 
                                 let mut generated_trait_bounds: List<TraitBound> = []
                                 let mut generated_fn_bounds: List<FnBoundsEntry> = []
-                                let wrapper_type_args = match exact_self_type {
-                                    Type::StructType { type_params, .. } => type_params,
-                                    Type::EnumType { type_params, .. } => type_params,
-                                    _ => []
-                                }
                                 match delegate_impl {
                                     some(delegate_entry) => {
-                                        for dict_bound in delegate_entry.dict_bounds {
-                                            match (delegate_entry.type_params.get(
-                                                        dict_bound.type_param_index),
-                                                   wrapper_type_args.get(
-                                                        dict_bound.type_param_index)) {
-                                                (some(type_param_name),
-                                                 some(Type::TypeVar { id, .. })) => {
-                                                    generated_trait_bounds.push(TraitBound {
-                                                        type_param: type_param_name,
-                                                        trait_name: dict_bound.trait_name
-                                                    })
-                                                    generated_fn_bounds.push(FnBoundsEntry {
-                                                        type_param_var_id: id,
-                                                        trait_name: dict_bound.trait_name,
-                                                        type_param_name: type_param_name
-                                                    })
-                                                },
-                                                _ => {}
-                                            }
+                                        generated_fn_bounds =
+                                            impl_owner_fn_bounds(delegate_entry)
+                                        for bound in generated_fn_bounds {
+                                            generated_trait_bounds.push(TraitBound {
+                                                type_param: bound.type_param_name,
+                                                trait_name: bound.trait_name
+                                            })
                                         }
                                     },
                                     none => {}
@@ -1056,12 +1033,21 @@ fn expand_delegate_impls(
                                     // the forwarded callee and its predicates.
                                     let resolved_method_scheme = match delegate_impl {
                                         some(wrapper_entry) =>
-                                            wrapper_entry.method_schemes.get(tm.name),
+                                            match wrapper_entry.method_schemes.get(tm.name) {
+                                                some(core) => some(
+                                                    impl_method_core_as_scheme(core)),
+                                                none => none
+                                            },
                                         none => none
                                     }
                                     let field_method_scheme = match field_impl {
                                         some(field_entry) =>
-                                            field_entry.method_schemes.get(tm.name),
+                                            match field_entry.method_schemes.get(tm.name) {
+                                                some(core) => some((
+                                                    core,
+                                                    impl_method_core_as_scheme(core))),
+                                                none => none
+                                            },
                                         none => none
                                     }
                                     match tm.ty {
@@ -1249,17 +1235,18 @@ fn expand_delegate_impls(
                                                     span: span
                                                 }
                                             } else {
-                                                let resolved_forward_dicts = match field_method_scheme {
-                                                    some(field_scheme) => {
+                                                let resolved_forward_dicts = match (field_impl, field_method_scheme) {
+                                                    (some(field_owner), some((field_core, field_scheme))) => {
                                                         let field_callee_type = apply_subst_map(
                                                             field_var_map, field_scheme.ty)
-                                                        resolve_dicts_from_scheme(
+                                                        resolve_dicts_from_impl_owner(
                                                             ctx.sink, ctx.env,
                                                             generated_fn_bounds,
-                                                            field_scheme, field_callee_type,
+                                                            field_owner, field_core,
+                                                            field_callee_type,
                                                             ctx.subst, span)
                                                     },
-                                                    none => []
+                                                    _ => []
                                                 }
                                                 // Build: self.field.method — as FieldAccess for UFCS dispatch
                                                 let method_access = HExpr::FieldAccess {
@@ -1448,13 +1435,15 @@ fn check_trait_default_body(
     match self_var {
         Type::TypeVar { id, .. } => {
             ctx.current_fn_bounds.push(FnBoundsEntry {
-                type_param_var_id: id, trait_name: trait_name, type_param_name: "self"
+                type_param_var_id: id, trait_name: trait_name,
+                type_param_name: "self", assoc_constraints: []
             })
             // Expand supertrait bounds for trait default body
             let supers = collect_all_supertraits(ctx, trait_name)
             for st_name in supers {
                 ctx.current_fn_bounds.push(FnBoundsEntry {
-                    type_param_var_id: id, trait_name: st_name, type_param_name: "self"
+                    type_param_var_id: id, trait_name: st_name,
+                    type_param_name: "self", assoc_constraints: []
                 })
             }
         },
@@ -1919,6 +1908,25 @@ fn capture_assoc_rebind_provenance(
                                         },
                                         none => {}
                                     }
+                                    // Impl method cores are deliberately
+                                    // boundless. Their registration predicate
+                                    // authority is current_fn_bounds, materialized
+                                    // from the exact owning ImplEntry above.
+                                    if !found_target &&
+                                       registration_scheme.bounds.len() == 0 {
+                                        for constraint in fn_bound.assoc_constraints {
+                                            if constraint.name == assoc_def.name {
+                                                found_target = true
+                                                captured.push(AssocRebindEntry {
+                                                    check_type: zonked_assoc,
+                                                    registration_type: some(constraint.ty),
+                                                    owner_name: fn_bound.type_param_name,
+                                                    trait_name: fn_bound.trait_name,
+                                                    assoc_name: assoc_def.name
+                                                })
+                                            }
+                                        }
+                                    }
                                     if !found_target {
                                         captured.push(AssocRebindEntry {
                                             check_type: zonked_assoc,
@@ -2011,14 +2019,25 @@ fn check_fn_decl_transaction(
                 Type::TypeVar { id, .. } => {
                     for bound in tp.bounds {
                         let bound_trait = resolve_trait_identity(ctx, bound.trait_name)
+                        let mut assoc_constraints: List<AssocConstraintEntry> = []
+                        for constraint in bound.assoc_constraints {
+                            assoc_constraints.push(AssocConstraintEntry {
+                                name: constraint.name,
+                                ty: resolve_type_expr(ctx, constraint.ty)
+                            })
+                        }
                         ctx.current_fn_bounds.push(FnBoundsEntry {
-                            type_param_var_id: id, trait_name: bound_trait, type_param_name: tp.name
+                            type_param_var_id: id, trait_name: bound_trait,
+                            type_param_name: tp.name,
+                            assoc_constraints: assoc_constraints
                         })
                         // Expand supertrait bounds: if T: Ord and Ord: Eq, add T: Eq too
                         let supers = collect_all_supertraits(ctx, bound_trait)
                         for st_name in supers {
                             ctx.current_fn_bounds.push(FnBoundsEntry {
-                                type_param_var_id: id, trait_name: st_name, type_param_name: tp.name
+                                type_param_var_id: id, trait_name: st_name,
+                                type_param_name: tp.name,
+                                assoc_constraints: []
                             })
                         }
                     }
@@ -3934,7 +3953,7 @@ fn check_registered_body(
     mut ctx: InferCtx, program: Program,
     derived_impls: List<DerivedImpl>
 ) -> HProgram {
-    // Effect pre-pass: check impl blocks to populate impl_methods with inferred effects.
+    // Effect pre-pass: rebind impl-owner method cores with inferred effects.
     // Without this, callers defined before impl blocks see EMPTY_ROW effects from Pass 1.
     // The main pass re-checks with correct effects visible.
     // DiagnosticSink deduplication (by code+span) prevents double error reporting.

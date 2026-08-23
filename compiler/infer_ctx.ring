@@ -12,10 +12,14 @@ use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705
 use union_find::{UnionFind, new_union_find, uf_find}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     StructDef, EnumDef, TypeAliasDef, EffectDef, EffectAliasDef, TraitDef,
+    ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
     new_type_env, mono,
     apply_subst, apply_subst_row, apply_subst_map, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
-    instantiate_impl_dict_requirements}
+    impl_method_core_as_scheme, frozen_impl_predicates,
+    impl_predicate_subject_type_var, impl_predicate_trait_name,
+    impl_predicate_assoc_constraints, impl_assoc_predicate_name,
+    impl_assoc_predicate_type, instantiate_impl_runtime_requirements}
 use unify::{UnificationError, empty_subst, unify, occurs_in, unify_effect_params}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     StructIdentityFact, NamespaceKind}
@@ -39,7 +43,8 @@ pub struct InferResult {
 pub struct FnBoundsEntry {
     pub type_param_var_id: Int,
     pub trait_name: Str,
-    pub type_param_name: Str
+    pub type_param_name: Str,
+    pub assoc_constraints: List<AssocConstraintEntry>
 }
 
 // Checker-only bridge between a function body's fresh associated-type
@@ -63,8 +68,16 @@ pub enum PendingDictPurpose {
     CallableValueShadow
 }
 
+pub enum PendingEvidenceSource {
+    SchemeEvidenceSource(TypeScheme),
+    ImplOwnerEvidenceSource {
+        owner: ImplEntry,
+        method_core: ImplMethodSchemeCore
+    }
+}
+
 pub struct PendingDictObligation {
-    pub scheme: TypeScheme,
+    pub source: PendingEvidenceSource,
     pub callee_type: Type,
     pub fn_bounds: List<FnBoundsEntry>,
     pub span: Span,
@@ -1272,18 +1285,17 @@ fn resolve_named_impl_dict_evidence(
         },
         some(impl_entry) => {
             let dict_name = trait_dict_name(name, trait_name)
-            if impl_entry.dict_bounds.len() == 0 {
-                return DictEvidenceResolution::Resolved {
-                    dict_ref: DictRef::Static(dict_name)
-                }
-            }
-
-            let requirements = match instantiate_impl_dict_requirements(
+            let requirements = match instantiate_impl_runtime_requirements(
                 impl_entry, type_params
             ) {
                 some(resolved) => resolved,
                 none => return DictEvidenceResolution::Missing {
                     suppress_diagnostic: false
+                }
+            }
+            if requirements.len() == 0 {
+                return DictEvidenceResolution::Resolved {
+                    dict_ref: DictRef::Static(dict_name)
                 }
             }
 
@@ -1293,11 +1305,30 @@ fn resolve_named_impl_dict_evidence(
             let mut suppress_missing = true
             for requirement in requirements {
                 match resolve_dict_evidence_for_type(
-                    env, current_fn_bounds, requirement.type_arg, s,
-                    requirement.trait_name
+                    env, current_fn_bounds, requirement.subject_type, s,
+                    requirement.canonical_trait_name
                 ) {
-                    DictEvidenceResolution::Resolved { dict_ref } =>
-                        inner_dicts.push(dict_ref),
+                    DictEvidenceResolution::Resolved { dict_ref } => {
+                        let assoc_valid = match find_matching_fn_bound(
+                            current_fn_bounds, requirement.subject_type, s,
+                            requirement.canonical_trait_name
+                        ) {
+                            some(bound) => impl_assoc_constraints_match_fn_bound(
+                                requirement.assoc_constraints, bound,
+                                map_new(), s),
+                            none => impl_assoc_constraints_match_concrete(
+                                env, requirement.subject_type,
+                                requirement.canonical_trait_name,
+                                requirement.assoc_constraints,
+                                map_new(), s)
+                        }
+                        if assoc_valid {
+                            inner_dicts.push(dict_ref)
+                        } else {
+                            has_missing = true
+                            suppress_missing = false
+                        }
+                    },
                     DictEvidenceResolution::Pending => {
                         has_pending = true
                     },
@@ -1524,6 +1555,28 @@ pub fn resolve_dicts_from_scheme(
     }
 }
 
+pub fn resolve_dicts_from_impl_owner(
+    sink: CollectingSink, env: TypeEnv,
+    current_fn_bounds: List<FnBoundsEntry>,
+    owner: ImplEntry, method_core: ImplMethodSchemeCore,
+    callee_type: Type, s: UnionFind, span: Span
+) -> List<DictRef> {
+    match resolve_impl_owner_evidence(
+        sink, env, current_fn_bounds, owner, method_core,
+        callee_type, s, span, true
+    ) {
+        SchemeEvidenceResolution::Resolved { dicts, .. } => dicts,
+        SchemeEvidenceResolution::Pending { failures } => {
+            report_evidence_failures(sink, failures, span)
+            []
+        },
+        SchemeEvidenceResolution::Missing { failures } => {
+            report_evidence_failures(sink, failures, span)
+            []
+        }
+    }
+}
+
 // Pending-capable call sites hand us their freshly allocated HIR list.  The
 // exact same alias is retained by the obligation and populated only after all
 // bounds resolve atomically.
@@ -1541,7 +1594,35 @@ pub fn resolve_or_defer_dicts_from_scheme(
             publish_resolved_dicts(purpose, dicts),
         SchemeEvidenceResolution::Pending { .. } =>
             ctx.pending_dict_obligations.push(PendingDictObligation {
-                scheme: scheme,
+                source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
+                callee_type: callee_type,
+                fn_bounds: list_clone(ctx.current_fn_bounds),
+                span: span,
+                purpose: purpose
+            }),
+        SchemeEvidenceResolution::Missing { failures } =>
+            report_evidence_failures(ctx.sink, failures, span)
+    }
+}
+
+pub fn resolve_or_defer_dicts_from_impl_owner(
+    mut ctx: InferCtx, owner: ImplEntry,
+    method_core: ImplMethodSchemeCore, callee_type: Type,
+    s: UnionFind, span: Span, purpose: PendingDictPurpose
+) {
+    if frozen_impl_predicates(owner.predicates).len() == 0 { return }
+    match resolve_impl_owner_evidence(
+        ctx.sink, ctx.env, ctx.current_fn_bounds,
+        owner, method_core, callee_type, s, span,
+        purpose_reports_assoc_mismatch(purpose)
+    ) {
+        SchemeEvidenceResolution::Resolved { dicts, .. } =>
+            publish_resolved_dicts(purpose, dicts),
+        SchemeEvidenceResolution::Pending { .. } =>
+            ctx.pending_dict_obligations.push(PendingDictObligation {
+                source: PendingEvidenceSource::ImplOwnerEvidenceSource {
+                    owner: owner, method_core: method_core
+                },
                 callee_type: callee_type,
                 fn_bounds: list_clone(ctx.current_fn_bounds),
                 span: span,
@@ -1567,7 +1648,7 @@ pub fn register_callable_value_shadow(
         SchemeEvidenceResolution::Resolved { .. } => {},
         SchemeEvidenceResolution::Pending { .. } =>
             ctx.pending_dict_obligations.push(PendingDictObligation {
-                scheme: scheme,
+                source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
                 callee_type: callee_type,
                 fn_bounds: list_clone(ctx.current_fn_bounds),
                 span: span,
@@ -1612,9 +1693,21 @@ fn pending_evidence_attempt_budget(
 ) -> Int {
     let mut evidence_sites = 0
     for obligation in obligations {
-        for bound in obligation.scheme.bounds {
-            evidence_sites = evidence_sites + 1
-            evidence_sites = evidence_sites + bound.assoc_constraints.len()
+        match obligation.source {
+            PendingEvidenceSource::SchemeEvidenceSource(scheme) => {
+                for bound in scheme.bounds {
+                    evidence_sites = evidence_sites + 1
+                    evidence_sites = evidence_sites +
+                        bound.assoc_constraints.len()
+                }
+            },
+            PendingEvidenceSource::ImplOwnerEvidenceSource { owner, .. } => {
+                for predicate in frozen_impl_predicates(owner.predicates) {
+                    evidence_sites = evidence_sites + 1
+                    evidence_sites = evidence_sites +
+                        impl_predicate_assoc_constraints(predicate).len()
+                }
+            }
         }
     }
     if evidence_sites == 0 { 1 } else { evidence_sites + 1 }
@@ -1639,9 +1732,9 @@ pub fn drain_pending_dicts(
     while remaining.len() > 0 && attempt < max_attempts {
         let mut next: List<PendingDictObligation> = []
         for obligation in remaining {
-            match resolve_scheme_evidence(
+            match resolve_pending_evidence_source(
                 ctx.sink, ctx.env, obligation.fn_bounds,
-                obligation.scheme, obligation.callee_type, s,
+                obligation.source, obligation.callee_type, s,
                 obligation.span,
                 purpose_reports_assoc_mismatch(obligation.purpose)
             ) {
@@ -1664,9 +1757,9 @@ pub fn drain_pending_dicts(
     // One final observation consumes any resolution made by the last pass;
     // only owners still unresolved here are genuine no-source obligations.
     for obligation in remaining {
-        match resolve_scheme_evidence(
+        match resolve_pending_evidence_source(
             ctx.sink, ctx.env, obligation.fn_bounds,
-            obligation.scheme, obligation.callee_type, s,
+            obligation.source, obligation.callee_type, s,
             obligation.span,
             purpose_reports_assoc_mismatch(obligation.purpose)
         ) {
@@ -3004,6 +3097,217 @@ pub fn bind_exact_import_alias(
         none => {}
     }
     found
+}
+
+fn impl_assoc_constraints_match_fn_bound(
+    constraints: List<ImplAssocPredicate>, bound: FnBoundsEntry,
+    var_map: Map<Int, Type>, s: UnionFind
+) -> Bool {
+    for expected in constraints {
+        let expected_ty = apply_subst(s, apply_subst_map(
+            var_map, impl_assoc_predicate_type(expected)))
+        let mut matched = false
+        for actual in bound.assoc_constraints {
+            if actual.name == impl_assoc_predicate_name(expected) {
+                matched = true
+                if !types_equal(expected_ty, apply_subst(s, actual.ty)) {
+                    return false
+                }
+            }
+        }
+        if !matched { return false }
+    }
+    true
+}
+
+fn impl_assoc_constraints_match_concrete(
+    env: TypeEnv, subject: Type, trait_name: Str,
+    constraints: List<ImplAssocPredicate>,
+    var_map: Map<Int, Type>, s: UnionFind
+) -> Bool {
+    if constraints.len() == 0 { return true }
+    let concrete = apply_subst(s, subject)
+    let mut target_name: Str? = none
+    let mut type_args: List<Type> = []
+    match concrete {
+        Type::StructType { name, type_params } => {
+            target_name = some(name)
+            type_args = type_params
+        },
+        Type::EnumType { name, type_params } => {
+            target_name = some(name)
+            type_args = type_params
+        },
+        _ => match type_to_builtin_name(concrete) {
+            some(name) => { target_name = some(name) },
+            none => return false
+        }
+    }
+    let target = match target_name {
+        some(name) => name,
+        none => return false
+    }
+    let entry = match find_impl(env.trait_reg, target, trait_name) {
+        some(found) => found,
+        none => return false
+    }
+    if entry.type_param_vars.len() != type_args.len() { return false }
+    let mut owner_map: Map<Int, Type> = map_new()
+    for index in 0..entry.type_param_vars.len() {
+        match (entry.type_param_vars.get(index), type_args.get(index)) {
+            (some(source), some(actual)) => owner_map.insert(source, actual),
+            _ => return false
+        }
+    }
+    for expected in constraints {
+        match entry.assoc_types.get(impl_assoc_predicate_name(expected)) {
+            some(actual) => {
+                let expected_ty = apply_subst(s, apply_subst_map(
+                    var_map, impl_assoc_predicate_type(expected)))
+                let actual_ty = apply_subst(s, apply_subst_map(
+                    owner_map, actual))
+                if !types_equal(expected_ty, actual_ty) { return false }
+            },
+            none => return false
+        }
+    }
+    true
+}
+
+fn find_matching_fn_bound(
+    current_fn_bounds: List<FnBoundsEntry>, subject: Type,
+    s: UnionFind, trait_name: Str
+) -> FnBoundsEntry? {
+    match apply_subst(s, subject) {
+        Type::TypeVar { id, .. } => current_fn_bounds.find(fn(bound) {
+            if bound.trait_name != trait_name { false } else {
+                let resolved = apply_subst(s, Type::TypeVar {
+                    id: bound.type_param_var_id, name: none
+                })
+                match resolved {
+                    Type::TypeVar { id: resolved_id, .. } =>
+                        resolved_id == id || bound.type_param_var_id == id ||
+                            uf_find(s, bound.type_param_var_id) == id,
+                    _ => false
+                }
+            }
+        }),
+        _ => none
+    }
+}
+
+pub fn impl_predicate_constraints_satisfied(
+    env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
+    subject: Type, trait_name: Str,
+    constraints: List<ImplAssocPredicate>, s: UnionFind
+) -> Bool {
+    match find_matching_fn_bound(
+        current_fn_bounds, subject, s, trait_name
+    ) {
+        some(bound) => impl_assoc_constraints_match_fn_bound(
+            constraints, bound, map_new(), s),
+        none => impl_assoc_constraints_match_concrete(
+            env, subject, trait_name, constraints, map_new(), s)
+    }
+}
+
+fn resolve_impl_owner_evidence(
+    sink: CollectingSink, env: TypeEnv,
+    current_fn_bounds: List<FnBoundsEntry>,
+    owner: ImplEntry, core: ImplMethodSchemeCore,
+    callee_type: Type, s: UnionFind, span: Span,
+    report_assoc_mismatch: Bool
+) -> SchemeEvidenceResolution {
+    let predicates = frozen_impl_predicates(owner.predicates)
+    if predicates.len() == 0 {
+        return SchemeEvidenceResolution::Resolved {
+            dicts: [], assoc_mismatch: false
+        }
+    }
+    let core_scheme = impl_method_core_as_scheme(core)
+    let var_map = build_scheme_var_map(core_scheme, callee_type)
+    let mut resolved_dicts: List<DictRef> = []
+    let mut pending_failures: List<EvidenceFailure> = []
+    let mut missing_failures: List<EvidenceFailure> = []
+    let mut assoc_mismatch = false
+    for predicate in predicates {
+        let trait_name = impl_predicate_trait_name(predicate)
+        match var_map.get(impl_predicate_subject_type_var(predicate)) {
+            some(subject) => {
+                match resolve_dict_evidence_for_type(
+                    env, current_fn_bounds, subject, s, trait_name
+                ) {
+                    DictEvidenceResolution::Resolved { dict_ref } => {
+                        let constraints = impl_predicate_assoc_constraints(
+                            predicate)
+                        let assoc_valid = match find_matching_fn_bound(
+                            current_fn_bounds, subject, s, trait_name
+                        ) {
+                            some(bound) => impl_assoc_constraints_match_fn_bound(
+                                constraints, bound, var_map, s),
+                            none => impl_assoc_constraints_match_concrete(
+                                env, subject, trait_name,
+                                constraints, var_map, s)
+                        }
+                        if assoc_valid {
+                            resolved_dicts.push(dict_ref)
+                        } else {
+                            assoc_mismatch = true
+                            if report_assoc_mismatch {
+                                let _ = type_error(sink, E0513,
+                                    "Associated type constraint mismatch for impl predicate '${nominal_display_name(trait_name)}'",
+                                    span, DiagnosticContext::TraitError {
+                                        detail: "impl-owner associated predicate mismatch"
+                                    })
+                            }
+                        }
+                    },
+                    DictEvidenceResolution::Pending =>
+                        pending_failures.push(EvidenceFailure {
+                            trait_name: trait_name,
+                            suppress_diagnostic: false
+                        }),
+                    DictEvidenceResolution::Missing { suppress_diagnostic } =>
+                        missing_failures.push(EvidenceFailure {
+                            trait_name: trait_name,
+                            suppress_diagnostic: suppress_diagnostic
+                        })
+                }
+            },
+            none => missing_failures.push(EvidenceFailure {
+                trait_name: trait_name,
+                suppress_diagnostic: false
+            })
+        }
+    }
+    if missing_failures.len() > 0 {
+        SchemeEvidenceResolution::Missing { failures: missing_failures }
+    } else if pending_failures.len() > 0 {
+        SchemeEvidenceResolution::Pending { failures: pending_failures }
+    } else {
+        SchemeEvidenceResolution::Resolved {
+            dicts: resolved_dicts, assoc_mismatch: assoc_mismatch
+        }
+    }
+}
+
+fn resolve_pending_evidence_source(
+    sink: CollectingSink, env: TypeEnv,
+    fn_bounds: List<FnBoundsEntry>, source: PendingEvidenceSource,
+    callee_type: Type, s: UnionFind, span: Span,
+    report_assoc_mismatch: Bool
+) -> SchemeEvidenceResolution {
+    match source {
+        PendingEvidenceSource::SchemeEvidenceSource(scheme) =>
+            resolve_scheme_evidence(
+                sink, env, fn_bounds, scheme, callee_type, s, span,
+                report_assoc_mismatch),
+        PendingEvidenceSource::ImplOwnerEvidenceSource {
+            owner, method_core
+        } => resolve_impl_owner_evidence(
+            sink, env, fn_bounds, owner, method_core,
+            callee_type, s, span, report_assoc_mismatch)
+    }
 }
 
 pub fn install_struct_identity_ledger(

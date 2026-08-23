@@ -7,8 +7,14 @@ use types::{Type, Effect, EffectRow, StructField, EnumVariant,
     make_option_type, make_map_type}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     EffectDef, EffectOpDef, BuiltInKind, TraitDef, TraitMethodDef,
-    ImplEntry, ImplDictBound, MethodOrigin, mono, add_impl,
-    install_method_scheme, specialize_trait_method_scheme}
+    ImplEntry, ImplMethodSchemeCore, TypedImplPredicate,
+    FrozenImplPredicateSet,
+    MethodOrigin, mono, add_impl, install_method_core,
+    make_impl_method_scheme_core, make_typed_impl_predicate,
+    direct_impl_predicate_provenance, freeze_impl_predicate_set,
+    frozen_impl_predicates, impl_predicate_subject_type_var,
+    impl_predicate_trait_name, ImplOwnerState,
+    specialize_trait_method_scheme}
 use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
@@ -29,19 +35,99 @@ struct OpenRow {
 // Shared built-in method installation
 // ============================================================
 
-fn install_builtin_method_map(
+struct BuiltinPredicateSpec {
+    subject_param_index: Int,
+    trait_name: Str
+}
+
+fn freeze_builtin_predicates(
+    owner_type_vars: List<Int>, specs: List<BuiltinPredicateSpec>
+) -> FrozenImplPredicateSet {
+    let mut predicates: List<TypedImplPredicate> = []
+    let mut seen: Set<Str> = set_new()
+    for spec in specs {
+        let subject_var = owner_type_vars.get(
+            spec.subject_param_index).unwrap_or(-1)
+        if subject_var < 0 {
+            panic("builtin impl owner: predicate subject is missing")
+        }
+        let key = "${spec.subject_param_index.to_str()}|${spec.trait_name}"
+        if seen.contains(key) {
+            panic("builtin impl owner: duplicate predicate")
+        }
+        seen.insert(key)
+        predicates.push(make_typed_impl_predicate(
+            spec.subject_param_index, subject_var, spec.trait_name, [],
+            direct_impl_predicate_provenance()))
+    }
+    freeze_impl_predicate_set(owner_type_vars, predicates)
+}
+
+fn scheme_bounds_match_owner(
+    scheme: TypeScheme, predicates: FrozenImplPredicateSet
+) -> Bool {
+    for bound in scheme.bounds {
+        if bound.assoc_constraints.len() != 0 { return false }
+        let found = frozen_impl_predicates(predicates).any(fn(predicate) {
+            impl_predicate_subject_type_var(predicate) == bound.type_var &&
+                impl_predicate_trait_name(predicate) == bound.trait_name
+        })
+        if !found { return false }
+    }
+    true
+}
+
+fn install_builtin_method_owner(
     mut env: TypeEnv, sink: CollectingSink,
     target_type_name: Str, origin: Str,
-    trait_name: Str?, methods: Map<Str, TypeScheme>
+    trait_name: Str?, type_params: List<Str>, owner_type_vars: List<Int>,
+    predicate_specs: List<BuiltinPredicateSpec>, state: ImplOwnerState,
+    methods: Map<Str, TypeScheme>
 ) {
     let span = span_zero()
+    if type_params.len() != owner_type_vars.len() {
+        panic("builtin impl owner: type-parameter arity mismatch")
+    }
+    let predicates = freeze_builtin_predicates(
+        owner_type_vars, predicate_specs)
+    let mut cores: Map<Str, ImplMethodSchemeCore> = map_new()
     let mut entries = methods.entries()
     entries.sort_by(compare_by_first)
     for entry in entries {
         let (method_name, scheme) = entry
-        let _ = install_method_scheme(
+        if !scheme_bounds_match_owner(scheme, predicates) {
+            panic("builtin impl owner: method scheme has non-owner bounds")
+        }
+        for owner_var in owner_type_vars {
+            if !scheme.type_vars.contains(owner_var) {
+                panic("builtin impl owner: method core lost owner type variable")
+            }
+        }
+        cores.insert(method_name, make_impl_method_scheme_core(
+            scheme.ty, scheme.type_vars, scheme.def_id))
+    }
+    let mut method_names = cores.keys()
+    method_names.sort()
+    add_impl(env.trait_reg, ImplEntry {
+        trait_name: trait_name,
+        target_type_name: target_type_name,
+        type_params: type_params,
+        type_param_vars: owner_type_vars,
+        predicates: predicates,
+        method_names: method_names,
+        assoc_types: map_new(),
+        method_schemes: map_clone(cores),
+        origin: origin,
+        span: span,
+        owner_state: state
+    })
+    let mut core_entries = cores.entries()
+    core_entries.sort_by(compare_by_first)
+    for entry in core_entries {
+        let (method_name, core) = entry
+        let _ = install_method_core(
             env.trait_reg, sink,
-            target_type_name, method_name, scheme,
+            target_type_name, method_name, core,
             MethodOrigin {
                 origin: origin,
                 trait_name: trait_name,
@@ -71,7 +157,7 @@ fn add_builtin_impl(
     mut env: TypeEnv, sink: CollectingSink,
     trait_name: Str, target_type_name: Str,
     type_params: List<Str>, type_var_ids: List<Int>,
-    dict_bounds: List<ImplDictBound>,
+    predicate_specs: List<BuiltinPredicateSpec>,
     method_names: List<Str>
 ) {
     let origin = "<builtin>:${target_type_name}:${trait_name}"
@@ -81,18 +167,9 @@ fn add_builtin_impl(
         type_args.push(Type::TypeVar { id: type_var_id, name: none })
     }
     let self_type = builtin_impl_self_type(target_type_name, type_args)
-    let mut scheme_bounds: List<SchemeBound> = []
-    for dict_bound in dict_bounds {
-        match type_var_ids.get(dict_bound.type_param_index) {
-            some(type_var_id) => scheme_bounds.push(SchemeBound {
-                type_var: type_var_id,
-                trait_name: dict_bound.trait_name,
-                assoc_constraints: []
-            }),
-            none => {}
-        }
-    }
-    let mut exact: Map<Str, TypeScheme> = map_new()
+    let predicates = freeze_builtin_predicates(
+        type_var_ids, predicate_specs)
+    let mut exact: Map<Str, ImplMethodSchemeCore> = map_new()
     match env.trait_reg.traits.get(trait_name) {
         some(trait_def) => {
             for method_name in method_names {
@@ -103,7 +180,7 @@ fn add_builtin_impl(
                         method_name,
                         specialize_trait_method_scheme(
                             trait_def, method, self_type, [],
-                            type_var_ids, map_new(), scheme_bounds)),
+                            type_var_ids, map_new())),
                     none => {}
                 }
             }
@@ -111,19 +188,30 @@ fn add_builtin_impl(
         none => {}
     }
     add_impl(env.trait_reg, ImplEntry {
-        trait_name: trait_name,
+        trait_name: some(trait_name),
         target_type_name: target_type_name,
         type_params: type_params,
-        dict_bounds: dict_bounds,
+        type_param_vars: type_var_ids,
+        predicates: predicates,
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: map_clone(exact),
         origin: origin,
-        span: span
+        span: span,
+        owner_state: ImplOwnerState::FinalOwner
     })
-    install_builtin_method_map(
-        env, sink, target_type_name, origin,
-        some(trait_name), exact)
+    let mut entries = exact.entries()
+    entries.sort_by(compare_by_first)
+    for entry in entries {
+        let (method_name, core) = entry
+        let _ = install_method_core(
+            env.trait_reg, sink, target_type_name, method_name, core,
+            MethodOrigin {
+                origin: origin,
+                trait_name: some(trait_name),
+                span: span
+            })
+    }
 }
 
 // ============================================================
@@ -319,9 +407,9 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
         def_id: none
     })
 
-    install_builtin_method_map(
+    install_builtin_method_owner(
         env, sink, BUILTIN_CELL, "<builtin-inherent>:Cell:core",
-        none, methods)
+        none, [], [], [], ImplOwnerState::FinalOwner, methods)
 }
 
 // ============================================================
@@ -442,9 +530,9 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    install_builtin_method_map(
+    install_builtin_method_owner(
         env, sink, BUILTIN_OPTION, "<builtin-inherent>:Option:core",
-        none, methods)
+        none, [], [], [], ImplOwnerState::FinalOwner, methods)
 }
 
 // ============================================================
@@ -483,7 +571,7 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
 fn register_option_eq(mut env: TypeEnv, sink: CollectingSink) {
     let t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Eq", BUILTIN_OPTION, ["T"], [t_id],
-        [ImplDictBound { type_param_index: 0, trait_name: "Eq" }],
+        [BuiltinPredicateSpec { subject_param_index: 0, trait_name: "Eq" }],
         ["eq", "ne"])
 }
 
@@ -557,7 +645,7 @@ fn register_drop_trait(mut env: TypeEnv) {
 fn register_option_clone(mut env: TypeEnv, sink: CollectingSink) {
     let t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Clone", BUILTIN_OPTION, ["T"], [t_id],
-        [ImplDictBound { type_param_index: 0, trait_name: "Clone" }],
+        [BuiltinPredicateSpec { subject_param_index: 0, trait_name: "Clone" }],
         ["clone"])
 }
 
@@ -617,7 +705,7 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
     let list_t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Debug", BUILTIN_LIST,
         ["T"], [list_t_id],
-        [ImplDictBound { type_param_index: 0, trait_name: "Debug" }],
+        [BuiltinPredicateSpec { subject_param_index: 0, trait_name: "Debug" }],
         ["debug"])
 
     // Map<K, V> Debug impl (no bounds required in TS source)
@@ -639,7 +727,7 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
 fn register_option_debug(mut env: TypeEnv, sink: CollectingSink) {
     let t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Debug", BUILTIN_OPTION, ["T"], [t_id],
-        [ImplDictBound { type_param_index: 0, trait_name: "Debug" }],
+        [BuiltinPredicateSpec { subject_param_index: 0, trait_name: "Debug" }],
         ["debug"])
 }
 
@@ -677,8 +765,8 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     let mut methods: Map<Str, TypeScheme> = map_new()
 
     // map: (List<T>, (T) -> U / e) -> List<U> / e
-    let mut t_id = env.fresh_var_id()
-    let mut t = Type::TypeVar { id: t_id, name: none }
+    let t_id = env.fresh_var_id()
+    let t = Type::TypeVar { id: t_id, name: none }
     let mut u_id = env.fresh_var_id()
     let mut u = Type::TypeVar { id: u_id, name: none }
     let mut orow = open_row(env)
@@ -691,8 +779,6 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     // filter: (List<T>, (T) -> Bool / e) -> List<T> / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     orow = open_row(env)
     cb = Type::FnType { params: [t], return_type: BOOL, effects: orow.eff }
     methods.insert("filter", TypeScheme {
@@ -703,8 +789,6 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     // flat_map: (List<T>, (T) -> List<U> / e) -> List<U> / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     u_id = env.fresh_var_id()
     u = Type::TypeVar { id: u_id, name: none }
     orow = open_row(env)
@@ -717,8 +801,6 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     // fold: (List<T>, U, (U, T) -> U / e) -> U / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     u_id = env.fresh_var_id()
     u = Type::TypeVar { id: u_id, name: none }
     orow = open_row(env)
@@ -731,8 +813,6 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     // any: (List<T>, (T) -> Bool / e) -> Bool / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     orow = open_row(env)
     cb = Type::FnType { params: [t], return_type: BOOL, effects: orow.eff }
     methods.insert("any", TypeScheme {
@@ -743,8 +823,6 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     // all: (List<T>, (T) -> Bool / e) -> Bool / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     orow = open_row(env)
     cb = Type::FnType { params: [t], return_type: BOOL, effects: orow.eff }
     methods.insert("all", TypeScheme {
@@ -755,8 +833,6 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     // find: (List<T>, (T) -> Bool / e) -> Option<T> / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     orow = open_row(env)
     cb = Type::FnType { params: [t], return_type: BOOL, effects: orow.eff }
     methods.insert("find", TypeScheme {
@@ -767,8 +843,6 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     // find_index: (List<T>, (T) -> Bool / e) -> Option<Int> / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     orow = open_row(env)
     cb = Type::FnType { params: [t], return_type: BOOL, effects: orow.eff }
     methods.insert("find_index", TypeScheme {
@@ -779,8 +853,6 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     // sort_by: (List<T>, (T, T) -> Int / e) -> () / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     orow = open_row(env)
     cb = Type::FnType { params: [t, t], return_type: INT, effects: orow.eff }
     methods.insert("sort_by", TypeScheme {
@@ -789,9 +861,10 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    install_builtin_method_map(
+    install_builtin_method_owner(
         env, sink, BUILTIN_LIST, "<std-predecl>:List:unbounded",
-        none, methods)
+        none, ["T"], [t_id], [],
+        ImplOwnerState::ProvisionalPrelude, methods)
 }
 
 // ============================================================
@@ -799,83 +872,100 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
 // ============================================================
 
 fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
-    let mut methods: Map<Str, TypeScheme> = map_new()
+    let mut bounded_methods: Map<Str, TypeScheme> = map_new()
+    let mut unbounded_methods: Map<Str, TypeScheme> = map_new()
+
+    let bounded_k_id = env.fresh_var_id()
+    let bounded_k = Type::TypeVar { id: bounded_k_id, name: none }
+    let bounded_v_id = env.fresh_var_id()
+    let bounded_v = Type::TypeVar { id: bounded_v_id, name: none }
 
     // map_values: (Map<K,V>, (V) -> U / e) -> Map<K,U> / e
-    let mut k_id = env.fresh_var_id()
-    let mut k = Type::TypeVar { id: k_id, name: none }
-    let mut v_id = env.fresh_var_id()
-    let mut v = Type::TypeVar { id: v_id, name: none }
     let mut u_id = env.fresh_var_id()
     let mut u = Type::TypeVar { id: u_id, name: none }
     let mut orow = open_row(env)
-    let mut cb = Type::FnType { params: [v], return_type: u, effects: orow.eff }
-    methods.insert("map_values", TypeScheme {
-        ty: Type::FnType { params: [make_map_type(k, v), cb], return_type: make_map_type(k, u), effects: orow.eff },
-        type_vars: [k_id, v_id, u_id, orow.tail_id],
+    let mut cb = Type::FnType {
+        params: [bounded_v], return_type: u, effects: orow.eff
+    }
+    bounded_methods.insert("map_values", TypeScheme {
+        ty: Type::FnType {
+            params: [make_map_type(bounded_k, bounded_v), cb],
+            return_type: make_map_type(bounded_k, u), effects: orow.eff
+        },
+        type_vars: [bounded_k_id, bounded_v_id, u_id, orow.tail_id],
         bounds: [],
         def_id: none
     })
 
     // filter: (Map<K,V>, (K, V) -> Bool / e) -> Map<K,V> / e
-    k_id = env.fresh_var_id()
-    k = Type::TypeVar { id: k_id, name: none }
-    v_id = env.fresh_var_id()
-    v = Type::TypeVar { id: v_id, name: none }
     orow = open_row(env)
-    cb = Type::FnType { params: [k, v], return_type: BOOL, effects: orow.eff }
-    methods.insert("filter", TypeScheme {
-        ty: Type::FnType { params: [make_map_type(k, v), cb], return_type: make_map_type(k, v), effects: orow.eff },
-        type_vars: [k_id, v_id, orow.tail_id],
+    cb = Type::FnType {
+        params: [bounded_k, bounded_v], return_type: BOOL, effects: orow.eff
+    }
+    bounded_methods.insert("filter", TypeScheme {
+        ty: Type::FnType {
+            params: [make_map_type(bounded_k, bounded_v), cb],
+            return_type: make_map_type(bounded_k, bounded_v),
+            effects: orow.eff
+        },
+        type_vars: [bounded_k_id, bounded_v_id, orow.tail_id],
         bounds: [],
         def_id: none
     })
 
+    let unbounded_k_id = env.fresh_var_id()
+    let unbounded_k = Type::TypeVar { id: unbounded_k_id, name: none }
+    let unbounded_v_id = env.fresh_var_id()
+    let unbounded_v = Type::TypeVar { id: unbounded_v_id, name: none }
+
     // fold: (Map<K,V>, U, (U, K, V) -> U / e) -> U / e
-    k_id = env.fresh_var_id()
-    k = Type::TypeVar { id: k_id, name: none }
-    v_id = env.fresh_var_id()
-    v = Type::TypeVar { id: v_id, name: none }
     u_id = env.fresh_var_id()
     u = Type::TypeVar { id: u_id, name: none }
     orow = open_row(env)
-    cb = Type::FnType { params: [u, k, v], return_type: u, effects: orow.eff }
-    methods.insert("fold", TypeScheme {
-        ty: Type::FnType { params: [make_map_type(k, v), u, cb], return_type: u, effects: orow.eff },
-        type_vars: [k_id, v_id, u_id, orow.tail_id],
+    cb = Type::FnType {
+        params: [u, unbounded_k, unbounded_v],
+        return_type: u, effects: orow.eff
+    }
+    unbounded_methods.insert("fold", TypeScheme {
+        ty: Type::FnType {
+            params: [make_map_type(unbounded_k, unbounded_v), u, cb],
+            return_type: u, effects: orow.eff
+        },
+        type_vars: [unbounded_k_id, unbounded_v_id, u_id, orow.tail_id],
         bounds: [],
         def_id: none
     })
 
     // any: (Map<K,V>, (K, V) -> Bool / e) -> Bool / e
-    k_id = env.fresh_var_id()
-    k = Type::TypeVar { id: k_id, name: none }
-    v_id = env.fresh_var_id()
-    v = Type::TypeVar { id: v_id, name: none }
     orow = open_row(env)
-    cb = Type::FnType { params: [k, v], return_type: BOOL, effects: orow.eff }
-    methods.insert("any", TypeScheme {
-        ty: Type::FnType { params: [make_map_type(k, v), cb], return_type: BOOL, effects: orow.eff },
-        type_vars: [k_id, v_id, orow.tail_id],
+    cb = Type::FnType {
+        params: [unbounded_k, unbounded_v],
+        return_type: BOOL, effects: orow.eff
+    }
+    unbounded_methods.insert("any", TypeScheme {
+        ty: Type::FnType {
+            params: [make_map_type(unbounded_k, unbounded_v), cb],
+            return_type: BOOL, effects: orow.eff
+        },
+        type_vars: [unbounded_k_id, unbounded_v_id, orow.tail_id],
         bounds: [],
         def_id: none
     })
-    let mut unbounded_methods: Map<Str, TypeScheme> = map_new()
-    let mut bounded_methods: Map<Str, TypeScheme> = map_new()
-    for entry in methods.entries() {
-        let (method_name, scheme) = entry
-        if method_name == "filter" || method_name == "map_values" {
-            bounded_methods.insert(method_name, scheme)
-        } else {
-            unbounded_methods.insert(method_name, scheme)
-        }
-    }
-    install_builtin_method_map(
+
+    install_builtin_method_owner(
         env, sink, BUILTIN_MAP, "<std-predecl>:Map:unbounded",
-        none, unbounded_methods)
-    install_builtin_method_map(
+        none, ["K", "V"], [unbounded_k_id, unbounded_v_id], [],
+        ImplOwnerState::ProvisionalPrelude, unbounded_methods)
+    install_builtin_method_owner(
         env, sink, BUILTIN_MAP, "<std-predecl>:Map:bounded",
-        none, bounded_methods)
+        none, ["K", "V"], [bounded_k_id, bounded_v_id], [
+            BuiltinPredicateSpec {
+                subject_param_index: 0, trait_name: "Hash"
+            },
+            BuiltinPredicateSpec {
+                subject_param_index: 0, trait_name: "Eq"
+            }
+        ], ImplOwnerState::ProvisionalPrelude, bounded_methods)
 }
 
 // ============================================================
@@ -883,76 +973,99 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
 // ============================================================
 
 fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
-    let mut methods: Map<Str, TypeScheme> = map_new()
+    let mut bounded_methods: Map<Str, TypeScheme> = map_new()
+    let mut unbounded_methods: Map<Str, TypeScheme> = map_new()
 
     // filter: (Set<T>, (T) -> Bool / e) -> Set<T> / e
-    let mut t_id = env.fresh_var_id()
-    let mut t = Type::TypeVar { id: t_id, name: none }
+    let bounded_t_id = env.fresh_var_id()
+    let bounded_t = Type::TypeVar { id: bounded_t_id, name: none }
     let mut orow = open_row(env)
-    let mut cb = Type::FnType { params: [t], return_type: BOOL, effects: orow.eff }
-    methods.insert("filter", TypeScheme {
-        ty: Type::FnType { params: [make_set_struct(t), cb], return_type: make_set_struct(t), effects: orow.eff },
-        type_vars: [t_id, orow.tail_id],
+    let mut cb = Type::FnType {
+        params: [bounded_t], return_type: BOOL, effects: orow.eff
+    }
+    bounded_methods.insert("filter", TypeScheme {
+        ty: Type::FnType {
+            params: [make_set_struct(bounded_t), cb],
+            return_type: make_set_struct(bounded_t), effects: orow.eff
+        },
+        type_vars: [bounded_t_id, orow.tail_id],
         bounds: [
-            SchemeBound { type_var: t_id, trait_name: "Hash", assoc_constraints: [] },
-            SchemeBound { type_var: t_id, trait_name: "Eq", assoc_constraints: [] }
+            SchemeBound {
+                type_var: bounded_t_id,
+                trait_name: "Hash", assoc_constraints: []
+            },
+            SchemeBound {
+                type_var: bounded_t_id,
+                trait_name: "Eq", assoc_constraints: []
+            }
         ],
         def_id: none
     })
 
+    let unbounded_t_id = env.fresh_var_id()
+    let unbounded_t = Type::TypeVar { id: unbounded_t_id, name: none }
+
     // fold: (Set<T>, U, (U, T) -> U / e) -> U / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     let u_id = env.fresh_var_id()
     let u = Type::TypeVar { id: u_id, name: none }
     orow = open_row(env)
-    cb = Type::FnType { params: [u, t], return_type: u, effects: orow.eff }
-    methods.insert("fold", TypeScheme {
-        ty: Type::FnType { params: [make_set_struct(t), u, cb], return_type: u, effects: orow.eff },
-        type_vars: [t_id, u_id, orow.tail_id],
+    cb = Type::FnType {
+        params: [u, unbounded_t], return_type: u, effects: orow.eff
+    }
+    unbounded_methods.insert("fold", TypeScheme {
+        ty: Type::FnType {
+            params: [make_set_struct(unbounded_t), u, cb],
+            return_type: u, effects: orow.eff
+        },
+        type_vars: [unbounded_t_id, u_id, orow.tail_id],
         bounds: [],
         def_id: none
     })
 
     // any: (Set<T>, (T) -> Bool / e) -> Bool / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     orow = open_row(env)
-    cb = Type::FnType { params: [t], return_type: BOOL, effects: orow.eff }
-    methods.insert("any", TypeScheme {
-        ty: Type::FnType { params: [make_set_struct(t), cb], return_type: BOOL, effects: orow.eff },
-        type_vars: [t_id, orow.tail_id],
+    cb = Type::FnType {
+        params: [unbounded_t], return_type: BOOL, effects: orow.eff
+    }
+    unbounded_methods.insert("any", TypeScheme {
+        ty: Type::FnType {
+            params: [make_set_struct(unbounded_t), cb],
+            return_type: BOOL, effects: orow.eff
+        },
+        type_vars: [unbounded_t_id, orow.tail_id],
         bounds: [],
         def_id: none
     })
 
     // all: (Set<T>, (T) -> Bool / e) -> Bool / e
-    t_id = env.fresh_var_id()
-    t = Type::TypeVar { id: t_id, name: none }
     orow = open_row(env)
-    cb = Type::FnType { params: [t], return_type: BOOL, effects: orow.eff }
-    methods.insert("all", TypeScheme {
-        ty: Type::FnType { params: [make_set_struct(t), cb], return_type: BOOL, effects: orow.eff },
-        type_vars: [t_id, orow.tail_id],
+    cb = Type::FnType {
+        params: [unbounded_t], return_type: BOOL, effects: orow.eff
+    }
+    unbounded_methods.insert("all", TypeScheme {
+        ty: Type::FnType {
+            params: [make_set_struct(unbounded_t), cb],
+            return_type: BOOL, effects: orow.eff
+        },
+        type_vars: [unbounded_t_id, orow.tail_id],
         bounds: [],
         def_id: none
     })
-    let mut unbounded_methods: Map<Str, TypeScheme> = map_new()
-    let mut bounded_methods: Map<Str, TypeScheme> = map_new()
-    for entry in methods.entries() {
-        let (method_name, scheme) = entry
-        if method_name == "filter" {
-            bounded_methods.insert(method_name, scheme)
-        } else {
-            unbounded_methods.insert(method_name, scheme)
-        }
-    }
-    install_builtin_method_map(
+
+    install_builtin_method_owner(
         env, sink, BUILTIN_SET, "<std-predecl>:Set:unbounded",
-        none, unbounded_methods)
-    install_builtin_method_map(
+        none, ["T"], [unbounded_t_id], [],
+        ImplOwnerState::ProvisionalPrelude, unbounded_methods)
+    install_builtin_method_owner(
         env, sink, BUILTIN_SET, "<std-predecl>:Set:bounded",
-        none, bounded_methods)
+        none, ["T"], [bounded_t_id], [
+            BuiltinPredicateSpec {
+                subject_param_index: 0, trait_name: "Hash"
+            },
+            BuiltinPredicateSpec {
+                subject_param_index: 0, trait_name: "Eq"
+            }
+        ], ImplOwnerState::ProvisionalPrelude, bounded_methods)
 }
 
 // ============================================================
@@ -1001,9 +1114,9 @@ fn register_option_hof(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    install_builtin_method_map(
+    install_builtin_method_owner(
         env, sink, BUILTIN_OPTION, "<builtin-inherent>:Option:hof",
-        none, methods)
+        none, [], [], [], ImplOwnerState::FinalOwner, methods)
 }
 
 // ============================================================
@@ -1131,7 +1244,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
-    install_builtin_method_map(
+    install_builtin_method_owner(
         env, sink, "Ptr", "<builtin-inherent>:Ptr:core",
-        none, methods)
+        none, [], [], [], ImplOwnerState::FinalOwner, methods)
 }

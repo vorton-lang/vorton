@@ -1,5 +1,5 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant, RecordField, INT,
-    effects_match_kind, nominal_display_name}
+    effects_match_kind, nominal_display_name, types_equal}
 use union_find::{UnionFind, uf_find, uf_lookup}
 use ast::{Span, EffectExpr, TypeParam, DeriveAttribute}
 use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
@@ -123,36 +123,334 @@ pub struct TraitDef {
     pub assoc_types: List<AssocTypeDef>
 }
 
-// Ordered impl predicates that require runtime dictionary evidence.
-// This is not a complete impl predicate: current impl registration does not
-// carry TypeBound type_args or assoc_constraints here.
-pub struct ImplDictBound {
-    pub type_param_index: Int,
-    pub trait_name: Str
+// One fully typed associated constraint on an impl-owner predicate.  The
+// representation is private so callers cannot splice a constraint into a
+// frozen owner after registration.
+pub struct ImplAssocPredicate {
+    name: Str,
+    ty: Type
 }
 
-// One runtime dictionary predicate instantiated against a nominal use site's
-// actual type arguments.  Both ordinary inference and synthetic derive code
-// consume this mapping so bound order/index/trait cannot drift between them.
-pub struct ImplDictRequirement {
-    pub type_arg: Type,
-    pub trait_name: Str
+pub fn make_impl_assoc_predicate(name: Str, ty: Type) -> ImplAssocPredicate {
+    if name == "" {
+        panic("impl predicate: associated type name is empty")
+    }
+    ImplAssocPredicate { name: name, ty: ty }
+}
+
+pub fn impl_assoc_predicate_name(value: ImplAssocPredicate) -> Str {
+    value.name
+}
+
+pub fn impl_assoc_predicate_type(value: ImplAssocPredicate) -> Type {
+    value.ty
+}
+
+enum ImplPredicateProvenanceValue {
+    DirectPredicate,
+    ExpandedPredicate(List<Str>)
+}
+
+pub struct ImplPredicateProvenance {
+    value: ImplPredicateProvenanceValue
+}
+
+pub fn direct_impl_predicate_provenance() -> ImplPredicateProvenance {
+    ImplPredicateProvenance {
+        value: ImplPredicateProvenanceValue::DirectPredicate
+    }
+}
+
+pub fn expanded_impl_predicate_provenance(
+    path: List<Str>
+) -> ImplPredicateProvenance {
+    if path.len() < 2 {
+        panic("impl predicate: expanded path is incomplete")
+    }
+    let mut copied: List<Str> = []
+    for component in path {
+        if component == "" {
+            panic("impl predicate: expanded path has empty component")
+        }
+        copied.push(component)
+    }
+    ImplPredicateProvenance {
+        value: ImplPredicateProvenanceValue::ExpandedPredicate(copied)
+    }
+}
+
+pub fn impl_predicate_provenance_is_direct(
+    value: ImplPredicateProvenance
+) -> Bool {
+    match value.value {
+        ImplPredicateProvenanceValue::DirectPredicate => true,
+        ImplPredicateProvenanceValue::ExpandedPredicate(_) => false
+    }
+}
+
+pub fn impl_predicate_provenance_path(
+    value: ImplPredicateProvenance
+) -> List<Str> {
+    match value.value {
+        ImplPredicateProvenanceValue::DirectPredicate => [],
+        ImplPredicateProvenanceValue::ExpandedPredicate(path) => {
+            let mut copied: List<Str> = []
+            for component in path { copied.push(component) }
+            copied
+        }
+    }
+}
+
+pub struct TypedImplPredicate {
+    subject_param_index: Int,
+    subject_type_var: Int,
+    canonical_trait_name: Str,
+    assoc_constraints: List<ImplAssocPredicate>,
+    provenance: ImplPredicateProvenance
+}
+
+pub fn make_typed_impl_predicate(
+    subject_param_index: Int, subject_type_var: Int,
+    canonical_trait_name: Str,
+    assoc_constraints: List<ImplAssocPredicate>,
+    provenance: ImplPredicateProvenance
+) -> TypedImplPredicate {
+    if subject_param_index < 0 || subject_type_var < 0 ||
+       canonical_trait_name == "" {
+        panic("impl predicate: incomplete typed predicate")
+    }
+    let mut copied: List<ImplAssocPredicate> = []
+    let mut seen: Set<Str> = set_new()
+    for constraint in assoc_constraints {
+        let name = impl_assoc_predicate_name(constraint)
+        if seen.contains(name) {
+            panic("impl predicate: duplicate associated constraint")
+        }
+        seen.insert(name)
+        copied.push(constraint)
+    }
+    if !impl_predicate_provenance_is_direct(provenance) && copied.len() > 0 {
+        panic("impl predicate: expanded predicate has associated constraints")
+    }
+    TypedImplPredicate {
+        subject_param_index: subject_param_index,
+        subject_type_var: subject_type_var,
+        canonical_trait_name: canonical_trait_name,
+        assoc_constraints: copied,
+        provenance: provenance
+    }
+}
+
+pub fn impl_predicate_subject_param_index(value: TypedImplPredicate) -> Int {
+    value.subject_param_index
+}
+
+pub fn impl_predicate_subject_type_var(value: TypedImplPredicate) -> Int {
+    value.subject_type_var
+}
+
+pub fn impl_predicate_trait_name(value: TypedImplPredicate) -> Str {
+    value.canonical_trait_name
+}
+
+pub fn impl_predicate_assoc_constraints(
+    value: TypedImplPredicate
+) -> List<ImplAssocPredicate> {
+    let mut copied: List<ImplAssocPredicate> = []
+    for constraint in value.assoc_constraints { copied.push(constraint) }
+    copied
+}
+
+pub fn impl_predicate_provenance(
+    value: TypedImplPredicate
+) -> ImplPredicateProvenance {
+    value.provenance
+}
+
+fn impl_predicate_same(
+    left: TypedImplPredicate, right: TypedImplPredicate
+) -> Bool {
+    if left.subject_param_index != right.subject_param_index ||
+       left.subject_type_var != right.subject_type_var ||
+       left.canonical_trait_name != right.canonical_trait_name ||
+       left.assoc_constraints.len() != right.assoc_constraints.len() ||
+       impl_predicate_provenance_is_direct(left.provenance) !=
+           impl_predicate_provenance_is_direct(right.provenance) {
+        return false
+    }
+    let left_path = impl_predicate_provenance_path(left.provenance)
+    let right_path = impl_predicate_provenance_path(right.provenance)
+    if left_path.len() != right_path.len() { return false }
+    for index in 0..left_path.len() {
+        if left_path.get(index).unwrap_or("") !=
+           right_path.get(index).unwrap_or("") { return false }
+    }
+    for index in 0..left.assoc_constraints.len() {
+        match (left.assoc_constraints.get(index),
+               right.assoc_constraints.get(index)) {
+            (some(a), some(b)) => {
+                if a.name != b.name || !types_equal(a.ty, b.ty) {
+                    return false
+                }
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+pub struct FrozenImplPredicateSet {
+    predicates: List<TypedImplPredicate>
+}
+
+pub fn freeze_impl_predicate_set(
+    owner_type_vars: List<Int>, predicates: List<TypedImplPredicate>
+) -> FrozenImplPredicateSet {
+    let mut copied: List<TypedImplPredicate> = []
+    let mut seen: Set<Str> = set_new()
+    for predicate in predicates {
+        let index = predicate.subject_param_index
+        if index < 0 || index >= owner_type_vars.len() ||
+           owner_type_vars.get(index).unwrap_or(-1) !=
+               predicate.subject_type_var {
+            panic("impl predicate: subject does not match owner type variables")
+        }
+        let key = "${index.to_str()}|${predicate.canonical_trait_name}"
+        if seen.contains(key) {
+            panic("impl predicate: duplicate owner predicate")
+        }
+        seen.insert(key)
+        if !impl_predicate_provenance_is_direct(predicate.provenance) {
+            let path = impl_predicate_provenance_path(predicate.provenance)
+            if path.get(path.len() - 1).unwrap_or("") !=
+               predicate.canonical_trait_name {
+                panic("impl predicate: expanded path has wrong target")
+            }
+            let direct_name = path.get(0).unwrap_or("")
+            let direct_exists = predicates.any(fn(candidate) {
+                candidate.subject_param_index == index &&
+                    candidate.canonical_trait_name == direct_name &&
+                    impl_predicate_provenance_is_direct(candidate.provenance)
+            })
+            if !direct_exists {
+                panic("impl predicate: expanded path has no direct root")
+            }
+        }
+        copied.push(predicate)
+    }
+    FrozenImplPredicateSet { predicates: copied }
+}
+
+pub fn empty_frozen_impl_predicate_set() -> FrozenImplPredicateSet {
+    freeze_impl_predicate_set([], [])
+}
+
+pub fn frozen_impl_predicates(
+    value: FrozenImplPredicateSet
+) -> List<TypedImplPredicate> {
+    let mut copied: List<TypedImplPredicate> = []
+    for predicate in value.predicates { copied.push(predicate) }
+    copied
+}
+
+pub fn frozen_impl_predicate_set_same(
+    left: FrozenImplPredicateSet, right: FrozenImplPredicateSet
+) -> Bool {
+    if left.predicates.len() != right.predicates.len() { return false }
+    for index in 0..left.predicates.len() {
+        match (left.predicates.get(index), right.predicates.get(index)) {
+            (some(a), some(b)) => if !impl_predicate_same(a, b) {
+                return false
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+// Method schemes intentionally cannot carry impl-owner predicates.  Every
+// consumer resolves those predicates through the owning ImplEntry.
+pub struct ImplMethodSchemeCore {
+    ty: Type,
+    type_vars: List<Int>,
+    def_id: Int?
+}
+
+pub fn make_impl_method_scheme_core(
+    ty: Type, type_vars: List<Int>, def_id: Int?
+) -> ImplMethodSchemeCore {
+    ImplMethodSchemeCore {
+        ty: ty, type_vars: list_clone(type_vars), def_id: def_id
+    }
+}
+
+pub fn impl_method_core_from_scheme(scheme: TypeScheme) -> ImplMethodSchemeCore {
+    if scheme.bounds.len() != 0 {
+        panic("impl method core: method-owned bounds are unsupported")
+    }
+    make_impl_method_scheme_core(scheme.ty, scheme.type_vars, scheme.def_id)
+}
+
+pub fn impl_method_core_type(value: ImplMethodSchemeCore) -> Type {
+    value.ty
+}
+
+pub fn impl_method_core_type_vars(value: ImplMethodSchemeCore) -> List<Int> {
+    list_clone(value.type_vars)
+}
+
+pub fn impl_method_core_def_id(value: ImplMethodSchemeCore) -> Int? {
+    value.def_id
+}
+
+pub fn impl_method_core_as_scheme(value: ImplMethodSchemeCore) -> TypeScheme {
+    TypeScheme {
+        ty: value.ty, type_vars: list_clone(value.type_vars),
+        bounds: [], def_id: value.def_id
+    }
+}
+
+fn impl_method_core_same(
+    left: ImplMethodSchemeCore, right: ImplMethodSchemeCore
+) -> Bool {
+    if !types_equal(left.ty, right.ty) || left.type_vars.len() != right.type_vars.len() ||
+       left.def_id != right.def_id { return false }
+    for index in 0..left.type_vars.len() {
+        if left.type_vars.get(index).unwrap_or(-1) !=
+           right.type_vars.get(index).unwrap_or(-1) { return false }
+    }
+    true
+}
+
+pub enum ImplOwnerState {
+    ProvisionalPrelude,
+    FinalOwner
+}
+
+// One runtime dictionary predicate instantiated from the unique frozen impl
+// owner.  This is a one-way consumer value, never a stored predicate authority.
+pub struct ImplRuntimeRequirement {
+    pub subject_type: Type,
+    pub canonical_trait_name: Str,
+    pub assoc_constraints: List<ImplAssocPredicate>
 }
 
 pub struct ImplEntry {
-    pub trait_name: Str,
+    pub trait_name: Str?,
     pub target_type_name: Str,
     pub type_params: List<Str>,
-    pub dict_bounds: List<ImplDictBound>,
+    pub type_param_vars: List<Int>,
+    pub predicates: FrozenImplPredicateSet,
     pub method_names: List<Str>,
     pub assoc_types: Map<Str, Type>,
-    // Trait-specific method evidence.  This is authoritative for protocol
-    // lowering; impl_methods remains only the unambiguous ordinary-call view.
-    pub method_schemes: Map<Str, TypeScheme>,
+    // Trait/inherent method cores live only on their owning entry. The flat
+    // ordinary-call view is a MethodOrigin index, never a second scheme map.
+    pub method_schemes: Map<Str, ImplMethodSchemeCore>,
     // Stable across export/re-export hydration.  Distinct source impl blocks
     // must never be collapsed merely because target/trait spellings match.
     pub origin: Str,
-    pub span: Span
+    pub span: Span,
+    pub owner_state: ImplOwnerState
 }
 
 pub struct MethodOrigin {
@@ -216,7 +514,6 @@ pub struct TypeRegistry {
 pub struct TraitRegistry {
     pub traits: Map<Str, TraitDef>,
     pub trait_impls: Map<Str, List<ImplEntry>>,
-    pub impl_methods: Map<Str, Map<Str, TypeScheme>>,
     pub method_origins: Map<Str, Map<Str, MethodOrigin>>,
     pub mut_methods: Map<Str, Set<Str>>
 }
@@ -271,7 +568,6 @@ pub fn new_type_env() -> TypeEnv {
         trait_reg: TraitRegistry {
             traits: map_new(),
             trait_impls: map_new(),
-            impl_methods: map_new(),
             method_origins: map_new(),
             mut_methods: map_new()
         },
@@ -401,6 +697,30 @@ impl TypeEnv {
         }
         apply_subst_map(mapping, scheme.ty)
     }
+
+    pub fn instantiate_impl_method_core(
+        mut self, owner: ImplEntry, core: ImplMethodSchemeCore
+    ) -> Type {
+        let mut mapping: Map<Int, Type> = map_new()
+        for type_var in impl_method_core_type_vars(core) {
+            mapping.insert(type_var, self.fresh_var())
+        }
+        for predicate in frozen_impl_predicates(owner.predicates) {
+            match mapping.get(impl_predicate_subject_type_var(predicate)) {
+                some(Type::TypeVar { id, .. }) => {
+                    let mut existing = match self.scope.var_bounds.get(id) {
+                        some(bounds) => bounds,
+                        none => set_new()
+                    }
+                    existing.insert(impl_predicate_trait_name(predicate))
+                    self.scope.var_bounds.insert(id, existing)
+                },
+                _ => panic(
+                    "impl method instantiation: predicate subject is not quantified")
+            }
+        }
+        apply_subst_map(mapping, impl_method_core_type(core))
+    }
 }
 
 // ============================================================
@@ -468,21 +788,216 @@ fn method_owner_display(trait_name: Str?) -> Str {
     }
 }
 
-// The sole writer for the ordinary method lookup table and its provenance.
-// Re-export hydration may replay the same origin, but no distinct source may
-// replace an existing same-target/same-name identity.
-pub fn install_method_scheme(
+fn optional_string_same(left: Str?, right: Str?) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => a == b,
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn int_list_same(left: List<Int>, right: List<Int>) -> Bool {
+    if left.len() != right.len() { return false }
+    for index in 0..left.len() {
+        if left.get(index).unwrap_or(-1) != right.get(index).unwrap_or(-1) {
+            return false
+        }
+    }
+    true
+}
+
+fn string_list_same(left: List<Str>, right: List<Str>) -> Bool {
+    if left.len() != right.len() { return false }
+    for index in 0..left.len() {
+        if left.get(index).unwrap_or("") != right.get(index).unwrap_or("") {
+            return false
+        }
+    }
+    true
+}
+
+fn assoc_type_map_same(left: Map<Str, Type>, right: Map<Str, Type>) -> Bool {
+    if left.len() != right.len() { return false }
+    for entry in left.entries() {
+        let (name, ty) = entry
+        match right.get(name) {
+            some(other) => if !types_equal(ty, other) { return false },
+            none => return false
+        }
+    }
+    true
+}
+
+fn method_core_map_same(
+    left: Map<Str, ImplMethodSchemeCore>,
+    right: Map<Str, ImplMethodSchemeCore>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    for entry in left.entries() {
+        let (name, core) = entry
+        match right.get(name) {
+            some(other) => if !impl_method_core_same(core, other) {
+                return false
+            },
+            none => return false
+        }
+    }
+    true
+}
+
+fn impl_entry_owner_shape_same(left: ImplEntry, right: ImplEntry) -> Bool {
+    left.target_type_name == right.target_type_name &&
+        optional_string_same(left.trait_name, right.trait_name) &&
+        string_list_same(left.type_params, right.type_params) &&
+        int_list_same(left.type_param_vars, right.type_param_vars) &&
+        frozen_impl_predicate_set_same(left.predicates, right.predicates) &&
+        assoc_type_map_same(left.assoc_types, right.assoc_types)
+}
+
+fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
+    impl_entry_owner_shape_same(left, right) &&
+        string_list_same(left.method_names, right.method_names) &&
+        method_core_map_same(left.method_schemes, right.method_schemes)
+}
+
+fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
+    if entry.target_type_name == "" || entry.origin == "" ||
+       entry.type_params.len() != entry.type_param_vars.len() {
+        panic("impl owner: incomplete owner entry")
+    }
+    let mut type_param_names: Set<Str> = set_new()
+    for name in entry.type_params {
+        if name == "" || type_param_names.contains(name) {
+            panic("impl owner: invalid type-parameter inventory")
+        }
+        type_param_names.insert(name)
+    }
+    match entry.trait_name {
+        some(name) => if !reg.traits.contains_key(name) {
+            panic("impl owner: declared trait is not registered")
+        },
+        none => {}
+    }
+    for predicate in frozen_impl_predicates(entry.predicates) {
+        let trait_name = impl_predicate_trait_name(predicate)
+        let trait_def = match reg.traits.get(trait_name) {
+            some(def) => def,
+            none => panic("impl owner: predicate trait is not registered")
+        }
+        for constraint in impl_predicate_assoc_constraints(predicate) {
+            let declared = trait_def.assoc_types.any(fn(assoc) {
+                assoc.name == impl_assoc_predicate_name(constraint)
+            })
+            if !declared {
+                panic("impl owner: predicate associated type is not declared")
+            }
+        }
+        let path = impl_predicate_provenance_path(
+            impl_predicate_provenance(predicate))
+        if path.len() > 0 {
+            for index in 0..path.len() - 1 {
+                let child = path.get(index).unwrap_or("")
+                let parent = path.get(index + 1).unwrap_or("")
+                match reg.traits.get(child) {
+                    some(def) => if !def.supertraits.contains(parent) {
+                        panic("impl owner: expanded predicate path is not a supertrait edge")
+                    },
+                    none => panic("impl owner: expanded predicate path has unknown trait")
+                }
+            }
+        }
+    }
+    for method_name in entry.method_names {
+        if !entry.method_schemes.contains_key(method_name) {
+            panic("impl owner: explicit method inventory lost its core")
+        }
+    }
+    for map_entry in entry.method_schemes.entries() {
+        let (_, core) = map_entry
+        let core_vars = impl_method_core_type_vars(core)
+        for predicate in frozen_impl_predicates(entry.predicates) {
+            if !core_vars.contains(
+                impl_predicate_subject_type_var(predicate)) {
+                panic("impl owner: method core does not quantify predicate subject")
+            }
+        }
+    }
+    match entry.owner_state {
+        ImplOwnerState::ProvisionalPrelude => if !entry.origin.starts_with(
+            "<std-predecl>:") {
+            panic("impl owner: only std predecls may remain provisional")
+        },
+        ImplOwnerState::FinalOwner => {}
+    }
+}
+
+pub fn impl_owner_is_provisional(entry: ImplEntry) -> Bool {
+    match entry.owner_state {
+        ImplOwnerState::ProvisionalPrelude => true,
+        ImplOwnerState::FinalOwner => false
+    }
+}
+
+pub fn finalize_provisional_impl_owner(
+    mut reg: TraitRegistry, entry: ImplEntry
+) {
+    validate_impl_entry(reg, entry)
+    if impl_owner_is_provisional(entry) {
+        panic("impl owner: finalization received provisional entry")
+    }
+    let mut impls = match reg.trait_impls.get(entry.target_type_name) {
+        some(values) => values,
+        none => panic("impl owner: provisional owner is missing")
+    }
+    let mut found = 0
+    for index in 0..impls.len() {
+        match impls.get(index) {
+            some(existing) => if existing.origin == entry.origin {
+                found = found + 1
+                if !impl_owner_is_provisional(existing) ||
+                   !impl_entry_owner_shape_same(existing, entry) {
+                    panic("impl owner: provisional/source structural mismatch")
+                }
+                impls.set(index, entry)
+            },
+            none => {}
+        }
+    }
+    if found != 1 {
+        panic("impl owner: provisional finalization is not unique")
+    }
+}
+
+pub fn assert_no_provisional_impl_owners(reg: TraitRegistry) {
+    for map_entry in reg.trait_impls.entries() {
+        let (_, owners) = map_entry
+        for owner in owners {
+            if impl_owner_is_provisional(owner) {
+                panic("impl owner: provisional prelude owner was not finalized")
+            }
+        }
+    }
+}
+
+// The sole writer for the ordinary method index. Method shape and predicates
+// live only on the referenced owner entry.
+pub fn install_method_core(
     mut reg: TraitRegistry, mut sink: CollectingSink,
     target_type: Str, method_name: Str,
-    scheme: TypeScheme, incoming: MethodOrigin
+    core: ImplMethodSchemeCore, incoming: MethodOrigin
 ) -> Bool {
-    let mut methods = match reg.impl_methods.get(target_type) {
-        some(existing) => existing,
-        none => {
-            let created: Map<Str, TypeScheme> = map_new()
-            reg.impl_methods.insert(target_type, created)
-            created
-        }
+    let owner = match find_impl_by_origin(reg, target_type, incoming.origin) {
+        some(found) => found,
+        none => panic("impl method index: owner entry is missing")
+    }
+    if !optional_string_same(owner.trait_name, incoming.trait_name) {
+        panic("impl method index: owner trait mismatch")
+    }
+    match owner.method_schemes.get(method_name) {
+        some(stored) => if !impl_method_core_same(stored, core) {
+            panic("impl method index: core differs from owner")
+        },
+        none => panic("impl method index: owner has no method core")
     }
     let mut origins = match reg.method_origins.get(target_type) {
         some(existing) => existing,
@@ -496,7 +1011,6 @@ pub fn install_method_scheme(
     match origins.get(method_name) {
         some(existing) => {
             if existing.origin == incoming.origin {
-                methods.insert(method_name, scheme)
                 origins.insert(method_name, incoming)
                 true
             } else {
@@ -513,34 +1027,30 @@ pub fn install_method_scheme(
             }
         },
         none => {
-            if methods.contains_key(method_name) {
-                // A scheme without provenance cannot be proven identical to
-                // the incoming method. Preserve the prior recovery view.
-                sink.report(make_diag(
-                    E0504, Severity::SevError,
-                    "Ambiguous method '${method_name}' on '${nominal_display_name(target_type)}': existing method identity has no stable origin",
-                    incoming.span,
-                    DiagnosticContext::TraitError {
-                        detail: "method scheme is missing origin provenance"
-                    }))
-                false
-            } else {
-                methods.insert(method_name, scheme)
-                origins.insert(method_name, incoming)
-                true
-            }
+            origins.insert(method_name, incoming)
+            true
         }
     }
 }
 
 pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {
+    validate_impl_entry(reg, entry)
     match reg.trait_impls.get(entry.target_type_name) {
         some(impls) => {
-            // The same exported impl may arrive through both its defining
-            // module and one or more facades.  Preserve one exact entry while
-            // retaining genuinely distinct, already-diagnosed collisions for
-            // checker recovery.
-            if !impls.any(fn(i) { i.origin == entry.origin }) {
+            let mut matched = false
+            for existing in impls {
+                if existing.origin == entry.origin {
+                    matched = true
+                    if impl_owner_is_provisional(existing) ||
+                       impl_owner_is_provisional(entry) {
+                        panic("impl owner: provisional replay requires explicit finalization")
+                    }
+                    if !impl_entry_final_same(existing, entry) {
+                        panic("impl owner: same-origin replay changed frozen entry")
+                    }
+                }
+            }
+            if !matched {
                 impls.push(entry)
             }
         },
@@ -554,27 +1064,52 @@ pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {
 
 pub fn has_impl(reg: TraitRegistry, type_name: Str, trait_name: Str) -> Bool {
     match reg.trait_impls.get(type_name) {
-        some(impls) => impls.any(fn(i) { i.trait_name == trait_name }),
+        some(impls) => impls.any(fn(i) {
+            match i.trait_name {
+                some(name) => name == trait_name,
+                none => false
+            }
+        }),
         none => false
     }
 }
 
 pub fn find_impl(reg: TraitRegistry, type_name: Str, trait_name: Str) -> ImplEntry? {
     match reg.trait_impls.get(type_name) {
-        some(impls) => impls.find(fn(i) { i.trait_name == trait_name }),
+        some(impls) => impls.find(fn(i) {
+            match i.trait_name {
+                some(name) => name == trait_name,
+                none => false
+            }
+        }),
         none => none
     }
 }
 
-pub fn instantiate_impl_dict_requirements(
+pub fn instantiate_impl_runtime_requirements(
     entry: ImplEntry, type_args: List<Type>
-) -> List<ImplDictRequirement>? {
-    let mut requirements: List<ImplDictRequirement> = []
-    for bound in entry.dict_bounds {
-        match type_args.get(bound.type_param_index) {
-            some(type_arg) => requirements.push(ImplDictRequirement {
-                type_arg: type_arg,
-                trait_name: bound.trait_name
+) -> List<ImplRuntimeRequirement>? {
+    if entry.type_param_vars.len() != type_args.len() { return none }
+    let mut mapping: Map<Int, Type> = map_new()
+    for index in 0..entry.type_param_vars.len() {
+        match (entry.type_param_vars.get(index), type_args.get(index)) {
+            (some(source), some(target)) => mapping.insert(source, target),
+            _ => return none
+        }
+    }
+    let mut requirements: List<ImplRuntimeRequirement> = []
+    for predicate in frozen_impl_predicates(entry.predicates) {
+        let mut constraints: List<ImplAssocPredicate> = []
+        for constraint in impl_predicate_assoc_constraints(predicate) {
+            constraints.push(make_impl_assoc_predicate(
+                impl_assoc_predicate_name(constraint),
+                apply_subst_map(mapping, impl_assoc_predicate_type(constraint))))
+        }
+        match type_args.get(impl_predicate_subject_param_index(predicate)) {
+            some(subject) => requirements.push(ImplRuntimeRequirement {
+                subject_type: subject,
+                canonical_trait_name: impl_predicate_trait_name(predicate),
+                assoc_constraints: constraints
             }),
             none => return none
         }
@@ -588,6 +1123,30 @@ pub fn find_impl_by_origin(
     match reg.trait_impls.get(type_name) {
         some(impls) => impls.find(fn(i) { i.origin == origin }),
         none => none
+    }
+}
+
+pub fn replace_impl_method_core(
+    mut reg: TraitRegistry, type_name: Str, origin: Str,
+    method_name: Str, core: ImplMethodSchemeCore
+) {
+    let mut matches = 0
+    match reg.trait_impls.get(type_name) {
+        some(impls) => {
+            for entry in impls {
+                if entry.origin == origin {
+                    matches = matches + 1
+                    if !entry.method_schemes.contains_key(method_name) {
+                        panic("impl method core: replacement target is missing")
+                    }
+                    entry.method_schemes.insert(method_name, core)
+                }
+            }
+        },
+        none => {}
+    }
+    if matches != 1 {
+        panic("impl method core: replacement owner is not unique")
     }
 }
 
@@ -1005,9 +1564,8 @@ fn collect_type_var_ids(t: Type, mut result: Set<Int>) {
 pub fn specialize_trait_method_scheme(
     trait_def: TraitDef, method: TraitMethodDef,
     self_type: Type, trait_type_args: List<Type>,
-    impl_type_vars: List<Int>, assoc_types: Map<Str, Type>,
-    bounds: List<SchemeBound>
-) -> TypeScheme {
+    impl_type_vars: List<Int>, assoc_types: Map<Str, Type>
+) -> ImplMethodSchemeCore {
     let mut mapping: Map<Int, Type> = map_new()
     match method.ty {
         Type::FnType { params, .. } => match params.first() {
@@ -1058,12 +1616,7 @@ pub fn specialize_trait_method_scheme(
     for id in remaining_ids {
         if !quantified.contains(id) { quantified.push(id) }
     }
-    TypeScheme {
-        ty: specialized_type,
-        type_vars: quantified,
-        bounds: bounds,
-        def_id: none
-    }
+    make_impl_method_scheme_core(specialized_type, quantified, none)
 }
 
 // ============================================================

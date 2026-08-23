@@ -29,7 +29,6 @@ pub struct ModuleExports {
     pub effect_aliases: Map<Str, EffectAliasDef>,
     pub traits: Map<Str, TraitDef>,
     pub trait_impls: List<ImplEntry>,
-    pub impl_methods: Map<Str, Map<Str, TypeScheme>>,
     pub method_origins: Map<Str, Map<Str, MethodOrigin>>,
     pub inherent_methods: Map<Str, List<Str>>,
     pub struct_field_orders: Map<Str, List<Str>>,
@@ -187,7 +186,6 @@ fn copy_inline_export(
     mut variant_ctor_origins: Map<Str, Str>,
     mut types: Map<Str, TypeDef>, mut type_aliases: Map<Str, TypeAliasDef>, mut effects: Map<Str, EffectDef>,
     mut effect_aliases: Map<Str, EffectAliasDef>, mut traits: Map<Str, TraitDef>,
-    mut impl_methods: Map<Str, Map<Str, TypeScheme>>,
     mut method_origins: Map<Str, Map<Str, MethodOrigin>>,
     mut inherent_methods: Map<Str, List<Str>>, mut struct_field_orders: Map<Str, List<Str>>,
     mut extern_values: Set<Str>, mut mut_methods: Map<Str, Set<Str>>,
@@ -238,9 +236,6 @@ fn copy_inline_export(
             let mut fields: List<Str> = []
             for field in def.fields { fields.push(field.name) }
             struct_field_orders.insert(local, fields)
-            match env.trait_reg.impl_methods.get(def.name) {
-                some(methods) => { impl_methods.insert(def.name, map_clone(methods)) }, none => {}
-            }
             match env.trait_reg.method_origins.get(def.name) {
                 some(origins) => { method_origins.insert(def.name, map_clone(origins)) }, none => {}
             }
@@ -290,9 +285,6 @@ fn copy_inline_export(
                     }
                 }
             }
-            match env.trait_reg.impl_methods.get(def.name) {
-                some(methods) => { impl_methods.insert(def.name, map_clone(methods)) }, none => {}
-            }
             match env.trait_reg.method_origins.get(def.name) {
                 some(origins) => { method_origins.insert(def.name, map_clone(origins)) }, none => {}
             }
@@ -332,7 +324,6 @@ fn extract_decl_export(
     mut effects: Map<Str, EffectDef>,
     mut effect_aliases: Map<Str, EffectAliasDef>,
     mut traits: Map<Str, TraitDef>,
-    mut impl_methods: Map<Str, Map<Str, TypeScheme>>,
     mut method_origins: Map<Str, Map<Str, MethodOrigin>>,
     mut inherent_methods: Map<Str, List<Str>>,
     mut struct_field_orders: Map<Str, List<Str>>,
@@ -488,7 +479,7 @@ fn extract_decl_export(
                         exact_value_binding_kinds, value_binding_kinds,
                         variant_ctor_origins,
                         types, type_aliases, effects, effect_aliases, traits,
-                        impl_methods, method_origins, inherent_methods, struct_field_orders,
+                        method_origins, inherent_methods, struct_field_orders,
                         extern_values, mut_methods, fn_mut_params, false)
                 }
                 let facade = export_display_name(mod_name)
@@ -504,7 +495,7 @@ fn extract_decl_export(
                                         exact_value_origins, exact_value_binding_kinds,
                                         value_binding_kinds, variant_ctor_origins,
                                         types, type_aliases, effects, effect_aliases, traits,
-                                        impl_methods, method_origins, inherent_methods, struct_field_orders, extern_values, mut_methods, fn_mut_params)
+                                        method_origins, inherent_methods, struct_field_orders, extern_values, mut_methods, fn_mut_params)
                                 }
                             },
                             UseImport::Module => {
@@ -516,7 +507,7 @@ fn extract_decl_export(
                                     exact_value_origins, exact_value_binding_kinds,
                                     value_binding_kinds, variant_ctor_origins,
                                     types, type_aliases, effects, effect_aliases, traits,
-                                    impl_methods, method_origins, inherent_methods, struct_field_orders, extern_values, mut_methods, fn_mut_params)
+                                    method_origins, inherent_methods, struct_field_orders, extern_values, mut_methods, fn_mut_params)
                             }
                         },
                         none => {}
@@ -541,7 +532,6 @@ fn copy_exported_name(
     mut effect_aliases: Map<Str, EffectAliasDef>, mut traits: Map<Str, TraitDef>,
     mut struct_field_orders: Map<Str, List<Str>>, mut extern_values: Set<Str>,
     mut fn_mut_params: Map<Str, List<Bool>>,
-    mut impl_methods: Map<Str, Map<Str, TypeScheme>>,
     mut method_origins: Map<Str, Map<Str, MethodOrigin>>,
     mut inherent_methods: Map<Str, List<Str>>, mut mut_methods: Map<Str, Set<Str>>
 ) {
@@ -569,9 +559,6 @@ fn copy_exported_name(
             let canonical_type = match def {
                 TypeDef::StructDef_(sdef) => sdef.name,
                 TypeDef::EnumDef_(edef) => edef.name
-            }
-            match source.impl_methods.get(canonical_type) {
-                some(methods) => { impl_methods.insert(canonical_type, map_clone(methods)) }, none => {}
             }
             match source.method_origins.get(canonical_type) {
                 some(origins) => { method_origins.insert(canonical_type, map_clone(origins)) }, none => {}
@@ -616,27 +603,12 @@ fn export_impl_facts(
     env: TypeEnv,
     fn_mut_params_map: Map<Str, List<Bool>>,
     program: Program,
-    mut impl_methods: Map<Str, Map<Str, TypeScheme>>,
     mut method_origins: Map<Str, Map<Str, MethodOrigin>>,
     mut inherent_methods: Map<Str, List<Str>>,
     mut mut_methods: Map<Str, Set<Str>>,
     mut fn_mut_params: Map<Str, List<Bool>>
 ) {
     for fact in impl_facts {
-        match env.trait_reg.impl_methods.get(fact.target) {
-            some(methods_map) => {
-                impl_methods.insert(fact.target, map_clone(methods_map))
-            },
-            none => {
-                // Registration and checking resolve the target through the
-                // same live frames, so a fact with methods but no registry
-                // entry means the two passes disagreed. Exports only run on
-                // modules with zero user errors — never paper over it.
-                if fact.method_names.len() > 0 {
-                    panic("internal: impl methods for '${fact.target}' missing from registration")
-                }
-            }
-        }
         match env.trait_reg.method_origins.get(fact.target) {
             some(origins) => {
                 method_origins.insert(fact.target, map_clone(origins))
@@ -702,7 +674,6 @@ pub fn extract_exports(
     let mut effects: Map<Str, EffectDef> = map_new()
     let mut effect_aliases: Map<Str, EffectAliasDef> = map_new()
     let mut traits: Map<Str, TraitDef> = map_new()
-    let mut impl_methods: Map<Str, Map<Str, TypeScheme>> = map_new()
     let mut method_origins: Map<Str, Map<Str, MethodOrigin>> = map_new()
     let mut inherent_methods: Map<Str, List<Str>> = map_new()
     let mut struct_field_orders: Map<Str, List<Str>> = map_new()
@@ -716,11 +687,11 @@ pub fn extract_exports(
             exact_value_binding_kinds, value_binding_kinds,
             variant_ctor_origins,
             types, type_aliases, effects, effect_aliases, traits,
-            impl_methods, method_origins, inherent_methods, struct_field_orders,
+            method_origins, inherent_methods, struct_field_orders,
             extern_values, mut_methods, fn_mut_params, true)
     }
     export_impl_facts(impl_facts, env, fn_mut_params_map, program,
-        impl_methods, method_origins, inherent_methods, mut_methods, fn_mut_params)
+        method_origins, inherent_methods, mut_methods, fn_mut_params)
 
     // Handle pub use re-exports from the dependency export objects themselves.
     // Payloads and origins are forwarded verbatim; only the facade lookup key
@@ -740,7 +711,7 @@ pub fn extract_exports(
                                 variant_ctor_origins,
                                 types, type_aliases, effects, effect_aliases, traits,
                                 struct_field_orders, extern_values, fn_mut_params,
-                                impl_methods, method_origins, inherent_methods, mut_methods)
+                                method_origins, inherent_methods, mut_methods)
                             // Importing an enum also imports its constructors.
                             match source.types.get(item.name) {
                                 some(TypeDef::EnumDef_(edef)) => {
@@ -750,7 +721,7 @@ pub fn extract_exports(
                                             variant_ctor_origins,
                                             types, type_aliases, effects, effect_aliases, traits,
                                             struct_field_orders, extern_values, fn_mut_params,
-                                            impl_methods, method_origins, inherent_methods, mut_methods)
+                                            method_origins, inherent_methods, mut_methods)
                                     }
                                 },
                                 _ => {}
@@ -773,7 +744,7 @@ pub fn extract_exports(
                                 variant_ctor_origins,
                                 types, type_aliases, effects, effect_aliases, traits,
                                 struct_field_orders, extern_values, fn_mut_params,
-                                impl_methods, method_origins, inherent_methods, mut_methods)
+                                method_origins, inherent_methods, mut_methods)
                         }
                     }
                 },
@@ -804,8 +775,12 @@ pub fn extract_exports(
     for map_entry in sorted_trait_impls {
         let (_, impl_list) = map_entry
         for impl_ in impl_list {
+            let trait_exported = match impl_.trait_name {
+                some(name) => exported_trait_ids.contains(name),
+                none => false
+            }
             if exported_type_ids.contains(impl_.target_type_name) ||
-               exported_trait_ids.contains(impl_.trait_name) {
+               trait_exported {
                 trait_impls.push(impl_)
             }
         }
@@ -824,7 +799,6 @@ pub fn extract_exports(
         effect_aliases: effect_aliases,
         traits: traits,
         trait_impls: trait_impls,
-        impl_methods: impl_methods,
         method_origins: method_origins,
         inherent_methods: inherent_methods,
         struct_field_orders: struct_field_orders,

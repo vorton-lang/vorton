@@ -1,9 +1,17 @@
 use types::{Type, EffectRow, StructField, EnumVariant,
-    INT, STR, BOOL, EMPTY_ROW}
+    INT, STR, BOOL, EMPTY_ROW, types_equal}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
-    ImplEntry, ImplDictBound, MethodOrigin,
-    add_impl, has_impl, find_impl, install_method_scheme,
-    instantiate_impl_dict_requirements}
+    ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
+    TypedImplPredicate, MethodOrigin,
+    add_impl, has_impl, find_impl, install_method_core,
+    instantiate_impl_runtime_requirements,
+    make_impl_method_scheme_core, make_typed_impl_predicate,
+    direct_impl_predicate_provenance, freeze_impl_predicate_set,
+    impl_predicate_subject_type_var, impl_predicate_trait_name,
+    impl_predicate_subject_param_index, frozen_impl_predicates,
+    impl_assoc_predicate_name, impl_assoc_predicate_type,
+    apply_subst_map,
+    ImplOwnerState}
 use ast::{Span, DeriveAttribute, span_zero}
 use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
@@ -24,6 +32,13 @@ fn type_at(list: List<Type>, i: Int) -> Type {
 
 fn df_at(list: List<DerivedField>, i: Int) -> DerivedField {
     match list.get(i) { some(v) => v, none => panic("unreachable: df_at out of bounds") }
+}
+
+// Derive's fixed point is transient. The only stored authority is the
+// FrozenImplPredicateSet installed on the completed ImplEntry.
+struct DerivedPredicatePlan {
+    type_param_index: Int,
+    trait_name: Str
 }
 
 const BUILTIN_TYPES: Set<Str> = set_from(["Option", "Cell", "List", "Map", "Set", "Range"])
@@ -117,8 +132,11 @@ fn derive_trait(
     for entry in sorted_impls {
         let (tname, impls) = entry
         for imp in impls {
-            if imp.trait_name == trait_name {
-                known.insert(imp.target_type_name)
+            match imp.trait_name {
+                some(name) => if name == trait_name {
+                    known.insert(imp.target_type_name)
+                },
+                none => {}
             }
         }
     }
@@ -139,8 +157,10 @@ fn derive_trait(
                     match result {
                         some(di) => {
                             known.insert(ut.name)
-                            register_derived_impl(env, sink, di, trait_name, span_zero())
-                            derived_impls.push(di)
+                            let owner = register_derived_impl(
+                                env, sink, di, trait_name, span_zero())
+                            derived_impls.push(derived_impl_with_bounds(
+                                di, derived_runtime_bounds_from_owner(owner)))
                             changed = true
                         },
                         none => {},
@@ -168,8 +188,11 @@ fn derive_hash_trait(
     for entry in sorted_impls {
         let (_tname, impls) = entry
         for imp in impls {
-            if imp.trait_name == "Hash" {
-                known.insert(imp.target_type_name)
+            match imp.trait_name {
+                some(name) => if name == "Hash" {
+                    known.insert(imp.target_type_name)
+                },
+                none => {}
             }
         }
     }
@@ -190,8 +213,10 @@ fn derive_hash_trait(
                         match result {
                             some(di) => {
                                 known.insert(ut.name)
-                                register_derived_impl(env, sink, di, "Hash", span_zero())
-                                derived_impls.push(di)
+                                let owner = register_derived_impl(
+                                    env, sink, di, "Hash", span_zero())
+                                derived_impls.push(derived_impl_with_bounds(
+                                    di, derived_runtime_bounds_from_owner(owner)))
                                 changed = true
                             },
                             none => {},
@@ -243,15 +268,15 @@ fn derive_json_trait(
     // ordered runtime predicates as a least fixed point.  Candidate references
     // consult the current plan, so mutually-recursive SCCs grow together rather
     // than waiting for one member to become "known" first.  Manual impls are
-    // always read through their authoritative ImplEntry.dict_bounds.
+    // always read through their authoritative frozen ImplEntry predicates.
     let mut candidates: List<UserType> = []
     let mut candidate_names: Set<Str> = set_new()
-    let mut plans: Map<Str, List<ImplDictBound>> = map_new()
+    let mut plans: Map<Str, List<DerivedPredicatePlan>> = map_new()
     for ut in all_types {
         if requests_derive(ut, "Json") && !has_manual_impl(env, ut.name, "Json") {
             candidates.push(ut)
             candidate_names.insert(ut.name)
-            let empty: List<ImplDictBound> = []
+            let empty: List<DerivedPredicatePlan> = []
             plans.insert(ut.name, empty)
         }
     }
@@ -286,7 +311,7 @@ fn derive_json_trait(
                         // Monotonic union preserves the first-discovery order.
                         // Never replace a plan: SCC peers may expose the same
                         // finite predicate set in a different traversal order.
-                        let mut merged: List<ImplDictBound> = []
+                        let mut merged: List<DerivedPredicatePlan> = []
                         match plans.get(ut.name) {
                             some(previous) => {
                                 for bound in previous { merged.push(bound) }
@@ -324,7 +349,8 @@ fn derive_json_trait(
                         some(attr) => attr.span,
                         none => span_zero()
                     }
-                    register_derived_impl(env, sink, di, "Json", attr_span)
+                    let _ = register_derived_impl(
+                        env, sink, di, "Json", attr_span)
                 },
                 none => { invalid.insert(ut.name) }
             }
@@ -337,7 +363,12 @@ fn derive_json_trait(
     for entry in sorted_impls {
         let (_target, impls) = entry
         for imp in impls {
-            if imp.trait_name == "Json" { known.insert(imp.target_type_name) }
+            match imp.trait_name {
+                some(name) => if name == "Json" {
+                    known.insert(imp.target_type_name)
+                },
+                none => {}
+            }
         }
     }
 
@@ -356,15 +387,17 @@ fn derive_json_trait(
                     if !same_impl_dict_bound_set(planned, actual) {
                         panic("Json derive evidence set changed after ImplEntry registration")
                     }
-                    let planned_signature = match json_derived_signature(ut, planned) {
+                    let registered_owner = match find_impl(
+                        env.trait_reg, ut.name, "Json") {
                         some(found) => found,
-                        none => panic("Json derive lost its registered evidence plan")
+                        none => panic("Json derive lost its registered owner")
                     }
                     // Field actions are name-addressed, while the method ABI is
                     // positional. Normalize the emitted ABI back to the exact
                     // first-discovery order already stored in ImplEntry.
                     derived_impls.push(derived_impl_with_bounds(
-                        di, planned_signature.bounds))
+                        di, derived_runtime_bounds_from_owner(
+                            registered_owner)))
                 },
                 none => { invalid.insert(ut.name) }
             }
@@ -401,7 +434,7 @@ fn user_type_param_count(ut: UserType) -> Int {
 }
 
 fn same_impl_dict_bound_set(
-    left: List<ImplDictBound>, right: List<ImplDictBound>
+    left: List<DerivedPredicatePlan>, right: List<DerivedPredicatePlan>
 ) -> Bool {
     if left.len() != right.len() { return false }
     for expected in left {
@@ -415,25 +448,69 @@ fn same_impl_dict_bound_set(
 }
 
 fn push_impl_dict_bound(
-    mut bounds: List<ImplDictBound>, type_param_index: Int, trait_name: Str
+    mut bounds: List<DerivedPredicatePlan>, type_param_index: Int, trait_name: Str
 ) {
     let duplicate = bounds.any(fn(bound) {
         bound.type_param_index == type_param_index && bound.trait_name == trait_name
     })
     if !duplicate {
-        bounds.push(ImplDictBound {
+        bounds.push(DerivedPredicatePlan {
             type_param_index: type_param_index,
             trait_name: trait_name
         })
     }
 }
 
+fn derive_requirement_assoc_satisfied(
+    env: TypeEnv, subject: Type, trait_name: Str,
+    constraints: List<ImplAssocPredicate>
+) -> Bool {
+    if constraints.len() == 0 { return true }
+    let mut target_name: Str? = none
+    let mut type_args: List<Type> = []
+    match subject {
+        Type::StructType { name, type_params } => {
+            target_name = some(name)
+            type_args = type_params
+        },
+        Type::EnumType { name, type_params } => {
+            target_name = some(name)
+            type_args = type_params
+        },
+        _ => return false
+    }
+    let entry = match target_name {
+        some(name) => match find_impl(env.trait_reg, name, trait_name) {
+            some(found) => found,
+            none => return false
+        },
+        none => return false
+    }
+    if entry.type_param_vars.len() != type_args.len() { return false }
+    let mut mapping: Map<Int, Type> = map_new()
+    for index in 0..entry.type_param_vars.len() {
+        match (entry.type_param_vars.get(index), type_args.get(index)) {
+            (some(source), some(actual)) => mapping.insert(source, actual),
+            _ => return false
+        }
+    }
+    for constraint in constraints {
+        match entry.assoc_types.get(impl_assoc_predicate_name(constraint)) {
+            some(actual) => if !types_equal(
+                impl_assoc_predicate_type(constraint),
+                apply_subst_map(mapping, actual)) { return false },
+            none => return false
+        }
+    }
+    true
+}
+
 fn plan_json_bounds_for_user_type(
     env: TypeEnv, ut: UserType,
     candidate_names: Set<Str>, invalid: Set<Str>,
-    plans: Map<Str, List<ImplDictBound>>
-) -> List<ImplDictBound>? {
-    let mut bounds: List<ImplDictBound> = []
+    plans: Map<Str, List<DerivedPredicatePlan>>
+) -> List<DerivedPredicatePlan>? {
+    let mut bounds: List<DerivedPredicatePlan> = []
     match ut.type_kind {
         TypeKind::StructKind => match ut.struct_def {
             some(def) => {
@@ -466,7 +543,7 @@ fn plan_json_bounds_for_user_type(
 fn plan_json_evidence_for_type(
     env: TypeEnv, t: Type, owner_type_param_vars: List<Int>, trait_name: Str,
     candidate_names: Set<Str>, invalid: Set<Str>,
-    plans: Map<Str, List<ImplDictBound>>, mut bounds: List<ImplDictBound>
+    plans: Map<Str, List<DerivedPredicatePlan>>, mut bounds: List<DerivedPredicatePlan>
 ) -> Bool {
     match t {
         Type::TypeVar { id, .. } => {
@@ -496,7 +573,7 @@ fn plan_json_nominal_evidence(
     env: TypeEnv, name: Str, type_args: List<Type>,
     owner_type_param_vars: List<Int>, trait_name: Str,
     candidate_names: Set<Str>, invalid: Set<Str>,
-    plans: Map<Str, List<ImplDictBound>>, mut bounds: List<ImplDictBound>
+    plans: Map<Str, List<DerivedPredicatePlan>>, mut bounds: List<DerivedPredicatePlan>
 ) -> Bool {
     if trait_name == "Json" && candidate_names.contains(name) {
         if invalid.contains(name) { return false }
@@ -521,15 +598,21 @@ fn plan_json_nominal_evidence(
 
     match find_impl(env.trait_reg, name, trait_name) {
         none => false,
-        some(impl_entry) => match instantiate_impl_dict_requirements(
+        some(impl_entry) => match instantiate_impl_runtime_requirements(
             impl_entry, type_args
         ) {
             none => false,
             some(requirements) => {
                 for requirement in requirements {
+                    if !derive_requirement_assoc_satisfied(
+                        env, requirement.subject_type,
+                        requirement.canonical_trait_name,
+                        requirement.assoc_constraints) {
+                        return false
+                    }
                     if !plan_json_evidence_for_type(
-                        env, requirement.type_arg, owner_type_param_vars,
-                        requirement.trait_name,
+                        env, requirement.subject_type, owner_type_param_vars,
+                        requirement.canonical_trait_name,
                         candidate_names, invalid, plans, bounds
                     ) { return false }
                 }
@@ -540,7 +623,7 @@ fn plan_json_nominal_evidence(
 }
 
 fn json_derived_signature(
-    ut: UserType, impl_bounds: List<ImplDictBound>
+    ut: UserType, impl_bounds: List<DerivedPredicatePlan>
 ) -> DerivedImpl? {
     let type_params = match ut.type_kind {
         TypeKind::StructKind => match ut.struct_def {
@@ -573,12 +656,12 @@ fn json_derived_signature(
     })
 }
 
-fn derived_impl_dict_bounds(di: DerivedImpl) -> List<ImplDictBound>? {
-    let mut result: List<ImplDictBound> = []
+fn derived_impl_dict_bounds(di: DerivedImpl) -> List<DerivedPredicatePlan>? {
+    let mut result: List<DerivedPredicatePlan> = []
     for bound in di.bounds {
         let param_idx = index_of_str(di.type_params, bound.type_param)
         if param_idx < 0 { return none }
-        result.push(ImplDictBound {
+        result.push(DerivedPredicatePlan {
             type_param_index: param_idx,
             trait_name: bound.trait_name
         })
@@ -598,6 +681,22 @@ fn derived_impl_with_bounds(
         struct_fields: di.struct_fields,
         enum_variants: di.enum_variants
     }
+}
+
+fn derived_runtime_bounds_from_owner(owner: ImplEntry) -> List<TraitBound> {
+    let mut bounds: List<TraitBound> = []
+    for predicate in frozen_impl_predicates(owner.predicates) {
+        let param_name = owner.type_params.get(
+            impl_predicate_subject_param_index(predicate)).unwrap_or("")
+        if param_name == "" {
+            panic("derived impl owner lost runtime predicate parameter")
+        }
+        bounds.push(TraitBound {
+            type_param: param_name,
+            trait_name: impl_predicate_trait_name(predicate)
+        })
+    }
+    bounds
 }
 
 // ================================================================
@@ -882,7 +981,7 @@ fn resolve_json_field_action(
 // Derive-side counterpart of infer_ctx.resolve_dict_evidence_for_type.  The
 // only local policy is how a surrounding derived impl turns a free type var
 // into one of its own bounds; nominal requirements are instantiated by the
-// shared env helper from the exact ImplEntry.dict_bounds sequence.
+// shared env helper from the exact frozen ImplEntry predicate sequence.
 fn resolve_json_dict_ref(
     env: TypeEnv, t: Type,
     owner_type_param_vars: List<Int>, owner_type_param_names: List<Str>,
@@ -939,7 +1038,7 @@ fn resolve_json_nominal_dict_ref(
         some(found) => found,
         none => return none
     }
-    let requirements = match instantiate_impl_dict_requirements(
+    let requirements = match instantiate_impl_runtime_requirements(
         impl_entry, type_args
     ) {
         some(found) => found,
@@ -951,9 +1050,16 @@ fn resolve_json_nominal_dict_ref(
     }
     let mut inner_dicts: List<DictRef> = []
     for requirement in requirements {
+        if !derive_requirement_assoc_satisfied(
+            env, requirement.subject_type,
+            requirement.canonical_trait_name,
+            requirement.assoc_constraints) {
+            return none
+        }
         match resolve_json_dict_ref(
-            env, requirement.type_arg, owner_type_param_vars,
-            owner_type_param_names, requirement.trait_name, bounds
+            env, requirement.subject_type, owner_type_param_vars,
+            owner_type_param_names,
+            requirement.canonical_trait_name, bounds
         ) {
             some(dict_ref) => inner_dicts.push(dict_ref),
             none => return none
@@ -1161,7 +1267,7 @@ fn resolve_type_arg_dict(
 fn register_derived_impl(
     mut env: TypeEnv, sink: CollectingSink,
     di: DerivedImpl, trait_name: Str, span: Span
-) {
+) -> ImplEntry {
     let mut methods: Map<Str, TypeScheme> = map_new()
 
     let mut type_var_ids: List<Int> = []
@@ -1175,45 +1281,72 @@ fn register_derived_impl(
     let self_type = build_self_type(env, di.type_name, di.type_kind, self_type_params)
 
     let mut scheme_bounds: List<SchemeBound> = []
-    let mut dict_bounds: List<ImplDictBound> = []
+    let mut predicates: List<TypedImplPredicate> = []
     for b in di.bounds {
         let param_idx = index_of_str(di.type_params, b.type_param)
         if param_idx >= 0 {
-            scheme_bounds.push(SchemeBound { type_var: int_at(type_var_ids, param_idx), trait_name: b.trait_name, assoc_constraints: [] })
-            dict_bounds.push(ImplDictBound { type_param_index: param_idx, trait_name: b.trait_name })
+            let subject_var = int_at(type_var_ids, param_idx)
+            scheme_bounds.push(SchemeBound {
+                type_var: subject_var,
+                trait_name: b.trait_name,
+                assoc_constraints: []
+            })
+            predicates.push(make_typed_impl_predicate(
+                param_idx, subject_var, b.trait_name, [],
+                direct_impl_predicate_provenance()))
         }
     }
+    let frozen_predicates = freeze_impl_predicate_set(
+        type_var_ids, predicates)
 
     let method_names = get_method_names(trait_name)
     register_trait_methods(methods, trait_name, self_type, type_var_ids, scheme_bounds)
 
     let origin = "<derive>:${di.type_name}:${trait_name}"
-    let exact = map_clone(methods)
+    let mut exact: Map<Str, ImplMethodSchemeCore> = map_new()
+    for entry in methods.entries() {
+        let (method_name, scheme) = entry
+        for bound in scheme.bounds {
+            let found = predicates.any(fn(predicate) {
+                impl_predicate_subject_type_var(predicate) == bound.type_var &&
+                    impl_predicate_trait_name(predicate) == bound.trait_name
+            })
+            if !found || bound.assoc_constraints.len() != 0 {
+                panic("derive impl owner: method scheme has non-owner bounds")
+            }
+        }
+        exact.insert(method_name, make_impl_method_scheme_core(
+            scheme.ty, scheme.type_vars, scheme.def_id))
+    }
 
-    add_impl(env.trait_reg, ImplEntry {
-        trait_name: trait_name,
+    let owner = ImplEntry {
+        trait_name: some(trait_name),
         target_type_name: di.type_name,
         type_params: di.type_params,
-        dict_bounds: dict_bounds,
+        type_param_vars: type_var_ids,
+        predicates: frozen_predicates,
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: exact,
         origin: origin,
-        span: span
-    })
+        span: span,
+        owner_state: ImplOwnerState::FinalOwner
+    }
+    add_impl(env.trait_reg, owner)
 
-    let mut sorted_methods = methods.entries()
+    let mut sorted_methods = exact.entries()
     sorted_methods.sort_by(compare_by_first)
     for entry in sorted_methods {
-        let (method_name, scheme) = entry
-        let _ = install_method_scheme(
-            env.trait_reg, sink, di.type_name, method_name, scheme,
+        let (method_name, core) = entry
+        let _ = install_method_core(
+            env.trait_reg, sink, di.type_name, method_name, core,
             MethodOrigin {
                 origin: origin,
                 trait_name: some(trait_name),
                 span: span
             })
     }
+    owner
 }
 
 fn get_method_names(trait_name: Str) -> List<Str> {

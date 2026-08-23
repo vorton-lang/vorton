@@ -21,9 +21,11 @@ use codes::{E0201, E0203, E0206, E0301, E0303, E0304, E0305, E0306,
     E0307, E0308, E0309, E0402, E0411, E0503, E0601, E0705, W0001}
 use union_find::{UnionFind}
 use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
-    EffectOpDef, TraitDef, TraitMethodDef, ImplEntry, TypeAliasDef,
+    EffectOpDef, TraitDef, TraitMethodDef, ImplEntry,
+    ImplMethodSchemeCore, TypeAliasDef,
     BuiltInKind, mono, apply_subst, apply_subst_row, apply_subst_map,
-    build_scheme_var_map, find_impl, lookup_variant}
+    build_scheme_var_map, impl_method_core_as_scheme,
+    find_impl, lookup_variant}
 use unify::{unify, empty_subst}
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     PendingDictPurpose,
@@ -31,6 +33,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     resolve_type_expr, resolve_self_type, resolve_named_type,
     bind_pattern, resolve_dict_ref_for_type,
     resolve_or_defer_dicts_from_scheme,
+    resolve_or_defer_dicts_from_impl_owner,
     register_callable_value_shadow,
     pending_dict_checkpoint, has_pending_dicts_since,
     remove_fail_effect,
@@ -400,12 +403,12 @@ fn require_for_protocol_impl(
 
 fn for_protocol_method_scheme(
     mut ctx: InferCtx, impl_entry: ImplEntry, method: Str, span: Span
-) -> TypeScheme {
+) -> ImplMethodSchemeCore {
     match impl_entry.method_schemes.get(method) {
         some(scheme) => scheme,
         none => {
             let _ = type_error(ctx.sink, E0305,
-                "Iteration protocol implementation '${nominal_display_name(impl_entry.target_type_name)}' has no exact '${nominal_display_name(impl_entry.trait_name)}::${method}' method scheme",
+                "Iteration protocol implementation '${nominal_display_name(impl_entry.target_type_name)}' has no exact method '${method}'",
                 span, DiagnosticContext::TraitError {
                     detail: "protocol lowering does not fall back to default or flat method tables"
                 })
@@ -416,7 +419,8 @@ fn for_protocol_method_scheme(
 
 struct MethodCallSelection {
     method_type: Type?,
-    method_scheme: TypeScheme?,
+    method_core: ImplMethodSchemeCore?,
+    impl_owner: ImplEntry?,
     dict_dispatch: DictDispatchInfo?
 }
 
@@ -427,11 +431,13 @@ struct MethodCallSelection {
 fn select_for_protocol_method(
     mut ctx: InferCtx, impl_entry: ImplEntry, method: Str, span: Span
 ) -> MethodCallSelection {
-    let impl_scheme = for_protocol_method_scheme(ctx, impl_entry, method, span)
-    let registered_method = ctx.env.instantiate(impl_scheme)
+    let impl_core = for_protocol_method_scheme(ctx, impl_entry, method, span)
+    let registered_method = ctx.env.instantiate_impl_method_core(
+        impl_entry, impl_core)
     MethodCallSelection {
         method_type: some(registered_method),
-        method_scheme: some(impl_scheme),
+        method_core: some(impl_core),
+        impl_owner: some(impl_entry),
         dict_dispatch: none
     }
 }
@@ -468,12 +474,13 @@ fn for_protocol_assoc_type(
         some(ty) => ty,
         none => {
             let _ = type_error(ctx.sink, E0301,
-                "Iteration protocol '${nominal_display_name(impl_entry.trait_name)}' implementation for '${nominal_display_name(impl_entry.target_type_name)}' is missing associated type '${assoc_name}'",
+                "Iteration protocol implementation for '${nominal_display_name(impl_entry.target_type_name)}' is missing associated type '${assoc_name}'",
                 span, DiagnosticContext::TraitError { detail: "protocol associated type is missing" })
             fail.raise(CompileError {})
         }
     }
-    let scheme = for_protocol_method_scheme(ctx, impl_entry, method, span)
+    let scheme = impl_method_core_as_scheme(
+        for_protocol_method_scheme(ctx, impl_entry, method, span))
     let instantiated_method = for_protocol_call_method_type(ctx, call, span)
     let var_map = build_scheme_var_map(scheme, instantiated_method)
     apply_subst(subst, apply_subst_map(var_map, raw_assoc))
@@ -1800,13 +1807,15 @@ fn infer_method_call_from_receiver(
     }
 
     let mut method_type: Type? = none
-    let mut method_scheme: TypeScheme? = none
+    let mut method_core: ImplMethodSchemeCore? = none
+    let mut impl_owner: ImplEntry? = none
     let mut dict_dispatch: DictDispatchInfo? = none
 
     match selection {
         some(selected) => {
             method_type = selected.method_type
-            method_scheme = selected.method_scheme
+            method_core = selected.method_core
+            impl_owner = selected.impl_owner
             dict_dispatch = selected.dict_dispatch
         },
         none => {}
@@ -1818,12 +1827,14 @@ fn infer_method_call_from_receiver(
             Type::StructType { name, .. } => {
                 let r = lookup_impl_method(ctx, name, method)
                 method_type = r.method_type
-                method_scheme = r.method_scheme
+                method_core = r.method_core
+                impl_owner = r.impl_owner
             },
             Type::EnumType { name, .. } => {
                 let r = lookup_impl_method(ctx, name, method)
                 method_type = r.method_type
-                method_scheme = r.method_scheme
+                method_core = r.method_core
+                impl_owner = r.impl_owner
             },
             _ => {}
         }
@@ -1835,7 +1846,8 @@ fn infer_method_call_from_receiver(
             some(prim_name) => {
                 let r = lookup_impl_method(ctx, prim_name, method)
                 method_type = r.method_type
-                method_scheme = r.method_scheme
+                method_core = r.method_core
+                impl_owner = r.impl_owner
             },
             none => {}
         }
@@ -1845,7 +1857,10 @@ fn infer_method_call_from_receiver(
     if method_type.is_none() {
         match type_to_builtin_name(recv_type) {
             some(type_name) => {
-                method_type = lookup_trait_method(ctx, type_name, method, span)
+                let r = lookup_trait_method(ctx, type_name, method, span)
+                method_type = r.method_type
+                method_core = r.method_core
+                impl_owner = r.impl_owner
             },
             none => {}
         }
@@ -2009,22 +2024,15 @@ fn infer_method_call_from_receiver(
     }
 
     let resolved_dicts: List<DictRef> = []
-    match method_scheme {
-        some(ms) => {
-            if ms.bounds.len() > 0 {
-                match method_type {
-                    some(mt) => {
-                        resolve_or_defer_dicts_from_scheme(
-                            ctx, ms, mt, s, span,
-                            PendingDictPurpose::DirectCallPublish {
-                                output_slot: resolved_dicts
-                            })
-                    },
-                    none => {}
-                }
-            }
+    match (impl_owner, method_core, method_type) {
+        (some(owner), some(core), some(mt)) => {
+            resolve_or_defer_dicts_from_impl_owner(
+                ctx, owner, core, mt, s, span,
+                PendingDictPurpose::DirectCallPublish {
+                    output_slot: resolved_dicts
+                })
         },
-        none => {}
+        _ => {}
     }
 
     // B-100 Fix 3: recompute result_type after dict resolution so

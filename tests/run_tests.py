@@ -7545,6 +7545,7 @@ F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
 F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
 F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 40
+F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT = 20
 
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
@@ -9006,6 +9007,244 @@ def nominal_field_u1b_source_check_errors(ring_exe: str) -> List[str]:
     return errors
 
 
+F2_U1C0_PATHS = {
+    "env": REPO / "compiler" / "env.ring",
+    "register": REPO / "compiler" / "infer_register.ring",
+    "builtins": REPO / "compiler" / "builtins.ring",
+    "ctx": REPO / "compiler" / "infer_ctx.ring",
+    "helpers": REPO / "compiler" / "infer_helpers.ring",
+    "infer": REPO / "compiler" / "infer.ring",
+    "decl": REPO / "compiler" / "infer_decl.ring",
+    "derive": REPO / "compiler" / "derive.ring",
+    "exports": REPO / "compiler" / "exports.ring",
+    "checker": REPO / "compiler" / "checker.ring",
+}
+
+
+def impl_predicate_u1c0_contract_errors(
+    sources: dict[str, str],
+) -> List[str]:
+    """Cheap U1c0 structure guard; candidate behavior is an external gate."""
+    errors: List[str] = []
+    combined = "\n".join(sources.values())
+    for forbidden in (
+        "ImplDictBound",
+        "instantiate_impl_dict_requirements",
+        "trait_reg.impl_methods",
+        "install_method_scheme",
+        "normalize_impl_bounds",
+    ):
+        if forbidden in combined:
+            errors.append(f"U1c0 retired predicate authority remains: {forbidden}")
+
+    env_source = sources.get("env", "")
+    for token in (
+        "pub struct TypedImplPredicate",
+        "pub struct FrozenImplPredicateSet",
+        "pub struct ImplMethodSchemeCore",
+        "pub predicates: FrozenImplPredicateSet",
+        "pub method_schemes: Map<Str, ImplMethodSchemeCore>",
+        "pub trait_name: Str?",
+        "pub type_param_vars: List<Int>",
+        "pub enum ImplOwnerState",
+        "pub fn instantiate_impl_runtime_requirements",
+    ):
+        if token not in env_source:
+            errors.append(f"U1c0 env schema missing {token!r}")
+    if "pub impl_methods:" in env_source:
+        errors.append("U1c0 TraitRegistry still exposes flat method schemes")
+
+    core_body, core_error = extract_ring_function_body(
+        env_source, "impl_method_core_from_scheme")
+    if core_error:
+        errors.append(core_error)
+    elif core_body is not None and not all(token in core_body for token in (
+        "scheme.bounds.len() != 0",
+        "method-owned bounds are unsupported",
+    )):
+        errors.append("U1c0 core conversion does not reject method bounds")
+
+    freeze_body, freeze_error = extract_ring_function_body(
+        env_source, "freeze_impl_predicate_set")
+    if freeze_error:
+        errors.append(freeze_error)
+    elif freeze_body is not None and not all(token in freeze_body for token in (
+        "subject does not match owner type variables",
+        "duplicate owner predicate",
+        "expanded path has no direct root",
+    )):
+        errors.append("U1c0 frozen predicate validation is incomplete")
+    add_impl_body, add_impl_error = extract_ring_function_body(
+        env_source, "add_impl")
+    if add_impl_error:
+        errors.append(add_impl_error)
+    elif add_impl_body is not None and "validate_impl_entry(reg, entry)" not in add_impl_body:
+        errors.append("U1c0 owner insertion bypasses relational validation")
+    if "expanded predicate path is not a supertrait edge" not in env_source:
+        errors.append("U1c0 expanded predicate paths are not relationally validated")
+
+    register_source = sources.get("register", "")
+    for token in (
+        "fn freeze_source_impl_predicates",
+        "BoundShapeContext::ImplMethodBound",
+        "BoundShapeContext::ProtocolImplBound",
+        "fn collect_supertraits_dfs",
+        "finalize_provisional_impl_owner",
+        "impl_owner_fn_bounds",
+        "merge_delegate_owner_predicates",
+    ):
+        if token not in register_source:
+            errors.append(f"U1c0 registration missing {token!r}")
+    super_body, super_error = extract_ring_function_body(
+        register_source, "collect_all_supertraits")
+    if super_error:
+        errors.append(super_error)
+    elif super_body is not None and "let mut stack: List<Str>" in super_body:
+        errors.append("U1c0 supertrait closure still uses LIFO authority")
+    if "ctx, mtps, BoundShapeContext::ImplMethodBound, method_span" not in register_source:
+        errors.append("U1c0 impl method bound gate is not attached to method registration")
+    if "some(found) => merge_delegate_owner_predicates(" not in register_source:
+        errors.append("U1c0 delegate does not merge the selected field owner")
+    if "some(_) => finalize_provisional_impl_owner(" not in register_source:
+        errors.append("U1c0 source impl does not finalize its provisional owner")
+    provisional_at = register_source.find("find_impl_by_origin(")
+    fresh_at = register_source.find(
+        "let tv = ctx.env.fresh_var()", provisional_at)
+    if provisional_at < 0 or fresh_at < 0 or provisional_at > fresh_at:
+        errors.append("U1c0 source impl does not reuse provisional owner before mint")
+
+    builtins = sources.get("builtins", "")
+    for token in (
+        '"<std-predecl>:Map:unbounded"',
+        '"<std-predecl>:Map:bounded"',
+        '"<std-predecl>:Set:unbounded"',
+        '"<std-predecl>:Set:bounded"',
+        "ImplOwnerState::ProvisionalPrelude",
+        "bounded_k_id",
+        "unbounded_k_id",
+        "bounded_t_id",
+        "unbounded_t_id",
+    ):
+        if token not in builtins:
+            errors.append(f"U1c0 provisional builtin owner missing {token!r}")
+    if ('none, ["T"], [t_id], [],\n'
+            '        ImplOwnerState::ProvisionalPrelude, methods)') not in builtins:
+        errors.append("U1c0 List predecl is not a provisional complete owner")
+    if ('none, ["K", "V"], [bounded_k_id, bounded_v_id], [') not in builtins:
+        errors.append("U1c0 bounded Map owner does not retain its direct IDs")
+
+    ctx_source = sources.get("ctx", "")
+    for token in (
+        "ImplOwnerEvidenceSource",
+        "resolve_impl_owner_evidence",
+        "resolve_or_defer_dicts_from_impl_owner",
+        "impl_predicate_constraints_satisfied",
+    ):
+        if token not in ctx_source:
+            errors.append(f"U1c0 evidence consumer missing {token!r}")
+    if "source: PendingEvidenceSource::ImplOwnerEvidenceSource {" not in ctx_source:
+        errors.append("U1c0 pending obligation does not retain the exact owner")
+
+    helpers = sources.get("helpers", "")
+    if "ctx.env.trait_reg.method_origins.get(type_name)" not in helpers or (
+        "find_impl_by_origin(" not in helpers
+    ):
+        errors.append("U1c0 method lookup does not follow the owner index")
+    infer_source = sources.get("infer", "")
+    if "resolve_or_defer_dicts_from_impl_owner(" not in infer_source:
+        errors.append("U1c0 method call does not consume owner predicates")
+    decl_source = sources.get("decl", "")
+    if "let impl_bounds = impl_owner_fn_bounds(impl_owner)" not in decl_source:
+        errors.append("U1c0 impl checking reconstructs predicates from AST")
+    derive_source = sources.get("derive", "")
+    if "struct DerivedPredicatePlan" not in derive_source or (
+        "freeze_impl_predicate_set(" not in derive_source
+    ):
+        errors.append("U1c0 derive does not freeze its transient plan")
+    exports_source = sources.get("exports", "")
+    if "pub impl_methods:" in exports_source or "source.impl_methods" in exports_source:
+        errors.append("U1c0 exports retain a flat method scheme copy")
+    checker_source = sources.get("checker", "")
+    owner_add = checker_source.find("add_impl(ctx.env.trait_reg, impl_)")
+    index_install = checker_source.find("install_method_core(", owner_add)
+    if owner_add < 0 or index_install < 0 or owner_add > index_install:
+        errors.append("U1c0 hydration does not install owners before indexes")
+    if "assert_no_provisional_impl_owners(ctx.env.trait_reg)" not in checker_source:
+        errors.append("U1c0 prelude does not close provisional owners")
+    return errors
+
+
+F2_U1C0_SOURCE_CONTRACT_MUTATIONS = (
+    ("env", "pub predicates: FrozenImplPredicateSet", "pub predicates: List<TypedImplPredicate>"),
+    ("env", "pub method_schemes: Map<Str, ImplMethodSchemeCore>", "pub method_schemes: Map<Str, TypeScheme>"),
+    ("env", "scheme.bounds.len() != 0", "false"),
+    ("env", "panic(\"impl predicate: duplicate owner predicate\")", "{}"),
+    ("register", "ctx, mtps, BoundShapeContext::ImplMethodBound, method_span", "ctx, mtps, BoundShapeContext::OrdinaryBound, method_span"),
+    ("register", "BoundShapeContext::ProtocolImplBound", "BoundShapeContext::ImplOwnerBound"),
+    ("register", "finalize_provisional_impl_owner(", "add_impl("),
+    ("decl", "let impl_bounds = impl_owner_fn_bounds(impl_owner)", "let impl_bounds: List<FnBoundsEntry> = []"),
+    ("register", "some(found) => merge_delegate_owner_predicates(", "some(found) => freeze_impl_predicate_set("),
+    ("builtins", '"<std-predecl>:Map:bounded"', '"<std-predecl>:Map:unbounded"'),
+    ("builtins", "[bounded_k_id, bounded_v_id]", "[unbounded_k_id, unbounded_v_id]"),
+    ("builtins", 'none, ["T"], [t_id], [],\n        ImplOwnerState::ProvisionalPrelude, methods)', 'none, ["T"], [t_id], [],\n        ImplOwnerState::FinalOwner, methods)'),
+    ("ctx", "source: PendingEvidenceSource::ImplOwnerEvidenceSource {", "source: PendingEvidenceSource::SchemeEvidenceSource("),
+    ("ctx", "resolve_or_defer_dicts_from_impl_owner", "resolve_or_defer_dicts_from_scheme"),
+    ("helpers", "ctx.env.trait_reg.method_origins.get(type_name)", "ctx.env.trait_reg.impl_methods.get(type_name)"),
+    ("infer", "resolve_or_defer_dicts_from_impl_owner(", "resolve_or_defer_dicts_from_scheme("),
+    ("derive", "freeze_impl_predicate_set(", "empty_frozen_impl_predicate_set("),
+    ("exports", "pub trait_impls: List<ImplEntry>,", "pub trait_impls: List<ImplEntry>,\n    pub impl_methods: Map<Str, Map<Str, TypeScheme>>,"),
+    ("checker", "assert_no_provisional_impl_owners(ctx.env.trait_reg)", "{}"),
+    ("env", "pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {\n    validate_impl_entry(reg, entry)", "pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {\n    {}"),
+)
+
+
+def impl_predicate_u1c0_source_errors() -> List[str]:
+    errors: List[str] = []
+    sources: dict[str, str] = {}
+    for name, path in F2_U1C0_PATHS.items():
+        try:
+            sources[name] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"cannot read {display_path(path)}: {exc}")
+    if errors:
+        return errors
+    errors.extend(impl_predicate_u1c0_contract_errors(sources))
+    killed = 0
+    for source_name, old, new in F2_U1C0_SOURCE_CONTRACT_MUTATIONS:
+        source = sources[source_name]
+        if source.count(old) != 1:
+            errors.append(
+                f"U1c0 mutation anchor {source_name}:{old!r} count was "
+                f"{source.count(old)}")
+            continue
+        mutated = dict(sources)
+        mutated[source_name] = source.replace(old, new, 1)
+        findings = impl_predicate_u1c0_contract_errors(mutated)
+        if not findings:
+            errors.append(f"U1c0 source mutation escaped: {source_name}:{old!r}")
+        else:
+            killed += 1
+    if killed != F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT:
+        errors.append(
+            f"U1c0 killed {killed} mutations, expected "
+            f"{F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT}")
+    return errors
+
+
+def impl_predicate_u1c0_source_check_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(ring_exe))
+    for source_path in (F2_U1C0_PATHS["env"], F2_U1C0_PATHS["builtins"]):
+        error = _f1_run_ring_check(ring_exe, source_path, environment)
+        if error:
+            errors.append(error)
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across F2 U1c0 checks")
+    return errors
+
+
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
         "hir": REPO / "compiler" / "hir.ring",
@@ -9585,6 +9824,22 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
     # This permanent gate covers cheap source structure and parse/typecheck
     # only.  Candidate behavior requires an external source-built compiler
     # packet running the targeted project fixtures.
+    impl_predicate_label = "compiler.impl_predicate_u1c0_source_contract"
+    if matches_filter(impl_predicate_label, name_filter):
+        impl_predicate_errors = impl_predicate_u1c0_source_errors()
+        if not impl_predicate_errors:
+            impl_predicate_errors.extend(
+                impl_predicate_u1c0_source_check_errors(ring_exe))
+        detail = (
+            f"source_contract_mutations="
+            f"{F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT}; "
+            "pinned_source_checks=2; candidate_behavior=not_evaluated; "
+            "behavior_gate=external_source_built_candidate_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not impl_predicate_errors else TestResult.FAIL,
+            suite, impl_predicate_label,
+            "; ".join([detail, *impl_predicate_errors])))
+
     nominal_field_label = "compiler.nominal_field_identity_u1b_source_contract"
     if matches_filter(nominal_field_label, name_filter):
         nominal_field_errors = nominal_field_u1b_source_errors()

@@ -9,8 +9,8 @@ use hir::{HExpr, HStmt, TraitDispatch, DictRef, ValueBindingKind,
 use diagnostics::{DiagnosticContext, DiagnosticNote}
 use codes::{E0201, E0205, E0208, E0303, E0307, E0308, E0504, E0705}
 use union_find::{UnionFind, uf_find, uf_lookup}
-use env::{TypeEnv, TypeScheme,
-    apply_subst, has_impl, lookup_variant}
+use env::{TypeEnv, TypeScheme, ImplEntry, ImplMethodSchemeCore,
+    apply_subst, has_impl, lookup_variant, find_impl_by_origin}
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     type_error, unify_at, resolve_relative_qualifier,
     resolve_dict_ref_for_type, resolve_dicts_from_scheme, variant_ctor_origin,
@@ -19,7 +19,8 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
 
 pub struct MethodLookupResult {
     method_type: Type?,
-    method_scheme: TypeScheme?
+    method_core: ImplMethodSchemeCore?,
+    impl_owner: ImplEntry?
 }
 
 
@@ -898,26 +899,43 @@ pub fn check_receiver_mutability(mut ctx: InferCtx, receiver: Expr, recv_type: T
 // ============================================================
 
 pub fn lookup_impl_method(mut ctx: InferCtx, type_name: Str, method: Str) -> MethodLookupResult {
-    match ctx.env.trait_reg.impl_methods.get(type_name) {
-        some(impl_methods) => match impl_methods.get(method) {
-            some(scheme) => MethodLookupResult {
-                method_type: some(ctx.env.instantiate(scheme)),
-                method_scheme: some(scheme)
+    match ctx.env.trait_reg.method_origins.get(type_name) {
+        some(origins) => match origins.get(method) {
+            some(origin) => match find_impl_by_origin(
+                ctx.env.trait_reg, type_name, origin.origin
+            ) {
+                some(owner) => match owner.method_schemes.get(method) {
+                    some(core) => MethodLookupResult {
+                        method_type: some(
+                            ctx.env.instantiate_impl_method_core(owner, core)),
+                        method_core: some(core),
+                        impl_owner: some(owner)
+                    },
+                    none => panic("method lookup: owner lost method core")
+                },
+                none => panic("method lookup: method index lost owner")
             },
-            none => MethodLookupResult { method_type: none, method_scheme: none }
+            none => MethodLookupResult {
+                method_type: none, method_core: none, impl_owner: none
+            }
         },
-        none => MethodLookupResult { method_type: none, method_scheme: none }
+        none => MethodLookupResult {
+            method_type: none, method_core: none, impl_owner: none
+        }
     }
 }
 
-pub fn lookup_trait_method(mut ctx: InferCtx, type_name: Str, method: Str, span: Span) -> Type? {
-    let mut found_type: Type? = none
+pub fn lookup_trait_method(mut ctx: InferCtx, type_name: Str, method: Str, span: Span) -> MethodLookupResult {
+    let mut found: MethodLookupResult = MethodLookupResult {
+        method_type: none, method_core: none, impl_owner: none
+    }
     let mut found_trait_name: Str? = none
     match ctx.env.trait_reg.trait_impls.get(type_name) {
         some(type_impls) => {
             for impl_entry in type_impls {
-                match ctx.env.trait_reg.traits.get(impl_entry.trait_name) {
-                    some(trait_def) => {
+                match impl_entry.trait_name {
+                    some(entry_trait_name) => match ctx.env.trait_reg.traits.get(entry_trait_name) {
+                        some(trait_def) => {
                         let tm = trait_def.methods.find(fn(m) { m.name == method })
                         match tm {
                             some(found_method) => {
@@ -925,20 +943,34 @@ pub fn lookup_trait_method(mut ctx: InferCtx, type_name: Str, method: Str, span:
                                     some(prev_trait) => {
                                         let type_display = nominal_display_name(type_name)
                                         let prev_display = nominal_display_name(prev_trait)
-                                        let trait_display = nominal_display_name(impl_entry.trait_name)
+                                        let trait_display = nominal_display_name(entry_trait_name)
                                         let _ = type_error(ctx.sink, E0504,
                                             "Ambiguous method '${method}' on '${type_display}': found in trait '${prev_display}' and '${trait_display}'",
                                             span, DiagnosticContext::OtherContext { detail: some("disambiguate by calling TraitName::${method}") })
-                                        return found_type
+                                        return found
                                     },
                                     none => {
-                                        found_type = some(ctx.env.instantiate(TypeScheme { ty: found_method.ty, type_vars: trait_def.type_param_vars, bounds: [], def_id: none }))
-                                        found_trait_name = some(impl_entry.trait_name)
+                                        match impl_entry.method_schemes.get(method) {
+                                            some(core) => {
+                                                found = MethodLookupResult {
+                                                    method_type: some(
+                                                        ctx.env.instantiate_impl_method_core(
+                                                            impl_entry, core)),
+                                                    method_core: some(core),
+                                                    impl_owner: some(impl_entry)
+                                                }
+                                            },
+                                            none => panic(
+                                                "trait method lookup: owner lost exact core")
+                                        }
+                                        found_trait_name = some(entry_trait_name)
                                     }
                                 }
                             },
                             none => {}
                         }
+                        },
+                        none => {}
                     },
                     none => {}
                 }
@@ -946,7 +978,7 @@ pub fn lookup_trait_method(mut ctx: InferCtx, type_name: Str, method: Str, span:
         },
         none => {}
     }
-    found_type
+    found
 }
 
 // ============================================================
