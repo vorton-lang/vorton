@@ -8920,7 +8920,7 @@ def builtin_method_intrinsic_contract_errors(
     for struct_name, expected_fields in (
         ("BuiltinMethodSite", ["tag"]),
         ("IntrinsicRef", ["site", "symbol"]),
-        ("MethodCallRef", ["intrinsic", "signature"]),
+        ("MethodCallRef", ["value", "signature", "receiver_mutable"]),
     ):
         source = hir if struct_name == "MethodCallRef" else identity
         fields, field_error = _f0_struct_fields(source, struct_name)
@@ -9066,16 +9066,26 @@ def builtin_method_intrinsic_contract_errors(
         errors.append("B-201 exact method consumer does not precede fallback")
 
     parse_impl = _b201_function_body(parser, "parse_impl_decl", errors)
-    if "impl-member extern fn is not part of Ring 0.1" not in parse_impl or (
+    if "skip_forbidden_impl_extern_member()" not in parse_impl or (
             "parse_extern_fn_decl_body" in parse_impl):
         errors.append("B-201 parser still accepts impl-member extern fn")
+    skip_extern = _b201_function_body(
+        parser, "skip_forbidden_impl_extern_member", errors)
+    for token in (
+        "self.report_error(E0103,", "self.advance() // extern",
+        "self.parse_type_params()", "self.parse_params()",
+        "self.parse_type_expr()", "self.parse_effect_annotation()",
+    ):
+        if token not in skip_extern:
+            errors.append(f"B-201 local extern recovery misses {token!r}")
     register_impl = _b201_function_body(
-        infer_register, "register_impl", errors)
-    check_impl = _b201_function_body(infer_decl, "check_impl_decl", errors)
-    if "Decl::ExternFn" in register_impl:
-        errors.append("B-201 registration still elaborates impl-member extern fn")
-    if "Decl::ExternFn" in check_impl:
-        errors.append("B-201 HIR still elaborates impl-member extern fn")
+        infer_register, "register_impl_canonical", errors)
+    check_impl = _b201_function_body(
+        infer_decl, "check_impl_decl_canonical", errors)
+    if "Decl::ExternFn { .. } => panic(" not in register_impl:
+        errors.append("B-201 registration does not fail closed on injected extern")
+    if "Decl::ExternFn { .. } => panic(" not in check_impl:
+        errors.append("B-201 HIR does not fail closed on injected extern")
     for file_name, source in (("std/str.ring", std_str), ("std/num.ring", std_num)):
         masked = mask_ring_strings_and_comments(source)
         if re.search(r"\bimpl\s+(?:Str|Int|Float)\s*\{", masked):
@@ -9121,7 +9131,7 @@ def builtin_method_intrinsic_mutation_errors(
         ("call signature kind", "hir.ring", "make_intrinsic_method_call_ref",
          "Type::FnType { .. }", "_"),
         ("call intrinsic equality", "hir.ring", "method_call_ref_same",
-         "intrinsic_ref_same(left.intrinsic, right.intrinsic)", "true"),
+         "intrinsic_ref_same(a, b)", "true"),
         ("HIR validation", "hir.ring", "validate_hir_expr",
          "method_call_ref_signature(exact_method)", "ty"),
         ("impl lookup", "infer_helpers.ring", "lookup_impl_method",
@@ -9148,7 +9158,7 @@ def builtin_method_intrinsic_mutation_errors(
          "fn intrinsic_runtime_name(tag: Int) -> Str {",
          "fn method_to_runtime_c(type_name: Str, method: Str) -> Str? { none }\n\nfn intrinsic_runtime_name(tag: Int) -> Str {"),
         ("parser fallback", "parser.ring", "parse_impl_decl",
-         'self.error(\n                    "impl-member extern fn is not part of Ring 0.1; use a top-level extern fn and an ordinary wrapper")',
+         "self.skip_forbidden_impl_extern_member()",
          "methods.push(self.parse_extern_fn_decl_body(m_pub, self.current_span_start()))"),
         ("source extern resurrection", "std", None, "", ""),
     )
@@ -9203,6 +9213,47 @@ def builtin_method_intrinsic_source_errors() -> List[str]:
         return errors
     errors.extend(builtin_method_intrinsic_mutation_errors(
         compiler_sources, std_str, std_num))
+    return errors
+
+
+B201_IMPL_EXTERN_RECOVERY_CASES = (
+    REPO / "tests" / "cases" / "error_impl_block_duplicate_fn_extern.ring",
+    REPO / "tests" / "cases" / "error_trait_impl_pub_extern_recovery.ring",
+)
+
+
+def builtin_impl_extern_recovery_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    expected_message = "impl-member extern fn is not part of Ring 0.1"
+    for source_path in B201_IMPL_EXTERN_RECOVERY_CASES:
+        contract = source_path.with_suffix(".error").read_text(encoding="utf-8")
+        for mode, extra_args in (
+                ("human", None), ("llm", ["--error-format=llm"])):
+            label = f"{source_path.name}:{mode}"
+            try:
+                result = ring_check(
+                    ring_exe, str(source_path), extra_args=extra_args,
+                    phase_suite="structural",
+                    phase_case=f"b201-impl-extern:{label}")
+            except subprocess.TimeoutExpired:
+                errors.append(f"B-201 {label} timed out")
+                continue
+            combined = (result.stdout or "") + (result.stderr or "")
+            if result.returncode == 0:
+                errors.append(f"B-201 {label} unexpectedly succeeded")
+                continue
+            contract_error = error_contract_failure(contract, combined)
+            if contract_error is not None:
+                errors.append(f"B-201 {label}: {contract_error}")
+                continue
+            codes = set(re.findall(r"\bE[0-9]{4}\b", combined))
+            if codes != {"E0103"}:
+                errors.append(
+                    f"B-201 {label} diagnostic set drifted: {sorted(codes)!r}")
+            if combined.count(expected_message) != 1:
+                errors.append(
+                    f"B-201 {label} emitted the rejection message "
+                    f"{combined.count(expected_message)} times")
     return errors
 
 
@@ -13754,6 +13805,17 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
             TestResult.PASS if not builtin_method_errors else TestResult.FAIL,
             suite, builtin_method_label,
             "; ".join([detail, *builtin_method_errors])))
+
+    impl_extern_label = "compiler.impl_extern_local_recovery"
+    if matches_filter(impl_extern_label, name_filter):
+        recovery_errors = builtin_impl_extern_recovery_errors(ring_exe)
+        collector.add(TestResult(
+            TestResult.PASS if not recovery_errors else TestResult.FAIL,
+            suite, impl_extern_label,
+            "; ".join([
+                "hard_reject=E0103; local_recovery=next_impl_member; "
+                "formats=human+llm; cases=inherent+trait",
+                *recovery_errors])))
 
     resource_label = "compiler.resource_model_f0"
     if matches_filter(resource_label, name_filter):

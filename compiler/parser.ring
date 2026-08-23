@@ -1200,8 +1200,7 @@ impl Parser {
             if self.check(TokenKind::TkIdent) && self.peek().value == "type" {
                 methods.push(self.parse_assoc_type_decl(m_pub))
             } else if self.check(TokenKind::TkExtern) {
-                self.error(
-                    "impl-member extern fn is not part of Ring 0.1; use a top-level extern fn and an ordinary wrapper")
+                self.skip_forbidden_impl_extern_member()
             } else {
                 methods.push(self.parse_fn_decl(m_pub, false))
             }
@@ -1213,6 +1212,29 @@ impl Parser {
             trait_name: trait_name,
             methods: methods,
             span: self.make_span(start, rbrace.span.end)
+        }
+    }
+
+    // Hard-rejected surface with local recovery.  This consumes exactly one
+    // extern signature but never constructs a Decl, so the next impl member
+    // remains in the same container and cannot be reinterpreted top-level.
+    fn skip_forbidden_impl_extern_member(mut self) {
+        let extern_span = self.peek().span
+        self.report_error(E0103,
+            "impl-member extern fn is not part of Ring 0.1; use a top-level extern fn and an ordinary wrapper",
+            some(extern_span))
+        self.advance() // extern
+        self.expect(TokenKind::TkFn)
+        let _ = self.expect(TokenKind::TkIdent)
+        let _ = self.parse_type_params()
+        self.expect(TokenKind::TkLParen)
+        let _ = self.parse_params()
+        self.expect(TokenKind::TkRParen)
+        if self.try_consume(TokenKind::TkArrow) {
+            let _ = self.parse_type_expr()
+        }
+        if self.check(TokenKind::TkWith) {
+            let _ = self.parse_effect_annotation()
         }
     }
 
