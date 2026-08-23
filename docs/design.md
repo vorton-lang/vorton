@@ -1888,6 +1888,8 @@ Source
 
 **渐进迁移而非平行重写**：#268/#269 先建立通用 typed identity、executable inventory、neutral normalization、FlowIR/RcIR 与 validator 骨架；后续 type/effect/evidence、failure/control、RIIR/FFI、optimization 各自在既有 backlog 里迁入其唯一所属层。一个事实切换到新层时必须原子迁移全部消费者并删除旧 fallback/side map；禁止长期双写、shadow authority 或以“兼容”保留旧解释路径。B-190 负责在相应消费者已迁移并有证据后删除遗留重复 authority，不把本架构变成一次无界全仓 rewrite。
 
+**0.1 real-consumer implementation boundary（2026-08-24 用户直接决定）**：首次0.1发布前，#268/#269与上述分层只实现0.1已有语义和验收矩阵的真实consumer。删除或拒绝任何仅为post-0.1预留的variant、carrier、fallback、extension hook或validator branch；未来能力不得要求当前IR携带空节点、unknown占位或兼容路径。Review finding只有在候选违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI，或实际阻止#268/#269闭合时才BLOCK；纯未来扩展性、post-0.1 feature兼容性和没有0.1 consumer的“完整性”意见不得阻塞，也不在当前工作中顺手新增post-0.1 item。该裁剪不降低0.1 Deep Clone、exact identity、Core closure、RC conservation、single/project一致性，以及source-build/fixed-point/full/ASan/self-host/exact CI门。
+
 **Koka 作为参考实现**：Effect 推断（`InferEffect.hs`）和 evidence passing（`Evidence.hs`）的算法翻译自 Koka 编译器（MIT 许可）。Perceus 引用计数已翻译其 POPL'21 实现落地（§7.11）。
 
 自举证明 Ring 能承载自身编译器；LLM 开发效率主张必须由 B-111 的对照实验验证。

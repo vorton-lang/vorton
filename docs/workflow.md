@@ -170,8 +170,9 @@
 2. **Acceptance evidence**：只有active spec明确指定的claim-advancing fixed-SHA transaction才使用sealed/no-retry纪律。启动前必须完成已知实现与review修正、固定输入/候选/环境/命令和failure identity；source-build、fixed point、standard full、ASan、exact CI等长门集中在真实纵向或integration boundary运行，不因每个carrier/micro-commit重复启动。Cheap targeted acceptance若确属final matrix可保留，但不得在候选仍探索时冒充development feedback提前消费。
 3. **Review economy**：多个micro-commit可组成一个green vertical checkpoint；reviewer审固定累计diff、producer→consumer契约、canary和旧authority边界，不要求每个中间commit分别完成一轮独立对抗仪式。高风险/架构单元在写码前做一次bounded refutation，green boundary做一次独立contract/code review；bounded implementation finding在同一review链返修，不重新启动完整Argument或全矩阵。若出现duplicate-authority、跨层回放或共同不变量缺失，则立即按宏观架构监督/方向止损门处理，而不是增加review轮数直到偶然CLEAR。
 4. **Reporting economy**：进展摘要只把net-new capability、已建立的producer→consumer路径、authority retirement/cutover、真实behavior或structural canary、remaining risk和下一可证伪门计为信息。命令数、mutation数量、fixture数量、receipt大小、review“CLEAR”或commit数量只能作为按需证据索引，不能单独冒充进展或里程碑。
+5. **0.1 real-consumer scope**：首次0.1发布前，当前实现只服务0.1真实consumer。删除/不新增仅为post-0.1准备的variant、carrier、fallback、extension hook或validator branch；review finding仅在违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI，或阻止当前总门闭合时BLOCK。纯未来扩展性、post-0.1 feature兼容与没有0.1 consumer的完整性意见不得阻塞，也不得从当前工作顺手新增post-0.1 item。
 
-该减负规则不降低correctness、safety、ownership、bootstrap、跨平台或最终release门；它只消除在未形成真实纵向价值前重复运行同一类审查与验收。Audit仍按§6处理，不因本节减少finding的独立证据要求。用户直接查看Steward过程时以原始diff、命令和证据为准，Discussion不成为中间批准者。
+该减负规则不降低0.1 Deep Clone、exact identity、Core closure、RC conservation、single/project一致性、correctness、safety、ownership、current platform/ABI、bootstrap、source-build/fixed-point/full/ASan/self-host/exact CI或最终release门；它只消除未形成真实纵向价值的重复审查、验收与未来占位。Audit仍按§6处理，不因本节减少finding的独立证据要求。用户直接查看Steward过程时以原始diff、命令和证据为准，Discussion不成为中间批准者。
 
 ### 4.4 执行与并发
 

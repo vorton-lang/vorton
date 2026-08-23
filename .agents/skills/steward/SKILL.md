@@ -73,7 +73,8 @@ Spec 漂移但可由既有设计唯一修正时，root 更新执行契约后继�
 - Development feedback与Acceptance evidence分开。普通check、focused probe和开发期mutation可按变化自由重跑，只用于修正WIP；不得为它们创建sealed/no-retry packet。只有active spec明确指定的claim-advancing fixed-SHA transaction才sealed；source-build、fixed point、standard full、ASan、exact CI等长门集中在真实vertical/integration boundary，不随每个carrier或micro-commit重复运行。
 - 多个micro-commit组成一个green vertical checkpoint。高风险架构单元写码前做一次bounded refutation，green boundary做一次独立contract/code review；review看累计diff、producer→consumer、canary与authority retirement。普通finding在同一review链返修，不重启完整Argument/全矩阵；duplicate-authority或跨层回放则立即走方向止损，而不是堆review轮次。
 - 进展只报告net-new capability、producer→consumer path、authority retirement/cutover、真实canary、remaining risk与下一可证伪门。命令数、mutation/fixture数量、receipt大小、review CLEAR和commit数量只作按需索引，不能冒充进展。
-- 上述减负不降低correctness、safety、ownership、bootstrap、跨平台或最终release门，也不改变§6 Audit证据门。用户可直接审查Steward全过程；Discussion不作为默认review gate或额外freeze/unlock authority。
+- 首次0.1发布前只实现0.1 real consumer。删除/不新增仅为post-0.1预留的variant、carrier、fallback、extension hook或validator branch；review finding仅在违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI或阻止当前总门闭合时BLOCK。纯未来扩展性、post-0.1 feature兼容和无0.1 consumer完整性不得阻塞，也不从当前工作顺手新增post-0.1 item。
+- 上述减负不降低0.1 Deep Clone、exact identity、Core closure、RC conservation、single/project、correctness、safety、ownership、current platform/ABI、bootstrap、source-build/fixed-point/full/ASan/self-host/exact CI或最终release门，也不改变§6 Audit证据门。用户可直接审查Steward全过程；Discussion不作为默认review gate或额外freeze/unlock authority。
 
 ## 执行与角色
 

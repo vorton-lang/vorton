@@ -155,7 +155,24 @@ EXECUTION_EVIDENCE_ECONOMY_CONTRACT = TextContract(
         ("不能冒充进展", "不能单独冒充进展"),
         ("用户可直接审查Steward",),
         ("Discussion不作为默认review gate",),
-        ("不降低correctness",),
+        ("0.1 real consumer", "0.1真实consumer"),
+        ("post-0.1",),
+        ("variant",),
+        ("extension hook",),
+        ("validator branch",),
+        ("不得阻塞",),
+        (
+            "不新增post-0.1 item",
+            "不得从当前工作顺手新增post-0.1 item",
+            "不从当前工作顺手新增post-0.1 item",
+        ),
+        ("Deep Clone",),
+        ("exact identity",),
+        ("Core closure",),
+        ("RC conservation",),
+        ("single/project",),
+        ("current platform/ABI",),
+        ("不降低correctness", "不降低0.1 Deep Clone"),
         ("safety",),
         ("ownership",),
         ("最终release门",),
@@ -165,6 +182,9 @@ EXECUTION_EVIDENCE_ECONOMY_CONTRACT = TextContract(
         "普通开发测试失败必须永久sealed",
         "命令数越多进展越大",
         "Discussion批准后才能继续每个实现步骤",
+        "为post-0.1预留空carrier",
+        "纯未来扩展性finding必须BLOCK",
+        "当前顺手新增post-0.1 item",
     ),
     (
         "Development feedback",
@@ -1349,7 +1369,10 @@ source-build与full等长门集中在integration boundary。
 报告只计net-new capability、producer→consumer、authority retirement、真实canary、
 remaining risk与下一门；命令数、mutation数量、receipt大小不能冒充进展。
 用户可直接审查Steward；Discussion不作为默认review gate。减负不降低correctness、
-safety、ownership、bootstrap、跨平台或最终release门。
+首次0.1发布前只实现0.1 real consumer；不新增post-0.1 variant、carrier、fallback、
+extension hook或validator branch。纯未来扩展性finding不得阻塞，也不新增post-0.1 item。
+减负不降低Deep Clone、exact identity、Core closure、RC conservation、single/project、
+current platform/ABI、safety、ownership、bootstrap、跨平台或最终release门。
 Steward Inbox 只保存 [决策]、[里程碑] 和 [全局阻塞]。
 Argument 比较至少两个真实候选，由独立 reviewer 主动攻击推荐方案，
 再由 root 给出 verdict。语言公开语义属于用户保留决定，保持现有公开行为。
@@ -1686,9 +1709,14 @@ def run_self_tests(*, include_audit_ledger_process: bool) -> list[str]:
         "报告只计net-new capability、producer→consumer、authority retirement、真实canary、\n"
         "remaining risk与下一门；命令数、mutation数量、receipt大小不能冒充进展。\n"
         "用户可直接审查Steward；Discussion不作为默认review gate。减负不降低correctness、\n"
-        "safety、ownership、bootstrap、跨平台或最终release门。",
+        "首次0.1发布前只实现0.1 real consumer；不新增post-0.1 variant、carrier、fallback、\n"
+        "extension hook或validator branch。纯未来扩展性finding不得阻塞，也不新增post-0.1 item。\n"
+        "减负不降低Deep Clone、exact identity、Core closure、RC conservation、single/project、\n"
+        "current platform/ABI、safety、ownership、bootstrap、跨平台或最终release门。",
         "每个micro-commit必须独立对抗审查；普通开发测试失败必须永久sealed；"
-        "命令数越多进展越大；Discussion批准后才能继续每个实现步骤。",
+        "命令数越多进展越大；Discussion批准后才能继续每个实现步骤；"
+        "为post-0.1预留空carrier；纯未来扩展性finding必须BLOCK；"
+        "当前顺手新增post-0.1 item。",
     )
     failures.extend(
         deterministic_failure(
