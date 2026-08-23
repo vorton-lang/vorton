@@ -5,6 +5,8 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     HStructFieldInit, HNominalStructFieldInit,
     HStringInterpPart, HForInDestructure,
     HLetDestructureBinding, HPatternBinding, ValueBindingKind, TraitDispatch,
+    MethodCallRef, make_intrinsic_method_call_ref,
+    method_call_ref_intrinsic, method_call_ref_signature,
     hexpr_type, hexpr_effects, hexpr_span}
 use union_find::{UnionFind}
 use env::{apply_subst, apply_subst_row}
@@ -23,6 +25,17 @@ pub struct ZonkCtx {
 pub fn zonk_type(ctx: ZonkCtx, t: Type) -> Type {
     let resolved = apply_subst(ctx.subst, t)
     label_vars(ctx.names, resolved)
+}
+
+fn zonk_method_call_ref(
+    ctx: ZonkCtx, value: MethodCallRef?
+) -> MethodCallRef? {
+    match value {
+        some(exact) => some(make_intrinsic_method_call_ref(
+            method_call_ref_intrinsic(exact),
+            zonk_type(ctx, method_call_ref_signature(exact)))),
+        none => none
+    }
 }
 
 fn label_effect(names: Map<Int, Str>, e: Effect) -> Effect {
@@ -241,7 +254,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
             HExpr::BinOp { op: op, left: zonk_expr(ctx, left), right: zonk_expr(ctx, right), eq_dispatch: zonk_dispatch(ctx, eq_dispatch), ord_dispatch: zonk_dispatch(ctx, ord_dispatch), ty: z_ty, effects: z_eff, span: z_span },
         HExpr::UnaryOp { op, operand, .. } =>
             HExpr::UnaryOp { op: op, operand: zonk_expr(ctx, operand), ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, .. } =>
+        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, method_ref, .. } =>
             HExpr::Call {
                 // A syntactic Ident callee uses the direct ABI and gets its
                 // evidence from Call.resolved_dicts.  Every other recursive
@@ -251,6 +264,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 type_args: type_args.map(fn(t) { zonk_type(ctx, t) }),
                 resolved_dicts: resolved_dicts,
                 dict_dispatch: dict_dispatch,
+                method_ref: zonk_method_call_ref(ctx, method_ref),
                 ty: z_ty, effects: z_eff, span: z_span
             },
         HExpr::FieldAccess { receiver, field, access_kind, .. } =>

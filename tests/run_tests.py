@@ -8435,6 +8435,777 @@ def ir_inventory_f1_compile_errors(ring_exe: str) -> List[str]:
     return errors
 
 
+CORE_HIR_C0_PATH = REPO / "compiler" / "core_hir.ring"
+CORE_HIR_C0_MUTATION_COUNT = 29
+CORE_HIR_C0_SCOPE_GUARD_COUNT = 3
+
+
+def core_hir_c0_contract_errors(
+    core_source: str, identity_source: str, inventory_source: str,
+) -> List[str]:
+    errors: List[str] = []
+    core_masked = mask_ring_strings_and_comments(core_source)
+    imports = re.findall(
+        r"(?m)^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)", core_masked)
+    if imports != ["ir_identity", "ir_inventory"]:
+        errors.append(f"C0 import authority drifted: {imports!r}")
+    for forbidden in (
+        "resource_model", "HProgram", "HDecl", "DerivedImpl",
+        "FieldAction", "ImplEntry", "DictDispatchInfo", "ParamMode",
+        "CallResourcePlan", "ResourcePlanner", "ResourceCertificate",
+        "AbiIR", "FlowIR", "RcIR", "HExpr", "HStmt",
+    ):
+        if forbidden in core_masked:
+            errors.append(f"C0 gained forbidden authority {forbidden!r}")
+    if re.search(
+            r"\b(?:ownership|borrow_mode|take_mode|cleanup_mode)\b",
+            core_masked, re.IGNORECASE):
+        errors.append("C0 gained an ownership-mode surface")
+    if ".sort" in core_masked or "sort_by" in core_masked:
+        errors.append("C0 body/inventory order was normalized by sorting")
+    for forbidden in (
+        "core_body_entry_body", "core_program_bodies",
+        "validate_core_expr", "lower_hprogram",
+    ):
+        if forbidden in core_masked:
+            errors.append(f"C0 exposed material-body authority {forbidden!r}")
+
+    origin_fields, origin_error = _f0_struct_fields(
+        identity_source, "OriginRef")
+    if origin_error:
+        errors.append(origin_error.replace("F0 struct", "C0 OriginRef struct"))
+    elif origin_fields is not None:
+        if [name for _, name in origin_fields] != ["value"]:
+            errors.append("C0 OriginRef field inventory drifted")
+        if any(is_public for is_public, _ in origin_fields):
+            errors.append("C0 OriginRef exposes forgeable fields")
+    for token in (
+        "SymbolOriginValue(SymbolRef)", "PathOriginValue(PathRef)",
+    ):
+        if token not in identity_source:
+            errors.append(f"C0 OriginRef form misses {token!r}")
+    symbol_ctor, symbol_error = _f0_function_body(
+        identity_source, "make_symbol_origin_ref")
+    if symbol_error:
+        errors.append(symbol_error)
+    elif symbol_ctor is not None:
+        if "SymbolOriginValue(value)" not in symbol_ctor:
+            errors.append("C0 symbol OriginRef does not wrap exact input")
+        if "make_symbol_ref(" in symbol_ctor:
+            errors.append("C0 symbol OriginRef reconstructs SymbolRef")
+    path_ctor, path_error = _f0_function_body(
+        identity_source, "make_path_origin_ref")
+    if path_error:
+        errors.append(path_error)
+    elif path_ctor is not None:
+        if "PathOriginValue(value)" not in path_ctor:
+            errors.append("C0 path OriginRef does not wrap exact input")
+        if "make_path_ref(" in path_ctor:
+            errors.append("C0 path OriginRef reconstructs PathRef")
+    origin_same, origin_same_error = _f0_function_body(
+        identity_source, "origin_ref_same")
+    if origin_same_error:
+        errors.append(origin_same_error)
+    elif origin_same is not None:
+        for token in (
+            "symbol_ref_same(a, b)", "path_ref_same(a, b)",
+            "_ => false",
+        ):
+            if token not in origin_same:
+                errors.append(f"C0 OriginRef equality misses {token!r}")
+
+    for struct_name, expected_fields in (
+        ("CoreBodyEntry", ["reference", "origin", "body_anchor"]),
+        ("CoreProgram", ["closure", "bodies"]),
+    ):
+        fields, field_error = _f0_struct_fields(core_source, struct_name)
+        if field_error:
+            errors.append(field_error.replace("F0 struct", f"C0 {struct_name} struct"))
+            continue
+        assert fields is not None
+        if [name for _, name in fields] != expected_fields:
+            errors.append(f"C0 {struct_name} field inventory drifted")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"C0 {struct_name} exposes forgeable fields")
+    if "pub fn make_core_body_entry(" not in core_source or (
+            "pub fn make_core_program(" not in core_source):
+        errors.append("C0 smart constructor surface is incomplete")
+    if re.search(
+            r"pub\s+struct\s+CoreBodyEntry\s*\{\s*"
+            r"reference\s*:\s*ExecutableRef\s*,\s*"
+            r"origin\s*:\s*OriginRef\s*,\s*"
+            r"body_anchor\s*:\s*PathRef\s*\}",
+            core_masked) is None:
+        errors.append("C0 body anchor is not an exact PathRef")
+
+    body_ctor, body_ctor_error = _f0_function_body(
+        core_source, "make_core_body_entry")
+    if body_ctor_error:
+        errors.append(body_ctor_error)
+    elif body_ctor is not None and not all(token in body_ctor for token in (
+            "reference: reference", "origin: origin",
+            "body_anchor: body_anchor")):
+        errors.append("C0 body-anchor constructor is incomplete")
+
+    program_ctor, program_ctor_error = _f0_function_body(
+        core_source, "make_core_program")
+    if program_ctor_error:
+        errors.append(program_ctor_error)
+    elif program_ctor is not None:
+        for token in (
+            "close_ir_inventory(inventory, manifests)",
+            "ir_inventory_closure_inventory(closure)",
+            "validate_core_body_subsequence(bodies, closed_inventory)",
+            "closure: closure", "bodies: copy_core_body_entries(bodies)",
+        ):
+            if token not in program_ctor:
+                errors.append(f"C0 program constructor misses {token!r}")
+    subsequence, subsequence_error = _f0_function_body(
+        core_source, "validate_core_body_subsequence")
+    if subsequence_error:
+        errors.append(subsequence_error)
+    elif subsequence is not None:
+        for token in (
+            "core_body_refs_are_unique(bodies)",
+            "for entry in entries", "bodies.get(body_index)",
+            "body.reference, executable_entry_reference(entry)",
+            "body.body_anchor,",
+            "executable_contract_body_path(contract)",
+            "body_index = body_index + 1", "body_index != bodies.len()",
+            "executable_contract_mode_concrete_body()",
+            "executable_contract_mode_contract_only()",
+        ):
+            if token not in subsequence:
+                errors.append(f"C0 body/inventory closure misses {token!r}")
+
+    # Reuse the existing F1 authority for named ImplMethod SymbolRef form and
+    # BinderManifest closure rather than duplicating those tables in C0.
+    inventory_errors = ir_inventory_f1_contract_errors(inventory_source)
+    if inventory_errors:
+        errors.extend(f"C0 inherited inventory failure: {e}" for e in inventory_errors)
+    return errors
+
+
+def core_hir_c0_live_consumer_errors(
+    compiler_sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    consumers: List[str] = []
+    for name, source in compiler_sources.items():
+        if name == "core_hir.ring":
+            continue
+        masked = mask_ring_strings_and_comments(source)
+        if re.search(r"(?m)^\s*use\s+core_hir\b", masked) or (
+                "core_hir::" in masked) or "CoreProgram" in masked:
+            consumers.append(name)
+    if consumers != ["builtins.ring"]:
+        errors.append(
+            f"C0 live consumer inventory drifted: {consumers!r}")
+
+    builtins_source = compiler_sources.get("builtins.ring", "")
+    shadow_body, shadow_error = _f0_function_body(
+        builtins_source, "validate_builtin_method_core_shadow")
+    if shadow_error:
+        errors.append(shadow_error.replace("F0 function", "C0 consumer"))
+    elif shadow_body is not None:
+        for token in (
+            "make_executable_entry(", "make_contract_only()",
+            "make_binder_manifest(executable, [])",
+            "make_core_program(", "core_program_body_count(program) != 0",
+        ):
+            if token not in shadow_body:
+                errors.append(f"C0 live consumer misses {token!r}")
+
+    checker_source = compiler_sources.get("checker.ring", "")
+    new_ctx_body, new_ctx_error = _f0_function_body(
+        checker_source, "new_infer_ctx")
+    if new_ctx_error:
+        errors.append(new_ctx_error.replace("F0 function", "C0 consumer"))
+    elif new_ctx_body is not None and (
+            "validate_builtin_method_core_shadow(ctx.env)" not in new_ctx_body):
+        errors.append("C0 shared checker consumer is missing")
+    return errors
+
+
+def core_hir_c0_mutation_errors(
+    core_source: str, identity_source: str, inventory_source: str,
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("symbol origin rebuild", "identity", "make_symbol_origin_ref",
+         "SymbolOriginValue(value)",
+         "SymbolOriginValue(make_symbol_ref(\"x\", namespace_value(), \"x\", \"x\"))"),
+        ("path origin rebuild", "identity", "make_path_origin_ref",
+         "PathOriginValue(value)",
+         "PathOriginValue(make_path_ref(path_ref_owner(value), [\"x\"], path_role_child()))"),
+        ("symbol origin equality", "identity", "origin_ref_same",
+         "symbol_ref_same(a, b)", "true"),
+        ("path origin equality", "identity", "origin_ref_same",
+         "path_ref_same(a, b)", "true"),
+        ("body ref uniqueness", "core", "validate_core_body_subsequence",
+         "!core_body_refs_are_unique(bodies)", "false"),
+        ("body order", "core", "validate_core_body_subsequence",
+         "body.reference, executable_entry_reference(entry)",
+         "body.reference, body.reference"),
+        ("body anchor", "core", "validate_core_body_subsequence",
+         "body.body_anchor,\n                    executable_contract_body_path(contract)",
+         "body.body_anchor, body.body_anchor"),
+        ("body final census", "core", "validate_core_body_subsequence",
+         "body_index != bodies.len()", "false"),
+        ("inventory close", "core", "make_core_program",
+         "close_ir_inventory(inventory, manifests)",
+         "close_ir_inventory(make_executable_inventory([]), [])"),
+        ("closed inventory", "core", "make_core_program",
+         "ir_inventory_closure_inventory(closure)", "inventory"),
+        ("body copy", "core", "make_core_program",
+         "bodies: copy_core_body_entries(bodies)", "bodies: bodies"),
+        ("concrete mode", "core", "validate_core_body_subsequence",
+         "mode, executable_contract_mode_concrete_body()",
+         "mode, executable_contract_mode_contract_only()"),
+        ("contract-only mode", "core", "validate_core_body_subsequence",
+         "mode, executable_contract_mode_contract_only()",
+         "mode, executable_contract_mode_concrete_body()"),
+    )
+    killed = 0
+    for label, source_name, function_name, anchor, replacement in mutations:
+        source = identity_source if source_name == "identity" else core_source
+        mutated, mutation_error = _f0_mutate_function_once(
+            source, function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"C0 mutation {label}: {mutation_error}")
+            continue
+        assert mutated is not None
+        findings = core_hir_c0_contract_errors(
+            mutated if source_name == "core" else core_source,
+            mutated if source_name == "identity" else identity_source,
+            inventory_source)
+        if not findings:
+            errors.append(f"C0 mutation escaped: {label}")
+        else:
+            killed += 1
+
+    manual_mutations = (
+        ("origin public field", "identity", "pub struct OriginRef {\n    value:",
+         "pub struct OriginRef {\n    pub value:"),
+        ("origin raw name", "identity", "pub struct OriginRef {\n    value: OriginRefValue",
+         "pub struct OriginRef {\n    name: Str,\n    value: OriginRefValue"),
+        ("origin raw span", "identity", "pub struct OriginRef {\n    value: OriginRefValue",
+         "pub struct OriginRef {\n    span: Span,\n    value: OriginRefValue"),
+        ("body public field", "core", "pub struct CoreBodyEntry {\n    reference:",
+         "pub struct CoreBodyEntry {\n    pub reference:"),
+        ("body anchor type", "core",
+         "pub struct CoreBodyEntry {\n    reference: ExecutableRef,\n"
+         "    origin: OriginRef,\n    body_anchor: PathRef",
+         "pub struct CoreBodyEntry {\n    reference: ExecutableRef,\n"
+         "    origin: OriginRef,\n    body_anchor: Str"),
+        ("material body", "core",
+         "pub struct CoreBodyEntry {\n    reference: ExecutableRef,\n"
+         "    origin: OriginRef,\n    body_anchor: PathRef",
+         "pub struct CoreBodyEntry {\n    reference: ExecutableRef,\n"
+         "    origin: OriginRef,\n    body_anchor: PathRef,\n    body: HExpr"),
+        ("program public field", "core", "pub struct CoreProgram {\n    closure:",
+         "pub struct CoreProgram {\n    pub closure:"),
+        ("duplicate inventory", "core", "closure: IrInventoryClosure,\n    bodies:",
+         "closure: IrInventoryClosure,\n    inventory: ExecutableInventory,\n    bodies:"),
+        ("duplicate manifests", "core", "closure: IrInventoryClosure,\n    bodies:",
+         "closure: IrInventoryClosure,\n    manifests: List<BinderManifest>,\n    bodies:"),
+        ("HProgram escape", "core", "pub struct CoreProgram {\n    closure:",
+         "pub struct CoreProgram {\n    legacy: HProgram,\n    closure:"),
+        ("resource import", "core", "use ir_identity::{",
+         "use resource_model::{ParamMode}\nuse ir_identity::{"),
+        ("ownership mode", "core", "pub struct CoreProgram {",
+         "struct OwnershipMode { take_mode: Bool }\n\npub struct CoreProgram {"),
+        ("legacy dict field", "core", "pub struct CoreBodyEntry {",
+         "struct LegacyDispatch { value: DictDispatchInfo }\n\npub struct CoreBodyEntry {"),
+        ("pipeline conversion", "core", "pub struct CoreProgram {",
+         "fn lower_hprogram(program: HProgram) -> CoreProgram { fail.raise() }\n\npub struct CoreProgram {"),
+        ("body sorting", "core", "let entries = executable_inventory_entries(inventory)",
+         "let entries = executable_inventory_entries(inventory)\n    entries.sort()"),
+        ("body accessor", "core", "pub struct CoreProgram {",
+         "pub fn core_body(value: CoreBodyEntry) -> HExpr { value.body }\n\npub struct CoreProgram {"),
+    )
+    for label, source_name, anchor, replacement in manual_mutations:
+        source = identity_source if source_name == "identity" else core_source
+        if source.count(anchor) != 1:
+            errors.append(
+                f"C0 mutation {label}: anchor count was {source.count(anchor)}")
+            continue
+        mutated = source.replace(anchor, replacement, 1)
+        findings = core_hir_c0_contract_errors(
+            mutated if source_name == "core" else core_source,
+            mutated if source_name == "identity" else identity_source,
+            inventory_source)
+        if not findings:
+            errors.append(f"C0 mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != CORE_HIR_C0_MUTATION_COUNT:
+        errors.append(
+            f"C0 killed {killed} mutations, expected "
+            f"{CORE_HIR_C0_MUTATION_COUNT}")
+    return errors
+
+
+def core_hir_c0_scope_guard_errors(
+    core_source: str, identity_source: str, inventory_source: str,
+    compiler_sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("main import", "main.ring", "\nuse core_hir::{CoreProgram}\n"),
+        ("checker consumer", "checker.ring",
+         "\nfn consume_core(value: CoreProgram) {}\n"),
+        ("codegen consumer", "codegen_c.ring",
+         "\nuse core_hir::{CoreProgram}\n"),
+    )
+    killed = 0
+    for label, file_name, suffix in mutations:
+        mutated_sources = dict(compiler_sources)
+        mutated_sources[file_name] = compiler_sources[file_name] + suffix
+        if not core_hir_c0_live_consumer_errors(mutated_sources):
+            errors.append(f"C0 scope guard escaped: {label}")
+        else:
+            killed += 1
+    if killed != CORE_HIR_C0_SCOPE_GUARD_COUNT:
+        errors.append(
+            f"C0 scope guards killed {killed}, expected "
+            f"{CORE_HIR_C0_SCOPE_GUARD_COUNT}")
+    return errors
+
+
+def core_hir_c0_source_errors() -> List[str]:
+    try:
+        core_source = CORE_HIR_C0_PATH.read_text(encoding="utf-8")
+        identity_source = IR_IDENTITY_F0_PATH.read_text(encoding="utf-8")
+        inventory_source = IR_INVENTORY_F1_PATH.read_text(encoding="utf-8")
+        compiler_sources = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in (REPO / "compiler").glob("*.ring")
+        }
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read C0 compiler sources: {exc}"]
+    errors = core_hir_c0_contract_errors(
+        core_source, identity_source, inventory_source)
+    errors.extend(core_hir_c0_live_consumer_errors(compiler_sources))
+    if errors:
+        return errors
+    errors.extend(core_hir_c0_mutation_errors(
+        core_source, identity_source, inventory_source))
+    errors.extend(core_hir_c0_scope_guard_errors(
+        core_source, identity_source, inventory_source, compiler_sources))
+    return errors
+
+
+def core_hir_c0_compile_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe).resolve(strict=True)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(str(compiler)))
+    for source_path in (IR_IDENTITY_F0_PATH, CORE_HIR_C0_PATH):
+        error = _f1_run_ring_check(
+            str(compiler), source_path, environment)
+        if error:
+            errors.append(error)
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across C0 checks")
+    return errors
+
+
+B201_BUILTIN_METHODS = (
+    ("BUILTIN_METHOD_STR_LEN", "Str", "len", "ring_str_len", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_CONTAINS", "Str", "contains", "ring_str_contains", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_STARTS_WITH", "Str", "starts_with", "ring_str_starts_with", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_ENDS_WITH", "Str", "ends_with", "ring_str_ends_with", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_SLICE", "Str", "slice", "ring_str_slice", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TRIM", "Str", "trim", "ring_str_trim", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TO_UPPER", "Str", "to_upper", "ring_str_to_upper", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TO_LOWER", "Str", "to_lower", "ring_str_to_lower", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_REPLACE", "Str", "replace", "ring_str_replace", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_SPLIT", "Str", "split", "ring_str_split", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_CHAR_AT", "Str", "char_at", "ring_str_char_at", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_INDEX_OF", "Str", "index_of", "ring_str_index_of", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_PAD_START", "Str", "pad_start", "ring_str_pad_start", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_PAD_END", "Str", "pad_end", "ring_str_pad_end", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_REPEAT", "Str", "repeat", "ring_str_repeat", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_CHAR_CODE_AT", "Str", "char_code_at", "ring_str_char_code_at", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TRIM_START", "Str", "trim_start", "ring_str_trim_start", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TRIM_END", "Str", "trim_end", "ring_str_trim_end", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_IS_EMPTY", "Str", "is_empty", "ring_str_is_empty", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_LAST_INDEX_OF", "Str", "last_index_of", "ring_str_last_index_of", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_INT_TO_STR", "Int", "to_str", "ring_int_to_str", "register_scalar_method_intrinsics", "int_intrinsics"),
+    ("BUILTIN_METHOD_FLOAT_TO_STR", "Float", "to_str", "ring_float_to_str", "register_scalar_method_intrinsics", "float_intrinsics"),
+    ("BUILTIN_METHOD_OPTION_UNWRAP_OR", "Option", "unwrap_or", "ring_Option_unwrap_or", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_UNWRAP", "Option", "unwrap", "ring_Option_unwrap", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_IS_SOME", "Option", "is_some", "ring_Option_is_some", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_IS_NONE", "Option", "is_none", "ring_Option_is_none", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_MAP", "Option", "map", "ring_Option_map", "register_option_hof", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_AND_THEN", "Option", "and_then", "ring_Option_and_then", "register_option_hof", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE", "Option", "unwrap_or_else", "ring_Option_unwrap_or_else", "register_option_hof", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_TO_FAIL", "Option", "to_fail", "ring_Option_to_fail", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_CELL_GET", "Cell", "get", "ring_Cell_get", "register_cell", "intrinsics"),
+    ("BUILTIN_METHOD_CELL_SET", "Cell", "set", "ring_Cell_set", "register_cell", "intrinsics"),
+    ("BUILTIN_METHOD_CELL_UPDATE", "Cell", "update", "ring_Cell_update", "register_cell", "intrinsics"),
+)
+B201_BUILTIN_METHOD_MUTATION_COUNT = 27
+
+
+def _b201_function_body(
+    source: str, function_name: str, errors: List[str],
+) -> str:
+    body, body_error = _f0_function_body(source, function_name)
+    if body_error:
+        errors.append(body_error.replace("F0 function", "B-201 function"))
+        return ""
+    assert body is not None
+    return body
+
+
+def _b201_runtime_names(
+    source: str,
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    masked = mask_ring_strings_and_comments(source)
+    pattern = re.compile(
+        r"\bconst\s+INTRINSIC_RUNTIME_NAMES\s*:\s*List<Str>\s*=\s*\[")
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1:
+        return None, (
+            f"B-201 runtime name table found {len(matches)} times")
+    open_index = masked.rfind("[", matches[0].start(), matches[0].end())
+    try:
+        close_index = matching_delimiter(masked, open_index, "[", "]")
+    except ValueError as exc:
+        return None, f"B-201 runtime name table: {exc}"
+    body = source[open_index + 1:close_index]
+    residue = re.sub(r'"(?:[^"\\]|\\.)*"|[\s,]', "", body)
+    if residue:
+        return None, f"B-201 runtime table has non-string token {residue!r}"
+    return re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', body), None
+
+
+def builtin_method_intrinsic_contract_errors(
+    compiler_sources: Mapping[str, str], std_str: str, std_num: str,
+) -> List[str]:
+    errors: List[str] = []
+    identity = compiler_sources["ir_identity.ring"]
+    builtins = compiler_sources["builtins.ring"]
+    env = compiler_sources["env.ring"]
+    hir = compiler_sources["hir.ring"]
+    infer = compiler_sources["infer.ring"]
+    infer_helpers = compiler_sources["infer_helpers.ring"]
+    zonk = compiler_sources["zonk.ring"]
+    codegen = compiler_sources["codegen_c_expr.ring"]
+    parser = compiler_sources["parser.ring"]
+    infer_register = compiler_sources["infer_register.ring"]
+    infer_decl = compiler_sources["infer_decl.ring"]
+    checker = compiler_sources["checker.ring"]
+
+    if len(B201_BUILTIN_METHODS) != 33:
+        errors.append("B-201 test census is not exact33")
+    for tag, method in enumerate(B201_BUILTIN_METHODS):
+        constant_name, _, method_name, _, producer, map_name = method
+        declaration = f"pub const {constant_name}: Int = {tag}"
+        if declaration not in identity:
+            errors.append(f"B-201 identity misses {declaration!r}")
+        producer_body = _b201_function_body(builtins, producer, errors)
+        normalized = re.sub(r"\s+", "", producer_body)
+        relation = re.sub(
+            r"\s+", "",
+            f'install_intrinsic({map_name}, "{method_name}", {constant_name})')
+        if relation not in normalized:
+            errors.append(
+                f"B-201 producer {producer} misses {constant_name}/{method_name}")
+    if "pub const BUILTIN_METHOD_SITE_COUNT: Int = 33" not in identity:
+        errors.append("B-201 identity site census drifted")
+
+    for struct_name, expected_fields in (
+        ("BuiltinMethodSite", ["tag"]),
+        ("IntrinsicRef", ["site", "symbol"]),
+        ("MethodCallRef", ["intrinsic", "signature"]),
+    ):
+        source = hir if struct_name == "MethodCallRef" else identity
+        fields, field_error = _f0_struct_fields(source, struct_name)
+        if field_error:
+            errors.append(field_error.replace("F0 struct", "B-201 struct"))
+            continue
+        assert fields is not None
+        if [name for _, name in fields] != expected_fields:
+            errors.append(f"B-201 {struct_name} field inventory drifted")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"B-201 {struct_name} exposes forgeable fields")
+
+    identity_ctor = _b201_function_body(
+        identity, "make_builtin_method_intrinsic_ref", errors)
+    for token in (
+        "builtin_method_site_tag(site)",
+        'symbol_ref_origin_module_key(symbol) != "$builtin"',
+        "namespace_value()", '"builtin-method:${tag.to_str()}"',
+        '"builtin:method-site:${tag.to_str()}"',
+    ):
+        if token not in identity_ctor:
+            errors.append(f"B-201 IntrinsicRef constructor misses {token!r}")
+
+    impl_fields, impl_error = _f0_struct_fields(env, "ImplEntry")
+    if impl_error:
+        errors.append(impl_error.replace("F0 struct", "B-201 ImplEntry"))
+    elif impl_fields is not None and (
+            [name for _, name in impl_fields].count("method_intrinsics") != 1):
+        errors.append("B-201 ImplEntry lacks one intrinsic relation payload")
+    impl_validator = _b201_function_body(env, "validate_impl_entry", errors)
+    for token in (
+        "entry.method_intrinsics.entries()",
+        "entry.method_schemes.contains_key(method_name)",
+    ):
+        if token not in impl_validator:
+            errors.append(f"B-201 ImplEntry validator misses {token!r}")
+    impl_same = _b201_function_body(env, "impl_entry_final_same", errors)
+    if "method_intrinsic_map_same(" not in impl_same:
+        errors.append("B-201 full owner equality drops intrinsic relations")
+
+    shadow = _b201_function_body(
+        builtins, "validate_builtin_method_core_shadow", errors)
+    shadow_normalized = re.sub(r"\s+", "", shadow)
+    for token in (
+        "for tag in 0..BUILTIN_METHOD_SITE_COUNT",
+        "registered_intrinsic_count(env, intrinsic) != 1",
+        "make_named_executable_ref(intrinsic_ref_symbol(intrinsic))",
+        "executable_kind_builtin_intrinsic()", "make_contract_only()",
+        "make_binder_manifest(executable, [])", "make_core_program(",
+        "core_program_body_count(program) != 0",
+        "BUILTIN_METHOD_SITE_COUNT",
+    ):
+        if re.sub(r"\s+", "", token) not in shadow_normalized:
+            errors.append(f"B-201 Core shadow misses {token!r}")
+    new_ctx = _b201_function_body(checker, "new_infer_ctx", errors)
+    register_pos = new_ctx.find("register_builtins(ctx.env, sink)")
+    shadow_pos = new_ctx.find("validate_builtin_method_core_shadow(ctx.env)")
+    if register_pos < 0 or shadow_pos <= register_pos:
+        errors.append("B-201 checker does not consume shadow after registration")
+
+    method_ctor = _b201_function_body(
+        hir, "make_intrinsic_method_call_ref", errors)
+    if "Type::FnType { .. }" not in method_ctor:
+        errors.append("B-201 MethodCallRef accepts a non-callable signature")
+    method_same = _b201_function_body(hir, "method_call_ref_same", errors)
+    for token in ("intrinsic_ref_same(", "types_equal("):
+        if token not in method_same:
+            errors.append(f"B-201 MethodCallRef equality misses {token!r}")
+    if re.search(
+            r"Call\s*\{[^{}]*\bmethod_ref\s*:\s*MethodCallRef\?",
+            mask_ring_strings_and_comments(hir)) is None:
+        errors.append("B-201 HExpr::Call lacks exact MethodCallRef carrier")
+    hir_validator = _b201_function_body(hir, "validate_hir_expr", errors)
+    for token in (
+        "some(exact_method)", "HFieldAccessKind::Method",
+        "method_call_ref_signature(exact_method)", "types_equal(",
+    ):
+        if token not in hir_validator:
+            errors.append(f"B-201 HIR validator misses {token!r}")
+
+    lookup_impl = _b201_function_body(
+        infer_helpers, "lookup_impl_method", errors)
+    lookup_trait = _b201_function_body(
+        infer_helpers, "lookup_trait_method", errors)
+    for label, body in (("impl", lookup_impl), ("trait", lookup_trait)):
+        if ".method_intrinsics.get(method)" not in body:
+            errors.append(f"B-201 {label} lookup drops exact intrinsic")
+    infer_method = _b201_function_body(
+        infer, "infer_method_call_from_receiver", errors)
+    for token in (
+        "intrinsic_ref = r.intrinsic_ref",
+        "make_intrinsic_method_call_ref(",
+        "method_ref: exact_method_ref",
+    ):
+        if token not in infer_method:
+            errors.append(f"B-201 infer consumer misses {token!r}")
+    zonk_helper = _b201_function_body(zonk, "zonk_method_call_ref", errors)
+    for token in (
+        "method_call_ref_intrinsic(exact)",
+        "zonk_type(ctx, method_call_ref_signature(exact))",
+    ):
+        if token not in zonk_helper:
+            errors.append(f"B-201 zonk relation misses {token!r}")
+
+    for file_name, function_name, transport in (
+        ("andor_lower.ring", "al_expr", "method_ref: method_ref"),
+        ("dict_lower.ring", "dl_expr", "method_ref: method_ref"),
+        ("perceus.ring", "anf_expr", "method_ref: method_ref"),
+        ("perceus.ring", "rc_expr", "method_ref: method_ref"),
+        ("zonk.ring", "zonk_expr", "method_ref: zonk_method_call_ref(ctx, method_ref)"),
+    ):
+        body = _b201_function_body(
+            compiler_sources[file_name], function_name, errors)
+        if transport not in body:
+            errors.append(
+                f"B-201 {file_name}:{function_name} drops MethodCallRef")
+
+    runtime_names, runtime_error = _b201_runtime_names(codegen)
+    if runtime_error:
+        errors.append(runtime_error)
+    elif runtime_names != [entry[3] for entry in B201_BUILTIN_METHODS]:
+        errors.append("B-201 exact tag-to-ABI projection drifted")
+    if "fn method_to_runtime_c(" in mask_ring_strings_and_comments(codegen):
+        errors.append("B-201 retained the type/name runtime method table")
+    intrinsic_codegen = _b201_function_body(
+        codegen, "gen_c_intrinsic_method_call", errors)
+    for token in (
+        "method_call_ref_signature(method_ref)",
+        "method_call_ref_intrinsic(method_ref)",
+        "builtin_method_site_tag(", "intrinsic_runtime_name(tag)",
+        "rt_use(ctx, runtime_name, call_args.len())",
+    ):
+        if token not in intrinsic_codegen:
+            errors.append(f"B-201 C intrinsic projection misses {token!r}")
+    for forbidden in ("type_to_builtin_name", "method_to_runtime_c"):
+        if forbidden in intrinsic_codegen:
+            errors.append(
+                f"B-201 exact C projection reinterprets {forbidden}")
+    gen_call = _b201_function_body(codegen, "gen_c_call", errors)
+    exact_pos = gen_call.find("match method_ref")
+    fallback_pos = gen_call.find("let raw = match callee")
+    if exact_pos < 0 or fallback_pos < 0 or exact_pos >= fallback_pos:
+        errors.append("B-201 exact method consumer does not precede fallback")
+
+    parse_impl = _b201_function_body(parser, "parse_impl_decl", errors)
+    if "impl-member extern fn is not part of Ring 0.1" not in parse_impl or (
+            "parse_extern_fn_decl_body" in parse_impl):
+        errors.append("B-201 parser still accepts impl-member extern fn")
+    register_impl = _b201_function_body(
+        infer_register, "register_impl", errors)
+    check_impl = _b201_function_body(infer_decl, "check_impl_decl", errors)
+    if "Decl::ExternFn" in register_impl:
+        errors.append("B-201 registration still elaborates impl-member extern fn")
+    if "Decl::ExternFn" in check_impl:
+        errors.append("B-201 HIR still elaborates impl-member extern fn")
+    for file_name, source in (("std/str.ring", std_str), ("std/num.ring", std_num)):
+        masked = mask_ring_strings_and_comments(source)
+        if re.search(r"\bimpl\s+(?:Str|Int|Float)\s*\{", masked):
+            errors.append(f"B-201 source extern owner remains in {file_name}")
+    return errors
+
+
+def builtin_method_intrinsic_mutation_errors(
+    compiler_sources: Mapping[str, str], std_str: str, std_num: str,
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("site count", "ir_identity.ring", None,
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 33",
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 32"),
+        ("tag duplicate", "ir_identity.ring", None,
+         "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 1",
+         "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 0"),
+        ("symbol payload", "ir_identity.ring", "make_builtin_method_intrinsic_ref",
+         '"builtin-method:${tag.to_str()}"', '"builtin-method"'),
+        ("producer swap", "builtins.ring", "register_scalar_method_intrinsics",
+         'install_intrinsic(str_intrinsics, "len", BUILTIN_METHOD_STR_LEN)',
+         'install_intrinsic(str_intrinsics, "len", BUILTIN_METHOD_STR_CONTAINS)'),
+        ("option producer", "builtins.ring", "register_option",
+         'install_intrinsic(intrinsics, "unwrap", BUILTIN_METHOD_OPTION_UNWRAP)',
+         'install_intrinsic(intrinsics, "unwrap", BUILTIN_METHOD_OPTION_UNWRAP_OR)'),
+        ("cell producer", "builtins.ring", "register_cell",
+         'install_intrinsic(intrinsics, "set", BUILTIN_METHOD_CELL_SET)',
+         'install_intrinsic(intrinsics, "set", BUILTIN_METHOD_CELL_GET)'),
+        ("owner scheme relation", "env.ring", "validate_impl_entry",
+         "for intrinsic_entry in entry.method_intrinsics.entries()",
+         "for intrinsic_entry in []"),
+        ("owner equality", "env.ring", "impl_entry_final_same",
+         "method_intrinsic_map_same(", "method_core_map_same("),
+        ("shadow uniqueness", "builtins.ring", "validate_builtin_method_core_shadow",
+         "registered_intrinsic_count(env, intrinsic) != 1", "false"),
+        ("shadow contract", "builtins.ring", "validate_builtin_method_core_shadow",
+         "make_contract_only()", "make_concrete_body_contract(make_path_ref(path_owner_for_module_body(module_body), [\"x\"], path_role_child()))"),
+        ("shadow manifest", "builtins.ring", "validate_builtin_method_core_shadow",
+         "make_binder_manifest(executable, [])", "make_binder_manifest(executable, [bad])"),
+        ("checker consumer", "checker.ring", "new_infer_ctx",
+         "validate_builtin_method_core_shadow(ctx.env)", "()"),
+        ("call signature kind", "hir.ring", "make_intrinsic_method_call_ref",
+         "Type::FnType { .. }", "_"),
+        ("call intrinsic equality", "hir.ring", "method_call_ref_same",
+         "intrinsic_ref_same(left.intrinsic, right.intrinsic)", "true"),
+        ("HIR validation", "hir.ring", "validate_hir_expr",
+         "method_call_ref_signature(exact_method)", "ty"),
+        ("impl lookup", "infer_helpers.ring", "lookup_impl_method",
+         "intrinsic_ref: owner.method_intrinsics.get(method)", "intrinsic_ref: none"),
+        ("trait lookup", "infer_helpers.ring", "lookup_trait_method",
+         "impl_entry.method_intrinsics.get(method)", "none"),
+        ("infer publish", "infer.ring", "infer_method_call_from_receiver",
+         "method_ref: exact_method_ref", "method_ref: none"),
+        ("zonk signature", "zonk.ring", "zonk_method_call_ref",
+         "zonk_type(ctx, method_call_ref_signature(exact))",
+         "method_call_ref_signature(exact)"),
+        ("andor transport", "andor_lower.ring", "al_expr",
+         "method_ref: method_ref", "method_ref: none"),
+        ("dict transport", "dict_lower.ring", "dl_expr",
+         "method_ref: method_ref", "method_ref: none"),
+        ("ANF transport", "perceus.ring", "anf_expr",
+         "method_ref: method_ref", "method_ref: none"),
+        ("RC transport", "perceus.ring", "rc_expr",
+         "method_ref: method_ref", "method_ref: none"),
+        ("ABI order", "codegen_c_expr.ring", None,
+         '"ring_str_len", "ring_str_contains"',
+         '"ring_str_contains", "ring_str_len"'),
+        ("name fallback", "codegen_c_expr.ring", None,
+         "fn intrinsic_runtime_name(tag: Int) -> Str {",
+         "fn method_to_runtime_c(type_name: Str, method: Str) -> Str? { none }\n\nfn intrinsic_runtime_name(tag: Int) -> Str {"),
+        ("parser fallback", "parser.ring", "parse_impl_decl",
+         'self.error(\n                    "impl-member extern fn is not part of Ring 0.1; use a top-level extern fn and an ordinary wrapper")',
+         "methods.push(self.parse_extern_fn_decl_body(m_pub, self.current_span_start()))"),
+        ("source extern resurrection", "std", None, "", ""),
+    )
+    killed = 0
+    for label, file_name, function_name, anchor, replacement in mutations:
+        mutated_sources = dict(compiler_sources)
+        mutated_str = std_str
+        mutated_num = std_num
+        if file_name == "std":
+            mutated_str = "impl Str { pub extern fn len(self: Str) -> Int }\n" + std_str
+        elif function_name is None:
+            source = compiler_sources[file_name]
+            if source.count(anchor) != 1:
+                errors.append(
+                    f"B-201 mutation {label}: anchor count was {source.count(anchor)}")
+                continue
+            mutated_sources[file_name] = source.replace(anchor, replacement, 1)
+        else:
+            mutated, mutation_error = _f0_mutate_function_once(
+                compiler_sources[file_name], function_name, anchor, replacement)
+            if mutation_error:
+                errors.append(f"B-201 mutation {label}: {mutation_error}")
+                continue
+            assert mutated is not None
+            mutated_sources[file_name] = mutated
+        findings = builtin_method_intrinsic_contract_errors(
+            mutated_sources, mutated_str, mutated_num)
+        if not findings:
+            errors.append(f"B-201 mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != B201_BUILTIN_METHOD_MUTATION_COUNT:
+        errors.append(
+            f"B-201 killed {killed} mutations, expected "
+            f"{B201_BUILTIN_METHOD_MUTATION_COUNT}")
+    return errors
+
+
+def builtin_method_intrinsic_source_errors() -> List[str]:
+    try:
+        compiler_sources = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in (REPO / "compiler").glob("*.ring")
+        }
+        std_str = (REPO / "std" / "str.ring").read_text(encoding="utf-8")
+        std_num = (REPO / "std" / "num.ring").read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read B-201 sources: {exc}"]
+    errors = builtin_method_intrinsic_contract_errors(
+        compiler_sources, std_str, std_num)
+    if errors:
+        return errors
+    errors.extend(builtin_method_intrinsic_mutation_errors(
+        compiler_sources, std_str, std_num))
+    return errors
+
+
 F2_U1A_SOURCE_CONTRACT_MUTATIONS = (
     # Resolver source-site and exact namespace construction.
     ("resolver", "source_declaration_site_path", "site.use_index != -1",
@@ -12953,6 +13724,36 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
             TestResult.PASS if not inventory_errors else TestResult.FAIL,
             suite, inventory_label,
             "; ".join([detail, *inventory_errors])))
+
+    core_c0_label = "compiler.core_hir_c0_schema_construction"
+    if matches_filter(core_c0_label, name_filter):
+        core_c0_errors = core_hir_c0_source_errors()
+        if not core_c0_errors:
+            core_c0_errors.extend(core_hir_c0_compile_errors(ring_exe))
+        detail = (
+            f"source_mutations={CORE_HIR_C0_MUTATION_COUNT}; "
+            f"scope_guards={CORE_HIR_C0_SCOPE_GUARD_COUNT}; "
+            "pinned_source_checks=2; pipeline_consumers=1; "
+            "contract_only_builtin_shadow=true; body_anchor_closure=true")
+        collector.add(TestResult(
+            TestResult.PASS if not core_c0_errors else TestResult.FAIL,
+            suite, core_c0_label,
+            "; ".join([detail, *core_c0_errors])))
+
+    builtin_method_label = "compiler.builtin_method_intrinsic_vertical"
+    if matches_filter(builtin_method_label, name_filter):
+        builtin_method_errors = builtin_method_intrinsic_source_errors()
+        detail = (
+            "producer=registered_impl_payload; "
+            "consumer=core_shadow+method_call_ref+c_abi; "
+            "census=33; source_mutations=27; "
+            "single_canary=builtin_intrinsic_identity; "
+            "project_canary=builtin_intrinsic_identity_project; "
+            "old_method_name_table=retired; impl_member_extern=hard_reject")
+        collector.add(TestResult(
+            TestResult.PASS if not builtin_method_errors else TestResult.FAIL,
+            suite, builtin_method_label,
+            "; ".join([detail, *builtin_method_errors])))
 
     resource_label = "compiler.resource_model_f0"
     if matches_filter(resource_label, name_filter):

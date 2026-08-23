@@ -661,6 +661,99 @@ pub fn origin_ref_same(left: OriginRef, right: OriginRef) -> Bool {
     }
 }
 
+// Fixed 0.1 builtin method intrinsic sites.  These tags are semantic compiler
+// identities, not runtime symbol ordinals.  Builtins is the sole producer;
+// HIR and Abi/C lowering may only copy and exhaustively consume them.
+pub const BUILTIN_METHOD_STR_LEN: Int = 0
+pub const BUILTIN_METHOD_STR_CONTAINS: Int = 1
+pub const BUILTIN_METHOD_STR_STARTS_WITH: Int = 2
+pub const BUILTIN_METHOD_STR_ENDS_WITH: Int = 3
+pub const BUILTIN_METHOD_STR_SLICE: Int = 4
+pub const BUILTIN_METHOD_STR_TRIM: Int = 5
+pub const BUILTIN_METHOD_STR_TO_UPPER: Int = 6
+pub const BUILTIN_METHOD_STR_TO_LOWER: Int = 7
+pub const BUILTIN_METHOD_STR_REPLACE: Int = 8
+pub const BUILTIN_METHOD_STR_SPLIT: Int = 9
+pub const BUILTIN_METHOD_STR_CHAR_AT: Int = 10
+pub const BUILTIN_METHOD_STR_INDEX_OF: Int = 11
+pub const BUILTIN_METHOD_STR_PAD_START: Int = 12
+pub const BUILTIN_METHOD_STR_PAD_END: Int = 13
+pub const BUILTIN_METHOD_STR_REPEAT: Int = 14
+pub const BUILTIN_METHOD_STR_CHAR_CODE_AT: Int = 15
+pub const BUILTIN_METHOD_STR_TRIM_START: Int = 16
+pub const BUILTIN_METHOD_STR_TRIM_END: Int = 17
+pub const BUILTIN_METHOD_STR_IS_EMPTY: Int = 18
+pub const BUILTIN_METHOD_STR_LAST_INDEX_OF: Int = 19
+pub const BUILTIN_METHOD_INT_TO_STR: Int = 20
+pub const BUILTIN_METHOD_FLOAT_TO_STR: Int = 21
+pub const BUILTIN_METHOD_OPTION_UNWRAP_OR: Int = 22
+pub const BUILTIN_METHOD_OPTION_UNWRAP: Int = 23
+pub const BUILTIN_METHOD_OPTION_IS_SOME: Int = 24
+pub const BUILTIN_METHOD_OPTION_IS_NONE: Int = 25
+pub const BUILTIN_METHOD_OPTION_MAP: Int = 26
+pub const BUILTIN_METHOD_OPTION_AND_THEN: Int = 27
+pub const BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE: Int = 28
+pub const BUILTIN_METHOD_OPTION_TO_FAIL: Int = 29
+pub const BUILTIN_METHOD_CELL_GET: Int = 30
+pub const BUILTIN_METHOD_CELL_SET: Int = 31
+pub const BUILTIN_METHOD_CELL_UPDATE: Int = 32
+pub const BUILTIN_METHOD_SITE_COUNT: Int = 33
+
+pub struct BuiltinMethodSite {
+    tag: Int
+}
+
+pub fn builtin_method_site_from_tag(tag: Int) -> BuiltinMethodSite {
+    if tag < 0 || tag >= BUILTIN_METHOD_SITE_COUNT {
+        panic("IR identity: invalid builtin method site")
+    }
+    BuiltinMethodSite { tag: tag }
+}
+
+pub fn builtin_method_site_tag(value: BuiltinMethodSite) -> Int {
+    builtin_method_site_from_tag(value.tag).tag
+}
+
+pub fn builtin_method_site_same(
+    left: BuiltinMethodSite, right: BuiltinMethodSite
+) -> Bool {
+    builtin_method_site_tag(left) == builtin_method_site_tag(right)
+}
+
+pub struct IntrinsicRef {
+    site: BuiltinMethodSite,
+    symbol: SymbolRef
+}
+
+pub fn make_builtin_method_intrinsic_ref(
+    site: BuiltinMethodSite, symbol: SymbolRef
+) -> IntrinsicRef {
+    let tag = builtin_method_site_tag(site)
+    if symbol_ref_origin_module_key(symbol) != "$builtin" ||
+       !namespace_kind_same(
+            symbol_ref_namespace_kind(symbol), namespace_value()) ||
+       symbol_ref_canonical_payload(symbol) !=
+            "builtin-method:${tag.to_str()}" ||
+       symbol_ref_declaration_site_path(symbol) !=
+            "builtin:method-site:${tag.to_str()}" {
+        panic("IR identity: builtin method intrinsic relation drifted")
+    }
+    IntrinsicRef { site: site, symbol: symbol }
+}
+
+pub fn intrinsic_ref_site(value: IntrinsicRef) -> BuiltinMethodSite {
+    value.site
+}
+
+pub fn intrinsic_ref_symbol(value: IntrinsicRef) -> SymbolRef {
+    value.symbol
+}
+
+pub fn intrinsic_ref_same(left: IntrinsicRef, right: IntrinsicRef) -> Bool {
+    builtin_method_site_same(left.site, right.site) &&
+        symbol_ref_same(left.symbol, right.symbol)
+}
+
 const IMPL_PROVIDER_SOURCE: Int = 0
 const IMPL_PROVIDER_BUILTIN: Int = 1
 const IMPL_PROVIDER_DERIVED: Int = 2

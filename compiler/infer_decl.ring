@@ -745,8 +745,6 @@ fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: L
     let mut hmethods: List<HDecl> = []
     for method in ordered_methods {
         match method {
-            Decl::ExternFn { name, type_params: mtps, params, return_type, declared_effects, is_pub, span: mspan } =>
-                hmethods.push(check_extern_fn_decl(ctx, name, mtps, params, declared_effects, is_pub, mspan)),
             Decl::Fn { name, type_params: mtps, params, return_type, declared_effects, body, is_pub, span: mspan, .. } => {
                 let registration_scheme = registered_impl_method_scheme(
                     ctx, target_type, trait_name, origin, name)
@@ -1300,7 +1298,7 @@ fn expand_delegate_impls(
                                                     dict_dispatch: some(DictDispatchInfo {
                                                         dict_ref: DictRef::Static(dict_name),
                                                         method: tm.name
-                                                    }),
+                                                    }), method_ref: none,
                                                     ty: ret_ty,
                                                     effects: eff,
                                                     span: span
@@ -1335,7 +1333,7 @@ fn expand_delegate_impls(
                                                     args: forward_args,
                                                     type_args: [],
                                                     resolved_dicts: resolved_forward_dicts,
-                                                    dict_dispatch: none,
+                                                    dict_dispatch: none, method_ref: none,
                                                     ty: ret_ty,
                                                     effects: eff,
                                                     span: span

@@ -1,10 +1,9 @@
-// C0 physical CoreHIR schema and body-anchor closure.
+// Physical CoreHIR closure shared by semantic lowerings.
 //
-// This module has no pipeline producer or consumer.  A CoreBodyEntry records
-// only the exact executable, its exact origin, and the already-validated body
-// anchor declared by ExecutableInventory.  It does not store or expose a
-// legacy HIR body and makes no semantic-closure claim.  C1 will add the first
-// private Core expression tree and its material valid/invalid probes.
+// A CoreBodyEntry records only the exact executable, its exact origin, and the
+// already-validated body anchor declared by ExecutableInventory. ContractOnly
+// builtin intrinsics close through the same inventory/manifests constructor
+// with no body entry; executable bodies never escape through legacy HIR here.
 
 use ir_identity::{OriginRef, PathRef, path_ref_same}
 use ir_inventory::{

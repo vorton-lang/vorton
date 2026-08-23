@@ -1200,9 +1200,8 @@ impl Parser {
             if self.check(TokenKind::TkIdent) && self.peek().value == "type" {
                 methods.push(self.parse_assoc_type_decl(m_pub))
             } else if self.check(TokenKind::TkExtern) {
-                let m_start = self.current_span_start()
-                self.expect(TokenKind::TkExtern)
-                methods.push(self.parse_extern_fn_decl_body(m_pub, m_start))
+                self.error(
+                    "impl-member extern fn is not part of Ring 0.1; use a top-level extern fn and an ordinary wrapper")
             } else {
                 methods.push(self.parse_fn_decl(m_pub, false))
             }

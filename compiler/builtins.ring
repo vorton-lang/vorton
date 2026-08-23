@@ -21,13 +21,42 @@ use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
 use ir_identity::{SymbolRef, TraitMethodRef,
-    ImplProviderRef,
+    ImplProviderRef, IntrinsicRef, BuiltinMethodSite,
     make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
     make_registered_nominal_ref, make_registered_trait_ref,
     make_module_body_ref, path_owner_for_module_body, make_path_ref,
     path_role_synthetic, make_impl_provider_ref,
     impl_provider_kind_builtin, registered_trait_ref_symbol,
-    namespace_nominal, namespace_trait, namespace_member}
+    builtin_method_site_from_tag, builtin_method_site_tag,
+    make_builtin_method_intrinsic_ref, intrinsic_ref_same,
+    intrinsic_ref_symbol,
+    BUILTIN_METHOD_SITE_COUNT,
+    BUILTIN_METHOD_STR_LEN, BUILTIN_METHOD_STR_CONTAINS,
+    BUILTIN_METHOD_STR_STARTS_WITH, BUILTIN_METHOD_STR_ENDS_WITH,
+    BUILTIN_METHOD_STR_SLICE, BUILTIN_METHOD_STR_TRIM,
+    BUILTIN_METHOD_STR_TO_UPPER, BUILTIN_METHOD_STR_TO_LOWER,
+    BUILTIN_METHOD_STR_REPLACE, BUILTIN_METHOD_STR_SPLIT,
+    BUILTIN_METHOD_STR_CHAR_AT, BUILTIN_METHOD_STR_INDEX_OF,
+    BUILTIN_METHOD_STR_PAD_START, BUILTIN_METHOD_STR_PAD_END,
+    BUILTIN_METHOD_STR_REPEAT, BUILTIN_METHOD_STR_CHAR_CODE_AT,
+    BUILTIN_METHOD_STR_TRIM_START, BUILTIN_METHOD_STR_TRIM_END,
+    BUILTIN_METHOD_STR_IS_EMPTY, BUILTIN_METHOD_STR_LAST_INDEX_OF,
+    BUILTIN_METHOD_INT_TO_STR, BUILTIN_METHOD_FLOAT_TO_STR,
+    BUILTIN_METHOD_OPTION_UNWRAP_OR, BUILTIN_METHOD_OPTION_UNWRAP,
+    BUILTIN_METHOD_OPTION_IS_SOME, BUILTIN_METHOD_OPTION_IS_NONE,
+    BUILTIN_METHOD_OPTION_MAP, BUILTIN_METHOD_OPTION_AND_THEN,
+    BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE, BUILTIN_METHOD_OPTION_TO_FAIL,
+    BUILTIN_METHOD_CELL_GET, BUILTIN_METHOD_CELL_SET,
+    BUILTIN_METHOD_CELL_UPDATE,
+    namespace_value, namespace_nominal, namespace_trait, namespace_member}
+use ir_inventory::{ExecutableEntry, ExecutableInventory, BinderManifest,
+    make_named_executable_ref, make_module_body_parent,
+    make_executable_entry, make_contract_only,
+    make_executable_inventory, make_binder_manifest,
+    executable_kind_builtin_intrinsic,
+    executable_inventory_count}
+use core_hir::{make_core_program, core_program_body_count,
+    core_program_inventory, core_program_manifests}
 
 // ============================================================
 // Struct for open_row return value
@@ -73,10 +102,13 @@ const BUILTIN_PROVIDER_SET_HOF_UNBOUNDED: Int = 6
 const BUILTIN_PROVIDER_SET_HOF_BOUNDED: Int = 7
 const BUILTIN_PROVIDER_OPTION_HOF: Int = 8
 const BUILTIN_PROVIDER_PTR_CORE: Int = 9
-const BUILTIN_PROVIDER_SITE_COUNT: Int = 10
+const BUILTIN_PROVIDER_STR_CORE: Int = 10
+const BUILTIN_PROVIDER_INT_CORE: Int = 11
+const BUILTIN_PROVIDER_FLOAT_CORE: Int = 12
+const BUILTIN_PROVIDER_SITE_COUNT: Int = 13
 
 const BUILTIN_PROVIDER_ORDINALS: List<Int> = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
 ]
 
 struct BuiltinImplProviderSite {
@@ -116,6 +148,23 @@ fn builtin_impl_provider(site: BuiltinImplProviderSite) -> ImplProviderRef {
                 "$builtin", "builtin:impl-providers")),
             [ordinal.to_str()], path_role_synthetic()),
         impl_provider_kind_builtin())
+}
+
+fn builtin_method_intrinsic(site: BuiltinMethodSite) -> IntrinsicRef {
+    let tag = builtin_method_site_tag(site)
+    make_builtin_method_intrinsic_ref(site, make_symbol_ref(
+        "$builtin", namespace_value(), "builtin-method:${tag.to_str()}",
+        "builtin:method-site:${tag.to_str()}"))
+}
+
+fn install_intrinsic(
+    mut intrinsics: Map<Str, IntrinsicRef>, name: Str, tag: Int
+) {
+    if intrinsics.contains_key(name) {
+        panic("builtin method intrinsic: duplicate method relation")
+    }
+    intrinsics.insert(name, builtin_method_intrinsic(
+        builtin_method_site_from_tag(tag)))
 }
 
 fn builtin_impl_trait_ref(env: TypeEnv, trait_name: Str?) -> SymbolRef? {
@@ -170,7 +219,9 @@ fn install_builtin_method_owner(
     target_type_name: Str, origin: Str,
     trait_name: Str?, type_params: List<Str>, owner_type_vars: List<Int>,
     predicate_specs: List<BuiltinPredicateSpec>, state: ImplOwnerState,
-    methods: Map<Str, TypeScheme>, provider_site: BuiltinImplProviderSite
+    methods: Map<Str, TypeScheme>,
+    method_intrinsics: Map<Str, IntrinsicRef>,
+    provider_site: BuiltinImplProviderSite
 ) {
     let span = span_zero()
     if type_params.len() != owner_type_vars.len() {
@@ -207,6 +258,7 @@ fn install_builtin_method_owner(
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: map_clone(cores),
+        method_intrinsics: map_clone(method_intrinsics),
         provider_ref: some(provider_ref),
         trait_ref: trait_ref,
         delegate_plan: delegate_plan_not_applicable(),
@@ -260,6 +312,7 @@ fn seed_std_hof_owner(
         method_names: [],
         assoc_types: map_new(),
         method_schemes: map_new(),
+        method_intrinsics: map_new(),
         provider_ref: none,
         trait_ref: none,
         delegate_plan: delegate_plan_not_applicable(),
@@ -350,6 +403,7 @@ fn add_builtin_impl(
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: map_clone(exact),
+        method_intrinsics: map_new(),
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
         delegate_plan: delegate_plan_not_applicable(),
@@ -461,6 +515,7 @@ fn make_set_struct(t: Type) -> Type {
 
 pub fn register_builtins(mut env: TypeEnv, sink: CollectingSink) {
     register_effects(env)
+    register_scalar_method_intrinsics(env, sink)
     register_cell(env, sink)
     register_option(env, sink)
     register_eq_trait(env, sink)
@@ -541,11 +596,156 @@ fn seed_std_hof_owners(mut env: TypeEnv) {
         ["T"], [set_unbounded_t], [])
 }
 
+fn register_scalar_method_intrinsics(
+    mut env: TypeEnv, sink: CollectingSink
+) {
+    let mut str_methods: Map<Str, TypeScheme> = map_new()
+    str_methods.insert("len", mono(Type::FnType {
+        params: [STR], return_type: INT, effects: EMPTY_ROW }))
+    for name in ["contains", "starts_with", "ends_with"] {
+        str_methods.insert(name, mono(Type::FnType {
+            params: [STR, STR], return_type: BOOL, effects: EMPTY_ROW }))
+    }
+    str_methods.insert("slice", mono(Type::FnType {
+        params: [STR, INT, INT], return_type: STR, effects: EMPTY_ROW }))
+    for name in ["trim", "to_upper", "to_lower", "trim_start", "trim_end"] {
+        str_methods.insert(name, mono(Type::FnType {
+            params: [STR], return_type: STR, effects: EMPTY_ROW }))
+    }
+    str_methods.insert("replace", mono(Type::FnType {
+        params: [STR, STR, STR], return_type: STR, effects: EMPTY_ROW }))
+    str_methods.insert("split", mono(Type::FnType {
+        params: [STR, STR], return_type: make_list_struct(STR),
+        effects: EMPTY_ROW }))
+    str_methods.insert("char_at", mono(Type::FnType {
+        params: [STR, INT], return_type: make_option_type(STR),
+        effects: EMPTY_ROW }))
+    str_methods.insert("index_of", mono(Type::FnType {
+        params: [STR, STR], return_type: make_option_type(INT),
+        effects: EMPTY_ROW }))
+    for name in ["pad_start", "pad_end"] {
+        str_methods.insert(name, mono(Type::FnType {
+            params: [STR, INT, STR], return_type: STR,
+            effects: EMPTY_ROW }))
+    }
+    str_methods.insert("repeat", mono(Type::FnType {
+        params: [STR, INT], return_type: STR, effects: EMPTY_ROW }))
+    str_methods.insert("char_code_at", mono(Type::FnType {
+        params: [STR, INT], return_type: make_option_type(INT),
+        effects: EMPTY_ROW }))
+    str_methods.insert("is_empty", mono(Type::FnType {
+        params: [STR], return_type: BOOL, effects: EMPTY_ROW }))
+    str_methods.insert("last_index_of", mono(Type::FnType {
+        params: [STR, STR], return_type: make_option_type(INT),
+        effects: EMPTY_ROW }))
+
+    let mut str_intrinsics: Map<Str, IntrinsicRef> = map_new()
+    install_intrinsic(str_intrinsics, "len", BUILTIN_METHOD_STR_LEN)
+    install_intrinsic(str_intrinsics, "contains", BUILTIN_METHOD_STR_CONTAINS)
+    install_intrinsic(
+        str_intrinsics, "starts_with", BUILTIN_METHOD_STR_STARTS_WITH)
+    install_intrinsic(str_intrinsics, "ends_with", BUILTIN_METHOD_STR_ENDS_WITH)
+    install_intrinsic(str_intrinsics, "slice", BUILTIN_METHOD_STR_SLICE)
+    install_intrinsic(str_intrinsics, "trim", BUILTIN_METHOD_STR_TRIM)
+    install_intrinsic(str_intrinsics, "to_upper", BUILTIN_METHOD_STR_TO_UPPER)
+    install_intrinsic(str_intrinsics, "to_lower", BUILTIN_METHOD_STR_TO_LOWER)
+    install_intrinsic(str_intrinsics, "replace", BUILTIN_METHOD_STR_REPLACE)
+    install_intrinsic(str_intrinsics, "split", BUILTIN_METHOD_STR_SPLIT)
+    install_intrinsic(str_intrinsics, "char_at", BUILTIN_METHOD_STR_CHAR_AT)
+    install_intrinsic(str_intrinsics, "index_of", BUILTIN_METHOD_STR_INDEX_OF)
+    install_intrinsic(str_intrinsics, "pad_start", BUILTIN_METHOD_STR_PAD_START)
+    install_intrinsic(str_intrinsics, "pad_end", BUILTIN_METHOD_STR_PAD_END)
+    install_intrinsic(str_intrinsics, "repeat", BUILTIN_METHOD_STR_REPEAT)
+    install_intrinsic(
+        str_intrinsics, "char_code_at", BUILTIN_METHOD_STR_CHAR_CODE_AT)
+    install_intrinsic(
+        str_intrinsics, "trim_start", BUILTIN_METHOD_STR_TRIM_START)
+    install_intrinsic(str_intrinsics, "trim_end", BUILTIN_METHOD_STR_TRIM_END)
+    install_intrinsic(str_intrinsics, "is_empty", BUILTIN_METHOD_STR_IS_EMPTY)
+    install_intrinsic(
+        str_intrinsics, "last_index_of", BUILTIN_METHOD_STR_LAST_INDEX_OF)
+    install_builtin_method_owner(
+        env, sink, "Str", "<builtin-inherent>:Str:core",
+        none, [], [], [], ImplOwnerState::FinalOwner,
+        str_methods, str_intrinsics,
+        builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_STR_CORE))
+
+    let mut int_methods: Map<Str, TypeScheme> = map_new()
+    int_methods.insert("to_str", mono(Type::FnType {
+        params: [INT], return_type: STR, effects: EMPTY_ROW }))
+    let mut int_intrinsics: Map<Str, IntrinsicRef> = map_new()
+    install_intrinsic(int_intrinsics, "to_str", BUILTIN_METHOD_INT_TO_STR)
+    install_builtin_method_owner(
+        env, sink, "Int", "<builtin-inherent>:Int:core",
+        none, [], [], [], ImplOwnerState::FinalOwner,
+        int_methods, int_intrinsics,
+        builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_INT_CORE))
+
+    let mut float_methods: Map<Str, TypeScheme> = map_new()
+    float_methods.insert("to_str", mono(Type::FnType {
+        params: [FLOAT], return_type: STR, effects: EMPTY_ROW }))
+    let mut float_intrinsics: Map<Str, IntrinsicRef> = map_new()
+    install_intrinsic(
+        float_intrinsics, "to_str", BUILTIN_METHOD_FLOAT_TO_STR)
+    install_builtin_method_owner(
+        env, sink, "Float", "<builtin-inherent>:Float:core",
+        none, [], [], [], ImplOwnerState::FinalOwner,
+        float_methods, float_intrinsics,
+        builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_FLOAT_CORE))
+}
+
 // Normal compilation publishes no std HOF method core before source
 // registration. Option HOFs are true builtins and remain final here.
 pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {
     seed_std_hof_owners(env)
     register_option_hof(env, sink)
+}
+
+fn registered_intrinsic_count(env: TypeEnv, intrinsic: IntrinsicRef) -> Int {
+    let mut count = 0
+    for map_entry in env.trait_reg.trait_impls.entries() {
+        let (_, owners) = map_entry
+        for owner in owners {
+            for method_entry in owner.method_intrinsics.entries() {
+                let (_, candidate) = method_entry
+                if intrinsic_ref_same(candidate, intrinsic) {
+                    count = count + 1
+                }
+            }
+        }
+    }
+    count
+}
+
+// Live C0/B-201 producer+consumer.  It closes the exact ContractOnly builtin
+// method inventory on every checker construction and then discards the shadow;
+// ordinary compilation still consumes the same registry owner payload.
+pub fn validate_builtin_method_core_shadow(env: TypeEnv) {
+    let module_body = make_module_body_ref(
+        "$builtin", "builtin:method-sites")
+    let mut entries: List<ExecutableEntry> = []
+    let mut manifests: List<BinderManifest> = []
+    for tag in 0..BUILTIN_METHOD_SITE_COUNT {
+        let intrinsic = builtin_method_intrinsic(
+            builtin_method_site_from_tag(tag))
+        if registered_intrinsic_count(env, intrinsic) != 1 {
+            panic("builtin method Core shadow: registry relation is not unique")
+        }
+        let executable = make_named_executable_ref(
+            intrinsic_ref_symbol(intrinsic))
+        entries.push(make_executable_entry(
+            executable, make_module_body_parent(module_body),
+            executable_kind_builtin_intrinsic(), make_contract_only()))
+        manifests.push(make_binder_manifest(executable, []))
+    }
+    let program = make_core_program(
+        [], make_executable_inventory(entries), manifests)
+    if core_program_body_count(program) != 0 ||
+       executable_inventory_count(core_program_inventory(program)) !=
+            BUILTIN_METHOD_SITE_COUNT ||
+       core_program_manifests(program).len() != BUILTIN_METHOD_SITE_COUNT {
+        panic("builtin method Core shadow: closed census drifted")
+    }
 }
 
 // Only checker.load_prelude's no-std branch may consume this fallback.
@@ -670,9 +870,13 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
         def_id: none
     })
 
+    let mut intrinsics: Map<Str, IntrinsicRef> = map_new()
+    install_intrinsic(intrinsics, "get", BUILTIN_METHOD_CELL_GET)
+    install_intrinsic(intrinsics, "set", BUILTIN_METHOD_CELL_SET)
+    install_intrinsic(intrinsics, "update", BUILTIN_METHOD_CELL_UPDATE)
     install_builtin_method_owner(
         env, sink, BUILTIN_CELL, "<builtin-inherent>:Cell:core",
-        none, [], [], [], ImplOwnerState::FinalOwner, methods,
+        none, [], [], [], ImplOwnerState::FinalOwner, methods, intrinsics,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_CELL_CORE))
 }
 
@@ -795,9 +999,15 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
+    let mut intrinsics: Map<Str, IntrinsicRef> = map_new()
+    install_intrinsic(intrinsics, "unwrap_or", BUILTIN_METHOD_OPTION_UNWRAP_OR)
+    install_intrinsic(intrinsics, "unwrap", BUILTIN_METHOD_OPTION_UNWRAP)
+    install_intrinsic(intrinsics, "is_some", BUILTIN_METHOD_OPTION_IS_SOME)
+    install_intrinsic(intrinsics, "is_none", BUILTIN_METHOD_OPTION_IS_NONE)
+    install_intrinsic(intrinsics, "to_fail", BUILTIN_METHOD_OPTION_TO_FAIL)
     install_builtin_method_owner(
         env, sink, BUILTIN_OPTION, "<builtin-inherent>:Option:core",
-        none, [], [], [], ImplOwnerState::FinalOwner, methods,
+        none, [], [], [], ImplOwnerState::FinalOwner, methods, intrinsics,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_OPTION_CORE))
 }
 
@@ -1144,7 +1354,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_LIST, "<std-predecl>:List:unbounded",
         none, ["T"], [t_id], [],
-        ImplOwnerState::FinalOwner, methods,
+        ImplOwnerState::FinalOwner, methods, map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_LIST_HOF_FALLBACK))
 }
@@ -1241,7 +1451,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_MAP, "<std-predecl>:Map:unbounded",
         none, ["K", "V"], [unbounded_k_id, unbounded_v_id], [],
-        ImplOwnerState::FinalOwner, unbounded_methods,
+        ImplOwnerState::FinalOwner, unbounded_methods, map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_MAP_HOF_UNBOUNDED))
     install_builtin_method_owner(
@@ -1253,7 +1463,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
             BuiltinPredicateSpec {
                 subject_param_index: 0, trait_name: "Eq"
             }
-        ], ImplOwnerState::FinalOwner, bounded_methods,
+        ], ImplOwnerState::FinalOwner, bounded_methods, map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_MAP_HOF_BOUNDED))
 }
@@ -1349,7 +1559,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_SET, "<std-predecl>:Set:unbounded",
         none, ["T"], [unbounded_t_id], [],
-        ImplOwnerState::FinalOwner, unbounded_methods,
+        ImplOwnerState::FinalOwner, unbounded_methods, map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_SET_HOF_UNBOUNDED))
     install_builtin_method_owner(
@@ -1361,7 +1571,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
             BuiltinPredicateSpec {
                 subject_param_index: 0, trait_name: "Eq"
             }
-        ], ImplOwnerState::FinalOwner, bounded_methods,
+        ], ImplOwnerState::FinalOwner, bounded_methods, map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_SET_HOF_BOUNDED))
 }
@@ -1412,9 +1622,14 @@ fn register_option_hof(mut env: TypeEnv, sink: CollectingSink) {
         bounds: [],
         def_id: none
     })
+    let mut intrinsics: Map<Str, IntrinsicRef> = map_new()
+    install_intrinsic(intrinsics, "map", BUILTIN_METHOD_OPTION_MAP)
+    install_intrinsic(intrinsics, "and_then", BUILTIN_METHOD_OPTION_AND_THEN)
+    install_intrinsic(
+        intrinsics, "unwrap_or_else", BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE)
     install_builtin_method_owner(
         env, sink, BUILTIN_OPTION, "<builtin-inherent>:Option:hof",
-        none, [], [], [], ImplOwnerState::FinalOwner, methods,
+        none, [], [], [], ImplOwnerState::FinalOwner, methods, intrinsics,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_OPTION_HOF))
 }
 
@@ -1545,6 +1760,6 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
     })
     install_builtin_method_owner(
         env, sink, "Ptr", "<builtin-inherent>:Ptr:core",
-        none, [], [], [], ImplOwnerState::FinalOwner, methods,
+        none, [], [], [], ImplOwnerState::FinalOwner, methods, map_new(),
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_PTR_CORE))
 }

@@ -13,17 +13,37 @@
 // Step 6 adds effect handlers (tail-resumptive + abort), try/catch and
 // default evidence — see the "Step 6" section below for the mechanism notes.
 //
-use types::{Type, EffectRow, EMPTY_ROW, type_to_builtin_name, BUILTIN_RANGE}
+use types::{Type, EffectRow, EMPTY_ROW, type_to_builtin_name, types_equal,
+    BUILTIN_RANGE}
 use ast::{BinOp, UnaryOp, Pattern, LiteralValue, NamedPatternField, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
     HNominalStructFieldInit, HFieldAccessKind,
     HEffectHandler, HEffectOp, DictRef,
-    TraitDispatch, DictDispatchInfo, effect_op_slot,
+    TraitDispatch, DictDispatchInfo, MethodCallRef,
+    method_call_ref_intrinsic, method_call_ref_signature, effect_op_slot,
     hexpr_type, hexpr_effects, is_fresh_owned_bool_value, variant_ctor_name, compare_by_first,
     trait_dict_name, trait_bound_param_name, evidence_param_name,
     effect_name_from_evidence_param, is_extern_handle_type,
     slot_bridge_runtime_name, is_synthetic_dict_def_id}
+use ir_identity::{builtin_method_site_tag, intrinsic_ref_site,
+    BUILTIN_METHOD_STR_LEN, BUILTIN_METHOD_STR_CONTAINS,
+    BUILTIN_METHOD_STR_STARTS_WITH, BUILTIN_METHOD_STR_ENDS_WITH,
+    BUILTIN_METHOD_STR_SLICE, BUILTIN_METHOD_STR_TRIM,
+    BUILTIN_METHOD_STR_TO_UPPER, BUILTIN_METHOD_STR_TO_LOWER,
+    BUILTIN_METHOD_STR_REPLACE, BUILTIN_METHOD_STR_SPLIT,
+    BUILTIN_METHOD_STR_CHAR_AT, BUILTIN_METHOD_STR_INDEX_OF,
+    BUILTIN_METHOD_STR_PAD_START, BUILTIN_METHOD_STR_PAD_END,
+    BUILTIN_METHOD_STR_REPEAT, BUILTIN_METHOD_STR_CHAR_CODE_AT,
+    BUILTIN_METHOD_STR_TRIM_START, BUILTIN_METHOD_STR_TRIM_END,
+    BUILTIN_METHOD_STR_IS_EMPTY, BUILTIN_METHOD_STR_LAST_INDEX_OF,
+    BUILTIN_METHOD_INT_TO_STR, BUILTIN_METHOD_FLOAT_TO_STR,
+    BUILTIN_METHOD_OPTION_UNWRAP_OR, BUILTIN_METHOD_OPTION_UNWRAP,
+    BUILTIN_METHOD_OPTION_IS_SOME, BUILTIN_METHOD_OPTION_IS_NONE,
+    BUILTIN_METHOD_OPTION_MAP, BUILTIN_METHOD_OPTION_AND_THEN,
+    BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE, BUILTIN_METHOD_OPTION_TO_FAIL,
+    BUILTIN_METHOD_CELL_GET, BUILTIN_METHOD_CELL_SET,
+    BUILTIN_METHOD_CELL_UPDATE}
 use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEmitState, CHandleCleanup,
     CNameOnlySlotRef, CTypedRef, CClosureEdge,
     c_emit, c_raw, fresh_tmp, fresh_i64, fresh_dbl, fresh_label,
@@ -110,8 +130,10 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
         HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch, ty, .. } =>
             gen_c_binop(ctx, op, left, right, eq_dispatch, ord_dispatch, ty),
         HExpr::UnaryOp { op, operand, ty, .. } => gen_c_unaryop(ctx, op, operand, ty),
-        HExpr::Call { callee, args, resolved_dicts, dict_dispatch, ty, .. } =>
-            gen_c_call(ctx, callee, args, resolved_dicts, dict_dispatch, ty),
+        HExpr::Call { callee, args, resolved_dicts, dict_dispatch, method_ref, ty, .. } =>
+            gen_c_call(
+                ctx, callee, args, resolved_dicts, dict_dispatch,
+                method_ref, ty),
         HExpr::FieldAccess { receiver, field, access_kind, ty, .. } =>
             gen_c_field_access(ctx, receiver, field, access_kind, ty),
         HExpr::StructLit { name, fields, spread, .. } =>
@@ -374,7 +396,8 @@ fn gen_c_extern_closure_wrapper(
     }
     let result = gen_c_expr(ctx, HExpr::Call {
         callee: synthetic_callee, args: synthetic_args, type_args: [],
-        resolved_dicts: [], dict_dispatch: none, ty: return_type,
+        resolved_dicts: [], dict_dispatch: none, method_ref: none,
+        ty: return_type,
         effects: fn_effects, span: span
     })
     c_emit(ctx, "return ${result};")
@@ -2604,7 +2627,111 @@ pub fn emit_c_default_evidence_init(mut ctx: CCtx) {
     c_pop_fn(ctx, init_name, "void", saved)
 }
 
-fn gen_c_call(mut ctx: CCtx, callee: HExpr, args: List<HExpr>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, result_ty: Type) -> Str {
+const INTRINSIC_RUNTIME_NAMES: List<Str> = [
+    "ring_str_len", "ring_str_contains", "ring_str_starts_with",
+    "ring_str_ends_with", "ring_str_slice", "ring_str_trim",
+    "ring_str_to_upper", "ring_str_to_lower", "ring_str_replace",
+    "ring_str_split", "ring_str_char_at", "ring_str_index_of",
+    "ring_str_pad_start", "ring_str_pad_end", "ring_str_repeat",
+    "ring_str_char_code_at", "ring_str_trim_start", "ring_str_trim_end",
+    "ring_str_is_empty", "ring_str_last_index_of", "ring_int_to_str",
+    "ring_float_to_str", "ring_Option_unwrap_or", "ring_Option_unwrap",
+    "ring_Option_is_some", "ring_Option_is_none", "ring_Option_map",
+    "ring_Option_and_then", "ring_Option_unwrap_or_else",
+    "ring_Option_to_fail", "ring_Cell_get", "ring_Cell_set",
+    "ring_Cell_update"
+]
+
+fn intrinsic_runtime_name(tag: Int) -> Str {
+    if INTRINSIC_RUNTIME_NAMES.len() != 33 || tag < 0 || tag >= 33 {
+        panic("C codegen: builtin method intrinsic census drifted")
+    }
+    INTRINSIC_RUNTIME_NAMES.get(tag).unwrap_or("")
+}
+
+fn intrinsic_returns_raw_i64(tag: Int) -> Bool {
+    tag == BUILTIN_METHOD_STR_LEN ||
+    tag == BUILTIN_METHOD_STR_CONTAINS ||
+    tag == BUILTIN_METHOD_STR_STARTS_WITH ||
+    tag == BUILTIN_METHOD_STR_ENDS_WITH ||
+    tag == BUILTIN_METHOD_STR_IS_EMPTY ||
+    tag == BUILTIN_METHOD_OPTION_IS_SOME ||
+    tag == BUILTIN_METHOD_OPTION_IS_NONE
+}
+
+fn intrinsic_returns_bool(tag: Int) -> Bool {
+    tag == BUILTIN_METHOD_STR_CONTAINS ||
+    tag == BUILTIN_METHOD_STR_STARTS_WITH ||
+    tag == BUILTIN_METHOD_STR_ENDS_WITH ||
+    tag == BUILTIN_METHOD_STR_IS_EMPTY ||
+    tag == BUILTIN_METHOD_OPTION_IS_SOME ||
+    tag == BUILTIN_METHOD_OPTION_IS_NONE
+}
+
+fn intrinsic_int_arg_count(tag: Int) -> Int {
+    if tag == BUILTIN_METHOD_STR_SLICE { 2 }
+    else if tag == BUILTIN_METHOD_STR_CHAR_AT ||
+            tag == BUILTIN_METHOD_STR_CHAR_CODE_AT ||
+            tag == BUILTIN_METHOD_STR_PAD_START ||
+            tag == BUILTIN_METHOD_STR_PAD_END ||
+            tag == BUILTIN_METHOD_STR_REPEAT { 1 }
+    else { 0 }
+}
+
+fn gen_c_intrinsic_method_call(
+    mut ctx: CCtx, callee: HExpr, method_ref: MethodCallRef,
+    arg_vals: List<Str>
+) -> Str {
+    if !types_equal(method_call_ref_signature(method_ref), hexpr_type(callee)) {
+        panic("C codegen: intrinsic method signature drifted")
+    }
+    let receiver = match callee {
+        HExpr::FieldAccess { receiver, .. } => gen_c_expr(ctx, receiver),
+        _ => panic("C codegen: intrinsic MethodCallRef has no receiver")
+    }
+    let tag = builtin_method_site_tag(intrinsic_ref_site(
+        method_call_ref_intrinsic(method_ref)))
+    let runtime_name = intrinsic_runtime_name(tag)
+    let mut call_args: List<Str> = []
+    if tag == BUILTIN_METHOD_INT_TO_STR {
+        call_args.push("RING_UNTAG(${receiver})")
+    } else if tag == BUILTIN_METHOD_FLOAT_TO_STR {
+        rt_use(ctx, "ring_unbox_float", 1)
+        call_args.push("ring_unbox_float(${receiver})")
+    } else {
+        call_args.push(receiver)
+    }
+    let int_arg_count = intrinsic_int_arg_count(tag)
+    let mut index = 0
+    for arg in arg_vals {
+        if index < int_arg_count {
+            call_args.push("RING_UNTAG(${arg})")
+        } else {
+            call_args.push(arg)
+        }
+        index = index + 1
+    }
+    match rt_known_arity(runtime_name) {
+        some(expected) => {
+            while call_args.len() < expected {
+                call_args.push("RING_UNIT")
+            }
+        },
+        none => {}
+    }
+    rt_use(ctx, runtime_name, call_args.len())
+    let result = fresh_tmp(ctx)
+    if intrinsic_returns_bool(tag) {
+        c_emit(ctx, "${result} = RING_BOOL(${runtime_name}(${call_args.join(", ")}));")
+    } else if intrinsic_returns_raw_i64(tag) {
+        c_emit(ctx, "${result} = RING_INT(${runtime_name}(${call_args.join(", ")}));")
+    } else {
+        c_emit(ctx, "${result} = ${runtime_name}(${call_args.join(", ")});")
+    }
+    result
+}
+
+fn gen_c_call(mut ctx: CCtx, callee: HExpr, args: List<HExpr>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, method_ref: MethodCallRef?, result_ty: Type) -> Str {
     // Dict dispatch (trait method through dict param).  B-118: Unit-returning
     // dispatch must yield RING_UNIT, not the ABI return value.
     match dict_dispatch {
@@ -2640,6 +2767,15 @@ fn gen_c_call(mut ctx: CCtx, callee: HExpr, args: List<HExpr>, resolved_dicts: L
     for dr in resolved_dicts {
         let reference = c_resolve_dict_ref(ctx, dr)
         dict_vals.push(c_ref_c_name(reference))
+    }
+
+    match method_ref {
+        some(exact_method) => {
+            let raw = gen_c_intrinsic_method_call(
+                ctx, callee, exact_method, arg_vals)
+            return if is_unit_type(result_ty) { "RING_UNIT" } else { raw }
+        },
+        none => {}
     }
 
     // An exact local Ident is a closure slot, never a direct/module symbol.
@@ -2929,119 +3065,6 @@ fn gen_c_direct_call(mut ctx: CCtx, name: Str, arg_vals: List<Str>, dict_vals: L
     }
 }
 
-// ============================================================
-// Method calls (ports of method_to_runtime + the unbox/box tables)
-// ============================================================
-
-fn rt_method_returns_i64_c(name: Str) -> Bool {
-    // In the C backend every entry below returns int64_t (see rt_sig);
-    // call sites re-box via RING_INT / RING_BOOL.
-    if name == "ring_str_len" { return true }
-    if name == "ring_str_contains" { return true }
-    if name == "ring_str_starts_with" { return true }
-    if name == "ring_str_ends_with" { return true }
-    if name == "ring_str_eq" { return true }
-    if name == "ring_str_lt" { return true }
-    if name == "ring_str_is_empty" { return true }
-    if name == "ring_list_len" { return true }
-    if name == "ring_list_is_empty" { return true }
-    if name == "ring_list_any" { return true }
-    if name == "ring_list_all" { return true }
-    if name == "ring_Option_is_some" { return true }
-    if name == "ring_Option_is_none" { return true }
-    if name == "ring_sb_len" { return true }
-    false
-}
-
-fn rt_method_returns_bool_c(name: Str) -> Bool {
-    if name == "ring_str_contains" { return true }
-    if name == "ring_str_starts_with" { return true }
-    if name == "ring_str_ends_with" { return true }
-    if name == "ring_str_eq" { return true }
-    if name == "ring_str_lt" { return true }
-    if name == "ring_list_is_empty" { return true }
-    if name == "ring_list_any" { return true }
-    if name == "ring_list_all" { return true }
-    if name == "ring_Option_is_some" { return true }
-    if name == "ring_Option_is_none" { return true }
-    if name == "ring_str_is_empty" { return true }
-    false
-}
-
-fn rt_method_int_arg_count_c(name: Str) -> Int {
-    if name == "ring_list_get" { return 1 }
-    if name == "ring_list_get_opt" { return 1 }
-    if name == "ring_str_get" { return 1 }
-    if name == "ring_str_slice" { return 2 }
-    if name == "ring_list_slice" { return 2 }
-    if name == "ring_list_set" { return 1 }
-    if name == "ring_str_char_at" { return 1 }
-    if name == "ring_str_char_code_at" { return 1 }
-    if name == "ring_str_pad_start" { return 1 }
-    if name == "ring_str_pad_end" { return 1 }
-    if name == "ring_str_repeat" { return 1 }
-    if name == "ring_sb_add_int" { return 1 }
-    0
-}
-
-fn rt_method_needs_recv_unbox_int_c(name: Str) -> Bool {
-    name == "ring_int_to_str"
-}
-
-fn rt_method_needs_recv_unbox_float_c(name: Str) -> Bool {
-    name == "ring_float_to_str"
-}
-
-fn rt_method_needs_recv_unbox_bool_c(name: Str) -> Bool {
-    name == "ring_bool_to_str"
-}
-
-fn method_to_runtime_c(type_name: Str, method: Str) -> Str? {
-    // Str methods
-    if type_name == "Str" && method == "len" { return some("ring_str_len") }
-    if type_name == "Str" && method == "contains" { return some("ring_str_contains") }
-    if type_name == "Str" && method == "starts_with" { return some("ring_str_starts_with") }
-    if type_name == "Str" && method == "ends_with" { return some("ring_str_ends_with") }
-    if type_name == "Str" && method == "slice" { return some("ring_str_slice") }
-    if type_name == "Str" && method == "split" { return some("ring_str_split") }
-    if type_name == "Str" && method == "replace" { return some("ring_str_replace") }
-    if type_name == "Str" && method == "get" { return some("ring_str_get") }
-    if type_name == "Str" && method == "trim" { return some("ring_str_trim") }
-    if type_name == "Str" && method == "trim_start" { return some("ring_str_trim_start") }
-    if type_name == "Str" && method == "trim_end" { return some("ring_str_trim_end") }
-    if type_name == "Str" && method == "to_upper" { return some("ring_str_to_upper") }
-    if type_name == "Str" && method == "to_lower" { return some("ring_str_to_lower") }
-    if type_name == "Str" && method == "char_at" { return some("ring_str_char_at") }
-    if type_name == "Str" && method == "char_code_at" { return some("ring_str_char_code_at") }
-    if type_name == "Str" && method == "index_of" { return some("ring_str_index_of") }
-    if type_name == "Str" && method == "pad_start" { return some("ring_str_pad_start") }
-    if type_name == "Str" && method == "pad_end" { return some("ring_str_pad_end") }
-    if type_name == "Str" && method == "repeat" { return some("ring_str_repeat") }
-    if type_name == "Str" && method == "is_empty" { return some("ring_str_is_empty") }
-    if type_name == "Str" && method == "last_index_of" { return some("ring_str_last_index_of") }
-    // Scalar to_str
-    if type_name == "Int" && method == "to_str" { return some("ring_int_to_str") }
-    if type_name == "Float" && method == "to_str" { return some("ring_float_to_str") }
-    if type_name == "Bool" && method == "to_str" { return some("ring_bool_to_str") }
-    // B-152 P2: List methods are pure Ring — no entries (fall through to
-    // the Ring-compiled impl methods).
-    // B-152 P3/P4: Map and Set methods are pure Ring impl methods.
-    // Option methods
-    if type_name == "Option" && method == "unwrap_or" { return some("ring_Option_unwrap_or") }
-    if type_name == "Option" && method == "unwrap" { return some("ring_Option_unwrap") }
-    if type_name == "Option" && method == "is_some" { return some("ring_Option_is_some") }
-    if type_name == "Option" && method == "is_none" { return some("ring_Option_is_none") }
-    if type_name == "Option" && method == "map" { return some("ring_Option_map") }
-    if type_name == "Option" && method == "and_then" { return some("ring_Option_and_then") }
-    if type_name == "Option" && method == "unwrap_or_else" { return some("ring_Option_unwrap_or_else") }
-    if type_name == "Option" && method == "to_fail" { return some("ring_Option_to_fail") }
-    // Cell methods
-    if type_name == "Cell" && method == "get" { return some("ring_Cell_get") }
-    if type_name == "Cell" && method == "set" { return some("ring_Cell_set") }
-    if type_name == "Cell" && method == "update" { return some("ring_Cell_update") }
-    none
-}
-
 // B-125 Ptr<T> methods — inline C (no runtime call), port of gen_ptr_method.
 fn gen_c_ptr_method(mut ctx: CCtx, recv: Str, recv_type: Type, method: Str, args: List<Str>) -> Str {
     if method == "read" {
@@ -3108,95 +3131,31 @@ fn gen_c_method_call(mut ctx: CCtx, recv: Str, recv_type: Type, method: Str, arg
     if type_name == "Ptr" {
         return gen_c_ptr_method(ctx, recv, recv_type, method, args)
     }
-
-    // B-134: only dispatch to runtime builtins for structurally-valid
-    // builtin collections.
-    let rt_method = if (type_name == "List" || type_name == "Map") && !is_builtin_collection(recv_type) {
-        none
-    } else {
-        method_to_runtime_c(type_name, method)
-    }
-    match rt_method {
-        some(rt_name) => {
-
-            let mut call_args: List<Str> = []
-            // Receiver (unboxed for Int/Float/Bool to_str).
-            if rt_method_needs_recv_unbox_int_c(rt_name) {
-                call_args.push("RING_UNTAG(${recv})")
-            } else if rt_method_needs_recv_unbox_float_c(rt_name) {
-                rt_use(ctx, "ring_unbox_float", 1)
-                call_args.push("ring_unbox_float(${recv})")
-            } else if rt_method_needs_recv_unbox_bool_c(rt_name) {
-                call_args.push("RING_UNTAG(${recv})")
-            } else {
-                call_args.push(recv)
-            }
-            // Leading N args unbox to int64_t; the rest stay boxed.
-            let int_arg_count = rt_method_int_arg_count_c(rt_name)
-            let mut ai = 0
-            for a in args {
-                if ai < int_arg_count {
-                    call_args.push("RING_UNTAG(${a})")
-                } else {
-                    call_args.push(a)
-                }
-                ai = ai + 1
-            }
-            // NULL-pad missing trailing args (checker allows fewer args for
-            // extern methods, e.g. sb.line()) up to the declared C arity.
-            match rt_known_arity(rt_name) {
-                some(expected) => {
-                    while call_args.len() < expected {
-                        call_args.push("RING_UNIT")
+    // Ordinary Ring method.  Every runtime-backed 0.1 method has already
+    // returned through its exact MethodCallRef above.
+    let mangled = c_mangle_method(type_name, method)
+    match ctx.functions.get(mangled) {
+        some(fi) => {
+            let mut call_args: List<Str> = [recv]
+            for a in args { call_args.push(a) }
+            for dv in dict_vals { call_args.push(dv) }
+            match ctx.fn_evidence_params.get(mangled) {
+                some(ev_params) => {
+                    for ep in ev_params {
+                        let reference = c_lookup_evidence(ctx, ep)
+                        call_args.push(c_ref_c_name(reference))
                     }
                 },
-                none => {},
+                none => {}
             }
-            rt_use(ctx, rt_name, call_args.len())
-            if is_void_runtime_fn_c(rt_name) {
-                c_emit(ctx, "${rt_name}(${call_args.join(", ")});")
-                "RING_UNIT"
-            } else if rt_method_returns_bool_c(rt_name) {
-                let t = fresh_tmp(ctx)
-                c_emit(ctx, "${t} = RING_BOOL(${rt_name}(${call_args.join(", ")}));")
-                t
-            } else if rt_method_returns_i64_c(rt_name) {
-                let t = fresh_tmp(ctx)
-                c_emit(ctx, "${t} = RING_INT(${rt_name}(${call_args.join(", ")}));")
-                t
-            } else {
-                let t = fresh_tmp(ctx)
-                c_emit(ctx, "${t} = ${rt_name}(${call_args.join(", ")});")
-                t
-            }
+            let t = fresh_tmp(ctx)
+            c_emit(ctx, "${t} = ${fi.c_name}(${call_args.join(", ")});")
+            t
         },
         none => {
-            // User/prelude impl method: ring_<Type>_<method>.
-            let mangled = c_mangle_method(type_name, method)
-            match ctx.functions.get(mangled) {
-                some(fi) => {
-                    let mut call_args: List<Str> = [recv]
-                    for a in args { call_args.push(a) }
-                    for dv in dict_vals { call_args.push(dv) }
-                    match ctx.fn_evidence_params.get(mangled) {
-                        some(ev_params) => {
-                            for ep in ev_params {
-                                let reference = c_lookup_evidence(ctx, ep)
-                                call_args.push(c_ref_c_name(reference))
-                            }
-                        },
-                        none => {},
-                    }
-                    let t = fresh_tmp(ctx)
-                    c_emit(ctx, "${t} = ${fi.c_name}(${call_args.join(", ")});")
-                    t
-                },
-                none => {
-                    eprintln("C codegen warning: unknown method '${type_name}.${method}' (mangled: ${mangled}), generating panic")
-                    c_stub_expr(ctx, "missing method ${type_name}.${method}")
-                },
-            }
-        },
+            eprintln("C codegen warning: unknown method '${type_name}.${method}' (mangled: ${mangled}), generating panic")
+            c_stub_expr(ctx, "missing method ${type_name}.${method}")
+        }
     }
 }
 

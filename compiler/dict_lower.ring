@@ -401,7 +401,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 ty: ty, effects: effects, span: span },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: dl_expr(operand, defs, seen, counter), ty: ty, effects: effects, span: span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, ty, effects, span } => {
+        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, method_ref, ty, effects, span } => {
             let new_callee = dl_expr(callee, defs, seen, counter)
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(dl_expr(a, defs, seen, counter)) }
@@ -413,6 +413,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             let call = HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
                 resolved_dicts: new_dicts,
                 dict_dispatch: dl_dict_dispatch(dict_dispatch, defs, seen),
+                method_ref: method_ref,
                 ty: ty, effects: effects, span: span }
             if lets.len() == 0 {
                 call

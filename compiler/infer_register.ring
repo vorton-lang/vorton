@@ -2302,23 +2302,7 @@ fn register_impl_canonical(
                     let scheme = register_impl_method(
                         ctx, impl_tv_ids, target_type, mname, mtps, params,
                         return_type, declared_effects, mspan,
-                        saved, type_params, false)
-                    exact_method_schemes.insert(mname, scheme)
-                }
-            },
-            Decl::ExternFn { name: mname, type_params: mtps, params, return_type, declared_effects, span: mspan, .. } => {
-                if declared_method_names.contains(mname) {
-                    let _ = type_error(ctx.sink, E0504,
-                        "Duplicate method '${mname}' in impl for '${nominal_display_name(target_type)}'",
-                        mspan, DiagnosticContext::TraitError {
-                            detail: "an impl block may declare each method name only once"
-                        })
-                } else {
-                    declared_method_names.insert(mname)
-                    let scheme = register_impl_method(
-                        ctx, impl_tv_ids, target_type, mname, mtps, params,
-                        return_type, declared_effects, mspan,
-                        saved, type_params, true)
+                        saved, type_params)
                     exact_method_schemes.insert(mname, scheme)
                 }
             },
@@ -2495,6 +2479,7 @@ fn register_impl_canonical(
             method_names: explicit_method_names,
             assoc_types: map_clone(assoc_type_map),
             method_schemes: map_clone(exact_method_schemes),
+            method_intrinsics: map_new(),
             provider_ref: some(provider_ref),
             trait_ref: resolved_trait_ref,
             delegate_plan: delegate_plan,
@@ -2557,7 +2542,7 @@ fn register_impl_method(
     target_type: Str, mname: Str, mtps: List<TypeParam>, params: List<Param>,
     return_type: TypeExpr?, declared_effects: List<EffectExpr>?, method_span: Span,
     outer_saved: Map<Str, Type>,
-    impl_type_params: List<TypeParam>, is_extern: Bool
+    impl_type_params: List<TypeParam>
 ) -> ImplMethodSchemeCore {
     validate_type_param_bound_shapes(
         ctx, mtps, BoundShapeContext::ImplMethodBound, method_span)
@@ -2583,7 +2568,7 @@ fn register_impl_method(
     for mtv in method_tv_ids { all_tvs.push(mtv) }
 
     // Non-extern methods: filter unused type variables from outer scope
-    if !is_extern {
+    {
         let mut declared_names: Set<Str> = set_new()
         let mut sorted_tp_scope = ctx.type_param_scope.entries()
         sorted_tp_scope.sort_by(compare_by_first)
@@ -3068,6 +3053,7 @@ fn register_delegate_traits(
                                     method_names: method_names,
                                     assoc_types: map_clone(field_assoc_types),
                                     method_schemes: map_clone(exact_method_schemes),
+                                    method_intrinsics: map_new(),
                                     provider_ref: some(provider_ref),
                                     trait_ref: some(registered_trait_ref_symbol(
                                         reg_trait_def.owner_ref)),

@@ -5,9 +5,9 @@ use ast::{Span, EffectExpr, TypeParam, DeriveAttribute}
 use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
     make_diag}
 use codes::{E0504}
-use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef,
+use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
-    registered_trait_ref_symbol, impl_provider_ref_same,
+    registered_trait_ref_symbol, impl_provider_ref_same, intrinsic_ref_same,
     impl_provider_ref_kind, impl_provider_kind_same,
     impl_provider_kind_source, impl_provider_kind_delegate}
 
@@ -566,6 +566,10 @@ pub struct ImplEntry {
     // Trait/inherent method cores live only on their owning entry. The flat
     // ordinary-call view is a MethodOrigin index, never a second scheme map.
     pub method_schemes: Map<Str, ImplMethodSchemeCore>,
+    // Exact builtin method semantic identity.  The owning method scheme is
+    // the sole signature payload; this map may only relate that core to one
+    // fixed IntrinsicRef.
+    pub method_intrinsics: Map<Str, IntrinsicRef>,
     pub provider_ref: ImplProviderRef?,
     pub trait_ref: SymbolRef?,
     pub delegate_plan: DelegatePlanState,
@@ -988,6 +992,22 @@ fn method_core_map_same(
     true
 }
 
+fn method_intrinsic_map_same(
+    left: Map<Str, IntrinsicRef>, right: Map<Str, IntrinsicRef>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    for entry in left.entries() {
+        let (name, intrinsic) = entry
+        match right.get(name) {
+            some(other) => if !intrinsic_ref_same(intrinsic, other) {
+                return false
+            },
+            none => return false
+        }
+    }
+    true
+}
+
 fn delegate_child_provider_plan_same(
     left: DelegateChildProviderPlan, right: DelegateChildProviderPlan
 ) -> Bool {
@@ -1061,6 +1081,8 @@ pub fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
         impl_entry_owner_shape_same(left, right) &&
         string_list_same(left.method_names, right.method_names) &&
         method_core_map_same(left.method_schemes, right.method_schemes) &&
+        method_intrinsic_map_same(
+            left.method_intrinsics, right.method_intrinsics) &&
         delegate_plan_state_same(left.delegate_plan, right.delegate_plan) &&
         impl_owner_span_same(left.span, right.span) &&
         impl_owner_state_same(left.owner_state, right.owner_state)
@@ -1081,6 +1103,12 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
     if entry.target_type_name == "" || entry.origin == "" ||
        entry.type_params.len() != entry.type_param_vars.len() {
         panic("impl owner: incomplete owner entry")
+    }
+    for intrinsic_entry in entry.method_intrinsics.entries() {
+        let (method_name, _) = intrinsic_entry
+        if !entry.method_schemes.contains_key(method_name) {
+            panic("impl owner: intrinsic has no method core")
+        }
     }
     let mut type_param_names: Set<Str> = set_new()
     for name in entry.type_params {

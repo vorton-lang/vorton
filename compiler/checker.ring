@@ -13,7 +13,7 @@ use env::{TypeEnv, TypeScheme, add_impl, find_impl,
     optional_symbol_ref_same,
     install_method_core, assert_no_provisional_impl_owners}
 use builtins::{register_builtins, register_hof_intrinsics,
-    finalize_std_hof_fallbacks}
+    finalize_std_hof_fallbacks, validate_builtin_method_core_shadow}
 use derive::{prepend_builtin_option_derived_impls,
     validate_derived_impls}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
@@ -276,6 +276,7 @@ fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
     let mut ctx = new_base_infer_ctx(sink)
     register_builtins(ctx.env, sink)
     register_hof_intrinsics(ctx.env, sink)
+    validate_builtin_method_core_shadow(ctx.env)
     // These bindings are created only by register_builtins above. Record their
     // freshly allocated DefIds now; later same-spelled locals cannot inherit
     // this provenance. `some` remains on the independent variant-ctor path.
@@ -314,8 +315,7 @@ fn validate_impl_carriers(
                     }
                     for method in methods {
                         match method {
-                            HDecl::Fn { name, .. } |
-                            HDecl::ExternFn { name, .. } => {
+                            HDecl::Fn { name, .. } => {
                                 if !owner.method_schemes.contains_key(name) {
                                     panic("impl HIR: method is not owned by carrier")
                                 }
@@ -346,7 +346,6 @@ fn collect_module_impl_facts(
                 for m in methods {
                     match m {
                         HDecl::Fn { name, .. } => method_names.push(name),
-                        HDecl::ExternFn { name, .. } => method_names.push(name),
                         _ => {}
                     }
                 }

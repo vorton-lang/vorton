@@ -1,6 +1,7 @@
 use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam}
-use types::{Type, EffectRow, StructField, EnumVariant, RecordField}
+use types::{Type, EffectRow, StructField, EnumVariant, RecordField, types_equal}
 use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
+    IntrinsicRef, intrinsic_ref_same,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     nominal_field_ref_owner, nominal_field_ref_index,
     nominal_field_ref_name, registered_nominal_ref_symbol,
@@ -261,6 +262,40 @@ pub struct HStructFieldInit {
     pub value: HExpr
 }
 
+// Exact 0.1 runtime-backed method identity.  Inference selects the fixed
+// IntrinsicRef and freezes its instantiated callable signature together; every
+// later pass transports this relation without reconstructing it from names.
+pub struct MethodCallRef {
+    intrinsic: IntrinsicRef,
+    signature: Type
+}
+
+pub fn make_intrinsic_method_call_ref(
+    intrinsic: IntrinsicRef, signature: Type
+) -> MethodCallRef {
+    match signature {
+        Type::FnType { .. } => MethodCallRef {
+            intrinsic: intrinsic, signature: signature
+        },
+        _ => panic("HIR method call: intrinsic signature is not callable")
+    }
+}
+
+pub fn method_call_ref_intrinsic(value: MethodCallRef) -> IntrinsicRef {
+    value.intrinsic
+}
+
+pub fn method_call_ref_signature(value: MethodCallRef) -> Type {
+    value.signature
+}
+
+pub fn method_call_ref_same(
+    left: MethodCallRef, right: MethodCallRef
+) -> Bool {
+    intrinsic_ref_same(left.intrinsic, right.intrinsic) &&
+        types_equal(left.signature, right.signature)
+}
+
 pub struct HNominalStructFieldInit {
     pub name: Str,
     pub field_ref: NominalFieldRef,
@@ -326,7 +361,7 @@ pub enum HExpr {
     Ident { name: Str, resolved_name: Str?, def_id: Int?, dict_closure_dicts: List<DictRef>?, ty: Type, effects: EffectRow, span: Span },
     BinOp { op: BinOp, left: HExpr, right: HExpr, eq_dispatch: TraitDispatch?, ord_dispatch: TraitDispatch?, ty: Type, effects: EffectRow, span: Span },
     UnaryOp { op: UnaryOp, operand: HExpr, ty: Type, effects: EffectRow, span: Span },
-    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, ty: Type, effects: EffectRow, span: Span },
+    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, method_ref: MethodCallRef?, ty: Type, effects: EffectRow, span: Span },
     FieldAccess { receiver: HExpr, field: Str, access_kind: HFieldAccessKind, ty: Type, effects: EffectRow, span: Span },
     StructLit { name: Str, owner_ref: RegisteredNominalRef, type_args: List<Type>, fields: List<HNominalStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
     NamedVariantConstruct { enum_name: Str, variant_name: Str, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
@@ -891,7 +926,20 @@ fn validate_hir_expr(
         },
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
-        HExpr::Call { callee, args, .. } => {
+        HExpr::Call { callee, args, method_ref, .. } => {
+            match method_ref {
+                some(exact_method) => match callee {
+                    HExpr::FieldAccess {
+                        access_kind: HFieldAccessKind::Method, ty, ..
+                    } => if !types_equal(
+                            method_call_ref_signature(exact_method), ty) {
+                        panic("HIR method call: exact signature drifted")
+                    },
+                    _ => panic(
+                        "HIR method call: intrinsic ref has no Method callee")
+                },
+                none => {}
+            }
             validate_hir_expr(callee, seen, scope)
             for arg in args { validate_hir_expr(arg, seen, scope) }
         },

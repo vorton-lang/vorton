@@ -1643,6 +1643,7 @@ fn register_derived_impl(
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: exact,
+        method_intrinsics: map_new(),
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
         delegate_plan: delegate_plan_not_applicable(),

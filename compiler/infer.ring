@@ -11,6 +11,7 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HStructFieldInit, HNominalStructFieldInit, HFieldAccessKind,
     HStringInterpPart, HProgram, DerivedImpl,
     TraitDispatch, DictDispatchInfo, DictRef, TraitBound,
+    MethodCallRef, make_intrinsic_method_call_ref,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod,
     HForInDestructure, HLetDestructureBinding, ValueBindingKind,
     trait_bound_param_name,
@@ -48,6 +49,7 @@ use infer_helpers::{MethodLookupResult, StmtResult,
     check_expr_is_let_def, get_expr_def_id, is_mut_method_call, check_receiver_mutability,
     lookup_impl_method, lookup_trait_method,
     rewrite_bare_enum_bindings}
+use ir_identity::{IntrinsicRef}
 
 // ============================================================
 // Block inference (from infer-stmt.ts)
@@ -421,7 +423,8 @@ struct MethodCallSelection {
     method_type: Type?,
     method_core: ImplMethodSchemeCore?,
     impl_owner: ImplEntry?,
-    dict_dispatch: DictDispatchInfo?
+    dict_dispatch: DictDispatchInfo?,
+    intrinsic_ref: IntrinsicRef?
 }
 
 // Resolve an already-authoritative protocol impl into the same input consumed
@@ -438,7 +441,8 @@ fn select_for_protocol_method(
         method_type: some(registered_method),
         method_core: some(impl_core),
         impl_owner: some(impl_entry),
-        dict_dispatch: none
+        dict_dispatch: none,
+        intrinsic_ref: impl_entry.method_intrinsics.get(method)
     }
 }
 
@@ -1473,7 +1477,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                     args: [recv_r.hexpr, idx_r.hexpr],
                     type_args: [],
                     resolved_dicts: resolved_dicts,
-                    dict_dispatch: none,
+                    dict_dispatch: none, method_ref: none,
                     ty: final_result_ty,
                     effects: combined_effects,
                     span: span
@@ -1737,6 +1741,7 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
         hexpr: HExpr::Call {
             callee: callee_r.hexpr, args: hargs, type_args: [],
             resolved_dicts: resolved_dicts, dict_dispatch: none,
+            method_ref: none,
             ty: result_type, effects: effects, span: span
         },
         subst: s, effects: effects
@@ -1810,6 +1815,7 @@ fn infer_method_call_from_receiver(
     let mut method_core: ImplMethodSchemeCore? = none
     let mut impl_owner: ImplEntry? = none
     let mut dict_dispatch: DictDispatchInfo? = none
+    let mut intrinsic_ref: IntrinsicRef? = none
 
     match selection {
         some(selected) => {
@@ -1817,6 +1823,7 @@ fn infer_method_call_from_receiver(
             method_core = selected.method_core
             impl_owner = selected.impl_owner
             dict_dispatch = selected.dict_dispatch
+            intrinsic_ref = selected.intrinsic_ref
         },
         none => {}
     }
@@ -1829,12 +1836,14 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_core = r.method_core
                 impl_owner = r.impl_owner
+                intrinsic_ref = r.intrinsic_ref
             },
             Type::EnumType { name, .. } => {
                 let r = lookup_impl_method(ctx, name, method)
                 method_type = r.method_type
                 method_core = r.method_core
                 impl_owner = r.impl_owner
+                intrinsic_ref = r.intrinsic_ref
             },
             _ => {}
         }
@@ -1848,6 +1857,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_core = r.method_core
                 impl_owner = r.impl_owner
+                intrinsic_ref = r.intrinsic_ref
             },
             none => {}
         }
@@ -1861,6 +1871,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_core = r.method_core
                 impl_owner = r.impl_owner
+                intrinsic_ref = r.intrinsic_ref
             },
             none => {}
         }
@@ -2040,6 +2051,11 @@ fn infer_method_call_from_receiver(
     result_type = apply_subst(s, result_type)
 
     let callee_type = match method_type { some(mt) => mt, none => ctx.env.fresh_var() }
+    let exact_method_ref: MethodCallRef? = match intrinsic_ref {
+        some(intrinsic) => some(make_intrinsic_method_call_ref(
+            intrinsic, callee_type)),
+        none => none
+    }
     InferResult {
         hexpr: HExpr::Call {
             callee: HExpr::FieldAccess {
@@ -2047,7 +2063,8 @@ fn infer_method_call_from_receiver(
                 access_kind: HFieldAccessKind::Method,
                 ty: callee_type, effects: EMPTY_ROW, span: span },
             args: hargs, type_args: [], resolved_dicts: resolved_dicts,
-            dict_dispatch: dict_dispatch, ty: result_type, effects: effects, span: span
+            dict_dispatch: dict_dispatch, method_ref: exact_method_ref,
+            ty: result_type, effects: effects, span: span
         },
         subst: s, effects: effects
     }
