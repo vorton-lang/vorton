@@ -14,12 +14,12 @@ FileRequires ::= 'requires' EffectSet
 ## 声明
 
 ```ebnf
-Decl         ::= 'pub'? DeclKind
+Decl         ::= ImplDecl
+               | 'pub'? DeclKind
 
 DeclKind     ::= FnDecl
                | StructDecl
                | EnumDecl
-               | ImplDecl
                | TraitDecl
                | EffectDecl
                | EffectAliasDecl
@@ -30,7 +30,7 @@ DeclKind     ::= FnDecl
                | ModDecl
 ```
 
-`pub` 修饰符控制多文件编译中的可见性。单文件模式下接受但不强制。
+`pub`修饰符控制多文件编译中的可见性。Impl block本身没有visibility，因此`pub impl ...`非法；只有inherent impl member继续允许逐项`pub`。单文件模式仍解析visibility并执行同一语法检查。
 
 ### 函数声明
 
@@ -92,7 +92,7 @@ TraitImplMember ::= FnDecl
                   | AssocTypeDecl
 ```
 
-`impl Type { ... }` 定义固有方法，member可分别`pub`或private。`impl Trait for Type { ... }`实现trait，全部member visibility继承trait，写`pub`是hard error。Impl块内可包含`extern fn`声明用于FFI方法绑定。`delegate field: Trait1, Trait2`为每个trait自动生成完整普通impl（替代继承的复用机制）；同一target + trait的手写impl与delegate冲突并报E0509，不支持partial override。关联类型`type Name = TypeExpr`用于满足trait的关联类型要求。
+`impl Type { ... }` 定义固有方法，member可分别`pub`或private。Impl block无visibility，`pub impl ...`是hard error。`impl Trait for Type { ... }`实现trait，全部member visibility继承trait，写`pub`同样hard-error。Impl块内可包含`extern fn`声明用于FFI方法绑定。`delegate field: Trait1, Trait2`为每个trait自动生成完整普通impl（替代继承的复用机制）；同一target + trait的手写impl与delegate冲突并报E0509，不支持partial override。关联类型`type Name = TypeExpr`用于满足trait的关联类型要求。
 
 ### Trait 声明
 
@@ -201,6 +201,8 @@ RecordField  ::= Ident ':' TypeExpr
 
 TypeExprList ::= TypeExpr (',' TypeExpr)* ','?
 ```
+
+Ring 0.1不支持return-position`impl Trait`或其他opaque type；`impl`在type position是语法错误。省略返回标注只会推断并保留concrete type，不形成API abstraction。Public interface也不得引用private concrete type；post-0.1的显式opaque return由B-200重新设计。
 
 命名类型的 `?` 后缀是 `Option<T>` 的语法糖：`Int?` ≡ `Option<Int>`。`FnType` 的 `with` 子句标注函数类型的 effect（无标注时为 open row，支持 effect 多态）。
 

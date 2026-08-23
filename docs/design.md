@@ -74,7 +74,9 @@ trait Collection {
 }
 ```
 
-**Trait member visibility（2026-08-23 用户决定，0.1 对齐 Rust）**：trait 是完整 contract，不为 method 或 associated type建立第二层 visibility。`pub trait` 的全部 associated items 随 trait 公开；private trait 的全部 associated items 保持 module-private。Trait declaration 与 `impl Trait for Type` 中写 `pub` 均 hard-fail并建议删除，trait impl method visibility继承trait。只有 inherent `impl Type` 继续允许每个method/associated item独立写`pub`或保持private。未来若需要sealed trait，必须显式设计，不以private required method偷渡；dictionary、ImplProviderRef、ExecutableInventory与CoreHIR不得携带per-trait-member visibility bit。
+**Trait / impl visibility（2026-08-23 用户决定，0.1 对齐 Rust）**：trait 是完整 contract，不为 method 或 associated type建立第二层 visibility。`pub trait` 的全部 associated items 随 trait 公开；private trait 的全部 associated items 保持 module-private。Impl block本身没有visibility，字面`pub impl ...`非法；trait declaration 与 `impl Trait for Type` 中写 `pub` 同样 hard-fail并建议删除，trait impl method visibility继承trait。只有 inherent `impl Type` 继续允许每个method/associated item独立写`pub`或保持private。未来若需要sealed trait，必须显式设计，不以private required method偷渡；dictionary、ImplProviderRef、ExecutableInventory与CoreHIR不得携带per-trait-member visibility bit。
+
+**Public interface 与 private implementation（2026-08-23 用户决定）**：public item的参数、返回类型、字段、generic bound与effect/trait contract不得引用更private的declaration，违反即hard error。`impl PublicTrait for PrivateType`可合法留在module/project internal coherence registry，但不构成外部callable surface；trait impl只有target与trait均可见时才对外发布，public inherent type只发布其`pub` methods。0.1不把private concrete type的推断泄漏冒充opaque type；需要隐藏具体返回类型时留待post-0.1 B-200显式设计。
 
 ### 1.1a JSON 编码支持域（2026-08-06 D-001）
 
@@ -970,7 +972,7 @@ Ring 有意选择简单 trait 系统，换取更强推断能力：
 - 方法名冲突 = 语义错误（ambiguous method）
 - 最小约束 = 只含实际调用方法对应的 trait（不做 supertrait 归并）
 - 方法属于具体类型固有方法（非 trait）→ 推断为具体类型参数（非泛型）
-- 不需要 `impl Trait` 语法（推断比 impl Trait 更强）
+- 0.1 不支持 return-position `impl Trait` / opaque return。推断只减少作者标注，不能隐藏 public API 的 concrete type；post-0.1 仅在真实 factory/iterator/closure consumer 下由 B-200 重审
 
 ---
 

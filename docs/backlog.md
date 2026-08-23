@@ -45,7 +45,7 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **0.1 surface simplification / CoreHIR closure（2026-08-23 用户决定）**：compiler/std/examples 对函数default parameters、sig placeholder、refinement placeholder、user effect default body与delegate surface均无必须保留的真实consumer。0.1 clean break删除函数default parameter、只注册/transport `SigDef`、parse-and-discard `where`与user default evidence全链；trait default method不受影响。Delegate因能表达组合关系而保留，但只在TypedHIR→CoreHIR一次展开成普通trait impl。每个新surface feature必须提供唯一CoreHIR lowering或证明自身为canonical core，禁止把surface-only variant、待生成body/impl/evidence带入下游。Sig/refinement/default provider分别只按B-192/B-001/B-197的完整未来门重入。
 
-> **0.1 trait member visibility（2026-08-23 用户批准）**：对齐Rust，trait是整体contract。`pub trait`全部associated items公开，private trait全部module-private；trait declaration与`impl Trait for Type`成员禁止单独`pub`，visibility继承trait。仅inherent impl保留逐method/item visibility。当前parser接受后丢弃trait-member`pub`属于fake syntax，由B-199 clean break；不新增IR/dictionary/provider visibility bit，private target/public trait等整体export policy仍待独立review，不在本决定偷渡。
+> **0.1 trait / impl / private-interface visibility（2026-08-23 用户批准）**：对齐Rust，trait是整体contract，impl block无visibility；`pub impl`、trait declaration/trait impl member的`pub`均hard-fail，只有inherent member逐项控制visibility。Public item接口与bounds不得引用更private type/trait/effect；private impl可留internal coherence registry，但外部trait impl surface要求target+trait均public，public inherent只发布pub methods。当前接受后丢弃的fake`pub`由B-199 clean break，不新增visibility identity bit。0.1无return-position`impl Trait`/opaque type，post-0.1由B-200按真实consumer重审。
 
 > **0.1 effect/capability batch（2026-08-23 用户批准）**：B-195以`SystemEffectRef(console/fs/process)`取代special `io`，system不进evidence、不可handle、无root handler，只经AbiIR HostImport/link provider；custom `HandledEffectRef`才显式handle。Host capability与`fail<E>`正交，std host extern漏标与`io.read`双authority原子收口。B-196令0.1用户Drop最终effect row为空且不建DropEffectSet；post-0.1 effectful destruction只在真实consumer下由B-198重审。B-072匿名sum既有语义继续批准但实现顺延post-0.1。
 
@@ -872,15 +872,23 @@ async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评�
 
 **验收**：缺失/类型不符/effect扩大/visibility与associated contract不符均给单轮可修诊断；合法single/project/re-export/diamond与separate implementation通过；signature成为TypedHIR/module interface与incremental hash的单一authority，CoreHIR后无name-based conformance重算；formatter/inspection/LLM contract输出一致。完整C/full/self-host/fixed-point与跨平台CI通过，且必须有至少一个仓内或preview真实consumer，不能再次以纯parser/namespace transport测试冒充feature完成。
 
-### B-199 删除 trait/trait-impl member 的假 `pub` 语义 [design-align] [P1] [S] [mechanical] [queued] [after: B-190] [before: B-174]
+### B-199 删除 impl / trait member 假 `pub` 并收口 private interface [design-align] [P1] [M] [judgment] [queued] [after: B-190] [before: B-174]
 
-> **2026-08-23 用户决定，已拍板 clean break**：0.1对齐Rust。Trait visibility一次决定完整associated contract；不支持method/associated type独立visibility。当前parser在trait与所有impl成员上复用`pub`，但TraitMethodDef/HTraitMethod不携带该位，形成接受后丢弃的假语义，必须在preview前hard-fail收口。
+> **2026-08-23 用户决定，已拍板 clean break**：0.1对齐Rust。Trait visibility一次决定完整associated contract；impl block本身无visibility。当前parser在所有Decl前接受`pub`、并在trait/impl路径部分丢弃，形成`pub impl`与trait-member`pub`假语义。Public接口含private declaration则外部必不可用，Ring不沿用warn-only，全部在preview前hard-fail。
 
-**范围 / 文件**：`compiler/parser.ring`/checker按impl kind区分visibility：trait declaration与trait impl中的fn/extern fn/associated type出现`pub`即单轮可修错误并建议删除；inherent impl继续逐member保留`pub`/private。`docs/lang-spec/{syntax,traits}.md`、examples/fixtures同步。Provider/trait dictionary/TypedHIR/CoreHIR/ExecutableInventory不新增visibility字段；public inherent export只消费exact HDecl member `is_pub`，trait impl surface只消费trait visibility。
+**范围 / 文件**：`compiler/parser.ring`/checker按decl/impl kind区分visibility：任何`pub impl`、trait declaration与trait impl中的fn/extern fn/associated type出现`pub`即单轮可修错误并建议删除；inherent impl继续逐member保留`pub`/private。Public fn/const/type/trait/effect、pub fields/methods及generic bounds递归检查Type/Effect/Trait可见性，发现更private declaration即稳定错误。`compiler/exports.ring`/module hydration把internal coherence inventory与public callable surface分开：private impl保留内部，public inherent只导出pub member，trait impl只有target+trait均可见才导出。`docs/lang-spec/{syntax,traits}.md`、examples/fixtures同步。
 
-**约束**：不改变trait default body、supertrait、delegate、associated binding、coherence或qualified-method post-0.1边界；不顺带决定private target/public trait或public target/private trait的整体export policy。未来sealed trait必须显式立项，不允许以private required method或warning-only语法预埋。
+**约束**：Provider/trait dictionary/TypedHIR/CoreHIR/ExecutableInventory不新增per-trait-member visibility字段，visibility不得从origin/name/span猜测。`impl PublicTrait for PrivateType`本身合法且参与internal coherence；禁止的是外部发布与private type泄漏。0.1无accidental opaque return，不改变trait default body、supertrait、delegate、associated binding、coherence或qualified-method post-0.1边界。未来sealed/opaque trait必须显式立项。
 
-**验收**：public/private trait正控；trait declaration与trait impl的`pub fn`/`pub extern fn`/`pub type`全部稳定hard-fail并给删除建议；inherent public/private method与跨模块visibility保持；mutation杀死parser skip、trait-method visibility carrier、dictionary/provider bit和private inherent method误导出。完整C e2e/golden/structural/parity/self-compile、targeted human/LLM diagnostics、double bootstrap与tracked`dist-c`literal fixed point通过，workflow validator/exact CI全绿。
+**验收**：`pub impl`及trait declaration/trait impl的`pub fn`/`pub extern fn`/`pub type`全部稳定hard-fail并给删除建议；inherent public/private method与跨模块visibility保持。Public参数/返回/字段/nested generic/bound/effect正反例覆盖private leak；private-target public-trait与public-target private-trait impl只在module内部可用，不进入dependency method index；same-origin re-export不扩大visibility。Mutation杀死parser skip、visibility carrier/猜测、private inherent误导出和单边public impl导出。完整C e2e/golden/structural/parity/self-compile、targeted human/LLM diagnostics、double bootstrap与tracked`dist-c`literal fixed point通过，workflow validator/exact CI全绿。
+
+### B-200 Return-position opaque type / `impl Trait` 设计 [design-align] [P3] [M] [judgment] [queued] [after: B-175] [deferred: post-0.1-release+real-consumer]
+
+> **2026-08-23 用户决定**：0.1不支持return-position`impl Trait`/opaque type；类型推断不能替代API abstraction，但当前没有必要为未来能力增加parser/AST/IR/ABI carrier。首次0.1发布后，以真实factory/iterator/closure API consumer重新设计。
+
+**研究范围**：比较`-> impl Trait`、具名opaque type与显式public wrapper/generic返回；固定“callee选择单一concrete type、caller只能使用公开bounds”的抽象边界。核对associated types、generic capture、effect row、ownership/Drop/RC shape、跨模块ABI、inspection/hash、多个return branch与错误诊断；与`dyn Trait`动态分发严格分开，不因语法相似合并实现。
+
+**进入/产出门**：至少一个仓内或preview真实consumer证明公开concrete type不可接受且wrapper/generic不足；先形成surface/TypedHIR→CoreHIR lowering/ABI与反例矩阵及用户decision dossier。获批前`impl`在type position稳定parse error，public interface引用private concrete type继续由B-199 hard-fail；不得预建OpaqueType、hidden associated type、dictionary slot或backend special case。
 
 ## 基础设施
 
