@@ -1402,7 +1402,12 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
             }
         }
 
-        hmethods.push(HTraitMethod { name: m.name, params: hparams, return_type: fn_ret, effects: fn_effects, has_default: m.has_default, body: method_body })
+        hmethods.push(HTraitMethod {
+            name: m.name, method_ref: m.method_ref,
+            params: hparams, return_type: fn_ret,
+            effects: fn_effects, has_default: m.has_default,
+            body: method_body
+        })
     }
 
     // Build HAssocType list from trait def
@@ -1411,7 +1416,12 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
         hassoc_types.push(HAssocType { name: atdef.name, bounds: atdef.bounds, concrete: atdef.default_type })
     }
 
-    HDecl::Trait { name: name, type_params: type_params, methods: hmethods, supertraits: trait_def.supertraits, assoc_types: hassoc_types, is_pub: is_pub, span: span }
+    HDecl::Trait {
+        name: name, owner_ref: trait_def.owner_ref,
+        type_params: type_params, methods: hmethods,
+        supertraits: trait_def.supertraits,
+        assoc_types: hassoc_types, is_pub: is_pub, span: span
+    }
 }
 
 fn check_trait_default_body(

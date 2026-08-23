@@ -289,6 +289,39 @@ pub fn registered_nominal_ref_same(
         left.display_name == right.display_name
 }
 
+// Registration gives a source trait its local typed display name without
+// changing the resolver-owned source identity.  Single-file compilation uses
+// an unspellable source module key while retaining the source spelling here.
+pub struct RegisteredTraitRef {
+    symbol: SymbolRef,
+    display_name: Str
+}
+
+pub fn make_registered_trait_ref(
+    symbol: SymbolRef, display_name: Str
+) -> RegisteredTraitRef {
+    if display_name == "" || !namespace_kind_same(
+            symbol_ref_namespace_kind(symbol), namespace_trait()) {
+        panic("IR identity: invalid registered trait relation")
+    }
+    RegisteredTraitRef { symbol: symbol, display_name: display_name }
+}
+
+pub fn registered_trait_ref_symbol(value: RegisteredTraitRef) -> SymbolRef {
+    value.symbol
+}
+
+pub fn registered_trait_ref_display_name(value: RegisteredTraitRef) -> Str {
+    value.display_name
+}
+
+pub fn registered_trait_ref_same(
+    left: RegisteredTraitRef, right: RegisteredTraitRef
+) -> Bool {
+    symbol_ref_same(left.symbol, right.symbol) &&
+        left.display_name == right.display_name
+}
+
 // A nominal field is one atomic typed relation: downstream stages may copy
 // it, but cannot pair an arbitrary member with an unrelated nominal owner.
 pub struct NominalFieldRef {
@@ -346,6 +379,81 @@ pub fn nominal_field_ref_same(
         symbol_ref_same(left.member, right.member) &&
         left.field_index == right.field_index &&
         left.field_name == right.field_name
+}
+
+// One source trait method is a closed relation between its exact trait
+// declaration, exact member declaration, raw AST member site, and callable
+// dictionary slot.  Source-member and callable-slot indexes are intentionally
+// separate: associated-type declarations may occupy source positions without
+// becoming callable dictionary slots.
+pub struct TraitMethodRef {
+    trait_symbol: SymbolRef,
+    member_symbol: SymbolRef,
+    source_member_index: Int,
+    callable_slot_index: Int,
+    method_name: Str
+}
+
+pub fn make_trait_method_ref(
+    trait_symbol: SymbolRef, source_member_index: Int,
+    callable_slot_index: Int, method_name: Str
+) -> TraitMethodRef {
+    if source_member_index < 0 || callable_slot_index < 0 ||
+       method_name == "" || !namespace_kind_same(
+            symbol_ref_namespace_kind(trait_symbol), namespace_trait()) {
+        panic("IR identity: invalid trait method owner/site")
+    }
+    let member_symbol = make_symbol_ref(
+        symbol_ref_origin_module_key(trait_symbol), namespace_member(),
+        "${symbol_ref_canonical_payload(trait_symbol)}::${method_name}",
+        "${symbol_ref_declaration_site_path(trait_symbol)}|member:${source_member_index}|slot:${callable_slot_index}|kind:trait-method")
+    if symbol_ref_origin_module_key(trait_symbol) !=
+           symbol_ref_origin_module_key(member_symbol) ||
+       !namespace_kind_same(
+            symbol_ref_namespace_kind(member_symbol), namespace_member()) ||
+       symbol_ref_canonical_payload(member_symbol) !=
+            "${symbol_ref_canonical_payload(trait_symbol)}::${method_name}" ||
+       symbol_ref_declaration_site_path(member_symbol) !=
+            "${symbol_ref_declaration_site_path(trait_symbol)}|member:${source_member_index}|slot:${callable_slot_index}|kind:trait-method" {
+        panic("IR identity: invalid trait method relation")
+    }
+    TraitMethodRef {
+        trait_symbol: trait_symbol,
+        member_symbol: member_symbol,
+        source_member_index: source_member_index,
+        callable_slot_index: callable_slot_index,
+        method_name: method_name
+    }
+}
+
+pub fn trait_method_ref_trait(value: TraitMethodRef) -> SymbolRef {
+    value.trait_symbol
+}
+
+pub fn trait_method_ref_member(value: TraitMethodRef) -> SymbolRef {
+    value.member_symbol
+}
+
+pub fn trait_method_ref_source_member_index(value: TraitMethodRef) -> Int {
+    value.source_member_index
+}
+
+pub fn trait_method_ref_callable_slot_index(value: TraitMethodRef) -> Int {
+    value.callable_slot_index
+}
+
+pub fn trait_method_ref_name(value: TraitMethodRef) -> Str {
+    value.method_name
+}
+
+pub fn trait_method_ref_same(
+    left: TraitMethodRef, right: TraitMethodRef
+) -> Bool {
+    symbol_ref_same(left.trait_symbol, right.trait_symbol) &&
+        symbol_ref_same(left.member_symbol, right.member_symbol) &&
+        left.source_member_index == right.source_member_index &&
+        left.callable_slot_index == right.callable_slot_index &&
+        left.method_name == right.method_name
 }
 
 pub struct ModuleBodyRef {

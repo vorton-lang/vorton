@@ -1,9 +1,13 @@
 use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam}
 use types::{Type, EffectRow, StructField, EnumVariant, RecordField}
-use ir_identity::{NominalFieldRef, RegisteredNominalRef, symbol_ref_same,
+use ir_identity::{NominalFieldRef, TraitMethodRef,
+    RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     nominal_field_ref_owner, nominal_field_ref_index,
     nominal_field_ref_name, registered_nominal_ref_symbol,
-    registered_nominal_ref_display_name}
+    registered_nominal_ref_display_name,
+    registered_trait_ref_symbol, registered_trait_ref_display_name,
+    trait_method_ref_trait, trait_method_ref_callable_slot_index,
+    trait_method_ref_name}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
@@ -409,6 +413,7 @@ pub struct HEffectOp {
 
 pub struct HTraitMethod {
     pub name: Str,
+    pub method_ref: TraitMethodRef,
     pub params: List<HParam>,
     pub return_type: Type,
     pub effects: EffectRow,
@@ -434,7 +439,7 @@ pub enum HDecl {
     Impl { target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
     Effect { name: Str, type_params: List<TypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
     Test { description: Str, body: HExpr, span: Span },
-    Trait { name: Str, type_params: List<TypeParam>, methods: List<HTraitMethod>, supertraits: List<Str>, assoc_types: List<HAssocType>, is_pub: Bool, span: Span },
+    Trait { name: Str, owner_ref: RegisteredTraitRef, type_params: List<TypeParam>, methods: List<HTraitMethod>, supertraits: List<Str>, assoc_types: List<HAssocType>, is_pub: Bool, span: Span },
     ExternFn { name: Str, abi_name: Str, def_id: Int?, type_params: List<TypeParam>, params: List<HParam>, return_type: Type, effects: EffectRow, is_pub: Bool, span: Span },
     ExternType { name: Str, type_params: List<TypeParam>, is_pub: Bool, span: Span },
     TypeAlias { name: Str, ty: Type, is_pub: Bool, span: Span },
@@ -1018,8 +1023,20 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                 let mut scope = new_hir_validation_scope()
                 validate_hir_expr(body, seen, scope)
             },
-            HDecl::Trait { name, methods, .. } => {
-                for method in methods {
+            HDecl::Trait { name, owner_ref, methods, .. } => {
+                if registered_trait_ref_display_name(owner_ref) != name {
+                    panic("HIR identity: trait declaration owner drifted")
+                }
+                for method_index in 0..methods.len() {
+                    let method = methods.get(method_index).unwrap()
+                    if !symbol_ref_same(
+                            trait_method_ref_trait(method.method_ref),
+                            registered_trait_ref_symbol(owner_ref)) ||
+                       trait_method_ref_callable_slot_index(
+                            method.method_ref) != method_index ||
+                       trait_method_ref_name(method.method_ref) != method.name {
+                        panic("HIR identity: trait method relation drifted")
+                    }
                     match method.body {
                         some(body) => {
                             let mut scope = new_hir_validation_scope()

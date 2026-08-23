@@ -20,9 +20,10 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
 use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
-use ir_identity::{make_symbol_ref, make_nominal_field_ref,
-    make_registered_nominal_ref,
-    namespace_nominal, namespace_member}
+use ir_identity::{SymbolRef, TraitMethodRef,
+    make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
+    make_registered_nominal_ref, make_registered_trait_ref,
+    namespace_nominal, namespace_trait, namespace_member}
 
 // ============================================================
 // Struct for open_row return value
@@ -40,6 +41,19 @@ struct OpenRow {
 struct BuiltinPredicateSpec {
     subject_param_index: Int,
     trait_name: Str
+}
+
+fn builtin_trait_symbol(name: Str) -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_trait(), name, "builtin:trait:${name}")
+}
+
+fn builtin_trait_method(
+    owner: SymbolRef, source_member_index: Int,
+    callable_slot_index: Int, name: Str
+) -> TraitMethodRef {
+    make_trait_method_ref(
+        owner, source_member_index, callable_slot_index, name)
 }
 
 fn freeze_builtin_predicates(
@@ -650,13 +664,15 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
     let eq_fn = Type::FnType { params: [self_var, self_var], return_type: BOOL, effects: EMPTY_ROW }
     let ne_fn = Type::FnType { params: [self_var, self_var], return_type: BOOL, effects: EMPTY_ROW }
 
+    let owner_ref = builtin_trait_symbol("Eq")
     env.trait_reg.traits.insert("Eq", TraitDef {
         name: "Eq",
+        owner_ref: make_registered_trait_ref(owner_ref, "Eq"),
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "eq", ty: eq_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] },
-            TraitMethodDef { name: "ne", ty: ne_fn, has_default: true, param_mutabilities: [false, false], method_type_params: [] }
+            TraitMethodDef { name: "eq", method_ref: builtin_trait_method(owner_ref, 0, 0, "eq"), ty: eq_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] },
+            TraitMethodDef { name: "ne", method_ref: builtin_trait_method(owner_ref, 1, 1, "ne"), ty: ne_fn, has_default: true, param_mutabilities: [false, false], method_type_params: [] }
         ],
         supertraits: [],
         assoc_types: []
@@ -689,12 +705,14 @@ fn register_clone_trait(mut env: TypeEnv, sink: CollectingSink) {
 
     let clone_fn = Type::FnType { params: [self_var], return_type: self_var, effects: EMPTY_ROW }
 
+    let owner_ref = builtin_trait_symbol("Clone")
     env.trait_reg.traits.insert("Clone", TraitDef {
         name: "Clone",
+        owner_ref: make_registered_trait_ref(owner_ref, "Clone"),
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "clone", ty: clone_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "clone", method_ref: builtin_trait_method(owner_ref, 0, 0, "clone"), ty: clone_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ],
         supertraits: [],
         assoc_types: []
@@ -730,12 +748,14 @@ fn register_drop_trait(mut env: TypeEnv) {
     let io_row = EffectRow { effects: [Effect::IoEffect], tail: none }
     let drop_fn = Type::FnType { params: [self_var], return_type: UNIT, effects: io_row }
 
+    let owner_ref = builtin_trait_symbol("Drop")
     env.trait_reg.traits.insert("Drop", TraitDef {
         name: "Drop",
+        owner_ref: make_registered_trait_ref(owner_ref, "Drop"),
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "drop", ty: drop_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "drop", method_ref: builtin_trait_method(owner_ref, 0, 0, "drop"), ty: drop_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ],
         supertraits: [],
         assoc_types: []
@@ -763,12 +783,14 @@ fn register_ord_trait(mut env: TypeEnv, sink: CollectingSink) {
 
     let cmp_fn = Type::FnType { params: [self_var, self_var], return_type: INT, effects: EMPTY_ROW }
 
+    let owner_ref = builtin_trait_symbol("Ord")
     env.trait_reg.traits.insert("Ord", TraitDef {
         name: "Ord",
+        owner_ref: make_registered_trait_ref(owner_ref, "Ord"),
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "cmp", ty: cmp_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] }
+            TraitMethodDef { name: "cmp", method_ref: builtin_trait_method(owner_ref, 0, 0, "cmp"), ty: cmp_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] }
         ],
         supertraits: [],
         assoc_types: []
@@ -789,12 +811,14 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
 
     let debug_fn = Type::FnType { params: [self_var], return_type: STR, effects: EMPTY_ROW }
 
+    let owner_ref = builtin_trait_symbol("Debug")
     env.trait_reg.traits.insert("Debug", TraitDef {
         name: "Debug",
+        owner_ref: make_registered_trait_ref(owner_ref, "Debug"),
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "debug", ty: debug_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "debug", method_ref: builtin_trait_method(owner_ref, 0, 0, "debug"), ty: debug_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ],
         supertraits: [],
         assoc_types: []
@@ -845,12 +869,14 @@ fn register_hash_trait(mut env: TypeEnv, sink: CollectingSink) {
 
     let hash_fn = Type::FnType { params: [self_var], return_type: INT, effects: EMPTY_ROW }
 
+    let owner_ref = builtin_trait_symbol("Hash")
     env.trait_reg.traits.insert("Hash", TraitDef {
         name: "Hash",
+        owner_ref: make_registered_trait_ref(owner_ref, "Hash"),
         type_params: [],
         type_param_vars: [self_var_id],
         methods: [
-            TraitMethodDef { name: "hash", ty: hash_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "hash", method_ref: builtin_trait_method(owner_ref, 0, 0, "hash"), ty: hash_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ],
         supertraits: [],
         assoc_types: []

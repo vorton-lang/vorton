@@ -35,12 +35,16 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     exit_struct_identity_frame, peek_struct_identity_fact,
     commit_struct_identity_fact, peek_struct_identity_completion,
     commit_struct_identity_completion,
+    peek_trait_identity_fact, commit_trait_identity_fact,
     close_struct_identity_ledger}
 use infer_helpers::{is_value_type}
 use resolver::{StructIdentityFact}
-use ir_identity::{make_registered_nominal_ref,
+use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
     registered_nominal_ref_symbol, nominal_field_ref_name,
-    nominal_field_ref_index}
+    nominal_field_ref_index, symbol_ref_same,
+    trait_method_ref_trait,
+    trait_method_ref_source_member_index,
+    trait_method_ref_callable_slot_index, trait_method_ref_name}
 
 // ============================================================
 // Public entry points
@@ -1826,7 +1830,19 @@ pub fn resolve_nominal_identity(ctx: InferCtx, type_name: Str) -> Str {
     }
 }
 
-fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, supertraits: List<TypeBound>, methods: List<Decl>, span: Span) {
+fn register_trait(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    supertraits: List<TypeBound>, methods: List<Decl>, span: Span,
+    decl_index: Int
+) {
+    let mut method_count = 0
+    for method in methods {
+        match method {
+            Decl::Fn { .. } => { method_count = method_count + 1 },
+            _ => {}
+        }
+    }
+    let identity = peek_trait_identity_fact(ctx, decl_index, method_count)
     validate_type_param_bound_shapes(
         ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     let saved = map_clone(ctx.type_param_scope)
@@ -1922,9 +1938,24 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
     }
 
     let mut trait_methods: List<TraitMethodDef> = []
-    for method in methods {
+    let mut callable_slot_index = 0
+    for source_member_index in 0..methods.len() {
+        let method = methods.get(source_member_index).unwrap()
         match method {
             Decl::Fn { name: mname, type_params: method_tps, params, return_type, declared_effects, is_abstract, .. } => {
+                let method_ref = match identity.methods.get(callable_slot_index) {
+                    some(value) => value,
+                    none => panic("trait identity ledger: method slot is missing")
+                }
+                if !symbol_ref_same(
+                        trait_method_ref_trait(method_ref), identity.owner_ref) ||
+                   trait_method_ref_source_member_index(method_ref) !=
+                        source_member_index ||
+                   trait_method_ref_callable_slot_index(method_ref) !=
+                        callable_slot_index ||
+                   trait_method_ref_name(method_ref) != mname {
+                    panic("trait identity ledger: method relation drifted")
+                }
                 validate_type_param_bound_shapes(
                     ctx, method_tps,
                     BoundShapeContext::ImplMethodBound, span)
@@ -1951,7 +1982,13 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
                     none => EMPTY_ROW
                 }
                 let fn_type = Type::FnType { params: param_types, return_type: ret, effects: method_effects }
-                trait_methods.push(TraitMethodDef { name: mname, ty: fn_type, has_default: !is_abstract, param_mutabilities: param_muts, method_type_params: method_tps })
+                trait_methods.push(TraitMethodDef {
+                    name: mname, method_ref: method_ref, ty: fn_type,
+                    has_default: !is_abstract,
+                    param_mutabilities: param_muts,
+                    method_type_params: method_tps
+                })
+                callable_slot_index = callable_slot_index + 1
             },
             _ => {}
         }
@@ -1959,7 +1996,14 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
 
     ctx.type_param_scope = saved
     ctx.qualified_assoc_scope = saved_qualified_assoc
-    ctx.env.trait_reg.traits.insert(name, TraitDef { name: name, type_params: tp_names, type_param_vars: tp_vars, methods: trait_methods, supertraits: supertrait_names, assoc_types: assoc_type_defs })
+    ctx.env.trait_reg.traits.insert(name, TraitDef {
+        name: name,
+        owner_ref: make_registered_trait_ref(identity.owner_ref, name),
+        type_params: tp_names, type_param_vars: tp_vars,
+        methods: trait_methods, supertraits: supertrait_names,
+        assoc_types: assoc_type_defs
+    })
+    commit_trait_identity_fact(ctx, identity)
 }
 
 // ============================================================
@@ -3373,7 +3417,9 @@ fn register_decl(mut ctx: InferCtx, decl: Decl, decl_index: Int) {
             register_fn(ctx, name, type_params, params, return_type, declared_effects, span),
         Decl::Test { .. } => {},
         Decl::Trait { name, type_params, supertraits, methods, span, .. } =>
-            register_trait(ctx, name, type_params, supertraits, methods, span),
+            register_trait(
+                ctx, name, type_params, supertraits, methods, span,
+                decl_index),
         Decl::ExternFn { name, type_params, params, return_type, declared_effects, span, .. } =>
             register_extern_fn(ctx, name, type_params, params, return_type, declared_effects, span),
         Decl::ExternType { name, type_params, span, .. } =>

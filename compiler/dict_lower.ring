@@ -168,7 +168,7 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             for md in decls { new_inner.push(dl_decl(md, defs, seen, counter)) }
             HDecl::ModBlock { name: name, decls: new_inner, is_pub: is_pub, span: span }
         },
-        HDecl::Trait { name, type_params, methods, supertraits, assoc_types, is_pub, span } => {
+        HDecl::Trait { name, owner_ref: trait_owner_ref, type_params, methods, supertraits, assoc_types, is_pub, span } => {
             // Default method bodies are real HIR (checked by infer) — lower them too.
             let mut new_methods: List<HTraitMethod> = []
             for tm in methods {
@@ -176,10 +176,12 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                     some(b) => some(dl_expr(b, defs, seen, counter)),
                     none => none,
                 }
-                new_methods.push(HTraitMethod { name: tm.name, params: tm.params,
+                new_methods.push(HTraitMethod { name: tm.name,
+                    method_ref: tm.method_ref, params: tm.params,
                     return_type: tm.return_type, effects: tm.effects, has_default: tm.has_default, body: new_body })
             }
-            HDecl::Trait { name: name, type_params: type_params, methods: new_methods,
+            HDecl::Trait { name: name, owner_ref: trait_owner_ref,
+                type_params: type_params, methods: new_methods,
                 supertraits: supertraits, assoc_types: assoc_types, is_pub: is_pub, span: span }
         },
         HDecl::Struct { name, owner_ref, type_params, fields, is_pub, span } =>

@@ -5,7 +5,7 @@ use ast::{Span, EffectExpr, TypeParam, DeriveAttribute}
 use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
     make_diag}
 use codes::{E0504}
-use ir_identity::{RegisteredNominalRef}
+use ir_identity::{TraitMethodRef, RegisteredNominalRef, RegisteredTraitRef}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -101,6 +101,7 @@ pub struct EffectDef {
 
 pub struct TraitMethodDef {
     pub name: Str,
+    pub method_ref: TraitMethodRef,
     pub ty: Type,
     pub has_default: Bool,
     pub param_mutabilities: List<Bool>,
@@ -116,6 +117,7 @@ pub struct AssocTypeDef {
 
 pub struct TraitDef {
     pub name: Str,
+    pub owner_ref: RegisteredTraitRef,
     pub type_params: List<Str>,
     pub type_param_vars: List<Int>,
     pub methods: List<TraitMethodDef>,

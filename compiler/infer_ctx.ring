@@ -22,9 +22,11 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements}
 use unify::{UnificationError, empty_subst, unify, occurs_in, unify_effect_params}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
-    StructIdentityFact, NamespaceKind}
+    StructIdentityFact, TraitIdentityFact, NamespaceKind}
 use ir_identity::{SymbolRef, symbol_ref_canonical_payload, symbol_ref_same,
-    nominal_field_ref_same, registered_nominal_ref_symbol}
+    nominal_field_ref_same, trait_method_ref_same,
+    registered_nominal_ref_symbol, registered_trait_ref_symbol,
+    registered_trait_ref_display_name}
 
 // ============================================================
 // InferResult — return type for expression inference
@@ -187,7 +189,8 @@ pub struct InferCtx {
     struct_identity_child_frames: Map<Str, Int>,
     struct_identity_frame_stack: List<Int>,
     struct_identity_unconsumed: List<StructIdentityFact>,
-    struct_identity_pending: List<StructIdentityFact>
+    struct_identity_pending: List<StructIdentityFact>,
+    trait_identity_unconsumed: List<TraitIdentityFact>
 }
 
 pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
@@ -225,7 +228,8 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         struct_identity_child_frames: map_new(),
         struct_identity_frame_stack: [],
         struct_identity_unconsumed: [],
-        struct_identity_pending: []
+        struct_identity_pending: [],
+        trait_identity_unconsumed: []
     }
 }
 
@@ -422,6 +426,13 @@ fn apply_project_namespace_binding(
         NamespaceKind::Trait => match ctx.env.trait_reg.traits.get(canonical_payload) {
             none => false,
             some(def) => {
+                if !symbol_ref_same(
+                        binding.symbol,
+                        registered_trait_ref_symbol(def.owner_ref)) ||
+                   registered_trait_ref_display_name(def.owner_ref) !=
+                        def.name || def.name != canonical_payload {
+                    panic("project hydration: trait owner identity mismatch")
+                }
                 state.journal.push(ProjectNamespaceUndo::Trait {
                     name: binding.exposed_name,
                     previous: ctx.env.trait_reg.traits.get(binding.exposed_name)
@@ -3316,7 +3327,8 @@ pub fn install_struct_identity_ledger(
     if ctx.struct_identity_file_key.is_some() ||
        ctx.struct_identity_frame_stack.len() != 0 ||
        ctx.struct_identity_unconsumed.len() != 0 ||
-       ctx.struct_identity_pending.len() != 0 {
+       ctx.struct_identity_pending.len() != 0 ||
+       ctx.trait_identity_unconsumed.len() != 0 {
         panic("struct identity ledger: prior ledger is still active")
     }
     ctx.struct_identity_file_key = some(file_key)
@@ -3350,9 +3362,27 @@ pub fn install_struct_identity_ledger(
             ctx.struct_identity_unconsumed.push(fact)
         }
     }
+    for fact in plan.trait_identities {
+        if fact.file_key == file_key {
+            for existing in ctx.trait_identity_unconsumed {
+                if trait_identity_site_same(existing, fact) {
+                    panic("trait identity ledger: duplicate declaration site")
+                }
+            }
+            ctx.trait_identity_unconsumed.push(fact)
+        }
+    }
     if ctx.struct_identity_root_frame.is_none() {
         panic("struct identity ledger: missing root frame")
     }
+}
+
+fn trait_identity_site_same(
+    left: TraitIdentityFact, right: TraitIdentityFact
+) -> Bool {
+    left.file_key == right.file_key &&
+        left.frame_index == right.frame_index &&
+        left.decl_index == right.decl_index
 }
 
 pub fn enter_struct_identity_root_frame(mut ctx: InferCtx) {
@@ -3504,10 +3534,79 @@ pub fn commit_struct_identity_completion(
     ctx.struct_identity_pending = remaining
 }
 
+fn trait_identity_fact_same(
+    left: TraitIdentityFact, right: TraitIdentityFact
+) -> Bool {
+    if left.file_key != right.file_key ||
+       left.frame_index != right.frame_index ||
+       left.decl_index != right.decl_index ||
+       !symbol_ref_same(left.owner_ref, right.owner_ref) ||
+       left.methods.len() != right.methods.len() {
+        return false
+    }
+    for method_index in 0..left.methods.len() {
+        match (left.methods.get(method_index), right.methods.get(method_index)) {
+            (some(a), some(b)) => if !trait_method_ref_same(a, b) {
+                return false
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+pub fn peek_trait_identity_fact(
+    ctx: InferCtx, decl_index: Int, method_count: Int
+) -> TraitIdentityFact {
+    let frame_index = match ctx.struct_identity_frame_stack.get(
+        ctx.struct_identity_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("trait identity ledger: declaration outside frame")
+    }
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let mut found: TraitIdentityFact? = none
+    for fact in ctx.trait_identity_unconsumed {
+        if fact.file_key == file_key && fact.frame_index == frame_index &&
+           fact.decl_index == decl_index {
+            if found.is_some() {
+                panic("trait identity ledger: duplicate consume match")
+            }
+            found = some(fact)
+        }
+    }
+    let fact = match found {
+        some(value) => value,
+        none => panic("trait identity ledger: missing declaration fact")
+    }
+    if fact.methods.len() != method_count {
+        panic("trait identity ledger: declaration shape mismatch")
+    }
+    fact
+}
+
+pub fn commit_trait_identity_fact(
+    mut ctx: InferCtx, fact: TraitIdentityFact
+) {
+    let mut matches = 0
+    let mut remaining: List<TraitIdentityFact> = []
+    for existing in ctx.trait_identity_unconsumed {
+        if trait_identity_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("trait identity ledger: commit fact mismatch")
+    }
+    ctx.trait_identity_unconsumed = remaining
+}
+
 pub fn close_struct_identity_ledger(mut ctx: InferCtx) {
     if ctx.struct_identity_frame_stack.len() != 0 ||
        ctx.struct_identity_unconsumed.len() != 0 ||
-       ctx.struct_identity_pending.len() != 0 {
+       ctx.struct_identity_pending.len() != 0 ||
+       ctx.trait_identity_unconsumed.len() != 0 {
         panic("struct identity ledger: registration did not close")
     }
     ctx.struct_identity_file_key = none
@@ -3516,6 +3615,7 @@ pub fn close_struct_identity_ledger(mut ctx: InferCtx) {
     ctx.struct_identity_frame_stack = []
     ctx.struct_identity_unconsumed = []
     ctx.struct_identity_pending = []
+    ctx.trait_identity_unconsumed = []
 }
 
 fn bind_raw_extern_type_alias(mut ctx: InferCtx, alias_name: Str, abi_name: Str) -> Bool {

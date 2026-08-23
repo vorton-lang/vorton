@@ -6,7 +6,8 @@ use formatter::{format_human, format_llm}
 use hir::{compare_by_first, module_item_identity, variant_ctor_name}
 use codes::{E0207, E0702, E0704, E0705}
 use ir_identity::{
-    SymbolRef, NominalFieldRef, make_symbol_ref, make_nominal_field_ref,
+    SymbolRef, NominalFieldRef, TraitMethodRef,
+    make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
     namespace_value, namespace_nominal, namespace_trait, namespace_effect,
     namespace_member,
     namespace_kind_same,
@@ -314,6 +315,14 @@ pub struct StructIdentityFact {
     pub is_extern: Bool
 }
 
+pub struct TraitIdentityFact {
+    pub file_key: Str,
+    pub frame_index: Int,
+    pub decl_index: Int,
+    pub owner_ref: SymbolRef,
+    pub methods: List<TraitMethodRef>
+}
+
 // Kept parallel to the worklist fact table so later consumers never have to
 // infer declaration-vs-import identity from a payload, owner, or AstSite.
 enum NamespaceFactProvenance {
@@ -496,6 +505,7 @@ pub struct ModuleNamespaceCensus {
     // projections only and never decide identity.
     pub enum_variant_facts: List<EnumVariantFactGroup>,
     pub struct_identities: List<StructIdentityFact>,
+    pub trait_identities: List<TraitIdentityFact>,
     pub imports: List<ImportObligation>,
     pub physical_dependencies: List<PhysicalDependencyObligation>,
     pub issues: List<ImportIssue>
@@ -506,6 +516,7 @@ pub struct ResolvedNamespacePlan {
     pub bindings: List<ResolvedNamespaceBinding>,
     pub enum_variant_facts: List<EnumVariantFactGroup>,
     pub struct_identities: List<StructIdentityFact>,
+    pub trait_identities: List<TraitIdentityFact>,
     pub imports: List<ImportObligation>,
     pub physical_dependencies: List<PhysicalDependencyObligation>,
     pub issues: List<ImportIssue>
@@ -818,6 +829,46 @@ fn collect_struct_identity_fact(
     }, facts)
 }
 
+fn append_trait_identity_fact(
+    fact: TraitIdentityFact, mut facts: List<TraitIdentityFact>
+) {
+    for existing in facts {
+        if existing.file_key == fact.file_key &&
+           existing.frame_index == fact.frame_index &&
+           existing.decl_index == fact.decl_index {
+            panic("namespace invariant violated: duplicate trait identity site")
+        }
+    }
+    facts.push(fact)
+}
+
+fn collect_trait_identity_fact(
+    frame: ModuleFramePlan, decl_index: Int,
+    owner_ref: SymbolRef, methods: List<Decl>,
+    mut facts: List<TraitIdentityFact>
+) {
+    let mut method_refs: List<TraitMethodRef> = []
+    let mut callable_slot_index = 0
+    for source_member_index in 0..methods.len() {
+        match methods.get(source_member_index) {
+            some(Decl::Fn { name, .. }) => {
+                method_refs.push(make_trait_method_ref(
+                    owner_ref, source_member_index,
+                    callable_slot_index, name))
+                callable_slot_index = callable_slot_index + 1
+            },
+            _ => {}
+        }
+    }
+    append_trait_identity_fact(TraitIdentityFact {
+        file_key: frame.file_key,
+        frame_index: frame.frame_index,
+        decl_index: decl_index,
+        owner_ref: owner_ref,
+        methods: method_refs
+    }, facts)
+}
+
 fn enum_variant_constructors(
     groups: List<EnumVariantFactGroup>, enum_symbol: SymbolRef
 ) -> Option<List<NamespaceSeed>> {
@@ -835,7 +886,8 @@ fn collect_decl_seed(
     decl: Decl,
     mut seeds: List<NamespaceSeed>,
     mut enum_variant_facts: List<EnumVariantFactGroup>,
-    mut struct_identities: List<StructIdentityFact>
+    mut struct_identities: List<StructIdentityFact>,
+    mut trait_identities: List<TraitIdentityFact>
 ) {
     match decl {
         Decl::Fn { name, is_pub, .. } => {
@@ -930,10 +982,13 @@ fn collect_decl_seed(
                 declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
-        Decl::Trait { name, is_pub, .. } => {
-            let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::Trait,
+        Decl::Trait { name, methods, is_pub, .. } => {
+            let owner_ref = append_namespace_seed(
+                frame, decl_index, name, NamespaceKind::Trait,
                 declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
+            collect_trait_identity_fact(
+                frame, decl_index, owner_ref, methods, trait_identities)
         },
         // Impl/Test/Delegate/AssocType do not introduce namespace seeds.
         // ModBlock introduces a frame in pass one and is traversed separately.
@@ -1194,6 +1249,7 @@ fn collect_frame_contents(
     mut seeds: List<NamespaceSeed>,
     mut enum_variant_facts: List<EnumVariantFactGroup>,
     mut struct_identities: List<StructIdentityFact>,
+    mut trait_identities: List<TraitIdentityFact>,
     mut imports: List<ImportObligation>,
     mut physical_dependencies: List<PhysicalDependencyObligation>,
     mut issues: List<ImportIssue>
@@ -1226,7 +1282,7 @@ fn collect_frame_contents(
             some(decl) => {
                 collect_decl_seed(
                     frame, decl_index, decl, seeds, enum_variant_facts,
-                    struct_identities)
+                    struct_identities, trait_identities)
                 match decl {
                     Decl::ModBlock { name, uses: nested_uses, decls: nested_decls, .. } => {
                         // Duplicate inline ModBlocks intentionally share a
@@ -1241,7 +1297,8 @@ fn collect_frame_contents(
                                     collect_frame_contents(
                                         child_frame, nested_uses, nested_decls,
                                         frames, frame_site_indices, seeds,
-                                        enum_variant_facts, struct_identities, imports,
+                                        enum_variant_facts, struct_identities,
+                                        trait_identities, imports,
                                         physical_dependencies, issues)
                                 },
                                 none => {}
@@ -1289,6 +1346,7 @@ pub fn census_module_namespaces(
     let mut seeds: List<NamespaceSeed> = []
     let mut enum_variant_facts: List<EnumVariantFactGroup> = []
     let mut struct_identities: List<StructIdentityFact> = []
+    let mut trait_identities: List<TraitIdentityFact> = []
     let mut imports: List<ImportObligation> = []
     let mut physical_dependencies: List<PhysicalDependencyObligation> = []
     let mut issues: List<ImportIssue> = []
@@ -1299,7 +1357,8 @@ pub fn census_module_namespaces(
             collect_frame_contents(
                 root_frame, program.uses, program.decls,
                 frames, frame_site_indices,
-                seeds, enum_variant_facts, struct_identities, imports,
+                seeds, enum_variant_facts, struct_identities,
+                trait_identities, imports,
                 physical_dependencies, issues)
         },
         none => {}
@@ -1312,6 +1371,7 @@ pub fn census_module_namespaces(
         seeds: seeds,
         enum_variant_facts: enum_variant_facts,
         struct_identities: struct_identities,
+        trait_identities: trait_identities,
         imports: imports,
         physical_dependencies: physical_dependencies,
         issues: issues
@@ -4786,6 +4846,7 @@ pub fn resolve_namespace_plan(
     let mut source_owners: Set<Str> = set_new()
     let mut enum_variant_facts: List<EnumVariantFactGroup> = []
     let mut struct_identities: List<StructIdentityFact> = []
+    let mut trait_identities: List<TraitIdentityFact> = []
 
     for census in censuses {
         for frame in census.frames {
@@ -4801,6 +4862,9 @@ pub fn resolve_namespace_plan(
         }
         for fact in census.struct_identities {
             append_struct_identity_fact(fact, struct_identities)
+        }
+        for fact in census.trait_identities {
+            append_trait_identity_fact(fact, trait_identities)
         }
         imports.extend(census.imports)
         physical_dependencies.extend(census.physical_dependencies)
@@ -5030,6 +5094,7 @@ pub fn resolve_namespace_plan(
         bindings: bindings,
         enum_variant_facts: enum_variant_facts,
         struct_identities: struct_identities,
+        trait_identities: trait_identities,
         imports: imports,
         physical_dependencies: physical_dependencies,
         issues: issues
