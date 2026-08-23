@@ -4,8 +4,10 @@ use hir::{HProgram, HDecl, ValueBindingKind, ModuleImplFact, compare_by_first,
     variant_ctor_name}
 use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef, ImplEntry,
     TypeAliasDef, EffectAliasDef, MethodOrigin,
-    exact_scheme_value_origin, find_impl_by_origin,
-    impl_entry_final_same}
+    exact_scheme_value_origin, find_impl_by_provider,
+    impl_entry_exact_key_same, impl_entry_final_same,
+    optional_symbol_ref_same}
+use ir_identity::{impl_provider_ref_same}
 use infer_register::{prefix_decl_name, module_prefix_decl_name}
 
 // ============================================================
@@ -589,10 +591,9 @@ fn copy_exported_name(
 // lexical resolution against the rolled-back environment.
 fn append_exact_impl_owner(owner: ImplEntry, mut owners: List<ImplEntry>) {
     for existing in owners {
-        if existing.target_type_name == owner.target_type_name &&
-           existing.origin == owner.origin {
+        if impl_entry_exact_key_same(existing, owner) {
             if !impl_entry_final_same(existing, owner) {
-                panic("impl export closure: same-origin owner structure drifted")
+                panic("impl export closure: same-provider owner structure drifted")
             }
             return
         }
@@ -621,13 +622,21 @@ fn method_origin_span_same(left: MethodOrigin, right: MethodOrigin) -> Bool {
 fn method_origin_same(left: MethodOrigin, right: MethodOrigin) -> Bool {
     left.origin == right.origin &&
     optional_impl_trait_same(left.trait_name, right.trait_name) &&
+    impl_provider_ref_same(left.provider_ref, right.provider_ref) &&
+    optional_symbol_ref_same(left.trait_ref, right.trait_ref) &&
     method_origin_span_same(left, right)
 }
 
 fn method_origin_matches_owner(origin: MethodOrigin, owner: ImplEntry) -> Bool {
     if origin.origin != owner.origin ||
-       !optional_impl_trait_same(origin.trait_name, owner.trait_name) {
+       !optional_impl_trait_same(origin.trait_name, owner.trait_name) ||
+       !optional_symbol_ref_same(origin.trait_ref, owner.trait_ref) {
         return false
+    }
+    match owner.provider_ref {
+        some(provider) => if !impl_provider_ref_same(
+                origin.provider_ref, provider) { return false },
+        none => return false
     }
     origin.span.file == owner.span.file &&
     origin.span.start.line == owner.span.start.line &&
@@ -700,30 +709,32 @@ fn export_impl_facts(
 ) {
     let mut seen_fact_owners: List<ImplEntry> = []
     for fact in impl_facts {
-        let owner = match find_impl_by_origin(
-            env.trait_reg, fact.target, fact.owner_origin
+        let owner = match find_impl_by_provider(
+            env.trait_reg, fact.target,
+            fact.trait_ref, fact.provider_ref
         ) {
             some(found) => found,
             none => panic("impl export closure: exact fact owner is missing")
         }
+        if owner.origin != fact.owner_origin ||
+           !optional_symbol_ref_same(owner.trait_ref, fact.trait_ref) {
+            panic("impl export closure: fact owner relation changed")
+        }
         for seen in seen_fact_owners {
-            if seen.target_type_name == owner.target_type_name &&
-               seen.origin == owner.origin {
+            if impl_entry_exact_key_same(seen, owner) {
                 panic("impl export closure: user impl fact was exported twice")
             }
         }
         seen_fact_owners.push(owner)
-        if fact.is_trait_impl != owner.trait_name.is_some() {
-            panic("impl export closure: fact owner kind changed")
-        }
         for method_name in fact.method_names {
             if !owner.method_schemes.contains_key(method_name) {
                 panic("impl export closure: fact method has no owner core")
             }
             match env.trait_reg.method_origins.get(fact.target) {
                 some(origins) => match origins.get(method_name) {
-                    some(origin) => if origin.origin != fact.owner_origin {
-                        panic("impl export closure: fact method changed origin")
+                    some(origin) => if !method_origin_matches_owner(
+                            origin, owner) {
+                        panic("impl export closure: fact method changed owner")
                     },
                     none => panic("impl export closure: fact method index is missing")
                 },
@@ -744,7 +755,7 @@ fn export_impl_facts(
         }
         // Inherent-method name lists — only for top-level impls of pub types
         // (mod-block nested impls never did the pub-type scan; preserved).
-        if fact.is_top_level && !fact.is_trait_impl {
+        if fact.is_top_level && fact.trait_ref.is_none() {
             let mut is_pub_type = false
             for d in program.decls {
                 match d {
@@ -780,11 +791,8 @@ fn validate_impl_export_closure(
             let mut matches = 0
             for owner in owners {
                 if owner.target_type_name == target &&
-                   owner.origin == origin.origin {
+                   method_origin_matches_owner(origin, owner) {
                     matches = matches + 1
-                    if !method_origin_matches_owner(origin, owner) {
-                        panic("impl export closure: exported index changed owner shape")
-                    }
                     if !owner.method_schemes.contains_key(method_name) {
                         panic("impl export closure: exported index has no owner core")
                     }

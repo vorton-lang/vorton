@@ -61,10 +61,12 @@ fn al_decl(d: HDecl) -> HDecl {
                 return_type: return_type, effects: effects,
                 body: al_expr(body),
                 is_pub: is_pub, trait_bounds: trait_bounds, span: span },
-        HDecl::Impl { target_type, type_params, trait_name, methods, assoc_types, span } => {
+        HDecl::Impl { target_type, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
             for m in methods { new_methods.push(al_decl(m)) }
-            HDecl::Impl { target_type: target_type, type_params: type_params, trait_name: trait_name,
+            HDecl::Impl { target_type: target_type,
+                provider_ref: provider_ref, trait_ref: trait_ref,
+                type_params: type_params, trait_name: trait_name,
                 methods: new_methods, assoc_types: assoc_types, span: span }
         },
         HDecl::Test { description, body, span } =>

@@ -8,7 +8,9 @@ use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImpl
     prelude_extern_identity,
     is_nullary_variant_ctor_ident}
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, new_collecting_sink, make_diag}
-use env::{TypeEnv, TypeScheme, ImplEntry, add_impl, find_impl, find_impl_by_origin,
+use env::{TypeEnv, TypeScheme, add_impl, find_impl,
+    find_impl_by_provider, impl_entry_exact_key_same,
+    optional_symbol_ref_same,
     install_method_core, assert_no_provisional_impl_owners}
 use builtins::{register_builtins, register_hof_intrinsics,
     finalize_std_hof_fallbacks}
@@ -285,7 +287,7 @@ fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
 // A private inline mod does not publish a direct fact. If one of its types or
 // traits is re-exported through a public facade, extract_exports instead adds
 // that exact registry owner through the public type/trait closure.
-fn impl_trait_identity_same(left: Str?, right: Str?) -> Bool {
+fn impl_trait_name_same(left: Str?, right: Str?) -> Bool {
     match (left, right) {
         (some(a), some(b)) => a == b,
         (none, none) => true,
@@ -293,43 +295,42 @@ fn impl_trait_identity_same(left: Str?, right: Str?) -> Bool {
     }
 }
 
-// Select the exact owner already registered for this checked HIR declaration.
-// MethodOrigin is an index into that owner, not an authority from which a new
-// origin may be reconstructed.
-fn exact_module_impl_owner(
-    env: TypeEnv, target: Str, trait_name: Str?, method_names: List<Str>
-) -> ImplEntry? {
-    let mut found: ImplEntry? = none
-    match env.trait_reg.trait_impls.get(target) {
-        some(owners) => {
-            for owner in owners {
-                if impl_trait_identity_same(owner.trait_name, trait_name) {
-                    let mut methods_match = true
-                    for method_name in method_names {
-                        if !owner.method_schemes.contains_key(method_name) {
-                            methods_match = false
-                        } else {
-                            match env.trait_reg.method_origins.get(target) {
-                                some(origins) => match origins.get(method_name) {
-                                    some(origin) => if origin.origin != owner.origin {
-                                        methods_match = false
-                                    },
-                                    none => { methods_match = false }
-                                },
-                                none => { methods_match = false }
-                            }
+fn validate_impl_carriers(
+    env: TypeEnv, decls: List<HDecl>, allow_incomplete: Bool
+) {
+    for decl in decls {
+        match decl {
+            HDecl::Impl {
+                target_type, provider_ref, trait_ref, trait_name, methods, ..
+            } => match find_impl_by_provider(
+                env.trait_reg, target_type, trait_ref, provider_ref
+            ) {
+                some(owner) => {
+                    if !impl_trait_name_same(owner.trait_name, trait_name) ||
+                       !optional_symbol_ref_same(owner.trait_ref, trait_ref) {
+                        panic("impl HIR: typed owner relation changed")
+                    }
+                    for method in methods {
+                        match method {
+                            HDecl::Fn { name, .. } |
+                            HDecl::ExternFn { name, .. } => {
+                                if !owner.method_schemes.contains_key(name) {
+                                    panic("impl HIR: method is not owned by carrier")
+                                }
+                            },
+                            _ => {}
                         }
                     }
-                    if methods_match {
-                        if found.is_some() { return none }
-                        found = some(owner)
-                    }
+                },
+                none => if !allow_incomplete {
+                    panic("impl HIR: typed owner is missing")
                 }
-            }
-        },
-        none => {}
+            },
+            HDecl::ModBlock { decls: inner, .. } =>
+                validate_impl_carriers(env, inner, allow_incomplete),
+            _ => {}
+        }
     }
-    found
 }
 
 fn collect_module_impl_facts(
@@ -338,7 +339,9 @@ fn collect_module_impl_facts(
 ) {
     for decl in decls {
         match decl {
-            HDecl::Impl { target_type, trait_name, methods, .. } => {
+            HDecl::Impl {
+                target_type, provider_ref, trait_ref, trait_name, methods, ..
+            } => {
                 let mut method_names: List<Str> = []
                 for m in methods {
                     match m {
@@ -349,16 +352,30 @@ fn collect_module_impl_facts(
                 }
                 // An empty inherent impl exports no callable or evidence.
                 if trait_name.is_some() || method_names.len() > 0 {
-                    match exact_module_impl_owner(
-                        env, target_type, trait_name, method_names
+                    match find_impl_by_provider(
+                        env.trait_reg, target_type, trait_ref, provider_ref
                     ) {
-                        some(owner) => facts.push(ModuleImplFact {
-                            target: target_type,
-                            owner_origin: owner.origin,
-                            is_trait_impl: trait_name.is_some(),
-                            method_names: method_names,
-                            is_top_level: is_top_level
-                        }),
+                        some(owner) => {
+                            if !impl_trait_name_same(
+                                    owner.trait_name, trait_name) ||
+                               !optional_symbol_ref_same(
+                                    owner.trait_ref, trait_ref) {
+                                panic("module impl fact: typed owner relation changed")
+                            }
+                            for method_name in method_names {
+                                if !owner.method_schemes.contains_key(method_name) {
+                                    panic("module impl fact: carrier method is not owned")
+                                }
+                            }
+                            facts.push(ModuleImplFact {
+                                target: target_type,
+                                provider_ref: provider_ref,
+                                trait_ref: trait_ref,
+                                owner_origin: owner.origin,
+                                method_names: method_names,
+                                is_top_level: is_top_level
+                            })
+                        },
                         none => if !allow_incomplete {
                             panic("module impl fact: exact registered owner is not unique")
                         }
@@ -391,6 +408,7 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         resolve_single_namespace_plan(program))
     let hprogram = infer_check(ctx, program)
     let mut impl_facts: List<ModuleImplFact> = []
+    validate_impl_carriers(ctx.env, hprogram.decls, ctx.sink.has_errors())
     collect_module_impl_facts(
         ctx.env, hprogram.decls, true, ctx.sink.has_errors(), impl_facts)
     // Prepend prelude hdecls to the program's decls
@@ -633,6 +651,7 @@ pub fn check_module(
     report_namespace_plan_issues(ctx, module_key, program, namespace_plan)
     let hprogram = check_module_identity(ctx, program, module_prefix)
     let mut impl_facts: List<ModuleImplFact> = []
+    validate_impl_carriers(ctx.env, hprogram.decls, ctx.sink.has_errors())
     collect_module_impl_facts(
         ctx.env, hprogram.decls, true, ctx.sink.has_errors(), impl_facts)
     // Prepend prelude hdecls to the program's decls
@@ -765,7 +784,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                     ctx.env.trait_reg,
                     impl_.target_type_name, trait_name) {
                     some(existing) => {
-                        if existing.origin != impl_.origin {
+                        if !impl_entry_exact_key_same(existing, impl_) {
                             let _ = type_error(ctx.sink, E0504,
                                 "Duplicate impl '${nominal_display_name(trait_name)}' for '${nominal_display_name(impl_.target_type_name)}' from distinct dependency origins",
                                 impl_.span, DiagnosticContext::TraitError {
@@ -787,10 +806,14 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
             sorted_origins.sort_by(compare_by_first)
             for origin_entry in sorted_origins {
                 let (method_name, origin) = origin_entry
-                match find_impl_by_origin(
-                    ctx.env.trait_reg, type_name, origin.origin
+                match find_impl_by_provider(
+                    ctx.env.trait_reg, type_name,
+                    origin.trait_ref, origin.provider_ref
                 ) {
                     some(owner) => {
+                        if owner.origin != origin.origin {
+                            panic("impl hydration: legacy origin changed")
+                        }
                         let core = match owner.method_schemes.get(method_name) {
                             some(found) => found,
                             none => panic(

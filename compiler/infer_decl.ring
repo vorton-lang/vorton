@@ -830,7 +830,16 @@ fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: L
     ctx.current_fn_bounds = saved_impl_bounds
     ctx.type_param_scope = saved_tp_scope
     ctx.qualified_assoc_scope = saved_qualified_assoc
-    HDecl::Impl { target_type: target_type, type_params: type_params, trait_name: trait_name, methods: hmethods, assoc_types: hassoc_types, span: span }
+    let provider_ref = match impl_owner.provider_ref {
+        some(value) => value,
+        none => panic("impl HIR: selected final owner has no provider")
+    }
+    HDecl::Impl {
+        target_type: target_type,
+        provider_ref: provider_ref, trait_ref: impl_owner.trait_ref,
+        type_params: type_params, trait_name: trait_name,
+        methods: hmethods, assoc_types: hassoc_types, span: span
+    }
 }
 
 fn expand_delegate_impls(
@@ -1312,8 +1321,21 @@ fn expand_delegate_impls(
                                     h_assoc_types.push(HAssocType { name: aname, bounds: [], concrete: some(aty) })
                                 }
 
+                                let selected_delegate_owner = match delegate_impl {
+                                    some(owner) => owner,
+                                    none => panic(
+                                        "delegate HIR: selected owner is missing")
+                                }
+                                let selected_delegate_provider = match
+                                        selected_delegate_owner.provider_ref {
+                                    some(provider) => provider,
+                                    none => panic(
+                                        "delegate HIR: final owner has no provider")
+                                }
                                 result.push(HDecl::Impl {
                                     target_type: target_type,
+                                    provider_ref: selected_delegate_provider,
+                                    trait_ref: selected_delegate_owner.trait_ref,
                                     type_params: type_params,
                                     trait_name: some(tname),
                                     methods: trait_hmethods,

@@ -1,6 +1,6 @@
 use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam}
 use types::{Type, EffectRow, StructField, EnumVariant, RecordField}
-use ir_identity::{NominalFieldRef, TraitMethodRef,
+use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     nominal_field_ref_owner, nominal_field_ref_index,
     nominal_field_ref_name, registered_nominal_ref_symbol,
@@ -8,7 +8,8 @@ use ir_identity::{NominalFieldRef, TraitMethodRef,
     registered_trait_ref_symbol, registered_trait_ref_display_name,
     trait_method_ref_trait, trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index,
-    trait_method_ref_name}
+    trait_method_ref_name, impl_provider_ref_kind,
+    impl_provider_kind_tag}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
@@ -73,13 +74,14 @@ pub struct ModuleImplFact {
     // checking: a declaration identity for user types, the bare builtin
     // spelling (e.g. "Str") for builtin impls.
     pub target: Str,
+    pub provider_ref: ImplProviderRef,
+    pub trait_ref: SymbolRef?,
     // Exact registered ImplEntry identity captured from TraitRegistry while
     // checking. This Str is an opaque transition token until the aggregate
     // typed owner identity replaces it: export/hydration may only copy and
     // compare it, never parse, concatenate, cache as ABI, or reconstruct it
     // from target, method spelling, or Span.
     pub owner_origin: Str,
-    pub is_trait_impl: Bool,
     // fn-method names in declaration order (delegates excluded upstream by
     // HIR construction only when they do not lower to HDecl::Fn).
     pub method_names: List<Str>,
@@ -437,7 +439,7 @@ pub enum HDecl {
     Fn { name: Str, def_id: Int?, type_params: List<TypeParam>, params: List<HParam>, return_type: Type, effects: EffectRow, body: HExpr, is_pub: Bool, trait_bounds: List<TraitBound>, span: Span },
     Struct { name: Str, owner_ref: RegisteredNominalRef, type_params: List<TypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
     Enum { name: Str, type_params: List<TypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
-    Impl { target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
+    Impl { target_type: Str, provider_ref: ImplProviderRef, trait_ref: SymbolRef?, type_params: List<TypeParam>, trait_name: Str?, methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
     Effect { name: Str, type_params: List<TypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
     Test { description: Str, body: HExpr, span: Span },
     Trait { name: Str, owner_ref: RegisteredTraitRef, type_params: List<TypeParam>, methods: List<HTraitMethod>, supertraits: List<Str>, assoc_types: List<HAssocType>, is_pub: Bool, span: Span },
@@ -1006,7 +1008,14 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     params, seen, scope, "function '${name}'")
                 validate_hir_expr(body, seen, scope)
             },
-            HDecl::Impl { methods, .. } => validate_hir_decls(methods, seen),
+            HDecl::Impl { provider_ref, trait_name, trait_ref, methods, .. } => {
+                let _ = impl_provider_kind_tag(
+                    impl_provider_ref_kind(provider_ref))
+                if trait_name.is_some() != trait_ref.is_some() {
+                    panic("HIR identity: impl trait name/ref presence drifted")
+                }
+                validate_hir_decls(methods, seen)
+            },
             HDecl::Effect { name, ops, .. } => {
                 for op in ops {
                     match op.default_body {
