@@ -17,6 +17,9 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     find_impl, find_impl_by_origin, find_impl_by_provider,
     find_impls_by_provider, find_delegate_child_provider_plan,
     optional_symbol_ref_same,
+    delegate_child_provider_ref,
+    delegate_child_provider_produced_owner_count,
+    delegate_child_provider_had_semantic_error,
     has_impl, impl_origin, impl_decl_origin,
     impl_method_origin,
     install_method_core, replace_impl_method_core,
@@ -871,10 +874,18 @@ fn expand_delegate_impls(
         some(plan) => plan,
         none => panic("delegate HIR: raw child provider plan is missing")
     }
+    let child_provider_ref = delegate_child_provider_ref(child_plan)
     let produced_owners = find_impls_by_provider(
-        ctx.env.trait_reg, target_type, child_plan.provider_ref)
-    if produced_owners.len() == 0 {
-        if ctx.sink.has_errors() { return result }
+        ctx.env.trait_reg, target_type, child_provider_ref)
+    let produced_owner_count =
+        delegate_child_provider_produced_owner_count(child_plan)
+    let had_semantic_error =
+        delegate_child_provider_had_semantic_error(child_plan)
+    if produced_owners.len() != produced_owner_count {
+        panic("delegate HIR: child provider owner count drifted")
+    }
+    if produced_owner_count == 0 {
+        if had_semantic_error { return result }
         panic("delegate HIR: clean child provider produced no owners")
     }
 

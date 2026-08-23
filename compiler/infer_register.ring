@@ -8,11 +8,13 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     TraitDef, TraitMethodDef, ImplEntry, ImplMethodSchemeCore,
     ExplicitDerivedProviderPlan, NominalDerivedProviderPlan,
     DelegateChildProviderPlan, DelegatePlanState,
+    make_delegate_child_provider_plan,
     ImplAssocPredicate, TypedImplPredicate, FrozenImplPredicateSet,
     TypeAliasDef, FnBound,
     EffectAliasDef, AssocTypeDef, MethodOrigin, mono, apply_subst, apply_subst_effect_map,
     apply_subst_map, add_impl, has_impl, find_impl, impl_origin, impl_decl_origin,
     find_impl_by_origin, find_impl_by_provider,
+    find_impls_by_provider,
     finalize_provisional_impl_owner,
     install_method_core, replace_impl_method_core,
     make_impl_method_scheme_core, impl_method_core_as_scheme,
@@ -1428,16 +1430,11 @@ fn register_phase3_delegate(
                 let canonical_trait_ref = exact_trait_ref(
                     ctx, canonical_trait)
                 let parent_provider_ref = delegate_facts.first().unwrap().parent_provider_ref
-                let mut child_plans: List<DelegateChildProviderPlan> = []
                 for fact in delegate_facts {
                     if !impl_provider_ref_same(
                             fact.parent_provider_ref, parent_provider_ref) {
                         panic("delegate registration: parent provider changed")
                     }
-                    child_plans.push(DelegateChildProviderPlan {
-                        source_member_index: fact.source_member_index,
-                        provider_ref: fact.provider_ref
-                    })
                 }
                 let owner = match find_impl_by_provider(
                     ctx.env.trait_reg, canonical_target,
@@ -1448,9 +1445,6 @@ fn register_phase3_delegate(
                         fail.raise(CompileError {})
                     }
                 }
-                finalize_delegate_provider_plan(
-                    ctx.env.trait_reg, canonical_target,
-                    canonical_trait_ref, parent_provider_ref, child_plans)
                 if owner.type_param_vars.len() != type_params.len() {
                     panic("delegate registration: outer owner arity mismatch")
                 }
@@ -1465,6 +1459,7 @@ fn register_phase3_delegate(
                     }
                 }
                 let mut delegate_index = 0
+                let mut child_plans: List<DelegateChildProviderPlan> = []
                 for source_member_index in 0..methods.len() {
                     match methods.get(source_member_index) {
                         some(Decl::Delegate {
@@ -1475,15 +1470,27 @@ fn register_phase3_delegate(
                             if fact.source_member_index != source_member_index {
                                 panic("delegate registration: provider order changed")
                             }
-                            let _ = some(register_delegate(
+                            let outcome = some(register_delegate(
                                 ctx, owner, canonical_target,
                                 field, trait_names, dspan, type_params,
                                 fact.provider_ref)) catch { _ => none }
+                            let had_semantic_error = outcome.unwrap_or(true)
+                            let produced_owner_count = find_impls_by_provider(
+                                ctx.env.trait_reg, canonical_target,
+                                fact.provider_ref).len()
+                            child_plans.push(
+                                make_delegate_child_provider_plan(
+                                    source_member_index, fact.provider_ref,
+                                    produced_owner_count,
+                                    had_semantic_error))
                             delegate_index = delegate_index + 1
                         },
                         _ => {}
                     }
                 }
+                finalize_delegate_provider_plan(
+                    ctx.env.trait_reg, canonical_target,
+                    canonical_trait_ref, parent_provider_ref, child_plans)
 
                 ctx.type_param_scope = saved
             }
@@ -2812,12 +2819,14 @@ fn register_delegate(
     mut ctx: InferCtx, wrapper_owner: ImplEntry,
     target_type: Str, field: Str, trait_names: List<Str>, span: Span,
     impl_type_params: List<TypeParam>, provider_ref: ImplProviderRef
-) {
+) -> Bool {
+    let mut had_semantic_error = false
     let wrapper_fn_bounds = impl_owner_fn_bounds(wrapper_owner)
     // 1. Validate field exists on target struct
     let target_display = nominal_display_name(target_type)
     match ctx.env.types.structs.get(target_type) {
         none => {
+            had_semantic_error = true
             let _ = type_error(ctx.sink, E0507,
                 "delegate can only be used on struct types, '${target_display}' is not a struct",
                 span, DiagnosticContext::TraitError { detail: "delegate on non-struct type" })
@@ -2850,6 +2859,7 @@ fn register_delegate(
             }
             match field_type {
                 none => {
+                    had_semantic_error = true
                     let _ = type_error(ctx.sink, E0507,
                         "field '${field}' not found in struct '${target_display}'",
                         span, DiagnosticContext::TraitError { detail: "delegate field not found" })
@@ -2861,6 +2871,7 @@ fn register_delegate(
                         Type::StructType { name, .. } => { field_type_name = some(name) },
                         Type::EnumType { name, .. } => { field_type_name = some(name) },
                         _ => {
+                            had_semantic_error = true
                             let _ = type_error(ctx.sink, E0507,
                                 "delegate field '${field}' must have a named type (struct or enum)",
                                 span, DiagnosticContext::TraitError { detail: "delegate field has unnamed type" })
@@ -2869,17 +2880,20 @@ fn register_delegate(
                     match field_type_name {
                         none => {},
                         some(ftn) => {
-                            register_delegate_traits(
+                            if register_delegate_traits(
                                 ctx, wrapper_owner, target_type,
                                 field, trait_names, span,
                                 wrapper_fn_bounds, impl_type_params, ftn, ft,
-                                provider_ref)
+                                provider_ref) {
+                                had_semantic_error = true
+                            }
                         }
                     }
                 }
             }
         }
     }
+    had_semantic_error
 }
 
 fn register_delegate_traits(
@@ -2888,7 +2902,8 @@ fn register_delegate_traits(
     wrapper_fn_bounds: List<FnBoundsEntry>,
     impl_type_params: List<TypeParam>, field_type_name: Str, ft: Type,
     provider_ref: ImplProviderRef
-) {
+) -> Bool {
+    let mut had_semantic_error = false
     for tname in trait_names {
         let canonical_trait = resolve_trait_identity(ctx, tname)
         let trait_display = nominal_display_name(canonical_trait)
@@ -2896,6 +2911,7 @@ fn register_delegate_traits(
         let target_display = nominal_display_name(target_type)
         match ctx.env.trait_reg.traits.get(canonical_trait) {
             none => {
+                had_semantic_error = true
                 let _ = type_error(ctx.sink, E0501,
                     "Unknown trait: ${trait_display}",
                     span, DiagnosticContext::TraitError { detail: "unknown trait '${trait_display}'" })
@@ -2903,12 +2919,14 @@ fn register_delegate_traits(
             some(trait_def) => {
                 // Validate that the field type implements the trait
                 if !has_impl(ctx.env.trait_reg, field_type_name, canonical_trait) {
+                    had_semantic_error = true
                     let _ = type_error(ctx.sink, E0508,
                         "type '${field_type_display}' (field '${field}') does not implement trait '${trait_display}'",
                         span, DiagnosticContext::TraitError { detail: "delegate field type missing trait impl" })
                 } else {
                     // Check for conflict: same trait already implemented (hand-written) for this type
                     if has_impl(ctx.env.trait_reg, target_type, canonical_trait) {
+                        had_semantic_error = true
                         let _ = type_error(ctx.sink, E0509,
                             "trait '${trait_display}' is already implemented for '${target_display}'; cannot delegate the same trait",
                             span, DiagnosticContext::TraitError { detail: "delegate conflicts with existing impl" })
@@ -2928,10 +2946,13 @@ fn register_delegate_traits(
                         if has_impl(ctx.env.trait_reg, target_type, reg_tname) { continue }
 
                         // Validate that the field type implements this trait
-                        if !has_impl(ctx.env.trait_reg, field_type_name, reg_tname) { continue }
+                        if !has_impl(ctx.env.trait_reg, field_type_name, reg_tname) {
+                            had_semantic_error = true
+                            continue
+                        }
 
                         match ctx.env.trait_reg.traits.get(reg_tname) {
-                            none => {},
+                            none => { had_semantic_error = true },
                             some(reg_trait_def) => {
                                 let field_impl = find_impl(
                                     ctx.env.trait_reg, field_type_name, reg_tname)
@@ -3025,6 +3046,7 @@ fn register_delegate_traits(
                                             exact_method_schemes.insert(tm.name, core)
                                         },
                                         none => {
+                                            had_semantic_error = true
                                             let _ = type_error(ctx.sink, E0508,
                                                 "type '${field_type_display}' has no exact '${nominal_display_name(reg_tname)}::${tm.name}' scheme to delegate",
                                                 span, DiagnosticContext::TraitError {
@@ -3079,6 +3101,7 @@ fn register_delegate_traits(
             }
         }
     }
+    had_semantic_error
 }
 
 fn expand_effect_exprs(mut ctx: InferCtx, decl_effects: List<EffectExpr>, mut expanding: Set<Str>) -> List<Effect> {

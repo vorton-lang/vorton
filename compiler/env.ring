@@ -454,8 +454,53 @@ pub struct ImplRuntimeRequirement {
 }
 
 pub struct DelegateChildProviderPlan {
-    pub source_member_index: Int,
-    pub provider_ref: ImplProviderRef
+    source_member_index: Int,
+    provider_ref: ImplProviderRef,
+    produced_owner_count: Int,
+    had_semantic_error: Bool
+}
+
+pub fn make_delegate_child_provider_plan(
+    source_member_index: Int, provider_ref: ImplProviderRef,
+    produced_owner_count: Int, had_semantic_error: Bool
+) -> DelegateChildProviderPlan {
+    if source_member_index < 0 || produced_owner_count < 0 ||
+       (produced_owner_count == 0 && !had_semantic_error) ||
+       !impl_provider_kind_same(
+            impl_provider_ref_kind(provider_ref),
+            impl_provider_kind_delegate()) {
+        panic("impl owner: invalid delegate child provider")
+    }
+    DelegateChildProviderPlan {
+        source_member_index: source_member_index,
+        provider_ref: provider_ref,
+        produced_owner_count: produced_owner_count,
+        had_semantic_error: had_semantic_error
+    }
+}
+
+pub fn delegate_child_provider_source_member_index(
+    value: DelegateChildProviderPlan
+) -> Int {
+    value.source_member_index
+}
+
+pub fn delegate_child_provider_ref(
+    value: DelegateChildProviderPlan
+) -> ImplProviderRef {
+    value.provider_ref
+}
+
+pub fn delegate_child_provider_produced_owner_count(
+    value: DelegateChildProviderPlan
+) -> Int {
+    value.produced_owner_count
+}
+
+pub fn delegate_child_provider_had_semantic_error(
+    value: DelegateChildProviderPlan
+) -> Bool {
+    value.had_semantic_error
 }
 
 enum DelegatePlanStateValue {
@@ -476,10 +521,19 @@ pub fn delegate_plan_pending() -> DelegatePlanState {
     DelegatePlanState { value: DelegatePlanStateValue::DelegatePending }
 }
 
+fn copy_delegate_child_provider_plans(
+    values: List<DelegateChildProviderPlan>
+) -> List<DelegateChildProviderPlan> {
+    let mut copied: List<DelegateChildProviderPlan> = []
+    for value in values { copied.push(value) }
+    copied
+}
+
 pub fn delegate_plan_final(
     children: List<DelegateChildProviderPlan>
 ) -> DelegatePlanState {
-    DelegatePlanState { value: DelegatePlanStateValue::DelegateFinal(children) }
+    DelegatePlanState { value: DelegatePlanStateValue::DelegateFinal(
+        copy_delegate_child_provider_plans(children)) }
 }
 
 pub fn delegate_plan_is_pending(value: DelegatePlanState) -> Bool {
@@ -493,7 +547,8 @@ pub fn delegate_plan_children(
     value: DelegatePlanState
 ) -> List<DelegateChildProviderPlan> {
     match value.value {
-        DelegatePlanStateValue::DelegateFinal(children) => children,
+        DelegatePlanStateValue::DelegateFinal(children) =>
+            copy_delegate_child_provider_plans(children),
         DelegatePlanStateValue::DelegateNotApplicable => [],
         DelegatePlanStateValue::DelegatePending =>
             panic("impl owner: pending delegate plan was observed")
@@ -937,7 +992,9 @@ fn delegate_child_provider_plan_same(
     left: DelegateChildProviderPlan, right: DelegateChildProviderPlan
 ) -> Bool {
     left.source_member_index == right.source_member_index &&
-        impl_provider_ref_same(left.provider_ref, right.provider_ref)
+        impl_provider_ref_same(left.provider_ref, right.provider_ref) &&
+        left.produced_owner_count == right.produced_owner_count &&
+        left.had_semantic_error == right.had_semantic_error
 }
 
 fn delegate_plan_state_same(
@@ -1103,14 +1160,25 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
                 panic("impl owner: final delegate plan parent is not Source")
             }
             let mut previous_delegate_index = -1
+            let mut seen_delegate_providers: List<ImplProviderRef> = []
             for child in children {
                 if child.source_member_index < 0 ||
+                   child.produced_owner_count < 0 ||
+                   (child.produced_owner_count == 0 &&
+                    !child.had_semantic_error) ||
                    child.source_member_index <= previous_delegate_index ||
                    !impl_provider_kind_same(
                         impl_provider_ref_kind(child.provider_ref),
                         impl_provider_kind_delegate()) {
                     panic("impl owner: invalid ordered delegate child plan")
                 }
+                for seen_provider in seen_delegate_providers {
+                    if impl_provider_ref_same(
+                            seen_provider, child.provider_ref) {
+                        panic("impl owner: duplicate delegate child provider")
+                    }
+                }
+                seen_delegate_providers.push(child.provider_ref)
                 previous_delegate_index = child.source_member_index
             }
         },

@@ -333,7 +333,7 @@ fn validate_impl_carriers(
 
 fn collect_module_impl_facts(
     env: TypeEnv, decls: List<HDecl>, is_top_level: Bool,
-    allow_incomplete: Bool, mut facts: List<ModuleImplFact>
+    mut facts: List<ModuleImplFact>
 ) {
     for decl in decls {
         match decl {
@@ -374,16 +374,15 @@ fn collect_module_impl_facts(
                                 is_top_level: is_top_level
                             })
                         },
-                        none => if !allow_incomplete {
-                            panic("module impl fact: exact registered owner is not unique")
-                        }
+                        none => panic(
+                            "module impl fact: exact registered owner is not unique")
                     }
                 }
             },
             HDecl::ModBlock { decls: mod_decls, is_pub, .. } => {
                 if is_pub {
                     collect_module_impl_facts(
-                        env, mod_decls, false, allow_incomplete, facts)
+                        env, mod_decls, false, facts)
                 }
             },
             _ => {}
@@ -408,7 +407,7 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     let mut impl_facts: List<ModuleImplFact> = []
     validate_impl_carriers(ctx.env, hprogram.decls)
     collect_module_impl_facts(
-        ctx.env, hprogram.decls, true, ctx.sink.has_errors(), impl_facts)
+        ctx.env, hprogram.decls, true, impl_facts)
     // Prepend prelude hdecls to the program's decls
     let mut all_decls = list_clone(prelude_hdecls)
     for d in hprogram.decls { all_decls.push(d) }
@@ -651,7 +650,7 @@ pub fn check_module(
     let mut impl_facts: List<ModuleImplFact> = []
     validate_impl_carriers(ctx.env, hprogram.decls)
     collect_module_impl_facts(
-        ctx.env, hprogram.decls, true, ctx.sink.has_errors(), impl_facts)
+        ctx.env, hprogram.decls, true, impl_facts)
     // Prepend prelude hdecls to the program's decls
     let mut all_decls = list_clone(prelude_hdecls)
     for d in hprogram.decls { all_decls.push(d) }
