@@ -605,6 +605,62 @@ pub fn path_ref_same(left: PathRef, right: PathRef) -> Bool {
         path_role_same(left.role, right.role)
 }
 
+// One exact source or elaboration origin.  Representation stays opaque so a
+// downstream stage can compare/copy the chosen origin but cannot reconstruct
+// it from a display spelling, source position, or backend symbol.
+enum OriginRefValue {
+    SymbolOriginValue(SymbolRef),
+    PathOriginValue(PathRef)
+}
+
+pub struct OriginRef {
+    value: OriginRefValue
+}
+
+pub fn make_symbol_origin_ref(value: SymbolRef) -> OriginRef {
+    // SymbolRef is already opaque and validated by its unique producer.
+    // OriginRef wraps that exact value; it must never reconstruct it.
+    OriginRef { value: OriginRefValue::SymbolOriginValue(value) }
+}
+
+pub fn make_path_origin_ref(value: PathRef) -> OriginRef {
+    // PathRef has the same opaque-construction contract.
+    OriginRef { value: OriginRefValue::PathOriginValue(value) }
+}
+
+pub fn origin_ref_is_symbol(value: OriginRef) -> Bool {
+    match value.value {
+        OriginRefValue::SymbolOriginValue(_) => true,
+        OriginRefValue::PathOriginValue(_) => false
+    }
+}
+
+pub fn origin_ref_symbol(value: OriginRef) -> SymbolRef {
+    match value.value {
+        OriginRefValue::SymbolOriginValue(symbol) => symbol,
+        OriginRefValue::PathOriginValue(_) =>
+            panic("IR identity: path OriginRef has no SymbolRef")
+    }
+}
+
+pub fn origin_ref_path(value: OriginRef) -> PathRef {
+    match value.value {
+        OriginRefValue::PathOriginValue(path) => path,
+        OriginRefValue::SymbolOriginValue(_) =>
+            panic("IR identity: symbol OriginRef has no PathRef")
+    }
+}
+
+pub fn origin_ref_same(left: OriginRef, right: OriginRef) -> Bool {
+    match (left.value, right.value) {
+        (OriginRefValue::SymbolOriginValue(a),
+         OriginRefValue::SymbolOriginValue(b)) => symbol_ref_same(a, b),
+        (OriginRefValue::PathOriginValue(a),
+         OriginRefValue::PathOriginValue(b)) => path_ref_same(a, b),
+        _ => false
+    }
+}
+
 const IMPL_PROVIDER_SOURCE: Int = 0
 const IMPL_PROVIDER_BUILTIN: Int = 1
 const IMPL_PROVIDER_DERIVED: Int = 2
