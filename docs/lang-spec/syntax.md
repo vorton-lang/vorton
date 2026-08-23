@@ -82,17 +82,15 @@ InherentImplDecl ::= 'impl' TypeParams? Ident TypeArgs? '{' InherentImplMember* 
 TraitImplDecl    ::= 'impl' TypeParams? Ident 'for' Ident TypeArgs? '{' TraitImplMember* '}'
 
 InherentImplMember ::= 'pub'? FnDecl
-                     | 'pub'? 'extern' 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation?
                      | 'delegate' Ident ':' Ident (',' Ident)*
                      | 'pub'? AssocTypeDecl
 
 TraitImplMember ::= FnDecl
-                  | 'extern' 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation?
                   | 'delegate' Ident ':' Ident (',' Ident)*
                   | AssocTypeDecl
 ```
 
-`impl Type { ... }` 定义固有方法，member可分别`pub`或private。Impl block无visibility，`pub impl ...`是hard error。`impl Trait for Type { ... }`实现trait，全部member visibility继承trait，写`pub`同样hard-error。Impl块内可包含`extern fn`声明用于FFI方法绑定。`delegate field: Trait1, Trait2`为每个trait自动生成完整普通impl（替代继承的复用机制）；同一target + trait的手写impl与delegate冲突并报E0509，不支持partial override。关联类型`type Name = TypeExpr`用于满足trait的关联类型要求。
+`impl Type { ... }` 定义固有方法，member可分别`pub`或private。Impl block无visibility，`pub impl ...`是hard error。`impl Trait for Type { ... }`实现trait，全部member visibility继承trait，写`pub`同样hard-error。Ring 0.1不允许impl-member `extern fn`；在inherent或trait impl中写`extern fn`必须于`extern`处hard-fail。用户需要FFI method时使用top-level `extern fn`加普通inherent wrapper；标准库内建方法由编译器的exact intrinsic manifest提供，不形成用户语法。`delegate field: Trait1, Trait2`为每个trait自动生成完整普通impl（替代继承的复用机制）；同一target + trait的手写impl与delegate冲突并报E0509，不支持partial override。关联类型`type Name = TypeExpr`用于满足trait的关联类型要求。
 
 ### Trait 声明
 
@@ -137,7 +135,7 @@ ExternKind   ::= 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAn
 
 访问宿主的 `extern fn` 必须显式声明其 exact system effect 与正交的 `fail<E>` 契约；省略或写成纯函数不得作为 host operation 的隐式 fallback。具体 system effect 分类见 [Effect 系统](effects.md)。
 
-`extern fn` 声明由目标环境提供实现的函数，类型检查以声明签名为准。`extern type` 声明不公开结构的 opaque 类型；具体 ABI 与表示不属于语言语法规范。
+Top-level `extern fn`声明由目标环境提供实现的函数，类型检查以声明签名为准；它是0.1唯一的用户函数FFI声明位置。`extern type`声明不公开结构的opaque类型；具体ABI与表示不属于语言语法规范。Impl-member `extern fn`不属于`ExternDecl`，必须按上一节hard-fail。
 
 ### 类型别名
 

@@ -78,6 +78,8 @@ trait Collection {
 
 **Public interface 与 private implementation（2026-08-23 用户决定）**：public item的参数、返回类型、字段、generic bound与effect/trait contract不得引用更private的declaration，违反即hard error。`impl PublicTrait for PrivateType`可合法留在module/project internal coherence registry，但不构成外部callable surface；trait impl只有target与trait均可见时才对外发布，public inherent type只发布其`pub` methods。0.1不把private concrete type的推断泄漏冒充opaque type；需要隐藏具体返回类型时留待post-0.1 B-200显式设计。
 
+**Impl-member extern 边界（2026-08-24 用户决定）**：0.1 的用户 FFI 声明只有 top-level `extern fn` / `extern type`；inherent impl 与 trait impl 都不接受 `extern fn` member。现有 Str、Int、Float 的宿主桥接方法仍保持普通 public inherent method 的调用表面，但由编译器在唯一 builtin assembly 中以 exact `BuiltinMethodSite + IntrinsicRef + signature` 安装，不能从 target/method 字符串、span 或声明顺序恢复。CoreHIR 在闭合前必须看见该 exact intrinsic contract，AbiIR 只按穷尽 intrinsic tag 做机械 ABI 投影；C 后端不得保留 `method_to_runtime_c(type, name)` 一类隐式表。该 clean break 不改变 top-level extern、runtime ABI 或 B-156 的 capability 边界。
+
 ### 1.1a JSON 编码支持域（2026-08-06 D-001）
 
 `json_stringify` 的公开支持域由公开 `Json` trait 裁决，签名为 `json_stringify<T: Json>(value: T) -> Str`，不再承诺无约束的任意 `T`。Int、Float、Bool、Str 与 `List<T: Json>` 提供标准实现；用户 struct/enum 只有在显式请求 `Json` derive 时才获得结构化实现，不做无提示的全局 auto-derive。
@@ -1247,7 +1249,7 @@ Parse / project Resolver / Type+Effect
 → mechanical C codegen
 ```
 
-**FlowIR 契约**：TypedHIR → CoreHIR 已完成 trait default、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 与 handled-effect evidence 等全部 semantic elaboration；函数默认参数、effect default body 与 `sig` 不属于 0.1 surface。FlowIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait default、Test、Const、Lambda/handler、derived/intrinsic/constructor/drop/dict helper 等所有 executable body 或显式 contract 进入一个共享 `ExecutableInventory`。System effect 只随exact call contract进入AbiIR HostImport，不成为executable handler root。Neutral ANF 只保持同一 evaluation region 内严格左到右求值，不跨 short-circuit、branch、loop/lambda、guard、catch/handle、unsafe 或 control-transfer 边界，也不产生 `Clone/Take/Drop/Cleanup`。FlowIR freeze 后任何阶段新增 binder 都是 internal error。
+**FlowIR 契约**：TypedHIR → CoreHIR 已完成 trait default、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 与 handled-effect evidence 等全部 semantic elaboration；函数默认参数、effect default body、`sig` 与 impl-member `extern fn` 不属于 0.1 surface。FlowIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait default、Test、Const、Lambda/handler、derived/intrinsic/constructor/drop/dict helper 等所有 executable body 或显式 contract进入一个共享 `ExecutableInventory`。Builtin inherent method在Core闭合前已是exact `IntrinsicRef` contract，而不是由backend按类型名/方法名补造的FFI body。System effect只随exact call contract进入AbiIR HostImport，不成为executable handler root。Neutral ANF只保持同一evaluation region内严格左到右求值，不跨short-circuit、branch、loop/lambda、guard、catch/handle、unsafe或control-transfer边界，也不产生`Clone/Take/Drop/Cleanup`。FlowIR freeze后任何阶段新增binder都是internal error。
 
 **Identity**：具名 source/member 使用 resolver/registry 已选定 origin 构造的 typed `SymbolRef { origin_module_key, namespace_kind, canonical_payload, declaration_site_path }`；re-export 原样携带，same-origin diamond 自然相等，不消耗共享 source counter。局部槽使用 `SlotRef(module_key, domain, local_def_id)`；Lambda、call-result、ANF/result/projection 等 synthetic identity 使用 final normalized tree 的 owner+path `PathRef`，只服务 planner/certificate，不进入 C 名称。Static call 必须携带 `CalleeRef`；dynamic call 必须落到 exact callable slot，freeze 后缺 identity 直接 fatal，Planner 不查 name/resolver/FnType fallback。
 
@@ -1657,7 +1659,9 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 
 ### 10.5 FFI 设计
 
-`extern fn` / `extern type` 面向 C ABI。unsafe 原语（`Ptr<T>` + alloc/read/write 等）已设计定案（§7.12），实现 = B-125。容器 RIIR 后 extern fn 数量持续减少。
+Top-level `extern fn` / `extern type` 是0.1唯一面向C ABI的用户声明。`extern fn`不能出现在inherent或trait impl中；需要用户自定义的FFI method时，先声明top-level extern，再写普通inherent wrapper。标准库既有的Str/Int/Float宿主方法不构成第二套用户FFI：它们以exact builtin intrinsic contract进入CoreHIR，再由AbiIR按intrinsic tag投影到既有runtime symbol；backend不得从receiver类型名与method leaf猜link symbol。
+
+unsafe原语（`Ptr<T>` + alloc/read/write等）已设计定案（§7.12），实现=B-125。B-201原子删除impl-member extern假表面及backend字符串映射；B-156只继续约束top-level extern声明处的`requires {unsafe}`。容器RIIR后top-level extern数量持续减少。
 
 ---
 

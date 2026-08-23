@@ -27,10 +27,12 @@ Trait 是完整的行为 contract，不为method或associated type提供独立vi
 - `pub trait T`的全部associated items随trait公开；private trait的全部items只在其module visibility内可用；
 - impl block本身没有visibility，`pub impl ...`非法；
 - trait declaration中的`pub fn`/`pub type`非法；
-- `impl Trait for Type`中的`pub fn`/`pub extern fn`/`pub type`非法，implementation item的visibility继承Trait；
+- `impl Trait for Type`中的`pub fn`/`pub type`非法，implementation item的visibility继承Trait；
 - inherent `impl Type`仍允许每个method/associated item独立写`pub`或保持private。
 
 非法`pub`必须hard-fail并给删除修复，不能接受后忽略。Trait dictionary、provider identity与CoreHIR不保存per-member visibility。需要sealed trait时将来使用显式设计，不以private required method模拟。
+
+Ring 0.1的inherent impl与trait impl都不接受`extern fn` member；这与visibility无关，写在impl中的`extern fn`一律hard-fail。用户FFI只由top-level `extern fn`声明；需要method形态时以普通inherent wrapper调用该top-level extern。标准库内建方法由编译器exact intrinsic manifest提供，不是trait/impl语法成员。
 
 ### Public interface、private impl 与 opaque return
 
@@ -165,6 +167,8 @@ impl Point {
 ```
 
 为类型定义方法，不依赖任何 trait。通过 `.method()` 调用：`point.distance()`。
+
+固有impl只包含普通函数、关联类型与允许的`delegate`声明，不承载FFI link identity。编译器内建的Str/Int/Float方法在语言层仍表现为普通固有方法，其宿主映射属于CoreHIR/AbiIR的exact intrinsic contract。
 
 ### Trait 实现
 
