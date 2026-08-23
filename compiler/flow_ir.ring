@@ -824,6 +824,7 @@ pub struct FlowCallable {
     reference: ExecutableRef,
     origin: OriginRef,
     parameter_types: List<FlowTypeRef>,
+    parameter_slots: List<SlotRef>,
     result_type: FlowTypeRef,
     mode: FlowCallableMode,
     semantic_contract: FlowCallContract,
@@ -832,16 +833,37 @@ pub struct FlowCallable {
 
 pub fn make_flow_callable(
     reference: ExecutableRef, origin: OriginRef,
-    parameter_types: List<FlowTypeRef>, result_type: FlowTypeRef,
+    parameter_types: List<FlowTypeRef>, parameter_slots: List<SlotRef>,
+    result_type: FlowTypeRef,
     mode: FlowCallableMode,
     semantic_contract: FlowCallContract
 ) -> FlowCallable {
     if parameter_types.len() != semantic_contract.parameter_roles.len() {
         panic("FlowIR: callable parameter/role arity differs")
     }
+    let concrete = flow_callable_mode_same(
+        mode, flow_callable_mode_concrete_body())
+    if (concrete && parameter_slots.len() != parameter_types.len()) ||
+       (!concrete && parameter_slots.len() != 0) {
+        panic("FlowIR: callable parameter slot relation is not total")
+    }
+    let mut left_index = 0
+    while left_index < parameter_slots.len() {
+        let mut right_index = left_index + 1
+        while right_index < parameter_slots.len() {
+            if slot_ref_same(
+                    parameter_slots.get(left_index).unwrap(),
+                    parameter_slots.get(right_index).unwrap()) {
+                panic("FlowIR: callable repeats a parameter slot")
+            }
+            right_index = right_index + 1
+        }
+        left_index = left_index + 1
+    }
     FlowCallable {
         reference: reference, origin: origin,
         parameter_types: copy_type_refs(parameter_types),
+        parameter_slots: copy_slot_refs(parameter_slots),
         result_type: result_type,
         mode: flow_callable_mode_from_tag(mode.tag),
         semantic_contract: copy_call_contract(semantic_contract),
@@ -853,6 +875,9 @@ pub fn flow_callable_reference(value: FlowCallable) -> ExecutableRef { value.ref
 pub fn flow_callable_origin(value: FlowCallable) -> OriginRef { value.origin }
 pub fn flow_callable_parameter_types(value: FlowCallable) -> List<FlowTypeRef> {
     copy_type_refs(value.parameter_types)
+}
+pub fn flow_callable_parameter_slots(value: FlowCallable) -> List<SlotRef> {
+    copy_slot_refs(value.parameter_slots)
 }
 pub fn flow_callable_result_type(value: FlowCallable) -> FlowTypeRef {
     value.result_type
@@ -1017,23 +1042,36 @@ pub struct FlowSlot {
     reverse_ordinal: Int,
     initial_state: FlowInitialSlotState,
     storage: FlowStorageClass,
-    storage_contract: FlowStorageContract
+    storage_contract: FlowStorageContract,
+    parameter_ordinal: Int?
 }
 
 pub fn make_flow_slot(
     reference: SlotRef, ty: FlowTypeRef, scope: FlowScopeRef,
     reverse_ordinal: Int, initial_state: FlowInitialSlotState,
-    storage: FlowStorageClass, storage_contract: FlowStorageContract
+    storage: FlowStorageClass, storage_contract: FlowStorageContract,
+    parameter_ordinal: Int?
 ) -> FlowSlot {
     if reverse_ordinal < 0 {
         panic("FlowIR: negative reverse lexical slot ordinal")
+    }
+    if flow_storage_class_same(storage, flow_storage_parameter()) {
+        match parameter_ordinal {
+            some(ordinal) => if ordinal < 0 {
+                panic("FlowIR: negative parameter ordinal")
+            },
+            none => panic("FlowIR: parameter storage lacks exact ordinal")
+        }
+    } else if parameter_ordinal.is_some() {
+        panic("FlowIR: non-parameter storage carries parameter ordinal")
     }
     FlowSlot {
         reference: reference, ty: ty, scope: scope,
         reverse_ordinal: reverse_ordinal,
         initial_state: flow_initial_slot_state_from_tag(initial_state.tag),
         storage: flow_storage_class_from_tag(storage.tag),
-        storage_contract: flow_storage_contract_from_tag(storage_contract.tag)
+        storage_contract: flow_storage_contract_from_tag(storage_contract.tag),
+        parameter_ordinal: parameter_ordinal
     }
 }
 
@@ -1048,6 +1086,12 @@ pub fn flow_slot_storage(value: FlowSlot) -> FlowStorageClass { value.storage }
 pub fn flow_slot_storage_contract(value: FlowSlot) -> FlowStorageContract {
     value.storage_contract
 }
+pub fn flow_slot_parameter_ordinal(value: FlowSlot) -> Int {
+    match value.parameter_ordinal {
+        some(ordinal) => ordinal,
+        none => panic("FlowIR: non-parameter slot has no parameter ordinal")
+    }
+}
 
 fn copy_flow_slots(values: List<FlowSlot>) -> List<FlowSlot> {
     let mut result: List<FlowSlot> = []
@@ -1056,7 +1100,8 @@ fn copy_flow_slots(values: List<FlowSlot>) -> List<FlowSlot> {
             reference: value.reference, ty: value.ty, scope: value.scope,
             reverse_ordinal: value.reverse_ordinal,
             initial_state: value.initial_state, storage: value.storage,
-            storage_contract: value.storage_contract
+            storage_contract: value.storage_contract,
+            parameter_ordinal: value.parameter_ordinal
         })
     }
     result
@@ -2648,6 +2693,26 @@ fn validate_callables(
            left.semantic_contract.parameter_roles.len() {
             panic("FlowIR: callable role vector is not total")
         }
+        let concrete = flow_callable_mode_same(
+            left.mode, flow_callable_mode_concrete_body())
+        if (concrete &&
+            left.parameter_slots.len() != left.parameter_types.len()) ||
+           (!concrete && left.parameter_slots.len() != 0) {
+            panic("FlowIR: callable parameter slot relation drifted")
+        }
+        let mut parameter_left = 0
+        while parameter_left < left.parameter_slots.len() {
+            let mut parameter_right = parameter_left + 1
+            while parameter_right < left.parameter_slots.len() {
+                if slot_ref_same(
+                        left.parameter_slots.get(parameter_left).unwrap(),
+                        left.parameter_slots.get(parameter_right).unwrap()) {
+                    panic("FlowIR: callable parameter slots are not unique")
+                }
+                parameter_right = parameter_right + 1
+            }
+            parameter_left = parameter_left + 1
+        }
         for ty in left.parameter_types {
             if !type_ref_exists(type_nodes, ty) {
                 panic("FlowIR: callable parameter type is absent")
@@ -2752,6 +2817,19 @@ fn validate_slots(
         let _ = flow_initial_slot_state_from_tag(slot.initial_state.tag)
         let _ = flow_storage_class_from_tag(slot.storage.tag)
         let _ = flow_storage_contract_from_tag(slot.storage_contract.tag)
+        if flow_storage_class_same(slot.storage, flow_storage_parameter()) {
+            match slot.parameter_ordinal {
+                some(parameter_ordinal) => {
+                    if parameter_ordinal < 0 ||
+                       slot.initial_state.tag != FLOW_SLOT_LIVE {
+                        panic("FlowIR: parameter slot ordinal/state is invalid")
+                    }
+                },
+                none => panic("FlowIR: parameter slot has no ordinal")
+            }
+        } else if slot.parameter_ordinal.is_some() {
+            panic("FlowIR: non-parameter slot has an ordinal")
+        }
         let mut right_index = index + 1
         while right_index < body.slots.len() {
             let right = body.slots.get(right_index).unwrap()
@@ -2788,6 +2866,43 @@ fn validate_slots(
                 panic("FlowIR: reverse lexical slot order is not dense")
             }
             expected = expected + 1
+        }
+    }
+}
+
+fn validate_body_callable_parameters(body: FlowBody, callable: FlowCallable) {
+    if callable.parameter_slots.len() != callable.parameter_types.len() {
+        panic("FlowIR: concrete callable parameter relation is partial")
+    }
+    let mut ordinal = 0
+    while ordinal < callable.parameter_slots.len() {
+        let expected_slot = callable.parameter_slots.get(ordinal).unwrap()
+        let expected_type = callable.parameter_types.get(ordinal).unwrap()
+        let mut matches = 0
+        for slot in body.slots {
+            if flow_storage_class_same(slot.storage, flow_storage_parameter()) &&
+               slot.parameter_ordinal == some(ordinal) {
+                if !slot_ref_same(slot.reference, expected_slot) ||
+                   !flow_type_ref_same(slot.ty, expected_type) {
+                    panic("FlowIR: parameter ordinal slot/type relation drifted")
+                }
+                matches = matches + 1
+            }
+        }
+        if matches != 1 {
+            panic("FlowIR: parameter ordinal is missing or duplicated")
+        }
+        ordinal = ordinal + 1
+    }
+    for slot in body.slots {
+        if flow_storage_class_same(slot.storage, flow_storage_parameter()) {
+            let slot_ordinal = match slot.parameter_ordinal {
+                some(value) => value,
+                none => panic("FlowIR: parameter ordinal disappeared")
+            }
+            if slot_ordinal >= callable.parameter_slots.len() {
+                panic("FlowIR: body has an extra parameter ordinal")
+            }
         }
     }
 }
@@ -3072,6 +3187,7 @@ fn validate_bodies(
             }
             validate_scopes(body.reference, body.scopes)
             validate_slots(body, type_nodes)
+            validate_body_callable_parameters(body, callable)
             validate_body_blocks(body)
             expected_body_index = expected_body_index + 1
         }
@@ -3503,6 +3619,11 @@ fn compute_topology_encoding(
         for parameter in callable.parameter_types {
             item.push(encode_type_ref(parameter))
         }
+        let mut parameter_ordinal = 0
+        for parameter_slot in callable.parameter_slots {
+            item.push("Q${parameter_ordinal.to_str()}/${encode_slot(parameter_slot)}")
+            parameter_ordinal = parameter_ordinal + 1
+        }
         item.push("R${encode_type_ref(callable.result_type)}")
         for role in callable.semantic_contract.parameter_roles {
             item.push("L${flow_semantic_role_tag(role).to_str()}")
@@ -3524,7 +3645,11 @@ fn compute_topology_encoding(
                 "SL", encode_slot(slot.reference), encode_type_ref(slot.ty),
                 encode_scope_ref(slot.scope), slot.reverse_ordinal.to_str(),
                 slot.initial_state.tag.to_str(), slot.storage.tag.to_str(),
-                slot.storage_contract.tag.to_str()
+                slot.storage_contract.tag.to_str(),
+                match slot.parameter_ordinal {
+                    some(ordinal) => ordinal.to_str(),
+                    none => (0 - 1).to_str()
+                }
             ].join(";"))
         }
         for block in body.blocks {
@@ -3581,6 +3706,7 @@ fn freeze_callables_with_edges(
         result.push(FlowCallable {
             reference: callable.reference, origin: callable.origin,
             parameter_types: copy_type_refs(callable.parameter_types),
+            parameter_slots: copy_slot_refs(callable.parameter_slots),
             result_type: callable.result_type, mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
             call_edges: copy_call_edges(edges)
@@ -3621,6 +3747,7 @@ pub fn flow_program_callables(value: FlowProgram) -> List<FlowCallable> {
         result.push(FlowCallable {
             reference: callable.reference, origin: callable.origin,
             parameter_types: copy_type_refs(callable.parameter_types),
+            parameter_slots: copy_slot_refs(callable.parameter_slots),
             result_type: callable.result_type, mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
             call_edges: copy_call_edges(callable.call_edges)
@@ -3642,7 +3769,8 @@ pub fn validate_flow_program(value: FlowProgram) {
         value.type_nodes, value.callables.map(fn(callable) {
             make_flow_callable(
                 callable.reference, callable.origin,
-                callable.parameter_types, callable.result_type,
+                callable.parameter_types, callable.parameter_slots,
+                callable.result_type,
                 callable.mode, callable.semantic_contract)
         }), value.bodies)
     if !flow_topology_fingerprint_same(
