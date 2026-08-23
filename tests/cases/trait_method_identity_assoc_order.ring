@@ -1,12 +1,18 @@
 trait AssocBeforeMethods {
     type Item
-    fn get(self) -> Item
+    fn keep(mut self, mut before_value: Item) -> Item {
+        before_value
+    }
 }
 
 trait AssocBetweenMethods {
-    fn first(self) -> Int
+    fn first(self, mut count: Int) -> Int {
+        count + 1
+    }
     type Item
-    fn second(self) -> Item
+    fn second(mut self, mut between_value: Item) -> Item {
+        between_value
+    }
 }
 
 fn main() {

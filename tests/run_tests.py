@@ -9127,7 +9127,7 @@ F2_TRAIT_METHOD_IDENTITY_PATHS = {
     "dict": REPO / "compiler" / "dict_lower.ring",
     "codegen": REPO / "compiler" / "codegen_c_expr.ring",
 }
-F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT = 39
+F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT = 42
 
 
 def _trait_method_function_body(
@@ -9408,9 +9408,28 @@ def trait_method_identity_u1c_contract_errors(
     decl_body = _trait_method_function_body(
         sources, "decl", "check_trait_decl", errors)
     for token in (
+        "for method_index in 0..trait_def.methods.len()",
+        "trait_method_ref_source_member_index(m.method_ref)",
+        "trait_method_ref_trait(m.method_ref)",
+        "registered_trait_ref_symbol(trait_def.owner_ref)",
+        "trait_method_ref_callable_slot_index(m.method_ref) != method_index",
+        "source_member_index < method_index",
+        "trait_method_ref_name(m.method_ref) != m.name",
+        "ast_methods.get(source_member_index)",
+        "Decl::Fn { name: source_name, is_abstract, .. }",
+        "source_name != m.name || m.has_default == is_abstract",
+        "source_param.name", "source_param.is_mutable",
         "method_ref: m.method_ref", "owner_ref: trait_def.owner_ref"):
         if token not in decl_body:
             errors.append(f"typed HIR trait transport misses {token!r}")
+    if "find_ast_fn_by_name" in decl:
+        errors.append(
+            "typed HIR trait transport retained fallback 'find_ast_fn_by_name'")
+    for forbidden in (
+            "methods.find(", "ast_methods.filter(", '"p${pi.to_str()}"'):
+        if forbidden in decl_body:
+            errors.append(
+                f"typed HIR trait transport retained fallback {forbidden!r}")
     for source_name, function_name in (("andor", "al_decl"), ("dict", "dl_decl")):
         visitor_body = _trait_method_function_body(
             sources, source_name, function_name, errors)
@@ -9523,6 +9542,15 @@ def trait_method_identity_u1c_mutation_errors(
          '"$builtin"', '"$single$"'),
         ("builtin source/slot mismatch", "builtins", "builtin_trait_method",
          "source_member_index != callable_slot_index", "false"),
+        ("trait HIR name scan", "decl", "check_trait_decl",
+         "ast_methods.get(source_member_index)",
+         "find_ast_fn_by_name(ast_methods, m.name)"),
+        ("trait HIR wrong index", "decl", "check_trait_decl",
+         "ast_methods.get(source_member_index)",
+         "ast_methods.get(method_index)"),
+        ("trait HIR filtered index", "decl", "check_trait_decl",
+         "ast_methods.get(source_member_index)",
+         "ast_methods.filter(fn(candidate) { true }).get(source_member_index)"),
         ("typed HIR transport", "decl", "check_trait_decl",
          "method_ref: m.method_ref", "method_ref: hmethods.first().unwrap().method_ref"),
         ("andor transport", "andor", "al_decl",
