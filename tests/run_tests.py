@@ -8808,7 +8808,8 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
     elif struct_def_fields is not None and [
             name for _, name in struct_def_fields] != [
                 "name", "owner_ref", "type_params", "type_param_vars",
-                "fields", "derive_attrs", "is_extern"]:
+                "fields", "derive_attrs", "derived_provider_plan",
+                "is_extern"]:
         errors.append("F2 U1b StructDef owner inventory drifted")
     registered_fields, registered_error = _f0_struct_fields(
         sources["identity"], "RegisteredNominalRef")
@@ -8847,7 +8848,8 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
         ("resolver", "single_namespace_file_key",
          'stable_source_basename(\n            program.span.file, "$virtual-source$")'),
         ("infer_ctx", "install_struct_identity_ledger",
-         "existing.frame_index == fact.frame_index"),
+         "for existing in ctx.struct_identity_unconsumed {\n"
+         "                if existing.frame_index == fact.frame_index"),
         ("infer_ctx", "peek_struct_identity_fact",
          'none => panic("struct identity ledger: missing declaration fact")'),
         ("infer_ctx", "commit_struct_identity_fact",
@@ -8992,7 +8994,10 @@ F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
      'stable_source_basename(\n            program.span.file, "$virtual-source$")',
      "program.span.file"),
     ("infer_ctx", "install_struct_identity_ledger",
-     "existing.frame_index == fact.frame_index", "false"),
+     "for existing in ctx.struct_identity_unconsumed {\n"
+     "                if existing.frame_index == fact.frame_index",
+     "for existing in ctx.struct_identity_unconsumed {\n"
+     "                if false"),
     ("infer_ctx", "peek_struct_identity_fact",
      'none => panic("struct identity ledger: missing declaration fact")',
      "none => StructIdentityFact {}"),
@@ -9651,6 +9656,576 @@ def trait_method_identity_u1c_fixture_errors(ring_exe: str) -> List[str]:
                         f"{contract_error}; output={combined[:300]!r}")
     if _sha256_file(compiler) != compiler_before:
         errors.append("pinned Ring compiler changed across trait identity fixtures")
+    return errors
+
+
+F2_IMPL_PROVIDER_PATHS = {
+    "identity": REPO / "compiler" / "ir_identity.ring",
+    "resolver": REPO / "compiler" / "resolver.ring",
+    "ctx": REPO / "compiler" / "infer_ctx.ring",
+    "env": REPO / "compiler" / "env.ring",
+    "register": REPO / "compiler" / "infer_register.ring",
+    "builtins": REPO / "compiler" / "builtins.ring",
+    "derive": REPO / "compiler" / "derive.ring",
+    "decl": REPO / "compiler" / "infer_decl.ring",
+    "codegen": REPO / "compiler" / "codegen_c_expr.ring",
+}
+F2_IMPL_PROVIDER_MUTATION_COUNT = 54
+
+
+def impl_provider_u1c1_contract_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    identity = sources["identity"]
+    resolver = sources["resolver"]
+    ctx = sources["ctx"]
+    env = sources["env"]
+    register = sources["register"]
+    builtins = sources["builtins"]
+    derive = sources["derive"]
+    decl = sources["decl"]
+
+    for struct_name, expected_fields in (
+        ("ImplProviderKind", ["tag"]),
+        ("ImplProviderRef", ["site", "kind"]),
+    ):
+        fields, field_error = _f0_struct_fields(identity, struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None:
+            if [name for _, name in fields] != expected_fields:
+                errors.append(f"impl provider {struct_name} inventory drifted")
+            if any(is_public for is_public, _ in fields):
+                errors.append(f"impl provider {struct_name} exposes fields")
+
+    provider_body = _trait_method_function_body(
+        sources, "identity", "make_impl_provider_ref", errors)
+    for token in (
+        "path_ref_owner(site)", "path_owner_ref_is_symbol(owner)",
+        "impl_provider_kind_from_tag(", "path_ref_role(site)",
+        "impl_provider_kind_source()", "path_role_declaration()",
+        "path_role_synthetic()", "ImplProviderRef { site: site, kind: checked_kind }",
+    ):
+        if token not in provider_body:
+            errors.append(f"ImplProviderRef constructor misses {token!r}")
+    provider_same = _trait_method_function_body(
+        sources, "identity", "impl_provider_ref_same", errors)
+    if not all(token in provider_same for token in (
+            "path_ref_same(left.site, right.site)",
+            "impl_provider_kind_same(left.kind, right.kind)")):
+        errors.append("ImplProviderRef equality is incomplete")
+
+    fact_schemas = (
+        ("SourceImplProviderFact", [
+            "file_key", "frame_index", "decl_index", "provider_ref"]),
+        ("DelegateProviderFact", [
+            "file_key", "frame_index", "parent_decl_index",
+            "source_member_index", "parent_provider_ref", "provider_ref"]),
+        ("ExplicitDerivedProviderFact", ["attr_index", "provider_ref"]),
+        ("NominalDerivedProviderPlanFact", [
+            "file_key", "frame_index", "decl_index",
+            "implicit_provider_ref", "explicit_providers"]),
+    )
+    for struct_name, expected_fields in fact_schemas:
+        fields, field_error = _f0_struct_fields(resolver, struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None:
+            if [name for _, name in fields] != expected_fields:
+                errors.append(f"{struct_name} inventory drifted")
+            if not all(is_public for is_public, _ in fields):
+                errors.append(f"{struct_name} is not transportable")
+
+    for container in ("ModuleNamespaceCensus", "ResolvedNamespacePlan"):
+        fields, field_error = _f0_struct_fields(resolver, container)
+        if field_error:
+            errors.append(field_error)
+            continue
+        assert fields is not None
+        names = [name for _, name in fields]
+        for required in (
+                "source_impl_providers", "delegate_providers",
+                "nominal_derived_providers"):
+            if required not in names:
+                errors.append(f"{container} loses {required}")
+
+    source_provider_body = _trait_method_function_body(
+        sources, "resolver", "source_provider_ref", errors)
+    for token in (
+        'frame.file_key, "frame:${frame.frame_index}"',
+        "path_owner_for_module_body(module_body)",
+        "path_role_declaration()", "path_role_synthetic()",
+        "impl_provider_kind_source()", "impl_provider_kind_derived()",
+    ):
+        if token not in source_provider_body:
+            errors.append(f"resolver provider producer misses {token!r}")
+    delegate_provider_body = _trait_method_function_body(
+        sources, "resolver", "source_delegate_provider_ref", errors)
+    for token in (
+        '"decl:${decl_index}", "delegate:${source_member_index}"',
+        "path_role_synthetic()", "impl_provider_kind_delegate()",
+    ):
+        if token not in delegate_provider_body:
+            errors.append(f"delegate provider producer misses {token!r}")
+    nominal_body = _trait_method_function_body(
+        sources, "resolver", "collect_nominal_derived_provider_fact", errors)
+    for token in (
+        '"decl:${decl_index}", "derive:implicit"',
+        "for attr_index in 0..derive_attrs.len()",
+        '"decl:${decl_index}", "derive:attr:${attr_index}"',
+        "attr_index: attr_index",
+        "append_nominal_derived_provider_fact(",
+    ):
+        if token not in nominal_body:
+            errors.append(f"nominal derive producer misses {token!r}")
+    impl_fact_body = _trait_method_function_body(
+        sources, "resolver", "collect_impl_provider_facts", errors)
+    for token in (
+        '"decl:${decl_index}", "impl"',
+        "for source_member_index in 0..methods.len()",
+        "some(Decl::Delegate { .. })",
+        "parent_provider_ref: source",
+        "source_delegate_provider_ref(",
+    ):
+        if token not in impl_fact_body:
+            errors.append(f"source/delegate provider producer misses {token!r}")
+    for function_name, tokens in (
+        ("append_source_impl_provider_fact", (
+            "existing.file_key == fact.file_key",
+            "existing.frame_index == fact.frame_index",
+            "existing.decl_index == fact.decl_index")),
+        ("append_delegate_provider_fact", (
+            "existing.file_key == fact.file_key",
+            "existing.frame_index == fact.frame_index",
+            "existing.parent_decl_index == fact.parent_decl_index",
+            "existing.source_member_index == fact.source_member_index")),
+        ("append_nominal_derived_provider_fact", (
+            "existing.file_key == fact.file_key",
+            "existing.frame_index == fact.frame_index",
+            "existing.decl_index == fact.decl_index")),
+    ):
+        body = _trait_method_function_body(
+            sources, "resolver", function_name, errors)
+        for token in tokens:
+            if token not in body:
+                errors.append(f"{function_name} misses {token!r}")
+    resolve_body = _trait_method_function_body(
+        sources, "resolver", "resolve_namespace_plan", errors)
+    for token in (
+        "append_source_impl_provider_fact(fact, source_impl_providers)",
+        "append_delegate_provider_fact(fact, delegate_providers)",
+        "append_nominal_derived_provider_fact(",
+    ):
+        if token not in resolve_body:
+            errors.append(f"resolved provider plan misses {token!r}")
+
+    env_schemas = (
+        ("ExplicitDerivedProviderPlan", ["attribute", "provider_ref"]),
+        ("NominalDerivedProviderPlan", [
+            "implicit_provider_ref", "explicit_providers"]),
+        ("EnumDef", [
+            "name", "type_params", "type_param_vars", "variants",
+            "derive_attrs", "derived_provider_plan", "variant_index"]),
+        ("ImplEntry", [
+            "trait_name", "target_type_name", "type_params",
+            "type_param_vars", "predicates", "method_names", "assoc_types",
+            "method_schemes", "provider_ref", "trait_ref", "origin", "span",
+            "owner_state"]),
+        ("MethodOrigin", [
+            "origin", "trait_name", "provider_ref", "trait_ref", "span"]),
+    )
+    for struct_name, expected_fields in env_schemas:
+        fields, field_error = _f0_struct_fields(env, struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None and [
+                name for _, name in fields] != expected_fields:
+            errors.append(f"{struct_name} provider inventory drifted")
+
+    validate_body = _trait_method_function_body(
+        sources, "env", "validate_impl_entry", errors)
+    for token in (
+        "match (entry.trait_name, entry.trait_ref)",
+        "registered_trait_ref_symbol(def.owner_ref), trait_ref",
+        "entry.provider_ref.is_some()",
+        "provisional prelude published provider",
+        "entry.provider_ref.is_none()", "final owner has no provider",
+    ):
+        if token not in validate_body:
+            errors.append(f"impl provider state validator misses {token!r}")
+    key_body = _trait_method_function_body(
+        sources, "env", "impl_entry_exact_key_same", errors)
+    for token in (
+        "left.target_type_name != right.target_type_name",
+        "optional_symbol_ref_same(left.trait_ref, right.trait_ref)",
+        "impl_provider_ref_same(a, b)",
+    ):
+        if token not in key_body:
+            errors.append(f"impl exact owner key misses {token!r}")
+    install_body = _trait_method_function_body(
+        sources, "env", "install_method_core", errors)
+    for token in (
+        "find_impl_by_provider(", "incoming.trait_ref, incoming.provider_ref",
+        "owner.origin != incoming.origin",
+        "optional_symbol_ref_same(owner.trait_ref, incoming.trait_ref)",
+        "existing.provider_ref, incoming.provider_ref",
+    ):
+        if token not in install_body:
+            errors.append(f"method origin provider closure misses {token!r}")
+    add_body = _trait_method_function_body(
+        sources, "env", "add_impl", errors)
+    if ("impl_entry_exact_key_same(existing, entry)" not in add_body or
+            "legacy origin aliases distinct typed owners" not in add_body):
+        errors.append("registry add_impl does not use the typed owner key")
+
+    ledger_functions = (
+        ("peek_source_impl_provider_fact", (
+            "fact.frame_index == frame_index", "fact.decl_index == decl_index",
+            "missing source impl fact")),
+        ("commit_source_impl_provider_fact", (
+            "source_impl_provider_fact_same(existing, fact)",
+            "if matches != 1")),
+        ("peek_delegate_provider_fact", (
+            "fact.parent_decl_index == parent_decl_index",
+            "fact.source_member_index == source_member_index",
+            "missing delegate fact")),
+        ("commit_delegate_provider_fact", (
+            "delegate_provider_fact_same(existing, fact)",
+            "if matches != 1")),
+        ("peek_nominal_derived_provider_fact", (
+            "fact.explicit_providers.len() != attr_count",
+            "explicit.attr_index != index", "derive attribute order changed")),
+        ("commit_nominal_derived_provider_fact", (
+            "nominal_derived_provider_fact_same(existing, fact)",
+            "if matches != 1")),
+    )
+    for function_name, tokens in ledger_functions:
+        body = _trait_method_function_body(
+            sources, "ctx", function_name, errors)
+        for token in tokens:
+            if token not in body:
+                errors.append(f"{function_name} misses {token!r}")
+    close_body = _trait_method_function_body(
+        sources, "ctx", "close_struct_identity_ledger", errors)
+    for token in (
+        "ctx.source_impl_provider_unconsumed.len() != 0",
+        "ctx.delegate_provider_unconsumed.len() != 0",
+        "ctx.nominal_derived_provider_unconsumed.len() != 0",
+    ):
+        if token not in close_body:
+            errors.append(f"provider ledger close misses {token!r}")
+
+    consume_body = _trait_method_function_body(
+        sources, "register", "consume_nominal_derived_provider_plan", errors)
+    for token in (
+        "peek_nominal_derived_provider_fact(",
+        "value.attr_index != attr_index", "attribute: attribute",
+        "commit_nominal_derived_provider_fact(ctx, fact)",
+        "implicit_provider_ref: fact.implicit_provider_ref",
+    ):
+        if token not in consume_body:
+            errors.append(f"nominal derive registration misses {token!r}")
+    register_impl_body = _trait_method_function_body(
+        sources, "register", "register_impl", errors)
+    if not all(token in register_impl_body for token in (
+            "peek_source_impl_provider_fact(ctx, decl_index)",
+            "commit_source_impl_provider_fact(ctx, provider_fact)",
+            "provider_fact.provider_ref")):
+        errors.append("source impl provider is not consumed before registration")
+    canonical_impl_body = _trait_method_function_body(
+        sources, "register", "register_impl_canonical", errors)
+    for token in (
+        "provider_ref: some(provider_ref)",
+        "trait_ref: resolved_trait_ref",
+        "provider_ref: provider_ref", "trait_ref: resolved_trait_ref",
+    ):
+        if token not in canonical_impl_body:
+            errors.append(f"source impl final owner misses {token!r}")
+    for function_name in ("preregister_struct", "preregister_enum"):
+        body = _trait_method_function_body(
+            sources, "register", function_name, errors)
+        if ("consume_nominal_derived_provider_plan(" not in body or
+                "derived_provider_plan: some(derived_provider_plan)" not in body):
+            errors.append(f"{function_name} loses the nominal provider plan")
+    phase3_body = _trait_method_function_body(
+        sources, "register", "register_phase3_delegate", errors)
+    for token in (
+        "peek_delegate_provider_fact(",
+        "commit_delegate_provider_fact(ctx, fact)",
+        "find_impl_by_provider(", "parent_provider_ref",
+        "impl_provider_ref_same(",
+        "fact.source_member_index != source_member_index",
+        "fact.provider_ref",
+    ):
+        if token not in phase3_body:
+            errors.append(f"delegate phase3 provider closure misses {token!r}")
+    for forbidden in ("impl_decl_origin(", "find_impl_by_origin("):
+        if forbidden in phase3_body:
+            errors.append(f"delegate phase3 retained fallback {forbidden!r}")
+    for function_name in (
+            "register_nonproject_phase3_delegate",
+            "register_project_phase3_delegate"):
+        body = _trait_method_function_body(
+            sources, "register", function_name, errors)
+        if ("enter_struct_identity_child_frame(ctx, item.decl_index)" not in body or
+                "exit_struct_identity_frame(ctx)" not in body):
+            errors.append(f"{function_name} does not pair provider frames")
+
+    builtin_provider = _trait_method_function_body(
+        sources, "builtins", "builtin_impl_provider", errors)
+    if not all(token in builtin_provider for token in (
+            '"$builtin", "builtin:impl-providers"',
+            "[ordinal.to_str()]", "path_role_synthetic()",
+            "impl_provider_kind_builtin()")):
+        errors.append("builtin impl provider domain drifted")
+    builtin_masked = mask_ring_strings_and_comments(builtins)
+    site_matches = re.findall(
+        r"\bstruct\s+BuiltinImplProviderSite\s*\{\s*tag\s*:\s*Int\s*\}",
+        builtin_masked)
+    if len(site_matches) != 1 or re.search(
+            r"\bpub\s+struct\s+BuiltinImplProviderSite\b",
+            builtin_masked):
+        errors.append("builtin provider site private inventory drifted")
+    ordinals, ordinal_error = _f0_int_list(
+        builtins, "BUILTIN_PROVIDER_ORDINALS")
+    if ordinal_error:
+        errors.append(ordinal_error)
+    elif ordinals != list(range(10)):
+        errors.append(f"builtin provider ordinal table drifted: {ordinals!r}")
+    site_body = _trait_method_function_body(
+        sources, "builtins", "builtin_impl_provider_site_from_tag", errors)
+    for token in (
+        "tag < 0 || tag >= BUILTIN_PROVIDER_SITE_COUNT",
+        "BUILTIN_PROVIDER_ORDINALS.len() != BUILTIN_PROVIDER_SITE_COUNT",
+        "ordinal != expected", "seen.contains(ordinal)",
+        "BuiltinImplProviderSite { tag: tag }",
+    ):
+        if token not in site_body:
+            errors.append(f"builtin provider site validator misses {token!r}")
+    for forbidden in (
+            "trait_name", "target_type_name", "origin", "method_name",
+            "provider_path"):
+        if forbidden in builtin_provider:
+            errors.append(
+                f"builtin provider path uses semantic spelling {forbidden!r}")
+    seed_body = _trait_method_function_body(
+        sources, "builtins", "seed_std_hof_owner", errors)
+    if "provider_ref: none" not in seed_body or "trait_ref: none" not in seed_body:
+        errors.append("provisional HOF owner published typed provider facts")
+    install_builtin = _trait_method_function_body(
+        sources, "builtins", "install_builtin_method_owner", errors)
+    for token in (
+        "builtin_impl_provider(provider_site)",
+        "provider_ref: some(provider_ref)", "trait_ref: trait_ref",
+        "provider_ref: provider_ref", "trait_ref: trait_ref",
+    ):
+        if token not in install_builtin:
+            errors.append(f"builtin final owner misses {token!r}")
+
+    collect_body = _trait_method_function_body(
+        sources, "derive", "collect_user_types", errors)
+    if collect_body.count("provider_plan: def.derived_provider_plan.unwrap()") != 2:
+        errors.append("derive registry does not copy both nominal provider plans")
+    explicit_body = _trait_method_function_body(
+        sources, "derive", "explicit_derive_request", errors)
+    for token in (
+        "ut.provider_plan.explicit_providers.len() != ut.derive_attrs.len()",
+        "request.attribute.trait_name != attribute.trait_name",
+        "return some(request)",
+    ):
+        if token not in explicit_body:
+            errors.append(f"explicit derive provider selection misses {token!r}")
+    derive_register = _trait_method_function_body(
+        sources, "derive", "register_derived_impl", errors)
+    for token in (
+        "provider_ref: some(provider_ref)", "trait_ref: some(trait_ref)",
+        "provider_ref: provider_ref", "trait_ref: some(trait_ref)",
+    ):
+        if token not in derive_register:
+            errors.append(f"derived owner provider closure misses {token!r}")
+    if "make_impl_provider_ref(" in derive:
+        errors.append("derive remints provider identity")
+    if derive.count("implicit_derive_provider(ut)") != 2:
+        errors.append("implicit derived owners do not share the nominal provider")
+    if "explicit_derive_request(\n                            ut, \"Json\").unwrap().provider_ref" not in derive:
+        errors.append("explicit Json owner does not copy its attr provider")
+
+    rebind_body = _trait_method_function_body(
+        sources, "decl", "store_rebound_impl_method_scheme", errors)
+    for token in (
+        "let owner = match find_impl_by_origin(",
+        "let provider_ref = match owner.provider_ref",
+        "provider_ref: provider_ref, trait_ref: owner.trait_ref",
+    ):
+        if token not in rebind_body:
+            errors.append(f"impl rebind provider copy misses {token!r}")
+    for token in ("ImplProviderRef", "impl_provider_ref_"):
+        if token in sources["codegen"]:
+            errors.append(f"backend reads 3a1 provider identity {token!r}")
+    return errors
+
+
+def impl_provider_u1c1_mutation_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("module-body owner", "identity", "make_impl_provider_ref",
+         "path_owner_ref_is_symbol(owner)", "false"),
+        ("source declaration role", "identity", "make_impl_provider_ref",
+         "path_role_same(role, path_role_declaration())",
+         "path_role_same(role, path_role_synthetic())"),
+        ("generated synthetic role", "identity", "make_impl_provider_ref",
+         "else if !path_role_same(role, path_role_synthetic())", "else if false"),
+        ("provider path equality", "identity", "impl_provider_ref_same",
+         "path_ref_same(left.site, right.site)", "true"),
+        ("provider kind equality", "identity", "impl_provider_ref_same",
+         "impl_provider_kind_same(left.kind, right.kind)", "true"),
+        ("source module frame", "resolver", "source_provider_ref",
+         'frame.file_key, "frame:${frame.frame_index}"',
+         'frame.file_key, "frame:0"'),
+        ("delegate raw member", "resolver", "source_delegate_provider_ref",
+         '"decl:${decl_index}", "delegate:${source_member_index}"',
+         '"decl:${decl_index}", "delegate:0"'),
+        ("delegate provider kind", "resolver", "source_delegate_provider_ref",
+         "impl_provider_kind_delegate()", "impl_provider_kind_derived()"),
+        ("implicit derive site", "resolver", "collect_nominal_derived_provider_fact",
+         '"decl:${decl_index}", "derive:implicit"',
+         '"decl:${decl_index}", "derive:attr:0"'),
+        ("explicit derive site", "resolver", "collect_nominal_derived_provider_fact",
+         '"decl:${decl_index}", "derive:attr:${attr_index}"',
+         '"decl:${decl_index}", "derive:implicit"'),
+        ("explicit attr order", "resolver", "collect_nominal_derived_provider_fact",
+         "attr_index: attr_index", "attr_index: 0"),
+        ("delegate parent provider", "resolver", "collect_impl_provider_facts",
+         "parent_provider_ref: source", "parent_provider_ref: provider_ref"),
+        ("source fact exact frame", "resolver", "append_source_impl_provider_fact",
+         "existing.frame_index == fact.frame_index", "true"),
+        ("delegate fact exact member", "resolver", "append_delegate_provider_fact",
+         "existing.source_member_index == fact.source_member_index", "true"),
+        ("nominal fact exact decl", "resolver", "append_nominal_derived_provider_fact",
+         "existing.decl_index == fact.decl_index", "true"),
+        ("resolved source fact dedupe", "resolver", "resolve_namespace_plan",
+         "append_source_impl_provider_fact(fact, source_impl_providers)",
+         "source_impl_providers.push(fact)"),
+        ("resolved delegate fact dedupe", "resolver", "resolve_namespace_plan",
+         "append_delegate_provider_fact(fact, delegate_providers)",
+         "delegate_providers.push(fact)"),
+        ("resolved nominal fact dedupe", "resolver", "resolve_namespace_plan",
+         "append_nominal_derived_provider_fact(\n                fact, nominal_derived_providers)",
+         "nominal_derived_providers.push(fact)"),
+        ("source peek declaration", "ctx", "peek_source_impl_provider_fact",
+         "fact.decl_index == decl_index", "true"),
+        ("source consume once", "ctx", "commit_source_impl_provider_fact",
+         "if matches != 1", "if false"),
+        ("delegate peek member", "ctx", "peek_delegate_provider_fact",
+         "fact.source_member_index == source_member_index", "true"),
+        ("delegate consume once", "ctx", "commit_delegate_provider_fact",
+         "if matches != 1", "if false"),
+        ("derive attr count", "ctx", "peek_nominal_derived_provider_fact",
+         "fact.explicit_providers.len() != attr_count", "false"),
+        ("derive attr order", "ctx", "peek_nominal_derived_provider_fact",
+         "explicit.attr_index != index", "false"),
+        ("derive consume once", "ctx", "commit_nominal_derived_provider_fact",
+         "if matches != 1", "if false"),
+        ("close source facts", "ctx", "close_struct_identity_ledger",
+         "ctx.source_impl_provider_unconsumed.len() != 0", "false"),
+        ("close delegate facts", "ctx", "close_struct_identity_ledger",
+         "ctx.delegate_provider_unconsumed.len() != 0", "false"),
+        ("close derive facts", "ctx", "close_struct_identity_ledger",
+         "ctx.nominal_derived_provider_unconsumed.len() != 0", "false"),
+        ("provisional provider", "env", "validate_impl_entry",
+         "entry.provider_ref.is_some()", "false"),
+        ("final provider", "env", "validate_impl_entry",
+         "entry.provider_ref.is_none()", "false"),
+        ("exact trait relation", "env", "validate_impl_entry",
+         "registered_trait_ref_symbol(def.owner_ref), trait_ref", "trait_ref, trait_ref"),
+        ("owner key target", "env", "impl_entry_exact_key_same",
+         "left.target_type_name != right.target_type_name", "false"),
+        ("owner key trait", "env", "impl_entry_exact_key_same",
+         "!optional_symbol_ref_same(left.trait_ref, right.trait_ref)", "false"),
+        ("owner key provider", "env", "impl_entry_exact_key_same",
+         "impl_provider_ref_same(a, b)", "true"),
+        ("method owner lookup", "env", "install_method_core",
+         "find_impl_by_provider(", "find_impl_by_origin("),
+        ("method exact trait", "env", "install_method_core",
+         "optional_symbol_ref_same(owner.trait_ref, incoming.trait_ref)", "true"),
+        ("registry typed key", "env", "add_impl",
+         "impl_entry_exact_key_same(existing, entry)",
+         "existing.origin == entry.origin"),
+        ("source provider zero consume", "register", "register_impl",
+         "commit_source_impl_provider_fact(ctx, provider_fact)", "{}"),
+        ("source owner provider", "register", "register_impl_canonical",
+         "provider_ref: some(provider_ref)", "provider_ref: none"),
+        ("nominal derive zero consume", "register", "consume_nominal_derived_provider_plan",
+         "commit_nominal_derived_provider_fact(ctx, fact)", "{}"),
+        ("nominal derive attr order", "register", "consume_nominal_derived_provider_plan",
+         "value.attr_index != attr_index", "false"),
+        ("delegate typed lookup", "register", "register_phase3_delegate",
+         "find_impl_by_provider(", "find_impl_by_origin("),
+        ("delegate parent relation", "register", "register_phase3_delegate",
+         "impl_provider_ref_same(\n                            fact.parent_provider_ref, parent_provider_ref)",
+         "true"),
+        ("nonproject provider frame", "register", "register_nonproject_phase3_delegate",
+         "enter_struct_identity_child_frame(ctx, item.decl_index)", "{}"),
+        ("project provider frame", "register", "register_project_phase3_delegate",
+         "exit_struct_identity_frame(ctx)", "{}"),
+        ("builtin provider domain", "builtins", "builtin_impl_provider",
+         "impl_provider_kind_builtin()", "impl_provider_kind_derived()"),
+        ("builtin string path", "builtins", "builtin_impl_provider",
+         "[ordinal.to_str()]", '["trait", ordinal.to_str()]'),
+        ("builtin ordinal order", "builtins", "builtin_impl_provider_site_from_tag",
+         "ordinal != expected", "false"),
+        ("builtin ordinal duplicate", "builtins", "builtin_impl_provider_site_from_tag",
+         "seen.contains(ordinal)", "false"),
+        ("builtin site bypass", "builtins", "install_builtin_method_owner",
+         "builtin_impl_provider(provider_site)",
+         "builtin_impl_provider(builtin_trait_factory_site())"),
+        ("provisional builtin provider", "builtins", "seed_std_hof_owner",
+         "provider_ref: none", "provider_ref: some(builtin_impl_provider([\"broken\"]))"),
+        ("derive remint", "derive", "register_derived_impl",
+         "provider_ref: some(provider_ref)",
+         "provider_ref: some(make_impl_provider_ref(provider_ref))"),
+        ("implicit derive copy", "derive", "derive_trait",
+         "implicit_derive_provider(ut)",
+         "explicit_derive_request(ut, trait_name).unwrap().provider_ref"),
+        ("rebind provider copy", "decl", "store_rebound_impl_method_scheme",
+         "let provider_ref = match owner.provider_ref", "let provider_ref = none"),
+    )
+    killed = 0
+    for label, source_name, function_name, anchor, replacement in mutations:
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"impl provider mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source
+        findings = impl_provider_u1c1_contract_errors(mutated)
+        if not findings:
+            errors.append(f"impl provider mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != F2_IMPL_PROVIDER_MUTATION_COUNT:
+        errors.append(
+            f"impl provider killed {killed} mutations, expected "
+            f"{F2_IMPL_PROVIDER_MUTATION_COUNT}")
+    return errors
+
+
+def impl_provider_u1c1_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    try:
+        for name, path in F2_IMPL_PROVIDER_PATHS.items():
+            sources[name] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read impl provider compiler sources: {exc}"]
+    errors = impl_provider_u1c1_contract_errors(sources)
+    if errors:
+        return errors
+    errors.extend(impl_provider_u1c1_mutation_errors(sources))
     return errors
 
 
@@ -11074,6 +11649,18 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
     # This permanent gate covers cheap source structure and parse/typecheck
     # only.  Candidate behavior requires an external source-built compiler
     # packet running the targeted project fixtures.
+    provider_identity_label = "compiler.impl_provider_identity_u1c1_source_contract"
+    if matches_filter(provider_identity_label, name_filter):
+        provider_identity_errors = impl_provider_u1c1_source_errors()
+        detail = (
+            f"isolated_mutations={F2_IMPL_PROVIDER_MUTATION_COUNT}; "
+            "provider_kinds=4; candidate_behavior=not_evaluated; "
+            "behavior_gate=aggregate_source_built_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not provider_identity_errors else TestResult.FAIL,
+            suite, provider_identity_label,
+            "; ".join([detail, *provider_identity_errors])))
+
     trait_identity_label = "compiler.trait_method_identity_u1c_source_contract"
     if matches_filter(trait_identity_label, name_filter):
         trait_identity_errors = trait_method_identity_u1c_source_errors()
