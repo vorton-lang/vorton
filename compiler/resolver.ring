@@ -1,4 +1,5 @@
-use ast::{Program, Decl, UseDecl, UseImport, StructFieldDecl, Span, Position}
+use ast::{Program, Decl, UseDecl, UseImport, StructFieldDecl, DeriveAttribute,
+    Span, Position}
 use parser::{parse}
 use diagnostics::{CollectingSink, Diagnostic, DiagnosticNote, Severity, DiagnosticContext,
     new_collecting_sink, make_diag}
@@ -6,8 +7,12 @@ use formatter::{format_human, format_llm}
 use hir::{compare_by_first, module_item_identity, variant_ctor_name}
 use codes::{E0207, E0702, E0704, E0705}
 use ir_identity::{
-    SymbolRef, NominalFieldRef, TraitMethodRef,
+    SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
+    make_module_body_ref, path_owner_for_module_body, make_path_ref,
+    path_role_declaration, path_role_synthetic,
+    make_impl_provider_ref, impl_provider_kind_source,
+    impl_provider_kind_derived, impl_provider_kind_delegate,
     namespace_value, namespace_nominal, namespace_trait, namespace_effect,
     namespace_member,
     namespace_kind_same,
@@ -323,6 +328,35 @@ pub struct TraitIdentityFact {
     pub methods: List<TraitMethodRef>
 }
 
+pub struct SourceImplProviderFact {
+    pub file_key: Str,
+    pub frame_index: Int,
+    pub decl_index: Int,
+    pub provider_ref: ImplProviderRef
+}
+
+pub struct DelegateProviderFact {
+    pub file_key: Str,
+    pub frame_index: Int,
+    pub parent_decl_index: Int,
+    pub source_member_index: Int,
+    pub parent_provider_ref: ImplProviderRef,
+    pub provider_ref: ImplProviderRef
+}
+
+pub struct ExplicitDerivedProviderFact {
+    pub attr_index: Int,
+    pub provider_ref: ImplProviderRef
+}
+
+pub struct NominalDerivedProviderPlanFact {
+    pub file_key: Str,
+    pub frame_index: Int,
+    pub decl_index: Int,
+    pub implicit_provider_ref: ImplProviderRef,
+    pub explicit_providers: List<ExplicitDerivedProviderFact>
+}
+
 // Kept parallel to the worklist fact table so later consumers never have to
 // infer declaration-vs-import identity from a payload, owner, or AstSite.
 enum NamespaceFactProvenance {
@@ -506,6 +540,9 @@ pub struct ModuleNamespaceCensus {
     pub enum_variant_facts: List<EnumVariantFactGroup>,
     pub struct_identities: List<StructIdentityFact>,
     pub trait_identities: List<TraitIdentityFact>,
+    pub source_impl_providers: List<SourceImplProviderFact>,
+    pub delegate_providers: List<DelegateProviderFact>,
+    pub nominal_derived_providers: List<NominalDerivedProviderPlanFact>,
     pub imports: List<ImportObligation>,
     pub physical_dependencies: List<PhysicalDependencyObligation>,
     pub issues: List<ImportIssue>
@@ -517,6 +554,9 @@ pub struct ResolvedNamespacePlan {
     pub enum_variant_facts: List<EnumVariantFactGroup>,
     pub struct_identities: List<StructIdentityFact>,
     pub trait_identities: List<TraitIdentityFact>,
+    pub source_impl_providers: List<SourceImplProviderFact>,
+    pub delegate_providers: List<DelegateProviderFact>,
+    pub nominal_derived_providers: List<NominalDerivedProviderPlanFact>,
     pub imports: List<ImportObligation>,
     pub physical_dependencies: List<PhysicalDependencyObligation>,
     pub issues: List<ImportIssue>
@@ -869,6 +909,138 @@ fn collect_trait_identity_fact(
     }, facts)
 }
 
+fn source_provider_ref(
+    frame: ModuleFramePlan, child_path: List<Str>, source: Bool
+) -> ImplProviderRef {
+    let module_body = make_module_body_ref(
+        frame.file_key, "frame:${frame.frame_index}")
+    let role = if source {
+        path_role_declaration()
+    } else {
+        path_role_synthetic()
+    }
+    let kind = if source {
+        impl_provider_kind_source()
+    } else {
+        impl_provider_kind_derived()
+    }
+    make_impl_provider_ref(
+        make_path_ref(
+            path_owner_for_module_body(module_body), child_path, role),
+        kind)
+}
+
+fn source_delegate_provider_ref(
+    frame: ModuleFramePlan, decl_index: Int, source_member_index: Int
+) -> ImplProviderRef {
+    let module_body = make_module_body_ref(
+        frame.file_key, "frame:${frame.frame_index}")
+    make_impl_provider_ref(
+        make_path_ref(
+            path_owner_for_module_body(module_body),
+            ["decl:${decl_index}", "delegate:${source_member_index}"],
+            path_role_synthetic()),
+        impl_provider_kind_delegate())
+}
+
+fn append_source_impl_provider_fact(
+    fact: SourceImplProviderFact, mut facts: List<SourceImplProviderFact>
+) {
+    for existing in facts {
+        if existing.file_key == fact.file_key &&
+           existing.frame_index == fact.frame_index &&
+           existing.decl_index == fact.decl_index {
+            panic("namespace invariant violated: duplicate source impl provider site")
+        }
+    }
+    facts.push(fact)
+}
+
+fn append_delegate_provider_fact(
+    fact: DelegateProviderFact, mut facts: List<DelegateProviderFact>
+) {
+    for existing in facts {
+        if existing.file_key == fact.file_key &&
+           existing.frame_index == fact.frame_index &&
+           existing.parent_decl_index == fact.parent_decl_index &&
+           existing.source_member_index == fact.source_member_index {
+            panic("namespace invariant violated: duplicate delegate provider site")
+        }
+    }
+    facts.push(fact)
+}
+
+fn append_nominal_derived_provider_fact(
+    fact: NominalDerivedProviderPlanFact,
+    mut facts: List<NominalDerivedProviderPlanFact>
+) {
+    for existing in facts {
+        if existing.file_key == fact.file_key &&
+           existing.frame_index == fact.frame_index &&
+           existing.decl_index == fact.decl_index {
+            panic("namespace invariant violated: duplicate nominal derive provider site")
+        }
+    }
+    facts.push(fact)
+}
+
+fn collect_nominal_derived_provider_fact(
+    frame: ModuleFramePlan, decl_index: Int,
+    derive_attrs: List<DeriveAttribute>,
+    mut facts: List<NominalDerivedProviderPlanFact>
+) {
+    let implicit_provider_ref = source_provider_ref(
+        frame, ["decl:${decl_index}", "derive:implicit"], false)
+    let mut explicit_providers: List<ExplicitDerivedProviderFact> = []
+    for attr_index in 0..derive_attrs.len() {
+        explicit_providers.push(ExplicitDerivedProviderFact {
+            attr_index: attr_index,
+            provider_ref: source_provider_ref(
+                frame,
+                ["decl:${decl_index}", "derive:attr:${attr_index}"],
+                false)
+        })
+    }
+    append_nominal_derived_provider_fact(
+        NominalDerivedProviderPlanFact {
+            file_key: frame.file_key,
+            frame_index: frame.frame_index,
+            decl_index: decl_index,
+            implicit_provider_ref: implicit_provider_ref,
+            explicit_providers: explicit_providers
+        }, facts)
+}
+
+fn collect_impl_provider_facts(
+    frame: ModuleFramePlan, decl_index: Int, methods: List<Decl>,
+    mut source_facts: List<SourceImplProviderFact>,
+    mut delegate_facts: List<DelegateProviderFact>
+) {
+    let source = source_provider_ref(
+        frame, ["decl:${decl_index}", "impl"], true)
+    append_source_impl_provider_fact(SourceImplProviderFact {
+        file_key: frame.file_key,
+        frame_index: frame.frame_index,
+        decl_index: decl_index,
+        provider_ref: source
+    }, source_facts)
+    for source_member_index in 0..methods.len() {
+        match methods.get(source_member_index) {
+            some(Decl::Delegate { .. }) => append_delegate_provider_fact(
+                DelegateProviderFact {
+                    file_key: frame.file_key,
+                    frame_index: frame.frame_index,
+                    parent_decl_index: decl_index,
+                    source_member_index: source_member_index,
+                    parent_provider_ref: source,
+                    provider_ref: source_delegate_provider_ref(
+                        frame, decl_index, source_member_index)
+                }, delegate_facts),
+            _ => {}
+        }
+    }
+}
+
 fn enum_variant_constructors(
     groups: List<EnumVariantFactGroup>, enum_symbol: SymbolRef
 ) -> Option<List<NamespaceSeed>> {
@@ -887,7 +1059,10 @@ fn collect_decl_seed(
     mut seeds: List<NamespaceSeed>,
     mut enum_variant_facts: List<EnumVariantFactGroup>,
     mut struct_identities: List<StructIdentityFact>,
-    mut trait_identities: List<TraitIdentityFact>
+    mut trait_identities: List<TraitIdentityFact>,
+    mut source_impl_providers: List<SourceImplProviderFact>,
+    mut delegate_providers: List<DelegateProviderFact>,
+    mut nominal_derived_providers: List<NominalDerivedProviderPlanFact>
 ) {
     match decl {
         Decl::Fn { name, is_pub, .. } => {
@@ -905,7 +1080,7 @@ fn collect_decl_seed(
                 declaration_payload(frame, name, false), none, is_pub,
                 NamespaceSeedRole::DirectDecl, seeds)
         },
-        Decl::Struct { name, fields, is_pub, .. } => {
+        Decl::Struct { name, fields, derive_attrs, is_pub, .. } => {
             let payload = declaration_payload(frame, name, false)
             let owner_ref = append_namespace_seed(frame, decl_index, name, NamespaceKind::Struct,
                 payload, none, is_pub,
@@ -913,6 +1088,9 @@ fn collect_decl_seed(
             collect_struct_identity_fact(
                 frame, decl_index, owner_ref, payload,
                 fields, false, struct_identities)
+            collect_nominal_derived_provider_fact(
+                frame, decl_index, derive_attrs,
+                nominal_derived_providers)
         },
         Decl::ExternType { name, is_pub, .. } => {
             // Extern types intentionally retain their raw ABI spelling.
@@ -924,7 +1102,7 @@ fn collect_decl_seed(
                 frame, decl_index, owner_ref, payload,
                 [], true, struct_identities)
         },
-        Decl::Enum { name, variants, is_pub, .. } => {
+        Decl::Enum { name, variants, derive_attrs, is_pub, .. } => {
             let enum_payload = declaration_payload(frame, name, false)
             let enum_symbol = append_namespace_seed(
                 frame, decl_index, name, NamespaceKind::Enum,
@@ -966,6 +1144,9 @@ fn collect_decl_seed(
             }
             append_enum_variant_fact_group(
                 enum_symbol, ctor_facts, enum_variant_facts)
+            collect_nominal_derived_provider_fact(
+                frame, decl_index, derive_attrs,
+                nominal_derived_providers)
         },
         Decl::TypeAlias { name, is_pub, .. } => {
             let _ = append_namespace_seed(frame, decl_index, name, NamespaceKind::TypeAlias,
@@ -990,6 +1171,9 @@ fn collect_decl_seed(
             collect_trait_identity_fact(
                 frame, decl_index, owner_ref, methods, trait_identities)
         },
+        Decl::Impl { methods, .. } => collect_impl_provider_facts(
+            frame, decl_index, methods,
+            source_impl_providers, delegate_providers),
         // Impl/Test/Delegate/AssocType do not introduce namespace seeds.
         // ModBlock introduces a frame in pass one and is traversed separately.
         _ => {}
@@ -1250,6 +1434,9 @@ fn collect_frame_contents(
     mut enum_variant_facts: List<EnumVariantFactGroup>,
     mut struct_identities: List<StructIdentityFact>,
     mut trait_identities: List<TraitIdentityFact>,
+    mut source_impl_providers: List<SourceImplProviderFact>,
+    mut delegate_providers: List<DelegateProviderFact>,
+    mut nominal_derived_providers: List<NominalDerivedProviderPlanFact>,
     mut imports: List<ImportObligation>,
     mut physical_dependencies: List<PhysicalDependencyObligation>,
     mut issues: List<ImportIssue>
@@ -1282,7 +1469,9 @@ fn collect_frame_contents(
             some(decl) => {
                 collect_decl_seed(
                     frame, decl_index, decl, seeds, enum_variant_facts,
-                    struct_identities, trait_identities)
+                    struct_identities, trait_identities,
+                    source_impl_providers, delegate_providers,
+                    nominal_derived_providers)
                 match decl {
                     Decl::ModBlock { name, uses: nested_uses, decls: nested_decls, .. } => {
                         // Duplicate inline ModBlocks intentionally share a
@@ -1298,7 +1487,9 @@ fn collect_frame_contents(
                                         child_frame, nested_uses, nested_decls,
                                         frames, frame_site_indices, seeds,
                                         enum_variant_facts, struct_identities,
-                                        trait_identities, imports,
+                                        trait_identities, source_impl_providers,
+                                        delegate_providers,
+                                        nominal_derived_providers, imports,
                                         physical_dependencies, issues)
                                 },
                                 none => {}
@@ -1347,6 +1538,10 @@ pub fn census_module_namespaces(
     let mut enum_variant_facts: List<EnumVariantFactGroup> = []
     let mut struct_identities: List<StructIdentityFact> = []
     let mut trait_identities: List<TraitIdentityFact> = []
+    let mut source_impl_providers: List<SourceImplProviderFact> = []
+    let mut delegate_providers: List<DelegateProviderFact> = []
+    let mut nominal_derived_providers:
+        List<NominalDerivedProviderPlanFact> = []
     let mut imports: List<ImportObligation> = []
     let mut physical_dependencies: List<PhysicalDependencyObligation> = []
     let mut issues: List<ImportIssue> = []
@@ -1358,7 +1553,8 @@ pub fn census_module_namespaces(
                 root_frame, program.uses, program.decls,
                 frames, frame_site_indices,
                 seeds, enum_variant_facts, struct_identities,
-                trait_identities, imports,
+                trait_identities, source_impl_providers,
+                delegate_providers, nominal_derived_providers, imports,
                 physical_dependencies, issues)
         },
         none => {}
@@ -1372,6 +1568,9 @@ pub fn census_module_namespaces(
         enum_variant_facts: enum_variant_facts,
         struct_identities: struct_identities,
         trait_identities: trait_identities,
+        source_impl_providers: source_impl_providers,
+        delegate_providers: delegate_providers,
+        nominal_derived_providers: nominal_derived_providers,
         imports: imports,
         physical_dependencies: physical_dependencies,
         issues: issues
@@ -4847,6 +5046,10 @@ pub fn resolve_namespace_plan(
     let mut enum_variant_facts: List<EnumVariantFactGroup> = []
     let mut struct_identities: List<StructIdentityFact> = []
     let mut trait_identities: List<TraitIdentityFact> = []
+    let mut source_impl_providers: List<SourceImplProviderFact> = []
+    let mut delegate_providers: List<DelegateProviderFact> = []
+    let mut nominal_derived_providers:
+        List<NominalDerivedProviderPlanFact> = []
 
     for census in censuses {
         for frame in census.frames {
@@ -4865,6 +5068,16 @@ pub fn resolve_namespace_plan(
         }
         for fact in census.trait_identities {
             append_trait_identity_fact(fact, trait_identities)
+        }
+        for fact in census.source_impl_providers {
+            append_source_impl_provider_fact(fact, source_impl_providers)
+        }
+        for fact in census.delegate_providers {
+            append_delegate_provider_fact(fact, delegate_providers)
+        }
+        for fact in census.nominal_derived_providers {
+            append_nominal_derived_provider_fact(
+                fact, nominal_derived_providers)
         }
         imports.extend(census.imports)
         physical_dependencies.extend(census.physical_dependencies)
@@ -5095,6 +5308,9 @@ pub fn resolve_namespace_plan(
         enum_variant_facts: enum_variant_facts,
         struct_identities: struct_identities,
         trait_identities: trait_identities,
+        source_impl_providers: source_impl_providers,
+        delegate_providers: delegate_providers,
+        nominal_derived_providers: nominal_derived_providers,
         imports: imports,
         physical_dependencies: physical_dependencies,
         issues: issues

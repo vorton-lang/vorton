@@ -557,6 +557,15 @@ fn store_rebound_impl_method_scheme(
     mut ctx: InferCtx, target_type: Str, trait_name: Str?,
     origin: Str, method_name: Str, scheme: TypeScheme, span: Span
 ) {
+    let owner = match find_impl_by_origin(
+        ctx.env.trait_reg, target_type, origin) {
+        some(entry) => entry,
+        none => panic("impl method rebind: selected owner disappeared")
+    }
+    let provider_ref = match owner.provider_ref {
+        some(value) => value,
+        none => panic("impl method rebind: final owner has no provider")
+    }
     let core = impl_method_core_from_scheme(scheme)
     replace_impl_method_core(
         ctx.env.trait_reg, target_type, origin, method_name, core)
@@ -564,7 +573,9 @@ fn store_rebound_impl_method_scheme(
         ctx.env.trait_reg, ctx.sink,
         target_type, method_name, core,
         MethodOrigin {
-            origin: origin, trait_name: trait_name, span: span
+            origin: origin, trait_name: trait_name,
+            provider_ref: provider_ref, trait_ref: owner.trait_ref,
+            span: span
         })
 }
 

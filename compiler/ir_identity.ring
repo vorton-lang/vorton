@@ -605,6 +605,90 @@ pub fn path_ref_same(left: PathRef, right: PathRef) -> Bool {
         path_role_same(left.role, right.role)
 }
 
+const IMPL_PROVIDER_SOURCE: Int = 0
+const IMPL_PROVIDER_BUILTIN: Int = 1
+const IMPL_PROVIDER_DERIVED: Int = 2
+const IMPL_PROVIDER_DELEGATE: Int = 3
+
+pub struct ImplProviderKind {
+    tag: Int
+}
+
+pub fn impl_provider_kind_from_tag(tag: Int) -> ImplProviderKind {
+    if tag < IMPL_PROVIDER_SOURCE || tag > IMPL_PROVIDER_DELEGATE {
+        panic("IR identity: invalid impl provider kind")
+    }
+    ImplProviderKind { tag: tag }
+}
+
+pub fn impl_provider_kind_tag(value: ImplProviderKind) -> Int {
+    impl_provider_kind_from_tag(value.tag).tag
+}
+
+pub fn impl_provider_kind_source() -> ImplProviderKind {
+    impl_provider_kind_from_tag(IMPL_PROVIDER_SOURCE)
+}
+
+pub fn impl_provider_kind_builtin() -> ImplProviderKind {
+    impl_provider_kind_from_tag(IMPL_PROVIDER_BUILTIN)
+}
+
+pub fn impl_provider_kind_derived() -> ImplProviderKind {
+    impl_provider_kind_from_tag(IMPL_PROVIDER_DERIVED)
+}
+
+pub fn impl_provider_kind_delegate() -> ImplProviderKind {
+    impl_provider_kind_from_tag(IMPL_PROVIDER_DELEGATE)
+}
+
+pub fn impl_provider_kind_same(
+    left: ImplProviderKind, right: ImplProviderKind
+) -> Bool {
+    impl_provider_kind_tag(left) == impl_provider_kind_tag(right)
+}
+
+// An impl provider identifies only the exact producer site. Target and trait
+// identity remain independent typed components of the registry owner key.
+pub struct ImplProviderRef {
+    site: PathRef,
+    kind: ImplProviderKind
+}
+
+pub fn make_impl_provider_ref(
+    site: PathRef, kind: ImplProviderKind
+) -> ImplProviderRef {
+    let owner = path_ref_owner(site)
+    if path_owner_ref_is_symbol(owner) {
+        panic("IR identity: impl provider is not module-body owned")
+    }
+    let checked_kind = impl_provider_kind_from_tag(
+        impl_provider_kind_tag(kind))
+    let role = path_ref_role(site)
+    if impl_provider_kind_same(checked_kind, impl_provider_kind_source()) {
+        if !path_role_same(role, path_role_declaration()) {
+            panic("IR identity: source impl provider is not a declaration")
+        }
+    } else if !path_role_same(role, path_role_synthetic()) {
+        panic("IR identity: generated impl provider is not synthetic")
+    }
+    ImplProviderRef { site: site, kind: checked_kind }
+}
+
+pub fn impl_provider_ref_site(value: ImplProviderRef) -> PathRef {
+    value.site
+}
+
+pub fn impl_provider_ref_kind(value: ImplProviderRef) -> ImplProviderKind {
+    value.kind
+}
+
+pub fn impl_provider_ref_same(
+    left: ImplProviderRef, right: ImplProviderRef
+) -> Bool {
+    path_ref_same(left.site, right.site) &&
+        impl_provider_kind_same(left.kind, right.kind)
+}
+
 enum SlotRefValue {
     SourceSlotValue {
         origin_module_key: Str,

@@ -2,6 +2,7 @@ use types::{Type, EffectRow, StructField, EnumVariant,
     INT, STR, BOOL, EMPTY_ROW, types_equal}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
+    ExplicitDerivedProviderPlan, NominalDerivedProviderPlan,
     TypedImplPredicate, MethodOrigin,
     add_impl, has_impl, find_impl, install_method_core,
     instantiate_impl_runtime_requirements,
@@ -17,6 +18,7 @@ use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
 use hir::{DerivedImpl, DerivedField, DerivedVariant, FieldAction, DictRef,
     TraitBound, TypeKind, trait_dict_name, trait_bound_param_name, compare_by_first}
+use ir_identity::{ImplProviderRef, registered_trait_ref_symbol}
 
 fn str_at(list: List<Str>, i: Int) -> Str {
     match list.get(i) { some(v) => v, none => panic("unreachable: str_at out of bounds") }
@@ -85,7 +87,8 @@ struct UserType {
     type_kind: TypeKind,
     struct_def: StructDef?,
     enum_def: EnumDef?,
-    derive_attrs: List<DeriveAttribute>
+    derive_attrs: List<DeriveAttribute>,
+    provider_plan: NominalDerivedProviderPlan
 }
 
 fn collect_user_types(env: TypeEnv) -> List<UserType> {
@@ -101,7 +104,12 @@ fn collect_user_types(env: TypeEnv) -> List<UserType> {
         // type-checking, but they have no observable runtime structure to derive.
         if def.is_extern { continue }
         if builtins.contains(name) == false {
-            result.push(UserType { name: name, type_kind: TypeKind::StructKind, struct_def: some(def), enum_def: none, derive_attrs: def.derive_attrs })
+            result.push(UserType {
+                name: name, type_kind: TypeKind::StructKind,
+                struct_def: some(def), enum_def: none,
+                derive_attrs: def.derive_attrs,
+                provider_plan: def.derived_provider_plan.unwrap()
+            })
         }
     }
     let mut sorted_enums = env.types.enums.entries()
@@ -111,7 +119,12 @@ fn collect_user_types(env: TypeEnv) -> List<UserType> {
         // Skip mod aliases to avoid duplicate derives
         if name != def.name { continue }
         if builtins.contains(name) == false {
-            result.push(UserType { name: name, type_kind: TypeKind::EnumKind, struct_def: none, enum_def: some(def), derive_attrs: def.derive_attrs })
+            result.push(UserType {
+                name: name, type_kind: TypeKind::EnumKind,
+                struct_def: none, enum_def: some(def),
+                derive_attrs: def.derive_attrs,
+                provider_plan: def.derived_provider_plan.unwrap()
+            })
         }
     }
     result
@@ -158,7 +171,8 @@ fn derive_trait(
                         some(di) => {
                             known.insert(ut.name)
                             let owner = register_derived_impl(
-                                env, sink, di, trait_name, span_zero())
+                                env, sink, di, trait_name, span_zero(),
+                                implicit_derive_provider(ut))
                             derived_impls.push(derived_impl_with_bounds(
                                 di, derived_runtime_bounds_from_owner(owner)))
                             changed = true
@@ -214,7 +228,8 @@ fn derive_hash_trait(
                             some(di) => {
                                 known.insert(ut.name)
                                 let owner = register_derived_impl(
-                                    env, sink, di, "Hash", span_zero())
+                                    env, sink, di, "Hash", span_zero(),
+                                    implicit_derive_provider(ut))
                                 derived_impls.push(derived_impl_with_bounds(
                                     di, derived_runtime_bounds_from_owner(owner)))
                                 changed = true
@@ -233,15 +248,43 @@ fn has_manual_impl(env: TypeEnv, type_name: Str, trait_name: Str) -> Bool {
 }
 
 fn requests_derive(ut: UserType, trait_name: Str) -> Bool {
-    for attr in ut.derive_attrs {
-        if attr.trait_name == trait_name { return true }
-    }
-    false
+    explicit_derive_request(ut, trait_name).is_some()
 }
 
 fn derive_attribute(ut: UserType, trait_name: Str) -> DeriveAttribute? {
-    for attr in ut.derive_attrs {
-        if attr.trait_name == trait_name { return some(attr) }
+    match explicit_derive_request(ut, trait_name) {
+        some(request) => some(request.attribute),
+        none => none
+    }
+}
+
+fn implicit_derive_provider(ut: UserType) -> ImplProviderRef {
+    ut.provider_plan.implicit_provider_ref
+}
+
+fn explicit_derive_request(
+    ut: UserType, trait_name: Str
+) -> ExplicitDerivedProviderPlan? {
+    if ut.provider_plan.explicit_providers.len() != ut.derive_attrs.len() {
+        panic("derive provider plan: explicit attribute arity changed")
+    }
+    for index in 0..ut.provider_plan.explicit_providers.len() {
+        match (ut.provider_plan.explicit_providers.get(index),
+               ut.derive_attrs.get(index)) {
+            (some(request), some(attribute)) => {
+                if request.attribute.trait_name != attribute.trait_name ||
+                   request.attribute.span.file != attribute.span.file ||
+                   request.attribute.span.start.offset !=
+                        attribute.span.start.offset ||
+                   request.attribute.span.end.offset != attribute.span.end.offset {
+                    panic("derive provider plan: explicit attribute changed")
+                }
+                if attribute.trait_name == trait_name {
+                    return some(request)
+                }
+            },
+            _ => panic("derive provider plan: explicit attribute is missing")
+        }
     }
     none
 }
@@ -253,7 +296,8 @@ fn derive_json_trait(
     all_types: List<UserType>, mut derived_impls: List<DerivedImpl>
 ) {
     for ut in all_types {
-        for attr in ut.derive_attrs {
+        for request in ut.provider_plan.explicit_providers {
+            let attr = request.attribute
             if attr.trait_name != "Json" {
                 let requested = attr.trait_name
                 let detail = "unsupported explicit derive trait '${requested}'"
@@ -350,7 +394,9 @@ fn derive_json_trait(
                         none => span_zero()
                     }
                     let _ = register_derived_impl(
-                        env, sink, di, "Json", attr_span)
+                        env, sink, di, "Json", attr_span,
+                        explicit_derive_request(
+                            ut, "Json").unwrap().provider_ref)
                 },
                 none => { invalid.insert(ut.name) }
             }
@@ -1266,7 +1312,8 @@ fn resolve_type_arg_dict(
 
 fn register_derived_impl(
     mut env: TypeEnv, sink: CollectingSink,
-    di: DerivedImpl, trait_name: Str, span: Span
+    di: DerivedImpl, trait_name: Str, span: Span,
+    provider_ref: ImplProviderRef
 ) -> ImplEntry {
     let mut methods: Map<Str, TypeScheme> = map_new()
 
@@ -1319,6 +1366,10 @@ fn register_derived_impl(
             scheme.ty, scheme.type_vars, scheme.def_id))
     }
 
+    let trait_ref = match env.trait_reg.traits.get(trait_name) {
+        some(def) => registered_trait_ref_symbol(def.owner_ref),
+        none => panic("derive impl provider: trait is not registered")
+    }
     let owner = ImplEntry {
         trait_name: some(trait_name),
         target_type_name: di.type_name,
@@ -1328,6 +1379,8 @@ fn register_derived_impl(
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: exact,
+        provider_ref: some(provider_ref),
+        trait_ref: some(trait_ref),
         origin: origin,
         span: span,
         owner_state: ImplOwnerState::FinalOwner
@@ -1343,6 +1396,8 @@ fn register_derived_impl(
             MethodOrigin {
                 origin: origin,
                 trait_name: some(trait_name),
+                provider_ref: provider_ref,
+                trait_ref: some(trait_ref),
                 span: span
             })
     }

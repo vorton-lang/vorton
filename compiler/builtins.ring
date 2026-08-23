@@ -21,8 +21,12 @@ use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
 use ir_identity::{SymbolRef, TraitMethodRef,
+    ImplProviderRef,
     make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
     make_registered_nominal_ref, make_registered_trait_ref,
+    make_module_body_ref, path_owner_for_module_body, make_path_ref,
+    path_role_synthetic, make_impl_provider_ref,
+    impl_provider_kind_builtin, registered_trait_ref_symbol,
     namespace_nominal, namespace_trait, namespace_member}
 
 // ============================================================
@@ -57,6 +61,25 @@ fn builtin_trait_method(
     }
     make_trait_method_ref(
         owner, source_member_index, callable_slot_index, name)
+}
+
+fn builtin_impl_provider(path: List<Str>) -> ImplProviderRef {
+    make_impl_provider_ref(
+        make_path_ref(
+            path_owner_for_module_body(make_module_body_ref(
+                "$builtin", "builtin:impl-providers")),
+            path, path_role_synthetic()),
+        impl_provider_kind_builtin())
+}
+
+fn builtin_impl_trait_ref(env: TypeEnv, trait_name: Str?) -> SymbolRef? {
+    match trait_name {
+        some(name) => match env.trait_reg.traits.get(name) {
+            some(def) => some(registered_trait_ref_symbol(def.owner_ref)),
+            none => panic("builtin impl provider: trait is not registered")
+        },
+        none => none
+    }
 }
 
 fn freeze_builtin_predicates(
@@ -101,7 +124,7 @@ fn install_builtin_method_owner(
     target_type_name: Str, origin: Str,
     trait_name: Str?, type_params: List<Str>, owner_type_vars: List<Int>,
     predicate_specs: List<BuiltinPredicateSpec>, state: ImplOwnerState,
-    methods: Map<Str, TypeScheme>
+    methods: Map<Str, TypeScheme>, provider_path: List<Str>
 ) {
     let span = span_zero()
     if type_params.len() != owner_type_vars.len() {
@@ -127,6 +150,8 @@ fn install_builtin_method_owner(
     }
     let mut method_names = cores.keys()
     method_names.sort()
+    let provider_ref = builtin_impl_provider(provider_path)
+    let trait_ref = builtin_impl_trait_ref(env, trait_name)
     let owner = ImplEntry {
         trait_name: trait_name,
         target_type_name: target_type_name,
@@ -136,6 +161,8 @@ fn install_builtin_method_owner(
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: map_clone(cores),
+        provider_ref: some(provider_ref),
+        trait_ref: trait_ref,
         origin: origin,
         span: span,
         owner_state: state
@@ -164,6 +191,8 @@ fn install_builtin_method_owner(
             MethodOrigin {
                 origin: origin,
                 trait_name: trait_name,
+                provider_ref: provider_ref,
+                trait_ref: trait_ref,
                 span: span
             })
     }
@@ -184,6 +213,8 @@ fn seed_std_hof_owner(
         method_names: [],
         assoc_types: map_new(),
         method_schemes: map_new(),
+        provider_ref: none,
+        trait_ref: none,
         origin: origin,
         span: span_zero(),
         owner_state: ImplOwnerState::ProvisionalPrelude
@@ -241,6 +272,10 @@ fn add_builtin_impl(
     let self_type = builtin_impl_self_type(target_type_name, type_args)
     let predicates = freeze_builtin_predicates(
         type_var_ids, predicate_specs)
+    let provider_ref = builtin_impl_provider(
+        ["trait", trait_name, target_type_name])
+    let trait_ref = builtin_impl_trait_ref(
+        env, some(trait_name)).unwrap()
     let mut exact: Map<Str, ImplMethodSchemeCore> = map_new()
     match env.trait_reg.traits.get(trait_name) {
         some(trait_def) => {
@@ -268,6 +303,8 @@ fn add_builtin_impl(
         method_names: method_names,
         assoc_types: map_new(),
         method_schemes: map_clone(exact),
+        provider_ref: some(provider_ref),
+        trait_ref: some(trait_ref),
         origin: origin,
         span: span,
         owner_state: ImplOwnerState::FinalOwner
@@ -281,6 +318,8 @@ fn add_builtin_impl(
             MethodOrigin {
                 origin: origin,
                 trait_name: some(trait_name),
+                provider_ref: provider_ref,
+                trait_ref: some(trait_ref),
                 span: span
             })
     }
@@ -475,6 +514,7 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
             span: span_zero()
         }],
         derive_attrs: [],
+        derived_provider_plan: none,
         is_extern: false
     })
 
@@ -530,7 +570,8 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
 
     install_builtin_method_owner(
         env, sink, BUILTIN_CELL, "<builtin-inherent>:Cell:core",
-        none, [], [], [], ImplOwnerState::FinalOwner, methods)
+        none, [], [], [], ImplOwnerState::FinalOwner, methods,
+        ["inherent", "Cell", "core"])
 }
 
 // ============================================================
@@ -553,6 +594,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
             EnumVariant { name: "none", fields: [], field_names: none }
         ],
         derive_attrs: [],
+        derived_provider_plan: none,
         variant_index: option_vi
     })
 
@@ -653,7 +695,8 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
     })
     install_builtin_method_owner(
         env, sink, BUILTIN_OPTION, "<builtin-inherent>:Option:core",
-        none, [], [], [], ImplOwnerState::FinalOwner, methods)
+        none, [], [], [], ImplOwnerState::FinalOwner, methods,
+        ["inherent", "Option", "core"])
 }
 
 // ============================================================
@@ -999,7 +1042,8 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_LIST, "<std-predecl>:List:unbounded",
         none, ["T"], [t_id], [],
-        ImplOwnerState::FinalOwner, methods)
+        ImplOwnerState::FinalOwner, methods,
+        ["std-hof-fallback", "List", "unbounded"])
 }
 
 // ============================================================
@@ -1094,7 +1138,8 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_MAP, "<std-predecl>:Map:unbounded",
         none, ["K", "V"], [unbounded_k_id, unbounded_v_id], [],
-        ImplOwnerState::FinalOwner, unbounded_methods)
+        ImplOwnerState::FinalOwner, unbounded_methods,
+        ["std-hof-fallback", "Map", "unbounded"])
     install_builtin_method_owner(
         env, sink, BUILTIN_MAP, "<std-predecl>:Map:bounded",
         none, ["K", "V"], [bounded_k_id, bounded_v_id], [
@@ -1104,7 +1149,8 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
             BuiltinPredicateSpec {
                 subject_param_index: 0, trait_name: "Eq"
             }
-        ], ImplOwnerState::FinalOwner, bounded_methods)
+        ], ImplOwnerState::FinalOwner, bounded_methods,
+        ["std-hof-fallback", "Map", "bounded"])
 }
 
 // ============================================================
@@ -1198,7 +1244,8 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_SET, "<std-predecl>:Set:unbounded",
         none, ["T"], [unbounded_t_id], [],
-        ImplOwnerState::FinalOwner, unbounded_methods)
+        ImplOwnerState::FinalOwner, unbounded_methods,
+        ["std-hof-fallback", "Set", "unbounded"])
     install_builtin_method_owner(
         env, sink, BUILTIN_SET, "<std-predecl>:Set:bounded",
         none, ["T"], [bounded_t_id], [
@@ -1208,7 +1255,8 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
             BuiltinPredicateSpec {
                 subject_param_index: 0, trait_name: "Eq"
             }
-        ], ImplOwnerState::FinalOwner, bounded_methods)
+        ], ImplOwnerState::FinalOwner, bounded_methods,
+        ["std-hof-fallback", "Set", "bounded"])
 }
 
 // ============================================================
@@ -1259,7 +1307,8 @@ fn register_option_hof(mut env: TypeEnv, sink: CollectingSink) {
     })
     install_builtin_method_owner(
         env, sink, BUILTIN_OPTION, "<builtin-inherent>:Option:hof",
-        none, [], [], [], ImplOwnerState::FinalOwner, methods)
+        none, [], [], [], ImplOwnerState::FinalOwner, methods,
+        ["inherent", "Option", "hof"])
 }
 
 // ============================================================
@@ -1389,5 +1438,6 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
     })
     install_builtin_method_owner(
         env, sink, "Ptr", "<builtin-inherent>:Ptr:core",
-        none, [], [], [], ImplOwnerState::FinalOwner, methods)
+        none, [], [], [], ImplOwnerState::FinalOwner, methods,
+        ["inherent", "Ptr", "core"])
 }

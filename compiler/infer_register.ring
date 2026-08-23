@@ -6,11 +6,13 @@ use ast::{Decl, Span, TypeParam, Param, TypeExpr, EffectOpDecl, StructFieldDecl,
     UseDecl, UseImport, DeriveAttribute}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, EnumDef, EffectDef, EffectOpDef,
     TraitDef, TraitMethodDef, ImplEntry, ImplMethodSchemeCore,
+    ExplicitDerivedProviderPlan, NominalDerivedProviderPlan,
     ImplAssocPredicate, TypedImplPredicate, FrozenImplPredicateSet,
     TypeAliasDef, FnBound,
     EffectAliasDef, AssocTypeDef, MethodOrigin, mono, apply_subst, apply_subst_effect_map,
     apply_subst_map, add_impl, has_impl, find_impl, impl_origin, impl_decl_origin,
-    find_impl_by_origin, finalize_provisional_impl_owner,
+    find_impl_by_origin, find_impl_by_provider,
+    finalize_provisional_impl_owner,
     install_method_core, replace_impl_method_core,
     make_impl_method_scheme_core, impl_method_core_as_scheme,
     make_impl_assoc_predicate, make_typed_impl_predicate,
@@ -36,15 +38,21 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     commit_struct_identity_fact, peek_struct_identity_completion,
     commit_struct_identity_completion,
     peek_trait_identity_fact, commit_trait_identity_fact,
+    peek_source_impl_provider_fact, commit_source_impl_provider_fact,
+    peek_delegate_provider_fact, commit_delegate_provider_fact,
+    peek_nominal_derived_provider_fact,
+    commit_nominal_derived_provider_fact,
     close_struct_identity_ledger}
 use infer_helpers::{is_value_type}
-use resolver::{StructIdentityFact}
+use resolver::{StructIdentityFact, DelegateProviderFact}
 use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
     registered_nominal_ref_symbol, nominal_field_ref_name,
     nominal_field_ref_index, symbol_ref_same,
     trait_method_ref_trait,
     trait_method_ref_source_member_index,
-    trait_method_ref_callable_slot_index, trait_method_ref_name}
+    trait_method_ref_callable_slot_index, trait_method_ref_name,
+    ImplProviderRef, SymbolRef, impl_provider_ref_same,
+    registered_trait_ref_symbol}
 
 // ============================================================
 // Public entry points
@@ -686,7 +694,8 @@ fn register_phase1(
             deferred_struct_names.push(name)
         },
         Decl::Enum { name, type_params, variants, derive_attrs, span, .. } => {
-            preregister_enum(ctx, name, type_params, derive_attrs, span)
+            preregister_enum(
+                ctx, name, type_params, derive_attrs, span, decl_index)
             deferred_enum_names.push(name)
         },
         Decl::ModBlock { name: mod_name, uses: mod_uses, decls: mod_decls, .. } => {
@@ -752,8 +761,8 @@ pub fn register_decls_two_phase(mut ctx: InferCtx, decls: List<Decl>) {
     }
 
     // Phase 3: process delegates (after struct/enum fields are complete)
-    for decl in decls {
-        register_phase3_delegate(ctx, decl)
+    for item in index_decls(decls) {
+        register_nonproject_phase3_delegate(ctx, item)
     }
     exit_struct_identity_frame(ctx)
     close_struct_identity_ledger(ctx)
@@ -878,6 +887,7 @@ fn register_project_phase3_delegate(
             if !enter_project_child_frame(ctx, item.decl_index) {
                 panic("unreachable: resolver plan missing phase3 delegate frame")
             }
+            enter_struct_identity_child_frame(ctx, item.decl_index)
             project_push_mod_path(ctx, name)
             for child in index_decls(decls) {
                 let qualified_child = IndexedDecl {
@@ -887,10 +897,11 @@ fn register_project_phase3_delegate(
                 register_project_phase3_delegate(ctx, qualified_child)
             }
             let _ = ctx.mod_path_stack.pop()
+            exit_struct_identity_frame(ctx)
             let _ = exit_project_namespace_frame(ctx)
         },
         _ => {
-            register_phase3_delegate(ctx, item.decl)
+            register_phase3_delegate(ctx, item.decl, item.decl_index)
             refresh_project_namespace_frame(ctx)
         }
     }
@@ -1054,7 +1065,7 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
 
     for item in qualified { register_phase2_struct(ctx, item.decl) }
     for item in qualified { register_phase2_enum(ctx, item.decl) }
-    for item in qualified { register_phase3_delegate(ctx, item.decl) }
+    for item in qualified { register_nonproject_phase3_delegate(ctx, item) }
 
     // Value schemes exist only after the final registration pass.  Binding the
     // short alias and recording its canonical origin makes HExpr::Ident exact.
@@ -1383,25 +1394,42 @@ fn freeze_source_impl_predicates(
     freeze_impl_predicate_set(impl_tv_ids, predicates)
 }
 
-fn register_phase3_delegate(mut ctx: InferCtx, decl: Decl) {
+fn register_phase3_delegate(
+    mut ctx: InferCtx, decl: Decl, decl_index: Int
+) {
     match decl {
         Decl::Impl { target_type, type_params, trait_name, methods, span } => {
-            // Check if any methods are delegates
-            let mut has_delegates = false
-            for m in methods {
-                match m { Decl::Delegate { .. } => { has_delegates = true }, _ => {} }
+            let mut delegate_facts: List<DelegateProviderFact> = []
+            for source_member_index in 0..methods.len() {
+                match methods.get(source_member_index) {
+                    some(Decl::Delegate { .. }) => {
+                        let fact = peek_delegate_provider_fact(
+                            ctx, decl_index, source_member_index)
+                        commit_delegate_provider_fact(ctx, fact)
+                        delegate_facts.push(fact)
+                    },
+                    _ => {}
+                }
             }
-            if has_delegates {
+            if delegate_facts.len() > 0 {
                 let saved = map_clone(ctx.type_param_scope)
                 let canonical_target = resolve_nominal_identity(ctx, target_type)
                 let canonical_trait = match trait_name {
                     some(name) => some(resolve_trait_identity(ctx, name)),
                     none => none
                 }
-                let owner_origin = impl_decl_origin(
-                    canonical_target, canonical_trait, type_params, span)
-                let owner = match find_impl_by_origin(
-                    ctx.env.trait_reg, canonical_target, owner_origin) {
+                let canonical_trait_ref = exact_trait_ref(
+                    ctx, canonical_trait)
+                let parent_provider_ref = delegate_facts.first().unwrap().parent_provider_ref
+                for fact in delegate_facts {
+                    if !impl_provider_ref_same(
+                            fact.parent_provider_ref, parent_provider_ref) {
+                        panic("delegate registration: parent provider changed")
+                    }
+                }
+                let owner = match find_impl_by_provider(
+                    ctx.env.trait_reg, canonical_target,
+                    canonical_trait_ref, parent_provider_ref) {
                     some(entry) => entry,
                     none => {
                         ctx.type_param_scope = saved
@@ -1421,12 +1449,22 @@ fn register_phase3_delegate(mut ctx: InferCtx, decl: Decl) {
                             "delegate registration: outer owner mapping is incomplete")
                     }
                 }
-                for m in methods {
-                    match m {
-                        Decl::Delegate { field, trait_names, span: dspan } => {
+                let mut delegate_index = 0
+                for source_member_index in 0..methods.len() {
+                    match methods.get(source_member_index) {
+                        some(Decl::Delegate {
+                            field, trait_names, span: dspan
+                        }) => {
+                            let fact = delegate_facts.get(
+                                delegate_index).unwrap()
+                            if fact.source_member_index != source_member_index {
+                                panic("delegate registration: provider order changed")
+                            }
                             register_delegate(
                                 ctx, owner, canonical_target,
-                                field, trait_names, dspan, type_params)
+                                field, trait_names, dspan, type_params,
+                                fact.provider_ref)
+                            delegate_index = delegate_index + 1
                         },
                         _ => {}
                     }
@@ -1435,13 +1473,25 @@ fn register_phase3_delegate(mut ctx: InferCtx, decl: Decl) {
                 ctx.type_param_scope = saved
             }
         },
-        Decl::ModBlock { name: mod_name, decls: mod_decls, .. } => {
-            for d in mod_decls {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_phase3_delegate(ctx, prefixed)
-            }
-        },
         _ => {}
+    }
+}
+
+fn register_nonproject_phase3_delegate(
+    mut ctx: InferCtx, item: IndexedDecl
+) {
+    match item.decl {
+        Decl::ModBlock { name, decls, .. } => {
+            enter_struct_identity_child_frame(ctx, item.decl_index)
+            for child in index_decls(decls) {
+                register_nonproject_phase3_delegate(ctx, IndexedDecl {
+                    decl_index: child.decl_index,
+                    decl: prefix_decl_name(name, child.decl)
+                })
+            }
+            exit_struct_identity_frame(ctx)
+        },
+        _ => register_phase3_delegate(ctx, item.decl, item.decl_index)
     }
 }
 
@@ -1449,11 +1499,43 @@ fn register_phase3_delegate(mut ctx: InferCtx, decl: Decl) {
 // Struct registration
 // ============================================================
 
+fn consume_nominal_derived_provider_plan(
+    mut ctx: InferCtx, decl_index: Int,
+    derive_attrs: List<DeriveAttribute>
+) -> NominalDerivedProviderPlan {
+    let fact = peek_nominal_derived_provider_fact(
+        ctx, decl_index, derive_attrs.len())
+    let mut explicit: List<ExplicitDerivedProviderPlan> = []
+    for attr_index in 0..derive_attrs.len() {
+        let attribute = derive_attrs.get(attr_index).unwrap()
+        let provider = match fact.explicit_providers.get(attr_index) {
+            some(value) => {
+                if value.attr_index != attr_index {
+                    panic("impl provider: explicit derive order changed")
+                }
+                value.provider_ref
+            },
+            none => panic("impl provider: explicit derive provider is missing")
+        }
+        explicit.push(ExplicitDerivedProviderPlan {
+            attribute: attribute,
+            provider_ref: provider
+        })
+    }
+    commit_nominal_derived_provider_fact(ctx, fact)
+    NominalDerivedProviderPlan {
+        implicit_provider_ref: fact.implicit_provider_ref,
+        explicit_providers: explicit
+    }
+}
+
 fn preregister_struct(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
     derive_attrs: List<DeriveAttribute>, span: Span, decl_index: Int,
     field_count: Int
 ) {
+    let derived_provider_plan = consume_nominal_derived_provider_plan(
+        ctx, decl_index, derive_attrs)
     validate_type_param_bound_shapes(
         ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     let identity = peek_struct_identity_fact(
@@ -1469,7 +1551,9 @@ fn preregister_struct(
     let def = StructDef { name: name,
         owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
         type_params: tp_names, type_param_vars: tp_vars, fields: [],
-        derive_attrs: derive_attrs, is_extern: false }
+        derive_attrs: derive_attrs,
+        derived_provider_plan: some(derived_provider_plan),
+        is_extern: false }
     commit_struct_identity_fact(ctx, identity, true)
     ctx.env.types.structs.insert(name, def)
 }
@@ -1537,8 +1621,10 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
 
 fn preregister_enum(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
-    derive_attrs: List<DeriveAttribute>, span: Span
+    derive_attrs: List<DeriveAttribute>, span: Span, decl_index: Int
 ) {
+    let derived_provider_plan = consume_nominal_derived_provider_plan(
+        ctx, decl_index, derive_attrs)
     validate_type_param_bound_shapes(
         ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     let mut tp_names: List<Str> = []
@@ -1549,7 +1635,12 @@ fn preregister_enum(
         match tv { Type::TypeVar { id, .. } => { tv_ids.push(id) }, _ => {} }
         ctx.type_param_scope.insert(tp.name, tv)
     }
-    let def = EnumDef { name: name, type_params: tp_names, type_param_vars: tv_ids, variants: [], derive_attrs: derive_attrs, variant_index: map_new() }
+    let def = EnumDef {
+        name: name, type_params: tp_names, type_param_vars: tv_ids,
+        variants: [], derive_attrs: derive_attrs,
+        derived_provider_plan: some(derived_provider_plan),
+        variant_index: map_new()
+    }
     ctx.env.types.enums.insert(name, def)
 }
 
@@ -2046,14 +2137,36 @@ fn reject_unsupported_protocol_impl_bounds(
     }
 }
 
-fn register_impl(mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<Decl>, span: Span) {
-    register_impl_canonical(ctx, resolve_nominal_identity(ctx, target_type), type_params, trait_name, methods, span)
+fn exact_trait_ref(ctx: InferCtx, trait_name: Str?) -> SymbolRef? {
+    match trait_name {
+        some(name) => match ctx.env.trait_reg.traits.get(name) {
+            some(def) => some(registered_trait_ref_symbol(def.owner_ref)),
+            none => none
+        },
+        none => none
+    }
 }
 
-fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<Decl>, span: Span) {
+fn register_impl(
+    mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
+    trait_name: Str?, methods: List<Decl>, span: Span, decl_index: Int
+) {
+    let provider_fact = peek_source_impl_provider_fact(ctx, decl_index)
+    commit_source_impl_provider_fact(ctx, provider_fact)
+    register_impl_canonical(
+        ctx, resolve_nominal_identity(ctx, target_type), type_params,
+        trait_name, methods, span, provider_fact.provider_ref)
+}
+
+fn register_impl_canonical(
+    mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
+    trait_name: Str?, methods: List<Decl>, span: Span,
+    provider_ref: ImplProviderRef
+) {
     let resolved_trait_name = match trait_name {
         some(name) => some(resolve_trait_identity(ctx, name)), none => none
     }
+    let resolved_trait_ref = exact_trait_ref(ctx, resolved_trait_name)
     let origin = impl_decl_origin(
         target_type, resolved_trait_name, type_params, span)
     reject_unsupported_protocol_impl_bounds(ctx, resolved_trait_name, type_params)
@@ -2346,6 +2459,8 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
             method_names: explicit_method_names,
             assoc_types: map_clone(assoc_type_map),
             method_schemes: map_clone(exact_method_schemes),
+            provider_ref: some(provider_ref),
+            trait_ref: resolved_trait_ref,
             origin: origin, span: span,
             owner_state: ImplOwnerState::FinalOwner
         }
@@ -2365,6 +2480,8 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
                 MethodOrigin {
                     origin: origin,
                     trait_name: resolved_trait_name,
+                    provider_ref: provider_ref,
+                    trait_ref: resolved_trait_ref,
                     span: span
                 })
         }
@@ -2664,7 +2781,7 @@ fn merge_delegate_owner_predicates(
 fn register_delegate(
     mut ctx: InferCtx, wrapper_owner: ImplEntry,
     target_type: Str, field: Str, trait_names: List<Str>, span: Span,
-    impl_type_params: List<TypeParam>
+    impl_type_params: List<TypeParam>, provider_ref: ImplProviderRef
 ) {
     let wrapper_fn_bounds = impl_owner_fn_bounds(wrapper_owner)
     // 1. Validate field exists on target struct
@@ -2725,7 +2842,8 @@ fn register_delegate(
                             register_delegate_traits(
                                 ctx, wrapper_owner, target_type,
                                 field, trait_names, span,
-                                wrapper_fn_bounds, impl_type_params, ftn, ft)
+                                wrapper_fn_bounds, impl_type_params, ftn, ft,
+                                provider_ref)
                         }
                     }
                 }
@@ -2738,7 +2856,8 @@ fn register_delegate_traits(
     mut ctx: InferCtx, wrapper_owner: ImplEntry,
     target_type: Str, field: Str, trait_names: List<Str>, span: Span,
     wrapper_fn_bounds: List<FnBoundsEntry>,
-    impl_type_params: List<TypeParam>, field_type_name: Str, ft: Type
+    impl_type_params: List<TypeParam>, field_type_name: Str, ft: Type,
+    provider_ref: ImplProviderRef
 ) {
     for tname in trait_names {
         let canonical_trait = resolve_trait_identity(ctx, tname)
@@ -2897,6 +3016,9 @@ fn register_delegate_traits(
                                     method_names: method_names,
                                     assoc_types: map_clone(field_assoc_types),
                                     method_schemes: map_clone(exact_method_schemes),
+                                    provider_ref: some(provider_ref),
+                                    trait_ref: some(registered_trait_ref_symbol(
+                                        reg_trait_def.owner_ref)),
                                     origin: origin,
                                     span: span,
                                     owner_state: ImplOwnerState::FinalOwner
@@ -2912,6 +3034,10 @@ fn register_delegate_traits(
                                         MethodOrigin {
                                             origin: origin,
                                             trait_name: some(reg_tname),
+                                            provider_ref: provider_ref,
+                                            trait_ref: some(
+                                                registered_trait_ref_symbol(
+                                                    reg_trait_def.owner_ref)),
                                             span: span
                                         })
                                 }
@@ -3298,7 +3424,7 @@ fn register_extern_type_common(
     let def = StructDef { name: name,
         owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
         type_params: tp_names, type_param_vars: tp_vars, fields: [],
-        derive_attrs: [], is_extern: true }
+        derive_attrs: [], derived_provider_plan: none, is_extern: true }
     commit_struct_identity_fact(ctx, identity, false)
     if install_visible_name {
         ctx.env.types.structs.insert(name, def)
@@ -3420,13 +3546,16 @@ fn register_decl(mut ctx: InferCtx, decl: Decl, decl_index: Int) {
             complete_struct_fields(ctx, name, fields)
         },
         Decl::Enum { name, type_params, variants, derive_attrs, span, .. } => {
-            preregister_enum(ctx, name, type_params, derive_attrs, span)
+            preregister_enum(
+                ctx, name, type_params, derive_attrs, span, decl_index)
             complete_enum_variants(ctx, name, type_params, variants)
         },
         Decl::Effect { name, type_params, ops, span, .. } =>
             register_effect(ctx, name, type_params, ops, span),
         Decl::Impl { target_type, type_params, trait_name, methods, span } =>
-            register_impl(ctx, target_type, type_params, trait_name, methods, span),
+            register_impl(
+                ctx, target_type, type_params, trait_name, methods, span,
+                decl_index),
         Decl::Fn { name, type_params, params, return_type, declared_effects, span, .. } =>
             register_fn(ctx, name, type_params, params, return_type, declared_effects, span),
         Decl::Test { .. } => {},

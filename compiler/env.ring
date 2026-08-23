@@ -5,7 +5,9 @@ use ast::{Span, EffectExpr, TypeParam, DeriveAttribute}
 use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
     make_diag}
 use codes::{E0504}
-use ir_identity::{TraitMethodRef, RegisteredNominalRef, RegisteredTraitRef}
+use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef,
+    RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
+    registered_trait_ref_symbol, impl_provider_ref_same}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -48,6 +50,16 @@ pub fn exact_scheme_value_origin(
 // Struct / Enum / Effect definitions stored in environment
 // ============================================================
 
+pub struct ExplicitDerivedProviderPlan {
+    pub attribute: DeriveAttribute,
+    pub provider_ref: ImplProviderRef
+}
+
+pub struct NominalDerivedProviderPlan {
+    pub implicit_provider_ref: ImplProviderRef,
+    pub explicit_providers: List<ExplicitDerivedProviderPlan>
+}
+
 pub struct StructDef {
     pub name: Str,
     pub owner_ref: RegisteredNominalRef,
@@ -55,6 +67,7 @@ pub struct StructDef {
     pub type_param_vars: List<Int>,
     pub fields: List<StructField>,
     pub derive_attrs: List<DeriveAttribute>,
+    pub derived_provider_plan: NominalDerivedProviderPlan?,
     // True for opaque extern (FFI) types registered as zero-field structs.
     // Carries cross-module via TypeDef::StructDef_ so both the declaring and
     // consuming modules can exclude it from trait derivation (B-074).
@@ -67,6 +80,7 @@ pub struct EnumDef {
     pub type_param_vars: List<Int>,
     pub variants: List<EnumVariant>,
     pub derive_attrs: List<DeriveAttribute>,
+    pub derived_provider_plan: NominalDerivedProviderPlan?,
     pub variant_index: Map<Str, Int>
 }
 
@@ -448,6 +462,8 @@ pub struct ImplEntry {
     // Trait/inherent method cores live only on their owning entry. The flat
     // ordinary-call view is a MethodOrigin index, never a second scheme map.
     pub method_schemes: Map<Str, ImplMethodSchemeCore>,
+    pub provider_ref: ImplProviderRef?,
+    pub trait_ref: SymbolRef?,
     // Stable across export/re-export hydration.  Distinct source impl blocks
     // must never be collapsed merely because target/trait spellings match.
     pub origin: Str,
@@ -458,6 +474,8 @@ pub struct ImplEntry {
 pub struct MethodOrigin {
     pub origin: Str,
     pub trait_name: Str?,
+    pub provider_ref: ImplProviderRef,
+    pub trait_ref: SymbolRef?,
     pub span: Span
 }
 
@@ -798,6 +816,24 @@ fn optional_string_same(left: Str?, right: Str?) -> Bool {
     }
 }
 
+pub fn optional_symbol_ref_same(left: SymbolRef?, right: SymbolRef?) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => symbol_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn optional_impl_provider_ref_same(
+    left: ImplProviderRef?, right: ImplProviderRef?
+) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => impl_provider_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
 fn int_list_same(left: List<Int>, right: List<Int>) -> Bool {
     if left.len() != right.len() { return false }
     for index in 0..left.len() {
@@ -850,6 +886,7 @@ fn method_core_map_same(
 fn impl_entry_owner_shape_same(left: ImplEntry, right: ImplEntry) -> Bool {
     left.target_type_name == right.target_type_name &&
         optional_string_same(left.trait_name, right.trait_name) &&
+        optional_symbol_ref_same(left.trait_ref, right.trait_ref) &&
         string_list_same(left.type_params, right.type_params) &&
         int_list_same(left.type_param_vars, right.type_param_vars) &&
         frozen_impl_predicate_set_same(left.predicates, right.predicates) &&
@@ -880,11 +917,24 @@ fn impl_owner_span_same(left: Span, right: Span) -> Bool {
 // treat that opaque token pair as proof that the structural owner is equal.
 pub fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
     left.origin == right.origin &&
+        optional_impl_provider_ref_same(
+            left.provider_ref, right.provider_ref) &&
         impl_entry_owner_shape_same(left, right) &&
         string_list_same(left.method_names, right.method_names) &&
         method_core_map_same(left.method_schemes, right.method_schemes) &&
         impl_owner_span_same(left.span, right.span) &&
         impl_owner_state_same(left.owner_state, right.owner_state)
+}
+
+pub fn impl_entry_exact_key_same(left: ImplEntry, right: ImplEntry) -> Bool {
+    if left.target_type_name != right.target_type_name ||
+       !optional_symbol_ref_same(left.trait_ref, right.trait_ref) {
+        return false
+    }
+    match (left.provider_ref, right.provider_ref) {
+        (some(a), some(b)) => impl_provider_ref_same(a, b),
+        _ => false
+    }
 }
 
 fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
@@ -899,11 +949,16 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
         }
         type_param_names.insert(name)
     }
-    match entry.trait_name {
-        some(name) => if !reg.traits.contains_key(name) {
-            panic("impl owner: declared trait is not registered")
+    match (entry.trait_name, entry.trait_ref) {
+        (some(name), some(trait_ref)) => match reg.traits.get(name) {
+            some(def) => if !symbol_ref_same(
+                    registered_trait_ref_symbol(def.owner_ref), trait_ref) {
+                panic("impl owner: declared trait identity changed")
+            },
+            none => panic("impl owner: declared trait is not registered")
         },
-        none => {}
+        (none, none) => {},
+        _ => panic("impl owner: trait name/ref presence mismatch")
     }
     for predicate in frozen_impl_predicates(entry.predicates) {
         let trait_name = impl_predicate_trait_name(predicate)
@@ -951,6 +1006,9 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
     }
     match entry.owner_state {
         ImplOwnerState::ProvisionalPrelude => {
+            if entry.provider_ref.is_some() {
+                panic("impl owner: provisional prelude published provider")
+            }
             if !entry.origin.starts_with("<std-predecl>:") {
                 panic("impl owner: only std predecls may remain provisional")
             }
@@ -959,7 +1017,9 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
                 panic("impl owner: provisional prelude owner published methods")
             }
         },
-        ImplOwnerState::FinalOwner => {}
+        ImplOwnerState::FinalOwner => if entry.provider_ref.is_none() {
+            panic("impl owner: final owner has no provider")
+        }
     }
 }
 
@@ -1029,11 +1089,15 @@ pub fn install_method_core(
     target_type: Str, method_name: Str,
     core: ImplMethodSchemeCore, incoming: MethodOrigin
 ) -> Bool {
-    let owner = match find_impl_by_origin(reg, target_type, incoming.origin) {
+    let owner = match find_impl_by_provider(
+        reg, target_type, incoming.trait_ref, incoming.provider_ref
+    ) {
         some(found) => found,
         none => panic("impl method index: owner entry is missing")
     }
-    if !optional_string_same(owner.trait_name, incoming.trait_name) {
+    if owner.origin != incoming.origin ||
+       !optional_string_same(owner.trait_name, incoming.trait_name) ||
+       !optional_symbol_ref_same(owner.trait_ref, incoming.trait_ref) {
         panic("impl method index: owner trait mismatch")
     }
     match owner.method_schemes.get(method_name) {
@@ -1053,7 +1117,10 @@ pub fn install_method_core(
 
     match origins.get(method_name) {
         some(existing) => {
-            if existing.origin == incoming.origin {
+            if impl_provider_ref_same(
+                    existing.provider_ref, incoming.provider_ref) &&
+               optional_symbol_ref_same(
+                    existing.trait_ref, incoming.trait_ref) {
                 origins.insert(method_name, incoming)
                 true
             } else {
@@ -1082,15 +1149,17 @@ pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {
         some(impls) => {
             let mut matched = false
             for existing in impls {
-                if existing.origin == entry.origin {
+                if impl_entry_exact_key_same(existing, entry) {
                     matched = true
                     if impl_owner_is_provisional(existing) ||
                        impl_owner_is_provisional(entry) {
                         panic("impl owner: provisional replay requires explicit finalization")
                     }
                     if !impl_entry_final_same(existing, entry) {
-                        panic("impl owner: same-origin replay changed frozen entry")
+                        panic("impl owner: same-provider replay changed frozen entry")
                     }
+                } else if existing.origin == entry.origin {
+                    panic("impl owner: legacy origin aliases distinct typed owners")
                 }
             }
             if !matched {
@@ -1127,6 +1196,33 @@ pub fn find_impl(reg: TraitRegistry, type_name: Str, trait_name: Str) -> ImplEnt
         }),
         none => none
     }
+}
+
+pub fn find_impl_by_provider(
+    reg: TraitRegistry, type_name: Str,
+    trait_ref: SymbolRef?, provider_ref: ImplProviderRef
+) -> ImplEntry? {
+    let mut found: ImplEntry? = none
+    match reg.trait_impls.get(type_name) {
+        some(impls) => {
+            for entry in impls {
+                if optional_symbol_ref_same(entry.trait_ref, trait_ref) {
+                    match entry.provider_ref {
+                        some(candidate) => if impl_provider_ref_same(
+                                candidate, provider_ref) {
+                            if found.is_some() {
+                                panic("impl owner: typed provider key is not unique")
+                            }
+                            found = some(entry)
+                        },
+                        none => {}
+                    }
+                }
+            }
+        },
+        none => {}
+    }
+    found
 }
 
 pub fn instantiate_impl_runtime_requirements(
