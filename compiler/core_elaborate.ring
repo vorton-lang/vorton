@@ -9,17 +9,22 @@
 
 use ir_identity::{
     SlotRef, OriginRef, RegisteredNominalRef,
-    slot_ref_same, registered_nominal_ref_same
+    VariantRef,
+    slot_ref_same, symbol_ref_same,
+    registered_nominal_ref_same, registered_nominal_ref_symbol,
+    variant_ref_owner, variant_ref_same, variant_ref_source_index,
+    variant_field_ref_variant
 }
 use ir_inventory::{ExecutableRef, BinderManifest}
 use hir::{MethodCallRef}
 use core_expr::{
-    CoreTypeRef, CoreEffectSet, CoreCalleeRef, CoreEvidenceRef,
-    CoreFieldRef, CoreFieldValue, CoreConstructorRef, CoreVariantRef,
+    CoreTypeRef, CoreTypeGraph, CoreEffectSet, CoreCalleeRef, CoreEvidenceRef,
+    CoreFieldRef, CoreFieldValue, CoreConstructorRef,
     CoreSlot, CoreBody, CoreBlock, CoreStmt, CoreExpr, CoreMatchArm,
     make_core_effect_set, core_effect_set_atoms,
     make_core_field_value,
-    make_core_nominal_field, make_core_binding_pattern,
+    make_core_nominal_field, make_core_variant_field,
+    make_core_binding_pattern,
     make_core_pattern_field, make_core_struct_pattern,
     make_core_variant_pattern,
     make_core_project_expr, make_core_method_call_expr,
@@ -29,8 +34,20 @@ use core_expr::{
     core_field_ref_kind_tag, core_field_ref_same,
     core_constructor_kind_tag, core_constructor_struct_owner,
     core_constructor_variant,
-    core_variant_owner, core_variant_ref_same,
-    core_body_reference, core_body_origin, core_slot_reference
+    core_body_reference, core_body_origin,
+    core_slot_reference, core_slot_type,
+    core_type_graph_count, core_type_graph_node,
+    core_type_graph_nodes, make_core_type_graph,
+    core_type_ref_same, flow_type_ref_to_core
+}
+use flow_ir::{
+    FlowScope, FlowScopeRef,
+    flow_type_node_kind, flow_type_node_nominal,
+    flow_type_node_nominal_fields,
+    flow_type_kind_tag, flow_type_kind_struct, flow_type_kind_enum,
+    flow_nominal_field_identity, flow_nominal_field_type,
+    flow_field_identity_is_nominal, flow_field_identity_nominal,
+    flow_field_identity_is_variant, flow_field_identity_variant
 }
 
 const CORE_ELAB_TRAIT_DEFAULT: Int = 0
@@ -63,14 +80,17 @@ pub struct CoreElaboratedBody {
 pub struct CoreOrdinaryBodyPlan {
     reference: ExecutableRef,
     origin: OriginRef,
+    graph: CoreTypeGraph,
     type_count: Int,
     manifest: BinderManifest,
+    scopes: List<FlowScope>,
     slots: List<CoreSlot>,
     parameter_slots: List<SlotRef>,
     result_type: CoreTypeRef,
     statements: List<CoreStmt>,
     tail: CoreExpr?,
-    body_origin: OriginRef
+    body_origin: OriginRef,
+    body_scope: FlowScopeRef
 }
 
 fn copy_statements(values: List<CoreStmt>) -> List<CoreStmt> {
@@ -80,17 +100,21 @@ fn copy_statements(values: List<CoreStmt>) -> List<CoreStmt> {
 }
 
 pub fn make_core_ordinary_body_plan(
-    reference: ExecutableRef, origin: OriginRef, type_count: Int,
-    manifest: BinderManifest, slots: List<CoreSlot>,
+    reference: ExecutableRef, origin: OriginRef, graph: CoreTypeGraph,
+    manifest: BinderManifest, scopes: List<FlowScope>, slots: List<CoreSlot>,
     parameter_slots: List<SlotRef>, result_type: CoreTypeRef,
-    statements: List<CoreStmt>, tail: CoreExpr?, body_origin: OriginRef
+    statements: List<CoreStmt>, tail: CoreExpr?, body_origin: OriginRef,
+    body_scope: FlowScopeRef
 ) -> CoreOrdinaryBodyPlan {
     CoreOrdinaryBodyPlan {
-        reference: reference, origin: origin, type_count: type_count,
-        manifest: manifest, slots: copy_slots(slots),
+        reference: reference, origin: origin,
+        graph: make_core_type_graph(core_type_graph_nodes(graph)),
+        type_count: core_type_graph_count(graph),
+        manifest: manifest, scopes: copy_scopes(scopes),
+        slots: copy_slots(slots),
         parameter_slots: copy_slot_refs(parameter_slots),
         result_type: result_type, statements: copy_statements(statements),
-        tail: tail, body_origin: body_origin
+        tail: tail, body_origin: body_origin, body_scope: body_scope
     }
 }
 
@@ -101,10 +125,10 @@ fn make_explicit_elaborated_body(
         panic("CoreHIR elaboration: derived Clone requires a deep plan")
     }
     let block = make_core_block(
-        plan.statements, plan.tail, plan.body_origin)
+        plan.statements, plan.tail, plan.body_origin, plan.body_scope)
     let body = make_core_body(
         plan.reference, plan.origin, plan.type_count,
-        plan.manifest, plan.slots, plan.parameter_slots,
+        plan.manifest, plan.scopes, plan.slots, plan.parameter_slots,
         plan.result_type, block)
     validate_core_body(body)
     CoreElaboratedBody { kind: kind, body: body }
@@ -170,19 +194,78 @@ pub fn core_elaborated_body(value: CoreElaboratedBody) -> CoreBody { value.body 
 pub struct CoreBodyHeader {
     reference: ExecutableRef,
     origin: OriginRef,
+    graph: CoreTypeGraph,
     type_count: Int,
     manifest: BinderManifest,
+    scopes: List<FlowScope>,
     slots: List<CoreSlot>,
     parameter_slots: List<SlotRef>,
     result_type: CoreTypeRef,
     self_slot: SlotRef,
     result_slot: SlotRef,
     body_origin: OriginRef,
+    body_scope: FlowScopeRef,
     result_effects: CoreEffectSet
+}
+
+pub struct CoreNominalContract {
+    graph: CoreTypeGraph,
+    owner: RegisteredNominalRef,
+    ty: CoreTypeRef,
+    variants: List<VariantRef>
+}
+
+fn copy_variants(values: List<VariantRef>) -> List<VariantRef> {
+    let mut result: List<VariantRef> = []
+    for value in values { result.push(value) }
+    result
+}
+
+pub fn make_core_nominal_contract(
+    graph: CoreTypeGraph, owner: RegisteredNominalRef,
+    ty: CoreTypeRef, variants: List<VariantRef>
+) -> CoreNominalContract {
+    let node = core_type_graph_node(graph, ty)
+    if !symbol_ref_same(
+            registered_nominal_ref_symbol(owner),
+            flow_type_node_nominal(node)) {
+        panic("CoreHIR elaboration: nominal contract owner/type differs")
+    }
+    let kind = flow_type_kind_tag(flow_type_node_kind(node))
+    if kind == flow_type_kind_tag(flow_type_kind_struct()) {
+        if variants.len() != 0 {
+            panic("CoreHIR elaboration: struct contract carries variants")
+        }
+    } else if kind == flow_type_kind_tag(flow_type_kind_enum()) {
+        let mut index = 0
+        while index < variants.len() {
+            if !registered_nominal_ref_same(
+                    variant_ref_owner(variants.get(index).unwrap()), owner) ||
+               (index > 0 &&
+                variant_ref_source_index(
+                    variants.get(index).unwrap()) <=
+                variant_ref_source_index(
+                    variants.get(index - 1).unwrap())) {
+                panic("CoreHIR elaboration: variant contract owner/order differs")
+            }
+            index = index + 1
+        }
+    } else {
+        panic("CoreHIR elaboration: nominal contract is not struct/enum")
+    }
+    CoreNominalContract {
+        graph: make_core_type_graph(core_type_graph_nodes(graph)),
+        owner: owner, ty: ty, variants: copy_variants(variants)
+    }
 }
 
 fn copy_slots(values: List<CoreSlot>) -> List<CoreSlot> {
     let mut result: List<CoreSlot> = []
+    for value in values { result.push(value) }
+    result
+}
+fn copy_scopes(values: List<FlowScope>) -> List<FlowScope> {
+    let mut result: List<FlowScope> = []
     for value in values { result.push(value) }
     result
 }
@@ -198,13 +281,15 @@ fn copy_evidence(values: List<CoreEvidenceRef>) -> List<CoreEvidenceRef> {
 }
 
 pub fn make_core_body_header(
-    reference: ExecutableRef, origin: OriginRef, type_count: Int,
-    manifest: BinderManifest, slots: List<CoreSlot>,
+    reference: ExecutableRef, origin: OriginRef, graph: CoreTypeGraph,
+    manifest: BinderManifest, scopes: List<FlowScope>, slots: List<CoreSlot>,
     parameter_slots: List<SlotRef>, result_type: CoreTypeRef,
     self_slot: SlotRef, result_slot: SlotRef,
-    body_origin: OriginRef, result_effects: CoreEffectSet
+    body_origin: OriginRef, body_scope: FlowScopeRef,
+    result_effects: CoreEffectSet
 ) -> CoreBodyHeader {
-    if slot_ref_same(self_slot, result_slot) {
+    if core_type_graph_count(graph) <= 0 ||
+       slot_ref_same(self_slot, result_slot) {
         panic("CoreHIR elaboration: Clone self/result slots alias")
     }
     let mut self_params = 0
@@ -216,23 +301,35 @@ pub fn make_core_body_header(
     }
     let mut self_declared = 0
     let mut result_declared = 0
+    let mut self_type: CoreTypeRef? = none
+    let mut declared_result_type: CoreTypeRef? = none
     for slot in slots {
         if slot_ref_same(core_slot_reference(slot), self_slot) {
             self_declared = self_declared + 1
+            self_type = some(core_slot_type(slot))
         }
         if slot_ref_same(core_slot_reference(slot), result_slot) {
             result_declared = result_declared + 1
+            declared_result_type = some(core_slot_type(slot))
         }
     }
     if self_declared != 1 || result_declared != 1 {
         panic("CoreHIR elaboration: Clone self/result slot census differs")
     }
+    if !core_type_ref_same(self_type.unwrap(), result_type) ||
+       !core_type_ref_same(declared_result_type.unwrap(), result_type) {
+        panic("CoreHIR elaboration: Clone self/result type differs")
+    }
     CoreBodyHeader {
-        reference: reference, origin: origin, type_count: type_count,
-        manifest: manifest, slots: copy_slots(slots),
+        reference: reference, origin: origin,
+        graph: make_core_type_graph(core_type_graph_nodes(graph)),
+        type_count: core_type_graph_count(graph),
+        manifest: manifest, scopes: copy_scopes(scopes),
+        slots: copy_slots(slots),
         parameter_slots: copy_slot_refs(parameter_slots),
         result_type: result_type, self_slot: self_slot,
         result_slot: result_slot, body_origin: body_origin,
+        body_scope: body_scope,
         result_effects: make_core_effect_set(
             core_effect_set_atoms(result_effects))
     }
@@ -304,6 +401,51 @@ fn require_unique_clone_fields(values: List<CoreCloneFieldPlan>) {
     }
 }
 
+fn header_slot_type(header: CoreBodyHeader, target: SlotRef) -> CoreTypeRef {
+    let mut found: CoreTypeRef? = none
+    for slot in header.slots {
+        if slot_ref_same(core_slot_reference(slot), target) {
+            if found.is_some() {
+                panic("CoreHIR elaboration: Clone slot is duplicated")
+            }
+            found = some(core_slot_type(slot))
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("CoreHIR elaboration: Clone slot is undeclared")
+    }
+}
+
+fn validate_clone_slot_roles(
+    header: CoreBodyHeader, fields: List<CoreCloneFieldPlan>
+) {
+    let mut roles: List<SlotRef> = [header.self_slot, header.result_slot]
+    for field in fields {
+        if !core_type_ref_same(
+                header_slot_type(header, field.source_slot), field.ty) ||
+           !core_type_ref_same(
+                header_slot_type(header, field.cloned_slot), field.ty) {
+            panic("CoreHIR elaboration: Clone source/result slot type differs")
+        }
+        roles.push(field.source_slot)
+        roles.push(field.cloned_slot)
+    }
+    let mut left_index = 0
+    while left_index < roles.len() {
+        let mut right_index = left_index + 1
+        while right_index < roles.len() {
+            if slot_ref_same(
+                    roles.get(left_index).unwrap(),
+                    roles.get(right_index).unwrap()) {
+                panic("CoreHIR elaboration: Clone slot roles alias")
+            }
+            right_index = right_index + 1
+        }
+        left_index = left_index + 1
+    }
+}
+
 fn clone_field_statements(
     value: CoreCloneFieldPlan, include_projection: Bool,
     base: SlotRef
@@ -326,21 +468,35 @@ fn clone_field_statements(
 
 pub struct CoreStructClonePlan {
     header: CoreBodyHeader,
-    owner: RegisteredNominalRef,
+    contract: CoreNominalContract,
     constructor: CoreConstructorRef,
     fields: List<CoreCloneFieldPlan>
 }
 
 pub fn make_core_struct_clone_plan(
-    header: CoreBodyHeader, owner: RegisteredNominalRef,
-    constructor: CoreConstructorRef,
-    expected_fields: List<CoreFieldRef>, fields: List<CoreCloneFieldPlan>
+    header: CoreBodyHeader, contract: CoreNominalContract,
+    constructor: CoreConstructorRef, fields: List<CoreCloneFieldPlan>
 ) -> CoreStructClonePlan {
     require_unique_clone_fields(fields)
-    if core_constructor_kind_tag(constructor) != 0 ||
+    validate_clone_slot_roles(header, fields)
+    if !core_type_ref_same(header.result_type, contract.ty) ||
+       core_constructor_kind_tag(constructor) != 0 ||
        !registered_nominal_ref_same(
-            core_constructor_struct_owner(constructor), owner) {
+            core_constructor_struct_owner(constructor), contract.owner) {
         panic("CoreHIR elaboration: struct Clone constructor/owner differs")
+    }
+    let mut expected_fields: List<CoreFieldRef> = []
+    let mut expected_types: List<CoreTypeRef> = []
+    for fact in flow_type_node_nominal_fields(
+            core_type_graph_node(contract.graph, contract.ty)) {
+        let identity = flow_nominal_field_identity(fact)
+        if !flow_field_identity_is_nominal(identity) {
+            panic("CoreHIR elaboration: struct contract has non-field identity")
+        }
+        expected_fields.push(make_core_nominal_field(
+            flow_field_identity_nominal(identity)))
+        expected_types.push(flow_type_ref_to_core(
+            flow_nominal_field_type(fact)))
     }
     if expected_fields.len() != fields.len() {
         panic("CoreHIR elaboration: struct Clone field census differs")
@@ -352,13 +508,15 @@ pub fn make_core_struct_clone_plan(
             panic("CoreHIR elaboration: struct Clone has non-nominal field")
         }
         if !core_field_ref_same(
-                expected_fields.get(field_index).unwrap(), field.field) {
+                expected_fields.get(field_index).unwrap(), field.field) ||
+           !core_type_ref_same(
+                expected_types.get(field_index).unwrap(), field.ty) {
             panic("CoreHIR elaboration: struct Clone field order differs")
         }
         field_index = field_index + 1
     }
     CoreStructClonePlan {
-        header: header, owner: owner, constructor: constructor,
+        header: header, contract: contract, constructor: constructor,
         fields: copy_clone_field_plans(fields)
     }
 }
@@ -381,10 +539,11 @@ pub fn elaborate_core_struct_deep_clone(
         plan.header.result_effects, plan.header.body_origin,
         plan.constructor, constructor_fields)
     let block = make_core_block(
-        statements, some(result), plan.header.body_origin)
+        statements, some(result), plan.header.body_origin,
+        plan.header.body_scope)
     let body = make_core_body(
         plan.header.reference, plan.header.origin, plan.header.type_count,
-        plan.header.manifest, plan.header.slots,
+        plan.header.manifest, plan.header.scopes, plan.header.slots,
         plan.header.parameter_slots, plan.header.result_type, block)
     CoreElaboratedBody {
         kind: core_elaboration_kind_from_tag(CORE_ELAB_DERIVED_CLONE),
@@ -393,33 +552,22 @@ pub fn elaborate_core_struct_deep_clone(
 }
 
 pub struct CoreCloneVariantPlan {
-    variant: CoreVariantRef,
+    variant: VariantRef,
     constructor: CoreConstructorRef,
     fields: List<CoreCloneFieldPlan>,
-    origin: OriginRef
+    origin: OriginRef,
+    scope: FlowScopeRef
 }
 
 pub fn make_core_clone_variant_plan(
-    variant: CoreVariantRef, constructor: CoreConstructorRef,
-    expected_fields: List<CoreFieldRef>, fields: List<CoreCloneFieldPlan>,
-    origin: OriginRef
+    variant: VariantRef, constructor: CoreConstructorRef,
+    fields: List<CoreCloneFieldPlan>, origin: OriginRef,
+    scope: FlowScopeRef
 ) -> CoreCloneVariantPlan {
     require_unique_clone_fields(fields)
-    if expected_fields.len() != fields.len() {
-        panic("CoreHIR elaboration: variant Clone field census differs")
-    }
-    let mut field_index = 0
-    while field_index < fields.len() {
-        if !core_field_ref_same(
-                expected_fields.get(field_index).unwrap(),
-                fields.get(field_index).unwrap().field) {
-            panic("CoreHIR elaboration: variant Clone field order differs")
-        }
-        field_index = field_index + 1
-    }
     CoreCloneVariantPlan {
         variant: variant, constructor: constructor,
-        fields: copy_clone_field_plans(fields), origin: origin
+        fields: copy_clone_field_plans(fields), origin: origin, scope: scope
     }
 }
 
@@ -430,7 +578,8 @@ fn copy_variant_plans(
     for value in values {
         result.push(CoreCloneVariantPlan {
             variant: value.variant, constructor: value.constructor,
-            fields: copy_clone_field_plans(value.fields), origin: value.origin
+            fields: copy_clone_field_plans(value.fields),
+            origin: value.origin, scope: value.scope
         })
     }
     result
@@ -438,29 +587,65 @@ fn copy_variant_plans(
 
 pub struct CoreEnumClonePlan {
     header: CoreBodyHeader,
-    owner: RegisteredNominalRef,
+    contract: CoreNominalContract,
     variants: List<CoreCloneVariantPlan>
 }
 
 pub fn make_core_enum_clone_plan(
-    header: CoreBodyHeader, owner: RegisteredNominalRef,
+    header: CoreBodyHeader, contract: CoreNominalContract,
     variants: List<CoreCloneVariantPlan>
 ) -> CoreEnumClonePlan {
-    if variants.len() == 0 {
+    if variants.len() == 0 || variants.len() != contract.variants.len() ||
+       !core_type_ref_same(header.result_type, contract.ty) {
         panic("CoreHIR elaboration: enum Clone has no variants")
     }
+    let node = core_type_graph_node(contract.graph, contract.ty)
+    let mut all_fields: List<CoreCloneFieldPlan> = []
     let mut left_index = 0
     while left_index < variants.len() {
         let left = variants.get(left_index).unwrap()
-        if !registered_nominal_ref_same(core_variant_owner(left.variant), owner) ||
+        if !variant_ref_same(
+                left.variant, contract.variants.get(left_index).unwrap()) ||
+           !registered_nominal_ref_same(
+                variant_ref_owner(left.variant), contract.owner) ||
            core_constructor_kind_tag(left.constructor) != 1 ||
-           !core_variant_ref_same(
+           !variant_ref_same(
                 core_constructor_variant(left.constructor), left.variant) {
             panic("CoreHIR elaboration: enum Clone variant/constructor differs")
         }
+        let mut expected_fields: List<CoreFieldRef> = []
+        let mut expected_types: List<CoreTypeRef> = []
+        for fact in flow_type_node_nominal_fields(node) {
+            let identity = flow_nominal_field_identity(fact)
+            if flow_field_identity_is_variant(identity) &&
+               variant_ref_same(
+                    variant_field_ref_variant(
+                        flow_field_identity_variant(identity)),
+                    left.variant) {
+                expected_fields.push(make_core_variant_field(
+                    flow_field_identity_variant(identity)))
+                expected_types.push(flow_type_ref_to_core(
+                    flow_nominal_field_type(fact)))
+            }
+        }
+        if expected_fields.len() != left.fields.len() {
+            panic("CoreHIR elaboration: variant Clone field census differs")
+        }
+        let mut field_index = 0
+        while field_index < left.fields.len() {
+            let field = left.fields.get(field_index).unwrap()
+            if !core_field_ref_same(
+                    expected_fields.get(field_index).unwrap(), field.field) ||
+               !core_type_ref_same(
+                    expected_types.get(field_index).unwrap(), field.ty) {
+                panic("CoreHIR elaboration: variant Clone field order differs")
+            }
+            all_fields.push(field)
+            field_index = field_index + 1
+        }
         let mut right_index = left_index + 1
         while right_index < variants.len() {
-            if core_variant_ref_same(
+            if variant_ref_same(
                     left.variant, variants.get(right_index).unwrap().variant) {
                 panic("CoreHIR elaboration: enum Clone repeats a variant")
             }
@@ -468,8 +653,10 @@ pub fn make_core_enum_clone_plan(
         }
         left_index = left_index + 1
     }
+    validate_clone_slot_roles(header, all_fields)
     CoreEnumClonePlan {
-        header: header, owner: owner, variants: copy_variant_plans(variants)
+        header: header, contract: contract,
+        variants: copy_variant_plans(variants)
     }
 }
 
@@ -483,7 +670,8 @@ pub fn elaborate_core_enum_deep_clone(
         let mut constructor_fields: List<CoreFieldValue> = []
         for field in variant.fields {
             pattern_fields.push(make_core_pattern_field(
-                field.field, make_core_binding_pattern(field.source_slot)))
+                field.field,
+                make_core_binding_pattern(field.ty, field.source_slot)))
             for statement in clone_field_statements(
                     field, false, plan.header.self_slot) {
                 statements.push(statement)
@@ -492,13 +680,13 @@ pub fn elaborate_core_enum_deep_clone(
                 field.field, field.cloned_slot))
         }
         let pattern = make_core_variant_pattern(
-            variant.variant, pattern_fields)
+            plan.header.result_type, variant.variant, pattern_fields)
         let constructed = make_core_construct_expr(
             plan.header.result_slot, plan.header.result_type,
             plan.header.result_effects, variant.origin,
             variant.constructor, constructor_fields)
         let arm_body = make_core_block(
-            statements, some(constructed), variant.origin)
+            statements, some(constructed), variant.origin, variant.scope)
         arms.push(make_core_match_arm(
             pattern, none, arm_body, variant.origin))
     }
@@ -507,10 +695,11 @@ pub fn elaborate_core_enum_deep_clone(
         plan.header.result_effects, plan.header.body_origin,
         plan.header.self_slot, arms)
     let block = make_core_block(
-        [], some(matched), plan.header.body_origin)
+        [], some(matched), plan.header.body_origin,
+        plan.header.body_scope)
     let body = make_core_body(
         plan.header.reference, plan.header.origin, plan.header.type_count,
-        plan.header.manifest, plan.header.slots,
+        plan.header.manifest, plan.header.scopes, plan.header.slots,
         plan.header.parameter_slots, plan.header.result_type, block)
     CoreElaboratedBody {
         kind: core_elaboration_kind_from_tag(CORE_ELAB_DERIVED_CLONE),

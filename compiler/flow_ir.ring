@@ -10,7 +10,7 @@
 
 use ir_identity::{
     SymbolRef, PathRef, PathOwnerRef, SlotRef,
-    NominalFieldRef, IntrinsicRef,
+    NominalFieldRef, VariantFieldRef, IntrinsicRef,
     symbol_ref_same, symbol_ref_origin_module_key,
     symbol_ref_namespace_kind, symbol_ref_canonical_payload,
     symbol_ref_declaration_site_path,
@@ -28,6 +28,10 @@ use ir_identity::{
     slot_domain_tag,
     nominal_field_ref_same, nominal_field_ref_owner,
     nominal_field_ref_member, nominal_field_ref_index,
+    variant_field_ref_same, variant_field_ref_variant,
+    variant_field_ref_member, variant_field_ref_index,
+    variant_ref_owner,
+    registered_nominal_ref_symbol,
     intrinsic_ref_same, intrinsic_ref_symbol, intrinsic_ref_site,
     builtin_method_site_tag,
     OriginRef, origin_ref_is_symbol, origin_ref_symbol, origin_ref_path,
@@ -415,6 +419,7 @@ fn copy_resource_edges(
 
 enum FlowFieldIdentityValue {
     NominalFieldIdentityValue(NominalFieldRef),
+    VariantFieldIdentityValue(VariantFieldRef),
     PathFieldIdentityValue(PathRef)
 }
 
@@ -428,10 +433,30 @@ pub fn make_nominal_flow_field_identity(
 pub fn make_path_flow_field_identity(value: PathRef) -> FlowFieldIdentity {
     FlowFieldIdentity { value: FlowFieldIdentityValue::PathFieldIdentityValue(value) }
 }
+pub fn make_variant_flow_field_identity(
+    value: VariantFieldRef
+) -> FlowFieldIdentity {
+    FlowFieldIdentity {
+        value: FlowFieldIdentityValue::VariantFieldIdentityValue(value)
+    }
+}
 pub fn flow_field_identity_is_nominal(value: FlowFieldIdentity) -> Bool {
     match value.value {
         FlowFieldIdentityValue::NominalFieldIdentityValue(_) => true,
+        FlowFieldIdentityValue::VariantFieldIdentityValue(_) => false,
         FlowFieldIdentityValue::PathFieldIdentityValue(_) => false
+    }
+}
+pub fn flow_field_identity_is_variant(value: FlowFieldIdentity) -> Bool {
+    match value.value {
+        FlowFieldIdentityValue::VariantFieldIdentityValue(_) => true,
+        _ => false
+    }
+}
+pub fn flow_field_identity_variant(value: FlowFieldIdentity) -> VariantFieldRef {
+    match value.value {
+        FlowFieldIdentityValue::VariantFieldIdentityValue(field) => field,
+        _ => panic("FlowIR: non-variant field has no VariantFieldRef")
     }
 }
 pub fn flow_field_identity_nominal(value: FlowFieldIdentity) -> NominalFieldRef {
@@ -453,6 +478,9 @@ fn flow_field_identity_same(
         (FlowFieldIdentityValue::NominalFieldIdentityValue(a),
          FlowFieldIdentityValue::NominalFieldIdentityValue(b)) =>
             nominal_field_ref_same(a, b),
+        (FlowFieldIdentityValue::VariantFieldIdentityValue(a),
+         FlowFieldIdentityValue::VariantFieldIdentityValue(b)) =>
+            variant_field_ref_same(a, b),
         (FlowFieldIdentityValue::PathFieldIdentityValue(a),
          FlowFieldIdentityValue::PathFieldIdentityValue(b)) => path_ref_same(a, b),
         _ => false
@@ -658,14 +686,17 @@ pub fn make_flow_tuple_type_node(
 }
 
 pub fn make_flow_record_type_node(
-    reference: FlowTypeRef, fields: List<FlowTypeRef>,
+    reference: FlowTypeRef, fields: List<FlowNominalFieldFact>,
     semantic_seed: FlowTypeSemanticSeed, drop_contract: FlowDropContract?,
     resource_parameters: List<FlowGenericParamFact>,
     resource_edges: List<FlowResourceDependencyEdge>
 ) -> FlowTypeNode {
-    make_structural_flow_type_node(
-        reference, flow_type_kind_record(), fields,
+    let mut node = make_structural_flow_type_node(
+        reference, flow_type_kind_record(),
+        fields.map(fn(field) { flow_nominal_field_type(field) }),
         semantic_seed, drop_contract, resource_parameters, resource_edges)
+    node.nominal_fields = copy_nominal_fields(fields)
+    node
 }
 
 pub fn make_flow_callable_type_node(
@@ -853,6 +884,15 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
                             panic("FlowIR: nominal field crosses type owner")
                         }
                     },
+                    FlowFieldIdentityValue::VariantFieldIdentityValue(reference) => {
+                        if !symbol_ref_same(
+                                registered_nominal_ref_symbol(
+                                    variant_ref_owner(
+                                        variant_field_ref_variant(reference))),
+                                nominal) {
+                            panic("FlowIR: variant field crosses nominal owner")
+                        }
+                    },
                     FlowFieldIdentityValue::PathFieldIdentityValue(path) => {
                         if path_ref_module_key(path) !=
                            symbol_ref_origin_module_key(nominal) {
@@ -875,7 +915,9 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
             if value.nominal.is_some() || value.parameter_count != 0 ||
                value.generic_param.is_some() ||
                value.generic_arguments.len() != 0 ||
-               value.nominal_fields.len() != 0 ||
+               (tag == FLOW_TYPE_TUPLE && value.nominal_fields.len() != 0) ||
+               (tag == FLOW_TYPE_RECORD &&
+                value.nominal_fields.len() != value.children.len()) ||
                value.foreign_contract.is_some() ||
                (seed != FLOW_SEED_UNIQUE &&
                 seed != FLOW_SEED_SHAREABLE &&
@@ -885,6 +927,29 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
                (value.resource_parameters.len() != 0 &&
                 seed != FLOW_SEED_PARAMETRIC) {
                 panic("FlowIR: structural type payload is invalid")
+            }
+            if tag == FLOW_TYPE_RECORD {
+                let mut field_index = 0
+                while field_index < value.nominal_fields.len() {
+                    let field = value.nominal_fields.get(field_index).unwrap()
+                    if flow_field_identity_is_nominal(field.identity) ||
+                       flow_field_identity_is_variant(field.identity) ||
+                       !flow_type_ref_same(
+                            field.ty, value.children.get(field_index).unwrap()) {
+                        panic("FlowIR: record field identity/type differs")
+                    }
+                    let mut right_index = field_index + 1
+                    while right_index < value.nominal_fields.len() {
+                        if flow_field_identity_same(
+                                field.identity,
+                                value.nominal_fields.get(right_index).unwrap()
+                                    .identity) {
+                            panic("FlowIR: record repeats a field identity")
+                        }
+                        right_index = right_index + 1
+                    }
+                    field_index = field_index + 1
+                }
             }
         } else if tag == FLOW_TYPE_CALLABLE {
             if value.nominal.is_some() || value.parameter_count < 0 ||
@@ -942,6 +1007,17 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
         ordinal = ordinal + 1
     }
     validate_resource_dependency_edges(values)
+}
+
+pub fn validate_flow_type_graph_nodes(values: List<FlowTypeNode>) {
+    validate_type_nodes(values)
+}
+
+pub fn copy_flow_type_graph_nodes(
+    values: List<FlowTypeNode>
+) -> List<FlowTypeNode> {
+    validate_type_nodes(values)
+    copy_type_nodes(values)
 }
 
 fn resource_dependency_arity(value: FlowTypeNode) -> Int {
@@ -2142,6 +2218,7 @@ fn copy_operation_contract(value: FlowOperationContract) -> FlowOperationContrac
 
 enum FlowProjectionContractValue {
     NominalProjectionValue(NominalFieldRef),
+    VariantProjectionValue(VariantFieldRef),
     StructuralProjectionValue(PathRef),
     WholeSlotProjectionValue
 }
@@ -2176,6 +2253,17 @@ pub fn make_structural_flow_projection_contract(
         base_role: base_role, partial: partial
     }
 }
+pub fn make_variant_flow_projection_contract(
+    field: VariantFieldRef, base_type: FlowTypeRef,
+    result_type: FlowTypeRef, base_role: FlowSemanticRole, partial: Bool
+) -> FlowProjectionContract {
+    let _ = flow_semantic_role_tag(base_role)
+    FlowProjectionContract {
+        value: FlowProjectionContractValue::VariantProjectionValue(field),
+        base_type: base_type, result_type: result_type,
+        base_role: base_role, partial: partial
+    }
+}
 pub fn make_whole_slot_flow_projection_contract(
     ty: FlowTypeRef, base_role: FlowSemanticRole
 ) -> FlowProjectionContract {
@@ -2190,7 +2278,8 @@ pub fn flow_projection_contract_kind_tag(value: FlowProjectionContract) -> Int {
     match value.value {
         FlowProjectionContractValue::NominalProjectionValue(_) => 0,
         FlowProjectionContractValue::StructuralProjectionValue(_) => 1,
-        FlowProjectionContractValue::WholeSlotProjectionValue => 2
+        FlowProjectionContractValue::WholeSlotProjectionValue => 2,
+        FlowProjectionContractValue::VariantProjectionValue(_) => 3
     }
 }
 pub fn flow_projection_contract_base_type(
@@ -2219,6 +2308,14 @@ pub fn flow_projection_contract_structural_path(
     match value.value {
         FlowProjectionContractValue::StructuralProjectionValue(path) => path,
         _ => panic("FlowIR: projection is not structural")
+    }
+}
+pub fn flow_projection_contract_variant_field(
+    value: FlowProjectionContract
+) -> VariantFieldRef {
+    match value.value {
+        FlowProjectionContractValue::VariantProjectionValue(field) => field,
+        _ => panic("FlowIR: projection is not variant payload")
     }
 }
 fn copy_projection_contract(
@@ -4456,6 +4553,31 @@ fn validate_projection_contract(
             if matches != 1 {
                 panic("FlowIR: nominal projection field fact is not exact")
             }
+        },
+        FlowProjectionContractValue::VariantProjectionValue(field) => {
+            let nominal = match base.nominal {
+                some(symbol) => symbol,
+                none => panic("FlowIR: variant projection base is not nominal")
+            }
+            if !symbol_ref_same(
+                    registered_nominal_ref_symbol(variant_ref_owner(
+                        variant_field_ref_variant(field))), nominal) {
+                panic("FlowIR: variant projection field crosses base owner")
+            }
+            let mut matches = 0
+            for fact in base.nominal_fields {
+                if flow_field_identity_is_variant(fact.identity) &&
+                   variant_field_ref_same(
+                        flow_field_identity_variant(fact.identity), field) {
+                    require_same_flow_type(
+                        fact.ty, contract.result_type,
+                        "FlowIR: variant projection result type differs")
+                    matches = matches + 1
+                }
+            }
+            if matches != 1 {
+                panic("FlowIR: variant projection field fact is not exact")
+            }
         }
     }
 }
@@ -4677,6 +4799,8 @@ fn encode_field_identity(value: FlowFieldIdentity) -> Str {
                 encode_symbol(nominal_field_ref_member(field)),
                 nominal_field_ref_index(field).to_str()
             ].join("/"),
+        FlowFieldIdentityValue::VariantFieldIdentityValue(field) =>
+            "FV/${variant_field_ref_index(field).to_str()}/${encode_symbol(variant_field_ref_member(field))}",
         FlowFieldIdentityValue::PathFieldIdentityValue(path) =>
             "FP/${encode_path(path)}"
     }
@@ -4766,6 +4890,8 @@ fn encode_projection_contract(value: FlowProjectionContract) -> Str {
     let identity = match value.value {
         FlowProjectionContractValue::NominalProjectionValue(field) =>
             "N${encode_field_identity(make_nominal_flow_field_identity(field))}",
+        FlowProjectionContractValue::VariantProjectionValue(field) =>
+            "V${encode_field_identity(make_variant_flow_field_identity(field))}",
         FlowProjectionContractValue::StructuralProjectionValue(path) =>
             "S${encode_path(path)}",
         FlowProjectionContractValue::WholeSlotProjectionValue => "W"

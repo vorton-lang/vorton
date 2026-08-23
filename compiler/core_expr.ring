@@ -8,6 +8,9 @@
 
 use ir_identity::{
     SymbolRef, RegisteredNominalRef, NominalFieldRef,
+    VariantRef, VariantFieldRef,
+    HandledEffectRef, SystemEffectRef,
+    ImplOwnerRef, ImplMethodRef,
     PathRef, PathOwnerRef, SlotRef, CalleeRef,
     OriginRef,
     symbol_ref_same, symbol_ref_origin_module_key,
@@ -15,23 +18,64 @@ use ir_identity::{
     namespace_kind_same, namespace_effect, namespace_member,
     registered_nominal_ref_symbol, registered_nominal_ref_same,
     nominal_field_ref_same, nominal_field_ref_owner,
+    variant_ref_owner, variant_ref_same,
+    variant_field_ref_variant, variant_field_ref_same,
+    handled_effect_ref_same, system_effect_ref_same,
+    impl_owner_ref_same, impl_method_ref_owner,
+    impl_method_ref_callable_slot_index, impl_method_ref_member,
+    intrinsic_ref_symbol, trait_method_ref_member,
     path_ref_same, path_ref_owner,
     path_owner_ref_is_symbol, path_owner_ref_symbol,
     path_owner_ref_module_body,
     module_body_ref_origin_module_key,
     slot_ref_same,
     make_named_callee_ref, make_local_callee_ref, make_dynamic_callee_ref,
-    callee_ref_same,
+    callee_ref_same, origin_ref_same,
     origin_ref_is_symbol, origin_ref_symbol, origin_ref_path
 }
 use ir_inventory::{
     ExecutableRef, BinderManifest,
+    EffectOperationRef, SystemHostCallableRef,
     executable_ref_same, executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_origin_module_key,
     binder_manifest_owner, binder_manifest_entries,
-    binder_entry_slot, make_binder_manifest
+    binder_entry_slot, make_binder_manifest,
+    effect_operation_ref_effect, effect_operation_ref_callable,
+    effect_operation_ref_same,
+    system_host_callable_effect, system_host_callable_executable
 }
-use hir::{MethodCallRef}
+use hir::{
+    MethodCallRef,
+    method_call_ref_is_intrinsic, method_call_ref_is_concrete,
+    method_call_ref_is_bound, method_call_ref_intrinsic,
+    method_call_ref_impl, method_call_ref_bound
+}
+use flow_ir::{
+    FlowTypeNode, FlowTypeRef, FlowFieldIdentity, FlowNominalFieldFact,
+    FlowCallableMode, FlowCallContract,
+    FlowScope, FlowScopeRef,
+    FlowInitialSlotState, FlowStorageClass, FlowStorageContract,
+    make_flow_type_ref,
+    validate_flow_type_graph_nodes, copy_flow_type_graph_nodes,
+    flow_type_ref_index, flow_type_node_kind, flow_type_node_children,
+    flow_type_node_nominal, flow_type_node_nominal_fields,
+    flow_type_node_parameter_count,
+    flow_type_kind_tag, flow_type_kind_int, flow_type_kind_float,
+    flow_type_kind_str, flow_type_kind_bool, flow_type_kind_unit,
+    flow_type_kind_never, flow_type_kind_struct, flow_type_kind_enum,
+    flow_type_kind_tuple, flow_type_kind_record, flow_type_kind_callable,
+    flow_callable_mode_same, flow_callable_mode_concrete_body,
+    flow_call_contract_parameter_types, flow_call_contract_result_type,
+    flow_call_contract_same,
+    flow_nominal_field_identity, flow_nominal_field_type,
+    flow_field_identity_is_nominal, flow_field_identity_nominal,
+    flow_field_identity_is_variant, flow_field_identity_variant,
+    flow_field_identity_path,
+    flow_scope_reference, flow_scope_ref_same,
+    flow_scope_ref_owner, flow_scope_ref_ordinal,
+    flow_initial_slot_state_tag, flow_storage_class_tag,
+    flow_storage_contract_tag
+}
 
 // ============================================================
 // Exact typed/effect references
@@ -48,12 +92,152 @@ pub fn core_type_ref_same(left: CoreTypeRef, right: CoreTypeRef) -> Bool {
     left.index == right.index
 }
 
+pub fn core_type_ref_to_flow(value: CoreTypeRef) -> FlowTypeRef {
+    make_flow_type_ref(value.index)
+}
+pub fn flow_type_ref_to_core(value: FlowTypeRef) -> CoreTypeRef {
+    make_core_type_ref(flow_type_ref_index(value))
+}
+
+pub struct CoreTypeGraph { nodes: List<FlowTypeNode> }
+
+pub fn make_core_type_graph(nodes: List<FlowTypeNode>) -> CoreTypeGraph {
+    validate_flow_type_graph_nodes(nodes)
+    CoreTypeGraph { nodes: copy_flow_type_graph_nodes(nodes) }
+}
+pub fn core_type_graph_count(value: CoreTypeGraph) -> Int {
+    value.nodes.len()
+}
+pub fn core_type_graph_nodes(value: CoreTypeGraph) -> List<FlowTypeNode> {
+    copy_flow_type_graph_nodes(value.nodes)
+}
+pub fn core_type_graph_node(
+    value: CoreTypeGraph, reference: CoreTypeRef
+) -> FlowTypeNode {
+    match value.nodes.get(reference.index) {
+        some(node) => node,
+        none => panic("CoreHIR: type reference is absent from CoreTypeGraph")
+    }
+}
+
+pub struct CoreCallableContract {
+    reference: ExecutableRef,
+    origin: OriginRef,
+    parameter_types: List<CoreTypeRef>,
+    parameter_slots: List<SlotRef>,
+    result_type: CoreTypeRef,
+    mode: FlowCallableMode,
+    semantic_contract: FlowCallContract,
+    evidence_requirements: List<SymbolRef>
+}
+
+fn copy_core_type_refs(values: List<CoreTypeRef>) -> List<CoreTypeRef> {
+    let mut result: List<CoreTypeRef> = []
+    for value in values { result.push(value) }
+    result
+}
+fn copy_symbols(values: List<SymbolRef>) -> List<SymbolRef> {
+    let mut result: List<SymbolRef> = []
+    for value in values { result.push(value) }
+    result
+}
+
+pub fn make_core_callable_contract(
+    reference: ExecutableRef, origin: OriginRef,
+    parameter_types: List<CoreTypeRef>, parameter_slots: List<SlotRef>,
+    result_type: CoreTypeRef, mode: FlowCallableMode,
+    semantic_contract: FlowCallContract,
+    evidence_requirements: List<SymbolRef>
+) -> CoreCallableContract {
+    let flow_parameters = flow_call_contract_parameter_types(semantic_contract)
+    if parameter_types.len() != flow_parameters.len() ||
+       core_type_ref_index(result_type) != flow_type_ref_index(
+            flow_call_contract_result_type(semantic_contract)) {
+        panic("CoreHIR: callable typed/semantic signature differs")
+    }
+    let mut index = 0
+    while index < parameter_types.len() {
+        if core_type_ref_index(parameter_types.get(index).unwrap()) !=
+           flow_type_ref_index(flow_parameters.get(index).unwrap()) {
+            panic("CoreHIR: callable parameter type projection differs")
+        }
+        index = index + 1
+    }
+    let concrete = flow_callable_mode_same(
+        mode, flow_callable_mode_concrete_body())
+    if (concrete && parameter_slots.len() != parameter_types.len()) ||
+       (!concrete && parameter_slots.len() != 0) {
+        panic("CoreHIR: callable parameter-slot relation differs")
+    }
+    let mut left_index = 0
+    while left_index < evidence_requirements.len() {
+        let mut right_index = left_index + 1
+        while right_index < evidence_requirements.len() {
+            if symbol_ref_same(
+                    evidence_requirements.get(left_index).unwrap(),
+                    evidence_requirements.get(right_index).unwrap()) {
+                panic("CoreHIR: callable repeats an evidence requirement")
+            }
+            right_index = right_index + 1
+        }
+        left_index = left_index + 1
+    }
+    CoreCallableContract {
+        reference: reference, origin: origin,
+        parameter_types: copy_core_type_refs(parameter_types),
+        parameter_slots: copy_slot_refs(parameter_slots),
+        result_type: result_type, mode: mode,
+        semantic_contract: semantic_contract,
+        evidence_requirements: copy_symbols(evidence_requirements)
+    }
+}
+pub fn core_callable_reference(value: CoreCallableContract) -> ExecutableRef {
+    value.reference
+}
+pub fn core_callable_origin(value: CoreCallableContract) -> OriginRef {
+    value.origin
+}
+pub fn core_callable_parameter_types(
+    value: CoreCallableContract
+) -> List<CoreTypeRef> { copy_core_type_refs(value.parameter_types) }
+pub fn core_callable_parameter_slots(
+    value: CoreCallableContract
+) -> List<SlotRef> { copy_slot_refs(value.parameter_slots) }
+pub fn core_callable_result_type(value: CoreCallableContract) -> CoreTypeRef {
+    value.result_type
+}
+pub fn core_callable_mode(value: CoreCallableContract) -> FlowCallableMode {
+    value.mode
+}
+pub fn core_callable_semantic_contract(
+    value: CoreCallableContract
+) -> FlowCallContract { value.semantic_contract }
+pub fn core_callable_evidence_requirements(
+    value: CoreCallableContract
+) -> List<SymbolRef> { copy_symbols(value.evidence_requirements) }
+
+fn copy_core_callable_contracts(
+    values: List<CoreCallableContract>
+) -> List<CoreCallableContract> {
+    let mut result: List<CoreCallableContract> = []
+    for value in values {
+        result.push(make_core_callable_contract(
+            value.reference, value.origin, value.parameter_types,
+            value.parameter_slots, value.result_type, value.mode,
+            value.semantic_contract, value.evidence_requirements))
+    }
+    result
+}
+pub fn copy_core_callables(
+    values: List<CoreCallableContract>
+) -> List<CoreCallableContract> { copy_core_callable_contracts(values) }
+
 enum CoreEffectAtomValue {
     FailEffectValue(CoreTypeRef),
     MutEffectValue(CoreTypeRef),
     UnsafeEffectValue,
-    HandledEffectValue(SymbolRef),
-    SystemEffectValue(SymbolRef)
+    HandledEffectValue(HandledEffectRef),
+    SystemEffectValue(SystemEffectRef)
 }
 
 pub struct CoreEffectAtom { value: CoreEffectAtomValue }
@@ -67,22 +251,14 @@ pub fn make_core_mut_effect(state_type: CoreTypeRef) -> CoreEffectAtom {
 pub fn make_core_unsafe_effect() -> CoreEffectAtom {
     CoreEffectAtom { value: CoreEffectAtomValue::UnsafeEffectValue }
 }
-pub fn make_core_handled_effect(effect_symbol: SymbolRef) -> CoreEffectAtom {
-    if !namespace_kind_same(
-            symbol_ref_namespace_kind(effect_symbol), namespace_effect()) {
-        panic("CoreHIR: handled effect is not an exact effect symbol")
-    }
+pub fn make_core_handled_effect(effect_ref: HandledEffectRef) -> CoreEffectAtom {
     CoreEffectAtom {
-        value: CoreEffectAtomValue::HandledEffectValue(effect_symbol)
+        value: CoreEffectAtomValue::HandledEffectValue(effect_ref)
     }
 }
-pub fn make_core_system_effect(effect_symbol: SymbolRef) -> CoreEffectAtom {
-    if !namespace_kind_same(
-            symbol_ref_namespace_kind(effect_symbol), namespace_effect()) {
-        panic("CoreHIR: system effect is not an exact effect symbol")
-    }
+pub fn make_core_system_effect(effect_ref: SystemEffectRef) -> CoreEffectAtom {
     CoreEffectAtom {
-        value: CoreEffectAtomValue::SystemEffectValue(effect_symbol)
+        value: CoreEffectAtomValue::SystemEffectValue(effect_ref)
     }
 }
 
@@ -102,11 +278,16 @@ pub fn core_effect_atom_type(value: CoreEffectAtom) -> CoreTypeRef {
         _ => panic("CoreHIR: effect atom has no type argument")
     }
 }
-pub fn core_effect_atom_symbol(value: CoreEffectAtom) -> SymbolRef {
+pub fn core_effect_atom_handled_ref(value: CoreEffectAtom) -> HandledEffectRef {
     match value.value {
-        CoreEffectAtomValue::HandledEffectValue(symbol) |
-        CoreEffectAtomValue::SystemEffectValue(symbol) => symbol,
-        _ => panic("CoreHIR: effect atom has no effect symbol")
+        CoreEffectAtomValue::HandledEffectValue(effect_ref) => effect_ref,
+        _ => panic("CoreHIR: effect atom is not handled")
+    }
+}
+pub fn core_effect_atom_system_ref(value: CoreEffectAtom) -> SystemEffectRef {
+    match value.value {
+        CoreEffectAtomValue::SystemEffectValue(effect_ref) => effect_ref,
+        _ => panic("CoreHIR: effect atom is not system")
     }
 }
 
@@ -119,9 +300,11 @@ fn core_effect_atom_same(left: CoreEffectAtom, right: CoreEffectAtom) -> Bool {
         (CoreEffectAtomValue::UnsafeEffectValue,
          CoreEffectAtomValue::UnsafeEffectValue) => true,
         (CoreEffectAtomValue::HandledEffectValue(a),
-         CoreEffectAtomValue::HandledEffectValue(b)) => symbol_ref_same(a, b),
+         CoreEffectAtomValue::HandledEffectValue(b)) =>
+            handled_effect_ref_same(a, b),
         (CoreEffectAtomValue::SystemEffectValue(a),
-         CoreEffectAtomValue::SystemEffectValue(b)) => symbol_ref_same(a, b),
+         CoreEffectAtomValue::SystemEffectValue(b)) =>
+            system_effect_ref_same(a, b),
         _ => false
     }
 }
@@ -167,29 +350,66 @@ pub struct CoreCalleeRef {
     kind: Int,
     direct: ExecutableRef?,
     local: SlotRef?,
-    dynamic: PathRef?
+    dynamic: PathRef?,
+    contract: FlowCallContract,
+    candidates: List<ExecutableRef>
 }
 
-pub fn make_core_direct_callee(value: ExecutableRef) -> CoreCalleeRef {
+fn copy_executables(values: List<ExecutableRef>) -> List<ExecutableRef> {
+    let mut result: List<ExecutableRef> = []
+    for value in values { result.push(value) }
+    result
+}
+fn validate_core_callee_candidates(values: List<ExecutableRef>) {
+    if values.len() == 0 { panic("CoreHIR: callee candidate set is empty") }
+    let mut left_index = 0
+    while left_index < values.len() {
+        let mut right_index = left_index + 1
+        while right_index < values.len() {
+            if executable_ref_same(
+                    values.get(left_index).unwrap(),
+                    values.get(right_index).unwrap()) {
+                panic("CoreHIR: callee candidate set repeats identity")
+            }
+            right_index = right_index + 1
+        }
+        left_index = left_index + 1
+    }
+}
+
+pub fn make_core_direct_callee(
+    value: ExecutableRef, contract: FlowCallContract
+) -> CoreCalleeRef {
     if !executable_ref_is_named(value) {
         panic("CoreHIR: direct callee is not a named executable")
     }
     let callee = make_named_callee_ref(executable_ref_named_symbol(value))
     CoreCalleeRef {
         callee: callee, kind: CORE_CALLEE_DIRECT,
-        direct: some(value), local: none, dynamic: none
+        direct: some(value), local: none, dynamic: none,
+        contract: contract, candidates: [value]
     }
 }
-pub fn make_core_local_callee(value: SlotRef) -> CoreCalleeRef {
+pub fn make_core_local_callee(
+    value: SlotRef, contract: FlowCallContract,
+    candidates: List<ExecutableRef>
+) -> CoreCalleeRef {
+    validate_core_callee_candidates(candidates)
     CoreCalleeRef {
         callee: make_local_callee_ref(value), kind: CORE_CALLEE_LOCAL,
-        direct: none, local: some(value), dynamic: none
+        direct: none, local: some(value), dynamic: none,
+        contract: contract, candidates: copy_executables(candidates)
     }
 }
-pub fn make_core_dynamic_callee(value: PathRef) -> CoreCalleeRef {
+pub fn make_core_dynamic_callee(
+    value: PathRef, contract: FlowCallContract,
+    candidates: List<ExecutableRef>
+) -> CoreCalleeRef {
+    validate_core_callee_candidates(candidates)
     CoreCalleeRef {
         callee: make_dynamic_callee_ref(value), kind: CORE_CALLEE_DYNAMIC,
-        direct: none, local: none, dynamic: some(value)
+        direct: none, local: none, dynamic: some(value),
+        contract: contract, candidates: copy_executables(candidates)
     }
 }
 pub fn core_callee_ref(value: CoreCalleeRef) -> CalleeRef { value.callee }
@@ -211,6 +431,12 @@ pub fn core_callee_dynamic(value: CoreCalleeRef) -> PathRef {
         some(path) => path,
         none => panic("CoreHIR: non-dynamic callee has no PathRef")
     }
+}
+pub fn core_callee_contract(value: CoreCalleeRef) -> FlowCallContract {
+    value.contract
+}
+pub fn core_callee_candidates(value: CoreCalleeRef) -> List<ExecutableRef> {
+    copy_executables(value.candidates)
 }
 
 enum CoreEvidenceRefValue {
@@ -250,69 +476,132 @@ fn copy_evidence(values: List<CoreEvidenceRef>) -> List<CoreEvidenceRef> {
     result
 }
 
-pub struct CoreVariantRef {
-    owner: RegisteredNominalRef,
+pub struct CoreAssocBinding {
     member: SymbolRef,
-    index: Int
+    ty: CoreTypeRef
 }
-
-pub fn make_core_variant_ref(
-    owner: RegisteredNominalRef, member: SymbolRef, index: Int
-) -> CoreVariantRef {
-    if index < 0 ||
-       !namespace_kind_same(
-            symbol_ref_namespace_kind(member), namespace_member()) ||
-       symbol_ref_origin_module_key(member) !=
-            symbol_ref_origin_module_key(registered_nominal_ref_symbol(owner)) {
-        panic("CoreHIR: invalid exact variant identity")
-    }
-    CoreVariantRef { owner: owner, member: member, index: index }
-}
-pub fn core_variant_owner(value: CoreVariantRef) -> RegisteredNominalRef {
-    value.owner
-}
-pub fn core_variant_member(value: CoreVariantRef) -> SymbolRef { value.member }
-pub fn core_variant_index(value: CoreVariantRef) -> Int { value.index }
-pub fn core_variant_ref_same(left: CoreVariantRef, right: CoreVariantRef) -> Bool {
-    registered_nominal_ref_same(left.owner, right.owner) &&
-        symbol_ref_same(left.member, right.member) && left.index == right.index
-}
-
-pub struct CoreEffectOperationRef {
-    effect_symbol: SymbolRef,
-    operation: SymbolRef,
-    callable: ExecutableRef
-}
-
-pub fn make_core_effect_operation_ref(
-    effect_symbol: SymbolRef, operation: SymbolRef, callable: ExecutableRef
-) -> CoreEffectOperationRef {
+pub fn make_core_assoc_binding(
+    member: SymbolRef, ty: CoreTypeRef
+) -> CoreAssocBinding {
     if !namespace_kind_same(
-            symbol_ref_namespace_kind(effect_symbol), namespace_effect()) ||
-       !namespace_kind_same(
-            symbol_ref_namespace_kind(operation), namespace_member()) ||
-       symbol_ref_origin_module_key(effect_symbol) !=
-            symbol_ref_origin_module_key(operation) ||
-       !executable_ref_is_named(callable) ||
-       !symbol_ref_same(executable_ref_named_symbol(callable), operation) {
-        panic("CoreHIR: effect operation identity/callable differs")
+            symbol_ref_namespace_kind(member), namespace_member()) {
+        panic("CoreHIR: associated binding is not an exact member")
     }
-    CoreEffectOperationRef {
-        effect_symbol: effect_symbol, operation: operation, callable: callable
+    CoreAssocBinding { member: member, ty: ty }
+}
+pub fn core_assoc_binding_member(value: CoreAssocBinding) -> SymbolRef {
+    value.member
+}
+pub fn core_assoc_binding_type(value: CoreAssocBinding) -> CoreTypeRef {
+    value.ty
+}
+fn copy_core_assoc_bindings(values: List<CoreAssocBinding>) -> List<CoreAssocBinding> {
+    let mut result: List<CoreAssocBinding> = []
+    for value in values { result.push(value) }
+    result
+}
+
+pub struct CoreObligationBinding {
+    requirement: SymbolRef,
+    evidence: CoreEvidenceRef
+}
+pub fn make_core_obligation_binding(
+    requirement: SymbolRef, evidence: CoreEvidenceRef
+) -> CoreObligationBinding {
+    CoreObligationBinding { requirement: requirement, evidence: evidence }
+}
+pub fn core_obligation_requirement(value: CoreObligationBinding) -> SymbolRef {
+    value.requirement
+}
+pub fn core_obligation_evidence(value: CoreObligationBinding) -> CoreEvidenceRef {
+    value.evidence
+}
+fn copy_core_obligations(
+    values: List<CoreObligationBinding>
+) -> List<CoreObligationBinding> {
+    let mut result: List<CoreObligationBinding> = []
+    for value in values { result.push(value) }
+    result
+}
+
+pub struct CoreImplMetadata {
+    owner: ImplOwnerRef,
+    methods: List<ImplMethodRef>,
+    assoc_bindings: List<CoreAssocBinding>,
+    obligations: List<CoreObligationBinding>
+}
+
+pub fn make_core_impl_metadata(
+    owner: ImplOwnerRef, methods: List<ImplMethodRef>,
+    assoc_bindings: List<CoreAssocBinding>,
+    obligations: List<CoreObligationBinding>
+) -> CoreImplMetadata {
+    let mut method_index = 0
+    while method_index < methods.len() {
+        let method = methods.get(method_index).unwrap()
+        if !impl_owner_ref_same(impl_method_ref_owner(method), owner) ||
+           (method_index > 0 &&
+            impl_method_ref_callable_slot_index(method) <=
+                impl_method_ref_callable_slot_index(
+                    methods.get(method_index - 1).unwrap())) {
+            panic("CoreHIR: impl method owner/order differs")
+        }
+        method_index = method_index + 1
+    }
+    let mut assoc_index = 0
+    while assoc_index < assoc_bindings.len() {
+        let mut right_index = assoc_index + 1
+        while right_index < assoc_bindings.len() {
+            if symbol_ref_same(
+                    assoc_bindings.get(assoc_index).unwrap().member,
+                    assoc_bindings.get(right_index).unwrap().member) {
+                panic("CoreHIR: impl repeats an associated binding")
+            }
+            right_index = right_index + 1
+        }
+        assoc_index = assoc_index + 1
+    }
+    let mut obligation_index = 0
+    while obligation_index < obligations.len() {
+        let mut right_index = obligation_index + 1
+        while right_index < obligations.len() {
+            if symbol_ref_same(
+                    obligations.get(obligation_index).unwrap().requirement,
+                    obligations.get(right_index).unwrap().requirement) {
+                panic("CoreHIR: impl repeats an obligation")
+            }
+            right_index = right_index + 1
+        }
+        obligation_index = obligation_index + 1
+    }
+    CoreImplMetadata {
+        owner: owner, methods: methods.map(fn(value) { value }),
+        assoc_bindings: copy_core_assoc_bindings(assoc_bindings),
+        obligations: copy_core_obligations(obligations)
     }
 }
-pub fn core_effect_operation_effect(value: CoreEffectOperationRef) -> SymbolRef {
-    value.effect_symbol
+pub fn core_impl_owner(value: CoreImplMetadata) -> ImplOwnerRef { value.owner }
+pub fn core_impl_methods(value: CoreImplMetadata) -> List<ImplMethodRef> {
+    value.methods.map(fn(method) { method })
 }
-pub fn core_effect_operation_member(value: CoreEffectOperationRef) -> SymbolRef {
-    value.operation
+pub fn core_impl_assoc_bindings(value: CoreImplMetadata) -> List<CoreAssocBinding> {
+    copy_core_assoc_bindings(value.assoc_bindings)
 }
-pub fn core_effect_operation_callable(
-    value: CoreEffectOperationRef
-) -> ExecutableRef { value.callable }
+pub fn core_impl_obligations(value: CoreImplMetadata) -> List<CoreObligationBinding> {
+    copy_core_obligations(value.obligations)
+}
+pub fn copy_core_impl_metadata(values: List<CoreImplMetadata>) -> List<CoreImplMetadata> {
+    let mut result: List<CoreImplMetadata> = []
+    for value in values {
+        result.push(make_core_impl_metadata(
+            value.owner, value.methods, value.assoc_bindings, value.obligations))
+    }
+    result
+}
 
 enum CoreFieldRefValue {
     NominalFieldValue(NominalFieldRef),
+    VariantFieldValue(VariantFieldRef),
     TupleFieldValue(Int),
     RecordFieldValue(PathRef)
 }
@@ -321,6 +610,9 @@ pub struct CoreFieldRef { value: CoreFieldRefValue }
 
 pub fn make_core_nominal_field(value: NominalFieldRef) -> CoreFieldRef {
     CoreFieldRef { value: CoreFieldRefValue::NominalFieldValue(value) }
+}
+pub fn make_core_variant_field(value: VariantFieldRef) -> CoreFieldRef {
+    CoreFieldRef { value: CoreFieldRefValue::VariantFieldValue(value) }
 }
 pub fn make_core_tuple_field(index: Int) -> CoreFieldRef {
     if index < 0 { panic("CoreHIR: negative tuple field index") }
@@ -333,7 +625,14 @@ pub fn core_field_ref_kind_tag(value: CoreFieldRef) -> Int {
     match value.value {
         CoreFieldRefValue::NominalFieldValue(_) => 0,
         CoreFieldRefValue::TupleFieldValue(_) => 1,
-        CoreFieldRefValue::RecordFieldValue(_) => 2
+        CoreFieldRefValue::RecordFieldValue(_) => 2,
+        CoreFieldRefValue::VariantFieldValue(_) => 3
+    }
+}
+pub fn core_field_ref_variant(value: CoreFieldRef) -> VariantFieldRef {
+    match value.value {
+        CoreFieldRefValue::VariantFieldValue(field) => field,
+        _ => panic("CoreHIR: non-variant field has no VariantFieldRef")
     }
 }
 pub fn core_field_ref_nominal(value: CoreFieldRef) -> NominalFieldRef {
@@ -359,6 +658,8 @@ pub fn core_field_ref_same(left: CoreFieldRef, right: CoreFieldRef) -> Bool {
     match (left.value, right.value) {
         (CoreFieldRefValue::NominalFieldValue(a),
          CoreFieldRefValue::NominalFieldValue(b)) => nominal_field_ref_same(a, b),
+        (CoreFieldRefValue::VariantFieldValue(a),
+         CoreFieldRefValue::VariantFieldValue(b)) => variant_field_ref_same(a, b),
         (CoreFieldRefValue::TupleFieldValue(a),
          CoreFieldRefValue::TupleFieldValue(b)) => a == b,
         (CoreFieldRefValue::RecordFieldValue(a),
@@ -369,7 +670,7 @@ pub fn core_field_ref_same(left: CoreFieldRef, right: CoreFieldRef) -> Bool {
 
 enum CoreConstructorRefValue {
     StructConstructorValue(RegisteredNominalRef),
-    VariantConstructorValue(CoreVariantRef),
+    VariantConstructorValue(VariantRef),
     TupleConstructorValue(Int),
     RecordConstructorValue(Int)
 }
@@ -381,7 +682,7 @@ pub fn make_core_struct_constructor(
 ) -> CoreConstructorRef {
     CoreConstructorRef { value: CoreConstructorRefValue::StructConstructorValue(owner) }
 }
-pub fn make_core_variant_constructor(variant: CoreVariantRef) -> CoreConstructorRef {
+pub fn make_core_variant_constructor(variant: VariantRef) -> CoreConstructorRef {
     CoreConstructorRef { value: CoreConstructorRefValue::VariantConstructorValue(variant) }
 }
 pub fn make_core_tuple_constructor(arity: Int) -> CoreConstructorRef {
@@ -408,7 +709,7 @@ pub fn core_constructor_struct_owner(
         _ => panic("CoreHIR: constructor is not a struct")
     }
 }
-pub fn core_constructor_variant(value: CoreConstructorRef) -> CoreVariantRef {
+pub fn core_constructor_variant(value: CoreConstructorRef) -> VariantRef {
     match value.value {
         CoreConstructorRefValue::VariantConstructorValue(variant) => variant,
         _ => panic("CoreHIR: constructor is not a variant")
@@ -535,12 +836,15 @@ enum CorePatternValue {
         fields: List<CorePatternField>
     },
     VariantPatternValue {
-        variant: CoreVariantRef,
+        variant: VariantRef,
         fields: List<CorePatternField>
     }
 }
 
-pub struct CorePattern { value: CorePatternValue }
+pub struct CorePattern {
+    ty: CoreTypeRef,
+    value: CorePatternValue
+}
 
 pub struct CorePatternField {
     field: CoreFieldRef,
@@ -558,33 +862,41 @@ fn copy_pattern_fields(values: List<CorePatternField>) -> List<CorePatternField>
     result
 }
 
-pub fn make_core_wildcard_pattern() -> CorePattern {
-    CorePattern { value: CorePatternValue::WildcardPatternValue }
+pub fn make_core_wildcard_pattern(ty: CoreTypeRef) -> CorePattern {
+    CorePattern { ty: ty, value: CorePatternValue::WildcardPatternValue }
 }
-pub fn make_core_binding_pattern(slot: SlotRef) -> CorePattern {
-    CorePattern { value: CorePatternValue::BindingPatternValue(slot) }
+pub fn make_core_binding_pattern(
+    ty: CoreTypeRef, slot: SlotRef
+) -> CorePattern {
+    CorePattern { ty: ty, value: CorePatternValue::BindingPatternValue(slot) }
 }
-pub fn make_core_literal_pattern(literal: CoreLiteral) -> CorePattern {
-    CorePattern { value: CorePatternValue::LiteralPatternValue(literal) }
+pub fn make_core_literal_pattern(
+    ty: CoreTypeRef, literal: CoreLiteral
+) -> CorePattern {
+    CorePattern { ty: ty, value: CorePatternValue::LiteralPatternValue(literal) }
 }
-pub fn make_core_tuple_pattern(elements: List<CorePattern>) -> CorePattern {
-    CorePattern { value: CorePatternValue::TuplePatternValue(
+pub fn make_core_tuple_pattern(
+    ty: CoreTypeRef, elements: List<CorePattern>
+) -> CorePattern {
+    CorePattern { ty: ty, value: CorePatternValue::TuplePatternValue(
         copy_patterns(elements)) }
 }
 pub fn make_core_pattern_field(
     field: CoreFieldRef, pattern: CorePattern
 ) -> CorePatternField { CorePatternField { field: field, pattern: pattern } }
 pub fn make_core_struct_pattern(
-    owner: RegisteredNominalRef, fields: List<CorePatternField>
+    ty: CoreTypeRef, owner: RegisteredNominalRef,
+    fields: List<CorePatternField>
 ) -> CorePattern {
-    CorePattern { value: CorePatternValue::StructPatternValue {
+    CorePattern { ty: ty, value: CorePatternValue::StructPatternValue {
         owner: owner, fields: copy_pattern_fields(fields)
     } }
 }
 pub fn make_core_variant_pattern(
-    variant: CoreVariantRef, fields: List<CorePatternField>
+    ty: CoreTypeRef, variant: VariantRef,
+    fields: List<CorePatternField>
 ) -> CorePattern {
-    CorePattern { value: CorePatternValue::VariantPatternValue {
+    CorePattern { ty: ty, value: CorePatternValue::VariantPatternValue {
         variant: variant, fields: copy_pattern_fields(fields)
     } }
 }
@@ -598,6 +910,7 @@ pub fn core_pattern_kind_tag(value: CorePattern) -> Int {
         CorePatternValue::VariantPatternValue { .. } => 5
     }
 }
+pub fn core_pattern_type(value: CorePattern) -> CoreTypeRef { value.ty }
 pub fn core_pattern_binding(value: CorePattern) -> SlotRef {
     match value.value {
         CorePatternValue::BindingPatternValue(slot) => slot,
@@ -630,7 +943,7 @@ pub fn core_pattern_struct_owner(value: CorePattern) -> RegisteredNominalRef {
         _ => panic("CoreHIR: pattern is not a struct")
     }
 }
-pub fn core_pattern_variant(value: CorePattern) -> CoreVariantRef {
+pub fn core_pattern_variant(value: CorePattern) -> VariantRef {
     match value.value {
         CorePatternValue::VariantPatternValue { variant, .. } => variant,
         _ => panic("CoreHIR: pattern is not a variant")
@@ -682,9 +995,13 @@ enum CoreExprValue {
         evidence: List<CoreEvidenceRef>
     },
     EffectCallExprValue {
-        operation: CoreEffectOperationRef,
+        operation: EffectOperationRef,
         arguments: List<SlotRef>,
         evidence: List<CoreEvidenceRef>
+    },
+    SystemCallExprValue {
+        host: SystemHostCallableRef,
+        arguments: List<SlotRef>
     },
     DictConstructExprValue {
         constructor: ExecutableRef,
@@ -758,7 +1075,8 @@ pub struct CoreStmt { value: CoreStmtValue }
 pub struct CoreBlock {
     statements: List<CoreStmt>,
     tail: CoreExpr?,
-    origin: OriginRef
+    origin: OriginRef,
+    scope: FlowScopeRef
 }
 
 pub struct CoreMatchArm {
@@ -769,7 +1087,7 @@ pub struct CoreMatchArm {
 }
 
 pub struct CoreHandlerEntry {
-    operation: CoreEffectOperationRef,
+    operation: EffectOperationRef,
     executable: ExecutableRef,
     manifest: BinderManifest,
     parameter_slots: List<SlotRef>,
@@ -863,13 +1181,23 @@ pub fn make_core_method_call_expr(
 }
 pub fn make_core_effect_call_expr(
     result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, operation: CoreEffectOperationRef,
+    origin: OriginRef, operation: EffectOperationRef,
     arguments: List<SlotRef>, evidence: List<CoreEvidenceRef>
 ) -> CoreExpr {
     make_core_expr(result, ty, effects, origin,
         CoreExprValue::EffectCallExprValue {
             operation: operation, arguments: copy_slot_refs(arguments),
             evidence: copy_evidence(evidence)
+        })
+}
+pub fn make_core_system_call_expr(
+    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
+    origin: OriginRef, host: SystemHostCallableRef,
+    arguments: List<SlotRef>
+) -> CoreExpr {
+    make_core_expr(result, ty, effects, origin,
+        CoreExprValue::SystemCallExprValue {
+            host: host, arguments: copy_slot_refs(arguments)
         })
 }
 pub fn make_core_dict_construct_expr(
@@ -926,10 +1254,12 @@ pub fn make_core_lambda_expr(
 }
 
 pub fn make_core_block(
-    statements: List<CoreStmt>, tail: CoreExpr?, origin: OriginRef
+    statements: List<CoreStmt>, tail: CoreExpr?, origin: OriginRef,
+    scope: FlowScopeRef
 ) -> CoreBlock {
     CoreBlock {
-        statements: copy_statements(statements), tail: tail, origin: origin
+        statements: copy_statements(statements), tail: tail,
+        origin: origin, scope: scope
     }
 }
 pub fn make_core_match_arm(
@@ -941,7 +1271,7 @@ pub fn make_core_match_arm(
     }
 }
 pub fn make_core_handler_entry(
-    operation: CoreEffectOperationRef, executable: ExecutableRef,
+    operation: EffectOperationRef, executable: ExecutableRef,
     manifest: BinderManifest, parameter_slots: List<SlotRef>,
     resume_slot: SlotRef?, origin: OriginRef
 ) -> CoreHandlerEntry {
@@ -1115,16 +1445,17 @@ pub fn core_expr_kind_tag(value: CoreExpr) -> Int {
         CoreExprValue::CallExprValue { .. } => 3,
         CoreExprValue::MethodCallExprValue { .. } => 4,
         CoreExprValue::EffectCallExprValue { .. } => 5,
-        CoreExprValue::DictConstructExprValue { .. } => 6,
-        CoreExprValue::DictProjectExprValue { .. } => 7,
-        CoreExprValue::ProjectExprValue { .. } => 8,
-        CoreExprValue::ConstructExprValue { .. } => 9,
-        CoreExprValue::LambdaExprValue { .. } => 10,
-        CoreExprValue::BlockExprValue(_) => 11,
-        CoreExprValue::IfExprValue { .. } => 12,
-        CoreExprValue::MatchExprValue { .. } => 13,
-        CoreExprValue::TryCatchExprValue { .. } => 14,
-        CoreExprValue::HandleExprValue { .. } => 15
+        CoreExprValue::SystemCallExprValue { .. } => 6,
+        CoreExprValue::DictConstructExprValue { .. } => 7,
+        CoreExprValue::DictProjectExprValue { .. } => 8,
+        CoreExprValue::ProjectExprValue { .. } => 9,
+        CoreExprValue::ConstructExprValue { .. } => 10,
+        CoreExprValue::LambdaExprValue { .. } => 11,
+        CoreExprValue::BlockExprValue(_) => 12,
+        CoreExprValue::IfExprValue { .. } => 13,
+        CoreExprValue::MatchExprValue { .. } => 14,
+        CoreExprValue::TryCatchExprValue { .. } => 15,
+        CoreExprValue::HandleExprValue { .. } => 16
     }
 }
 pub fn core_expr_literal(value: CoreExpr) -> CoreLiteral {
@@ -1163,7 +1494,8 @@ pub fn core_expr_call_arguments(value: CoreExpr) -> List<SlotRef> {
     match value.value {
         CoreExprValue::CallExprValue { arguments, .. } |
         CoreExprValue::MethodCallExprValue { arguments, .. } |
-        CoreExprValue::EffectCallExprValue { arguments, .. } =>
+        CoreExprValue::EffectCallExprValue { arguments, .. } |
+        CoreExprValue::SystemCallExprValue { arguments, .. } =>
             copy_slot_refs(arguments),
         _ => panic("CoreHIR: expression has no call arguments")
     }
@@ -1190,10 +1522,16 @@ pub fn core_expr_method_receiver(value: CoreExpr) -> SlotRef {
         _ => panic("CoreHIR: expression is not MethodCall")
     }
 }
-pub fn core_expr_effect_operation(value: CoreExpr) -> CoreEffectOperationRef {
+pub fn core_expr_effect_operation(value: CoreExpr) -> EffectOperationRef {
     match value.value {
         CoreExprValue::EffectCallExprValue { operation, .. } => operation,
         _ => panic("CoreHIR: expression is not EffectCall")
+    }
+}
+pub fn core_expr_system_host(value: CoreExpr) -> SystemHostCallableRef {
+    match value.value {
+        CoreExprValue::SystemCallExprValue { host, .. } => host,
+        _ => panic("CoreHIR: expression is not SystemCall")
     }
 }
 pub fn core_expr_dict_constructor(value: CoreExpr) -> ExecutableRef {
@@ -1330,13 +1668,14 @@ pub fn core_block_statements(value: CoreBlock) -> List<CoreStmt> {
 }
 pub fn core_block_tail(value: CoreBlock) -> CoreExpr? { value.tail }
 pub fn core_block_origin(value: CoreBlock) -> OriginRef { value.origin }
+pub fn core_block_scope(value: CoreBlock) -> FlowScopeRef { value.scope }
 pub fn core_match_arm_pattern(value: CoreMatchArm) -> CorePattern { value.pattern }
 pub fn core_match_arm_guard(value: CoreMatchArm) -> CoreExpr? { value.guard }
 pub fn core_match_arm_body(value: CoreMatchArm) -> CoreBlock { value.body }
 pub fn core_match_arm_origin(value: CoreMatchArm) -> OriginRef { value.origin }
 pub fn core_handler_operation(
     value: CoreHandlerEntry
-) -> CoreEffectOperationRef { value.operation }
+) -> EffectOperationRef { value.operation }
 pub fn core_handler_executable(value: CoreHandlerEntry) -> ExecutableRef {
     value.executable
 }
@@ -1357,14 +1696,49 @@ pub fn core_handler_origin(value: CoreHandlerEntry) -> OriginRef { value.origin 
 
 pub struct CoreSlot {
     reference: SlotRef,
-    ty: CoreTypeRef
+    ty: CoreTypeRef,
+    scope: FlowScopeRef,
+    reverse_ordinal: Int,
+    initial_state: FlowInitialSlotState,
+    storage: FlowStorageClass,
+    storage_contract: FlowStorageContract,
+    parameter_ordinal: Int?
 }
 
-pub fn make_core_slot(reference: SlotRef, ty: CoreTypeRef) -> CoreSlot {
-    CoreSlot { reference: reference, ty: ty }
+pub fn make_core_slot(
+    reference: SlotRef, ty: CoreTypeRef, scope: FlowScopeRef,
+    reverse_ordinal: Int, initial_state: FlowInitialSlotState,
+    storage: FlowStorageClass, storage_contract: FlowStorageContract,
+    parameter_ordinal: Int?
+) -> CoreSlot {
+    if reverse_ordinal < 0 {
+        panic("CoreHIR: negative reverse slot ordinal")
+    }
+    let _ = flow_initial_slot_state_tag(initial_state)
+    let _ = flow_storage_class_tag(storage)
+    let _ = flow_storage_contract_tag(storage_contract)
+    CoreSlot {
+        reference: reference, ty: ty, scope: scope,
+        reverse_ordinal: reverse_ordinal,
+        initial_state: initial_state, storage: storage,
+        storage_contract: storage_contract,
+        parameter_ordinal: parameter_ordinal
+    }
 }
 pub fn core_slot_reference(value: CoreSlot) -> SlotRef { value.reference }
 pub fn core_slot_type(value: CoreSlot) -> CoreTypeRef { value.ty }
+pub fn core_slot_scope(value: CoreSlot) -> FlowScopeRef { value.scope }
+pub fn core_slot_reverse_ordinal(value: CoreSlot) -> Int { value.reverse_ordinal }
+pub fn core_slot_initial_state(value: CoreSlot) -> FlowInitialSlotState {
+    value.initial_state
+}
+pub fn core_slot_storage(value: CoreSlot) -> FlowStorageClass { value.storage }
+pub fn core_slot_storage_contract(value: CoreSlot) -> FlowStorageContract {
+    value.storage_contract
+}
+pub fn core_slot_parameter_ordinal(value: CoreSlot) -> Int? {
+    value.parameter_ordinal
+}
 fn copy_core_slots(values: List<CoreSlot>) -> List<CoreSlot> {
     let mut result: List<CoreSlot> = []
     for value in values { result.push(value) }
@@ -1376,10 +1750,17 @@ pub struct CoreBody {
     origin: OriginRef,
     type_count: Int,
     manifest: BinderManifest,
+    scopes: List<FlowScope>,
     slots: List<CoreSlot>,
     parameter_slots: List<SlotRef>,
     result_type: CoreTypeRef,
     body: CoreBlock
+}
+
+fn copy_flow_scopes(values: List<FlowScope>) -> List<FlowScope> {
+    let mut result: List<FlowScope> = []
+    for value in values { result.push(value) }
+    result
 }
 
 fn path_module_key(value: PathRef) -> Str {
@@ -1495,19 +1876,17 @@ fn validate_pattern(
             }
         },
         CorePatternValue::VariantPatternValue { variant, fields } => {
-            let owner_symbol = registered_nominal_ref_symbol(variant.owner)
             let mut field_index = 0
             while field_index < fields.len() {
                 let field = fields.get(field_index).unwrap()
                 match field.field.value {
-                    CoreFieldRefValue::NominalFieldValue(reference) => {
-                        if !symbol_ref_same(
-                                nominal_field_ref_owner(reference), owner_symbol) {
+                    CoreFieldRefValue::VariantFieldValue(reference) => {
+                        if !variant_ref_same(
+                                variant_field_ref_variant(reference), variant) {
                             panic("CoreHIR: variant pattern field crosses owner")
                         }
                     },
-                    CoreFieldRefValue::TupleFieldValue(_) => {},
-                    CoreFieldRefValue::RecordFieldValue(_) => {}
+                    _ => panic("CoreHIR: variant pattern lacks VariantFieldRef")
                 }
                 let mut right_index = field_index + 1
                 while right_index < fields.len() {
@@ -1594,16 +1973,14 @@ fn validate_constructor_fields(
             }
         },
         CoreConstructorRefValue::VariantConstructorValue(variant) => {
-            let symbol = registered_nominal_ref_symbol(variant.owner)
             for field in fields {
                 match field.field.value {
-                    CoreFieldRefValue::NominalFieldValue(reference) => if
-                        !symbol_ref_same(
-                            nominal_field_ref_owner(reference), symbol) {
+                    CoreFieldRefValue::VariantFieldValue(reference) => if
+                        !variant_ref_same(
+                            variant_field_ref_variant(reference), variant) {
                         panic("CoreHIR: variant constructor field crosses owner")
                     },
-                    CoreFieldRefValue::TupleFieldValue(_) |
-                    CoreFieldRefValue::RecordFieldValue(_) => {}
+                    _ => panic("CoreHIR: variant constructor lacks VariantFieldRef")
                 }
             }
         },
@@ -1650,6 +2027,9 @@ fn validate_expr_with_loop_depth(
         } => {
             for argument in arguments { require_slot(body.slots, argument) }
             validate_evidence(evidence, body.slots)
+        },
+        CoreExprValue::SystemCallExprValue { arguments, .. } => {
+            for argument in arguments { require_slot(body.slots, argument) }
         },
         CoreExprValue::DictConstructExprValue { evidence, .. } =>
             validate_evidence(evidence, body.slots),
@@ -1719,12 +2099,8 @@ fn validate_expr_with_loop_depth(
                 let mut right_index = index + 1
                 while right_index < handlers.len() {
                     let right = handlers.get(right_index).unwrap()
-                    if symbol_ref_same(
-                            handler.operation.effect_symbol,
-                            right.operation.effect_symbol) &&
-                       symbol_ref_same(
-                            handler.operation.operation,
-                            right.operation.operation) {
+                    if effect_operation_ref_same(
+                            handler.operation, right.operation) {
                         panic("CoreHIR: handle repeats an exact operation")
                     }
                     right_index = right_index + 1
@@ -1790,6 +2166,15 @@ fn validate_block_with_loop_depth(
     value: CoreBlock, body: CoreBody, loop_depth: Int
 ) {
     validate_origin(value.origin, body.reference)
+    let mut scope_found = false
+    for scope in body.scopes {
+        if flow_scope_ref_same(flow_scope_reference(scope), value.scope) {
+            scope_found = true
+        }
+    }
+    if !scope_found {
+        panic("CoreHIR: block scope is absent from body")
+    }
     for statement in value.statements {
         validate_statement(statement, body, loop_depth)
     }
@@ -1804,7 +2189,7 @@ fn validate_block(value: CoreBlock, body: CoreBody) {
 
 pub fn make_core_body(
     reference: ExecutableRef, origin: OriginRef, type_count: Int,
-    manifest: BinderManifest, slots: List<CoreSlot>,
+    manifest: BinderManifest, scopes: List<FlowScope>, slots: List<CoreSlot>,
     parameter_slots: List<SlotRef>, result_type: CoreTypeRef,
     body: CoreBlock
 ) -> CoreBody {
@@ -1813,6 +2198,18 @@ pub fn make_core_body(
     }
     if !executable_ref_same(reference, binder_manifest_owner(manifest)) {
         panic("CoreHIR: body executable/manifest identity differs")
+    }
+    if scopes.len() == 0 {
+        panic("CoreHIR: body has no exact scope table")
+    }
+    let mut scope_index = 0
+    while scope_index < scopes.len() {
+        let scope = flow_scope_reference(scopes.get(scope_index).unwrap())
+        if !executable_ref_same(flow_scope_ref_owner(scope), reference) ||
+           flow_scope_ref_ordinal(scope) != scope_index {
+            panic("CoreHIR: scope owner/order differs")
+        }
+        scope_index = scope_index + 1
     }
     let binders = binder_manifest_entries(manifest)
     if binders.len() != slots.len() {
@@ -1825,6 +2222,16 @@ pub fn make_core_body(
                 slot.reference, binder_entry_slot(binders.get(index).unwrap())) ||
            !type_ref_valid(slot.ty, type_count) {
             panic("CoreHIR: typed slot order/type is invalid")
+        }
+        let mut scope_found = false
+        for scope in scopes {
+            if flow_scope_ref_same(
+                    flow_scope_reference(scope), slot.scope) {
+                scope_found = true
+            }
+        }
+        if !scope_found {
+            panic("CoreHIR: typed slot scope is absent")
         }
         let mut right_index = index + 1
         while right_index < slots.len() {
@@ -1852,7 +2259,8 @@ pub fn make_core_body(
     }
     let result = CoreBody {
         reference: reference, origin: origin, type_count: type_count,
-        manifest: copy_manifest(manifest), slots: copy_core_slots(slots),
+        manifest: copy_manifest(manifest), scopes: copy_flow_scopes(scopes),
+        slots: copy_core_slots(slots),
         parameter_slots: copy_slot_refs(parameter_slots),
         result_type: result_type, body: body
     }
@@ -1875,6 +2283,9 @@ pub fn core_body_type_count(value: CoreBody) -> Int { value.type_count }
 pub fn core_body_manifest(value: CoreBody) -> BinderManifest {
     copy_manifest(value.manifest)
 }
+pub fn core_body_scopes(value: CoreBody) -> List<FlowScope> {
+    copy_flow_scopes(value.scopes)
+}
 pub fn core_body_slots(value: CoreBody) -> List<CoreSlot> {
     copy_core_slots(value.slots)
 }
@@ -1883,3 +2294,825 @@ pub fn core_body_parameter_slots(value: CoreBody) -> List<SlotRef> {
 }
 pub fn core_body_result_type(value: CoreBody) -> CoreTypeRef { value.result_type }
 pub fn core_body_block(value: CoreBody) -> CoreBlock { value.body }
+
+// ============================================================
+// Collection-complete CoreProgram validation
+// ============================================================
+
+fn core_slot_type_for(value: CoreBody, slot: SlotRef) -> CoreTypeRef {
+    match slot_index(value.slots, slot) {
+        some(index) => core_slot_type(value.slots.get(index).unwrap()),
+        none => panic("CoreHIR: program validation found an absent slot")
+    }
+}
+
+fn core_callable_for(
+    values: List<CoreCallableContract>, reference: ExecutableRef
+) -> CoreCallableContract {
+    let mut found: CoreCallableContract? = none
+    for value in values {
+        if executable_ref_same(value.reference, reference) {
+            if found.is_some() {
+                panic("CoreHIR: duplicate callable contract")
+            }
+            found = some(value)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("CoreHIR: exact callable contract is absent")
+    }
+}
+
+pub fn validate_core_callable_contracts(
+    graph: CoreTypeGraph, values: List<CoreCallableContract>
+) {
+    let mut left_index = 0
+    while left_index < values.len() {
+        let left = values.get(left_index).unwrap()
+        validate_origin(left.origin, left.reference)
+        let _ = core_type_graph_node(graph, left.result_type)
+        let mut parameter_index = 0
+        for parameter in left.parameter_types {
+            let _ = core_type_graph_node(graph, parameter)
+            if flow_type_ref_index(
+                    flow_call_contract_parameter_types(
+                        left.semantic_contract).get(
+                            parameter_index).unwrap()) != parameter.index {
+                panic("CoreHIR: callable semantic parameter type drifted")
+            }
+            parameter_index = parameter_index + 1
+        }
+        if flow_type_ref_index(flow_call_contract_result_type(
+                left.semantic_contract)) != left.result_type.index {
+            panic("CoreHIR: callable semantic result type drifted")
+        }
+        let mut right_index = left_index + 1
+        while right_index < values.len() {
+            if executable_ref_same(
+                    left.reference, values.get(right_index).unwrap().reference) {
+                panic("CoreHIR: duplicate callable contract")
+            }
+            right_index = right_index + 1
+        }
+        left_index = left_index + 1
+    }
+}
+
+fn type_kind(graph: CoreTypeGraph, ty: CoreTypeRef) -> Int {
+    flow_type_kind_tag(flow_type_node_kind(core_type_graph_node(graph, ty)))
+}
+fn require_core_type_same(
+    left: CoreTypeRef, right: CoreTypeRef, message: Str
+) {
+    if !core_type_ref_same(left, right) { panic(message) }
+}
+
+fn validate_evidence_count(
+    evidence: List<CoreEvidenceRef>, contract: CoreCallableContract,
+    body: CoreBody
+) {
+    if evidence.len() != contract.evidence_requirements.len() {
+        panic("CoreHIR: call evidence census differs from exact contract")
+    }
+    validate_evidence(evidence, body.slots)
+}
+
+fn validate_call_signature(
+    callee: CoreCalleeRef, arguments: List<SlotRef>, result_type: CoreTypeRef,
+    evidence: List<CoreEvidenceRef>, body: CoreBody,
+    graph: CoreTypeGraph, callables: List<CoreCallableContract>
+) {
+    if callee.candidates.len() == 0 {
+        panic("CoreHIR: call has no finite candidate set")
+    }
+    let flow_parameters = flow_call_contract_parameter_types(callee.contract)
+    if arguments.len() != flow_parameters.len() {
+        panic("CoreHIR: call argument arity differs from exact contract")
+    }
+    let mut index = 0
+    while index < arguments.len() {
+        if core_slot_type_for(body, arguments.get(index).unwrap()).index !=
+           flow_type_ref_index(flow_parameters.get(index).unwrap()) {
+            panic("CoreHIR: call argument type differs from exact contract")
+        }
+        index = index + 1
+    }
+    if result_type.index != flow_type_ref_index(
+            flow_call_contract_result_type(callee.contract)) {
+        panic("CoreHIR: call result type differs from exact contract")
+    }
+    let mut evidence_contract: CoreCallableContract? = none
+    for candidate_ref in callee.candidates {
+        let candidate = core_callable_for(callables, candidate_ref)
+        if !flow_call_contract_same(
+                candidate.semantic_contract, callee.contract) {
+            panic("CoreHIR: call candidate semantic contract differs")
+        }
+        match evidence_contract {
+            some(existing) => {
+                if existing.evidence_requirements.len() !=
+                   candidate.evidence_requirements.len() {
+                    panic("CoreHIR: call candidates have different evidence")
+                }
+                let mut requirement_index = 0
+                while requirement_index < existing.evidence_requirements.len() {
+                    if !symbol_ref_same(
+                            existing.evidence_requirements.get(
+                                requirement_index).unwrap(),
+                            candidate.evidence_requirements.get(
+                                requirement_index).unwrap()) {
+                        panic("CoreHIR: call candidate evidence order differs")
+                    }
+                    requirement_index = requirement_index + 1
+                }
+            },
+            none => { evidence_contract = some(candidate) }
+        }
+    }
+    let exact = match evidence_contract {
+        some(value) => value,
+        none => panic("CoreHIR: call evidence contract is absent")
+    }
+    validate_evidence_count(evidence, exact, body)
+    if callee.kind == CORE_CALLEE_DIRECT {
+        if callee.candidates.len() != 1 ||
+           !executable_ref_same(
+                callee.candidates.get(0).unwrap(), core_callee_direct(callee)) {
+            panic("CoreHIR: direct call candidate differs")
+        }
+    } else if callee.kind == CORE_CALLEE_LOCAL {
+        let callable_ty = core_type_graph_node(
+            graph, core_slot_type_for(body, core_callee_local(callee)))
+        if flow_type_kind_tag(flow_type_node_kind(callable_ty)) !=
+           flow_type_kind_tag(flow_type_kind_callable()) ||
+           flow_type_node_parameter_count(callable_ty) != arguments.len() {
+            panic("CoreHIR: local callee slot is not exact callable type")
+        }
+    }
+}
+
+fn core_field_matches_flow(
+    core: CoreFieldRef, flow: FlowFieldIdentity
+) -> Bool {
+    match core.value {
+        CoreFieldRefValue::NominalFieldValue(field) =>
+            flow_field_identity_is_nominal(flow) &&
+                nominal_field_ref_same(
+                    field, flow_field_identity_nominal(flow)),
+        CoreFieldRefValue::VariantFieldValue(field) =>
+            flow_field_identity_is_variant(flow) &&
+                variant_field_ref_same(
+                    field, flow_field_identity_variant(flow)),
+        CoreFieldRefValue::RecordFieldValue(path) =>
+            !flow_field_identity_is_nominal(flow) &&
+                !flow_field_identity_is_variant(flow) &&
+                path_ref_same(path, flow_field_identity_path(flow)),
+        CoreFieldRefValue::TupleFieldValue(_) => false
+    }
+}
+
+fn validate_core_literal_type(
+    literal: CoreLiteral, ty: CoreTypeRef, graph: CoreTypeGraph
+) {
+    let expected = match core_literal_kind_tag(literal) {
+        0 => flow_type_kind_tag(flow_type_kind_int()),
+        1 => flow_type_kind_tag(flow_type_kind_float()),
+        2 => flow_type_kind_tag(flow_type_kind_str()),
+        3 => flow_type_kind_tag(flow_type_kind_bool()),
+        _ => flow_type_kind_tag(flow_type_kind_unit())
+    }
+    if type_kind(graph, ty) != expected {
+        panic("CoreHIR: literal type differs")
+    }
+}
+
+fn validate_core_primitive_signature(
+    operation: CorePrimitiveOp, operands: List<SlotRef>,
+    result_type: CoreTypeRef, body: CoreBody, graph: CoreTypeGraph
+) {
+    let tag = core_primitive_op_tag(operation)
+    if tag == CORE_PRIMITIVE_NEGATE {
+        if operands.len() != 1 {
+            panic("CoreHIR: negate arity differs")
+        }
+        require_core_type_same(
+            core_slot_type_for(body, operands.get(0).unwrap()), result_type,
+            "CoreHIR: negate input/result type differs")
+    } else if tag == CORE_PRIMITIVE_NOT {
+        if operands.len() != 1 ||
+           type_kind(graph, result_type) !=
+                flow_type_kind_tag(flow_type_kind_bool()) ||
+           type_kind(graph, core_slot_type_for(
+                body, operands.get(0).unwrap())) !=
+                flow_type_kind_tag(flow_type_kind_bool()) {
+            panic("CoreHIR: not signature differs")
+        }
+    } else {
+        if operands.len() != 2 {
+            panic("CoreHIR: binary primitive arity differs")
+        }
+        let left = core_slot_type_for(body, operands.get(0).unwrap())
+        let right = core_slot_type_for(body, operands.get(1).unwrap())
+        require_core_type_same(
+            left, right, "CoreHIR: binary operand types differ")
+        if tag >= CORE_PRIMITIVE_LT && tag <= CORE_PRIMITIVE_GE {
+            if type_kind(graph, result_type) !=
+               flow_type_kind_tag(flow_type_kind_bool()) {
+                panic("CoreHIR: comparison result is not Bool")
+            }
+        } else {
+            require_core_type_same(
+                left, result_type,
+                "CoreHIR: arithmetic input/result type differs")
+        }
+    }
+}
+
+fn variant_flow_fields(
+    node: FlowTypeNode, variant: VariantRef
+) -> List<FlowNominalFieldFact> {
+    let mut result: List<FlowNominalFieldFact> = []
+    for field in flow_type_node_nominal_fields(node) {
+        let identity = flow_nominal_field_identity(field)
+        if flow_field_identity_is_variant(identity) &&
+           variant_ref_same(
+                variant_field_ref_variant(
+                    flow_field_identity_variant(identity)), variant) {
+            result.push(field)
+        }
+    }
+    result
+}
+
+fn validate_field_sequence(
+    fields: List<CoreFieldValue>, expected: List<FlowNominalFieldFact>,
+    body: CoreBody
+) {
+    if fields.len() != expected.len() {
+        panic("CoreHIR: constructor field census differs from type graph")
+    }
+    let mut index = 0
+    while index < fields.len() {
+        let actual = fields.get(index).unwrap()
+        let fact = expected.get(index).unwrap()
+        if !core_field_matches_flow(
+                actual.field, flow_nominal_field_identity(fact)) ||
+           core_slot_type_for(body, actual.value).index !=
+                flow_type_ref_index(flow_nominal_field_type(fact)) {
+            panic("CoreHIR: constructor field identity/type order differs")
+        }
+        index = index + 1
+    }
+}
+
+fn validate_construct_with_graph(
+    constructor: CoreConstructorRef, fields: List<CoreFieldValue>,
+    result_type: CoreTypeRef, body: CoreBody, graph: CoreTypeGraph
+) {
+    let node = core_type_graph_node(graph, result_type)
+    match constructor.value {
+        CoreConstructorRefValue::StructConstructorValue(owner) => {
+            if type_kind(graph, result_type) !=
+                    flow_type_kind_tag(flow_type_kind_struct()) ||
+               !symbol_ref_same(
+                    registered_nominal_ref_symbol(owner),
+                    flow_type_node_nominal(node)) {
+                panic("CoreHIR: struct constructor/result owner differs")
+            }
+            let mut expected: List<FlowNominalFieldFact> = []
+            for fact in flow_type_node_nominal_fields(node) {
+                if flow_field_identity_is_nominal(
+                        flow_nominal_field_identity(fact)) {
+                    expected.push(fact)
+                }
+            }
+            validate_field_sequence(fields, expected, body)
+        },
+        CoreConstructorRefValue::VariantConstructorValue(variant) => {
+            if type_kind(graph, result_type) !=
+                    flow_type_kind_tag(flow_type_kind_enum()) ||
+               !symbol_ref_same(
+                    registered_nominal_ref_symbol(variant_ref_owner(variant)),
+                    flow_type_node_nominal(node)) {
+                panic("CoreHIR: variant constructor/result owner differs")
+            }
+            validate_field_sequence(
+                fields, variant_flow_fields(node, variant), body)
+        },
+        CoreConstructorRefValue::TupleConstructorValue(arity) => {
+            let children = flow_type_node_children(node)
+            if type_kind(graph, result_type) !=
+                    flow_type_kind_tag(flow_type_kind_tuple()) ||
+               arity != children.len() || fields.len() != children.len() {
+                panic("CoreHIR: tuple constructor/result arity differs")
+            }
+            let mut index = 0
+            while index < fields.len() {
+                let field = fields.get(index).unwrap()
+                match field.field.value {
+                    CoreFieldRefValue::TupleFieldValue(field_index) => if
+                        field_index != index {
+                        panic("CoreHIR: tuple constructor field order differs")
+                    },
+                    _ => panic("CoreHIR: tuple constructor field identity differs")
+                }
+                if core_slot_type_for(body, field.value).index !=
+                   flow_type_ref_index(children.get(index).unwrap()) {
+                    panic("CoreHIR: tuple constructor field type differs")
+                }
+                index = index + 1
+            }
+        },
+        CoreConstructorRefValue::RecordConstructorValue(arity) => {
+            if type_kind(graph, result_type) !=
+                    flow_type_kind_tag(flow_type_kind_record()) ||
+               arity != fields.len() {
+                panic("CoreHIR: record constructor/result arity differs")
+            }
+            validate_field_sequence(
+                fields, flow_type_node_nominal_fields(node), body)
+        }
+    }
+}
+
+fn validate_pattern_with_graph(
+    pattern: CorePattern, expected_type: CoreTypeRef,
+    body: CoreBody, graph: CoreTypeGraph
+) {
+    require_core_type_same(
+        pattern.ty, expected_type,
+        "CoreHIR: pattern type differs from scrutinee")
+    let node = core_type_graph_node(graph, pattern.ty)
+    match pattern.value {
+        CorePatternValue::WildcardPatternValue => {},
+        CorePatternValue::BindingPatternValue(slot) => require_core_type_same(
+            core_slot_type_for(body, slot), pattern.ty,
+            "CoreHIR: pattern binding type differs"),
+        CorePatternValue::LiteralPatternValue(literal) =>
+            validate_core_literal_type(literal, pattern.ty, graph),
+        CorePatternValue::TuplePatternValue(elements) => {
+            let children = flow_type_node_children(node)
+            if type_kind(graph, pattern.ty) !=
+                    flow_type_kind_tag(flow_type_kind_tuple()) ||
+               elements.len() != children.len() {
+                panic("CoreHIR: tuple pattern type/arity differs")
+            }
+            let mut index = 0
+            for element in elements {
+                validate_pattern_with_graph(
+                    element,
+                    flow_type_ref_to_core(children.get(index).unwrap()),
+                    body, graph)
+                index = index + 1
+            }
+        },
+        CorePatternValue::StructPatternValue { owner, fields } => {
+            if type_kind(graph, pattern.ty) !=
+                    flow_type_kind_tag(flow_type_kind_struct()) ||
+               !symbol_ref_same(
+                    registered_nominal_ref_symbol(owner),
+                    flow_type_node_nominal(node)) {
+                panic("CoreHIR: struct pattern owner/type differs")
+            }
+            let expected = flow_type_node_nominal_fields(node)
+            if fields.len() != expected.len() {
+                panic("CoreHIR: struct pattern is not field-complete")
+            }
+            let mut index = 0
+            for field in fields {
+                let fact = expected.get(index).unwrap()
+                if !core_field_matches_flow(
+                        field.field, flow_nominal_field_identity(fact)) {
+                    panic("CoreHIR: struct pattern field order differs")
+                }
+                validate_pattern_with_graph(
+                    field.pattern,
+                    flow_type_ref_to_core(flow_nominal_field_type(fact)),
+                    body, graph)
+                index = index + 1
+            }
+        },
+        CorePatternValue::VariantPatternValue { variant, fields } => {
+            if type_kind(graph, pattern.ty) !=
+                    flow_type_kind_tag(flow_type_kind_enum()) ||
+               !symbol_ref_same(
+                    registered_nominal_ref_symbol(variant_ref_owner(variant)),
+                    flow_type_node_nominal(node)) {
+                panic("CoreHIR: variant pattern owner/type differs")
+            }
+            let expected = variant_flow_fields(node, variant)
+            if fields.len() != expected.len() {
+                panic("CoreHIR: variant pattern is not payload-complete")
+            }
+            let mut index = 0
+            for field in fields {
+                let fact = expected.get(index).unwrap()
+                if !core_field_matches_flow(
+                        field.field, flow_nominal_field_identity(fact)) {
+                    panic("CoreHIR: variant pattern field order differs")
+                }
+                validate_pattern_with_graph(
+                    field.pattern,
+                    flow_type_ref_to_core(flow_nominal_field_type(fact)),
+                    body, graph)
+                index = index + 1
+            }
+        }
+    }
+}
+
+fn projection_result_type(
+    field: CoreFieldRef, base_type: CoreTypeRef,
+    graph: CoreTypeGraph
+) -> CoreTypeRef {
+    let node = core_type_graph_node(graph, base_type)
+    match field.value {
+        CoreFieldRefValue::TupleFieldValue(index) => {
+            let children = flow_type_node_children(node)
+            if type_kind(graph, base_type) !=
+                    flow_type_kind_tag(flow_type_kind_tuple()) ||
+               index < 0 || index >= children.len() {
+                panic("CoreHIR: tuple projection index/type differs")
+            }
+            flow_type_ref_to_core(children.get(index).unwrap())
+        },
+        _ => {
+            let mut found: CoreTypeRef? = none
+            for fact in flow_type_node_nominal_fields(node) {
+                if core_field_matches_flow(
+                        field, flow_nominal_field_identity(fact)) {
+                    if found.is_some() {
+                        panic("CoreHIR: projection field fact is duplicated")
+                    }
+                    found = some(flow_type_ref_to_core(
+                        flow_nominal_field_type(fact)))
+                }
+            }
+            match found {
+                some(value) => value,
+                none => panic("CoreHIR: projection field is absent from type graph")
+            }
+        }
+    }
+}
+
+fn block_tail_type(value: CoreBlock) -> CoreTypeRef? {
+    match value.tail {
+        some(expr) => some(expr.ty),
+        none => none
+    }
+}
+
+fn require_block_result_type(
+    value: CoreBlock, expected: CoreTypeRef, graph: CoreTypeGraph
+) {
+    match block_tail_type(value) {
+        some(actual) => require_core_type_same(
+            actual, expected, "CoreHIR: block result type differs"),
+        none => if type_kind(graph, expected) !=
+                flow_type_kind_tag(flow_type_kind_unit()) &&
+                type_kind(graph, expected) !=
+                flow_type_kind_tag(flow_type_kind_never()) {
+            panic("CoreHIR: value block has no typed tail")
+        }
+    }
+}
+
+fn callee_candidates_contain_symbol(
+    callee: CoreCalleeRef, symbol: SymbolRef
+) -> Bool {
+    for candidate in callee.candidates {
+        if executable_ref_is_named(candidate) &&
+           symbol_ref_same(executable_ref_named_symbol(candidate), symbol) {
+            return true
+        }
+    }
+    false
+}
+
+fn validate_method_call_identity(
+    method: MethodCallRef, callee: CoreCalleeRef,
+    evidence: List<CoreEvidenceRef>
+) {
+    if method_call_ref_is_intrinsic(method) {
+        if !callee_candidates_contain_symbol(
+                callee, intrinsic_ref_symbol(
+                    method_call_ref_intrinsic(method))) {
+            panic("CoreHIR: intrinsic MethodCallRef/callee differs")
+        }
+    } else if method_call_ref_is_concrete(method) {
+        if !callee_candidates_contain_symbol(
+                callee, impl_method_ref_member(
+                    method_call_ref_impl(method))) {
+            panic("CoreHIR: concrete MethodCallRef/callee differs")
+        }
+    } else if method_call_ref_is_bound(method) {
+        let _ = trait_method_ref_member(method_call_ref_bound(method))
+        if evidence.len() == 0 {
+            panic("CoreHIR: bound MethodCallRef has no exact evidence")
+        }
+    } else {
+        panic("CoreHIR: MethodCallRef identity is not closed")
+    }
+}
+
+fn validate_expr_with_program(
+    value: CoreExpr, body: CoreBody, graph: CoreTypeGraph,
+    callables: List<CoreCallableContract>,
+    current_callable: CoreCallableContract, loop_depth: Int
+) {
+    validate_expr_with_loop_depth(value, body, loop_depth)
+    require_core_type_same(
+        core_slot_type_for(body, value.result), value.ty,
+        "CoreHIR: expression result slot/type differs")
+    let _ = core_type_graph_node(graph, value.ty)
+    match value.value {
+        CoreExprValue::LiteralExprValue(literal) =>
+            validate_core_literal_type(literal, value.ty, graph),
+        CoreExprValue::ReadExprValue(source) => require_core_type_same(
+            core_slot_type_for(body, source), value.ty,
+            "CoreHIR: Read source/result type differs"),
+        CoreExprValue::PrimitiveExprValue { operation, operands } =>
+            validate_core_primitive_signature(
+                operation, operands, value.ty, body, graph),
+        CoreExprValue::CallExprValue { callee, arguments, evidence } =>
+            validate_call_signature(
+                callee, arguments, value.ty, evidence,
+                body, graph, callables),
+        CoreExprValue::MethodCallExprValue {
+            callee, method, receiver, arguments, evidence
+        } => {
+            validate_method_call_identity(method, callee, evidence)
+            let mut all_arguments: List<SlotRef> = [receiver]
+            for argument in arguments { all_arguments.push(argument) }
+            validate_call_signature(
+                callee, all_arguments, value.ty, evidence,
+                body, graph, callables)
+        },
+        CoreExprValue::EffectCallExprValue {
+            operation, arguments, evidence
+        } => {
+            let callable = core_callable_for(
+                callables, effect_operation_ref_callable(operation))
+            validate_call_signature(
+                make_core_direct_callee(
+                    callable.reference, callable.semantic_contract),
+                arguments, value.ty, evidence, body, graph, callables)
+            let handled = effect_operation_ref_effect(operation)
+            let mut present = false
+            for atom in value.effects.atoms {
+                match atom.value {
+                    CoreEffectAtomValue::HandledEffectValue(effect_ref) => if
+                        handled_effect_ref_same(effect_ref, handled) {
+                        present = true
+                    },
+                    _ => {}
+                }
+            }
+            if !present {
+                panic("CoreHIR: handled operation is absent from effect set")
+            }
+        },
+        CoreExprValue::SystemCallExprValue { host, arguments } => {
+            let callable = core_callable_for(
+                callables, system_host_callable_executable(host))
+            if callable.evidence_requirements.len() != 0 {
+                panic("CoreHIR: system host call entered evidence domain")
+            }
+            validate_call_signature(
+                make_core_direct_callee(
+                    callable.reference, callable.semantic_contract),
+                arguments, value.ty, [], body, graph, callables)
+            let system = system_host_callable_effect(host)
+            let mut present = false
+            for atom in value.effects.atoms {
+                match atom.value {
+                    CoreEffectAtomValue::SystemEffectValue(effect_ref) => if
+                        system_effect_ref_same(effect_ref, system) {
+                        present = true
+                    },
+                    _ => {}
+                }
+            }
+            if !present {
+                panic("CoreHIR: system call is absent from effect set")
+            }
+        },
+        CoreExprValue::DictConstructExprValue { constructor, evidence } => {
+            let callable = core_callable_for(callables, constructor)
+            validate_call_signature(
+                make_core_direct_callee(
+                    callable.reference, callable.semantic_contract),
+                [], value.ty, evidence, body, graph, callables)
+        },
+        CoreExprValue::DictProjectExprValue { dictionary, method } => {
+            let callable = core_callable_for(callables, method)
+            validate_call_signature(
+                make_core_direct_callee(
+                    callable.reference, callable.semantic_contract),
+                [dictionary], value.ty, [], body, graph, callables)
+        },
+        CoreExprValue::ProjectExprValue { base, field, .. } =>
+            require_core_type_same(
+                projection_result_type(
+                    field, core_slot_type_for(body, base), graph),
+                value.ty, "CoreHIR: projection result type differs"),
+        CoreExprValue::ConstructExprValue { constructor, fields } =>
+            validate_construct_with_graph(
+                constructor, fields, value.ty, body, graph),
+        CoreExprValue::LambdaExprValue { executable, .. } => {
+            let contract = core_callable_for(callables, executable)
+            if !flow_callable_mode_same(
+                    contract.mode, flow_callable_mode_concrete_body()) {
+                panic("CoreHIR: lambda references a bodyless callable")
+            }
+        },
+        CoreExprValue::BlockExprValue(block) => {
+            validate_block_with_program(
+                block, body, graph, callables, current_callable, loop_depth)
+            require_block_result_type(block, value.ty, graph)
+        },
+        CoreExprValue::IfExprValue {
+            condition, then_block, else_block
+        } => {
+            if type_kind(graph, core_slot_type_for(body, condition)) !=
+               flow_type_kind_tag(flow_type_kind_bool()) {
+                panic("CoreHIR: If condition is not Bool")
+            }
+            validate_block_with_program(
+                then_block, body, graph, callables,
+                current_callable, loop_depth)
+            validate_block_with_program(
+                else_block, body, graph, callables,
+                current_callable, loop_depth)
+            require_block_result_type(then_block, value.ty, graph)
+            require_block_result_type(else_block, value.ty, graph)
+        },
+        CoreExprValue::MatchExprValue { scrutinee, arms } => {
+            let scrutinee_type = core_slot_type_for(body, scrutinee)
+            for arm in arms {
+                validate_pattern_with_graph(
+                    arm.pattern, scrutinee_type, body, graph)
+                match arm.guard {
+                    some(guard) => {
+                        validate_expr_with_program(
+                            guard, body, graph, callables,
+                            current_callable, loop_depth)
+                        if type_kind(graph, guard.ty) !=
+                           flow_type_kind_tag(flow_type_kind_bool()) {
+                            panic("CoreHIR: match guard is not Bool")
+                        }
+                    },
+                    none => {}
+                }
+                validate_block_with_program(
+                    arm.body, body, graph, callables,
+                    current_callable, loop_depth)
+                require_block_result_type(arm.body, value.ty, graph)
+            }
+        },
+        CoreExprValue::TryCatchExprValue {
+            body: protected, error_slot, arms
+        } => {
+            validate_block_with_program(
+                protected, body, graph, callables,
+                current_callable, loop_depth)
+            require_block_result_type(protected, value.ty, graph)
+            let error_type = core_slot_type_for(body, error_slot)
+            for arm in arms {
+                validate_pattern_with_graph(
+                    arm.pattern, error_type, body, graph)
+                validate_block_with_program(
+                    arm.body, body, graph, callables,
+                    current_callable, loop_depth)
+                require_block_result_type(arm.body, value.ty, graph)
+            }
+        },
+        CoreExprValue::HandleExprValue { body: handled, handlers } => {
+            validate_block_with_program(
+                handled, body, graph, callables,
+                current_callable, loop_depth)
+            require_block_result_type(handled, value.ty, graph)
+            for handler in handlers {
+                let operation_callable = effect_operation_ref_callable(
+                    handler.operation)
+                let handler_contract = core_callable_for(
+                    callables, handler.executable)
+                let _ = core_callable_for(callables, operation_callable)
+                if !flow_callable_mode_same(
+                        handler_contract.mode,
+                        flow_callable_mode_concrete_body()) {
+                    panic("CoreHIR: handler executable is bodyless")
+                }
+            }
+        }
+    }
+}
+
+fn validate_statement_with_program(
+    value: CoreStmt, body: CoreBody, graph: CoreTypeGraph,
+    callables: List<CoreCallableContract>,
+    current_callable: CoreCallableContract, loop_depth: Int
+) {
+    validate_statement(value, body, loop_depth)
+    match value.value {
+        CoreStmtValue::Initialize { target, value: expr, .. } => {
+            validate_expr_with_program(
+                expr, body, graph, callables, current_callable, loop_depth)
+            require_core_type_same(
+                core_slot_type_for(body, target), expr.ty,
+                "CoreHIR: Initialize target/value type differs")
+            if !slot_ref_same(target, expr.result) {
+                panic("CoreHIR: Initialize result is not target slot")
+            }
+        },
+        CoreStmtValue::Assign { target, value: expr, .. } => {
+            validate_expr_with_program(
+                expr, body, graph, callables, current_callable, loop_depth)
+            require_core_type_same(
+                core_slot_type_for(body, target), expr.ty,
+                "CoreHIR: Assign target/value type differs")
+        },
+        CoreStmtValue::ExprStmt { value: expr, .. } =>
+            validate_expr_with_program(
+                expr, body, graph, callables, current_callable, loop_depth),
+        CoreStmtValue::While { condition, body: loop_body, .. } => {
+            validate_expr_with_program(
+                condition, body, graph, callables,
+                current_callable, loop_depth)
+            if type_kind(graph, condition.ty) !=
+               flow_type_kind_tag(flow_type_kind_bool()) {
+                panic("CoreHIR: While condition is not Bool")
+            }
+            validate_block_with_program(
+                loop_body, body, graph, callables,
+                current_callable, loop_depth + 1)
+        },
+        CoreStmtValue::Return { value: returned, .. } => match returned {
+            some(expr) => {
+                validate_expr_with_program(
+                    expr, body, graph, callables,
+                    current_callable, loop_depth)
+                require_core_type_same(
+                    expr.ty, current_callable.result_type,
+                    "CoreHIR: Return type differs from callable")
+            },
+            none => {
+                let kind = type_kind(graph, current_callable.result_type)
+                if kind != flow_type_kind_tag(flow_type_kind_unit()) &&
+                   kind != flow_type_kind_tag(flow_type_kind_never()) {
+                    panic("CoreHIR: value callable has empty Return")
+                }
+            }
+        },
+        _ => {}
+    }
+}
+
+fn validate_block_with_program(
+    value: CoreBlock, body: CoreBody, graph: CoreTypeGraph,
+    callables: List<CoreCallableContract>,
+    current_callable: CoreCallableContract, loop_depth: Int
+) {
+    for statement in value.statements {
+        validate_statement_with_program(
+            statement, body, graph, callables,
+            current_callable, loop_depth)
+    }
+    match value.tail {
+        some(expr) => validate_expr_with_program(
+            expr, body, graph, callables, current_callable, loop_depth),
+        none => {}
+    }
+}
+
+pub fn validate_core_body_with_program(
+    value: CoreBody, graph: CoreTypeGraph,
+    callables: List<CoreCallableContract>,
+    current_callable: CoreCallableContract
+) {
+    validate_core_body(value)
+    if value.type_count != core_type_graph_count(graph) ||
+       !executable_ref_same(value.reference, current_callable.reference) ||
+       !origin_ref_same(value.origin, current_callable.origin) ||
+       !core_type_ref_same(value.result_type, current_callable.result_type) ||
+       value.parameter_slots.len() != current_callable.parameter_slots.len() {
+        panic("CoreHIR: body/program callable closure differs")
+    }
+    let mut index = 0
+    while index < value.parameter_slots.len() {
+        if !slot_ref_same(
+                value.parameter_slots.get(index).unwrap(),
+                current_callable.parameter_slots.get(index).unwrap()) ||
+           !core_type_ref_same(
+                core_slot_type_for(
+                    value, value.parameter_slots.get(index).unwrap()),
+                current_callable.parameter_types.get(index).unwrap()) {
+            panic("CoreHIR: body parameter slot/type order differs")
+        }
+        index = index + 1
+    }
+    validate_block_with_program(
+        value.body, value, graph, callables, current_callable, 0)
+}

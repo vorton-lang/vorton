@@ -7,10 +7,13 @@
 
 use ir_identity::{
     SymbolRef, NominalFieldRef, TraitMethodRef,
+    HandledEffectRef,
     ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     SlotRef, OriginRef,
     symbol_ref_same, symbol_ref_namespace_kind,
     namespace_kind_same, namespace_member, namespace_trait, namespace_effect,
+    registered_trait_ref_symbol,
+    handled_effect_ref_same,
     nominal_field_ref_owner,
     trait_method_ref_same, trait_method_ref_trait,
     trait_method_ref_source_member_index,
@@ -38,6 +41,16 @@ use hir::{
     method_call_ref_is_bound, method_call_ref_impl,
     method_call_ref_bound
 }
+use env::{
+    RegisteredTraitContract,
+    registered_trait_contract_owner,
+    registered_trait_contract_methods,
+    registered_trait_contract_assoc_items,
+    registered_trait_contract_handled_effects,
+    registered_trait_contract_dict_obligations,
+    registered_trait_method_ref,
+    registered_trait_assoc_member
+}
 use core_expr::{
     CoreTypeRef, CoreEffectSet, CoreCalleeRef, CoreEvidenceRef, CoreSlot,
     core_type_ref_same, core_type_ref_index,
@@ -45,6 +58,7 @@ use core_expr::{
     core_evidence_is_local, core_evidence_local, core_evidence_callable,
     core_slot_reference, core_slot_type
 }
+use flow_ir::{FlowScope, FlowScopeRef}
 
 // ============================================================
 // Exact associated/evidence facts
@@ -103,6 +117,31 @@ fn copy_evidence_bindings(
     for value in values { result.push(value) }
     result
 }
+
+pub struct DelegateHandledEvidenceBinding {
+    requirement: HandledEffectRef,
+    evidence: CoreEvidenceRef
+}
+pub fn make_delegate_handled_evidence_binding(
+    requirement: HandledEffectRef, evidence: CoreEvidenceRef
+) -> DelegateHandledEvidenceBinding {
+    DelegateHandledEvidenceBinding {
+        requirement: requirement, evidence: evidence
+    }
+}
+pub fn delegate_handled_evidence_requirement(
+    value: DelegateHandledEvidenceBinding
+) -> HandledEffectRef { value.requirement }
+pub fn delegate_handled_evidence_value(
+    value: DelegateHandledEvidenceBinding
+) -> CoreEvidenceRef { value.evidence }
+fn copy_handled_evidence_bindings(
+    values: List<DelegateHandledEvidenceBinding>
+) -> List<DelegateHandledEvidenceBinding> {
+    let mut result: List<DelegateHandledEvidenceBinding> = []
+    for value in values { result.push(value) }
+    result
+}
 fn copy_evidence(values: List<CoreEvidenceRef>) -> List<CoreEvidenceRef> {
     let mut result: List<CoreEvidenceRef> = []
     for value in values { result.push(value) }
@@ -127,6 +166,7 @@ fn core_evidence_same(left: CoreEvidenceRef, right: CoreEvidenceRef) -> Bool {
 pub struct DelegateMethodBodyPlan {
     type_count: Int,
     manifest: BinderManifest,
+    scopes: List<FlowScope>,
     slots: List<CoreSlot>,
     parameter_slots: List<SlotRef>,
     outer_type: CoreTypeRef,
@@ -138,11 +178,17 @@ pub struct DelegateMethodBodyPlan {
     result_slot: SlotRef,
     effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
-    body_origin: OriginRef
+    body_origin: OriginRef,
+    body_scope: FlowScopeRef
 }
 
 fn copy_core_slots(values: List<CoreSlot>) -> List<CoreSlot> {
     let mut result: List<CoreSlot> = []
+    for value in values { result.push(value) }
+    result
+}
+fn copy_scopes(values: List<FlowScope>) -> List<FlowScope> {
+    let mut result: List<FlowScope> = []
     for value in values { result.push(value) }
     result
 }
@@ -153,13 +199,14 @@ fn copy_slot_refs(values: List<SlotRef>) -> List<SlotRef> {
 }
 
 pub fn make_delegate_method_body_plan(
-    type_count: Int, manifest: BinderManifest, slots: List<CoreSlot>,
+    type_count: Int, manifest: BinderManifest,
+    scopes: List<FlowScope>, slots: List<CoreSlot>,
     parameter_slots: List<SlotRef>, outer_type: CoreTypeRef,
     field_type: CoreTypeRef, result_type: CoreTypeRef,
     wrapper_receiver_slot: SlotRef, field_receiver_slot: SlotRef,
     forwarded_argument_slots: List<SlotRef>, result_slot: SlotRef,
     effects: CoreEffectSet, evidence: List<CoreEvidenceRef>,
-    body_origin: OriginRef
+    body_origin: OriginRef, body_scope: FlowScopeRef
 ) -> DelegateMethodBodyPlan {
     if type_count <= 0 || slot_ref_same(
             wrapper_receiver_slot, field_receiver_slot) ||
@@ -168,6 +215,7 @@ pub fn make_delegate_method_body_plan(
     }
     DelegateMethodBodyPlan {
         type_count: type_count, manifest: manifest,
+        scopes: copy_scopes(scopes),
         slots: copy_core_slots(slots),
         parameter_slots: copy_slot_refs(parameter_slots),
         outer_type: outer_type, field_type: field_type,
@@ -177,7 +225,8 @@ pub fn make_delegate_method_body_plan(
         forwarded_argument_slots: copy_slot_refs(forwarded_argument_slots),
         result_slot: result_slot,
         effects: make_core_effect_set(core_effect_set_atoms(effects)),
-        evidence: copy_evidence(evidence), body_origin: body_origin
+        evidence: copy_evidence(evidence), body_origin: body_origin,
+        body_scope: body_scope
     }
 }
 
@@ -258,6 +307,9 @@ pub fn delegate_body_manifest(value: DelegateMethodBodyPlan) -> BinderManifest {
 pub fn delegate_body_slots(value: DelegateMethodBodyPlan) -> List<CoreSlot> {
     copy_core_slots(value.slots)
 }
+pub fn delegate_body_scopes(value: DelegateMethodBodyPlan) -> List<FlowScope> {
+    copy_scopes(value.scopes)
+}
 pub fn delegate_body_parameter_slots(
     value: DelegateMethodBodyPlan
 ) -> List<SlotRef> { copy_slot_refs(value.parameter_slots) }
@@ -291,6 +343,9 @@ pub fn delegate_body_evidence(
 pub fn delegate_body_origin(value: DelegateMethodBodyPlan) -> OriginRef {
     value.body_origin
 }
+pub fn delegate_body_scope(value: DelegateMethodBodyPlan) -> FlowScopeRef {
+    value.body_scope
+}
 
 // ============================================================
 // Input, explicit invalid outcome, and validated TypedPlan
@@ -300,18 +355,17 @@ pub struct DelegatePlanInput {
     outer_owner: ImplOwnerRef,
     outer_provider: ImplProviderRef,
     child_provider: ImplProviderRef,
+    field_impl_owner: ImplOwnerRef,
+    field_impl_provider: ImplProviderRef,
+    field_target: SymbolRef,
     source_member_index: Int,
     field: NominalFieldRef,
     outer_type: CoreTypeRef,
     field_type: CoreTypeRef,
-    trait_ref: SymbolRef,
-    required_methods: List<TraitMethodRef>,
+    trait_contract: RegisteredTraitContract,
     method_plans: List<DelegateMethodPlan>,
-    required_assoc_members: List<SymbolRef>,
     assoc_bindings: List<DelegateAssocBinding>,
-    required_effect_evidence: List<SymbolRef>,
-    effect_evidence: List<DelegateEvidenceBinding>,
-    required_dict_evidence: List<SymbolRef>,
+    effect_evidence: List<DelegateHandledEvidenceBinding>,
     dict_evidence: List<DelegateEvidenceBinding>,
     manual_conflict: Bool
 }
@@ -319,33 +373,28 @@ pub struct DelegatePlanInput {
 pub fn make_delegate_plan_input(
     outer_owner: ImplOwnerRef, outer_provider: ImplProviderRef,
     child_provider: ImplProviderRef, source_member_index: Int,
+    field_impl_owner: ImplOwnerRef,
+    field_impl_provider: ImplProviderRef, field_target: SymbolRef,
     field: NominalFieldRef, outer_type: CoreTypeRef,
-    field_type: CoreTypeRef, trait_ref: SymbolRef,
-    required_methods: List<TraitMethodRef>,
+    field_type: CoreTypeRef, trait_contract: RegisteredTraitContract,
     method_plans: List<DelegateMethodPlan>,
-    required_assoc_members: List<SymbolRef>,
     assoc_bindings: List<DelegateAssocBinding>,
-    required_effect_evidence: List<SymbolRef>,
-    effect_evidence: List<DelegateEvidenceBinding>,
-    required_dict_evidence: List<SymbolRef>,
+    effect_evidence: List<DelegateHandledEvidenceBinding>,
     dict_evidence: List<DelegateEvidenceBinding>,
     manual_conflict: Bool
 ) -> DelegatePlanInput {
     DelegatePlanInput {
         outer_owner: outer_owner, outer_provider: outer_provider,
         child_provider: child_provider,
+        field_impl_owner: field_impl_owner,
+        field_impl_provider: field_impl_provider,
+        field_target: field_target,
         source_member_index: source_member_index,
         field: field, outer_type: outer_type, field_type: field_type,
-        trait_ref: trait_ref,
-        required_methods: required_methods.map(fn(value) { value }),
+        trait_contract: trait_contract,
         method_plans: copy_method_plans(method_plans),
-        required_assoc_members: required_assoc_members.map(fn(value) { value }),
         assoc_bindings: copy_assoc_bindings(assoc_bindings),
-        required_effect_evidence:
-            required_effect_evidence.map(fn(value) { value }),
-        effect_evidence: copy_evidence_bindings(effect_evidence),
-        required_dict_evidence:
-            required_dict_evidence.map(fn(value) { value }),
+        effect_evidence: copy_handled_evidence_bindings(effect_evidence),
         dict_evidence: copy_evidence_bindings(dict_evidence),
         manual_conflict: manual_conflict
     }
@@ -409,6 +458,8 @@ pub fn delegate_invalid_body_reason() -> Int { DELEGATE_INVALID_BODY }
 pub struct DelegateTypedPlan {
     outer_owner: ImplOwnerRef,
     child_provider: ImplProviderRef,
+    field_impl_owner: ImplOwnerRef,
+    field_target: SymbolRef,
     source_member_index: Int,
     field: NominalFieldRef,
     outer_type: CoreTypeRef,
@@ -416,7 +467,7 @@ pub struct DelegateTypedPlan {
     trait_ref: SymbolRef,
     methods: List<DelegateMethodPlan>,
     assoc_bindings: List<DelegateAssocBinding>,
-    effect_evidence: List<DelegateEvidenceBinding>,
+    effect_evidence: List<DelegateHandledEvidenceBinding>,
     dict_evidence: List<DelegateEvidenceBinding>
 }
 
@@ -579,19 +630,23 @@ fn method_identity_is_exact(
 fn child_call_is_exact(
     input: DelegatePlanInput, value: DelegateMethodPlan
 ) -> Bool {
+    let trait_symbol = registered_trait_ref_symbol(
+        registered_trait_contract_owner(input.trait_contract))
     if method_call_ref_is_intrinsic(value.child_call) {
         return false
     }
     if method_call_ref_is_concrete(value.child_call) {
         let child_method = method_call_ref_impl(value.child_call)
         let child_owner = impl_method_ref_owner(child_method)
-        if !impl_provider_ref_same(
-                impl_owner_ref_provider(child_owner), input.child_provider) {
+        if !impl_owner_ref_same(child_owner, input.field_impl_owner) ||
+           !impl_provider_ref_same(
+                impl_owner_ref_provider(child_owner),
+                input.field_impl_provider) {
             return false
         }
         return match impl_owner_ref_trait(child_owner) {
-            some(trait_symbol) => symbol_ref_same(
-                trait_symbol, input.trait_ref),
+            some(selected_trait) => symbol_ref_same(
+                selected_trait, trait_symbol),
             none => false
         }
     }
@@ -600,37 +655,23 @@ fn child_call_is_exact(
             method_call_ref_bound(value.child_call), value.required_method)
 }
 
-fn required_methods_are_ordered(input: DelegatePlanInput) -> Bool {
-    let mut index = 0
-    while index < input.required_methods.len() {
-        let current = input.required_methods.get(index).unwrap()
-        if !symbol_ref_same(
-                trait_method_ref_trait(current), input.trait_ref) {
-            return false
-        }
-        if index > 0 {
-            let previous = input.required_methods.get(index - 1).unwrap()
-            if trait_method_ref_source_member_index(current) <=
-                    trait_method_ref_source_member_index(previous) ||
-               trait_method_ref_callable_slot_index(current) <=
-                    trait_method_ref_callable_slot_index(previous) {
-                return false
-            }
-        }
-        index = index + 1
-    }
-    true
+fn contract_method_refs(input: DelegatePlanInput) -> List<TraitMethodRef> {
+    registered_trait_contract_methods(input.trait_contract).map(fn(method) {
+        registered_trait_method_ref(method)
+    })
 }
 
 fn binding_requirements_match_assoc(input: DelegatePlanInput) -> Bool {
-    if input.required_assoc_members.len() != input.assoc_bindings.len() {
+    let required = registered_trait_contract_assoc_items(
+        input.trait_contract)
+    if required.len() != input.assoc_bindings.len() {
         return false
     }
     let mut index = 0
     while index < input.assoc_bindings.len() {
         let binding = input.assoc_bindings.get(index).unwrap()
         if !symbol_ref_same(
-                input.required_assoc_members.get(index).unwrap(),
+                registered_trait_assoc_member(required.get(index).unwrap()),
                 binding.member) {
             return false
         }
@@ -672,24 +713,28 @@ fn evidence_requirements_match(
     true
 }
 
-fn evidence_requirement_namespaces_are_exact(input: DelegatePlanInput) -> Bool {
-    for requirement in input.required_effect_evidence {
-        if !namespace_kind_same(
-                symbol_ref_namespace_kind(requirement), namespace_effect()) {
+fn handled_evidence_requirements_match(input: DelegatePlanInput) -> Bool {
+    let required = registered_trait_contract_handled_effects(
+        input.trait_contract)
+    if required.len() != input.effect_evidence.len() { return false }
+    let mut index = 0
+    while index < required.len() {
+        let binding = input.effect_evidence.get(index).unwrap()
+        if !handled_effect_ref_same(
+                required.get(index).unwrap(), binding.requirement) {
             return false
         }
-    }
-    for requirement in input.required_dict_evidence {
-        if !namespace_kind_same(
-                symbol_ref_namespace_kind(requirement), namespace_trait()) {
-            return false
+        let mut right_index = index + 1
+        while right_index < input.effect_evidence.len() {
+            let right = input.effect_evidence.get(right_index).unwrap()
+            if handled_effect_ref_same(
+                    binding.requirement, right.requirement) ||
+               core_evidence_same(binding.evidence, right.evidence) {
+                return false
+            }
+            right_index = right_index + 1
         }
-    }
-    for member in input.required_assoc_members {
-        if !namespace_kind_same(
-                symbol_ref_namespace_kind(member), namespace_member()) {
-            return false
-        }
+        index = index + 1
     }
     true
 }
@@ -719,6 +764,8 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
         return invalid_outcome(input, DELEGATE_INVALID_MANUAL_CONFLICT)
     }
     let owner_trait = impl_owner_ref_trait(input.outer_owner)
+    let contract_trait = registered_trait_ref_symbol(
+        registered_trait_contract_owner(input.trait_contract))
     if input.source_member_index < 0 ||
        !impl_provider_ref_same(
             impl_owner_ref_provider(input.outer_owner), input.outer_provider) ||
@@ -727,7 +774,7 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
             impl_provider_kind_delegate()) ||
        match owner_trait {
             some(trait_symbol) => !symbol_ref_same(
-                trait_symbol, input.trait_ref),
+                trait_symbol, contract_trait),
             none => true
        } {
         return invalid_outcome(input, DELEGATE_INVALID_OWNER)
@@ -737,19 +784,31 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
             nominal_field_ref_owner(input.field)) {
         return invalid_outcome(input, DELEGATE_INVALID_FIELD)
     }
-    if !required_methods_are_ordered(input) {
-        return invalid_outcome(input, DELEGATE_INVALID_METHOD_ORDER)
+    let field_trait = impl_owner_ref_trait(input.field_impl_owner)
+    if !symbol_ref_same(
+            impl_owner_ref_target(input.field_impl_owner),
+            input.field_target) ||
+       !impl_provider_ref_same(
+            impl_owner_ref_provider(input.field_impl_owner),
+            input.field_impl_provider) ||
+       match field_trait {
+            some(trait_symbol) => !symbol_ref_same(
+                trait_symbol, contract_trait),
+            none => true
+       } {
+        return invalid_outcome(input, DELEGATE_INVALID_CHILD_CALL)
     }
-    if input.method_plans.len() < input.required_methods.len() {
+    let required_methods = contract_method_refs(input)
+    if input.method_plans.len() < required_methods.len() {
         return invalid_outcome(input, DELEGATE_INVALID_MISSING_METHOD)
     }
-    if input.method_plans.len() > input.required_methods.len() {
+    if input.method_plans.len() > required_methods.len() {
         return invalid_outcome(input, DELEGATE_INVALID_EXTRA_METHOD)
     }
     let mut index = 0
     while index < input.method_plans.len() {
         let method = input.method_plans.get(index).unwrap()
-        let required = input.required_methods.get(index).unwrap()
+        let required = required_methods.get(index).unwrap()
         let mut duplicate_index = index + 1
         while duplicate_index < input.method_plans.len() {
             if trait_method_ref_same(
@@ -783,25 +842,26 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
         }
         index = index + 1
     }
-    if !evidence_requirement_namespaces_are_exact(input) ||
-       !binding_requirements_match_assoc(input) {
+    if !binding_requirements_match_assoc(input) {
         return invalid_outcome(input, DELEGATE_INVALID_ASSOC_BINDING)
     }
-    if !evidence_requirements_match(
-            input.required_effect_evidence, input.effect_evidence) ||
+    if !handled_evidence_requirements_match(input) ||
        !evidence_requirements_match(
-            input.required_dict_evidence, input.dict_evidence) {
+            registered_trait_contract_dict_obligations(input.trait_contract),
+            input.dict_evidence) {
         return invalid_outcome(input, DELEGATE_INVALID_EVIDENCE)
     }
     let plan = DelegateTypedPlan {
         outer_owner: input.outer_owner,
         child_provider: input.child_provider,
+        field_impl_owner: input.field_impl_owner,
+        field_target: input.field_target,
         source_member_index: input.source_member_index,
         field: input.field, outer_type: input.outer_type,
-        field_type: input.field_type, trait_ref: input.trait_ref,
+        field_type: input.field_type, trait_ref: contract_trait,
         methods: copy_method_plans(input.method_plans),
         assoc_bindings: copy_assoc_bindings(input.assoc_bindings),
-        effect_evidence: copy_evidence_bindings(input.effect_evidence),
+        effect_evidence: copy_handled_evidence_bindings(input.effect_evidence),
         dict_evidence: copy_evidence_bindings(input.dict_evidence)
     }
     DelegatePlanOutcome {
@@ -815,6 +875,12 @@ pub fn delegate_typed_plan_outer_owner(value: DelegateTypedPlan) -> ImplOwnerRef
 pub fn delegate_typed_plan_child_provider(
     value: DelegateTypedPlan
 ) -> ImplProviderRef { value.child_provider }
+pub fn delegate_typed_plan_field_impl_owner(
+    value: DelegateTypedPlan
+) -> ImplOwnerRef { value.field_impl_owner }
+pub fn delegate_typed_plan_field_target(value: DelegateTypedPlan) -> SymbolRef {
+    value.field_target
+}
 pub fn delegate_typed_plan_source_member_index(
     value: DelegateTypedPlan
 ) -> Int { value.source_member_index }
@@ -838,8 +904,8 @@ pub fn delegate_typed_plan_assoc_bindings(
 ) -> List<DelegateAssocBinding> { copy_assoc_bindings(value.assoc_bindings) }
 pub fn delegate_typed_plan_effect_evidence(
     value: DelegateTypedPlan
-) -> List<DelegateEvidenceBinding> {
-    copy_evidence_bindings(value.effect_evidence)
+) -> List<DelegateHandledEvidenceBinding> {
+    copy_handled_evidence_bindings(value.effect_evidence)
 }
 pub fn delegate_typed_plan_dict_evidence(
     value: DelegateTypedPlan
