@@ -124,6 +124,78 @@ ANTI_OVERENGINEERING_CONTRACT = TextContract(
 )
 
 
+EXECUTION_EVIDENCE_ECONOMY_CONTRACT = TextContract(
+    "vertical delivery and evidence economy",
+    (
+        ("producer",),
+        ("consumer",),
+        ("纵向",),
+        ("schema",),
+        ("carrier",),
+        ("scaffolding",),
+        ("不单独构成milestone", "不单独构成 milestone"),
+        ("Development feedback",),
+        ("自由重跑", "可按代码变化自由重跑"),
+        ("Acceptance evidence",),
+        ("fixed-SHA",),
+        ("sealed",),
+        ("source-build",),
+        ("integration boundary",),
+        ("micro-commit",),
+        ("green vertical checkpoint", "green boundary"),
+        ("bounded refutation",),
+        ("contract/code review",),
+        ("duplicate-authority",),
+        ("net-new capability",),
+        ("authority retirement",),
+        ("remaining risk",),
+        ("命令数",),
+        ("mutation",),
+        ("receipt",),
+        ("不能冒充进展", "不能单独冒充进展"),
+        ("用户可直接审查Steward",),
+        ("Discussion不作为默认review gate",),
+        ("0.1 real consumer", "0.1真实consumer"),
+        ("post-0.1",),
+        ("variant",),
+        ("extension hook",),
+        ("validator branch",),
+        ("不得阻塞",),
+        (
+            "不新增post-0.1 item",
+            "不得从当前工作顺手新增post-0.1 item",
+            "不从当前工作顺手新增post-0.1 item",
+        ),
+        ("Deep Clone",),
+        ("exact identity",),
+        ("Core closure",),
+        ("RC conservation",),
+        ("single/project",),
+        ("current platform/ABI",),
+        ("不降低correctness", "不降低0.1 Deep Clone"),
+        ("safety",),
+        ("ownership",),
+        ("最终release门",),
+    ),
+    (
+        "每个micro-commit必须独立对抗审查",
+        "普通开发测试失败必须永久sealed",
+        "命令数越多进展越大",
+        "Discussion批准后才能继续每个实现步骤",
+        "为post-0.1预留空carrier",
+        "纯未来扩展性finding必须BLOCK",
+        "当前顺手新增post-0.1 item",
+    ),
+    (
+        "Development feedback",
+        "Acceptance evidence",
+        "source-build",
+        "green vertical checkpoint",
+        "net-new capability",
+    ),
+)
+
+
 STEWARD_BEHAVIOR_CONTRACTS = (
     TextContract(
         "waiting-feedback backfill",
@@ -234,6 +306,7 @@ STEWARD_BEHAVIOR_CONTRACTS = (
         ),
     ),
     ANTI_OVERENGINEERING_CONTRACT,
+    EXECUTION_EVIDENCE_ECONOMY_CONTRACT,
     TextContract(
         "long-command exact wait then short completion waits",
         (
@@ -951,6 +1024,7 @@ class WorkflowValidator:
             PAIRED_WORKFLOW_CONTRACT,
             MACRO_CHECKIN_CONTRACT,
             ANTI_OVERENGINEERING_CONTRACT,
+            EXECUTION_EVIDENCE_ECONOMY_CONTRACT,
         ):
             for error in check_text_contract(text, contract):
                 self.errors.append(f"docs/workflow.md: {error}")
@@ -1286,6 +1360,19 @@ waiting-feedback item 达到 clean checkpoint commit，且测试状态与必要 
 内部友善边界不默认恶意攻击，不用虚构应用场景支持无意义泛化。
 实现现在可用且近期不会产生已知bug时，留到定期 refactor。
 发现修灯泡空难式scope扩张立即停止；简单化不降低correctness/safety/ownership或真实外部边界。
+进度以真实producer→consumer纵向闭环为单位；只有schema、carrier、validator的commit是scaffolding，
+不单独构成milestone。Development feedback中的普通check和mutation可以自由重跑，
+不创建sealed packet；Acceptance evidence只用于claim-advancing fixed-SHA transaction，
+source-build与full等长门集中在integration boundary。
+多个micro-commit组成一个green vertical checkpoint；高风险写码前做bounded refutation，
+边界做contract/code review。普通finding在同一链返修；duplicate-authority立即止损。
+报告只计net-new capability、producer→consumer、authority retirement、真实canary、
+remaining risk与下一门；命令数、mutation数量、receipt大小不能冒充进展。
+用户可直接审查Steward；Discussion不作为默认review gate。减负不降低correctness、
+首次0.1发布前只实现0.1 real consumer；不新增post-0.1 variant、carrier、fallback、
+extension hook或validator branch。纯未来扩展性finding不得阻塞，也不新增post-0.1 item。
+减负不降低Deep Clone、exact identity、Core closure、RC conservation、single/project、
+current platform/ABI、safety、ownership、bootstrap、跨平台或最终release门。
 Steward Inbox 只保存 [决策]、[里程碑] 和 [全局阻塞]。
 Argument 比较至少两个真实候选，由独立 reviewer 主动攻击推荐方案，
 再由 root 给出 verdict。语言公开语义属于用户保留决定，保持现有公开行为。
@@ -1612,6 +1699,36 @@ def run_self_tests(*, include_audit_ledger_process: bool) -> list[str]:
         )
     )
 
+    bad_evidence_economy = GOOD_STEWARD_FIXTURE.replace(
+        "进度以真实producer→consumer纵向闭环为单位；只有schema、carrier、validator的commit是scaffolding，\n"
+        "不单独构成milestone。Development feedback中的普通check和mutation可以自由重跑，\n"
+        "不创建sealed packet；Acceptance evidence只用于claim-advancing fixed-SHA transaction，\n"
+        "source-build与full等长门集中在integration boundary。\n"
+        "多个micro-commit组成一个green vertical checkpoint；高风险写码前做bounded refutation，\n"
+        "边界做contract/code review。普通finding在同一链返修；duplicate-authority立即止损。\n"
+        "报告只计net-new capability、producer→consumer、authority retirement、真实canary、\n"
+        "remaining risk与下一门；命令数、mutation数量、receipt大小不能冒充进展。\n"
+        "用户可直接审查Steward；Discussion不作为默认review gate。减负不降低correctness、\n"
+        "首次0.1发布前只实现0.1 real consumer；不新增post-0.1 variant、carrier、fallback、\n"
+        "extension hook或validator branch。纯未来扩展性finding不得阻塞，也不新增post-0.1 item。\n"
+        "减负不降低Deep Clone、exact identity、Core closure、RC conservation、single/project、\n"
+        "current platform/ABI、safety、ownership、bootstrap、跨平台或最终release门。",
+        "每个micro-commit必须独立对抗审查；普通开发测试失败必须永久sealed；"
+        "命令数越多进展越大；Discussion批准后才能继续每个实现步骤；"
+        "为post-0.1预留空carrier；纯未来扩展性finding必须BLOCK；"
+        "当前顺手新增post-0.1 item。",
+    )
+    failures.extend(
+        deterministic_failure(
+            "vertical evidence-economy fixture",
+            lambda: check_text_contract(
+                bad_evidence_economy,
+                EXECUTION_EVIDENCE_ECONOMY_CONTRACT,
+            ),
+            "vertical delivery and evidence economy",
+        )
+    )
+
     bad_argument = GOOD_STEWARD_FIXTURE.replace(
         "Argument 比较至少两个真实候选，由独立 reviewer 主动攻击推荐方案，\n"
         "再由 root 给出 verdict。语言公开语义属于用户保留决定，保持现有公开行为。",
@@ -1861,7 +1978,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(
             "workflow validator self-test passed: "
-            "25 legacy/broken fixtures rejected deterministically; "
+            "26 legacy/broken fixtures rejected deterministically; "
             "2 durable-ledger regressions passed"
         )
         return 0
@@ -1891,7 +2008,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{backlog_count} active backlog items, "
         f"{audit_count} active audit items, "
         "2 steward adapters, 4 Codex roles, "
-        "25 fast negative fixtures; "
+        "26 fast negative fixtures; "
         "run --self-test for 2 durable-ledger process regressions"
     )
     return 0

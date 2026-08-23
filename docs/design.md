@@ -74,6 +74,12 @@ trait Collection {
 }
 ```
 
+**Trait / impl visibility（2026-08-23 用户决定，0.1 对齐 Rust）**：trait 是完整 contract，不为 method 或 associated type建立第二层 visibility。`pub trait` 的全部 associated items 随 trait 公开；private trait 的全部 associated items 保持 module-private。Impl block本身没有visibility，字面`pub impl ...`非法；trait declaration 与 `impl Trait for Type` 中写 `pub` 同样 hard-fail并建议删除，trait impl method visibility继承trait。只有 inherent `impl Type` 继续允许每个method/associated item独立写`pub`或保持private。未来若需要sealed trait，必须显式设计，不以private required method偷渡；dictionary、ImplProviderRef、ExecutableInventory与CoreHIR不得携带per-trait-member visibility bit。
+
+**Public interface 与 private implementation（2026-08-23 用户决定）**：public item的参数、返回类型、字段、generic bound与effect/trait contract不得引用更private的declaration，违反即hard error。`impl PublicTrait for PrivateType`可合法留在module/project internal coherence registry，但不构成外部callable surface；trait impl只有target与trait均可见时才对外发布，public inherent type只发布其`pub` methods。0.1不把private concrete type的推断泄漏冒充opaque type；需要隐藏具体返回类型时留待post-0.1 B-200显式设计。
+
+**Impl-member extern 边界（2026-08-24 用户决定）**：0.1 的用户 FFI 声明只有 top-level `extern fn` / `extern type`；inherent impl 与 trait impl 都不接受 `extern fn` member。现有 Str、Int、Float 的宿主桥接方法仍保持普通 public inherent method 的调用表面，但由编译器在唯一 builtin assembly 中以 exact `BuiltinMethodSite + IntrinsicRef + signature` 安装，不能从 target/method 字符串、span 或声明顺序恢复。CoreHIR 在闭合前必须看见该 exact intrinsic contract，AbiIR 只按穷尽 intrinsic tag 做机械 ABI 投影；C 后端不得保留 `method_to_runtime_c(type, name)` 一类隐式表。该 clean break 不改变 top-level extern、runtime ABI 或 B-156 的 capability 边界。
+
 ### 1.1a JSON 编码支持域（2026-08-06 D-001）
 
 `json_stringify` 的公开支持域由公开 `Json` trait 裁决，签名为 `json_stringify<T: Json>(value: T) -> Str`，不再承诺无约束的任意 `T`。Int、Float、Bool、Str 与 `List<T: Json>` 提供标准实现；用户 struct/enum 只有在显式请求 `Json` derive 时才获得结构化实现，不做无提示的全局 auto-derive。
@@ -499,6 +505,8 @@ EffectAtom
 
 **Handled effect**：用户 `effect` 声明产生 nominal operation set，进入 typed evidence并由显式 `handle...with` 消除。需要 mock host dependency 时，声明如 `FileAccess` 的 custom effect，再用普通 handler adapter翻译到 `fs` API；system call自身不动态截获。
 
+**Allocation-effect boundary（2026-08-23 用户决定）**：0.1 不建立 `AllocEffect`，也不预留 OOM profile、effect carrier 或空 metadata。现有 `alloc<T>()` 是 `unsafe` raw-memory 原语，不代表普通 List/Map/Str 分配会进入 effect row。只有 post-0.1 出现真实 no-heap、real-time 或 embedded consumer 后，才重新 Argument 分配可见性、OOM 语义与 allocator contract；不能从旧研究草案直接恢复 `with {alloc}`。
+
 ### 2.2 0.1 无用户 default handler
 
 ```ring
@@ -787,7 +795,7 @@ preset = "api"
 # pub_fn = true         # pub 函数 with {...}
 # internal_fn = false   # 内部函数 effect 签名
 # callsite = false      # 调用点 //: effect 冒泡标注
-# module_capability = false  # mod requires {...}
+# module_capability = false  # file / inline mod requires {...}
 
 [annotations.mut]
 # callsite = false      # 调用点 mut 参数标记：increment(mut n)
@@ -966,7 +974,7 @@ Ring 有意选择简单 trait 系统，换取更强推断能力：
 - 方法名冲突 = 语义错误（ambiguous method）
 - 最小约束 = 只含实际调用方法对应的 trait（不做 supertrait 归并）
 - 方法属于具体类型固有方法（非 trait）→ 推断为具体类型参数（非泛型）
-- 不需要 `impl Trait` 语法（推断比 impl Trait 更强）
+- 0.1 不支持 return-position `impl Trait` / opaque return。推断只减少作者标注，不能隐藏 public API 的 concrete type；post-0.1 仅在真实 factory/iterator/closure consumer 下由 B-200 重审
 
 ---
 
@@ -1118,13 +1126,27 @@ Ring 0.1 不支持 partial/reopened inline module。同一 direct parent scope �
 
 Import、re-export 与 same-origin diamond 是同一既有 declaration 的重复 delivery，可按 exact origin 幂等复用，不属于 source declaration reopening。多个 `impl` block 也不是 partial module，继续服从既有 impl/coherence 规则。若公开发布后出现跨文件 aggregation、generated extension 或 conditional compilation 等真实需求，必须以显式 `partial mod`、`namespace` 或 extension 设计重新立项；不能让普通重复 `mod` 静默获得第二种含义。
 
+### 6.2b 文件模块 capability header（2026-08-23 用户决定）
+
+文件本身是隐式模块。0.1 允许一个可选的 `requires {effects}` 文件头；它必须是文件中第一项非注释语法、每文件至多一次，并与 inline `mod name requires {effects}` 使用同一 capability checker：
+
+```ring
+requires {unsafe}
+
+use std::ptr
+extern fn ring_raw_alloc(count: Int) -> Ptr<Int>
+```
+
+存在 header 时，它是该文件模块的 effect ceiling；`requires {}` 表示纯文件模块。省略 header 时，普通 system/handled/fail/mut 不增加额外 ceiling，但 `unsafe` 从不隐式授权：使用或 discharge unsafe 原语、以及声明 `extern fn`，都要求有效的文件/inline-module `requires` 集合显式包含 `unsafe`。`unsafe {}` 仍是逐块责任签字，header 不能替代它；extern 声明本身是 ABI 签字，调用点保持 safe。拒绝再增加逐声明 `unsafe extern fn` 第二套授权语法。实现与仓内迁移由 B-156 跟踪。
+
 ### 6.3 未来方向 ⚠️ 设计愿景，尚未实现
 
 - 完整 module signature conformance（post-0.1，B-192）：0.1 删除当前只注册 `SigDef`、不约束任何 module 的 `sig` placeholder；未来只有连同真实 `mod/module : Signature` conformance 一起才可重新加入
 - 一等模块（模块作为值传递）
 - ~~`inline mod` 块~~ ✅ 已实现（`pub mod name { ... }` 嵌套命名空间，声明自动加前缀 `mod_name::decl_name`）
 - 相对路径导入（`super::`/`self::`）
-- ~~Capability 限制~~ ✅ 已实现（`mod name requires {effects} { ... }` 语法，E0405 检查函数推断 effect 是否在 requires 集合内）
+- ~~Inline module capability 限制~~ ✅ 已实现（`mod name requires {effects} { ... }` 语法，E0405 检查函数推断 effect 是否在 requires 集合内）
+- 文件模块 capability header（0.1，B-156）：`requires {effects}` 已拍板，尚未实现
 
 ---
 
@@ -1227,7 +1249,7 @@ Parse / project Resolver / Type+Effect
 → mechanical C codegen
 ```
 
-**FlowIR 契约**：TypedHIR → CoreHIR 已完成 trait default、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 与 handled-effect evidence 等全部 semantic elaboration；函数默认参数、effect default body 与 `sig` 不属于 0.1 surface。FlowIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait default、Test、Const、Lambda/handler、derived/intrinsic/constructor/drop/dict helper 等所有 executable body 或显式 contract 进入一个共享 `ExecutableInventory`。System effect 只随exact call contract进入AbiIR HostImport，不成为executable handler root。Neutral ANF 只保持同一 evaluation region 内严格左到右求值，不跨 short-circuit、branch、loop/lambda、guard、catch/handle、unsafe 或 control-transfer 边界，也不产生 `Clone/Take/Drop/Cleanup`。FlowIR freeze 后任何阶段新增 binder 都是 internal error。
+**FlowIR 契约**：TypedHIR → CoreHIR 已完成 trait default、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 与 handled-effect evidence 等全部 semantic elaboration；函数默认参数、effect default body、`sig` 与 impl-member `extern fn` 不属于 0.1 surface。FlowIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait default、Test、Const、Lambda/handler、derived/intrinsic/constructor/drop/dict helper 等所有 executable body 或显式 contract进入一个共享 `ExecutableInventory`。Builtin inherent method在Core闭合前已是exact `IntrinsicRef` contract，而不是由backend按类型名/方法名补造的FFI body。System effect只随exact call contract进入AbiIR HostImport，不成为executable handler root。Neutral ANF只保持同一evaluation region内严格左到右求值，不跨short-circuit、branch、loop/lambda、guard、catch/handle、unsafe或control-transfer边界，也不产生`Clone/Take/Drop/Cleanup`。FlowIR freeze后任何阶段新增binder都是internal error。
 
 **Identity**：具名 source/member 使用 resolver/registry 已选定 origin 构造的 typed `SymbolRef { origin_module_key, namespace_kind, canonical_payload, declaration_site_path }`；re-export 原样携带，same-origin diamond 自然相等，不消耗共享 source counter。局部槽使用 `SlotRef(module_key, domain, local_def_id)`；Lambda、call-result、ANF/result/projection 等 synthetic identity 使用 final normalized tree 的 owner+path `PathRef`，只服务 planner/certificate，不进入 C 名称。Static call 必须携带 `CalleeRef`；dynamic call 必须落到 exact callable slot，freeze 后缺 identity 直接 fatal，Planner 不查 name/resolver/FnType fallback。
 
@@ -1454,7 +1476,7 @@ Tail-resumptive handler arm 会被物化进 effect evidence；该 evidence 又�
 **形态 = `unsafe` effect**：unsafe 原语操作产生 `unsafe` effect，签名可见、自动冒泡。不可被普通 handler 处理——唯一消除方式是 discharge。
 
 **Discharge 模型 = 两级，关键字与 Rust 一致（2026-06-11 用户拍板）**：
-- **模块级 = 许可**：`mod name requires {unsafe}`（复用 mod capability 语法）——未声明的模块内不可使用 unsafe 原语；
+- **模块级 = 许可**：文件模块用第一项 `requires {unsafe}` header，inline module 用 `mod name requires {unsafe}`；未显式授权的模块内不可使用 unsafe 原语；
 - **块级 = 责任**：`unsafe { ... }` 吸收块内 unsafe effect，块 = 作者签字「此处不变量已人工验证」，等价 Rust unsafe block。安全封装因此成立：std 容器内部 unsafe、pub 签名纯净；
 - 配套 `ring audit unsafe`：列出全代码库 discharge 点。
 
@@ -1491,7 +1513,7 @@ buffer 内的值 = RC 世界之外、所有权由封装作者人工记账。拆�
 
 **相对 Rust 的三处简化（明确不做）**：① 无 `MaybeUninit`——Rust 需要它是因为 safe 区要能持有未初始化值，Ring 的未初始化内存只活在 Ptr 后面、永不以值形态进安全区，「read 前已 init」即签字内容；② 无泛型 `transmute`——99% 用例 = 指针 reinterpret（走 cast）+ 标量 bits 互转（具体 intrinsic 按需提供），最危险的门开最窄；③ v1 无 volatile/atomic——§8 并发定型后随 B-007 系再议。
 
-**extern fn 边界 = 声明处签字**：extern fn 声明要求所在模块 `requires {unsafe}`，声明 = 签字「签名忠实于 C 实现」，调用点 safe（与现状 std extern 调用兼容；Rust 2024 `unsafe extern` 同方向）。**`extern type` 与 `Ptr<T>` 并存两层**：extern type = 不透明句柄（不可 deref/offset，持有传递天然 safe）；`Ptr<T>` = 可算术可解引用的真指针。大量 FFI 永远停留在句柄层，分层本身是缩小 unsafe 面的杠杆。
+**extern fn 边界 = 声明处签字**：extern fn 声明要求所在文件 header 或 inline module clause 的有效 `requires` 集合显式包含 `unsafe`，声明 = 签字「签名忠实于 C 实现」，调用点 safe（与现状 std extern 调用兼容；Rust 2024 `unsafe extern` 同方向）。**`extern type` 与 `Ptr<T>` 并存两层**：extern type = 不透明句柄（不可 deref/offset，持有传递天然 safe）；`Ptr<T>` = 可算术可解引用的真指针。大量 FFI 永远停留在句柄层，分层本身是缩小 unsafe 面的杠杆。
 
 **跨界移交 = per-type 三件套，不做泛型 `addr_of`**：泛型「对任意安全值取指针」把引擎私有的值表示（box 布局/unboxing/单例化——B-104 D4 dict、D6 none/const 均在动）变成可观测 API，「优化不可观测」被堵死。跨界走容器显式 API：`List<T>::from_raw_parts(p, len, cap)`（移交进 RC 世界）/ `list.into_raw_parts()`（移交出，consume）/ `list.as_ptr()`（borrow 性质，指针有效期 ≤ 宿主存活 = 签字内容）；Str 同构。FFI 调用保活无需新机制（实参 borrow 语义已覆盖）。
 
@@ -1637,7 +1659,9 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 
 ### 10.5 FFI 设计
 
-`extern fn` / `extern type` 面向 C ABI。unsafe 原语（`Ptr<T>` + alloc/read/write 等）已设计定案（§7.12），实现 = B-125。容器 RIIR 后 extern fn 数量持续减少。
+Top-level `extern fn` / `extern type` 是0.1唯一面向C ABI的用户声明。`extern fn`不能出现在inherent或trait impl中；需要用户自定义的FFI method时，先声明top-level extern，再写普通inherent wrapper。标准库既有的Str/Int/Float宿主方法不构成第二套用户FFI：它们以exact builtin intrinsic contract进入CoreHIR，再由AbiIR按intrinsic tag投影到既有runtime symbol；backend不得从receiver类型名与method leaf猜link symbol。
+
+unsafe原语（`Ptr<T>` + alloc/read/write等）已设计定案（§7.12），实现=B-125。B-201原子删除impl-member extern假表面及backend字符串映射；B-156只继续约束top-level extern声明处的`requires {unsafe}`。容器RIIR后top-level extern数量持续减少。
 
 ---
 
@@ -1863,6 +1887,8 @@ Source
 **CoreHIR semantic elaboration closure（2026-08-23 用户决定）**：CoreHIR 是大多数语言 feature 的统一去糖终点，不是允许下游继续补语义的中转层。每个新 surface feature 必须给出唯一 TypedHIR → CoreHIR lowering，或明确证明自身就是 canonical core construct；否则不得进入实现。CoreHIR validator 必须拒绝 surface-only variant、未选择的 callee/impl/evidence、待生成 executable/body 与其他 implicit obligation。CoreHIR 之后不得再读取 AST/source spelling、调用 resolver/type/effect/trait selection，或在 verifier/codegen 临时生成语言级行为。FlowIR 仅规范化 evaluation/control/pattern 并冻结 binder/node/edge，RcIR 仅显式化资源操作，AbiIR 仅显式化 representation/ABI。
 
 **渐进迁移而非平行重写**：#268/#269 先建立通用 typed identity、executable inventory、neutral normalization、FlowIR/RcIR 与 validator 骨架；后续 type/effect/evidence、failure/control、RIIR/FFI、optimization 各自在既有 backlog 里迁入其唯一所属层。一个事实切换到新层时必须原子迁移全部消费者并删除旧 fallback/side map；禁止长期双写、shadow authority 或以“兼容”保留旧解释路径。B-190 负责在相应消费者已迁移并有证据后删除遗留重复 authority，不把本架构变成一次无界全仓 rewrite。
+
+**0.1 real-consumer implementation boundary（2026-08-24 用户直接决定）**：首次0.1发布前，#268/#269与上述分层只实现0.1已有语义和验收矩阵的真实consumer。删除或拒绝任何仅为post-0.1预留的variant、carrier、fallback、extension hook或validator branch；未来能力不得要求当前IR携带空节点、unknown占位或兼容路径。Review finding只有在候选违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI，或实际阻止#268/#269闭合时才BLOCK；纯未来扩展性、post-0.1 feature兼容性和没有0.1 consumer的“完整性”意见不得阻塞，也不在当前工作中顺手新增post-0.1 item。该裁剪不降低0.1 Deep Clone、exact identity、Core closure、RC conservation、single/project一致性，以及source-build/fixed-point/full/ASan/self-host/exact CI门。
 
 **Koka 作为参考实现**：Effect 推断（`InferEffect.hs`）和 evidence passing（`Evidence.hs`）的算法翻译自 Koka 编译器（MIT 许可）。Perceus 引用计数已翻译其 POPL'21 实现落地（§7.11）。
 

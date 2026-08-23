@@ -170,79 +170,20 @@
 
 旧草案中“联网是唯一值得独立追踪的宿主边界”与把filesystem/console/process合并进`os`的判断被本轮否决：这些能力对agent审计、module requires、inspection与未来package policy均有独立价值。历史推导只查Git；实施与验收以B-195为准。
 
-### 12.2 `alloc` 效果：堆分配可见化
+### 12.2 分配可见性：post-0.1 真实 consumer 触发研究
 
-**状态：暂定（2026-06-23 Discussion）。实现前审视。**
+> **2026-08-23 用户完成宏观重审**：旧 `with {alloc}` 草案不再是待实施设计。0.1 不建立 `AllocEffect`，不为 OOM profile、allocator kind、effect carrier 或分配追踪预留语法、IR 字段、metadata 或 backlog item。
 
-#### 动机
+现有 `alloc<T>()` / `dealloc<T>()` 是 `unsafe` raw-memory 原语：它们的 safety contract 与普通 List/Map/Str 内部可能分配是两件事。本决定不删除或重命名这些原语，也不把普通容器操作染成新的 effect。
 
-当前 Ring 的堆分配对效果系统是不可见的——`List.push()`、`Map.insert()`、`Str` 拼接在效果上是纯函数。这意味着：
+只有 post-0.1 出现真实 no-heap、real-time 或 embedded consumer，并证明“从签名静态禁止分配”相对 profiler、allocator injection、构建 profile 或普通 API 分层具有不可替代价值时，才重新立项 Argument。届时必须从 current compiler/runtime/FlowIR/AbiIR 事实重新比较：
 
-- 无法从签名区分"零分配"函数和"可能分配"函数
-- 嵌入式/no-std/实时场景无法**静态禁止**堆分配——只能靠约定
-- OOM 是不可恢复的 panic，而非可处理的 fail effect
-- 与公理⑦（场景不可堵死）存在张力：嵌入式/WASM 场景下 OOM 是常态
+- 分配可见性应是 effect、显式 allocator contract、静态 profile 还是其他机制；
+- OOM 是 fatal、`fail<Oom>` 还是 provider-specific contract，是否会制造双 ABI；
+- RC dup/drop、deallocation、stack/box/container allocation 的精确分类与可审计来源；
+- 对普通应用签名的污染、generic/HOF传播、SystemEffectRef正交性与真实运行时收益。
 
-**先例**：Zig 将分配器作为显式参数传递，所有可能分配的函数签名携带分配器信息，编译期即可审计"哪些代码路径需要分配"。Ring 的选择是用效果系统承载同一信息——推断 + 自动冒泡，零语法负担。
-
-#### 设计
-
-`alloc` 是一个内建效果，操作集合：
-
-| 操作 | 说明 |
-|------|------|
-| `alloc.heap(size: USize, align: USize) -> Ptr<U8>` | 堆分配原始字节 |
-| `alloc.free(ptr: Ptr<U8>, size: USize, align: USize)` | 释放 |
-
-高层操作（`List.push`、`Map.insert`、`Str` 拼接、`.clone()` 等）内部调用 `alloc.heap`，其所在函数需要 `with {alloc}`。
-
-`alloc.free` 不被视为需要 `alloc` 效果的调用——它不失败、不阻塞、不增复杂度。只有**分配**方向携带效果。
-
-#### 什么不产生 alloc 效果
-
-- 值类型操作：I64/F64/Bool/Char 的 copy、`@value struct` 的 memcpy
-- RC 计数操作：`ring_dup`（写对象头 rc 字段）、`ring_drop`（读/写对象头）——对象已存在，计数值变化不分配
-- 栈分配：`let x = some_struct(a, b)`（alloca）
-- dealloc：`ring_drop` 最终释放（已有 RC 语义，不另标）
-
-#### 签名语义
-
-```ring
-fn pure_fn(xs: List<I64>) -> I64 with {}           // 零堆分配——纯计算
-fn process(xs: List<I64>) -> List<I64> with {alloc} // 可能分配（push / clone）
-fn main() -> Unit with {os, alloc}                  // 正常程序
-```
-
-**Perceus RC 区分**：`ring_dup` 不产生 `alloc` effect——dup 操作的是已存在的堆对象头。只有首次分配（malloc）产生 `alloc` effect。这是与 C++ `new` / Rust `Box::new` / Zig `allocator.alloc` 一致的语义——分配和引用计数是两个不同层。
-
-#### 编译器自身的影响
-
-Ring 编译器是重度分配 workload；原型必须测量 `alloc` 在真实签名中的传播范围与噪音，不能用一次机器侧 allocation 计数直接决定语言面。若它几乎总与 `os` 连体且不能提供独立控制价值，就不应作为独立 effect。
-
-但 `alloc` 和 `os` 不绑定——分配可以在无 OS 的场景（嵌入式、WASM、裸机）通过自定义 allocator 满足。这正是 Zig 模型的核心：分配器独立于 OS。
-
-#### OOM 处理（实现时核定）
-
-`alloc` 效果可带 OOM fail 语义——分配失败 raise `fail<Oom>` 而非 panic。这对嵌入式场景是必须的。对桌面/服务端，OOM 通常是 fatal（OS overcommit 让 OOM 语义本身不可靠），两种策略可能不同：
-
-- 桌面 profile：`alloc` 不产生 fail effect，OOM 直接 panic（当前行为）
-- 嵌入式 profile：`alloc.heap` 可 raise `fail<Oom>`，由调用栈处理
-
-#### 与 unsafe 的关系
-
-`alloc` 和 `unsafe` 是正交的：
-- `alloc`：告知"此函数需要堆内存"，签名级可见
-- `unsafe`：告知"此函数执行了绕过类型安全的内存操作"
-
-两者可共存（`with {alloc, unsafe}` = 手动管理内存）、独立存在（`with {alloc}` = List.push，安全分配）、或都不存在（纯计算）。
-
-#### 实施要点（实现时核定）
-
-- `alloc` 的粒度：是否需要 `alloc.heap` / `alloc.arena` / `alloc.bump` 子效果，还是只一个顶层 `alloc`
-- Perceus RC 层：`ring_malloc` / `ring_free` 的调用点是否在 HIR 层显式化（当前是 codegen/runtime 层）
-- 值类型定义：`@value struct` 的判定规则——不含任何堆分配字段
-- 与 B-002（Drop/RAII）的交互：Drop 执行期间不应该分配（或应显式标注 `with {alloc}`）
-- 迁移：标准库逐个函数审视——哪些无分配（如 `List.len`）、哪些有分配（如 `List.push`）
+没有上述 consumer 与证据时保持现状；历史 `alloc` effect 设计、`os` 示例与先验 OOM 结论只查 Git，不得被 future worker 当作已批准 seed。
 
 ### 12.3 已落地能力
 

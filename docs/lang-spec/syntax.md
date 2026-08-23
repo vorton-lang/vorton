@@ -5,20 +5,21 @@ Ring 的完整 EBNF 文法。产生式按类别分组。可选元素用 `?`，�
 ## 程序
 
 ```ebnf
-Program      ::= UseDecl* Decl*
+Program      ::= FileRequires? UseDecl* Decl*
+FileRequires ::= 'requires' EffectSet
 ```
 
-程序是一系列 `use` 声明后跟其他声明。`use` 声明必须出现在所有其他声明之前。
+文件是一个隐式模块。可选的 `requires {effects}` 文件头必须是第一项非注释语法、每文件至多一次；其后是一系列 `use` 声明和其他声明。`use` 声明仍必须出现在所有普通声明之前。文件头与 inline `mod name requires {effects}` 使用同一 capability 语义，详见[模块系统](modules.md#capability-限制requires)。
 
 ## 声明
 
 ```ebnf
-Decl         ::= 'pub'? DeclKind
+Decl         ::= ImplDecl
+               | 'pub'? DeclKind
 
 DeclKind     ::= FnDecl
                | StructDecl
                | EnumDecl
-               | ImplDecl
                | TraitDecl
                | EffectDecl
                | EffectAliasDecl
@@ -29,7 +30,7 @@ DeclKind     ::= FnDecl
                | ModDecl
 ```
 
-`pub` 修饰符控制多文件编译中的可见性。单文件模式下接受但不强制。
+`pub`修饰符控制多文件编译中的可见性。Impl block本身没有visibility，因此`pub impl ...`非法；只有inherent impl member继续允许逐项`pub`。单文件模式仍解析visibility并执行同一语法检查。
 
 ### 函数声明
 
@@ -75,18 +76,21 @@ NamedField   ::= Ident ':' TypeExpr
 ### Impl 块
 
 ```ebnf
-ImplDecl     ::= 'impl' TypeParams? ImplTarget '{' ImplMember* '}'
+ImplDecl     ::= InherentImplDecl | TraitImplDecl
 
-ImplTarget   ::= Ident TypeArgs?
-               | Ident 'for' Ident TypeArgs?
+InherentImplDecl ::= 'impl' TypeParams? Ident TypeArgs? '{' InherentImplMember* '}'
+TraitImplDecl    ::= 'impl' TypeParams? Ident 'for' Ident TypeArgs? '{' TraitImplMember* '}'
 
-ImplMember   ::= 'pub'? FnDecl
-               | 'pub'? 'extern' 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation?
-               | 'delegate' Ident ':' Ident (',' Ident)*
-               | 'pub'? AssocTypeDecl
+InherentImplMember ::= 'pub'? FnDecl
+                     | 'delegate' Ident ':' Ident (',' Ident)*
+                     | 'pub'? AssocTypeDecl
+
+TraitImplMember ::= FnDecl
+                  | 'delegate' Ident ':' Ident (',' Ident)*
+                  | AssocTypeDecl
 ```
 
-`impl Type { ... }` 定义固有方法。`impl Trait for Type { ... }` 实现 trait。Impl 块内可包含 `extern fn` 声明用于 FFI 方法绑定。`delegate field: Trait1, Trait2` 为每个 trait 自动生成完整普通 impl（替代继承的复用机制）；同一 target + trait 的手写 impl 与 delegate 冲突并报 E0509，不支持 partial override。关联类型 `type Name = TypeExpr` 用于满足 trait 的关联类型要求。
+`impl Type { ... }` 定义固有方法，member可分别`pub`或private。Impl block无visibility，`pub impl ...`是hard error。`impl Trait for Type { ... }`实现trait，全部member visibility继承trait，写`pub`同样hard-error。Ring 0.1不允许impl-member `extern fn`；在inherent或trait impl中写`extern fn`必须于`extern`处hard-fail。用户需要FFI method时使用top-level `extern fn`加普通inherent wrapper；标准库内建方法由编译器的exact intrinsic manifest提供，不形成用户语法。`delegate field: Trait1, Trait2`为每个trait自动生成完整普通impl（替代继承的复用机制）；同一target + trait的手写impl与delegate冲突并报E0509，不支持partial override。关联类型`type Name = TypeExpr`用于满足trait的关联类型要求。
 
 ### Trait 声明
 
@@ -95,12 +99,12 @@ TraitDecl    ::= 'trait' Ident TypeParams? (':' TypeBound ('+' TypeBound)*)? '{'
 
 TraitMember  ::= TraitMethod | AssocTypeDecl
 
-TraitMethod  ::= 'pub'? 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation? Block?
+TraitMethod  ::= 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation? Block?
 
-AssocTypeDecl ::= 'pub'? 'type' Ident (':' TypeBound ('+' TypeBound)*)? ('=' TypeExpr)?
+AssocTypeDecl ::= 'type' Ident (':' TypeBound ('+' TypeBound)*)? ('=' TypeExpr)?
 ```
 
-无函数体的方法是抽象方法（必须实现）。有函数体的方法提供默认实现。Supertrait 继承通过 `:` 后的 `TypeBound` 列表声明（如 `trait Ord: Eq`），支持多级传递和循环检测。关联类型通过 `type Name` 声明，可带 bounds 约束和默认值。
+无函数体的方法是抽象方法（必须实现）。有函数体的方法提供默认实现。Supertrait继承通过`:`后的`TypeBound`列表声明（如`trait Ord: Eq`），支持多级传递和循环检测。关联类型通过`type Name`声明，可带bounds约束和默认值。Trait是完整contract：所有member visibility随trait，trait declaration与trait impl member不得单独写`pub`；只有inherent impl保留逐member visibility。
 
 ### Effect 声明
 
@@ -131,7 +135,7 @@ ExternKind   ::= 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAn
 
 访问宿主的 `extern fn` 必须显式声明其 exact system effect 与正交的 `fail<E>` 契约；省略或写成纯函数不得作为 host operation 的隐式 fallback。具体 system effect 分类见 [Effect 系统](effects.md)。
 
-`extern fn` 声明由目标环境提供实现的函数，类型检查以声明签名为准。`extern type` 声明不公开结构的 opaque 类型；具体 ABI 与表示不属于语言语法规范。
+Top-level `extern fn`声明由目标环境提供实现的函数，类型检查以声明签名为准；它是0.1唯一的用户函数FFI声明位置。`extern type`声明不公开结构的opaque类型；具体ABI与表示不属于语言语法规范。Impl-member `extern fn`不属于`ExternDecl`，必须按上一节hard-fail。
 
 ### 类型别名
 
@@ -195,6 +199,8 @@ RecordField  ::= Ident ':' TypeExpr
 
 TypeExprList ::= TypeExpr (',' TypeExpr)* ','?
 ```
+
+Ring 0.1不支持return-position`impl Trait`或其他opaque type；`impl`在type position是语法错误。省略返回标注只会推断并保留concrete type，不形成API abstraction。Public interface也不得引用private concrete type；post-0.1的显式opaque return由B-200重新设计。
 
 命名类型的 `?` 后缀是 `Option<T>` 的语法糖：`Int?` ≡ `Option<Int>`。`FnType` 的 `with` 子句标注函数类型的 effect（无标注时为 open row，支持 effect 多态）。
 

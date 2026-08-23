@@ -7,7 +7,7 @@
 ## 0. Discussion–Steward 双 session 控制面
 
 1. **唯一配对**：同一仓库默认恰有一个 Discussion session 与一个 Steward session。启动时先用 runtime 的任务发现能力复用同 cwd/repository 的既有 counterpart；不得因标题或摘要变化重复创建。counterpart 确实缺失且用户的双 session standing direction 仍有效时，才创建一个缺失 session；runtime 不支持时以 Steward Inbox 作 durable fallback。
-2. **Discussion 职责**：持有用户对话、公开方向、high-level 路线、用户保留决定、阶段验收定义与方向监督。它可做只读事实核验并写治理真值，但不实现编译器、runtime 或测试功能，也不替 Steward处理普通工程取舍。
+2. **Discussion 职责**：持有用户对话、公开方向、high-level 路线、用户保留决定、阶段验收定义与方向监督。它可做只读事实核验并写治理真值，但不实现编译器、runtime 或测试功能，也不替 Steward处理普通工程取舍。用户可直接审查Steward的完整执行过程；Discussion不作为默认review gate，不代理用户插入额外freeze/unlock或用单方摘要替代用户核验。
 3. **Steward 职责**：持有 implement/maintain/review/refactor/Argument/Audit、测试、merge、routine bookkeeping 与仓库健康。它在既定路线内自主推进，不因 Discussion 休眠而停机。
 4. **双向消息**：Discussion 通常在用户 verdict 已写入真值并 commit 后，向 Steward 发送 commit SHA、约束、被阻塞/解锁 item 与优先级。若用户已明确批准、Discussion 治理文件与 isolated authority 实现范围无路径重叠，Discussion 可先发送一条 exact provisional packet，允许 Steward 在隔离 worktree 并行实现；治理 commit 仍必须在 review/merge/main mutation 前完成并由 authority 吸收，provisional packet 不得扩大用户 verdict、授权 main 写入或替代 durable 真值。Steward 只在用户保留决定、路线/依赖漂移、新 critical 改变主线、跨 session 里程碑、全局阻塞或仓库健康风险需要用户可见时唤醒 Discussion。普通实现状态、命令等待、局部 blocker 与 review 往返不得唤醒 Discussion。
 5. **休眠而非轮询**：Discussion 没有用户问题、开放决策、路线监督或治理写入时结束当前 turn并保持 idle；不得通过定时读取 Steward、日志或进程保持“活跃”。Steward 的触发消息或新的用户输入负责唤醒它。Discussion 需要状态时读取一次 compact task snapshot，不尾随实现日志。
@@ -159,6 +159,20 @@
 检查必须产出：① current 端到端管线；②每项关键事实首次可知、唯一 authority 与最终消费者；③“局部缺陷 / 系统性边界缺失”的明确判定；④局部方案与分层/overhaul 方案的真实比较；⑤若属系统性问题，固定 IR/组件边界、输入输出契约、不变量、迁移/删除旧 authority 与可证伪验收。禁止在没有该判定时让用户靠主动指出 overhaul 才发现宏观方案。
 
 已批准总架构能唯一决定的内部迁移仍由 Steward 自主实施；若检查提出新的全局 IR/管线、长期路线重排、显著投入或其他用户保留决定，Discussion 必须用宏观图和紧凑决策包交给用户监督后再实施。用户监督针对方向、抽象和里程碑，不等于同步查看原始日志、普通 review 往返或暂停其他无冲突工作。
+
+### 4.3.3 纵向交付与证据减负
+
+执行流程必须优化真实信息增量，不以局部证明数量替代工程进展。默认交付单位是一个**真实纵向闭环**：新语义事实或新IR表示必须至少贯通一个实际producer、一个当前或shadow pipeline consumer、一个可观察canary，并明确旧authority已删除/冻结，或给出有owner和cutover门的短期shadow边界。只有schema、carrier、visitor、validator、side map或测试框架而没有producer→consumer路径的commit属于scaffolding；它可在同一已批准纵向单元内作为可恢复中间commit存在，但不单独构成milestone、durable claim或触发长验收门。
+
+开发反馈与验收证据严格分层：
+
+1. **Development feedback**：普通check、focused fixture、局部generated-C/native probe和开发期mutation可以按代码变化自由重跑，用于定位和修正；失败只说明当前WIP未就绪，不创建版本化acceptance packet、不做sealed/no-retry叙事，也不与后续结果拼成durable claim。
+2. **Acceptance evidence**：只有active spec明确指定的claim-advancing fixed-SHA transaction才使用sealed/no-retry纪律。启动前必须完成已知实现与review修正、固定输入/候选/环境/命令和failure identity；source-build、fixed point、standard full、ASan、exact CI等长门集中在真实纵向或integration boundary运行，不因每个carrier/micro-commit重复启动。Cheap targeted acceptance若确属final matrix可保留，但不得在候选仍探索时冒充development feedback提前消费。
+3. **Review economy**：多个micro-commit可组成一个green vertical checkpoint；reviewer审固定累计diff、producer→consumer契约、canary和旧authority边界，不要求每个中间commit分别完成一轮独立对抗仪式。高风险/架构单元在写码前做一次bounded refutation，green boundary做一次独立contract/code review；bounded implementation finding在同一review链返修，不重新启动完整Argument或全矩阵。若出现duplicate-authority、跨层回放或共同不变量缺失，则立即按宏观架构监督/方向止损门处理，而不是增加review轮数直到偶然CLEAR。
+4. **Reporting economy**：进展摘要只把net-new capability、已建立的producer→consumer路径、authority retirement/cutover、真实behavior或structural canary、remaining risk和下一可证伪门计为信息。命令数、mutation数量、fixture数量、receipt大小、review“CLEAR”或commit数量只能作为按需证据索引，不能单独冒充进展或里程碑。
+5. **0.1 real-consumer scope**：首次0.1发布前，当前实现只服务0.1真实consumer。删除/不新增仅为post-0.1准备的variant、carrier、fallback、extension hook或validator branch；review finding仅在违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI，或阻止当前总门闭合时BLOCK。纯未来扩展性、post-0.1 feature兼容与没有0.1 consumer的完整性意见不得阻塞，也不得从当前工作顺手新增post-0.1 item。
+
+该减负规则不降低0.1 Deep Clone、exact identity、Core closure、RC conservation、single/project一致性、correctness、safety、ownership、current platform/ABI、bootstrap、source-build/fixed-point/full/ASan/self-host/exact CI或最终release门；它只消除未形成真实纵向价值的重复审查、验收与未来占位。Audit仍按§6处理，不因本节减少finding的独立证据要求。用户直接查看Steward过程时以原始diff、命令和证据为准，Discussion不成为中间批准者。
 
 ### 4.4 执行与并发
 

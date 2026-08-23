@@ -41,11 +41,19 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **Compiler-wide staged IR adoption（2026-08-22 用户批准；2026-08-23 naming clean break）**：总架构固定为 `AST -> ResolvedAST -> TypedHIR -> CoreHIR -> FlowIR -> RcIR -> AbiIR -> mechanical C11`，但不新增平行 P0 或一次性 rewrite。`FinalHIR`/`RcHIR`旧名不保留alias；FlowIR明确是first MIR/CFG-style operational IR，RcIR是其资源显式版本。当前 #268/#269 只建立后续可共用的 exact identity、typed carrier、ExecutableInventory、neutral normalization、freeze/validator 与 RcIR 骨架；不得用 ownership-only side map 抢先形成第二套前端。以后 B-180 仅在测量支持时消费稳定 stage hash/cache，B-168/B-169/B-167 在既有顺序中把 control/evidence/call ABI 放入 CoreHIR/FlowIR/AbiIR，B-152 把 RIIR/FFI representation 收口到 AbiIR；其他 item 同理按其现有优先级迁入唯一层。每个 cutover 必须原子迁移消费者并删除旧 name/type/backend fallback，B-190 只清理已有迁移证据支持的遗留 authority；上述约束不改变七道门顺序、公开语义/ABI或原验收门。
 
+> **0.1 real-consumer execution boundary（2026-08-24 用户直接决定）**：当前#268/#269与staged-IR authority只实现0.1真实consumer。任何仅服务post-0.1的variant/carrier/fallback/extension hook/validator branch必须删除或不新增；review finding只有在违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI，或阻止#268/#269闭合时才BLOCK。纯未来扩展性、post-0.1 feature兼容或无0.1 consumer的完整性不得阻塞，也不得在本轮顺手新增post-0.1 item；既有deferred items保持原排期，但当前IR不为它们预铺carrier。该裁剪不降低Deep Clone、exact identity、Core closure、RC conservation、single/project、source-build/fixed-point/full/ASan/self-host/exact CI门。
+
 > **U1a no-partial-inline-module gate（2026-08-22 用户决定）**：0.1 中同一 direct parent scope 的 `mod name` 只能声明一次，第二个 ModBlock 在 resolver source census 立即报 `E0207`；不同 AstSite 不能因 canonical payload 相同合并，`E0707` 只保留给不同 origin 的 import ambiguity。Import/re-export/same-origin diamond 仍幂等复用 exact origin，不同 parent 同 leaf 与多个 impl block 不受影响。仓内 compiler/std/examples 零迁移；3 个 active resolver fixture 机械合为单 block 或改成 duplicate-mod 负例，staged b107 probes 同步重写/退役。验收必须由 source-built exact candidate 的真实 parser/resolver 覆盖 duplicate ModBlock、单 block 内 Fn/Const/Extern/Struct/ExternType/Enum/TypeAlias/Effect/Alias/Trait direct duplicates 及 delivery 非回归；Python source scan 只作非权威 scope guard。未来若有真实大规模 consumer，以显式新 feature 重新设计，不保留隐藏兼容路径。
 
 > **0.1 surface simplification / CoreHIR closure（2026-08-23 用户决定）**：compiler/std/examples 对函数default parameters、sig placeholder、refinement placeholder、user effect default body与delegate surface均无必须保留的真实consumer。0.1 clean break删除函数default parameter、只注册/transport `SigDef`、parse-and-discard `where`与user default evidence全链；trait default method不受影响。Delegate因能表达组合关系而保留，但只在TypedHIR→CoreHIR一次展开成普通trait impl。每个新surface feature必须提供唯一CoreHIR lowering或证明自身为canonical core，禁止把surface-only variant、待生成body/impl/evidence带入下游。Sig/refinement/default provider分别只按B-192/B-001/B-197的完整未来门重入。
 
+> **0.1 trait / impl / private-interface visibility（2026-08-23 用户批准）**：对齐Rust，trait是整体contract，impl block无visibility；`pub impl`、trait declaration/trait impl member的`pub`均hard-fail，只有inherent member逐项控制visibility。Public item接口与bounds不得引用更private type/trait/effect；private impl可留internal coherence registry，但外部trait impl surface要求target+trait均public，public inherent只发布pub methods。当前接受后丢弃的fake`pub`由B-199 clean break，不新增visibility identity bit。0.1无return-position`impl Trait`/opaque type，post-0.1由B-200按真实consumer重审。
+
+> **0.1 impl-member extern clean break（2026-08-24 用户批准 A2）**：top-level `extern fn`/`extern type`是唯一用户FFI声明；inherent/trait impl中的`extern fn`全量hard-fail，不保留deprecated或backend fallback。现有Str20项与Int/Float `to_str`两项公共方法由B-201迁成唯一builtin assembly产生的exact `BuiltinMethodSite + IntrinsicRef + signature`，CoreHIR在闭合前接收contract，AbiIR按穷尽tag机械投影到既有runtime；删除`method_to_runtime_c(type,name)`字符串authority，不改变public method行为、top-level extern、runtime ABI或B-156 capability边界。B-201直接并入当前#268/#269 physical Core/formal3b cutover，不建立平行FFI/identity路线。
+
 > **0.1 effect/capability batch（2026-08-23 用户批准）**：B-195以`SystemEffectRef(console/fs/process)`取代special `io`，system不进evidence、不可handle、无root handler，只经AbiIR HostImport/link provider；custom `HandledEffectRef`才显式handle。Host capability与`fail<E>`正交，std host extern漏标与`io.read`双authority原子收口。B-196令0.1用户Drop最终effect row为空且不建DropEffectSet；post-0.1 effectful destruction只在真实consumer下由B-198重审。B-072匿名sum既有语义继续批准但实现顺延post-0.1。
+
+> **0.1 file capability / allocation-effect boundary（2026-08-23 用户批准）**：文件是隐式模块，B-156新增唯一第一项`requires {effects}` header并复用inline-module capability checker；无header不隐式授权unsafe，extern声明要求有效requires集合含unsafe，拒绝逐声明`unsafe extern fn`第二语法。0.1不建立`AllocEffect`、OOM profile或占位carrier；现有unsafe `alloc<T>()` raw-memory intrinsic不变，分配可见性只在post-0.1出现真实no-heap/real-time/embedded consumer后重新Argument，不为它预建backlog item。
 
 3. **B-176/B-180 反馈速度**：在 post-ownership 最新 main 重做 baseline；runner 与 compiler 分 checkpoint，但原 2x 量化验收不变。compiler 只允许一个 profile-guided wave。
 4. **B-190 全仓简化**：B-180完成并吸收B-187文档盘点后，以固定snapshot做一次有界过度设计复核与减法refactor；不做rewrite-for-perfection。
@@ -292,20 +300,23 @@ B-116 先以 native probe 选 lowering；归档 JS generator/Promise 不属于 s
 
 ### B-156 extern fn 声明处 `requires {unsafe}` 签字检查 [feature] [P1] [M] [judgment] [queued] [after: B-195]
 
-> 2026-06-27 从 B-125 拆出。B-125 core 完成但 extern fn 签字检查推迟——当前无文件级 `requires` 语法（327 个 extern fn 声明分布在 19 个文件顶层，无 `mod` 块包装），需先设计文件级 `requires` 语法。
+> **2026-08-23 用户决定，已拍板 clean break**：文件本身是隐式模块。0.1新增一个可选文件头`requires {effects}`，必须是第一项非注释语法、每文件至多一次，并与`mod name requires {effects}`共享同一解析、typed capability与checker authority。拒绝逐声明`unsafe extern fn`第二套语法。立项时current main census为78个extern fn/10个文件；实施时重新机械census，不把旧327/19计数当迁移真值。
 
-**前置**：文件级 `requires` 语法设计
+**公开语义**：
 
-**涉及修改**：
-1. Parser：文件级 `requires { effects }` 语法（文件开头，声明之前）
-2. Checker：extern fn 声明所在模块必须有 `requires {unsafe}`
-3. 19 个文件批量迁移（加文件级 `requires {unsafe}`）
-4. `ring audit unsafe` 子命令（列全代码库 discharge 点 + extern 声明点）
+1. `Program ::= FileRequires? UseDecl* Decl*`，`FileRequires ::= 'requires' EffectSet`；header晚于`use`/声明或重复出现均稳定报错。
+2. 有header时，它是文件模块的effect ceiling，`requires {}`表示纯模块；无header时system/handled/fail/mut不增加额外ceiling，但unsafe许可从不隐式获得。
+3. unsafe原语仍必须由`unsafe {}`逐块discharge；header只提供模块许可，不能替代责任签字。
+4. 每个`extern fn`声明要求其有效文件/inline-module requires集合显式包含`unsafe`。声明是ABI签字，调用点保持safe；extern type不因本项变成unsafe操作。
+
+**范围 / 唯一authority**：`compiler/parser.ring`/AST与模块resolver/checker建立文件header并把它运输为与inline mod相同的typed capability fact；B-195后的SystemEffectRef/HandledEffectRef/fail/mut/unsafe全部复用同一集合检查。仓内compiler/std/examples/tests按实际推断effect迁移header；不能给所有文件机械只写`{unsafe}`而误拒其真实console/fs/process/fail/mut。`ring audit unsafe`枚举文件/inline capability许可、unsafe discharge block与extern声明，禁止另建extern叶名白名单或backend fallback。
 
 **验收标准**：
-- 无 `requires {unsafe}` 的文件中 extern fn 声明 → 编译错误
-- 现有 std/ + compiler/ extern fn 全部通过（迁移后）
-- 自举一致
+
+- header第一项/重复/late/empty/qualified/custom effect的parser与human/LLM诊断矩阵；无header普通effect正控、`requires {}`与受限集合负控、single/project/inline nesting一致；
+- 无显式unsafe许可的unsafe block或extern fn声明稳定失败；有许可的raw-memory与全部仓内extern声明通过，普通extern调用点不染unsafe；
+- mutation杀死header skip、unsafe隐式授权、extern特判、file/inline双checker与system→handler evidence；inspection/audit只消费typed capability authority；
+- 完整C e2e/golden/RC/structural/parity/self-compile、targeted audit output、double bootstrap与tracked`dist-c`literal fixed point通过，workflow validator与exact CI全绿。
 
 ### B-168 C-native abort/unwind 实现模型探针 [design-align] [P0] [M] [judgment] [queued] [after: B-180+B-195+B-196]
 
@@ -864,6 +875,44 @@ async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评�
 **目标 / 范围**：先以真实大型代码库需求重新Argument surface，至少比较 contextual `sig` + `module/mod X : Signature`、独立interface文件与inspection-generated contract；0.1中`sig`是合法标识符，未来语法不得无迁移地夺回该标识符。实现必须让module公开value/type/effect/trait/associated type与可见性、泛型/effect row、re-export及same-origin identity接受一个可检查的signature contract；不顺带引入first-class modules、functor、动态module value或跨文件partial module。
 
 **验收**：缺失/类型不符/effect扩大/visibility与associated contract不符均给单轮可修诊断；合法single/project/re-export/diamond与separate implementation通过；signature成为TypedHIR/module interface与incremental hash的单一authority，CoreHIR后无name-based conformance重算；formatter/inspection/LLM contract输出一致。完整C/full/self-host/fixed-point与跨平台CI通过，且必须有至少一个仓内或preview真实consumer，不能再次以纯parser/namespace transport测试冒充feature完成。
+
+### B-199 删除 impl / trait member 假 `pub` 并收口 private interface [design-align] [P1] [M] [judgment] [queued] [after: B-190] [before: B-174]
+
+> **2026-08-23 用户决定，已拍板 clean break**：0.1对齐Rust。Trait visibility一次决定完整associated contract；impl block本身无visibility。当前parser在所有Decl前接受`pub`、并在trait/impl路径部分丢弃，形成`pub impl`与trait-member`pub`假语义。Public接口含private declaration则外部必不可用，Ring不沿用warn-only，全部在preview前hard-fail。
+
+**范围 / 文件**：`compiler/parser.ring`/checker按decl/impl kind区分visibility：任何`pub impl`、trait declaration与trait impl中的fn/associated type出现`pub`即单轮可修错误并建议删除；inherent impl继续逐member保留`pub`/private。Public fn/const/type/trait/effect、pub fields/methods及generic bounds递归检查Type/Effect/Trait可见性，发现更private declaration即稳定错误。`compiler/exports.ring`/module hydration把internal coherence inventory与public callable surface分开：private impl保留内部，public inherent只导出pub member，trait impl只有target+trait均可见才导出。Impl-member extern由B-201整体删除，不在本项保留visibility分支。`docs/lang-spec/{syntax,traits}.md`、examples/fixtures同步。
+
+**约束**：Provider/trait dictionary/TypedHIR/CoreHIR/ExecutableInventory不新增per-trait-member visibility字段，visibility不得从origin/name/span猜测。`impl PublicTrait for PrivateType`本身合法且参与internal coherence；禁止的是外部发布与private type泄漏。0.1无accidental opaque return，不改变trait default body、supertrait、delegate、associated binding、coherence或qualified-method post-0.1边界。未来sealed/opaque trait必须显式立项。
+
+**验收**：`pub impl`及trait declaration/trait impl的`pub fn`/`pub type`全部稳定hard-fail并给删除建议；inherent public/private method与跨模块visibility保持。Public参数/返回/字段/nested generic/bound/effect正反例覆盖private leak；private-target public-trait与public-target private-trait impl只在module内部可用，不进入dependency method index；same-origin re-export不扩大visibility。Mutation杀死parser skip、visibility carrier/猜测、private inherent误导出和单边public impl导出。完整C e2e/golden/structural/parity/self-compile、targeted human/LLM diagnostics、double bootstrap与tracked`dist-c`literal fixed point通过，workflow validator/exact CI全绿。
+
+### B-200 Return-position opaque type / `impl Trait` 设计 [design-align] [P3] [M] [judgment] [queued] [after: B-175] [deferred: post-0.1-release+real-consumer]
+
+> **2026-08-23 用户决定**：0.1不支持return-position`impl Trait`/opaque type；类型推断不能替代API abstraction，但当前没有必要为未来能力增加parser/AST/IR/ABI carrier。首次0.1发布后，以真实factory/iterator/closure API consumer重新设计。
+
+**研究范围**：比较`-> impl Trait`、具名opaque type与显式public wrapper/generic返回；固定“callee选择单一concrete type、caller只能使用公开bounds”的抽象边界。核对associated types、generic capture、effect row、ownership/Drop/RC shape、跨模块ABI、inspection/hash、多个return branch与错误诊断；与`dyn Trait`动态分发严格分开，不因语法相似合并实现。
+
+**进入/产出门**：至少一个仓内或preview真实consumer证明公开concrete type不可接受且wrapper/generic不足；先形成surface/TypedHIR→CoreHIR lowering/ABI与反例矩阵及用户decision dossier。获批前`impl`在type position稳定parse error，public interface引用private concrete type继续由B-199 hard-fail；不得预建OpaqueType、hidden associated type、dictionary slot或backend special case。
+
+### B-201 删除 impl-member extern 假FFI表面并迁移精确内建方法 [design-align] [P1] [M] [judgment] [queued] [before: B-156+B-174]
+
+> **2026-08-24 用户决定，A2 clean break**：0.1不支持impl-member `extern fn`。现行表面没有link name、calling convention、physical representation或collision规则，普通用户声明会失败；仓内唯一正向依赖是Str的20项与Int/Float `to_str`两项std特例，它们依靠C backend的target/method字符串表才工作。删除假能力，同时保持这些公共method的签名、effect、visibility、runtime symbol与行为不变。
+
+**范围 / 文件**：
+
+- `compiler/parser.ring`、AST/checker/resolver/infer/HIR：从inherent/trait impl member grammar与各pass删除ExternFn分支；在impl内遇到`extern fn`于`extern`处给单轮可修hard error，建议“top-level extern + ordinary inherent wrapper”。Top-level `extern fn`/`extern type`路径原样保留。
+- builtin/prelude/project唯一assembly：为22项既有公共method安装fixed exact `BuiltinMethodSite + IntrinsicRef + signature`；single/project/prelude共享同一producer，public method lookup只消费typed ref，不按target/name/span/注册顺序重建。
+- TypedHIR→CoreHIR/ExecutableInventory：builtin method在Core闭合前成为exact intrinsic contract；MethodCallRef只携callee/evidence/signature identity，不携Borrow/Own/Take/RC策略。AbiIR按穷尽IntrinsicRef tag投影到既有runtime symbol；删除C backend `method_to_runtime_c(type,name)`及相关字符串fallback。
+- `std/str.ring`等删除22项impl extern声明并同步fixtures、grammar、human/LLM diagnostics；runtime与无关top-level extern声明不改。
+
+**约束**：不新增用户link-name/callconv/ForeignAbiRef表面，不把未来真实method FFI提前塞进0.1；不保留deprecated alias、old-or-new fallback、name table或impl ExternFn inert carrier。B-156仍只负责top-level extern的`requires {unsafe}`签字；本项不扩大unsafe/HostImport、runtime TCB、公开ABI、qualified method、trait visibility、delegate、derive或ResourcePlanner范围。它是当前#268/#269 physical Core/formal3b的直接前置，复用同一authority，不建立平行P0。
+
+**验收**：
+
+- inherent/trait impl中的public/private/generic/effectful `extern fn`均在exact token稳定hard-fail，human/LLM JSON诊断与恢复不吞后续member；top-level extern与普通wrapper正例保持。
+- 22项builtin method逐项核对public签名、effect、method resolution、generated-C call target与native行为；single/project/prelude/re-export输入一致。缺tag、重复tag、错signature、错runtime target及任何name/span fallback mutation全部fail loud。
+- 活动compiler/std/examples除专用负例外无impl-member extern，backend无`method_to_runtime_c`或等价`(type-name, method-name)`映射；Core closure validator拒绝backend-only executable/intrinsic。
+- 与current aggregate固定SHA一起通过独立review、fresh source-built targeted matrix、deep-Clone scoped delta外的行为/parity门、12GiB fixed point、standard full、targeted ASan、self-host与exact CI；不得用既有sealed packet拼接acceptance。
 
 ## 基础设施
 
