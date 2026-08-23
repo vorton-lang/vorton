@@ -859,7 +859,7 @@ fn rc_slot_index_for(slots: List<RcSlot>, target: SlotRef) -> Int {
 fn reason_is_resource_source(reason: SlotTransitionReason) -> Bool {
     let tag = slot_transition_reason_tag(reason)
     tag == SLOT_REASON_CLONE_SOURCE || tag == SLOT_REASON_TAKE_SOURCE ||
-        tag == SLOT_REASON_DROP
+        tag == SLOT_REASON_DROP || tag == SLOT_REASON_CLEANUP
 }
 
 fn resource_source_transitions(
@@ -898,6 +898,9 @@ fn operation_matches_source_reason(
     if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_drop()) {
         return transition_reason_is(reason, SLOT_REASON_DROP)
     }
+    if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_cleanup()) {
+        return transition_reason_is(reason, SLOT_REASON_CLEANUP)
+    }
     false
 }
 
@@ -914,10 +917,6 @@ fn verify_block_resource_witnesses(
     while index < operations.len() {
         let operation = operations.get(index).unwrap()
         let witness = witnesses.get(index).unwrap()
-        if rc_op_kind_same(
-                rc_operation_kind(operation), rc_op_kind_cleanup()) {
-            panic("resource certificate: Cleanup appears inside semantic block")
-        }
         if !operation_matches_source_reason(operation, witness.reason) ||
            rc_slot_index_for(slots, rc_operation_source(operation)) !=
                witness.slot_index {

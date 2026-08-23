@@ -9,6 +9,59 @@
 
 use ir_identity::{SlotRef, slot_ref_same}
 use ir_inventory::{ExecutableRef, executable_ref_same}
+use flow_ir::{
+    FlowProgram, FlowTypeNode, FlowTypeRef, FlowSemanticRole,
+    FlowCallable, FlowBody, FlowSlot, FlowScope, FlowScopeRef,
+    FlowInstruction, FlowTerminator, FlowCallTarget,
+    validate_flow_program,
+    flow_program_type_nodes, flow_program_callables, flow_program_bodies,
+    flow_program_topology_fingerprint,
+    flow_topology_fingerprint_canonical,
+    flow_type_ref_index, flow_type_ref_same,
+    flow_type_node_reference, flow_type_node_kind,
+    flow_type_node_children, flow_type_node_generic_param,
+    flow_type_node_semantic_seed, flow_type_node_drop_contract,
+    flow_type_node_foreign_contract,
+    flow_type_kind_tag, flow_type_semantic_seed_tag,
+    flow_generic_param_index, flow_generic_param_arity,
+    flow_foreign_contract_is_managed,
+    flow_semantic_role_tag,
+    flow_call_contract_parameter_roles, flow_call_contract_result_role,
+    flow_callable_reference, flow_callable_parameter_types,
+    flow_callable_result_type, flow_callable_mode,
+    flow_callable_mode_concrete_body, flow_callable_mode_same,
+    flow_callable_semantic_contract, flow_callable_call_edges,
+    flow_call_edge_target, flow_call_edge_arguments, flow_call_edge_result,
+    flow_call_target_contract, flow_call_target_candidates,
+    flow_body_reference, flow_body_scopes, flow_body_slots,
+    flow_body_entry, flow_body_blocks, flow_body_exit_edges,
+    flow_scope_reference, flow_scope_has_parent, flow_scope_parent,
+    flow_scope_ref_ordinal, flow_scope_ref_same,
+    flow_slot_reference, flow_slot_type, flow_slot_scope,
+    flow_slot_reverse_ordinal, flow_slot_initial_state,
+    flow_slot_storage, flow_slot_storage_contract,
+    flow_initial_slot_state_tag, flow_storage_class_tag,
+    flow_storage_contract_tag,
+    flow_block_reference, flow_block_instructions, flow_block_terminator,
+    flow_block_ref_ordinal,
+    flow_instruction_kind_tag,
+    flow_initialize_operation, flow_initialize_inputs,
+    flow_initialize_target,
+    flow_operation_contract_input_roles,
+    flow_read_source, flow_read_target,
+    flow_mutate_target, flow_mutate_value,
+    flow_mutate_target_role, flow_mutate_value_role,
+    flow_consume_source, flow_discard_source,
+    flow_assign_rhs_temp, flow_assign_target,
+    flow_call_target, flow_call_arguments, flow_call_result,
+    flow_project_base, flow_project_result, flow_project_is_partial,
+    flow_capture_source, flow_capture_target, flow_capture_source_role,
+    flow_capture_target_role,
+    flow_scope_instruction_scope,
+    flow_terminator_kind_tag, flow_terminator_successors,
+    flow_terminator_read_slots, flow_terminator_terminal_exited_scopes,
+    flow_successor_target, flow_successor_exited_scopes,
+    flow_exit_kind_tag, flow_exit_edge_kind, flow_exit_edge_value}
 use resource_model::{
     ParamMode, TransferDemand,
     LogicalOwnershipShape, PhysicalRcShape,
@@ -317,6 +370,26 @@ fn copy_planner_callables(values: List<PlannerCallable>) -> List<PlannerCallable
 // Frozen FlowIR adapter: body, slots, operations, CFG edges
 // ============================================================
 
+pub struct PlannerScope {
+    scope_id: Int,
+    depth: Int
+}
+
+pub fn make_planner_scope(scope_id: Int, depth: Int) -> PlannerScope {
+    if scope_id < 0 || depth < 0 {
+        panic("ResourcePlanner: invalid frozen scope metadata")
+    }
+    PlannerScope { scope_id: scope_id, depth: depth }
+}
+
+fn copy_planner_scopes(values: List<PlannerScope>) -> List<PlannerScope> {
+    let mut result: List<PlannerScope> = []
+    for value in values {
+        result.push(make_planner_scope(value.scope_id, value.depth))
+    }
+    result
+}
+
 pub struct PlannerSlot {
     reference: SlotRef,
     type_index: Int,
@@ -360,6 +433,8 @@ fn copy_planner_slots(values: List<PlannerSlot>) -> List<PlannerSlot> {
 }
 
 enum PlannerEventValue {
+    NoOpValue,
+    ScopeExitValue(Int),
     InitializeValue {
         input_slots: List<Int>,
         input_demands: List<TransferDemand>,
@@ -377,7 +452,10 @@ enum PlannerEventValue {
     DiscardValue(Int),
     AssignValue { rhs_temp: Int, target: Int },
     CallValue {
-        callable_index: Int,
+        callable_indices: List<Int>,
+        argument_demands: List<TransferDemand>,
+        result_owned: Bool,
+        result_type_index: Int,
         argument_slots: List<Int>,
         result_slot: Int?
     },
@@ -394,6 +472,15 @@ enum PlannerEventValue {
 }
 
 pub struct PlannerEvent { value: PlannerEventValue }
+
+pub fn make_planner_noop() -> PlannerEvent {
+    PlannerEvent { value: PlannerEventValue::NoOpValue }
+}
+
+pub fn make_planner_scope_exit(scope_id: Int) -> PlannerEvent {
+    if scope_id < 0 { panic("ResourcePlanner: negative lexical scope exit") }
+    PlannerEvent { value: PlannerEventValue::ScopeExitValue(scope_id) }
+}
 
 pub fn make_planner_initialize(
     input_slots: List<Int>, input_demands: List<TransferDemand>, target: Int
@@ -460,13 +547,38 @@ pub fn make_planner_assign(rhs_temp: Int, target: Int) -> PlannerEvent {
     }
 }
 pub fn make_planner_call(
-    callable_index: Int, argument_slots: List<Int>, result_slot: Int?
+    callable_indices: List<Int>, argument_slots: List<Int>,
+    argument_demands: List<TransferDemand>,
+    result_owned: Bool, result_type_index: Int, result_slot: Int?
 ) -> PlannerEvent {
+    if callable_indices.len() == 0 ||
+       argument_slots.len() != argument_demands.len() ||
+       result_type_index < 0 {
+        panic("ResourcePlanner: call contract is incomplete")
+    }
+    let mut candidates: List<Int> = []
     let mut arguments: List<Int> = []
+    let mut demands: List<TransferDemand> = []
+    for candidate in callable_indices {
+        if candidate < 0 || int_list_contains(candidates, candidate) {
+            panic("ResourcePlanner: call candidate set is invalid")
+        }
+        candidates.push(candidate)
+    }
     for slot in argument_slots { arguments.push(slot) }
+    for demand in argument_demands {
+        if param_mode_is_conflict(transfer_demand_mode(demand)) {
+            panic("ResourcePlanner: call argument demand is conflicting")
+        }
+        demands.push(make_transfer_demand(
+            transfer_demand_mode(demand), transfer_demand_force(demand)))
+    }
     PlannerEvent {
         value: PlannerEventValue::CallValue {
-            callable_index: callable_index,
+            callable_indices: candidates,
+            argument_demands: demands,
+            result_owned: result_owned,
+            result_type_index: result_type_index,
             argument_slots: arguments,
             result_slot: result_slot
         }
@@ -500,6 +612,9 @@ pub fn make_planner_capture(
 
 fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
     match value.value {
+        PlannerEventValue::NoOpValue => make_planner_noop(),
+        PlannerEventValue::ScopeExitValue(scope_id) =>
+            make_planner_scope_exit(scope_id),
         PlannerEventValue::InitializeValue {
             input_slots, input_demands, target
         } => make_planner_initialize(input_slots, input_demands, target),
@@ -518,8 +633,12 @@ fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
         PlannerEventValue::AssignValue { rhs_temp, target } =>
             make_planner_assign(rhs_temp, target),
         PlannerEventValue::CallValue {
-            callable_index, argument_slots, result_slot
-        } => make_planner_call(callable_index, argument_slots, result_slot),
+            callable_indices, argument_demands,
+            result_owned, result_type_index,
+            argument_slots, result_slot
+        } => make_planner_call(
+            callable_indices, argument_slots, argument_demands,
+            result_owned, result_type_index, result_slot),
         PlannerEventValue::ProjectValue {
             source, target, whole_slot
         } => make_planner_project(source, target, whole_slot),
@@ -599,13 +718,15 @@ pub fn make_planner_block(
 
 pub struct PlannerBody {
     reference: ExecutableRef,
+    scopes: List<PlannerScope>,
     slots: List<PlannerSlot>,
     entry_block: Int,
     blocks: List<PlannerBlock>
 }
 
 pub fn make_planner_body(
-    reference: ExecutableRef, slots: List<PlannerSlot>,
+    reference: ExecutableRef, scopes: List<PlannerScope>,
+    slots: List<PlannerSlot>,
     entry_block: Int, blocks: List<PlannerBlock>
 ) -> PlannerBody {
     let mut copied_blocks: List<PlannerBlock> = []
@@ -615,6 +736,7 @@ pub fn make_planner_body(
     }
     PlannerBody {
         reference: reference,
+        scopes: copy_planner_scopes(scopes),
         slots: copy_planner_slots(slots),
         entry_block: entry_block,
         blocks: copied_blocks
@@ -625,7 +747,8 @@ fn copy_planner_bodies(values: List<PlannerBody>) -> List<PlannerBody> {
     let mut result: List<PlannerBody> = []
     for value in values {
         result.push(make_planner_body(
-            value.reference, value.slots, value.entry_block, value.blocks))
+            value.reference, value.scopes, value.slots,
+            value.entry_block, value.blocks))
     }
     result
 }
@@ -645,9 +768,16 @@ fn validate_slot_index(index: Int, slots: List<PlannerSlot>) {
 
 fn validate_event(
     event: PlannerEvent, slots: List<PlannerSlot>,
-    callables: List<PlannerCallable>
+    scopes: List<PlannerScope>, callables: List<PlannerCallable>,
+    type_nodes: List<PlannerTypeNode>
 ) {
     match event.value {
+        PlannerEventValue::NoOpValue => {},
+        PlannerEventValue::ScopeExitValue(scope_id) => {
+            if planner_scope_depth(scopes, scope_id).is_none() {
+                panic("ResourcePlanner: scope-exit marker has no frozen scope")
+            }
+        },
         PlannerEventValue::InitializeValue {
             input_slots, input_demands, target
         } => {
@@ -690,14 +820,24 @@ fn validate_event(
             }
         },
         PlannerEventValue::CallValue {
-            callable_index, argument_slots, result_slot
+            callable_indices, argument_demands,
+            result_owned: _, result_type_index,
+            argument_slots, result_slot
         } => {
-            if callable_index < 0 || callable_index >= callables.len() {
-                panic("ResourcePlanner: call lacks exact callable")
+            if callable_indices.len() == 0 ||
+               argument_slots.len() != argument_demands.len() ||
+               result_type_index < 0 ||
+               result_type_index >= type_nodes.len() {
+                panic("ResourcePlanner: call contract is incomplete")
             }
-            let callable = callables.get(callable_index).unwrap()
-            if argument_slots.len() != callable.parameter_type_indices.len() {
-                panic("ResourcePlanner: call argument census differs")
+            for callable_index in callable_indices {
+                if callable_index < 0 || callable_index >= callables.len() {
+                    panic("ResourcePlanner: call lacks exact callable candidate")
+                }
+                if argument_slots.len() != callables.get(
+                        callable_index).unwrap().parameter_type_indices.len() {
+                    panic("ResourcePlanner: call candidate arity differs")
+                }
             }
             for slot in argument_slots { validate_slot_index(slot, slots) }
             match result_slot {
@@ -729,15 +869,17 @@ fn validate_event(
     }
 }
 
-fn scope_depth_for_id(slots: List<PlannerSlot>, scope_id: Int) -> Int? {
+fn planner_scope_depth(
+    scopes: List<PlannerScope>, scope_id: Int
+) -> Int? {
     let mut result: Int? = none
-    for slot in slots {
-        if slot.scope_id == scope_id {
+    for scope in scopes {
+        if scope.scope_id == scope_id {
             match result {
-                some(depth) => if depth != slot.scope_depth {
+                some(_) => {
                     panic("ResourcePlanner: one scope has multiple depths")
                 },
-                none => { result = some(slot.scope_depth) }
+                none => { result = some(scope.depth) }
             }
         }
     }
@@ -752,9 +894,27 @@ fn validate_body(
        body.entry_block >= body.blocks.len() {
         panic("ResourcePlanner: body lacks a valid frozen entry block")
     }
+    let mut scope_index = 0
+    while scope_index < body.scopes.len() {
+        let scope = body.scopes.get(scope_index).unwrap()
+        let mut other = scope_index + 1
+        while other < body.scopes.len() {
+            if scope.scope_id == body.scopes.get(other).unwrap().scope_id {
+                panic("ResourcePlanner: duplicate frozen scope")
+            }
+            other = other + 1
+        }
+        scope_index = scope_index + 1
+    }
     let mut left_index = 0
     while left_index < body.slots.len() {
         let left = body.slots.get(left_index).unwrap()
+        match planner_scope_depth(body.scopes, left.scope_id) {
+            some(depth) => if depth != left.scope_depth {
+                panic("ResourcePlanner: slot/scope depth differs")
+            },
+            none => panic("ResourcePlanner: slot has no frozen scope")
+        }
         if left.type_index < 0 || left.type_index >= type_nodes.len() {
             panic("ResourcePlanner: slot type is outside frozen type graph")
         }
@@ -775,7 +935,8 @@ fn validate_body(
     }
     for block in body.blocks {
         for event in block.events {
-            validate_event(event, body.slots, callables)
+            validate_event(
+                event, body.slots, body.scopes, callables, type_nodes)
         }
         for usage in block.terminator_uses {
             validate_slot_index(usage.slot, body.slots)
@@ -795,7 +956,7 @@ fn validate_body(
             }
             previous_depth = none
             for scope_id in edge.exited_scope_ids {
-                match scope_depth_for_id(body.slots, scope_id) {
+                match planner_scope_depth(body.scopes, scope_id) {
                     some(depth) => {
                         match previous_depth {
                             some(previous) => if depth >= previous {
@@ -832,8 +993,8 @@ pub fn make_frozen_planner_input(
                 panic("ResourcePlanner: type child is outside frozen graph")
             }
             let child_node = copied_types.get(child).unwrap()
-            if child_node.type_parameter_count != node.type_parameter_count {
-                panic("ResourcePlanner: recursive type parameter arity drifted")
+            if child_node.type_parameter_count > node.type_parameter_count {
+                panic("ResourcePlanner: child type parameter domain escapes parent")
             }
         }
         type_index = type_index + 1
@@ -1082,18 +1243,28 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
         for child_index in node.child_type_indices {
             let child = type_layouts.get(child_index).unwrap()
             let mut logical_component = 0
-            while logical_component < 2 + layout.parameter_count {
+            while logical_component < 2 {
                 add_constraint(constraints, RULE_TYPE_CHILD,
                     layout.logical_start + logical_component, 0,
                     [child.logical_start + logical_component])
                 logical_component = logical_component + 1
             }
             let mut physical_component = 0
-            while physical_component < 4 + layout.parameter_count {
+            while physical_component < 4 {
                 add_constraint(constraints, RULE_TYPE_CHILD,
                     layout.physical_start + physical_component, 0,
                     [child.physical_start + physical_component])
                 physical_component = physical_component + 1
+            }
+            let mut parameter = 0
+            while parameter < child.parameter_count {
+                add_constraint(constraints, RULE_TYPE_CHILD,
+                    layout.logical_start + 2 + parameter, 0,
+                    [child.logical_start + 2 + parameter])
+                add_constraint(constraints, RULE_TYPE_CHILD,
+                    layout.physical_start + 4 + parameter, 0,
+                    [child.physical_start + 4 + parameter])
+                parameter = parameter + 1
             }
         }
         type_index = type_index + 1
@@ -1383,14 +1554,60 @@ fn apply_demand_abstract(
     }
 }
 
+fn effective_call_demands(
+    callable_indices: List<Int>, lower_bounds: List<TransferDemand>,
+    solved_demands: List<List<TransferDemand>>
+) -> List<TransferDemand> {
+    let mut result: List<TransferDemand> = []
+    for lower in lower_bounds {
+        result.push(make_transfer_demand(
+            transfer_demand_mode(lower), transfer_demand_force(lower)))
+    }
+    for callable_index in callable_indices {
+        let candidate = solved_demands.get(callable_index).unwrap()
+        if candidate.len() != result.len() {
+            panic("ResourcePlanner: callable candidate contract arity differs")
+        }
+        let mut parameter = 0
+        while parameter < result.len() {
+            result.set(parameter, transfer_demand_join(
+                result.get(parameter).unwrap(),
+                candidate.get(parameter).unwrap()))
+            parameter = parameter + 1
+        }
+    }
+    result
+}
+
+fn effective_call_result_owned(
+    callable_indices: List<Int>, lower_bound: Bool,
+    solved_results: List<Bool>
+) -> Bool {
+    if lower_bound { return true }
+    for callable_index in callable_indices {
+        if solved_results.get(callable_index).unwrap() { return true }
+    }
+    false
+}
+
 fn apply_event_abstract(
     event: PlannerEvent, slots: List<PlannerSlot>,
     logical_shapes: List<LogicalOwnershipShape>,
     physical_shapes: List<PhysicalRcShape>,
     callable_demands: List<List<TransferDemand>>,
+    callable_results_owned: List<Bool>,
     mut states: List<SlotFlow>
 ) {
     match event.value {
+        PlannerEventValue::NoOpValue => {},
+        PlannerEventValue::ScopeExitValue(scope_id) => {
+            for slot_index in cleanup_slot_order(slots, [scope_id]) {
+                let before = states.get(slot_index).unwrap()
+                if !slot_flow_same(before, slot_flow_unreachable()) {
+                    states.set(slot_index, slot_flow_empty())
+                }
+            }
+        },
         PlannerEventValue::InitializeValue {
             input_slots, input_demands, target
         } => {
@@ -1472,9 +1689,14 @@ fn apply_event_abstract(
             states.set(rhs_temp, slot_flow_moved())
         },
         PlannerEventValue::CallValue {
-            callable_index, argument_slots, result_slot
+            callable_indices, argument_demands,
+            result_owned, result_type_index,
+            argument_slots, result_slot
         } => {
-            let demands = callable_demands.get(callable_index).unwrap()
+            let demands = effective_call_demands(
+                callable_indices, argument_demands, callable_demands)
+            let effective_result_owned = effective_call_result_owned(
+                callable_indices, result_owned, callable_results_owned)
             let mut argument = 0
             while argument < argument_slots.len() {
                 apply_demand_abstract(
@@ -1492,7 +1714,13 @@ fn apply_event_abstract(
                     }
                     states.set(slot, slot_flow_live())
                 },
-                none => {}
+                none => if effective_result_owned &&
+                        (logical_shape_may_take(
+                            logical_shapes.get(result_type_index).unwrap()) ||
+                         physical_shape_may_drop(
+                            physical_shapes.get(result_type_index).unwrap())) {
+                    panic("ResourcePlanner: owned call result lacks precreated result slot")
+                }
             }
         },
         PlannerEventValue::ProjectValue {
@@ -1637,7 +1865,8 @@ fn solve_body_entry_states(
                     apply_event_abstract(
                         event, body.slots, solved.logical_shapes,
                         solved.physical_shapes,
-                        solved.callable_demands, states)
+                        solved.callable_demands,
+                        solved.callable_results_owned, states)
                 }
                 for usage in block.terminator_uses {
                     apply_demand_abstract(
@@ -1753,6 +1982,30 @@ fn materialize_event(
     let mut after_ops: List<RcOperation> = []
     let transitions: List<SlotTransitionWitness> = []
     match event.value {
+        PlannerEventValue::NoOpValue => {},
+        PlannerEventValue::ScopeExitValue(scope_id) => {
+            for slot_index in cleanup_slot_order(body.slots, [scope_id]) {
+                let slot = body.slots.get(slot_index).unwrap()
+                let before = states.get(slot_index).unwrap()
+                if !slot_flow_same(before, slot_flow_unreachable()) {
+                    let logical = solved.logical_shapes.get(
+                        slot.type_index).unwrap()
+                    let physical = solved.physical_shapes.get(
+                        slot.type_index).unwrap()
+                    if slot.owns_storage &&
+                       (physical_shape_may_drop(physical) ||
+                        logical_shape_may_take(logical)) {
+                        before_ops.push(make_rc_cleanup(slot.reference))
+                        push_transition(transitions, slot_index, before,
+                            slot_flow_empty(), slot_reason_cleanup())
+                    } else {
+                        push_transition(transitions, slot_index, before,
+                            slot_flow_empty(), slot_reason_scope_end())
+                    }
+                    states.set(slot_index, slot_flow_empty())
+                }
+            }
+        },
         PlannerEventValue::InitializeValue {
             input_slots, input_demands, target
         } => {
@@ -1887,9 +2140,16 @@ fn materialize_event(
                 })
         },
         PlannerEventValue::CallValue {
-            callable_index, argument_slots, result_slot
+            callable_indices, argument_demands,
+            result_owned, result_type_index,
+            argument_slots, result_slot
         } => {
-            let demands = solved.callable_demands.get(callable_index).unwrap()
+            let demands = effective_call_demands(
+                callable_indices, argument_demands,
+                solved.callable_demands)
+            let effective_result_owned = effective_call_result_owned(
+                callable_indices, result_owned,
+                solved.callable_results_owned)
             let mut argument = 0
             while argument < argument_slots.len() {
                 apply_demand_materialized(
@@ -1908,8 +2168,7 @@ fn materialize_event(
                     states.set(slot, slot_flow_live())
                     push_transition(transitions, slot, before,
                         slot_flow_live(), slot_reason_call_result())
-                    if !solved.callable_results_owned.get(
-                            callable_index).unwrap() &&
+                    if !effective_result_owned &&
                        body.slots.get(slot).unwrap().owns_storage {
                         let type_index = body.slots.get(slot).unwrap().type_index
                         if logical_shape_may_take(
@@ -1926,10 +2185,8 @@ fn materialize_event(
                         }
                     }
                 },
-                none => if solved.callable_results_owned.get(
-                        callable_index).unwrap() {
-                    let result_type = solved.callable_result_type_indices.get(
-                        callable_index).unwrap()
+                none => if effective_result_owned {
+                    let result_type = result_type_index
                     if logical_shape_may_take(
                             solved.logical_shapes.get(result_type).unwrap()) ||
                        physical_shape_may_drop(
@@ -2152,6 +2409,542 @@ fn plan_body(body: PlannerBody, solved: SolvedResourceGraph) -> PlannedBody {
         certificate: make_cfg_body_certificate(
             body.entry_block, entry_seed, block_certificates)
     }
+}
+
+// ============================================================
+// Sole frozen FlowProgram adapter
+// ============================================================
+
+fn transfer_demand_from_flow_role(role: FlowSemanticRole) -> TransferDemand {
+    let tag = flow_semantic_role_tag(role)
+    if tag == 0 {
+        return make_transfer_demand(param_mode_borrow(), false)
+    }
+    if tag == 1 {
+        return make_transfer_demand(param_mode_mut_borrow(), false)
+    }
+    if tag == 2 {
+        return make_transfer_demand(param_mode_own(), false)
+    }
+    if tag == 3 {
+        return make_transfer_demand(param_mode_own(), true)
+    }
+    panic("ResourcePlanner: unknown FlowIR semantic role")
+}
+
+fn flow_role_is_owned(role: FlowSemanticRole) -> Bool {
+    let tag = flow_semantic_role_tag(role)
+    tag == 2 || tag == 3
+}
+
+fn flow_resource_children(node: FlowTypeNode) -> List<FlowTypeRef> {
+    let tag = flow_type_kind_tag(flow_type_node_kind(node))
+    // Ptr pointees and callable signatures do not contribute to the value's
+    // own resource representation. Nominal fields and structural elements do.
+    if tag == 6 || tag == 7 || tag == 8 || tag == 9 {
+        return flow_type_node_children(node)
+    }
+    []
+}
+
+fn compute_flow_type_arities(nodes: List<FlowTypeNode>) -> List<Int> {
+    let mut arities: List<Int> = []
+    let mut max_arity = 0
+    for node in nodes {
+        let tag = flow_type_kind_tag(flow_type_node_kind(node))
+        let arity = if tag == 12 {
+            flow_generic_param_arity(flow_type_node_generic_param(node))
+        } else {
+            0
+        }
+        arities.push(arity)
+        if arity > max_arity { max_arity = arity }
+    }
+    let exact_rank_budget = nodes.len() * max_arity
+    let mut promotions = 0
+    let mut changed = true
+    while changed {
+        changed = false
+        let mut node_index = 0
+        while node_index < nodes.len() {
+            let node = nodes.get(node_index).unwrap()
+            let mut required = arities.get(node_index).unwrap()
+            for child in flow_resource_children(node) {
+                let child_arity = arities.get(
+                    flow_type_ref_index(child)).unwrap()
+                if child_arity > required { required = child_arity }
+            }
+            if required > arities.get(node_index).unwrap() {
+                arities.set(node_index, required)
+                promotions = promotions + 1
+                if promotions > exact_rank_budget {
+                    panic("ResourcePlanner: FlowIR generic arity graph did not converge")
+                }
+                changed = true
+            }
+            node_index = node_index + 1
+        }
+    }
+    arities
+}
+
+fn planner_type_kind_from_flow(node: FlowTypeNode) -> PlannerTypeKind {
+    let tag = flow_type_kind_tag(flow_type_node_kind(node))
+    if tag >= 0 && tag <= 5 { return planner_type_kind_atomic() }
+    if tag == 6 || tag == 7 { return planner_type_kind_nominal() }
+    if tag == 8 { return planner_type_kind_tuple() }
+    if tag == 9 { return planner_type_kind_record() }
+    if tag == 10 { return planner_type_kind_callable() }
+    if tag == 11 { return planner_type_kind_ptr() }
+    if tag == 12 { return planner_type_kind_parameter() }
+    if tag == 13 { return planner_type_kind_extern() }
+    panic("ResourcePlanner: unknown FlowIR type kind crossed adapter")
+}
+
+fn planner_type_node_from_flow(
+    node: FlowTypeNode, arity: Int
+) -> PlannerTypeNode {
+    let seed_tag = flow_type_semantic_seed_tag(
+        flow_type_node_semantic_seed(node))
+    let drop_contract = flow_type_node_drop_contract(node)
+    let foreign_contract = flow_type_node_foreign_contract(node)
+    let managed_foreign = match foreign_contract {
+        some(contract) => flow_foreign_contract_is_managed(contract),
+        none => false
+    }
+    let mut children: List<Int> = []
+    for child in flow_resource_children(node) {
+        children.push(flow_type_ref_index(child))
+    }
+    let is_unique = seed_tag == 2 || drop_contract.is_some()
+    let is_shareable = seed_tag == 3 || managed_foreign
+    let parameter_index = if flow_type_kind_tag(
+            flow_type_node_kind(node)) == 12 {
+        some(flow_generic_param_index(flow_type_node_generic_param(node)))
+    } else {
+        none
+    }
+    make_planner_type_node(
+        planner_type_kind_from_flow(node), children, arity, parameter_index,
+        drop_contract.is_some(), is_unique,
+        is_shareable, is_shareable || is_unique,
+        is_shareable || drop_contract.is_some(), seed_tag == 4)
+}
+
+fn flow_callable_index(
+    callables: List<FlowCallable>, reference: ExecutableRef
+) -> Int {
+    let mut index = 0
+    while index < callables.len() {
+        if executable_ref_same(
+                flow_callable_reference(callables.get(index).unwrap()),
+                reference) {
+            return index
+        }
+        index = index + 1
+    }
+    panic("ResourcePlanner: exact FlowIR callable is absent")
+}
+
+fn flow_body_for_reference(
+    bodies: List<FlowBody>, reference: ExecutableRef
+) -> FlowBody? {
+    for body in bodies {
+        if executable_ref_same(flow_body_reference(body), reference) {
+            return some(body)
+        }
+    }
+    none
+}
+
+fn flow_parameter_slots(body: FlowBody) -> List<FlowSlot> {
+    let mut result: List<FlowSlot> = []
+    for slot in flow_body_slots(body) {
+        if flow_storage_class_tag(flow_slot_storage(slot)) == 0 {
+            result.push(slot)
+        }
+    }
+    result
+}
+
+fn argument_source_from_flow(
+    argument: SlotRef, parameters: List<FlowSlot>
+) -> PlannerArgumentSource {
+    let mut index = 0
+    while index < parameters.len() {
+        if slot_ref_same(
+                argument, flow_slot_reference(parameters.get(index).unwrap())) {
+            return make_caller_parameter_source(index)
+        }
+        index = index + 1
+    }
+    make_local_argument_source()
+}
+
+fn flow_result_is_direct_return(body: FlowBody, result: SlotRef?) -> Bool {
+    match result {
+        none => return false,
+        some(slot) => {
+            for edge in flow_body_exit_edges(body) {
+                if flow_exit_kind_tag(flow_exit_edge_kind(edge)) == 0 {
+                    match flow_exit_edge_value(edge) {
+                        some(returned) => if slot_ref_same(slot, returned) {
+                            return true
+                        },
+                        none => {}
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn planner_callable_from_flow(
+    callable: FlowCallable, all_callables: List<FlowCallable>,
+    bodies: List<FlowBody>
+) -> PlannerCallable {
+    let mut parameter_types: List<Int> = []
+    for ty in flow_callable_parameter_types(callable) {
+        parameter_types.push(flow_type_ref_index(ty))
+    }
+    let contract = flow_callable_semantic_contract(callable)
+    let mut seeds: List<TransferDemand> = []
+    for role in flow_call_contract_parameter_roles(contract) {
+        seeds.push(transfer_demand_from_flow_role(role))
+    }
+    let has_body = flow_callable_mode_same(
+        flow_callable_mode(callable), flow_callable_mode_concrete_body())
+    let mut edges: List<PlannerCallEdge> = []
+    if has_body {
+        let body = match flow_body_for_reference(
+                bodies, flow_callable_reference(callable)) {
+            some(value) => value,
+            none => panic("ResourcePlanner: concrete FlowIR callable lacks body")
+        }
+        let parameters = flow_parameter_slots(body)
+        if parameters.len() != parameter_types.len() {
+            panic("ResourcePlanner: FlowIR parameter slot census differs")
+        }
+        let mut parameter = 0
+        while parameter < parameters.len() {
+            if !flow_type_ref_same(
+                    flow_slot_type(parameters.get(parameter).unwrap()),
+                    flow_callable_parameter_types(callable).get(parameter).unwrap()) {
+                panic("ResourcePlanner: parameter slot/signature type order differs")
+            }
+            parameter = parameter + 1
+        }
+        for edge in flow_callable_call_edges(callable) {
+            let mut sources: List<PlannerArgumentSource> = []
+            for argument in flow_call_edge_arguments(edge) {
+                sources.push(argument_source_from_flow(argument, parameters))
+            }
+            let forwards_result = flow_result_is_direct_return(
+                body, flow_call_edge_result(edge))
+            for candidate in flow_call_target_candidates(
+                    flow_call_edge_target(edge)) {
+                edges.push(make_planner_call_edge(
+                    flow_callable_index(all_callables, candidate),
+                    sources, forwards_result))
+            }
+        }
+    }
+    make_planner_callable(
+        flow_callable_reference(callable), parameter_types,
+        flow_type_ref_index(flow_callable_result_type(callable)),
+        seeds,
+        flow_role_is_owned(flow_call_contract_result_role(contract)),
+        edges, has_body)
+}
+
+fn flow_scope_depth(
+    scopes: List<FlowScope>, target: FlowScopeRef
+) -> Int {
+    let mut current = target
+    let mut depth = 0
+    let mut traversed = 0
+    while true {
+        let mut found: FlowScope? = none
+        for scope in scopes {
+            if flow_scope_ref_same(flow_scope_reference(scope), current) {
+                found = some(scope)
+            }
+        }
+        let scope = match found {
+            some(value) => value,
+            none => panic("ResourcePlanner: slot scope is outside FlowIR body")
+        }
+        if !flow_scope_has_parent(scope) { return depth }
+        current = flow_scope_parent(scope)
+        depth = depth + 1
+        traversed = traversed + 1
+        if traversed >= scopes.len() {
+            panic("ResourcePlanner: FlowIR scope parent cycle")
+        }
+    }
+    0
+}
+
+fn flow_slot_index(slots: List<FlowSlot>, target: SlotRef) -> Int {
+    let mut index = 0
+    while index < slots.len() {
+        if slot_ref_same(flow_slot_reference(slots.get(index).unwrap()), target) {
+            return index
+        }
+        index = index + 1
+    }
+    panic("ResourcePlanner: FlowIR operand lacks frozen slot")
+}
+
+fn flow_call_candidate_indices(
+    target: FlowCallTarget, callables: List<FlowCallable>
+) -> List<Int> {
+    let mut result: List<Int> = []
+    for candidate in flow_call_target_candidates(target) {
+        result.push(flow_callable_index(callables, candidate))
+    }
+    result
+}
+
+fn flow_call_result_type_index(
+    target: FlowCallTarget, callables: List<FlowCallable>
+) -> Int {
+    let candidates = flow_call_target_candidates(target)
+    let first = match candidates.get(0) {
+        some(value) => flow_callable_result_type(
+            callables.get(flow_callable_index(callables, value)).unwrap()),
+        none => panic("ResourcePlanner: call target has empty candidate set")
+    }
+    for candidate in candidates {
+        let result = flow_callable_result_type(
+            callables.get(flow_callable_index(callables, candidate)).unwrap())
+        if !flow_type_ref_same(first, result) {
+            panic("ResourcePlanner: dynamic callable result type differs")
+        }
+    }
+    flow_type_ref_index(first)
+}
+
+fn planner_event_from_flow(
+    instruction: FlowInstruction, slots: List<FlowSlot>,
+    callables: List<FlowCallable>
+) -> PlannerEvent {
+    let tag = flow_instruction_kind_tag(instruction)
+    if tag == 0 {
+        let operation = flow_initialize_operation(instruction)
+        let mut inputs: List<Int> = []
+        for slot in flow_initialize_inputs(instruction) {
+            inputs.push(flow_slot_index(slots, slot))
+        }
+        let mut demands: List<TransferDemand> = []
+        for role in flow_operation_contract_input_roles(operation) {
+            demands.push(transfer_demand_from_flow_role(role))
+        }
+        return make_planner_initialize(
+            inputs, demands,
+            flow_slot_index(slots, flow_initialize_target(instruction)))
+    }
+    if tag == 1 {
+        return make_planner_read(
+            flow_slot_index(slots, flow_read_source(instruction)),
+            flow_slot_index(slots, flow_read_target(instruction)))
+    }
+    if tag == 2 {
+        let target_role = flow_mutate_target_role(instruction)
+        if flow_semantic_role_tag(target_role) != 1 {
+            panic("ResourcePlanner: mutate target is not exact MutBorrow")
+        }
+        return make_planner_mutate(
+            flow_slot_index(slots, flow_mutate_target(instruction)),
+            flow_slot_index(slots, flow_mutate_value(instruction)),
+            transfer_demand_from_flow_role(
+                flow_mutate_value_role(instruction)))
+    }
+    if tag == 3 {
+        return make_planner_consume(
+            flow_slot_index(slots, flow_consume_source(instruction)), false)
+    }
+    if tag == 4 {
+        return make_planner_discard(
+            flow_slot_index(slots, flow_discard_source(instruction)))
+    }
+    if tag == 5 {
+        return make_planner_assign(
+            flow_slot_index(slots, flow_assign_rhs_temp(instruction)),
+            flow_slot_index(slots, flow_assign_target(instruction)))
+    }
+    if tag == 6 {
+        let target = flow_call_target(instruction)
+        let contract = flow_call_target_contract(target)
+        let mut arguments: List<Int> = []
+        for slot in flow_call_arguments(instruction) {
+            arguments.push(flow_slot_index(slots, slot))
+        }
+        let mut demands: List<TransferDemand> = []
+        for role in flow_call_contract_parameter_roles(contract) {
+            demands.push(transfer_demand_from_flow_role(role))
+        }
+        let result = match flow_call_result(instruction) {
+            some(slot) => some(flow_slot_index(slots, slot)),
+            none => none
+        }
+        return make_planner_call(
+            flow_call_candidate_indices(target, callables),
+            arguments, demands,
+            flow_role_is_owned(flow_call_contract_result_role(contract)),
+            flow_call_result_type_index(target, callables), result)
+    }
+    if tag == 7 {
+        return make_planner_project(
+            flow_slot_index(slots, flow_project_base(instruction)),
+            flow_slot_index(slots, flow_project_result(instruction)),
+            !flow_project_is_partial(instruction))
+    }
+    if tag == 8 {
+        let source_role = flow_capture_source_role(instruction)
+        let target_index = flow_slot_index(
+            slots, flow_capture_target(instruction))
+        let target_owns = flow_storage_contract_tag(flow_slot_storage_contract(
+            slots.get(target_index).unwrap())) == 0
+        let target_role_owned = flow_role_is_owned(
+            flow_capture_target_role(instruction))
+        if target_owns != target_role_owned {
+            panic("ResourcePlanner: capture target storage/role differs")
+        }
+        return make_planner_capture(
+            flow_slot_index(slots, flow_capture_source(instruction)),
+            target_index, transfer_demand_from_flow_role(source_role))
+    }
+    if tag == 9 { return make_planner_noop() }
+    if tag == 10 {
+        return make_planner_scope_exit(flow_scope_ref_ordinal(
+            flow_scope_instruction_scope(instruction)))
+    }
+    panic("ResourcePlanner: unknown FlowIR instruction kind")
+}
+
+fn planner_terminator_uses_from_flow(
+    terminator: FlowTerminator, slots: List<FlowSlot>
+) -> List<PlannerTerminatorUse> {
+    let mut result: List<PlannerTerminatorUse> = []
+    let tag = flow_terminator_kind_tag(terminator)
+    for slot in flow_terminator_read_slots(terminator) {
+        result.push(make_planner_terminator_use(
+            flow_slot_index(slots, slot),
+            if tag == 3 {
+                make_transfer_demand(param_mode_own(), false)
+            } else {
+                make_transfer_demand(param_mode_borrow(), false)
+            }))
+    }
+    result
+}
+
+fn exited_scope_ids(scopes: List<FlowScopeRef>) -> List<Int> {
+    let mut result: List<Int> = []
+    for scope in scopes { result.push(flow_scope_ref_ordinal(scope)) }
+    result
+}
+
+fn planner_edges_from_flow(terminator: FlowTerminator) -> List<PlannerEdge> {
+    let mut result: List<PlannerEdge> = []
+    let successors = flow_terminator_successors(terminator)
+    for successor in successors {
+        result.push(make_planner_edge(
+            some(flow_block_ref_ordinal(flow_successor_target(successor))),
+            exited_scope_ids(flow_successor_exited_scopes(successor))))
+    }
+    if result.len() == 0 {
+        let tag = flow_terminator_kind_tag(terminator)
+        if tag != 3 && tag != 8 && tag != 9 {
+            panic("ResourcePlanner: non-terminal FlowIR block has no successor")
+        }
+        result.push(make_planner_edge(
+            none, exited_scope_ids(
+                flow_terminator_terminal_exited_scopes(terminator))))
+    }
+    result
+}
+
+fn planner_body_from_flow(
+    body: FlowBody, callables: List<FlowCallable>
+) -> PlannerBody {
+    let flow_slots = flow_body_slots(body)
+    let scopes = flow_body_scopes(body)
+    let mut planner_scopes: List<PlannerScope> = []
+    for scope in scopes {
+        let reference = flow_scope_reference(scope)
+        planner_scopes.push(make_planner_scope(
+            flow_scope_ref_ordinal(reference),
+            flow_scope_depth(scopes, reference)))
+    }
+    let mut slots: List<PlannerSlot> = []
+    for slot in flow_slots {
+        let scope = flow_slot_scope(slot)
+        slots.push(make_planner_slot(
+            flow_slot_reference(slot),
+            flow_type_ref_index(flow_slot_type(slot)),
+            flow_scope_ref_ordinal(scope), flow_scope_depth(scopes, scope),
+            flow_slot_reverse_ordinal(slot),
+            flow_initial_slot_state_tag(flow_slot_initial_state(slot)) == 1,
+            flow_storage_contract_tag(flow_slot_storage_contract(slot)) == 0))
+    }
+    let mut blocks: List<PlannerBlock> = []
+    let mut expected_block = 0
+    for block in flow_body_blocks(body) {
+        let block_ref = flow_block_reference(block)
+        if flow_block_ref_ordinal(block_ref) != expected_block {
+            panic("ResourcePlanner: FlowIR block order drifted")
+        }
+        let mut events: List<PlannerEvent> = []
+        for instruction in flow_block_instructions(block) {
+            events.push(planner_event_from_flow(
+                instruction, flow_slots, callables))
+        }
+        let terminator = flow_block_terminator(block)
+        blocks.push(make_planner_block(
+            events, planner_terminator_uses_from_flow(terminator, flow_slots),
+            planner_edges_from_flow(terminator)))
+        expected_block = expected_block + 1
+    }
+    make_planner_body(
+        flow_body_reference(body), planner_scopes, slots,
+        flow_block_ref_ordinal(flow_body_entry(body)), blocks)
+}
+
+pub fn make_frozen_planner_input_from_flow(
+    program: FlowProgram
+) -> FrozenPlannerInput {
+    validate_flow_program(program)
+    let flow_types = flow_program_type_nodes(program)
+    let arities = compute_flow_type_arities(flow_types)
+    let mut types: List<PlannerTypeNode> = []
+    let mut type_index = 0
+    while type_index < flow_types.len() {
+        let node = flow_types.get(type_index).unwrap()
+        if flow_type_ref_index(flow_type_node_reference(node)) != type_index {
+            panic("ResourcePlanner: FlowIR type order drifted")
+        }
+        types.push(planner_type_node_from_flow(
+            node, arities.get(type_index).unwrap()))
+        type_index = type_index + 1
+    }
+    let flow_callables = flow_program_callables(program)
+    let flow_bodies = flow_program_bodies(program)
+    let mut callables: List<PlannerCallable> = []
+    for callable in flow_callables {
+        callables.push(planner_callable_from_flow(
+            callable, flow_callables, flow_bodies))
+    }
+    let mut bodies: List<PlannerBody> = []
+    for body in flow_bodies {
+        bodies.push(planner_body_from_flow(body, flow_callables))
+    }
+    make_frozen_planner_input(
+        flow_topology_fingerprint_canonical(
+            flow_program_topology_fingerprint(program)),
+        types, callables, bodies)
 }
 
 // ============================================================
