@@ -9114,6 +9114,452 @@ def nominal_field_u1b_source_check_errors(ring_exe: str) -> List[str]:
     return errors
 
 
+F2_TRAIT_METHOD_IDENTITY_PATHS = {
+    "identity": REPO / "compiler" / "ir_identity.ring",
+    "resolver": REPO / "compiler" / "resolver.ring",
+    "ctx": REPO / "compiler" / "infer_ctx.ring",
+    "env": REPO / "compiler" / "env.ring",
+    "register": REPO / "compiler" / "infer_register.ring",
+    "builtins": REPO / "compiler" / "builtins.ring",
+    "hir": REPO / "compiler" / "hir.ring",
+    "decl": REPO / "compiler" / "infer_decl.ring",
+    "andor": REPO / "compiler" / "andor_lower.ring",
+    "dict": REPO / "compiler" / "dict_lower.ring",
+    "codegen": REPO / "compiler" / "codegen_c_expr.ring",
+}
+F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT = 35
+
+
+def _trait_method_function_body(
+    sources: Mapping[str, str], source_name: str, function_name: str,
+    errors: List[str],
+) -> str:
+    body, body_error = _f0_function_body(
+        sources[source_name], function_name)
+    if body_error:
+        errors.append(body_error)
+        return ""
+    assert body is not None
+    return body
+
+
+def trait_method_identity_u1c_contract_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    """Exact trait declarations; candidate behavior remains an external gate."""
+    errors: List[str] = []
+    identity = sources["identity"]
+    resolver = sources["resolver"]
+    ctx = sources["ctx"]
+    env = sources["env"]
+    register = sources["register"]
+    builtins = sources["builtins"]
+    hir = sources["hir"]
+    decl = sources["decl"]
+    andor = sources["andor"]
+    dict_source = sources["dict"]
+
+    for struct_name, expected_fields in (
+        ("RegisteredTraitRef", ["symbol", "display_name"]),
+        ("TraitMethodRef", [
+            "trait_symbol", "member_symbol", "source_member_index",
+            "callable_slot_index", "method_name"]),
+    ):
+        fields, field_error = _f0_struct_fields(identity, struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None:
+            if [name for _, name in fields] != expected_fields:
+                errors.append(
+                    f"trait identity {struct_name} field inventory drifted")
+            if any(is_public for is_public, _ in fields):
+                errors.append(
+                    f"trait identity {struct_name} exposes forgeable fields")
+
+    fact_fields, fact_error = _f0_struct_fields(
+        resolver, "TraitIdentityFact")
+    if fact_error:
+        errors.append(fact_error)
+    elif fact_fields is not None:
+        if [name for _, name in fact_fields] != [
+                "file_key", "frame_index", "decl_index", "owner_ref",
+                "methods"]:
+            errors.append("trait identity fact inventory drifted")
+        if not all(is_public for is_public, _ in fact_fields):
+            errors.append("trait identity fact is not transportable")
+
+    registered_body = _trait_method_function_body(
+        sources, "identity", "make_registered_trait_ref", errors)
+    for token in (
+        'display_name == ""',
+        "symbol_ref_namespace_kind(symbol), namespace_trait()",
+        "RegisteredTraitRef { symbol: symbol, display_name: display_name }",
+    ):
+        if token not in registered_body:
+            errors.append(
+                f"RegisteredTraitRef constructor misses relation {token!r}")
+
+    method_body = _trait_method_function_body(
+        sources, "identity", "make_trait_method_ref", errors)
+    for token in (
+        "source_member_index < 0", "callable_slot_index < 0",
+        'method_name == ""',
+        "symbol_ref_namespace_kind(trait_symbol), namespace_trait()",
+        "symbol_ref_origin_module_key(trait_symbol), namespace_member()",
+        "symbol_ref_origin_module_key(trait_symbol) !=",
+        "symbol_ref_namespace_kind(member_symbol), namespace_member()",
+        "symbol_ref_canonical_payload(member_symbol) !=",
+        "symbol_ref_declaration_site_path(member_symbol) !=",
+        "source_member_index: source_member_index",
+        "callable_slot_index: callable_slot_index",
+        "method_name: method_name",
+    ):
+        if token not in method_body:
+            errors.append(
+                f"TraitMethodRef constructor misses relation {token!r}")
+    same_body = _trait_method_function_body(
+        sources, "identity", "trait_method_ref_same", errors)
+    for token in (
+        "symbol_ref_same(left.trait_symbol, right.trait_symbol)",
+        "symbol_ref_same(left.member_symbol, right.member_symbol)",
+        "left.source_member_index == right.source_member_index",
+        "left.callable_slot_index == right.callable_slot_index",
+        "left.method_name == right.method_name",
+    ):
+        if token not in same_body:
+            errors.append(f"TraitMethodRef equality misses {token!r}")
+
+    for container in ("ModuleNamespaceCensus", "ResolvedNamespacePlan"):
+        fields, field_error = _f0_struct_fields(resolver, container)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None and "trait_identities" not in [
+                name for _, name in fields]:
+            errors.append(f"{container} loses exact trait facts")
+
+    collect_body = _trait_method_function_body(
+        sources, "resolver", "collect_trait_identity_fact", errors)
+    for token in (
+        "for source_member_index in 0..methods.len()",
+        "some(Decl::Fn { name, .. })",
+        "owner_ref, source_member_index,",
+        "callable_slot_index, name",
+        "callable_slot_index = callable_slot_index + 1",
+        "append_trait_identity_fact(TraitIdentityFact {",
+    ):
+        if token not in collect_body:
+            errors.append(f"trait resolver producer misses {token!r}")
+    append_body = _trait_method_function_body(
+        sources, "resolver", "append_trait_identity_fact", errors)
+    if not all(token in append_body for token in (
+            "existing.file_key == fact.file_key",
+            "existing.frame_index == fact.frame_index",
+            "existing.decl_index == fact.decl_index",
+            "duplicate trait identity site")):
+        errors.append("trait resolver fact dedupe is not exact-site")
+    seed_body = _trait_method_function_body(
+        sources, "resolver", "collect_decl_seed", errors)
+    if not all(token in seed_body for token in (
+            "Decl::Trait { name, methods, is_pub, .. }",
+            "collect_trait_identity_fact(",
+            "frame, decl_index, owner_ref, methods, trait_identities")):
+        errors.append("trait resolver seed does not own method production")
+    resolve_body = _trait_method_function_body(
+        sources, "resolver", "resolve_namespace_plan", errors)
+    if "append_trait_identity_fact(fact, trait_identities)" not in resolve_body:
+        errors.append("resolved plan bypasses exact trait fact dedupe")
+    if resolver.count("make_trait_method_ref(") != 1:
+        errors.append("resolver TraitMethodRef producer count drifted")
+
+    install_body = _trait_method_function_body(
+        sources, "ctx", "install_struct_identity_ledger", errors)
+    for token in (
+        "ctx.trait_identity_unconsumed.len() != 0",
+        "for fact in plan.trait_identities",
+        "trait_identity_site_same(existing, fact)",
+        "ctx.trait_identity_unconsumed.push(fact)",
+    ):
+        if token not in install_body:
+            errors.append(f"trait registration ledger misses {token!r}")
+    site_body = _trait_method_function_body(
+        sources, "ctx", "trait_identity_site_same", errors)
+    if not all(token in site_body for token in (
+            "left.file_key == right.file_key",
+            "left.frame_index == right.frame_index",
+            "left.decl_index == right.decl_index")):
+        errors.append("trait registration site equality is incomplete")
+    peek_body = _trait_method_function_body(
+        sources, "ctx", "peek_trait_identity_fact", errors)
+    for token in (
+        "fact.file_key == file_key", "fact.frame_index == frame_index",
+        "fact.decl_index == decl_index", "fact.methods.len() != method_count",
+        "missing declaration fact",
+    ):
+        if token not in peek_body:
+            errors.append(f"trait registration peek misses {token!r}")
+    commit_body = _trait_method_function_body(
+        sources, "ctx", "commit_trait_identity_fact", errors)
+    if commit_body.count("trait_identity_fact_same(existing, fact)") != 1 or (
+            "if matches != 1" not in commit_body or
+            "ctx.trait_identity_unconsumed = remaining" not in commit_body):
+        errors.append("trait registration commit is not consume-once")
+    close_body = _trait_method_function_body(
+        sources, "ctx", "close_struct_identity_ledger", errors)
+    if ("ctx.trait_identity_unconsumed.len() != 0" not in close_body or
+            "ctx.trait_identity_unconsumed = []" not in close_body):
+        errors.append("trait registration ledger does not close")
+
+    hydration_body = _trait_method_function_body(
+        sources, "ctx", "apply_project_namespace_binding", errors)
+    for token in (
+        "binding.symbol,\n                        registered_trait_ref_symbol(def.owner_ref)",
+        "registered_trait_ref_display_name(def.owner_ref) !=",
+        "def.name || def.name != canonical_payload",
+        "ctx.env.trait_reg.traits.insert(binding.exposed_name, def)",
+    ):
+        if token not in hydration_body:
+            errors.append(f"trait project hydration misses {token!r}")
+
+    method_def_fields, method_def_error = _f0_struct_fields(
+        env, "TraitMethodDef")
+    if method_def_error:
+        errors.append(method_def_error)
+    elif method_def_fields is not None and [
+            name for _, name in method_def_fields] != [
+                "name", "method_ref", "ty", "has_default",
+                "param_mutabilities", "method_type_params"]:
+        errors.append("TraitMethodDef exact ref inventory drifted")
+    trait_def_fields, trait_def_error = _f0_struct_fields(env, "TraitDef")
+    if trait_def_error:
+        errors.append(trait_def_error)
+    elif trait_def_fields is not None and [
+            name for _, name in trait_def_fields] != [
+                "name", "owner_ref", "type_params", "type_param_vars",
+                "methods", "supertraits", "assoc_types"]:
+        errors.append("TraitDef registered owner inventory drifted")
+
+    register_body = _trait_method_function_body(
+        sources, "register", "register_trait", errors)
+    register_tokens = (
+        "let identity = peek_trait_identity_fact(ctx, decl_index, method_count)",
+        "identity.methods.get(callable_slot_index)",
+        "trait_method_ref_trait(method_ref), identity.owner_ref",
+        "trait_method_ref_source_member_index(method_ref) !=",
+        "trait_method_ref_callable_slot_index(method_ref) !=",
+        "trait_method_ref_name(method_ref) != mname",
+        "method_ref: method_ref",
+        "owner_ref: make_registered_trait_ref(identity.owner_ref, name)",
+        "commit_trait_identity_fact(ctx, identity)",
+    )
+    for token in register_tokens:
+        if token not in register_body:
+            errors.append(f"trait registration consumer misses {token!r}")
+    if register_body.count("commit_trait_identity_fact(ctx, identity)") != 1:
+        errors.append("trait registration does not commit exactly once")
+    peek_at = register_body.find("peek_trait_identity_fact(")
+    publish_at = register_body.find("ctx.env.trait_reg.traits.insert(")
+    commit_at = register_body.find("commit_trait_identity_fact(")
+    if min(peek_at, publish_at, commit_at) < 0 or not (
+            peek_at < publish_at < commit_at):
+        errors.append("trait registration atomic order drifted")
+
+    builtin_body = _trait_method_function_body(
+        sources, "builtins", "builtin_trait_symbol", errors)
+    if not all(token in builtin_body for token in (
+            '"$builtin"', "namespace_trait()", '"builtin:trait:${name}"')):
+        errors.append("builtin trait identity domain drifted")
+    builtin_method_body = _trait_method_function_body(
+        sources, "builtins", "builtin_trait_method", errors)
+    if "make_trait_method_ref(" not in builtin_method_body:
+        errors.append("builtin trait method bypasses typed relation")
+    if builtins.count("make_registered_trait_ref(owner_ref,") != 6:
+        errors.append("builtin registered trait census drifted")
+
+    hmethod_fields, hmethod_error = _f0_struct_fields(hir, "HTraitMethod")
+    if hmethod_error:
+        errors.append(hmethod_error)
+    elif hmethod_fields is not None and [
+            name for _, name in hmethod_fields] != [
+                "name", "method_ref", "params", "return_type", "effects",
+                "has_default", "body"]:
+        errors.append("HTraitMethod exact ref inventory drifted")
+    validate_body = _trait_method_function_body(
+        sources, "hir", "validate_hir_decls", errors)
+    for token in (
+        "registered_trait_ref_display_name(owner_ref) != name",
+        "trait_method_ref_trait(method.method_ref)",
+        "registered_trait_ref_symbol(owner_ref)",
+        "trait_method_ref_callable_slot_index(",
+        "method.method_ref) != method_index",
+        "trait_method_ref_name(method.method_ref) != method.name",
+    ):
+        if token not in validate_body:
+            errors.append(f"HIR trait relation validator misses {token!r}")
+
+    decl_body = _trait_method_function_body(
+        sources, "decl", "check_trait_decl", errors)
+    for token in (
+        "method_ref: m.method_ref", "owner_ref: trait_def.owner_ref"):
+        if token not in decl_body:
+            errors.append(f"typed HIR trait transport misses {token!r}")
+    for source_name, function_name in (("andor", "al_decl"), ("dict", "dl_decl")):
+        visitor_body = _trait_method_function_body(
+            sources, source_name, function_name, errors)
+        for token in (
+            "owner_ref: trait_owner_ref", "method_ref: tm.method_ref"):
+            if token not in visitor_body:
+                errors.append(
+                    f"{source_name} trait transport misses {token!r}")
+
+    combined_nonproducers = "\n".join(
+        sources[name] for name in (
+            "ctx", "env", "hir", "decl", "andor", "dict", "codegen"))
+    if "make_trait_method_ref(" in combined_nonproducers:
+        errors.append("downstream stage remints TraitMethodRef")
+    for token in (
+            "TraitMethodRef", "RegisteredTraitRef",
+            "trait_method_ref_", "registered_trait_ref_"):
+        if token in sources["codegen"]:
+            errors.append(f"backend semantically reads trait identity {token!r}")
+    for source_name in ("ctx", "register", "hir", "decl", "andor", "dict"):
+        masked = mask_ring_strings_and_comments(sources[source_name])
+        if re.search(
+                r"Map\s*<\s*Str\s*,\s*(?:TraitMethodRef|RegisteredTraitRef)\s*>",
+                masked):
+            errors.append(f"{source_name} gained a trait identity side map")
+    return errors
+
+
+def trait_method_identity_u1c_mutation_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("registered owner domain", "identity", "make_registered_trait_ref",
+         "symbol_ref_namespace_kind(symbol), namespace_trait()",
+         "symbol_ref_namespace_kind(symbol), namespace_nominal()"),
+        ("registered display", "identity", "make_registered_trait_ref",
+         'display_name == ""', "false"),
+        ("method owner domain", "identity", "make_trait_method_ref",
+         "symbol_ref_namespace_kind(trait_symbol), namespace_trait()",
+         "symbol_ref_namespace_kind(trait_symbol), namespace_nominal()"),
+        ("member production domain", "identity", "make_trait_method_ref",
+         "symbol_ref_origin_module_key(trait_symbol), namespace_member()",
+         "symbol_ref_origin_module_key(trait_symbol), namespace_value()"),
+        ("member origin module", "identity", "make_trait_method_ref",
+         "symbol_ref_origin_module_key(trait_symbol) !=",
+         "false &&"),
+        ("member validation domain", "identity", "make_trait_method_ref",
+         "symbol_ref_namespace_kind(member_symbol), namespace_member()",
+         "symbol_ref_namespace_kind(member_symbol), namespace_value()"),
+        ("member payload", "identity", "make_trait_method_ref",
+         "symbol_ref_canonical_payload(member_symbol) !=", "false &&"),
+        ("member path", "identity", "make_trait_method_ref",
+         "symbol_ref_declaration_site_path(member_symbol) !=", "false &&"),
+        ("source member index", "identity", "make_trait_method_ref",
+         "source_member_index: source_member_index",
+         "source_member_index: 0"),
+        ("callable slot index", "identity", "make_trait_method_ref",
+         "callable_slot_index: callable_slot_index",
+         "callable_slot_index: 0"),
+        ("method name", "identity", "make_trait_method_ref",
+         "method_name: method_name", 'method_name: ""'),
+        ("member equality", "identity", "trait_method_ref_same",
+         "symbol_ref_same(left.member_symbol, right.member_symbol)", "true"),
+        ("resolver exact-site frame", "resolver", "append_trait_identity_fact",
+         "existing.frame_index == fact.frame_index", "true"),
+        ("resolver assoc/method order", "resolver", "collect_trait_identity_fact",
+         "owner_ref, source_member_index,\n                    callable_slot_index, name",
+         "owner_ref, callable_slot_index,\n                    source_member_index, name"),
+        ("resolver slot progression", "resolver", "collect_trait_identity_fact",
+         "callable_slot_index = callable_slot_index + 1",
+         "callable_slot_index = callable_slot_index + 0"),
+        ("resolved fact dedupe", "resolver", "resolve_namespace_plan",
+         "append_trait_identity_fact(fact, trait_identities)",
+         "trait_identities.push(fact)"),
+        ("ledger fact census", "ctx", "install_struct_identity_ledger",
+         "for fact in plan.trait_identities", "for fact in []"),
+        ("ledger site declaration", "ctx", "trait_identity_site_same",
+         "left.decl_index == right.decl_index", "true"),
+        ("ledger peek frame", "ctx", "peek_trait_identity_fact",
+         "fact.frame_index == frame_index", "true"),
+        ("zero consume", "register", "register_trait",
+         "commit_trait_identity_fact(ctx, identity)", "{}"),
+        ("double consume", "register", "register_trait",
+         "commit_trait_identity_fact(ctx, identity)",
+         "commit_trait_identity_fact(ctx, identity)\n    commit_trait_identity_fact(ctx, identity)"),
+        ("ledger close", "ctx", "close_struct_identity_ledger",
+         "ctx.trait_identity_unconsumed.len() != 0", "false"),
+        ("hydration binding symbol", "ctx", "apply_project_namespace_binding",
+         "binding.symbol,\n                        registered_trait_ref_symbol(def.owner_ref)",
+         "registered_trait_ref_symbol(def.owner_ref),\n                        registered_trait_ref_symbol(def.owner_ref)"),
+        ("hydration display relation", "ctx", "apply_project_namespace_binding",
+         "registered_trait_ref_display_name(def.owner_ref) !=",
+         "false &&"),
+        ("reexport remint", "ctx", "apply_project_namespace_binding",
+         "ctx.env.trait_reg.traits.insert(binding.exposed_name, def)",
+         "ctx.env.trait_reg.traits.insert(binding.exposed_name, remint_trait(def))"),
+        ("registration owner relation", "register", "register_trait",
+         "trait_method_ref_trait(method_ref), identity.owner_ref",
+         "identity.owner_ref, identity.owner_ref"),
+        ("registration source site", "register", "register_trait",
+         "trait_method_ref_source_member_index(method_ref) !=",
+         "false &&"),
+        ("builtin/source domain", "builtins", "builtin_trait_symbol",
+         '"$builtin"', '"$single$"'),
+        ("typed HIR transport", "decl", "check_trait_decl",
+         "method_ref: m.method_ref", "method_ref: hmethods.first().unwrap().method_ref"),
+        ("andor transport", "andor", "al_decl",
+         "method_ref: tm.method_ref", "method_ref: new_methods.first().unwrap().method_ref"),
+        ("dict transport", "dict", "dl_decl",
+         "method_ref: tm.method_ref", "method_ref: new_methods.first().unwrap().method_ref"),
+        ("HIR registered display", "hir", "validate_hir_decls",
+         "registered_trait_ref_display_name(owner_ref) != name", "false"),
+        ("HIR callable slot", "hir", "validate_hir_decls",
+         "trait_method_ref_callable_slot_index(\n                            method.method_ref) != method_index",
+         "false"),
+        ("HIR method name", "hir", "validate_hir_decls",
+         "trait_method_ref_name(method.method_ref) != method.name", "false"),
+        ("resolver seed method inventory", "resolver", "collect_decl_seed",
+         "frame, decl_index, owner_ref, methods, trait_identities",
+         "frame, decl_index, owner_ref, [], trait_identities"),
+    )
+    killed = 0
+    for label, source_name, function_name, anchor, replacement in mutations:
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"trait identity mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source
+        findings = trait_method_identity_u1c_contract_errors(mutated)
+        if not findings:
+            errors.append(f"trait identity mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT:
+        errors.append(
+            f"trait identity killed {killed} mutations, expected "
+            f"{F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT}")
+    return errors
+
+
+def trait_method_identity_u1c_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    try:
+        for name, path in F2_TRAIT_METHOD_IDENTITY_PATHS.items():
+            sources[name] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read trait identity compiler sources: {exc}"]
+    errors = trait_method_identity_u1c_contract_errors(sources)
+    if errors:
+        return errors
+    errors.extend(trait_method_identity_u1c_mutation_errors(sources))
+    return errors
+
+
 F2_U1C0_PATHS = {
     "hir": REPO / "compiler" / "hir.ring",
     "env": REPO / "compiler" / "env.ring",
@@ -10534,6 +10980,20 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
     # This permanent gate covers cheap source structure and parse/typecheck
     # only.  Candidate behavior requires an external source-built compiler
     # packet running the targeted project fixtures.
+    trait_identity_label = "compiler.trait_method_identity_u1c_source_contract"
+    if matches_filter(trait_identity_label, name_filter):
+        trait_identity_errors = trait_method_identity_u1c_source_errors()
+        detail = (
+            f"isolated_mutations="
+            f"{F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT}; "
+            "source_producer=resolver+builtin; "
+            "candidate_behavior=not_evaluated; "
+            "behavior_gate=external_source_built_aggregate_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not trait_identity_errors else TestResult.FAIL,
+            suite, trait_identity_label,
+            "; ".join([detail, *trait_identity_errors])))
+
     impl_predicate_label = "compiler.impl_predicate_u1c0_source_contract"
     if matches_filter(impl_predicate_label, name_filter):
         impl_predicate_errors = impl_predicate_u1c0_source_errors()
