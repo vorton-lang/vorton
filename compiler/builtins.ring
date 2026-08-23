@@ -52,6 +52,9 @@ fn builtin_trait_method(
     owner: SymbolRef, source_member_index: Int,
     callable_slot_index: Int, name: Str
 ) -> TraitMethodRef {
+    if source_member_index != callable_slot_index {
+        panic("builtin trait method: source/slot ordering drifted")
+    }
     make_trait_method_ref(
         owner, source_member_index, callable_slot_index, name)
 }

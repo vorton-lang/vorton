@@ -1843,6 +1843,30 @@ fn register_trait(
         }
     }
     let identity = peek_trait_identity_fact(ctx, decl_index, method_count)
+    let mut identity_callable_slot_index = 0
+    for identity_source_member_index in 0..methods.len() {
+        match methods.get(identity_source_member_index) {
+            some(Decl::Fn { name: identity_method_name, .. }) => {
+                let method_ref = match identity.methods.get(
+                    identity_callable_slot_index) {
+                    some(value) => value,
+                    none => panic("trait identity ledger: method slot is missing")
+                }
+                if !symbol_ref_same(
+                        trait_method_ref_trait(method_ref), identity.owner_ref) ||
+                   trait_method_ref_source_member_index(method_ref) !=
+                        identity_source_member_index ||
+                   trait_method_ref_callable_slot_index(method_ref) !=
+                        identity_callable_slot_index ||
+                   trait_method_ref_name(method_ref) != identity_method_name {
+                    panic("trait identity ledger: method relation drifted")
+                }
+                identity_callable_slot_index = identity_callable_slot_index + 1
+            },
+            _ => {}
+        }
+    }
+    commit_trait_identity_fact(ctx, identity)
     validate_type_param_bound_shapes(
         ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     let saved = map_clone(ctx.type_param_scope)
@@ -1947,15 +1971,6 @@ fn register_trait(
                     some(value) => value,
                     none => panic("trait identity ledger: method slot is missing")
                 }
-                if !symbol_ref_same(
-                        trait_method_ref_trait(method_ref), identity.owner_ref) ||
-                   trait_method_ref_source_member_index(method_ref) !=
-                        source_member_index ||
-                   trait_method_ref_callable_slot_index(method_ref) !=
-                        callable_slot_index ||
-                   trait_method_ref_name(method_ref) != mname {
-                    panic("trait identity ledger: method relation drifted")
-                }
                 validate_type_param_bound_shapes(
                     ctx, method_tps,
                     BoundShapeContext::ImplMethodBound, span)
@@ -2003,7 +2018,6 @@ fn register_trait(
         methods: trait_methods, supertraits: supertrait_names,
         assoc_types: assoc_type_defs
     })
-    commit_trait_identity_fact(ctx, identity)
 }
 
 // ============================================================

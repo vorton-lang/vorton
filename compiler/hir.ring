@@ -6,7 +6,8 @@ use ir_identity::{NominalFieldRef, TraitMethodRef,
     nominal_field_ref_name, registered_nominal_ref_symbol,
     registered_nominal_ref_display_name,
     registered_trait_ref_symbol, registered_trait_ref_display_name,
-    trait_method_ref_trait, trait_method_ref_callable_slot_index,
+    trait_method_ref_trait, trait_method_ref_source_member_index,
+    trait_method_ref_callable_slot_index,
     trait_method_ref_name}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
@@ -1027,16 +1028,22 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                 if registered_trait_ref_display_name(owner_ref) != name {
                     panic("HIR identity: trait declaration owner drifted")
                 }
+                let mut previous_source_member_index = -1
                 for method_index in 0..methods.len() {
                     let method = methods.get(method_index).unwrap()
+                    let source_member_index =
+                        trait_method_ref_source_member_index(method.method_ref)
                     if !symbol_ref_same(
                             trait_method_ref_trait(method.method_ref),
                             registered_trait_ref_symbol(owner_ref)) ||
                        trait_method_ref_callable_slot_index(
                             method.method_ref) != method_index ||
+                       source_member_index < method_index ||
+                       source_member_index <= previous_source_member_index ||
                        trait_method_ref_name(method.method_ref) != method.name {
                         panic("HIR identity: trait method relation drifted")
                     }
+                    previous_source_member_index = source_member_index
                     match method.body {
                         some(body) => {
                             let mut scope = new_hir_validation_scope()

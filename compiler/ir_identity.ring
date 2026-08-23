@@ -399,6 +399,7 @@ pub fn make_trait_method_ref(
     callable_slot_index: Int, method_name: Str
 ) -> TraitMethodRef {
     if source_member_index < 0 || callable_slot_index < 0 ||
+       source_member_index < callable_slot_index ||
        method_name == "" || !namespace_kind_same(
             symbol_ref_namespace_kind(trait_symbol), namespace_trait()) {
         panic("IR identity: invalid trait method owner/site")
