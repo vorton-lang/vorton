@@ -76,18 +76,23 @@ NamedField   ::= Ident ':' TypeExpr
 ### Impl 块
 
 ```ebnf
-ImplDecl     ::= 'impl' TypeParams? ImplTarget '{' ImplMember* '}'
+ImplDecl     ::= InherentImplDecl | TraitImplDecl
 
-ImplTarget   ::= Ident TypeArgs?
-               | Ident 'for' Ident TypeArgs?
+InherentImplDecl ::= 'impl' TypeParams? Ident TypeArgs? '{' InherentImplMember* '}'
+TraitImplDecl    ::= 'impl' TypeParams? Ident 'for' Ident TypeArgs? '{' TraitImplMember* '}'
 
-ImplMember   ::= 'pub'? FnDecl
-               | 'pub'? 'extern' 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation?
-               | 'delegate' Ident ':' Ident (',' Ident)*
-               | 'pub'? AssocTypeDecl
+InherentImplMember ::= 'pub'? FnDecl
+                     | 'pub'? 'extern' 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation?
+                     | 'delegate' Ident ':' Ident (',' Ident)*
+                     | 'pub'? AssocTypeDecl
+
+TraitImplMember ::= FnDecl
+                  | 'extern' 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation?
+                  | 'delegate' Ident ':' Ident (',' Ident)*
+                  | AssocTypeDecl
 ```
 
-`impl Type { ... }` 定义固有方法。`impl Trait for Type { ... }` 实现 trait。Impl 块内可包含 `extern fn` 声明用于 FFI 方法绑定。`delegate field: Trait1, Trait2` 为每个 trait 自动生成完整普通 impl（替代继承的复用机制）；同一 target + trait 的手写 impl 与 delegate 冲突并报 E0509，不支持 partial override。关联类型 `type Name = TypeExpr` 用于满足 trait 的关联类型要求。
+`impl Type { ... }` 定义固有方法，member可分别`pub`或private。`impl Trait for Type { ... }`实现trait，全部member visibility继承trait，写`pub`是hard error。Impl块内可包含`extern fn`声明用于FFI方法绑定。`delegate field: Trait1, Trait2`为每个trait自动生成完整普通impl（替代继承的复用机制）；同一target + trait的手写impl与delegate冲突并报E0509，不支持partial override。关联类型`type Name = TypeExpr`用于满足trait的关联类型要求。
 
 ### Trait 声明
 
@@ -96,12 +101,12 @@ TraitDecl    ::= 'trait' Ident TypeParams? (':' TypeBound ('+' TypeBound)*)? '{'
 
 TraitMember  ::= TraitMethod | AssocTypeDecl
 
-TraitMethod  ::= 'pub'? 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation? Block?
+TraitMethod  ::= 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAnnotation? Block?
 
-AssocTypeDecl ::= 'pub'? 'type' Ident (':' TypeBound ('+' TypeBound)*)? ('=' TypeExpr)?
+AssocTypeDecl ::= 'type' Ident (':' TypeBound ('+' TypeBound)*)? ('=' TypeExpr)?
 ```
 
-无函数体的方法是抽象方法（必须实现）。有函数体的方法提供默认实现。Supertrait 继承通过 `:` 后的 `TypeBound` 列表声明（如 `trait Ord: Eq`），支持多级传递和循环检测。关联类型通过 `type Name` 声明，可带 bounds 约束和默认值。
+无函数体的方法是抽象方法（必须实现）。有函数体的方法提供默认实现。Supertrait继承通过`:`后的`TypeBound`列表声明（如`trait Ord: Eq`），支持多级传递和循环检测。关联类型通过`type Name`声明，可带bounds约束和默认值。Trait是完整contract：所有member visibility随trait，trait declaration与trait impl member不得单独写`pub`；只有inherent impl保留逐member visibility。
 
 ### Effect 声明
 

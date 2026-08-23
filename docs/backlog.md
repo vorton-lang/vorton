@@ -45,6 +45,8 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **0.1 surface simplification / CoreHIR closure（2026-08-23 用户决定）**：compiler/std/examples 对函数default parameters、sig placeholder、refinement placeholder、user effect default body与delegate surface均无必须保留的真实consumer。0.1 clean break删除函数default parameter、只注册/transport `SigDef`、parse-and-discard `where`与user default evidence全链；trait default method不受影响。Delegate因能表达组合关系而保留，但只在TypedHIR→CoreHIR一次展开成普通trait impl。每个新surface feature必须提供唯一CoreHIR lowering或证明自身为canonical core，禁止把surface-only variant、待生成body/impl/evidence带入下游。Sig/refinement/default provider分别只按B-192/B-001/B-197的完整未来门重入。
 
+> **0.1 trait member visibility（2026-08-23 用户批准）**：对齐Rust，trait是整体contract。`pub trait`全部associated items公开，private trait全部module-private；trait declaration与`impl Trait for Type`成员禁止单独`pub`，visibility继承trait。仅inherent impl保留逐method/item visibility。当前parser接受后丢弃trait-member`pub`属于fake syntax，由B-199 clean break；不新增IR/dictionary/provider visibility bit，private target/public trait等整体export policy仍待独立review，不在本决定偷渡。
+
 > **0.1 effect/capability batch（2026-08-23 用户批准）**：B-195以`SystemEffectRef(console/fs/process)`取代special `io`，system不进evidence、不可handle、无root handler，只经AbiIR HostImport/link provider；custom `HandledEffectRef`才显式handle。Host capability与`fail<E>`正交，std host extern漏标与`io.read`双authority原子收口。B-196令0.1用户Drop最终effect row为空且不建DropEffectSet；post-0.1 effectful destruction只在真实consumer下由B-198重审。B-072匿名sum既有语义继续批准但实现顺延post-0.1。
 
 > **0.1 file capability / allocation-effect boundary（2026-08-23 用户批准）**：文件是隐式模块，B-156新增唯一第一项`requires {effects}` header并复用inline-module capability checker；无header不隐式授权unsafe，extern声明要求有效requires集合含unsafe，拒绝逐声明`unsafe extern fn`第二语法。0.1不建立`AllocEffect`、OOM profile或占位carrier；现有unsafe `alloc<T>()` raw-memory intrinsic不变，分配可见性只在post-0.1出现真实no-heap/real-time/embedded consumer后重新Argument，不为它预建backlog item。
@@ -869,6 +871,16 @@ async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评�
 **目标 / 范围**：先以真实大型代码库需求重新Argument surface，至少比较 contextual `sig` + `module/mod X : Signature`、独立interface文件与inspection-generated contract；0.1中`sig`是合法标识符，未来语法不得无迁移地夺回该标识符。实现必须让module公开value/type/effect/trait/associated type与可见性、泛型/effect row、re-export及same-origin identity接受一个可检查的signature contract；不顺带引入first-class modules、functor、动态module value或跨文件partial module。
 
 **验收**：缺失/类型不符/effect扩大/visibility与associated contract不符均给单轮可修诊断；合法single/project/re-export/diamond与separate implementation通过；signature成为TypedHIR/module interface与incremental hash的单一authority，CoreHIR后无name-based conformance重算；formatter/inspection/LLM contract输出一致。完整C/full/self-host/fixed-point与跨平台CI通过，且必须有至少一个仓内或preview真实consumer，不能再次以纯parser/namespace transport测试冒充feature完成。
+
+### B-199 删除 trait/trait-impl member 的假 `pub` 语义 [design-align] [P1] [S] [mechanical] [queued] [after: B-190] [before: B-174]
+
+> **2026-08-23 用户决定，已拍板 clean break**：0.1对齐Rust。Trait visibility一次决定完整associated contract；不支持method/associated type独立visibility。当前parser在trait与所有impl成员上复用`pub`，但TraitMethodDef/HTraitMethod不携带该位，形成接受后丢弃的假语义，必须在preview前hard-fail收口。
+
+**范围 / 文件**：`compiler/parser.ring`/checker按impl kind区分visibility：trait declaration与trait impl中的fn/extern fn/associated type出现`pub`即单轮可修错误并建议删除；inherent impl继续逐member保留`pub`/private。`docs/lang-spec/{syntax,traits}.md`、examples/fixtures同步。Provider/trait dictionary/TypedHIR/CoreHIR/ExecutableInventory不新增visibility字段；public inherent export只消费exact HDecl member `is_pub`，trait impl surface只消费trait visibility。
+
+**约束**：不改变trait default body、supertrait、delegate、associated binding、coherence或qualified-method post-0.1边界；不顺带决定private target/public trait或public target/private trait的整体export policy。未来sealed trait必须显式立项，不允许以private required method或warning-only语法预埋。
+
+**验收**：public/private trait正控；trait declaration与trait impl的`pub fn`/`pub extern fn`/`pub type`全部稳定hard-fail并给删除建议；inherent public/private method与跨模块visibility保持；mutation杀死parser skip、trait-method visibility carrier、dictionary/provider bit和private inherent method误导出。完整C e2e/golden/structural/parity/self-compile、targeted human/LLM diagnostics、double bootstrap与tracked`dist-c`literal fixed point通过，workflow validator/exact CI全绿。
 
 ## 基础设施
 

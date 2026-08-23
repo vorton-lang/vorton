@@ -74,6 +74,8 @@ trait Collection {
 }
 ```
 
+**Trait member visibility（2026-08-23 用户决定，0.1 对齐 Rust）**：trait 是完整 contract，不为 method 或 associated type建立第二层 visibility。`pub trait` 的全部 associated items 随 trait 公开；private trait 的全部 associated items 保持 module-private。Trait declaration 与 `impl Trait for Type` 中写 `pub` 均 hard-fail并建议删除，trait impl method visibility继承trait。只有 inherent `impl Type` 继续允许每个method/associated item独立写`pub`或保持private。未来若需要sealed trait，必须显式设计，不以private required method偷渡；dictionary、ImplProviderRef、ExecutableInventory与CoreHIR不得携带per-trait-member visibility bit。
+
 ### 1.1a JSON 编码支持域（2026-08-06 D-001）
 
 `json_stringify` 的公开支持域由公开 `Json` trait 裁决，签名为 `json_stringify<T: Json>(value: T) -> Str`，不再承诺无约束的任意 `T`。Int、Float、Bool、Str 与 `List<T: Json>` 提供标准实现；用户 struct/enum 只有在显式请求 `Json` derive 时才获得结构化实现，不做无提示的全局 auto-derive。

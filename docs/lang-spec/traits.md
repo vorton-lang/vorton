@@ -20,6 +20,17 @@ TraitMember = FnDecl | AssocTypeDecl
 AssocTypeDecl = "type" IDENT (":" TypeBound ("+" TypeBound)*)? ("=" TypeExpr)?
 ```
 
+### Visibility
+
+Trait 是完整的行为 contract，不为method或associated type提供独立visibility：
+
+- `pub trait T`的全部associated items随trait公开；private trait的全部items只在其module visibility内可用；
+- trait declaration中的`pub fn`/`pub type`非法；
+- `impl Trait for Type`中的`pub fn`/`pub extern fn`/`pub type`非法，implementation item的visibility继承Trait；
+- inherent `impl Type`仍允许每个method/associated item独立写`pub`或保持private。
+
+非法`pub`必须hard-fail并给删除修复，不能接受后忽略。Trait dictionary、provider identity与CoreHIR不保存per-member visibility。需要sealed trait时将来使用显式设计，不以private required method模拟。
+
 ### 默认方法
 
 ```ring
