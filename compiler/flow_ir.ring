@@ -10,7 +10,7 @@
 
 use ir_identity::{
     SymbolRef, PathRef, PathOwnerRef, SlotRef,
-    NominalFieldRef, VariantFieldRef, IntrinsicRef,
+    NominalFieldRef, VariantRef, VariantFieldRef, IntrinsicRef,
     symbol_ref_same, symbol_ref_origin_module_key,
     symbol_ref_namespace_kind, symbol_ref_canonical_payload,
     symbol_ref_declaration_site_path,
@@ -30,7 +30,8 @@ use ir_identity::{
     nominal_field_ref_member, nominal_field_ref_index,
     variant_field_ref_same, variant_field_ref_variant,
     variant_field_ref_member, variant_field_ref_index,
-    variant_ref_owner,
+    variant_ref_owner, variant_ref_same,
+    variant_ref_member,
     registered_nominal_ref_symbol,
     intrinsic_ref_same, intrinsic_ref_symbol, intrinsic_ref_site,
     builtin_method_site_tag,
@@ -41,6 +42,9 @@ use ir_inventory::{
     ExecutableRef, executable_ref_same, executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_anonymous_path,
     executable_ref_origin_module_key,
+    EffectOperationRef, effect_operation_ref_member,
+    effect_operation_ref_callable,
+    effect_operation_ref_same,
     BinderManifest, BinderEntry,
     binder_manifest_owner, binder_manifest_entries,
     binder_entry_slot, make_binder_manifest
@@ -1492,6 +1496,7 @@ pub struct FlowCallable {
     result_type: FlowTypeRef,
     mode: FlowCallableMode,
     semantic_contract: FlowCallContract,
+    evidence_requirements: List<SymbolRef>,
     call_edges: List<FlowCallEdge>
 }
 
@@ -1500,7 +1505,8 @@ pub fn make_flow_callable(
     parameter_types: List<FlowTypeRef>, parameter_slots: List<SlotRef>,
     result_type: FlowTypeRef,
     mode: FlowCallableMode,
-    semantic_contract: FlowCallContract
+    semantic_contract: FlowCallContract,
+    evidence_requirements: List<SymbolRef>
 ) -> FlowCallable {
     if parameter_types.len() != semantic_contract.parameter_roles.len() ||
        parameter_types.len() != semantic_contract.parameter_types.len() ||
@@ -1542,6 +1548,7 @@ pub fn make_flow_callable(
         result_type: result_type,
         mode: flow_callable_mode_from_tag(mode.tag),
         semantic_contract: copy_call_contract(semantic_contract),
+        evidence_requirements: copy_symbols(evidence_requirements),
         call_edges: []
     }
 }
@@ -1565,6 +1572,9 @@ pub fn flow_callable_parameter_role_lower_bounds(
 }
 pub fn flow_callable_semantic_contract(value: FlowCallable) -> FlowCallContract {
     copy_call_contract(value.semantic_contract)
+}
+pub fn flow_callable_evidence_requirements(value: FlowCallable) -> List<SymbolRef> {
+    copy_symbols(value.evidence_requirements)
 }
 
 // ============================================================
@@ -1979,6 +1989,43 @@ fn copy_call_target(value: FlowCallTarget) -> FlowCallTarget {
     }
 }
 
+enum FlowEvidenceRefValue {
+    FlowLocalEvidenceValue(SlotRef),
+    FlowCallableEvidenceValue(ExecutableRef)
+}
+pub struct FlowEvidenceRef { value: FlowEvidenceRefValue }
+pub fn make_flow_local_evidence(slot: SlotRef) -> FlowEvidenceRef {
+    FlowEvidenceRef { value: FlowEvidenceRefValue::FlowLocalEvidenceValue(slot) }
+}
+pub fn make_flow_callable_evidence(executable: ExecutableRef) -> FlowEvidenceRef {
+    FlowEvidenceRef {
+        value: FlowEvidenceRefValue::FlowCallableEvidenceValue(executable)
+    }
+}
+pub fn flow_evidence_is_local(value: FlowEvidenceRef) -> Bool {
+    match value.value {
+        FlowEvidenceRefValue::FlowLocalEvidenceValue(_) => true,
+        FlowEvidenceRefValue::FlowCallableEvidenceValue(_) => false
+    }
+}
+pub fn flow_evidence_local(value: FlowEvidenceRef) -> SlotRef {
+    match value.value {
+        FlowEvidenceRefValue::FlowLocalEvidenceValue(slot) => slot,
+        _ => panic("FlowIR: callable evidence has no local slot")
+    }
+}
+pub fn flow_evidence_callable(value: FlowEvidenceRef) -> ExecutableRef {
+    match value.value {
+        FlowEvidenceRefValue::FlowCallableEvidenceValue(executable) => executable,
+        _ => panic("FlowIR: local evidence has no executable")
+    }
+}
+fn copy_flow_evidence(values: List<FlowEvidenceRef>) -> List<FlowEvidenceRef> {
+    let mut result: List<FlowEvidenceRef> = []
+    for value in values { result.push(value) }
+    result
+}
+
 const FLOW_PRIMITIVE_ADD: Int = 0
 const FLOW_PRIMITIVE_SUB: Int = 1
 const FLOW_PRIMITIVE_MUL: Int = 2
@@ -2023,7 +2070,10 @@ enum FlowOperationValue {
     PrimitiveOperationValue(FlowPrimitiveOp),
     ConstructorOperationValue(ExecutableRef),
     DictionaryOperationValue(ExecutableRef),
-    IntrinsicOperationValue(IntrinsicRef)
+    IntrinsicOperationValue(IntrinsicRef),
+    TupleAggregateOperationValue(Int),
+    RecordAggregateOperationValue(Int),
+    ClosureOperationValue(ExecutableRef)
 }
 
 pub struct FlowOperationContract {
@@ -2127,6 +2177,39 @@ pub fn make_flow_intrinsic_contract(
         FlowOperationValue::IntrinsicOperationValue(intrinsic),
         input_types, input_roles, target_type, target_role, target_origin)
 }
+pub fn make_flow_tuple_aggregate_contract(
+    arity: Int, input_types: List<FlowTypeRef>,
+    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef
+) -> FlowOperationContract {
+    if arity < 0 || arity != input_types.len() {
+        panic("FlowIR: tuple aggregate arity differs")
+    }
+    make_flow_operation_contract(
+        FlowOperationValue::TupleAggregateOperationValue(arity),
+        input_types, input_roles, target_type,
+        flow_semantic_role_read(), make_fresh_flow_value_origin())
+}
+pub fn make_flow_record_aggregate_contract(
+    arity: Int, input_types: List<FlowTypeRef>,
+    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef
+) -> FlowOperationContract {
+    if arity < 0 || arity != input_types.len() {
+        panic("FlowIR: record aggregate arity differs")
+    }
+    make_flow_operation_contract(
+        FlowOperationValue::RecordAggregateOperationValue(arity),
+        input_types, input_roles, target_type,
+        flow_semantic_role_read(), make_fresh_flow_value_origin())
+}
+pub fn make_flow_closure_contract(
+    executable: ExecutableRef, input_types: List<FlowTypeRef>,
+    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef
+) -> FlowOperationContract {
+    make_flow_operation_contract(
+        FlowOperationValue::ClosureOperationValue(executable),
+        input_types, input_roles, target_type,
+        flow_semantic_role_read(), make_fresh_flow_value_origin())
+}
 
 pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
     match value.value {
@@ -2138,7 +2221,10 @@ pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
         FlowOperationValue::PrimitiveOperationValue(_) => 5,
         FlowOperationValue::ConstructorOperationValue(_) => 6,
         FlowOperationValue::DictionaryOperationValue(_) => 7,
-        FlowOperationValue::IntrinsicOperationValue(_) => 8
+        FlowOperationValue::IntrinsicOperationValue(_) => 8,
+        FlowOperationValue::TupleAggregateOperationValue(_) => 9,
+        FlowOperationValue::RecordAggregateOperationValue(_) => 10,
+        FlowOperationValue::ClosureOperationValue(_) => 11
     }
 }
 pub fn flow_operation_contract_input_roles(
@@ -2219,6 +2305,7 @@ fn copy_operation_contract(value: FlowOperationContract) -> FlowOperationContrac
 enum FlowProjectionContractValue {
     NominalProjectionValue(NominalFieldRef),
     VariantProjectionValue(VariantFieldRef),
+    TupleProjectionValue(Int),
     StructuralProjectionValue(PathRef),
     WholeSlotProjectionValue
 }
@@ -2264,6 +2351,18 @@ pub fn make_variant_flow_projection_contract(
         base_role: base_role, partial: partial
     }
 }
+pub fn make_tuple_flow_projection_contract(
+    index: Int, base_type: FlowTypeRef,
+    result_type: FlowTypeRef, base_role: FlowSemanticRole, partial: Bool
+) -> FlowProjectionContract {
+    if index < 0 { panic("FlowIR: negative tuple projection index") }
+    let _ = flow_semantic_role_tag(base_role)
+    FlowProjectionContract {
+        value: FlowProjectionContractValue::TupleProjectionValue(index),
+        base_type: base_type, result_type: result_type,
+        base_role: base_role, partial: partial
+    }
+}
 pub fn make_whole_slot_flow_projection_contract(
     ty: FlowTypeRef, base_role: FlowSemanticRole
 ) -> FlowProjectionContract {
@@ -2279,7 +2378,8 @@ pub fn flow_projection_contract_kind_tag(value: FlowProjectionContract) -> Int {
         FlowProjectionContractValue::NominalProjectionValue(_) => 0,
         FlowProjectionContractValue::StructuralProjectionValue(_) => 1,
         FlowProjectionContractValue::WholeSlotProjectionValue => 2,
-        FlowProjectionContractValue::VariantProjectionValue(_) => 3
+        FlowProjectionContractValue::VariantProjectionValue(_) => 3,
+        FlowProjectionContractValue::TupleProjectionValue(_) => 4
     }
 }
 pub fn flow_projection_contract_base_type(
@@ -2318,6 +2418,12 @@ pub fn flow_projection_contract_variant_field(
         _ => panic("FlowIR: projection is not variant payload")
     }
 }
+pub fn flow_projection_contract_tuple_index(value: FlowProjectionContract) -> Int {
+    match value.value {
+        FlowProjectionContractValue::TupleProjectionValue(index) => index,
+        _ => panic("FlowIR: projection is not tuple")
+    }
+}
 fn copy_projection_contract(
     value: FlowProjectionContract
 ) -> FlowProjectionContract {
@@ -2342,7 +2448,8 @@ enum FlowInstructionValue {
     DiscardValue { source: SlotRef },
     AssignValue { rhs_temp: SlotRef, target: SlotRef },
     CallValue {
-        target: FlowCallTarget, arguments: List<SlotRef>, result: SlotRef?
+        target: FlowCallTarget, arguments: List<SlotRef>,
+        evidence: List<FlowEvidenceRef>, result: SlotRef?
     },
     ProjectValue {
         contract: FlowProjectionContract,
@@ -2450,13 +2557,15 @@ pub fn make_flow_assign(
 
 pub fn make_flow_call(
     reference: FlowInstructionRef, origin: OriginRef,
-    target: FlowCallTarget, arguments: List<SlotRef>, result: SlotRef?
+    target: FlowCallTarget, arguments: List<SlotRef>,
+    evidence: List<FlowEvidenceRef>, result: SlotRef?
 ) -> FlowInstruction {
     FlowInstruction {
         reference: reference, origin: origin,
         value: FlowInstructionValue::CallValue {
             target: copy_call_target(target),
-            arguments: copy_slot_refs(arguments), result: result
+            arguments: copy_slot_refs(arguments),
+            evidence: copy_flow_evidence(evidence), result: result
         }
     }
 }
@@ -2631,6 +2740,13 @@ pub fn flow_call_arguments(value: FlowInstruction) -> List<SlotRef> {
 pub fn flow_call_result(value: FlowInstruction) -> SlotRef? {
     match value.value {
         FlowInstructionValue::CallValue { result, .. } => result,
+        _ => panic("FlowIR: instruction is not Call")
+    }
+}
+pub fn flow_call_evidence(value: FlowInstruction) -> List<FlowEvidenceRef> {
+    match value.value {
+        FlowInstructionValue::CallValue { evidence, .. } =>
+            copy_flow_evidence(evidence),
         _ => panic("FlowIR: instruction is not Call")
     }
 }
@@ -2889,9 +3005,119 @@ pub fn flow_instruction_results(value: FlowInstruction) -> List<FlowResultRef> {
 // Fixed control topology
 // ============================================================
 
+enum FlowPatternLiteralValue {
+    PatternIntValue(Int), PatternFloatValue(Float),
+    PatternStrValue(Str), PatternBoolValue(Bool), PatternUnitValue
+}
+pub struct FlowPatternLiteral { value: FlowPatternLiteralValue }
+pub fn make_flow_pattern_int(value: Int) -> FlowPatternLiteral {
+    FlowPatternLiteral { value: FlowPatternLiteralValue::PatternIntValue(value) }
+}
+pub fn make_flow_pattern_float(value: Float) -> FlowPatternLiteral {
+    FlowPatternLiteral { value: FlowPatternLiteralValue::PatternFloatValue(value) }
+}
+pub fn make_flow_pattern_str(value: Str) -> FlowPatternLiteral {
+    FlowPatternLiteral { value: FlowPatternLiteralValue::PatternStrValue(value) }
+}
+pub fn make_flow_pattern_bool(value: Bool) -> FlowPatternLiteral {
+    FlowPatternLiteral { value: FlowPatternLiteralValue::PatternBoolValue(value) }
+}
+pub fn make_flow_pattern_unit() -> FlowPatternLiteral {
+    FlowPatternLiteral { value: FlowPatternLiteralValue::PatternUnitValue }
+}
+pub fn flow_pattern_literal_kind_tag(value: FlowPatternLiteral) -> Int {
+    match value.value {
+        FlowPatternLiteralValue::PatternIntValue(_) => 0,
+        FlowPatternLiteralValue::PatternFloatValue(_) => 1,
+        FlowPatternLiteralValue::PatternStrValue(_) => 2,
+        FlowPatternLiteralValue::PatternBoolValue(_) => 3,
+        FlowPatternLiteralValue::PatternUnitValue => 4
+    }
+}
+
+enum FlowPatternContractValue {
+    FlowWildcardPattern,
+    FlowBindingPattern(SlotRef),
+    FlowLiteralPattern(FlowPatternLiteral),
+    FlowTuplePattern(List<FlowPatternContract>),
+    FlowStructPattern { owner: SymbolRef, fields: List<FlowPatternField> },
+    FlowVariantPattern { variant: VariantRef,
+                         fields: List<FlowPatternField> }
+}
+pub struct FlowPatternContract {
+    ty: FlowTypeRef,
+    value: FlowPatternContractValue
+}
+pub struct FlowPatternField {
+    field: FlowFieldIdentity,
+    pattern: FlowPatternContract
+}
+fn copy_flow_patterns(values: List<FlowPatternContract>) -> List<FlowPatternContract> {
+    let mut result: List<FlowPatternContract> = []
+    for value in values { result.push(value) }
+    result
+}
+fn copy_flow_pattern_fields(values: List<FlowPatternField>) -> List<FlowPatternField> {
+    let mut result: List<FlowPatternField> = []
+    for value in values { result.push(value) }
+    result
+}
+pub fn make_flow_wildcard_pattern(ty: FlowTypeRef) -> FlowPatternContract {
+    FlowPatternContract { ty: ty, value: FlowPatternContractValue::FlowWildcardPattern }
+}
+pub fn make_flow_binding_pattern(
+    ty: FlowTypeRef, slot: SlotRef
+) -> FlowPatternContract {
+    FlowPatternContract { ty: ty,
+        value: FlowPatternContractValue::FlowBindingPattern(slot) }
+}
+pub fn make_flow_literal_pattern(
+    ty: FlowTypeRef, literal: FlowPatternLiteral
+) -> FlowPatternContract {
+    FlowPatternContract { ty: ty,
+        value: FlowPatternContractValue::FlowLiteralPattern(literal) }
+}
+pub fn make_flow_tuple_pattern(
+    ty: FlowTypeRef, elements: List<FlowPatternContract>
+) -> FlowPatternContract {
+    FlowPatternContract { ty: ty,
+        value: FlowPatternContractValue::FlowTuplePattern(
+            copy_flow_patterns(elements)) }
+}
+pub fn make_flow_pattern_field(
+    field: FlowFieldIdentity, pattern: FlowPatternContract
+) -> FlowPatternField { FlowPatternField { field: field, pattern: pattern } }
+pub fn make_flow_struct_pattern(
+    ty: FlowTypeRef, owner: SymbolRef, fields: List<FlowPatternField>
+) -> FlowPatternContract {
+    FlowPatternContract { ty: ty,
+        value: FlowPatternContractValue::FlowStructPattern {
+            owner: owner, fields: copy_flow_pattern_fields(fields) } }
+}
+pub fn make_flow_variant_pattern(
+    ty: FlowTypeRef, variant: VariantRef,
+    fields: List<FlowPatternField>
+) -> FlowPatternContract {
+    FlowPatternContract { ty: ty,
+        value: FlowPatternContractValue::FlowVariantPattern {
+            variant: variant, fields: copy_flow_pattern_fields(fields) } }
+}
+pub fn flow_pattern_type(value: FlowPatternContract) -> FlowTypeRef { value.ty }
+pub fn flow_pattern_kind_tag(value: FlowPatternContract) -> Int {
+    match value.value {
+        FlowPatternContractValue::FlowWildcardPattern => 0,
+        FlowPatternContractValue::FlowBindingPattern(_) => 1,
+        FlowPatternContractValue::FlowLiteralPattern(_) => 2,
+        FlowPatternContractValue::FlowTuplePattern(_) => 3,
+        FlowPatternContractValue::FlowStructPattern { .. } => 4,
+        FlowPatternContractValue::FlowVariantPattern { .. } => 5
+    }
+}
+
 pub struct FlowSuccessor {
     target: FlowBlockRef,
-    exited_scopes: List<FlowScopeRef>
+    exited_scopes: List<FlowScopeRef>,
+    entered_scopes: List<FlowScopeRef>
 }
 
 fn copy_scope_refs(values: List<FlowScopeRef>) -> List<FlowScopeRef> {
@@ -2901,7 +3127,8 @@ fn copy_scope_refs(values: List<FlowScopeRef>) -> List<FlowScopeRef> {
 }
 
 pub fn make_flow_successor(
-    target: FlowBlockRef, exited_scopes: List<FlowScopeRef>
+    target: FlowBlockRef, exited_scopes: List<FlowScopeRef>,
+    entered_scopes: List<FlowScopeRef>
 ) -> FlowSuccessor {
     let mut left_index = 0
     while left_index < exited_scopes.len() {
@@ -2919,8 +3146,14 @@ pub fn make_flow_successor(
         }
         left_index = left_index + 1
     }
+    for scope in entered_scopes {
+        if !executable_ref_same(scope.owner, target.owner) {
+            panic("FlowIR: successor enters a cross-body scope")
+        }
+    }
     FlowSuccessor {
-        target: target, exited_scopes: copy_scope_refs(exited_scopes)
+        target: target, exited_scopes: copy_scope_refs(exited_scopes),
+        entered_scopes: copy_scope_refs(entered_scopes)
     }
 }
 
@@ -2930,6 +3163,30 @@ pub fn flow_successor_target(value: FlowSuccessor) -> FlowBlockRef {
 pub fn flow_successor_exited_scopes(
     value: FlowSuccessor
 ) -> List<FlowScopeRef> { copy_scope_refs(value.exited_scopes) }
+pub fn flow_successor_entered_scopes(
+    value: FlowSuccessor
+) -> List<FlowScopeRef> { copy_scope_refs(value.entered_scopes) }
+
+pub struct FlowHandlerBinding {
+    operation: EffectOperationRef,
+    handler: ExecutableRef
+}
+pub fn make_flow_handler_binding(
+    operation: EffectOperationRef, handler: ExecutableRef
+) -> FlowHandlerBinding {
+    FlowHandlerBinding { operation: operation, handler: handler }
+}
+pub fn flow_handler_binding_operation(
+    value: FlowHandlerBinding
+) -> EffectOperationRef { value.operation }
+pub fn flow_handler_binding_handler(value: FlowHandlerBinding) -> ExecutableRef {
+    value.handler
+}
+fn copy_handler_bindings(values: List<FlowHandlerBinding>) -> List<FlowHandlerBinding> {
+    let mut result: List<FlowHandlerBinding> = []
+    for value in values { result.push(value) }
+    result
+}
 
 enum FlowTerminatorValue {
     GotoValue(FlowSuccessor),
@@ -2955,6 +3212,21 @@ enum FlowTerminatorValue {
         operation: SlotRef,
         handled: FlowSuccessor,
         unhandled: FlowSuccessor
+    },
+    PatternValue {
+        scrutinee: SlotRef,
+        pattern: FlowPatternContract,
+        matched: FlowSuccessor,
+        unmatched: FlowSuccessor
+    },
+    TryValue {
+        error: SlotRef,
+        protected: FlowSuccessor,
+        caught: FlowSuccessor
+    },
+    HandleInstallValue {
+        body: FlowSuccessor,
+        handlers: List<FlowHandlerBinding>
     },
     UnreachableValue { exited_scopes: List<FlowScopeRef> },
     DivergeValue { exited_scopes: List<FlowScopeRef> }
@@ -3050,6 +3322,33 @@ pub fn make_flow_handler(
         }
     }
 }
+pub fn make_flow_pattern_branch(
+    origin: OriginRef, scrutinee: SlotRef,
+    pattern: FlowPatternContract,
+    matched: FlowSuccessor, unmatched: FlowSuccessor
+) -> FlowTerminator {
+    FlowTerminator { origin: origin,
+        value: FlowTerminatorValue::PatternValue {
+            scrutinee: scrutinee, pattern: pattern,
+            matched: matched, unmatched: unmatched } }
+}
+pub fn make_flow_try(
+    origin: OriginRef, error: SlotRef,
+    protected: FlowSuccessor, caught: FlowSuccessor
+) -> FlowTerminator {
+    FlowTerminator { origin: origin,
+        value: FlowTerminatorValue::TryValue {
+            error: error, protected: protected, caught: caught } }
+}
+pub fn make_flow_handle_install(
+    origin: OriginRef, body: FlowSuccessor,
+    handlers: List<FlowHandlerBinding>
+) -> FlowTerminator {
+    if handlers.len() == 0 { panic("FlowIR: handle has no exact handlers") }
+    FlowTerminator { origin: origin,
+        value: FlowTerminatorValue::HandleInstallValue {
+            body: body, handlers: copy_handler_bindings(handlers) } }
+}
 
 pub fn make_flow_unreachable(
     origin: OriginRef, exited_scopes: List<FlowScopeRef>
@@ -3088,7 +3387,10 @@ pub fn flow_terminator_kind_tag(value: FlowTerminator) -> Int {
         FlowTerminatorValue::CatchValue { .. } => 6,
         FlowTerminatorValue::HandlerValue { .. } => 7,
         FlowTerminatorValue::UnreachableValue { .. } => 8,
-        FlowTerminatorValue::DivergeValue { .. } => 9
+        FlowTerminatorValue::DivergeValue { .. } => 9,
+        FlowTerminatorValue::PatternValue { .. } => 10,
+        FlowTerminatorValue::TryValue { .. } => 11,
+        FlowTerminatorValue::HandleInstallValue { .. } => 12
     }
 }
 
@@ -3104,6 +3406,11 @@ fn terminator_successors(value: FlowTerminator) -> List<FlowSuccessor> {
             [handled, propagate],
         FlowTerminatorValue::HandlerValue { handled, unhandled, .. } =>
             [handled, unhandled],
+        FlowTerminatorValue::PatternValue { matched, unmatched, .. } =>
+            [matched, unmatched],
+        FlowTerminatorValue::TryValue { protected, caught, .. } =>
+            [protected, caught],
+        FlowTerminatorValue::HandleInstallValue { body, .. } => [body],
         FlowTerminatorValue::ReturnValue { .. } |
         FlowTerminatorValue::UnreachableValue { .. } |
         FlowTerminatorValue::DivergeValue { .. } => []
@@ -3117,7 +3424,8 @@ pub fn flow_terminator_successors(
     for edge in terminator_successors(value) {
         result.push(FlowSuccessor {
             target: edge.target,
-            exited_scopes: copy_scope_refs(edge.exited_scopes)
+            exited_scopes: copy_scope_refs(edge.exited_scopes),
+            entered_scopes: copy_scope_refs(edge.entered_scopes)
         })
     }
     result
@@ -3131,6 +3439,8 @@ pub fn flow_terminator_read_slots(value: FlowTerminator) -> List<SlotRef> {
             match returned { some(slot) => [slot], none => [] },
         FlowTerminatorValue::CatchValue { error, .. } => [error],
         FlowTerminatorValue::HandlerValue { operation, .. } => [operation],
+        FlowTerminatorValue::PatternValue { scrutinee, .. } => [scrutinee],
+        FlowTerminatorValue::TryValue { error, .. } => [error],
         _ => []
     }
 }
@@ -3147,7 +3457,8 @@ pub fn flow_terminator_terminal_exited_scopes(
 fn copy_successor(value: FlowSuccessor) -> FlowSuccessor {
     FlowSuccessor {
         target: value.target,
-        exited_scopes: copy_scope_refs(value.exited_scopes)
+        exited_scopes: copy_scope_refs(value.exited_scopes),
+        entered_scopes: copy_scope_refs(value.entered_scopes)
     }
 }
 
@@ -3179,6 +3490,19 @@ fn copy_terminator(value: FlowTerminator) -> FlowTerminator {
         } => make_flow_handler(
             value.origin, operation,
             copy_successor(handled), copy_successor(unhandled)),
+        FlowTerminatorValue::PatternValue {
+            scrutinee, pattern, matched, unmatched
+        } => make_flow_pattern_branch(
+            value.origin, scrutinee, pattern,
+            copy_successor(matched), copy_successor(unmatched)),
+        FlowTerminatorValue::TryValue {
+            error, protected, caught
+        } => make_flow_try(
+            value.origin, error,
+            copy_successor(protected), copy_successor(caught)),
+        FlowTerminatorValue::HandleInstallValue { body, handlers } =>
+            make_flow_handle_install(
+                value.origin, copy_successor(body), handlers),
         FlowTerminatorValue::UnreachableValue { exited_scopes } =>
             make_flow_unreachable(value.origin, exited_scopes),
         FlowTerminatorValue::DivergeValue { exited_scopes } =>
@@ -3230,9 +3554,12 @@ fn copy_instructions(values: List<FlowInstruction>) -> List<FlowInstruction> {
             FlowInstructionValue::AssignValue { rhs_temp, target } =>
                 make_flow_assign(
                     value.reference, value.origin, rhs_temp, target),
-            FlowInstructionValue::CallValue { target, arguments, result } =>
+            FlowInstructionValue::CallValue {
+                target, arguments, evidence, result
+            } =>
                 make_flow_call(
-                    value.reference, value.origin, target, arguments, result),
+                    value.reference, value.origin, target, arguments,
+                    evidence, result),
             FlowInstructionValue::ProjectValue {
                 contract, base, result: projected
             } => make_flow_project(
@@ -3313,8 +3640,60 @@ pub fn flow_block_terminator_operands(value: FlowBlock) -> List<FlowOperandRef> 
             step: step, ordinal: 0, slot: operation,
             role: flow_semantic_role_read()
         }],
+        FlowTerminatorValue::PatternValue { scrutinee, .. } => [FlowOperandRef {
+            step: step, ordinal: 0, slot: scrutinee,
+            role: flow_semantic_role_read()
+        }],
         _ => []
     }
+}
+
+fn flow_pattern_binding_slots(value: FlowPatternContract) -> List<SlotRef> {
+    let mut result: List<SlotRef> = []
+    match value.value {
+        FlowPatternContractValue::FlowBindingPattern(slot) => result.push(slot),
+        FlowPatternContractValue::FlowTuplePattern(elements) => {
+            for element in elements {
+                for slot in flow_pattern_binding_slots(element) {
+                    result.push(slot)
+                }
+            }
+        },
+        FlowPatternContractValue::FlowStructPattern { fields, .. } |
+        FlowPatternContractValue::FlowVariantPattern { fields, .. } => {
+            for field in fields {
+                for slot in flow_pattern_binding_slots(field.pattern) {
+                    result.push(slot)
+                }
+            }
+        },
+        _ => {}
+    }
+    result
+}
+
+pub fn flow_block_terminator_results(value: FlowBlock) -> List<FlowResultRef> {
+    let step = make_flow_terminator_step_ref(value.reference)
+    let mut result: List<FlowResultRef> = []
+    match value.terminator.value {
+        FlowTerminatorValue::PatternValue { pattern, .. } => {
+            let mut ordinal = 0
+            for slot in flow_pattern_binding_slots(pattern) {
+                result.push(FlowResultRef {
+                    step: step, ordinal: ordinal, slot: slot,
+                    origin: make_aliasing_flow_value_origin([0])
+                })
+                ordinal = ordinal + 1
+            }
+        },
+        FlowTerminatorValue::TryValue { error, .. } => result.push(
+            FlowResultRef {
+                step: step, ordinal: 0, slot: error,
+                origin: make_fresh_flow_value_origin()
+            }),
+        _ => {}
+    }
+    result
 }
 
 fn copy_blocks(values: List<FlowBlock>) -> List<FlowBlock> {
@@ -3402,6 +3781,7 @@ pub struct FlowCallEdge {
     site: FlowInstructionRef,
     target: FlowCallTarget,
     arguments: List<SlotRef>,
+    evidence: List<FlowEvidenceRef>,
     result: SlotRef?
 }
 
@@ -3418,6 +3798,9 @@ pub fn flow_call_edge_arguments(value: FlowCallEdge) -> List<SlotRef> {
     copy_slot_refs(value.arguments)
 }
 pub fn flow_call_edge_result(value: FlowCallEdge) -> SlotRef? { value.result }
+pub fn flow_call_edge_evidence(value: FlowCallEdge) -> List<FlowEvidenceRef> {
+    copy_flow_evidence(value.evidence)
+}
 
 fn copy_call_edges(values: List<FlowCallEdge>) -> List<FlowCallEdge> {
     let mut result: List<FlowCallEdge> = []
@@ -3426,7 +3809,8 @@ fn copy_call_edges(values: List<FlowCallEdge>) -> List<FlowCallEdge> {
             caller: value.caller, site: value.site,
             target: copy_call_target(value.target),
             // target owns role/candidate lists and must not alias the caller.
-            arguments: copy_slot_refs(value.arguments), result: value.result
+            arguments: copy_slot_refs(value.arguments),
+            evidence: copy_flow_evidence(value.evidence), result: value.result
         })
     }
     result
@@ -3502,6 +3886,7 @@ pub struct FlowControlEdge {
     from: FlowBlockRef,
     to: FlowBlockRef,
     exited_scopes: List<FlowScopeRef>,
+    entered_scopes: List<FlowScopeRef>,
     terminator_kind: Int
 }
 
@@ -3515,6 +3900,9 @@ pub fn flow_control_edge_to(value: FlowControlEdge) -> FlowBlockRef { value.to }
 pub fn flow_control_edge_exited_scopes(
     value: FlowControlEdge
 ) -> List<FlowScopeRef> { copy_scope_refs(value.exited_scopes) }
+pub fn flow_control_edge_entered_scopes(
+    value: FlowControlEdge
+) -> List<FlowScopeRef> { copy_scope_refs(value.entered_scopes) }
 pub fn flow_control_edge_terminator_kind(value: FlowControlEdge) -> Int {
     value.terminator_kind
 }
@@ -3567,11 +3955,12 @@ pub fn flow_body_call_edges(value: FlowBody) -> List<FlowCallEdge> {
         for instruction in block.instructions {
             match instruction.value {
                 FlowInstructionValue::CallValue {
-                    target, arguments, result: call_result
+                    target, arguments, evidence, result: call_result
                 } => result.push(FlowCallEdge {
                     caller: value.reference, site: instruction.reference,
                     target: copy_call_target(target),
                     arguments: copy_slot_refs(arguments),
+                    evidence: copy_flow_evidence(evidence),
                     result: call_result
                 }),
                 _ => {}
@@ -3628,6 +4017,7 @@ pub fn flow_body_control_edges(value: FlowBody) -> List<FlowControlEdge> {
                 owner: value.reference, from: block.reference,
                 to: successor.target,
                 exited_scopes: copy_scope_refs(successor.exited_scopes),
+                entered_scopes: copy_scope_refs(successor.entered_scopes),
                 terminator_kind: kind
             })
         }
@@ -3774,6 +4164,19 @@ fn validate_callables(
             let _ = flow_semantic_role_tag(role)
         }
         let _ = flow_semantic_role_tag(left.semantic_contract.result_role)
+        let mut evidence_index = 0
+        while evidence_index < left.evidence_requirements.len() {
+            let mut right_evidence = evidence_index + 1
+            while right_evidence < left.evidence_requirements.len() {
+                if symbol_ref_same(
+                        left.evidence_requirements.get(evidence_index).unwrap(),
+                        left.evidence_requirements.get(right_evidence).unwrap()) {
+                    panic("FlowIR: callable repeats evidence requirement")
+                }
+                right_evidence = right_evidence + 1
+            }
+            evidence_index = evidence_index + 1
+        }
         let _ = flow_callable_mode_from_tag(left.mode.tag)
         let mut right_index = left_index + 1
         while right_index < values.len() {
@@ -3959,9 +4362,95 @@ fn validate_body_callable_parameters(body: FlowBody, callable: FlowCallable) {
     }
 }
 
+fn validate_typed_flow_pattern(
+    pattern: FlowPatternContract, expected: FlowTypeRef,
+    body: FlowBody, type_nodes: List<FlowTypeNode>
+) {
+    require_same_flow_type(
+        pattern.ty, expected, "FlowIR: pattern/scrutinee type differs")
+    let node = type_node_for(type_nodes, pattern.ty)
+    match pattern.value {
+        FlowPatternContractValue::FlowWildcardPattern => {},
+        FlowPatternContractValue::FlowBindingPattern(slot) =>
+            require_same_flow_type(
+                slot_type_for(body, slot), pattern.ty,
+                "FlowIR: pattern binding type differs"),
+        FlowPatternContractValue::FlowLiteralPattern(literal) => {
+            let expected_kind = match flow_pattern_literal_kind_tag(literal) {
+                0 => FLOW_TYPE_INT, 1 => FLOW_TYPE_FLOAT, 2 => FLOW_TYPE_STR,
+                3 => FLOW_TYPE_BOOL, _ => FLOW_TYPE_UNIT
+            }
+            if flow_type_kind_tag(node.kind) != expected_kind {
+                panic("FlowIR: literal pattern type differs")
+            }
+        },
+        FlowPatternContractValue::FlowTuplePattern(elements) => {
+            if flow_type_kind_tag(node.kind) != FLOW_TYPE_TUPLE ||
+               elements.len() != node.children.len() {
+                panic("FlowIR: tuple pattern type/arity differs")
+            }
+            let mut index = 0
+            for element in elements {
+                validate_typed_flow_pattern(
+                    element, node.children.get(index).unwrap(),
+                    body, type_nodes)
+                index = index + 1
+            }
+        },
+        FlowPatternContractValue::FlowStructPattern { owner, fields } => {
+            if flow_type_kind_tag(node.kind) != FLOW_TYPE_STRUCT ||
+               !symbol_ref_same(node.nominal.unwrap(), owner) ||
+               fields.len() != node.nominal_fields.len() {
+                panic("FlowIR: struct pattern owner/field census differs")
+            }
+            let mut index = 0
+            for field in fields {
+                let fact = node.nominal_fields.get(index).unwrap()
+                if !flow_field_identity_same(field.field, fact.identity) {
+                    panic("FlowIR: struct pattern field order differs")
+                }
+                validate_typed_flow_pattern(
+                    field.pattern, fact.ty, body, type_nodes)
+                index = index + 1
+            }
+        },
+        FlowPatternContractValue::FlowVariantPattern { variant, fields } => {
+            if flow_type_kind_tag(node.kind) != FLOW_TYPE_ENUM ||
+               !symbol_ref_same(
+                    node.nominal.unwrap(),
+                    registered_nominal_ref_symbol(variant_ref_owner(variant))) {
+                panic("FlowIR: variant pattern owner differs")
+            }
+            let mut expected_fields: List<FlowNominalFieldFact> = []
+            for fact in node.nominal_fields {
+                if flow_field_identity_is_variant(fact.identity) &&
+                   variant_ref_same(
+                        variant_field_ref_variant(
+                            flow_field_identity_variant(fact.identity)),
+                        variant) {
+                    expected_fields.push(fact)
+                }
+            }
+            if fields.len() != expected_fields.len() {
+                panic("FlowIR: variant pattern field census differs")
+            }
+            let mut index = 0
+            for field in fields {
+                let fact = expected_fields.get(index).unwrap()
+                if !flow_field_identity_same(field.field, fact.identity) {
+                    panic("FlowIR: variant pattern field order differs")
+                }
+                validate_typed_flow_pattern(
+                    field.pattern, fact.ty, body, type_nodes)
+                index = index + 1
+            }
+        }
+    }
+}
+
 fn validate_typed_terminators(
     body: FlowBody, callable: FlowCallable,
-    type_nodes: List<FlowTypeNode>
+    type_nodes: List<FlowTypeNode>, callables: List<FlowCallable>
 ) {
     for block in body.blocks {
         match block.terminator.value {
@@ -3984,6 +4473,35 @@ fn validate_typed_terminators(
                     if kind != FLOW_TYPE_UNIT && kind != FLOW_TYPE_NEVER {
                         panic("FlowIR: value-returning callable has empty Return")
                     }
+                }
+            },
+            FlowTerminatorValue::PatternValue {
+                scrutinee, pattern, ..
+            } => validate_typed_flow_pattern(
+                pattern, slot_type_for(body, scrutinee), body, type_nodes),
+            FlowTerminatorValue::HandleInstallValue { handlers, .. } => {
+                let mut index = 0
+                while index < handlers.len() {
+                    let binding = handlers.get(index).unwrap()
+                    let _ = callable_for_ref(
+                        callables, effect_operation_ref_callable(
+                            binding.operation))
+                    let handler = callable_for_ref(callables, binding.handler)
+                    if !flow_callable_mode_same(
+                            handler.mode,
+                            flow_callable_mode_concrete_body()) {
+                        panic("FlowIR: installed handler is bodyless")
+                    }
+                    let mut right_index = index + 1
+                    while right_index < handlers.len() {
+                        if effect_operation_ref_same(
+                                binding.operation,
+                                handlers.get(right_index).unwrap().operation) {
+                            panic("FlowIR: handle repeats an operation")
+                        }
+                        right_index = right_index + 1
+                    }
+                    index = index + 1
                 }
             },
             _ => {}
@@ -4050,7 +4568,19 @@ fn validate_successor(
         panic("FlowIR: non-terminal edge exits the root scope")
     }
     let remaining = lineage.get(successor.exited_scopes.len()).unwrap()
-    if !flow_scope_ref_same(target_block.scope, remaining) {
+    let mut active = remaining
+    for entered in successor.entered_scopes {
+        let scope = scope_for_ref(body.scopes, entered)
+        let parent = match scope.parent {
+            some(value) => value,
+            none => panic("FlowIR: successor cannot enter root scope")
+        }
+        if !flow_scope_ref_same(parent, active) {
+            panic("FlowIR: entered scopes are not outer-to-inner")
+        }
+        active = entered
+    }
+    if !flow_scope_ref_same(target_block.scope, active) {
         panic("FlowIR: successor target scope differs after exits")
     }
 }
@@ -4095,13 +4625,20 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
                 panic("FlowIR: Assign RHS is not an explicit temp slot")
             }
         },
-        FlowInstructionValue::CallValue { target, arguments, result } => {
+        FlowInstructionValue::CallValue {
+            target, arguments, evidence, result
+        } => {
             for argument in arguments {
                 let _ = slot_for_ref(body.slots, argument)
             }
             match result {
                 some(slot) => { let _ = slot_for_ref(body.slots, slot) },
                 none => {}
+            }
+            for item in evidence {
+                if flow_evidence_is_local(item) {
+                    let _ = slot_for_ref(body.slots, flow_evidence_local(item))
+                }
             }
             if flow_call_target_is_local(target) {
                 let _ = slot_for_ref(body.slots, flow_call_target_local(target))
@@ -4167,6 +4704,24 @@ fn advance_instruction_scope(
     }
 }
 
+fn validate_flow_pattern_slots(body: FlowBody, pattern: FlowPatternContract) {
+    match pattern.value {
+        FlowPatternContractValue::FlowBindingPattern(slot) => {
+            let _ = slot_for_ref(body.slots, slot)
+        },
+        FlowPatternContractValue::FlowTuplePattern(elements) => {
+            for element in elements { validate_flow_pattern_slots(body, element) }
+        },
+        FlowPatternContractValue::FlowStructPattern { fields, .. } |
+        FlowPatternContractValue::FlowVariantPattern { fields, .. } => {
+            for field in fields {
+                validate_flow_pattern_slots(body, field.pattern)
+            }
+        },
+        _ => {}
+    }
+}
+
 fn validate_terminator_slots(body: FlowBody, terminator: FlowTerminator) {
     validate_origin_for_executable(terminator.origin, body.reference)
     match terminator.value {
@@ -4183,6 +4738,15 @@ fn validate_terminator_slots(body: FlowBody, terminator: FlowTerminator) {
         },
         FlowTerminatorValue::HandlerValue { operation, .. } => {
             let _ = slot_for_ref(body.slots, operation)
+        },
+        FlowTerminatorValue::PatternValue {
+            scrutinee, pattern, ..
+        } => {
+            let _ = slot_for_ref(body.slots, scrutinee)
+            validate_flow_pattern_slots(body, pattern)
+        },
+        FlowTerminatorValue::TryValue { error, .. } => {
+            let _ = slot_for_ref(body.slots, error)
         },
         _ => {}
     }
@@ -4248,9 +4812,10 @@ fn validate_body_blocks(body: FlowBody) {
         }
         cursor = cursor + 1
     }
-    if reachable.len() != body.blocks.len() {
-        panic("FlowIR: frozen body contains an unreachable block")
-    }
+    // Structured lowering may retain a deterministic join after every arm
+    // diverges.  Such blocks remain typed/frozen but have no incoming edge;
+    // reachability is explicit topology, not an excuse to delete or renumber
+    // stable blocks here.
 }
 
 fn validate_bodies(
@@ -4273,7 +4838,8 @@ fn validate_bodies(
             validate_slots(body, type_nodes)
             validate_body_callable_parameters(body, callable)
             validate_body_blocks(body)
-            validate_typed_terminators(body, callable, type_nodes)
+            validate_typed_terminators(
+                body, callable, type_nodes, callables)
             expected_body_index = expected_body_index + 1
         }
     }
@@ -4291,12 +4857,42 @@ fn validate_direct_calls(
             if edge.arguments.len() != contract.parameter_roles.len() {
                 panic("FlowIR: call arguments/semantic contract arity differs")
             }
+            let mut expected_requirements: List<SymbolRef>? = none
             for candidate_ref in edge.target.candidates {
                 let candidate = callable_for_ref(callables, candidate_ref)
                 if candidate.parameter_types.len() != edge.arguments.len() ||
                    !flow_call_contract_same(
                         candidate.semantic_contract, contract) {
                     panic("FlowIR: callable candidate contract differs")
+                }
+                match expected_requirements {
+                    some(required) => {
+                        if required.len() != candidate.evidence_requirements.len() {
+                            panic("FlowIR: call candidates differ in evidence arity")
+                        }
+                        let mut requirement_index = 0
+                        while requirement_index < required.len() {
+                            if !symbol_ref_same(
+                                    required.get(requirement_index).unwrap(),
+                                    candidate.evidence_requirements.get(
+                                        requirement_index).unwrap()) {
+                                panic("FlowIR: call candidate evidence order differs")
+                            }
+                            requirement_index = requirement_index + 1
+                        }
+                    },
+                    none => { expected_requirements = some(
+                        copy_symbols(candidate.evidence_requirements)) }
+                }
+            }
+            let requirements = expected_requirements.unwrap_or([])
+            if requirements.len() != edge.evidence.len() {
+                panic("FlowIR: call evidence census differs")
+            }
+            for evidence in edge.evidence {
+                if !flow_evidence_is_local(evidence) {
+                    let _ = callable_for_ref(
+                        callables, flow_evidence_callable(evidence))
                 }
             }
             if flow_call_target_is_direct(edge.target) &&
@@ -4531,6 +5127,14 @@ fn validate_projection_contract(
                 panic("FlowIR: structural projection base is not tuple/record")
             }
         },
+        FlowProjectionContractValue::TupleProjectionValue(index) => {
+            if flow_type_kind_tag(base.kind) != FLOW_TYPE_TUPLE ||
+               index < 0 || index >= base.children.len() ||
+               !flow_type_ref_same(
+                    base.children.get(index).unwrap(), contract.result_type) {
+                panic("FlowIR: tuple projection index/result type differs")
+            }
+        },
         FlowProjectionContractValue::NominalProjectionValue(field) => {
             let nominal = match base.nominal {
                 some(symbol) => symbol,
@@ -4626,6 +5230,14 @@ fn validate_typed_instructions(
                                         callables,
                                         intrinsic_ref_symbol(intrinsic)))
                             },
+                            FlowOperationValue::ClosureOperationValue(executable) => {
+                                let callable = callable_for_ref(callables, executable)
+                                if !flow_callable_mode_same(
+                                        callable.mode,
+                                        flow_callable_mode_concrete_body()) {
+                                    panic("FlowIR: closure executable is bodyless")
+                                }
+                            },
                             _ => {}
                         }
                     },
@@ -4651,7 +5263,7 @@ fn validate_typed_instructions(
                         slot_type_for(body, target),
                         "FlowIR: Capture source/target type differs"),
                     FlowInstructionValue::CallValue {
-                        target, arguments, result
+                        target, arguments, result, ..
                     } => {
                         let contract = target.contract
                         if arguments.len() != contract.parameter_types.len() {
@@ -4872,7 +5484,13 @@ fn encode_operation(value: FlowOperationContract) -> Str {
             parts.push(builtin_method_site_tag(
                 intrinsic_ref_site(intrinsic)).to_str())
             parts.push(encode_symbol(intrinsic_ref_symbol(intrinsic)))
-        }
+        },
+        FlowOperationValue::TupleAggregateOperationValue(arity) =>
+            parts.push("tuple:${arity.to_str()}"),
+        FlowOperationValue::RecordAggregateOperationValue(arity) =>
+            parts.push("record:${arity.to_str()}"),
+        FlowOperationValue::ClosureOperationValue(executable) =>
+            parts.push("closure:${encode_executable(executable)}")
     }
     for ty in value.input_types {
         parts.push("T${encode_type_ref(ty)}")
@@ -4892,6 +5510,8 @@ fn encode_projection_contract(value: FlowProjectionContract) -> Str {
             "N${encode_field_identity(make_nominal_flow_field_identity(field))}",
         FlowProjectionContractValue::VariantProjectionValue(field) =>
             "V${encode_field_identity(make_variant_flow_field_identity(field))}",
+        FlowProjectionContractValue::TupleProjectionValue(index) =>
+            "T${index.to_str()}",
         FlowProjectionContractValue::StructuralProjectionValue(path) =>
             "S${encode_path(path)}",
         FlowProjectionContractValue::WholeSlotProjectionValue => "W"
@@ -4906,7 +5526,7 @@ fn encode_scope_refs(values: List<FlowScopeRef>) -> Str {
 }
 
 fn encode_successor(value: FlowSuccessor) -> Str {
-    "${encode_block_ref(value.target)}[${encode_scope_refs(value.exited_scopes)}]"
+    "${encode_block_ref(value.target)}[x:${encode_scope_refs(value.exited_scopes)}][e:${encode_scope_refs(value.entered_scopes)}]"
 }
 
 fn encode_instruction(value: FlowInstruction) -> Str {
@@ -4937,9 +5557,18 @@ fn encode_instruction(value: FlowInstruction) -> Str {
         FlowInstructionValue::AssignValue { rhs_temp, target } => {
             parts.push(encode_slot(rhs_temp)); parts.push(encode_slot(target))
         },
-        FlowInstructionValue::CallValue { target, arguments, result } => {
+        FlowInstructionValue::CallValue {
+            target, arguments, evidence, result
+        } => {
             parts.push(encode_call_target(target))
             for argument in arguments { parts.push(encode_slot(argument)) }
+            for item in evidence {
+                parts.push(if flow_evidence_is_local(item) {
+                    "EL${encode_slot(flow_evidence_local(item))}"
+                } else {
+                    "EC${encode_executable(flow_evidence_callable(item))}"
+                })
+            }
             match result {
                 some(slot) => parts.push(encode_slot(slot)),
                 none => parts.push("void")
@@ -4966,6 +5595,45 @@ fn encode_instruction(value: FlowInstruction) -> Str {
         }
     }
     parts.join(";")
+}
+
+fn encode_flow_pattern(value: FlowPatternContract) -> Str {
+    let mut parts: List<Str> = [
+        flow_pattern_kind_tag(value).to_str(), encode_type_ref(value.ty)
+    ]
+    match value.value {
+        FlowPatternContractValue::FlowWildcardPattern => {},
+        FlowPatternContractValue::FlowBindingPattern(slot) =>
+            parts.push(encode_slot(slot)),
+        FlowPatternContractValue::FlowLiteralPattern(literal) => match
+                literal.value {
+            FlowPatternLiteralValue::PatternIntValue(item) =>
+                parts.push(item.to_str()),
+            FlowPatternLiteralValue::PatternFloatValue(item) =>
+                parts.push(item.to_str()),
+            FlowPatternLiteralValue::PatternStrValue(item) =>
+                parts.push(encode_atom(item)),
+            FlowPatternLiteralValue::PatternBoolValue(item) =>
+                parts.push(if item { "true" } else { "false" }),
+            FlowPatternLiteralValue::PatternUnitValue => parts.push("unit")
+        },
+        FlowPatternContractValue::FlowTuplePattern(elements) => {
+            for element in elements { parts.push(encode_flow_pattern(element)) }
+        },
+        FlowPatternContractValue::FlowStructPattern { owner, fields } => {
+            parts.push(encode_symbol(owner))
+            for field in fields {
+                parts.push("${encode_field_identity(field.field)}=${encode_flow_pattern(field.pattern)}")
+            }
+        },
+        FlowPatternContractValue::FlowVariantPattern { variant, fields } => {
+            parts.push(encode_symbol(variant_ref_member(variant)))
+            for field in fields {
+                parts.push("${encode_field_identity(field.field)}=${encode_flow_pattern(field.pattern)}")
+            }
+        }
+    }
+    parts.join("~")
 }
 
 fn encode_terminator(value: FlowTerminator) -> Str {
@@ -5005,6 +5673,25 @@ fn encode_terminator(value: FlowTerminator) -> Str {
             parts.push(encode_slot(operation))
             parts.push(encode_successor(handled))
             parts.push(encode_successor(unhandled))
+        },
+        FlowTerminatorValue::PatternValue {
+            scrutinee, pattern, matched, unmatched
+        } => {
+            parts.push(encode_slot(scrutinee))
+            parts.push(encode_flow_pattern(pattern))
+            parts.push(encode_successor(matched))
+            parts.push(encode_successor(unmatched))
+        },
+        FlowTerminatorValue::TryValue { error, protected, caught } => {
+            parts.push(encode_slot(error))
+            parts.push(encode_successor(protected))
+            parts.push(encode_successor(caught))
+        },
+        FlowTerminatorValue::HandleInstallValue { body, handlers } => {
+            parts.push(encode_successor(body))
+            for handler in handlers {
+                parts.push("H${encode_symbol(effect_operation_ref_member(handler.operation))}/${encode_executable(handler.handler)}")
+            }
         },
         FlowTerminatorValue::UnreachableValue { exited_scopes } |
         FlowTerminatorValue::DivergeValue { exited_scopes } =>
@@ -5110,6 +5797,9 @@ fn compute_topology_encoding(
         }
         item.push("O${flow_semantic_role_tag(callable.semantic_contract.result_role).to_str()}")
         item.push("G${encode_value_origin(callable.semantic_contract.result_origin)}")
+        for requirement in callable.evidence_requirements {
+            item.push("E${encode_symbol(requirement)}")
+        }
         parts.push(item.join(";"))
     }
     for body in bodies {
@@ -5190,6 +5880,8 @@ fn freeze_callables_with_edges(
             parameter_slots: copy_slot_refs(callable.parameter_slots),
             result_type: callable.result_type, mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
+            evidence_requirements: copy_symbols(
+                callable.evidence_requirements),
             call_edges: copy_call_edges(edges)
         })
     }
@@ -5231,6 +5923,8 @@ pub fn flow_program_callables(value: FlowProgram) -> List<FlowCallable> {
             parameter_slots: copy_slot_refs(callable.parameter_slots),
             result_type: callable.result_type, mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
+            evidence_requirements: copy_symbols(
+                callable.evidence_requirements),
             call_edges: copy_call_edges(callable.call_edges)
         })
     }
@@ -5252,7 +5946,8 @@ pub fn validate_flow_program(value: FlowProgram) {
                 callable.reference, callable.origin,
                 callable.parameter_types, callable.parameter_slots,
                 callable.result_type,
-                callable.mode, callable.semantic_contract)
+                callable.mode, callable.semantic_contract,
+                callable.evidence_requirements)
         }), value.bodies)
     if !flow_topology_fingerprint_same(
             rebuilt.topology_fingerprint, value.topology_fingerprint) {

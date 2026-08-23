@@ -675,23 +675,40 @@ enum CoreConstructorRefValue {
     RecordConstructorValue(Int)
 }
 
-pub struct CoreConstructorRef { value: CoreConstructorRefValue }
+pub struct CoreConstructorRef {
+    value: CoreConstructorRefValue,
+    executable: ExecutableRef?
+}
 
 pub fn make_core_struct_constructor(
-    owner: RegisteredNominalRef
+    owner: RegisteredNominalRef, executable: ExecutableRef
 ) -> CoreConstructorRef {
-    CoreConstructorRef { value: CoreConstructorRefValue::StructConstructorValue(owner) }
+    CoreConstructorRef {
+        value: CoreConstructorRefValue::StructConstructorValue(owner),
+        executable: some(executable)
+    }
 }
-pub fn make_core_variant_constructor(variant: VariantRef) -> CoreConstructorRef {
-    CoreConstructorRef { value: CoreConstructorRefValue::VariantConstructorValue(variant) }
+pub fn make_core_variant_constructor(
+    variant: VariantRef, executable: ExecutableRef
+) -> CoreConstructorRef {
+    CoreConstructorRef {
+        value: CoreConstructorRefValue::VariantConstructorValue(variant),
+        executable: some(executable)
+    }
 }
 pub fn make_core_tuple_constructor(arity: Int) -> CoreConstructorRef {
     if arity < 0 { panic("CoreHIR: negative tuple constructor arity") }
-    CoreConstructorRef { value: CoreConstructorRefValue::TupleConstructorValue(arity) }
+    CoreConstructorRef {
+        value: CoreConstructorRefValue::TupleConstructorValue(arity),
+        executable: none
+    }
 }
 pub fn make_core_record_constructor(arity: Int) -> CoreConstructorRef {
     if arity < 0 { panic("CoreHIR: negative record constructor arity") }
-    CoreConstructorRef { value: CoreConstructorRefValue::RecordConstructorValue(arity) }
+    CoreConstructorRef {
+        value: CoreConstructorRefValue::RecordConstructorValue(arity),
+        executable: none
+    }
 }
 pub fn core_constructor_kind_tag(value: CoreConstructorRef) -> Int {
     match value.value {
@@ -721,6 +738,9 @@ pub fn core_constructor_arity(value: CoreConstructorRef) -> Int {
         CoreConstructorRefValue::RecordConstructorValue(arity) => arity,
         _ => panic("CoreHIR: nominal constructor has no structural arity")
     }
+}
+pub fn core_constructor_executable(value: CoreConstructorRef) -> ExecutableRef? {
+    value.executable
 }
 
 pub struct CoreFieldValue {
@@ -2918,9 +2938,18 @@ fn validate_expr_with_program(
                 projection_result_type(
                     field, core_slot_type_for(body, base), graph),
                 value.ty, "CoreHIR: projection result type differs"),
-        CoreExprValue::ConstructExprValue { constructor, fields } =>
+        CoreExprValue::ConstructExprValue { constructor, fields } => {
             validate_construct_with_graph(
-                constructor, fields, value.ty, body, graph),
+                constructor, fields, value.ty, body, graph)
+            match constructor.executable {
+                some(executable) => {
+                    let _ = core_callable_for(callables, executable)
+                },
+                none => if core_constructor_kind_tag(constructor) < 2 {
+                    panic("CoreHIR: nominal constructor has no exact executable")
+                }
+            }
+        },
         CoreExprValue::LambdaExprValue { executable, .. } => {
             let contract = core_callable_for(callables, executable)
             if !flow_callable_mode_same(

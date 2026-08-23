@@ -52,13 +52,19 @@ use env::{
     registered_trait_assoc_member
 }
 use core_expr::{
-    CoreTypeRef, CoreEffectSet, CoreCalleeRef, CoreEvidenceRef, CoreSlot,
+    CoreTypeRef, CoreTypeGraph, CoreEffectSet,
+    CoreCalleeRef, CoreEvidenceRef, CoreSlot,
     core_type_ref_same, core_type_ref_index,
     core_effect_set_atoms, make_core_effect_set,
     core_evidence_is_local, core_evidence_local, core_evidence_callable,
-    core_slot_reference, core_slot_type
+    core_slot_reference, core_slot_type,
+    core_type_graph_count, core_type_graph_node,
+    core_type_graph_nodes, make_core_type_graph
 }
-use flow_ir::{FlowScope, FlowScopeRef}
+use flow_ir::{
+    FlowScope, FlowScopeRef,
+    flow_type_node_nominal
+}
 
 // ============================================================
 // Exact associated/evidence facts
@@ -359,6 +365,7 @@ pub struct DelegatePlanInput {
     field_impl_provider: ImplProviderRef,
     field_target: SymbolRef,
     source_member_index: Int,
+    type_graph: CoreTypeGraph,
     field: NominalFieldRef,
     outer_type: CoreTypeRef,
     field_type: CoreTypeRef,
@@ -375,6 +382,7 @@ pub fn make_delegate_plan_input(
     child_provider: ImplProviderRef, source_member_index: Int,
     field_impl_owner: ImplOwnerRef,
     field_impl_provider: ImplProviderRef, field_target: SymbolRef,
+    type_graph: CoreTypeGraph,
     field: NominalFieldRef, outer_type: CoreTypeRef,
     field_type: CoreTypeRef, trait_contract: RegisteredTraitContract,
     method_plans: List<DelegateMethodPlan>,
@@ -390,6 +398,7 @@ pub fn make_delegate_plan_input(
         field_impl_provider: field_impl_provider,
         field_target: field_target,
         source_member_index: source_member_index,
+        type_graph: make_core_type_graph(core_type_graph_nodes(type_graph)),
         field: field, outer_type: outer_type, field_type: field_type,
         trait_contract: trait_contract,
         method_plans: copy_method_plans(method_plans),
@@ -784,6 +793,17 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
             nominal_field_ref_owner(input.field)) {
         return invalid_outcome(input, DELEGATE_INVALID_FIELD)
     }
+    if core_type_graph_count(input.type_graph) <= 0 ||
+       !symbol_ref_same(
+            flow_type_node_nominal(core_type_graph_node(
+                input.type_graph, input.outer_type)),
+            impl_owner_ref_target(input.outer_owner)) ||
+       !symbol_ref_same(
+            flow_type_node_nominal(core_type_graph_node(
+                input.type_graph, input.field_type)),
+            input.field_target) {
+        return invalid_outcome(input, DELEGATE_INVALID_FIELD)
+    }
     let field_trait = impl_owner_ref_trait(input.field_impl_owner)
     if !symbol_ref_same(
             impl_owner_ref_target(input.field_impl_owner),
@@ -832,6 +852,7 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
         }
         if !core_type_ref_same(method.body.field_type, input.field_type) ||
            !core_type_ref_same(method.body.outer_type, input.outer_type) ||
+           method.body.type_count != core_type_graph_count(input.type_graph) ||
            !method_contains_plan_evidence(method, input) ||
            !method_body_is_closed(
                 method.body, method.generated_executable,
