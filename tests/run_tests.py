@@ -2517,6 +2517,10 @@ def delegate_provider_plan_u1c3_mutation_errors(
 
 def delegate_provider_plan_u1c3_fixture_errors(ring_exe: str) -> List[str]:
     errors: List[str] = []
+    compiler_path = Path(ring_exe).resolve(strict=True)
+    compiler = str(compiler_path)
+    compiler_before = _sha256_file(compiler_path)
+    environment = dict(_controlled_environment(compiler))
     positive = CASES_DIR / "delegate_shared_supertrait_provider.ring"
     negatives = (
         CASES_DIR / "delegate_conflict.ring",
@@ -2527,9 +2531,8 @@ def delegate_provider_plan_u1c3_fixture_errors(ring_exe: str) -> List[str]:
     if positive not in discover_positive_cases(CASES_DIR):
         errors.append("shared-supertrait delegate fixture is not runner-discovered")
     else:
-        compiler = str(Path(ring_exe).resolve(strict=True))
         positive_error = _f1_run_ring_check(
-            compiler, positive, dict(_controlled_environment(compiler)))
+            compiler, positive, environment)
         if positive_error:
             errors.append(positive_error)
     discovered_negatives = discover_negative_cases(CASES_DIR)
@@ -2537,6 +2540,30 @@ def delegate_provider_plan_u1c3_fixture_errors(ring_exe: str) -> List[str]:
         if negative not in discovered_negatives:
             errors.append(
                 f"delegate negative fixture is not runner-discovered: {negative.name}")
+            continue
+        try:
+            completed = subprocess.run(
+                [compiler, "check", str(negative)],
+                cwd=REPO, env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="strict",
+                check=False, timeout=120)
+        except subprocess.TimeoutExpired:
+            errors.append(f"delegate negative timed out: {negative.name}")
+            continue
+        if completed.returncode == 0:
+            errors.append(
+                f"delegate negative unexpectedly passed: {negative.name}")
+            continue
+        contract = negative.with_suffix(".error").read_text(encoding="utf-8")
+        combined = (completed.stdout or "") + (completed.stderr or "")
+        contract_error = error_contract_failure(contract, combined)
+        if contract_error is not None:
+            errors.append(
+                f"delegate negative contract failed for {negative.name}: "
+                f"{contract_error}; output={combined[:300]!r}")
+    if _sha256_file(compiler_path) != compiler_before:
+        errors.append("pinned Ring compiler changed across delegate fixtures")
     return errors
 
 

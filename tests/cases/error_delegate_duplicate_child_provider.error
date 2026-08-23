@@ -1,3 +1,4 @@
 E0509
+trait 'Labelled' is already implemented for 'DuplicateDelegate'; cannot delegate the same trait
 delegate conflicts with existing impl
 !internal compiler error
