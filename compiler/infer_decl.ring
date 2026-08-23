@@ -6,7 +6,10 @@ use hir::{HDecl, HParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssoc
     DictDispatchInfo, DictRef, trait_dict_name,
     hexpr_type, hexpr_effects, hexpr_span,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
-use ir_identity::{NominalFieldRef, nominal_field_ref_index}
+use ir_identity::{NominalFieldRef, nominal_field_ref_index, symbol_ref_same,
+    registered_trait_ref_symbol, trait_method_ref_trait,
+    trait_method_ref_source_member_index,
+    trait_method_ref_callable_slot_index, trait_method_ref_name}
 use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     MethodOrigin, ImplEntry,
     ImplMethodSchemeCore,
@@ -1343,8 +1346,30 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
     }
 
     let mut hmethods: List<HTraitMethod> = []
-    for m in trait_def.methods {
-        let ast_method = find_ast_fn_by_name(ast_methods, m.name)
+    for method_index in 0..trait_def.methods.len() {
+        let m = trait_def.methods.get(method_index).unwrap()
+        let source_member_index =
+            trait_method_ref_source_member_index(m.method_ref)
+        if !symbol_ref_same(
+                trait_method_ref_trait(m.method_ref),
+                registered_trait_ref_symbol(trait_def.owner_ref)) ||
+           trait_method_ref_callable_slot_index(m.method_ref) != method_index ||
+           source_member_index < method_index ||
+           trait_method_ref_name(m.method_ref) != m.name {
+            panic("trait HIR: exact method relation drifted")
+        }
+        let ast_method = match ast_methods.get(source_member_index) {
+            some(method) => match method {
+                Decl::Fn { name: source_name, is_abstract, .. } => {
+                    if source_name != m.name || m.has_default == is_abstract {
+                        panic("trait HIR: exact source method shape drifted")
+                    }
+                    method
+                },
+                _ => panic("trait HIR: exact source member is not a method")
+            },
+            none => panic("trait HIR: exact source member is missing")
+        }
         let fn_params: List<Type> = match m.ty {
             Type::FnType { params, .. } => params,
             _ => []
@@ -1358,47 +1383,45 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
             _ => EMPTY_ROW
         }
         let ast_params = match ast_method {
-            some(am) => match am { Decl::Fn { params, .. } => some(params), _ => none },
-            none => none
+            Decl::Fn { params, .. } => params,
+            _ => panic("trait HIR: exact source member changed kind")
+        }
+        if ast_params.len() != fn_params.len() ||
+           m.param_mutabilities.len() != ast_params.len() {
+            panic("trait HIR: exact source parameter shape drifted")
         }
 
         let mut hparams: List<HParam> = []
         let mut pi = 0
         for param_type in fn_params {
-            let p_name = match ast_params {
-                some(aps) => match aps.get(pi) { some(ap) => ap.name, none => "p${pi.to_str()}" },
-                none => "p${pi.to_str()}"
-            }
-            let p_mutable = match ast_params {
-                some(aps) => match aps.get(pi) { some(ap) => ap.is_mutable, none => false },
-                none => false
+            let source_param = match ast_params.get(pi) {
+                some(param) => param,
+                none => panic("trait HIR: exact source parameter is missing")
             }
             let trait_param_def_id = ctx.env.fresh_def_id()
-            hparams.push(HParam { name: p_name, ty: param_type,
-                def_id: some(trait_param_def_id), is_mutable: p_mutable })
+            hparams.push(HParam { name: source_param.name, ty: param_type,
+                def_id: some(trait_param_def_id),
+                is_mutable: source_param.is_mutable })
             pi = pi + 1
         }
 
         let mut method_body: HExpr? = none
         if m.has_default {
             match ast_method {
-                some(am) => match am {
-                    Decl::Fn { body: abody, span: method_span, .. } => {
-                        let has_body = match abody {
-                            Expr::Block { stmts, tail, .. } => stmts.len() > 0 || tail.is_some(),
-                            _ => true
-                        }
-                        if has_body {
-                            let method_identity = "${name}::${m.name}"
-                            method_body = check_trait_default_body(
-                                ctx, name, method_identity,
-                                self_var, hparams, fn_ret, fn_effects,
-                                method_span, abody)
-                        }
-                    },
-                    _ => {}
+                Decl::Fn { body: abody, span: method_span, .. } => {
+                    let has_body = match abody {
+                        Expr::Block { stmts, tail, .. } => stmts.len() > 0 || tail.is_some(),
+                        _ => true
+                    }
+                    if has_body {
+                        let method_identity = "${name}::${m.name}"
+                        method_body = check_trait_default_body(
+                            ctx, name, method_identity,
+                            self_var, hparams, fn_ret, fn_effects,
+                            method_span, abody)
+                    }
                 },
-                none => {}
+                _ => panic("trait HIR: exact default method changed kind")
             }
         }
 
@@ -1566,12 +1589,6 @@ fn check_trait_default_body(
     ctx.qualified_assoc_scope = saved_qualified_assoc
     assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
     final_body
-}
-
-fn find_ast_fn_by_name(methods: List<Decl>, name: Str) -> Decl? {
-    methods.find(fn(d) {
-        match d { Decl::Fn { name: n, .. } => n == name, _ => false }
-    })
 }
 
 fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, params: List<Param>, declared_effects: List<EffectExpr>?, is_pub: Bool, span: Span) -> HDecl {
