@@ -4,7 +4,7 @@ use hir::{HProgram, HDecl, ValueBindingKind, ModuleImplFact, compare_by_first,
     variant_ctor_name}
 use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef, ImplEntry,
     TypeAliasDef, EffectAliasDef, MethodOrigin,
-    exact_scheme_value_origin}
+    exact_scheme_value_origin, find_impl_by_origin}
 use infer_register::{prefix_decl_name, module_prefix_decl_name}
 
 // ============================================================
@@ -237,7 +237,8 @@ fn copy_inline_export(
             for field in def.fields { fields.push(field.name) }
             struct_field_orders.insert(local, fields)
             match env.trait_reg.method_origins.get(def.name) {
-                some(origins) => { method_origins.insert(def.name, map_clone(origins)) }, none => {}
+                some(origins) => merge_exact_method_origins(
+                    def.name, origins, method_origins), none => {}
             }
             match env.trait_reg.mut_methods.get(def.name) {
                 some(methods) => { mut_methods.insert(def.name, methods) }, none => {}
@@ -286,7 +287,8 @@ fn copy_inline_export(
                 }
             }
             match env.trait_reg.method_origins.get(def.name) {
-                some(origins) => { method_origins.insert(def.name, map_clone(origins)) }, none => {}
+                some(origins) => merge_exact_method_origins(
+                    def.name, origins, method_origins), none => {}
             }
             match env.trait_reg.mut_methods.get(def.name) {
                 some(methods) => { mut_methods.insert(def.name, methods) }, none => {}
@@ -561,7 +563,8 @@ fn copy_exported_name(
                 TypeDef::EnumDef_(edef) => edef.name
             }
             match source.method_origins.get(canonical_type) {
-                some(origins) => { method_origins.insert(canonical_type, map_clone(origins)) }, none => {}
+                some(origins) => merge_exact_method_origins(
+                    canonical_type, origins, method_origins), none => {}
             }
             match source.inherent_methods.get(canonical_type) {
                 some(methods) => { inherent_methods.insert(canonical_type, list_clone(methods)) }, none => {}
@@ -598,23 +601,163 @@ fn copy_exported_name(
 // namespace frames were live (check_impl_decl -> resolve_nominal_identity),
 // so this consumes the registration result directly instead of replaying
 // lexical resolution against the rolled-back environment.
+fn append_exact_impl_owner(owner: ImplEntry, mut owners: List<ImplEntry>) {
+    for existing in owners {
+        if existing.target_type_name == owner.target_type_name &&
+           existing.origin == owner.origin {
+            return
+        }
+    }
+    owners.push(owner)
+}
+
+fn optional_impl_trait_same(left: Str?, right: Str?) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => a == b,
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn method_origin_span_same(left: MethodOrigin, right: MethodOrigin) -> Bool {
+    left.span.file == right.span.file &&
+    left.span.start.line == right.span.start.line &&
+    left.span.start.column == right.span.start.column &&
+    left.span.start.offset == right.span.start.offset &&
+    left.span.end.line == right.span.end.line &&
+    left.span.end.column == right.span.end.column &&
+    left.span.end.offset == right.span.end.offset
+}
+
+fn method_origin_same(left: MethodOrigin, right: MethodOrigin) -> Bool {
+    left.origin == right.origin &&
+    optional_impl_trait_same(left.trait_name, right.trait_name) &&
+    method_origin_span_same(left, right)
+}
+
+fn method_origin_matches_owner(origin: MethodOrigin, owner: ImplEntry) -> Bool {
+    if origin.origin != owner.origin ||
+       !optional_impl_trait_same(origin.trait_name, owner.trait_name) {
+        return false
+    }
+    origin.span.file == owner.span.file &&
+    origin.span.start.line == owner.span.start.line &&
+    origin.span.start.column == owner.span.start.column &&
+    origin.span.start.offset == owner.span.start.offset &&
+    origin.span.end.line == owner.span.end.line &&
+    origin.span.end.column == owner.span.end.column &&
+    origin.span.end.offset == owner.span.end.offset
+}
+
+fn merge_exact_method_origins(
+    target: Str, origins: Map<Str, MethodOrigin>,
+    mut method_origins: Map<Str, Map<Str, MethodOrigin>>
+) {
+    let mut sorted_origins = origins.entries()
+    sorted_origins.sort_by(compare_by_first)
+    for entry in sorted_origins {
+        let (method_name, origin) = entry
+        insert_exact_method_origin(
+            target, method_name, origin, method_origins)
+    }
+}
+
+fn append_owner_method_indexes(
+    owner: ImplEntry,
+    registry_origins: Map<Str, Map<Str, MethodOrigin>>,
+    mut method_origins: Map<Str, Map<Str, MethodOrigin>>
+) {
+    match registry_origins.get(owner.target_type_name) {
+        some(origins) => {
+            let mut sorted_cores = owner.method_schemes.entries()
+            sorted_cores.sort_by(compare_by_first)
+            for core_entry in sorted_cores {
+                let (method_name, _) = core_entry
+                let origin = match origins.get(method_name) {
+                    some(found) => found,
+                    none => panic(
+                        "impl export closure: owner core index is missing")
+                }
+                if !method_origin_matches_owner(origin, owner) {
+                    panic("impl export closure: owner core index changed origin")
+                }
+                insert_exact_method_origin(
+                    owner.target_type_name, method_name, origin,
+                    method_origins)
+            }
+        },
+        none => if owner.method_schemes.len() > 0 {
+            panic("impl export closure: owner core index map is missing")
+        }
+    }
+}
+
+fn insert_exact_method_origin(
+    target: Str, method_name: Str, origin: MethodOrigin,
+    mut method_origins: Map<Str, Map<Str, MethodOrigin>>
+) {
+    let mut target_origins = match method_origins.get(target) {
+        some(existing) => existing,
+        none => {
+            let created: Map<Str, MethodOrigin> = map_new()
+            method_origins.insert(target, created)
+            created
+        }
+    }
+    match target_origins.get(method_name) {
+        some(existing) => if !method_origin_same(existing, origin) {
+            panic("impl export closure: distinct origins share one method index")
+        },
+        none => target_origins.insert(method_name, origin)
+    }
+}
+
 fn export_impl_facts(
     impl_facts: List<ModuleImplFact>,
     env: TypeEnv,
     fn_mut_params_map: Map<Str, List<Bool>>,
     program: Program,
+    mut fact_owners: List<ImplEntry>,
     mut method_origins: Map<Str, Map<Str, MethodOrigin>>,
     mut inherent_methods: Map<Str, List<Str>>,
     mut mut_methods: Map<Str, Set<Str>>,
     mut fn_mut_params: Map<Str, List<Bool>>
 ) {
+    let mut seen_fact_owners: List<ImplEntry> = []
     for fact in impl_facts {
-        match env.trait_reg.method_origins.get(fact.target) {
-            some(origins) => {
-                method_origins.insert(fact.target, map_clone(origins))
-            },
-            none => {}
+        let owner = match find_impl_by_origin(
+            env.trait_reg, fact.target, fact.owner_origin
+        ) {
+            some(found) => found,
+            none => panic("impl export closure: exact fact owner is missing")
         }
+        for seen in seen_fact_owners {
+            if seen.target_type_name == owner.target_type_name &&
+               seen.origin == owner.origin {
+                panic("impl export closure: user impl fact was exported twice")
+            }
+        }
+        seen_fact_owners.push(owner)
+        if fact.is_trait_impl != owner.trait_name.is_some() {
+            panic("impl export closure: fact owner kind changed")
+        }
+        for method_name in fact.method_names {
+            if !owner.method_schemes.contains_key(method_name) {
+                panic("impl export closure: fact method has no owner core")
+            }
+            match env.trait_reg.method_origins.get(fact.target) {
+                some(origins) => match origins.get(method_name) {
+                    some(origin) => if origin.origin != fact.owner_origin {
+                        panic("impl export closure: fact method changed origin")
+                    },
+                    none => panic("impl export closure: fact method index is missing")
+                },
+                none => panic("impl export closure: fact method index map is missing")
+            }
+        }
+        append_exact_impl_owner(owner, fact_owners)
+        append_owner_method_indexes(
+            owner, env.trait_reg.method_origins, method_origins)
         match env.trait_reg.mut_methods.get(fact.target) {
             some(ms) => { mut_methods.insert(fact.target, ms) },
             none => {}
@@ -653,6 +796,34 @@ fn export_impl_facts(
     }
 }
 
+fn validate_impl_export_closure(
+    owners: List<ImplEntry>,
+    method_origins: Map<Str, Map<Str, MethodOrigin>>
+) {
+    for map_entry in method_origins.entries() {
+        let (target, origins) = map_entry
+        for origin_entry in origins.entries() {
+            let (method_name, origin) = origin_entry
+            let mut matches = 0
+            for owner in owners {
+                if owner.target_type_name == target &&
+                   owner.origin == origin.origin {
+                    matches = matches + 1
+                    if !method_origin_matches_owner(origin, owner) {
+                        panic("impl export closure: exported index changed owner shape")
+                    }
+                    if !owner.method_schemes.contains_key(method_name) {
+                        panic("impl export closure: exported index has no owner core")
+                    }
+                }
+            }
+            if matches != 1 {
+                panic("impl export closure: exported index owner is not unique")
+            }
+        }
+    }
+}
+
 pub fn extract_exports(
     module_key: Str,
     module_prefix: Str,
@@ -680,6 +851,7 @@ pub fn extract_exports(
     let mut extern_values: Set<Str> = set_new()
     let mut mut_methods: Map<Str, Set<Str>> = map_new()
     let mut fn_mut_params: Map<Str, List<Bool>> = map_new()
+    let mut fact_owners: List<ImplEntry> = []
     for decl in program.decls {
         let canonical_decl = module_prefix_decl_name(module_prefix, decl)
         extract_decl_export(canonical_decl, env, fn_mut_params_map, program,
@@ -691,7 +863,8 @@ pub fn extract_exports(
             extern_values, mut_methods, fn_mut_params, true)
     }
     export_impl_facts(impl_facts, env, fn_mut_params_map, program,
-        method_origins, inherent_methods, mut_methods, fn_mut_params)
+        fact_owners, method_origins, inherent_methods, mut_methods,
+        fn_mut_params)
 
     // Handle pub use re-exports from the dependency export objects themselves.
     // Payloads and origins are forwarded verbatim; only the facade lookup key
@@ -770,6 +943,9 @@ pub fn extract_exports(
         exported_trait_ids.insert(def.name)
     }
     let mut trait_impls: List<ImplEntry> = []
+    for owner in fact_owners {
+        append_exact_impl_owner(owner, trait_impls)
+    }
     let mut sorted_trait_impls = env.trait_reg.trait_impls.entries()
     sorted_trait_impls.sort_by(compare_by_first)
     for map_entry in sorted_trait_impls {
@@ -781,10 +957,15 @@ pub fn extract_exports(
             }
             if exported_type_ids.contains(impl_.target_type_name) ||
                trait_exported {
-                trait_impls.push(impl_)
+                append_exact_impl_owner(impl_, trait_impls)
             }
         }
     }
+    for owner in trait_impls {
+        append_owner_method_indexes(
+            owner, env.trait_reg.method_origins, method_origins)
+    }
+    validate_impl_export_closure(trait_impls, method_origins)
 
     ModuleExports {
         module_key: module_key,

@@ -7546,6 +7546,7 @@ F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
 F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 40
 F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT = 35
+F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT = 23
 
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
@@ -9008,6 +9009,7 @@ def nominal_field_u1b_source_check_errors(ring_exe: str) -> List[str]:
 
 
 F2_U1C0_PATHS = {
+    "hir": REPO / "compiler" / "hir.ring",
     "env": REPO / "compiler" / "env.ring",
     "register": REPO / "compiler" / "infer_register.ring",
     "builtins": REPO / "compiler" / "builtins.ring",
@@ -9019,6 +9021,284 @@ F2_U1C0_PATHS = {
     "exports": REPO / "compiler" / "exports.ring",
     "checker": REPO / "compiler" / "checker.ring",
 }
+
+
+def impl_export_closure_contract_errors(
+    sources: dict[str, str],
+) -> List[str]:
+    """Cheap exact-owner export closure guard; behavior stays packet-owned."""
+    errors: List[str] = []
+    hir_source = sources.get("hir", "")
+    if "pub owner_origin: Str," not in hir_source:
+        errors.append("impl export closure: ModuleImplFact exact owner field missing")
+
+    checker_source = sources.get("checker", "")
+    owner_body, owner_error = _f0_function_body(
+        checker_source, "exact_module_impl_owner")
+    if owner_error:
+        errors.append(owner_error)
+    elif owner_body is not None and not all(token in owner_body for token in (
+        "env.trait_reg.trait_impls.get(target)",
+        "impl_trait_identity_same(owner.trait_name, trait_name)",
+        "owner.method_schemes.contains_key(method_name)",
+        "origin.origin != owner.origin",
+        "if found.is_some() { return none }",
+    )):
+        errors.append("impl export closure: collector bypasses exact owner lookup")
+
+    collect_body, collect_error = _f0_function_body(
+        checker_source, "collect_module_impl_facts")
+    if collect_error:
+        errors.append(collect_error)
+    elif collect_body is not None:
+        if "HDecl::ExternFn { name, .. } => method_names.push(name)" not in collect_body:
+            errors.append("impl export closure: collector loses extern method indexes")
+        if "owner_origin: owner.origin" not in collect_body:
+            errors.append("impl export closure: collector does not capture owner token")
+        if "if trait_name.is_some() || method_names.len() > 0" not in collect_body:
+            errors.append("impl export closure: empty inherent skip is not explicit")
+        if not all(token in collect_body for token in (
+            "HDecl::ModBlock { decls: mod_decls, is_pub, .. }",
+            "if is_pub {",
+            "env, mod_decls, false, allow_incomplete, facts",
+        )):
+            errors.append("impl export closure: public/private nested inventory is open")
+        if "none => if !allow_incomplete" not in collect_body:
+            errors.append("impl export closure: error recovery can publish an orphan fact")
+
+    exports_source = sources.get("exports", "")
+    if "map_clone(origins)" in exports_source:
+        errors.append("impl export closure: whole target method map clone remains")
+    merge_body, merge_error = _f0_function_body(
+        exports_source, "merge_exact_method_origins")
+    if merge_error:
+        errors.append(merge_error)
+    elif merge_body is not None and "insert_exact_method_origin(" not in merge_body:
+        errors.append("impl export closure: method map union bypasses exact insertion")
+    replay_body, replay_error = _f0_function_body(
+        exports_source, "method_origin_same")
+    if replay_error:
+        errors.append(replay_error)
+    elif replay_body is not None and not all(token in replay_body for token in (
+        "left.origin == right.origin",
+        "optional_impl_trait_same(left.trait_name, right.trait_name)",
+        "method_origin_span_same(left, right)",
+    )):
+        errors.append("impl export closure: same-origin replay is not structurally exact")
+    owner_shape_body, owner_shape_error = _f0_function_body(
+        exports_source, "method_origin_matches_owner")
+    if owner_shape_error:
+        errors.append(owner_shape_error)
+    elif owner_shape_body is not None and not all(token in owner_shape_body for token in (
+        "origin.origin != owner.origin",
+        "optional_impl_trait_same(origin.trait_name, owner.trait_name)",
+        "origin.span.file == owner.span.file",
+        "origin.span.end.offset == owner.span.end.offset",
+    )):
+        errors.append("impl export closure: method index owner shape is not exact")
+    insert_body, insert_error = _f0_function_body(
+        exports_source, "insert_exact_method_origin")
+    if insert_error:
+        errors.append(insert_error)
+    elif insert_body is not None and not all(token in insert_body for token in (
+        "some(existing) => if !method_origin_same(existing, origin)",
+        "distinct origins share one method index",
+    )):
+        errors.append("impl export closure: method map union can silently overwrite")
+    dedupe_body, dedupe_error = _f0_function_body(
+        exports_source, "append_exact_impl_owner")
+    if dedupe_error:
+        errors.append(dedupe_error)
+    elif dedupe_body is not None and not all(token in dedupe_body for token in (
+        "existing.target_type_name == owner.target_type_name",
+        "existing.origin == owner.origin",
+    )):
+        errors.append("impl export closure: derive/reexport owner dedupe is not exact")
+    indexes_body, indexes_error = _f0_function_body(
+        exports_source, "append_owner_method_indexes")
+    if indexes_error:
+        errors.append(indexes_error)
+    elif indexes_body is not None and not all(token in indexes_body for token in (
+        "owner.method_schemes.entries()",
+        "!method_origin_matches_owner(origin, owner)",
+        "insert_exact_method_origin(",
+    )):
+        errors.append("impl export closure: owner indexes are not same-origin exact")
+    facts_body, facts_error = _f0_function_body(
+        exports_source, "export_impl_facts")
+    if facts_error:
+        errors.append(facts_error)
+    elif facts_body is not None:
+        if not all(token in facts_body for token in (
+            "find_impl_by_origin(",
+            "env.trait_reg, fact.target, fact.owner_origin",
+            "append_exact_impl_owner(owner, fact_owners)",
+        )):
+            errors.append("impl export closure: fact export loses exact owner")
+        if not all(token in facts_body for token in (
+            "let mut seen_fact_owners: List<ImplEntry> = []",
+            "seen.origin == owner.origin",
+            "user impl fact was exported twice",
+        )):
+            errors.append("impl export closure: user fact is not consumed once")
+
+    extract_body, extract_error = _f0_function_body(
+        exports_source, "extract_exports")
+    if extract_error:
+        errors.append(extract_error)
+    elif extract_body is not None:
+        if not all(token in extract_body for token in (
+            "let mut fact_owners: List<ImplEntry> = []",
+            "for owner in fact_owners",
+            "append_exact_impl_owner(owner, trait_impls)",
+        )):
+            errors.append("impl export closure: final owner union omits module facts")
+        if "validate_impl_export_closure(trait_impls, method_origins)" not in extract_body:
+            errors.append("impl export closure: final owner/index relation is unvalidated")
+    validate_body, validate_error = _f0_function_body(
+        exports_source, "validate_impl_export_closure")
+    if validate_error:
+        errors.append(validate_error)
+    elif validate_body is not None and not all(token in validate_body for token in (
+        "!owner.method_schemes.contains_key(method_name)",
+        "if matches != 1",
+    )):
+        errors.append("impl export closure: final validator misses owner/core exactness")
+
+    inject_body, inject_error = _f0_function_body(
+        checker_source, "inject_module_exports")
+    if inject_error:
+        errors.append(inject_error)
+    elif inject_body is not None and not all(token in inject_body for token in (
+        "impl hydration: exported index has no owner core",
+        "impl hydration: exported index owner is missing",
+    )):
+        errors.append("impl export closure: hydration treats missing owner as ambiguity")
+    if "report_hydrated_method_collision" in checker_source:
+        errors.append("impl export closure: stale missing-owner E0504 helper remains")
+    return errors
+
+
+def impl_export_closure_mutation_errors(
+    sources: dict[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("checker", "exact_module_impl_owner",
+         "impl_trait_identity_same(owner.trait_name, trait_name)", "true",
+         "collector bypasses exact owner lookup"),
+        ("checker", "exact_module_impl_owner",
+         "origin.origin != owner.origin", "false",
+         "collector bypasses exact owner lookup"),
+        ("checker", "exact_module_impl_owner",
+         "if found.is_some() { return none }", "{}",
+         "collector bypasses exact owner lookup"),
+        ("checker", "collect_module_impl_facts",
+         "HDecl::ExternFn { name, .. } => method_names.push(name)",
+         "HDecl::ExternFn { .. } => {}",
+         "collector loses extern method indexes"),
+        ("checker", "collect_module_impl_facts",
+         "owner_origin: owner.origin", "owner_origin: target_type",
+         "collector does not capture owner token"),
+        ("checker", "collect_module_impl_facts",
+         "if trait_name.is_some() || method_names.len() > 0", "if true",
+         "empty inherent skip is not explicit"),
+        ("checker", "collect_module_impl_facts",
+         "if is_pub {", "if true {",
+         "public/private nested inventory is open"),
+        ("checker", "collect_module_impl_facts",
+         "none => if !allow_incomplete", "none => if allow_incomplete",
+         "error recovery can publish an orphan fact"),
+        ("exports", "merge_exact_method_origins",
+         "insert_exact_method_origin(\n            target, method_name, origin, method_origins)",
+         "method_origins.insert(target, map_clone(origins))",
+         "whole target method map clone remains"),
+        ("exports", "method_origin_same",
+         "method_origin_span_same(left, right)", "true",
+         "same-origin replay is not structurally exact"),
+        ("exports", "method_origin_matches_owner",
+         "origin.span.file == owner.span.file", "true",
+         "method index owner shape is not exact"),
+        ("exports", "insert_exact_method_origin",
+         "!method_origin_same(existing, origin)", "false",
+         "method map union can silently overwrite"),
+        ("exports", "append_exact_impl_owner",
+         "existing.origin == owner.origin", "true",
+         "derive/reexport owner dedupe is not exact"),
+        ("exports", "append_owner_method_indexes",
+         "!method_origin_matches_owner(origin, owner)", "false",
+         "owner indexes are not same-origin exact"),
+        ("exports", "export_impl_facts",
+         "env.trait_reg, fact.target, fact.owner_origin",
+         "env.trait_reg, fact.target, fact.target",
+         "fact export loses exact owner"),
+        ("exports", "export_impl_facts",
+         "seen.origin == owner.origin", "false",
+         "user fact is not consumed once"),
+        ("exports", "extract_exports",
+         "for owner in fact_owners {\n        append_exact_impl_owner(owner, trait_impls)\n    }",
+         "for owner in fact_owners { {} }",
+         "final owner union omits module facts"),
+        ("exports", "extract_exports",
+         "validate_impl_export_closure(trait_impls, method_origins)", "{}",
+         "final owner/index relation is unvalidated"),
+        ("exports", "validate_impl_export_closure",
+         "!owner.method_schemes.contains_key(method_name)", "false",
+         "final validator misses owner/core exactness"),
+        ("exports", "validate_impl_export_closure",
+         "if matches != 1", "if false",
+         "final validator misses owner/core exactness"),
+        ("checker", "inject_module_exports",
+         "panic(\n                                \"impl hydration: exported index has no owner core\")",
+         "{}",
+         "hydration treats missing owner as ambiguity"),
+        ("checker", "inject_module_exports",
+         "panic(\n                        \"impl hydration: exported index owner is missing\")",
+         "{}",
+         "hydration treats missing owner as ambiguity"),
+    )
+    killed = 0
+    for source_name, function_name, anchor, replacement, expected in mutations:
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(
+                f"impl export closure mutation {source_name}.{function_name}: "
+                f"{mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source
+        findings = impl_export_closure_contract_errors(mutated)
+        if not any(expected in finding for finding in findings):
+            errors.append(
+                f"impl export closure mutation {source_name}.{function_name} "
+                f"missed {expected!r}: {findings!r}")
+        else:
+            killed += 1
+
+    hir_source = sources["hir"]
+    anchor = "    pub owner_origin: Str,\n"
+    if hir_source.count(anchor) != 1:
+        errors.append(
+            f"impl export closure HIR mutation anchor count was "
+            f"{hir_source.count(anchor)}")
+    else:
+        mutated = dict(sources)
+        mutated["hir"] = hir_source.replace(anchor, "", 1)
+        findings = impl_export_closure_contract_errors(mutated)
+        expected = "ModuleImplFact exact owner field missing"
+        if not any(expected in finding for finding in findings):
+            errors.append(
+                f"impl export closure HIR mutation missed {expected!r}: "
+                f"{findings!r}")
+        else:
+            killed += 1
+    if killed != F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT:
+        errors.append(
+            f"impl export closure killed {killed} mutations, expected "
+            f"{F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT}")
+    return errors
 
 
 def impl_predicate_u1c0_contract_errors(
@@ -9297,6 +9577,8 @@ def impl_predicate_u1c0_source_errors() -> List[str]:
     if errors:
         return errors
     errors.extend(impl_predicate_u1c0_contract_errors(sources))
+    errors.extend(impl_export_closure_contract_errors(sources))
+    errors.extend(impl_export_closure_mutation_errors(sources))
     killed = 0
     for source_name, old, new in F2_U1C0_SOURCE_CONTRACT_MUTATIONS:
         source = sources[source_name]
@@ -9953,6 +10235,8 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         detail = (
             f"source_contract_mutations="
             f"{F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT}; "
+            f"impl_export_closure_mutations="
+            f"{F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT}; "
             "pinned_source_checks=2; no_std_behavior_checks=1; "
             "candidate_behavior=not_evaluated; "
             "behavior_gate=external_source_built_candidate_packet")

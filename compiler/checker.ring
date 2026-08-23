@@ -8,7 +8,7 @@ use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImpl
     prelude_extern_identity,
     is_nullary_variant_ctor_ident}
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, new_collecting_sink, make_diag}
-use env::{TypeEnv, TypeScheme, add_impl, find_impl, find_impl_by_origin,
+use env::{TypeEnv, TypeScheme, ImplEntry, add_impl, find_impl, find_impl_by_origin,
     install_method_core, assert_no_provisional_impl_owners}
 use builtins::{register_builtins, register_hof_intrinsics,
     finalize_std_hof_fallbacks}
@@ -281,11 +281,60 @@ fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
     ctx
 }
 
-// Collect ModuleImplFact entries from a module's own HIR (pre-prelude).
-// Non-public inline mods are skipped: their impls were never exported by the
-// AST-walking extractor either, so consumers cannot observe those methods.
+// Collect direct ModuleImplFact entries from a module's own HIR (pre-prelude).
+// A private inline mod does not publish a direct fact. If one of its types or
+// traits is re-exported through a public facade, extract_exports instead adds
+// that exact registry owner through the public type/trait closure.
+fn impl_trait_identity_same(left: Str?, right: Str?) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => a == b,
+        (none, none) => true,
+        _ => false
+    }
+}
+
+// Select the exact owner already registered for this checked HIR declaration.
+// MethodOrigin is an index into that owner, not an authority from which a new
+// origin may be reconstructed.
+fn exact_module_impl_owner(
+    env: TypeEnv, target: Str, trait_name: Str?, method_names: List<Str>
+) -> ImplEntry? {
+    let mut found: ImplEntry? = none
+    match env.trait_reg.trait_impls.get(target) {
+        some(owners) => {
+            for owner in owners {
+                if impl_trait_identity_same(owner.trait_name, trait_name) {
+                    let mut methods_match = true
+                    for method_name in method_names {
+                        if !owner.method_schemes.contains_key(method_name) {
+                            methods_match = false
+                        } else {
+                            match env.trait_reg.method_origins.get(target) {
+                                some(origins) => match origins.get(method_name) {
+                                    some(origin) => if origin.origin != owner.origin {
+                                        methods_match = false
+                                    },
+                                    none => { methods_match = false }
+                                },
+                                none => { methods_match = false }
+                            }
+                        }
+                    }
+                    if methods_match {
+                        if found.is_some() { return none }
+                        found = some(owner)
+                    }
+                }
+            }
+        },
+        none => {}
+    }
+    found
+}
+
 fn collect_module_impl_facts(
-    decls: List<HDecl>, is_top_level: Bool, mut facts: List<ModuleImplFact>
+    env: TypeEnv, decls: List<HDecl>, is_top_level: Bool,
+    allow_incomplete: Bool, mut facts: List<ModuleImplFact>
 ) {
     for decl in decls {
         match decl {
@@ -294,19 +343,32 @@ fn collect_module_impl_facts(
                 for m in methods {
                     match m {
                         HDecl::Fn { name, .. } => method_names.push(name),
+                        HDecl::ExternFn { name, .. } => method_names.push(name),
                         _ => {}
                     }
                 }
-                facts.push(ModuleImplFact {
-                    target: target_type,
-                    is_trait_impl: trait_name.is_some(),
-                    method_names: method_names,
-                    is_top_level: is_top_level
-                })
+                // An empty inherent impl exports no callable or evidence.
+                if trait_name.is_some() || method_names.len() > 0 {
+                    match exact_module_impl_owner(
+                        env, target_type, trait_name, method_names
+                    ) {
+                        some(owner) => facts.push(ModuleImplFact {
+                            target: target_type,
+                            owner_origin: owner.origin,
+                            is_trait_impl: trait_name.is_some(),
+                            method_names: method_names,
+                            is_top_level: is_top_level
+                        }),
+                        none => if !allow_incomplete {
+                            panic("module impl fact: exact registered owner is not unique")
+                        }
+                    }
+                }
             },
             HDecl::ModBlock { decls: mod_decls, is_pub, .. } => {
                 if is_pub {
-                    collect_module_impl_facts(mod_decls, false, facts)
+                    collect_module_impl_facts(
+                        env, mod_decls, false, allow_incomplete, facts)
                 }
             },
             _ => {}
@@ -329,7 +391,8 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         resolve_single_namespace_plan(program))
     let hprogram = infer_check(ctx, program)
     let mut impl_facts: List<ModuleImplFact> = []
-    collect_module_impl_facts(hprogram.decls, true, impl_facts)
+    collect_module_impl_facts(
+        ctx.env, hprogram.decls, true, ctx.sink.has_errors(), impl_facts)
     // Prepend prelude hdecls to the program's decls
     let mut all_decls = list_clone(prelude_hdecls)
     for d in hprogram.decls { all_decls.push(d) }
@@ -570,7 +633,8 @@ pub fn check_module(
     report_namespace_plan_issues(ctx, module_key, program, namespace_plan)
     let hprogram = check_module_identity(ctx, program, module_prefix)
     let mut impl_facts: List<ModuleImplFact> = []
-    collect_module_impl_facts(hprogram.decls, true, impl_facts)
+    collect_module_impl_facts(
+        ctx.env, hprogram.decls, true, ctx.sink.has_errors(), impl_facts)
     // Prepend prelude hdecls to the program's decls
     let mut all_decls = list_clone(prelude_hdecls)
     for d in hprogram.decls { all_decls.push(d) }
@@ -594,16 +658,6 @@ pub fn check_module(
         value_binding_kinds: map_clone(ctx.value_binding_kinds),
         impl_facts: impl_facts
     }
-}
-
-fn report_hydrated_method_collision(
-    mut ctx: InferCtx, target_type: Str, method_name: Str, span: Span
-) {
-    let _ = type_error(ctx.sink, E0504,
-        "Ambiguous method '${method_name}' on '${nominal_display_name(target_type)}': dependency exports contain distinct implementation origins",
-        span, DiagnosticContext::TraitError {
-            detail: "same-origin re-exports dedupe, distinct origins collide"
-        })
 }
 
 fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
@@ -736,17 +790,18 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                 match find_impl_by_origin(
                     ctx.env.trait_reg, type_name, origin.origin
                 ) {
-                    some(owner) => match owner.method_schemes.get(method_name) {
-                        some(core) => {
-                            let _ = install_method_core(
-                                ctx.env.trait_reg, ctx.sink,
-                                type_name, method_name, core, origin)
-                        },
-                        none => report_hydrated_method_collision(
-                            ctx, type_name, method_name, origin.span)
+                    some(owner) => {
+                        let core = match owner.method_schemes.get(method_name) {
+                            some(found) => found,
+                            none => panic(
+                                "impl hydration: exported index has no owner core")
+                        }
+                        let _ = install_method_core(
+                            ctx.env.trait_reg, ctx.sink,
+                            type_name, method_name, core, origin)
                     },
-                    none => report_hydrated_method_collision(
-                        ctx, type_name, method_name, origin.span)
+                    none => panic(
+                        "impl hydration: exported index owner is missing")
                 }
             }
         }

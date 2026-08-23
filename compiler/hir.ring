@@ -68,6 +68,12 @@ pub struct ModuleImplFact {
     // checking: a declaration identity for user types, the bare builtin
     // spelling (e.g. "Str") for builtin impls.
     pub target: Str,
+    // Exact registered ImplEntry identity captured from TraitRegistry while
+    // checking. This Str is an opaque transition token until the aggregate
+    // typed owner identity replaces it: export/hydration may only copy and
+    // compare it, never parse, concatenate, cache as ABI, or reconstruct it
+    // from target, method spelling, or Span.
+    pub owner_origin: Str,
     pub is_trait_impl: Bool,
     // fn-method names in declaration order (delegates excluded upstream by
     // HIR construction only when they do not lower to HDecl::Fn).
