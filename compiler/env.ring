@@ -854,10 +854,35 @@ fn impl_entry_owner_shape_same(left: ImplEntry, right: ImplEntry) -> Bool {
         assoc_type_map_same(left.assoc_types, right.assoc_types)
 }
 
-fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
-    impl_entry_owner_shape_same(left, right) &&
+fn impl_owner_state_same(left: ImplOwnerState, right: ImplOwnerState) -> Bool {
+    match (left, right) {
+        (ImplOwnerState::ProvisionalPrelude,
+         ImplOwnerState::ProvisionalPrelude) => true,
+        (ImplOwnerState::FinalOwner, ImplOwnerState::FinalOwner) => true,
+        _ => false
+    }
+}
+
+fn impl_owner_span_same(left: Span, right: Span) -> Bool {
+    left.file == right.file &&
+        left.start.line == right.start.line &&
+        left.start.column == right.start.column &&
+        left.start.offset == right.start.offset &&
+        left.end.line == right.end.line &&
+        left.end.column == right.end.column &&
+        left.end.offset == right.end.offset
+}
+
+// Complete equality for a registration-issued final owner. Export/re-export
+// dedupe uses this shared invariant after target+origin match; it may never
+// treat that opaque token pair as proof that the structural owner is equal.
+pub fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
+    left.origin == right.origin &&
+        impl_entry_owner_shape_same(left, right) &&
         string_list_same(left.method_names, right.method_names) &&
-        method_core_map_same(left.method_schemes, right.method_schemes)
+        method_core_map_same(left.method_schemes, right.method_schemes) &&
+        impl_owner_span_same(left.span, right.span) &&
+        impl_owner_state_same(left.owner_state, right.owner_state)
 }
 
 fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {

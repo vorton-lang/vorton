@@ -7546,7 +7546,7 @@ F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
 F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 40
 F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT = 35
-F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT = 23
+F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT = 34
 
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
@@ -8077,23 +8077,132 @@ def ir_inventory_f1_source_errors() -> List[str]:
     return errors
 
 
+LLM_WARNING_ENVELOPE_KEYS = frozenset(("version", "file", "diagnostics"))
+LLM_WARNING_DIAGNOSTIC_KEYS = frozenset((
+    "code", "severity", "message", "span", "context",
+    "notes", "suggestions", "category",
+))
+LLM_WARNING_SPAN_KEYS = frozenset(("line", "col", "end_line", "end_col"))
+
+
+def _reject_duplicate_json_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def llm_warning_document_sequence(
+    output: str,
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Decode exact newline-separated formatter-v1 warning documents."""
+    if not output:
+        return None, "expected non-empty LLM warning document sequence"
+    decoder = json.JSONDecoder(object_pairs_hook=_reject_duplicate_json_keys)
+    documents: List[Any] = []
+    offset = 0
+    while offset < len(output):
+        try:
+            document, end = decoder.raw_decode(output, offset)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return None, f"invalid LLM warning JSON document: {exc}"
+        documents.append(document)
+        if end == len(output):
+            offset = end
+            break
+        if output[end:end + 1] != "\n":
+            return None, "LLM warning documents are not separated by one newline"
+        offset = end + 1
+        if offset == len(output):
+            break
+
+    flattened: List[Dict[str, Any]] = []
+    unique_keys: set[Tuple[Any, ...]] = set()
+    for document in documents:
+        if not isinstance(document, dict) or (
+                frozenset(document.keys()) != LLM_WARNING_ENVELOPE_KEYS):
+            return None, "LLM warning envelope keys drifted"
+        if document.get("version") != 1 or not isinstance(document.get("file"), str):
+            return None, "LLM warning envelope version/file drifted"
+        diagnostics = document.get("diagnostics")
+        if not isinstance(diagnostics, list) or not diagnostics:
+            return None, "LLM warning envelope has no diagnostics"
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, dict) or (
+                    frozenset(diagnostic.keys()) !=
+                    LLM_WARNING_DIAGNOSTIC_KEYS):
+                return None, "LLM warning diagnostic keys drifted"
+            span = diagnostic.get("span")
+            if not isinstance(span, dict) or (
+                    frozenset(span.keys()) != LLM_WARNING_SPAN_KEYS):
+                return None, "LLM warning span keys drifted"
+            key = (
+                document["file"], diagnostic.get("code"),
+                span.get("line"), span.get("col"),
+                span.get("end_line"), span.get("end_col"),
+            )
+            if key in unique_keys:
+                return None, f"duplicate LLM warning diagnostic key {key!r}"
+            unique_keys.add(key)
+            flattened.append({
+                "file": document["file"],
+                "diagnostic": diagnostic,
+            })
+    return flattened, None
+
+
+def llm_warning_contract_error(
+    output: str, expected: Sequence[Mapping[str, Any]],
+) -> Optional[str]:
+    actual, error = llm_warning_document_sequence(output)
+    if error is not None or actual is None:
+        return error
+    if actual != list(expected):
+        return (
+            "LLM warning sequence drifted: "
+            f"expected={list(expected)!r} actual={actual!r}")
+    return None
+
+
 def _f1_run_ring_check(
     ring_exe: str, source_path: Path, environment: dict[str, str],
+    timeout_seconds: int = 120,
+    expected_warnings: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Optional[str]:
-    completed = subprocess.run(
-        [ring_exe, "check", str(source_path)], cwd=REPO, env=environment,
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="strict",
-        check=False, timeout=120)
+    command = [ring_exe, "check", str(source_path)]
+    if expected_warnings is not None:
+        command.append("--error-format=llm")
+    try:
+        completed = subprocess.run(
+            command, cwd=REPO, env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="strict",
+            check=False, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return (
+            f"pinned Ring check timed out for {source_path} after "
+            f"{timeout_seconds}s")
     if completed.returncode != 0:
         return (
             f"pinned Ring check failed for {source_path}: "
             f"exit={completed.returncode} stdout={completed.stdout!r} "
             f"stderr={completed.stderr!r}")
-    if completed.stdout.strip() != "OK" or completed.stderr:
+    if completed.stdout.strip() != "OK":
         return (
             f"pinned Ring check output drifted for {source_path}: "
             f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+    if expected_warnings is None:
+        if completed.stderr:
+            return (
+                f"pinned Ring check output drifted for {source_path}: "
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+    else:
+        warning_error = llm_warning_contract_error(
+            completed.stderr, expected_warnings)
+        if warning_error is not None:
+            return f"pinned Ring warning drift for {source_path}: {warning_error}"
     return None
 
 
@@ -9022,6 +9131,104 @@ F2_U1C0_PATHS = {
     "checker": REPO / "compiler" / "checker.ring",
 }
 
+F2_U1C0_WARNING_MESSAGE = (
+    "catch on expression with no fail effect; handler will never execute")
+
+
+def _u1c0_warning(
+    file_name: str, line: int, col: int, end_line: int, end_col: int,
+) -> Dict[str, Any]:
+    return {
+        "file": str(REPO / "compiler" / file_name),
+        "diagnostic": {
+            "code": "W0001",
+            "severity": "warning",
+            "message": F2_U1C0_WARNING_MESSAGE,
+            "span": {
+                "line": line, "col": col,
+                "end_line": end_line, "end_col": end_col,
+            },
+            "context": {
+                "kind": "other", "detail": "body has no fail effect",
+            },
+            "notes": [],
+            "suggestions": [],
+            "category": "warning",
+        },
+    }
+
+
+F2_U1C0_PARSER_WARNINGS = (
+    _u1c0_warning("parser.ring", 1778, 40, 1778, 88),
+    _u1c0_warning("parser.ring", 1721, 33, 1721, 86),
+    _u1c0_warning("parser.ring", 1731, 33, 1731, 82),
+    _u1c0_warning("parser.ring", 1743, 41, 1743, 87),
+    _u1c0_warning("parser.ring", 1751, 41, 1751, 90),
+    _u1c0_warning("parser.ring", 806, 36, 806, 73),
+)
+F2_U1C0_CHECKER_WARNINGS = (*F2_U1C0_PARSER_WARNINGS,
+    _u1c0_warning("infer.ring", 937, 38, 938, 74),
+    _u1c0_warning("infer.ring", 674, 30, 674, 87),
+    _u1c0_warning("infer.ring", 781, 30, 781, 87),
+    _u1c0_warning("infer.ring", 3434, 22, 3434, 72),
+    _u1c0_warning("infer_decl.ring", 165, 21, 166, 65),
+)
+F2_U1C0_EXPORTS_WARNINGS = F2_U1C0_PARSER_WARNINGS
+
+
+def _warning_document(
+    file_name: str, diagnostics: Sequence[Mapping[str, Any]],
+) -> str:
+    return json.dumps({
+        "version": 1,
+        "file": str(REPO / "compiler" / file_name),
+        "diagnostics": list(diagnostics),
+    }, separators=(",", ":"))
+
+
+def llm_warning_document_sequence_probe_errors() -> List[str]:
+    errors: List[str] = []
+    first = F2_U1C0_PARSER_WARNINGS[0]
+    second = _u1c0_warning("infer.ring", 937, 38, 938, 74)
+    first_diag = first["diagnostic"]
+    second_diag = second["diagnostic"]
+    single = _warning_document("parser.ring", [first_diag]) + "\n"
+    multi = (
+        _warning_document("parser.ring", [first_diag]) + "\n" +
+        _warning_document("infer.ring", [second_diag]) + "\n")
+    if llm_warning_contract_error(single, [first]) is not None:
+        errors.append("LLM warning probe rejected valid single document")
+    if llm_warning_contract_error(multi, [first, second]) is not None:
+        errors.append("LLM warning probe rejected valid multi-document sequence")
+
+    duplicate_key = single.replace(
+        '"version":1', '"version":1,"version":1', 1)
+    if llm_warning_contract_error(duplicate_key, [first]) is None:
+        errors.append("LLM warning probe accepted duplicate JSON key")
+    if llm_warning_contract_error(single + "panic", [first]) is None:
+        errors.append("LLM warning probe accepted trailing raw output")
+    duplicate_diag = _warning_document(
+        "parser.ring", [first_diag, first_diag]) + "\n"
+    if llm_warning_contract_error(duplicate_diag, [first]) is None:
+        errors.append("LLM warning probe accepted duplicate diagnostic")
+    extra_warning = _warning_document(
+        "parser.ring", [first_diag, F2_U1C0_PARSER_WARNINGS[1]["diagnostic"]]
+    ) + "\n"
+    if llm_warning_contract_error(extra_warning, [first]) is None:
+        errors.append("LLM warning probe accepted extra W0001")
+    w0002 = dict(first_diag)
+    w0002["code"] = "W0002"
+    if llm_warning_contract_error(
+            _warning_document("parser.ring", [w0002]) + "\n", [first]) is None:
+        errors.append("LLM warning probe accepted W0002")
+    error_diag = dict(first_diag)
+    error_diag["severity"] = "error"
+    if llm_warning_contract_error(
+            _warning_document("parser.ring", [error_diag]) + "\n", [first]
+    ) is None:
+        errors.append("LLM warning probe accepted error severity")
+    return errors
+
 
 def impl_export_closure_contract_errors(
     sources: dict[str, str],
@@ -9066,15 +9273,53 @@ def impl_export_closure_contract_errors(
         if "none => if !allow_incomplete" not in collect_body:
             errors.append("impl export closure: error recovery can publish an orphan fact")
 
+    env_source = sources.get("env", "")
+    owner_shape_body, owner_shape_error = _f0_function_body(
+        env_source, "impl_entry_owner_shape_same")
+    if owner_shape_error:
+        errors.append(owner_shape_error)
+    elif owner_shape_body is not None and not all(
+            token in owner_shape_body for token in (
+                "left.target_type_name == right.target_type_name",
+                "optional_string_same(left.trait_name, right.trait_name)",
+                "string_list_same(left.type_params, right.type_params)",
+                "int_list_same(left.type_param_vars, right.type_param_vars)",
+                "frozen_impl_predicate_set_same(left.predicates, right.predicates)",
+                "assoc_type_map_same(left.assoc_types, right.assoc_types)",
+            )):
+        errors.append("impl export closure: final-owner shape equality is incomplete")
+    owner_same_body, owner_same_error = _f0_function_body(
+        env_source, "impl_entry_final_same")
+    if owner_same_error:
+        errors.append(owner_same_error)
+    elif owner_same_body is not None and not all(
+            token in owner_same_body for token in (
+                "left.origin == right.origin",
+                "impl_entry_owner_shape_same(left, right)",
+                "string_list_same(left.method_names, right.method_names)",
+                "method_core_map_same(left.method_schemes, right.method_schemes)",
+                "impl_owner_span_same(left.span, right.span)",
+                "impl_owner_state_same(left.owner_state, right.owner_state)",
+            )):
+        errors.append("impl export closure: shared final-owner equality is incomplete")
+
     exports_source = sources.get("exports", "")
-    if "map_clone(origins)" in exports_source:
-        errors.append("impl export closure: whole target method map clone remains")
-    merge_body, merge_error = _f0_function_body(
-        exports_source, "merge_exact_method_origins")
-    if merge_error:
-        errors.append(merge_error)
-    elif merge_body is not None and "insert_exact_method_origin(" not in merge_body:
-        errors.append("impl export closure: method map union bypasses exact insertion")
+    if "fn merge_exact_method_origins" in exports_source or (
+            "map_clone(origins)" in exports_source):
+        errors.append("impl export closure: whole target method map merge remains")
+    for helper_name in (
+        "copy_inline_export", "extract_decl_export",
+        "copy_exported_name", "export_impl_facts",
+    ):
+        helper_body, helper_error = _f0_function_body(
+            exports_source, helper_name)
+        if helper_error:
+            errors.append(helper_error)
+        elif helper_body is not None and (
+                "method_origins.insert(" in helper_body or
+                "append_owner_method_indexes(" in helper_body):
+            errors.append(
+                f"impl export closure: {helper_name} produces method indexes")
     replay_body, replay_error = _f0_function_body(
         exports_source, "method_origin_same")
     if replay_error:
@@ -9112,8 +9357,10 @@ def impl_export_closure_contract_errors(
     elif dedupe_body is not None and not all(token in dedupe_body for token in (
         "existing.target_type_name == owner.target_type_name",
         "existing.origin == owner.origin",
+        "!impl_entry_final_same(existing, owner)",
+        "same-origin owner structure drifted",
     )):
-        errors.append("impl export closure: derive/reexport owner dedupe is not exact")
+        errors.append("impl export closure: same-origin owner drift is not rejected")
     indexes_body, indexes_error = _f0_function_body(
         exports_source, "append_owner_method_indexes")
     if indexes_error:
@@ -9124,6 +9371,8 @@ def impl_export_closure_contract_errors(
         "insert_exact_method_origin(",
     )):
         errors.append("impl export closure: owner indexes are not same-origin exact")
+    elif indexes_body is not None and "if method_name" in indexes_body:
+        errors.append("impl export closure: owner index production is conditional")
     facts_body, facts_error = _f0_function_body(
         exports_source, "export_impl_facts")
     if facts_error:
@@ -9141,6 +9390,9 @@ def impl_export_closure_contract_errors(
             "user impl fact was exported twice",
         )):
             errors.append("impl export closure: user fact is not consumed once")
+        if "append_owner_method_indexes(" in facts_body or (
+                "method_origins.insert(" in facts_body):
+            errors.append("impl export closure: fact helper produces method indexes")
 
     extract_body, extract_error = _f0_function_body(
         exports_source, "extract_exports")
@@ -9153,6 +9405,14 @@ def impl_export_closure_contract_errors(
             "append_exact_impl_owner(owner, trait_impls)",
         )):
             errors.append("impl export closure: final owner union omits module facts")
+        map_at = extract_body.find(
+            "let mut method_origins: Map<Str, Map<Str, MethodOrigin>> = map_new()")
+        final_union_at = extract_body.find("for owner in trait_impls")
+        closed_owner_at = extract_body.rfind(
+            "append_exact_impl_owner(impl_, trait_impls)")
+        if (map_at < 0 or final_union_at < 0 or closed_owner_at < 0 or
+                map_at < closed_owner_at or map_at > final_union_at):
+            errors.append("impl export closure: index map is not fresh after owner union")
         if "validate_impl_export_closure(trait_impls, method_origins)" not in extract_body:
             errors.append("impl export closure: final owner/index relation is unvalidated")
     validate_body, validate_error = _f0_function_body(
@@ -9162,8 +9422,11 @@ def impl_export_closure_contract_errors(
     elif validate_body is not None and not all(token in validate_body for token in (
         "!owner.method_schemes.contains_key(method_name)",
         "if matches != 1",
+        "for core_entry in owner.method_schemes.entries()",
+        "owner core has no exported index",
+        "owner core index is not exact",
     )):
-        errors.append("impl export closure: final validator misses owner/core exactness")
+        errors.append("impl export closure: final validator is not bidirectional")
 
     inject_body, inject_error = _f0_function_body(
         checker_source, "inject_module_exports")
@@ -9209,10 +9472,6 @@ def impl_export_closure_mutation_errors(
         ("checker", "collect_module_impl_facts",
          "none => if !allow_incomplete", "none => if allow_incomplete",
          "error recovery can publish an orphan fact"),
-        ("exports", "merge_exact_method_origins",
-         "insert_exact_method_origin(\n            target, method_name, origin, method_origins)",
-         "method_origins.insert(target, map_clone(origins))",
-         "whole target method map clone remains"),
         ("exports", "method_origin_same",
          "method_origin_span_same(left, right)", "true",
          "same-origin replay is not structurally exact"),
@@ -9224,7 +9483,28 @@ def impl_export_closure_mutation_errors(
          "method map union can silently overwrite"),
         ("exports", "append_exact_impl_owner",
          "existing.origin == owner.origin", "true",
-         "derive/reexport owner dedupe is not exact"),
+         "same-origin owner drift is not rejected"),
+        ("exports", "append_exact_impl_owner",
+         "!impl_entry_final_same(existing, owner)", "false",
+         "same-origin owner drift is not rejected"),
+        ("env", "impl_entry_owner_shape_same",
+         "frozen_impl_predicate_set_same(left.predicates, right.predicates)",
+         "true", "final-owner shape equality is incomplete"),
+        ("env", "impl_entry_owner_shape_same",
+         "assoc_type_map_same(left.assoc_types, right.assoc_types)",
+         "true", "final-owner shape equality is incomplete"),
+        ("env", "impl_entry_final_same",
+         "string_list_same(left.method_names, right.method_names)",
+         "true", "shared final-owner equality is incomplete"),
+        ("env", "impl_entry_final_same",
+         "method_core_map_same(left.method_schemes, right.method_schemes)",
+         "true", "shared final-owner equality is incomplete"),
+        ("env", "impl_entry_final_same",
+         "impl_owner_span_same(left.span, right.span)",
+         "true", "shared final-owner equality is incomplete"),
+        ("env", "impl_entry_final_same",
+         "impl_owner_state_same(left.owner_state, right.owner_state)",
+         "true", "shared final-owner equality is incomplete"),
         ("exports", "append_owner_method_indexes",
          "!method_origin_matches_owner(origin, owner)", "false",
          "owner indexes are not same-origin exact"),
@@ -9235,27 +9515,44 @@ def impl_export_closure_mutation_errors(
         ("exports", "export_impl_facts",
          "seen.origin == owner.origin", "false",
          "user fact is not consumed once"),
+        ("exports", "copy_exported_name",
+         "types.insert(local_name, def)",
+         "types.insert(local_name, def)\n            method_origins.insert(canonical_type, map_clone(source.method_origins.get(canonical_type).unwrap()))",
+         "copy_exported_name produces method indexes"),
+        ("exports", "export_impl_facts",
+         "append_exact_impl_owner(owner, fact_owners)",
+         "append_exact_impl_owner(owner, fact_owners)\n        append_owner_method_indexes(owner, env.trait_reg.method_origins, method_origins)",
+         "fact helper produces method indexes"),
         ("exports", "extract_exports",
          "for owner in fact_owners {\n        append_exact_impl_owner(owner, trait_impls)\n    }",
          "for owner in fact_owners { {} }",
          "final owner union omits module facts"),
+        ("exports", "append_owner_method_indexes",
+         "for core_entry in sorted_cores {",
+         "for core_entry in sorted_cores {\n                if method_name == \"__review_skip__\" { continue }",
+         "owner index production is conditional"),
         ("exports", "extract_exports",
          "validate_impl_export_closure(trait_impls, method_origins)", "{}",
          "final owner/index relation is unvalidated"),
         ("exports", "validate_impl_export_closure",
          "!owner.method_schemes.contains_key(method_name)", "false",
-         "final validator misses owner/core exactness"),
+         "final validator is not bidirectional"),
         ("exports", "validate_impl_export_closure",
          "if matches != 1", "if false",
-         "final validator misses owner/core exactness"),
+         "final validator is not bidirectional"),
+        ("exports", "validate_impl_export_closure",
+         "for core_entry in owner.method_schemes.entries()",
+         "for core_entry in []",
+         "final validator is not bidirectional"),
+        ("exports", "validate_impl_export_closure",
+         "panic(\"impl export closure: owner core index is not exact\")",
+         "{}", "final validator is not bidirectional"),
         ("checker", "inject_module_exports",
          "panic(\n                                \"impl hydration: exported index has no owner core\")",
-         "{}",
-         "hydration treats missing owner as ambiguity"),
+         "{}", "hydration treats missing owner as ambiguity"),
         ("checker", "inject_module_exports",
          "panic(\n                        \"impl hydration: exported index owner is missing\")",
-         "{}",
-         "hydration treats missing owner as ambiguity"),
+         "{}", "hydration treats missing owner as ambiguity"),
     )
     killed = 0
     for source_name, function_name, anchor, replacement, expected in mutations:
@@ -9576,6 +9873,7 @@ def impl_predicate_u1c0_source_errors() -> List[str]:
             errors.append(f"cannot read {display_path(path)}: {exc}")
     if errors:
         return errors
+    errors.extend(llm_warning_document_sequence_probe_errors())
     errors.extend(impl_predicate_u1c0_contract_errors(sources))
     errors.extend(impl_export_closure_contract_errors(sources))
     errors.extend(impl_export_closure_mutation_errors(sources))
@@ -9606,8 +9904,21 @@ def impl_predicate_u1c0_source_check_errors(ring_exe: str) -> List[str]:
     compiler = Path(ring_exe)
     before = _sha256_file(compiler)
     environment = dict(_controlled_environment(ring_exe))
-    for source_path in (F2_U1C0_PATHS["env"], F2_U1C0_PATHS["builtins"]):
-        error = _f1_run_ring_check(ring_exe, source_path, environment)
+    for source_path in (
+        F2_U1C0_PATHS["env"], F2_U1C0_PATHS["builtins"],
+        F2_U1C0_PATHS["hir"], F2_U1C0_PATHS["checker"],
+        F2_U1C0_PATHS["exports"],
+    ):
+        timeout_seconds = (
+            600 if source_path == F2_U1C0_PATHS["checker"] else 120)
+        expected_warnings: Optional[Sequence[Mapping[str, Any]]] = None
+        if source_path == F2_U1C0_PATHS["checker"]:
+            expected_warnings = F2_U1C0_CHECKER_WARNINGS
+        elif source_path == F2_U1C0_PATHS["exports"]:
+            expected_warnings = F2_U1C0_EXPORTS_WARNINGS
+        error = _f1_run_ring_check(
+            ring_exe, source_path, environment, timeout_seconds,
+            expected_warnings)
         if error:
             errors.append(error)
     if _sha256_file(compiler) != before:
@@ -10237,7 +10548,7 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
             f"{F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT}; "
             f"impl_export_closure_mutations="
             f"{F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT}; "
-            "pinned_source_checks=2; no_std_behavior_checks=1; "
+            "pinned_source_checks=5; no_std_behavior_checks=1; "
             "candidate_behavior=not_evaluated; "
             "behavior_gate=external_source_built_candidate_packet")
         collector.add(TestResult(
