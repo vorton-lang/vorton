@@ -28,6 +28,7 @@ use flow_ir::{
     flow_semantic_role_tag,
     flow_call_contract_parameter_roles, flow_call_contract_result_role,
     flow_callable_reference, flow_callable_parameter_types,
+    flow_callable_parameter_slots,
     flow_callable_result_type, flow_callable_mode,
     flow_callable_mode_concrete_body, flow_callable_mode_same,
     flow_callable_semantic_contract, flow_callable_call_edges,
@@ -40,6 +41,7 @@ use flow_ir::{
     flow_slot_reference, flow_slot_type, flow_slot_scope,
     flow_slot_reverse_ordinal, flow_slot_initial_state,
     flow_slot_storage, flow_slot_storage_contract,
+    flow_slot_parameter_ordinal,
     flow_initial_slot_state_tag, flow_storage_class_tag,
     flow_storage_contract_tag,
     flow_block_reference, flow_block_instructions, flow_block_terminator,
@@ -2557,12 +2559,31 @@ fn flow_body_for_reference(
     none
 }
 
-fn flow_parameter_slots(body: FlowBody) -> List<FlowSlot> {
+fn flow_parameter_slots(
+    body: FlowBody, callable: FlowCallable
+) -> List<FlowSlot> {
     let mut result: List<FlowSlot> = []
-    for slot in flow_body_slots(body) {
-        if flow_storage_class_tag(flow_slot_storage(slot)) == 0 {
-            result.push(slot)
+    let exact_slots = flow_callable_parameter_slots(callable)
+    let mut ordinal = 0
+    while ordinal < exact_slots.len() {
+        let expected = exact_slots.get(ordinal).unwrap()
+        let mut matches = 0
+        let mut found: FlowSlot? = none
+        for slot in flow_body_slots(body) {
+            if flow_storage_class_tag(flow_slot_storage(slot)) == 0 &&
+               flow_slot_parameter_ordinal(slot) == ordinal {
+                if !slot_ref_same(flow_slot_reference(slot), expected) {
+                    panic("ResourcePlanner: parameter ordinal/ref relation drifted")
+                }
+                found = some(slot)
+                matches = matches + 1
+            }
         }
+        if matches != 1 {
+            panic("ResourcePlanner: parameter ordinal is missing or duplicated")
+        }
+        result.push(found.unwrap())
+        ordinal = ordinal + 1
     }
     result
 }
@@ -2622,7 +2643,7 @@ fn planner_callable_from_flow(
             some(value) => value,
             none => panic("ResourcePlanner: concrete FlowIR callable lacks body")
         }
-        let parameters = flow_parameter_slots(body)
+        let parameters = flow_parameter_slots(body, callable)
         if parameters.len() != parameter_types.len() {
             panic("ResourcePlanner: FlowIR parameter slot census differs")
         }
