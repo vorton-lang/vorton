@@ -16,7 +16,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_predicate_trait_name, ImplOwnerState,
     find_impl_by_origin, impl_owner_is_provisional,
     finalize_provisional_impl_owner,
-    specialize_trait_method_scheme}
+    specialize_trait_method_scheme, delegate_plan_not_applicable}
 use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
@@ -209,6 +209,7 @@ fn install_builtin_method_owner(
         method_schemes: map_clone(cores),
         provider_ref: some(provider_ref),
         trait_ref: trait_ref,
+        delegate_plan: delegate_plan_not_applicable(),
         origin: origin,
         span: span,
         owner_state: state
@@ -261,6 +262,7 @@ fn seed_std_hof_owner(
         method_schemes: map_new(),
         provider_ref: none,
         trait_ref: none,
+        delegate_plan: delegate_plan_not_applicable(),
         origin: origin,
         span: span_zero(),
         owner_state: ImplOwnerState::ProvisionalPrelude
@@ -350,6 +352,7 @@ fn add_builtin_impl(
         method_schemes: map_clone(exact),
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
+        delegate_plan: delegate_plan_not_applicable(),
         origin: origin,
         span: span,
         owner_state: ImplOwnerState::FinalOwner

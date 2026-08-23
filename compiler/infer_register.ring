@@ -7,6 +7,7 @@ use ast::{Decl, Span, TypeParam, Param, TypeExpr, EffectOpDecl, StructFieldDecl,
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, EnumDef, EffectDef, EffectOpDef,
     TraitDef, TraitMethodDef, ImplEntry, ImplMethodSchemeCore,
     ExplicitDerivedProviderPlan, NominalDerivedProviderPlan,
+    DelegateChildProviderPlan, DelegatePlanState,
     ImplAssocPredicate, TypedImplPredicate, FrozenImplPredicateSet,
     TypeAliasDef, FnBound,
     EffectAliasDef, AssocTypeDef, MethodOrigin, mono, apply_subst, apply_subst_effect_map,
@@ -23,7 +24,10 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     impl_predicate_assoc_constraints, impl_assoc_predicate_name,
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
     ImplOwnerState, impl_owner_is_provisional,
-    specialize_trait_method_scheme, build_type_var_map}
+    specialize_trait_method_scheme, build_type_var_map,
+    delegate_plan_not_applicable, delegate_plan_pending,
+    delegate_plan_final,
+    finalize_delegate_provider_plan, assert_no_pending_delegate_plans}
 use diagnostics::{DiagnosticContext}
 use codes::{E0207, E0406, E0501, E0502, E0503, E0504, E0505, E0506, E0507, E0508, E0509, E0510, E0511, E0513, E0514}
 use hir::{compare_by_first, module_item_identity, variant_ctor_name, ValueBindingKind}
@@ -765,6 +769,7 @@ pub fn register_decls_two_phase(mut ctx: InferCtx, decls: List<Decl>) {
         register_nonproject_phase3_delegate(ctx, item)
     }
     exit_struct_identity_frame(ctx)
+    assert_no_pending_delegate_plans(ctx.env.trait_reg)
     close_struct_identity_ledger(ctx)
 }
 
@@ -969,6 +974,7 @@ fn register_project_module_decls_two_phase(
     refresh_project_namespace_frame(ctx)
     exit_struct_identity_frame(ctx)
     let _ = exit_project_namespace_frame(ctx)
+    assert_no_pending_delegate_plans(ctx.env.trait_reg)
     close_struct_identity_ledger(ctx)
 
     let mut result: List<Decl> = []
@@ -1071,6 +1077,7 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
     // short alias and recording its canonical origin makes HExpr::Ident exact.
     insert_file_module_aliases(ctx, module_prefix, decls, true)
     exit_struct_identity_frame(ctx)
+    assert_no_pending_delegate_plans(ctx.env.trait_reg)
     close_struct_identity_ledger(ctx)
     let mut result: List<Decl> = []
     for item in qualified { result.push(item.decl) }
@@ -1421,11 +1428,16 @@ fn register_phase3_delegate(
                 let canonical_trait_ref = exact_trait_ref(
                     ctx, canonical_trait)
                 let parent_provider_ref = delegate_facts.first().unwrap().parent_provider_ref
+                let mut child_plans: List<DelegateChildProviderPlan> = []
                 for fact in delegate_facts {
                     if !impl_provider_ref_same(
                             fact.parent_provider_ref, parent_provider_ref) {
                         panic("delegate registration: parent provider changed")
                     }
+                    child_plans.push(DelegateChildProviderPlan {
+                        source_member_index: fact.source_member_index,
+                        provider_ref: fact.provider_ref
+                    })
                 }
                 let owner = match find_impl_by_provider(
                     ctx.env.trait_reg, canonical_target,
@@ -1436,6 +1448,9 @@ fn register_phase3_delegate(
                         fail.raise(CompileError {})
                     }
                 }
+                finalize_delegate_provider_plan(
+                    ctx.env.trait_reg, canonical_target,
+                    canonical_trait_ref, parent_provider_ref, child_plans)
                 if owner.type_param_vars.len() != type_params.len() {
                     panic("delegate registration: outer owner arity mismatch")
                 }
@@ -1460,10 +1475,10 @@ fn register_phase3_delegate(
                             if fact.source_member_index != source_member_index {
                                 panic("delegate registration: provider order changed")
                             }
-                            register_delegate(
+                            let _ = some(register_delegate(
                                 ctx, owner, canonical_target,
                                 field, trait_names, dspan, type_params,
-                                fact.provider_ref)
+                                fact.provider_ref)) catch { _ => none }
                             delegate_index = delegate_index + 1
                         },
                         _ => {}
@@ -2153,15 +2168,29 @@ fn register_impl(
 ) {
     let provider_fact = peek_source_impl_provider_fact(ctx, decl_index)
     commit_source_impl_provider_fact(ctx, provider_fact)
+    let mut has_delegate = false
+    for source_member_index in 0..methods.len() {
+        match methods.get(source_member_index) {
+            some(Decl::Delegate { .. }) => { has_delegate = true },
+            _ => {}
+        }
+    }
+    let delegate_plan = if has_delegate {
+        delegate_plan_pending()
+    } else {
+        delegate_plan_final([])
+    }
     register_impl_canonical(
         ctx, resolve_nominal_identity(ctx, target_type), type_params,
-        trait_name, methods, span, provider_fact.provider_ref)
+        trait_name, methods, span, provider_fact.provider_ref,
+        delegate_plan)
 }
 
 fn register_impl_canonical(
     mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
     trait_name: Str?, methods: List<Decl>, span: Span,
-    provider_ref: ImplProviderRef
+    provider_ref: ImplProviderRef,
+    delegate_plan: DelegatePlanState
 ) {
     let resolved_trait_name = match trait_name {
         some(name) => some(resolve_trait_identity(ctx, name)), none => none
@@ -2461,6 +2490,7 @@ fn register_impl_canonical(
             method_schemes: map_clone(exact_method_schemes),
             provider_ref: some(provider_ref),
             trait_ref: resolved_trait_ref,
+            delegate_plan: delegate_plan,
             origin: origin, span: span,
             owner_state: ImplOwnerState::FinalOwner
         }
@@ -3019,6 +3049,7 @@ fn register_delegate_traits(
                                     provider_ref: some(provider_ref),
                                     trait_ref: some(registered_trait_ref_symbol(
                                         reg_trait_def.owner_ref)),
+                                    delegate_plan: delegate_plan_not_applicable(),
                                     origin: origin,
                                     span: span,
                                     owner_state: ImplOwnerState::FinalOwner

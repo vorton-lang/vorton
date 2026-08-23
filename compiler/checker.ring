@@ -296,7 +296,7 @@ fn impl_trait_name_same(left: Str?, right: Str?) -> Bool {
 }
 
 fn validate_impl_carriers(
-    env: TypeEnv, decls: List<HDecl>, allow_incomplete: Bool
+    env: TypeEnv, decls: List<HDecl>
 ) {
     for decl in decls {
         match decl {
@@ -322,12 +322,10 @@ fn validate_impl_carriers(
                         }
                     }
                 },
-                none => if !allow_incomplete {
-                    panic("impl HIR: typed owner is missing")
-                }
+                none => panic("impl HIR: typed owner is missing")
             },
             HDecl::ModBlock { decls: inner, .. } =>
-                validate_impl_carriers(env, inner, allow_incomplete),
+                validate_impl_carriers(env, inner),
             _ => {}
         }
     }
@@ -408,7 +406,7 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         resolve_single_namespace_plan(program))
     let hprogram = infer_check(ctx, program)
     let mut impl_facts: List<ModuleImplFact> = []
-    validate_impl_carriers(ctx.env, hprogram.decls, ctx.sink.has_errors())
+    validate_impl_carriers(ctx.env, hprogram.decls)
     collect_module_impl_facts(
         ctx.env, hprogram.decls, true, ctx.sink.has_errors(), impl_facts)
     // Prepend prelude hdecls to the program's decls
@@ -651,7 +649,7 @@ pub fn check_module(
     report_namespace_plan_issues(ctx, module_key, program, namespace_plan)
     let hprogram = check_module_identity(ctx, program, module_prefix)
     let mut impl_facts: List<ModuleImplFact> = []
-    validate_impl_carriers(ctx.env, hprogram.decls, ctx.sink.has_errors())
+    validate_impl_carriers(ctx.env, hprogram.decls)
     collect_module_impl_facts(
         ctx.env, hprogram.decls, true, ctx.sink.has_errors(), impl_facts)
     // Prepend prelude hdecls to the program's decls

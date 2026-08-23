@@ -7,7 +7,9 @@ use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
 use codes::{E0504}
 use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
-    registered_trait_ref_symbol, impl_provider_ref_same}
+    registered_trait_ref_symbol, impl_provider_ref_same,
+    impl_provider_ref_kind, impl_provider_kind_same,
+    impl_provider_kind_source, impl_provider_kind_delegate}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -451,6 +453,53 @@ pub struct ImplRuntimeRequirement {
     pub assoc_constraints: List<ImplAssocPredicate>
 }
 
+pub struct DelegateChildProviderPlan {
+    pub source_member_index: Int,
+    pub provider_ref: ImplProviderRef
+}
+
+enum DelegatePlanStateValue {
+    DelegateNotApplicable,
+    DelegatePending,
+    DelegateFinal(List<DelegateChildProviderPlan>)
+}
+
+pub struct DelegatePlanState {
+    value: DelegatePlanStateValue
+}
+
+pub fn delegate_plan_not_applicable() -> DelegatePlanState {
+    DelegatePlanState { value: DelegatePlanStateValue::DelegateNotApplicable }
+}
+
+pub fn delegate_plan_pending() -> DelegatePlanState {
+    DelegatePlanState { value: DelegatePlanStateValue::DelegatePending }
+}
+
+pub fn delegate_plan_final(
+    children: List<DelegateChildProviderPlan>
+) -> DelegatePlanState {
+    DelegatePlanState { value: DelegatePlanStateValue::DelegateFinal(children) }
+}
+
+pub fn delegate_plan_is_pending(value: DelegatePlanState) -> Bool {
+    match value.value {
+        DelegatePlanStateValue::DelegatePending => true,
+        _ => false
+    }
+}
+
+pub fn delegate_plan_children(
+    value: DelegatePlanState
+) -> List<DelegateChildProviderPlan> {
+    match value.value {
+        DelegatePlanStateValue::DelegateFinal(children) => children,
+        DelegatePlanStateValue::DelegateNotApplicable => [],
+        DelegatePlanStateValue::DelegatePending =>
+            panic("impl owner: pending delegate plan was observed")
+    }
+}
+
 pub struct ImplEntry {
     pub trait_name: Str?,
     pub target_type_name: Str,
@@ -464,6 +513,7 @@ pub struct ImplEntry {
     pub method_schemes: Map<Str, ImplMethodSchemeCore>,
     pub provider_ref: ImplProviderRef?,
     pub trait_ref: SymbolRef?,
+    pub delegate_plan: DelegatePlanState,
     // Stable across export/re-export hydration.  Distinct source impl blocks
     // must never be collapsed merely because target/trait spellings match.
     pub origin: Str,
@@ -883,6 +933,38 @@ fn method_core_map_same(
     true
 }
 
+fn delegate_child_provider_plan_same(
+    left: DelegateChildProviderPlan, right: DelegateChildProviderPlan
+) -> Bool {
+    left.source_member_index == right.source_member_index &&
+        impl_provider_ref_same(left.provider_ref, right.provider_ref)
+}
+
+fn delegate_plan_state_same(
+    left: DelegatePlanState, right: DelegatePlanState
+) -> Bool {
+    match (left.value, right.value) {
+        (DelegatePlanStateValue::DelegateNotApplicable,
+         DelegatePlanStateValue::DelegateNotApplicable) => true,
+        (DelegatePlanStateValue::DelegatePending,
+         DelegatePlanStateValue::DelegatePending) => true,
+        (DelegatePlanStateValue::DelegateFinal(a),
+         DelegatePlanStateValue::DelegateFinal(b)) => {
+            if a.len() != b.len() { return false }
+            for index in 0..a.len() {
+                match (a.get(index), b.get(index)) {
+                    (some(left_child), some(right_child)) =>
+                        if !delegate_child_provider_plan_same(
+                                left_child, right_child) { return false },
+                    _ => return false
+                }
+            }
+            true
+        }
+        _ => false
+    }
+}
+
 fn impl_entry_owner_shape_same(left: ImplEntry, right: ImplEntry) -> Bool {
     left.target_type_name == right.target_type_name &&
         optional_string_same(left.trait_name, right.trait_name) &&
@@ -922,6 +1004,7 @@ pub fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
         impl_entry_owner_shape_same(left, right) &&
         string_list_same(left.method_names, right.method_names) &&
         method_core_map_same(left.method_schemes, right.method_schemes) &&
+        delegate_plan_state_same(left.delegate_plan, right.delegate_plan) &&
         impl_owner_span_same(left.span, right.span) &&
         impl_owner_state_same(left.owner_state, right.owner_state)
 }
@@ -1003,6 +1086,42 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
                 panic("impl owner: method core does not quantify predicate subject")
             }
         }
+    }
+    match (entry.provider_ref, entry.delegate_plan.value) {
+        (none, DelegatePlanStateValue::DelegateNotApplicable) => {},
+        (some(provider), DelegatePlanStateValue::DelegatePending) => {
+            if !impl_provider_kind_same(
+                    impl_provider_ref_kind(provider),
+                    impl_provider_kind_source()) {
+                panic("impl owner: pending delegate plan parent is not Source")
+            }
+        },
+        (some(provider), DelegatePlanStateValue::DelegateFinal(children)) => {
+            if !impl_provider_kind_same(
+                    impl_provider_ref_kind(provider),
+                    impl_provider_kind_source()) {
+                panic("impl owner: final delegate plan parent is not Source")
+            }
+            let mut previous_delegate_index = -1
+            for child in children {
+                if child.source_member_index < 0 ||
+                   child.source_member_index <= previous_delegate_index ||
+                   !impl_provider_kind_same(
+                        impl_provider_ref_kind(child.provider_ref),
+                        impl_provider_kind_delegate()) {
+                    panic("impl owner: invalid ordered delegate child plan")
+                }
+                previous_delegate_index = child.source_member_index
+            }
+        },
+        (some(provider), DelegatePlanStateValue::DelegateNotApplicable) => {
+            if impl_provider_kind_same(
+                    impl_provider_ref_kind(provider),
+                    impl_provider_kind_source()) {
+                panic("impl owner: Source provider has no final delegate plan")
+            }
+        },
+        _ => panic("impl owner: provider/delegate plan state mismatch")
     }
     match entry.owner_state {
         ImplOwnerState::ProvisionalPrelude => {
@@ -1223,6 +1342,92 @@ pub fn find_impl_by_provider(
         none => {}
     }
     found
+}
+
+pub fn find_impls_by_provider(
+    reg: TraitRegistry, type_name: Str, provider_ref: ImplProviderRef
+) -> List<ImplEntry> {
+    let mut found: List<ImplEntry> = []
+    match reg.trait_impls.get(type_name) {
+        some(impls) => {
+            for entry in impls {
+                match entry.provider_ref {
+                    some(candidate) => if impl_provider_ref_same(
+                            candidate, provider_ref) {
+                        found.push(entry)
+                    },
+                    none => {}
+                }
+            }
+        },
+        none => {}
+    }
+    found
+}
+
+pub fn find_delegate_child_provider_plan(
+    owner: ImplEntry, source_member_index: Int
+) -> DelegateChildProviderPlan? {
+    let mut found: DelegateChildProviderPlan? = none
+    for child in delegate_plan_children(owner.delegate_plan) {
+        if child.source_member_index == source_member_index {
+            if found.is_some() {
+                panic("impl owner: duplicate delegate child source index")
+            }
+            found = some(child)
+        }
+    }
+    found
+}
+
+pub fn finalize_delegate_provider_plan(
+    mut reg: TraitRegistry, type_name: Str, trait_ref: SymbolRef?,
+    parent_provider_ref: ImplProviderRef,
+    children: List<DelegateChildProviderPlan>
+) {
+    let mut matches = 0
+    match reg.trait_impls.get(type_name) {
+        some(impls) => {
+            for index in 0..impls.len() {
+                match impls.get(index) {
+                    some(entry) => {
+                        let provider_matches = match entry.provider_ref {
+                            some(provider) => impl_provider_ref_same(
+                                provider, parent_provider_ref),
+                            none => false
+                        }
+                        if provider_matches && optional_symbol_ref_same(
+                                entry.trait_ref, trait_ref) {
+                            matches = matches + 1
+                            if !delegate_plan_is_pending(entry.delegate_plan) {
+                                panic("impl owner: delegate plan finalization replay")
+                            }
+                            let mut updated = entry
+                            updated.delegate_plan = delegate_plan_final(children)
+                            validate_impl_entry(reg, updated)
+                            impls.set(index, updated)
+                        }
+                    },
+                    none => {}
+                }
+            }
+        },
+        none => {}
+    }
+    if matches != 1 {
+        panic("impl owner: delegate plan parent is not unique")
+    }
+}
+
+pub fn assert_no_pending_delegate_plans(reg: TraitRegistry) {
+    for map_entry in reg.trait_impls.entries() {
+        let (_, owners) = map_entry
+        for owner in owners {
+            if delegate_plan_is_pending(owner.delegate_plan) {
+                panic("impl owner: pending delegate plan reached close")
+            }
+        }
+    }
 }
 
 pub fn instantiate_impl_runtime_requirements(

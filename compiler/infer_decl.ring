@@ -14,7 +14,10 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     MethodOrigin, ImplEntry,
     ImplMethodSchemeCore,
     apply_subst, apply_subst_map, apply_subst_row_map,
-    find_impl, find_impl_by_origin, has_impl, impl_origin, impl_decl_origin,
+    find_impl, find_impl_by_origin, find_impl_by_provider,
+    find_impls_by_provider, find_delegate_child_provider_plan,
+    optional_symbol_ref_same,
+    has_impl, impl_origin, impl_decl_origin,
     impl_method_origin,
     install_method_core, replace_impl_method_core,
     impl_method_core_as_scheme, impl_method_core_from_scheme,
@@ -183,33 +186,36 @@ fn check_mod_decl_body(
                     some(cap) => check_capability(ctx, hd, cap, span),
                     none => {}
                 }
+                let mut delegate_decls: List<HDecl> = []
+                match prefixed {
+                    Decl::Impl { methods, .. } => {
+                        for source_member_index in 0..methods.len() {
+                            match methods.get(source_member_index) {
+                                some(Decl::Delegate {
+                                    field, span: dspan, ..
+                                }) => {
+                                    let expanded = expand_delegate_impls(
+                                        ctx, hd, source_member_index,
+                                        field, dspan)
+                                    for child in expanded {
+                                        match cap_row {
+                                            some(cap) => check_capability(
+                                                ctx, child, cap, span),
+                                            none => {}
+                                        }
+                                        delegate_decls.push(child)
+                                    }
+                                },
+                                _ => {}
+                            }
+                        }
+                    },
+                    _ => {}
+                }
                 hdecls.push(hd)
+                for child in delegate_decls { hdecls.push(child) }
             },
             none => {}
-        }
-
-        // Expand delegates inside mod-scoped impl blocks (same as check_one_decl)
-        match prefixed {
-            Decl::Impl { target_type, type_params: impl_tps, methods, span: impl_span, .. } => {
-                let canonical_target = resolve_nominal_identity(ctx, target_type)
-                for m in methods {
-                    match m {
-                        Decl::Delegate { field, trait_names, span: dspan } => {
-                            let delegate_impls = expand_delegate_impls(ctx, canonical_target, impl_tps, field, trait_names, dspan)
-                            for di in delegate_impls {
-                                // Check capability on delegate-generated impls too
-                                match cap_row {
-                                    some(cap) => check_capability(ctx, di, cap, span),
-                                    none => {}
-                                }
-                                hdecls.push(di)
-                            }
-                        },
-                        _ => {}
-                    }
-                }
-            },
-            _ => {}
         }
     }
     HDecl::ModBlock { name: mod_name, decls: hdecls, is_pub: is_pub, span: span }
@@ -843,11 +849,34 @@ fn check_impl_decl_canonical(mut ctx: InferCtx, target_type: Str, type_params: L
 }
 
 fn expand_delegate_impls(
-    mut ctx: InferCtx,
-    target_type: Str, type_params: List<TypeParam>,
-    field: Str, trait_names: List<Str>, span: Span
+    mut ctx: InferCtx, outer_impl: HDecl, source_member_index: Int,
+    field: Str, span: Span
 ) -> List<HDecl> {
     let mut result: List<HDecl> = []
+    let (target_type, type_params, outer_provider_ref, outer_trait_ref) =
+        match outer_impl {
+            HDecl::Impl {
+                target_type, type_params, provider_ref, trait_ref, ..
+            } => (target_type, type_params, provider_ref, trait_ref),
+            _ => panic("delegate HIR: outer carrier is not an impl")
+        }
+    let outer_owner = match find_impl_by_provider(
+        ctx.env.trait_reg, target_type, outer_trait_ref, outer_provider_ref
+    ) {
+        some(owner) => owner,
+        none => panic("delegate HIR: outer typed owner is missing")
+    }
+    let child_plan = match find_delegate_child_provider_plan(
+        outer_owner, source_member_index) {
+        some(plan) => plan,
+        none => panic("delegate HIR: raw child provider plan is missing")
+    }
+    let produced_owners = find_impls_by_provider(
+        ctx.env.trait_reg, target_type, child_plan.provider_ref)
+    if produced_owners.len() == 0 {
+        if ctx.sink.has_errors() { return result }
+        panic("delegate HIR: clean child provider produced no owners")
+    }
 
     // Look up the field type from the struct definition
     match ctx.env.types.structs.get(target_type) {
@@ -888,36 +917,44 @@ fn expand_delegate_impls(
                         resolve_self_type(ctx, target_type)
                     }
 
-                    // Collect all traits to generate: explicit traits + their supertraits
-                    let mut all_traits: List<Str> = []
-                    for tname in trait_names {
-                        let canonical_trait = resolve_trait_identity(ctx, tname)
-                        all_traits.push(canonical_trait)
-                        let supers = collect_all_supertraits(ctx, canonical_trait)
-                        for st_name in supers {
-                            // Avoid duplicates
-                            if !all_traits.contains(st_name) {
-                                all_traits.push(st_name)
-                            }
-                        }
-                    }
-
                     // #125/#128: Get the field type name for looking up resolved methods
                     let field_type_name = match ft {
                         Type::StructType { name: n, .. } => some(n),
                         Type::EnumType { name: n, .. } => some(n),
                         _ => none
                     }
-                    for tname in all_traits {
-                        match ctx.env.trait_reg.traits.get(tname) {
-                            none => {},  // Error already reported in Pass 1
+                    for produced_owner in produced_owners {
+                        let produced_trait_name = match produced_owner.trait_name {
+                            some(name) => name,
+                            none => panic("delegate HIR: child owner is inherent")
+                        }
+                        let produced_trait_ref = match produced_owner.trait_ref {
+                            some(reference) => reference,
+                            none => panic("delegate HIR: child owner lost trait ref")
+                        }
+                        match ctx.env.trait_reg.traits.get(produced_trait_name) {
+                            none => panic("delegate HIR: child trait is missing"),
                             some(trait_def) => {
-                                let delegate_impl = find_impl(
-                                    ctx.env.trait_reg, target_type, tname)
+                                if !symbol_ref_same(
+                                        registered_trait_ref_symbol(
+                                            trait_def.owner_ref),
+                                        produced_trait_ref) {
+                                    panic("delegate HIR: child trait identity changed")
+                                }
+                                let tname = produced_trait_name
+                                let delegate_impl = some(produced_owner)
                                 let field_impl = match field_type_name {
                                     some(ftn) => find_impl(
                                         ctx.env.trait_reg, ftn, tname),
                                     none => none
+                                }
+                                match field_impl {
+                                    some(field_owner) => if !optional_symbol_ref_same(
+                                            field_owner.trait_ref,
+                                            some(produced_trait_ref)) {
+                                        panic("delegate HIR: field trait identity changed")
+                                    },
+                                    none => {}
                                 }
 
                                 // Use the exact registered delegate receiver so
@@ -2332,11 +2369,11 @@ fn check_one_decl(
     let mut delegate_decls: List<HDecl> = []
     match decl {
         Decl::Impl { target_type, type_params, methods, span, .. } => {
-            let canonical_target = resolve_nominal_identity(ctx, target_type)
-            for m in methods {
-                match m {
-                    Decl::Delegate { field, trait_names, span: dspan } => {
-                        let delegate_impls = expand_delegate_impls(ctx, canonical_target, type_params, field, trait_names, dspan)
+            for source_member_index in 0..methods.len() {
+                match methods.get(source_member_index) {
+                    some(Decl::Delegate { field, span: dspan, .. }) => {
+                        let delegate_impls = expand_delegate_impls(
+                            ctx, hd, source_member_index, field, dspan)
                         for di in delegate_impls { delegate_decls.push(di) }
                     },
                     _ => {}
@@ -2387,11 +2424,11 @@ fn check_one_decl_with_rebind(
     let mut delegate_decls: List<HDecl> = []
     match decl {
         Decl::Impl { target_type, type_params, methods, span, .. } => {
-            let canonical_target = resolve_nominal_identity(ctx, target_type)
-            for m in methods {
-                match m {
-                    Decl::Delegate { field, trait_names, span: dspan } => {
-                        let delegate_impls = expand_delegate_impls(ctx, canonical_target, type_params, field, trait_names, dspan)
+            for source_member_index in 0..methods.len() {
+                match methods.get(source_member_index) {
+                    some(Decl::Delegate { field, span: dspan, .. }) => {
+                        let delegate_impls = expand_delegate_impls(
+                            ctx, hd, source_member_index, field, dspan)
                         for di in delegate_impls { delegate_decls.push(di) }
                     },
                     _ => {}

@@ -12,7 +12,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_predicate_subject_param_index, frozen_impl_predicates,
     impl_assoc_predicate_name, impl_assoc_predicate_type,
     apply_subst_map,
-    ImplOwnerState}
+    ImplOwnerState, delegate_plan_not_applicable}
 use ast::{Span, DeriveAttribute, span_zero}
 use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
@@ -1381,6 +1381,7 @@ fn register_derived_impl(
         method_schemes: exact,
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
+        delegate_plan: delegate_plan_not_applicable(),
         origin: origin,
         span: span,
         owner_state: ImplOwnerState::FinalOwner
