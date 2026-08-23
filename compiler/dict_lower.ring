@@ -135,6 +135,8 @@ fn dl_derived_impl(di: DerivedImpl, mut defs: List<HDictDef>,
         none => none,
     }
     DerivedImpl {
+        provider_ref: di.provider_ref,
+        trait_ref: di.trait_ref,
         type_name: di.type_name,
         trait_name: di.trait_name,
         type_params: di.type_params,

@@ -14,7 +14,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     direct_impl_predicate_provenance, freeze_impl_predicate_set,
     frozen_impl_predicates, impl_predicate_subject_type_var,
     impl_predicate_trait_name, ImplOwnerState,
-    find_impl_by_origin, impl_owner_is_provisional,
+    find_impl_by_origin, find_impl_by_provider, impl_owner_is_provisional,
     finalize_provisional_impl_owner,
     specialize_trait_method_scheme, delegate_plan_not_applicable}
 use ast::{span_zero}
@@ -371,6 +371,60 @@ fn add_builtin_impl(
                 span: span
             })
     }
+}
+
+// The builtin Option derived-body inventory is a front-end fact.  Consumers
+// receive the exact final registry owners in the historical emission order;
+// they never reconstruct a provider from target/trait/backend spellings.
+const BUILTIN_OPTION_DERIVED_TRAITS: List<Str> = ["Eq", "Debug", "Clone"]
+
+fn require_builtin_option_derived_owner(
+    env: TypeEnv, trait_name: Str
+) -> ImplEntry {
+    let provider_ref = builtin_impl_provider(builtin_trait_factory_site())
+    let trait_ref = builtin_impl_trait_ref(
+        env, some(trait_name)).unwrap()
+    let owner = match find_impl_by_provider(
+        env.trait_reg, BUILTIN_OPTION, some(trait_ref), provider_ref
+    ) {
+        some(found) => found,
+        none => panic("builtin Option derived owner is missing")
+    }
+    if impl_owner_is_provisional(owner) ||
+       owner.target_type_name != BUILTIN_OPTION {
+        panic("builtin Option derived owner is not final")
+    }
+    match owner.trait_name {
+        some(found) => if found != trait_name {
+            panic("builtin Option derived owner changed trait")
+        },
+        none => panic("builtin Option derived owner lost trait")
+    }
+    owner
+}
+
+pub fn builtin_option_derived_owners(env: TypeEnv) -> List<ImplEntry> {
+    if BUILTIN_OPTION_DERIVED_TRAITS.len() != 3 ||
+       BUILTIN_OPTION_DERIVED_TRAITS.get(0).unwrap_or("") != "Eq" ||
+       BUILTIN_OPTION_DERIVED_TRAITS.get(1).unwrap_or("") != "Debug" ||
+       BUILTIN_OPTION_DERIVED_TRAITS.get(2).unwrap_or("") != "Clone" {
+        panic("builtin Option derived owner census drifted")
+    }
+    let mut owners: List<ImplEntry> = []
+    for trait_name in BUILTIN_OPTION_DERIVED_TRAITS {
+        owners.push(require_builtin_option_derived_owner(env, trait_name))
+    }
+
+    // Ord has no Option registry owner.  The historical C-only descriptor was
+    // unreachable backend behavior, not an implicit language implementation.
+    let provider_ref = builtin_impl_provider(builtin_trait_factory_site())
+    let ord_ref = builtin_impl_trait_ref(env, some("Ord")).unwrap()
+    if find_impl_by_provider(
+            env.trait_reg, BUILTIN_OPTION, some(ord_ref), provider_ref
+        ).is_some() {
+        panic("builtin Option derived owner census gained Ord")
+    }
+    owners
 }
 
 // ============================================================

@@ -14,6 +14,8 @@ use env::{TypeEnv, TypeScheme, add_impl, find_impl,
     install_method_core, assert_no_provisional_impl_owners}
 use builtins::{register_builtins, register_hof_intrinsics,
     finalize_std_hof_fallbacks}
+use derive::{prepend_builtin_option_derived_impls,
+    validate_derived_impls}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
 use dict_lower::{lower_dicts}
 use andor_lower::{lower_andor}
@@ -414,7 +416,10 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     // B-104 D7: lower `&&`/`||` to if-else (andor_lower), then B-104 D4:
     // first-class the dict evidence (static singleton set + local
     // constructions for dynamic wrapped dicts) — both before perceus/codegen.
-    let assembled = HProgram { decls: all_decls, derived_impls: hprogram.derived_impls, boxed_vars: hprogram.boxed_vars, static_dicts: [], extern_type_names: hprogram.extern_type_names, drop_types: hprogram.drop_types }
+    let derived_impls = prepend_builtin_option_derived_impls(
+        ctx.env, hprogram.derived_impls)
+    validate_derived_impls(ctx.env, derived_impls)
+    let assembled = HProgram { decls: all_decls, derived_impls: derived_impls, boxed_vars: hprogram.boxed_vars, static_dicts: [], extern_type_names: hprogram.extern_type_names, drop_types: hprogram.drop_types }
     let has_errors = ctx.sink.has_errors()
     // B-002p1: check for use-after-move on Drop types (before lowering)
     if !has_errors && assembled.drop_types.len() > 0 {
@@ -647,6 +652,11 @@ pub fn check_module(
     install_struct_identity_ledger(ctx, module_key, namespace_plan)
     report_namespace_plan_issues(ctx, module_key, program, namespace_plan)
     let hprogram = check_module_identity(ctx, program, module_prefix)
+    // Project-wide builtin derived descriptors have one physical carrier and
+    // are assembled by compiler_mod only after every module has crossed the
+    // dictionary-lowering boundary.  Per-module checking validates user
+    // descriptors but must never publish builtin duplicates.
+    validate_derived_impls(ctx.env, hprogram.derived_impls)
     let mut impl_facts: List<ModuleImplFact> = []
     validate_impl_carriers(ctx.env, hprogram.decls)
     collect_module_impl_facts(

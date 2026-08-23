@@ -489,6 +489,8 @@ pub enum TypeKind { StructKind, EnumKind }
 pub const DERIVED_HASH_SEED: Int = 1469598103934665603
 
 pub struct DerivedImpl {
+    pub provider_ref: ImplProviderRef,
+    pub trait_ref: SymbolRef,
     pub type_name: Str,
     pub trait_name: Str,
     pub type_params: List<Str>,

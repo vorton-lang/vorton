@@ -1,10 +1,10 @@
 use types::{Type, EffectRow, StructField, EnumVariant,
-    INT, STR, BOOL, EMPTY_ROW, types_equal}
+    INT, STR, BOOL, EMPTY_ROW, BUILTIN_OPTION, types_equal}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
     ExplicitDerivedProviderPlan, NominalDerivedProviderPlan,
     TypedImplPredicate, MethodOrigin,
-    add_impl, has_impl, find_impl, install_method_core,
+    add_impl, has_impl, find_impl, find_impl_by_provider, install_method_core,
     instantiate_impl_runtime_requirements,
     make_impl_method_scheme_core, make_typed_impl_predicate,
     direct_impl_predicate_provenance, freeze_impl_predicate_set,
@@ -12,13 +12,19 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_predicate_subject_param_index, frozen_impl_predicates,
     impl_assoc_predicate_name, impl_assoc_predicate_type,
     apply_subst_map,
-    ImplOwnerState, delegate_plan_not_applicable}
+    ImplOwnerState, impl_owner_is_provisional,
+    delegate_plan_not_applicable}
+use builtins::{builtin_option_derived_owners}
 use ast::{Span, DeriveAttribute, span_zero}
 use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
 use hir::{DerivedImpl, DerivedField, DerivedVariant, FieldAction, DictRef,
     TraitBound, TypeKind, trait_dict_name, trait_bound_param_name, compare_by_first}
-use ir_identity::{ImplProviderRef, registered_trait_ref_symbol}
+use ir_identity::{SymbolRef, ImplProviderRef,
+    symbol_ref_same, impl_provider_ref_same,
+    impl_provider_ref_kind, impl_provider_kind_same,
+    impl_provider_kind_builtin, impl_provider_kind_derived,
+    registered_trait_ref_symbol}
 
 fn str_at(list: List<Str>, i: Int) -> Str {
     match list.get(i) { some(v) => v, none => panic("unreachable: str_at out of bounds") }
@@ -66,6 +72,186 @@ pub fn run_derive_pass(
     derive_trait(env, sink, all_types, "Debug", derived_impls)
     derive_json_trait(env, sink, all_types, derived_impls)
     derived_impls
+}
+
+fn option_derived_some_variant(bound: TraitBound) -> DerivedVariant {
+    DerivedVariant {
+        name: "some",
+        discriminator: 0,
+        fields: [DerivedField {
+            name: "_0",
+            positional_index: some(0),
+            action: FieldAction::Call {
+                base_dict: DictRef::Simple(trait_bound_param_name(
+                    bound.type_param, bound.trait_name)),
+                extra_dicts: []
+            }
+        }],
+        has_named_fields: false
+    }
+}
+
+fn option_derived_none_variant() -> DerivedVariant {
+    DerivedVariant {
+        name: "none", discriminator: 1,
+        fields: [], has_named_fields: false
+    }
+}
+
+fn builtin_option_derived_impl(owner: ImplEntry) -> DerivedImpl {
+    let provider_ref = match owner.provider_ref {
+        some(provider) => provider,
+        none => panic("builtin Option derived descriptor lost provider")
+    }
+    let trait_ref = match owner.trait_ref {
+        some(value) => value,
+        none => panic("builtin Option derived descriptor lost trait")
+    }
+    let trait_name = match owner.trait_name {
+        some(name) => name,
+        none => panic("builtin Option derived descriptor lost trait name")
+    }
+    if impl_owner_is_provisional(owner) ||
+       owner.target_type_name != BUILTIN_OPTION ||
+       !impl_provider_kind_same(
+            impl_provider_ref_kind(provider_ref),
+            impl_provider_kind_builtin()) ||
+       !string_lists_same(owner.type_params, ["T"]) {
+        panic("builtin Option derived descriptor owner drifted")
+    }
+    let bounds = derived_runtime_bounds_from_owner(owner)
+    if bounds.len() != 1 {
+        panic("builtin Option derived descriptor lost exact predicate")
+    }
+    let bound = bounds.get(0).unwrap()
+    if bound.type_param != "T" || bound.trait_name != trait_name {
+        panic("builtin Option derived descriptor predicate drifted")
+    }
+    let variants = match trait_name {
+        "Eq" => some([
+            option_derived_some_variant(bound),
+            option_derived_none_variant()
+        ]),
+        "Debug" => some([
+            option_derived_some_variant(bound),
+            option_derived_none_variant()
+        ]),
+        "Clone" => none,
+        _ => panic("builtin Option derived descriptor census drifted")
+    }
+    DerivedImpl {
+        provider_ref: provider_ref,
+        trait_ref: trait_ref,
+        type_name: owner.target_type_name,
+        trait_name: trait_name,
+        type_params: owner.type_params,
+        bounds: bounds,
+        type_kind: TypeKind::EnumKind,
+        struct_fields: none,
+        enum_variants: variants
+    }
+}
+
+pub fn builtin_option_derived_impls(env: TypeEnv) -> List<DerivedImpl> {
+    let mut result: List<DerivedImpl> = []
+    for owner in builtin_option_derived_owners(env) {
+        result.push(builtin_option_derived_impl(owner))
+    }
+    if result.len() != 3 ||
+       result.get(0).unwrap().trait_name != "Eq" ||
+       result.get(1).unwrap().trait_name != "Debug" ||
+       result.get(2).unwrap().trait_name != "Clone" {
+        panic("builtin Option derived descriptor order drifted")
+    }
+    result
+}
+
+fn derived_impl_key_same(left: DerivedImpl, right: DerivedImpl) -> Bool {
+    left.type_name == right.type_name &&
+        impl_provider_ref_same(left.provider_ref, right.provider_ref) &&
+        symbol_ref_same(left.trait_ref, right.trait_ref)
+}
+
+fn derived_impl_matches_owner(di: DerivedImpl, owner: ImplEntry) -> Bool {
+    let provider_matches = match owner.provider_ref {
+        some(provider) => impl_provider_ref_same(
+            provider, di.provider_ref),
+        none => false
+    }
+    let trait_matches = match owner.trait_ref {
+        some(trait_ref) => symbol_ref_same(trait_ref, di.trait_ref),
+        none => false
+    }
+    let trait_name_matches = match owner.trait_name {
+        some(name) => name == di.trait_name,
+        none => false
+    }
+    !impl_owner_is_provisional(owner) && provider_matches &&
+        trait_matches && trait_name_matches &&
+        owner.target_type_name == di.type_name &&
+        string_lists_same(owner.type_params, di.type_params) &&
+        trait_bounds_same(
+            derived_runtime_bounds_from_owner(owner), di.bounds)
+}
+
+// This is the first real consumer of the derived carrier identity.  It checks
+// the final registry owner rather than trusting a backend spelling or a derive
+// plan that happened to mint the same display name.
+pub fn validate_derived_impls(
+    env: TypeEnv, derived_impls: List<DerivedImpl>
+) {
+    let builtin_owners = builtin_option_derived_owners(env)
+    let mut seen: List<DerivedImpl> = []
+    for di in derived_impls {
+        for existing in seen {
+            if derived_impl_key_same(existing, di) {
+                panic("derived impl descriptor duplicated exact owner")
+            }
+        }
+        let owner = match find_impl_by_provider(
+            env.trait_reg, di.type_name,
+            some(di.trait_ref), di.provider_ref
+        ) {
+            some(found) => found,
+            none => panic("derived impl descriptor owner is missing")
+        }
+        if !derived_impl_matches_owner(di, owner) {
+            panic("derived impl descriptor changed final owner")
+        }
+        let kind = impl_provider_ref_kind(di.provider_ref)
+        if impl_provider_kind_same(kind, impl_provider_kind_builtin()) {
+            let mut matches = 0
+            for expected in builtin_owners {
+                if derived_impl_matches_owner(di, expected) {
+                    matches = matches + 1
+                }
+            }
+            if matches != 1 {
+                panic("derived impl descriptor has unknown builtin owner")
+            }
+        } else if !impl_provider_kind_same(
+                kind, impl_provider_kind_derived()) {
+            panic("derived impl descriptor has invalid provider kind")
+        }
+        seen.push(di)
+    }
+}
+
+pub fn prepend_builtin_option_derived_impls(
+    env: TypeEnv, existing: List<DerivedImpl>
+) -> List<DerivedImpl> {
+    let builtin_impls = builtin_option_derived_impls(env)
+    for builtin_di in builtin_impls {
+        for existing_di in existing {
+            if derived_impl_key_same(builtin_di, existing_di) {
+                panic("builtin Option derived descriptors assembled twice")
+            }
+        }
+    }
+    let mut result: List<DerivedImpl> = []
+    for builtin_di in builtin_impls { result.push(builtin_di) }
+    for existing_di in existing { result.push(existing_di) }
+    result
 }
 
 fn collect_derived_type_names(derived_impls: List<DerivedImpl>, trait_name: Str) -> Set<Str> {
@@ -166,15 +352,16 @@ fn derive_trait(
                 // B-002p1: Drop types cannot auto-derive Clone (mutual exclusion)
                 if trait_name == "Clone" && has_impl(env.trait_reg, ut.name, "Drop") { } else {
                 if has_manual_impl(env, ut.name, trait_name) { } else {
-                    let result = try_derive(env, ut, trait_name, known)
+                    let result = try_derive(
+                        env, ut, trait_name, known,
+                        implicit_derive_provider(ut))
                     match result {
                         some(di) => {
                             known.insert(ut.name)
                             let owner = register_derived_impl(
-                                env, sink, di, trait_name, span_zero(),
-                                implicit_derive_provider(ut))
-                            derived_impls.push(derived_impl_with_bounds(
-                                di, derived_runtime_bounds_from_owner(owner)))
+                                env, sink, di, span_zero())
+                            derived_impls.push(
+                                finalize_derived_impl(di, owner))
                             changed = true
                         },
                         none => {},
@@ -223,15 +410,16 @@ fn derive_hash_trait(
             if auto_eq_types.contains(ut.name) {
                 if known.contains(ut.name) { } else {
                     if has_manual_impl(env, ut.name, "Hash") { } else {
-                        let result = try_derive(env, ut, "Hash", known)
+                        let result = try_derive(
+                            env, ut, "Hash", known,
+                            implicit_derive_provider(ut))
                         match result {
                             some(di) => {
                                 known.insert(ut.name)
                                 let owner = register_derived_impl(
-                                    env, sink, di, "Hash", span_zero(),
-                                    implicit_derive_provider(ut))
-                                derived_impls.push(derived_impl_with_bounds(
-                                    di, derived_runtime_bounds_from_owner(owner)))
+                                    env, sink, di, span_zero())
+                                derived_impls.push(
+                                    finalize_derived_impl(di, owner))
                                 changed = true
                             },
                             none => {},
@@ -386,7 +574,10 @@ fn derive_json_trait(
                 some(bounds) => bounds,
                 none => []
             }
-            let signature = json_derived_signature(ut, plan)
+            let provider_ref = explicit_derive_request(
+                ut, "Json").unwrap().provider_ref
+            let signature = json_derived_signature(
+                env, ut, plan, provider_ref)
             match signature {
                 some(di) => {
                     let attr_span = match derive_attribute(ut, "Json") {
@@ -394,9 +585,7 @@ fn derive_json_trait(
                         none => span_zero()
                     }
                     let _ = register_derived_impl(
-                        env, sink, di, "Json", attr_span,
-                        explicit_derive_request(
-                            ut, "Json").unwrap().provider_ref)
+                        env, sink, di, attr_span)
                 },
                 none => { invalid.insert(ut.name) }
             }
@@ -420,7 +609,10 @@ fn derive_json_trait(
 
     for ut in candidates {
         if !invalid.contains(ut.name) {
-            match try_derive(env, ut, "Json", known) {
+            let provider_ref = explicit_derive_request(
+                ut, "Json").unwrap().provider_ref
+            match try_derive(
+                env, ut, "Json", known, provider_ref) {
                 some(di) => {
                     let planned = match plans.get(ut.name) {
                         some(found) => found,
@@ -433,17 +625,17 @@ fn derive_json_trait(
                     if !same_impl_dict_bound_set(planned, actual) {
                         panic("Json derive evidence set changed after ImplEntry registration")
                     }
-                    let registered_owner = match find_impl(
-                        env.trait_reg, ut.name, "Json") {
+                    let registered_owner = match find_impl_by_provider(
+                        env.trait_reg, ut.name,
+                        some(di.trait_ref), di.provider_ref) {
                         some(found) => found,
                         none => panic("Json derive lost its registered owner")
                     }
                     // Field actions are name-addressed, while the method ABI is
                     // positional. Normalize the emitted ABI back to the exact
                     // first-discovery order already stored in ImplEntry.
-                    derived_impls.push(derived_impl_with_bounds(
-                        di, derived_runtime_bounds_from_owner(
-                            registered_owner)))
+                    derived_impls.push(finalize_derived_impl(
+                        di, registered_owner))
                 },
                 none => { invalid.insert(ut.name) }
             }
@@ -668,8 +860,19 @@ fn plan_json_nominal_evidence(
     }
 }
 
+fn registered_derive_trait_ref(
+    env: TypeEnv, trait_name: Str
+) -> SymbolRef {
+    match env.trait_reg.traits.get(trait_name) {
+        some(def) => registered_trait_ref_symbol(def.owner_ref),
+        none => panic("derive impl provider: trait is not registered")
+    }
+}
+
 fn json_derived_signature(
-    ut: UserType, impl_bounds: List<DerivedPredicatePlan>
+    env: TypeEnv, ut: UserType,
+    impl_bounds: List<DerivedPredicatePlan>,
+    provider_ref: ImplProviderRef
 ) -> DerivedImpl? {
     let type_params = match ut.type_kind {
         TypeKind::StructKind => match ut.struct_def {
@@ -692,6 +895,8 @@ fn json_derived_signature(
         }
     }
     some(DerivedImpl {
+        provider_ref: provider_ref,
+        trait_ref: registered_derive_trait_ref(env, "Json"),
         type_name: ut.name,
         trait_name: "Json",
         type_params: type_params,
@@ -715,10 +920,60 @@ fn derived_impl_dict_bounds(di: DerivedImpl) -> List<DerivedPredicatePlan>? {
     some(result)
 }
 
-fn derived_impl_with_bounds(
-    di: DerivedImpl, bounds: List<TraitBound>
+fn string_lists_same(left: List<Str>, right: List<Str>) -> Bool {
+    if left.len() != right.len() { return false }
+    for index in 0..left.len() {
+        if left.get(index).unwrap_or("") !=
+           right.get(index).unwrap_or("") {
+            return false
+        }
+    }
+    true
+}
+
+fn trait_bounds_same(
+    left: List<TraitBound>, right: List<TraitBound>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    for index in 0..left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a.type_param != b.type_param ||
+                                      a.trait_name != b.trait_name {
+                return false
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+fn finalize_derived_impl(
+    di: DerivedImpl, owner: ImplEntry
 ) -> DerivedImpl {
+    let owner_provider = match owner.provider_ref {
+        some(provider) => provider,
+        none => panic("derived impl descriptor owner lost provider")
+    }
+    let owner_trait = match owner.trait_ref {
+        some(trait_ref) => trait_ref,
+        none => panic("derived impl descriptor owner lost trait")
+    }
+    let owner_trait_name = match owner.trait_name {
+        some(name) => name,
+        none => panic("derived impl descriptor owner lost trait name")
+    }
+    if impl_owner_is_provisional(owner) ||
+       owner.target_type_name != di.type_name ||
+       owner_trait_name != di.trait_name ||
+       !impl_provider_ref_same(owner_provider, di.provider_ref) ||
+       !symbol_ref_same(owner_trait, di.trait_ref) ||
+       !string_lists_same(owner.type_params, di.type_params) {
+        panic("derived impl descriptor changed exact owner")
+    }
+    let bounds = derived_runtime_bounds_from_owner(owner)
     DerivedImpl {
+        provider_ref: owner_provider,
+        trait_ref: owner_trait,
         type_name: di.type_name,
         trait_name: di.trait_name,
         type_params: di.type_params,
@@ -749,8 +1004,12 @@ fn derived_runtime_bounds_from_owner(owner: ImplEntry) -> List<TraitBound> {
 // Try to derive a trait for a single type
 // ================================================================
 
-fn try_derive(env: TypeEnv, ut: UserType, trait_name: Str, known: Set<Str>) -> DerivedImpl? {
+fn try_derive(
+    env: TypeEnv, ut: UserType, trait_name: Str, known: Set<Str>,
+    provider_ref: ImplProviderRef
+) -> DerivedImpl? {
     let mut bounds: List<TraitBound> = []
+    let trait_ref = registered_derive_trait_ref(env, trait_name)
 
     match ut.type_kind {
         TypeKind::StructKind => match ut.struct_def {
@@ -759,6 +1018,8 @@ fn try_derive(env: TypeEnv, ut: UserType, trait_name: Str, known: Set<Str>) -> D
                 let fields = try_derive_fields(env, field_entries, def.type_param_vars, def.type_params, trait_name, known, ut.name, bounds)
                 match fields {
                     some(fs) => some(DerivedImpl {
+                        provider_ref: provider_ref,
+                        trait_ref: trait_ref,
                         type_name: ut.name,
                         trait_name: trait_name,
                         type_params: def.type_params,
@@ -821,6 +1082,8 @@ fn try_derive(env: TypeEnv, ut: UserType, trait_name: Str, known: Set<Str>) -> D
                 }
                 if ok {
                     some(DerivedImpl {
+                        provider_ref: provider_ref,
+                        trait_ref: trait_ref,
                         type_name: ut.name,
                         trait_name: trait_name,
                         type_params: def.type_params,
@@ -1312,9 +1575,10 @@ fn resolve_type_arg_dict(
 
 fn register_derived_impl(
     mut env: TypeEnv, sink: CollectingSink,
-    di: DerivedImpl, trait_name: Str, span: Span,
-    provider_ref: ImplProviderRef
+    di: DerivedImpl, span: Span
 ) -> ImplEntry {
+    let trait_name = di.trait_name
+    let provider_ref = di.provider_ref
     let mut methods: Map<Str, TypeScheme> = map_new()
 
     let mut type_var_ids: List<Int> = []
@@ -1366,9 +1630,9 @@ fn register_derived_impl(
             scheme.ty, scheme.type_vars, scheme.def_id))
     }
 
-    let trait_ref = match env.trait_reg.traits.get(trait_name) {
-        some(def) => registered_trait_ref_symbol(def.owner_ref),
-        none => panic("derive impl provider: trait is not registered")
+    let trait_ref = registered_derive_trait_ref(env, trait_name)
+    if !symbol_ref_same(trait_ref, di.trait_ref) {
+        panic("derive impl descriptor changed registered trait")
     }
     let owner = ImplEntry {
         trait_name: some(trait_name),

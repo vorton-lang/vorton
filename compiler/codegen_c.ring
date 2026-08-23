@@ -94,9 +94,8 @@ pub fn generate_c(
     c_declare_struct_ctors(ctx, program.decls)
 
     // Derived trait impls (Eq/Clone/Ord/Debug/Json) BEFORE the body pass — method
-    // calls in bodies need ring_<Type>_clone etc. registered (LLVM parity:
-    // emit_builtin_derived_impls + emit_derived_impls_llvm run here).
-    emit_c_builtin_derived_impls(ctx)
+    // calls in bodies need ring_<Type>_clone etc. registered. Builtin Option
+    // descriptors are already part of the checker-owned HProgram inventory.
     emit_c_derived_impls(ctx, program.derived_impls)
 
     // Second pass: function bodies (+ impl trait dict build fns, default
@@ -186,10 +185,10 @@ pub fn generate_c_project(
         c_declare_struct_ctors(ctx, program.decls)
     }
 
-    // Derived trait impls before the body pass (builtin Option + per-module).
+    // Derived trait impls before the body pass. The project assembler prepends
+    // builtin Option descriptors to its one physical carrier HProgram.
     // Register every Json method/builder/getter across the project before any
     // Json body is emitted, so declaration order cannot select a fallback.
-    emit_c_builtin_derived_impls(ctx)
     for m in modules {
         let (_prefix, program, _uses) = m
         predeclare_c_json_derived_impls(ctx, program.derived_impls)
@@ -1778,9 +1777,9 @@ fn emit_c_default_method_stubs(mut ctx: CCtx, target_type: Str, trait_name: Str,
 
 // ============================================================
 // B-100 Fix 2 port: C codegen for auto-derived trait impls
-// (Eq/Hash/Clone/Ord/Debug) — emit_derived_impls_llvm /
-// emit_builtin_derived_impls and the
-// per-trait method emitters, rendered as plain C (no phi/bb bookkeeping).
+// (Eq/Hash/Clone/Ord/Debug) and the per-trait method emitters, rendered as
+// plain C (no phi/bb bookkeeping). Identity and builtin descriptor assembly
+// are checker responsibilities; this backend consumes the list mechanically.
 // ============================================================
 
 pub fn emit_c_derived_impls(mut ctx: CCtx, derived_impls: List<DerivedImpl>) {
@@ -1800,85 +1799,6 @@ fn emit_c_derived_impl_bodies(mut ctx: CCtx, derived_impls: List<DerivedImpl>) {
             _ => {},
         }
     }
-}
-
-// Option is a builtin enum excluded from derive.ring (BUILTIN_TYPES);
-// synthesise its DerivedImpls here (port of emit_builtin_derived_impls).
-fn c_option_some_variant(base_dict: DictRef) -> DerivedVariant {
-    DerivedVariant {
-        name: "some",
-        discriminator: 0,
-        fields: [DerivedField {
-            name: "_0",
-            positional_index: some(0),
-            action: FieldAction::Call {
-                base_dict: base_dict, extra_dicts: []
-            }
-        }],
-        has_named_fields: false
-    }
-}
-
-fn c_option_none_variant() -> DerivedVariant {
-    DerivedVariant { name: "none", discriminator: 1, fields: [], has_named_fields: false }
-}
-
-pub fn emit_c_builtin_derived_impls(mut ctx: CCtx) {
-    let option_eq = DerivedImpl {
-        type_name: "Option",
-        trait_name: "Eq",
-        type_params: ["T"],
-        bounds: [TraitBound { type_param: "T", trait_name: "Eq" }],
-        type_kind: TypeKind::EnumKind,
-        struct_fields: none,
-        enum_variants: some([
-            c_option_some_variant(DictRef::Simple(
-                trait_bound_param_name("T", "Eq"))),
-            c_option_none_variant()
-        ])
-    }
-    emit_c_derived_eq(ctx, option_eq)
-
-    let option_debug = DerivedImpl {
-        type_name: "Option",
-        trait_name: "Debug",
-        type_params: ["T"],
-        bounds: [TraitBound { type_param: "T", trait_name: "Debug" }],
-        type_kind: TypeKind::EnumKind,
-        struct_fields: none,
-        enum_variants: some([
-            c_option_some_variant(DictRef::Simple(
-                trait_bound_param_name("T", "Debug"))),
-            c_option_none_variant()
-        ])
-    }
-    emit_c_derived_debug(ctx, option_debug)
-
-    let option_ord = DerivedImpl {
-        type_name: "Option",
-        trait_name: "Ord",
-        type_params: ["T"],
-        bounds: [TraitBound { type_param: "T", trait_name: "Ord" }],
-        type_kind: TypeKind::EnumKind,
-        struct_fields: none,
-        enum_variants: some([
-            c_option_some_variant(DictRef::Simple(
-                trait_bound_param_name("T", "Ord"))),
-            c_option_none_variant()
-        ])
-    }
-    emit_c_derived_ord(ctx, option_ord)
-
-    let option_clone = DerivedImpl {
-        type_name: "Option",
-        trait_name: "Clone",
-        type_params: ["T"],
-        bounds: [],
-        type_kind: TypeKind::EnumKind,
-        struct_fields: none,
-        enum_variants: none
-    }
-    emit_c_derived_clone(ctx, option_clone)
 }
 
 // ── scaffold ─────────────────────────────────────────────────
