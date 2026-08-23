@@ -7,6 +7,9 @@
 
 use ir_identity::{SlotRef, slot_ref_same}
 use ir_inventory::{executable_ref_same}
+use flow_ir::{
+    FlowInstructionRef, FlowBlockRef,
+    flow_instruction_ref_same, flow_block_ref_same}
 use resource_model::{
     SlotFlow,
     slot_flow_from_tag, slot_flow_tag, slot_flow_same,
@@ -19,10 +22,19 @@ use rc_ir::{
     rc_program_flow_fingerprint, rc_program_type_count,
     rc_program_callable_count, rc_program_bodies,
     rc_body_reference, rc_body_slots, rc_body_entry_block, rc_body_blocks,
+    rc_block_source_ref, rc_block_terminator_kind,
     rc_block_steps, rc_block_before_terminator, rc_block_edges,
-    rc_step_before, rc_step_after,
+    rc_step_instruction, rc_step_before, rc_step_after,
     rc_edge_target_block, rc_edge_cleanup,
-    rc_operation_kind, rc_operation_source, rc_operation_target,
+    rc_operation_site, rc_operation_kind,
+    rc_operation_source, rc_operation_target,
+    rc_semantic_site_is_instruction, rc_semantic_site_instruction,
+    rc_semantic_site_block, rc_semantic_site_terminator_kind,
+    rc_semantic_site_successor_ordinal, rc_semantic_site_placement,
+    rc_semantic_site_operand_ordinal,
+    rc_site_placement_tag, rc_site_before_instruction,
+    rc_site_after_instruction, rc_site_before_terminator,
+    rc_site_edge_cleanup,
     rc_op_kind_clone, rc_op_kind_take, rc_op_kind_drop,
     rc_op_kind_cleanup, rc_op_kind_same,
     rc_slot_reference}
@@ -302,6 +314,9 @@ fn constraint_required_rank(
 }
 
 fn verify_fixed_point_proof(value: ResourceFixedPointProof) {
+    if value.cells.len() == 0 || value.constraints.len() == 0 {
+        panic("resource certificate: empty fixed-point proof is not admissible")
+    }
     if value.final_ranks.len() != value.cells.len() {
         panic("resource certificate: final cell census differs")
     }
@@ -599,20 +614,25 @@ fn verify_slot_transition(value: SlotTransitionWitness) {
 }
 
 pub struct CfgEdgeCertificate {
+    successor_ordinal: Int,
     target_block: Int?,
     exit_states: List<SlotFlow>,
     transitions: List<SlotTransitionWitness>
 }
 
 pub fn make_cfg_edge_certificate(
-    target_block: Int?, exit_states: List<SlotFlow>,
+    successor_ordinal: Int, target_block: Int?, exit_states: List<SlotFlow>,
     transitions: List<SlotTransitionWitness>
 ) -> CfgEdgeCertificate {
+    if successor_ordinal < 0 {
+        panic("resource certificate: negative successor ordinal")
+    }
     let mut states: List<SlotFlow> = []
     for state in exit_states {
         states.push(slot_flow_from_tag(slot_flow_tag(state)))
     }
     CfgEdgeCertificate {
+        successor_ordinal: successor_ordinal,
         target_block: target_block,
         exit_states: states,
         transitions: copy_slot_transitions(transitions)
@@ -622,6 +642,9 @@ pub fn make_cfg_edge_certificate(
 pub fn cfg_edge_certificate_target(value: CfgEdgeCertificate) -> Int? {
     value.target_block
 }
+pub fn cfg_edge_certificate_successor_ordinal(
+    value: CfgEdgeCertificate
+) -> Int { value.successor_ordinal }
 pub fn cfg_edge_certificate_exit_states(
     value: CfgEdgeCertificate
 ) -> List<SlotFlow> {
@@ -641,24 +664,75 @@ fn copy_cfg_edge_certificates(
     let mut result: List<CfgEdgeCertificate> = []
     for value in values {
         result.push(make_cfg_edge_certificate(
-            value.target_block, value.exit_states, value.transitions))
+            value.successor_ordinal, value.target_block,
+            value.exit_states, value.transitions))
+    }
+    result
+}
+
+pub struct CfgStepCertificate {
+    instruction: FlowInstructionRef,
+    before: List<SlotTransitionWitness>,
+    semantic: List<SlotTransitionWitness>,
+    after: List<SlotTransitionWitness>
+}
+
+pub fn make_cfg_step_certificate(
+    instruction: FlowInstructionRef,
+    before: List<SlotTransitionWitness>,
+    semantic: List<SlotTransitionWitness>,
+    after: List<SlotTransitionWitness>
+) -> CfgStepCertificate {
+    CfgStepCertificate {
+        instruction: instruction,
+        before: copy_slot_transitions(before),
+        semantic: copy_slot_transitions(semantic),
+        after: copy_slot_transitions(after)
+    }
+}
+
+pub fn cfg_step_certificate_instruction(
+    value: CfgStepCertificate
+) -> FlowInstructionRef { value.instruction }
+pub fn cfg_step_certificate_before(
+    value: CfgStepCertificate
+) -> List<SlotTransitionWitness> { copy_slot_transitions(value.before) }
+pub fn cfg_step_certificate_semantic(
+    value: CfgStepCertificate
+) -> List<SlotTransitionWitness> { copy_slot_transitions(value.semantic) }
+pub fn cfg_step_certificate_after(
+    value: CfgStepCertificate
+) -> List<SlotTransitionWitness> { copy_slot_transitions(value.after) }
+
+fn copy_cfg_step_certificates(
+    values: List<CfgStepCertificate>
+) -> List<CfgStepCertificate> {
+    let mut result: List<CfgStepCertificate> = []
+    for value in values {
+        result.push(make_cfg_step_certificate(
+            value.instruction, value.before, value.semantic, value.after))
     }
     result
 }
 
 pub struct CfgBlockCertificate {
     block_index: Int,
+    source_block: FlowBlockRef,
+    terminator_kind: Int,
     entry_states: List<SlotFlow>,
-    semantic_transitions: List<SlotTransitionWitness>,
+    steps: List<CfgStepCertificate>,
+    terminator_transitions: List<SlotTransitionWitness>,
     edges: List<CfgEdgeCertificate>
 }
 
 pub fn make_cfg_block_certificate(
-    block_index: Int, entry_states: List<SlotFlow>,
-    semantic_transitions: List<SlotTransitionWitness>,
+    block_index: Int, source_block: FlowBlockRef,
+    terminator_kind: Int, entry_states: List<SlotFlow>,
+    steps: List<CfgStepCertificate>,
+    terminator_transitions: List<SlotTransitionWitness>,
     edges: List<CfgEdgeCertificate>
 ) -> CfgBlockCertificate {
-    if block_index < 0 {
+    if block_index < 0 || terminator_kind < 0 {
         panic("resource certificate: negative CFG block index")
     }
     let mut states: List<SlotFlow> = []
@@ -667,8 +741,11 @@ pub fn make_cfg_block_certificate(
     }
     CfgBlockCertificate {
         block_index: block_index,
+        source_block: source_block,
+        terminator_kind: terminator_kind,
         entry_states: states,
-        semantic_transitions: copy_slot_transitions(semantic_transitions),
+        steps: copy_cfg_step_certificates(steps),
+        terminator_transitions: copy_slot_transitions(terminator_transitions),
         edges: copy_cfg_edge_certificates(edges)
     }
 }
@@ -676,6 +753,12 @@ pub fn make_cfg_block_certificate(
 pub fn cfg_block_certificate_index(value: CfgBlockCertificate) -> Int {
     value.block_index
 }
+pub fn cfg_block_certificate_source_block(
+    value: CfgBlockCertificate
+) -> FlowBlockRef { value.source_block }
+pub fn cfg_block_certificate_terminator_kind(
+    value: CfgBlockCertificate
+) -> Int { value.terminator_kind }
 pub fn cfg_block_certificate_entry_states(
     value: CfgBlockCertificate
 ) -> List<SlotFlow> {
@@ -683,10 +766,13 @@ pub fn cfg_block_certificate_entry_states(
     for state in value.entry_states { result.push(state) }
     result
 }
-pub fn cfg_block_certificate_semantic_transitions(
+pub fn cfg_block_certificate_steps(
+    value: CfgBlockCertificate
+) -> List<CfgStepCertificate> { copy_cfg_step_certificates(value.steps) }
+pub fn cfg_block_certificate_terminator_transitions(
     value: CfgBlockCertificate
 ) -> List<SlotTransitionWitness> {
-    copy_slot_transitions(value.semantic_transitions)
+    copy_slot_transitions(value.terminator_transitions)
 }
 pub fn cfg_block_certificate_edges(
     value: CfgBlockCertificate
@@ -700,8 +786,9 @@ fn copy_cfg_block_certificates(
     let mut result: List<CfgBlockCertificate> = []
     for value in values {
         result.push(make_cfg_block_certificate(
-            value.block_index, value.entry_states,
-            value.semantic_transitions, value.edges))
+            value.block_index, value.source_block, value.terminator_kind,
+            value.entry_states, value.steps,
+            value.terminator_transitions, value.edges))
     }
     result
 }
@@ -815,16 +902,6 @@ pub fn resource_certificate_cfg_bodies(
     copy_cfg_body_certificates(value.cfg_bodies)
 }
 
-// Opaque proof token.  Downstream consumers receive it only after all local
-// certificate checks have succeeded for the exact RcProgram fingerprint.
-pub struct VerifiedResourceCertificate {
-    flow_fingerprint: Str
-}
-
-pub fn verified_resource_certificate_flow_fingerprint(
-    value: VerifiedResourceCertificate
-) -> Str { value.flow_fingerprint }
-
 fn verify_transition_sequence(
     initial: List<SlotFlow>, transitions: List<SlotTransitionWitness>
 ) -> List<SlotFlow> {
@@ -874,18 +951,6 @@ fn resource_source_transitions(
     result
 }
 
-fn block_resource_operations(block: RcBlock) -> List<RcOperation> {
-    let mut result: List<RcOperation> = []
-    for step in rc_block_steps(block) {
-        for operation in rc_step_before(step) { result.push(operation) }
-        for operation in rc_step_after(step) { result.push(operation) }
-    }
-    for operation in rc_block_before_terminator(block) {
-        result.push(operation)
-    }
-    result
-}
-
 fn operation_matches_source_reason(
     operation: RcOperation, reason: SlotTransitionReason
 ) -> Bool {
@@ -904,11 +969,47 @@ fn operation_matches_source_reason(
     false
 }
 
-fn verify_block_resource_witnesses(
-    block: RcBlock, slots: List<RcSlot>,
+fn operation_target_reason_matches(
+    operation: RcOperation, reason: SlotTransitionReason
+) -> Bool {
+    if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_clone()) {
+        return transition_reason_is(reason, SLOT_REASON_CLONE_TARGET)
+    }
+    if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_take()) {
+        return transition_reason_is(reason, SLOT_REASON_TAKE_TARGET) ||
+            transition_reason_is(reason, SLOT_REASON_ASSIGN_SCALAR)
+    }
+    false
+}
+
+fn verify_operation_target_witness(
+    operation: RcOperation, slots: List<RcSlot>,
     transitions: List<SlotTransitionWitness>
 ) {
-    let operations = block_resource_operations(block)
+    match rc_operation_target(operation) {
+        some(target) => {
+            let target_index = rc_slot_index_for(slots, target)
+            let mut matches = 0
+            for transition in transitions {
+                if transition.slot_index == target_index &&
+                   operation_target_reason_matches(operation, transition.reason) {
+                    matches = matches + 1
+                }
+            }
+            if matches != 1 {
+                panic("resource certificate: RC target witness is absent or ambiguous")
+            }
+        },
+        none => {}
+    }
+}
+
+fn verify_instruction_phase_witnesses(
+    operations: List<RcOperation>, slots: List<RcSlot>,
+    instruction: FlowInstructionRef, expected_placement: Int,
+    transitions: List<SlotTransitionWitness>,
+    target_transitions: List<SlotTransitionWitness>
+) {
     let witnesses = resource_source_transitions(transitions)
     if operations.len() != witnesses.len() {
         panic("resource certificate: block RC operation/witness census differs")
@@ -917,21 +1018,66 @@ fn verify_block_resource_witnesses(
     while index < operations.len() {
         let operation = operations.get(index).unwrap()
         let witness = witnesses.get(index).unwrap()
-        if !operation_matches_source_reason(operation, witness.reason) ||
+        let site = rc_operation_site(operation)
+        if !rc_semantic_site_is_instruction(site) ||
+           !flow_instruction_ref_same(
+                rc_semantic_site_instruction(site), instruction) ||
+           rc_site_placement_tag(rc_semantic_site_placement(site)) !=
+                expected_placement ||
+           rc_semantic_site_operand_ordinal(site) < 0 ||
+           !operation_matches_source_reason(operation, witness.reason) ||
            rc_slot_index_for(slots, rc_operation_source(operation)) !=
                witness.slot_index {
-            panic("resource certificate: block RC operation witness drifted")
+            panic("resource certificate: instruction RC operation witness drifted")
         }
-        match rc_operation_target(operation) {
-            some(target) => { let _ = rc_slot_index_for(slots, target) },
-            none => {}
+        verify_operation_target_witness(
+            operation, slots, target_transitions)
+        index = index + 1
+    }
+}
+
+fn append_transition_lists(
+    left: List<SlotTransitionWitness>, right: List<SlotTransitionWitness>
+) -> List<SlotTransitionWitness> {
+    let mut result: List<SlotTransitionWitness> = []
+    for value in left { result.push(value) }
+    for value in right { result.push(value) }
+    result
+}
+
+fn verify_terminator_phase_witnesses(
+    operations: List<RcOperation>, slots: List<RcSlot>,
+    block: FlowBlockRef, terminator_kind: Int,
+    transitions: List<SlotTransitionWitness>
+) {
+    let witnesses = resource_source_transitions(transitions)
+    if operations.len() != witnesses.len() {
+        panic("resource certificate: terminator RC operation/witness census differs")
+    }
+    let mut index = 0
+    while index < operations.len() {
+        let operation = operations.get(index).unwrap()
+        let witness = witnesses.get(index).unwrap()
+        let site = rc_operation_site(operation)
+        if rc_semantic_site_is_instruction(site) ||
+           !flow_block_ref_same(rc_semantic_site_block(site), block) ||
+           rc_semantic_site_terminator_kind(site) != terminator_kind ||
+           rc_semantic_site_successor_ordinal(site).is_some() ||
+           rc_site_placement_tag(rc_semantic_site_placement(site)) !=
+                rc_site_placement_tag(rc_site_before_terminator()) ||
+           !operation_matches_source_reason(operation, witness.reason) ||
+           rc_slot_index_for(slots, rc_operation_source(operation)) !=
+                witness.slot_index {
+            panic("resource certificate: terminator RC operation witness drifted")
         }
+        verify_operation_target_witness(operation, slots, transitions)
         index = index + 1
     }
 }
 
 fn verify_edge_resource_witnesses(
-    edge: RcEdge, slots: List<RcSlot>,
+    edge: RcEdge, slots: List<RcSlot>, block: FlowBlockRef,
+    terminator_kind: Int, successor_ordinal: Int,
     transitions: List<SlotTransitionWitness>
 ) {
     let operations = rc_edge_cleanup(edge)
@@ -949,8 +1095,16 @@ fn verify_edge_resource_witnesses(
     while index < operations.len() {
         let operation = operations.get(index).unwrap()
         let witness = cleanup_witnesses.get(index).unwrap()
+        let site = rc_operation_site(operation)
         if !rc_op_kind_same(
                 rc_operation_kind(operation), rc_op_kind_cleanup()) ||
+           rc_semantic_site_is_instruction(site) ||
+           !flow_block_ref_same(rc_semantic_site_block(site), block) ||
+           rc_semantic_site_terminator_kind(site) != terminator_kind ||
+           rc_semantic_site_successor_ordinal(site) !=
+                some(successor_ordinal) ||
+           rc_site_placement_tag(rc_semantic_site_placement(site)) !=
+                rc_site_placement_tag(rc_site_edge_cleanup()) ||
            !transition_reason_is(witness.reason, SLOT_REASON_CLEANUP) ||
            rc_slot_index_for(slots, rc_operation_source(operation)) !=
                witness.slot_index {
@@ -975,13 +1129,52 @@ fn verify_cfg_body_certificate(
         let rc_block = blocks.get(block_index).unwrap()
         let proof = certificate.blocks.get(block_index).unwrap()
         if proof.block_index != block_index ||
-           proof.entry_states.len() != slots.len() {
+           proof.entry_states.len() != slots.len() ||
+           !flow_block_ref_same(
+                proof.source_block, rc_block_source_ref(rc_block)) ||
+           proof.terminator_kind != rc_block_terminator_kind(rc_block) {
             panic("resource certificate: CFG block identity/state census differs")
         }
-        verify_block_resource_witnesses(
-            rc_block, slots, proof.semantic_transitions)
-        let after_semantic = verify_transition_sequence(
-            proof.entry_states, proof.semantic_transitions)
+        let rc_steps = rc_block_steps(rc_block)
+        if proof.steps.len() != rc_steps.len() {
+            panic("resource certificate: semantic step census differs")
+        }
+        let mut after_semantic = copy_state_vector(proof.entry_states)
+        let mut step_index = 0
+        while step_index < rc_steps.len() {
+            let rc_step = rc_steps.get(step_index).unwrap()
+            let step_proof = proof.steps.get(step_index).unwrap()
+            let instruction = rc_step_instruction(rc_step)
+            if !flow_instruction_ref_same(
+                    instruction, step_proof.instruction) {
+                panic("resource certificate: semantic step identity drifted")
+            }
+            verify_instruction_phase_witnesses(
+                rc_step_before(rc_step), slots, instruction,
+                rc_site_placement_tag(rc_site_before_instruction()),
+                step_proof.before,
+                append_transition_lists(
+                    step_proof.before, step_proof.semantic))
+            after_semantic = verify_transition_sequence(
+                after_semantic, step_proof.before)
+            after_semantic = verify_transition_sequence(
+                after_semantic, step_proof.semantic)
+            verify_instruction_phase_witnesses(
+                rc_step_after(rc_step), slots, instruction,
+                rc_site_placement_tag(rc_site_after_instruction()),
+                step_proof.after,
+                append_transition_lists(
+                    step_proof.semantic, step_proof.after))
+            after_semantic = verify_transition_sequence(
+                after_semantic, step_proof.after)
+            step_index = step_index + 1
+        }
+        verify_terminator_phase_witnesses(
+            rc_block_before_terminator(rc_block), slots,
+            proof.source_block, proof.terminator_kind,
+            proof.terminator_transitions)
+        after_semantic = verify_transition_sequence(
+            after_semantic, proof.terminator_transitions)
         let rc_edges = rc_block_edges(rc_block)
         if proof.edges.len() != rc_edges.len() {
             panic("resource certificate: CFG edge census differs")
@@ -990,11 +1183,14 @@ fn verify_cfg_body_certificate(
         while edge_index < rc_edges.len() {
             let rc_edge = rc_edges.get(edge_index).unwrap()
             let edge_proof = proof.edges.get(edge_index).unwrap()
-            if rc_edge_target_block(rc_edge) != edge_proof.target_block {
+            if edge_proof.successor_ordinal != edge_index ||
+               rc_edge_target_block(rc_edge) != edge_proof.target_block {
                 panic("resource certificate: CFG edge endpoint drifted")
             }
             verify_edge_resource_witnesses(
-                rc_edge, slots, edge_proof.transitions)
+                rc_edge, slots, proof.source_block,
+                proof.terminator_kind, edge_index,
+                edge_proof.transitions)
             if edge_proof.exit_states.len() != slots.len() {
                 panic("resource certificate: CFG edge state census differs")
             }
@@ -1072,7 +1268,7 @@ fn verify_cfg_body_certificate(
 
 pub fn verify_resource_certificate(
     rc_program: RcProgram, certificate: ResourceCertificate
-) -> VerifiedResourceCertificate {
+) {
     if rc_program_flow_fingerprint(rc_program) != certificate.flow_fingerprint {
         panic("resource certificate: FlowIR fingerprint mismatch")
     }
@@ -1088,8 +1284,5 @@ pub fn verify_resource_certificate(
             bodies.get(body_index).unwrap(),
             certificate.cfg_bodies.get(body_index).unwrap())
         body_index = body_index + 1
-    }
-    VerifiedResourceCertificate {
-        flow_fingerprint: certificate.flow_fingerprint
     }
 }

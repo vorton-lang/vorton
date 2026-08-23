@@ -10,9 +10,11 @@
 use ir_identity::{SlotRef, slot_ref_same}
 use ir_inventory::{ExecutableRef, executable_ref_same}
 use flow_ir::{
-    FlowProgram, FlowTypeNode, FlowTypeRef, FlowSemanticRole,
+    FlowProgram, FlowTypeNode, FlowTypeRef,
+    FlowSemanticRole, FlowValueOriginContract,
     FlowCallable, FlowBody, FlowSlot, FlowScope, FlowScopeRef,
-    FlowInstruction, FlowTerminator, FlowCallTarget,
+    FlowInstruction, FlowInstructionRef, FlowBlockRef,
+    FlowTerminator, FlowCallTarget,
     validate_flow_program,
     flow_program_type_nodes, flow_program_callables, flow_program_bodies,
     flow_program_topology_fingerprint,
@@ -20,6 +22,14 @@ use flow_ir::{
     flow_type_ref_index, flow_type_ref_same,
     flow_type_node_reference, flow_type_node_kind,
     flow_type_node_children, flow_type_node_generic_param,
+    flow_type_node_resource_edges,
+    flow_resource_edge_child,
+    flow_resource_edge_child_dependency_ordinal,
+    flow_resource_edge_target,
+    flow_resource_dependency_target_is_parent,
+    flow_resource_dependency_target_parent,
+    flow_resource_dependency_target_parent_ordinal,
+    flow_resource_dependency_target_concrete_type,
     flow_type_node_semantic_seed, flow_type_node_drop_contract,
     flow_type_node_foreign_contract,
     flow_type_kind_tag, flow_type_semantic_seed_tag,
@@ -27,15 +37,16 @@ use flow_ir::{
     flow_foreign_contract_is_managed,
     flow_semantic_role_tag,
     flow_call_contract_parameter_roles, flow_call_contract_result_role,
+    flow_call_contract_result_origin,
+    flow_value_origin_is_fresh, flow_value_origin_alias_ordinals,
     flow_callable_reference, flow_callable_parameter_types,
     flow_callable_parameter_slots,
     flow_callable_result_type, flow_callable_mode,
     flow_callable_mode_concrete_body, flow_callable_mode_same,
-    flow_callable_semantic_contract, flow_callable_call_edges,
-    flow_call_edge_target, flow_call_edge_arguments, flow_call_edge_result,
+    flow_callable_semantic_contract,
     flow_call_target_contract, flow_call_target_candidates,
     flow_body_reference, flow_body_scopes, flow_body_slots,
-    flow_body_entry, flow_body_blocks, flow_body_exit_edges,
+    flow_body_entry, flow_body_blocks,
     flow_scope_reference, flow_scope_has_parent, flow_scope_parent,
     flow_scope_ref_ordinal, flow_scope_ref_same,
     flow_slot_reference, flow_slot_type, flow_slot_scope,
@@ -45,11 +56,14 @@ use flow_ir::{
     flow_initial_slot_state_tag, flow_storage_class_tag,
     flow_storage_contract_tag,
     flow_block_reference, flow_block_instructions, flow_block_terminator,
-    flow_block_ref_ordinal,
+    flow_block_ref_ordinal, flow_block_ref_same,
+    flow_instruction_ref_same,
+    make_flow_instruction_ref, make_flow_block_ref,
     flow_instruction_kind_tag,
     flow_initialize_operation, flow_initialize_inputs,
     flow_initialize_target,
     flow_operation_contract_input_roles,
+    flow_operation_contract_target_origin,
     flow_read_source, flow_read_target,
     flow_mutate_target, flow_mutate_value,
     flow_mutate_target_role, flow_mutate_value_role,
@@ -62,8 +76,7 @@ use flow_ir::{
     flow_scope_instruction_scope,
     flow_terminator_kind_tag, flow_terminator_successors,
     flow_terminator_read_slots, flow_terminator_terminal_exited_scopes,
-    flow_successor_target, flow_successor_exited_scopes,
-    flow_exit_kind_tag, flow_exit_edge_kind, flow_exit_edge_value}
+    flow_successor_target, flow_successor_exited_scopes}
 use resource_model::{
     ParamMode, TransferDemand,
     LogicalOwnershipShape, PhysicalRcShape,
@@ -89,20 +102,38 @@ use resource_model::{
     slot_flow_join}
 use rc_ir::{
     RcProgram, RcBody, RcBlock, RcStep, RcEdge, RcSlot, RcOperation,
+    RcSemanticSite,
     make_rc_program, make_rc_body, make_rc_block, make_rc_step,
     make_rc_edge, make_rc_slot,
-    make_rc_clone, make_rc_take, make_rc_drop, make_rc_cleanup,
-    rc_program_flow_fingerprint}
+    make_rc_clone_at, make_rc_take_at, make_rc_drop_at, make_rc_cleanup_at,
+    make_rc_instruction_site, make_rc_terminator_site, make_rc_edge_site,
+    rc_site_before_instruction, rc_site_after_instruction,
+    rc_program_flow_fingerprint, rc_program_type_count,
+    rc_program_callable_count, rc_program_bodies,
+    rc_body_reference, rc_body_slots, rc_body_entry_block, rc_body_blocks,
+    rc_slot_reference, rc_slot_type_index, rc_slot_scope_id,
+    rc_slot_scope_depth, rc_slot_reverse_lexical_ordinal,
+    rc_block_source_index, rc_block_source_ref,
+    rc_block_terminator_kind, rc_block_semantic_op_count,
+    rc_block_steps, rc_block_before_terminator, rc_block_edges,
+    rc_step_semantic_op_index, rc_step_instruction,
+    rc_step_before, rc_step_after,
+    rc_edge_successor_ordinal, rc_edge_target_block, rc_edge_cleanup,
+    rc_operation_site, rc_operation_kind,
+    rc_operation_source, rc_operation_target,
+    rc_op_kind_cleanup, rc_op_kind_same,
+    rc_semantic_site_operand_ordinal}
 use resource_certificate::{
     ResourceCellKind, ResourceCellSpec, ResourceConstraint, ResourcePromotion,
     ResourceFixedPointProof, ResourceCertificate,
-    VerifiedResourceCertificate,
-    CfgBodyCertificate, CfgBlockCertificate, CfgEdgeCertificate,
+    CfgBodyCertificate, CfgBlockCertificate,
+    CfgStepCertificate, CfgEdgeCertificate,
     SlotTransitionReason, SlotTransitionWitness,
     make_resource_cell_spec, make_resource_constraint,
     make_resource_promotion, make_resource_fixed_point_proof,
     make_resource_certificate,
     make_cfg_body_certificate, make_cfg_block_certificate,
+    make_cfg_step_certificate,
     make_cfg_edge_certificate, make_slot_transition_witness,
     resource_cell_kind_logical_shape,
     resource_cell_kind_physical_shape,
@@ -110,10 +141,25 @@ use resource_certificate::{
     resource_cell_kind_callable_force,
     resource_cell_kind_callable_result,
     resource_cell_spec_max_rank,
+    resource_cell_spec_kind, resource_cell_spec_owner_index,
+    resource_cell_spec_component_index, resource_cell_kind_tag,
+    resource_constraint_rule_tag,
     resource_constraint_target_cell,
     resource_constraint_floor_rank,
     resource_constraint_premise_cells,
     resource_fixed_point_final_ranks,
+    resource_fixed_point_cells, resource_fixed_point_constraints,
+    resource_certificate_fixed_point,
+    resource_certificate_cfg_bodies,
+    cfg_body_certificate_blocks,
+    cfg_body_certificate_entry_block,
+    cfg_block_certificate_index, cfg_block_certificate_source_block,
+    cfg_block_certificate_terminator_kind,
+    cfg_block_certificate_entry_states,
+    cfg_block_certificate_steps, cfg_block_certificate_edges,
+    cfg_step_certificate_instruction,
+    cfg_edge_certificate_successor_ordinal,
+    cfg_edge_certificate_target,
     slot_reason_init_empty, slot_reason_init_live,
     slot_reason_borrow, slot_reason_mutate,
     slot_reason_clone_source, slot_reason_clone_target,
@@ -182,9 +228,72 @@ fn planner_type_kind_tag(kind: PlannerTypeKind) -> Int {
     planner_type_kind_from_tag(kind.tag).tag
 }
 
+enum PlannerDependencyTargetValue {
+    ParentParameterTargetValue(Int),
+    ConcreteTypeTargetValue(Int)
+}
+
+pub struct PlannerResourceDependency {
+    child_type_index: Int,
+    child_dependency_ordinal: Int,
+    target: PlannerDependencyTargetValue
+}
+
+pub fn make_parent_resource_dependency(
+    child_type_index: Int, child_dependency_ordinal: Int,
+    parent_parameter_ordinal: Int
+) -> PlannerResourceDependency {
+    if child_type_index < 0 || child_dependency_ordinal < 0 ||
+       parent_parameter_ordinal < 0 {
+        panic("ResourcePlanner: negative parent resource dependency")
+    }
+    PlannerResourceDependency {
+        child_type_index: child_type_index,
+        child_dependency_ordinal: child_dependency_ordinal,
+        target: PlannerDependencyTargetValue::ParentParameterTargetValue(
+            parent_parameter_ordinal)
+    }
+}
+
+pub fn make_concrete_resource_dependency(
+    child_type_index: Int, child_dependency_ordinal: Int,
+    concrete_type_index: Int
+) -> PlannerResourceDependency {
+    if child_type_index < 0 || child_dependency_ordinal < 0 ||
+       concrete_type_index < 0 {
+        panic("ResourcePlanner: negative concrete resource dependency")
+    }
+    PlannerResourceDependency {
+        child_type_index: child_type_index,
+        child_dependency_ordinal: child_dependency_ordinal,
+        target: PlannerDependencyTargetValue::ConcreteTypeTargetValue(
+            concrete_type_index)
+    }
+}
+
+fn copy_resource_dependencies(
+    values: List<PlannerResourceDependency>
+) -> List<PlannerResourceDependency> {
+    let mut result: List<PlannerResourceDependency> = []
+    for value in values {
+        match value.target {
+            PlannerDependencyTargetValue::ParentParameterTargetValue(parent) =>
+                result.push(make_parent_resource_dependency(
+                    value.child_type_index,
+                    value.child_dependency_ordinal, parent)),
+            PlannerDependencyTargetValue::ConcreteTypeTargetValue(concrete) =>
+                result.push(make_concrete_resource_dependency(
+                    value.child_type_index,
+                    value.child_dependency_ordinal, concrete))
+        }
+    }
+    result
+}
+
 pub struct PlannerTypeNode {
     kind: PlannerTypeKind,
     child_type_indices: List<Int>,
+    resource_dependencies: List<PlannerResourceDependency>,
     type_parameter_count: Int,
     parameter_index: Int?,
     direct_drop_seed: Bool,
@@ -197,6 +306,7 @@ pub struct PlannerTypeNode {
 
 pub fn make_planner_type_node(
     kind: PlannerTypeKind, child_type_indices: List<Int>,
+    resource_dependencies: List<PlannerResourceDependency>,
     type_parameter_count: Int, parameter_index: Int?,
     direct_drop_seed: Bool, may_unique_seed: Bool,
     physical_rc_seed: Bool, boxing_seed: Bool,
@@ -230,9 +340,23 @@ pub fn make_planner_type_node(
         if child < 0 { panic("ResourcePlanner: negative type edge") }
         children.push(child)
     }
+    let dependencies = copy_resource_dependencies(resource_dependencies)
+    for dependency in dependencies {
+        if !int_list_contains(children, dependency.child_type_index) {
+            panic("ResourcePlanner: resource dependency names a non-child type")
+        }
+        match dependency.target {
+            PlannerDependencyTargetValue::ParentParameterTargetValue(index) =>
+                if index >= type_parameter_count {
+                    panic("ResourcePlanner: dependency target escapes parent parameters")
+                },
+            PlannerDependencyTargetValue::ConcreteTypeTargetValue(_) => {}
+        }
+    }
     PlannerTypeNode {
         kind: kind,
         child_type_indices: children,
+        resource_dependencies: dependencies,
         type_parameter_count: type_parameter_count,
         parameter_index: parameter_index,
         direct_drop_seed: direct_drop_seed,
@@ -249,6 +373,7 @@ fn copy_planner_type_nodes(values: List<PlannerTypeNode>) -> List<PlannerTypeNod
     for value in values {
         result.push(make_planner_type_node(
             value.kind, value.child_type_indices,
+            value.resource_dependencies,
             value.type_parameter_count, value.parameter_index,
             value.direct_drop_seed, value.may_unique_seed,
             value.physical_rc_seed, value.boxing_seed,
@@ -261,29 +386,36 @@ fn copy_planner_type_nodes(values: List<PlannerTypeNode>) -> List<PlannerTypeNod
 // Frozen FlowIR adapter: callable graph
 // ============================================================
 
-enum PlannerArgumentSourceValue {
-    CallerParameterValue(Int),
-    LocalValue
-}
+pub struct PlannerArgumentSource { parameter_indices: List<Int> }
 
-pub struct PlannerArgumentSource { value: PlannerArgumentSourceValue }
+pub fn make_caller_parameter_sources(
+    parameter_indices: List<Int>
+) -> PlannerArgumentSource {
+    let mut copied: List<Int> = []
+    for index in parameter_indices {
+        if index < 0 || int_list_contains(copied, index) {
+            panic("ResourcePlanner: invalid caller parameter origin set")
+        }
+        copied.push(index)
+    }
+    PlannerArgumentSource { parameter_indices: copied }
+}
 
 pub fn make_caller_parameter_source(index: Int) -> PlannerArgumentSource {
     if index < 0 { panic("ResourcePlanner: negative caller parameter index") }
-    PlannerArgumentSource {
-        value: PlannerArgumentSourceValue::CallerParameterValue(index)
-    }
+    make_caller_parameter_sources([index])
 }
 
 pub fn make_local_argument_source() -> PlannerArgumentSource {
-    PlannerArgumentSource { value: PlannerArgumentSourceValue::LocalValue }
+    make_caller_parameter_sources([])
 }
 
-fn planner_argument_source_parameter(value: PlannerArgumentSource) -> Int? {
-    match value.value {
-        PlannerArgumentSourceValue::CallerParameterValue(index) => some(index),
-        PlannerArgumentSourceValue::LocalValue => none
-    }
+fn planner_argument_source_parameters(
+    value: PlannerArgumentSource
+) -> List<Int> {
+    let mut result: List<Int> = []
+    for index in value.parameter_indices { result.push(index) }
+    result
 }
 
 pub struct PlannerCallEdge {
@@ -300,7 +432,10 @@ pub fn make_planner_call_edge(
         panic("ResourcePlanner: negative exact callee index")
     }
     let mut sources: List<PlannerArgumentSource> = []
-    for source in argument_sources { sources.push(source) }
+    for source in argument_sources {
+        sources.push(make_caller_parameter_sources(
+            source.parameter_indices))
+    }
     PlannerCallEdge {
         callee_index: callee_index,
         argument_sources: sources,
@@ -398,6 +533,7 @@ pub struct PlannerSlot {
     scope_id: Int,
     scope_depth: Int,
     reverse_lexical_ordinal: Int,
+    parameter_ordinal: Int?,
     initially_live: Bool,
     owns_storage: Bool
 }
@@ -406,11 +542,18 @@ pub fn make_planner_slot(
     reference: SlotRef, type_index: Int,
     scope_id: Int, scope_depth: Int,
     reverse_lexical_ordinal: Int,
+    parameter_ordinal: Int?,
     initially_live: Bool, owns_storage: Bool
 ) -> PlannerSlot {
     if type_index < 0 || scope_id < 0 || scope_depth < 0 ||
        reverse_lexical_ordinal < 0 {
         panic("ResourcePlanner: invalid frozen slot metadata")
+    }
+    match parameter_ordinal {
+        some(index) => if index < 0 {
+            panic("ResourcePlanner: negative parameter ordinal")
+        },
+        none => {}
     }
     PlannerSlot {
         reference: reference,
@@ -418,6 +561,7 @@ pub fn make_planner_slot(
         scope_id: scope_id,
         scope_depth: scope_depth,
         reverse_lexical_ordinal: reverse_lexical_ordinal,
+        parameter_ordinal: parameter_ordinal,
         initially_live: initially_live,
         owns_storage: owns_storage
     }
@@ -429,6 +573,7 @@ fn copy_planner_slots(values: List<PlannerSlot>) -> List<PlannerSlot> {
         result.push(make_planner_slot(
             value.reference, value.type_index, value.scope_id,
             value.scope_depth, value.reverse_lexical_ordinal,
+            value.parameter_ordinal,
             value.initially_live, value.owns_storage))
     }
     result
@@ -440,6 +585,7 @@ enum PlannerEventValue {
     InitializeValue {
         input_slots: List<Int>,
         input_demands: List<TransferDemand>,
+        origin_input_ordinals: List<Int>,
         target: Int
     },
     InitializeEmptyValue(Int),
@@ -458,6 +604,7 @@ enum PlannerEventValue {
         argument_demands: List<TransferDemand>,
         result_owned: Bool,
         result_type_index: Int,
+        result_origin_argument_ordinals: List<Int>,
         argument_slots: List<Int>,
         result_slot: Int?
     },
@@ -485,13 +632,15 @@ pub fn make_planner_scope_exit(scope_id: Int) -> PlannerEvent {
 }
 
 pub fn make_planner_initialize(
-    input_slots: List<Int>, input_demands: List<TransferDemand>, target: Int
+    input_slots: List<Int>, input_demands: List<TransferDemand>,
+    origin_input_ordinals: List<Int>, target: Int
 ) -> PlannerEvent {
     if input_slots.len() != input_demands.len() {
         panic("ResourcePlanner: initialize input/demand census differs")
     }
     let mut slots: List<Int> = []
     let mut demands: List<TransferDemand> = []
+    let mut origins: List<Int> = []
     for slot in input_slots { slots.push(slot) }
     for demand in input_demands {
         if param_mode_is_conflict(transfer_demand_mode(demand)) {
@@ -500,9 +649,17 @@ pub fn make_planner_initialize(
         demands.push(make_transfer_demand(
             transfer_demand_mode(demand), transfer_demand_force(demand)))
     }
+    for ordinal in origin_input_ordinals {
+        if ordinal < 0 || ordinal >= slots.len() ||
+           int_list_contains(origins, ordinal) {
+            panic("ResourcePlanner: Initialize origin input set is invalid")
+        }
+        origins.push(ordinal)
+    }
     PlannerEvent {
         value: PlannerEventValue::InitializeValue {
-            input_slots: slots, input_demands: demands, target: target
+            input_slots: slots, input_demands: demands,
+            origin_input_ordinals: origins, target: target
         }
     }
 }
@@ -551,7 +708,8 @@ pub fn make_planner_assign(rhs_temp: Int, target: Int) -> PlannerEvent {
 pub fn make_planner_call(
     callable_indices: List<Int>, argument_slots: List<Int>,
     argument_demands: List<TransferDemand>,
-    result_owned: Bool, result_type_index: Int, result_slot: Int?
+    result_owned: Bool, result_type_index: Int,
+    result_origin_argument_ordinals: List<Int>, result_slot: Int?
 ) -> PlannerEvent {
     if callable_indices.len() == 0 ||
        argument_slots.len() != argument_demands.len() ||
@@ -561,6 +719,7 @@ pub fn make_planner_call(
     let mut candidates: List<Int> = []
     let mut arguments: List<Int> = []
     let mut demands: List<TransferDemand> = []
+    let mut result_origins: List<Int> = []
     for candidate in callable_indices {
         if candidate < 0 || int_list_contains(candidates, candidate) {
             panic("ResourcePlanner: call candidate set is invalid")
@@ -575,12 +734,20 @@ pub fn make_planner_call(
         demands.push(make_transfer_demand(
             transfer_demand_mode(demand), transfer_demand_force(demand)))
     }
+    for ordinal in result_origin_argument_ordinals {
+        if ordinal < 0 || ordinal >= arguments.len() ||
+           int_list_contains(result_origins, ordinal) {
+            panic("ResourcePlanner: call result origin set is invalid")
+        }
+        result_origins.push(ordinal)
+    }
     PlannerEvent {
         value: PlannerEventValue::CallValue {
             callable_indices: candidates,
             argument_demands: demands,
             result_owned: result_owned,
             result_type_index: result_type_index,
+            result_origin_argument_ordinals: result_origins,
             argument_slots: arguments,
             result_slot: result_slot
         }
@@ -618,8 +785,9 @@ fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
         PlannerEventValue::ScopeExitValue(scope_id) =>
             make_planner_scope_exit(scope_id),
         PlannerEventValue::InitializeValue {
-            input_slots, input_demands, target
-        } => make_planner_initialize(input_slots, input_demands, target),
+            input_slots, input_demands, origin_input_ordinals, target
+        } => make_planner_initialize(
+            input_slots, input_demands, origin_input_ordinals, target),
         PlannerEventValue::InitializeEmptyValue(slot) =>
             make_planner_initialize_empty(slot),
         PlannerEventValue::InitializeLiveValue(slot) =>
@@ -637,10 +805,12 @@ fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
             result_owned, result_type_index,
+            result_origin_argument_ordinals,
             argument_slots, result_slot
         } => make_planner_call(
             callable_indices, argument_slots, argument_demands,
-            result_owned, result_type_index, result_slot),
+            result_owned, result_type_index,
+            result_origin_argument_ordinals, result_slot),
         PlannerEventValue::ProjectValue {
             source, target, whole_slot
         } => make_planner_project(source, target, whole_slot),
@@ -689,16 +859,20 @@ pub fn make_planner_terminator_use(
 }
 
 pub struct PlannerBlock {
+    terminator_kind: Int,
     events: List<PlannerEvent>,
     terminator_uses: List<PlannerTerminatorUse>,
     edges: List<PlannerEdge>
 }
 
 pub fn make_planner_block(
-    events: List<PlannerEvent>,
+    terminator_kind: Int, events: List<PlannerEvent>,
     terminator_uses: List<PlannerTerminatorUse>,
     edges: List<PlannerEdge>
 ) -> PlannerBlock {
+    if terminator_kind < 0 {
+        panic("ResourcePlanner: invalid frozen terminator kind")
+    }
     let mut copied_events: List<PlannerEvent> = []
     let mut copied_uses: List<PlannerTerminatorUse> = []
     let mut copied_edges: List<PlannerEdge> = []
@@ -712,6 +886,7 @@ pub fn make_planner_block(
             edge.target_block, edge.exited_scope_ids))
     }
     PlannerBlock {
+        terminator_kind: terminator_kind,
         events: copied_events,
         terminator_uses: copied_uses,
         edges: copied_edges
@@ -734,7 +909,8 @@ pub fn make_planner_body(
     let mut copied_blocks: List<PlannerBlock> = []
     for block in blocks {
         copied_blocks.push(make_planner_block(
-            block.events, block.terminator_uses, block.edges))
+            block.terminator_kind, block.events,
+            block.terminator_uses, block.edges))
     }
     PlannerBody {
         reference: reference,
@@ -755,7 +931,7 @@ fn copy_planner_bodies(values: List<PlannerBody>) -> List<PlannerBody> {
     result
 }
 
-pub struct FrozenPlannerInput {
+struct FrozenPlannerInput {
     flow_fingerprint: Str,
     type_nodes: List<PlannerTypeNode>,
     callables: List<PlannerCallable>,
@@ -781,7 +957,7 @@ fn validate_event(
             }
         },
         PlannerEventValue::InitializeValue {
-            input_slots, input_demands, target
+            input_slots, input_demands, target, ..
         } => {
             if input_slots.len() != input_demands.len() {
                 panic("ResourcePlanner: initialize input/demand census differs")
@@ -824,7 +1000,7 @@ fn validate_event(
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
             result_owned: _, result_type_index,
-            argument_slots, result_slot
+            argument_slots, result_slot, ..
         } => {
             if callable_indices.len() == 0 ||
                argument_slots.len() != argument_demands.len() ||
@@ -975,7 +1151,7 @@ fn validate_body(
     }
 }
 
-pub fn make_frozen_planner_input(
+fn make_frozen_planner_input(
     flow_fingerprint: Str,
     type_nodes: List<PlannerTypeNode>,
     callables: List<PlannerCallable>,
@@ -995,8 +1171,36 @@ pub fn make_frozen_planner_input(
                 panic("ResourcePlanner: type child is outside frozen graph")
             }
             let child_node = copied_types.get(child).unwrap()
-            if child_node.type_parameter_count > node.type_parameter_count {
-                panic("ResourcePlanner: child type parameter domain escapes parent")
+            let mut dependency_ordinal = 0
+            while dependency_ordinal < child_node.type_parameter_count {
+                let mut matches = 0
+                for dependency in node.resource_dependencies {
+                    if dependency.child_type_index == child &&
+                       dependency.child_dependency_ordinal == dependency_ordinal {
+                        matches = matches + 1
+                    }
+                }
+                if matches != 1 {
+                    panic("ResourcePlanner: child resource substitution is partial or ambiguous")
+                }
+                dependency_ordinal = dependency_ordinal + 1
+            }
+        }
+        for dependency in node.resource_dependencies {
+            let child = copied_types.get(
+                dependency.child_type_index).unwrap()
+            if dependency.child_dependency_ordinal >=
+                   child.type_parameter_count {
+                panic("ResourcePlanner: child dependency ordinal is outside child")
+            }
+            match dependency.target {
+                PlannerDependencyTargetValue::ConcreteTypeTargetValue(index) =>
+                    if index < 0 || index >= copied_types.len() {
+                        panic("ResourcePlanner: concrete substitution type is absent")
+                    } else if copied_types.get(index).unwrap().type_parameter_count != 0 {
+                        panic("ResourcePlanner: concrete substitution still has free dependencies")
+                    },
+                PlannerDependencyTargetValue::ParentParameterTargetValue(_) => {}
             }
         }
         type_index = type_index + 1
@@ -1024,12 +1228,11 @@ pub fn make_frozen_planner_input(
                 panic("ResourcePlanner: callable graph argument census differs")
             }
             for source in edge.argument_sources {
-                match planner_argument_source_parameter(source) {
-                    some(parameter) => if parameter < 0 || parameter >=
+                for parameter in planner_argument_source_parameters(source) {
+                    if parameter < 0 || parameter >=
                                              callable.parameter_type_indices.len() {
                         panic("ResourcePlanner: callable edge source parameter is absent")
-                    },
-                    none => {}
+                    }
                 }
             }
         }
@@ -1093,7 +1296,7 @@ pub fn make_frozen_planner_input(
     }
 }
 
-pub fn frozen_planner_input_flow_fingerprint(
+fn frozen_planner_input_flow_fingerprint(
     value: FrozenPlannerInput
 ) -> Str { value.flow_fingerprint }
 
@@ -1258,15 +1461,40 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
                     [child.physical_start + physical_component])
                 physical_component = physical_component + 1
             }
-            let mut parameter = 0
-            while parameter < child.parameter_count {
-                add_constraint(constraints, RULE_TYPE_CHILD,
-                    layout.logical_start + 2 + parameter, 0,
-                    [child.logical_start + 2 + parameter])
-                add_constraint(constraints, RULE_TYPE_CHILD,
-                    layout.physical_start + 4 + parameter, 0,
-                    [child.physical_start + 4 + parameter])
-                parameter = parameter + 1
+        }
+        for dependency in node.resource_dependencies {
+            let child = type_layouts.get(
+                dependency.child_type_index).unwrap()
+            match dependency.target {
+                PlannerDependencyTargetValue::ParentParameterTargetValue(
+                    parent_parameter) => {
+                    add_constraint(constraints, RULE_TYPE_CHILD,
+                        layout.logical_start + 2 + parent_parameter, 0,
+                        [child.logical_start + 2 +
+                            dependency.child_dependency_ordinal])
+                    add_constraint(constraints, RULE_TYPE_CHILD,
+                        layout.physical_start + 4 + parent_parameter, 0,
+                        [child.physical_start + 4 +
+                            dependency.child_dependency_ordinal])
+                },
+                PlannerDependencyTargetValue::ConcreteTypeTargetValue(
+                    concrete_index) => {
+                    let concrete = type_layouts.get(concrete_index).unwrap()
+                    let mut logical_component = 0
+                    while logical_component < 2 {
+                        add_constraint(constraints, RULE_TYPE_CHILD,
+                            layout.logical_start + logical_component, 0,
+                            [concrete.logical_start + logical_component])
+                        logical_component = logical_component + 1
+                    }
+                    let mut physical_component = 0
+                    while physical_component < 4 {
+                        add_constraint(constraints, RULE_TYPE_CHILD,
+                            layout.physical_start + physical_component, 0,
+                            [concrete.physical_start + physical_component])
+                        physical_component = physical_component + 1
+                    }
+                }
             }
         }
         type_index = type_index + 1
@@ -1295,17 +1523,14 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
             let callee = callable_layouts.get(edge.callee_index).unwrap()
             let mut argument = 0
             while argument < edge.argument_sources.len() {
-                match planner_argument_source_parameter(
+                for caller_parameter in planner_argument_source_parameters(
                         edge.argument_sources.get(argument).unwrap()) {
-                    some(caller_parameter) => {
                         add_constraint(constraints, RULE_CALLABLE_EDGE,
                             layout.mode_start + caller_parameter, 0,
                             [callee.mode_start + argument])
                         add_constraint(constraints, RULE_CALLABLE_EDGE,
                             layout.force_start + caller_parameter, 0,
                             [callee.force_start + argument])
-                    },
-                    none => {}
                 }
                 argument = argument + 1
             }
@@ -1513,14 +1738,22 @@ fn bool_list_has_true(values: List<Bool>) -> Bool {
 
 fn logical_shape_may_take(shape: LogicalOwnershipShape) -> Bool {
     logical_ownership_shape_direct_drop(shape) ||
-        logical_ownership_shape_may_unique(shape) ||
-        bool_list_has_true(logical_ownership_shape_param_deps(shape))
+        logical_ownership_shape_may_unique(shape)
 }
 
 fn physical_shape_may_drop(shape: PhysicalRcShape) -> Bool {
     physical_rc_shape_physical_rc(shape) ||
-        physical_rc_shape_drop_glue(shape) ||
-        bool_list_has_true(physical_rc_shape_param_deps(shape))
+        physical_rc_shape_drop_glue(shape)
+}
+
+fn require_concrete_resource_shape(
+    logical: LogicalOwnershipShape, physical: PhysicalRcShape,
+    context: Str
+) {
+    if bool_list_has_true(logical_ownership_shape_param_deps(logical)) ||
+       bool_list_has_true(physical_rc_shape_param_deps(physical)) {
+        panic("ResourcePlanner: unresolved generic resource dependency at ${context}")
+    }
 }
 
 fn require_live_state(state: SlotFlow, operation: Str) {
@@ -1550,6 +1783,10 @@ fn apply_demand_abstract(
     }
     let type_index = slots.get(slot).unwrap().type_index
     let logical = logical_shapes.get(type_index).unwrap()
+    let physical = physical_shapes.get(type_index).unwrap()
+    if param_mode_same(mode, param_mode_own()) {
+        require_concrete_resource_shape(logical, physical, "value edge")
+    }
     if param_mode_same(mode, param_mode_own()) &&
        (transfer_demand_force(demand) || logical_shape_may_take(logical)) {
         states.set(slot, slot_flow_moved())
@@ -1604,6 +1841,13 @@ fn apply_event_abstract(
         PlannerEventValue::NoOpValue => {},
         PlannerEventValue::ScopeExitValue(scope_id) => {
             for slot_index in cleanup_slot_order(slots, [scope_id]) {
+                let slot = slots.get(slot_index).unwrap()
+                if slot.owns_storage {
+                    require_concrete_resource_shape(
+                        logical_shapes.get(slot.type_index).unwrap(),
+                        physical_shapes.get(slot.type_index).unwrap(),
+                        "scope exit")
+                }
                 let before = states.get(slot_index).unwrap()
                 if !slot_flow_same(before, slot_flow_unreachable()) {
                     states.set(slot_index, slot_flow_empty())
@@ -1611,7 +1855,7 @@ fn apply_event_abstract(
             }
         },
         PlannerEventValue::InitializeValue {
-            input_slots, input_demands, target
+            input_slots, input_demands, target, ..
         } => {
             let mut input_index = 0
             while input_index < input_slots.len() {
@@ -1675,16 +1919,25 @@ fn apply_event_abstract(
         PlannerEventValue::DiscardValue(slot) => {
             require_live_state(states.get(slot).unwrap(), "discard")
             let type_index = slots.get(slot).unwrap().type_index
-            if physical_shape_may_drop(
-                    physical_shapes.get(type_index).unwrap()) ||
-               logical_shape_may_take(
-                    logical_shapes.get(type_index).unwrap()) {
+            let logical = logical_shapes.get(type_index).unwrap()
+            let physical = physical_shapes.get(type_index).unwrap()
+            require_concrete_resource_shape(logical, physical, "discard")
+            if physical_shape_may_drop(physical) ||
+               logical_shape_may_take(logical) {
                 states.set(slot, slot_flow_empty())
             }
         },
         PlannerEventValue::AssignValue { rhs_temp, target } => {
             require_live_state(states.get(rhs_temp).unwrap(), "Assign RHS temp")
             require_writable_state(states.get(target).unwrap(), "Assign")
+            let rhs_type = slots.get(rhs_temp).unwrap().type_index
+            let target_type = slots.get(target).unwrap().type_index
+            require_concrete_resource_shape(
+                logical_shapes.get(rhs_type).unwrap(),
+                physical_shapes.get(rhs_type).unwrap(), "Assign RHS")
+            require_concrete_resource_shape(
+                logical_shapes.get(target_type).unwrap(),
+                physical_shapes.get(target_type).unwrap(), "Assign target")
             // The semantic event occurs only after its RHS-producing events.
             // Resource materialization later emits Drop-old then Take(temp).
             states.set(target, slot_flow_live())
@@ -1693,12 +1946,18 @@ fn apply_event_abstract(
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
             result_owned, result_type_index,
-            argument_slots, result_slot
+            argument_slots, result_slot, ..
         } => {
             let demands = effective_call_demands(
                 callable_indices, argument_demands, callable_demands)
             let effective_result_owned = effective_call_result_owned(
                 callable_indices, result_owned, callable_results_owned)
+            if effective_result_owned || result_slot.is_some() {
+                require_concrete_resource_shape(
+                    logical_shapes.get(result_type_index).unwrap(),
+                    physical_shapes.get(result_type_index).unwrap(),
+                    "call result")
+            }
             let mut argument = 0
             while argument < argument_slots.len() {
                 apply_demand_abstract(
@@ -1805,10 +2064,17 @@ fn cleanup_slot_order(
 
 fn apply_edge_cleanup_abstract(
     edge: PlannerEdge, slots: List<PlannerSlot>,
+    logical_shapes: List<LogicalOwnershipShape>,
+    physical_shapes: List<PhysicalRcShape>,
     mut states: List<SlotFlow>
 ) {
     for slot_index in cleanup_slot_order(slots, edge.exited_scope_ids) {
         let slot = slots.get(slot_index).unwrap()
+        if slot.owns_storage {
+            require_concrete_resource_shape(
+                logical_shapes.get(slot.type_index).unwrap(),
+                physical_shapes.get(slot.type_index).unwrap(), "CFG exit")
+        }
         let before = states.get(slot_index).unwrap()
         if !slot_flow_same(before, slot_flow_unreachable()) {
             // Empty/Moved/MaybeMoved are represented by cleared storage;
@@ -1818,6 +2084,579 @@ fn apply_edge_cleanup_abstract(
             states.set(slot_index, slot_flow_empty())
         }
     }
+}
+
+// ============================================================
+// Finite body slot-origin and direct-demand dataflow
+// ============================================================
+
+fn empty_origin_bits(parameter_count: Int) -> List<Bool> {
+    let mut result: List<Bool> = []
+    let mut index = 0
+    while index < parameter_count {
+        result.push(false)
+        index = index + 1
+    }
+    result
+}
+
+fn copy_origin_bits(values: List<Bool>) -> List<Bool> {
+    let mut result: List<Bool> = []
+    for value in values { result.push(value) }
+    result
+}
+
+fn join_origin_bits(left: List<Bool>, right: List<Bool>) -> List<Bool> {
+    if left.len() != right.len() {
+        panic("ResourcePlanner: slot-origin parameter arity differs")
+    }
+    let mut result: List<Bool> = []
+    let mut index = 0
+    while index < left.len() {
+        result.push(left.get(index).unwrap() || right.get(index).unwrap())
+        index = index + 1
+    }
+    result
+}
+
+fn origin_bits_same(left: List<Bool>, right: List<Bool>) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if left.get(index).unwrap() != right.get(index).unwrap() {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn copy_origin_state(values: List<List<Bool>>) -> List<List<Bool>> {
+    let mut result: List<List<Bool>> = []
+    for value in values { result.push(copy_origin_bits(value)) }
+    result
+}
+
+fn join_origin_states(
+    left: List<List<Bool>>, right: List<List<Bool>>
+) -> List<List<Bool>> {
+    if left.len() != right.len() {
+        panic("ResourcePlanner: slot-origin state census differs")
+    }
+    let mut result: List<List<Bool>> = []
+    let mut index = 0
+    while index < left.len() {
+        result.push(join_origin_bits(
+            left.get(index).unwrap(), right.get(index).unwrap()))
+        index = index + 1
+    }
+    result
+}
+
+fn origin_states_same(
+    left: List<List<Bool>>, right: List<List<Bool>>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if !origin_bits_same(
+                left.get(index).unwrap(), right.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn origin_from_inputs(
+    states: List<List<Bool>>, input_slots: List<Int>,
+    origin_ordinals: List<Int>, parameter_count: Int
+) -> List<Bool> {
+    let mut result = empty_origin_bits(parameter_count)
+    for ordinal in origin_ordinals {
+        let slot = input_slots.get(ordinal).unwrap()
+        result = join_origin_bits(result, states.get(slot).unwrap())
+    }
+    result
+}
+
+fn body_call_event_count(body: PlannerBody) -> Int {
+    let mut count = 0
+    for block in body.blocks {
+        for event in block.events {
+            match event.value {
+                PlannerEventValue::CallValue { .. } => { count = count + 1 },
+                _ => {}
+            }
+        }
+    }
+    count
+}
+
+fn body_call_token_ordinal(
+    body: PlannerBody, target_block: Int, target_event: Int
+) -> Int? {
+    let mut token = 0
+    let mut block_index = 0
+    while block_index < body.blocks.len() {
+        let block = body.blocks.get(block_index).unwrap()
+        let mut event_index = 0
+        while event_index < block.events.len() {
+            match block.events.get(event_index).unwrap().value {
+                PlannerEventValue::CallValue { .. } => {
+                    if block_index == target_block &&
+                       event_index == target_event {
+                        return some(token)
+                    }
+                    token = token + 1
+                },
+                _ => {}
+            }
+            event_index = event_index + 1
+        }
+        block_index = block_index + 1
+    }
+    none
+}
+
+fn apply_event_origin(
+    event: PlannerEvent, body: PlannerBody,
+    origin_width: Int, call_token: Int?,
+    mut states: List<List<Bool>>
+) {
+    match event.value {
+        PlannerEventValue::NoOpValue => {},
+        PlannerEventValue::ScopeExitValue(scope_id) => {
+            for slot_index in cleanup_slot_order(body.slots, [scope_id]) {
+                states.set(slot_index, empty_origin_bits(origin_width))
+            }
+        },
+        PlannerEventValue::InitializeValue {
+            input_slots, origin_input_ordinals, target, ..
+        } => states.set(target, origin_from_inputs(
+            states, input_slots, origin_input_ordinals, origin_width)),
+        PlannerEventValue::InitializeEmptyValue(slot) |
+        PlannerEventValue::InitializeLiveValue(slot) =>
+            states.set(slot, empty_origin_bits(origin_width)),
+        PlannerEventValue::ReadValue { source, target } =>
+            states.set(target, copy_origin_bits(states.get(source).unwrap())),
+        PlannerEventValue::MutateValue { .. } => {},
+        PlannerEventValue::ConsumeValue(slot, _) |
+        PlannerEventValue::DiscardValue(slot) =>
+            states.set(slot, empty_origin_bits(origin_width)),
+        PlannerEventValue::AssignValue { rhs_temp, target } => {
+            states.set(target, copy_origin_bits(states.get(rhs_temp).unwrap()))
+            states.set(rhs_temp, empty_origin_bits(origin_width))
+        },
+        PlannerEventValue::CallValue {
+            argument_slots, result_origin_argument_ordinals,
+            result_slot, ..
+        } => match result_slot {
+            some(target) => {
+                let mut origins = origin_from_inputs(
+                    states, argument_slots,
+                    result_origin_argument_ordinals, origin_width)
+                match call_token {
+                    some(token) => {
+                        if token < 0 || token >= origin_width {
+                            panic("ResourcePlanner: call-result token escapes origin lattice")
+                        }
+                        origins.set(token, true)
+                    },
+                    none => panic("ResourcePlanner: call result lacks exact origin token")
+                }
+                states.set(target, origins)
+            },
+            none => {}
+        },
+        PlannerEventValue::ProjectValue {
+            source, target, whole_slot: _
+        } => {
+            states.set(target, copy_origin_bits(states.get(source).unwrap()))
+        },
+        PlannerEventValue::CaptureValue { source, target, demand } => {
+            states.set(target, copy_origin_bits(states.get(source).unwrap()))
+            if param_mode_same(
+                    transfer_demand_mode(demand), param_mode_own()) &&
+               transfer_demand_force(demand) {
+                states.set(source, empty_origin_bits(origin_width))
+            }
+        }
+    }
+}
+
+fn apply_origin_edge_cleanup(
+    edge: PlannerEdge, body: PlannerBody,
+    origin_width: Int, mut states: List<List<Bool>>
+) {
+    for slot_index in cleanup_slot_order(body.slots, edge.exited_scope_ids) {
+        states.set(slot_index, empty_origin_bits(origin_width))
+    }
+}
+
+struct BodyOriginSolution {
+    parameter_count: Int,
+    origin_width: Int,
+    reachable: List<Bool>,
+    entry_states: List<List<List<Bool>>>
+}
+
+fn solve_body_origins(
+    body: PlannerBody, parameter_count: Int
+) -> BodyOriginSolution {
+    let origin_width = parameter_count + body_call_event_count(body)
+    let mut reachable: List<Bool> = []
+    let mut entries: List<List<List<Bool>>> = []
+    for _ in body.blocks {
+        reachable.push(false)
+        let mut state: List<List<Bool>> = []
+        for _ in body.slots { state.push(empty_origin_bits(origin_width)) }
+        entries.push(state)
+    }
+    let mut seed: List<List<Bool>> = []
+    for slot in body.slots {
+        let mut origins = empty_origin_bits(origin_width)
+        match slot.parameter_ordinal {
+            some(parameter) => {
+                if parameter < 0 || parameter >= parameter_count {
+                    panic("ResourcePlanner: body parameter ordinal escapes signature")
+                }
+                origins.set(parameter, true)
+            },
+            none => {}
+        }
+        seed.push(origins)
+    }
+    reachable.set(body.entry_block, true)
+    entries.set(body.entry_block, seed)
+    let exact_rank_budget = body.blocks.len() *
+        (body.slots.len() * origin_width + 1)
+    let mut promotions = 1
+    let mut changed = true
+    while changed {
+        changed = false
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            if reachable.get(block_index).unwrap() {
+                let block = body.blocks.get(block_index).unwrap()
+                let state = copy_origin_state(entries.get(block_index).unwrap())
+                let mut event_index = 0
+                while event_index < block.events.len() {
+                    let event = block.events.get(event_index).unwrap()
+                    let token = match body_call_token_ordinal(
+                            body, block_index, event_index) {
+                        some(value) => some(parameter_count + value),
+                        none => none
+                    }
+                    apply_event_origin(
+                        event, body, origin_width, token, state)
+                    event_index = event_index + 1
+                }
+                for edge in block.edges {
+                    match edge.target_block {
+                        some(target) => {
+                            let edge_state = copy_origin_state(state)
+                            apply_origin_edge_cleanup(
+                                edge, body, origin_width, edge_state)
+                            if !reachable.get(target).unwrap() {
+                                reachable.set(target, true)
+                                entries.set(target, edge_state)
+                                promotions = promotions + 1
+                                changed = true
+                            } else {
+                                let previous = entries.get(target).unwrap()
+                                let joined = join_origin_states(previous, edge_state)
+                                if !origin_states_same(previous, joined) {
+                                    entries.set(target, joined)
+                                    promotions = promotions + 1
+                                    changed = true
+                                }
+                            }
+                            if promotions > exact_rank_budget {
+                                panic("ResourcePlanner: finite slot-origin worklist exceeded rank budget")
+                            }
+                        },
+                        none => {}
+                    }
+                }
+            }
+            block_index = block_index + 1
+        }
+    }
+    BodyOriginSolution {
+        parameter_count: parameter_count,
+        origin_width: origin_width,
+        reachable: reachable, entry_states: entries
+    }
+}
+
+fn add_demand_to_origins(
+    origins: List<Bool>, demand: TransferDemand,
+    mut seeds: List<TransferDemand>
+) {
+    let mut parameter = 0
+    while parameter < seeds.len() {
+        if origins.get(parameter).unwrap() {
+            seeds.set(parameter, transfer_demand_join(
+                seeds.get(parameter).unwrap(), demand))
+        }
+        parameter = parameter + 1
+    }
+}
+
+fn seed_event_demands(
+    event: PlannerEvent, body: PlannerBody,
+    states: List<List<Bool>>, mut seeds: List<TransferDemand>
+) {
+    match event.value {
+        PlannerEventValue::NoOpValue |
+        PlannerEventValue::ScopeExitValue(_) |
+        PlannerEventValue::InitializeEmptyValue(_) |
+        PlannerEventValue::InitializeLiveValue(_) |
+        PlannerEventValue::AssignValue { .. } => {},
+        PlannerEventValue::InitializeValue {
+            input_slots, input_demands, ..
+        } => {
+            let mut input = 0
+            while input < input_slots.len() {
+                add_demand_to_origins(
+                    states.get(input_slots.get(input).unwrap()).unwrap(),
+                    input_demands.get(input).unwrap(), seeds)
+                input = input + 1
+            }
+        },
+        PlannerEventValue::ReadValue { source, target } =>
+            add_demand_to_origins(
+                states.get(source).unwrap(),
+                if body.slots.get(target).unwrap().owns_storage {
+                    make_transfer_demand(param_mode_own(), false)
+                } else {
+                    make_transfer_demand(param_mode_borrow(), false)
+                }, seeds),
+        PlannerEventValue::MutateValue {
+            target, value: input, value_demand
+        } => {
+            add_demand_to_origins(
+                states.get(target).unwrap(),
+                make_transfer_demand(param_mode_mut_borrow(), false), seeds)
+            add_demand_to_origins(
+                states.get(input).unwrap(), value_demand, seeds)
+        },
+        PlannerEventValue::ConsumeValue(slot, force) =>
+            add_demand_to_origins(
+                states.get(slot).unwrap(),
+                make_transfer_demand(param_mode_own(), force), seeds),
+        PlannerEventValue::DiscardValue(slot) =>
+            add_demand_to_origins(
+                states.get(slot).unwrap(),
+                make_transfer_demand(param_mode_own(), false), seeds),
+        PlannerEventValue::CallValue {
+            argument_slots, argument_demands, ..
+        } => {
+            let mut argument = 0
+            while argument < argument_slots.len() {
+                add_demand_to_origins(
+                    states.get(argument_slots.get(argument).unwrap()).unwrap(),
+                    argument_demands.get(argument).unwrap(), seeds)
+                argument = argument + 1
+            }
+        },
+        PlannerEventValue::ProjectValue {
+            source, target, whole_slot
+        } => add_demand_to_origins(
+            states.get(source).unwrap(),
+            if whole_slot && body.slots.get(target).unwrap().owns_storage {
+                make_transfer_demand(param_mode_own(), false)
+            } else {
+                make_transfer_demand(param_mode_borrow(), false)
+            }, seeds),
+        PlannerEventValue::CaptureValue { source, demand, .. } =>
+            add_demand_to_origins(
+                states.get(source).unwrap(), demand, seeds)
+    }
+}
+
+fn body_direct_parameter_seeds(
+    body: PlannerBody, parameter_count: Int,
+    solution: BodyOriginSolution
+) -> List<TransferDemand> {
+    let mut seeds: List<TransferDemand> = []
+    let mut parameter = 0
+    while parameter < parameter_count {
+        seeds.push(make_transfer_demand(param_mode_bottom(), false))
+        parameter = parameter + 1
+    }
+    let mut block_index = 0
+    while block_index < body.blocks.len() {
+        if solution.reachable.get(block_index).unwrap() {
+            let block = body.blocks.get(block_index).unwrap()
+            let state = copy_origin_state(
+                solution.entry_states.get(block_index).unwrap())
+            let mut event_index = 0
+            while event_index < block.events.len() {
+                let event = block.events.get(event_index).unwrap()
+                seed_event_demands(event, body, state, seeds)
+                let token = match body_call_token_ordinal(
+                        body, block_index, event_index) {
+                    some(value) => some(parameter_count + value),
+                    none => none
+                }
+                apply_event_origin(
+                    event, body, solution.origin_width, token, state)
+                event_index = event_index + 1
+            }
+            for usage in block.terminator_uses {
+                add_demand_to_origins(
+                    state.get(usage.slot).unwrap(), usage.demand, seeds)
+            }
+        }
+        block_index = block_index + 1
+    }
+    seeds
+}
+
+fn body_call_token_is_returned(
+    body: PlannerBody, solution: BodyOriginSolution,
+    call_token_ordinal: Int
+) -> Bool {
+    let token_index = solution.parameter_count + call_token_ordinal
+    let mut block_index = 0
+    while block_index < body.blocks.len() {
+        if solution.reachable.get(block_index).unwrap() {
+            let block = body.blocks.get(block_index).unwrap()
+            let state = copy_origin_state(
+                solution.entry_states.get(block_index).unwrap())
+            let mut event_index = 0
+            while event_index < block.events.len() {
+                let event = block.events.get(event_index).unwrap()
+                let token = match body_call_token_ordinal(
+                        body, block_index, event_index) {
+                    some(value) => some(solution.parameter_count + value),
+                    none => none
+                }
+                apply_event_origin(
+                    event, body, solution.origin_width, token, state)
+                event_index = event_index + 1
+            }
+            if block.terminator_kind == 3 {
+                for usage in block.terminator_uses {
+                    if state.get(usage.slot).unwrap().get(
+                            token_index).unwrap() {
+                        return true
+                    }
+                }
+            }
+        }
+        block_index = block_index + 1
+    }
+    false
+}
+
+fn body_callable_edges(
+    body: PlannerBody, parameter_count: Int,
+    solution: BodyOriginSolution
+) -> List<PlannerCallEdge> {
+    let mut result: List<PlannerCallEdge> = []
+    let mut block_index = 0
+    while block_index < body.blocks.len() {
+        if solution.reachable.get(block_index).unwrap() {
+            let block = body.blocks.get(block_index).unwrap()
+            let state = copy_origin_state(
+                solution.entry_states.get(block_index).unwrap())
+            let mut event_index = 0
+            while event_index < block.events.len() {
+                let event = block.events.get(event_index).unwrap()
+                match event.value {
+                    PlannerEventValue::CallValue {
+                        callable_indices, argument_slots, result_slot, ..
+                    } => {
+                        let mut sources: List<PlannerArgumentSource> = []
+                        for slot in argument_slots {
+                            let origins = state.get(slot).unwrap()
+                            let mut parameters: List<Int> = []
+                            let mut parameter = 0
+                            while parameter < parameter_count {
+                                if origins.get(parameter).unwrap() {
+                                    parameters.push(parameter)
+                                }
+                                parameter = parameter + 1
+                            }
+                            sources.push(make_caller_parameter_sources(parameters))
+                        }
+                        let call_token = match body_call_token_ordinal(
+                                body, block_index, event_index) {
+                            some(value) => value,
+                            none => panic("ResourcePlanner: call edge lacks origin token")
+                        }
+                        let forwards = body_call_token_is_returned(
+                            body, solution, call_token)
+                        for callee in callable_indices {
+                            result.push(make_planner_call_edge(
+                                callee, sources, forwards))
+                        }
+                    },
+                    _ => {}
+                }
+                let token = match body_call_token_ordinal(
+                        body, block_index, event_index) {
+                    some(value) => some(parameter_count + value),
+                    none => none
+                }
+                apply_event_origin(
+                    event, body, solution.origin_width, token, state)
+                event_index = event_index + 1
+            }
+        }
+        block_index = block_index + 1
+    }
+    result
+}
+
+fn planner_body_for_reference(
+    bodies: List<PlannerBody>, reference: ExecutableRef
+) -> PlannerBody? {
+    for body in bodies {
+        if executable_ref_same(body.reference, reference) { return some(body) }
+    }
+    none
+}
+
+fn close_callable_body_dataflow(
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>
+) -> List<PlannerCallable> {
+    let mut result: List<PlannerCallable> = []
+    for callable in callables {
+        if !callable.has_body {
+            result.push(make_planner_callable(
+                callable.reference, callable.parameter_type_indices,
+                callable.result_type_index, callable.parameter_seeds,
+                callable.result_owned_seed, [], false))
+        } else {
+            let body = match planner_body_for_reference(
+                    bodies, callable.reference) {
+                some(value) => value,
+                none => panic("ResourcePlanner: callable body dataflow is absent")
+            }
+            let parameter_count = callable.parameter_type_indices.len()
+            let solution = solve_body_origins(body, parameter_count)
+            let direct = body_direct_parameter_seeds(
+                body, parameter_count, solution)
+            let mut seeds: List<TransferDemand> = []
+            let mut parameter = 0
+            while parameter < parameter_count {
+                seeds.push(transfer_demand_join(
+                    callable.parameter_seeds.get(parameter).unwrap(),
+                    direct.get(parameter).unwrap()))
+                parameter = parameter + 1
+            }
+            result.push(make_planner_callable(
+                callable.reference, callable.parameter_type_indices,
+                callable.result_type_index, seeds,
+                callable.result_owned_seed,
+                body_callable_edges(body, parameter_count, solution), true))
+        }
+    }
+    result
 }
 
 struct BodyEntrySolution {
@@ -1880,7 +2719,9 @@ fn solve_body_entry_states(
                         some(target) => {
                             let edge_states = copy_slot_states(states)
                             apply_edge_cleanup_abstract(
-                                edge, body.slots, edge_states)
+                                edge, body.slots,
+                                solved.logical_shapes,
+                                solved.physical_shapes, edge_states)
                             if !reachable.get(target).unwrap() {
                                 reachable.set(target, true)
                                 entry_states.set(target, edge_states)
@@ -1927,7 +2768,7 @@ fn push_transition(
 
 fn apply_demand_materialized(
     body: PlannerBody, slot: Int, demand: TransferDemand,
-    solved: SolvedResourceGraph,
+    site: RcSemanticSite, solved: SolvedResourceGraph,
     target: Int?, mut states: List<SlotFlow>,
     mut operations: List<RcOperation>,
     mut transitions: List<SlotTransitionWitness>
@@ -1952,17 +2793,21 @@ fn apply_demand_materialized(
     let type_index = body.slots.get(slot).unwrap().type_index
     let logical = solved.logical_shapes.get(type_index).unwrap()
     let physical = solved.physical_shapes.get(type_index).unwrap()
+    require_concrete_resource_shape(
+        logical, physical, "materialized value edge")
     let target_ref = match target {
         some(index) => some(rc_slot_for(body, index)),
         none => none
     }
     if transfer_demand_force(demand) || logical_shape_may_take(logical) {
-        operations.push(make_rc_take(rc_slot_for(body, slot), target_ref))
+        operations.push(make_rc_take_at(
+            site, rc_slot_for(body, slot), target_ref))
         states.set(slot, slot_flow_moved())
         push_transition(transitions, slot, before,
             slot_flow_moved(), slot_reason_take_source())
     } else if physical_shape_may_drop(physical) {
-        operations.push(make_rc_clone(rc_slot_for(body, slot), target_ref))
+        operations.push(make_rc_clone_at(
+            site, rc_slot_for(body, slot), target_ref))
         push_transition(transitions, slot, before,
             before, slot_reason_clone_source())
     } else {
@@ -1973,16 +2818,21 @@ fn apply_demand_materialized(
 
 struct MaterializedStep {
     step: RcStep,
-    transitions: List<SlotTransitionWitness>
+    certificate: CfgStepCertificate
 }
 
 fn materialize_event(
-    body: PlannerBody, event: PlannerEvent, event_index: Int,
+    body: PlannerBody, block_index: Int,
+    event: PlannerEvent, event_index: Int,
     solved: SolvedResourceGraph, mut states: List<SlotFlow>
 ) -> MaterializedStep {
+    let instruction = make_flow_instruction_ref(
+        body.reference, block_index, event_index)
     let mut before_ops: List<RcOperation> = []
     let mut after_ops: List<RcOperation> = []
-    let transitions: List<SlotTransitionWitness> = []
+    let before_transitions: List<SlotTransitionWitness> = []
+    let semantic_transitions: List<SlotTransitionWitness> = []
+    let after_transitions: List<SlotTransitionWitness> = []
     match event.value {
         PlannerEventValue::NoOpValue => {},
         PlannerEventValue::ScopeExitValue(scope_id) => {
@@ -1994,14 +2844,21 @@ fn materialize_event(
                         slot.type_index).unwrap()
                     let physical = solved.physical_shapes.get(
                         slot.type_index).unwrap()
+                    if slot.owns_storage {
+                        require_concrete_resource_shape(
+                            logical, physical, "scope exit")
+                    }
                     if slot.owns_storage &&
                        (physical_shape_may_drop(physical) ||
                         logical_shape_may_take(logical)) {
-                        before_ops.push(make_rc_cleanup(slot.reference))
-                        push_transition(transitions, slot_index, before,
+                        before_ops.push(make_rc_cleanup_at(
+                            make_rc_instruction_site(
+                                instruction, rc_site_before_instruction(),
+                                slot_index), slot.reference))
+                        push_transition(before_transitions, slot_index, before,
                             slot_flow_empty(), slot_reason_cleanup())
                     } else {
-                        push_transition(transitions, slot_index, before,
+                        push_transition(before_transitions, slot_index, before,
                             slot_flow_empty(), slot_reason_scope_end())
                     }
                     states.set(slot_index, slot_flow_empty())
@@ -2009,14 +2866,16 @@ fn materialize_event(
             }
         },
         PlannerEventValue::InitializeValue {
-            input_slots, input_demands, target
+            input_slots, input_demands, target, ..
         } => {
             let mut input_index = 0
             while input_index < input_slots.len() {
                 apply_demand_materialized(
                     body, input_slots.get(input_index).unwrap(),
                     input_demands.get(input_index).unwrap(),
-                    solved, none, states, before_ops, transitions)
+                    make_rc_instruction_site(
+                        instruction, rc_site_before_instruction(), input_index),
+                    solved, none, states, before_ops, before_transitions)
                 input_index = input_index + 1
             }
             let before = states.get(target).unwrap()
@@ -2025,7 +2884,7 @@ fn materialize_event(
                 panic("ResourcePlanner: initialize overwrites live storage")
             }
             states.set(target, slot_flow_live())
-            push_transition(transitions, target, before,
+            push_transition(semantic_transitions, target, before,
                 slot_flow_live(), slot_reason_call_result())
         },
         PlannerEventValue::InitializeEmptyValue(slot) => {
@@ -2034,7 +2893,7 @@ fn materialize_event(
                 panic("ResourcePlanner: empty initialization overwrites live slot")
             }
             states.set(slot, slot_flow_empty())
-            push_transition(transitions, slot, before,
+            push_transition(semantic_transitions, slot, before,
                 slot_flow_empty(), slot_reason_init_empty())
         },
         PlannerEventValue::InitializeLiveValue(slot) => {
@@ -2044,7 +2903,7 @@ fn materialize_event(
                 panic("ResourcePlanner: live initialization lacks empty storage")
             }
             states.set(slot, slot_flow_live())
-            push_transition(transitions, slot, before,
+            push_transition(semantic_transitions, slot, before,
                 slot_flow_live(), slot_reason_init_live())
         },
         PlannerEventValue::ReadValue { source, target } => {
@@ -2061,8 +2920,11 @@ fn materialize_event(
                 make_transfer_demand(param_mode_borrow(), false)
             }
             apply_demand_materialized(
-                body, source, demand, solved, some(target),
-                states, before_ops, transitions)
+                body, source, demand,
+                make_rc_instruction_site(
+                    instruction, rc_site_before_instruction(), 0),
+                solved, some(target),
+                states, before_ops, before_transitions)
             states.set(target, slot_flow_live())
             let type_index = body.slots.get(source).unwrap().type_index
             let target_reason = if logical_shape_may_take(
@@ -2076,7 +2938,7 @@ fn materialize_event(
             } else {
                 slot_reason_assign_scalar()
             }
-            push_transition(transitions, target, target_before,
+            push_transition(semantic_transitions, target, target_before,
                 slot_flow_live(), target_reason)
         },
         PlannerEventValue::MutateValue {
@@ -2084,27 +2946,36 @@ fn materialize_event(
         } => {
             let target_before = states.get(target).unwrap()
             require_live_state(target_before, "mutation target")
-            push_transition(transitions, target, target_before,
+            push_transition(semantic_transitions, target, target_before,
                 target_before, slot_reason_mutate())
             apply_demand_materialized(
-                body, input, value_demand, solved, none,
-                states, before_ops, transitions)
+                body, input, value_demand,
+                make_rc_instruction_site(
+                    instruction, rc_site_before_instruction(), 1),
+                solved, none,
+                states, before_ops, before_transitions)
         },
         PlannerEventValue::ConsumeValue(slot, force) =>
             apply_demand_materialized(
                 body, slot, make_transfer_demand(param_mode_own(), force),
-                solved, none, states, before_ops, transitions),
+                make_rc_instruction_site(
+                    instruction, rc_site_before_instruction(), 0),
+                solved, none, states, before_ops, before_transitions),
         PlannerEventValue::DiscardValue(slot) => {
             let before = states.get(slot).unwrap()
             require_live_state(before, "discard")
             let type_index = body.slots.get(slot).unwrap().type_index
             let logical = solved.logical_shapes.get(type_index).unwrap()
             let physical = solved.physical_shapes.get(type_index).unwrap()
+            require_concrete_resource_shape(logical, physical, "discard")
             if physical_shape_may_drop(physical) ||
                logical_shape_may_take(logical) {
-                before_ops.push(make_rc_drop(rc_slot_for(body, slot)))
+                before_ops.push(make_rc_drop_at(
+                    make_rc_instruction_site(
+                        instruction, rc_site_before_instruction(), 0),
+                    rc_slot_for(body, slot)))
                 states.set(slot, slot_flow_empty())
-                push_transition(transitions, slot, before,
+                push_transition(before_transitions, slot, before,
                     slot_flow_empty(), slot_reason_drop())
             }
         },
@@ -2116,24 +2987,35 @@ fn materialize_event(
             let target_type = body.slots.get(target).unwrap().type_index
             let target_logical = solved.logical_shapes.get(target_type).unwrap()
             let target_physical = solved.physical_shapes.get(target_type).unwrap()
+            let rhs_type = body.slots.get(rhs_temp).unwrap().type_index
+            require_concrete_resource_shape(
+                solved.logical_shapes.get(rhs_type).unwrap(),
+                solved.physical_shapes.get(rhs_type).unwrap(), "Assign RHS")
+            require_concrete_resource_shape(
+                target_logical, target_physical, "Assign target")
             if physical_shape_may_drop(target_physical) ||
                logical_shape_may_take(target_logical) {
                 // Exact order: all RHS events already ran; only now Drop old.
-                before_ops.push(make_rc_drop(rc_slot_for(body, target)))
+                before_ops.push(make_rc_drop_at(
+                    make_rc_instruction_site(
+                        instruction, rc_site_before_instruction(), 1),
+                    rc_slot_for(body, target)))
                 states.set(target, slot_flow_empty())
-                push_transition(transitions, target, target_before,
+                push_transition(before_transitions, target, target_before,
                     slot_flow_empty(), slot_reason_drop())
             }
             // Take saves the already-evaluated temp, clears it, and feeds the
             // existing semantic Assign destination.  No slot is created here.
-            before_ops.push(make_rc_take(
+            before_ops.push(make_rc_take_at(
+                make_rc_instruction_site(
+                    instruction, rc_site_before_instruction(), 0),
                 rc_slot_for(body, rhs_temp), some(rc_slot_for(body, target))))
             states.set(rhs_temp, slot_flow_moved())
-            push_transition(transitions, rhs_temp, rhs_before,
+            push_transition(before_transitions, rhs_temp, rhs_before,
                 slot_flow_moved(), slot_reason_take_source())
             let before_target_write = states.get(target).unwrap()
             states.set(target, slot_flow_live())
-            push_transition(transitions, target, before_target_write,
+            push_transition(semantic_transitions, target, before_target_write,
                 slot_flow_live(),
                 if slot_flow_same(before_target_write, slot_flow_empty()) {
                     slot_reason_take_target()
@@ -2144,7 +3026,7 @@ fn materialize_event(
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
             result_owned, result_type_index,
-            argument_slots, result_slot
+            argument_slots, result_slot, ..
         } => {
             let demands = effective_call_demands(
                 callable_indices, argument_demands,
@@ -2152,12 +3034,21 @@ fn materialize_event(
             let effective_result_owned = effective_call_result_owned(
                 callable_indices, result_owned,
                 solved.callable_results_owned)
+            if effective_result_owned || result_slot.is_some() {
+                require_concrete_resource_shape(
+                    solved.logical_shapes.get(result_type_index).unwrap(),
+                    solved.physical_shapes.get(result_type_index).unwrap(),
+                    "call result")
+            }
             let mut argument = 0
             while argument < argument_slots.len() {
                 apply_demand_materialized(
                     body, argument_slots.get(argument).unwrap(),
-                    demands.get(argument).unwrap(), solved, none,
-                    states, before_ops, transitions)
+                    demands.get(argument).unwrap(),
+                    make_rc_instruction_site(
+                        instruction, rc_site_before_instruction(), argument),
+                    solved, none,
+                    states, before_ops, before_transitions)
                 argument = argument + 1
             }
             match result_slot {
@@ -2168,7 +3059,7 @@ fn materialize_event(
                         panic("ResourcePlanner: call result overwrites live storage")
                     }
                     states.set(slot, slot_flow_live())
-                    push_transition(transitions, slot, before,
+                    push_transition(semantic_transitions, slot, before,
                         slot_flow_live(), slot_reason_call_result())
                     if !effective_result_owned &&
                        body.slots.get(slot).unwrap().owns_storage {
@@ -2179,9 +3070,12 @@ fn materialize_event(
                         }
                         if physical_shape_may_drop(
                                 solved.physical_shapes.get(type_index).unwrap()) {
-                            after_ops.push(make_rc_clone(
+                            after_ops.push(make_rc_clone_at(
+                                make_rc_instruction_site(
+                                    instruction, rc_site_after_instruction(),
+                                    argument_slots.len()),
                                 rc_slot_for(body, slot), none))
-                            push_transition(transitions, slot,
+                            push_transition(after_transitions, slot,
                                 slot_flow_live(), slot_flow_live(),
                                 slot_reason_clone_source())
                         }
@@ -2221,8 +3115,11 @@ fn materialize_event(
                 make_transfer_demand(param_mode_borrow(), false)
             }
             apply_demand_materialized(
-                body, source, demand, solved, some(target),
-                states, before_ops, transitions)
+                body, source, demand,
+                make_rc_instruction_site(
+                    instruction, rc_site_before_instruction(), 0),
+                solved, some(target),
+                states, before_ops, before_transitions)
             let before_target_write = states.get(target).unwrap()
             states.set(target, slot_flow_live())
             let target_reason = if logical_shape_may_take(logical) && whole_slot {
@@ -2234,7 +3131,7 @@ fn materialize_event(
             } else {
                 slot_reason_assign_scalar()
             }
-            push_transition(transitions, target, before_target_write,
+            push_transition(semantic_transitions, target, before_target_write,
                 slot_flow_live(), target_reason)
         },
         PlannerEventValue::CaptureValue { source, target, demand } => {
@@ -2244,8 +3141,11 @@ fn materialize_event(
                 panic("ResourcePlanner: capture overwrites live storage")
             }
             apply_demand_materialized(
-                body, source, demand, solved, some(target),
-                states, before_ops, transitions)
+                body, source, demand,
+                make_rc_instruction_site(
+                    instruction, rc_site_before_instruction(), 0),
+                solved, some(target),
+                states, before_ops, before_transitions)
             states.set(target, slot_flow_live())
             let mode = transfer_demand_mode(demand)
             let type_index = body.slots.get(source).unwrap().type_index
@@ -2261,13 +3161,15 @@ fn materialize_event(
             } else {
                 slot_reason_assign_scalar()
             }
-            push_transition(transitions, target, target_before,
+            push_transition(semantic_transitions, target, target_before,
                 slot_flow_live(), reason)
         }
     }
     MaterializedStep {
-        step: make_rc_step(event_index, before_ops, after_ops),
-        transitions: transitions
+        step: make_rc_step(event_index, instruction, before_ops, after_ops),
+        certificate: make_cfg_step_certificate(
+            instruction, before_transitions,
+            semantic_transitions, after_transitions)
     }
 }
 
@@ -2277,7 +3179,8 @@ struct MaterializedEdge {
 }
 
 fn materialize_edge(
-    body: PlannerBody, edge: PlannerEdge, edge_index: Int,
+    body: PlannerBody, block_index: Int, terminator_kind: Int,
+    edge: PlannerEdge, edge_index: Int,
     solved: SolvedResourceGraph, states_after_block: List<SlotFlow>
 ) -> MaterializedEdge {
     let mut states = copy_slot_states(states_after_block)
@@ -2291,9 +3194,15 @@ fn materialize_edge(
             if slot.owns_storage {
                 let logical = solved.logical_shapes.get(slot.type_index).unwrap()
                 let physical = solved.physical_shapes.get(slot.type_index).unwrap()
+                require_concrete_resource_shape(
+                    logical, physical, "CFG exit")
                 if physical_shape_may_drop(physical) ||
                    logical_shape_may_take(logical) {
-                    cleanup_ops.push(make_rc_cleanup(slot.reference))
+                    cleanup_ops.push(make_rc_cleanup_at(
+                        make_rc_edge_site(
+                            make_flow_block_ref(body.reference, block_index),
+                            terminator_kind, edge_index, slot_index),
+                        slot.reference))
                     push_transition(transitions, slot_index, before,
                         slot_flow_empty(), slot_reason_cleanup())
                     emitted_cleanup = true
@@ -2309,7 +3218,7 @@ fn materialize_edge(
     MaterializedEdge {
         edge: make_rc_edge(edge_index, edge.target_block, cleanup_ops),
         certificate: make_cfg_edge_certificate(
-            edge.target_block, states, transitions)
+            edge_index, edge.target_block, states, transitions)
     }
 }
 
@@ -2345,9 +3254,18 @@ fn plan_body(body: PlannerBody, solved: SolvedResourceGraph) -> PlannedBody {
             // Frozen but unreachable blocks remain in topology.  Their events
             // receive no resource operations and carry bottom proof states.
             let mut steps: List<RcStep> = []
+            let mut step_proofs: List<CfgStepCertificate> = []
             let mut event_index = 0
             while event_index < block.events.len() {
-                steps.push(make_rc_step(event_index, [], []))
+                steps.push(make_rc_step(
+                    event_index,
+                    make_flow_instruction_ref(
+                        body.reference, block_index, event_index),
+                    [], []))
+                step_proofs.push(make_cfg_step_certificate(
+                    make_flow_instruction_ref(
+                        body.reference, block_index, event_index),
+                    [], [], []))
                 event_index = event_index + 1
             }
             let mut edges: List<RcEdge> = []
@@ -2357,52 +3275,70 @@ fn plan_body(body: PlannerBody, solved: SolvedResourceGraph) -> PlannedBody {
                 let edge = block.edges.get(edge_index).unwrap()
                 edges.push(make_rc_edge(edge_index, edge.target_block, []))
                 edge_proofs.push(make_cfg_edge_certificate(
-                    edge.target_block, entry_states, []))
+                    edge_index, edge.target_block, entry_states, []))
                 edge_index = edge_index + 1
             }
             rc_blocks.push(make_rc_block(
-                block_index, block.events.len(), steps, [], edges))
+                block_index,
+                make_flow_block_ref(body.reference, block_index),
+                block.terminator_kind,
+                block.events.len(), steps, [], edges))
             block_certificates.push(make_cfg_block_certificate(
-                block_index, entry_states, [], edge_proofs))
+                block_index,
+                make_flow_block_ref(body.reference, block_index),
+                block.terminator_kind, entry_states,
+                step_proofs, [], edge_proofs))
             block_index = block_index + 1
             continue
         }
         let states = copy_slot_states(entry_states)
         let mut steps: List<RcStep> = []
-        let mut semantic_transitions: List<SlotTransitionWitness> = []
+        let mut step_proofs: List<CfgStepCertificate> = []
         let mut event_index = 0
         while event_index < block.events.len() {
             let materialized = materialize_event(
-                body, block.events.get(event_index).unwrap(),
+                body, block_index,
+                block.events.get(event_index).unwrap(),
                 event_index, solved, states)
             steps.push(materialized.step)
-            for transition in materialized.transitions {
-                semantic_transitions.push(transition)
-            }
+            step_proofs.push(materialized.certificate)
             event_index = event_index + 1
         }
         let mut terminator_ops: List<RcOperation> = []
+        let terminator_transitions: List<SlotTransitionWitness> = []
+        let mut terminator_operand = 0
         for usage in block.terminator_uses {
             apply_demand_materialized(
-                body, usage.slot, usage.demand, solved, none,
-                states, terminator_ops, semantic_transitions)
+                body, usage.slot, usage.demand,
+                make_rc_terminator_site(
+                    make_flow_block_ref(body.reference, block_index),
+                    block.terminator_kind, terminator_operand),
+                solved, none,
+                states, terminator_ops, terminator_transitions)
+            terminator_operand = terminator_operand + 1
         }
         let mut edges: List<RcEdge> = []
         let mut edge_proofs: List<CfgEdgeCertificate> = []
         let mut edge_index = 0
         while edge_index < block.edges.len() {
             let materialized = materialize_edge(
-                body, block.edges.get(edge_index).unwrap(),
+                body, block_index, block.terminator_kind,
+                block.edges.get(edge_index).unwrap(),
                 edge_index, solved, states)
             edges.push(materialized.edge)
             edge_proofs.push(materialized.certificate)
             edge_index = edge_index + 1
         }
         rc_blocks.push(make_rc_block(
-            block_index, block.events.len(), steps, terminator_ops, edges))
+            block_index,
+            make_flow_block_ref(body.reference, block_index),
+            block.terminator_kind,
+            block.events.len(), steps, terminator_ops, edges))
         block_certificates.push(make_cfg_block_certificate(
-            block_index, entry_states,
-            semantic_transitions, edge_proofs))
+            block_index,
+            make_flow_block_ref(body.reference, block_index),
+            block.terminator_kind, entry_states,
+            step_proofs, terminator_transitions, edge_proofs))
         block_index = block_index + 1
     }
     PlannedBody {
@@ -2439,6 +3375,11 @@ fn flow_role_is_owned(role: FlowSemanticRole) -> Bool {
     tag == 2 || tag == 3
 }
 
+fn flow_origin_ordinals(value: FlowValueOriginContract) -> List<Int> {
+    if flow_value_origin_is_fresh(value) { return [] }
+    flow_value_origin_alias_ordinals(value)
+}
+
 fn flow_resource_children(node: FlowTypeNode) -> List<FlowTypeRef> {
     let tag = flow_type_kind_tag(flow_type_node_kind(node))
     // Ptr pointees and callable signatures do not contribute to the value's
@@ -2451,41 +3392,25 @@ fn flow_resource_children(node: FlowTypeNode) -> List<FlowTypeRef> {
 
 fn compute_flow_type_arities(nodes: List<FlowTypeNode>) -> List<Int> {
     let mut arities: List<Int> = []
-    let mut max_arity = 0
     for node in nodes {
         let tag = flow_type_kind_tag(flow_type_node_kind(node))
-        let arity = if tag == 12 {
+        let mut arity = if tag == 12 {
             flow_generic_param_arity(flow_type_node_generic_param(node))
         } else {
             0
         }
-        arities.push(arity)
-        if arity > max_arity { max_arity = arity }
-    }
-    let exact_rank_budget = nodes.len() * max_arity
-    let mut promotions = 0
-    let mut changed = true
-    while changed {
-        changed = false
-        let mut node_index = 0
-        while node_index < nodes.len() {
-            let node = nodes.get(node_index).unwrap()
-            let mut required = arities.get(node_index).unwrap()
-            for child in flow_resource_children(node) {
-                let child_arity = arities.get(
-                    flow_type_ref_index(child)).unwrap()
-                if child_arity > required { required = child_arity }
-            }
-            if required > arities.get(node_index).unwrap() {
-                arities.set(node_index, required)
-                promotions = promotions + 1
-                if promotions > exact_rank_budget {
-                    panic("ResourcePlanner: FlowIR generic arity graph did not converge")
+        for edge in flow_type_node_resource_edges(node) {
+            let target = flow_resource_edge_target(edge)
+            if flow_resource_dependency_target_is_parent(target) {
+                let target_arity = flow_generic_param_arity(
+                    flow_resource_dependency_target_parent(target))
+                if arity != 0 && arity != target_arity {
+                    panic("ResourcePlanner: FlowIR parent generic arity differs")
                 }
-                changed = true
+                arity = target_arity
             }
-            node_index = node_index + 1
         }
+        arities.push(arity)
     }
     arities
 }
@@ -2518,6 +3443,22 @@ fn planner_type_node_from_flow(
     for child in flow_resource_children(node) {
         children.push(flow_type_ref_index(child))
     }
+    let mut dependencies: List<PlannerResourceDependency> = []
+    for edge in flow_type_node_resource_edges(node) {
+        let child_index = flow_type_ref_index(flow_resource_edge_child(edge))
+        let child_dependency = flow_resource_edge_child_dependency_ordinal(edge)
+        let target = flow_resource_edge_target(edge)
+        if flow_resource_dependency_target_is_parent(target) {
+            dependencies.push(make_parent_resource_dependency(
+                child_index, child_dependency,
+                flow_resource_dependency_target_parent_ordinal(target)))
+        } else {
+            dependencies.push(make_concrete_resource_dependency(
+                child_index, child_dependency,
+                flow_type_ref_index(
+                    flow_resource_dependency_target_concrete_type(target))))
+        }
+    }
     let is_unique = seed_tag == 2 || drop_contract.is_some()
     let is_shareable = seed_tag == 3 || managed_foreign
     let parameter_index = if flow_type_kind_tag(
@@ -2527,7 +3468,8 @@ fn planner_type_node_from_flow(
         none
     }
     make_planner_type_node(
-        planner_type_kind_from_flow(node), children, arity, parameter_index,
+        planner_type_kind_from_flow(node), children, dependencies,
+        arity, parameter_index,
         drop_contract.is_some(), is_unique,
         is_shareable, is_shareable || is_unique,
         is_shareable || drop_contract.is_some(), seed_tag == 4)
@@ -2588,42 +3530,8 @@ fn flow_parameter_slots(
     result
 }
 
-fn argument_source_from_flow(
-    argument: SlotRef, parameters: List<FlowSlot>
-) -> PlannerArgumentSource {
-    let mut index = 0
-    while index < parameters.len() {
-        if slot_ref_same(
-                argument, flow_slot_reference(parameters.get(index).unwrap())) {
-            return make_caller_parameter_source(index)
-        }
-        index = index + 1
-    }
-    make_local_argument_source()
-}
-
-fn flow_result_is_direct_return(body: FlowBody, result: SlotRef?) -> Bool {
-    match result {
-        none => return false,
-        some(slot) => {
-            for edge in flow_body_exit_edges(body) {
-                if flow_exit_kind_tag(flow_exit_edge_kind(edge)) == 0 {
-                    match flow_exit_edge_value(edge) {
-                        some(returned) => if slot_ref_same(slot, returned) {
-                            return true
-                        },
-                        none => {}
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
 fn planner_callable_from_flow(
-    callable: FlowCallable, all_callables: List<FlowCallable>,
-    bodies: List<FlowBody>
+    callable: FlowCallable, bodies: List<FlowBody>
 ) -> PlannerCallable {
     let mut parameter_types: List<Int> = []
     for ty in flow_callable_parameter_types(callable) {
@@ -2636,7 +3544,6 @@ fn planner_callable_from_flow(
     }
     let has_body = flow_callable_mode_same(
         flow_callable_mode(callable), flow_callable_mode_concrete_body())
-    let mut edges: List<PlannerCallEdge> = []
     if has_body {
         let body = match flow_body_for_reference(
                 bodies, flow_callable_reference(callable)) {
@@ -2656,27 +3563,13 @@ fn planner_callable_from_flow(
             }
             parameter = parameter + 1
         }
-        for edge in flow_callable_call_edges(callable) {
-            let mut sources: List<PlannerArgumentSource> = []
-            for argument in flow_call_edge_arguments(edge) {
-                sources.push(argument_source_from_flow(argument, parameters))
-            }
-            let forwards_result = flow_result_is_direct_return(
-                body, flow_call_edge_result(edge))
-            for candidate in flow_call_target_candidates(
-                    flow_call_edge_target(edge)) {
-                edges.push(make_planner_call_edge(
-                    flow_callable_index(all_callables, candidate),
-                    sources, forwards_result))
-            }
-        }
     }
     make_planner_callable(
         flow_callable_reference(callable), parameter_types,
         flow_type_ref_index(flow_callable_result_type(callable)),
         seeds,
         flow_role_is_owned(flow_call_contract_result_role(contract)),
-        edges, has_body)
+        [], has_body)
 }
 
 fn flow_scope_depth(
@@ -2764,6 +3657,8 @@ fn planner_event_from_flow(
         }
         return make_planner_initialize(
             inputs, demands,
+            flow_origin_ordinals(
+                flow_operation_contract_target_origin(operation)),
             flow_slot_index(slots, flow_initialize_target(instruction)))
     }
     if tag == 1 {
@@ -2814,7 +3709,9 @@ fn planner_event_from_flow(
             flow_call_candidate_indices(target, callables),
             arguments, demands,
             flow_role_is_owned(flow_call_contract_result_role(contract)),
-            flow_call_result_type_index(target, callables), result)
+            flow_call_result_type_index(target, callables),
+            flow_origin_ordinals(flow_call_contract_result_origin(contract)),
+            result)
     }
     if tag == 7 {
         return make_planner_project(
@@ -2846,7 +3743,8 @@ fn planner_event_from_flow(
 }
 
 fn planner_terminator_uses_from_flow(
-    terminator: FlowTerminator, slots: List<FlowSlot>
+    terminator: FlowTerminator, slots: List<FlowSlot>,
+    return_demand: TransferDemand
 ) -> List<PlannerTerminatorUse> {
     let mut result: List<PlannerTerminatorUse> = []
     let tag = flow_terminator_kind_tag(terminator)
@@ -2854,7 +3752,7 @@ fn planner_terminator_uses_from_flow(
         result.push(make_planner_terminator_use(
             flow_slot_index(slots, slot),
             if tag == 3 {
-                make_transfer_demand(param_mode_own(), false)
+                return_demand
             } else {
                 make_transfer_demand(param_mode_borrow(), false)
             }))
@@ -2892,6 +3790,11 @@ fn planner_body_from_flow(
     body: FlowBody, callables: List<FlowCallable>
 ) -> PlannerBody {
     let flow_slots = flow_body_slots(body)
+    let callable = callables.get(flow_callable_index(
+        callables, flow_body_reference(body))).unwrap()
+    let return_demand = transfer_demand_from_flow_role(
+        flow_call_contract_result_role(
+            flow_callable_semantic_contract(callable)))
     let scopes = flow_body_scopes(body)
     let mut planner_scopes: List<PlannerScope> = []
     for scope in scopes {
@@ -2908,6 +3811,9 @@ fn planner_body_from_flow(
             flow_type_ref_index(flow_slot_type(slot)),
             flow_scope_ref_ordinal(scope), flow_scope_depth(scopes, scope),
             flow_slot_reverse_ordinal(slot),
+            if flow_storage_class_tag(flow_slot_storage(slot)) == 0 {
+                some(flow_slot_parameter_ordinal(slot))
+            } else { none },
             flow_initial_slot_state_tag(flow_slot_initial_state(slot)) == 1,
             flow_storage_contract_tag(flow_slot_storage_contract(slot)) == 0))
     }
@@ -2925,7 +3831,9 @@ fn planner_body_from_flow(
         }
         let terminator = flow_block_terminator(block)
         blocks.push(make_planner_block(
-            events, planner_terminator_uses_from_flow(terminator, flow_slots),
+            flow_terminator_kind_tag(terminator), events,
+            planner_terminator_uses_from_flow(
+                terminator, flow_slots, return_demand),
             planner_edges_from_flow(terminator)))
         expected_block = expected_block + 1
     }
@@ -2934,7 +3842,7 @@ fn planner_body_from_flow(
         flow_block_ref_ordinal(flow_body_entry(body)), blocks)
 }
 
-pub fn make_frozen_planner_input_from_flow(
+fn make_frozen_planner_input_from_flow(
     program: FlowProgram
 ) -> FrozenPlannerInput {
     validate_flow_program(program)
@@ -2956,30 +3864,30 @@ pub fn make_frozen_planner_input_from_flow(
     let mut callables: List<PlannerCallable> = []
     for callable in flow_callables {
         callables.push(planner_callable_from_flow(
-            callable, flow_callables, flow_bodies))
+            callable, flow_bodies))
     }
     let mut bodies: List<PlannerBody> = []
     for body in flow_bodies {
         bodies.push(planner_body_from_flow(body, flow_callables))
     }
+    let closed_callables = close_callable_body_dataflow(callables, bodies)
     make_frozen_planner_input(
         flow_topology_fingerprint_canonical(
             flow_program_topology_fingerprint(program)),
-        types, callables, bodies)
+        types, closed_callables, bodies)
 }
 
 // ============================================================
 // Public planning result and verifier boundary
 // ============================================================
 
-pub struct PlannedResources {
+struct PlannedResources {
     logical_shapes: List<LogicalOwnershipShape>,
     physical_shapes: List<PhysicalRcShape>,
     callable_demands: List<List<TransferDemand>>,
     callable_results_owned: List<Bool>,
     rc_program: RcProgram,
-    certificate: ResourceCertificate,
-    verified: VerifiedResourceCertificate
+    certificate: ResourceCertificate
 }
 
 fn copy_logical_shapes(
@@ -3026,39 +3934,35 @@ fn copy_callable_demands(
     result
 }
 
-pub fn planned_resources_logical_shapes(
+fn planned_resources_logical_shapes(
     value: PlannedResources
 ) -> List<LogicalOwnershipShape> {
     copy_logical_shapes(value.logical_shapes)
 }
-pub fn planned_resources_physical_shapes(
+fn planned_resources_physical_shapes(
     value: PlannedResources
 ) -> List<PhysicalRcShape> {
     copy_physical_shapes(value.physical_shapes)
 }
-pub fn planned_resources_callable_demands(
+fn planned_resources_callable_demands(
     value: PlannedResources
 ) -> List<List<TransferDemand>> {
     copy_callable_demands(value.callable_demands)
 }
-pub fn planned_resources_callable_results_owned(
+fn planned_resources_callable_results_owned(
     value: PlannedResources
 ) -> List<Bool> {
     let mut result: List<Bool> = []
     for owned in value.callable_results_owned { result.push(owned) }
     result
 }
-pub fn planned_resources_rc_program(value: PlannedResources) -> RcProgram {
+fn planned_resources_rc_program(value: PlannedResources) -> RcProgram {
     value.rc_program
 }
-pub fn planned_resources_certificate(
+fn planned_resources_certificate(
     value: PlannedResources
 ) -> ResourceCertificate { value.certificate }
-pub fn planned_resources_verified_certificate(
-    value: PlannedResources
-) -> VerifiedResourceCertificate { value.verified }
-
-pub fn plan_resources(input: FrozenPlannerInput) -> PlannedResources {
+fn plan_resources(input: FrozenPlannerInput) -> PlannedResources {
     let build = build_constraint_graph(input)
     let fixed_point = solve_constraint_graph(build)
     let solved = materialize_solved_graph(input, build, fixed_point)
@@ -3074,7 +3978,7 @@ pub fn plan_resources(input: FrozenPlannerInput) -> PlannedResources {
         input.callables.len(), rc_bodies)
     let certificate = make_resource_certificate(
         input.flow_fingerprint, solved.fixed_point, cfg_certificates)
-    let verified = verify_resource_certificate(rc_program, certificate)
+    verify_resource_certificate(rc_program, certificate)
     if rc_program_flow_fingerprint(rc_program) != input.flow_fingerprint {
         panic("ResourcePlanner: RcIR changed frozen FlowIR identity")
     }
@@ -3084,7 +3988,440 @@ pub fn plan_resources(input: FrozenPlannerInput) -> PlannedResources {
         callable_demands: copy_callable_demands(solved.callable_demands),
         callable_results_owned: solved.callable_results_owned,
         rc_program: rc_program,
-        certificate: certificate,
-        verified: verified
+        certificate: certificate
     }
 }
+
+fn int_lists_same(left: List<Int>, right: List<Int>) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if left.get(index).unwrap() != right.get(index).unwrap() {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn verify_fixed_graph_contract(
+    input: FrozenPlannerInput, certificate: ResourceCertificate
+) {
+    let expected = build_constraint_graph(input)
+    let proof = resource_certificate_fixed_point(certificate)
+    let actual_cells = resource_fixed_point_cells(proof)
+    let actual_constraints = resource_fixed_point_constraints(proof)
+    if expected.cells.len() == 0 || expected.constraints.len() == 0 ||
+       actual_cells.len() != expected.cells.len() ||
+       actual_constraints.len() != expected.constraints.len() {
+        panic("ResourcePlanner verifier: finite proof graph is empty or incomplete")
+    }
+    let mut cell_index = 0
+    while cell_index < expected.cells.len() {
+        let left = expected.cells.get(cell_index).unwrap()
+        let right = actual_cells.get(cell_index).unwrap()
+        if resource_cell_kind_tag(resource_cell_spec_kind(left)) !=
+               resource_cell_kind_tag(resource_cell_spec_kind(right)) ||
+           resource_cell_spec_owner_index(left) !=
+               resource_cell_spec_owner_index(right) ||
+           resource_cell_spec_component_index(left) !=
+               resource_cell_spec_component_index(right) ||
+           resource_cell_spec_max_rank(left) !=
+               resource_cell_spec_max_rank(right) {
+            panic("ResourcePlanner verifier: finite proof cell graph drifted")
+        }
+        cell_index = cell_index + 1
+    }
+    let mut constraint_index = 0
+    while constraint_index < expected.constraints.len() {
+        let left = expected.constraints.get(constraint_index).unwrap()
+        let right = actual_constraints.get(constraint_index).unwrap()
+        if resource_constraint_rule_tag(left) !=
+               resource_constraint_rule_tag(right) ||
+           resource_constraint_target_cell(left) !=
+               resource_constraint_target_cell(right) ||
+           resource_constraint_floor_rank(left) !=
+               resource_constraint_floor_rank(right) ||
+           !int_lists_same(
+                resource_constraint_premise_cells(left),
+                resource_constraint_premise_cells(right)) {
+            panic("ResourcePlanner verifier: finite proof constraint graph drifted")
+        }
+        constraint_index = constraint_index + 1
+    }
+}
+
+fn slot_option_same(left: SlotRef?, right: SlotRef?) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => slot_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn verify_operation_slots_exact(
+    operation: RcOperation, expected_source: SlotRef,
+    expected_target: SlotRef?
+) {
+    if !slot_ref_same(rc_operation_source(operation), expected_source) ||
+       !slot_option_same(rc_operation_target(operation), expected_target) {
+        panic("ResourcePlanner verifier: RC operation operand/target drifted")
+    }
+}
+
+fn verify_event_operation_contract(
+    body: PlannerBody, event: PlannerEvent,
+    before: List<RcOperation>, after: List<RcOperation>
+) {
+    match event.value {
+        PlannerEventValue::NoOpValue |
+        PlannerEventValue::InitializeEmptyValue(_) |
+        PlannerEventValue::InitializeLiveValue(_) => {
+            if before.len() != 0 || after.len() != 0 {
+                panic("ResourcePlanner verifier: resource op attached to inert instruction")
+            }
+        },
+        PlannerEventValue::ScopeExitValue(scope_id) => {
+            if after.len() != 0 {
+                panic("ResourcePlanner verifier: scope Cleanup is after marker")
+            }
+            for operation in before {
+                let site = rc_operation_site(operation)
+                let slot_index = rc_semantic_site_operand_ordinal(site)
+                if slot_index < 0 || slot_index >= body.slots.len() ||
+                   body.slots.get(slot_index).unwrap().scope_id != scope_id ||
+                   !rc_op_kind_same(
+                        rc_operation_kind(operation), rc_op_kind_cleanup()) {
+                    panic("ResourcePlanner verifier: scope Cleanup operand drifted")
+                }
+                verify_operation_slots_exact(
+                    operation, body.slots.get(slot_index).unwrap().reference, none)
+            }
+        },
+        PlannerEventValue::InitializeValue { input_slots, .. } => {
+            if after.len() != 0 {
+                panic("ResourcePlanner verifier: Initialize has after-resource op")
+            }
+            for operation in before {
+                let operand = rc_semantic_site_operand_ordinal(
+                    rc_operation_site(operation))
+                if operand < 0 || operand >= input_slots.len() {
+                    panic("ResourcePlanner verifier: Initialize operand ordinal drifted")
+                }
+                verify_operation_slots_exact(
+                    operation,
+                    body.slots.get(input_slots.get(operand).unwrap()).unwrap().reference,
+                    none)
+            }
+        },
+        PlannerEventValue::ReadValue { source, target } => {
+            if after.len() != 0 {
+                panic("ResourcePlanner verifier: Read has after-resource op")
+            }
+            for operation in before {
+                if rc_semantic_site_operand_ordinal(
+                        rc_operation_site(operation)) != 0 {
+                    panic("ResourcePlanner verifier: Read operand ordinal drifted")
+                }
+                verify_operation_slots_exact(
+                    operation, body.slots.get(source).unwrap().reference,
+                    some(body.slots.get(target).unwrap().reference))
+            }
+        },
+        PlannerEventValue::MutateValue { value: input, .. } => {
+            if after.len() != 0 {
+                panic("ResourcePlanner verifier: Mutate has after-resource op")
+            }
+            for operation in before {
+                if rc_semantic_site_operand_ordinal(
+                        rc_operation_site(operation)) != 1 {
+                    panic("ResourcePlanner verifier: Mutate value ordinal drifted")
+                }
+                verify_operation_slots_exact(
+                    operation, body.slots.get(input).unwrap().reference, none)
+            }
+        },
+        PlannerEventValue::ConsumeValue(slot, _) |
+        PlannerEventValue::DiscardValue(slot) => {
+            if after.len() != 0 {
+                panic("ResourcePlanner verifier: consume/discard has after-resource op")
+            }
+            for operation in before {
+                if rc_semantic_site_operand_ordinal(
+                        rc_operation_site(operation)) != 0 {
+                    panic("ResourcePlanner verifier: consume/discard ordinal drifted")
+                }
+                verify_operation_slots_exact(
+                    operation, body.slots.get(slot).unwrap().reference, none)
+            }
+        },
+        PlannerEventValue::AssignValue { rhs_temp, target } => {
+            if after.len() != 0 || before.len() == 0 {
+                panic("ResourcePlanner verifier: Assign resource sequence is absent")
+            }
+            for operation in before {
+                let operand = rc_semantic_site_operand_ordinal(
+                    rc_operation_site(operation))
+                if operand == 0 {
+                    verify_operation_slots_exact(
+                        operation, body.slots.get(rhs_temp).unwrap().reference,
+                        some(body.slots.get(target).unwrap().reference))
+                } else if operand == 1 {
+                    verify_operation_slots_exact(
+                        operation, body.slots.get(target).unwrap().reference, none)
+                } else {
+                    panic("ResourcePlanner verifier: Assign operand ordinal drifted")
+                }
+            }
+        },
+        PlannerEventValue::CallValue {
+            argument_slots, result_slot, ..
+        } => {
+            for operation in before {
+                let operand = rc_semantic_site_operand_ordinal(
+                    rc_operation_site(operation))
+                if operand < 0 || operand >= argument_slots.len() {
+                    panic("ResourcePlanner verifier: call argument ordinal drifted")
+                }
+                verify_operation_slots_exact(
+                    operation,
+                    body.slots.get(argument_slots.get(operand).unwrap()).unwrap().reference,
+                    none)
+            }
+            for operation in after {
+                if rc_semantic_site_operand_ordinal(
+                        rc_operation_site(operation)) != argument_slots.len() {
+                    panic("ResourcePlanner verifier: call result ordinal drifted")
+                }
+                let result = match result_slot {
+                    some(index) => body.slots.get(index).unwrap().reference,
+                    none => panic("ResourcePlanner verifier: call result op lacks result slot")
+                }
+                verify_operation_slots_exact(operation, result, none)
+            }
+        },
+        PlannerEventValue::ProjectValue { source, target, .. } |
+        PlannerEventValue::CaptureValue { source, target, .. } => {
+            if after.len() != 0 {
+                panic("ResourcePlanner verifier: projection/capture has after-resource op")
+            }
+            for operation in before {
+                if rc_semantic_site_operand_ordinal(
+                        rc_operation_site(operation)) != 0 {
+                    panic("ResourcePlanner verifier: projection/capture ordinal drifted")
+                }
+                verify_operation_slots_exact(
+                    operation, body.slots.get(source).unwrap().reference,
+                    some(body.slots.get(target).unwrap().reference))
+            }
+        }
+    }
+}
+
+fn verify_terminator_operation_contract(
+    body: PlannerBody, block: PlannerBlock,
+    operations: List<RcOperation>
+) {
+    for operation in operations {
+        let operand = rc_semantic_site_operand_ordinal(
+            rc_operation_site(operation))
+        if operand < 0 || operand >= block.terminator_uses.len() {
+            panic("ResourcePlanner verifier: terminator operand ordinal drifted")
+        }
+        verify_operation_slots_exact(
+            operation,
+            body.slots.get(
+                block.terminator_uses.get(operand).unwrap().slot).unwrap().reference,
+            none)
+    }
+}
+
+fn verify_edge_operation_contract(
+    body: PlannerBody, edge: PlannerEdge,
+    operations: List<RcOperation>
+) {
+    for operation in operations {
+        let slot_index = rc_semantic_site_operand_ordinal(
+            rc_operation_site(operation))
+        if slot_index < 0 || slot_index >= body.slots.len() ||
+           !int_list_contains(
+                edge.exited_scope_ids,
+                body.slots.get(slot_index).unwrap().scope_id) ||
+           !rc_op_kind_same(
+                rc_operation_kind(operation), rc_op_kind_cleanup()) {
+            panic("ResourcePlanner verifier: edge Cleanup operand drifted")
+        }
+        verify_operation_slots_exact(
+            operation, body.slots.get(slot_index).unwrap().reference, none)
+    }
+}
+
+fn verify_rc_topology_contract(
+    input: FrozenPlannerInput, rc_program: RcProgram,
+    certificate: ResourceCertificate
+) {
+    if rc_program_flow_fingerprint(rc_program) != input.flow_fingerprint ||
+       rc_program_type_count(rc_program) != input.type_nodes.len() ||
+       rc_program_callable_count(rc_program) != input.callables.len() {
+        panic("ResourcePlanner verifier: RcIR frozen graph census drifted")
+    }
+    let rc_bodies = rc_program_bodies(rc_program)
+    let cfg_bodies = resource_certificate_cfg_bodies(certificate)
+    if rc_bodies.len() != input.bodies.len() ||
+       cfg_bodies.len() != input.bodies.len() {
+        panic("ResourcePlanner verifier: executable body census drifted")
+    }
+    let mut body_index = 0
+    while body_index < input.bodies.len() {
+        let expected_body = input.bodies.get(body_index).unwrap()
+        let rc_body = rc_bodies.get(body_index).unwrap()
+        let cfg_body = cfg_bodies.get(body_index).unwrap()
+        if !executable_ref_same(
+                expected_body.reference, rc_body_reference(rc_body)) ||
+           expected_body.entry_block != rc_body_entry_block(rc_body) ||
+           expected_body.entry_block !=
+                cfg_body_certificate_entry_block(cfg_body) {
+            panic("ResourcePlanner verifier: body identity/entry drifted")
+        }
+        let rc_slots = rc_body_slots(rc_body)
+        if rc_slots.len() != expected_body.slots.len() {
+            panic("ResourcePlanner verifier: frozen binder census drifted")
+        }
+        let mut slot_index = 0
+        while slot_index < expected_body.slots.len() {
+            let expected_slot = expected_body.slots.get(slot_index).unwrap()
+            let rc_slot = rc_slots.get(slot_index).unwrap()
+            if !slot_ref_same(
+                    expected_slot.reference, rc_slot_reference(rc_slot)) ||
+               expected_slot.type_index != rc_slot_type_index(rc_slot) ||
+               expected_slot.scope_id != rc_slot_scope_id(rc_slot) ||
+               expected_slot.scope_depth != rc_slot_scope_depth(rc_slot) ||
+               expected_slot.reverse_lexical_ordinal !=
+                    rc_slot_reverse_lexical_ordinal(rc_slot) {
+                panic("ResourcePlanner verifier: frozen binder metadata drifted")
+            }
+            slot_index = slot_index + 1
+        }
+        let rc_blocks = rc_body_blocks(rc_body)
+        let cfg_blocks = cfg_body_certificate_blocks(cfg_body)
+        if rc_blocks.len() != expected_body.blocks.len() ||
+           cfg_blocks.len() != expected_body.blocks.len() {
+            panic("ResourcePlanner verifier: frozen block census drifted")
+        }
+        let mut block_index = 0
+        while block_index < expected_body.blocks.len() {
+            let expected_block = expected_body.blocks.get(block_index).unwrap()
+            let rc_block = rc_blocks.get(block_index).unwrap()
+            let cfg_block = cfg_blocks.get(block_index).unwrap()
+            let exact_block = make_flow_block_ref(
+                expected_body.reference, block_index)
+            if rc_block_source_index(rc_block) != block_index ||
+               !flow_block_ref_same(
+                    rc_block_source_ref(rc_block), exact_block) ||
+               rc_block_terminator_kind(rc_block) !=
+                    expected_block.terminator_kind ||
+               rc_block_semantic_op_count(rc_block) !=
+                    expected_block.events.len() ||
+               cfg_block_certificate_index(cfg_block) != block_index ||
+               !flow_block_ref_same(
+                    cfg_block_certificate_source_block(cfg_block), exact_block) ||
+               cfg_block_certificate_terminator_kind(cfg_block) !=
+                    expected_block.terminator_kind {
+                panic("ResourcePlanner verifier: block/terminator topology drifted")
+            }
+            let rc_steps = rc_block_steps(rc_block)
+            let cfg_steps = cfg_block_certificate_steps(cfg_block)
+            if rc_steps.len() != expected_block.events.len() ||
+               cfg_steps.len() != expected_block.events.len() {
+                panic("ResourcePlanner verifier: semantic step census drifted")
+            }
+            let mut step_index = 0
+            while step_index < rc_steps.len() {
+                let exact_instruction = make_flow_instruction_ref(
+                    expected_body.reference, block_index, step_index)
+                if rc_step_semantic_op_index(
+                        rc_steps.get(step_index).unwrap()) != step_index ||
+                   !flow_instruction_ref_same(
+                        rc_step_instruction(rc_steps.get(step_index).unwrap()),
+                        exact_instruction) ||
+                   !flow_instruction_ref_same(
+                        cfg_step_certificate_instruction(
+                            cfg_steps.get(step_index).unwrap()),
+                        exact_instruction) {
+                    panic("ResourcePlanner verifier: instruction identity drifted")
+                }
+                verify_event_operation_contract(
+                    expected_body,
+                    expected_block.events.get(step_index).unwrap(),
+                    rc_step_before(rc_steps.get(step_index).unwrap()),
+                    rc_step_after(rc_steps.get(step_index).unwrap()))
+                step_index = step_index + 1
+            }
+            verify_terminator_operation_contract(
+                expected_body, expected_block,
+                rc_block_before_terminator(rc_block))
+            let rc_edges = rc_block_edges(rc_block)
+            let cfg_edges = cfg_block_certificate_edges(cfg_block)
+            if rc_edges.len() != expected_block.edges.len() ||
+               cfg_edges.len() != expected_block.edges.len() {
+                panic("ResourcePlanner verifier: successor census drifted")
+            }
+            let mut edge_index = 0
+            while edge_index < expected_block.edges.len() {
+                let expected_edge = expected_block.edges.get(edge_index).unwrap()
+                let rc_edge = rc_edges.get(edge_index).unwrap()
+                let cfg_edge = cfg_edges.get(edge_index).unwrap()
+                if rc_edge_successor_ordinal(rc_edge) != edge_index ||
+                   cfg_edge_certificate_successor_ordinal(cfg_edge) != edge_index ||
+                   rc_edge_target_block(rc_edge) != expected_edge.target_block ||
+                   cfg_edge_certificate_target(cfg_edge) !=
+                        expected_edge.target_block {
+                    panic("ResourcePlanner verifier: successor endpoint drifted")
+                }
+                verify_edge_operation_contract(
+                    expected_body, expected_edge,
+                    rc_edge_cleanup(rc_edge))
+                edge_index = edge_index + 1
+            }
+            block_index = block_index + 1
+        }
+        body_index = body_index + 1
+    }
+}
+
+// The only public acceptance token. RcIR/certificate constructors remain data
+// builders; downstream codegen/verifier entrypoints must require this wrapper,
+// which can only be produced from an actual validated FlowProgram.
+pub struct VerifiedResourceProgram {
+    flow_fingerprint: Str,
+    rc_program: RcProgram,
+    certificate: ResourceCertificate
+}
+
+pub fn verify_and_plan_resource_program(
+    program: FlowProgram
+) -> VerifiedResourceProgram {
+    validate_flow_program(program)
+    let planning_input = make_frozen_planner_input_from_flow(program)
+    let planned = plan_resources(planning_input)
+    // Rebuild independently from the immutable FlowProgram rather than trust
+    // the planner's adapter snapshot or certificate-supplied graph.
+    let verification_input = make_frozen_planner_input_from_flow(program)
+    verify_fixed_graph_contract(verification_input, planned.certificate)
+    verify_rc_topology_contract(
+        verification_input, planned.rc_program, planned.certificate)
+    verify_resource_certificate(planned.rc_program, planned.certificate)
+    VerifiedResourceProgram {
+        flow_fingerprint: verification_input.flow_fingerprint,
+        rc_program: planned.rc_program,
+        certificate: planned.certificate
+    }
+}
+
+pub fn verified_resource_program_flow_fingerprint(
+    value: VerifiedResourceProgram
+) -> Str { value.flow_fingerprint }
+
+pub fn verified_resource_program_rc_ir(
+    value: VerifiedResourceProgram
+) -> RcProgram { value.rc_program }
