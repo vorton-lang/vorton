@@ -9127,7 +9127,7 @@ F2_TRAIT_METHOD_IDENTITY_PATHS = {
     "dict": REPO / "compiler" / "dict_lower.ring",
     "codegen": REPO / "compiler" / "codegen_c_expr.ring",
 }
-F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT = 35
+F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT = 39
 
 
 def _trait_method_function_body(
@@ -9203,6 +9203,7 @@ def trait_method_identity_u1c_contract_errors(
         sources, "identity", "make_trait_method_ref", errors)
     for token in (
         "source_member_index < 0", "callable_slot_index < 0",
+        "source_member_index < callable_slot_index",
         'method_name == ""',
         "symbol_ref_namespace_kind(trait_symbol), namespace_trait()",
         "symbol_ref_origin_module_key(trait_symbol), namespace_member()",
@@ -9346,7 +9347,7 @@ def trait_method_identity_u1c_contract_errors(
         "trait_method_ref_trait(method_ref), identity.owner_ref",
         "trait_method_ref_source_member_index(method_ref) !=",
         "trait_method_ref_callable_slot_index(method_ref) !=",
-        "trait_method_ref_name(method_ref) != mname",
+        "trait_method_ref_name(method_ref) != identity_method_name",
         "method_ref: method_ref",
         "owner_ref: make_registered_trait_ref(identity.owner_ref, name)",
         "commit_trait_identity_fact(ctx, identity)",
@@ -9357,10 +9358,11 @@ def trait_method_identity_u1c_contract_errors(
     if register_body.count("commit_trait_identity_fact(ctx, identity)") != 1:
         errors.append("trait registration does not commit exactly once")
     peek_at = register_body.find("peek_trait_identity_fact(")
-    publish_at = register_body.find("ctx.env.trait_reg.traits.insert(")
     commit_at = register_body.find("commit_trait_identity_fact(")
-    if min(peek_at, publish_at, commit_at) < 0 or not (
-            peek_at < publish_at < commit_at):
+    semantic_at = register_body.find("validate_type_param_bound_shapes(")
+    publish_at = register_body.find("ctx.env.trait_reg.traits.insert(")
+    if min(peek_at, commit_at, semantic_at, publish_at) < 0 or not (
+            peek_at < commit_at < semantic_at < publish_at):
         errors.append("trait registration atomic order drifted")
 
     builtin_body = _trait_method_function_body(
@@ -9370,7 +9372,9 @@ def trait_method_identity_u1c_contract_errors(
         errors.append("builtin trait identity domain drifted")
     builtin_method_body = _trait_method_function_body(
         sources, "builtins", "builtin_trait_method", errors)
-    if "make_trait_method_ref(" not in builtin_method_body:
+    if not all(token in builtin_method_body for token in (
+            "source_member_index != callable_slot_index",
+            "source/slot ordering drifted", "make_trait_method_ref(")):
         errors.append("builtin trait method bypasses typed relation")
     if builtins.count("make_registered_trait_ref(owner_ref,") != 6:
         errors.append("builtin registered trait census drifted")
@@ -9387,10 +9391,15 @@ def trait_method_identity_u1c_contract_errors(
         sources, "hir", "validate_hir_decls", errors)
     for token in (
         "registered_trait_ref_display_name(owner_ref) != name",
+        "let mut previous_source_member_index = -1",
+        "trait_method_ref_source_member_index(method.method_ref)",
         "trait_method_ref_trait(method.method_ref)",
         "registered_trait_ref_symbol(owner_ref)",
         "trait_method_ref_callable_slot_index(",
         "method.method_ref) != method_index",
+        "source_member_index < method_index",
+        "source_member_index <= previous_source_member_index",
+        "previous_source_member_index = source_member_index",
         "trait_method_ref_name(method.method_ref) != method.name",
     ):
         if token not in validate_body:
@@ -9443,6 +9452,8 @@ def trait_method_identity_u1c_mutation_errors(
         ("method owner domain", "identity", "make_trait_method_ref",
          "symbol_ref_namespace_kind(trait_symbol), namespace_trait()",
          "symbol_ref_namespace_kind(trait_symbol), namespace_nominal()"),
+        ("source before callable slot", "identity", "make_trait_method_ref",
+         "source_member_index < callable_slot_index", "false"),
         ("member production domain", "identity", "make_trait_method_ref",
          "symbol_ref_origin_module_key(trait_symbol), namespace_member()",
          "symbol_ref_origin_module_key(trait_symbol), namespace_value()"),
@@ -9488,6 +9499,9 @@ def trait_method_identity_u1c_mutation_errors(
         ("double consume", "register", "register_trait",
          "commit_trait_identity_fact(ctx, identity)",
          "commit_trait_identity_fact(ctx, identity)\n    commit_trait_identity_fact(ctx, identity)"),
+        ("consume after semantic validation", "register", "register_trait",
+         "commit_trait_identity_fact(ctx, identity)\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)",
+         "validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)\n    commit_trait_identity_fact(ctx, identity)"),
         ("ledger close", "ctx", "close_struct_identity_ledger",
          "ctx.trait_identity_unconsumed.len() != 0", "false"),
         ("hydration binding symbol", "ctx", "apply_project_namespace_binding",
@@ -9507,6 +9521,8 @@ def trait_method_identity_u1c_mutation_errors(
          "false &&"),
         ("builtin/source domain", "builtins", "builtin_trait_symbol",
          '"$builtin"', '"$single$"'),
+        ("builtin source/slot mismatch", "builtins", "builtin_trait_method",
+         "source_member_index != callable_slot_index", "false"),
         ("typed HIR transport", "decl", "check_trait_decl",
          "method_ref: m.method_ref", "method_ref: hmethods.first().unwrap().method_ref"),
         ("andor transport", "andor", "al_decl",
@@ -9518,6 +9534,8 @@ def trait_method_identity_u1c_mutation_errors(
         ("HIR callable slot", "hir", "validate_hir_decls",
          "trait_method_ref_callable_slot_index(\n                            method.method_ref) != method_index",
          "false"),
+        ("HIR duplicate/decreasing source", "hir", "validate_hir_decls",
+         "source_member_index <= previous_source_member_index", "false"),
         ("HIR method name", "hir", "validate_hir_decls",
          "trait_method_ref_name(method.method_ref) != method.name", "false"),
         ("resolver seed method inventory", "resolver", "collect_decl_seed",
@@ -9557,6 +9575,54 @@ def trait_method_identity_u1c_source_errors() -> List[str]:
     if errors:
         return errors
     errors.extend(trait_method_identity_u1c_mutation_errors(sources))
+    return errors
+
+
+def trait_method_identity_u1c_fixture_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe).resolve(strict=True)
+    compiler_before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(str(compiler)))
+    positive = CASES_DIR / "trait_method_identity_assoc_order.ring"
+    negative = CASES_DIR / "error_supertrait_assoc_predicate.ring"
+
+    if positive not in discover_positive_cases(CASES_DIR):
+        errors.append("trait identity assoc-order fixture is not runner-discovered")
+    else:
+        positive_error = _f1_run_ring_check(
+            str(compiler), positive, environment)
+        if positive_error:
+            errors.append(positive_error)
+
+    if negative not in discover_negative_cases(CASES_DIR):
+        errors.append("trait identity clean-diagnostic fixture is not runner-discovered")
+    else:
+        try:
+            completed = subprocess.run(
+                [str(compiler), "check", str(negative)],
+                cwd=REPO, env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="strict",
+                check=False, timeout=120)
+        except subprocess.TimeoutExpired:
+            errors.append("trait identity clean-diagnostic parser check timed out")
+        else:
+            if completed.returncode == 0:
+                if completed.stdout != "OK\n" or completed.stderr:
+                    errors.append(
+                        "trait identity pre-cutover parser output drifted: "
+                        f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+            else:
+                contract = negative.with_suffix(".error").read_text(
+                    encoding="utf-8")
+                combined = (completed.stdout or "") + (completed.stderr or "")
+                contract_error = error_contract_failure(contract, combined)
+                if contract_error is not None:
+                    errors.append(
+                        "trait identity diagnostic is not clean: "
+                        f"{contract_error}; output={combined[:300]!r}")
+    if _sha256_file(compiler) != compiler_before:
+        errors.append("pinned Ring compiler changed across trait identity fixtures")
     return errors
 
 
@@ -10983,10 +11049,13 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
     trait_identity_label = "compiler.trait_method_identity_u1c_source_contract"
     if matches_filter(trait_identity_label, name_filter):
         trait_identity_errors = trait_method_identity_u1c_source_errors()
+        if not trait_identity_errors:
+            trait_identity_errors.extend(
+                trait_method_identity_u1c_fixture_errors(ring_exe))
         detail = (
             f"isolated_mutations="
             f"{F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT}; "
-            "source_producer=resolver+builtin; "
+            "source_producer=resolver+builtin; proper_parser_cases=2; "
             "candidate_behavior=not_evaluated; "
             "behavior_gate=external_source_built_aggregate_packet")
         collector.add(TestResult(
