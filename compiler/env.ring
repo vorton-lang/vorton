@@ -923,9 +923,14 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
         }
     }
     match entry.owner_state {
-        ImplOwnerState::ProvisionalPrelude => if !entry.origin.starts_with(
-            "<std-predecl>:") {
-            panic("impl owner: only std predecls may remain provisional")
+        ImplOwnerState::ProvisionalPrelude => {
+            if !entry.origin.starts_with("<std-predecl>:") {
+                panic("impl owner: only std predecls may remain provisional")
+            }
+            if entry.method_names.len() != 0 ||
+               entry.method_schemes.len() != 0 {
+                panic("impl owner: provisional prelude owner published methods")
+            }
         },
         ImplOwnerState::FinalOwner => {}
     }
@@ -948,6 +953,17 @@ pub fn finalize_provisional_impl_owner(
     let mut impls = match reg.trait_impls.get(entry.target_type_name) {
         some(values) => values,
         none => panic("impl owner: provisional owner is missing")
+    }
+    match reg.method_origins.get(entry.target_type_name) {
+        some(origins) => {
+            for origin_entry in origins.entries() {
+                let (_, indexed) = origin_entry
+                if indexed.origin == entry.origin {
+                    panic("impl owner: provisional owner published a stale method index")
+                }
+            }
+        },
+        none => {}
     }
     let mut found = 0
     for index in 0..impls.len() {

@@ -10,7 +10,8 @@ use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImpl
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, new_collecting_sink, make_diag}
 use env::{TypeEnv, TypeScheme, add_impl, find_impl, find_impl_by_origin,
     install_method_core, assert_no_provisional_impl_owners}
-use builtins::{register_builtins, register_hof_intrinsics}
+use builtins::{register_builtins, register_hof_intrinsics,
+    finalize_std_hof_fallbacks}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
 use dict_lower::{lower_dicts}
 use andor_lower::{lower_andor}
@@ -259,7 +260,10 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                 }
             }
         },
-        none => {},
+        none => {
+            finalize_std_hof_fallbacks(ctx.env, ctx.sink)
+            assert_no_provisional_impl_owners(ctx.env.trait_reg)
+        },
     }
     prelude_hdecls
 }

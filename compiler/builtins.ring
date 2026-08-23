@@ -14,6 +14,8 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     direct_impl_predicate_provenance, freeze_impl_predicate_set,
     frozen_impl_predicates, impl_predicate_subject_type_var,
     impl_predicate_trait_name, ImplOwnerState,
+    find_impl_by_origin, impl_owner_is_provisional,
+    finalize_provisional_impl_owner,
     specialize_trait_method_scheme}
 use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
@@ -108,7 +110,7 @@ fn install_builtin_method_owner(
     }
     let mut method_names = cores.keys()
     method_names.sort()
-    add_impl(env.trait_reg, ImplEntry {
+    let owner = ImplEntry {
         trait_name: trait_name,
         target_type_name: target_type_name,
         type_params: type_params,
@@ -120,7 +122,21 @@ fn install_builtin_method_owner(
         origin: origin,
         span: span,
         owner_state: state
-    })
+    }
+    match find_impl_by_origin(
+        env.trait_reg, target_type_name, origin) {
+        some(existing) => {
+            let incoming_is_final = match state {
+                ImplOwnerState::FinalOwner => true,
+                ImplOwnerState::ProvisionalPrelude => false
+            }
+            if !impl_owner_is_provisional(existing) || !incoming_is_final {
+                panic("builtin impl owner: unexpected existing owner")
+            }
+            finalize_provisional_impl_owner(env.trait_reg, owner)
+        },
+        none => add_impl(env.trait_reg, owner)
+    }
     let mut core_entries = cores.entries()
     core_entries.sort_by(compare_by_first)
     for entry in core_entries {
@@ -133,6 +149,45 @@ fn install_builtin_method_owner(
                 trait_name: trait_name,
                 span: span
             })
+    }
+}
+
+fn seed_std_hof_owner(
+    mut env: TypeEnv, target_type_name: Str, origin: Str,
+    type_params: List<Str>, owner_type_vars: List<Int>,
+    predicate_specs: List<BuiltinPredicateSpec>
+) {
+    add_impl(env.trait_reg, ImplEntry {
+        trait_name: none,
+        target_type_name: target_type_name,
+        type_params: type_params,
+        type_param_vars: owner_type_vars,
+        predicates: freeze_builtin_predicates(
+            owner_type_vars, predicate_specs),
+        method_names: [],
+        assoc_types: map_new(),
+        method_schemes: map_new(),
+        origin: origin,
+        span: span_zero(),
+        owner_state: ImplOwnerState::ProvisionalPrelude
+    })
+}
+
+fn require_std_hof_seed(
+    env: TypeEnv, target_type_name: Str, origin: Str,
+    expected_arity: Int
+) -> ImplEntry {
+    match find_impl_by_origin(env.trait_reg, target_type_name, origin) {
+        some(owner) => {
+            if !impl_owner_is_provisional(owner) ||
+               owner.type_param_vars.len() != expected_arity ||
+               owner.method_names.len() != 0 ||
+               owner.method_schemes.len() != 0 {
+                panic("builtin HOF fallback: invalid provisional owner")
+            }
+            owner
+        },
+        none => panic("builtin HOF fallback: provisional owner is missing")
     }
 }
 
@@ -287,12 +342,61 @@ fn register_mut_methods(mut env: TypeEnv) {
     env.trait_reg.mut_methods.insert("Set", set_mut)
 }
 
-// Main entry point: register all HOF intrinsics
+fn seed_std_hof_owners(mut env: TypeEnv) {
+    let list_t = env.fresh_var_id()
+    seed_std_hof_owner(
+        env, BUILTIN_LIST, "<std-predecl>:List:unbounded",
+        ["T"], [list_t], [])
+
+    let map_bounded_k = env.fresh_var_id()
+    let map_bounded_v = env.fresh_var_id()
+    seed_std_hof_owner(
+        env, BUILTIN_MAP, "<std-predecl>:Map:bounded",
+        ["K", "V"], [map_bounded_k, map_bounded_v], [
+            BuiltinPredicateSpec {
+                subject_param_index: 0, trait_name: "Hash"
+            },
+            BuiltinPredicateSpec {
+                subject_param_index: 0, trait_name: "Eq"
+            }
+        ])
+    let map_unbounded_k = env.fresh_var_id()
+    let map_unbounded_v = env.fresh_var_id()
+    seed_std_hof_owner(
+        env, BUILTIN_MAP, "<std-predecl>:Map:unbounded",
+        ["K", "V"], [map_unbounded_k, map_unbounded_v], [])
+
+    let set_bounded_t = env.fresh_var_id()
+    seed_std_hof_owner(
+        env, BUILTIN_SET, "<std-predecl>:Set:bounded",
+        ["T"], [set_bounded_t], [
+            BuiltinPredicateSpec {
+                subject_param_index: 0, trait_name: "Hash"
+            },
+            BuiltinPredicateSpec {
+                subject_param_index: 0, trait_name: "Eq"
+            }
+        ])
+    let set_unbounded_t = env.fresh_var_id()
+    seed_std_hof_owner(
+        env, BUILTIN_SET, "<std-predecl>:Set:unbounded",
+        ["T"], [set_unbounded_t], [])
+}
+
+// Normal compilation publishes no std HOF method core before source
+// registration. Option HOFs are true builtins and remain final here.
 pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {
+    seed_std_hof_owners(env)
+    register_option_hof(env, sink)
+}
+
+// Only checker.load_prelude's no-std branch may consume this fallback.
+pub fn finalize_std_hof_fallbacks(
+    mut env: TypeEnv, sink: CollectingSink
+) {
     register_list_hof(env, sink)
     register_map_hof(env, sink)
     register_set_hof(env, sink)
-    register_option_hof(env, sink)
 }
 
 // ============================================================
@@ -763,9 +867,11 @@ fn register_hash_trait(mut env: TypeEnv, sink: CollectingSink) {
 
 fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     let mut methods: Map<Str, TypeScheme> = map_new()
+    let owner = require_std_hof_seed(
+        env, BUILTIN_LIST, "<std-predecl>:List:unbounded", 1)
 
     // map: (List<T>, (T) -> U / e) -> List<U> / e
-    let t_id = env.fresh_var_id()
+    let t_id = owner.type_param_vars.get(0).unwrap_or(-1)
     let t = Type::TypeVar { id: t_id, name: none }
     let mut u_id = env.fresh_var_id()
     let mut u = Type::TypeVar { id: u_id, name: none }
@@ -864,7 +970,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_LIST, "<std-predecl>:List:unbounded",
         none, ["T"], [t_id], [],
-        ImplOwnerState::ProvisionalPrelude, methods)
+        ImplOwnerState::FinalOwner, methods)
 }
 
 // ============================================================
@@ -875,9 +981,13 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
     let mut bounded_methods: Map<Str, TypeScheme> = map_new()
     let mut unbounded_methods: Map<Str, TypeScheme> = map_new()
 
-    let bounded_k_id = env.fresh_var_id()
+    let bounded_owner = require_std_hof_seed(
+        env, BUILTIN_MAP, "<std-predecl>:Map:bounded", 2)
+    let unbounded_owner = require_std_hof_seed(
+        env, BUILTIN_MAP, "<std-predecl>:Map:unbounded", 2)
+    let bounded_k_id = bounded_owner.type_param_vars.get(0).unwrap_or(-1)
     let bounded_k = Type::TypeVar { id: bounded_k_id, name: none }
-    let bounded_v_id = env.fresh_var_id()
+    let bounded_v_id = bounded_owner.type_param_vars.get(1).unwrap_or(-1)
     let bounded_v = Type::TypeVar { id: bounded_v_id, name: none }
 
     // map_values: (Map<K,V>, (V) -> U / e) -> Map<K,U> / e
@@ -913,9 +1023,9 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
         def_id: none
     })
 
-    let unbounded_k_id = env.fresh_var_id()
+    let unbounded_k_id = unbounded_owner.type_param_vars.get(0).unwrap_or(-1)
     let unbounded_k = Type::TypeVar { id: unbounded_k_id, name: none }
-    let unbounded_v_id = env.fresh_var_id()
+    let unbounded_v_id = unbounded_owner.type_param_vars.get(1).unwrap_or(-1)
     let unbounded_v = Type::TypeVar { id: unbounded_v_id, name: none }
 
     // fold: (Map<K,V>, U, (U, K, V) -> U / e) -> U / e
@@ -955,7 +1065,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_MAP, "<std-predecl>:Map:unbounded",
         none, ["K", "V"], [unbounded_k_id, unbounded_v_id], [],
-        ImplOwnerState::ProvisionalPrelude, unbounded_methods)
+        ImplOwnerState::FinalOwner, unbounded_methods)
     install_builtin_method_owner(
         env, sink, BUILTIN_MAP, "<std-predecl>:Map:bounded",
         none, ["K", "V"], [bounded_k_id, bounded_v_id], [
@@ -965,7 +1075,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
             BuiltinPredicateSpec {
                 subject_param_index: 0, trait_name: "Eq"
             }
-        ], ImplOwnerState::ProvisionalPrelude, bounded_methods)
+        ], ImplOwnerState::FinalOwner, bounded_methods)
 }
 
 // ============================================================
@@ -977,7 +1087,11 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
     let mut unbounded_methods: Map<Str, TypeScheme> = map_new()
 
     // filter: (Set<T>, (T) -> Bool / e) -> Set<T> / e
-    let bounded_t_id = env.fresh_var_id()
+    let bounded_owner = require_std_hof_seed(
+        env, BUILTIN_SET, "<std-predecl>:Set:bounded", 1)
+    let unbounded_owner = require_std_hof_seed(
+        env, BUILTIN_SET, "<std-predecl>:Set:unbounded", 1)
+    let bounded_t_id = bounded_owner.type_param_vars.get(0).unwrap_or(-1)
     let bounded_t = Type::TypeVar { id: bounded_t_id, name: none }
     let mut orow = open_row(env)
     let mut cb = Type::FnType {
@@ -1002,7 +1116,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
         def_id: none
     })
 
-    let unbounded_t_id = env.fresh_var_id()
+    let unbounded_t_id = unbounded_owner.type_param_vars.get(0).unwrap_or(-1)
     let unbounded_t = Type::TypeVar { id: unbounded_t_id, name: none }
 
     // fold: (Set<T>, U, (U, T) -> U / e) -> U / e
@@ -1055,7 +1169,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_SET, "<std-predecl>:Set:unbounded",
         none, ["T"], [unbounded_t_id], [],
-        ImplOwnerState::ProvisionalPrelude, unbounded_methods)
+        ImplOwnerState::FinalOwner, unbounded_methods)
     install_builtin_method_owner(
         env, sink, BUILTIN_SET, "<std-predecl>:Set:bounded",
         none, ["T"], [bounded_t_id], [
@@ -1065,7 +1179,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
             BuiltinPredicateSpec {
                 subject_param_index: 0, trait_name: "Eq"
             }
-        ], ImplOwnerState::ProvisionalPrelude, bounded_methods)
+        ], ImplOwnerState::FinalOwner, bounded_methods)
 }
 
 // ============================================================

@@ -7545,7 +7545,7 @@ F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
 F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
 F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 40
-F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT = 20
+F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT = 35
 
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
@@ -9082,6 +9082,12 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 owner insertion bypasses relational validation")
     if "expanded predicate path is not a supertrait edge" not in env_source:
         errors.append("U1c0 expanded predicate paths are not relationally validated")
+    for token in (
+        "provisional prelude owner published methods",
+        "provisional owner published a stale method index",
+    ):
+        if token not in env_source:
+            errors.append(f"U1c0 provisional validation missing {token!r}")
 
     register_source = sources.get("register", "")
     for token in (
@@ -9112,6 +9118,23 @@ def impl_predicate_u1c0_contract_errors(
         "let tv = ctx.env.fresh_var()", provisional_at)
     if provisional_at < 0 or fresh_at < 0 or provisional_at > fresh_at:
         errors.append("U1c0 source impl does not reuse provisional owner before mint")
+    for function_name in (
+        "register_fn_common",
+        "register_effect",
+        "register_type_alias",
+        "register_effect_alias",
+    ):
+        body, error = extract_ring_function_body(register_source, function_name)
+        if error:
+            errors.append(error)
+        elif body is not None and "validate_type_param_bound_shapes(" not in body:
+            errors.append(f"U1c0 {function_name} bypasses TypeBound shape validation")
+    for token in (
+        "protocol lowering does not yet consume",
+        "protocol lowering has not consumed nested impl predicates",
+    ):
+        if token not in register_source:
+            errors.append(f"U1c0 protocol fail-loud wording missing {token!r}")
 
     builtins = sources.get("builtins", "")
     for token in (
@@ -9120,18 +9143,54 @@ def impl_predicate_u1c0_contract_errors(
         '"<std-predecl>:Set:unbounded"',
         '"<std-predecl>:Set:bounded"',
         "ImplOwnerState::ProvisionalPrelude",
-        "bounded_k_id",
-        "unbounded_k_id",
-        "bounded_t_id",
-        "unbounded_t_id",
+        "fn seed_std_hof_owners",
+        "fn seed_std_hof_owner",
+        "fn require_std_hof_seed",
+        "pub fn finalize_std_hof_fallbacks",
     ):
         if token not in builtins:
             errors.append(f"U1c0 provisional builtin owner missing {token!r}")
-    if ('none, ["T"], [t_id], [],\n'
-            '        ImplOwnerState::ProvisionalPrelude, methods)') not in builtins:
-        errors.append("U1c0 List predecl is not a provisional complete owner")
-    if ('none, ["K", "V"], [bounded_k_id, bounded_v_id], [') not in builtins:
-        errors.append("U1c0 bounded Map owner does not retain its direct IDs")
+    seed_body, seed_error = extract_ring_function_body(
+        builtins, "seed_std_hof_owner")
+    if seed_error:
+        errors.append(seed_error)
+    elif seed_body is not None and not all(token in seed_body for token in (
+        "method_names: []",
+        "method_schemes: map_new()",
+        "ImplOwnerState::ProvisionalPrelude",
+    )):
+        errors.append("U1c0 std HOF seed publishes method state")
+    elif seed_body is not None and "install_method_core(" in seed_body:
+        errors.append("U1c0 std HOF seed publishes a method index")
+    register_hof_body, register_hof_error = extract_ring_function_body(
+        builtins, "register_hof_intrinsics")
+    if register_hof_error:
+        errors.append(register_hof_error)
+    elif register_hof_body is not None:
+        if "seed_std_hof_owners(env)" not in register_hof_body or (
+                "register_option_hof(env, sink)" not in register_hof_body):
+            errors.append("U1c0 normal HOF registration lost seed/Option split")
+        for forbidden_call in (
+            "register_list_hof(", "register_map_hof(", "register_set_hof("):
+            if forbidden_call in register_hof_body:
+                errors.append("U1c0 normal path publishes std HOF method cores")
+    fallback_body, fallback_error = extract_ring_function_body(
+        builtins, "finalize_std_hof_fallbacks")
+    if fallback_error:
+        errors.append(fallback_error)
+    elif fallback_body is not None and not all(token in fallback_body for token in (
+        "register_list_hof(env, sink)",
+        "register_map_hof(env, sink)",
+        "register_set_hof(env, sink)",
+    )):
+        errors.append("U1c0 no-std fallback does not finalize all std HOF owners")
+    for function_name in (
+        "register_list_hof", "register_map_hof", "register_set_hof"):
+        body, error = extract_ring_function_body(builtins, function_name)
+        if error:
+            errors.append(error)
+        elif body is not None and "require_std_hof_seed(" not in body:
+            errors.append(f"U1c0 {function_name} mints instead of consuming seed IDs")
 
     ctx_source = sources.get("ctx", "")
     for token in (
@@ -9171,6 +9230,20 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 hydration does not install owners before indexes")
     if "assert_no_provisional_impl_owners(ctx.env.trait_reg)" not in checker_source:
         errors.append("U1c0 prelude does not close provisional owners")
+    load_prelude_body, load_prelude_error = extract_ring_function_body(
+        checker_source, "load_prelude")
+    if load_prelude_error:
+        errors.append(load_prelude_error)
+    elif load_prelude_body is not None:
+        if load_prelude_body.count("finalize_std_hof_fallbacks(") != 1:
+            errors.append("U1c0 no-std fallback branch is not unique")
+        fallback_at = load_prelude_body.find("none => {")
+        finalize_at = load_prelude_body.find("finalize_std_hof_fallbacks(")
+        if fallback_at < 0 or finalize_at < fallback_at:
+            errors.append("U1c0 std-present path can reach late HOF fallback")
+        if load_prelude_body.count(
+                "assert_no_provisional_impl_owners(ctx.env.trait_reg)") != 2:
+            errors.append("U1c0 prelude branches do not both close provisional owners")
     return errors
 
 
@@ -9184,16 +9257,31 @@ F2_U1C0_SOURCE_CONTRACT_MUTATIONS = (
     ("register", "finalize_provisional_impl_owner(", "add_impl("),
     ("decl", "let impl_bounds = impl_owner_fn_bounds(impl_owner)", "let impl_bounds: List<FnBoundsEntry> = []"),
     ("register", "some(found) => merge_delegate_owner_predicates(", "some(found) => freeze_impl_predicate_set("),
-    ("builtins", '"<std-predecl>:Map:bounded"', '"<std-predecl>:Map:unbounded"'),
-    ("builtins", "[bounded_k_id, bounded_v_id]", "[unbounded_k_id, unbounded_v_id]"),
-    ("builtins", 'none, ["T"], [t_id], [],\n        ImplOwnerState::ProvisionalPrelude, methods)', 'none, ["T"], [t_id], [],\n        ImplOwnerState::FinalOwner, methods)'),
+    ("env", 'panic("impl owner: provisional prelude owner published methods")', "{}"),
+    ("env", 'panic("impl owner: provisional owner published a stale method index")', "{}"),
+    ("builtins", "method_names: [],", 'method_names: ["map"],'),
+    ("builtins", "method_schemes: map_new(),", "method_schemes: map_clone(cores),"),
+    ("builtins", "owner_state: ImplOwnerState::ProvisionalPrelude", "owner_state: ImplOwnerState::FinalOwner"),
+    ("builtins", "seed_std_hof_owners(env)", "register_list_hof(env, sink)"),
+    ("builtins", "register_option_hof(env, sink)", "register_list_hof(env, sink)"),
+    ("builtins", "register_list_hof(env, sink)\n", "{}\n"),
+    ("builtins", "register_map_hof(env, sink)\n", "{}\n"),
+    ("builtins", "register_set_hof(env, sink)\n", "{}\n"),
+    ("builtins", "let owner = require_std_hof_seed(\n        env, BUILTIN_LIST", "let owner = empty_frozen_impl_predicate_set(\n        env, BUILTIN_LIST"),
+    ("checker", "finalize_std_hof_fallbacks(ctx.env, ctx.sink)", "{}"),
+    ("checker", "some(std_dir) => {", "some(std_dir) => {\n            finalize_std_hof_fallbacks(ctx.env, ctx.sink)"),
+    ("register", "span: Span, check_dup: Bool, track_mut_params: Bool, track_fn_bounds: Bool\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "span: Span, check_dup: Bool, track_mut_params: Bool, track_fn_bounds: Bool\n) {\n    {}"),
+    ("register", "ops: List<EffectOpDecl>, span: Span\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "ops: List<EffectOpDecl>, span: Span\n) {\n    {}"),
+    ("register", "type_expr: TypeExpr, span: Span\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "type_expr: TypeExpr, span: Span\n) {\n    {}"),
+    ("register", "fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, span: Span) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, span: Span) {\n    {}"),
+    ("register", "that protocol lowering does not yet consume", "that exact dictionary evidence cannot preserve"),
+    ("register", "protocol lowering has not consumed nested impl predicates", "nested impl predicates are not yet representable in ImplEntry"),
     ("ctx", "source: PendingEvidenceSource::ImplOwnerEvidenceSource {", "source: PendingEvidenceSource::SchemeEvidenceSource("),
-    ("ctx", "resolve_or_defer_dicts_from_impl_owner", "resolve_or_defer_dicts_from_scheme"),
     ("helpers", "ctx.env.trait_reg.method_origins.get(type_name)", "ctx.env.trait_reg.impl_methods.get(type_name)"),
     ("infer", "resolve_or_defer_dicts_from_impl_owner(", "resolve_or_defer_dicts_from_scheme("),
     ("derive", "freeze_impl_predicate_set(", "empty_frozen_impl_predicate_set("),
     ("exports", "pub trait_impls: List<ImplEntry>,", "pub trait_impls: List<ImplEntry>,\n    pub impl_methods: Map<Str, Map<Str, TypeScheme>>,"),
-    ("checker", "assert_no_provisional_impl_owners(ctx.env.trait_reg)", "{}"),
+    ("checker", "            assert_no_provisional_impl_owners(ctx.env.trait_reg)\n            // Install", "            {}\n            // Install"),
     ("env", "pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {\n    validate_impl_entry(reg, entry)", "pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {\n    {}"),
 )
 
@@ -9242,6 +9330,35 @@ def impl_predicate_u1c0_source_check_errors(ring_exe: str) -> List[str]:
             errors.append(error)
     if _sha256_file(compiler) != before:
         errors.append("pinned Ring compiler changed across F2 U1c0 checks")
+    return errors
+
+
+def impl_predicate_u1c0_no_std_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe).resolve(strict=True)
+    before = _sha256_file(compiler)
+    fixture = CASES_DIR / "no_std_hof_fallback.ring"
+    environment = dict(_controlled_environment(str(compiler)))
+    with tempfile.TemporaryDirectory(prefix="ring_u1c0_no_std_") as temp:
+        cwd = Path(temp).resolve(strict=True)
+        if (cwd / "std").exists() or (cwd.parent / "std").exists():
+            return ["U1c0 no-std check root unexpectedly contains std"]
+        completed = subprocess.run(
+            [str(compiler), "check", str(fixture)],
+            cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="strict",
+            check=False, timeout=120)
+        if completed.returncode != 0:
+            errors.append(
+                f"U1c0 no-std HOF fallback failed: exit={completed.returncode} "
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+        elif completed.stdout != "OK\n" or completed.stderr:
+            errors.append(
+                f"U1c0 no-std HOF fallback output drifted: "
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across U1c0 no-std check")
     return errors
 
 
@@ -9830,10 +9947,14 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         if not impl_predicate_errors:
             impl_predicate_errors.extend(
                 impl_predicate_u1c0_source_check_errors(ring_exe))
+        if not impl_predicate_errors:
+            impl_predicate_errors.extend(
+                impl_predicate_u1c0_no_std_errors(ring_exe))
         detail = (
             f"source_contract_mutations="
             f"{F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT}; "
-            "pinned_source_checks=2; candidate_behavior=not_evaluated; "
+            "pinned_source_checks=2; no_std_behavior_checks=1; "
+            "candidate_behavior=not_evaluated; "
             "behavior_gate=external_source_built_candidate_packet")
         collector.add(TestResult(
             TestResult.PASS if not impl_predicate_errors else TestResult.FAIL,

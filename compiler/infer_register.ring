@@ -1668,7 +1668,12 @@ fn bind_variant_constructor(mut ctx: InferCtx, variant_name: Str, enum_type: Typ
 // Effect registration
 // ============================================================
 
-fn register_effect(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, ops: List<EffectOpDecl>) {
+fn register_effect(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    ops: List<EffectOpDecl>, span: Span
+) {
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     let saved = map_clone(ctx.type_param_scope)
     let mut tp_names: List<Str> = []
     let mut tp_vars: List<Int> = []
@@ -1973,9 +1978,9 @@ fn reject_unsupported_protocol_impl_bounds(
         for bound in tp.bounds {
             if bound.type_args.len() > 0 || bound.assoc_constraints.len() > 0 {
                 let _ = type_error(ctx.sink, E0503,
-                    "Iteration protocol impl bound '${tp.name}: ${nominal_display_name(bound.trait_name)}' uses nested type arguments or associated constraints that exact dictionary evidence cannot preserve",
+                    "Iteration protocol impl bound '${tp.name}: ${nominal_display_name(bound.trait_name)}' uses nested type arguments or associated constraints that protocol lowering does not yet consume",
                     bound.span, DiagnosticContext::TraitError {
-                        detail: "nested impl predicates are not yet representable in ImplEntry"
+                        detail: "protocol lowering has not consumed nested impl predicates"
                     })
                 fail.raise(CompileError {})
             }
@@ -3056,6 +3061,8 @@ fn register_fn_common(
     params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?,
     span: Span, check_dup: Bool, track_mut_params: Bool, track_fn_bounds: Bool
 ) {
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     if check_dup { check_duplicate_def(ctx, name, span) }
 
     let mut type_vars: List<Int> = []
@@ -3257,7 +3264,12 @@ fn register_extern_type(
         ctx, name, type_params, span, true, decl_index)
 }
 
-fn register_type_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, type_expr: TypeExpr) {
+fn register_type_alias(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    type_expr: TypeExpr, span: Span
+) {
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     let saved = map_clone(ctx.type_param_scope)
     let mut tp_vars: List<Int> = []
     for tp in type_params {
@@ -3311,6 +3323,8 @@ fn canonicalize_effect_alias_body(ctx: InferCtx, effects: List<EffectExpr>) -> L
 }
 
 fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, span: Span) {
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     if ctx.env.types.effect_aliases.contains_key(name) {
         let display = nominal_display_name(name)
         let _ = type_error(ctx.sink, E0207,
@@ -3351,8 +3365,8 @@ fn register_decl(mut ctx: InferCtx, decl: Decl, decl_index: Int) {
             preregister_enum(ctx, name, type_params, derive_attrs, span)
             complete_enum_variants(ctx, name, type_params, variants)
         },
-        Decl::Effect { name, type_params, ops, .. } =>
-            register_effect(ctx, name, type_params, ops),
+        Decl::Effect { name, type_params, ops, span, .. } =>
+            register_effect(ctx, name, type_params, ops, span),
         Decl::Impl { target_type, type_params, trait_name, methods, span } =>
             register_impl(ctx, target_type, type_params, trait_name, methods, span),
         Decl::Fn { name, type_params, params, return_type, declared_effects, span, .. } =>
@@ -3364,8 +3378,8 @@ fn register_decl(mut ctx: InferCtx, decl: Decl, decl_index: Int) {
             register_extern_fn(ctx, name, type_params, params, return_type, declared_effects, span),
         Decl::ExternType { name, type_params, span, .. } =>
             register_extern_type(ctx, name, type_params, span, decl_index),
-        Decl::TypeAlias { name, type_params, type_expr, .. } =>
-            register_type_alias(ctx, name, type_params, type_expr),
+        Decl::TypeAlias { name, type_params, type_expr, span, .. } =>
+            register_type_alias(ctx, name, type_params, type_expr, span),
         Decl::Const { name, type_annotation, span, .. } =>
             register_const(ctx, name, type_annotation, span),
         Decl::EffectAlias { name, type_params, effects, span, .. } =>
