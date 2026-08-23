@@ -8109,11 +8109,8 @@ def llm_warning_document_sequence(
         except (json.JSONDecodeError, ValueError) as exc:
             return None, f"invalid LLM warning JSON document: {exc}"
         documents.append(document)
-        if end == len(output):
-            offset = end
-            break
-        if output[end:end + 1] != "\n":
-            return None, "LLM warning documents are not separated by one newline"
+        if end == len(output) or output[end:end + 1] != "\n":
+            return None, "each LLM warning document must end with one newline"
         offset = end + 1
         if offset == len(output):
             break
@@ -8189,7 +8186,7 @@ def _f1_run_ring_check(
             f"pinned Ring check failed for {source_path}: "
             f"exit={completed.returncode} stdout={completed.stdout!r} "
             f"stderr={completed.stderr!r}")
-    if completed.stdout.strip() != "OK":
+    if completed.stdout != "OK\n":
         return (
             f"pinned Ring check output drifted for {source_path}: "
             f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
@@ -9207,6 +9204,8 @@ def llm_warning_document_sequence_probe_errors() -> List[str]:
         errors.append("LLM warning probe accepted duplicate JSON key")
     if llm_warning_contract_error(single + "panic", [first]) is None:
         errors.append("LLM warning probe accepted trailing raw output")
+    if llm_warning_contract_error(single[:-1], [first]) is None:
+        errors.append("LLM warning probe accepted missing final newline")
     duplicate_diag = _warning_document(
         "parser.ring", [first_diag, first_diag]) + "\n"
     if llm_warning_contract_error(duplicate_diag, [first]) is None:
@@ -9367,6 +9366,7 @@ def impl_export_closure_contract_errors(
         errors.append(indexes_error)
     elif indexes_body is not None and not all(token in indexes_body for token in (
         "owner.method_schemes.entries()",
+        "for core_entry in sorted_cores",
         "!method_origin_matches_owner(origin, owner)",
         "insert_exact_method_origin(",
     )):
@@ -9529,8 +9529,8 @@ def impl_export_closure_mutation_errors(
          "final owner union omits module facts"),
         ("exports", "append_owner_method_indexes",
          "for core_entry in sorted_cores {",
-         "for core_entry in sorted_cores {\n                if method_name == \"__review_skip__\" { continue }",
-         "owner index production is conditional"),
+         "for core_entry in [] {",
+         "owner indexes are not same-origin exact"),
         ("exports", "extract_exports",
          "validate_impl_export_closure(trait_impls, method_origins)", "{}",
          "final owner/index relation is unvalidated"),
