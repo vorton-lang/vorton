@@ -19,8 +19,7 @@ use core_hir::{
     core_program_body_count, core_program_bodies,
     core_body_entry_reference, core_body_entry_origin,
     core_program_type_graph, core_program_callables,
-    core_program_impls, core_program_inventory,
-    core_program_manifests}
+    core_program_impls, core_program_inventory}
 use flow_ir::{
     FlowProgram,
     flow_program_type_nodes, flow_program_callables, flow_program_bodies,
@@ -139,8 +138,7 @@ pub fn run_ownership_pipeline(
         core_program_callables(core),
         core_program_impls(core),
         core_program_bodies(core),
-        core_program_inventory(core),
-        core_program_manifests(core))
+        core_program_inventory(core))
     validate_nonempty_core(validated_core)
 
     let lowering = lower_core_to_flow(validated_core)
