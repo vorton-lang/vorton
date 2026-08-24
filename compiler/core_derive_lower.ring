@@ -31,12 +31,11 @@ use core_expr::{
     make_core_block, make_core_bind_stmt, make_core_expr_stmt,
     make_core_body, validate_core_body,
     core_binder_reference, core_binder_type,
-    core_field_ref_same, core_type_ref_same
-}
-use core_elaborate::{
-    CoreStructClonePlan, CoreEnumClonePlan,
-    elaborate_core_struct_deep_clone, elaborate_core_enum_deep_clone,
-    core_elaborated_body
+    core_field_ref_kind_tag, core_field_ref_same,
+    core_field_ref_tuple_index,
+    core_constructor_kind_tag, core_constructor_struct_owner,
+    core_constructor_variant, core_constructor_arity,
+    core_type_ref_same
 }
 
 fn copy_binders(values: List<CoreBinder>) -> List<CoreBinder> {
@@ -1140,11 +1139,348 @@ pub fn elaborate_core_derived_json_body(
     plan: CoreDerivedJsonPlan
 ) -> CoreBody { elaborate_text_body(plan.plan) }
 
-// Clone is the same exact deep constructor elaboration audited in
-// core_elaborate; no resource Clone or alternate implementation exists here.
-pub fn elaborate_core_derived_struct_clone_body(
-    plan: CoreStructClonePlan
-) -> CoreBody { core_elaborated_body(elaborate_core_struct_deep_clone(plan)) }
-pub fn elaborate_core_derived_enum_clone_body(
-    plan: CoreEnumClonePlan
-) -> CoreBody { core_elaborated_body(elaborate_core_enum_deep_clone(plan)) }
+// ============================================================
+// Clone — recursive typed tuple reconstruction and outer nominal construct
+// ============================================================
+
+enum CoreDerivedCloneValuePlanValue {
+    CloneLeaf(CoreDerivedCallPlan),
+    CloneTuple {
+        constructor: CoreConstructorRef,
+        fields: List<CoreFieldRef>,
+        field_types: List<CoreTypeRef>,
+        children: List<CoreDerivedCloneValuePlan>,
+        effects: CoreEffectSet,
+        origin: OriginRef
+    }
+}
+pub struct CoreDerivedCloneValuePlan {
+    source: CoreDerivedValueRef,
+    result_type: CoreTypeRef,
+    value: CoreDerivedCloneValuePlanValue
+}
+
+fn copy_clone_values(
+    values: List<CoreDerivedCloneValuePlan>
+) -> List<CoreDerivedCloneValuePlan> {
+    let mut result: List<CoreDerivedCloneValuePlan> = []
+    for value in values { result.push(value) }
+    result
+}
+
+pub fn make_core_derived_clone_leaf(
+    source: CoreDerivedValueRef, call: CoreDerivedCallPlan
+) -> CoreDerivedCloneValuePlan {
+    if call.method.is_none() ||
+       !core_type_ref_same(source.ty, call.result_type) {
+        panic("Core derive Clone: leaf lacks exact Clone method/result")
+    }
+    CoreDerivedCloneValuePlan {
+        source: source, result_type: source.ty,
+        value: CoreDerivedCloneValuePlanValue::CloneLeaf(call)
+    }
+}
+
+fn require_child_projection(
+    parent: CoreDerivedValueRef, child: CoreDerivedValueRef,
+    field: CoreFieldRef, field_type: CoreTypeRef, ordinal: Int
+) {
+    if !slot_ref_same(parent.root, child.root) ||
+       !core_type_ref_same(parent.root_type, child.root_type) ||
+       child.projections.len() != parent.projections.len() + 1 ||
+       child.projection_types.len() != parent.projection_types.len() + 1 ||
+       !core_field_ref_same(
+            child.projections.get(child.projections.len() - 1).unwrap(), field) ||
+       !core_type_ref_same(child.ty, field_type) ||
+       core_field_ref_kind_tag(field) != 2 ||
+       core_field_ref_tuple_index(field) != ordinal {
+        panic("Core derive Clone: tuple child projection/order differs")
+    }
+    let mut index = 0
+    while index < parent.projections.len() {
+        if !core_field_ref_same(
+                parent.projections.get(index).unwrap(),
+                child.projections.get(index).unwrap()) ||
+           !core_type_ref_same(
+                parent.projection_types.get(index).unwrap(),
+                child.projection_types.get(index).unwrap()) {
+            panic("Core derive Clone: tuple child path prefix differs")
+        }
+        index = index + 1
+    }
+}
+
+pub fn make_core_derived_clone_tuple(
+    source: CoreDerivedValueRef, constructor: CoreConstructorRef,
+    fields: List<CoreFieldRef>, field_types: List<CoreTypeRef>,
+    children: List<CoreDerivedCloneValuePlan>,
+    effects: CoreEffectSet, origin: OriginRef
+) -> CoreDerivedCloneValuePlan {
+    if core_constructor_kind_tag(constructor) != 2 ||
+       core_constructor_arity(constructor) != fields.len() ||
+       fields.len() != field_types.len() || fields.len() != children.len() {
+        panic("Core derive Clone: tuple constructor/child arity differs")
+    }
+    let mut index = 0
+    while index < fields.len() {
+        let child = children.get(index).unwrap()
+        require_child_projection(
+            source, child.source, fields.get(index).unwrap(),
+            field_types.get(index).unwrap(), index)
+        if !core_type_ref_same(
+                child.result_type, field_types.get(index).unwrap()) {
+            panic("Core derive Clone: tuple child result type differs")
+        }
+        index = index + 1
+    }
+    CoreDerivedCloneValuePlan {
+        source: source, result_type: source.ty,
+        value: CoreDerivedCloneValuePlanValue::CloneTuple {
+            constructor: constructor, fields: copy_fields(fields),
+            field_types: copy_types(field_types),
+            children: copy_clone_values(children),
+            effects: make_core_effect_set(core_effect_set_atoms(effects)),
+            origin: origin
+        }
+    }
+}
+
+fn clone_value_expr(value: CoreDerivedCloneValuePlan) -> CoreExpr {
+    match value.value {
+        CoreDerivedCloneValuePlanValue::CloneLeaf(call) =>
+            derived_call(call, [derived_value_expr(value.source)]),
+        CoreDerivedCloneValuePlanValue::CloneTuple {
+            constructor, fields, field_types, children, effects, origin
+        } => {
+            let mut values: List<CoreFieldValue> = []
+            let mut index = 0
+            while index < children.len() {
+                let cloned = clone_value_expr(children.get(index).unwrap())
+                if !core_type_ref_same(
+                        children.get(index).unwrap().result_type,
+                        field_types.get(index).unwrap()) {
+                    panic("Core derive Clone: tuple child type drifted")
+                }
+                values.push(make_core_field_value(
+                    fields.get(index).unwrap(), cloned))
+                index = index + 1
+            }
+            make_core_construct_expr(
+                value.result_type, effects, origin, constructor, values)
+        }
+    }
+}
+
+pub struct CoreDerivedCloneFieldPlan {
+    field: CoreFieldRef,
+    ty: CoreTypeRef,
+    value: CoreDerivedCloneValuePlan
+}
+pub fn make_core_derived_clone_field_plan(
+    field: CoreFieldRef, ty: CoreTypeRef,
+    value: CoreDerivedCloneValuePlan
+) -> CoreDerivedCloneFieldPlan {
+    if !core_type_ref_same(value.result_type, ty) ||
+       (value.source.projections.len() > 0 &&
+        !core_field_ref_same(
+            value.source.projections.get(
+                value.source.projections.len() - 1).unwrap(), field)) {
+        panic("Core derive Clone: outer field/value relation differs")
+    }
+    CoreDerivedCloneFieldPlan { field: field, ty: ty, value: value }
+}
+fn copy_clone_fields(
+    values: List<CoreDerivedCloneFieldPlan>
+) -> List<CoreDerivedCloneFieldPlan> {
+    let mut result: List<CoreDerivedCloneFieldPlan> = []
+    for value in values { result.push(value) }
+    result
+}
+
+pub struct CoreDerivedCloneVariantPlan {
+    variant: VariantRef,
+    constructor: CoreConstructorRef,
+    pattern_slots: List<SlotRef>,
+    fields: List<CoreDerivedCloneFieldPlan>,
+    origin: OriginRef
+}
+pub fn make_core_derived_clone_variant_plan(
+    variant: VariantRef, constructor: CoreConstructorRef,
+    pattern_slots: List<SlotRef>,
+    fields: List<CoreDerivedCloneFieldPlan>, origin: OriginRef
+) -> CoreDerivedCloneVariantPlan {
+    if core_constructor_kind_tag(constructor) != 1 ||
+       !variant_ref_same(core_constructor_variant(constructor), variant) ||
+       pattern_slots.len() != fields.len() {
+        panic("Core derive Clone: variant constructor/pattern census differs")
+    }
+    CoreDerivedCloneVariantPlan {
+        variant: variant, constructor: constructor,
+        pattern_slots: copy_slots(pattern_slots),
+        fields: copy_clone_fields(fields), origin: origin
+    }
+}
+fn copy_clone_variants(
+    values: List<CoreDerivedCloneVariantPlan>
+) -> List<CoreDerivedCloneVariantPlan> {
+    let mut result: List<CoreDerivedCloneVariantPlan> = []
+    for value in values { result.push(value) }
+    result
+}
+
+enum CoreDerivedClonePlanValue {
+    StructClone {
+        constructor: CoreConstructorRef,
+        fields: List<CoreDerivedCloneFieldPlan>
+    },
+    EnumClone(List<CoreDerivedCloneVariantPlan>)
+}
+pub struct CoreDerivedClonePlan {
+    header: CoreDerivedHeader,
+    owner: RegisteredNominalRef,
+    target_type: CoreTypeRef,
+    value: CoreDerivedClonePlanValue
+}
+
+pub fn make_core_derived_struct_clone_plan(
+    header: CoreDerivedHeader, owner: RegisteredNominalRef,
+    target_type: CoreTypeRef, constructor: CoreConstructorRef,
+    fields: List<CoreDerivedCloneFieldPlan>
+) -> CoreDerivedClonePlan {
+    if header.other_slot.is_some() ||
+       !core_type_ref_same(header.result_type, target_type) ||
+       !core_type_ref_same(
+            binder_type(header.binders, header.self_slot), target_type) ||
+       core_constructor_kind_tag(constructor) != 0 ||
+       !registered_nominal_ref_same(
+            core_constructor_struct_owner(constructor), owner) {
+        panic("Core derive Clone: struct header/constructor differs")
+    }
+    let mut exact_fields: List<CoreFieldRef> = []
+    for field in fields {
+        if !slot_ref_same(field.value.source.root, header.self_slot) ||
+           !core_type_ref_same(field.value.source.root_type, target_type) {
+            panic("Core derive Clone: struct field source is not self")
+        }
+        exact_fields.push(field.field)
+    }
+    let mut left = 0
+    while left < exact_fields.len() {
+        let mut right = left + 1
+        while right < exact_fields.len() {
+            if core_field_ref_same(
+                    exact_fields.get(left).unwrap(),
+                    exact_fields.get(right).unwrap()) {
+                panic("Core derive Clone: struct field is duplicated")
+            }
+            right = right + 1
+        }
+        left = left + 1
+    }
+    CoreDerivedClonePlan {
+        header: header, owner: owner, target_type: target_type,
+        value: CoreDerivedClonePlanValue::StructClone {
+            constructor: constructor, fields: copy_clone_fields(fields)
+        }
+    }
+}
+
+pub fn make_core_derived_enum_clone_plan(
+    header: CoreDerivedHeader, owner: RegisteredNominalRef,
+    target_type: CoreTypeRef,
+    variants: List<CoreDerivedCloneVariantPlan>
+) -> CoreDerivedClonePlan {
+    if variants.len() == 0 || header.other_slot.is_some() ||
+       !core_type_ref_same(header.result_type, target_type) ||
+       !core_type_ref_same(
+            binder_type(header.binders, header.self_slot), target_type) {
+        panic("Core derive Clone: enum header/type differs")
+    }
+    let mut left = 0
+    while left < variants.len() {
+        let current = variants.get(left).unwrap()
+        let mut field_index = 0
+        while field_index < current.fields.len() {
+            let field = current.fields.get(field_index).unwrap()
+            let slot = current.pattern_slots.get(field_index).unwrap()
+            if !slot_ref_same(field.value.source.root, slot) ||
+               !core_type_ref_same(field.value.source.root_type, field.ty) ||
+               !core_type_ref_same(
+                    binder_type(header.binders, slot), field.ty) {
+                panic("Core derive Clone: enum payload source/binder differs")
+            }
+            field_index = field_index + 1
+        }
+        let mut right = left + 1
+        while right < variants.len() {
+            if variant_ref_same(
+                    variants.get(left).unwrap().variant,
+                    variants.get(right).unwrap().variant) {
+                panic("Core derive Clone: enum variant is duplicated")
+            }
+            right = right + 1
+        }
+        left = left + 1
+    }
+    CoreDerivedClonePlan {
+        header: header, owner: owner, target_type: target_type,
+        value: CoreDerivedClonePlanValue::EnumClone(
+            copy_clone_variants(variants))
+    }
+}
+
+fn clone_variant_pattern(
+    target_type: CoreTypeRef, value: CoreDerivedCloneVariantPlan
+) -> CorePattern {
+    let mut fields: List<CorePatternField> = []
+    let mut index = 0
+    while index < value.fields.len() {
+        let field = value.fields.get(index).unwrap()
+        fields.push(make_core_pattern_field(
+            field.field, make_core_binding_pattern(
+                field.ty, value.pattern_slots.get(index).unwrap())))
+        index = index + 1
+    }
+    make_core_variant_pattern(target_type, value.variant, fields)
+}
+
+pub fn elaborate_core_derived_clone_body(
+    plan: CoreDerivedClonePlan
+) -> CoreBody {
+    let tail = match plan.value {
+        CoreDerivedClonePlanValue::StructClone { constructor, fields } => {
+            let mut values: List<CoreFieldValue> = []
+            for field in fields {
+                values.push(make_core_field_value(
+                    field.field, clone_value_expr(field.value)))
+            }
+            make_core_construct_expr(
+                plan.target_type, plan.header.result_effects,
+                plan.header.body_origin, constructor, values)
+        },
+        CoreDerivedClonePlanValue::EnumClone(variants) => {
+            let scrutinee = make_core_read_expr(
+                plan.target_type, make_core_effect_set([]),
+                plan.header.body_origin, plan.header.self_slot)
+            let mut arms: List<CoreMatchArm> = []
+            for variant in variants {
+                let mut values: List<CoreFieldValue> = []
+                for field in variant.fields {
+                    values.push(make_core_field_value(
+                        field.field, clone_value_expr(field.value)))
+                }
+                let constructed = make_core_construct_expr(
+                    plan.target_type, plan.header.result_effects,
+                    variant.origin, variant.constructor, values)
+                arms.push(make_core_match_arm(
+                    clone_variant_pattern(plan.target_type, variant), none,
+                    make_core_block([], some(constructed), variant.origin),
+                    variant.origin))
+            }
+            make_core_match_expr(
+                plan.target_type, plan.header.result_effects,
+                plan.header.body_origin, scrutinee, arms)
+        }
+    }
+    finalize_body(plan.header, tail)
+}
