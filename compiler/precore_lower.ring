@@ -14,7 +14,8 @@ use ir_identity::{
     make_named_callee_ref, make_dynamic_callee_ref,
     make_source_slot_ref, slot_domain_lexical,
     callee_ref_is_named, callee_ref_named_symbol,
-    symbol_ref_canonical_payload,
+    symbol_ref_canonical_payload, symbol_ref_same,
+    system_effect_ref_same,
     make_registered_nominal_ref,
     nominal_field_ref_owner, nominal_field_ref_index, nominal_field_ref_name,
     nominal_field_ref_same,
@@ -28,6 +29,7 @@ use ir_inventory::{
     ExecutableRef, BinderEntry,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_anonymous_path, executable_ref_origin_module_key,
+    system_host_callable_effect, system_host_callable_executable,
     binder_entry_slot
 }
 use env::{TypeEnv}
@@ -812,30 +814,34 @@ fn close_stmt(value: HStmt) -> List<HStmt> {
         HStmt::Break { span } => [HStmt::Break { span: span }],
         HStmt::Continue { span } => [HStmt::Continue { span: span }],
         HStmt::LetDestructure {
-            pattern, pattern_plan, init, span, ..
+            pattern, pattern_plan, bindings, init, span
         } => {
             let plan = match pattern_plan {
                 some(value) => value,
                 none => panic(
                     "PreCore closure: let destructure exact pattern is absent")
             }
-            let scrutinee = close_expr(init)
-            let mut arms: List<HMatchArm> = []
-            for expanded in expand_pattern(pattern, plan) {
-                arms.push(HMatchArm {
-                    pattern: expanded.pattern,
-                    pattern_plan: some(expanded.plan),
-                    bindings: closed_pattern_bindings(expanded.plan),
-                    guard: none, body: unit_expr(span), span: span
-                })
+            let expanded = expand_pattern(pattern, plan)
+            if expanded.len() != 1 {
+                panic("PreCore closure: let destructure is not irrefutable")
             }
-            [HStmt::ExprStmt {
-                expr: HExpr::MatchExpr {
-                    scrutinee: scrutinee, arms: arms,
-                    ty: Type::UnitType, effects: hexpr_effects(scrutinee),
-                    span: span
-                },
-                span: span
+            let mut exact_bindings: List<HLetDestructureBinding> = []
+            for binding in bindings {
+                if binding.projection.is_none() ||
+                   (binding.name != "_" && binding.slot.is_none()) {
+                    panic(
+                        "PreCore closure: destructure exact projection/slot is absent")
+                }
+                exact_bindings.push(binding)
+            }
+            let exact = expanded.get(0).unwrap()
+            // This is no longer a surface pattern operation: the carrier is a
+            // deterministic ordered list of exact source SlotRef projections.
+            // Keeping it atomic preserves one evaluation of `init` and keeps
+            // every source binding visible to the following lexical statements.
+            [HStmt::LetDestructure {
+                pattern: exact.pattern, pattern_plan: some(exact.plan),
+                bindings: exact_bindings, init: close_expr(init), span: span
             }]
         },
         HStmt::IfLet {
@@ -1035,8 +1041,34 @@ fn close_expr(value: HExpr) -> HExpr {
             callee, args, type_args, resolved_dicts,
             callee_ref, method_ref, system_host, ty, effects, span
         } => {
-            if callee_ref.is_none() {
-                panic("PreCore closure: call exact callee is absent")
+            match (callee_ref, method_ref, system_host) {
+                (none, some(_), none) => {},
+                (some(_), none, none) => {},
+                (some(exact_callee), none, some(host)) => {
+                    let host_executable = system_host_callable_executable(host)
+                    if !callee_ref_is_named(exact_callee) ||
+                       !executable_ref_is_named(host_executable) ||
+                       !symbol_ref_same(
+                            callee_ref_named_symbol(exact_callee),
+                            executable_ref_named_symbol(host_executable)) {
+                        panic("PreCore closure: system call exact callee differs")
+                    }
+                    let expected_effect = system_host_callable_effect(host)
+                    let mut found = false
+                    for atom in effects.effects {
+                        match atom {
+                            Effect::SystemEffect { reference } => if
+                                system_effect_ref_same(reference, expected_effect) {
+                                found = true
+                            },
+                            _ => {}
+                        }
+                    }
+                    if !found {
+                        panic("PreCore closure: system capability is absent")
+                    }
+                },
+                _ => panic("PreCore closure: call identity domains overlap/absent")
             }
             HExpr::Call {
                 callee: close_expr(callee),
