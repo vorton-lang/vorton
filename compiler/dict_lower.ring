@@ -12,7 +12,7 @@
 //     sites).  Borrow of a binding in scope.
 //   * DictRef::Wrapped{..}   — a parameterized type's dict resolution.
 //
-// This pass rewrites every use site (Call.resolved_dicts,
+// This pass rewrites every use site (Call.resolved_dicts/bound evidence,
 // Ident.dict_closure_dicts, and BinOp eq/ord_dispatch extra_dicts):
 //   1. Static(name) plain refs  → registered in HProgram.static_dicts
 //      (footprint; LLVM memoises the singleton on first use).
@@ -41,7 +41,10 @@ use types::{Type, EffectRow, EMPTY_ROW}
 use hir::{HProgram, HDecl, HStmt, HExpr, HMatchArm, HStructFieldInit,
     HNominalStructFieldInit,
     HStringInterpPart, HEffectHandler, HEffectOp, HTraitMethod,
-    DictRef, TraitDispatch, DictDispatchInfo,
+    DictRef, TraitDispatch, MethodCallRef,
+    make_bound_method_call_ref, method_call_ref_is_bound,
+    method_call_ref_bound, method_call_ref_bound_evidence,
+    method_call_ref_signature, method_call_ref_receiver_mutable,
     HDictDef, DerivedImpl, DerivedField, DerivedVariant, FieldAction,
     dict_instance_name, hexpr_type, hexpr_effects, hexpr_span,
     synthetic_def_id, SYNTHETIC_DICT_DEF_ID_BASE,
@@ -338,14 +341,20 @@ fn dl_dispatch(d: TraitDispatch?, mut defs: List<HDictDef>, mut seen: Set<Str>) 
     }
 }
 
-fn dl_dict_dispatch(
-    d: DictDispatchInfo?, mut defs: List<HDictDef>, mut seen: Set<Str>
-) -> DictDispatchInfo? {
-    match d {
-        some(info) => some(DictDispatchInfo {
-            dict_ref: dl_ref_static_only(info.dict_ref, defs, seen),
-            method: info.method
-        }),
+fn dl_method_call_ref(
+    value: MethodCallRef?, mut defs: List<HDictDef>, mut seen: Set<Str>
+) -> MethodCallRef? {
+    match value {
+        some(exact) => if method_call_ref_is_bound(exact) {
+            some(make_bound_method_call_ref(
+                method_call_ref_bound(exact),
+                dl_ref_static_only(
+                    method_call_ref_bound_evidence(exact), defs, seen),
+                method_call_ref_signature(exact),
+                method_call_ref_receiver_mutable(exact)))
+        } else {
+            some(exact)
+        },
         none => none
     }
 }
@@ -402,7 +411,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 ty: ty, effects: effects, span: span },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: dl_expr(operand, defs, seen, counter), ty: ty, effects: effects, span: span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, method_ref, ty, effects, span } => {
+        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref, method_ref, ty, effects, span } => {
             let new_callee = dl_expr(callee, defs, seen, counter)
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(dl_expr(a, defs, seen, counter)) }
@@ -413,8 +422,8 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             }
             let call = HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
                 resolved_dicts: new_dicts,
-                dict_dispatch: dl_dict_dispatch(dict_dispatch, defs, seen),
-                method_ref: method_ref,
+                callee_ref: callee_ref,
+                method_ref: dl_method_call_ref(method_ref, defs, seen),
                 ty: ty, effects: effects, span: span }
             if lets.len() == 0 {
                 call

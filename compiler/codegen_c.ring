@@ -1520,7 +1520,7 @@ fn propagate_transitive_effects_c(fn_callees: Map<Str, Set<Str>>, mut local_fn_e
 // B-141: default trait method bodies (port of emit_trait_default_methods /
 // emit_one_default_method).  __<Trait>_<method>(self_dict,
 // ...supertrait_dicts, ...params, ...evidence): self_dict is registered as
-// __ring_self_<Trait> so body DictDispatchInfo references find it.
+// __ring_self_<Trait> so exact bound-call DictRef evidence finds it.
 // ============================================================
 
 fn emit_c_trait_default_methods(mut ctx: CCtx, trait_name: Str, methods: List<HTraitMethod>) {

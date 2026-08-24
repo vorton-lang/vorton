@@ -167,6 +167,11 @@ pub struct InferCtx {
     // as LocalBorrow; neither a FnType nor a spelling may manufacture direct
     // callable/const-getter provenance.
     pub value_binding_kinds: Map<Int, ValueBindingKind>,
+    // Resolver-issued value identity. The payload index is populated from the
+    // namespace plan; registration relates each fresh lexical DefId to that
+    // exact SymbolRef once. Core assembly consumes this map without reminting.
+    pub value_symbols: Map<Int, SymbolRef>,
+    value_symbols_by_payload: Map<Str, SymbolRef>,
     pub boxed_vars: Set<Int>,
     pub lambda_depth: Int,
     pub var_lambda_depth: Map<Int, Int>,
@@ -230,6 +235,8 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         mod_path_stack: [],
         use_aliases: map_new(),
         value_binding_kinds: map_new(),
+        value_symbols: map_new(),
+        value_symbols_by_payload: map_new(),
         boxed_vars: set_new(),
         lambda_depth: 0,
         var_lambda_depth: map_new(),
@@ -1204,7 +1211,13 @@ pub fn record_value_origin(mut ctx: InferCtx, local_name: Str, origin: Str) {
 pub fn record_variant_ctor_origin(mut ctx: InferCtx, local_name: Str, origin: Str) {
     match ctx.env.lookup(local_name) {
         some(scheme) => match scheme.def_id {
-            some(def_id) => { ctx.env.types.variant_ctor_origins.insert(def_id, origin) },
+            some(def_id) => {
+                ctx.env.types.variant_ctor_origins.insert(def_id, origin)
+                match ctx.value_symbols_by_payload.get(origin) {
+                    some(symbol) => ctx.value_symbols.insert(def_id, symbol),
+                    none => {}
+                }
+            },
             none => {}
         },
         none => {}
@@ -1251,10 +1264,63 @@ fn resolve_fn_bound_dict_ref(
 pub fn record_value_binding_kind(mut ctx: InferCtx, local_name: Str, kind: ValueBindingKind) {
     match ctx.env.lookup(local_name) {
         some(scheme) => match scheme.def_id {
-            some(def_id) => { ctx.value_binding_kinds.insert(def_id, kind) },
+            some(def_id) => {
+                ctx.value_binding_kinds.insert(def_id, kind)
+                let payload = match ctx.use_aliases.get(def_id) {
+                    some(origin) => origin,
+                    none => local_name
+                }
+                match ctx.value_symbols_by_payload.get(payload) {
+                    some(symbol) => {
+                        match ctx.value_symbols.get(def_id) {
+                            some(existing) => if !symbol_ref_same(
+                                    existing, symbol) {
+                                panic("value identity: DefId was rebound to another SymbolRef")
+                            },
+                            none => ctx.value_symbols.insert(def_id, symbol)
+                        }
+                    },
+                    none => {}
+                }
+            },
             none => {}
         },
         none => {}
+    }
+}
+
+pub fn value_symbol_ref(ctx: InferCtx, def_id: Int) -> SymbolRef {
+    match ctx.value_symbols.get(def_id) {
+        some(symbol) => symbol,
+        none => panic("value identity: callable DefId has no resolver SymbolRef")
+    }
+}
+
+pub fn record_value_symbol_ref(
+    mut ctx: InferCtx, local_name: Str, symbol: SymbolRef
+) {
+    match ctx.env.lookup(local_name) {
+        some(scheme) => match scheme.def_id {
+            some(def_id) => match ctx.value_symbols.get(def_id) {
+                some(existing) => if !symbol_ref_same(existing, symbol) {
+                    panic("value identity: explicit SymbolRef changed")
+                },
+                none => ctx.value_symbols.insert(def_id, symbol)
+            },
+            none => panic("value identity: explicit callable has no DefId")
+        },
+        none => panic("value identity: explicit callable is not registered")
+    }
+}
+
+pub fn current_identity_file_key(ctx: InferCtx) -> Str {
+    match ctx.impl_check_frame_stack.get(
+            ctx.impl_check_frame_stack.len() - 1) {
+        some(frame) => frame.0,
+        none => match ctx.struct_identity_file_key {
+            some(file_key) => file_key,
+            none => panic("value identity: no active resolver/check file")
+        }
     }
 }
 
@@ -3391,6 +3457,32 @@ pub fn install_struct_identity_ledger(
     ctx.struct_identity_file_key = some(file_key)
     ctx.struct_identity_root_frame = none
     ctx.struct_identity_child_frames = map_new()
+    for binding in plan.bindings {
+        match binding.namespace {
+            NamespaceKind::Value => {
+                let payload = symbol_ref_canonical_payload(binding.symbol)
+                match ctx.value_symbols_by_payload.get(payload) {
+                    some(existing) => if !symbol_ref_same(
+                            existing, binding.symbol) {
+                        panic("value identity: canonical payload has two SymbolRefs")
+                    },
+                    none => ctx.value_symbols_by_payload.insert(
+                        payload, binding.symbol)
+                }
+            },
+            _ => {}
+        }
+    }
+    // Project dependency hydration precedes installation of this module's
+    // resolver plan. Relate those already-minted alias DefIds now that their
+    // exact delivered SymbolRefs are available.
+    for alias_entry in ctx.use_aliases.entries() {
+        let (def_id, payload) = alias_entry
+        match ctx.value_symbols_by_payload.get(payload) {
+            some(symbol) => ctx.value_symbols.insert(def_id, symbol),
+            none => {}
+        }
+    }
     for frame in plan.frames {
         if frame.file_key == file_key {
             if frame.parent_frame_index < 0 {

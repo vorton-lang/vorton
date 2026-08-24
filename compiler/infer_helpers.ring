@@ -14,8 +14,10 @@ use env::{TypeEnv, TypeScheme, ImplEntry, ImplMethodSchemeCore,
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     type_error, unify_at, resolve_relative_qualifier,
     resolve_dict_ref_for_type, resolve_dicts_from_scheme, variant_ctor_origin,
-    value_binding_kind}
-use ir_identity::{IntrinsicRef, ImplMethodRef}
+    value_binding_kind, value_symbol_ref}
+use ir_identity::{IntrinsicRef, ImplMethodRef,
+    impl_method_ref_owner, impl_owner_ref_trait, impl_owner_ref_provider,
+    make_named_callee_ref}
 
 
 pub struct MethodLookupResult {
@@ -716,7 +718,13 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                     }
                     return HExpr::Call {
                         callee: getter, args: [], type_args: [],
-                        resolved_dicts: [], dict_dispatch: none,
+                        resolved_dicts: [],
+                        callee_ref: match def_id {
+                            some(id) => some(make_named_callee_ref(
+                                value_symbol_ref(ctx, id))),
+                            none => panic(
+                                "const getter: exact DefId is missing")
+                        },
                         method_ref: none,
                         ty: ty, effects: effects, span: span
                     }
@@ -903,11 +911,14 @@ pub fn check_receiver_mutability(mut ctx: InferCtx, receiver: Expr, recv_type: T
 // ============================================================
 
 pub fn lookup_impl_method(mut ctx: InferCtx, type_name: Str, method: Str) -> MethodLookupResult {
-    match ctx.env.trait_reg.method_origins.get(type_name) {
-        some(origins) => match origins.get(method) {
-            some(origin) => match find_impl_by_provider(
+    match ctx.env.trait_reg.method_index.get(type_name) {
+        some(index) => match index.get(method) {
+            some(method_ref) => {
+                let owner_ref = impl_method_ref_owner(method_ref)
+                match find_impl_by_provider(
                 ctx.env.trait_reg, type_name,
-                origin.trait_ref, origin.provider_ref
+                impl_owner_ref_trait(owner_ref),
+                impl_owner_ref_provider(owner_ref)
             ) {
                 some(owner) => match owner.method_schemes.get(method) {
                     some(core) => MethodLookupResult {
@@ -915,12 +926,13 @@ pub fn lookup_impl_method(mut ctx: InferCtx, type_name: Str, method: Str) -> Met
                             ctx.env.instantiate_impl_method_core(owner, core)),
                         method_core: some(core),
                         impl_owner: some(owner),
-                        impl_method_ref: some(origin.method_ref),
+                        impl_method_ref: some(method_ref),
                         intrinsic_ref: owner.method_intrinsics.get(method)
                     },
                     none => panic("method lookup: owner lost method core")
                 },
                 none => panic("method lookup: method index lost owner")
+                }
             },
             none => MethodLookupResult {
                 method_type: none, method_core: none, impl_owner: none,

@@ -3,7 +3,7 @@ use types::{Type, EffectRow, StructField, EnumVariant,
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
     ExplicitDerivedProviderPlan, NominalDerivedProviderPlan,
-    TypedImplPredicate, MethodOrigin,
+    TypedImplPredicate,
     add_impl, has_impl, find_impl, find_impl_by_provider, install_method_core,
     instantiate_impl_runtime_requirements,
     make_impl_method_scheme_core, make_typed_impl_predicate,
@@ -13,7 +13,6 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_assoc_predicate_name, impl_assoc_predicate_type,
     apply_subst_map,
     impl_target_symbol,
-    ImplOwnerState, impl_owner_is_provisional,
     delegate_plan_not_applicable}
 use builtins::{builtin_option_derived_owners}
 use ast::{Span, DeriveAttribute, span_zero}
@@ -117,8 +116,7 @@ fn builtin_option_derived_impl(owner: ImplEntry) -> DerivedImpl {
         some(name) => name,
         none => panic("builtin Option derived descriptor lost trait name")
     }
-    if impl_owner_is_provisional(owner) ||
-       owner.target_type_name != BUILTIN_OPTION ||
+    if owner.target_type_name != BUILTIN_OPTION ||
        !impl_provider_kind_same(
             impl_provider_ref_kind(provider_ref),
             impl_provider_kind_builtin()) ||
@@ -192,8 +190,7 @@ fn derived_impl_matches_owner(di: DerivedImpl, owner: ImplEntry) -> Bool {
         some(name) => name == di.trait_name,
         none => false
     }
-    !impl_owner_is_provisional(owner) && provider_matches &&
-        trait_matches && trait_name_matches &&
+    provider_matches && trait_matches && trait_name_matches &&
         owner.target_type_name == di.type_name &&
         string_lists_same(owner.type_params, di.type_params) &&
         trait_bounds_same(
@@ -968,8 +965,7 @@ fn finalize_derived_impl(
         some(name) => name,
         none => panic("derived impl descriptor owner lost trait name")
     }
-    if impl_owner_is_provisional(owner) ||
-       owner.target_type_name != di.type_name ||
+    if owner.target_type_name != di.type_name ||
        owner_trait_name != di.trait_name ||
        !impl_provider_ref_same(owner_provider, di.provider_ref) ||
        !symbol_ref_same(owner_trait, di.trait_ref) ||
@@ -1651,7 +1647,6 @@ fn register_derived_impl(
     let method_names = get_method_names(trait_name)
     register_trait_methods(methods, trait_name, self_type, type_var_ids, scheme_bounds)
 
-    let origin = "<derive>:${di.type_name}:${trait_name}"
     let mut exact: Map<Str, ImplMethodSchemeCore> = map_new()
     for entry in methods.entries() {
         let (method_name, scheme) = entry
@@ -1691,9 +1686,7 @@ fn register_derived_impl(
         trait_ref: some(trait_ref),
         owner_ref: some(owner_ref),
         delegate_plan: delegate_plan_not_applicable(),
-        origin: origin,
-        span: span,
-        owner_state: ImplOwnerState::FinalOwner
+        span: span
     }
     add_impl(env.trait_reg, owner)
 
@@ -1703,14 +1696,7 @@ fn register_derived_impl(
         let (method_name, core) = entry
         let _ = install_method_core(
             env.trait_reg, sink, di.type_name, method_name, core,
-            MethodOrigin {
-                origin: origin,
-                trait_name: some(trait_name),
-                provider_ref: provider_ref,
-                trait_ref: some(trait_ref),
-                method_ref: method_refs.get(method_name).unwrap(),
-                span: span
-            })
+            method_refs.get(method_name).unwrap(), span)
     }
     owner
 }

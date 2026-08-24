@@ -9,6 +9,7 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     make_concrete_method_call_ref, make_bound_method_call_ref,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_intrinsic, method_call_ref_impl, method_call_ref_bound,
+    method_call_ref_bound_evidence,
     method_call_ref_signature, method_call_ref_receiver_mutable,
     hexpr_type, hexpr_effects, hexpr_span}
 use union_find::{UnionFind}
@@ -45,7 +46,8 @@ fn zonk_method_call_ref(
                     method_call_ref_receiver_mutable(exact)))
             } else {
                 some(make_bound_method_call_ref(
-                    method_call_ref_bound(exact), signature,
+                    method_call_ref_bound(exact),
+                    method_call_ref_bound_evidence(exact), signature,
                     method_call_ref_receiver_mutable(exact)))
             }
         },
@@ -269,7 +271,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
             HExpr::BinOp { op: op, left: zonk_expr(ctx, left), right: zonk_expr(ctx, right), eq_dispatch: zonk_dispatch(ctx, eq_dispatch), ord_dispatch: zonk_dispatch(ctx, ord_dispatch), ty: z_ty, effects: z_eff, span: z_span },
         HExpr::UnaryOp { op, operand, .. } =>
             HExpr::UnaryOp { op: op, operand: zonk_expr(ctx, operand), ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, method_ref, .. } =>
+        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref, method_ref, .. } =>
             HExpr::Call {
                 // A syntactic Ident callee uses the direct ABI and gets its
                 // evidence from Call.resolved_dicts.  Every other recursive
@@ -278,7 +280,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 args: args.map(fn(a) { zonk_expr(ctx, a) }),
                 type_args: type_args.map(fn(t) { zonk_type(ctx, t) }),
                 resolved_dicts: resolved_dicts,
-                dict_dispatch: dict_dispatch,
+                callee_ref: callee_ref,
                 method_ref: zonk_method_call_ref(ctx, method_ref),
                 ty: z_ty, effects: z_eff, span: z_span
             },

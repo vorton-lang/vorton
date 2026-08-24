@@ -20,16 +20,19 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
     HNominalStructFieldInit, HFieldAccessKind,
     HEffectHandler, HEffectOp, DictRef,
-    TraitDispatch, DictDispatchInfo, MethodCallRef,
+    TraitDispatch, MethodCallRef,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
+    method_call_ref_is_bound,
     method_call_ref_intrinsic, method_call_ref_impl,
+    method_call_ref_bound, method_call_ref_bound_evidence,
     method_call_ref_signature, effect_op_slot,
     hexpr_type, hexpr_effects, is_fresh_owned_bool_value, variant_ctor_name, compare_by_first,
     trait_dict_name, trait_bound_param_name, evidence_param_name,
     effect_name_from_evidence_param, is_extern_handle_type,
     slot_bridge_runtime_name, is_synthetic_dict_def_id}
-use ir_identity::{builtin_method_site_tag, intrinsic_ref_site,
+use ir_identity::{CalleeRef, builtin_method_site_tag, intrinsic_ref_site,
     impl_method_ref_owner, impl_method_ref_name,
+    trait_method_ref_callable_slot_index,
     impl_owner_ref_target, symbol_ref_canonical_payload,
     BUILTIN_METHOD_STR_LEN, BUILTIN_METHOD_STR_CONTAINS,
     BUILTIN_METHOD_STR_STARTS_WITH, BUILTIN_METHOD_STR_ENDS_WITH,
@@ -134,10 +137,10 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
         HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch, ty, .. } =>
             gen_c_binop(ctx, op, left, right, eq_dispatch, ord_dispatch, ty),
         HExpr::UnaryOp { op, operand, ty, .. } => gen_c_unaryop(ctx, op, operand, ty),
-        HExpr::Call { callee, args, resolved_dicts, dict_dispatch, method_ref, ty, .. } =>
+        HExpr::Call { callee, args, resolved_dicts, callee_ref, method_ref, ty, .. } =>
             gen_c_call(
-                ctx, callee, args, resolved_dicts, dict_dispatch,
-                method_ref, ty),
+                ctx, callee, args, resolved_dicts,
+                callee_ref, method_ref, ty),
         HExpr::FieldAccess { receiver, field, access_kind, ty, .. } =>
             gen_c_field_access(ctx, receiver, field, access_kind, ty),
         HExpr::StructLit { name, fields, spread, .. } =>
@@ -400,7 +403,7 @@ fn gen_c_extern_closure_wrapper(
     }
     let result = gen_c_expr(ctx, HExpr::Call {
         callee: synthetic_callee, args: synthetic_args, type_args: [],
-        resolved_dicts: [], dict_dispatch: none, method_ref: none,
+        resolved_dicts: [], callee_ref: none, method_ref: none,
         ty: return_type,
         effects: fn_effects, span: span
     })
@@ -1433,7 +1436,7 @@ fn collect_c_captures(
         HExpr::UnaryOp { operand, .. } => {
             collect_c_captures(ctx, operand, params, captures)
         },
-        HExpr::Call { callee, args, resolved_dicts, dict_dispatch, effects, .. } => {
+        HExpr::Call { callee, args, resolved_dicts, method_ref, effects, .. } => {
             collect_c_captures(ctx, callee, params, captures)
             for a in args {
                 collect_c_captures(ctx, a, params, captures)
@@ -1441,10 +1444,13 @@ fn collect_c_captures(
             for d in resolved_dicts {
                 collect_c_dictref_names(ctx, d, params, captures)
             }
-            match dict_dispatch {
-                some(dd) => collect_c_dictref_names(
-                    ctx, dd.dict_ref, params, captures),
-                none => {},
+            match method_ref {
+                some(exact) => if method_call_ref_is_bound(exact) {
+                    collect_c_dictref_names(
+                        ctx, method_call_ref_bound_evidence(exact),
+                        params, captures)
+                },
+                none => {}
             }
             // B-145: evidence params forwarded by calls inside the body must
             // be captured (only ones actually in named_values are).
@@ -1909,85 +1915,11 @@ pub fn gen_c_closure_call(
     t
 }
 
-// Extract the trait name from a dict param name __ring_<typeparam>_<Trait>.
-fn c_trait_name_from_dict_param(dict_param: Str) -> Str? {
-    let prefix = "__ring_"
-    if !dict_param.starts_with(prefix) { return none }
-    let rest = dict_param.slice(prefix.len(), dict_param.len())
-    match rest.index_of("_") {
-        some(us) => some(rest.slice(us + 1, rest.len())),
-        none => none,
-    }
-}
-
-// Extract the trait name from a static dict name __<TypeName>_<TraitName>
-// by longest-suffix match against known trait names (sorted scan — audit
-// #237 determinism discipline).
-fn c_trait_name_from_static_dict(ctx: CCtx, dict_param: Str) -> Str? {
-    if !dict_param.starts_with("__") { return none }
-    let body = dict_param.slice(2, dict_param.len())
-    let mut best_match: Str? = none
-    let mut best_len = 0
-    let mut sorted = ctx.trait_method_order.entries()
-    sorted.sort_by(compare_by_first)
-    for entry in sorted {
-        let (tn, _methods) = entry
-        let suffix = "_${tn}"
-        if body.ends_with(suffix) && tn.len() > best_len {
-            best_match = some(tn)
-            best_len = tn.len()
-        }
-    }
-    best_match
-}
-
-// Fallback ordering for built-in traits.
-fn c_builtin_method_index(method: Str) -> Int {
-    if method == "eq" { 0 }
-    else if method == "ne" { 1 }
-    else if method == "clone" { 0 }
-    else if method == "cmp" { 0 }
-    else if method == "debug" { 0 }
-    else { 0 }
-}
-
-// Slot index of a method within a trait's dict — authoritative order =
-// ctx.trait_method_order (hir.ring scan_trait_method_order, single source).
-fn get_c_trait_method_index(ctx: CCtx, dict_param: Str, method: Str) -> Int {
-    let trait_name_opt = match c_trait_name_from_dict_param(dict_param) {
-        some(tn) => some(tn),
-        none => c_trait_name_from_static_dict(ctx, dict_param),
-    }
-    match trait_name_opt {
-        some(trait_name) => {
-            match ctx.trait_method_order.get(trait_name) {
-                some(order) => {
-                    let mut idx = 0
-                    for m in order {
-                        if m == method { return idx }
-                        idx = idx + 1
-                    }
-                    c_builtin_method_index(method)
-                },
-                none => c_builtin_method_index(method),
-            }
-        },
-        none => c_builtin_method_index(method),
-    }
-}
-
-// Trait method call through a dict param (port of gen_dict_dispatch_call):
-// load the dict, read the method's closure slot, call through it.
-fn c_dispatch_dict_name(dict_ref: DictRef) -> Str {
-    match dict_ref {
-        DictRef::Simple(name) => name,
-        DictRef::Static(name) => name,
-        DictRef::Wrapped { .. } => panic(
-            "C codegen: DictDispatchInfo Wrapped base was not normalized")
-    }
-}
-
-fn gen_c_dict_dispatch_call(mut ctx: CCtx, callee: HExpr, args: List<HExpr>, dd: DictDispatchInfo) -> Str {
+// Trait method call through exact dictionary evidence:
+// load exact evidence, read the resolver-issued callable slot, and call it.
+fn gen_c_bound_method_call(
+    mut ctx: CCtx, callee: HExpr, args: List<HExpr>, exact: MethodCallRef
+) -> Str {
     // Receiver from callee (FieldAccess) or first arg.
     let mut call_args: List<Str> = []
     let mut other_arg_start = 0
@@ -2012,9 +1944,10 @@ fn gen_c_dict_dispatch_call(mut ctx: CCtx, callee: HExpr, args: List<HExpr>, dd:
         }
     }
 
-    let dict_name = c_dispatch_dict_name(dd.dict_ref)
-    let dict_ref = c_resolve_dict_ref(ctx, dd.dict_ref)
-    let method_idx = get_c_trait_method_index(ctx, dict_name, dd.method)
+    let dict_ref = c_resolve_dict_ref(
+        ctx, method_call_ref_bound_evidence(exact))
+    let method_idx = trait_method_ref_callable_slot_index(
+        method_call_ref_bound(exact))
     let cls_ref = emit_c_receiver_load(
         ctx, dict_ref, method_idx + 1, "dict")
     gen_c_closure_call(ctx, cls_ref, call_args)
@@ -2735,18 +2668,25 @@ fn gen_c_intrinsic_method_call(
     result
 }
 
-fn gen_c_call(mut ctx: CCtx, callee: HExpr, args: List<HExpr>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, method_ref: MethodCallRef?, result_ty: Type) -> Str {
-    // Dict dispatch (trait method through dict param).  B-118: Unit-returning
-    // dispatch must yield RING_UNIT, not the ABI return value.
-    match dict_dispatch {
-        some(dd) => {
-            let raw = gen_c_dict_dispatch_call(ctx, callee, args, dd)
+fn gen_c_call(
+    mut ctx: CCtx, callee: HExpr, args: List<HExpr>,
+    resolved_dicts: List<DictRef>, callee_ref: CalleeRef?,
+    method_ref: MethodCallRef?,
+    result_ty: Type
+) -> Str {
+    let _ = callee_ref
+    // Bound dispatch consumes the exact TraitMethodRef slot and DictRef
+    // evidence carried by MethodCallRef. Unit-returning dispatch yields
+    // RING_UNIT rather than exposing the closure ABI return value.
+    match method_ref {
+        some(exact) => if method_call_ref_is_bound(exact) {
+            let raw = gen_c_bound_method_call(ctx, callee, args, exact)
             if is_unit_type(result_ty) {
                 return "RING_UNIT"
             }
             return raw
         },
-        none => {},
+        none => {}
     }
 
     let mut_flags = c_lookup_call_mut_flags(ctx, callee)
@@ -2795,7 +2735,7 @@ fn gen_c_call(mut ctx: CCtx, callee: HExpr, args: List<HExpr>, resolved_dicts: L
                     impl_method_ref_name(method_identity),
                     arg_vals, dict_vals)
             } else {
-                panic("C codegen: bound method reached direct call path")
+                panic("C codegen: unknown method identity domain")
             }
             return if is_unit_type(result_ty) { "RING_UNIT" } else { raw }
         },

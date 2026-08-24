@@ -3,7 +3,7 @@ use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, Span, Position, Effec
     UseDecl}
 use hir::{HDecl, HParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssocType,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod, HFieldAccessKind,
-    DictDispatchInfo, DictRef, trait_dict_name,
+    DictRef, trait_dict_name,
     make_intrinsic_method_call_ref, make_concrete_method_call_ref,
     make_bound_method_call_ref,
     hexpr_type, hexpr_effects, hexpr_span,
@@ -16,7 +16,7 @@ use ir_identity::{NominalFieldRef, nominal_field_ref_index, symbol_ref_same,
     trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index, trait_method_ref_name}
 use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
-    MethodOrigin, ImplEntry,
+    ImplEntry,
     ImplMethodSchemeCore,
     apply_subst, apply_subst_map, apply_subst_row_map,
     find_impl, find_impl_by_provider,
@@ -25,7 +25,7 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     delegate_child_provider_ref,
     delegate_child_provider_produced_owner_count,
     delegate_child_provider_had_semantic_error,
-    has_impl, impl_origin,
+    has_impl,
     install_method_core, replace_impl_method_core,
     impl_method_core_as_scheme, impl_method_core_from_scheme,
     build_type_var_map}
@@ -623,19 +623,13 @@ fn store_rebound_impl_method_scheme(
         },
         none => panic("impl method rebind: selected owner disappeared")
     }
-    let provider_ref = impl_owner_ref_provider(owner_ref)
     let core = impl_method_core_from_scheme(scheme)
     replace_impl_method_core(
         ctx.env.trait_reg, target_type, owner_ref, method_name, core)
     let _ = install_method_core(
         ctx.env.trait_reg, ctx.sink,
         target_type, method_name, core,
-        MethodOrigin {
-            origin: owner.origin, trait_name: trait_name,
-            provider_ref: provider_ref, trait_ref: owner.trait_ref,
-            method_ref: owner.method_refs.get(method_name).unwrap(),
-            span: span
-        })
+        owner.method_refs.get(method_name).unwrap(), span)
 }
 
 fn check_impl_decl(
@@ -1339,8 +1333,8 @@ fn expand_delegate_impls(
                                             }
 
                                             // #68: Check if this method is a default method without explicit impl
-                                            // on the field type. If so, use trait dict dispatch instead of UFCS.
-                                            let mut use_dict_dispatch = false
+                                            // on the field type. If so, use exact bound evidence instead of UFCS.
+                                            let mut use_bound_evidence = false
                                             if tm.has_default {
                                                 // Get the field type name
                                                 let ftn = match resolved_ft {
@@ -1359,15 +1353,15 @@ fn expand_delegate_impls(
                                                             none => {}
                                                         }
                                                         if !has_explicit {
-                                                            use_dict_dispatch = true
+                                                            use_bound_evidence = true
                                                         }
                                                     },
                                                     none => {}
                                                 }
                                             }
 
-                                            let call_expr = if use_dict_dispatch {
-                                                // Generate dict dispatch: __FieldType_Trait.method(self.field, args...)
+                                            let call_expr = if use_bound_evidence {
+                                                // Generate exact bound dispatch through __FieldType_Trait evidence.
                                                 let ftn = match resolved_ft {
                                                     Type::StructType { name: n, .. } => n,
                                                     Type::EnumType { name: n, .. } => n,
@@ -1386,13 +1380,11 @@ fn expand_delegate_impls(
                                                     args: dict_args,
                                                     type_args: [],
                                                     resolved_dicts: [],
-                                                    dict_dispatch: some(DictDispatchInfo {
-                                                        dict_ref: DictRef::Static(dict_name),
-                                                        method: tm.name
-                                                    }),
+                                                    callee_ref: none,
                                                     method_ref: some(
                                                         make_bound_method_call_ref(
-                                                            tm.method_ref, tm.ty,
+                                                            tm.method_ref,
+                                                            DictRef::Static(dict_name), tm.ty,
                                                             tm.param_mutabilities.first().unwrap_or(false))),
                                                     ty: ret_ty,
                                                     effects: eff,
@@ -1447,7 +1439,7 @@ fn expand_delegate_impls(
                                                     args: forward_args,
                                                     type_args: [],
                                                     resolved_dicts: resolved_forward_dicts,
-                                                    dict_dispatch: none,
+                                                    callee_ref: none,
                                                     method_ref: some(exact_forward_ref),
                                                     ty: ret_ty,
                                                     effects: eff,

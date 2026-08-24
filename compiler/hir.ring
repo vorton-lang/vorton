@@ -4,7 +4,7 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     ImplOwnerRef,
     VariantRef, VariantFieldRef,
     HandledEffectRef,
-    ImplMethodRef, IntrinsicRef,
+    ImplMethodRef, IntrinsicRef, CalleeRef,
     intrinsic_ref_same, impl_method_ref_same, trait_method_ref_same,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     nominal_field_ref_owner, nominal_field_ref_index,
@@ -59,9 +59,6 @@ pub fn is_synthetic_dict_def_id(def_id: Int) -> Bool {
 // Callable values installed directly by builtins.ring rather than parsed from
 // a Decl. Checker provenance and both native backends must consume this one
 // list so a newly added checker-only callable cannot drift across phases.
-pub const CHECKER_ONLY_EXTERN_CALLABLES: List<Str> =
-    ["Cell", "alloc", "dealloc", "ptr_copy", "ptr_from_addr"]
-
 // File-module declaration identity. `$` is not legal in a Ring identifier,
 // while resolver module prefixes use `$` between path segments.  Therefore
 // `$$_` is an unambiguous boundary between a module path and its declaration;
@@ -93,6 +90,9 @@ pub struct ModuleImplFact {
     // fn-method names in declaration order (delegates excluded upstream by
     // HIR construction only when they do not lower to HDecl::Fn).
     pub method_names: List<Str>,
+    // Existing HDecl::Fn visibility projected only for inherent impls. Trait
+    // impl surface is governed by target+trait visibility, never a member bit.
+    pub public_inherent_method_names: List<Str>,
     // True for impls declared at file level (frame zero); inline-mod impls
     // keep the public-frame gate applied during collection.
     pub is_top_level: Bool
@@ -214,6 +214,34 @@ pub enum DictRef {
     Static(Str)
 }
 
+fn dict_ref_same(left: DictRef, right: DictRef) -> Bool {
+    match (left, right) {
+        (DictRef::Simple(a), DictRef::Simple(b)) => a == b,
+        (DictRef::Static(a), DictRef::Static(b)) => a == b,
+        (DictRef::Wrapped {
+            dict: left_dict, trait_name: left_trait,
+            inner_dicts: left_inner
+         }, DictRef::Wrapped {
+            dict: right_dict, trait_name: right_trait,
+            inner_dicts: right_inner
+         }) => {
+            if left_dict != right_dict || left_trait != right_trait ||
+               left_inner.len() != right_inner.len() {
+                return false
+            }
+            for index in 0..left_inner.len() {
+                if !dict_ref_same(
+                        left_inner.get(index).unwrap(),
+                        right_inner.get(index).unwrap()) {
+                    return false
+                }
+            }
+            true
+        },
+        _ => false
+    }
+}
+
 // B-104 D4: a module-level static dict singleton definition (HProgram.static_dicts).
 //   inner == []  — a PLAIN static dict (impl dict or builtin primitive dict).
 //                  Its definition already exists (ring_dict_init_* / runtime
@@ -256,14 +284,6 @@ pub enum TraitDispatch {
     Tuple { element_types: List<Type>, elements: List<TraitDispatch> }
 }
 
-pub struct DictDispatchInfo {
-    // Bound dispatch is Simple; delegated concrete/default dispatch is
-    // Static.  The tag is the authority -- codegen never guesses a domain
-    // from the spelling.
-    pub dict_ref: DictRef,
-    pub method: Str
-}
-
 pub struct HStructFieldInit {
     pub name: Str,
     pub field_ref: VariantFieldRef,
@@ -276,7 +296,7 @@ pub struct HStructFieldInit {
 enum MethodCallRefValue {
     IntrinsicMethodValue(IntrinsicRef),
     ConcreteMethodValue(ImplMethodRef),
-    BoundMethodValue(TraitMethodRef)
+    BoundMethodValue { method: TraitMethodRef, evidence: DictRef }
 }
 
 pub struct MethodCallRef {
@@ -317,11 +337,14 @@ pub fn make_concrete_method_call_ref(
 }
 
 pub fn make_bound_method_call_ref(
-    method: TraitMethodRef, signature: Type, receiver_mutable: Bool
+    method: TraitMethodRef, evidence: DictRef,
+    signature: Type, receiver_mutable: Bool
 ) -> MethodCallRef {
     match signature {
         Type::FnType { .. } => MethodCallRef {
-            value: MethodCallRefValue::BoundMethodValue(method),
+            value: MethodCallRefValue::BoundMethodValue {
+                method: method, evidence: evidence
+            },
             signature: signature, receiver_mutable: receiver_mutable
         },
         _ => panic("HIR method call: bound signature is not callable")
@@ -344,7 +367,7 @@ pub fn method_call_ref_is_concrete(value: MethodCallRef) -> Bool {
 
 pub fn method_call_ref_is_bound(value: MethodCallRef) -> Bool {
     match value.value {
-        MethodCallRefValue::BoundMethodValue(_) => true,
+        MethodCallRefValue::BoundMethodValue { .. } => true,
         _ => false
     }
 }
@@ -358,8 +381,15 @@ pub fn method_call_ref_impl(value: MethodCallRef) -> ImplMethodRef {
 
 pub fn method_call_ref_bound(value: MethodCallRef) -> TraitMethodRef {
     match value.value {
-        MethodCallRefValue::BoundMethodValue(method) => method,
+        MethodCallRefValue::BoundMethodValue { method, .. } => method,
         _ => panic("HIR method call: non-bound has no TraitMethodRef")
+    }
+}
+
+pub fn method_call_ref_bound_evidence(value: MethodCallRef) -> DictRef {
+    match value.value {
+        MethodCallRefValue::BoundMethodValue { evidence, .. } => evidence,
+        _ => panic("HIR method call: non-bound has no dictionary evidence")
     }
 }
 
@@ -381,9 +411,12 @@ pub fn method_call_ref_same(
         (MethodCallRefValue::ConcreteMethodValue(a),
          MethodCallRefValue::ConcreteMethodValue(b)) =>
             impl_method_ref_same(a, b),
-        (MethodCallRefValue::BoundMethodValue(a),
-         MethodCallRefValue::BoundMethodValue(b)) =>
-            trait_method_ref_same(a, b),
+        (MethodCallRefValue::BoundMethodValue {
+            method: left_method, evidence: left_evidence
+         }, MethodCallRefValue::BoundMethodValue {
+            method: right_method, evidence: right_evidence
+         }) => trait_method_ref_same(left_method, right_method) &&
+            dict_ref_same(left_evidence, right_evidence),
         _ => false
     }
     identity_same && types_equal(left.signature, right.signature) &&
@@ -455,7 +488,7 @@ pub enum HExpr {
     Ident { name: Str, resolved_name: Str?, def_id: Int?, dict_closure_dicts: List<DictRef>?, ty: Type, effects: EffectRow, span: Span },
     BinOp { op: BinOp, left: HExpr, right: HExpr, eq_dispatch: TraitDispatch?, ord_dispatch: TraitDispatch?, ty: Type, effects: EffectRow, span: Span },
     UnaryOp { op: UnaryOp, operand: HExpr, ty: Type, effects: EffectRow, span: Span },
-    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, dict_dispatch: DictDispatchInfo?, method_ref: MethodCallRef?, ty: Type, effects: EffectRow, span: Span },
+    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, callee_ref: CalleeRef?, method_ref: MethodCallRef?, ty: Type, effects: EffectRow, span: Span },
     FieldAccess { receiver: HExpr, field: Str, access_kind: HFieldAccessKind, ty: Type, effects: EffectRow, span: Span },
     StructLit { name: Str, owner_ref: RegisteredNominalRef, type_args: List<Type>, fields: List<HNominalStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
     NamedVariantConstruct { enum_name: Str, variant_name: Str, variant_ref: VariantRef, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
@@ -1043,28 +1076,23 @@ fn validate_hir_expr(
         },
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
-        HExpr::Call { callee, args, dict_dispatch, method_ref, .. } => {
-            match dict_dispatch {
-                some(_) => match method_ref {
-                    some(exact_method) => if
-                            !method_call_ref_is_bound(exact_method) {
-                        panic("HIR method call: dictionary dispatch is not bound")
-                    } else if !types_equal(
-                            method_call_ref_signature(exact_method),
-                            hexpr_type(callee)) {
-                        panic("HIR method call: bound signature drifted")
-                    },
-                    none => panic(
-                        "HIR method call: dictionary dispatch has no exact trait member")
+        HExpr::Call { callee, args, callee_ref, method_ref, .. } => {
+            if callee_ref.is_some() && method_ref.is_some() {
+                panic("HIR call: ordinary and method identities overlap")
+            }
+            match callee {
+                HExpr::Ident { def_id: some(_), .. } => {
+                    if method_ref.is_none() && callee_ref.is_none() {
+                        panic("HIR call: exact Ident callee has no CalleeRef")
+                    }
                 },
-                none => match callee {
+                _ => {}
+            }
+            match callee {
                 HExpr::FieldAccess {
                     access_kind: HFieldAccessKind::Method, ty, ..
                 } => match method_ref {
                     some(exact_method) => {
-                        if method_call_ref_is_bound(exact_method) {
-                            panic("HIR method call: bound member lacks dictionary")
-                        }
                         if !types_equal(
                                 method_call_ref_signature(exact_method), ty) {
                             panic("HIR method call: exact signature drifted")
@@ -1075,7 +1103,6 @@ fn validate_hir_expr(
                 },
                 _ => if method_ref.is_some() {
                     panic("HIR method call: exact identity has no Method callee")
-                }
                 }
             }
             validate_hir_expr(callee, seen, scope)

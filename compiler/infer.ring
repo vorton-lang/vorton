@@ -10,7 +10,7 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HPatternBinding,
     HStructFieldInit, HNominalStructFieldInit, HFieldAccessKind,
     HStringInterpPart, HProgram, DerivedImpl,
-    TraitDispatch, DictDispatchInfo, DictRef, TraitBound,
+    TraitDispatch, DictRef, TraitBound,
     MethodCallRef, make_intrinsic_method_call_ref,
     make_concrete_method_call_ref, make_bound_method_call_ref,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod,
@@ -39,7 +39,9 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     register_callable_value_shadow,
     pending_dict_checkpoint, has_pending_dicts_since,
     remove_fail_effect,
-    generalize, free_type_vars, resolve_relative_qualifier}
+    generalize, free_type_vars, resolve_relative_qualifier,
+    value_binding_kind, value_symbol_ref, current_identity_file_key,
+    has_variant_ctor_origin_def_id}
 use exhaustive::{check_exhaustive}
 use infer_helpers::{MethodLookupResult, StmtResult,
     is_value_type, cancel_local_mut_effects, resolve_var_id,
@@ -50,7 +52,31 @@ use infer_helpers::{MethodLookupResult, StmtResult,
     check_expr_is_let_def, get_expr_def_id, is_mut_method_call, check_receiver_mutability,
     lookup_impl_method, lookup_trait_method,
     rewrite_bare_enum_bindings}
-use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef}
+use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
+    make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
+    slot_domain_lexical}
+
+fn exact_call_callee_ref(ctx: InferCtx, callee: HExpr) -> CalleeRef? {
+    match callee {
+        HExpr::Ident { def_id: some(def_id), .. } => {
+            if has_variant_ctor_origin_def_id(ctx, def_id) {
+                return some(make_named_callee_ref(
+                    value_symbol_ref(ctx, def_id)))
+            }
+            match value_binding_kind(ctx, some(def_id)) {
+                ValueBindingKind::DirectCallable |
+                ValueBindingKind::ExternCallable |
+                ValueBindingKind::ConstGetter => some(make_named_callee_ref(
+                    value_symbol_ref(ctx, def_id))),
+                ValueBindingKind::LocalBorrow => some(make_local_callee_ref(
+                    make_source_slot_ref(
+                        current_identity_file_key(ctx),
+                        slot_domain_lexical(), def_id)))
+            }
+        },
+        _ => none
+    }
+}
 
 // ============================================================
 // Block inference (from infer-stmt.ts)
@@ -425,7 +451,6 @@ struct MethodCallSelection {
     method_core: ImplMethodSchemeCore?,
     impl_owner: ImplEntry?,
     impl_method_ref: ImplMethodRef?,
-    dict_dispatch: DictDispatchInfo?,
     intrinsic_ref: IntrinsicRef?
 }
 
@@ -444,7 +469,6 @@ fn select_for_protocol_method(
         method_core: some(impl_core),
         impl_owner: some(impl_entry),
         impl_method_ref: impl_entry.method_refs.get(method),
-        dict_dispatch: none,
         intrinsic_ref: impl_entry.method_intrinsics.get(method)
     }
 }
@@ -1479,8 +1503,8 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                     callee: callee,
                     args: [recv_r.hexpr, idx_r.hexpr],
                     type_args: [],
-                    resolved_dicts: resolved_dicts,
-                    dict_dispatch: none, method_ref: none,
+                    resolved_dicts: resolved_dicts, method_ref: none,
+                    callee_ref: exact_call_callee_ref(ctx, callee),
                     ty: final_result_ty,
                     effects: combined_effects,
                     span: span
@@ -1743,7 +1767,8 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
     InferResult {
         hexpr: HExpr::Call {
             callee: callee_r.hexpr, args: hargs, type_args: [],
-            resolved_dicts: resolved_dicts, dict_dispatch: none,
+            resolved_dicts: resolved_dicts,
+            callee_ref: exact_call_callee_ref(ctx, callee_r.hexpr),
             method_ref: none,
             ty: result_type, effects: effects, span: span
         },
@@ -1818,9 +1843,9 @@ fn infer_method_call_from_receiver(
     let mut method_core: ImplMethodSchemeCore? = none
     let mut impl_owner: ImplEntry? = none
     let mut impl_method_ref: ImplMethodRef? = none
-    let mut dict_dispatch: DictDispatchInfo? = none
     let mut intrinsic_ref: IntrinsicRef? = none
     let mut bound_method_ref: TraitMethodRef? = none
+    let mut bound_evidence: DictRef? = none
     let mut bound_receiver_mutable = false
 
     match selection {
@@ -1829,7 +1854,6 @@ fn infer_method_call_from_receiver(
             method_core = selected.method_core
             impl_owner = selected.impl_owner
             impl_method_ref = selected.impl_method_ref
-            dict_dispatch = selected.dict_dispatch
             intrinsic_ref = selected.intrinsic_ref
         },
         none => {}
@@ -1911,11 +1935,10 @@ fn infer_method_call_from_receiver(
                                             some(value) => value,
                                             none => false
                                         }
-                                        dict_dispatch = some(DictDispatchInfo {
-                                            dict_ref: DictRef::Simple(trait_bound_param_name(
-                                                fb.type_param_name, fb.trait_name)),
-                                            method: method
-                                        })
+                                        bound_evidence = some(DictRef::Simple(
+                                            trait_bound_param_name(
+                                                fb.type_param_name,
+                                                fb.trait_name)))
                                     },
                                     none => {}
                                 }
@@ -2075,10 +2098,16 @@ fn infer_method_call_from_receiver(
             some(concrete) => some(make_concrete_method_call_ref(
                 concrete, callee_type,
                 is_mut_method_call(ctx, recv_type, method))),
-            none => match bound_method_ref {
-                some(bound) => some(make_bound_method_call_ref(
-                    bound, callee_type, bound_receiver_mutable)),
-                none => none
+            none => match (bound_method_ref, bound_evidence) {
+                (some(bound), some(evidence)) => some(
+                    make_bound_method_call_ref(
+                        bound, evidence, callee_type,
+                        bound_receiver_mutable)),
+                (some(_), none) => panic(
+                    "method inference: bound member has no exact evidence"),
+                (none, some(_)) => panic(
+                    "method inference: evidence has no bound member"),
+                (none, none) => none
             }
         }
     }
@@ -2089,7 +2118,8 @@ fn infer_method_call_from_receiver(
                 access_kind: HFieldAccessKind::Method,
                 ty: callee_type, effects: EMPTY_ROW, span: span },
             args: hargs, type_args: [], resolved_dicts: resolved_dicts,
-            dict_dispatch: dict_dispatch, method_ref: exact_method_ref,
+            callee_ref: none,
+            method_ref: exact_method_ref,
             ty: result_type, effects: effects, span: span
         },
         subst: s, effects: effects

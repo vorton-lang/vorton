@@ -921,7 +921,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, method_ref, ty, effects, span } => {
+        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref, method_ref, ty, effects, span } => {
             // Callee is a borrow read (FieldAccess receiver / Ident) — normalise its
             // subexprs but it is not itself a materialisable value.
             let new_callee = anf_callee(callee, hoists, externs, counter)
@@ -943,7 +943,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 new_args.push(anf_operand(a, hoists, externs, counter))
             }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
-                resolved_dicts: resolved_dicts, dict_dispatch: dict_dispatch,
+                resolved_dicts: resolved_dicts, callee_ref: callee_ref,
                 method_ref: method_ref,
                 ty: ty, effects: effects, span: span }
         },
@@ -2616,7 +2616,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, dict_dispatch, method_ref, ty, effects, span } => {
+        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref, method_ref, ty, effects, span } => {
             // Callee is a borrow.  Arguments BORROW by default (the callee does not
             // drop them — point 4) EXCEPT two ownership-taking sinks:
             //   1. a known container-sink (push/insert/set): the value escapes into
@@ -2647,7 +2647,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 i = i + 1
             }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
-                resolved_dicts: resolved_dicts, dict_dispatch: dict_dispatch,
+                resolved_dicts: resolved_dicts, callee_ref: callee_ref,
                 method_ref: method_ref,
                 ty: ty, effects: effects, span: span }
         },

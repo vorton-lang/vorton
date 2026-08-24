@@ -636,11 +636,6 @@ fn impl_method_core_same(
     true
 }
 
-pub enum ImplOwnerState {
-    ProvisionalPrelude,
-    FinalOwner
-}
-
 // One runtime dictionary predicate instantiated from the unique frozen impl
 // owner.  This is a one-way consumer value, never a stored predicate authority.
 pub struct ImplRuntimeRequirement {
@@ -760,11 +755,10 @@ pub struct ImplEntry {
     pub method_names: List<Str>,
     pub assoc_types: Map<Str, Type>,
     // Trait/inherent method cores live only on their owning entry. The flat
-    // ordinary-call view is a MethodOrigin index, never a second scheme map.
+    // ordinary-call view carries only exact ImplMethodRef identity.
     pub method_schemes: Map<Str, ImplMethodSchemeCore>,
-    // Registration-issued executable members.  Final owners carry one exact
-    // ImplMethodRef for every method core; provisional prelude reservations
-    // carry none until their source owner finalizes.
+    // Registration-issued executable members. Every owner carries one exact
+    // ImplMethodRef for every method core.
     pub method_refs: Map<Str, ImplMethodRef>,
     // Exact builtin method semantic identity.  The owning method scheme is
     // the sole signature payload; this map may only relate that core to one
@@ -774,19 +768,6 @@ pub struct ImplEntry {
     pub trait_ref: SymbolRef?,
     pub owner_ref: ImplOwnerRef?,
     pub delegate_plan: DelegatePlanState,
-    // Stable across export/re-export hydration.  Distinct source impl blocks
-    // must never be collapsed merely because target/trait spellings match.
-    pub origin: Str,
-    pub span: Span,
-    pub owner_state: ImplOwnerState
-}
-
-pub struct MethodOrigin {
-    pub origin: Str,
-    pub trait_name: Str?,
-    pub provider_ref: ImplProviderRef,
-    pub trait_ref: SymbolRef?,
-    pub method_ref: ImplMethodRef,
     pub span: Span
 }
 
@@ -845,7 +826,7 @@ pub struct TypeRegistry {
 pub struct TraitRegistry {
     pub traits: Map<Str, TraitDef>,
     pub trait_impls: Map<Str, List<ImplEntry>>,
-    pub method_origins: Map<Str, Map<Str, MethodOrigin>>,
+    pub method_index: Map<Str, Map<Str, ImplMethodRef>>,
     pub mut_methods: Map<Str, Set<Str>>
 }
 
@@ -899,7 +880,7 @@ pub fn new_type_env() -> TypeEnv {
         trait_reg: TraitRegistry {
             traits: map_new(),
             trait_impls: map_new(),
-            method_origins: map_new(),
+            method_index: map_new(),
             mut_methods: map_new()
         },
         scope: ScopeManager {
@@ -1093,60 +1074,6 @@ impl TypeEnv {
 // trait_impls helpers (Map<Str, List<ImplEntry>> keyed by target_type_name)
 // ============================================================
 
-pub fn impl_origin(
-    target_type_name: Str, trait_name: Str?, span: Span
-) -> Str {
-    let trait_part = match trait_name {
-        some(name) => name,
-        none => "<inherent>"
-    }
-    "${span.file}:${span.start.offset.to_str()}:${target_type_name}:${trait_part}"
-}
-
-fn path_has_suffix(path: Str, suffix: Str) -> Bool {
-    let normalized = path.replace("\\", "/")
-    if normalized.len() < suffix.len() { return false }
-    normalized.slice(normalized.len() - suffix.len(), normalized.len()) == suffix
-}
-
-// List/Map/Set HOF schemes are compiler predeclarations for the matching
-// standard-library impl blocks. Give the declaration and definition one
-// stable source identity so the definition may rebind its inferred effects
-// without weakening duplicate detection for any user impl block.
-pub fn impl_decl_origin(
-    target_type_name: Str, trait_name: Str?,
-    type_params: List<TypeParam>, span: Span
-) -> Str {
-    if trait_name.is_none() {
-        let has_bounds = type_params.any(fn(param) {
-            param.bounds.len() > 0
-        })
-        if target_type_name == "List" && !has_bounds &&
-           path_has_suffix(span.file, "std/list.ring") {
-            return "<std-predecl>:List:unbounded"
-        }
-        if target_type_name == "Map" &&
-           path_has_suffix(span.file, "std/map.ring") {
-            if has_bounds {
-                return "<std-predecl>:Map:bounded"
-            }
-            return "<std-predecl>:Map:unbounded"
-        }
-        if target_type_name == "Set" &&
-           path_has_suffix(span.file, "std/set.ring") {
-            if has_bounds {
-                return "<std-predecl>:Set:bounded"
-            }
-            return "<std-predecl>:Set:unbounded"
-        }
-    }
-    impl_origin(target_type_name, trait_name, span)
-}
-
-pub fn impl_method_origin(impl_origin_: Str, method_name: Str) -> Str {
-    "${impl_origin_}::${method_name}"
-}
-
 fn method_owner_display(trait_name: Str?) -> Str {
     match trait_name {
         some(name) => "trait '${nominal_display_name(name)}'",
@@ -1316,28 +1243,9 @@ fn impl_entry_owner_shape_same(left: ImplEntry, right: ImplEntry) -> Bool {
         assoc_type_map_same(left.assoc_types, right.assoc_types)
 }
 
-fn impl_owner_state_same(left: ImplOwnerState, right: ImplOwnerState) -> Bool {
-    match (left, right) {
-        (ImplOwnerState::ProvisionalPrelude,
-         ImplOwnerState::ProvisionalPrelude) => true,
-        (ImplOwnerState::FinalOwner, ImplOwnerState::FinalOwner) => true,
-        _ => false
-    }
-}
-
-fn impl_owner_span_same(left: Span, right: Span) -> Bool {
-    left.file == right.file &&
-        left.start.line == right.start.line &&
-        left.start.column == right.start.column &&
-        left.start.offset == right.start.offset &&
-        left.end.line == right.end.line &&
-        left.end.column == right.end.column &&
-        left.end.offset == right.end.offset
-}
-
 // Complete equality for a registration-issued final owner. Export/re-export
-// dedupe uses this shared invariant after target+origin match; it may never
-// treat that opaque token pair as proof that the structural owner is equal.
+// dedupe uses this shared invariant after exact owner-key match; the opaque
+// identity alone may never stand in for structural equality.
 pub fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
     optional_impl_provider_ref_same(
             left.provider_ref, right.provider_ref) &&
@@ -1347,8 +1255,7 @@ pub fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
         method_ref_map_same(left.method_refs, right.method_refs) &&
         method_intrinsic_map_same(
             left.method_intrinsics, right.method_intrinsics) &&
-        delegate_plan_state_same(left.delegate_plan, right.delegate_plan) &&
-        impl_owner_state_same(left.owner_state, right.owner_state)
+        delegate_plan_state_same(left.delegate_plan, right.delegate_plan)
 }
 
 pub fn impl_entry_exact_key_same(left: ImplEntry, right: ImplEntry) -> Bool {
@@ -1359,7 +1266,7 @@ pub fn impl_entry_exact_key_same(left: ImplEntry, right: ImplEntry) -> Bool {
 }
 
 fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
-    if entry.target_type_name == "" || entry.origin == "" ||
+    if entry.target_type_name == "" ||
        entry.type_params.len() != entry.type_param_vars.len() {
         panic("impl owner: incomplete owner entry")
     }
@@ -1492,95 +1399,19 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
         },
         _ => panic("impl owner: provider/delegate plan state mismatch")
     }
-    match entry.owner_state {
-        ImplOwnerState::ProvisionalPrelude => {
-            if entry.provider_ref.is_some() {
-                panic("impl owner: provisional prelude published provider")
-            }
-            if !entry.origin.starts_with("<std-predecl>:") {
-                panic("impl owner: only std predecls may remain provisional")
-            }
-            if entry.owner_ref.is_some() ||
-               entry.method_names.len() != 0 ||
-               entry.method_schemes.len() != 0 ||
-               entry.method_refs.len() != 0 {
-                panic("impl owner: provisional prelude owner published methods")
+    match (entry.provider_ref, entry.owner_ref) {
+        (some(provider), some(owner)) => {
+            if !impl_provider_ref_same(
+                    impl_owner_ref_provider(owner), provider) ||
+               !optional_symbol_ref_same(
+                    impl_owner_ref_trait(owner), entry.trait_ref) ||
+               symbol_ref_canonical_payload(
+                    impl_owner_ref_target(owner)) != entry.target_type_name ||
+               entry.method_refs.len() != entry.method_schemes.len() {
+                panic("impl owner: typed owner/method closure drifted")
             }
         },
-        ImplOwnerState::FinalOwner => match
-                (entry.provider_ref, entry.owner_ref) {
-            (some(provider), some(owner)) => {
-                if !impl_provider_ref_same(
-                        impl_owner_ref_provider(owner), provider) ||
-                   !optional_symbol_ref_same(
-                        impl_owner_ref_trait(owner), entry.trait_ref) ||
-                   symbol_ref_canonical_payload(
-                        impl_owner_ref_target(owner)) != entry.target_type_name ||
-                   entry.method_refs.len() != entry.method_schemes.len() {
-                    panic("impl owner: typed owner/method closure drifted")
-                }
-            },
-            _ => panic("impl owner: final owner lacks typed identity")
-        }
-    }
-}
-
-pub fn impl_owner_is_provisional(entry: ImplEntry) -> Bool {
-    match entry.owner_state {
-        ImplOwnerState::ProvisionalPrelude => true,
-        ImplOwnerState::FinalOwner => false
-    }
-}
-
-pub fn finalize_provisional_impl_owner(
-    mut reg: TraitRegistry, entry: ImplEntry
-) {
-    validate_impl_entry(reg, entry)
-    if impl_owner_is_provisional(entry) {
-        panic("impl owner: finalization received provisional entry")
-    }
-    let mut impls = match reg.trait_impls.get(entry.target_type_name) {
-        some(values) => values,
-        none => panic("impl owner: provisional owner is missing")
-    }
-    match reg.method_origins.get(entry.target_type_name) {
-        some(origins) => {
-            for origin_entry in origins.entries() {
-                let (_, indexed) = origin_entry
-                if indexed.origin == entry.origin {
-                    panic("impl owner: provisional owner published a stale method index")
-                }
-            }
-        },
-        none => {}
-    }
-    let mut found = 0
-    for index in 0..impls.len() {
-        match impls.get(index) {
-            some(existing) => if existing.origin == entry.origin {
-                found = found + 1
-                if !impl_owner_is_provisional(existing) ||
-                   !impl_entry_owner_shape_same(existing, entry) {
-                    panic("impl owner: provisional/source structural mismatch")
-                }
-                impls.set(index, entry)
-            },
-            none => {}
-        }
-    }
-    if found != 1 {
-        panic("impl owner: provisional finalization is not unique")
-    }
-}
-
-pub fn assert_no_provisional_impl_owners(reg: TraitRegistry) {
-    for map_entry in reg.trait_impls.entries() {
-        let (_, owners) = map_entry
-        for owner in owners {
-            if impl_owner_is_provisional(owner) {
-                panic("impl owner: provisional prelude owner was not finalized")
-            }
-        }
+        _ => panic("impl owner: final owner lacks typed identity")
     }
 }
 
@@ -1589,17 +1420,16 @@ pub fn assert_no_provisional_impl_owners(reg: TraitRegistry) {
 pub fn install_method_core(
     mut reg: TraitRegistry, mut sink: CollectingSink,
     target_type: Str, method_name: Str,
-    core: ImplMethodSchemeCore, incoming: MethodOrigin
+    core: ImplMethodSchemeCore, incoming: ImplMethodRef,
+    diagnostic_span: Span
 ) -> Bool {
+    let incoming_owner = impl_method_ref_owner(incoming)
     let owner = match find_impl_by_provider(
-        reg, target_type, incoming.trait_ref, incoming.provider_ref
+        reg, target_type, impl_owner_ref_trait(incoming_owner),
+        impl_owner_ref_provider(incoming_owner)
     ) {
         some(found) => found,
         none => panic("impl method index: owner entry is missing")
-    }
-    if !optional_string_same(owner.trait_name, incoming.trait_name) ||
-       !optional_symbol_ref_same(owner.trait_ref, incoming.trait_ref) {
-        panic("impl method index: owner trait mismatch")
     }
     match owner.method_schemes.get(method_name) {
         some(stored) => if !impl_method_core_same(stored, core) {
@@ -1609,35 +1439,39 @@ pub fn install_method_core(
     }
     match (owner.method_refs.get(method_name), owner.owner_ref) {
         (some(stored_ref), some(owner_ref)) => if
-                !impl_method_ref_same(stored_ref, incoming.method_ref) ||
+                !impl_method_ref_same(stored_ref, incoming) ||
                 !impl_owner_ref_same(
                     impl_method_ref_owner(stored_ref), owner_ref) {
             panic("impl method index: exact member differs from owner")
         },
         _ => panic("impl method index: owner has no exact method relation")
     }
-    let mut origins = match reg.method_origins.get(target_type) {
+    let mut method_index = match reg.method_index.get(target_type) {
         some(existing) => existing,
         none => {
-            let created: Map<Str, MethodOrigin> = map_new()
-            reg.method_origins.insert(target_type, created)
+            let created: Map<Str, ImplMethodRef> = map_new()
+            reg.method_index.insert(target_type, created)
             created
         }
     }
 
-    match origins.get(method_name) {
+    match method_index.get(method_name) {
         some(existing) => {
-            if impl_method_ref_same(
-                    existing.method_ref, incoming.method_ref) {
-                origins.insert(method_name, incoming)
+            if impl_method_ref_same(existing, incoming) {
+                method_index.insert(method_name, incoming)
                 true
             } else {
-                let old_owner = method_owner_display(existing.trait_name)
-                let new_owner = method_owner_display(incoming.trait_name)
+                let old_owner = match impl_owner_ref_trait(
+                        impl_method_ref_owner(existing)) {
+                    some(trait_ref) => "trait '${nominal_display_name(
+                        symbol_ref_canonical_payload(trait_ref))}'",
+                    none => "an inherent impl"
+                }
+                let new_owner = method_owner_display(owner.trait_name)
                 sink.report(make_diag(
                     E0504, Severity::SevError,
                     "Ambiguous method '${method_name}' on '${nominal_display_name(target_type)}': provided by ${old_owner} and ${new_owner}",
-                    incoming.span,
+                    diagnostic_span,
                     DiagnosticContext::TraitError {
                         detail: "same-target method origins must be unique"
                     }))
@@ -1645,7 +1479,7 @@ pub fn install_method_core(
             }
         },
         none => {
-            origins.insert(method_name, incoming)
+            method_index.insert(method_name, incoming)
             true
         }
     }
@@ -1659,10 +1493,6 @@ pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {
             for existing in impls {
                 if impl_entry_exact_key_same(existing, entry) {
                     matched = true
-                    if impl_owner_is_provisional(existing) ||
-                       impl_owner_is_provisional(entry) {
-                        panic("impl owner: provisional replay requires explicit finalization")
-                    }
                     if !impl_entry_final_same(existing, entry) {
                         panic("impl owner: same-provider replay changed frozen entry")
                     }
@@ -1846,15 +1676,6 @@ pub fn instantiate_impl_runtime_requirements(
         }
     }
     some(requirements)
-}
-
-pub fn find_impl_by_origin(
-    reg: TraitRegistry, type_name: Str, origin: Str
-) -> ImplEntry? {
-    match reg.trait_impls.get(type_name) {
-        some(impls) => impls.find(fn(i) { i.origin == origin }),
-        none => none
-    }
 }
 
 pub fn replace_impl_method_core(

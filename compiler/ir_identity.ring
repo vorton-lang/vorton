@@ -881,6 +881,37 @@ pub fn intrinsic_ref_same(left: IntrinsicRef, right: IntrinsicRef) -> Bool {
         symbol_ref_same(left.symbol, right.symbol)
 }
 
+// Fixed compiler-provided 0.1 value sites which have no source declaration.
+// Their tag domain is independent from builtin method sites and runtime ABI
+// ordinals; only builtins may relate a site to its source spelling/signature.
+pub const BUILTIN_VALUE_CELL_CONSTRUCTOR: Int = 0
+pub const BUILTIN_VALUE_ALLOC: Int = 1
+pub const BUILTIN_VALUE_DEALLOC: Int = 2
+pub const BUILTIN_VALUE_PTR_COPY: Int = 3
+pub const BUILTIN_VALUE_PTR_FROM_ADDR: Int = 4
+pub const BUILTIN_VALUE_SITE_COUNT: Int = 5
+
+pub struct BuiltinValueSite { tag: Int }
+
+pub fn builtin_value_site_from_tag(tag: Int) -> BuiltinValueSite {
+    if tag < 0 || tag >= BUILTIN_VALUE_SITE_COUNT {
+        panic("IR identity: invalid builtin value site")
+    }
+    BuiltinValueSite { tag: tag }
+}
+
+pub fn builtin_value_site_tag(value: BuiltinValueSite) -> Int {
+    builtin_value_site_from_tag(value.tag).tag
+}
+
+pub fn builtin_value_symbol(value: BuiltinValueSite) -> SymbolRef {
+    let tag = builtin_value_site_tag(value)
+    make_symbol_ref(
+        "$builtin", namespace_value(),
+        "builtin-value:${tag.to_str()}",
+        "builtin:value-site:${tag.to_str()}")
+}
+
 const IMPL_PROVIDER_SOURCE: Int = 0
 const IMPL_PROVIDER_BUILTIN: Int = 1
 const IMPL_PROVIDER_DERIVED: Int = 2
@@ -1196,6 +1227,20 @@ pub fn make_dynamic_callee_ref(path: PathRef) -> CalleeRef {
 pub fn callee_ref_is_named(value: CalleeRef) -> Bool {
     match value.value {
         CalleeRefValue::NamedCalleeValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn callee_ref_is_local(value: CalleeRef) -> Bool {
+    match value.value {
+        CalleeRefValue::LocalCalleeValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn callee_ref_is_dynamic(value: CalleeRef) -> Bool {
+    match value.value {
+        CalleeRefValue::DynamicCalleeValue(_) => true,
         _ => false
     }
 }

@@ -2,7 +2,6 @@ use types::{Type, UNIT, nominal_display_name}
 use ast::{Program, Decl, UseDecl, UseImport, Span, TypeParam, span_zero}
 use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImplFact,
     HStringInterpPart, HEffectHandler, ValueBindingKind,
-    CHECKER_ONLY_EXTERN_CALLABLES,
     compare_by_first, is_user_drop_type, hexpr_type,
     map_index_helper_source_name, map_index_helper_identity,
     prelude_extern_identity,
@@ -10,10 +9,11 @@ use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImpl
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, new_collecting_sink, make_diag}
 use env::{TypeEnv, TypeScheme, add_impl, find_impl,
     find_impl_by_provider, impl_entry_exact_key_same,
-    optional_symbol_ref_same,
-    install_method_core, assert_no_provisional_impl_owners}
+    optional_symbol_ref_same, install_method_core}
 use builtins::{register_builtins, register_hof_intrinsics,
-    finalize_std_hof_fallbacks, validate_builtin_method_core_shadow}
+    finalize_std_hof_fallbacks, validate_builtin_method_core_shadow,
+    checker_only_builtin_values, checker_builtin_value_name,
+    checker_builtin_value_symbol}
 use derive::{prepend_builtin_option_derived_impls,
     validate_derived_impls}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
@@ -21,7 +21,8 @@ use dict_lower::{lower_dicts}
 use andor_lower::{lower_andor}
 use infer_ctx::{InferCtx, new_infer_ctx as new_base_infer_ctx,
     type_error, record_value_origin, record_variant_ctor_origin,
-    record_value_binding_kind, install_project_namespace_plan,
+    record_value_binding_kind, record_value_symbol_ref,
+    install_project_namespace_plan,
     install_struct_identity_ledger, enter_struct_identity_root_frame,
     exit_struct_identity_frame, close_struct_identity_ledger}
 use infer_register::{register_decl_public}
@@ -33,7 +34,8 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
     prelude_namespace_file_key, resolve_prelude_namespace_plan}
 use codes::{E0504, E0702, E0703, E0704, E0705, E0707, E0801}
 use parser::{parse}
-use ir_identity::{impl_owner_ref_same, impl_method_ref_same}
+use ir_identity::{SymbolRef, impl_owner_ref_same, impl_method_ref_owner,
+    impl_owner_ref_trait, impl_owner_ref_provider, impl_method_ref_same}
 use union_find::{UnionFind}
 
 pub struct CheckResult {
@@ -47,6 +49,7 @@ pub struct CheckResult {
     // this map so same-file inline aliases retain provenance across arbitrary
     // pub-use hops without falling back to leaf-name guesses.
     pub value_binding_kinds: Map<Int, ValueBindingKind>,
+    pub value_symbols: Map<Int, SymbolRef>,
     // User-declared impl blocks with the canonical target identity resolved
     // during checking (while namespace frames were live). Collected from the
     // module's own HIR before prelude decls are prepended, so exports never
@@ -68,6 +71,7 @@ fn duplicate_direct_declaration_error_result(ctx: InferCtx) -> CheckResult {
         fn_mut_params: ctx.fn_mut_params,
         value_origins: map_clone(ctx.use_aliases),
         value_binding_kinds: map_clone(ctx.value_binding_kinds),
+        value_symbols: map_clone(ctx.value_symbols),
         impl_facts: []
     }
 }
@@ -159,7 +163,6 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                     close_struct_identity_ledger(ctx)
                 }
             }
-            assert_no_provisional_impl_owners(ctx.env.trait_reg)
             // Install the source-level API spelling as an alias of the exact
             // canonical scheme/DefId. record_value_origin makes ordinary
             // explicit calls use the same backend-safe canonical identity too.
@@ -285,7 +288,6 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
         },
         none => {
             finalize_std_hof_fallbacks(ctx.env, ctx.sink)
-            assert_no_provisional_impl_owners(ctx.env.trait_reg)
         },
     }
     validate_builtin_method_core_shadow(ctx.env)
@@ -299,8 +301,11 @@ fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
     // These bindings are created only by register_builtins above. Record their
     // freshly allocated DefIds now; later same-spelled locals cannot inherit
     // this provenance. `some` remains on the independent variant-ctor path.
-    for builtin in (CHECKER_ONLY_EXTERN_CALLABLES) {
-        record_value_binding_kind(ctx, builtin, ValueBindingKind::ExternCallable)
+    for builtin in checker_only_builtin_values() {
+        let name = checker_builtin_value_name(builtin)
+        record_value_binding_kind(ctx, name, ValueBindingKind::ExternCallable)
+        record_value_symbol_ref(
+            ctx, name, checker_builtin_value_symbol(builtin))
     }
     ctx
 }
@@ -367,9 +372,15 @@ fn collect_module_impl_facts(
                 target_type, owner_ref, provider_ref, trait_ref, trait_name, methods, ..
             } => {
                 let mut method_names: List<Str> = []
+                let mut public_inherent_method_names: List<Str> = []
                 for m in methods {
                     match m {
-                        HDecl::Fn { name, .. } => method_names.push(name),
+                        HDecl::Fn { name, is_pub, .. } => {
+                            method_names.push(name)
+                            if trait_ref.is_none() && is_pub {
+                                public_inherent_method_names.push(name)
+                            }
+                        },
                         _ => {}
                     }
                 }
@@ -401,6 +412,8 @@ fn collect_module_impl_facts(
                                 trait_ref: trait_ref,
                                 owner_ref: owner_ref,
                                 method_names: method_names,
+                                public_inherent_method_names:
+                                    public_inherent_method_names,
                                 is_top_level: is_top_level
                             })
                         },
@@ -464,6 +477,7 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         fn_mut_params: ctx.fn_mut_params,
         value_origins: map_clone(ctx.use_aliases),
         value_binding_kinds: map_clone(ctx.value_binding_kinds),
+        value_symbols: map_clone(ctx.value_symbols),
         impl_facts: impl_facts
     }
 }
@@ -711,6 +725,7 @@ pub fn check_module(
         fn_mut_params: ctx.fn_mut_params,
         value_origins: map_clone(ctx.use_aliases),
         value_binding_kinds: map_clone(ctx.value_binding_kinds),
+        value_symbols: map_clone(ctx.value_symbols),
         impl_facts: impl_facts
     }
 }
@@ -834,22 +849,24 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
             }
             add_impl(ctx.env.trait_reg, impl_)
         }
-        let mut sorted_method_origins = mod_.method_origins.entries()
-        sorted_method_origins.sort_by(compare_by_first)
-        for entry in sorted_method_origins {
-            let (type_name, origins) = entry
-            let mut sorted_origins = origins.entries()
-            sorted_origins.sort_by(compare_by_first)
-            for origin_entry in sorted_origins {
-                let (method_name, origin) = origin_entry
+        let mut sorted_method_index = mod_.method_index.entries()
+        sorted_method_index.sort_by(compare_by_first)
+        for entry in sorted_method_index {
+            let (type_name, method_index) = entry
+            let mut sorted_methods = method_index.entries()
+            sorted_methods.sort_by(compare_by_first)
+            for method_entry in sorted_methods {
+                let (method_name, method_ref) = method_entry
+                let owner_ref = impl_method_ref_owner(method_ref)
                 match find_impl_by_provider(
                     ctx.env.trait_reg, type_name,
-                    origin.trait_ref, origin.provider_ref
+                    impl_owner_ref_trait(owner_ref),
+                    impl_owner_ref_provider(owner_ref)
                 ) {
                     some(owner) => {
                         match owner.method_refs.get(method_name) {
-                            some(method_ref) => if !impl_method_ref_same(
-                                    method_ref, origin.method_ref) {
+                            some(expected) => if !impl_method_ref_same(
+                                    expected, method_ref) {
                                 panic("impl hydration: exact method changed")
                             },
                             none => panic(
@@ -862,7 +879,8 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                         }
                         let _ = install_method_core(
                             ctx.env.trait_reg, ctx.sink,
-                            type_name, method_name, core, origin)
+                            type_name, method_name, core,
+                            method_ref, owner.span)
                     },
                     none => panic(
                         "impl hydration: exported index owner is missing")

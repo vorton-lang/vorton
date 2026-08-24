@@ -15,11 +15,10 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     make_delegate_child_provider_plan,
     ImplAssocPredicate, TypedImplPredicate, FrozenImplPredicateSet,
     TypeAliasDef, FnBound,
-    EffectAliasDef, AssocTypeDef, MethodOrigin, mono, apply_subst, apply_subst_effect_map,
-    apply_subst_map, add_impl, has_impl, find_impl, impl_origin, impl_decl_origin,
-    find_impl_by_origin, find_impl_by_provider,
+    EffectAliasDef, AssocTypeDef, mono, apply_subst, apply_subst_effect_map,
+    apply_subst_map, add_impl, has_impl, find_impl,
+    find_impl_by_provider,
     find_impls_by_provider,
-    finalize_provisional_impl_owner,
     install_method_core, replace_impl_method_core,
     make_impl_method_scheme_core, impl_method_core_as_scheme,
     make_impl_assoc_predicate, make_typed_impl_predicate,
@@ -29,7 +28,6 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     impl_predicate_subject_type_var, impl_predicate_trait_name,
     impl_predicate_assoc_constraints, impl_assoc_predicate_name,
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
-    ImplOwnerState, impl_owner_is_provisional,
     impl_target_symbol,
     specialize_trait_method_scheme, build_type_var_map,
     delegate_plan_not_applicable, delegate_plan_pending,
@@ -2426,49 +2424,18 @@ fn register_impl_canonical(
         some(name) => some(resolve_trait_identity(ctx, name)), none => none
     }
     let resolved_trait_ref = exact_trait_ref(ctx, resolved_trait_name)
-    let origin = impl_decl_origin(
-        target_type, resolved_trait_name, type_params, span)
     reject_unsupported_protocol_impl_bounds(ctx, resolved_trait_name, type_params)
 
     let saved = map_clone(ctx.type_param_scope)
     let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
     let mut impl_tv_ids: List<Int> = []
-    let provisional = match find_impl_by_origin(
-        ctx.env.trait_reg, target_type, origin) {
-        some(entry) => if impl_owner_is_provisional(entry) {
-            some(entry)
-        } else { none },
-        none => none
-    }
-    match provisional {
-        some(entry) => {
-            if entry.type_param_vars.len() != type_params.len() ||
-               entry.type_params.len() != type_params.len() {
-                panic("impl owner: prelude/source type-parameter arity mismatch")
-            }
-            let mut index = 0
-            for tp in type_params {
-                let id = entry.type_param_vars.get(index).unwrap_or(-1)
-                let expected_name = entry.type_params.get(index).unwrap_or("")
-                if id < 0 || expected_name != tp.name {
-                    panic("impl owner: prelude/source type-parameter order mismatch")
-                }
-                impl_tv_ids.push(id)
-                ctx.type_param_scope.insert(
-                    tp.name, Type::TypeVar { id: id, name: some(tp.name) })
-                index = index + 1
-            }
-        },
-        none => {
-            for tp in type_params {
-                let tv = ctx.env.fresh_var()
-                match tv {
-                    Type::TypeVar { id, .. } => { impl_tv_ids.push(id) },
-                    _ => {}
-                }
-                ctx.type_param_scope.insert(tp.name, tv)
-            }
+    for tp in type_params {
+        let tv = ctx.env.fresh_var()
+        match tv {
+            Type::TypeVar { id, .. } => { impl_tv_ids.push(id) },
+            _ => {}
         }
+        ctx.type_param_scope.insert(tp.name, tv)
     }
 
     let frozen_predicates = freeze_source_impl_predicates(
@@ -2544,11 +2511,16 @@ fn register_impl_canonical(
                 some(trait_def) => {
                     match find_impl(ctx.env.trait_reg, target_type, tname) {
                         some(existing) => {
-                            if existing.origin != origin {
+                            let same_provider = match existing.provider_ref {
+                                some(existing_provider) => impl_provider_ref_same(
+                                    existing_provider, provider_ref),
+                                none => false
+                            }
+                            if !same_provider {
                                 let _ = type_error(ctx.sink, E0504,
                                     "Duplicate impl '${trait_display}' for '${target_display}'",
                                     span, DiagnosticContext::TraitError {
-                                        detail: "distinct impl origins provide the same target/trait pair"
+                                        detail: "distinct exact impl providers supply the same target/trait pair"
                                     })
                             }
                         },
@@ -2758,14 +2730,9 @@ fn register_impl_canonical(
             trait_ref: resolved_trait_ref,
             owner_ref: some(owner_ref),
             delegate_plan: delegate_plan,
-            origin: origin, span: span,
-            owner_state: ImplOwnerState::FinalOwner
+            span: span
         }
-        match provisional {
-            some(_) => finalize_provisional_impl_owner(
-                ctx.env.trait_reg, owner_entry),
-            none => add_impl(ctx.env.trait_reg, owner_entry)
-        }
+        add_impl(ctx.env.trait_reg, owner_entry)
 
         let mut sorted_exact_methods = exact_method_schemes.entries()
         sorted_exact_methods.sort_by(compare_by_first)
@@ -2774,14 +2741,7 @@ fn register_impl_canonical(
             let _ = install_method_core(
                 ctx.env.trait_reg, ctx.sink,
                 target_type, method_name, core,
-                MethodOrigin {
-                    origin: origin,
-                    trait_name: resolved_trait_name,
-                    provider_ref: provider_ref,
-                    trait_ref: resolved_trait_ref,
-                    method_ref: exact_method_refs.get(method_name).unwrap(),
-                    span: span
-                })
+                exact_method_refs.get(method_name).unwrap(), span)
         }
     }
 
@@ -3288,8 +3248,6 @@ fn register_delegate_traits(
                                         "delegate registration: field owner disappeared")
                                 }
                                 let mut exact_method_schemes: Map<Str, ImplMethodSchemeCore> = map_new()
-                                let origin = impl_origin(
-                                    target_type, some(reg_tname), span)
 
                                 // Every forwarding scheme is the exact field
                                 // scheme under the same structural mapping.
@@ -3367,9 +3325,7 @@ fn register_delegate_traits(
                                     trait_ref: some(delegate_trait_ref),
                                     owner_ref: some(delegate_owner_ref),
                                     delegate_plan: delegate_plan_not_applicable(),
-                                    origin: origin,
-                                    span: span,
-                                    owner_state: ImplOwnerState::FinalOwner
+                                    span: span
                                 })
                                 let mut sorted_cores =
                                     exact_method_schemes.entries()
@@ -3379,15 +3335,8 @@ fn register_delegate_traits(
                                     let _ = install_method_core(
                                         ctx.env.trait_reg, ctx.sink,
                                         target_type, method_name, core,
-                                        MethodOrigin {
-                                            origin: origin,
-                                            trait_name: some(reg_tname),
-                                            provider_ref: provider_ref,
-                                            trait_ref: some(delegate_trait_ref),
-                                            method_ref: exact_method_refs.get(
-                                                method_name).unwrap(),
-                                            span: span
-                                        })
+                                        exact_method_refs.get(
+                                            method_name).unwrap(), span)
                                 }
                             }
                         }
