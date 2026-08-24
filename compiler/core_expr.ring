@@ -7,7 +7,7 @@
 // has no Clone/Take/Drop/Cleanup, layout, ABI, or backend variant.
 
 use ir_identity::{
-    SymbolRef, RegisteredNominalRef, NominalFieldRef,
+    SymbolRef, IntrinsicRef, RegisteredNominalRef, NominalFieldRef,
     VariantRef, VariantFieldRef,
     HandledEffectRef, SystemEffectRef,
     ImplOwnerRef, ImplMethodRef,
@@ -23,7 +23,7 @@ use ir_identity::{
     handled_effect_ref_same, system_effect_ref_same,
     impl_owner_ref_same, impl_method_ref_owner,
     impl_method_ref_callable_slot_index, impl_method_ref_member,
-    intrinsic_ref_symbol, trait_method_ref_member,
+    intrinsic_ref_symbol, intrinsic_ref_same, trait_method_ref_member,
     path_ref_same, path_ref_owner,
     path_owner_ref_is_symbol, path_owner_ref_symbol,
     path_owner_ref_module_body,
@@ -34,7 +34,7 @@ use ir_identity::{
     origin_ref_is_symbol, origin_ref_symbol, origin_ref_path
 }
 use ir_inventory::{
-    ExecutableRef, BinderKind,
+    ExecutableRef, BinderKind, make_named_executable_ref,
     EffectOperationRef, SystemHostCallableRef,
     executable_ref_same, executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_origin_module_key,
@@ -740,6 +740,7 @@ enum CorePlaceRefValue {
         base: CoreExpr,
         field: CoreFieldRef?,
         evaluated_index: CoreExpr?,
+        intrinsic: IntrinsicRef?,
         value_type: CoreTypeRef
     }
 }
@@ -748,16 +749,21 @@ pub fn make_core_slot_place(slot: SlotRef) -> CorePlaceRef {
     CorePlaceRef { value: CorePlaceRefValue::CoreSlotPlaceValue(slot) }
 }
 pub fn make_core_project_place(
-    base: CoreExpr, field: CoreFieldRef?, evaluated_index: CoreExpr?,
-    value_type: CoreTypeRef
+    base: CoreExpr, field: CoreFieldRef, value_type: CoreTypeRef
 ) -> CorePlaceRef {
-    if (field.is_some() && evaluated_index.is_some()) ||
-       (field.is_none() && evaluated_index.is_none()) {
-        panic("CoreHIR: project place must select field xor index")
-    }
     CorePlaceRef { value: CorePlaceRefValue::CoreProjectPlaceValue {
-        base: base, field: field, evaluated_index: evaluated_index,
+        base: base, field: some(field), evaluated_index: none,
+        intrinsic: none,
         value_type: value_type
+    } }
+}
+pub fn make_core_index_place(
+    base: CoreExpr, evaluated_index: CoreExpr,
+    intrinsic: IntrinsicRef, value_type: CoreTypeRef
+) -> CorePlaceRef {
+    CorePlaceRef { value: CorePlaceRefValue::CoreProjectPlaceValue {
+        base: base, field: none, evaluated_index: some(evaluated_index),
+        intrinsic: some(intrinsic), value_type: value_type
     } }
 }
 pub fn core_place_is_slot(value: CorePlaceRef) -> Bool {
@@ -789,6 +795,12 @@ pub fn core_place_evaluated_index(value: CorePlaceRef) -> CoreExpr? {
         CorePlaceRefValue::CoreProjectPlaceValue { evaluated_index, .. } =>
             evaluated_index,
         _ => panic("CoreHIR: slot place has no evaluated index")
+    }
+}
+pub fn core_place_intrinsic(value: CorePlaceRef) -> IntrinsicRef? {
+    match value.value {
+        CorePlaceRefValue::CoreProjectPlaceValue { intrinsic, .. } => intrinsic,
+        _ => panic("CoreHIR: slot place has no index intrinsic")
     }
 }
 pub fn core_place_value_type(value: CorePlaceRef) -> CoreTypeRef {
@@ -1154,6 +1166,7 @@ enum CoreExprValue {
         host: SystemHostCallableRef,
         arguments: List<CoreExpr>
     },
+    FailRaiseExprValue { payload: CoreExpr },
     DictConstructExprValue {
         constructor: ExecutableRef,
         evidence: List<CoreEvidenceRef>
@@ -1348,6 +1361,13 @@ pub fn make_core_system_call_expr(
         CoreExprValue::SystemCallExprValue {
             host: host, arguments: copy_core_exprs(arguments)
         })
+}
+pub fn make_core_fail_raise_expr(
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    payload: CoreExpr
+) -> CoreExpr {
+    make_core_expr(ty, effects, origin,
+        CoreExprValue::FailRaiseExprValue { payload: payload })
 }
 pub fn make_core_dict_construct_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
@@ -1600,7 +1620,8 @@ pub fn core_expr_kind_tag(value: CoreExpr) -> Int {
         CoreExprValue::MatchExprValue { .. } => 14,
         CoreExprValue::TryCatchExprValue { .. } => 15,
         CoreExprValue::HandleExprValue { .. } => 16,
-        CoreExprValue::CallableValueExprValue(_) => 17
+        CoreExprValue::CallableValueExprValue(_) => 17,
+        CoreExprValue::FailRaiseExprValue { .. } => 18
     }
 }
 pub fn core_expr_literal(value: CoreExpr) -> CoreLiteral {
@@ -1683,6 +1704,12 @@ pub fn core_expr_system_host(value: CoreExpr) -> SystemHostCallableRef {
     match value.value {
         CoreExprValue::SystemCallExprValue { host, .. } => host,
         _ => panic("CoreHIR: expression is not SystemCall")
+    }
+}
+pub fn core_expr_fail_payload(value: CoreExpr) -> CoreExpr {
+    match value.value {
+        CoreExprValue::FailRaiseExprValue { payload } => payload,
+        _ => panic("CoreHIR: expression is not FailRaise")
     }
 }
 pub fn core_expr_dict_constructor(value: CoreExpr) -> ExecutableRef {
@@ -2168,6 +2195,8 @@ fn validate_expr_with_loop_depth(
                 validate_expr_with_loop_depth(argument, body, loop_depth)
             }
         },
+        CoreExprValue::FailRaiseExprValue { payload } =>
+            validate_expr_with_loop_depth(payload, body, loop_depth),
         CoreExprValue::DictConstructExprValue { evidence, .. } =>
             validate_evidence(evidence, body.binders),
         CoreExprValue::DictProjectExprValue { dictionary, .. } =>
@@ -2397,6 +2426,8 @@ fn collect_expr_effect_sets(
             collect_expr_effect_sets(receiver, result)
             for argument in arguments { collect_expr_effect_sets(argument, result) }
         },
+        CoreExprValue::FailRaiseExprValue { payload } =>
+            collect_expr_effect_sets(payload, result),
         CoreExprValue::DictProjectExprValue { dictionary, .. } =>
             collect_expr_effect_sets(dictionary, result),
         CoreExprValue::ProjectExprValue { base, .. } =>
@@ -2547,15 +2578,17 @@ fn remap_core_place(
     match value.value {
         CorePlaceRefValue::CoreSlotPlaceValue(slot) => make_core_slot_place(slot),
         CorePlaceRefValue::CoreProjectPlaceValue {
-            base, field, evaluated_index, value_type
-        } => make_core_project_place(
-            remap_core_expr_types(base, mapping, module_key), field,
-            match evaluated_index {
-                some(index) => some(remap_core_expr_types(
-                    index, mapping, module_key)),
-                none => none
-            },
-            remap_core_type_reference(value_type, mapping, module_key))
+            base, field, evaluated_index, intrinsic, value_type
+        } => match field {
+            some(reference) => make_core_project_place(
+                remap_core_expr_types(base, mapping, module_key), reference,
+                remap_core_type_reference(value_type, mapping, module_key)),
+            none => make_core_index_place(
+                remap_core_expr_types(base, mapping, module_key),
+                remap_core_expr_types(evaluated_index.unwrap(), mapping, module_key),
+                intrinsic.unwrap(),
+                remap_core_type_reference(value_type, mapping, module_key))
+        }
     }
 }
 
@@ -2666,6 +2699,10 @@ fn remap_core_expr_types(
                 host: host, arguments: arguments.map(fn(argument) {
                     remap_core_expr_types(argument, mapping, module_key)
                 })
+            },
+        CoreExprValue::FailRaiseExprValue { payload } =>
+            CoreExprValue::FailRaiseExprValue {
+                payload: remap_core_expr_types(payload, mapping, module_key)
             },
         CoreExprValue::DictConstructExprValue { constructor, evidence } =>
             CoreExprValue::DictConstructExprValue {
@@ -3269,7 +3306,8 @@ fn projection_result_type(
 }
 
 fn core_place_type(
-    place: CorePlaceRef, body: CoreBody, graph: CoreTypeGraph
+    place: CorePlaceRef, body: CoreBody, graph: CoreTypeGraph,
+    callables: List<CoreCallableContract>
 ) -> CoreTypeRef {
     if core_place_is_slot(place) {
         return core_binder_type_for(body, core_place_slot(place))
@@ -3285,6 +3323,23 @@ fn core_place_type(
             if type_kind(graph, core_expr_type(index)) !=
                flow_type_kind_tag(flow_type_kind_int()) {
                 panic("CoreHIR: place index is not Int")
+            }
+            let intrinsic = match core_place_intrinsic(place) {
+                some(value) => value,
+                none => panic("CoreHIR: indexed place has no exact intrinsic")
+            }
+            let callable = core_callable_for(
+                callables,
+                make_named_executable_ref(intrinsic_ref_symbol(intrinsic)))
+            if callable.parameter_types.len() < 2 ||
+               !core_type_ref_same(
+                    callable.parameter_types.get(0).unwrap(), base_type) ||
+               !core_type_ref_same(
+                    callable.parameter_types.get(1).unwrap(),
+                    core_expr_type(index)) ||
+               !core_type_ref_same(callable.result_type,
+                    core_place_value_type(place)) {
+                panic("CoreHIR: indexed place intrinsic contract differs")
             }
             core_place_value_type(place)
         }
@@ -3481,6 +3536,24 @@ fn validate_expr_with_program(
                 panic("CoreHIR: system call is absent from effect set")
             }
         },
+        CoreExprValue::FailRaiseExprValue { payload } => {
+            validate_expr_with_program(
+                payload, body, graph, callables,
+                current_callable, loop_depth)
+            let mut found = false
+            for atom in value.effects.atoms {
+                match atom.value {
+                    CoreEffectAtomValue::FailEffectValue(error_type) => if
+                        core_type_ref_same(error_type, payload.ty) {
+                        found = true
+                    },
+                    _ => {}
+                }
+            }
+            if !found {
+                panic("CoreHIR: FailRaise payload is absent from fail effect")
+            }
+        },
         CoreExprValue::DictConstructExprValue { constructor, evidence } => {
             let callable = core_callable_for(callables, constructor)
             validate_call_signature(
@@ -3648,7 +3721,7 @@ fn validate_statement_with_program(
             validate_expr_with_program(
                 expr, body, graph, callables, current_callable, loop_depth)
             require_core_type_same(
-                core_place_type(target, body, graph), expr.ty,
+                core_place_type(target, body, graph, callables), expr.ty,
                 "CoreHIR: Assign target/value type differs")
         },
         CoreStmtValue::ExprStmt { value: expr, .. } =>

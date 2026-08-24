@@ -2776,6 +2776,7 @@ enum FlowPlaceRefValue {
         base: SlotRef,
         projection: FlowProjectionContract?,
         evaluated_index: SlotRef?,
+        intrinsic: IntrinsicRef?,
         value_type: FlowTypeRef
     }
 }
@@ -2784,16 +2785,22 @@ pub fn make_flow_slot_place(slot: SlotRef) -> FlowPlaceRef {
     FlowPlaceRef { value: FlowPlaceRefValue::FlowSlotPlaceValue(slot) }
 }
 pub fn make_flow_project_place(
-    base: SlotRef, projection: FlowProjectionContract?,
-    evaluated_index: SlotRef?, value_type: FlowTypeRef
+    base: SlotRef, projection: FlowProjectionContract,
+    value_type: FlowTypeRef
 ) -> FlowPlaceRef {
-    if (projection.is_some() && evaluated_index.is_some()) ||
-       (projection.is_none() && evaluated_index.is_none()) {
-        panic("FlowIR: project place must select projection xor index")
-    }
     FlowPlaceRef { value: FlowPlaceRefValue::FlowProjectPlaceValue {
-        base: base, projection: projection,
-        evaluated_index: evaluated_index, value_type: value_type
+        base: base, projection: some(projection),
+        evaluated_index: none, intrinsic: none, value_type: value_type
+    } }
+}
+pub fn make_flow_index_place(
+    base: SlotRef, evaluated_index: SlotRef,
+    intrinsic: IntrinsicRef, value_type: FlowTypeRef
+) -> FlowPlaceRef {
+    FlowPlaceRef { value: FlowPlaceRefValue::FlowProjectPlaceValue {
+        base: base, projection: none,
+        evaluated_index: some(evaluated_index),
+        intrinsic: some(intrinsic), value_type: value_type
     } }
 }
 pub fn flow_place_is_slot(value: FlowPlaceRef) -> Bool {
@@ -2827,6 +2834,12 @@ pub fn flow_place_evaluated_index(value: FlowPlaceRef) -> SlotRef? {
         _ => panic("FlowIR: slot place has no evaluated index")
     }
 }
+pub fn flow_place_intrinsic(value: FlowPlaceRef) -> IntrinsicRef? {
+    match value.value {
+        FlowPlaceRefValue::FlowProjectPlaceValue { intrinsic, .. } => intrinsic,
+        _ => panic("FlowIR: slot place has no index intrinsic")
+    }
+}
 pub fn flow_place_value_type(value: FlowPlaceRef) -> FlowTypeRef {
     match value.value {
         FlowPlaceRefValue::FlowProjectPlaceValue { value_type, .. } => value_type,
@@ -2837,12 +2850,13 @@ fn copy_flow_place(value: FlowPlaceRef) -> FlowPlaceRef {
     match value.value {
         FlowPlaceRefValue::FlowSlotPlaceValue(slot) => make_flow_slot_place(slot),
         FlowPlaceRefValue::FlowProjectPlaceValue {
-            base, projection, evaluated_index, value_type
-        } => make_flow_project_place(
-            base, match projection {
-                some(contract) => some(copy_projection_contract(contract)),
-                none => none
-            }, evaluated_index, value_type)
+            base, projection, evaluated_index, intrinsic, value_type
+        } => match projection {
+            some(contract) => make_flow_project_place(
+                base, copy_projection_contract(contract), value_type),
+            none => make_flow_index_place(
+                base, evaluated_index.unwrap(), intrinsic.unwrap(), value_type)
+        }
     }
 }
 
@@ -2858,6 +2872,7 @@ enum FlowInstructionValue {
     },
     ConsumeValue { source: SlotRef },
     DiscardValue { source: SlotRef },
+    FailRaiseValue { payload: SlotRef, sink: SlotRef },
     AssignValue { rhs_temp: SlotRef, target: FlowPlaceRef },
     CallValue {
         target: FlowCallTarget, arguments: List<SlotRef>,
@@ -2949,6 +2964,20 @@ pub fn make_flow_discard(
     FlowInstruction {
         reference: reference, origin: origin,
         value: FlowInstructionValue::DiscardValue { source: source }
+    }
+}
+pub fn make_flow_fail_raise(
+    reference: FlowInstructionRef, origin: OriginRef,
+    payload: SlotRef, sink: SlotRef
+) -> FlowInstruction {
+    if slot_ref_same(payload, sink) {
+        panic("FlowIR: FailRaise payload aliases sink")
+    }
+    FlowInstruction {
+        reference: reference, origin: origin,
+        value: FlowInstructionValue::FailRaiseValue {
+            payload: payload, sink: sink
+        }
     }
 }
 
@@ -3053,7 +3082,8 @@ pub fn flow_instruction_kind_tag(value: FlowInstruction) -> Int {
         FlowInstructionValue::ProjectValue { .. } => 7,
         FlowInstructionValue::CaptureValue { .. } => 8,
         FlowInstructionValue::ScopeEnterValue { .. } => 9,
-        FlowInstructionValue::ScopeExitValue { .. } => 10
+        FlowInstructionValue::ScopeExitValue { .. } => 10,
+        FlowInstructionValue::FailRaiseValue { .. } => 11
     }
 }
 
@@ -3123,6 +3153,18 @@ pub fn flow_discard_source(value: FlowInstruction) -> SlotRef {
     match value.value {
         FlowInstructionValue::DiscardValue { source } => source,
         _ => panic("FlowIR: instruction is not Discard")
+    }
+}
+pub fn flow_fail_raise_payload(value: FlowInstruction) -> SlotRef {
+    match value.value {
+        FlowInstructionValue::FailRaiseValue { payload, .. } => payload,
+        _ => panic("FlowIR: instruction is not FailRaise")
+    }
+}
+pub fn flow_fail_raise_sink(value: FlowInstruction) -> SlotRef {
+    match value.value {
+        FlowInstructionValue::FailRaiseValue { sink, .. } => sink,
+        _ => panic("FlowIR: instruction is not FailRaise")
     }
 }
 pub fn flow_assign_rhs_temp(value: FlowInstruction) -> SlotRef {
@@ -3362,6 +3404,9 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
         FlowInstructionValue::DiscardValue { source } =>
             result.push(make_instruction_operand(
                 value, 0, source, flow_semantic_role_consume())),
+        FlowInstructionValue::FailRaiseValue { payload, .. } =>
+            result.push(make_instruction_operand(
+                value, 0, payload, flow_semantic_role_consume())),
         FlowInstructionValue::AssignValue { rhs_temp, target } => {
             result.push(make_instruction_operand(
                 value, 0, rhs_temp, flow_semantic_role_consume()))
@@ -4081,6 +4126,9 @@ fn copy_instructions(values: List<FlowInstruction>) -> List<FlowInstruction> {
                 make_flow_consume(value.reference, value.origin, source),
             FlowInstructionValue::DiscardValue { source } =>
                 make_flow_discard(value.reference, value.origin, source),
+            FlowInstructionValue::FailRaiseValue { payload, sink } =>
+                make_flow_fail_raise(
+                    value.reference, value.origin, payload, sink),
             FlowInstructionValue::AssignValue { rhs_temp, target } =>
                 make_flow_assign(
                     value.reference, value.origin, rhs_temp, target),
@@ -5148,6 +5196,14 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
         FlowInstructionValue::DiscardValue { source } => {
             let _ = slot_for_ref(body.slots, source)
         },
+        FlowInstructionValue::FailRaiseValue { payload, sink } => {
+            let _ = slot_for_ref(body.slots, payload)
+            let sink_slot = slot_for_ref(body.slots, sink)
+            if !flow_storage_class_same(sink_slot.storage, flow_storage_temp()) ||
+               sink_slot.initial_state.tag != FLOW_SLOT_EMPTY {
+                panic("FlowIR: FailRaise sink is not an empty temp")
+            }
+        },
         FlowInstructionValue::AssignValue { rhs_temp, target } => {
             let rhs = slot_for_ref(body.slots, rhs_temp)
             if flow_place_is_slot(target) {
@@ -5586,7 +5642,8 @@ pub fn flow_instruction_callable_provenance(
 }
 
 fn flow_place_type(
-    body: FlowBody, type_nodes: List<FlowTypeNode>, place: FlowPlaceRef
+    body: FlowBody, type_nodes: List<FlowTypeNode>,
+    callables: List<FlowCallable>, place: FlowPlaceRef
 ) -> FlowTypeRef {
     if flow_place_is_slot(place) {
         return slot_type_for(body, flow_place_slot(place))
@@ -5613,6 +5670,22 @@ fn flow_place_type(
             if flow_type_kind_tag(type_node_for(
                     type_nodes, slot_type_for(body, index)).kind) != FLOW_TYPE_INT {
                 panic("FlowIR: indexed place index is not Int")
+            }
+            let intrinsic = match flow_place_intrinsic(place) {
+                some(value) => value,
+                none => panic("FlowIR: indexed place has no exact intrinsic")
+            }
+            let callable = callable_for_symbol(
+                callables, intrinsic_ref_symbol(intrinsic))
+            if callable.parameter_types.len() < 2 ||
+               !flow_type_ref_same(
+                    callable.parameter_types.get(0).unwrap(),
+                    slot_type_for(body, flow_place_base(place))) ||
+               !flow_type_ref_same(
+                    callable.parameter_types.get(1).unwrap(),
+                    slot_type_for(body, index)) ||
+               !flow_type_ref_same(callable.result_type, value_type) {
+                panic("FlowIR: indexed place intrinsic contract differs")
             }
         }
     }
@@ -5884,10 +5957,15 @@ fn validate_typed_instructions(
                             slot_type_for(body, target),
                             slot_type_for(body, value),
                             "FlowIR: Mutate target/value type differs"),
+                    FlowInstructionValue::FailRaiseValue { payload, sink } =>
+                        require_same_flow_type(
+                            slot_type_for(body, payload),
+                            slot_type_for(body, sink),
+                            "FlowIR: FailRaise payload/sink type differs"),
                     FlowInstructionValue::AssignValue { rhs_temp, target } =>
                         require_same_flow_type(
                             slot_type_for(body, rhs_temp),
-                            flow_place_type(body, type_nodes, target),
+                            flow_place_type(body, type_nodes, callables, target),
                             "FlowIR: Assign RHS/target type differs"),
                     FlowInstructionValue::CaptureValue {
                         source, target, ..
@@ -6148,7 +6226,15 @@ fn encode_flow_place(value: FlowPlaceRef) -> Str {
     match flow_place_projection(value) {
         some(contract) => parts.push(encode_projection_contract(contract)),
         none => match flow_place_evaluated_index(value) {
-            some(index) => parts.push("index:${encode_slot(index)}"),
+            some(index) => {
+                let intrinsic = match flow_place_intrinsic(value) {
+                    some(reference) => reference,
+                    none => panic("FlowIR: indexed place fingerprint lacks intrinsic")
+                }
+                parts.push("index:${encode_slot(index)}")
+                parts.push("intrinsic:${encode_symbol(
+                    intrinsic_ref_symbol(intrinsic))}")
+            },
             none => panic("FlowIR: place fingerprint lacks projection/index")
         }
     }
@@ -6159,9 +6245,9 @@ fn encode_dict_evidence(value: DictRef) -> Str {
     match value {
         DictRef::Simple(name) => "simple:${encode_atom(name)}",
         DictRef::Static(name) => "static:${encode_atom(name)}",
-        DictRef::Wrapped { dict, trait_name, inner_dicts } => {
+        DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
             let mut parts: List<Str> = [
-                "wrapped", encode_atom(dict), encode_atom(trait_name)
+                "wrapped", encode_atom(dict), encode_symbol(trait_ref)
             ]
             for inner in inner_dicts { parts.push(encode_dict_evidence(inner)) }
             parts.join("/")
@@ -6219,6 +6305,9 @@ fn encode_instruction(value: FlowInstruction) -> Str {
         FlowInstructionValue::ConsumeValue { source } |
         FlowInstructionValue::DiscardValue { source } =>
             parts.push(encode_slot(source)),
+        FlowInstructionValue::FailRaiseValue { payload, sink } => {
+            parts.push(encode_slot(payload)); parts.push(encode_slot(sink))
+        },
         FlowInstructionValue::AssignValue { rhs_temp, target } => {
             parts.push(encode_slot(rhs_temp)); parts.push(encode_flow_place(target))
         },

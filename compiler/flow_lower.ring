@@ -56,7 +56,8 @@ use core_expr::{
     core_stmt_value, core_stmt_while_condition, core_stmt_while_body,
     core_stmt_return_value, core_stmt_bind_is_mutable,
     core_place_is_slot, core_place_slot, core_place_base,
-    core_place_field, core_place_evaluated_index, core_place_value_type,
+    core_place_field, core_place_evaluated_index, core_place_intrinsic,
+    core_place_value_type,
     core_expr_kind_tag, core_expr_type,
     core_expr_origin, core_expr_literal, core_literal_kind_tag,
     core_expr_callable_executable,
@@ -67,6 +68,7 @@ use core_expr::{
     core_expr_call_evidence, core_expr_method_ref,
     core_expr_method_receiver,
     core_expr_effect_operation, core_expr_system_host,
+    core_expr_fail_payload,
     core_expr_dict_constructor, core_expr_dict_project_dictionary,
     core_expr_dict_project_method,
     core_expr_project_base, core_expr_project_field,
@@ -122,7 +124,8 @@ use flow_ir::{
     make_flow_pattern_branch, make_flow_try,
     make_flow_handler_binding, make_flow_handle_install,
     make_flow_initialize, make_flow_read, make_flow_assign,
-    make_flow_slot_place, make_flow_project_place,
+    make_flow_fail_raise,
+    make_flow_slot_place, make_flow_project_place, make_flow_index_place,
     make_flow_call, make_flow_project, make_flow_capture,
     make_flow_int_literal_contract, make_flow_float_literal_contract,
     make_flow_str_literal_contract, make_flow_bool_literal_contract,
@@ -369,6 +372,9 @@ fn validate_core_flow_step_map(
         } else if relation.node.node_class == CORE_FLOW_NODE_EXPR {
             if relation.node.kind_tag <= 11 || relation.node.kind_tag == 17 {
                 role_tag == CORE_FLOW_ROLE_EXPR_PRIMARY
+            } else if relation.node.kind_tag == 18 {
+                role_tag == CORE_FLOW_ROLE_EXPR_PRIMARY ||
+                role_tag == CORE_FLOW_ROLE_CONTROL_EXIT
             } else {
                 role_tag == CORE_FLOW_ROLE_CONTROL_DISPATCH ||
                 role_tag == CORE_FLOW_ROLE_BRANCH_MERGE ||
@@ -811,15 +817,16 @@ fn flow_field(value: CoreFieldRef) -> FlowFieldIdentity {
 fn lower_flow_place(
     mut ctx: FlowLowerCtx, value: CorePlaceRef,
     continue_target: FlowBlockRef?, break_target: FlowBlockRef?
-) -> FlowPlaceRef {
+) -> FlowPlaceRef? {
     if core_place_is_slot(value) {
         if !flow_slot_exists(ctx, core_place_slot(value)) {
             panic("Flow lowering: assignment target is not active")
         }
-        return make_flow_slot_place(core_place_slot(value))
+        return some(make_flow_slot_place(core_place_slot(value)))
     }
     let base = lower_expr(
         ctx, core_place_base(value), continue_target, break_target)
+    if is_terminated(ctx) { return none }
     let base_type = frozen_slot_type_at(ctx, base)
     let value_type = core_type_ref_to_flow(core_place_value_type(value))
     match core_place_field(value) {
@@ -842,7 +849,7 @@ fn lower_flow_place(
                     core_field_ref_variant(field), base_type, value_type,
                     flow_semantic_role_mutate(), false)
             }
-            make_flow_project_place(base, some(contract), none, value_type)
+            some(make_flow_project_place(base, contract, value_type))
         },
         none => {
             let index = match core_place_evaluated_index(value) {
@@ -850,7 +857,10 @@ fn lower_flow_place(
                     ctx, expr, continue_target, break_target)),
                 none => none
             }
-            make_flow_project_place(base, none, index, value_type)
+            if is_terminated(ctx) { return none }
+            some(make_flow_index_place(
+                base, index.unwrap(), core_place_intrinsic(value).unwrap(),
+                value_type))
         }
     }
 }
@@ -964,7 +974,9 @@ fn emit_simple_expr(
         for operand in core_expr_primitive_operands(expr) {
             operands.push(lower_expr(
                 ctx, operand, continue_target, break_target))
+            if is_terminated(ctx) { return true }
         }
+        if is_terminated(ctx) { return true }
         let input_types = operands.map(fn(slot) {
             frozen_slot_type_at(ctx, slot)
         })
@@ -986,11 +998,14 @@ fn emit_simple_expr(
             arguments.push(lower_expr(
                 ctx, core_expr_method_receiver(expr),
                 continue_target, break_target))
+            if is_terminated(ctx) { return true }
         }
         for argument in core_expr_call_arguments(expr) {
             arguments.push(lower_expr(
                 ctx, argument, continue_target, break_target))
+            if is_terminated(ctx) { return true }
         }
+        if is_terminated(ctx) { return true }
         let mut evidence = flow_evidence(core_expr_call_evidence(expr))
         if kind == 4 {
             let method = core_expr_method_ref(expr)
@@ -1012,7 +1027,9 @@ fn emit_simple_expr(
         for argument in core_expr_call_arguments(expr) {
             arguments.push(lower_expr(
                 ctx, argument, continue_target, break_target))
+            if is_terminated(ctx) { return true }
         }
+        if is_terminated(ctx) { return true }
         let callable = callable_for(
             ctx, effect_operation_ref_callable(
                 core_expr_effect_operation(expr)))
@@ -1031,7 +1048,9 @@ fn emit_simple_expr(
         for argument in core_expr_call_arguments(expr) {
             arguments.push(lower_expr(
                 ctx, argument, continue_target, break_target))
+            if is_terminated(ctx) { return true }
         }
+        if is_terminated(ctx) { return true }
         let callable = callable_for(
             ctx, system_host_callable_executable(core_expr_system_host(expr)))
         emit_instruction(ctx, make_flow_call(
@@ -1054,6 +1073,7 @@ fn emit_simple_expr(
             [lower_expr(ctx, core_expr_dict_project_dictionary(expr),
                 continue_target, break_target)]
         }
+        if is_terminated(ctx) { return true }
         emit_instruction(ctx, make_flow_call(
             next_instruction_ref(ctx), origin,
             make_direct_flow_call_target(
@@ -1068,6 +1088,7 @@ fn emit_simple_expr(
         let base = lower_expr(
             ctx, core_expr_project_base(expr),
             continue_target, break_target)
+        if is_terminated(ctx) { return true }
         let field = core_expr_project_field(expr)
         let base_type = frozen_slot_type_at(ctx, base)
         let partial = core_expr_project_is_partial(expr)
@@ -1102,7 +1123,9 @@ fn emit_simple_expr(
             inputs.push(lower_expr(
                 ctx, core_field_value_expr(field),
                 continue_target, break_target))
+            if is_terminated(ctx) { return true }
         }
+        if is_terminated(ctx) { return true }
         let input_types = inputs.map(fn(slot) { frozen_slot_type_at(ctx, slot) })
         let roles = repeated_role(inputs.len(), flow_semantic_role_consume())
         let constructor_kind = core_constructor_kind_tag(constructor)
@@ -1223,6 +1246,7 @@ fn lower_if_expression(
     let else_block = core_expr_else_block(expr)
     let condition = lower_expr(
         ctx, core_expr_condition(expr), continue_target, break_target)
+    if is_terminated(ctx) { return }
     let then_scope = new_child_scope(ctx, parent_scope)
     let else_scope = new_child_scope(ctx, parent_scope)
     let then_entry = new_draft(ctx, core_block_origin(then_block), then_scope)
@@ -1322,6 +1346,7 @@ fn lower_match_expression(
     let origin = core_expr_origin(expr)
     let scrutinee = lower_expr(
         ctx, core_expr_scrutinee(expr), continue_target, break_target)
+    if is_terminated(ctx) { return }
     let join = new_draft(ctx, origin, current_draft(ctx).scope)
     lower_match_arms(
         ctx, scrutinee, core_expr_match_arms(expr),
@@ -1405,6 +1430,27 @@ fn lower_expr(
     let previous = enter_core_node(
         ctx, CORE_FLOW_NODE_EXPR, kind,
         core_expr_origin(expr), some(result))
+    if kind == 18 {
+        let payload = lower_expr(
+            ctx, core_expr_fail_payload(expr),
+            continue_target, break_target)
+        if !is_terminated(ctx) {
+            let sink = new_admin_slot(
+                ctx, frozen_slot_type_at(ctx, payload),
+                current_draft(ctx).scope, binder_kind_pre_anf(),
+                "fail-payload", 3,
+                flow_storage_temp(), flow_initial_slot_empty())
+            emit_instruction(ctx, make_flow_fail_raise(
+                next_instruction_ref(ctx), core_expr_origin(expr),
+                payload, sink),
+                core_flow_role_expr_primary())
+            terminate(ctx, make_flow_diverge(
+                core_expr_origin(expr), all_exited_scopes(ctx)),
+                core_flow_role_control_exit(0))
+        }
+        restore_core_node(ctx, previous)
+        return result
+    }
     if emit_simple_expr(
             ctx, expr, result, continue_target, break_target) {
         restore_core_node(ctx, previous)
@@ -1449,6 +1495,7 @@ fn lower_while_statement(
     set_current(ctx, condition)
     let condition_slot = lower_expr(
         ctx, condition_expr, some(condition), some(exit))
+    if is_terminated(ctx) { return }
     terminate(ctx, make_flow_loop(
         origin, condition_slot,
         successor_to(ctx, body_entry), successor_to(ctx, exit)),
@@ -1477,14 +1524,29 @@ fn lower_statement(
         activate_core_binder(ctx, target, current_draft(ctx).scope)
         let rhs = lower_expr(
             ctx, core_stmt_value(statement), continue_target, break_target)
+        if is_terminated(ctx) {
+            restore_core_node(ctx, previous)
+            return
+        }
         emit_instruction(ctx, make_flow_assign(
             next_instruction_ref(ctx), origin, rhs,
             make_flow_slot_place(target)), core_flow_role_stmt_assign())
     } else if kind == 1 {
-        let target = lower_flow_place(
-            ctx, core_stmt_target(statement), continue_target, break_target)
+        let target = match lower_flow_place(
+                ctx, core_stmt_target(statement),
+                continue_target, break_target) {
+            some(value) => value,
+            none => {
+                restore_core_node(ctx, previous)
+                return
+            }
+        }
         let rhs = lower_expr(
             ctx, core_stmt_value(statement), continue_target, break_target)
+        if is_terminated(ctx) {
+            restore_core_node(ctx, previous)
+            return
+        }
         emit_instruction(ctx, make_flow_assign(
             next_instruction_ref(ctx), origin, rhs, target),
             core_flow_role_stmt_assign())
@@ -1513,6 +1575,10 @@ fn lower_statement(
             some(expr) => some(lower_expr(
                 ctx, expr, continue_target, break_target)),
             none => none
+        }
+        if is_terminated(ctx) {
+            restore_core_node(ctx, previous)
+            return
         }
         terminate(ctx, make_flow_return(
             origin, returned_slot, all_exited_scopes(ctx)),

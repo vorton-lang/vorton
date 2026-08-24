@@ -80,6 +80,7 @@ use flow_ir::{
     flow_mutate_target, flow_mutate_value,
     flow_mutate_target_role, flow_mutate_value_role,
     flow_consume_source, flow_discard_source,
+    flow_fail_raise_payload, flow_fail_raise_sink,
     flow_assign_rhs_temp, flow_assign_target,
     flow_place_is_slot, flow_place_slot, flow_place_base,
     flow_place_projection, flow_place_evaluated_index,
@@ -795,7 +796,7 @@ enum PlannerEventValue {
         value: Int,
         value_demand: TransferDemand
     },
-    ConsumeValue(Int, Bool),
+    ConsumeValue(Int, Bool, Int?),
     DiscardValue(Int),
     AssignValue { rhs_temp: Int, target: PlannerPlace },
     CallValue {
@@ -985,8 +986,16 @@ pub fn make_planner_mutate(
                 transfer_demand_force(value_demand))
         })
 }
-pub fn make_planner_consume(slot: Int, force: Bool) -> PlannerEvent {
-    make_planner_event(PlannerEventValue::ConsumeValue(slot, force))
+pub fn make_planner_consume(
+    slot: Int, force: Bool, target: Int?
+) -> PlannerEvent {
+    match target {
+        some(value) => if value < 0 || value == slot {
+            panic("ResourcePlanner: Consume target is invalid")
+        },
+        none => {}
+    }
+    make_planner_event(PlannerEventValue::ConsumeValue(slot, force, target))
 }
 pub fn make_planner_discard(slot: Int) -> PlannerEvent {
     make_planner_event(PlannerEventValue::DiscardValue(slot))
@@ -1090,8 +1099,8 @@ fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
         PlannerEventValue::MutateValue {
             target, value: input, value_demand
         } => make_planner_mutate(target, input, value_demand),
-        PlannerEventValue::ConsumeValue(slot, force) =>
-            make_planner_consume(slot, force),
+        PlannerEventValue::ConsumeValue(slot, force, target) =>
+            make_planner_consume(slot, force, target),
         PlannerEventValue::DiscardValue(slot) => make_planner_discard(slot),
         PlannerEventValue::AssignValue { rhs_temp, target } =>
             make_planner_assign(rhs_temp, target),
@@ -1308,8 +1317,20 @@ fn validate_event(
             validate_slot_index(target, slots)
             validate_slot_index(input, slots)
         },
-        PlannerEventValue::ConsumeValue(slot, _) =>
-            validate_slot_index(slot, slots),
+        PlannerEventValue::ConsumeValue(slot, _, target) => {
+            validate_slot_index(slot, slots)
+            match target {
+                some(value) => {
+                    validate_slot_index(value, slots)
+                    if !slots.get(value).unwrap().owns_storage ||
+                       slots.get(value).unwrap().type_index !=
+                            slots.get(slot).unwrap().type_index {
+                        panic("ResourcePlanner: Consume sink does not own storage")
+                    }
+                },
+                none => {}
+            }
+        },
         PlannerEventValue::DiscardValue(slot) =>
             validate_slot_index(slot, slots),
         PlannerEventValue::AssignValue { rhs_temp, target } => {
@@ -2287,10 +2308,21 @@ fn apply_event_abstract(
                 input, value_demand, slots, logical_shapes,
                 physical_shapes, states)
         },
-        PlannerEventValue::ConsumeValue(slot, force) =>
+        PlannerEventValue::ConsumeValue(slot, force, target) => {
+            match target {
+                some(value) => {
+                    let sink_state = states.get(value).unwrap()
+                    if slot_flow_same(sink_state, slot_flow_live()) ||
+                       slot_flow_same(sink_state, slot_flow_unreachable()) {
+                        panic("ResourcePlanner: abstract Consume sink is not empty")
+                    }
+                },
+                none => {}
+            }
             apply_demand_abstract(
                 slot, make_transfer_demand(param_mode_own(), force),
-                slots, logical_shapes, physical_shapes, states),
+                slots, logical_shapes, physical_shapes, states)
+        },
         PlannerEventValue::DiscardValue(slot) => {
             require_live_state(states.get(slot).unwrap(), "discard")
             let type_index = slots.get(slot).unwrap().type_index
@@ -2633,7 +2665,7 @@ fn apply_event_origin(
         PlannerEventValue::ReadValue { source, target } =>
             states.set(target, copy_origin_bits(states.get(source).unwrap())),
         PlannerEventValue::MutateValue { .. } => {},
-        PlannerEventValue::ConsumeValue(slot, _) |
+        PlannerEventValue::ConsumeValue(slot, _, _) |
         PlannerEventValue::DiscardValue(slot) =>
             states.set(slot, empty_origin_bits(origin_width)),
         PlannerEventValue::AssignValue { rhs_temp, target } => {
@@ -2837,7 +2869,7 @@ fn seed_event_demands(
             add_demand_to_origins(
                 states.get(input).unwrap(), value_demand, seeds)
         },
-        PlannerEventValue::ConsumeValue(slot, force) =>
+        PlannerEventValue::ConsumeValue(slot, force, _) =>
             add_demand_to_origins(
                 states.get(slot).unwrap(),
                 make_transfer_demand(param_mode_own(), force), seeds),
@@ -3141,7 +3173,7 @@ fn event_candidate_slot_overwritten(
     match event.value {
         PlannerEventValue::InitializeEmptyValue(target) |
         PlannerEventValue::InitializeLiveValue(target) |
-        PlannerEventValue::ConsumeValue(target, _) |
+        PlannerEventValue::ConsumeValue(target, _, _) |
         PlannerEventValue::DiscardValue(target) => target == slot,
         PlannerEventValue::ScopeExitValue(scope_id) =>
             body.slots.get(slot).unwrap().scope_id == scope_id,
@@ -4005,12 +4037,23 @@ fn materialize_event(
                 solved, none,
                 states, before_ops, before_transitions)
         },
-        PlannerEventValue::ConsumeValue(slot, force) =>
+        PlannerEventValue::ConsumeValue(slot, force, target) => {
+            match target {
+                some(value) => {
+                    let sink_state = states.get(value).unwrap()
+                    if slot_flow_same(sink_state, slot_flow_live()) ||
+                       slot_flow_same(sink_state, slot_flow_unreachable()) {
+                        panic("ResourcePlanner: Consume sink is not empty")
+                    }
+                },
+                none => {}
+            }
             apply_demand_materialized(
                 body, slot, make_transfer_demand(param_mode_own(), force),
                 make_rc_instruction_site(
                     instruction, rc_site_before_instruction(), 0),
-                solved, none, states, before_ops, before_transitions),
+                solved, target, states, before_ops, before_transitions)
+        },
         PlannerEventValue::DiscardValue(slot) => {
             let before = states.get(slot).unwrap()
             require_live_state(before, "discard")
@@ -4794,7 +4837,8 @@ fn planner_event_value_from_flow(
     }
     if tag == 3 {
         return make_planner_consume(
-            flow_slot_index(slots, flow_consume_source(instruction)), false)
+            flow_slot_index(slots, flow_consume_source(instruction)),
+            false, none)
     }
     if tag == 4 {
         return make_planner_discard(
@@ -4856,6 +4900,12 @@ fn planner_event_value_from_flow(
     if tag == 10 {
         return make_planner_scope_exit(flow_scope_ref_ordinal(
             flow_scope_instruction_scope(instruction)))
+    }
+    if tag == 11 {
+        return make_planner_consume(
+            flow_slot_index(slots, flow_fail_raise_payload(instruction)),
+            true, some(flow_slot_index(
+                slots, flow_fail_raise_sink(instruction))))
     }
     panic("ResourcePlanner: unknown FlowIR instruction kind")
 }
@@ -5415,15 +5465,30 @@ fn verify_event_operation_contract(
                     operation, body.slots.get(input).unwrap().reference, none)
             }
         },
-        PlannerEventValue::ConsumeValue(slot, _) |
-        PlannerEventValue::DiscardValue(slot) => {
+        PlannerEventValue::ConsumeValue(slot, _, target) => {
             if after.len() != 0 {
-                panic("ResourcePlanner verifier: consume/discard has after-resource op")
+                panic("ResourcePlanner verifier: consume has after-resource op")
             }
             for operation in before {
                 if rc_semantic_site_operand_ordinal(
                         rc_operation_site(operation)) != 0 {
-                    panic("ResourcePlanner verifier: consume/discard ordinal drifted")
+                    panic("ResourcePlanner verifier: consume ordinal drifted")
+                }
+                verify_operation_slots_exact(
+                    operation, body.slots.get(slot).unwrap().reference,
+                    target.map(fn(value) {
+                        body.slots.get(value).unwrap().reference
+                    }))
+            }
+        },
+        PlannerEventValue::DiscardValue(slot) => {
+            if after.len() != 0 {
+                panic("ResourcePlanner verifier: discard has after-resource op")
+            }
+            for operation in before {
+                if rc_semantic_site_operand_ordinal(
+                        rc_operation_site(operation)) != 0 {
+                    panic("ResourcePlanner verifier: discard ordinal drifted")
                 }
                 verify_operation_slots_exact(
                     operation, body.slots.get(slot).unwrap().reference, none)
