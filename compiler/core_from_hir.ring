@@ -75,7 +75,7 @@ use core_expr::{
     reserve_core_type_fact_ref,
     core_type_fact_module_key, core_type_fact_ordinal,
     core_type_fact_same, core_type_fact_local_ref,
-    core_type_ref_module_key, make_core_effect_set,
+    core_type_ref_module_key, make_core_effect_set, core_effect_set_atoms,
     make_core_callable_contract, make_core_assoc_binding,
     make_core_impl_metadata,
     make_core_fail_effect, make_core_mut_effect, make_core_unsafe_effect,
@@ -116,7 +116,8 @@ use core_expr::{
     copy_core_callables, copy_core_impl_metadata,
     core_callable_reference, core_impl_owner,
     remap_core_callable_types, remap_core_impl_types, remap_core_body_types,
-    validate_core_body_type_domain, validate_core_impl_type_domain
+    validate_core_body_type_domain, validate_core_impl_type_domain,
+    core_effect_set_same, core_body_effect_sets
 }
 use core_hir::{
     CoreProgram, CoreBodyEntry,
@@ -1591,6 +1592,7 @@ pub fn record_core_delegate(
 pub struct FrozenCoreAssemblyFacts {
     module_key: Str,
     module_order: Int,
+    type_refs: List<CoreTypeFactRef>,
     type_nodes: List<FlowTypeNode>,
     callables: List<CoreCallableContract>,
     impls: List<CoreImplMetadata>,
@@ -1703,6 +1705,7 @@ pub fn freeze_core_assembly_facts(
     FrozenCoreAssemblyFacts {
         module_key: recorder.module_key,
         module_order: recorder.module_order,
+        type_refs: recorder.type_refs.map(fn(value) { value }),
         type_nodes: type_nodes.map(fn(value) { value }),
         callables: copy_core_callables(callables),
         impls: copy_core_impl_metadata(impls),
@@ -2522,7 +2525,9 @@ fn lower_expr(mut cursor: BodyCursor, expr: HExpr) -> LoweredExpr {
                 callee, arguments, evidence) }
         },
         HExpr::Clone { .. } =>
-            panic("Core assembly: legacy resource Clone crossed Core")
+            panic("Core assembly: legacy resource Clone crossed Core"),
+        HExpr::Take { .. } =>
+            panic("Core assembly: resource Take crossed Core input")
     }
 }
 
@@ -3136,9 +3141,151 @@ fn intern_project_types(
     }
 }
 
+pub struct CoreAssemblyTypeRemapEntry {
+    source: CoreTypeFactRef,
+    target: CoreTypeRef
+}
+pub fn core_assembly_type_remap_source(
+    value: CoreAssemblyTypeRemapEntry
+) -> CoreTypeFactRef { value.source }
+pub fn core_assembly_type_remap_target(
+    value: CoreAssemblyTypeRemapEntry
+) -> CoreTypeRef { value.target }
+
+pub struct CoreAssemblyTypeRemap {
+    entries: List<CoreAssemblyTypeRemapEntry>
+}
+pub fn core_assembly_type_remap_entries(
+    value: CoreAssemblyTypeRemap
+) -> List<CoreAssemblyTypeRemapEntry> {
+    value.entries.map(fn(entry) {
+        CoreAssemblyTypeRemapEntry {
+            source: entry.source, target: entry.target
+        }
+    })
+}
+pub fn core_assembly_remap_type(
+    value: CoreAssemblyTypeRemap, source: CoreTypeFactRef
+) -> CoreTypeRef {
+    let mut found: CoreTypeRef? = none
+    for entry in value.entries {
+        if core_type_fact_same(entry.source, source) {
+            if found.is_some() {
+                panic("Core assembly: type remap source repeats")
+            }
+            found = some(entry.target)
+        }
+    }
+    match found {
+        some(target) => target,
+        none => panic("Core assembly: type fact has no project remap")
+    }
+}
+
+pub struct CoreAssemblyEffectRemapEntry {
+    module_key: Str,
+    source: CoreEffectSet,
+    target: CoreEffectSet
+}
+pub fn core_assembly_effect_remap_module_key(
+    value: CoreAssemblyEffectRemapEntry
+) -> Str { value.module_key }
+pub fn core_assembly_effect_remap_source(
+    value: CoreAssemblyEffectRemapEntry
+) -> CoreEffectSet {
+    make_core_effect_set(core_effect_set_atoms(value.source))
+}
+pub fn core_assembly_effect_remap_target(
+    value: CoreAssemblyEffectRemapEntry
+) -> CoreEffectSet {
+    make_core_effect_set(core_effect_set_atoms(value.target))
+}
+pub struct CoreAssemblyEffectRemap {
+    entries: List<CoreAssemblyEffectRemapEntry>
+}
+pub fn core_assembly_effect_remap_entries(
+    value: CoreAssemblyEffectRemap
+) -> List<CoreAssemblyEffectRemapEntry> {
+    value.entries.map(fn(entry) {
+        CoreAssemblyEffectRemapEntry {
+            module_key: entry.module_key,
+            source: make_core_effect_set(core_effect_set_atoms(entry.source)),
+            target: make_core_effect_set(core_effect_set_atoms(entry.target))
+        }
+    })
+}
+pub fn core_assembly_remap_effect(
+    value: CoreAssemblyEffectRemap,
+    module_key: Str, source: CoreEffectSet
+) -> CoreEffectSet {
+    let mut found: CoreEffectSet? = none
+    for entry in value.entries {
+        if entry.module_key == module_key &&
+           core_effect_set_same(entry.source, source) {
+            if found.is_some() {
+                panic("Core assembly: effect remap source repeats")
+            }
+            found = some(entry.target)
+        }
+    }
+    match found {
+        some(target) => make_core_effect_set(core_effect_set_atoms(target)),
+        none => panic("Core assembly: effect set has no project remap")
+    }
+}
+
+pub struct CoreAssemblyResult {
+    program: CoreProgram,
+    type_remap: CoreAssemblyTypeRemap,
+    effect_remap: CoreAssemblyEffectRemap
+}
+pub fn core_assembly_result_program(value: CoreAssemblyResult) -> CoreProgram {
+    value.program
+}
+pub fn core_assembly_result_type_remap(
+    value: CoreAssemblyResult
+) -> CoreAssemblyTypeRemap { value.type_remap }
+pub fn core_assembly_result_effect_remap(
+    value: CoreAssemblyResult
+) -> CoreAssemblyEffectRemap { value.effect_remap }
+
+fn append_effect_remaps(
+    module_key: Str, local: CoreBody, global: CoreBody,
+    mut entries: List<CoreAssemblyEffectRemapEntry>
+) {
+    let local_effects = core_body_effect_sets(local)
+    let global_effects = core_body_effect_sets(global)
+    if local_effects.len() != global_effects.len() {
+        panic("Core assembly: local/global effect traversal differs")
+    }
+    let mut index = 0
+    while index < local_effects.len() {
+        let source = local_effects.get(index).unwrap()
+        let target = global_effects.get(index).unwrap()
+        let mut existing: CoreEffectSet? = none
+        for entry in entries {
+            if entry.module_key == module_key &&
+               core_effect_set_same(entry.source, source) {
+                existing = some(entry.target)
+            }
+        }
+        match existing {
+            some(value) => if !core_effect_set_same(value, target) {
+                panic("Core assembly: effect remap target differs")
+            },
+            none => entries.push(CoreAssemblyEffectRemapEntry {
+                module_key: module_key,
+                source: make_core_effect_set(core_effect_set_atoms(source)),
+                target: make_core_effect_set(core_effect_set_atoms(target))
+            })
+        }
+        index = index + 1
+    }
+}
+
 fn assemble_frozen_core_facts(
     facts: List<FrozenCoreAssemblyFacts>
-) -> CoreProgram {
+) -> CoreAssemblyResult {
     if facts.len() == 0 { panic("Core assembly: project has no frozen facts") }
     validate_project_fact_order(facts)
     let interning = intern_project_types(facts)
@@ -3150,9 +3297,32 @@ fn assemble_frozen_core_facts(
     }
     let inventory = make_executable_inventory(inventory_entries)
     let project_type_count = core_type_graph_count(interning.graph)
+    let mut type_remap_entries: List<CoreAssemblyTypeRemapEntry> = []
+    let mut type_fact_index = 0
+    while type_fact_index < facts.len() {
+        let fact = facts.get(type_fact_index).unwrap()
+        let mapping = interning.module_mappings.get(type_fact_index).unwrap()
+        if fact.type_refs.len() != mapping.len() {
+            panic("Core assembly: type fact/remap census differs")
+        }
+        let mut local_index = 0
+        while local_index < fact.type_refs.len() {
+            if core_type_fact_ordinal(
+                    fact.type_refs.get(local_index).unwrap()) != local_index {
+                panic("Core assembly: type fact/remap order differs")
+            }
+            type_remap_entries.push(CoreAssemblyTypeRemapEntry {
+                source: fact.type_refs.get(local_index).unwrap(),
+                target: make_core_type_ref(mapping.get(local_index).unwrap())
+            })
+            local_index = local_index + 1
+        }
+        type_fact_index = type_fact_index + 1
+    }
     let mut callables: List<CoreCallableContract> = []
     let mut all_impls: List<CoreImplMetadata> = []
     let mut body_pool: List<CoreBodyEntry> = []
+    let mut effect_remap_entries: List<CoreAssemblyEffectRemapEntry> = []
     let mut fact_index = 0
     while fact_index < facts.len() {
         let fact = facts.get(fact_index).unwrap()
@@ -3170,41 +3340,58 @@ fn assemble_frozen_core_facts(
         for source in fact.source_bodies {
             let hir = source.source
             let local_entry = assemble_source_body(source, hir, local_graph)
+            let local_body = core_body_entry_body(local_entry)
+            let global_body = remap_core_body_types(
+                local_body, mapping, project_type_count, fact.module_key)
+            append_effect_remaps(
+                fact.module_key, local_body, global_body,
+                effect_remap_entries)
             body_pool.push(make_core_body_entry(
                 core_body_entry_reference(local_entry),
                 core_body_entry_origin(local_entry),
                 core_body_entry_anchor(local_entry),
-                remap_core_body_types(
-                    core_body_entry_body(local_entry), mapping,
-                    project_type_count, fact.module_key)))
+                global_body))
         }
         for generated in fact.generated {
+            let local_body = materialize_generated(generated)
+            let global_body = remap_core_body_types(
+                local_body, mapping, project_type_count, fact.module_key)
+            append_effect_remaps(
+                fact.module_key, local_body, global_body,
+                effect_remap_entries)
             body_pool.push(entry_for_body(
-                remap_core_body_types(
-                    materialize_generated(generated), mapping,
-                    project_type_count, fact.module_key),
-                inventory))
+                global_body, inventory))
         }
         for delegate in fact.delegates {
             let (metadata, bodies) = elaborate_delegate_to_core(delegate)
             all_impls.push(remap_core_impl_types(
                 metadata, mapping, fact.module_key))
             for body in bodies {
+                let global_body = remap_core_body_types(
+                    body, mapping, project_type_count, fact.module_key)
+                append_effect_remaps(
+                    fact.module_key, body, global_body,
+                    effect_remap_entries)
                 body_pool.push(entry_for_body(
-                    remap_core_body_types(
-                        body, mapping, project_type_count,
-                        fact.module_key), inventory))
+                    global_body, inventory))
             }
         }
         fact_index = fact_index + 1
     }
     let ordered = order_entries_by_inventory(body_pool, inventory)
-    make_core_program(
+    let program = make_core_program(
         interning.graph, callables, all_impls, ordered,
         inventory, manifests)
+    CoreAssemblyResult {
+        program: program,
+        type_remap: CoreAssemblyTypeRemap { entries: type_remap_entries },
+        effect_remap: CoreAssemblyEffectRemap { entries: effect_remap_entries }
+    }
 }
 
-pub fn assemble_single_core(facts: FrozenCoreAssemblyFacts) -> CoreProgram {
+pub fn assemble_single_core(
+    facts: FrozenCoreAssemblyFacts
+) -> CoreAssemblyResult {
     if facts.module_order != 0 {
         panic("Core assembly: single module order is not zero")
     }
@@ -3213,6 +3400,6 @@ pub fn assemble_single_core(facts: FrozenCoreAssemblyFacts) -> CoreProgram {
 
 pub fn assemble_project_core(
     facts_in_topological_order: List<FrozenCoreAssemblyFacts>
-) -> CoreProgram {
+) -> CoreAssemblyResult {
     assemble_frozen_core_facts(facts_in_topological_order)
 }

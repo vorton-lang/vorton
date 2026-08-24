@@ -410,6 +410,17 @@ pub fn make_core_effect_set(atoms: List<CoreEffectAtom>) -> CoreEffectSet {
 pub fn core_effect_set_atoms(value: CoreEffectSet) -> List<CoreEffectAtom> {
     copy_effect_atoms(value.atoms)
 }
+pub fn core_effect_set_same(left: CoreEffectSet, right: CoreEffectSet) -> Bool {
+    if left.atoms.len() != right.atoms.len() { return false }
+    for atom in left.atoms {
+        let mut matches = 0
+        for candidate in right.atoms {
+            if core_effect_atom_same(atom, candidate) { matches = matches + 1 }
+        }
+        if matches != 1 { return false }
+    }
+    true
+}
 
 // ============================================================
 // Exact callable/evidence/member identities
@@ -2450,6 +2461,80 @@ pub fn core_body_parameter_slots(value: CoreBody) -> List<SlotRef> {
 }
 pub fn core_body_result_type(value: CoreBody) -> CoreTypeRef { value.result_type }
 pub fn core_body_block(value: CoreBody) -> CoreBlock { value.body }
+
+fn collect_expr_effect_sets(
+    value: CoreExpr, mut result: List<CoreEffectSet>
+) {
+    result.push(make_core_effect_set(value.effects.atoms))
+    match value.value {
+        CoreExprValue::BlockExprValue(block) =>
+            collect_block_effect_sets(block, result),
+        CoreExprValue::IfExprValue { then_block, else_block, .. } => {
+            collect_block_effect_sets(then_block, result)
+            collect_block_effect_sets(else_block, result)
+        },
+        CoreExprValue::MatchExprValue { arms, .. } => {
+            for arm in arms {
+                match arm.guard {
+                    some(guard) => collect_expr_effect_sets(guard, result),
+                    none => {}
+                }
+                collect_block_effect_sets(arm.body, result)
+            }
+        },
+        CoreExprValue::TryCatchExprValue { body, arms, .. } => {
+            collect_block_effect_sets(body, result)
+            for arm in arms {
+                match arm.guard {
+                    some(guard) => collect_expr_effect_sets(guard, result),
+                    none => {}
+                }
+                collect_block_effect_sets(arm.body, result)
+            }
+        },
+        CoreExprValue::HandleExprValue { body, .. } =>
+            collect_block_effect_sets(body, result),
+        _ => {}
+    }
+}
+
+fn collect_statement_effect_sets(
+    value: CoreStmt, mut result: List<CoreEffectSet>
+) {
+    match value.value {
+        CoreStmtValue::Initialize { value: expr, .. } |
+        CoreStmtValue::Assign { value: expr, .. } |
+        CoreStmtValue::ExprStmt { value: expr, .. } =>
+            collect_expr_effect_sets(expr, result),
+        CoreStmtValue::While { condition, body, .. } => {
+            collect_expr_effect_sets(condition, result)
+            collect_block_effect_sets(body, result)
+        },
+        CoreStmtValue::Return { value: returned, .. } => match returned {
+            some(expr) => collect_expr_effect_sets(expr, result),
+            none => {}
+        },
+        _ => {}
+    }
+}
+
+fn collect_block_effect_sets(
+    value: CoreBlock, mut result: List<CoreEffectSet>
+) {
+    for statement in value.statements {
+        collect_statement_effect_sets(statement, result)
+    }
+    match value.tail {
+        some(expr) => collect_expr_effect_sets(expr, result),
+        none => {}
+    }
+}
+
+pub fn core_body_effect_sets(value: CoreBody) -> List<CoreEffectSet> {
+    let mut result: List<CoreEffectSet> = []
+    collect_block_effect_sets(value.body, result)
+    result
+}
 
 // Core assembly first closes each module against its own opaque type-fact
 // ordinals, then the project interner assigns the only global CoreTypeRef
