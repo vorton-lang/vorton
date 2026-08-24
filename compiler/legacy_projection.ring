@@ -15,20 +15,32 @@ use ir_identity::{
     origin_ref_is_symbol, origin_ref_symbol, origin_ref_path, origin_ref_same,
     path_ref_owner, path_owner_ref_is_symbol,
     path_owner_ref_symbol, path_owner_ref_module_body,
-    slot_ref_is_source, slot_ref_source_def_id, slot_ref_same,
+    slot_ref_is_source, slot_ref_source_origin_module_key,
+    slot_ref_source_def_id, slot_ref_synthetic_path, slot_ref_same,
     impl_owner_ref_target, impl_owner_ref_trait, impl_owner_ref_same,
     impl_method_ref_owner, impl_method_ref_member, impl_method_ref_same}
 use ir_inventory::{
     ExecutableRef, ExecutableKind,
     make_named_executable_ref,
+    executable_inventory_entries, executable_entry_reference,
     executable_ref_same, executable_ref_origin_module_key,
     executable_kind_same}
 use core_expr::{
-    CoreTypeRef, CoreEffectAtom, CoreEffectSet,
-    core_type_ref_index, core_type_ref_same,
+    CoreTypeRef, CoreTypeFactRef, CoreEffectAtom, CoreEffectSet,
+    core_type_ref_index, core_type_ref_same, core_type_graph_count,
+    core_type_fact_module_key, core_type_fact_ordinal, core_type_fact_same,
     make_core_effect_set, core_effect_set_atoms,
     core_effect_atom_kind_tag, core_effect_atom_type,
     core_effect_atom_handled_ref, core_effect_atom_system_ref}
+use core_hir::{core_program_type_graph, core_program_inventory}
+use core_from_hir::{
+    CoreEffectSetFact, CoreAssemblyResult,
+    CoreAssemblyTypeRemap,
+    core_effect_set_fact_local_set,
+    core_assembly_result_program,
+    core_assembly_result_type_remap,
+    core_assembly_result_effect_remap,
+    core_assembly_remap_type, core_assembly_remap_effect}
 
 // ============================================================
 // Total CoreTypeRef <-> legacy Type bijection
@@ -792,6 +804,308 @@ pub fn legacy_executable_shell_for(
 }
 
 // ============================================================
+// Module-domain projection facts (no project CoreTypeRef)
+// ============================================================
+
+pub struct LegacyTypeFactProjection {
+    fact: CoreTypeFactRef,
+    legacy_type: Type
+}
+pub fn make_legacy_type_fact_projection(
+    fact: CoreTypeFactRef, legacy_type: Type
+) -> LegacyTypeFactProjection {
+    match legacy_type {
+        Type::ErrorType => panic("legacy projection: module Type fact is ErrorType"),
+        _ => {}
+    }
+    LegacyTypeFactProjection { fact: fact, legacy_type: legacy_type }
+}
+pub fn legacy_type_fact_projection_fact(
+    value: LegacyTypeFactProjection
+) -> CoreTypeFactRef { value.fact }
+pub fn legacy_type_fact_projection_type(
+    value: LegacyTypeFactProjection
+) -> Type { value.legacy_type }
+
+pub struct LegacyEffectFactProjection {
+    fact: CoreEffectSetFact,
+    legacy_effects: EffectRow
+}
+pub fn make_legacy_effect_fact_projection(
+    fact: CoreEffectSetFact, legacy_effects: EffectRow
+) -> LegacyEffectFactProjection {
+    LegacyEffectFactProjection {
+        fact: fact,
+        legacy_effects: EffectRow {
+            effects: legacy_effects.effects, tail: legacy_effects.tail
+        }
+    }
+}
+pub fn legacy_effect_fact_projection_fact(
+    value: LegacyEffectFactProjection
+) -> CoreEffectSetFact { value.fact }
+pub fn legacy_effect_fact_projection_row(
+    value: LegacyEffectFactProjection
+) -> EffectRow {
+    EffectRow {
+        effects: value.legacy_effects.effects,
+        tail: value.legacy_effects.tail
+    }
+}
+
+pub struct LegacyBinderFactProjection {
+    slot: SlotRef,
+    name: Str,
+    def_id: Int,
+    type_fact: CoreTypeFactRef,
+    ty: Type,
+    is_mutable: Bool
+}
+pub fn make_legacy_binder_fact_projection(
+    slot: SlotRef, name: Str, def_id: Int,
+    type_fact: CoreTypeFactRef, ty: Type, is_mutable: Bool
+) -> LegacyBinderFactProjection {
+    if name.len() == 0 {
+        panic("legacy projection: module binder physical name is empty")
+    }
+    if slot_ref_is_source(slot) {
+        if def_id < 0 || def_id != slot_ref_source_def_id(slot) {
+            panic("legacy projection: module source binder DefId differs")
+        }
+    } else if def_id >= 0 {
+        panic("legacy projection: module synthetic binder DefId is not negative")
+    }
+    LegacyBinderFactProjection {
+        slot: slot, name: name, def_id: def_id,
+        type_fact: type_fact, ty: ty, is_mutable: is_mutable
+    }
+}
+pub fn legacy_binder_fact_slot(value: LegacyBinderFactProjection) -> SlotRef {
+    value.slot
+}
+pub fn legacy_binder_fact_name(value: LegacyBinderFactProjection) -> Str {
+    value.name
+}
+pub fn legacy_binder_fact_def_id(value: LegacyBinderFactProjection) -> Int {
+    value.def_id
+}
+pub fn legacy_binder_fact_type_fact(
+    value: LegacyBinderFactProjection
+) -> CoreTypeFactRef { value.type_fact }
+pub fn legacy_binder_fact_type(value: LegacyBinderFactProjection) -> Type {
+    value.ty
+}
+pub fn legacy_binder_fact_is_mutable(
+    value: LegacyBinderFactProjection
+) -> Bool { value.is_mutable }
+
+pub struct LegacyCallableFactProjection {
+    reference: ExecutableRef,
+    origin: OriginRef,
+    module_body: ModuleBodyRef,
+    container: LegacyContainerRef,
+    kind: ExecutableKind,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    bounds: List<LegacyTraitBoundProjection>,
+    parameters: List<LegacyBinderFactProjection>,
+    result_type_fact: CoreTypeFactRef,
+    result_type: Type,
+    effects: EffectRow,
+    is_public: Bool
+}
+pub fn make_legacy_callable_fact_projection(
+    reference: ExecutableRef, origin: OriginRef,
+    module_body: ModuleBodyRef, container: LegacyContainerRef,
+    kind: ExecutableKind,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    bounds: List<LegacyTraitBoundProjection>,
+    parameters: List<LegacyBinderFactProjection>,
+    result_type_fact: CoreTypeFactRef, result_type: Type,
+    effects: EffectRow, is_public: Bool
+) -> LegacyCallableFactProjection {
+    let module_key = module_body_ref_origin_module_key(module_body)
+    if executable_ref_origin_module_key(reference) != module_key ||
+       origin_module_key(origin) != module_key ||
+       legacy_container_module_key(container) != module_key ||
+       core_type_fact_module_key(result_type_fact) != module_key {
+        panic("legacy projection: module callable identity/type domain differs")
+    }
+    for parameter in parameters {
+        if core_type_fact_module_key(parameter.type_fact) != module_key {
+            panic("legacy projection: callable parameter fact crosses module")
+        }
+    }
+    LegacyCallableFactProjection {
+        reference: reference, origin: origin,
+        module_body: module_body, container: container, kind: kind,
+        type_parameters: copy_type_parameters(type_parameters),
+        bounds: copy_trait_bounds(bounds), parameters: parameters,
+        result_type_fact: result_type_fact, result_type: result_type,
+        effects: EffectRow { effects: effects.effects, tail: effects.tail },
+        is_public: is_public
+    }
+}
+
+pub struct LegacyAssocBindingFactProjection {
+    member_ref: SymbolRef,
+    type_fact: CoreTypeFactRef,
+    ty: Type
+}
+pub fn make_legacy_assoc_binding_fact_projection(
+    member_ref: SymbolRef, type_fact: CoreTypeFactRef, ty: Type
+) -> LegacyAssocBindingFactProjection {
+    LegacyAssocBindingFactProjection {
+        member_ref: member_ref, type_fact: type_fact, ty: ty
+    }
+}
+
+pub struct LegacyImplFactProjection {
+    owner: ImplOwnerRef,
+    target_type_fact: CoreTypeFactRef,
+    target_type: Type,
+    target_nominal: SymbolRef,
+    trait_ref: SymbolRef?,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    assoc_bindings: List<LegacyAssocBindingFactProjection>,
+    methods: List<ImplMethodRef>,
+    module_body: ModuleBodyRef,
+    container: LegacyContainerRef
+}
+pub fn make_legacy_impl_fact_projection(
+    owner: ImplOwnerRef,
+    target_type_fact: CoreTypeFactRef, target_type: Type,
+    target_nominal: SymbolRef, trait_ref: SymbolRef?,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    assoc_bindings: List<LegacyAssocBindingFactProjection>,
+    methods: List<ImplMethodRef>, module_body: ModuleBodyRef,
+    container: LegacyContainerRef
+) -> LegacyImplFactProjection {
+    let module_key = module_body_ref_origin_module_key(module_body)
+    if core_type_fact_module_key(target_type_fact) != module_key ||
+       !symbol_ref_same(impl_owner_ref_target(owner), target_nominal) ||
+       legacy_container_module_key(container) != module_key {
+        panic("legacy projection: module impl identity/type domain differs")
+    }
+    match (impl_owner_ref_trait(owner), trait_ref) {
+        (some(a), some(b)) => if !symbol_ref_same(a, b) {
+            panic("legacy projection: module impl trait differs")
+        },
+        (none, none) => {},
+        _ => panic("legacy projection: module impl trait presence differs")
+    }
+    for binding in assoc_bindings {
+        if core_type_fact_module_key(binding.type_fact) != module_key {
+            panic("legacy projection: impl assoc fact crosses module")
+        }
+    }
+    for method in methods {
+        if !impl_owner_ref_same(impl_method_ref_owner(method), owner) {
+            panic("legacy projection: module impl method crosses owner")
+        }
+    }
+    LegacyImplFactProjection {
+        owner: owner, target_type_fact: target_type_fact,
+        target_type: target_type, target_nominal: target_nominal,
+        trait_ref: trait_ref,
+        type_parameters: copy_type_parameters(type_parameters),
+        assoc_bindings: assoc_bindings, methods: methods,
+        module_body: module_body, container: container
+    }
+}
+
+fn slot_projection_module_key(value: SlotRef) -> Str {
+    if slot_ref_is_source(value) {
+        slot_ref_source_origin_module_key(value)
+    } else {
+        let owner = path_ref_owner(slot_ref_synthetic_path(value))
+        if path_owner_ref_is_symbol(owner) {
+            symbol_ref_origin_module_key(path_owner_ref_symbol(owner))
+        } else {
+            module_body_ref_origin_module_key(path_owner_ref_module_body(owner))
+        }
+    }
+}
+
+pub struct LegacyProjectionFacts {
+    module_key: Str,
+    module_order: Int,
+    local_type_count: Int,
+    types: List<LegacyTypeFactProjection>,
+    effects: List<LegacyEffectFactProjection>,
+    binders: List<LegacyBinderFactProjection>,
+    callables: List<LegacyCallableFactProjection>,
+    impls: List<LegacyImplFactProjection>,
+    shells: LegacyExecutableShellMap
+}
+
+pub fn make_legacy_projection_facts(
+    module_key: Str, module_order: Int, local_type_count: Int,
+    types: List<LegacyTypeFactProjection>,
+    effects: List<LegacyEffectFactProjection>,
+    binders: List<LegacyBinderFactProjection>,
+    callables: List<LegacyCallableFactProjection>,
+    impls: List<LegacyImplFactProjection>,
+    shells: LegacyExecutableShellMap
+) -> LegacyProjectionFacts {
+    if module_key.len() == 0 || module_order < 0 ||
+       local_type_count <= 0 || types.len() != local_type_count {
+        panic("legacy projection: invalid/incomplete module projection facts")
+    }
+    let mut index = 0
+    while index < types.len() {
+        let value = types.get(index).unwrap()
+        if core_type_fact_module_key(value.fact) != module_key ||
+           core_type_fact_ordinal(value.fact) != index {
+            panic("legacy projection: module Type facts are not dense/ordered")
+        }
+        index = index + 1
+    }
+    index = 0
+    while index < binders.len() {
+        let left = binders.get(index).unwrap()
+        if slot_projection_module_key(left.slot) != module_key ||
+           core_type_fact_module_key(left.type_fact) != module_key {
+            panic("legacy projection: module binder fact crosses module")
+        }
+        let mut other = index + 1
+        while other < binders.len() {
+            let right = binders.get(other).unwrap()
+            if slot_ref_same(left.slot, right.slot) ||
+               left.def_id == right.def_id {
+                panic("legacy projection: duplicate module binder SlotRef/DefId")
+            }
+            other = other + 1
+        }
+        index = index + 1
+    }
+    for callable in callables {
+        if executable_ref_origin_module_key(callable.reference) != module_key {
+            panic("legacy projection: callable fact crosses module")
+        }
+    }
+    for item in impls {
+        if core_type_fact_module_key(item.target_type_fact) != module_key {
+            panic("legacy projection: impl fact crosses module")
+        }
+    }
+    LegacyProjectionFacts {
+        module_key: module_key, module_order: module_order,
+        local_type_count: local_type_count,
+        types: types, effects: effects, binders: binders,
+        callables: callables, impls: impls,
+        shells: make_legacy_executable_shell_map(
+            legacy_executable_shell_entries(shells))
+    }
+}
+
+pub fn legacy_projection_facts_module_key(value: LegacyProjectionFacts) -> Str {
+    value.module_key
+}
+pub fn legacy_projection_facts_module_order(value: LegacyProjectionFacts) -> Int {
+    value.module_order
+}
+
+// ============================================================
 // Collection-complete immutable projection table
 // ============================================================
 
@@ -881,9 +1195,8 @@ pub fn make_legacy_projection_table(
         let mut other = index + 1
         while other < effects.len() {
             let right = effects.get(other).unwrap()
-            if core_effect_sets_same(left.core_effects, right.core_effects) ||
-               effect_rows_same(left.legacy_effects, right.legacy_effects) {
-                panic("legacy projection: Core/legacy effect mapping is not bijective")
+            if core_effect_sets_same(left.core_effects, right.core_effects) {
+                panic("legacy projection: duplicate Core effect-set mapping")
             }
             other = other + 1
         }
@@ -1056,4 +1369,205 @@ pub fn legacy_projection_impl_for(
         }
     }
     panic("legacy projection: requested impl owner is absent")
+}
+
+// ============================================================
+// One-shot module-facts -> project projection assembly
+// ============================================================
+
+fn append_assembled_type_projection(
+    mut values: List<LegacyTypeProjection>, projection: LegacyTypeProjection
+) {
+    for existing in values {
+        if core_type_ref_same(existing.core_type, projection.core_type) {
+            if !types_equal(existing.legacy_type, projection.legacy_type) {
+                panic("legacy projection: interned Type fact has two physical types")
+            }
+            return
+        }
+    }
+    values.push(projection)
+}
+
+fn order_assembled_type_projections(
+    values: List<LegacyTypeProjection>, count: Int
+) -> List<LegacyTypeProjection> {
+    let mut result: List<LegacyTypeProjection> = []
+    let mut index = 0
+    while index < count {
+        let mut found: LegacyTypeProjection? = none
+        for value in values {
+            if core_type_ref_index(value.core_type) == index {
+                if found.is_some() {
+                    panic("legacy projection: project type projection repeats")
+                }
+                found = some(value)
+            }
+        }
+        result.push(match found {
+            some(value) => value,
+            none => panic("legacy projection: assembled project Type is absent")
+        })
+        index = index + 1
+    }
+    if result.len() != values.len() {
+        panic("legacy projection: assembled Type lies outside project graph")
+    }
+    result
+}
+
+fn append_assembled_effect_projection(
+    mut values: List<LegacyEffectProjection>, projection: LegacyEffectProjection
+) {
+    for existing in values {
+        if core_effect_sets_same(existing.core_effects, projection.core_effects) {
+            if !effect_rows_same(
+                    existing.legacy_effects, projection.legacy_effects) {
+                panic("legacy projection: remapped effect set has two physical rows")
+            }
+            return
+        }
+    }
+    values.push(projection)
+}
+
+fn assemble_fact_binder(
+    type_remap: CoreAssemblyTypeRemap, value: LegacyBinderFactProjection
+) -> LegacyBinderProjection {
+    make_legacy_binder_projection(
+        value.slot, value.name, value.def_id,
+        core_assembly_remap_type(type_remap, value.type_fact),
+        value.ty, value.is_mutable)
+}
+
+fn assemble_fact_callable(
+    type_remap: CoreAssemblyTypeRemap,
+    value: LegacyCallableFactProjection
+) -> LegacyCallableProjection {
+    let mut parameters: List<LegacyBinderProjection> = []
+    for parameter in value.parameters {
+        parameters.push(assemble_fact_binder(type_remap, parameter))
+    }
+    make_legacy_callable_projection(
+        value.reference, value.origin, value.module_body,
+        value.container, value.kind, value.type_parameters,
+        value.bounds, parameters,
+        core_assembly_remap_type(type_remap, value.result_type_fact),
+        value.result_type, value.effects, value.is_public)
+}
+
+fn assemble_fact_impl(
+    type_remap: CoreAssemblyTypeRemap, value: LegacyImplFactProjection
+) -> LegacyImplProjection {
+    let mut bindings: List<LegacyAssocBindingProjection> = []
+    for binding in value.assoc_bindings {
+        bindings.push(make_legacy_assoc_binding_projection(
+            binding.member_ref,
+            core_assembly_remap_type(type_remap, binding.type_fact),
+            binding.ty))
+    }
+    make_legacy_impl_projection(
+        value.owner,
+        core_assembly_remap_type(type_remap, value.target_type_fact),
+        value.target_type, value.target_nominal, value.trait_ref,
+        value.type_parameters, bindings, value.methods,
+        value.module_body, value.container)
+}
+
+fn validate_projection_fact_order(values: List<LegacyProjectionFacts>) {
+    let mut index = 0
+    while index < values.len() {
+        let value = values.get(index).unwrap()
+        if value.module_order != index {
+            panic("legacy projection: module facts are not topologically ordered")
+        }
+        let mut prior = 0
+        while prior < index {
+            if values.get(prior).unwrap().module_key == value.module_key {
+                panic("legacy projection: duplicate module projection facts")
+            }
+            prior = prior + 1
+        }
+        index = index + 1
+    }
+}
+
+fn validate_projection_shells_against_core(
+    result: CoreAssemblyResult, shells: LegacyExecutableShellMap
+) {
+    let inventory = executable_inventory_entries(core_program_inventory(
+        core_assembly_result_program(result)))
+    let entries = legacy_executable_shell_entries(shells)
+    if inventory.len() != entries.len() {
+        panic("legacy projection: executable shells/Core inventory census differs")
+    }
+    for inventory_entry in inventory {
+        let reference = executable_entry_reference(inventory_entry)
+        let mut matches = 0
+        for shell in entries {
+            if executable_ref_same(shell.reference, reference) {
+                matches = matches + 1
+            }
+        }
+        if matches != 1 {
+            panic("legacy projection: Core executable lacks one exact shell")
+        }
+    }
+}
+
+pub fn assemble_legacy_projection(
+    facts_in_topological_order: List<LegacyProjectionFacts>,
+    assembly: CoreAssemblyResult
+) -> LegacyProjectionTable {
+    if facts_in_topological_order.len() == 0 {
+        panic("legacy projection: project has no module projection facts")
+    }
+    validate_projection_fact_order(facts_in_topological_order)
+    let program = core_assembly_result_program(assembly)
+    let type_remap = core_assembly_result_type_remap(assembly)
+    let effect_remap = core_assembly_result_effect_remap(assembly)
+    let project_type_count = core_type_graph_count(
+        core_program_type_graph(program))
+    let mut projected_types: List<LegacyTypeProjection> = []
+    let mut projected_effects: List<LegacyEffectProjection> = []
+    let mut projected_binders: List<LegacyBinderProjection> = []
+    let mut projected_callables: List<LegacyCallableProjection> = []
+    let mut projected_impls: List<LegacyImplProjection> = []
+    let mut projected_shells: List<LegacyExecutableShell> = []
+    for facts in facts_in_topological_order {
+        for value in facts.types {
+            append_assembled_type_projection(
+                projected_types, make_legacy_type_projection(
+                    core_assembly_remap_type(type_remap, value.fact),
+                    value.legacy_type))
+        }
+        for value in facts.effects {
+            let local = core_effect_set_fact_local_set(value.fact)
+            append_assembled_effect_projection(
+                projected_effects, make_legacy_effect_projection(
+                    core_assembly_remap_effect(
+                        effect_remap, facts.module_key, local),
+                    value.legacy_effects))
+        }
+        for value in facts.binders {
+            projected_binders.push(assemble_fact_binder(type_remap, value))
+        }
+        for value in facts.callables {
+            projected_callables.push(assemble_fact_callable(type_remap, value))
+        }
+        for value in facts.impls {
+            projected_impls.push(assemble_fact_impl(type_remap, value))
+        }
+        for shell in legacy_executable_shell_entries(facts.shells) {
+            projected_shells.push(shell)
+        }
+    }
+    let ordered_types = order_assembled_type_projections(
+        projected_types, project_type_count)
+    let shell_map = make_legacy_executable_shell_map(projected_shells)
+    validate_projection_shells_against_core(assembly, shell_map)
+    make_legacy_projection_table(
+        project_type_count, ordered_types, projected_effects,
+        projected_binders, projected_callables,
+        projected_impls, shell_map)
 }
