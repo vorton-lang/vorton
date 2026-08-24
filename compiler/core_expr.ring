@@ -17,7 +17,7 @@ use ir_identity::{
     symbol_ref_namespace_kind,
     namespace_kind_same, namespace_effect, namespace_member,
     registered_nominal_ref_symbol, registered_nominal_ref_same,
-    nominal_field_ref_same, nominal_field_ref_owner,
+    nominal_field_ref_same, nominal_field_ref_owner, nominal_field_ref_index,
     variant_ref_owner, variant_ref_same,
     variant_field_ref_variant, variant_field_ref_same,
     handled_effect_ref_same, system_effect_ref_same,
@@ -34,14 +34,22 @@ use ir_identity::{
     origin_ref_is_symbol, origin_ref_symbol, origin_ref_path
 }
 use ir_inventory::{
-    ExecutableRef, BinderKind, make_named_executable_ref,
+    ExecutableRef, BinderKind, BinderEntry, HandledEvidenceRef,
+    HandledEvidenceCapture,
+    make_named_executable_ref,
     EffectOperationRef, SystemHostCallableRef,
     executable_ref_same, executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_origin_module_key,
     make_source_binder_entry, make_synthetic_binder_entry,
-    binder_entry_slot, binder_entry_kind, binder_entry_site,
+    binder_kind_tag, binder_kind_handled_evidence_local,
+    binder_entry_slot, binder_entry_owner, binder_entry_kind, binder_entry_site,
+    handled_evidence_requirement, handled_evidence_binding,
+    handled_evidence_slot, handled_evidence_contract_owner,
+    handled_evidence_ordinal, handled_evidence_ref_same,
+    handled_evidence_capture_requirement,
+    handled_evidence_capture_source, handled_evidence_capture_target,
     effect_operation_ref_effect, effect_operation_ref_callable,
-    effect_operation_ref_same,
+    effect_operation_ref_same, effect_operation_ref_source_index,
     system_host_callable_effect, system_host_callable_executable
 }
 use hir::{
@@ -189,6 +197,139 @@ pub fn core_type_graph_ref_from_flow(
     }
 }
 
+pub struct CoreHandledEvidenceBinding {
+    reference: HandledEvidenceRef,
+    aggregate_type: CoreTypeRef
+}
+
+pub fn make_core_handled_evidence_binding(
+    reference: HandledEvidenceRef, aggregate_type: CoreTypeRef
+) -> CoreHandledEvidenceBinding {
+    if core_type_ref_index(aggregate_type) < 0 ||
+       !slot_ref_same(
+            handled_evidence_slot(reference),
+            binder_entry_slot(handled_evidence_binding(reference))) {
+        panic("CoreHIR: invalid typed handled-evidence binding")
+    }
+    CoreHandledEvidenceBinding {
+        reference: reference, aggregate_type: aggregate_type
+    }
+}
+pub fn core_handled_evidence_reference(
+    value: CoreHandledEvidenceBinding
+) -> HandledEvidenceRef { value.reference }
+pub fn core_handled_evidence_requirement(
+    value: CoreHandledEvidenceBinding
+) -> HandledEffectRef { handled_evidence_requirement(value.reference) }
+pub fn core_handled_evidence_slot(
+    value: CoreHandledEvidenceBinding
+) -> SlotRef { handled_evidence_slot(value.reference) }
+pub fn core_handled_evidence_owner(
+    value: CoreHandledEvidenceBinding
+) -> ExecutableRef { handled_evidence_contract_owner(value.reference) }
+pub fn core_handled_evidence_ordinal(
+    value: CoreHandledEvidenceBinding
+) -> Int { handled_evidence_ordinal(value.reference) }
+pub fn core_handled_evidence_type(
+    value: CoreHandledEvidenceBinding
+) -> CoreTypeRef { value.aggregate_type }
+fn copy_handled_evidence_bindings(
+    values: List<CoreHandledEvidenceBinding>
+) -> List<CoreHandledEvidenceBinding> {
+    let mut result: List<CoreHandledEvidenceBinding> = []
+    for value in values {
+        result.push(make_core_handled_evidence_binding(
+            value.reference, value.aggregate_type))
+    }
+    result
+}
+
+pub struct CoreHandledEvidenceUse {
+    reference: HandledEvidenceRef,
+    aggregate_type: CoreTypeRef
+}
+pub fn make_core_handled_evidence_use(
+    reference: HandledEvidenceRef, aggregate_type: CoreTypeRef
+) -> CoreHandledEvidenceUse {
+    if core_type_ref_index(aggregate_type) < 0 {
+        panic("CoreHIR: invalid typed handled-evidence use")
+    }
+    CoreHandledEvidenceUse {
+        reference: reference, aggregate_type: aggregate_type
+    }
+}
+pub fn core_handled_use_reference(
+    value: CoreHandledEvidenceUse
+) -> HandledEvidenceRef { value.reference }
+pub fn core_handled_use_requirement(
+    value: CoreHandledEvidenceUse
+) -> HandledEffectRef { handled_evidence_requirement(value.reference) }
+pub fn core_handled_use_slot(value: CoreHandledEvidenceUse) -> SlotRef {
+    handled_evidence_slot(value.reference)
+}
+pub fn core_handled_use_owner(value: CoreHandledEvidenceUse) -> ExecutableRef {
+    handled_evidence_contract_owner(value.reference)
+}
+pub fn core_handled_use_ordinal(value: CoreHandledEvidenceUse) -> Int {
+    handled_evidence_ordinal(value.reference)
+}
+pub fn core_handled_use_type(value: CoreHandledEvidenceUse) -> CoreTypeRef {
+    value.aggregate_type
+}
+fn copy_handled_evidence_uses(
+    values: List<CoreHandledEvidenceUse>
+) -> List<CoreHandledEvidenceUse> {
+    let mut result: List<CoreHandledEvidenceUse> = []
+    for value in values {
+        result.push(make_core_handled_evidence_use(
+            value.reference, value.aggregate_type))
+    }
+    result
+}
+
+pub struct CoreHandledEvidenceCapture {
+    reference: HandledEvidenceCapture,
+    aggregate_type: CoreTypeRef
+}
+pub fn make_core_handled_evidence_capture(
+    reference: HandledEvidenceCapture, aggregate_type: CoreTypeRef
+) -> CoreHandledEvidenceCapture {
+    if core_type_ref_index(aggregate_type) < 0 {
+        panic("CoreHIR: invalid typed handled-evidence capture")
+    }
+    CoreHandledEvidenceCapture {
+        reference: reference, aggregate_type: aggregate_type
+    }
+}
+pub fn core_handled_capture_requirement(
+    value: CoreHandledEvidenceCapture
+) -> HandledEffectRef {
+    handled_evidence_capture_requirement(value.reference)
+}
+pub fn core_handled_capture_source(
+    value: CoreHandledEvidenceCapture
+) -> HandledEvidenceRef {
+    handled_evidence_capture_source(value.reference)
+}
+pub fn core_handled_capture_target(
+    value: CoreHandledEvidenceCapture
+) -> HandledEvidenceRef {
+    handled_evidence_capture_target(value.reference)
+}
+pub fn core_handled_capture_type(
+    value: CoreHandledEvidenceCapture
+) -> CoreTypeRef { value.aggregate_type }
+fn copy_handled_evidence_captures(
+    values: List<CoreHandledEvidenceCapture>
+) -> List<CoreHandledEvidenceCapture> {
+    let mut result: List<CoreHandledEvidenceCapture> = []
+    for value in values {
+        result.push(make_core_handled_evidence_capture(
+            value.reference, value.aggregate_type))
+    }
+    result
+}
+
 pub struct CoreCallableContract {
     reference: ExecutableRef,
     origin: OriginRef,
@@ -197,7 +338,7 @@ pub struct CoreCallableContract {
     result_type: CoreTypeRef,
     mode: FlowCallableMode,
     semantic_contract: FlowCallContract,
-    evidence_requirements: List<SymbolRef>
+    handled_evidence: List<CoreHandledEvidenceBinding>
 }
 
 fn copy_core_type_refs(values: List<CoreTypeRef>) -> List<CoreTypeRef> {
@@ -205,18 +346,12 @@ fn copy_core_type_refs(values: List<CoreTypeRef>) -> List<CoreTypeRef> {
     for value in values { result.push(value) }
     result
 }
-fn copy_symbols(values: List<SymbolRef>) -> List<SymbolRef> {
-    let mut result: List<SymbolRef> = []
-    for value in values { result.push(value) }
-    result
-}
-
 pub fn make_core_callable_contract(
     reference: ExecutableRef, origin: OriginRef,
     parameter_types: List<CoreTypeRef>, parameter_slots: List<SlotRef>,
     result_type: CoreTypeRef, mode: FlowCallableMode,
     semantic_contract: FlowCallContract,
-    evidence_requirements: List<SymbolRef>
+    handled_evidence: List<CoreHandledEvidenceBinding>
 ) -> CoreCallableContract {
     let flow_parameters = flow_call_contract_parameter_types(semantic_contract)
     if parameter_types.len() != flow_parameters.len() ||
@@ -239,13 +374,27 @@ pub fn make_core_callable_contract(
         panic("CoreHIR: callable parameter-slot relation differs")
     }
     let mut left_index = 0
-    while left_index < evidence_requirements.len() {
+    while left_index < handled_evidence.len() {
+        let left = handled_evidence.get(left_index).unwrap()
+        if core_handled_evidence_ordinal(left) != left_index ||
+           !executable_ref_same(
+                core_handled_evidence_owner(left), reference) ||
+           !executable_ref_same(
+                binder_entry_owner(handled_evidence_binding(left.reference)),
+                reference) {
+            panic("CoreHIR: callable handled-evidence owner/order differs")
+        }
         let mut right_index = left_index + 1
-        while right_index < evidence_requirements.len() {
-            if symbol_ref_same(
-                    evidence_requirements.get(left_index).unwrap(),
-                    evidence_requirements.get(right_index).unwrap()) {
-                panic("CoreHIR: callable repeats an evidence requirement")
+        while right_index < handled_evidence.len() {
+            let right = handled_evidence.get(right_index).unwrap()
+            if handled_effect_ref_same(
+                    core_handled_evidence_requirement(left),
+                    core_handled_evidence_requirement(right)) ||
+               slot_ref_same(
+                    core_handled_evidence_slot(left),
+                    core_handled_evidence_slot(right)) ||
+               handled_evidence_ref_same(left.reference, right.reference) {
+                panic("CoreHIR: callable repeats handled evidence")
             }
             right_index = right_index + 1
         }
@@ -257,7 +406,7 @@ pub fn make_core_callable_contract(
         parameter_slots: copy_slot_refs(parameter_slots),
         result_type: result_type, mode: mode,
         semantic_contract: semantic_contract,
-        evidence_requirements: copy_symbols(evidence_requirements)
+        handled_evidence: copy_handled_evidence_bindings(handled_evidence)
     }
 }
 pub fn core_callable_reference(value: CoreCallableContract) -> ExecutableRef {
@@ -281,9 +430,11 @@ pub fn core_callable_mode(value: CoreCallableContract) -> FlowCallableMode {
 pub fn core_callable_semantic_contract(
     value: CoreCallableContract
 ) -> FlowCallContract { value.semantic_contract }
-pub fn core_callable_evidence_requirements(
+pub fn core_callable_handled_evidence(
     value: CoreCallableContract
-) -> List<SymbolRef> { copy_symbols(value.evidence_requirements) }
+) -> List<CoreHandledEvidenceBinding> {
+    copy_handled_evidence_bindings(value.handled_evidence)
+}
 
 fn copy_core_callable_contracts(
     values: List<CoreCallableContract>
@@ -293,7 +444,7 @@ fn copy_core_callable_contracts(
         result.push(make_core_callable_contract(
             value.reference, value.origin, value.parameter_types,
             value.parameter_slots, value.result_type, value.mode,
-            value.semantic_contract, value.evidence_requirements))
+            value.semantic_contract, value.handled_evidence))
     }
     result
 }
@@ -811,7 +962,10 @@ pub fn core_place_value_type(value: CorePlaceRef) -> CoreTypeRef {
 }
 
 enum CoreConstructorRefValue {
-    StructConstructorValue(RegisteredNominalRef),
+    StructConstructorValue {
+        owner: RegisteredNominalRef,
+        fields: List<NominalFieldRef>
+    },
     VariantConstructorValue(VariantRef),
     TupleConstructorValue(Int),
     RecordConstructorValue(Int)
@@ -822,12 +976,32 @@ pub struct CoreConstructorRef {
     executable: ExecutableRef?
 }
 
+fn copy_nominal_field_refs(
+    values: List<NominalFieldRef>
+) -> List<NominalFieldRef> {
+    let mut result: List<NominalFieldRef> = []
+    for value in values { result.push(value) }
+    result
+}
+
 pub fn make_core_struct_constructor(
-    owner: RegisteredNominalRef, executable: ExecutableRef
+    owner: RegisteredNominalRef, fields: List<NominalFieldRef>
 ) -> CoreConstructorRef {
+    let owner_symbol = registered_nominal_ref_symbol(owner)
+    let mut index = 0
+    while index < fields.len() {
+        let field = fields.get(index).unwrap()
+        if !symbol_ref_same(nominal_field_ref_owner(field), owner_symbol) ||
+           nominal_field_ref_index(field) != index {
+            panic("CoreHIR: struct constructor field owner/order differs")
+        }
+        index = index + 1
+    }
     CoreConstructorRef {
-        value: CoreConstructorRefValue::StructConstructorValue(owner),
-        executable: some(executable)
+        value: CoreConstructorRefValue::StructConstructorValue {
+            owner: owner, fields: copy_nominal_field_refs(fields)
+        },
+        executable: none
     }
 }
 pub fn make_core_variant_constructor(
@@ -854,7 +1028,7 @@ pub fn make_core_record_constructor(arity: Int) -> CoreConstructorRef {
 }
 pub fn core_constructor_kind_tag(value: CoreConstructorRef) -> Int {
     match value.value {
-        CoreConstructorRefValue::StructConstructorValue(_) => 0,
+        CoreConstructorRefValue::StructConstructorValue { .. } => 0,
         CoreConstructorRefValue::VariantConstructorValue(_) => 1,
         CoreConstructorRefValue::TupleConstructorValue(_) => 2,
         CoreConstructorRefValue::RecordConstructorValue(_) => 3
@@ -864,7 +1038,16 @@ pub fn core_constructor_struct_owner(
     value: CoreConstructorRef
 ) -> RegisteredNominalRef {
     match value.value {
-        CoreConstructorRefValue::StructConstructorValue(owner) => owner,
+        CoreConstructorRefValue::StructConstructorValue { owner, .. } => owner,
+        _ => panic("CoreHIR: constructor is not a struct")
+    }
+}
+pub fn core_constructor_struct_fields(
+    value: CoreConstructorRef
+) -> List<NominalFieldRef> {
+    match value.value {
+        CoreConstructorRefValue::StructConstructorValue { fields, .. } =>
+            copy_nominal_field_refs(fields),
         _ => panic("CoreHIR: constructor is not a struct")
     }
 }
@@ -1148,19 +1331,22 @@ enum CoreExprValue {
     CallExprValue {
         callee: CoreCalleeRef,
         arguments: List<CoreExpr>,
-        evidence: List<CoreEvidenceRef>
+        evidence: List<CoreEvidenceRef>,
+        handled_evidence: List<CoreHandledEvidenceUse>
     },
     MethodCallExprValue {
         callee: CoreCalleeRef,
         method: MethodCallRef,
         receiver: CoreExpr,
         arguments: List<CoreExpr>,
-        evidence: List<CoreEvidenceRef>
+        evidence: List<CoreEvidenceRef>,
+        handled_evidence: List<CoreHandledEvidenceUse>
     },
     EffectCallExprValue {
         operation: EffectOperationRef,
         arguments: List<CoreExpr>,
-        evidence: List<CoreEvidenceRef>
+        evidence: List<CoreEvidenceRef>,
+        handled_evidence: List<CoreHandledEvidenceUse>
     },
     SystemCallExprValue {
         host: SystemHostCallableRef,
@@ -1186,7 +1372,8 @@ enum CoreExprValue {
     },
     LambdaExprValue {
         executable: ExecutableRef,
-        captures: List<CoreCapture>
+        captures: List<CoreCapture>,
+        handled_captures: List<CoreHandledEvidenceCapture>
     },
     BlockExprValue(CoreBlock),
     IfExprValue {
@@ -1205,7 +1392,7 @@ enum CoreExprValue {
     },
     HandleExprValue {
         body: CoreBlock,
-        handlers: List<CoreHandlerEntry>
+        installations: List<CoreHandlerInstallation>
     }
 }
 
@@ -1248,11 +1435,18 @@ pub struct CoreMatchArm {
     origin: OriginRef
 }
 
-pub struct CoreHandlerEntry {
+pub struct CoreHandlerOperation {
     operation: EffectOperationRef,
     executable: ExecutableRef,
     parameter_slots: List<SlotRef>,
     resume_slot: SlotRef?,
+    handled_captures: List<CoreHandledEvidenceCapture>,
+    origin: OriginRef
+}
+
+pub struct CoreHandlerInstallation {
+    evidence: CoreHandledEvidenceBinding,
+    operations: List<CoreHandlerOperation>,
     origin: OriginRef
 }
 
@@ -1271,9 +1465,34 @@ fn copy_match_arms(values: List<CoreMatchArm>) -> List<CoreMatchArm> {
     for value in values { result.push(value) }
     result
 }
-fn copy_handler_entries(values: List<CoreHandlerEntry>) -> List<CoreHandlerEntry> {
-    let mut result: List<CoreHandlerEntry> = []
-    for value in values { result.push(value) }
+fn copy_handler_operations(
+    values: List<CoreHandlerOperation>
+) -> List<CoreHandlerOperation> {
+    let mut result: List<CoreHandlerOperation> = []
+    for value in values {
+        result.push(CoreHandlerOperation {
+            operation: value.operation, executable: value.executable,
+            parameter_slots: copy_slot_refs(value.parameter_slots),
+            resume_slot: value.resume_slot,
+            handled_captures: copy_handled_evidence_captures(
+                value.handled_captures),
+            origin: value.origin
+        })
+    }
+    result
+}
+fn copy_handler_installations(
+    values: List<CoreHandlerInstallation>
+) -> List<CoreHandlerInstallation> {
+    let mut result: List<CoreHandlerInstallation> = []
+    for value in values {
+        result.push(CoreHandlerInstallation {
+            evidence: make_core_handled_evidence_binding(
+                value.evidence.reference, value.evidence.aggregate_type),
+            operations: copy_handler_operations(value.operations),
+            origin: value.origin
+        })
+    }
     result
 }
 fn make_core_expr(
@@ -1321,36 +1540,49 @@ pub fn make_core_primitive_expr(
 pub fn make_core_call_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     callee: CoreCalleeRef, arguments: List<CoreExpr>,
-    evidence: List<CoreEvidenceRef>
+    evidence: List<CoreEvidenceRef>,
+    handled_evidence: List<CoreHandledEvidenceUse>
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::CallExprValue {
             callee: callee, arguments: copy_core_exprs(arguments),
-            evidence: copy_evidence(evidence)
+            evidence: copy_evidence(evidence),
+            handled_evidence: copy_handled_evidence_uses(handled_evidence)
         })
 }
 pub fn make_core_method_call_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     callee: CoreCalleeRef, method: MethodCallRef,
     receiver: CoreExpr, arguments: List<CoreExpr>,
-    evidence: List<CoreEvidenceRef>
+    evidence: List<CoreEvidenceRef>,
+    handled_evidence: List<CoreHandledEvidenceUse>
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::MethodCallExprValue {
             callee: callee, method: method, receiver: receiver,
             arguments: copy_core_exprs(arguments),
-            evidence: copy_evidence(evidence)
+            evidence: copy_evidence(evidence),
+            handled_evidence: copy_handled_evidence_uses(handled_evidence)
         })
 }
 pub fn make_core_effect_call_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     operation: EffectOperationRef, arguments: List<CoreExpr>,
-    evidence: List<CoreEvidenceRef>
+    evidence: List<CoreEvidenceRef>,
+    handled_evidence: List<CoreHandledEvidenceUse>
 ) -> CoreExpr {
+    if handled_evidence.len() != 1 ||
+       !handled_effect_ref_same(
+            core_handled_use_requirement(
+                handled_evidence.get(0).unwrap()),
+            effect_operation_ref_effect(operation)) {
+        panic("CoreHIR: custom effect call lacks one exact handled use")
+    }
     make_core_expr(ty, effects, origin,
         CoreExprValue::EffectCallExprValue {
             operation: operation, arguments: copy_core_exprs(arguments),
-            evidence: copy_evidence(evidence)
+            evidence: copy_evidence(evidence),
+            handled_evidence: copy_handled_evidence_uses(handled_evidence)
         })
 }
 pub fn make_core_system_call_expr(
@@ -1409,11 +1641,13 @@ pub fn make_core_construct_expr(
 }
 pub fn make_core_lambda_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
-    executable: ExecutableRef, captures: List<CoreCapture>
+    executable: ExecutableRef, captures: List<CoreCapture>,
+    handled_captures: List<CoreHandledEvidenceCapture>
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::LambdaExprValue {
-            executable: executable, captures: copy_captures(captures)
+            executable: executable, captures: copy_captures(captures),
+            handled_captures: copy_handled_evidence_captures(handled_captures)
         })
 }
 
@@ -1432,15 +1666,57 @@ pub fn make_core_match_arm(
         pattern: pattern, guard: guard, body: body, origin: origin
     }
 }
-pub fn make_core_handler_entry(
+pub fn make_core_handler_operation(
     operation: EffectOperationRef, executable: ExecutableRef,
     parameter_slots: List<SlotRef>,
-    resume_slot: SlotRef?, origin: OriginRef
-) -> CoreHandlerEntry {
-    CoreHandlerEntry {
+    resume_slot: SlotRef?,
+    handled_captures: List<CoreHandledEvidenceCapture>,
+    origin: OriginRef
+) -> CoreHandlerOperation {
+    CoreHandlerOperation {
         operation: operation, executable: executable,
         parameter_slots: copy_slot_refs(parameter_slots),
-        resume_slot: resume_slot, origin: origin
+        resume_slot: resume_slot,
+        handled_captures: copy_handled_evidence_captures(handled_captures),
+        origin: origin
+    }
+}
+pub fn make_core_handler_installation(
+    evidence: CoreHandledEvidenceBinding,
+    operations: List<CoreHandlerOperation>, origin: OriginRef
+) -> CoreHandlerInstallation {
+    if operations.len() == 0 {
+        panic("CoreHIR: handled effect installation has no operations")
+    }
+    if binder_kind_tag(binder_entry_kind(
+            handled_evidence_binding(evidence.reference))) !=
+       binder_kind_tag(binder_kind_handled_evidence_local()) {
+        panic("CoreHIR: handled installation evidence is not local")
+    }
+    let requirement = core_handled_evidence_requirement(evidence)
+    let mut index = 0
+    while index < operations.len() {
+        let operation = operations.get(index).unwrap()
+        if !handled_effect_ref_same(
+                effect_operation_ref_effect(operation.operation), requirement) ||
+           effect_operation_ref_source_index(operation.operation) != index {
+            panic("CoreHIR: handler operation effect/order differs")
+        }
+        let mut right = index + 1
+        while right < operations.len() {
+            let other = operations.get(right).unwrap()
+            if effect_operation_ref_same(
+                    operation.operation, other.operation) ||
+               executable_ref_same(operation.executable, other.executable) {
+                panic("CoreHIR: handler operation/executable is duplicated")
+            }
+            right = right + 1
+        }
+        index = index + 1
+    }
+    CoreHandlerInstallation {
+        evidence: evidence,
+        operations: copy_handler_operations(operations), origin: origin
     }
 }
 pub fn make_core_block_expr(
@@ -1486,12 +1762,35 @@ pub fn make_core_try_catch_expr(
 pub fn make_core_handle_expr(
     ty: CoreTypeRef, effects: CoreEffectSet,
     origin: OriginRef, body: CoreBlock,
-    handlers: List<CoreHandlerEntry>
+    installations: List<CoreHandlerInstallation>
 ) -> CoreExpr {
-    if handlers.len() == 0 { panic("CoreHIR: handle has no handlers") }
+    if installations.len() == 0 {
+        panic("CoreHIR: handle has no effect installations")
+    }
+    let mut index = 0
+    while index < installations.len() {
+        let current = installations.get(index).unwrap()
+        if index > 0 && core_handled_evidence_ordinal(current.evidence) <=
+                core_handled_evidence_ordinal(
+                    installations.get(index - 1).unwrap().evidence) {
+            panic("CoreHIR: handled installations are not in exact order")
+        }
+        let mut right = index + 1
+        while right < installations.len() {
+            if handled_effect_ref_same(
+                    core_handled_evidence_requirement(current.evidence),
+                    core_handled_evidence_requirement(
+                        installations.get(right).unwrap().evidence)) {
+                panic("CoreHIR: handled installations repeat an effect")
+            }
+            right = right + 1
+        }
+        index = index + 1
+    }
     make_core_expr(ty, effects, origin,
         CoreExprValue::HandleExprValue {
-            body: body, handlers: copy_handler_entries(handlers)
+            body: body,
+            installations: copy_handler_installations(installations)
         })
 }
 
@@ -1682,6 +1981,17 @@ pub fn core_expr_call_evidence(value: CoreExpr) -> List<CoreEvidenceRef> {
         _ => panic("CoreHIR: expression has no evidence list")
     }
 }
+pub fn core_expr_call_handled_evidence(
+    value: CoreExpr
+) -> List<CoreHandledEvidenceUse> {
+    match value.value {
+        CoreExprValue::CallExprValue { handled_evidence, .. } |
+        CoreExprValue::MethodCallExprValue { handled_evidence, .. } |
+        CoreExprValue::EffectCallExprValue { handled_evidence, .. } =>
+            copy_handled_evidence_uses(handled_evidence),
+        _ => panic("CoreHIR: expression has no handled-evidence list")
+    }
+}
 pub fn core_expr_method_ref(value: CoreExpr) -> MethodCallRef {
     match value.value {
         CoreExprValue::MethodCallExprValue { method, .. } => method,
@@ -1773,6 +2083,15 @@ pub fn core_expr_lambda_captures(value: CoreExpr) -> List<CoreCapture> {
         _ => panic("CoreHIR: expression is not Lambda")
     }
 }
+pub fn core_expr_lambda_handled_captures(
+    value: CoreExpr
+) -> List<CoreHandledEvidenceCapture> {
+    match value.value {
+        CoreExprValue::LambdaExprValue { handled_captures, .. } =>
+            copy_handled_evidence_captures(handled_captures),
+        _ => panic("CoreHIR: expression is not Lambda")
+    }
+}
 pub fn core_expr_block(value: CoreExpr) -> CoreBlock {
     match value.value {
         CoreExprValue::BlockExprValue(block) => block,
@@ -1828,10 +2147,12 @@ pub fn core_expr_handle_body(value: CoreExpr) -> CoreBlock {
         _ => panic("CoreHIR: expression is not Handle")
     }
 }
-pub fn core_expr_handlers(value: CoreExpr) -> List<CoreHandlerEntry> {
+pub fn core_expr_handler_installations(
+    value: CoreExpr
+) -> List<CoreHandlerInstallation> {
     match value.value {
-        CoreExprValue::HandleExprValue { handlers, .. } =>
-            copy_handler_entries(handlers),
+        CoreExprValue::HandleExprValue { installations, .. } =>
+            copy_handler_installations(installations),
         _ => panic("CoreHIR: expression is not Handle")
     }
 }
@@ -1844,19 +2165,43 @@ pub fn core_match_arm_pattern(value: CoreMatchArm) -> CorePattern { value.patter
 pub fn core_match_arm_guard(value: CoreMatchArm) -> CoreExpr? { value.guard }
 pub fn core_match_arm_body(value: CoreMatchArm) -> CoreBlock { value.body }
 pub fn core_match_arm_origin(value: CoreMatchArm) -> OriginRef { value.origin }
-pub fn core_handler_operation(
-    value: CoreHandlerEntry
+pub fn core_handler_operation_ref(
+    value: CoreHandlerOperation
 ) -> EffectOperationRef { value.operation }
-pub fn core_handler_executable(value: CoreHandlerEntry) -> ExecutableRef {
+pub fn core_handler_operation_executable(
+    value: CoreHandlerOperation
+) -> ExecutableRef {
     value.executable
 }
-pub fn core_handler_parameter_slots(value: CoreHandlerEntry) -> List<SlotRef> {
+pub fn core_handler_operation_parameter_slots(
+    value: CoreHandlerOperation
+) -> List<SlotRef> {
     copy_slot_refs(value.parameter_slots)
 }
-pub fn core_handler_resume_slot(value: CoreHandlerEntry) -> SlotRef? {
+pub fn core_handler_operation_resume_slot(
+    value: CoreHandlerOperation
+) -> SlotRef? {
     value.resume_slot
 }
-pub fn core_handler_origin(value: CoreHandlerEntry) -> OriginRef { value.origin }
+pub fn core_handler_operation_handled_captures(
+    value: CoreHandlerOperation
+) -> List<CoreHandledEvidenceCapture> {
+    copy_handled_evidence_captures(value.handled_captures)
+}
+pub fn core_handler_operation_origin(
+    value: CoreHandlerOperation
+) -> OriginRef { value.origin }
+pub fn core_handler_installation_evidence(
+    value: CoreHandlerInstallation
+) -> CoreHandledEvidenceBinding { value.evidence }
+pub fn core_handler_installation_operations(
+    value: CoreHandlerInstallation
+) -> List<CoreHandlerOperation> {
+    copy_handler_operations(value.operations)
+}
+pub fn core_handler_installation_origin(
+    value: CoreHandlerInstallation
+) -> OriginRef { value.origin }
 
 // ============================================================
 // Closed structured body and recursive validator
@@ -1977,6 +2322,88 @@ fn validate_evidence(values: List<CoreEvidenceRef>, binders: List<CoreBinder>) {
         if core_evidence_is_local(value) {
             require_binder(binders, core_evidence_local(value))
         }
+    }
+}
+
+fn validate_handled_evidence_uses(
+    values: List<CoreHandledEvidenceUse>, body: CoreBody
+) {
+    let mut index = 0
+    while index < values.len() {
+        let value = values.get(index).unwrap()
+        require_binder(body.binders, core_handled_use_slot(value))
+        let binder = body.binders.get(
+            binder_index(body.binders, core_handled_use_slot(value)).unwrap()
+        ).unwrap()
+        if !core_type_ref_same(binder.ty, value.aggregate_type) ||
+           !executable_ref_same(core_handled_use_owner(value), body.reference) {
+            panic("CoreHIR: handled-evidence use binder/type/owner differs")
+        }
+        let mut right = index + 1
+        while right < values.len() {
+            let other = values.get(right).unwrap()
+            if handled_effect_ref_same(
+                    core_handled_use_requirement(value),
+                    core_handled_use_requirement(other)) ||
+               slot_ref_same(
+                    core_handled_use_slot(value),
+                    core_handled_use_slot(other)) {
+                panic("CoreHIR: call repeats handled-evidence use")
+            }
+            right = right + 1
+        }
+        index = index + 1
+    }
+}
+
+fn validate_handled_installation(
+    value: CoreHandlerInstallation, body: CoreBody
+) {
+    let slot = core_handled_evidence_slot(value.evidence)
+    require_binder(body.binders, slot)
+    let binder = body.binders.get(binder_index(body.binders, slot).unwrap()).unwrap()
+    if !core_type_ref_same(binder.ty, value.evidence.aggregate_type) ||
+       !executable_ref_same(
+            core_handled_evidence_owner(value.evidence), body.reference) {
+        panic("CoreHIR: handled installation evidence differs from body")
+    }
+}
+
+fn validate_handled_captures(
+    values: List<CoreHandledEvidenceCapture>,
+    body: CoreBody, target_owner: ExecutableRef
+) {
+    let mut index = 0
+    while index < values.len() {
+        let value = values.get(index).unwrap()
+        let source = core_handled_capture_source(value)
+        let target = core_handled_capture_target(value)
+        let source_slot = handled_evidence_slot(source)
+        require_binder(body.binders, source_slot)
+        let binder = body.binders.get(
+            binder_index(body.binders, source_slot).unwrap()).unwrap()
+        if !core_type_ref_same(binder.ty, value.aggregate_type) ||
+           !executable_ref_same(
+                handled_evidence_contract_owner(source), body.reference) ||
+           !executable_ref_same(
+                handled_evidence_contract_owner(target), target_owner) {
+            panic("CoreHIR: handled capture owner/type differs")
+        }
+        let mut right = index + 1
+        while right < values.len() {
+            let other = values.get(right).unwrap()
+            if handled_effect_ref_same(
+                    core_handled_capture_requirement(value),
+                    core_handled_capture_requirement(other)) ||
+               slot_ref_same(
+                    handled_evidence_slot(target),
+                    handled_evidence_slot(
+                        core_handled_capture_target(other))) {
+                panic("CoreHIR: handled capture is duplicated")
+            }
+            right = right + 1
+        }
+        index = index + 1
     }
 }
 
@@ -2112,17 +2539,28 @@ fn validate_constructor_fields(
         index = index + 1
     }
     match constructor.value {
-        CoreConstructorRefValue::StructConstructorValue(owner) => {
+        CoreConstructorRefValue::StructConstructorValue {
+            owner, fields: contract_fields
+        } => {
             let symbol = registered_nominal_ref_symbol(owner)
-            for field in fields {
+            if fields.len() != contract_fields.len() {
+                panic("CoreHIR: struct constructor contract arity differs")
+            }
+            let mut field_index = 0
+            while field_index < fields.len() {
+                let field = fields.get(field_index).unwrap()
                 match field.field.value {
                     CoreFieldRefValue::NominalFieldValue(reference) => if
                         !symbol_ref_same(
-                            nominal_field_ref_owner(reference), symbol) {
-                        panic("CoreHIR: struct constructor field crosses owner")
+                            nominal_field_ref_owner(reference), symbol) ||
+                        !nominal_field_ref_same(
+                            reference,
+                            contract_fields.get(field_index).unwrap()) {
+                        panic("CoreHIR: struct constructor field order/owner differs")
                     },
                     _ => panic("CoreHIR: struct constructor uses non-nominal field")
                 }
+                field_index = field_index + 1
             }
         },
         CoreConstructorRefValue::VariantConstructorValue(variant) => {
@@ -2165,15 +2603,18 @@ fn validate_expr_with_loop_depth(
                 validate_expr_with_loop_depth(operand, body, loop_depth)
             }
         },
-        CoreExprValue::CallExprValue { callee, arguments, evidence } => {
+        CoreExprValue::CallExprValue {
+            callee, arguments, evidence, handled_evidence
+        } => {
             validate_callee(callee, body)
             for argument in arguments {
                 validate_expr_with_loop_depth(argument, body, loop_depth)
             }
             validate_evidence(evidence, body.binders)
+            validate_handled_evidence_uses(handled_evidence, body)
         },
         CoreExprValue::MethodCallExprValue {
-            callee, receiver, arguments, evidence, ..
+            callee, receiver, arguments, evidence, handled_evidence, ..
         } => {
             validate_callee(callee, body)
             validate_expr_with_loop_depth(receiver, body, loop_depth)
@@ -2181,14 +2622,23 @@ fn validate_expr_with_loop_depth(
                 validate_expr_with_loop_depth(argument, body, loop_depth)
             }
             validate_evidence(evidence, body.binders)
+            validate_handled_evidence_uses(handled_evidence, body)
         },
         CoreExprValue::EffectCallExprValue {
-            arguments, evidence, ..
+            operation, arguments, evidence, handled_evidence
         } => {
             for argument in arguments {
                 validate_expr_with_loop_depth(argument, body, loop_depth)
             }
             validate_evidence(evidence, body.binders)
+            validate_handled_evidence_uses(handled_evidence, body)
+            if handled_evidence.len() != 1 ||
+               !handled_effect_ref_same(
+                    core_handled_use_requirement(
+                        handled_evidence.get(0).unwrap()),
+                    effect_operation_ref_effect(operation)) {
+                panic("CoreHIR: effect call handled use differs")
+            }
         },
         CoreExprValue::SystemCallExprValue { arguments, .. } => {
             for argument in arguments {
@@ -2205,10 +2655,13 @@ fn validate_expr_with_loop_depth(
             validate_expr_with_loop_depth(base, body, loop_depth),
         CoreExprValue::ConstructExprValue { constructor, fields } =>
             validate_constructor_fields(constructor, fields, body, loop_depth),
-        CoreExprValue::LambdaExprValue { captures, .. } => {
+        CoreExprValue::LambdaExprValue {
+            executable, captures, handled_captures
+        } => {
             for capture in captures {
                 require_binder(body.binders, capture.source)
             }
+            validate_handled_captures(handled_captures, body, executable)
         },
         CoreExprValue::BlockExprValue(block) =>
             validate_block_with_loop_depth(block, body, loop_depth),
@@ -2230,18 +2683,29 @@ fn validate_expr_with_loop_depth(
             validate_block_with_loop_depth(protected, body, loop_depth)
             for arm in arms { validate_match_arm(arm, body, loop_depth) }
         },
-        CoreExprValue::HandleExprValue { body: handled_body, handlers } => {
+        CoreExprValue::HandleExprValue {
+            body: handled_body, installations
+        } => {
             validate_block_with_loop_depth(handled_body, body, loop_depth)
             let mut index = 0
-            while index < handlers.len() {
-                let handler = handlers.get(index).unwrap()
-                validate_origin(handler.origin, body.reference)
+            while index < installations.len() {
+                let installation = installations.get(index).unwrap()
+                validate_origin(installation.origin, body.reference)
+                validate_handled_installation(installation, body)
+                for operation in installation.operations {
+                    validate_origin(operation.origin, operation.executable)
+                    validate_handled_captures(
+                        operation.handled_captures,
+                        body, operation.executable)
+                }
                 let mut right_index = index + 1
-                while right_index < handlers.len() {
-                    let right = handlers.get(right_index).unwrap()
-                    if effect_operation_ref_same(
-                            handler.operation, right.operation) {
-                        panic("CoreHIR: handle repeats an exact operation")
+                while right_index < installations.len() {
+                    let right = installations.get(right_index).unwrap()
+                    if handled_effect_ref_same(
+                            core_handled_evidence_requirement(
+                                installation.evidence),
+                            core_handled_evidence_requirement(right.evidence)) {
+                        panic("CoreHIR: handle repeats an exact effect")
                     }
                     right_index = right_index + 1
                 }
@@ -2557,6 +3021,33 @@ fn remap_core_effect_set(
     }))
 }
 
+fn remap_handled_binding(
+    value: CoreHandledEvidenceBinding,
+    mapping: List<Int>, module_key: Str
+) -> CoreHandledEvidenceBinding {
+    make_core_handled_evidence_binding(
+        value.reference, remap_core_type_reference(
+            value.aggregate_type, mapping, module_key))
+}
+fn remap_handled_use(
+    value: CoreHandledEvidenceUse,
+    mapping: List<Int>, module_key: Str
+) -> CoreHandledEvidenceUse {
+    make_core_handled_evidence_use(
+        value.reference, remap_core_type_reference(
+            value.aggregate_type, mapping, module_key))
+}
+fn remap_handled_uses(
+    values: List<CoreHandledEvidenceUse>,
+    mapping: List<Int>, module_key: Str
+) -> List<CoreHandledEvidenceUse> {
+    let mut result: List<CoreHandledEvidenceUse> = []
+    for value in values {
+        result.push(remap_handled_use(value, mapping, module_key))
+    }
+    result
+}
+
 fn remap_core_callee(
     value: CoreCalleeRef, mapping: List<Int>, module_key: Str
 ) -> CoreCalleeRef {
@@ -2667,16 +3158,20 @@ fn remap_core_expr_types(
                     remap_core_expr_types(operand, mapping, module_key)
                 })
             },
-        CoreExprValue::CallExprValue { callee, arguments, evidence } =>
+        CoreExprValue::CallExprValue {
+            callee, arguments, evidence, handled_evidence
+        } =>
             CoreExprValue::CallExprValue {
                 callee: remap_core_callee(callee, mapping, module_key),
                 arguments: arguments.map(fn(argument) {
                     remap_core_expr_types(argument, mapping, module_key)
                 }),
-                evidence: copy_evidence(evidence)
+                evidence: copy_evidence(evidence),
+                handled_evidence: remap_handled_uses(
+                    handled_evidence, mapping, module_key)
             },
         CoreExprValue::MethodCallExprValue {
-            callee, method, receiver, arguments, evidence
+            callee, method, receiver, arguments, evidence, handled_evidence
         } => CoreExprValue::MethodCallExprValue {
             callee: remap_core_callee(callee, mapping, module_key),
             method: method,
@@ -2684,15 +3179,19 @@ fn remap_core_expr_types(
             arguments: arguments.map(fn(argument) {
                 remap_core_expr_types(argument, mapping, module_key)
             }),
-            evidence: copy_evidence(evidence)
+            evidence: copy_evidence(evidence),
+            handled_evidence: remap_handled_uses(
+                handled_evidence, mapping, module_key)
         },
         CoreExprValue::EffectCallExprValue {
-            operation, arguments, evidence
+            operation, arguments, evidence, handled_evidence
         } => CoreExprValue::EffectCallExprValue {
             operation: operation, arguments: arguments.map(fn(argument) {
                 remap_core_expr_types(argument, mapping, module_key)
             }),
-            evidence: copy_evidence(evidence)
+            evidence: copy_evidence(evidence),
+            handled_evidence: remap_handled_uses(
+                handled_evidence, mapping, module_key)
         },
         CoreExprValue::SystemCallExprValue { host, arguments } =>
             CoreExprValue::SystemCallExprValue {
@@ -2726,10 +3225,18 @@ fn remap_core_expr_types(
                             field.value, mapping, module_key))
                 })
             },
-        CoreExprValue::LambdaExprValue { executable, captures } =>
+        CoreExprValue::LambdaExprValue {
+            executable, captures, handled_captures
+        } =>
             CoreExprValue::LambdaExprValue {
             executable: executable,
-            captures: copy_captures(captures)
+            captures: copy_captures(captures),
+            handled_captures: handled_captures.map(fn(capture) {
+                make_core_handled_evidence_capture(
+                    capture.reference,
+                    remap_core_type_reference(
+                        capture.aggregate_type, mapping, module_key))
+            })
         },
         CoreExprValue::BlockExprValue(block) =>
             CoreExprValue::BlockExprValue(
@@ -2760,10 +3267,34 @@ fn remap_core_expr_types(
                     remap_core_match_arm_types(arm, mapping, module_key)
                 })
             },
-        CoreExprValue::HandleExprValue { body, handlers } =>
+        CoreExprValue::HandleExprValue { body, installations } =>
             CoreExprValue::HandleExprValue {
                 body: remap_core_block_types(body, mapping, module_key),
-                handlers: copy_handler_entries(handlers)
+                installations: installations.map(fn(installation) {
+                    CoreHandlerInstallation {
+                        evidence: remap_handled_binding(
+                            installation.evidence, mapping, module_key),
+                        operations: installation.operations.map(fn(operation) {
+                            CoreHandlerOperation {
+                                operation: operation.operation,
+                                executable: operation.executable,
+                                parameter_slots: copy_slot_refs(
+                                    operation.parameter_slots),
+                                resume_slot: operation.resume_slot,
+                                handled_captures:
+                                    operation.handled_captures.map(fn(capture) {
+                                        make_core_handled_evidence_capture(
+                                            capture.reference,
+                                            remap_core_type_reference(
+                                                capture.aggregate_type,
+                                                mapping, module_key))
+                                    }),
+                                origin: operation.origin
+                            }
+                        }),
+                        origin: installation.origin
+                    }
+                })
             }
     }
     make_core_expr(ty, effects, value.origin, payload)
@@ -2812,7 +3343,9 @@ pub fn remap_core_callable_types(
         remap_core_type_reference(value.result_type, mapping, module_key),
         value.mode,
         remap_flow_call_contract(value.semantic_contract, mapping, module_key),
-        value.evidence_requirements)
+        value.handled_evidence.map(fn(binding) {
+            remap_handled_binding(binding, mapping, module_key)
+        }))
 }
 
 pub fn remap_core_impl_types(
@@ -2926,6 +3459,17 @@ pub fn validate_core_callable_contracts(
                 left.semantic_contract)) != left.result_type.index {
             panic("CoreHIR: callable semantic result type drifted")
         }
+        let mut evidence_index = 0
+        while evidence_index < left.handled_evidence.len() {
+            let binding = left.handled_evidence.get(evidence_index).unwrap()
+            let _ = core_type_graph_node(graph, binding.aggregate_type)
+            if core_handled_evidence_ordinal(binding) != evidence_index ||
+               !executable_ref_same(
+                    core_handled_evidence_owner(binding), left.reference) {
+                panic("CoreHIR: callable handled-evidence order/owner drifted")
+            }
+            evidence_index = evidence_index + 1
+        }
         let mut right_index = left_index + 1
         while right_index < values.len() {
             if executable_ref_same(
@@ -2947,19 +3491,33 @@ fn require_core_type_same(
     if !core_type_ref_same(left, right) { panic(message) }
 }
 
-fn validate_evidence_count(
-    evidence: List<CoreEvidenceRef>, contract: CoreCallableContract,
+fn validate_handled_contract_uses(
+    uses: List<CoreHandledEvidenceUse>, contract: CoreCallableContract,
     body: CoreBody
 ) {
-    if evidence.len() != contract.evidence_requirements.len() {
-        panic("CoreHIR: call evidence census differs from exact contract")
+    if uses.len() != contract.handled_evidence.len() {
+        panic("CoreHIR: handled-evidence census differs from exact contract")
     }
-    validate_evidence(evidence, body.binders)
+    validate_handled_evidence_uses(uses, body)
+    let mut index = 0
+    while index < uses.len() {
+        let actual = uses.get(index).unwrap()
+        let expected = contract.handled_evidence.get(index).unwrap()
+        if !handled_effect_ref_same(
+                core_handled_use_requirement(actual),
+                core_handled_evidence_requirement(expected)) ||
+           !core_type_ref_same(
+                actual.aggregate_type, expected.aggregate_type) {
+            panic("CoreHIR: handled-evidence requirement/type order differs")
+        }
+        index = index + 1
+    }
 }
 
 fn validate_call_signature(
     callee: CoreCalleeRef, arguments: List<CoreExpr>, result_type: CoreTypeRef,
-    evidence: List<CoreEvidenceRef>, body: CoreBody,
+    evidence: List<CoreEvidenceRef>,
+    handled_evidence: List<CoreHandledEvidenceUse>, body: CoreBody,
     graph: CoreTypeGraph, callables: List<CoreCallableContract>
 ) {
     let flow_parameters = flow_call_contract_parameter_types(callee.contract)
@@ -2984,7 +3542,8 @@ fn validate_call_signature(
                 candidate.semantic_contract, callee.contract) {
             panic("CoreHIR: direct call semantic contract differs")
         }
-        validate_evidence_count(evidence, candidate, body)
+        validate_evidence(evidence, body.binders)
+        validate_handled_contract_uses(handled_evidence, candidate, body)
     } else if callee.kind == CORE_CALLEE_LOCAL {
         let callable_ty = core_type_graph_node(
             graph, core_binder_type_for(body, core_callee_local(callee)))
@@ -2994,8 +3553,10 @@ fn validate_call_signature(
             panic("CoreHIR: local callee slot is not exact callable type")
         }
         validate_evidence(evidence, body.binders)
+        validate_handled_evidence_uses(handled_evidence, body)
     } else if callee.kind == CORE_CALLEE_DYNAMIC {
         validate_evidence(evidence, body.binders)
+        validate_handled_evidence_uses(handled_evidence, body)
     } else {
         panic("CoreHIR: unknown callee identity form")
     }
@@ -3120,7 +3681,9 @@ fn validate_construct_with_graph(
 ) {
     let node = core_type_graph_node(graph, result_type)
     match constructor.value {
-        CoreConstructorRefValue::StructConstructorValue(owner) => {
+        CoreConstructorRefValue::StructConstructorValue {
+            owner, fields: contract_fields
+        } => {
             if type_kind(graph, result_type) !=
                     flow_type_kind_tag(flow_type_kind_struct()) ||
                !symbol_ref_same(
@@ -3134,6 +3697,21 @@ fn validate_construct_with_graph(
                         flow_nominal_field_identity(fact)) {
                     expected.push(fact)
                 }
+            }
+            if contract_fields.len() != expected.len() {
+                panic("CoreHIR: struct constructor contract/type arity differs")
+            }
+            let mut contract_index = 0
+            while contract_index < contract_fields.len() {
+                let identity = flow_nominal_field_identity(
+                    expected.get(contract_index).unwrap())
+                if !flow_field_identity_is_nominal(identity) ||
+                   !nominal_field_ref_same(
+                        contract_fields.get(contract_index).unwrap(),
+                        flow_field_identity_nominal(identity)) {
+                    panic("CoreHIR: struct constructor contract/type order differs")
+                }
+                contract_index = contract_index + 1
             }
             validate_field_sequence(fields, expected, body)
         },
@@ -3403,6 +3981,29 @@ fn validate_method_call_identity(
     }
 }
 
+fn validate_handled_capture_targets(
+    captures: List<CoreHandledEvidenceCapture>,
+    contract: CoreCallableContract, graph: CoreTypeGraph
+) {
+    for capture in captures {
+        let target = core_handled_capture_target(capture)
+        let mut found = false
+        for binding in contract.handled_evidence {
+            if handled_evidence_ref_same(target, binding.reference) {
+                if !core_type_ref_same(
+                        capture.aggregate_type, binding.aggregate_type) {
+                    panic("CoreHIR: handled capture target type differs")
+                }
+                found = true
+            }
+        }
+        if !found {
+            panic("CoreHIR: handled capture target is absent from callable")
+        }
+        let _ = core_type_graph_node(graph, capture.aggregate_type)
+    }
+}
+
 fn validate_expr_with_program(
     value: CoreExpr, body: CoreBody, graph: CoreTypeGraph,
     callables: List<CoreCallableContract>,
@@ -3449,18 +4050,20 @@ fn validate_expr_with_program(
             validate_core_primitive_signature(
                 operation, operands, value.ty, body, graph)
         },
-        CoreExprValue::CallExprValue { callee, arguments, evidence } => {
+        CoreExprValue::CallExprValue {
+            callee, arguments, evidence, handled_evidence
+        } => {
             for argument in arguments {
                 validate_expr_with_program(
                     argument, body, graph, callables,
                     current_callable, loop_depth)
             }
             validate_call_signature(
-                callee, arguments, value.ty, evidence,
+                callee, arguments, value.ty, evidence, handled_evidence,
                 body, graph, callables)
         },
         CoreExprValue::MethodCallExprValue {
-            callee, method, receiver, arguments, evidence
+            callee, method, receiver, arguments, evidence, handled_evidence
         } => {
             validate_method_call_identity(method, callee, evidence)
             validate_expr_with_program(
@@ -3474,11 +4077,11 @@ fn validate_expr_with_program(
                 all_arguments.push(argument)
             }
             validate_call_signature(
-                callee, all_arguments, value.ty, evidence,
+                callee, all_arguments, value.ty, evidence, handled_evidence,
                 body, graph, callables)
         },
         CoreExprValue::EffectCallExprValue {
-            operation, arguments, evidence
+            operation, arguments, evidence, handled_evidence
         } => {
             for argument in arguments {
                 validate_expr_with_program(
@@ -3490,7 +4093,8 @@ fn validate_expr_with_program(
             validate_call_signature(
                 make_core_direct_callee(
                     callable.reference, callable.semantic_contract),
-                arguments, value.ty, evidence, body, graph, callables)
+                arguments, value.ty, evidence, handled_evidence,
+                body, graph, callables)
             let handled = effect_operation_ref_effect(operation)
             let mut present = false
             for atom in value.effects.atoms {
@@ -3514,13 +4118,13 @@ fn validate_expr_with_program(
             }
             let callable = core_callable_for(
                 callables, system_host_callable_executable(host))
-            if callable.evidence_requirements.len() != 0 {
+            if callable.handled_evidence.len() != 0 {
                 panic("CoreHIR: system host call entered evidence domain")
             }
             validate_call_signature(
                 make_core_direct_callee(
                     callable.reference, callable.semantic_contract),
-                arguments, value.ty, [], body, graph, callables)
+                arguments, value.ty, [], [], body, graph, callables)
             let system = system_host_callable_effect(host)
             let mut present = false
             for atom in value.effects.atoms {
@@ -3559,7 +4163,7 @@ fn validate_expr_with_program(
             validate_call_signature(
                 make_core_direct_callee(
                     callable.reference, callable.semantic_contract),
-                [], value.ty, evidence, body, graph, callables)
+                [], value.ty, evidence, [], body, graph, callables)
         },
         CoreExprValue::DictProjectExprValue { dictionary, method } => {
             validate_expr_with_program(
@@ -3569,7 +4173,7 @@ fn validate_expr_with_program(
             validate_call_signature(
                 make_core_direct_callee(
                     callable.reference, callable.semantic_contract),
-                [dictionary], value.ty, [], body, graph, callables)
+                [dictionary], value.ty, [], [], body, graph, callables)
         },
         CoreExprValue::ProjectExprValue { base, field, .. } => {
             validate_expr_with_program(
@@ -3590,19 +4194,26 @@ fn validate_expr_with_program(
                 constructor, fields, value.ty, body, graph)
             match constructor.executable {
                 some(executable) => {
+                    if core_constructor_kind_tag(constructor) != 1 {
+                        panic("CoreHIR: structural constructor has executable")
+                    }
                     let _ = core_callable_for(callables, executable)
                 },
-                none => if core_constructor_kind_tag(constructor) < 2 {
-                    panic("CoreHIR: nominal constructor has no exact executable")
+                none => if core_constructor_kind_tag(constructor) == 1 {
+                    panic("CoreHIR: variant constructor has no exact executable")
                 }
             }
         },
-        CoreExprValue::LambdaExprValue { executable, .. } => {
+        CoreExprValue::LambdaExprValue {
+            executable, handled_captures, ..
+        } => {
             let contract = core_callable_for(callables, executable)
             if !flow_callable_mode_same(
                     contract.mode, flow_callable_mode_concrete_body()) {
                 panic("CoreHIR: lambda references a bodyless callable")
             }
+            validate_handled_capture_targets(
+                handled_captures, contract, graph)
         },
         CoreExprValue::BlockExprValue(block) => {
             validate_block_with_program(
@@ -3671,21 +4282,33 @@ fn validate_expr_with_program(
                 require_block_result_type(arm.body, value.ty, graph)
             }
         },
-        CoreExprValue::HandleExprValue { body: handled, handlers } => {
+        CoreExprValue::HandleExprValue { body: handled, installations } => {
             validate_block_with_program(
                 handled, body, graph, callables,
                 current_callable, loop_depth)
             require_block_result_type(handled, value.ty, graph)
-            for handler in handlers {
-                let operation_callable = effect_operation_ref_callable(
-                    handler.operation)
-                let handler_contract = core_callable_for(
-                    callables, handler.executable)
-                let _ = core_callable_for(callables, operation_callable)
-                if !flow_callable_mode_same(
-                        handler_contract.mode,
-                        flow_callable_mode_concrete_body()) {
-                    panic("CoreHIR: handler executable is bodyless")
+            for installation in installations {
+                let _ = core_type_graph_node(
+                    graph, installation.evidence.aggregate_type)
+                if !executable_ref_same(
+                        core_handled_evidence_owner(installation.evidence),
+                        current_callable.reference) {
+                    panic("CoreHIR: handler installation owner differs")
+                }
+                for operation in installation.operations {
+                    let operation_callable = effect_operation_ref_callable(
+                        operation.operation)
+                    let handler_contract = core_callable_for(
+                        callables, operation.executable)
+                    let _ = core_callable_for(callables, operation_callable)
+                    if !flow_callable_mode_same(
+                            handler_contract.mode,
+                            flow_callable_mode_concrete_body()) {
+                        panic("CoreHIR: handler executable is bodyless")
+                    }
+                    validate_handled_capture_targets(
+                        operation.handled_captures,
+                        handler_contract, graph)
                 }
             }
         }
@@ -3801,6 +4424,24 @@ pub fn validate_core_body_with_program(
             panic("CoreHIR: body parameter slot/type order differs")
         }
         index = index + 1
+    }
+    let mut evidence_index = 0
+    while evidence_index < current_callable.handled_evidence.len() {
+        let evidence = current_callable.handled_evidence.get(
+            evidence_index).unwrap()
+        let slot = core_handled_evidence_slot(evidence)
+        let binder = match binder_index(value.binders, slot) {
+            some(position) => value.binders.get(position).unwrap(),
+            none => panic("CoreHIR: callable handled binder is absent")
+        }
+        let exact = handled_evidence_binding(evidence.reference)
+        if !core_type_ref_same(binder.ty, evidence.aggregate_type) ||
+           binder_kind_tag(binder.kind) !=
+                binder_kind_tag(binder_entry_kind(exact)) ||
+           !path_ref_same(binder.site, binder_entry_site(exact)) {
+            panic("CoreHIR: callable handled binder/type/site differs")
+        }
+        evidence_index = evidence_index + 1
     }
     validate_block_with_program(
         value.body, value, graph, callables, current_callable, 0)
