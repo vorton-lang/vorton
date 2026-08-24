@@ -28,9 +28,10 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     method_call_ref_signature, effect_op_slot,
     hexpr_type, hexpr_effects, is_fresh_owned_bool_value, variant_ctor_name, compare_by_first,
     trait_dict_name, trait_bound_param_name, evidence_param_name,
-    effect_name_from_evidence_param, is_extern_handle_type,
+    is_extern_handle_type,
     slot_bridge_runtime_name, is_synthetic_dict_def_id}
 use ir_identity::{CalleeRef, builtin_method_site_tag, intrinsic_ref_site,
+    slot_ref_is_source, slot_ref_source_def_id,
     impl_method_ref_owner, impl_method_ref_name,
     trait_method_ref_callable_slot_index,
     impl_owner_ref_target, symbol_ref_canonical_payload,
@@ -59,7 +60,7 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEmitState, CHandleCl
     c_exact_slot_c_name, c_name_only_slot_c_name, c_name_only_slot_key,
     c_register_name_only_value, c_restore_name_only_value, c_remove_name_only_value,
     c_name_only_value, c_ref_exact, c_ref_name_only, c_ref_static,
-    c_ref_default_evidence, c_ref_computed, c_ref_fresh, c_ref_loaded,
+    c_ref_computed, c_ref_fresh, c_ref_loaded,
     c_ref_c_name, c_ref_domain, c_ref_def_id, c_ref_key,
     c_new_closure_edge, c_fresh_load_id,
     c_record_capture_extract, c_record_capture_store, c_record_closure_edge,
@@ -175,6 +176,24 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
             rt_use(ctx, "ring_dup", 1)
             c_emit(ctx, "ring_dup(${v});")
             v
+        },
+        HExpr::Take { source, saved_slot, .. } => {
+            let _ = saved_slot
+            match source {
+                HExpr::Ident { name, def_id: some(def_id), .. } => match
+                        c_exact_value_slot(ctx, name, def_id) {
+                    some(slot) => {
+                        let source_name = c_exact_slot_c_name(slot)
+                        let saved = fresh_tmp(ctx)
+                        c_emit(ctx, "${saved} = ${source_name};")
+                        c_emit(ctx, "${source_name} = RING_NULL;")
+                        saved
+                    },
+                    none => panic(
+                        "C codegen: Take source has no exact physical slot")
+                },
+                _ => panic("C codegen: Take source is not a projected slot")
+            }
         },
         HExpr::UnsafeBlock { body, .. } => gen_c_expr(ctx, body),
         HExpr::ReturnExpr { value, .. } => {
@@ -404,6 +423,7 @@ fn gen_c_extern_closure_wrapper(
     let result = gen_c_expr(ctx, HExpr::Call {
         callee: synthetic_callee, args: synthetic_args, type_args: [],
         resolved_dicts: [], callee_ref: none, method_ref: none,
+        system_host: none,
         ty: return_type,
         effects: fn_effects, span: span
     })
@@ -1574,6 +1594,8 @@ fn collect_c_captures(
         },
         HExpr::Clone { inner, .. } =>
             collect_c_captures(ctx, inner, params, captures),
+        HExpr::Take { source, .. } =>
+            collect_c_captures(ctx, source, params, captures),
         HExpr::ReturnExpr { value, .. } => match value {
             some(v) => collect_c_captures(ctx, v, params, captures),
             none => {},
@@ -1621,7 +1643,11 @@ fn collect_c_captures_stmt(
         },
         // B-084 #131: Perceus branch-balancing may place an HStmt::Drop for an
         // outer-scope variable inside the lambda body — treat as a use.
-        HStmt::Drop { name, def_id, ty, .. } => {
+        HStmt::Drop { name, def_id, slot, ty, .. } => {
+            if slot_ref_is_source(slot) &&
+               slot_ref_source_def_id(slot) != def_id {
+                panic("C codegen: Drop SlotRef/DefId relation drifted")
+            }
             consider_c_drop_reference(ctx, name, def_id,
                 is_extern_handle_type(ty, ctx.extern_types),
                 params, captures)
@@ -1768,6 +1794,9 @@ fn collect_c_extern_typed_names(
         },
         HExpr::Clone { inner, .. } =>
             collect_c_extern_typed_names(inner, captures, params, externs, out),
+        HExpr::Take { source, .. } =>
+            collect_c_extern_typed_names(
+                source, captures, params, externs, out),
         HExpr::ReturnExpr { value, .. } => match value {
             some(v) => collect_c_extern_typed_names(v, captures, params, externs, out),
             none => {},
@@ -1880,8 +1909,7 @@ pub fn emit_c_receiver_load(
         }
     } else {
         if role == "effect" {
-            if domain != "name-only" && domain != "default-evidence" &&
-               domain != "computed" {
+            if domain != "name-only" && domain != "computed" {
                 panic("C codegen: effect receiver has forbidden '${domain}' identity domain")
             }
         } else {
@@ -2120,20 +2148,11 @@ fn gen_c_ord_dispatch(mut ctx: CCtx, op: BinOp, left: HExpr, right: HExpr, dispa
 }
 
 fn c_lookup_evidence(mut ctx: CCtx, ep_name: Str) -> CTypedRef {
-    // Evidence param/handle binding in scope → pass it; else fall back to the
-    // B-097 default evidence global (populated by __ring_default_evidence_init
-    // before ring_main); else NULL for io/fail/unhandled effects (the runtime
-    // handles those without evidence).  Port of lookup_evidence.
+    // Only handled custom effects request evidence. System effects, failure,
+    // mutation and unsafe are excluded by the shared typed effect scan.
     match c_name_only_value(ctx, ep_name) {
         some(slot) => c_ref_name_only(slot),
-        none => {
-            let effect_name = effect_name_from_evidence_param(ep_name)
-            match ctx.default_evidence.get(effect_name) {
-                some(g) => c_ref_default_evidence(g, ep_name),
-                none => c_ref_computed(
-                    "RING_UNIT", "unhandled-evidence:${effect_name}"),
-            }
-        },
+        none => panic("C codegen: handled effect evidence is absent"),
     }
 }
 
@@ -2422,7 +2441,7 @@ fn build_c_handler_evidence(mut ctx: CCtx, effect_name: Str, hs: List<HEffectHan
     let ev = fresh_tmp(ctx)
     c_emit(ctx, "${ev} = ring_alloc((int64_t)(sizeof(int64_t) + ${n_slots} * sizeof(void*)), 21);")
     c_emit(ctx, "*(int64_t*)${ev} = ${n_slots};")
-    // Null-init every slot (unhandled ops without defaults stay null).
+    // Null-init every slot. Missing custom handlers are rejected before C.
     for i in 0..n_slots {
         c_emit(ctx, "((void**)${ev})[${i + 1}] = 0;")
     }
@@ -2430,47 +2449,12 @@ fn build_c_handler_evidence(mut ctx: CCtx, effect_name: Str, hs: List<HEffectHan
     // One closure per handler arm, stored at its declared op slot.  The arm's
     // return value is the resume value (tail-resumptive), so the closure
     // simply returns its body.
-    let mut handled_ops: Set<Str> = set_new()
     for h in hs {
-        handled_ops.insert(h.op_name)
         let slot_idx = effect_op_slot(ctx.effect_ops, effect_name, h.op_name)
         let idx = if slot_idx >= 0 { slot_idx } else { 0 }
         let arm_ret_ty = hexpr_type(h.body)
         let arm_closure = gen_c_lambda(ctx, h.params, arm_ret_ty, h.body, arm_ret_ty)
         c_emit(ctx, "((void**)${ev})[${idx + 1}] = ${arm_closure};")
-    }
-
-    // B-097: merge default bodies for unhandled ops.  B-161: bind ev_name to
-    // THIS evidence while generating the default-body closures, so sibling op
-    // calls inside a default body dispatch through the handler's overrides
-    // (not the outer/default evidence).
-    let ev_name = evidence_param_name(effect_name)
-    let saved_ev = c_name_only_value(ctx, ev_name)
-    c_register_name_only_value(ctx, ev_name, ev)
-
-    match ctx.effect_ops.get(effect_name) {
-        some(all_ops) => {
-            for op in all_ops {
-                if op.has_default && handled_ops.contains(op.name) == false {
-                    match op.default_body {
-                        some(dbody) => {
-                            let didx = effect_op_slot(ctx.effect_ops, effect_name, op.name)
-                            let slot_i = if didx >= 0 { didx } else { 0 }
-                            let dclosure = gen_c_lambda(ctx, op.params, op.return_type, dbody, op.return_type)
-                            c_emit(ctx, "((void**)${ev})[${slot_i + 1}] = ${dclosure};")
-                        },
-                        none => {},
-                    }
-                }
-            }
-        },
-        none => {},
-    }
-
-    // B-161: restore the original evidence binding.
-    match saved_ev {
-        some(old_slot) => c_restore_name_only_value(ctx, ev_name, old_slot),
-        none => c_remove_name_only_value(ctx, ev_name),
     }
 
     ev
@@ -2504,64 +2488,6 @@ fn gen_c_effect_op(mut ctx: CCtx, effect_name: Str, op_name: Str, args: List<HEx
             ctx, ev_ref, idx + 1, "effect")
         gen_c_closure_call(ctx, closure_ref, arg_vals)
     }
-}
-
-// B-097: build the default evidence structs for every effect whose ops ALL
-// have default bodies (port of build_default_evidence_all).  Emitted as a
-// synthesised init fn called from C main before ring_main — the LLVM backend
-// builds these inline in main's entry block; the semantics are identical
-// (globals are process-lifetime, never dropped).
-pub fn emit_c_default_evidence_init(mut ctx: CCtx) {
-    if ctx.default_evidence.len() == 0 { return }
-    let mut effect_names = ctx.default_evidence.keys()
-    effect_names.sort()
-
-    let init_name = "__ring_default_evidence_init"
-    let saved = c_push_fn(ctx, init_name)
-    rt_use(ctx, "ring_alloc", 2)
-
-    for ename in effect_names {
-        let g = match ctx.default_evidence.get(ename) {
-            some(gn) => gn,
-            none => panic("C codegen: default evidence global missing for '${ename}'"),
-        }
-        match ctx.effect_ops.get(ename) {
-            some(ops) => {
-                let n_slots = ops.len()
-                let ev = fresh_tmp(ctx)
-                c_emit(ctx, "${ev} = ring_alloc((int64_t)(sizeof(int64_t) + ${n_slots} * sizeof(void*)), 21);")
-                c_emit(ctx, "*(int64_t*)${ev} = ${n_slots};")
-                // Store the global BEFORE generating the closures so sibling
-                // op calls inside a default body resolve via the fallback
-                // (LLVM parity: default_evidence is set before gen_lambda).
-                c_emit(ctx, "${g} = ${ev};")
-                // Bind ev_name so collect_c_captures captures the evidence
-                // pointer into default-body closures that call sibling ops.
-                let ev_name = evidence_param_name(ename)
-                c_register_name_only_value(ctx, ev_name, ev)
-
-                for op in ops {
-                    let slot_idx = effect_op_slot(ctx.effect_ops, ename, op.name)
-                    let idx = if slot_idx >= 0 { slot_idx } else { 0 }
-                    match op.default_body {
-                        some(dbody) => {
-                            let dclosure = gen_c_lambda(ctx, op.params, op.return_type, dbody, op.return_type)
-                            c_emit(ctx, "((void**)${ev})[${idx + 1}] = ${dclosure};")
-                        },
-                        none => {
-                            // Unreachable (all_have_defaults) — defensive null.
-                            c_emit(ctx, "((void**)${ev})[${idx + 1}] = 0;")
-                        },
-                    }
-                }
-            },
-            none => {},
-        }
-    }
-
-    c_emit(ctx, "return RING_UNIT;")
-    ctx.fn_protos.push("void* ${init_name}(void);")
-    c_pop_fn(ctx, init_name, "void", saved)
 }
 
 const INTRINSIC_RUNTIME_NAMES: List<Str> = [

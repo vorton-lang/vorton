@@ -1877,28 +1877,20 @@ fn register_effect(
             }
         }
         let ret = resolve_type_expr(ctx, op.return_type)
-        let op_has_default = op.body.is_some()
         effect_ops.push(EffectOpDef {
             name: op.name,
             operation_ref: some(identity.operations.get(op_index).unwrap()),
-            params: param_types, return_type: ret,
-            has_default: op_has_default
+            params: param_types, return_type: ret
         })
         op_index = op_index + 1
     }
-    let mut all_defaults = true
-    for eop in effect_ops {
-        if !eop.has_default { all_defaults = false }
-    }
-    if effect_ops.len() == 0 { all_defaults = false }
     ctx.type_param_scope = saved
     commit_effect_identity_fact(ctx, identity)
     ctx.env.types.effects.insert(name, EffectDef {
         name: name, owner_ref: some(identity.owner_ref),
         handled_ref: some(identity.handled_ref),
         type_params: tp_names, type_param_vars: tp_vars,
-        ops: effect_ops, built_in_kind: none,
-        all_have_defaults: all_defaults
+        ops: effect_ops, built_in_kind: none
     })
 }
 
@@ -2234,25 +2226,17 @@ fn register_trait(
                 }
                 for method_effect in method_effects.effects {
                     match method_effect {
-                        Effect::CustomEffect { name: effect_name, .. } =>
-                            match ctx.env.types.effects.get(effect_name) {
-                                some(effect_def) => match effect_def.handled_ref {
-                                    some(effect_ref) => {
-                                        let mut seen_effect = false
-                                        for existing in handled_effect_obligations {
-                                            if handled_effect_ref_same(
-                                                    existing, effect_ref) {
-                                                seen_effect = true
-                                            }
-                                        }
-                                        if !seen_effect {
-                                            handled_effect_obligations.push(effect_ref)
-                                        }
-                                    },
-                                    none => {}
-                                },
-                                none => {}
-                            },
+                        Effect::CustomEffect { reference: effect_ref, .. } => {
+                            let mut seen_effect = false
+                            for existing in handled_effect_obligations {
+                                if handled_effect_ref_same(existing, effect_ref) {
+                                    seen_effect = true
+                                }
+                            }
+                            if !seen_effect {
+                                handled_effect_obligations.push(effect_ref)
+                            }
+                        },
                         _ => {}
                     }
                 }

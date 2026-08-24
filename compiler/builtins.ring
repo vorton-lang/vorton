@@ -969,24 +969,11 @@ pub fn finalize_std_hof_fallbacks(
 }
 
 // ============================================================
-// register_effects: "io" and "fail" built-in effects
+// register_effects: dedicated abortive failure effect. System capabilities
+// are exact row atoms on host extern declarations, not handled EffectDefs.
 // ============================================================
 
 fn register_effects(mut env: TypeEnv) {
-    // io effect
-    env.types.effects.insert("io", EffectDef {
-        name: "io",
-        owner_ref: none, handled_ref: none,
-        type_params: [],
-        type_param_vars: [],
-        ops: [
-            EffectOpDef { name: "read", operation_ref: none, params: [STR], return_type: STR, has_default: false },
-            EffectOpDef { name: "write", operation_ref: none, params: [STR, STR], return_type: UNIT, has_default: false }
-        ],
-        built_in_kind: some(BuiltInKind::BkIo),
-        all_have_defaults: false
-    })
-
     // fail effect
     let fail_t_id = env.fresh_var_id()
     let fail_t = Type::TypeVar { id: fail_t_id, name: none }
@@ -996,10 +983,9 @@ fn register_effects(mut env: TypeEnv) {
         type_params: ["E"],
         type_param_vars: [fail_t_id],
         ops: [
-            EffectOpDef { name: "raise", operation_ref: none, params: [fail_t], return_type: NEVER, has_default: false }
+            EffectOpDef { name: "raise", operation_ref: none, params: [fail_t], return_type: NEVER }
         ],
-        built_in_kind: some(BuiltInKind::BkFail),
-        all_have_defaults: false
+        built_in_kind: some(BuiltInKind::BkFail)
     })
 }
 

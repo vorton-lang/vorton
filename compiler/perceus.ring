@@ -14,16 +14,19 @@
 use ast::{Span, Position, Pattern, BinOp}
 use hir::{HDecl, HStmt, HExpr, HParam, HProgram, HMatchArm,
     HStructFieldInit, HNominalStructFieldInit,
-    HStringInterpPart, HEffectHandler, HEffectOp,
+    HStringInterpPart, HEffectHandler, HEffectOp, HLambdaCapture,
     hexpr_type, hexpr_span, hexpr_effects,
     is_rc_excluded_type, type_contains_extern_handle,
     is_borrow_returning_call, is_user_drop_type,
     is_nullary_variant_ctor_ident, is_materialized_fn_value,
     is_exact_direct_call_ident,
+    make_h_instruction_resource_site, h_resource_reason_drop,
     slot_read_identity, slot_take_identity, slot_write_identity,
     synthetic_def_id, SYNTHETIC_ANF_DEF_ID_BASE,
     SYNTHETIC_RC_DEF_ID_BASE, validate_hir_binder_def_ids}
 use types::{Type}
+use ir_identity::{make_source_slot_ref, slot_domain_lexical}
+use ir_inventory::{ExecutableRef, executable_ref_origin_module_key}
 
 // ============================================================
 // Synthetic span for pass-inserted ANF/RC nodes.
@@ -33,6 +36,10 @@ use types::{Type}
 fn synthetic_span() -> Span {
     let pos = Position { line: 0, column: 0, offset: 0 }
     Span { file: "<perceus>", start: pos, end: pos }
+}
+
+fn retired_perceus_drop() -> HStmt {
+    panic("legacy Perceus Drop emission is retired; use verified Rc bridge")
 }
 
 // B-084 #131(a): the wildcard `_` is never bound to a real named_values slot
@@ -126,11 +133,15 @@ fn mutate_drop_params(decls: List<HDecl>) -> List<HDecl> {
     let mut out: List<HDecl> = []
     for d in decls {
         match d {
-            HDecl::Fn { name, def_id, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } => {
+            HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } => {
                 out.push(HDecl::Fn {
-                    name: name, def_id: def_id, type_params: type_params,
+                    name: name, def_id: def_id,
+                    executable_ref: executable_ref,
+                    impl_method_ref: impl_method_ref,
+                    type_params: type_params,
                     params: params, return_type: return_type, effects: effects,
-                    body: mutate_append_param_drops(body, params),
+                    body: mutate_append_param_drops(
+                        body, params, executable_ref),
                     is_pub: is_pub, trait_bounds: trait_bounds, span: span
                 })
             },
@@ -140,7 +151,9 @@ fn mutate_drop_params(decls: List<HDecl>) -> List<HDecl> {
     out
 }
 
-fn mutate_append_param_drops(body: HExpr, params: List<HParam>) -> HExpr {
+fn mutate_append_param_drops(
+    body: HExpr, params: List<HParam>, executable_ref: ExecutableRef
+) -> HExpr {
     match body {
         HExpr::Block { stmts, tail, ty, effects, span } => {
             let mut new_stmts = stmts.concat([])
@@ -150,8 +163,14 @@ fn mutate_append_param_drops(body: HExpr, params: List<HParam>) -> HExpr {
                     none => panic(
                         "unreachable: RC mutation parameter has no exact DefId")
                 }
+                let slot = make_source_slot_ref(
+                    executable_ref_origin_module_key(executable_ref),
+                    slot_domain_lexical(), param_def_id)
                 new_stmts.push(HStmt::Drop { name: p.name,
-                    def_id: param_def_id, ty: Type::UnitType,
+                    def_id: param_def_id, slot: slot,
+                    site: make_h_instruction_resource_site(
+                        executable_ref, 0, new_stmts.len()),
+                    reason: h_resource_reason_drop(), ty: Type::UnitType,
                     span: synthetic_span() })
             }
             HExpr::Block { stmts: new_stmts, tail: tail, ty: ty, effects: effects, span: span }
@@ -232,9 +251,12 @@ fn fresh_anf_tmp(mut counter: List<Int>) -> (Str, Int) {
 
 fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
     match decl {
-        HDecl::Fn { name, def_id, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } => {
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } => {
             HDecl::Fn {
-                name: name, def_id: def_id, type_params: type_params,
+                name: name, def_id: def_id,
+                executable_ref: executable_ref,
+                impl_method_ref: impl_method_ref,
+                type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
                 body: anf_fn_body(body, externs, counter), is_pub: is_pub,
                 trait_bounds: trait_bounds, span: span
@@ -251,14 +273,17 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
                 assoc_types: assoc_types, span: span
             }
         },
-        HDecl::Test { description, body, span } => {
-            HDecl::Test { description: description, body: anf_fn_body(body, externs, counter), span: span }
+        HDecl::Test { description, executable_ref, body, span } => {
+            HDecl::Test { description: description,
+                executable_ref: executable_ref,
+                body: anf_fn_body(body, externs, counter), span: span }
         },
-        HDecl::Const { name, def_id, ty, init, is_pub, span } => {
+        HDecl::Const { name, def_id, executable_ref, ty, init, is_pub, span } => {
             // Const init is in escape position with no enclosing statement list to
             // hoist into; normalise its nested subexprs into a Block tail if any
             // materialisation is needed.
-            HDecl::Const { name: name, def_id: def_id, ty: ty,
+            HDecl::Const { name: name, def_id: def_id,
+                executable_ref: executable_ref, ty: ty,
                 init: anf_value_in_own_scope(init, externs, counter), is_pub: is_pub, span: span }
         },
         HDecl::ModBlock { name, decls: mod_decls, is_pub, span } => {
@@ -271,14 +296,9 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
         HDecl::Effect { name, owner_ref, handled_ref, type_params, ops, is_pub, span } => {
             let mut new_ops: List<HEffectOp> = []
             for op in ops {
-                let new_default_body = match op.default_body {
-                    some(body) => some(anf_fn_body(body, externs, counter)),
-                    none => none,
-                }
                 new_ops.push(HEffectOp {
                     name: op.name, operation_ref: op.operation_ref,
-                    params: op.params, return_type: op.return_type,
-                    has_default: op.has_default, default_body: new_default_body
+                    params: op.params, return_type: op.return_type
                 })
             }
             HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
@@ -338,6 +358,7 @@ pub fn is_materializable_fn_value(expr: HExpr, externs: Set<Str>) -> Bool {
         HExpr::Lambda { .. } => true,
         HExpr::Call { callee, .. } => is_borrow_returning_call(callee) == false,
         HExpr::Clone { .. } => true,
+        HExpr::Take { .. } => true,
         HExpr::Block { tail, .. } => match tail {
             some(value) => is_materializable_fn_value(value, externs),
             none => false
@@ -921,7 +942,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref, method_ref, ty, effects, span } => {
+        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref,
+                      method_ref, system_host, ty, effects, span } => {
             // Callee is a borrow read (FieldAccess receiver / Ident) — normalise its
             // subexprs but it is not itself a materialisable value.
             let new_callee = anf_callee(callee, hoists, externs, counter)
@@ -944,7 +966,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
                 resolved_dicts: resolved_dicts, callee_ref: callee_ref,
-                method_ref: method_ref,
+                method_ref: method_ref, system_host: system_host,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -1140,7 +1162,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             for h in handlers {
                 let h_body = anf_block_expr(h.body, externs, counter)
                 new_handlers.push(HEffectHandler {
-                    effect_name: h.effect_name, op_name: h.op_name,
+                    effect_name: h.effect_name, handled_ref: h.handled_ref,
+                    op_name: h.op_name,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
@@ -1148,10 +1171,17 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             HExpr::HandleExpr { body: new_body, handlers: new_handlers, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Lambda { params, return_type, body, ty, effects, span } => {
+        HExpr::Lambda { executable_ref, params, captures, return_type, body, ty, effects, span } => {
             // The lambda body is its own function scope.  Captures are dup'd by
             // gen_lambda; perceus handles the body.  Normalise the body in place.
-            HExpr::Lambda { params: params, return_type: return_type,
+            HExpr::Lambda { executable_ref: executable_ref,
+                params: params,
+                captures: captures.map(fn(capture) { HLambdaCapture {
+                    source: capture.source, target: capture.target,
+                    value: capture.value.map(fn(value) {
+                        anf_operand(value, hoists, externs, counter) }),
+                    resource_site: capture.resource_site } }),
+                return_type: return_type,
                 body: anf_block_expr(body, externs, counter),
                 ty: ty, effects: effects, span: span }
         },
@@ -1185,6 +1215,11 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
         // Clone is inserted by perceus (after ANF); never present in input.
         HExpr::Clone { inner, ty, effects, span } =>
             HExpr::Clone { inner: inner, ty: ty, effects: effects, span: span },
+        HExpr::Take { source, source_slot, saved_slot, site, ty, effects, span } =>
+            HExpr::Take { source: anf_operand(
+                    source, hoists, externs, counter),
+                source_slot: source_slot, saved_slot: saved_slot, site: site,
+                ty: ty, effects: effects, span: span },
 
         // B-113: return in expression position (match arm).
         // Normalise the return value as a tail value (same as HStmt::Return in anf_stmt).
@@ -1251,11 +1286,14 @@ fn transform_decl(
     drop_types: Set<Str>, mut gensym: List<Int>
 ) -> HDecl {
     match decl {
-        HDecl::Fn { name, def_id, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } => {
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } => {
             let new_body = transform_fn_body(
                 params, body, boxed, externs, drop_types, gensym)
             HDecl::Fn {
-                name: name, def_id: def_id, type_params: type_params,
+                name: name, def_id: def_id,
+                executable_ref: executable_ref,
+                impl_method_ref: impl_method_ref,
+                type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
                 body: new_body, is_pub: is_pub, trait_bounds: trait_bounds, span: span
             }
@@ -1271,18 +1309,22 @@ fn transform_decl(
                 assoc_types: assoc_types, span: span
             }
         },
-        HDecl::Test { description, body, span } => {
+        HDecl::Test { description, executable_ref, body, span } => {
             // Transform test bodies as parameterless functions
             let new_body = transform_fn_body(
                 [], body, boxed, externs, drop_types, gensym)
-            HDecl::Test { description: description, body: new_body, span: span }
+            HDecl::Test { description: description,
+                executable_ref: executable_ref,
+                body: new_body, span: span }
         },
-        HDecl::Const { name, def_id, ty, init, is_pub, span } => {
+        HDecl::Const { name, def_id, executable_ref, ty, init, is_pub, span } => {
             // B-098: the const owns its value → the initialiser is in escape
             // position, with an empty enclosing owned scope (no locals at top level).
             let owned: List<OwnedSlot> = []
             let new_init = rc_escape(init, owned, boxed, externs, drop_types, gensym, 0 - 1)
-            HDecl::Const { name: name, def_id: def_id, ty: ty, init: new_init, is_pub: is_pub, span: span }
+            HDecl::Const { name: name, def_id: def_id,
+                executable_ref: executable_ref, ty: ty,
+                init: new_init, is_pub: is_pub, span: span }
         },
         HDecl::ModBlock { name, decls: mod_decls, is_pub, span } => {
             HDecl::ModBlock { name: name,
@@ -1296,15 +1338,9 @@ fn transform_decl(
         HDecl::Effect { name, owner_ref, handled_ref, type_params, ops, is_pub, span } => {
             let mut new_ops: List<HEffectOp> = []
             for op in ops {
-                let new_default_body = match op.default_body {
-                    some(body) => some(transform_fn_body(
-                        op.params, body, boxed, externs, drop_types, gensym)),
-                    none => none,
-                }
                 new_ops.push(HEffectOp {
                     name: op.name, operation_ref: op.operation_ref,
-                    params: op.params, return_type: op.return_type,
-                    has_default: op.has_default, default_body: new_default_body
+                    params: op.params, return_type: op.return_type
                 })
             }
             HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
@@ -1497,9 +1533,8 @@ fn mutate_capture_drop_lambda(
         HExpr::Lambda { body, .. } => match body {
             HExpr::Block { stmts, .. } => {
                 let mut new_stmts = stmts.concat([])
-                new_stmts.push(HStmt::Drop { name: "capture_slot",
-                    def_id: def_id, ty: Type::UnitType,
-                    span: synthetic_span() })
+                let _ = def_id
+                new_stmts.push(retired_perceus_drop())
                 changed.set(0, true)
                 HExpr::Lambda { ..expr,
                     body: HExpr::Block { ..body, stmts: new_stmts } }
@@ -2191,6 +2226,7 @@ fn is_droppable_init(init: HExpr, externs: Set<Str>) -> Bool {
         HExpr::StrLit { .. } => true,
         HExpr::BoolLit { .. } => true,
         HExpr::Clone { .. } => true,
+        HExpr::Take { .. } => true,
         // B-103: every Call result is droppable.  Two sub-cases, both safe:
         //   (a) BORROW-returning call (.unwrap / .unwrap_or / .unwrap_or_else /
         //       .to_fail, per is_borrow_returning_call): is_owner_bearing(Call) is
@@ -2313,9 +2349,7 @@ fn drops_for(names: List<OwnedSlot>) -> List<HStmt> {
         index = index - 1
         match names.get(index) {
             some(slot) => if !rc_name_skippable(slot.name) {
-                out.push(HStmt::Drop { name: slot.name,
-                    def_id: slot.def_id, ty: Type::UnitType,
-                    span: synthetic_span() })
+                out.push(retired_perceus_drop())
             },
             none => {}
         }
@@ -2434,9 +2468,7 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
                         HStmt::Let { name: tmp, name_span: synthetic_span(),
                             def_id: some(tmp_def_id),
                             ty: vt, init: new_value, span: synthetic_span() },
-                        HStmt::Drop { name: drop_slot.name,
-                            def_id: drop_slot.def_id, ty: Type::UnitType,
-                            span: synthetic_span() },
+                        retired_perceus_drop(),
                         HStmt::Assign { target: target, value: tmp_id, span: span },
                     ]
                 },
@@ -2616,7 +2648,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref, method_ref, ty, effects, span } => {
+        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref,
+                      method_ref, system_host, ty, effects, span } => {
             // Callee is a borrow.  Arguments BORROW by default (the callee does not
             // drop them — point 4) EXCEPT two ownership-taking sinks:
             //   1. a known container-sink (push/insert/set): the value escapes into
@@ -2648,7 +2681,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
                 resolved_dicts: resolved_dicts, callee_ref: callee_ref,
-                method_ref: method_ref,
+                method_ref: method_ref, system_host: system_host,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -2794,7 +2827,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 // escape position.
                 let h_body = rc_block_root(h.body, true, [], boxed, externs, drop_types, gensym, 0 - 1)
                 new_handlers.push(HEffectHandler {
-                    effect_name: h.effect_name, op_name: h.op_name,
+                    effect_name: h.effect_name, handled_ref: h.handled_ref,
+                    op_name: h.op_name,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
@@ -2802,7 +2836,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             HExpr::HandleExpr { body: new_body, handlers: new_handlers, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Lambda { params, return_type, body, ty, effects, span } => {
+        HExpr::Lambda { executable_ref, params, captures, return_type, body, ty, effects, span } => {
             // Conservative closure model (B-098 all-owned captures): every captured
             // outer owned local is DUP'd at CONSTRUCTION by gen_lambda (the env
             // takes its own reference), released when the env dies (B-084
@@ -2812,7 +2846,15 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             // its own fresh function scope (params borrow, tail = return = escape,
             // no enclosing owned locals — captures come through the env).
             let new_body = rc_block_root(body, true, [], boxed, externs, drop_types, gensym, 0 - 1)
-            HExpr::Lambda { params: params, return_type: return_type, body: new_body,
+            HExpr::Lambda { executable_ref: executable_ref,
+                params: params,
+                captures: captures.map(fn(capture) { HLambdaCapture {
+                    source: capture.source, target: capture.target,
+                    value: capture.value.map(fn(value) {
+                        rc_escape(value, owned, boxed, externs, drop_types,
+                            gensym, loop_base) }),
+                    resource_site: capture.resource_site } }),
+                return_type: return_type, body: new_body,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -2857,6 +2899,12 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
         // through idempotently if seen.
         HExpr::Clone { inner, ty, effects, span } =>
             HExpr::Clone { inner: inner, ty: ty, effects: effects, span: span },
+        HExpr::Take { source, source_slot, saved_slot, site, ty, effects, span } =>
+            HExpr::Take { source: rc_expr(
+                    source, false, owned, boxed, externs, drop_types,
+                    gensym, loop_base),
+                source_slot: source_slot, saved_slot: saved_slot, site: site,
+                ty: ty, effects: effects, span: span },
 
         // B-113: return in expression position (match arm).
         // Same drop semantics as HStmt::Return in rc_stmt: escape the return value,

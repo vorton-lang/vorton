@@ -109,7 +109,7 @@ fn occurs_in_effect(var_id: Int, e: Effect, subst: UnionFind) -> Bool {
         Effect::MutEffect { state_type } => occurs_in(var_id, state_type, subst),
         Effect::CustomEffect { type_args, .. } =>
             type_args.any(fn(a) { occurs_in(var_id, a, subst) }),
-        Effect::IoEffect => false,
+        Effect::SystemEffect { .. } => false,
         Effect::UnsafeEffect => false
     }
 }
@@ -123,7 +123,7 @@ pub fn unify_effect_params(a: Effect, b: Effect, subst: UnionFind, mut env: Type
             unify(et_a, et_b, subst, env),
         (Effect::MutEffect { state_type: sa }, Effect::MutEffect { state_type: sb }) =>
             unify(sa, sb, subst, env),
-        (Effect::CustomEffect { name, type_args: ta_a }, Effect::CustomEffect { type_args: ta_b, .. }) => {
+        (Effect::CustomEffect { name, type_args: ta_a, .. }, Effect::CustomEffect { type_args: ta_b, .. }) => {
             if ta_a.len() != ta_b.len() {
                 unify_error_msg("effect '${name}' type argument count mismatch: ${ta_a.len()} vs ${ta_b.len()}")
             }

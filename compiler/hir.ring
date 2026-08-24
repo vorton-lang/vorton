@@ -1,10 +1,13 @@
 use ast::{Span, Pattern, BinOp, UnaryOp, TypeParam}
-use types::{Type, EffectRow, StructField, EnumVariant, RecordField, types_equal}
+use types::{Type, Effect, EffectRow, StructField, EnumVariant, RecordField,
+    types_equal}
 use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     ImplOwnerRef,
     VariantRef, VariantFieldRef,
     HandledEffectRef,
-    ImplMethodRef, IntrinsicRef, CalleeRef,
+    ImplMethodRef, IntrinsicRef, CalleeRef, SlotRef, slot_ref_same,
+    callee_ref_is_named, callee_ref_named_symbol,
+    slot_ref_is_source, slot_ref_source_def_id,
     intrinsic_ref_same, impl_method_ref_same, trait_method_ref_same,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     nominal_field_ref_owner, nominal_field_ref_index,
@@ -14,15 +17,21 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     registered_trait_ref_symbol, registered_trait_ref_display_name,
     trait_method_ref_trait, trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index,
-    trait_method_ref_name, impl_owner_ref_provider, impl_owner_ref_trait,
+    trait_method_ref_name, trait_method_ref_member,
+    impl_owner_ref_provider, impl_owner_ref_trait,
+    impl_method_ref_member,
     variant_ref_owner, variant_ref_source_index,
     variant_field_ref_variant, variant_field_ref_index,
     variant_ref_same,
-    handled_effect_ref_same,
+    handled_effect_ref_same, system_effect_ref_same,
     impl_provider_ref_same, impl_provider_ref_kind,
     impl_provider_kind_tag}
-use ir_inventory::{EffectOperationRef, effect_operation_ref_effect,
-    effect_operation_ref_source_index}
+use ir_inventory::{ExecutableRef, EffectOperationRef, SystemHostCallableRef,
+    executable_ref_is_named, executable_ref_named_symbol,
+    executable_ref_same,
+    effect_operation_ref_effect,
+    effect_operation_ref_source_index,
+    system_host_callable_effect, system_host_callable_executable}
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
@@ -457,6 +466,7 @@ pub struct HMatchArm {
 
 pub struct HEffectHandler {
     pub effect_name: Str,
+    pub handled_ref: HandledEffectRef?,
     pub op_name: Str,
     pub params: List<HParam>,
     pub resume_binding: HPatternBinding?,
@@ -466,6 +476,91 @@ pub struct HEffectHandler {
 pub enum HStringInterpPart {
     Literal(Str),
     Expression(HExpr)
+}
+
+pub struct HLambdaCapture {
+    pub source: SlotRef,
+    pub target: SlotRef,
+    pub value: HExpr?,
+    pub resource_site: HResourceSite?
+}
+
+// Lossless bridge identity for one frozen Flow semantic step. HIR cannot
+// import FlowIR because FlowIR consumes DictRef, so the bridge copies the
+// exact executable and ordinals into this closed representation.
+pub struct HResourceSite {
+    owner: ExecutableRef,
+    block_ordinal: Int,
+    instruction_ordinal: Int?
+}
+
+pub fn make_h_instruction_resource_site(
+    owner: ExecutableRef, block_ordinal: Int, instruction_ordinal: Int
+) -> HResourceSite {
+    if block_ordinal < 0 || instruction_ordinal < 0 {
+        panic("HIR resource site: negative instruction ordinal")
+    }
+    HResourceSite { owner: owner, block_ordinal: block_ordinal,
+        instruction_ordinal: some(instruction_ordinal) }
+}
+
+pub fn make_h_terminator_resource_site(
+    owner: ExecutableRef, block_ordinal: Int
+) -> HResourceSite {
+    if block_ordinal < 0 {
+        panic("HIR resource site: negative terminator ordinal")
+    }
+    HResourceSite { owner: owner, block_ordinal: block_ordinal,
+        instruction_ordinal: none }
+}
+
+pub fn h_resource_site_owner(value: HResourceSite) -> ExecutableRef {
+    value.owner
+}
+pub fn h_resource_site_block_ordinal(value: HResourceSite) -> Int {
+    value.block_ordinal
+}
+pub fn h_resource_site_instruction_ordinal(value: HResourceSite) -> Int? {
+    value.instruction_ordinal
+}
+pub fn h_resource_site_same(
+    left: HResourceSite, right: HResourceSite
+) -> Bool {
+    executable_ref_same(left.owner, right.owner) &&
+        left.block_ordinal == right.block_ordinal &&
+        left.instruction_ordinal == right.instruction_ordinal
+}
+
+const H_RESOURCE_TAKE: Int = 0
+const H_RESOURCE_DROP: Int = 1
+const H_RESOURCE_CLEANUP: Int = 2
+const H_RESOURCE_SCOPE_END: Int = 3
+const H_RESOURCE_DROP_PROJECTED_OLD: Int = 4
+
+pub struct HResourceReason { tag: Int }
+fn h_resource_reason_from_tag(tag: Int) -> HResourceReason {
+    if tag < H_RESOURCE_TAKE || tag > H_RESOURCE_DROP_PROJECTED_OLD {
+        panic("HIR resource reason: invalid tag")
+    }
+    HResourceReason { tag: tag }
+}
+pub fn h_resource_reason_take() -> HResourceReason {
+    h_resource_reason_from_tag(H_RESOURCE_TAKE)
+}
+pub fn h_resource_reason_drop() -> HResourceReason {
+    h_resource_reason_from_tag(H_RESOURCE_DROP)
+}
+pub fn h_resource_reason_cleanup() -> HResourceReason {
+    h_resource_reason_from_tag(H_RESOURCE_CLEANUP)
+}
+pub fn h_resource_reason_scope_end() -> HResourceReason {
+    h_resource_reason_from_tag(H_RESOURCE_SCOPE_END)
+}
+pub fn h_resource_reason_drop_projected_old() -> HResourceReason {
+    h_resource_reason_from_tag(H_RESOURCE_DROP_PROJECTED_OLD)
+}
+pub fn h_resource_reason_tag(value: HResourceReason) -> Int {
+    h_resource_reason_from_tag(value.tag).tag
 }
 
 // Exact checker provenance for value bindings whose source-level type alone
@@ -488,7 +583,7 @@ pub enum HExpr {
     Ident { name: Str, resolved_name: Str?, def_id: Int?, dict_closure_dicts: List<DictRef>?, ty: Type, effects: EffectRow, span: Span },
     BinOp { op: BinOp, left: HExpr, right: HExpr, eq_dispatch: TraitDispatch?, ord_dispatch: TraitDispatch?, ty: Type, effects: EffectRow, span: Span },
     UnaryOp { op: UnaryOp, operand: HExpr, ty: Type, effects: EffectRow, span: Span },
-    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, callee_ref: CalleeRef?, method_ref: MethodCallRef?, ty: Type, effects: EffectRow, span: Span },
+    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, callee_ref: CalleeRef?, method_ref: MethodCallRef?, system_host: SystemHostCallableRef?, ty: Type, effects: EffectRow, span: Span },
     FieldAccess { receiver: HExpr, field: Str, access_kind: HFieldAccessKind, ty: Type, effects: EffectRow, span: Span },
     StructLit { name: Str, owner_ref: RegisteredNominalRef, type_args: List<Type>, fields: List<HNominalStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
     NamedVariantConstruct { enum_name: Str, variant_name: Str, variant_ref: VariantRef, fields: List<HStructFieldInit>, spread: HExpr?, ty: Type, effects: EffectRow, span: Span },
@@ -498,7 +593,9 @@ pub enum HExpr {
     StringInterp { parts: List<HStringInterpPart>, ty: Type, effects: EffectRow, span: Span },
     TryCatch { body: HExpr, arms: List<HMatchArm>, ty: Type, effects: EffectRow, span: Span },
     HandleExpr { body: HExpr, handlers: List<HEffectHandler>, ty: Type, effects: EffectRow, span: Span },
-    Lambda { params: List<HParam>, return_type: Type, body: HExpr, ty: Type, effects: EffectRow, span: Span },
+    Lambda { executable_ref: ExecutableRef, params: List<HParam>,
+             captures: List<HLambdaCapture>, return_type: Type,
+             body: HExpr, ty: Type, effects: EffectRow, span: Span },
     EffectOp { effect_name: Str, op_name: Str, operation_ref: EffectOperationRef?, args: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
     RangeExpr { start: HExpr, end: HExpr, inclusive: Bool, ty: Type, effects: EffectRow, span: Span },
     ListLit { elements: List<HExpr>, ty: Type, effects: EffectRow, span: Span },
@@ -521,6 +618,8 @@ pub enum HExpr {
     // than aliasing the still-live source.  codegen lowers `Clone{inner}` to
     // eval inner -> ring_dup(result) -> result (ty/effects/span taken from inner).
     Clone { inner: HExpr, ty: Type, effects: EffectRow, span: Span },
+    Take { source: HExpr, source_slot: SlotRef, saved_slot: SlotRef?,
+           site: HResourceSite, ty: Type, effects: EffectRow, span: Span },
     ReturnExpr { value: HExpr?, ty: Type, effects: EffectRow, span: Span },
     UnsafeBlock { body: HExpr, ty: Type, effects: EffectRow, span: Span }
 }
@@ -550,7 +649,8 @@ pub enum HStmt {
     IfLet { pattern: Pattern, bindings: List<HPatternBinding>, expr: HExpr, then_block: HExpr, else_block: HExpr?, span: Span },
 
     // Perceus RC: explicit reference counting op inserted by the RC pass.
-    Drop { name: Str, def_id: Int, ty: Type, span: Span }
+    Drop { name: Str, def_id: Int, slot: SlotRef, site: HResourceSite,
+           reason: HResourceReason, ty: Type, span: Span }
 }
 
 pub struct HStructField {
@@ -574,9 +674,7 @@ pub struct HEffectOp {
     pub name: Str,
     pub operation_ref: EffectOperationRef?,
     pub params: List<HParam>,
-    pub return_type: Type,
-    pub has_default: Bool,
-    pub default_body: HExpr?
+    pub return_type: Type
 }
 
 pub struct HTraitMethod {
@@ -586,6 +684,7 @@ pub struct HTraitMethod {
     pub return_type: Type,
     pub effects: EffectRow,
     pub has_default: Bool,
+    pub executable_ref: ExecutableRef?,
     pub body: HExpr?
 }
 
@@ -601,17 +700,25 @@ pub struct HAssocType {
 }
 
 pub enum HDecl {
-    Fn { name: Str, def_id: Int?, type_params: List<TypeParam>, params: List<HParam>, return_type: Type, effects: EffectRow, body: HExpr, is_pub: Bool, trait_bounds: List<TraitBound>, span: Span },
+    Fn { name: Str, def_id: Int?, executable_ref: ExecutableRef,
+         impl_method_ref: ImplMethodRef?, type_params: List<TypeParam>,
+         params: List<HParam>, return_type: Type, effects: EffectRow,
+         body: HExpr, is_pub: Bool, trait_bounds: List<TraitBound>, span: Span },
     Struct { name: Str, owner_ref: RegisteredNominalRef, type_params: List<TypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
     Enum { name: Str, owner_ref: RegisteredNominalRef, type_params: List<TypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
     Impl { target_type: Str, owner_ref: ImplOwnerRef, provider_ref: ImplProviderRef, trait_ref: SymbolRef?, type_params: List<TypeParam>, trait_name: Str?, methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
     Effect { name: Str, owner_ref: SymbolRef?, handled_ref: HandledEffectRef?, type_params: List<TypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
-    Test { description: Str, body: HExpr, span: Span },
+    Test { description: Str, executable_ref: ExecutableRef,
+           body: HExpr, span: Span },
     Trait { name: Str, owner_ref: RegisteredTraitRef, type_params: List<TypeParam>, methods: List<HTraitMethod>, supertraits: List<Str>, assoc_types: List<HAssocType>, is_pub: Bool, span: Span },
-    ExternFn { name: Str, abi_name: Str, def_id: Int?, type_params: List<TypeParam>, params: List<HParam>, return_type: Type, effects: EffectRow, is_pub: Bool, span: Span },
+    ExternFn { name: Str, abi_name: Str, def_id: Int?,
+               executable_ref: ExecutableRef, type_params: List<TypeParam>,
+               params: List<HParam>, return_type: Type, effects: EffectRow,
+               is_pub: Bool, span: Span },
     ExternType { name: Str, type_params: List<TypeParam>, is_pub: Bool, span: Span },
     TypeAlias { name: Str, ty: Type, is_pub: Bool, span: Span },
-    Const { name: Str, def_id: Int?, ty: Type, init: HExpr, is_pub: Bool, span: Span },
+    Const { name: Str, def_id: Int?, executable_ref: ExecutableRef,
+            ty: Type, init: HExpr, is_pub: Bool, span: Span },
     ModBlock { name: Str, decls: List<HDecl>, is_pub: Bool, span: Span }
 }
 
@@ -956,8 +1063,13 @@ fn validate_hir_stmt(
                 none => {}
             }
         },
-        HStmt::Drop { name, def_id, .. } =>
-            validate_hir_drop_reference(scope, name, def_id),
+        HStmt::Drop { name, def_id, slot, .. } => {
+            if slot_ref_is_source(slot) &&
+               slot_ref_source_def_id(slot) != def_id {
+                panic("HIR Drop: source SlotRef/DefId relation drifted")
+            }
+            validate_hir_drop_reference(scope, name, def_id)
+        },
         HStmt::Break { .. } | HStmt::Continue { .. } => {}
     }
 }
@@ -1076,7 +1188,8 @@ fn validate_hir_expr(
         },
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
-        HExpr::Call { callee, args, callee_ref, method_ref, .. } => {
+        HExpr::Call { callee, args, callee_ref, method_ref, system_host,
+                      effects, .. } => {
             if callee_ref.is_some() && method_ref.is_some() {
                 panic("HIR call: ordinary and method identities overlap")
             }
@@ -1087,6 +1200,43 @@ fn validate_hir_expr(
                     }
                 },
                 _ => {}
+            }
+            match system_host {
+                some(host) => {
+                    if method_ref.is_some() {
+                        panic("HIR system host call: method identity overlaps host call")
+                    }
+                    let exact_callee = match callee_ref {
+                        some(reference) => reference,
+                        none => panic(
+                            "HIR system host call: exact CalleeRef is absent")
+                    }
+                    if !callee_ref_is_named(exact_callee) ||
+                       !executable_ref_is_named(
+                            system_host_callable_executable(host)) ||
+                       !symbol_ref_same(
+                            callee_ref_named_symbol(exact_callee),
+                            executable_ref_named_symbol(
+                                system_host_callable_executable(host))) {
+                        panic("HIR system host call: callable identity drifted")
+                    }
+                    let expected_effect = system_host_callable_effect(host)
+                    let mut found = false
+                    for atom in effects.effects {
+                        match atom {
+                            Effect::SystemEffect { reference } => if
+                                system_effect_ref_same(
+                                    reference, expected_effect) {
+                                found = true
+                            },
+                            _ => {}
+                        }
+                    }
+                    if !found {
+                        panic("HIR system host call: capability is absent")
+                    }
+                },
+                none => {}
             }
             match callee {
                 HExpr::FieldAccess {
@@ -1160,6 +1310,16 @@ fn validate_hir_expr(
         HExpr::HandleExpr { body, handlers, .. } => {
             validate_hir_expr(body, seen, scope)
             for handler in handlers {
+                if handler.effect_name == "console" ||
+                   handler.effect_name == "fs" ||
+                   handler.effect_name == "process" ||
+                   handler.effect_name == "io" {
+                    panic("HIR effect handler: system effect crossed handled domain")
+                }
+                if handler.effect_name != "fail" &&
+                   handler.handled_ref.is_none() {
+                    panic("HIR effect handler: custom effect has no exact identity")
+                }
                 let label = "handler '${handler.effect_name}.${handler.op_name}'"
                 push_hir_validation_scope(scope)
                 validate_hir_params(handler.params, seen, scope, label)
@@ -1176,7 +1336,28 @@ fn validate_hir_expr(
                 pop_hir_validation_scope(scope)
             }
         },
-        HExpr::Lambda { params, body, .. } => {
+        HExpr::Lambda { params, captures, body, .. } => {
+            let mut capture_index = 0
+            while capture_index < captures.len() {
+                let capture = captures.get(capture_index).unwrap()
+                if slot_ref_same(capture.source, capture.target) {
+                    panic("HIR lambda: invalid pre-resource capture relation")
+                }
+                let mut right = capture_index + 1
+                while right < captures.len() {
+                    let other = captures.get(right).unwrap()
+                    if slot_ref_same(capture.source, other.source) ||
+                       slot_ref_same(capture.target, other.target) {
+                        panic("HIR lambda: duplicate capture relation")
+                    }
+                    right = right + 1
+                }
+                match capture.value {
+                    some(value) => validate_hir_expr(value, seen, scope),
+                    none => {}
+                }
+                capture_index = capture_index + 1
+            }
             push_hir_validation_scope(scope)
             validate_hir_params(params, seen, scope, "lambda")
             validate_hir_expr(body, seen, scope)
@@ -1203,6 +1384,24 @@ fn validate_hir_expr(
         },
         HExpr::Clone { inner, .. } =>
             validate_hir_expr(inner, seen, scope),
+        HExpr::Take { source, source_slot, saved_slot, .. } => {
+            match source {
+                HExpr::Ident { def_id: some(id), .. } => {
+                    if slot_ref_is_source(source_slot) &&
+                       slot_ref_source_def_id(source_slot) != id {
+                        panic("HIR Take: source SlotRef/DefId relation drifted")
+                    }
+                },
+                _ => {}
+            }
+            match saved_slot {
+                some(saved) => if slot_ref_same(source_slot, saved) {
+                    panic("HIR Take: source and saved slots alias")
+                },
+                none => {}
+            }
+            validate_hir_expr(source, seen, scope)
+        },
         HExpr::ReturnExpr { value, .. } => match value {
             some(inner) => validate_hir_expr(inner, seen, scope),
             none => {}
@@ -1218,7 +1417,19 @@ fn validate_hir_expr(
 fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
     for decl in decls {
         match decl {
-            HDecl::Fn { name, def_id, params, body, .. } => {
+            HDecl::Fn { name, def_id, executable_ref, impl_method_ref,
+                        params, body, .. } => {
+                if !executable_ref_is_named(executable_ref) {
+                    panic("HIR identity: function executable is not named")
+                }
+                match impl_method_ref {
+                    some(method_ref) => if !symbol_ref_same(
+                            executable_ref_named_symbol(executable_ref),
+                            impl_method_ref_member(method_ref)) {
+                        panic("HIR identity: impl method executable drifted")
+                    },
+                    none => {}
+                }
                 match def_id {
                     some(id) => validate_hir_binder(
                         seen, id, "function '${name}'"),
@@ -1288,15 +1499,6 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                         (none, none) => {},
                         _ => panic("HIR identity: effect operation domain drifted")
                     }
-                    match op.default_body {
-                        some(body) => {
-                            let mut scope = new_hir_validation_scope()
-                            validate_hir_params(op.params, seen, scope,
-                                "effect default '${name}.${op.name}'")
-                            validate_hir_expr(body, seen, scope)
-                        },
-                        none => {}
-                    }
                 }
             },
             HDecl::Test { body, .. } => {
@@ -1325,16 +1527,30 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     previous_source_member_index = source_member_index
                     match method.body {
                         some(body) => {
+                            match method.executable_ref {
+                                some(executable) => if !symbol_ref_same(
+                                        executable_ref_named_symbol(executable),
+                                        trait_method_ref_member(method.method_ref)) {
+                                    panic("HIR identity: trait default executable drifted")
+                                },
+                                none => panic(
+                                    "HIR identity: trait default has no executable")
+                            }
                             let mut scope = new_hir_validation_scope()
                             validate_hir_params(method.params, seen, scope,
                                 "trait default '${name}.${method.name}'")
                             validate_hir_expr(body, seen, scope)
                         },
-                        none => {}
+                        none => if method.executable_ref.is_some() {
+                            panic("HIR identity: bodyless trait method has executable")
+                        }
                     }
                 }
             },
-            HDecl::Const { name, def_id, init, .. } => {
+            HDecl::Const { name, def_id, executable_ref, init, .. } => {
+                if !executable_ref_is_named(executable_ref) {
+                    panic("HIR identity: const executable is not named")
+                }
                 match def_id {
                     some(id) => validate_hir_binder(
                         seen, id, "const '${name}'"),
@@ -1365,8 +1581,12 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     }
                 }
             },
-            HDecl::Enum { .. } |
-            HDecl::ExternFn { .. } | HDecl::ExternType { .. } |
+            HDecl::ExternFn { executable_ref, .. } => {
+                if !executable_ref_is_named(executable_ref) {
+                    panic("HIR identity: extern executable is not named")
+                }
+            },
+            HDecl::Enum { .. } | HDecl::ExternType { .. } |
             HDecl::TypeAlias { .. } => {}
         }
     }
@@ -1476,11 +1696,6 @@ pub fn effect_name_from_evidence_param(param_name: Str) -> Str {
         },
         none => encoded.replace("$", "::"),
     }
-}
-
-pub fn default_evidence_name(effect_name: Str) -> Str {
-    let safe = if effect_name.contains("::") { effect_name.replace("::", "$") } else { effect_name }
-    "__ring_default_ev_${safe}"
 }
 
 // B-090: declaration-order index of an op within its effect. This is the
@@ -1619,6 +1834,7 @@ pub fn hexpr_type(e: HExpr) -> Type {
         HExpr::IndexExpr { ty, .. } => ty,
         HExpr::DictConstruct { ty, .. } => ty,
         HExpr::Clone { ty, .. } => ty,
+        HExpr::Take { ty, .. } => ty,
         HExpr::ReturnExpr { ty, .. } => ty,
         HExpr::UnsafeBlock { ty, .. } => ty
     }
@@ -1651,6 +1867,7 @@ pub fn hexpr_effects(e: HExpr) -> EffectRow {
         HExpr::IndexExpr { effects, .. } => effects,
         HExpr::DictConstruct { effects, .. } => effects,
         HExpr::Clone { effects, .. } => effects,
+        HExpr::Take { effects, .. } => effects,
         HExpr::ReturnExpr { effects, .. } => effects,
         HExpr::UnsafeBlock { effects, .. } => effects
     }
@@ -1683,6 +1900,7 @@ pub fn hexpr_span(e: HExpr) -> Span {
         HExpr::IndexExpr { span, .. } => span,
         HExpr::DictConstruct { span, .. } => span,
         HExpr::Clone { span, .. } => span,
+        HExpr::Take { span, .. } => span,
         HExpr::ReturnExpr { span, .. } => span,
         HExpr::UnsafeBlock { span, .. } => span
     }

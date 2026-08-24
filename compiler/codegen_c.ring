@@ -13,7 +13,6 @@ use types::{Type, Effect, EffectRow, effect_kind_name}
 use ast::{Span, UseDecl, UseImport}
 use hir::{HExpr, HStmt, HDecl, HParam, HProgram, HStructField, HEnumVariant,
     HTraitMethod, HEffectOp, TraitBound, evidence_param_name, trait_bound_param_name,
-    effect_name_from_evidence_param, default_evidence_name,
     variant_ctor_name, compare_by_first, hexpr_type, trait_dict_name,
     default_method_self_name, scan_trait_method_order, collect_all_supertraits,
     type_contains_extern_handle,
@@ -29,8 +28,7 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTy
     fresh_label, c_push_fn, c_pop_fn, c_global_cstr, c_ref_c_name,
     c_enable_identity_ledger, c_identity_ledger_text}
 use codegen_c_expr::{gen_c_expr, emit_c_stmt, c_resolve_dict_ref,
-    ensure_c_dict_getter, gen_c_closure_call, emit_c_receiver_load,
-    emit_c_default_evidence_init}
+    ensure_c_dict_getter, gen_c_closure_call, emit_c_receiver_load}
 use effect_analysis::{extract_effect_names, collect_fn_callees}
 use resolver::{module_prefix}
 
@@ -73,12 +71,8 @@ pub fn generate_c(
     scan_fn_mut_params_c(program.decls, ctx.fn_mut_params)
     compute_transitive_effect_closure_c(program.decls, ctx.local_fn_effects)
 
-    // Step 6: effect op declarations (slot-order contract) + B-097 default
-    // evidence globals.  The globals must be registered BEFORE the body pass
-    // so c_lookup_evidence's off-scope fallback resolves to them; the init
-    // function that populates them is emitted after the body pass.
+    // Step 6: effect op declarations (slot-order contract).
     register_effect_ops_c(program.decls, ctx.effect_ops)
-    register_c_default_evidence(ctx)
 
     // First pass: prototypes + registries (enum variant ctors are declared
     // AND defined here — their bodies depend on nothing but the registries).
@@ -107,11 +101,6 @@ pub fn generate_c(
     // Step 7: per-type drop functions (port of emit_drop_functions) + the
     // ring_register_drop statements consumed by the main wrapper below.
     emit_c_drop_functions(ctx)
-
-    // B-097: default evidence init fn (port of build_default_evidence_all —
-    // the LLVM backend builds these inline in main's entry block; C uses a
-    // synthesised init fn called from main before ring_main).
-    emit_c_default_evidence_init(ctx)
 
     // C main() wrapper.
     emit_c_main_wrapper(ctx)
@@ -169,8 +158,6 @@ pub fn generate_c_project(
     // qualified registry key as forward declarations and body emission.
     compute_project_effect_closure_c(modules, ctx.local_fn_effects)
 
-    register_c_default_evidence(ctx)
-
     // First pass: forward declare all modules' functions with their module
     // prefix (registry keys ring_<prefix>$$_<name>, LLVM key parity; impl
     // methods / traits / enums stay globally bare, also LLVM parity).
@@ -215,9 +202,8 @@ pub fn generate_c_project(
     // passes below do registry-keyed lookups, no name resolution).
     ctx.module_prefix = none
 
-    // Drop functions + default evidence init + C main (entry module's main).
+    // Drop functions + C main (entry module's main).
     emit_c_drop_functions(ctx)
-    emit_c_default_evidence_init(ctx)
     emit_c_main_wrapper_common(ctx, c_mangle_fn_with_prefix(entry_prefix, "main"), true)
 
     c_write_and_compile(ctx, c_path, o_path)
@@ -1019,9 +1005,8 @@ fn emit_c_memoised_const(mut ctx: CCtx, mangled: Str, init: HExpr, intern_fn: St
 //     fixed typeid-8 drop_option path; Result is an ordinary generated enum.
 //     Set is an ordinary generated struct; StringBuilder remains an extern
 //     type (not in struct_types).
-// ABI note: the user drop call passes RING_UNIT / the default-evidence global
-// for the drop method's evidence params, so the generated call matches the
-// complete C prototype rather than relying on unspecified register contents.
+// ABI note: 0.1 user Drop is effect-free. The legacy bridge passes RING_UNIT
+// only for any non-self ABI filler so the call matches the complete prototype.
 // ============================================================
 
 fn emit_c_drop_functions(mut ctx: CCtx) {
@@ -1143,26 +1128,15 @@ fn emit_c_drop_functions(mut ctx: CCtx) {
 }
 
 // Argument list for the user drop call inside ring_drop_<T>: `p` plus a
-// filler for every extra prototype param — trait-bound dicts (none for Drop
-// impls in practice) get RING_UNIT, evidence params get the B-097 default
-// evidence global when the effect has one (io/fail/handler-only effects get
-// RING_UNIT, same convention as the ring_main call below).
+// filler for every extra prototype param.  Ring 0.1 Drop is effect-free, so
+// an evidence parameter here is invalid typed input; RING_UNIT remains only
+// the legacy ABI filler until the RcIR bridge becomes the sole emitter.
 fn c_user_drop_args(ctx: CCtx, user_drop_name: Str, total_params: Int) -> Str {
-    let no_ev: List<Str> = []
-    let ev = match ctx.fn_evidence_params.get(user_drop_name) {
-        some(e) => e,
-        none => no_ev,
-    }
+    let _ = ctx
+    let _ = user_drop_name
     let mut args: List<Str> = ["p"]
-    for _i in 1..(total_params - ev.len()) {
+    for _i in 1..total_params {
         args.push("RING_UNIT")
-    }
-    for ep in ev {
-        let effect_name = effect_name_from_evidence_param(ep)
-        match ctx.default_evidence.get(effect_name) {
-            some(g) => args.push(g),
-            none => args.push("RING_UNIT"),
-        }
     }
     args.join(", ")
 }
@@ -1170,8 +1144,7 @@ fn c_user_drop_args(ctx: CCtx, user_drop_name: Str, total_params: Int) -> Str {
 // ============================================================
 // C main() wrapper — parity with emit_c_main_common:
 //   ring_runtime_init(argc, argv) → drop registrations (step 7) →
-//   __ring_default_evidence_init (B-097, when any effect has all-default
-//   ops) → ring_main(default evidence…) or test functions → return 0.
+//   ring_main or test functions → return 0.
 // ============================================================
 
 fn emit_c_main_wrapper(mut ctx: CCtx) {
@@ -1187,29 +1160,16 @@ fn emit_c_main_wrapper_common(mut ctx: CCtx, ring_main_key: Str, warn_no_main: B
     lines.push("int main(int argc, char** argv) {")
     lines.push("    ring_runtime_init(argc, argv);")
     // Step 7: register per-type drop functions with the RC runtime BEFORE
-    // any Ring code runs (LLVM parity: emit_drop_registrations precedes the
-    // default-evidence construction in main's entry block).
+    // any Ring code runs.
     for reg in ctx.drop_registrations {
         lines.push("    ${reg}")
-    }
-    if ctx.default_evidence.len() > 0 {
-        lines.push("    __ring_default_evidence_init();")
     }
     match ctx.functions.get(ring_main_key) {
         some(fi) => {
             let mut args: List<Str> = []
             match ctx.fn_evidence_params.get(ring_main_key) {
                 some(evs) => {
-                    // B-097: pass the default evidence global for effects that
-                    // have one; NULL for io/fail/unknown effects (the runtime
-                    // handles those without evidence).
-                    for ep in evs {
-                        let effect_name = effect_name_from_evidence_param(ep)
-                        match ctx.default_evidence.get(effect_name) {
-                            some(g) => args.push(g),
-                            none => args.push("RING_UNIT"),
-                        }
-                    }
+                    for _ep in evs { args.push("RING_UNIT") }
                 },
                 none => {},
             }
@@ -1246,30 +1206,6 @@ fn register_effect_ops_c(decls: List<HDecl>, mut effect_ops: Map<Str, List<HEffe
             },
             _ => {},
         }
-    }
-}
-
-// B-097: register one `static void*` global per effect whose ops ALL have
-// default bodies (build_default_evidence_all's selection rule).  The global
-// name comes from the shared hir::default_evidence_name convention,
-// sanitized to the C identifier set.  Sorted for deterministic output.
-fn register_c_default_evidence(mut ctx: CCtx) {
-    let mut effect_names: List<Str> = []
-    for entry in ctx.effect_ops.entries() {
-        let (ename, ops) = entry
-        let mut all_have_defaults = true
-        for op in ops {
-            if !op.has_default { all_have_defaults = false }
-        }
-        if all_have_defaults && ops.len() > 0 {
-            effect_names.push(ename)
-        }
-    }
-    effect_names.sort()
-    for ename in effect_names {
-        let g = c_symbol_fragment(default_evidence_name(ename))
-        ctx.globals.push("static void* ${g} = 0;")
-        ctx.default_evidence.insert(ename, g)
     }
 }
 

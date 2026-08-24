@@ -18,6 +18,8 @@ use ir_identity::{
     path_ref_role, path_owner_ref_same, path_owner_ref_is_symbol,
     path_owner_ref_symbol, path_owner_ref_module_body,
     slot_ref_same, slot_ref_is_source, slot_ref_synthetic_path,
+    slot_ref_source_origin_module_key, slot_ref_source_domain,
+    slot_ref_source_def_id, slot_domain_same, slot_domain_lexical,
     path_role_same, path_role_child,
     path_role_declaration, path_role_parameter, path_role_result, path_role_capture,
     path_role_handler, path_role_synthetic, path_role_from_tag
@@ -286,25 +288,24 @@ fn executable_ref_contains_path(
 const EXECUTABLE_FN: Int = 0
 const EXECUTABLE_IMPL_METHOD: Int = 1
 const EXECUTABLE_TRAIT_DEFAULT: Int = 2
-const EXECUTABLE_EFFECT_DEFAULT: Int = 3
-const EXECUTABLE_TEST: Int = 4
-const EXECUTABLE_CONST_INITIALIZER: Int = 5
-const EXECUTABLE_MODULE_BODY: Int = 6
-const EXECUTABLE_LAMBDA: Int = 7
-const EXECUTABLE_HANDLER: Int = 8
-const EXECUTABLE_DEFAULT_SPECIALIZATION: Int = 9
-const EXECUTABLE_DERIVED_IMPL: Int = 10
-const EXECUTABLE_CONSTRUCTOR: Int = 11
-const EXECUTABLE_DICT_HELPER: Int = 12
-const EXECUTABLE_CONST_GETTER: Int = 13
-const EXECUTABLE_DROP_GLUE: Int = 14
-const EXECUTABLE_BODYLESS_TRAIT_MEMBER: Int = 15
-const EXECUTABLE_BODYLESS_EFFECT_OPERATION: Int = 16
-const EXECUTABLE_BODYLESS_INTERFACE_MEMBER: Int = 17
-const EXECUTABLE_EXTERN_FN: Int = 18
-const EXECUTABLE_EXTERN_BRIDGE: Int = 19
-const EXECUTABLE_BUILTIN_INTRINSIC: Int = 20
-const EXECUTABLE_KIND_COUNT: Int = 21
+const EXECUTABLE_TEST: Int = 3
+const EXECUTABLE_CONST_INITIALIZER: Int = 4
+const EXECUTABLE_MODULE_BODY: Int = 5
+const EXECUTABLE_LAMBDA: Int = 6
+const EXECUTABLE_HANDLER: Int = 7
+const EXECUTABLE_DEFAULT_SPECIALIZATION: Int = 8
+const EXECUTABLE_DERIVED_IMPL: Int = 9
+const EXECUTABLE_CONSTRUCTOR: Int = 10
+const EXECUTABLE_DICT_HELPER: Int = 11
+const EXECUTABLE_CONST_GETTER: Int = 12
+const EXECUTABLE_DROP_GLUE: Int = 13
+const EXECUTABLE_BODYLESS_TRAIT_MEMBER: Int = 14
+const EXECUTABLE_BODYLESS_EFFECT_OPERATION: Int = 15
+const EXECUTABLE_BODYLESS_INTERFACE_MEMBER: Int = 16
+const EXECUTABLE_EXTERN_FN: Int = 17
+const EXECUTABLE_EXTERN_BRIDGE: Int = 18
+const EXECUTABLE_BUILTIN_INTRINSIC: Int = 19
+const EXECUTABLE_KIND_COUNT: Int = 20
 
 const CONTRACT_CONCRETE_BODY: Int = 0
 const CONTRACT_ONLY: Int = 1
@@ -313,7 +314,7 @@ const CONTRACT_MODE_COUNT: Int = 2
 // 0 permits ConcreteBody, 1 permits ContractOnly, and 2 permits both.
 // Generated origins permit both because CoreHIR may elaborate a real body.
 const EXECUTABLE_KIND_ALLOWED_MODE_TAGS: List<Int> = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0,
     2, 2, 0, 2, 2,
     1, 1, 1, 1,
     2, 2
@@ -322,7 +323,7 @@ const EXECUTABLE_KIND_ALLOWED_MODE_TAGS: List<Int> = [
 const REF_FORM_NAMED: Int = 0
 const REF_FORM_ANONYMOUS: Int = 1
 const EXECUTABLE_KIND_REF_FORM_TAGS: List<Int> = [
-    0, 0, 0, 0, 1, 0, 1, 1, 1, 1,
+    0, 0, 0, 1, 0, 1, 1, 1, 1,
     0, 0, 1, 0, 0,
     0, 0, 0, 0,
     0, 0
@@ -331,19 +332,19 @@ const EXECUTABLE_KIND_REF_FORM_TAGS: List<Int> = [
 // Namespace tag 5 and path-role tag 7 are table-local sentinels for the
 // opposite ref form; they are never converted to a typed identity tag.
 const EXECUTABLE_KIND_NAMESPACE_TAGS: List<Int> = [
-    0, 4, 4, 4, 5, 0, 5, 5, 5, 5,
+    0, 4, 4, 5, 0, 5, 5, 5, 5,
     4, 0, 5, 0, 4,
     4, 4, 4, 0,
     0, 0
 ]
 const EXECUTABLE_KIND_PATH_ROLE_TAGS: List<Int> = [
-    7, 7, 7, 7, 0, 7, 0, 1, 5, 1,
+    7, 7, 7, 0, 7, 0, 1, 5, 1,
     7, 7, 6, 7, 7,
     7, 7, 7, 7,
     7, 7
 ]
 const EXECUTABLE_KIND_PARENT_FORM_TAGS: List<Int> = [
-    0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+    0, 0, 0, 0, 0, 0, 1, 1, 1,
     0, 0, 2, 0, 0,
     0, 0, 0, 0,
     0, 0
@@ -371,7 +372,6 @@ pub fn executable_kind_same(
 pub fn executable_kind_fn() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_FN) }
 pub fn executable_kind_impl_method() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_IMPL_METHOD) }
 pub fn executable_kind_trait_default() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_TRAIT_DEFAULT) }
-pub fn executable_kind_effect_default() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_EFFECT_DEFAULT) }
 pub fn executable_kind_test() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_TEST) }
 pub fn executable_kind_const_initializer() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_CONST_INITIALIZER) }
 pub fn executable_kind_module_body() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_MODULE_BODY) }
@@ -718,10 +718,37 @@ pub struct BinderEntry {
     site: PathRef
 }
 
-// Source binder kinds remain an exhaustive declarative census, but F1 cannot
-// relate a source SlotRef to its structural site and executable owner.  Their
-// activation waits for one atomic typed producer in F2.  Consequently the
-// only public F1 constructor accepts normalized synthetic binders.
+// Source binders are emitted by the typed semantic producer before FlowIR
+// allocates administrative slots.  Their lexical DefId/domain and structural
+// site must agree with the exact executable owner; neither names nor spans can
+// recover this relation later.
+pub fn make_source_binder_entry(
+    slot: SlotRef, owner: ExecutableRef, kind: BinderKind, site: PathRef
+) -> BinderEntry {
+    if !binder_kind_is_source(kind) {
+        panic("IR inventory: source binder uses synthetic/admin kind")
+    }
+    if !slot_ref_is_source(slot) ||
+       slot_ref_source_def_id(slot) < 0 ||
+       !slot_domain_same(
+            slot_ref_source_domain(slot), slot_domain_lexical()) {
+        panic("IR inventory: source binder has invalid lexical SlotRef")
+    }
+    if slot_ref_source_origin_module_key(slot) !=
+           executable_ref_origin_module_key(owner) ||
+       slot_ref_source_origin_module_key(slot) !=
+           path_owner_origin_module_key(path_ref_owner(site)) ||
+       !executable_ref_contains_path(owner, site) {
+        panic("IR inventory: source binder site crosses executable/module")
+    }
+    if !path_role_same(
+            path_ref_role(site), binder_kind_expected_path_role(kind)) {
+        panic("IR inventory: source binder site role mismatch")
+    }
+    BinderEntry { slot: slot, owner: owner, kind: kind, site: site }
+}
+
+// Flow lowering alone creates normalized synthetic/admin binders.
 pub fn make_synthetic_binder_entry(
     slot: SlotRef, owner: ExecutableRef, kind: BinderKind, site: PathRef
 ) -> BinderEntry {

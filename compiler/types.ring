@@ -1,5 +1,7 @@
 use ast::{Span}
-use ir_identity::{NominalFieldRef}
+use ir_identity::{NominalFieldRef, SystemEffectRef, HandledEffectRef,
+    system_effect_ref_name, system_effect_ref_same,
+    handled_effect_ref_same}
 
 pub const BUILTIN_INT: Str = "Int"
 pub const BUILTIN_FLOAT: Str = "Float"
@@ -55,10 +57,11 @@ pub enum Type {
 }
 
 pub enum Effect {
-    IoEffect,
+    SystemEffect { reference: SystemEffectRef },
     FailEffect { error_type: Type },
     MutEffect { state_type: Type },
-    CustomEffect { name: Str, type_args: List<Type> },
+    CustomEffect { reference: HandledEffectRef, name: Str,
+                   type_args: List<Type> },
     UnsafeEffect
 }
 
@@ -84,7 +87,7 @@ pub const EMPTY_ROW: EffectRow = EffectRow { effects: [], tail: none }
 
 pub fn effect_kind_name(e: Effect) -> Str {
     match e {
-        Effect::IoEffect => "io",
+        Effect::SystemEffect { reference } => system_effect_ref_name(reference),
         Effect::MutEffect { .. } => "mut",
         Effect::FailEffect { .. } => "fail",
         Effect::CustomEffect { name, .. } => name,
@@ -98,7 +101,11 @@ fn is_type_var(t: Type) -> Bool {
 
 pub fn effects_match_kind(a: Effect, b: Effect) -> Bool {
     match a {
-        Effect::IoEffect => match b { Effect::IoEffect => true, _ => false },
+        Effect::SystemEffect { reference: a_ref } => match b {
+            Effect::SystemEffect { reference: b_ref } =>
+                system_effect_ref_same(a_ref, b_ref),
+            _ => false
+        },
         // is_type_var fallback: during row_merge, type vars may not yet be resolved.
         // Without this, mut<?T> and mut<Int> (where ?T will resolve to Int) would be
         // kept as separate effects. The broader match ensures deduplication in row_merge;
@@ -111,8 +118,9 @@ pub fn effects_match_kind(a: Effect, b: Effect) -> Bool {
         // Ring uses single-fail-effect design — the unification engine separately
         // handles error type parameter merging during row unification.
         Effect::FailEffect { .. } => match b { Effect::FailEffect { .. } => true, _ => false },
-        Effect::CustomEffect { name: na, .. } => match b {
-            Effect::CustomEffect { name: nb, .. } => na == nb,
+        Effect::CustomEffect { reference: a_ref, .. } => match b {
+            Effect::CustomEffect { reference: b_ref, .. } =>
+                handled_effect_ref_same(a_ref, b_ref),
             _ => false
         },
         Effect::UnsafeEffect => match b { Effect::UnsafeEffect => true, _ => false }
@@ -210,14 +218,19 @@ pub fn row_contains(row: EffectRow, eff: Effect) -> Bool {
 
 pub fn effects_same_kind(a: Effect, b: Effect) -> Bool {
     match a {
-        Effect::IoEffect => match b { Effect::IoEffect => true, _ => false },
+        Effect::SystemEffect { reference: a_ref } => match b {
+            Effect::SystemEffect { reference: b_ref } =>
+                system_effect_ref_same(a_ref, b_ref),
+            _ => false
+        },
         Effect::MutEffect { state_type: sa } => match b { Effect::MutEffect { state_type: sb } => types_equal(sa, sb), _ => false },
         Effect::FailEffect { error_type: ea } => match b {
             Effect::FailEffect { error_type: eb } => types_equal(ea, eb),
             _ => false
         },
-        Effect::CustomEffect { name: na, .. } => match b {
-            Effect::CustomEffect { name: nb, .. } => na == nb,
+        Effect::CustomEffect { reference: a_ref, .. } => match b {
+            Effect::CustomEffect { reference: b_ref, .. } =>
+                handled_effect_ref_same(a_ref, b_ref),
             _ => false
         },
         Effect::UnsafeEffect => match b { Effect::UnsafeEffect => true, _ => false }
@@ -283,7 +296,11 @@ fn optional_ids_equal(a: Int?, b: Int?) -> Bool {
 
 pub fn effects_equal(a: Effect, b: Effect) -> Bool {
     match a {
-        Effect::IoEffect => match b { Effect::IoEffect => true, _ => false },
+        Effect::SystemEffect { reference: a_ref } => match b {
+            Effect::SystemEffect { reference: b_ref } =>
+                system_effect_ref_same(a_ref, b_ref),
+            _ => false
+        },
         Effect::MutEffect { state_type: sa } => match b {
             Effect::MutEffect { state_type: sb } => types_equal(sa, sb),
             _ => false
@@ -292,9 +309,10 @@ pub fn effects_equal(a: Effect, b: Effect) -> Bool {
             Effect::FailEffect { error_type: et_b } => types_equal(et_a, et_b),
             _ => false
         },
-        Effect::CustomEffect { name: na, type_args: args_a } => match b {
-            Effect::CustomEffect { name: nb, type_args: args_b } =>
-                na == nb && type_lists_equal(args_a, args_b),
+        Effect::CustomEffect { reference: a_ref, type_args: args_a, .. } => match b {
+            Effect::CustomEffect { reference: b_ref, type_args: args_b, .. } =>
+                handled_effect_ref_same(a_ref, b_ref) &&
+                    type_lists_equal(args_a, args_b),
             _ => false
         },
         Effect::UnsafeEffect => match b { Effect::UnsafeEffect => true, _ => false }
@@ -441,10 +459,10 @@ pub fn type_to_string(t: Type) -> Str {
 
 pub fn effect_to_string(e: Effect) -> Str {
     match e {
-        Effect::IoEffect => "io",
+        Effect::SystemEffect { reference } => system_effect_ref_name(reference),
         Effect::MutEffect { state_type } => "mut<${type_to_string(state_type)}>",
         Effect::FailEffect { error_type } => "fail<${type_to_string(error_type)}>",
-        Effect::CustomEffect { name, type_args } => {
+        Effect::CustomEffect { name, type_args, .. } => {
             let display = nominal_display_name(name)
             if type_args.len() == 0 { display }
             else { "${display}<${type_args.map(fn(a) { type_to_string(a) }).join(", ")}>" }

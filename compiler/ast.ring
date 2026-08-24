@@ -271,7 +271,6 @@ pub struct EffectOpDecl {
     pub name: Str,
     pub params: List<Param>,
     pub return_type: TypeExpr,
-    pub body: Expr?,
     pub span: Span
 }
 

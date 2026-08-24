@@ -242,17 +242,7 @@ fn verify_decls(decls: List<HDecl>, boxed: Set<Int>, externs: Set<Str>, mut find
             },
             HDecl::Struct { .. } => {},
             HDecl::Enum { .. } => {},
-            HDecl::Effect { name, ops, .. } => {
-                for op in ops {
-                    match op.default_body {
-                        some(body) => {
-                            v_fn_scope(op.params, body, "effect ${name}.${op.name} default",
-                                boxed, externs, findings)
-                        },
-                        none => {},
-                    }
-                }
-            },
+            HDecl::Effect { .. } => {},
             HDecl::Trait { .. } => {},
             HDecl::ExternFn { .. } => {},
             HDecl::ExternType { .. } => {},
@@ -476,6 +466,7 @@ fn v_droppable_init(init: HExpr, externs: Set<Str>) -> Bool {
     // do not let the audit #149 TypeVar guard erase that ownership proof.
     match init {
         HExpr::Clone { .. } => return true,
+        HExpr::Take { .. } => return true,
         _ => {}
     }
     if is_unresolved_var_type(ty) {
@@ -500,6 +491,7 @@ fn v_droppable_init(init: HExpr, externs: Set<Str>) -> Bool {
         HExpr::StrLit { .. } => true,
         HExpr::BoolLit { .. } => true,
         HExpr::Clone { .. } => true,
+        HExpr::Take { .. } => true,
         HExpr::Call { .. } => true,
         // B-104 D4: a dict construction is fresh-owned (mirrors
         // perceus.is_droppable_init) — the dict_lower binding is dropped at
@@ -788,6 +780,16 @@ fn v_expr(expr: HExpr, mode: Int, mut ctx: VCtx) -> Int {
             // apply, but an unnamed TypeVar result remains provably owned.
             if is_rc_excluded_type(ty, ctx.externs)
                 || type_contains_extern_handle(ty, ctx.externs) {
+                CLS_EXCLUDED
+            } else {
+                CLS_OWNED
+            }
+        },
+
+        HExpr::Take { source, ty, .. } => {
+            v_expr(source, M_BORROWED, ctx)
+            if is_rc_excluded_type(ty, ctx.externs) ||
+               type_contains_extern_handle(ty, ctx.externs) {
                 CLS_EXCLUDED
             } else {
                 CLS_OWNED

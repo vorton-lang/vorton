@@ -7,7 +7,7 @@ use ast::{Program, Decl, Expr, Stmt, Param, MatchArm, StructFieldInit,
     TypeParam, TypeBound, Span, UseDecl, DestructureBinding, span_zero,
     EffectOpDecl}
 use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
-    HPatternBinding,
+    HPatternBinding, HLambdaCapture,
     HStructFieldInit, HNominalStructFieldInit, HFieldAccessKind,
     HStringInterpPart, HProgram, DerivedImpl,
     TraitDispatch, DictRef, TraitBound,
@@ -41,7 +41,9 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     remove_fail_effect,
     generalize, free_type_vars, resolve_relative_qualifier,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
-    has_variant_ctor_origin_def_id}
+    has_variant_ctor_origin_def_id, fresh_child_executable,
+    enter_executable_owner, exit_executable_owner,
+    executable_capture_slot}
 use exhaustive::{check_exhaustive}
 use infer_helpers::{MethodLookupResult, StmtResult,
     is_value_type, cancel_local_mut_effects, resolve_var_id,
@@ -53,8 +55,12 @@ use infer_helpers::{MethodLookupResult, StmtResult,
     lookup_impl_method, lookup_trait_method,
     rewrite_bare_enum_bindings}
 use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
+    HandledEffectRef, SystemEffectRef, handled_effect_ref_same,
     make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
-    slot_domain_lexical}
+    callee_ref_is_named, callee_ref_named_symbol,
+    slot_domain_lexical, slot_ref_same}
+use ir_inventory::{ExecutableRef, SystemHostCallableRef,
+    make_named_executable_ref, make_system_host_callable_ref}
 
 fn exact_call_callee_ref(ctx: InferCtx, callee: HExpr) -> CalleeRef? {
     match callee {
@@ -76,6 +82,47 @@ fn exact_call_callee_ref(ctx: InferCtx, callee: HExpr) -> CalleeRef? {
         },
         _ => none
     }
+}
+
+fn exact_system_host_callable(
+    ctx: InferCtx, callee: HExpr, callee_type: Type,
+    exact_callee: CalleeRef?
+) -> SystemHostCallableRef? {
+    let def_id = match callee {
+        HExpr::Ident { def_id: some(id), .. } => id,
+        _ => return none
+    }
+    match value_binding_kind(ctx, some(def_id)) {
+        ValueBindingKind::ExternCallable => {},
+        _ => return none
+    }
+    let mut system_effects: List<SystemEffectRef> = []
+    match callee_type {
+        Type::FnType { effects, .. } => {
+            for atom in effects.effects {
+                match atom {
+                    Effect::SystemEffect { reference } =>
+                        system_effects.push(reference),
+                    _ => {}
+                }
+            }
+        },
+        _ => return none
+    }
+    if system_effects.len() == 0 { return none }
+    if system_effects.len() != 1 {
+        panic("system host callable: extern has multiple system capabilities")
+    }
+    let callee_ref = match exact_callee {
+        some(reference) => reference,
+        none => panic("system host callable: exact CalleeRef is absent")
+    }
+    if !callee_ref_is_named(callee_ref) {
+        panic("system host callable: extern CalleeRef is not named")
+    }
+    some(make_system_host_callable_ref(
+        system_effects.get(0).unwrap(),
+        make_named_executable_ref(callee_ref_named_symbol(callee_ref))))
 }
 
 // ============================================================
@@ -319,6 +366,8 @@ fn collect_bounded_callable_values(
         },
         HExpr::Clone { inner, .. } =>
             collect_bounded_callable_values(ctx, inner, found),
+        HExpr::Take { source, .. } =>
+            collect_bounded_callable_values(ctx, source, found),
         HExpr::ReturnExpr { value, .. } => match value {
             some(inner) =>
                 collect_bounded_callable_values(ctx, inner, found),
@@ -1505,6 +1554,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                     type_args: [],
                     resolved_dicts: resolved_dicts, method_ref: none,
                     callee_ref: exact_call_callee_ref(ctx, callee),
+                    system_host: none,
                     ty: final_result_ty,
                     effects: combined_effects,
                     span: span
@@ -1764,12 +1814,16 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
         none => {}
     }
 
+    let exact_callee = exact_call_callee_ref(ctx, callee_r.hexpr)
+    let system_host = exact_system_host_callable(
+        ctx, callee_r.hexpr, resolved_callee_type, exact_callee)
     InferResult {
         hexpr: HExpr::Call {
             callee: callee_r.hexpr, args: hargs, type_args: [],
             resolved_dicts: resolved_dicts,
-            callee_ref: exact_call_callee_ref(ctx, callee_r.hexpr),
+            callee_ref: exact_callee,
             method_ref: none,
+            system_host: system_host,
             ty: result_type, effects: effects, span: span
         },
         subst: s, effects: effects
@@ -2120,6 +2174,7 @@ fn infer_method_call_from_receiver(
             args: hargs, type_args: [], resolved_dicts: resolved_dicts,
             callee_ref: none,
             method_ref: exact_method_ref,
+            system_host: none,
             ty: result_type, effects: effects, span: span
         },
         subst: s, effects: effects
@@ -2209,17 +2264,22 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
         i = i + 1
     }
 
-    let mut eff: Effect = Effect::CustomEffect { name: canonical_effect_name, type_args: inst_type_args }
-    match effect_def.built_in_kind {
+    let eff: Effect = match effect_def.built_in_kind {
         some(bik) => match bik {
-            BuiltInKind::BkIo => { eff = Effect::IoEffect },
             BuiltInKind::BkFail => {
                 let error_type = if hargs.len() > 0 { apply_subst(s, hexpr_type(match hargs.first() { some(h) => h, none => panic("unreachable: hargs.first() after len > 0 check") })) } else { UNIT }
-                eff = Effect::FailEffect { error_type: error_type }
+                Effect::FailEffect { error_type: error_type }
             },
-            BuiltInKind::BkMut => { eff = Effect::MutEffect { state_type: ctx.env.fresh_var() } }
+            BuiltInKind::BkMut => Effect::MutEffect {
+                state_type: ctx.env.fresh_var() }
         },
-        none => {}
+        none => match effect_def.handled_ref {
+            some(reference) => Effect::CustomEffect {
+                reference: reference, name: canonical_effect_name,
+                type_args: inst_type_args },
+            none => panic(
+                "effect inference: custom effect has no HandledEffectRef")
+        }
     }
 
     let me = merge_effects(ctx.sink, ctx.env, effects, effect_row([eff]), s, span)
@@ -3053,6 +3113,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
 
     let mut hhandlers: List<HEffectHandler> = []
     let mut handled_effects: Set<Str> = set_new()
+    let mut handled_custom_effects: List<HandledEffectRef> = []
     // Tail-resumptive arm closures capture the OUTER evidence for
     // their handled effect, while abort arms run after the current handler has
     // been deactivated. Both kinds of arm effects therefore escape unchanged
@@ -3078,11 +3139,35 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
         ctx.lambda_depth = enclosing_lambda_depth + 1
         let handler_result = some({
             let effect_def = ctx.env.types.effects.get(handler.effect_name)
+            match effect_def {
+                some(_) => {},
+                none => {
+                    let effect_display = nominal_display_name(handler.effect_name)
+                    let _ = type_error(ctx.sink, E0402,
+                        "Effect '${effect_display}' cannot be handled",
+                        handler.span, DiagnosticContext::OtherContext {
+                            detail: some(
+                                "only declared custom handled effects and fail can appear in handle") })
+                    fail.raise(CompileError {})
+                }
+            }
             let canonical_effect_name = match effect_def {
                 some(ed) => ed.name,
                 none => handler.effect_name
             }
             let is_abort_handler = canonical_effect_name == "fail" && handler.op_name == "raise"
+            let handler_handled_ref = match effect_def {
+                some(ed) => ed.handled_ref,
+                none => none
+            }
+            if !is_abort_handler && handler_handled_ref.is_none() {
+                let effect_display = nominal_display_name(canonical_effect_name)
+                let _ = type_error(ctx.sink, E0402,
+                    "Effect '${effect_display}' is not a handled custom effect",
+                    handler.span, DiagnosticContext::OtherContext {
+                        detail: some("system, mutation, and unsafe effects cannot be handled") })
+                fail.raise(CompileError {})
+            }
 
             // fail.raise receives the error payload raised by the handled body.
             // Extract concrete fail label(s) exactly as infer_catch does and
@@ -3152,8 +3237,13 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     let resolved_body_effects_for_handler = apply_subst_row(s, effects)
                     for body_effect in resolved_body_effects_for_handler.effects {
                         match body_effect {
-                            Effect::CustomEffect { name, type_args } => {
-                                if name == canonical_effect_name {
+                            Effect::CustomEffect { reference, type_args, .. } => {
+                                let same_handler = match handler_handled_ref {
+                                    some(expected) => handled_effect_ref_same(
+                                        reference, expected),
+                                    none => false
+                                }
+                                if same_handler {
                                     let mut type_arg_index = 0
                                     for handler_type_arg in handler_inst_type_args {
                                         match type_args.get(type_arg_index) {
@@ -3406,11 +3496,22 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 }
             }
             hhandlers.push(HEffectHandler {
-                effect_name: canonical_effect_name, op_name: handler.op_name,
+                effect_name: canonical_effect_name,
+                handled_ref: handler_handled_ref,
+                op_name: handler.op_name,
                 params: hparams, resume_binding: resume_binding,
                 body: hbr.hexpr
             })
             handled_effects.insert(canonical_effect_name)
+            match handler_handled_ref {
+                some(reference) => if !handled_custom_effects.any(
+                        fn(existing) {
+                            handled_effect_ref_same(existing, reference)
+                        }) {
+                    handled_custom_effects.push(reference)
+                },
+                none => {}
+            }
             true
         }) catch { _ => none }
         ctx.lambda_depth = enclosing_lambda_depth
@@ -3426,8 +3527,11 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
     let mut filtered_effects: List<Effect> = []
     for e in resolved_effects.effects {
         let should_keep = match e {
-            Effect::IoEffect => !handled_effects.contains("io"),
-            Effect::CustomEffect { name, .. } => !handled_effects.contains(name),
+            Effect::SystemEffect { .. } => true,
+            Effect::CustomEffect { reference, .. } =>
+                !handled_custom_effects.any(fn(handled) {
+                    handled_effect_ref_same(handled, reference)
+                }),
             Effect::FailEffect { .. } => !handled_effects.contains("fail"),
             Effect::MutEffect { .. } => !handled_effects.contains("mut"),
             // UnsafeEffect cannot be handled — only discharged by unsafe {}
@@ -3469,9 +3573,200 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
 // infer_lambda
 // ============================================================
 
+fn append_lambda_capture(
+    ctx: InferCtx, def_id: Int, lambda_depth: Int,
+    executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    let binding_depth = match ctx.var_lambda_depth.get(def_id) {
+        some(depth) => depth,
+        none => return
+    }
+    if binding_depth >= lambda_depth { return }
+    let source = make_source_slot_ref(
+        current_identity_file_key(ctx), slot_domain_lexical(), def_id)
+    for capture in captures {
+        if slot_ref_same(capture.source, source) { return }
+    }
+    captures.push(HLambdaCapture {
+        source: source,
+        target: executable_capture_slot(executable, captures.len()),
+        value: none, resource_site: none
+    })
+}
+
+fn collect_lambda_capture_stmt(
+    ctx: InferCtx, stmt: HStmt, lambda_depth: Int,
+    executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    match stmt {
+        HStmt::Let { init, .. } | HStmt::Var { init, .. } =>
+            collect_lambda_capture_expr(
+                ctx, init, lambda_depth, executable, captures),
+        HStmt::Assign { target, value, .. } => {
+            collect_lambda_capture_expr(
+                ctx, target, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures)
+        },
+        HStmt::ExprStmt { expr, .. } => collect_lambda_capture_expr(
+            ctx, expr, lambda_depth, executable, captures),
+        HStmt::Return { value, .. } => match value {
+            some(expr) => collect_lambda_capture_expr(
+                ctx, expr, lambda_depth, executable, captures),
+            none => {}
+        },
+        HStmt::While { condition, body, .. } => {
+            collect_lambda_capture_expr(
+                ctx, condition, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, body, lambda_depth, executable, captures)
+        },
+        HStmt::ForIn { iterable, body, .. } => {
+            collect_lambda_capture_expr(
+                ctx, iterable, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, body, lambda_depth, executable, captures)
+        },
+        HStmt::LetDestructure { init, .. } => collect_lambda_capture_expr(
+            ctx, init, lambda_depth, executable, captures),
+        HStmt::IfLet { expr, then_block, else_block, .. } => {
+            collect_lambda_capture_expr(
+                ctx, expr, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, then_block, lambda_depth, executable, captures)
+            match else_block {
+                some(block) => collect_lambda_capture_expr(
+                    ctx, block, lambda_depth, executable, captures),
+                none => {}
+            }
+        },
+        HStmt::Drop { .. } | HStmt::Break { .. } |
+        HStmt::Continue { .. } => {}
+    }
+}
+
+fn collect_lambda_capture_expr(
+    ctx: InferCtx, expr: HExpr, lambda_depth: Int,
+    executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    match expr {
+        HExpr::Ident { def_id: some(id), .. } =>
+            append_lambda_capture(
+                ctx, id, lambda_depth, executable, captures),
+        HExpr::BinOp { left, right, .. } => {
+            collect_lambda_capture_expr(
+                ctx, left, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, right, lambda_depth, executable, captures)
+        },
+        HExpr::UnaryOp { operand, .. } => collect_lambda_capture_expr(
+            ctx, operand, lambda_depth, executable, captures),
+        HExpr::Call { callee, args, .. } => {
+            collect_lambda_capture_expr(
+                ctx, callee, lambda_depth, executable, captures)
+            for arg in args { collect_lambda_capture_expr(
+                ctx, arg, lambda_depth, executable, captures) }
+        },
+        HExpr::FieldAccess { receiver, .. } => collect_lambda_capture_expr(
+            ctx, receiver, lambda_depth, executable, captures),
+        HExpr::StructLit { fields, spread, .. } => {
+            for field in fields { collect_lambda_capture_expr(
+                ctx, field.value, lambda_depth, executable, captures) }
+            match spread { some(value) => collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures), none => {} }
+        },
+        HExpr::NamedVariantConstruct { fields, spread, .. } => {
+            for field in fields { collect_lambda_capture_expr(
+                ctx, field.value, lambda_depth, executable, captures) }
+            match spread { some(value) => collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures), none => {} }
+        },
+        HExpr::MatchExpr { scrutinee, arms, .. } |
+        HExpr::TryCatch { body: scrutinee, arms, .. } => {
+            collect_lambda_capture_expr(
+                ctx, scrutinee, lambda_depth, executable, captures)
+            for arm in arms {
+                match arm.guard { some(guard) => collect_lambda_capture_expr(
+                    ctx, guard, lambda_depth, executable, captures), none => {} }
+                collect_lambda_capture_expr(
+                    ctx, arm.body, lambda_depth, executable, captures)
+            }
+        },
+        HExpr::Block { stmts, tail, .. } => {
+            for stmt in stmts { collect_lambda_capture_stmt(
+                ctx, stmt, lambda_depth, executable, captures) }
+            match tail { some(value) => collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures), none => {} }
+        },
+        HExpr::IfExpr { condition, then_branch, else_branch, .. } => {
+            collect_lambda_capture_expr(
+                ctx, condition, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, then_branch, lambda_depth, executable, captures)
+            match else_branch { some(value) => collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures), none => {} }
+        },
+        HExpr::StringInterp { parts, .. } => {
+            for part in parts {
+                match part { HStringInterpPart::Expression(value) =>
+                    collect_lambda_capture_expr(
+                        ctx, value, lambda_depth, executable, captures), _ => {} }
+            }
+        },
+        HExpr::HandleExpr { body, handlers, .. } => {
+            collect_lambda_capture_expr(
+                ctx, body, lambda_depth, executable, captures)
+            for handler in handlers { collect_lambda_capture_expr(
+                ctx, handler.body, lambda_depth, executable, captures) }
+        },
+        HExpr::Lambda { captures: nested, .. } => {
+            for capture in nested {
+                match capture.value { some(value) => collect_lambda_capture_expr(
+                    ctx, value, lambda_depth, executable, captures), none => {} }
+            }
+        },
+        HExpr::EffectOp { args, .. } => {
+            for arg in args {
+                collect_lambda_capture_expr(
+                    ctx, arg, lambda_depth, executable, captures)
+            }
+        },
+        HExpr::RangeExpr { start, end, .. } |
+        HExpr::IndexExpr { receiver: start, index: end, .. } => {
+            collect_lambda_capture_expr(
+                ctx, start, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, end, lambda_depth, executable, captures)
+        },
+        HExpr::ListLit { elements, .. } |
+        HExpr::TupleLit { elements, .. } => {
+            for value in elements {
+                collect_lambda_capture_expr(
+                    ctx, value, lambda_depth, executable, captures)
+            }
+        },
+        HExpr::Clone { inner, .. } => collect_lambda_capture_expr(
+            ctx, inner, lambda_depth, executable, captures),
+        HExpr::Take { source, .. } => collect_lambda_capture_expr(
+            ctx, source, lambda_depth, executable, captures),
+        HExpr::ReturnExpr { value, .. } => match value {
+            some(inner) => collect_lambda_capture_expr(
+                ctx, inner, lambda_depth, executable, captures), none => {} },
+        HExpr::UnsafeBlock { body, .. } => collect_lambda_capture_expr(
+            ctx, body, lambda_depth, executable, captures),
+        _ => {}
+    }
+}
+
 fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, subst: UnionFind, expected_param_types: List<Type>?) -> InferResult {
+    let lambda_executable = fresh_child_executable(ctx, "lambda")
+    enter_executable_owner(ctx, lambda_executable)
     ctx.env.push_scope()
     ctx.lambda_depth = ctx.lambda_depth + 1
+    let exact_lambda_depth = ctx.lambda_depth
     let mut s = subst
     let mut hparams: List<HParam> = []
     let mut param_types: List<Type> = []
@@ -3523,6 +3818,7 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
     let body_result = some(infer_expr(ctx, body, s)) catch { _ => none }
     ctx.lambda_depth = ctx.lambda_depth - 1
     ctx.env.pop_scope()
+    exit_executable_owner(ctx)
 
     match body_result {
         some(body_r) => {
@@ -3538,9 +3834,16 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                 final_hparams.push(HParam { name: hp.name, ty: apply_subst(s, hp.ty), def_id: hp.def_id, is_mutable: hp.is_mutable })
             }
 
+            let mut captures: List<HLambdaCapture> = []
+            collect_lambda_capture_expr(
+                ctx, body_r.hexpr, exact_lambda_depth,
+                lambda_executable, captures)
+
             InferResult {
                 hexpr: HExpr::Lambda {
-                    params: final_hparams, return_type: applied_ret,
+                    executable_ref: lambda_executable,
+                    params: final_hparams, captures: captures,
+                    return_type: applied_ret,
                     body: body_r.hexpr, ty: fn_type, effects: EMPTY_ROW, span: span
                 },
                 subst: s, effects: EMPTY_ROW

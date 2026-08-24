@@ -8,13 +8,21 @@ use hir::{HDecl, HParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssoc
     make_bound_method_call_ref,
     hexpr_type, hexpr_effects, hexpr_span,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
-use ir_identity::{NominalFieldRef, nominal_field_ref_index, symbol_ref_same,
-    ImplOwnerRef, impl_owner_ref_provider, impl_owner_ref_trait,
+use ir_identity::{SymbolRef, NominalFieldRef,
+    nominal_field_ref_index, symbol_ref_same,
+    ImplOwnerRef, ImplMethodRef,
+    impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_target,
     impl_owner_ref_same,
     impl_method_ref_member, symbol_ref_declaration_site_path,
     registered_trait_ref_symbol, trait_method_ref_trait,
+    trait_method_ref_member,
     trait_method_ref_source_member_index,
-    trait_method_ref_callable_slot_index, trait_method_ref_name}
+    trait_method_ref_callable_slot_index, trait_method_ref_name,
+    make_module_body_ref, path_owner_for_module_body, make_path_ref,
+    path_role_declaration}
+use ir_inventory::{ExecutableRef, make_named_executable_ref,
+    make_anonymous_executable_ref, executable_ref_named_symbol,
+    effect_operation_ref_callable}
 use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     ImplEntry,
     ImplMethodSchemeCore,
@@ -44,7 +52,9 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     enter_project_root_frame, enter_project_child_frame,
     exit_project_namespace_frame,
     enter_impl_check_root_frame, enter_impl_check_child_frame,
-    exit_impl_check_frame, impl_check_owner}
+    exit_impl_check_frame, impl_check_owner, value_symbol_ref,
+    current_impl_check_site, enter_executable_owner,
+    exit_executable_owner, record_core_parameter_fact}
 use infer_helpers::{is_value_type}
 use resolver::{single_namespace_file_key}
 use infer_register::{register_decls_two_phase, register_module_decls_two_phase,
@@ -61,6 +71,24 @@ use scc::{build_call_graph, tarjan_scc, collect_registered_fn_names, collect_sel
 // ============================================================
 // Pass 2: Check declarations (from infer.ts)
 // ============================================================
+
+fn named_executable_for_def_id(
+    ctx: InferCtx, def_id: Int?, detail: Str
+) -> ExecutableRef {
+    match def_id {
+        some(id) => make_named_executable_ref(value_symbol_ref(ctx, id)),
+        none => panic("${detail}: executable DefId is missing")
+    }
+}
+
+fn test_executable_for_site(ctx: InferCtx, decl_index: Int) -> ExecutableRef {
+    if decl_index < 0 { panic("test executable: declaration index is missing") }
+    let (file_key, frame_index) = current_impl_check_site(ctx)
+    let owner = path_owner_for_module_body(
+        make_module_body_ref(file_key, frame_index))
+    make_anonymous_executable_ref(make_path_ref(
+        owner, ["decl:${decl_index}", "test"], path_role_declaration()))
+}
 
 fn check_decl(
     mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?
@@ -96,9 +124,11 @@ fn check_decl_inner(
                 frame_decl_index.unwrap_or(-1)),
         Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span, .. } =>
             check_fn_decl(ctx, name, type_params, params, return_type,
-                declared_effects, body, is_pub, span, none, none, none),
+                declared_effects, body, is_pub, span, none, none, none, none),
         Decl::Test { description, body, span } =>
-            check_test_decl(ctx, description, body, span),
+            check_test_decl(
+                ctx, description, body, span,
+                frame_decl_index.unwrap_or(-1)),
         Decl::Trait { name, type_params, methods, is_pub, span, .. } =>
             check_trait_decl(ctx, name, type_params, methods, is_pub, span),
         Decl::ExternFn { name, type_params, params, return_type, declared_effects, is_pub, span } =>
@@ -337,12 +367,23 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
         some(sc) => sc.def_id,
         none => none
     }
+    let const_executable = named_executable_for_def_id(
+        ctx, old_def_id, "const '${name}'")
+    enter_executable_owner(ctx, const_executable)
     let mut expected_ty: Type? = none
     match type_annotation {
         some(texpr) => { expected_ty = some(resolve_type_expr(ctx, texpr)) },
         none => {}
     }
-    let init_r = infer_expr(ctx, init, ctx.subst)
+    let init_r = match some(infer_expr(ctx, init, ctx.subst)) catch {
+            _ => none } {
+        some(value) => value,
+        none => {
+            exit_executable_owner(ctx)
+            ctx.subst = saved_subst
+            fail.raise(CompileError {})
+        }
+    }
     let mut s = init_r.subst
     let mut init_ty = hexpr_type(init_r.hexpr)
     match expected_ty {
@@ -372,6 +413,7 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
             // Declaration-level recovery continues checking later declarations.
             // Never leak this const's isolated substitution through that path.
             rollback_pending_dicts(ctx, obligation_checkpoint)
+            exit_executable_owner(ctx)
             ctx.subst = saved_subst
             fail.raise(CompileError {})
         }
@@ -380,8 +422,37 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
     // Preserve the original def_id so mutability checks work
     let scheme = TypeScheme { ty: gen_scheme.ty, type_vars: gen_scheme.type_vars, bounds: gen_scheme.bounds, def_id: old_def_id }
     ctx.env.rebind(name, scheme)
+    exit_executable_owner(ctx)
     ctx.subst = saved_subst
-    HDecl::Const { name: name, def_id: old_def_id, ty: resolved, init: final_init, is_pub: is_pub, span: span }
+    HDecl::Const { name: name, def_id: old_def_id,
+        executable_ref: const_executable,
+        ty: resolved, init: final_init, is_pub: is_pub, span: span }
+}
+
+fn record_nominal_core_parameters(
+    mut ctx: InferCtx, owner: SymbolRef,
+    type_params: List<TypeParam>, type_var_ids: List<Int>
+) {
+    if type_params.len() != type_var_ids.len() {
+        panic("Core type producer: nominal parameter arity differs")
+    }
+    let mut index = 0
+    while index < type_params.len() {
+        let param = type_params.get(index).unwrap()
+        let mut bounds: List<SymbolRef> = []
+        for bound in param.bounds {
+            let trait_name = resolve_trait_identity(ctx, bound.trait_name)
+            let trait_def = ctx.env.trait_reg.traits.get(
+                trait_name).unwrap_or_else(fn() {
+                panic("Core type producer: nominal bound trait is missing")
+            })
+            bounds.push(registered_trait_ref_symbol(trait_def.owner_ref))
+        }
+        record_core_parameter_fact(
+            ctx, type_var_ids.get(index).unwrap(), owner,
+            index, type_params.len(), bounds)
+        index = index + 1
+    }
 }
 
 fn check_struct_decl(ctx: InferCtx, name: Str, type_params: List<TypeParam>, is_pub: Bool, span: Span) -> HDecl {
@@ -402,6 +473,9 @@ fn check_struct_decl(ctx: InferCtx, name: Str, type_params: List<TypeParam>, is_
             span: f.span
         })
     }
+    record_nominal_core_parameters(
+        ctx, registered_nominal_ref_symbol(def.owner_ref),
+        type_params, def.type_param_vars)
     HDecl::Struct {
         name: name, owner_ref: def.owner_ref,
         type_params: type_params, fields: hfields,
@@ -429,6 +503,9 @@ fn check_enum_decl(ctx: InferCtx, name: Str, type_params: List<TypeParam>, is_pu
             field_names: v.field_names
         })
     }
+    record_nominal_core_parameters(
+        ctx, registered_nominal_ref_symbol(def.owner_ref),
+        type_params, def.type_param_vars)
     HDecl::Enum {
         name: name, owner_ref: def.owner_ref,
         type_params: type_params, variants: hvariants,
@@ -459,127 +536,27 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
                 },
                 none => "p${pi.to_str()}"
             }
-            let effect_param_def_id = ctx.env.fresh_def_id()
             op_params.push(HParam { name: p_name, ty: pt,
-                def_id: some(effect_param_def_id), is_mutable: false })
+                def_id: none, is_mutable: false })
             pi = pi + 1
-        }
-        // Type-check default body if present
-        let ast_op_opt = ast_ops.get(oi)
-        let mut default_body: HExpr? = none
-        match ast_op_opt {
-            some(ast_op) => match ast_op.body {
-                some(body_expr) => {
-                    let obligation_checkpoint = pending_dict_checkpoint(ctx)
-                    // Bind op params in a new scope for type checking the default body
-                    ctx.env.push_scope()
-                    for p in op_params {
-                        let exact_effect_def_id = match p.def_id {
-                            some(id) => id,
-                            none => panic(
-                                "unreachable: effect default parameter has no exact DefId")
-                        }
-                        ctx.env.bind(p.name, TypeScheme {
-                            ty: p.ty, type_vars: [], bounds: [],
-                            def_id: some(exact_effect_def_id)
-                        })
-                    }
-                    let checked_default = some({
-                        let body_result = infer_block(ctx, body_expr, none)
-                        ctx.subst = body_result.subst
-                        let body_type = hexpr_type(body_result.hexpr)
-                        ctx.subst = unify_at(
-                            ctx.sink, ctx.env, body_type,
-                            op.return_type, ctx.subst, span)
-                        register_bounded_callable_value_shadows(
-                            ctx, body_result.hexpr, ctx.subst)
-                        drain_pending_dicts(
-                            ctx, obligation_checkpoint, ctx.subst)
-                        // Zonk only after the owner obligation transaction.
-                        let zctx = ZonkCtx {
-                            subst: ctx.subst, names: map_new(),
-                            dict_resolver: some(ctx)
-                        }
-                        zonk_block(zctx, body_result.hexpr)
-                    }) catch { _ => none }
-                    let _ = ctx.env.pop_scope()
-                    match checked_default {
-                        some(checked_body) => {
-                            assert_pending_dict_owner_closed(
-                                ctx, obligation_checkpoint)
-                            default_body = some(checked_body)
-                        },
-                        none => {
-                            rollback_pending_dicts(
-                                ctx, obligation_checkpoint)
-                            fail.raise(CompileError {})
-                        }
-                    }
-                },
-                none => {},
-            },
-            none => {},
         }
         hops.push(HEffectOp {
             name: op.name, operation_ref: op.operation_ref,
-            params: op_params, return_type: op.return_type,
-            has_default: op.has_default, default_body: default_body
+            params: op_params, return_type: op.return_type
         })
         oi = oi + 1
-    }
-
-    // Validate default handler body effect dependencies:
-    // Collect all custom effects used by default bodies and verify each has all_have_defaults.
-    // Also record the dependency graph for cycle detection.
-    let mut all_defaults = true
-    for op in def.ops {
-        if !op.has_default { all_defaults = false }
-    }
-    if all_defaults && def.ops.len() > 0 {
-        let mut deps: List<Str> = []
-        let mut dep_set: Set<Str> = set_new()
-        for hop in hops {
-            match hop.default_body {
-                some(body) => {
-                    let body_effs = hexpr_effects(body)
-                    for eff in body_effs.effects {
-                        let eff_name = effect_kind_name(eff)
-                        // Skip: io (builtin), fail (builtin), mut (marker), self (same effect)
-                        if eff_name == "io" || eff_name == "fail" || eff_name == "mut" || eff_name == name {
-                            continue
-                        }
-                        // Check if the referenced effect has all defaults
-                        match ctx.env.types.effects.get(eff_name) {
-                            some(dep_def) => {
-                                if !dep_def.all_have_defaults {
-                                    let effect_display = nominal_display_name(name)
-                                    let dep_display = nominal_display_name(eff_name)
-                                    let _ = type_error(ctx.sink, E0409,
-                                        "Default handler body of effect '${effect_display}' uses effect '${dep_display}' which has no default handler; all-default effects cannot depend on effects without defaults",
-                                        span,
-                                        DiagnosticContext::OtherContext { detail: some("default effect dependency violation") })
-                                } else {
-                                    if !dep_set.contains(eff_name) {
-                                        dep_set.insert(eff_name)
-                                        deps.push(eff_name)
-                                    }
-                                }
-                            },
-                            none => {}
-                        }
-                    }
-                },
-                none => {}
-            }
-        }
-        if deps.len() > 0 {
-            ctx.effect_default_deps.insert(name, deps)
-        }
     }
 
     HDecl::Effect {
         name: name, owner_ref: def.owner_ref, handled_ref: def.handled_ref,
         type_params: type_params, ops: hops, is_pub: is_pub, span: span
+    }
+    match def.owner_ref {
+        some(owner) => record_nominal_core_parameters(
+            ctx, owner, type_params, def.type_param_vars),
+        none => if type_params.len() != 0 {
+            panic("Core type producer: builtin effect has type parameters")
+        }
     }
 }
 
@@ -682,6 +659,9 @@ fn check_impl_decl_canonical(
        impl_owner.type_params.len() != type_params.len() {
         panic("impl checking: owner type-parameter arity mismatch")
     }
+    record_nominal_core_parameters(
+        ctx, impl_owner_ref_target(selected_owner),
+        type_params, impl_owner.type_param_vars)
     let saved_tp_scope = map_clone(ctx.type_param_scope)
     let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
     for index in 0..type_params.len() {
@@ -832,7 +812,8 @@ fn check_impl_decl_canonical(
                 let hdecl = check_fn_decl(
                     ctx, name, mtps, params, return_type, declared_effects,
                     body, is_pub, mspan, some(impl_self_type),
-                    registration_scheme, some(rebind_identity))
+                    registration_scheme, some(rebind_identity),
+                    some(exact_method))
                 // #210: Also register fn_mut_params with qualified key for cross-module export.
                 // check_fn_decl inserts with unqualified `name`; exports.ring looks up
                 // with "${target_type}_${mname}", so we mirror that key here.
@@ -1386,6 +1367,7 @@ fn expand_delegate_impls(
                                                             tm.method_ref,
                                                             DictRef::Static(dict_name), tm.ty,
                                                             tm.param_mutabilities.first().unwrap_or(false))),
+                                                    system_host: none,
                                                     ty: ret_ty,
                                                     effects: eff,
                                                     span: span
@@ -1441,15 +1423,32 @@ fn expand_delegate_impls(
                                                     resolved_dicts: resolved_forward_dicts,
                                                     callee_ref: none,
                                                     method_ref: some(exact_forward_ref),
+                                                    system_host: none,
                                                     ty: ret_ty,
                                                     effects: eff,
                                                     span: span
                                                 }
                                             }
 
+                                            let generated_method_ref = match delegate_impl {
+                                                some(wrapper) => match
+                                                        wrapper.method_refs.get(tm.name) {
+                                                    some(reference) => reference,
+                                                    none => panic(
+                                                        "delegate HIR: wrapper lost exact method")
+                                                },
+                                                none => panic(
+                                                    "delegate HIR: wrapper owner is missing")
+                                            }
                                             trait_hmethods.push(HDecl::Fn {
                                                 name: tm.name,
                                                 def_id: some(ctx.env.fresh_def_id()),
+                                                executable_ref:
+                                                    make_named_executable_ref(
+                                                        impl_method_ref_member(
+                                                            generated_method_ref)),
+                                                impl_method_ref:
+                                                    some(generated_method_ref),
                                                 // #77: Copy method type_params from trait method declaration
                                                 type_params: tm.method_type_params,
                                                 params: hparams,
@@ -1522,6 +1521,9 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
             fail.raise(CompileError {})
         }
     }
+    record_nominal_core_parameters(
+        ctx, registered_trait_ref_symbol(trait_def.owner_ref),
+        type_params, trait_def.type_param_vars)
 
     let mut self_var: Type = ctx.env.fresh_var()
     if trait_def.methods.len() > 0 {
@@ -1610,6 +1612,8 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
                         let method_identity = "${name}::${m.name}"
                         method_body = check_trait_default_body(
                             ctx, name, method_identity,
+                            make_named_executable_ref(
+                                trait_method_ref_member(m.method_ref)),
                             self_var, hparams, fn_ret, fn_effects,
                             method_span, abody)
                     }
@@ -1622,6 +1626,10 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
             name: m.name, method_ref: m.method_ref,
             params: hparams, return_type: fn_ret,
             effects: fn_effects, has_default: m.has_default,
+            executable_ref: if m.has_default {
+                some(make_named_executable_ref(
+                    trait_method_ref_member(m.method_ref)))
+            } else { none },
             body: method_body
         })
     }
@@ -1642,9 +1650,11 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
 
 fn check_trait_default_body(
     mut ctx: InferCtx, trait_name: Str, method_identity: Str,
+    executable_ref: ExecutableRef,
     self_var: Type, hparams: List<HParam>, method_return: Type,
     method_effects: EffectRow, method_span: Span, body: Expr
 ) -> HExpr? {
+    enter_executable_owner(ctx, executable_ref)
     let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let saved_subst = ctx.subst
     let saved_fn_return = ctx.current_fn_return_type
@@ -1781,6 +1791,7 @@ fn check_trait_default_body(
     ctx.type_param_scope = saved_tp_scope
     ctx.qualified_assoc_scope = saved_qualified_assoc
     assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
+    exit_executable_owner(ctx)
     final_body
 }
 
@@ -1817,7 +1828,10 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
     }
     HDecl::ExternFn {
         name: name, abi_name: extern_abi_leaf(name),
-        def_id: scheme.def_id, type_params: type_params,
+        def_id: scheme.def_id,
+        executable_ref: named_executable_for_def_id(
+            ctx, scheme.def_id, "extern '${name}'"),
+        type_params: type_params,
         params: hparams, return_type: fn_ret, effects: extern_effects,
         is_pub: is_pub, span: span
     }
@@ -2175,14 +2189,31 @@ fn check_fn_decl(
     params: List<Param>, return_type: TypeExpr?,
     declared_effects: List<EffectExpr>?, body: Expr,
     is_pub: Bool, span: Span, self_type: Type?,
-    registration_override: TypeScheme?, rebind_identity: Str?
+    registration_override: TypeScheme?, rebind_identity: Str?,
+    impl_method_ref: ImplMethodRef?
 ) -> HDecl {
     let obligation_checkpoint = pending_dict_checkpoint(ctx)
+    let registered_def_id = match registration_override {
+        some(scheme) => scheme.def_id,
+        none => match ctx.env.lookup(name) {
+            some(scheme) => scheme.def_id,
+            none => none
+        }
+    }
+    let executable_ref = match impl_method_ref {
+        some(method_ref) => make_named_executable_ref(
+            impl_method_ref_member(method_ref)),
+        none => named_executable_for_def_id(
+            ctx, registered_def_id, "function '${name}'")
+    }
+    enter_executable_owner(ctx, executable_ref)
     let result = some(check_fn_decl_transaction(
         ctx, name, type_params, params, return_type,
         declared_effects, body, is_pub, span, self_type,
-        registration_override, rebind_identity,
+        registration_override, rebind_identity, impl_method_ref,
+        executable_ref,
         obligation_checkpoint)) catch { _ => none }
+    exit_executable_owner(ctx)
     match result {
         some(hdecl) => {
             assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
@@ -2201,6 +2232,8 @@ fn check_fn_decl_transaction(
     declared_effects: List<EffectExpr>?, body: Expr,
     is_pub: Bool, span: Span, self_type: Type?,
     registration_override: TypeScheme?, rebind_identity: Str?,
+    impl_method_ref: ImplMethodRef?,
+    executable_ref: ExecutableRef,
     obligation_checkpoint: Int
 ) -> HDecl {
     // Save the registration scheme before entering the parameter scope: a
@@ -2227,6 +2260,28 @@ fn check_fn_decl_transaction(
         let tv = ctx.env.fresh_var()
         ctx.type_param_scope.insert(tp.name, tv)
         ctx.env.bind_mono(tp.name, tv)
+    }
+    let mut core_param_index = 0
+    for tp in type_params {
+        let type_var_id = match ctx.type_param_scope.get(tp.name) {
+            some(Type::TypeVar { id, .. }) => id,
+            _ => panic("Core type producer: function parameter var is missing")
+        }
+        let mut exact_bounds: List<SymbolRef> = []
+        for bound in tp.bounds {
+            let trait_name = resolve_trait_identity(ctx, bound.trait_name)
+            let trait_def = ctx.env.trait_reg.traits.get(
+                trait_name).unwrap_or_else(fn() {
+                panic("Core type producer: function bound trait is missing")
+            })
+            exact_bounds.push(registered_trait_ref_symbol(
+                trait_def.owner_ref))
+        }
+        record_core_parameter_fact(
+            ctx, type_var_id,
+            executable_ref_named_symbol(executable_ref),
+            core_param_index, type_params.len(), exact_bounds)
+        core_param_index = core_param_index + 1
     }
 
     ctx.fn_bounds_stack.push(ctx.current_fn_bounds)
@@ -2359,32 +2414,22 @@ fn check_fn_decl_transaction(
     let final_body = fn_result.body
 
     // Check: main function must not have unhandled custom effects.
-    // io/fail/mut are allowed (io is implicit, fail has default handler, mut is Cell-based),
+    // Builtin effects have dedicated 0.1 rules,
     // but CustomEffect requires an explicit handler and cannot propagate past main.
-    // Exception: effects where all ops have default handlers are allowed (auto-injected evidence).
     if name == "main" || name.ends_with("$$_main") {
         for eff in final_effects.effects {
             match eff {
                 Effect::CustomEffect { name: eff_name, .. } => {
-                    let mut skip = false
-                    match ctx.env.types.effects.get(eff_name) {
-                        some(edef) => {
-                            if edef.all_have_defaults { skip = true }
-                        },
-                        none => {}
-                    }
-                    if !skip {
-                        let effect_display = nominal_display_name(eff_name)
-                        let effect_notes: List<DiagnosticNote> = [
-                            DiagnosticNote { message: "effect '${effect_display}' is used but not handled in main", span: some(span) },
-                            DiagnosticNote { message: "use 'handle ... with { ${effect_display} { op_name(args) => result } }' to handle this effect", span: none }
-                        ]
-                        let _ = type_error_with_notes(ctx.sink, E0403,
-                            "Unhandled effect '${effect_display}' in main function; custom effects must be handled before reaching main",
-                            span,
-                            DiagnosticContext::EffectUnhandled { eff: effect_display, in_function: some("main") },
-                            effect_notes)
-                    }
+                    let effect_display = nominal_display_name(eff_name)
+                    let effect_notes: List<DiagnosticNote> = [
+                        DiagnosticNote { message: "effect '${effect_display}' is used but not handled in main", span: some(span) },
+                        DiagnosticNote { message: "use 'handle ... with { ${effect_display} { op_name(args) => result } }' to handle this effect", span: none }
+                    ]
+                    let _ = type_error_with_notes(ctx.sink, E0403,
+                        "Unhandled effect '${effect_display}' in main function; custom effects must be handled before reaching main",
+                        span,
+                        DiagnosticContext::EffectUnhandled { eff: effect_display, in_function: some("main") },
+                        effect_notes)
                 },
                 _ => {}
             }
@@ -2425,13 +2470,21 @@ fn check_fn_decl_transaction(
     ctx.fn_mut_params.insert(name, mut_flags)
 
     HDecl::Fn {
-        name: name, def_id: fn_def_id, type_params: type_params,
+        name: name, def_id: fn_def_id,
+        executable_ref: executable_ref,
+        impl_method_ref: impl_method_ref,
+        type_params: type_params,
         params: final_params, return_type: final_ret, effects: final_effects,
         body: final_body, is_pub: is_pub, trait_bounds: trait_bounds, span: span
     }
 }
 
-fn check_test_decl(mut ctx: InferCtx, description: Str, body: Expr, span: Span) -> HDecl {
+fn check_test_decl(
+    mut ctx: InferCtx, description: Str, body: Expr, span: Span,
+    decl_index: Int
+) -> HDecl {
+    let test_executable = test_executable_for_site(ctx, decl_index)
+    enter_executable_owner(ctx, test_executable)
     let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let saved_subst = ctx.subst
     ctx.subst = empty_subst()
@@ -2458,12 +2511,16 @@ fn check_test_decl(mut ctx: InferCtx, description: Str, body: Expr, span: Span) 
             // The scope must be restored before re-raising the declaration
             // error; the success path pops once below after value-zonk.
             ctx.env.pop_scope()
+            exit_executable_owner(ctx)
             fail.raise(CompileError {})
         }
     }
     ctx.env.pop_scope()
+    exit_executable_owner(ctx)
 
-    HDecl::Test { description: description, body: final_body, span: span }
+    HDecl::Test { description: description,
+        executable_ref: test_executable,
+        body: final_body, span: span }
 }
 
 // ============================================================
@@ -4050,88 +4107,6 @@ fn build_effect_var_mapping(
     }
 }
 
-// ============================================================
-// Default effect handler cycle detection
-// ============================================================
-
-fn check_default_effect_cycles(mut ctx: InferCtx, decls: List<Decl>) {
-    // Build span lookup for error reporting
-    let mut effect_spans: Map<Str, Span> = map_new()
-    collect_effect_spans(decls, effect_spans)
-
-    // DFS-based cycle detection on effect_default_deps graph
-    // States: 0 = unvisited, 1 = in-progress (on stack), 2 = done
-    let mut state: Map<Str, Int> = map_new()
-    let mut path: List<Str> = []
-
-    let mut sorted_edd = ctx.effect_default_deps.entries()
-    sorted_edd.sort_by(compare_by_first)
-    for entry in sorted_edd {
-        let (eff_name, _) = entry
-        if !state.contains_key(eff_name) {
-            dfs_detect_cycle(ctx, eff_name, state, path, effect_spans)
-        }
-    }
-}
-
-fn collect_effect_spans(decls: List<Decl>, mut spans: Map<Str, Span>) {
-    for decl in decls {
-        match decl {
-            Decl::Effect { name, span, .. } => {
-                spans.insert(name, span)
-            },
-            Decl::ModBlock { decls: mod_decls, .. } => {
-                collect_effect_spans(mod_decls, spans)
-            },
-            _ => {}
-        }
-    }
-}
-
-fn dfs_detect_cycle(mut ctx: InferCtx, name: Str, mut state: Map<Str, Int>, mut path: List<Str>, effect_spans: Map<Str, Span>) {
-    state.insert(name, 1)  // mark as in-progress
-    path.push(name)
-
-    match ctx.effect_default_deps.get(name) {
-        some(deps) => {
-            for dep in deps {
-                match state.get(dep) {
-                    some(s) => {
-                        if s == 1 {
-                            // Found a cycle: build cycle path description
-                            let mut cycle_parts: List<Str> = []
-                            let mut found_start = false
-                            for p in path {
-                                if p == dep { found_start = true }
-                                if found_start { cycle_parts.push(nominal_display_name(p)) }
-                            }
-                            cycle_parts.push(nominal_display_name(dep))
-                            let cycle_str = cycle_parts.join(" -> ")
-                            let err_span = match effect_spans.get(name) {
-                                some(sp) => sp,
-                                none => Span { file: "", start: Position { line: 0, column: 0, offset: 0 }, end: Position { line: 0, column: 0, offset: 0 } }
-                            }
-                            let _ = type_error(ctx.sink, E0410,
-                                "Cyclic dependency in default effect handlers: ${cycle_str}",
-                                err_span,
-                                DiagnosticContext::OtherContext { detail: some("cyclic default effect dependency") })
-                        }
-                        // s == 2 means already processed, no cycle through this node
-                    },
-                    none => {
-                        // Unvisited: recurse
-                        dfs_detect_cycle(ctx, dep, state, path, effect_spans)
-                    }
-                }
-            }
-        },
-        none => {}
-    }
-
-    path.pop()
-    state.insert(name, 2)  // mark as done
-}
-
 pub fn check(mut ctx: InferCtx, program: Program) -> HProgram {
     register_decls_two_phase(ctx, program.decls)
     let file_key = single_namespace_file_key(program)
@@ -4327,9 +4302,6 @@ fn check_registered_body(
         }
         ri = ri + 1
     }
-
-    // Check for cyclic dependencies in default effect handlers
-    check_default_effect_cycles(ctx, program.decls)
 
     // static_dicts is populated by dict_lower (checker pipeline) — empty here.
     // B-144/B-145: declarations contribute directly. In project mode the root

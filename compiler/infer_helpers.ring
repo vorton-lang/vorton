@@ -726,6 +726,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                                 "const getter: exact DefId is missing")
                         },
                         method_ref: none,
+                        system_host: none,
                         ty: ty, effects: effects, span: span
                     }
                 },

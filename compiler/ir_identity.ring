@@ -504,6 +504,13 @@ pub fn system_effect_process() -> SystemEffectRef {
 pub fn system_effect_ref_tag(value: SystemEffectRef) -> Int {
     system_effect_ref_from_tag(value.tag).tag
 }
+pub fn system_effect_ref_name(value: SystemEffectRef) -> Str {
+    let tag = system_effect_ref_tag(value)
+    if tag == SYSTEM_EFFECT_CONSOLE { return "console" }
+    if tag == SYSTEM_EFFECT_FS { return "fs" }
+    if tag == SYSTEM_EFFECT_PROCESS { return "process" }
+    panic("IR identity: invalid system effect name")
+}
 pub fn system_effect_ref_same(
     left: SystemEffectRef, right: SystemEffectRef
 ) -> Bool { system_effect_ref_tag(left) == system_effect_ref_tag(right) }

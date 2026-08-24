@@ -41,6 +41,7 @@ use types::{Type, EffectRow, EMPTY_ROW}
 use hir::{HProgram, HDecl, HStmt, HExpr, HMatchArm, HStructFieldInit,
     HNominalStructFieldInit,
     HStringInterpPart, HEffectHandler, HEffectOp, HTraitMethod,
+    HLambdaCapture,
     DictRef, TraitDispatch, MethodCallRef,
     make_bound_method_call_ref, method_call_ref_is_bound,
     method_call_ref_bound, method_call_ref_bound_evidence,
@@ -152,8 +153,11 @@ fn dl_derived_impl(di: DerivedImpl, mut defs: List<HDictDef>,
 
 fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: List<Int>) -> HDecl {
     match d {
-        HDecl::Fn { name, def_id, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } =>
-            HDecl::Fn { name: name, def_id: def_id, type_params: type_params, params: params,
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } =>
+            HDecl::Fn { name: name, def_id: def_id,
+                executable_ref: executable_ref,
+                impl_method_ref: impl_method_ref,
+                type_params: type_params, params: params,
                 return_type: return_type, effects: effects,
                 body: dl_expr(body, defs, seen, counter),
                 is_pub: is_pub, trait_bounds: trait_bounds, span: span },
@@ -165,10 +169,13 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 type_params: type_params, trait_name: trait_name,
                 methods: new_methods, assoc_types: assoc_types, span: span }
         },
-        HDecl::Test { description, body, span } =>
-            HDecl::Test { description: description, body: dl_expr(body, defs, seen, counter), span: span },
-        HDecl::Const { name, def_id, ty, init, is_pub, span } =>
-            HDecl::Const { name: name, def_id: def_id, ty: ty,
+        HDecl::Test { description, executable_ref, body, span } =>
+            HDecl::Test { description: description,
+                executable_ref: executable_ref,
+                body: dl_expr(body, defs, seen, counter), span: span },
+        HDecl::Const { name, def_id, executable_ref, ty, init, is_pub, span } =>
+            HDecl::Const { name: name, def_id: def_id,
+                executable_ref: executable_ref, ty: ty,
                 init: dl_expr(init, defs, seen, counter), is_pub: is_pub, span: span },
         HDecl::ModBlock { name, decls, is_pub, span } => {
             let mut new_inner: List<HDecl> = []
@@ -185,7 +192,9 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 }
                 new_methods.push(HTraitMethod { name: tm.name,
                     method_ref: tm.method_ref, params: tm.params,
-                    return_type: tm.return_type, effects: tm.effects, has_default: tm.has_default, body: new_body })
+                    return_type: tm.return_type, effects: tm.effects,
+                    has_default: tm.has_default,
+                    executable_ref: tm.executable_ref, body: new_body })
             }
             HDecl::Trait { name: name, owner_ref: trait_owner_ref,
                 type_params: type_params, methods: new_methods,
@@ -200,20 +209,18 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
         HDecl::Effect { name, owner_ref, handled_ref, type_params, ops, is_pub, span } => {
             let mut new_ops: List<HEffectOp> = []
             for op in ops {
-                let new_default_body = match op.default_body {
-                    some(body) => some(dl_expr(body, defs, seen, counter)),
-                    none => none,
-                }
                 new_ops.push(HEffectOp {
                     name: op.name, operation_ref: op.operation_ref,
-                    params: op.params, return_type: op.return_type,
-                    has_default: op.has_default, default_body: new_default_body
+                    params: op.params, return_type: op.return_type
                 })
             }
             HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
-        HDecl::ExternFn { name, abi_name, def_id, type_params, params, return_type, effects, is_pub, span } =>
-            HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id, type_params: type_params, params: params, return_type: return_type, effects: effects, is_pub: is_pub, span: span },
+        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, is_pub, span } =>
+            HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id,
+                executable_ref: executable_ref, type_params: type_params,
+                params: params, return_type: return_type, effects: effects,
+                is_pub: is_pub, span: span },
         HDecl::ExternType { name, type_params, is_pub, span } =>
             HDecl::ExternType { name: name, type_params: type_params, is_pub: is_pub, span: span },
         HDecl::TypeAlias { name, ty, is_pub, span } =>
@@ -411,7 +418,8 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 ty: ty, effects: effects, span: span },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: dl_expr(operand, defs, seen, counter), ty: ty, effects: effects, span: span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref, method_ref, ty, effects, span } => {
+        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref,
+                      method_ref, system_host, ty, effects, span } => {
             let new_callee = dl_expr(callee, defs, seen, counter)
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(dl_expr(a, defs, seen, counter)) }
@@ -424,6 +432,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 resolved_dicts: new_dicts,
                 callee_ref: callee_ref,
                 method_ref: dl_method_call_ref(method_ref, defs, seen),
+                system_host: system_host,
                 ty: ty, effects: effects, span: span }
             if lets.len() == 0 {
                 call
@@ -501,14 +510,22 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
         HExpr::HandleExpr { body, handlers, ty, effects, span } => {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
-                new_handlers.push(HEffectHandler { effect_name: h.effect_name, op_name: h.op_name,
+                new_handlers.push(HEffectHandler { effect_name: h.effect_name,
+                    handled_ref: h.handled_ref, op_name: h.op_name,
                     params: h.params, resume_binding: h.resume_binding,
                     body: dl_expr(h.body, defs, seen, counter) })
             }
             HExpr::HandleExpr { body: dl_expr(body, defs, seen, counter), handlers: new_handlers, ty: ty, effects: effects, span: span }
         },
-        HExpr::Lambda { params, return_type, body, ty, effects, span } =>
-            HExpr::Lambda { params: params, return_type: return_type,
+        HExpr::Lambda { executable_ref, params, captures, return_type, body, ty, effects, span } =>
+            HExpr::Lambda { executable_ref: executable_ref,
+                params: params,
+                captures: captures.map(fn(capture) { HLambdaCapture {
+                    source: capture.source, target: capture.target,
+                    value: capture.value.map(fn(value) {
+                        dl_expr(value, defs, seen, counter) }),
+                    resource_site: capture.resource_site } }),
+                return_type: return_type,
                 body: dl_expr(body, defs, seen, counter), ty: ty, effects: effects, span: span },
         HExpr::EffectOp { effect_name, op_name, operation_ref, args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []
@@ -537,6 +554,10 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
         // Clone is inserted by perceus (runs after this pass) — never present.
         HExpr::Clone { inner, ty, effects, span } =>
             HExpr::Clone { inner: dl_expr(inner, defs, seen, counter), ty: ty, effects: effects, span: span },
+        HExpr::Take { source, source_slot, saved_slot, site, ty, effects, span } =>
+            HExpr::Take { source: dl_expr(source, defs, seen, counter),
+                source_slot: source_slot, saved_slot: saved_slot, site: site,
+                ty: ty, effects: effects, span: span },
         // B-113: return in expression position (match arm)
         HExpr::ReturnExpr { value, ty, effects, span } => match value {
             some(v) => HExpr::ReturnExpr { value: some(dl_expr(v, defs, seen, counter)), ty: ty, effects: effects, span: span },
@@ -606,7 +627,8 @@ fn dl_stmt(s: HStmt, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 then_block: dl_expr(then_block, defs, seen, counter), else_block: new_else, span: span }
         },
         // RC ops are inserted by perceus (after this pass) — never present.
-        HStmt::Drop { name, def_id, ty, span } =>
-            HStmt::Drop { name: name, def_id: def_id, ty: ty, span: span }
+        HStmt::Drop { name, def_id, slot, site, reason, ty, span } =>
+            HStmt::Drop { name: name, def_id: def_id, slot: slot,
+                site: site, reason: reason, ty: ty, span: span }
     }
 }

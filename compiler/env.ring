@@ -115,11 +115,10 @@ pub struct EffectOpDef {
     pub name: Str,
     pub operation_ref: EffectOperationRef?,
     pub params: List<Type>,
-    pub return_type: Type,
-    pub has_default: Bool
+    pub return_type: Type
 }
 
-pub enum BuiltInKind { BkIo, BkFail, BkMut }
+pub enum BuiltInKind { BkFail, BkMut }
 
 pub struct EffectDef {
     pub name: Str,
@@ -128,8 +127,7 @@ pub struct EffectDef {
     pub type_params: List<Str>,
     pub type_param_vars: List<Int>,
     pub ops: List<EffectOpDef>,
-    pub built_in_kind: BuiltInKind?,
-    pub all_have_defaults: Bool
+    pub built_in_kind: BuiltInKind?
 }
 
 // ============================================================
@@ -1797,9 +1795,10 @@ pub fn apply_subst_effect_map(subst: Map<Int, Type>, e: Effect) -> Effect {
             Effect::FailEffect { error_type: apply_subst_map(subst, error_type) },
         Effect::MutEffect { state_type } =>
             Effect::MutEffect { state_type: apply_subst_map(subst, state_type) },
-        Effect::CustomEffect { name, type_args } =>
-            Effect::CustomEffect { name: name, type_args: type_args.map(fn(a) { apply_subst_map(subst, a) }) },
-        Effect::IoEffect => Effect::IoEffect,
+        Effect::CustomEffect { reference, name, type_args } =>
+            Effect::CustomEffect { reference: reference, name: name,
+                type_args: type_args.map(fn(a) { apply_subst_map(subst, a) }) },
+        Effect::SystemEffect { .. } => e,
         Effect::UnsafeEffect => Effect::UnsafeEffect
     }
 }
@@ -2272,9 +2271,10 @@ fn apply_subst_effect(subst: UnionFind, e: Effect) -> Effect {
             Effect::FailEffect { error_type: apply_subst(subst, error_type) },
         Effect::MutEffect { state_type } =>
             Effect::MutEffect { state_type: apply_subst(subst, state_type) },
-        Effect::CustomEffect { name, type_args } =>
-            Effect::CustomEffect { name: name, type_args: type_args.map(fn(a) { apply_subst(subst, a) }) },
-        Effect::IoEffect => Effect::IoEffect,
+        Effect::CustomEffect { reference, name, type_args } =>
+            Effect::CustomEffect { reference: reference, name: name,
+                type_args: type_args.map(fn(a) { apply_subst(subst, a) }) },
+        Effect::SystemEffect { .. } => e,
         Effect::UnsafeEffect => Effect::UnsafeEffect
     }
 }

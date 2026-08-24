@@ -10,7 +10,7 @@
 
 use types::{Type, EffectRow}
 use ast::{Span}
-use hir::{HDictDef, TraitBound, HEffectOp, CHECKER_ONLY_EXTERN_CALLABLES}
+use hir::{HDictDef, TraitBound, HEffectOp}
 
 // Per-function registration info (forward-declare pass).
 // total_params = ring params + trait-bound dict params + evidence params —
@@ -74,7 +74,6 @@ pub enum CRefKind {
     Exact { source_name: Str, def_id: Int },
     NameOnly { canonical_key: Str },
     Static { canonical_key: Str },
-    DefaultEvidence { canonical_key: Str },
     Computed { producer: Str },
     Fresh { producer: Str }
 }
@@ -219,10 +218,6 @@ pub struct CCtx {
     // ---- step 6: effect handler / catch state ----
     // Effect op declarations (slot-order contract, hir::effect_op_slot).
     pub effect_ops: Map<Str, List<HEffectOp>>,
-    // B-097 default evidence: effect name -> C global variable name (a
-    // `static void*` initialised by __ring_default_evidence_init before
-    // ring_main runs).  c_lookup_evidence falls back to it off handle scope.
-    pub default_evidence: Map<Str, Str>,
     // Enclosing handle/try scopes for `return`-path cleanup (#173).
     pub handle_cleanup_stack: List<CHandleCleanup>,
 
@@ -262,12 +257,6 @@ pub struct CCtx {
 pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
     let mut extern_callable_names: Set<Str> = set_new()
     let mut extern_abi_names: Map<Str, Str> = map_new()
-    // Checker-only builtins have no HDecl to discover in the forward pass.
-    for name in (CHECKER_ONLY_EXTERN_CALLABLES) {
-        let key = c_mangle_fn(name)
-        extern_callable_names.insert(key)
-        extern_abi_names.insert(key, name)
-    }
     CCtx {
         globals: [],
         fn_protos: [],
@@ -318,7 +307,6 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         identity_edge_counter: 0,
         identity_load_counter: 0,
         effect_ops: map_new(),
-        default_evidence: map_new(),
         handle_cleanup_stack: [],
         loop_continue_stmt: "",
         in_loop: false,
@@ -694,8 +682,7 @@ fn validate_identity_domain_shape(
             panic("C identity: malformed Exact domain shape")
         }
     } else {
-        if domain == "name-only" || domain == "static" ||
-           domain == "default-evidence" {
+        if domain == "name-only" || domain == "static" {
             if def_id != -1 || canonical_key == "" || producer != "" {
                 panic("C identity: malformed keyed domain shape '${domain}'")
             }
@@ -722,9 +709,6 @@ fn validate_c_typed_ref(reference: CTypedRef) -> CTypedRef {
             validate_identity_domain_shape("name-only", -1, canonical_key, ""),
         CRefKind::Static { canonical_key } =>
             validate_identity_domain_shape("static", -1, canonical_key, ""),
-        CRefKind::DefaultEvidence { canonical_key } =>
-            validate_identity_domain_shape(
-                "default-evidence", -1, canonical_key, ""),
         CRefKind::Computed { producer } =>
             validate_identity_domain_shape("computed", -1, "", producer),
         CRefKind::Fresh { producer } =>
@@ -755,14 +739,6 @@ pub fn c_ref_static(c_name: Str, canonical_key: Str) -> CTypedRef {
     validate_c_typed_ref(CTypedRef {
         c_name: c_name,
         kind: CRefKind::Static { canonical_key: canonical_key },
-        load_id: 0
-    })
-}
-
-pub fn c_ref_default_evidence(c_name: Str, canonical_key: Str) -> CTypedRef {
-    validate_c_typed_ref(CTypedRef {
-        c_name: c_name,
-        kind: CRefKind::DefaultEvidence { canonical_key: canonical_key },
         load_id: 0
     })
 }
@@ -800,7 +776,6 @@ pub fn c_ref_domain(reference: CTypedRef) -> Str {
         CRefKind::Exact { .. } => "exact",
         CRefKind::NameOnly { .. } => "name-only",
         CRefKind::Static { .. } => "static",
-        CRefKind::DefaultEvidence { .. } => "default-evidence",
         CRefKind::Computed { .. } => "computed",
         CRefKind::Fresh { .. } => "fresh"
     }
@@ -818,7 +793,6 @@ pub fn c_ref_key(reference: CTypedRef) -> Str {
         CRefKind::Exact { source_name, .. } => source_name,
         CRefKind::NameOnly { canonical_key } => canonical_key,
         CRefKind::Static { canonical_key } => canonical_key,
-        CRefKind::DefaultEvidence { canonical_key } => canonical_key,
         _ => ""
     }
 }
@@ -987,7 +961,6 @@ fn validate_identity_event_shape(event: CIdentityEvent) {
     }
     if event.kind == "effect-receiver-load" {
         if event.domain != "name-only" &&
-           event.domain != "default-evidence" &&
            event.domain != "computed" {
             panic("C identity ledger: effect receiver has forbidden '${event.domain}' domain")
         }

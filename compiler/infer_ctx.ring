@@ -27,17 +27,49 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     EffectIdentityFact,
     SourceImplProviderFact,
     DelegateProviderFact, NominalDerivedProviderPlanFact, NamespaceKind}
-use ir_identity::{SymbolRef, symbol_ref_canonical_payload,
+use ir_identity::{SymbolRef, SlotRef, symbol_ref_canonical_payload,
     symbol_ref_origin_module_key, symbol_ref_same,
     ImplProviderRef, ImplOwnerRef,
     impl_provider_ref_same, impl_owner_ref_same,
     nominal_field_ref_same, trait_method_ref_same,
     registered_nominal_ref_same, variant_ref_same,
     variant_field_ref_same,
-    handled_effect_ref_same,
+    handled_effect_ref_same, system_effect_console, system_effect_fs,
+    system_effect_process,
     registered_nominal_ref_symbol, registered_trait_ref_symbol,
-    registered_trait_ref_display_name, registered_trait_ref_same}
-use ir_inventory::{effect_operation_ref_same}
+    registered_trait_ref_display_name, registered_trait_ref_same,
+    make_path_ref, make_synthetic_slot_ref, make_module_body_ref,
+    path_owner_for_symbol, path_owner_for_module_body, path_ref_owner,
+    path_ref_normalized_child_path, path_role_child,
+    path_role_capture, path_role_synthetic}
+use ir_inventory::{ExecutableRef, effect_operation_ref_same,
+    make_anonymous_executable_ref, executable_ref_is_named,
+    executable_ref_named_symbol, executable_ref_anonymous_path}
+use core_from_hir::{CoreAssemblyRecorder,
+    CoreNominalFieldSpec, new_core_assembly_recorder,
+    reserve_core_type_fact, define_core_atomic_type_fact,
+    define_core_parameter_type_fact, define_core_nominal_type_fact,
+    define_core_extern_type_fact, define_core_tuple_type_fact,
+    define_core_record_type_fact, define_core_callable_type_fact,
+    define_core_ptr_type_fact, make_core_nominal_field_spec}
+use core_expr::{CoreTypeFactRef, core_type_fact_ordinal}
+use flow_ir::{FlowGenericParamFact,
+    make_flow_generic_param_fact,
+    flow_generic_param_index, flow_generic_param_arity,
+    flow_generic_param_owner,
+    flow_type_kind_int, flow_type_kind_float, flow_type_kind_str,
+    flow_type_kind_bool, flow_type_kind_unit, flow_type_kind_never,
+    flow_type_kind_struct, flow_type_kind_enum,
+    flow_type_seed_shareable, make_borrowed_flow_foreign_contract,
+    make_nominal_flow_field_identity, make_variant_flow_field_identity,
+    make_path_flow_field_identity}
+use legacy_projection::{LegacyTypeFactProjection,
+    make_legacy_type_fact_projection}
+
+struct RecordedCoreTypeFact {
+    ty: Type,
+    fact: CoreTypeFactRef
+}
 
 // ============================================================
 // InferResult — return type for expression inference
@@ -150,6 +182,14 @@ pub struct ProjectNamespaceFrameState {
 }
 
 pub struct InferCtx {
+    pub core_recorder: CoreAssemblyRecorder,
+    pub core_module_key: Str,
+    pub core_module_order: Int,
+    recorded_core_types: List<RecordedCoreTypeFact>,
+    core_parameter_facts: Map<Int, FlowGenericParamFact>,
+    pub legacy_type_facts: List<LegacyTypeFactProjection>,
+    pub executable_stack: List<ExecutableRef>,
+    anonymous_child_counters: List<Int>,
     pub env: TypeEnv,
     pub subst: UnionFind,
     pub sink: CollectingSink,
@@ -177,8 +217,6 @@ pub struct InferCtx {
     pub var_lambda_depth: Map<Int, Int>,
     pub fn_mut_params: Map<Str, List<Bool>>,
     pub file_extern_types: Set<Str>,
-    // Default effect handler dependency graph: effect name -> list of effect names it depends on
-    pub effect_default_deps: Map<Str, List<Str>>,
     // Qualified associated type scope: "T::Item" -> Type
     // Used to disambiguate when multiple type params have same-named associated types
     pub qualified_assoc_scope: Map<Str, Type>,
@@ -221,8 +259,19 @@ pub struct InferCtx {
     impl_check_owners: Map<Str, ImplOwnerRef>
 }
 
-pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
+pub fn new_infer_ctx(
+    sink: CollectingSink, module_key: Str, module_order: Int
+) -> InferCtx {
     InferCtx {
+        core_recorder: new_core_assembly_recorder(
+            module_key, module_order),
+        core_module_key: module_key,
+        core_module_order: module_order,
+        recorded_core_types: [],
+        core_parameter_facts: map_new(),
+        legacy_type_facts: [],
+        executable_stack: [],
+        anonymous_child_counters: [],
         env: new_type_env(),
         subst: empty_subst(),
         sink: sink,
@@ -242,7 +291,6 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         var_lambda_depth: map_new(),
         fn_mut_params: map_new(),
         file_extern_types: set_new(),
-        effect_default_deps: map_new(),
         qualified_assoc_scope: map_new(),
         rebind_assoc_provenance: map_new(),
         mod_unsafe_allowed: false,
@@ -1324,6 +1372,240 @@ pub fn current_identity_file_key(ctx: InferCtx) -> Str {
     }
 }
 
+pub fn current_impl_check_site(ctx: InferCtx) -> (Str, Int) {
+    match ctx.impl_check_frame_stack.get(
+            ctx.impl_check_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("executable identity: declaration outside check frame")
+    }
+}
+
+pub fn enter_executable_owner(mut ctx: InferCtx, value: ExecutableRef) {
+    ctx.executable_stack.push(value)
+    ctx.anonymous_child_counters.push(0)
+}
+
+pub fn exit_executable_owner(mut ctx: InferCtx) {
+    if ctx.executable_stack.pop().is_none() ||
+       ctx.anonymous_child_counters.pop().is_none() {
+        panic("executable identity: owner stack underflow")
+    }
+}
+
+pub fn current_executable_owner(ctx: InferCtx) -> ExecutableRef {
+    match ctx.executable_stack.last() {
+        some(value) => value,
+        none => panic("executable identity: no current body owner")
+    }
+}
+
+pub fn fresh_child_executable(mut ctx: InferCtx, role: Str) -> ExecutableRef {
+    if role.len() == 0 { panic("executable identity: empty child role") }
+    let parent = current_executable_owner(ctx)
+    let counter_index = ctx.anonymous_child_counters.len() - 1
+    let ordinal = ctx.anonymous_child_counters.get(
+        counter_index).unwrap_or(0)
+    ctx.anonymous_child_counters.set(counter_index, ordinal + 1)
+    let (owner, prefix) = if executable_ref_is_named(parent) {
+        (path_owner_for_symbol(executable_ref_named_symbol(parent)), [])
+    } else {
+        let path = executable_ref_anonymous_path(parent)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("${role}:${ordinal}")
+    make_anonymous_executable_ref(make_path_ref(
+        owner, child_path, path_role_child()))
+}
+
+pub fn executable_capture_slot(
+    executable: ExecutableRef, capture_ordinal: Int
+) -> SlotRef {
+    if capture_ordinal < 0 {
+        panic("executable identity: negative capture ordinal")
+    }
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("capture:${capture_ordinal}")
+    make_synthetic_slot_ref(make_path_ref(
+        owner, child_path, path_role_capture()))
+}
+
+pub fn record_core_parameter_fact(
+    mut ctx: InferCtx, type_var_id: Int, owner: SymbolRef,
+    index: Int, arity: Int, bounds: List<SymbolRef>
+) {
+    let fact = make_flow_generic_param_fact(owner, index, arity, bounds)
+    match ctx.core_parameter_facts.get(type_var_id) {
+        some(existing) => {
+            if flow_generic_param_index(existing) != index ||
+               flow_generic_param_arity(existing) != arity ||
+               !symbol_ref_same(
+                    flow_generic_param_owner(existing), owner) {
+                panic("Core type producer: type parameter identity changed")
+            }
+        },
+        none => ctx.core_parameter_facts.insert(type_var_id, fact)
+    }
+}
+
+fn recorded_core_type_fact(ctx: InferCtx, ty: Type) -> CoreTypeFactRef? {
+    for relation in ctx.recorded_core_types {
+        if types_equal(relation.ty, ty) { return some(relation.fact) }
+    }
+    none
+}
+
+pub fn record_core_type_fact(mut ctx: InferCtx, ty: Type) -> CoreTypeFactRef {
+    match recorded_core_type_fact(ctx, ty) {
+        some(fact) => return fact,
+        none => {}
+    }
+    let fact = reserve_core_type_fact(ctx.core_recorder)
+    ctx.recorded_core_types.push(RecordedCoreTypeFact { ty: ty, fact: fact })
+    ctx.legacy_type_facts.push(make_legacy_type_fact_projection(fact, ty))
+    match ty {
+        Type::IntType => define_core_atomic_type_fact(
+            ctx.core_recorder, fact, flow_type_kind_int()),
+        Type::FloatType => define_core_atomic_type_fact(
+            ctx.core_recorder, fact, flow_type_kind_float()),
+        Type::StrType => define_core_atomic_type_fact(
+            ctx.core_recorder, fact, flow_type_kind_str()),
+        Type::BoolType => define_core_atomic_type_fact(
+            ctx.core_recorder, fact, flow_type_kind_bool()),
+        Type::UnitType => define_core_atomic_type_fact(
+            ctx.core_recorder, fact, flow_type_kind_unit()),
+        Type::NeverType => define_core_atomic_type_fact(
+            ctx.core_recorder, fact, flow_type_kind_never()),
+        Type::TypeVar { id, .. } => match ctx.core_parameter_facts.get(id) {
+            some(parameter) => define_core_parameter_type_fact(
+                ctx.core_recorder, fact, parameter),
+            none => panic("Core type producer: unresolved type parameter fact")
+        },
+        Type::FnType { params, return_type, .. } => {
+            let mut parameter_facts: List<CoreTypeFactRef> = []
+            for parameter in params {
+                parameter_facts.push(record_core_type_fact(ctx, parameter))
+            }
+            define_core_callable_type_fact(
+                ctx.core_recorder, fact, parameter_facts,
+                record_core_type_fact(ctx, return_type))
+        },
+        Type::StructType { name, type_params } => {
+            let def = ctx.env.types.structs.get(name).unwrap_or_else(fn() {
+                panic("Core type producer: struct registry owner is missing")
+            })
+            let mut arguments: List<CoreTypeFactRef> = []
+            let mut type_map: Map<Int, Type> = map_new()
+            let mut index = 0
+            for argument in type_params {
+                arguments.push(record_core_type_fact(ctx, argument))
+                match def.type_param_vars.get(index) {
+                    some(id) => type_map.insert(id, argument),
+                    none => {}
+                }
+                index = index + 1
+            }
+            if def.is_extern {
+                define_core_extern_type_fact(
+                    ctx.core_recorder, fact,
+                    registered_nominal_ref_symbol(def.owner_ref), arguments,
+                    make_borrowed_flow_foreign_contract(), [])
+            } else {
+                let mut fields: List<CoreNominalFieldSpec> = []
+                for field in def.fields {
+                    fields.push(make_core_nominal_field_spec(
+                        make_nominal_flow_field_identity(field.field_ref),
+                        record_core_type_fact(
+                            ctx, apply_subst_map(type_map, field.ty))))
+                }
+                define_core_nominal_type_fact(
+                    ctx.core_recorder, fact, flow_type_kind_struct(),
+                    registered_nominal_ref_symbol(def.owner_ref), arguments,
+                    fields, flow_type_seed_shareable(), none, [], [])
+            }
+        },
+        Type::EnumType { name, type_params } => {
+            let def = ctx.env.types.enums.get(name).unwrap_or_else(fn() {
+                panic("Core type producer: enum registry owner is missing")
+            })
+            let mut arguments: List<CoreTypeFactRef> = []
+            let mut type_map: Map<Int, Type> = map_new()
+            let mut index = 0
+            for argument in type_params {
+                arguments.push(record_core_type_fact(ctx, argument))
+                match def.type_param_vars.get(index) {
+                    some(id) => type_map.insert(id, argument),
+                    none => {}
+                }
+                index = index + 1
+            }
+            let mut fields: List<CoreNominalFieldSpec> = []
+            let mut variant_index = 0
+            for variant in def.variants {
+                let variant_ref = def.variant_refs.get(variant_index).unwrap()
+                let field_refs = def.variant_field_refs.get(variant_index).unwrap()
+                let mut field_index = 0
+                for field_ty in variant.fields {
+                    fields.push(make_core_nominal_field_spec(
+                        make_variant_flow_field_identity(
+                            field_refs.get(field_index).unwrap()),
+                        record_core_type_fact(
+                            ctx, apply_subst_map(type_map, field_ty))))
+                    field_index = field_index + 1
+                }
+                let _ = variant_ref
+                variant_index = variant_index + 1
+            }
+            define_core_nominal_type_fact(
+                ctx.core_recorder, fact, flow_type_kind_enum(),
+                registered_nominal_ref_symbol(def.owner_ref), arguments,
+                fields, flow_type_seed_shareable(), none, [], [])
+        },
+        Type::TupleType { elements } => {
+            let mut element_facts: List<CoreTypeFactRef> = []
+            for element in elements {
+                element_facts.push(record_core_type_fact(ctx, element))
+            }
+            define_core_tuple_type_fact(
+                ctx.core_recorder, fact, element_facts,
+                flow_type_seed_shareable(), none, [], [])
+        },
+        Type::RecordType { fields, tail, .. } => {
+            if tail.is_some() {
+                panic("Core type producer: open record crossed Core closure")
+            }
+            let owner = path_owner_for_module_body(
+                make_module_body_ref(ctx.core_module_key, "module-body"))
+            let mut field_specs: List<CoreNominalFieldSpec> = []
+            let mut index = 0
+            for field in fields {
+                let path = make_path_ref(owner,
+                    ["record:${core_type_fact_ordinal(fact)}",
+                     "field:${index}"], path_role_synthetic())
+                field_specs.push(make_core_nominal_field_spec(
+                    make_path_flow_field_identity(path),
+                    record_core_type_fact(ctx, field.ty)))
+                index = index + 1
+            }
+            define_core_record_type_fact(
+                ctx.core_recorder, fact, field_specs,
+                flow_type_seed_shareable(), none, [], [])
+        },
+        Type::PtrType { pointee } => define_core_ptr_type_fact(
+            ctx.core_recorder, fact, record_core_type_fact(ctx, pointee)),
+        Type::AnyType | Type::GenericType { .. } |
+        Type::EffectRowType { .. } | Type::ErrorType =>
+            panic("Core type producer: non-canonical type crossed Core closure")
+    }
+    fact
+}
+
 pub fn value_binding_kind(ctx: InferCtx, def_id: Int?) -> ValueBindingKind {
     match def_id {
         some(id) => match ctx.value_binding_kinds.get(id) {
@@ -2150,7 +2432,30 @@ fn resolve_assoc_type(mut ctx: InferCtx, type_param_name: Str, assoc_name: Str, 
 }
 
 pub fn resolve_effect_expr(mut ctx: InferCtx, eff: EffectExpr) -> Effect {
-    if eff.name == "io" { return Effect::IoEffect }
+    if eff.name == "console" || eff.name == "fs" || eff.name == "process" {
+        if eff.type_args.len() != 0 {
+            let _ = type_error(ctx.sink, E0407,
+                "System effect '${eff.name}' does not accept type arguments",
+                eff.span, DiagnosticContext::OtherContext {
+                    detail: some("system effect is a closed capability atom") })
+            fail.raise(CompileError {})
+        }
+        let reference = if eff.name == "console" {
+            system_effect_console()
+        } else if eff.name == "fs" {
+            system_effect_fs()
+        } else {
+            system_effect_process()
+        }
+        return Effect::SystemEffect { reference: reference }
+    }
+    if eff.name == "io" {
+        let _ = type_error(ctx.sink, E0407,
+            "Unknown effect 'io'; use exact system effects console, fs, or process",
+            eff.span, DiagnosticContext::OtherContext {
+                detail: some("broad io effect was removed from Ring 0.1") })
+        fail.raise(CompileError {})
+    }
     if eff.name == "unsafe" { return Effect::UnsafeEffect }
     if eff.name == "mut" {
         let mut_state = if eff.type_args.len() > 0 {
@@ -2175,20 +2480,30 @@ pub fn resolve_effect_expr(mut ctx: InferCtx, eff: EffectExpr) -> Effect {
         return Effect::FailEffect { error_type: err_type }
     }
     // Custom effects: resolve to canonical name from EffectDef
-    let canonical_name = match ctx.env.types.effects.get(eff.name) {
-        some(edef) => edef.name,
+    let (canonical_name, handled_ref) = match ctx.env.types.effects.get(eff.name) {
+        some(edef) => match edef.handled_ref {
+            some(reference) => (edef.name, reference),
+            none => {
+                let _ = type_error(ctx.sink, E0407,
+                    "Effect '${eff.name}' is not a handled custom effect",
+                    eff.span, DiagnosticContext::OtherContext {
+                        detail: some("effect class cannot enter handled evidence") })
+                fail.raise(CompileError {})
+            }
+        },
         none => {
             let _ = type_error(ctx.sink, E0407,
                 "Unknown effect '${eff.name}'", eff.span,
                 DiagnosticContext::OtherContext { detail: some("unknown effect") })
-            eff.name
+            fail.raise(CompileError {})
         }
     }
     let mut resolved_args: List<Type> = []
     for ta in eff.type_args {
         resolved_args.push(resolve_type_expr(ctx, ta))
     }
-    Effect::CustomEffect { name: canonical_name, type_args: resolved_args }
+    Effect::CustomEffect { reference: handled_ref,
+        name: canonical_name, type_args: resolved_args }
 }
 
 pub fn resolve_self_type(mut ctx: InferCtx, name: Str) -> Type {
