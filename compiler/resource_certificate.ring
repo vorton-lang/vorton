@@ -878,14 +878,542 @@ fn join_state_vectors(
     result
 }
 
+// ============================================================
+// Ranked callable-candidate provenance proof
+// ============================================================
+
+fn candidate_int_list_contains(values: List<Int>, target: Int) -> Bool {
+    for value in values { if value == target { return true } }
+    false
+}
+
+const CANDIDATE_CELL_PARAMETER: Int = 0
+const CANDIDATE_CELL_RESULT: Int = 1
+const CANDIDATE_CELL_STATE: Int = 2
+const CANDIDATE_CELL_KIND_COUNT: Int = 3
+
+pub struct CandidateCellKind { tag: Int }
+
+pub fn candidate_cell_kind_from_tag(tag: Int) -> CandidateCellKind {
+    if tag < CANDIDATE_CELL_PARAMETER || tag >= CANDIDATE_CELL_KIND_COUNT {
+        panic("resource certificate: invalid callable-candidate cell kind")
+    }
+    CandidateCellKind { tag: tag }
+}
+pub fn candidate_cell_kind_tag(value: CandidateCellKind) -> Int {
+    candidate_cell_kind_from_tag(value.tag).tag
+}
+pub fn candidate_cell_parameter() -> CandidateCellKind {
+    candidate_cell_kind_from_tag(CANDIDATE_CELL_PARAMETER)
+}
+pub fn candidate_cell_result() -> CandidateCellKind {
+    candidate_cell_kind_from_tag(CANDIDATE_CELL_RESULT)
+}
+pub fn candidate_cell_state() -> CandidateCellKind {
+    candidate_cell_kind_from_tag(CANDIDATE_CELL_STATE)
+}
+
+// Coordinates are exact table ordinals. Parameter: owner=callable,
+// component=parameter. Result: owner=callable. State: owner=body,
+// block/boundary/component=block/step-boundary/slot. candidate is always the
+// exact callable-table ordinal whose membership bit this cell proves.
+pub struct CandidateCellSpec {
+    kind: CandidateCellKind,
+    owner: Int,
+    block: Int,
+    boundary: Int,
+    component: Int,
+    candidate: Int
+}
+
+pub fn make_candidate_cell_spec(
+    kind: CandidateCellKind, owner: Int, block: Int,
+    boundary: Int, component: Int, candidate: Int
+) -> CandidateCellSpec {
+    if owner < 0 || block < 0 || boundary < 0 ||
+       component < 0 || candidate < 0 {
+        panic("resource certificate: negative callable-candidate cell coordinate")
+    }
+    CandidateCellSpec {
+        kind: kind, owner: owner, block: block,
+        boundary: boundary, component: component,
+        candidate: candidate
+    }
+}
+
+pub fn candidate_cell_spec_kind(value: CandidateCellSpec) -> CandidateCellKind {
+    value.kind
+}
+pub fn candidate_cell_spec_owner(value: CandidateCellSpec) -> Int { value.owner }
+pub fn candidate_cell_spec_block(value: CandidateCellSpec) -> Int { value.block }
+pub fn candidate_cell_spec_boundary(value: CandidateCellSpec) -> Int {
+    value.boundary
+}
+pub fn candidate_cell_spec_component(value: CandidateCellSpec) -> Int {
+    value.component
+}
+pub fn candidate_cell_spec_candidate(value: CandidateCellSpec) -> Int {
+    value.candidate
+}
+
+fn candidate_cell_spec_same(
+    left: CandidateCellSpec, right: CandidateCellSpec
+) -> Bool {
+    candidate_cell_kind_tag(left.kind) == candidate_cell_kind_tag(right.kind) &&
+        left.owner == right.owner && left.block == right.block &&
+        left.boundary == right.boundary &&
+        left.component == right.component &&
+        left.candidate == right.candidate
+}
+
+fn copy_candidate_cells(values: List<CandidateCellSpec>) -> List<CandidateCellSpec> {
+    let mut result: List<CandidateCellSpec> = []
+    for value in values {
+        result.push(make_candidate_cell_spec(
+            value.kind, value.owner, value.block,
+            value.boundary, value.component, value.candidate))
+    }
+    result
+}
+
+enum CandidateRuleSiteValue {
+    GlobalCandidateSiteValue,
+    InstructionCandidateSiteValue(FlowInstructionRef),
+    TerminatorCandidateSiteValue(FlowBlockRef),
+    EdgeCandidateSiteValue {
+        block: FlowBlockRef,
+        successor_ordinal: Int
+    }
+}
+
+pub struct CandidateRuleSite { value: CandidateRuleSiteValue }
+
+pub fn make_global_candidate_rule_site() -> CandidateRuleSite {
+    CandidateRuleSite { value: CandidateRuleSiteValue::GlobalCandidateSiteValue }
+}
+pub fn make_instruction_candidate_rule_site(
+    value: FlowInstructionRef
+) -> CandidateRuleSite {
+    CandidateRuleSite {
+        value: CandidateRuleSiteValue::InstructionCandidateSiteValue(value)
+    }
+}
+pub fn make_terminator_candidate_rule_site(
+    value: FlowBlockRef
+) -> CandidateRuleSite {
+    CandidateRuleSite {
+        value: CandidateRuleSiteValue::TerminatorCandidateSiteValue(value)
+    }
+}
+pub fn make_edge_candidate_rule_site(
+    block: FlowBlockRef, successor_ordinal: Int
+) -> CandidateRuleSite {
+    if successor_ordinal < 0 {
+        panic("resource certificate: negative callable-candidate edge ordinal")
+    }
+    CandidateRuleSite { value: CandidateRuleSiteValue::EdgeCandidateSiteValue {
+        block: block, successor_ordinal: successor_ordinal
+    } }
+}
+
+pub fn candidate_rule_site_kind_tag(value: CandidateRuleSite) -> Int {
+    match value.value {
+        CandidateRuleSiteValue::GlobalCandidateSiteValue => 0,
+        CandidateRuleSiteValue::InstructionCandidateSiteValue(_) => 1,
+        CandidateRuleSiteValue::TerminatorCandidateSiteValue(_) => 2,
+        CandidateRuleSiteValue::EdgeCandidateSiteValue { .. } => 3
+    }
+}
+pub fn candidate_rule_site_instruction(
+    value: CandidateRuleSite
+) -> FlowInstructionRef {
+    match value.value {
+        CandidateRuleSiteValue::InstructionCandidateSiteValue(site) => site,
+        _ => panic("resource certificate: candidate rule site is not instruction")
+    }
+}
+pub fn candidate_rule_site_block(value: CandidateRuleSite) -> FlowBlockRef {
+    match value.value {
+        CandidateRuleSiteValue::TerminatorCandidateSiteValue(block) |
+        CandidateRuleSiteValue::EdgeCandidateSiteValue { block, .. } => block,
+        _ => panic("resource certificate: candidate rule site has no block")
+    }
+}
+pub fn candidate_rule_site_successor_ordinal(
+    value: CandidateRuleSite
+) -> Int {
+    match value.value {
+        CandidateRuleSiteValue::EdgeCandidateSiteValue {
+            successor_ordinal, ..
+        } => successor_ordinal,
+        _ => panic("resource certificate: candidate rule site is not edge")
+    }
+}
+
+fn copy_candidate_rule_site(value: CandidateRuleSite) -> CandidateRuleSite {
+    match value.value {
+        CandidateRuleSiteValue::GlobalCandidateSiteValue =>
+            make_global_candidate_rule_site(),
+        CandidateRuleSiteValue::InstructionCandidateSiteValue(site) =>
+            make_instruction_candidate_rule_site(site),
+        CandidateRuleSiteValue::TerminatorCandidateSiteValue(block) =>
+            make_terminator_candidate_rule_site(block),
+        CandidateRuleSiteValue::EdgeCandidateSiteValue {
+            block, successor_ordinal
+        } => make_edge_candidate_rule_site(block, successor_ordinal)
+    }
+}
+
+fn candidate_rule_site_same(
+    left: CandidateRuleSite, right: CandidateRuleSite
+) -> Bool {
+    if candidate_rule_site_kind_tag(left) != candidate_rule_site_kind_tag(right) {
+        return false
+    }
+    let tag = candidate_rule_site_kind_tag(left)
+    if tag == 0 { return true }
+    if tag == 1 {
+        return flow_instruction_ref_same(
+            candidate_rule_site_instruction(left),
+            candidate_rule_site_instruction(right))
+    }
+    if !flow_block_ref_same(
+            candidate_rule_site_block(left),
+            candidate_rule_site_block(right)) {
+        return false
+    }
+    tag == 2 || candidate_rule_site_successor_ordinal(left) ==
+        candidate_rule_site_successor_ordinal(right)
+}
+
+const CANDIDATE_RULE_SEED: Int = 0
+const CANDIDATE_RULE_COPY: Int = 1
+const CANDIDATE_RULE_ALL: Int = 2
+const CANDIDATE_RULE_KIND_COUNT: Int = 3
+
+pub struct CandidateRuleKind { tag: Int }
+pub fn candidate_rule_kind_from_tag(tag: Int) -> CandidateRuleKind {
+    if tag < CANDIDATE_RULE_SEED || tag >= CANDIDATE_RULE_KIND_COUNT {
+        panic("resource certificate: invalid callable-candidate rule kind")
+    }
+    CandidateRuleKind { tag: tag }
+}
+pub fn candidate_rule_kind_tag(value: CandidateRuleKind) -> Int {
+    candidate_rule_kind_from_tag(value.tag).tag
+}
+pub fn candidate_rule_seed() -> CandidateRuleKind {
+    candidate_rule_kind_from_tag(CANDIDATE_RULE_SEED)
+}
+pub fn candidate_rule_copy() -> CandidateRuleKind {
+    candidate_rule_kind_from_tag(CANDIDATE_RULE_COPY)
+}
+pub fn candidate_rule_all() -> CandidateRuleKind {
+    candidate_rule_kind_from_tag(CANDIDATE_RULE_ALL)
+}
+
+pub struct CandidateRule {
+    kind: CandidateRuleKind,
+    site: CandidateRuleSite,
+    target_cell: Int,
+    premise_cells: List<Int>
+}
+
+pub fn make_candidate_rule(
+    kind: CandidateRuleKind, site: CandidateRuleSite,
+    target_cell: Int, premise_cells: List<Int>
+) -> CandidateRule {
+    if target_cell < 0 { panic("resource certificate: negative candidate target") }
+    let tag = candidate_rule_kind_tag(kind)
+    if (tag == CANDIDATE_RULE_SEED && premise_cells.len() != 0) ||
+       (tag == CANDIDATE_RULE_COPY && premise_cells.len() != 1) ||
+       (tag == CANDIDATE_RULE_ALL && premise_cells.len() < 2) {
+        panic("resource certificate: callable-candidate rule arity differs")
+    }
+    let mut premises: List<Int> = []
+    for premise in premise_cells {
+        if premise < 0 { panic("resource certificate: negative candidate premise") }
+        if candidate_int_list_contains(premises, premise) {
+            panic("resource certificate: duplicate candidate premise")
+        }
+        premises.push(premise)
+    }
+    CandidateRule {
+        kind: kind, site: copy_candidate_rule_site(site),
+        target_cell: target_cell, premise_cells: premises
+    }
+}
+
+pub fn candidate_rule_kind(value: CandidateRule) -> CandidateRuleKind { value.kind }
+pub fn candidate_rule_site(value: CandidateRule) -> CandidateRuleSite {
+    copy_candidate_rule_site(value.site)
+}
+pub fn candidate_rule_target_cell(value: CandidateRule) -> Int {
+    value.target_cell
+}
+pub fn candidate_rule_premise_cells(value: CandidateRule) -> List<Int> {
+    let mut result: List<Int> = []
+    for premise in value.premise_cells { result.push(premise) }
+    result
+}
+
+fn copy_candidate_rules(values: List<CandidateRule>) -> List<CandidateRule> {
+    let mut result: List<CandidateRule> = []
+    for value in values {
+        result.push(make_candidate_rule(
+            value.kind, value.site, value.target_cell, value.premise_cells))
+    }
+    result
+}
+
+pub struct CandidatePromotion {
+    rule_index: Int,
+    target_cell: Int,
+    premise_values: List<Bool>
+}
+
+pub fn make_candidate_promotion(
+    rule_index: Int, target_cell: Int, premise_values: List<Bool>
+) -> CandidatePromotion {
+    if rule_index < 0 || target_cell < 0 {
+        panic("resource certificate: negative candidate promotion coordinate")
+    }
+    let mut copied: List<Bool> = []
+    for value in premise_values { copied.push(value) }
+    CandidatePromotion {
+        rule_index: rule_index,
+        target_cell: target_cell, premise_values: copied
+    }
+}
+pub fn candidate_promotion_rule_index(value: CandidatePromotion) -> Int {
+    value.rule_index
+}
+pub fn candidate_promotion_target_cell(value: CandidatePromotion) -> Int {
+    value.target_cell
+}
+pub fn candidate_promotion_premise_values(
+    value: CandidatePromotion
+) -> List<Bool> {
+    let mut result: List<Bool> = []
+    for item in value.premise_values { result.push(item) }
+    result
+}
+
+fn copy_candidate_promotions(
+    values: List<CandidatePromotion>
+) -> List<CandidatePromotion> {
+    let mut result: List<CandidatePromotion> = []
+    for value in values {
+        result.push(make_candidate_promotion(
+            value.rule_index, value.target_cell, value.premise_values))
+    }
+    result
+}
+
+pub struct CandidateSelection {
+    instruction: FlowInstructionRef,
+    candidates: List<Int>
+}
+pub fn make_candidate_selection(
+    instruction: FlowInstructionRef, candidates: List<Int>
+) -> CandidateSelection {
+    if candidates.len() == 0 {
+        panic("resource certificate: required call candidate selection is empty")
+    }
+    let mut copied: List<Int> = []
+    for candidate in candidates {
+        if candidate < 0 || candidate_int_list_contains(copied, candidate) {
+            panic("resource certificate: candidate selection is invalid")
+        }
+        copied.push(candidate)
+    }
+    CandidateSelection { instruction: instruction, candidates: copied }
+}
+pub fn candidate_selection_instruction(
+    value: CandidateSelection
+) -> FlowInstructionRef { value.instruction }
+pub fn candidate_selection_candidates(value: CandidateSelection) -> List<Int> {
+    let mut result: List<Int> = []
+    for candidate in value.candidates { result.push(candidate) }
+    result
+}
+
+fn copy_candidate_selections(
+    values: List<CandidateSelection>
+) -> List<CandidateSelection> {
+    let mut result: List<CandidateSelection> = []
+    for value in values {
+        result.push(make_candidate_selection(value.instruction, value.candidates))
+    }
+    result
+}
+
+pub struct CallableCandidateProof {
+    callable_count: Int,
+    cells: List<CandidateCellSpec>,
+    rules: List<CandidateRule>,
+    promotions: List<CandidatePromotion>,
+    final_values: List<Bool>,
+    selections: List<CandidateSelection>
+}
+
+pub fn make_callable_candidate_proof(
+    callable_count: Int, cells: List<CandidateCellSpec>,
+    rules: List<CandidateRule>, promotions: List<CandidatePromotion>,
+    final_values: List<Bool>, selections: List<CandidateSelection>
+) -> CallableCandidateProof {
+    if callable_count <= 0 {
+        panic("resource certificate: callable candidate domain is empty")
+    }
+    let mut finals: List<Bool> = []
+    for value in final_values { finals.push(value) }
+    CallableCandidateProof {
+        callable_count: callable_count,
+        cells: copy_candidate_cells(cells),
+        rules: copy_candidate_rules(rules),
+        promotions: copy_candidate_promotions(promotions),
+        final_values: finals,
+        selections: copy_candidate_selections(selections)
+    }
+}
+
+pub fn callable_candidate_proof_callable_count(
+    value: CallableCandidateProof
+) -> Int { value.callable_count }
+pub fn callable_candidate_proof_cells(
+    value: CallableCandidateProof
+) -> List<CandidateCellSpec> { copy_candidate_cells(value.cells) }
+pub fn callable_candidate_proof_rules(
+    value: CallableCandidateProof
+) -> List<CandidateRule> { copy_candidate_rules(value.rules) }
+pub fn callable_candidate_proof_promotions(
+    value: CallableCandidateProof
+) -> List<CandidatePromotion> { copy_candidate_promotions(value.promotions) }
+pub fn callable_candidate_proof_final_values(
+    value: CallableCandidateProof
+) -> List<Bool> {
+    let mut result: List<Bool> = []
+    for item in value.final_values { result.push(item) }
+    result
+}
+pub fn callable_candidate_proof_selections(
+    value: CallableCandidateProof
+) -> List<CandidateSelection> { copy_candidate_selections(value.selections) }
+
+fn candidate_rule_enabled(rule: CandidateRule, values: List<Bool>) -> Bool {
+    if candidate_rule_kind_tag(rule.kind) == CANDIDATE_RULE_SEED { return true }
+    for premise in rule.premise_cells {
+        if !values.get(premise).unwrap() { return false }
+    }
+    true
+}
+
+fn verify_callable_candidate_proof(value: CallableCandidateProof) {
+    if value.cells.len() == 0 || value.rules.len() == 0 ||
+       value.final_values.len() != value.cells.len() {
+        panic("resource certificate: callable candidate proof is empty or incomplete")
+    }
+    let mut left_index = 0
+    while left_index < value.cells.len() {
+        let left = value.cells.get(left_index).unwrap()
+        if left.candidate >= value.callable_count {
+            panic("resource certificate: candidate cell escapes callable table")
+        }
+        let mut right_index = left_index + 1
+        while right_index < value.cells.len() {
+            if candidate_cell_spec_same(
+                    left, value.cells.get(right_index).unwrap()) {
+                panic("resource certificate: duplicate callable candidate cell")
+            }
+            right_index = right_index + 1
+        }
+        left_index = left_index + 1
+    }
+    for rule in value.rules {
+        if rule.target_cell < 0 || rule.target_cell >= value.cells.len() {
+            panic("resource certificate: candidate rule target is absent")
+        }
+        for premise in rule.premise_cells {
+            if premise < 0 || premise >= value.cells.len() {
+                panic("resource certificate: candidate rule premise is absent")
+            }
+        }
+    }
+    let mut current: List<Bool> = []
+    for _ in value.cells { current.push(false) }
+    if value.promotions.len() > value.cells.len() {
+        panic("resource certificate: candidate proof exceeds strict rank budget")
+    }
+    for promotion in value.promotions {
+        let rule = match value.rules.get(promotion.rule_index) {
+            some(item) => item,
+            none => panic("resource certificate: candidate promotion rule is absent")
+        }
+        if promotion.target_cell != rule.target_cell ||
+           current.get(promotion.target_cell).unwrap() ||
+           promotion.premise_values.len() != rule.premise_cells.len() {
+            panic("resource certificate: candidate promotion is not strict")
+        }
+        let mut premise_index = 0
+        while premise_index < rule.premise_cells.len() {
+            let actual = current.get(
+                rule.premise_cells.get(premise_index).unwrap()).unwrap()
+            if actual != promotion.premise_values.get(premise_index).unwrap() {
+                panic("resource certificate: candidate promotion premise drifted")
+            }
+            premise_index = premise_index + 1
+        }
+        if !candidate_rule_enabled(rule, current) {
+            panic("resource certificate: candidate promotion rule is not enabled")
+        }
+        current.set(promotion.target_cell, true)
+    }
+    let mut cell_index = 0
+    while cell_index < current.len() {
+        if current.get(cell_index).unwrap() !=
+           value.final_values.get(cell_index).unwrap() {
+            panic("resource certificate: candidate final cell differs from derivation")
+        }
+        cell_index = cell_index + 1
+    }
+    // Completeness: no rule can still promote a false cell. Starting from
+    // bottom plus strict locally justified promotions proves leastness.
+    for rule in value.rules {
+        if !current.get(rule.target_cell).unwrap() &&
+           candidate_rule_enabled(rule, current) {
+            panic("resource certificate: callable candidate solution is not fixed")
+        }
+    }
+    let mut selection_index = 0
+    while selection_index < value.selections.len() {
+        let selection = value.selections.get(selection_index).unwrap()
+        for candidate in selection.candidates {
+            if candidate >= value.callable_count {
+                panic("resource certificate: selected callable is absent")
+            }
+        }
+        let mut other = selection_index + 1
+        while other < value.selections.len() {
+            if flow_instruction_ref_same(
+                    selection.instruction,
+                    value.selections.get(other).unwrap().instruction) {
+                panic("resource certificate: duplicate call-site selection")
+            }
+            other = other + 1
+        }
+        selection_index = selection_index + 1
+    }
+}
+
 pub struct ResourceCertificate {
     flow_fingerprint: Str,
+    candidate_proof: CallableCandidateProof,
     fixed_point: ResourceFixedPointProof,
     cfg_bodies: List<CfgBodyCertificate>
 }
 
 pub fn make_resource_certificate(
     flow_fingerprint: Str,
+    candidate_proof: CallableCandidateProof,
     fixed_point: ResourceFixedPointProof,
     cfg_bodies: List<CfgBodyCertificate>
 ) -> ResourceCertificate {
@@ -894,6 +1422,7 @@ pub fn make_resource_certificate(
     }
     ResourceCertificate {
         flow_fingerprint: flow_fingerprint,
+        candidate_proof: candidate_proof,
         fixed_point: fixed_point,
         cfg_bodies: copy_cfg_body_certificates(cfg_bodies)
     }
@@ -905,6 +1434,9 @@ pub fn resource_certificate_flow_fingerprint(
 pub fn resource_certificate_fixed_point(
     value: ResourceCertificate
 ) -> ResourceFixedPointProof { value.fixed_point }
+pub fn resource_certificate_candidate_proof(
+    value: ResourceCertificate
+) -> CallableCandidateProof { value.candidate_proof }
 pub fn resource_certificate_cfg_bodies(
     value: ResourceCertificate
 ) -> List<CfgBodyCertificate> {
@@ -1283,6 +1815,7 @@ pub fn verify_resource_certificate(
     if rc_program_flow_fingerprint(rc_program) != certificate.flow_fingerprint {
         panic("resource certificate: FlowIR fingerprint mismatch")
     }
+    verify_callable_candidate_proof(certificate.candidate_proof)
     verify_fixed_point_domains(rc_program, certificate.fixed_point)
     verify_fixed_point_proof(certificate.fixed_point)
     let bodies = rc_program_bodies(rc_program)

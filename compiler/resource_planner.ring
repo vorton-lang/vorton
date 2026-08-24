@@ -141,12 +141,25 @@ use rc_ir::{
 use resource_certificate::{
     ResourceCellKind, ResourceCellSpec, ResourceConstraint, ResourcePromotion,
     ResourceFixedPointProof, ResourceCertificate,
+    CandidateCellKind, CandidateCellSpec, CandidateRuleSite,
+    CandidateRuleKind, CandidateRule, CandidatePromotion,
+    CandidateSelection, CallableCandidateProof,
     CfgBodyCertificate, CfgBlockCertificate,
     CfgStepCertificate, CfgEdgeCertificate,
     SlotTransitionReason, SlotTransitionWitness,
     make_resource_cell_spec, make_resource_constraint,
     make_resource_promotion, make_resource_fixed_point_proof,
     make_resource_certificate,
+    make_candidate_cell_spec,
+    make_global_candidate_rule_site,
+    make_instruction_candidate_rule_site,
+    make_terminator_candidate_rule_site,
+    make_edge_candidate_rule_site,
+    make_candidate_rule, make_candidate_promotion,
+    make_candidate_selection, make_callable_candidate_proof,
+    candidate_cell_parameter, candidate_cell_result,
+    candidate_cell_state, candidate_rule_seed,
+    candidate_rule_copy, candidate_rule_all,
     make_cfg_body_certificate, make_cfg_block_certificate,
     make_cfg_step_certificate,
     make_cfg_edge_certificate, make_slot_transition_witness,
@@ -165,6 +178,7 @@ use resource_certificate::{
     resource_fixed_point_final_ranks,
     resource_fixed_point_cells, resource_fixed_point_constraints,
     resource_certificate_fixed_point,
+    resource_certificate_candidate_proof,
     resource_certificate_cfg_bodies,
     cfg_body_certificate_blocks,
     cfg_body_certificate_entry_block,
@@ -175,6 +189,22 @@ use resource_certificate::{
     cfg_step_certificate_instruction,
     cfg_edge_certificate_successor_ordinal,
     cfg_edge_certificate_target,
+    callable_candidate_proof_callable_count,
+    callable_candidate_proof_cells,
+    callable_candidate_proof_rules,
+    callable_candidate_proof_promotions,
+    callable_candidate_proof_final_values,
+    callable_candidate_proof_selections,
+    candidate_cell_spec_kind, candidate_cell_spec_owner,
+    candidate_cell_spec_block, candidate_cell_spec_boundary,
+    candidate_cell_spec_component, candidate_cell_spec_candidate,
+    candidate_cell_kind_tag,
+    candidate_rule_kind, candidate_rule_site,
+    candidate_rule_target_cell, candidate_rule_premise_cells,
+    candidate_rule_kind_tag, candidate_rule_site_kind_tag,
+    candidate_rule_site_instruction, candidate_rule_site_block,
+    candidate_rule_site_successor_ordinal,
+    candidate_selection_instruction, candidate_selection_candidates,
     slot_reason_init_empty, slot_reason_init_live,
     slot_reason_borrow, slot_reason_mutate,
     slot_reason_clone_source, slot_reason_clone_target,
@@ -1198,6 +1228,7 @@ fn copy_planner_bodies(values: List<PlannerBody>) -> List<PlannerBody> {
 
 struct FrozenPlannerInput {
     flow_fingerprint: Str,
+    candidate_proof: CallableCandidateProof,
     type_nodes: List<PlannerTypeNode>,
     callables: List<PlannerCallable>,
     bodies: List<PlannerBody>
@@ -1495,6 +1526,7 @@ fn validate_body(
 
 fn make_frozen_planner_input(
     flow_fingerprint: Str,
+    candidate_proof: CallableCandidateProof,
     type_nodes: List<PlannerTypeNode>,
     callables: List<PlannerCallable>,
     bodies: List<PlannerBody>
@@ -1632,6 +1664,7 @@ fn make_frozen_planner_input(
     }
     FrozenPlannerInput {
         flow_fingerprint: flow_fingerprint,
+        candidate_proof: candidate_proof,
         type_nodes: copied_types,
         callables: copied_callables,
         bodies: copied_bodies
@@ -3017,53 +3050,6 @@ fn empty_candidate_set(callable_count: Int) -> List<Bool> {
     result
 }
 
-fn singleton_candidate_set(
-    callable_count: Int, candidate: Int
-) -> List<Bool> {
-    if candidate < 0 || candidate >= callable_count {
-        panic("ResourcePlanner: callable candidate is outside frozen table")
-    }
-    let mut result = empty_candidate_set(callable_count)
-    result.set(candidate, true)
-    result
-}
-
-fn copy_candidate_set(values: List<Bool>) -> List<Bool> {
-    let mut result: List<Bool> = []
-    for value in values { result.push(value) }
-    result
-}
-
-fn join_candidate_sets(left: List<Bool>, right: List<Bool>) -> List<Bool> {
-    if left.len() != right.len() {
-        panic("ResourcePlanner: callable candidate domain differs")
-    }
-    let mut result: List<Bool> = []
-    let mut index = 0
-    while index < left.len() {
-        result.push(left.get(index).unwrap() || right.get(index).unwrap())
-        index = index + 1
-    }
-    result
-}
-
-fn candidate_sets_same(left: List<Bool>, right: List<Bool>) -> Bool {
-    if left.len() != right.len() { return false }
-    let mut index = 0
-    while index < left.len() {
-        if left.get(index).unwrap() != right.get(index).unwrap() {
-            return false
-        }
-        index = index + 1
-    }
-    true
-}
-
-fn candidate_set_is_empty(values: List<Bool>) -> Bool {
-    for value in values { if value { return false } }
-    true
-}
-
 fn candidate_set_indices(values: List<Bool>) -> List<Int> {
     let mut result: List<Int> = []
     let mut index = 0
@@ -3074,437 +3060,11 @@ fn candidate_set_indices(values: List<Bool>) -> List<Int> {
     result
 }
 
-fn copy_candidate_state(
-    values: List<List<Bool>>
-) -> List<List<Bool>> {
-    let mut result: List<List<Bool>> = []
-    for value in values { result.push(copy_candidate_set(value)) }
-    result
-}
-
-fn join_candidate_states(
-    left: List<List<Bool>>, right: List<List<Bool>>
-) -> List<List<Bool>> {
-    if left.len() != right.len() {
-        panic("ResourcePlanner: callable slot-state census differs")
-    }
-    let mut result: List<List<Bool>> = []
-    let mut index = 0
-    while index < left.len() {
-        result.push(join_candidate_sets(
-            left.get(index).unwrap(), right.get(index).unwrap()))
-        index = index + 1
-    }
-    result
-}
-
-fn candidate_states_same(
-    left: List<List<Bool>>, right: List<List<Bool>>
-) -> Bool {
-    if left.len() != right.len() { return false }
-    let mut index = 0
-    while index < left.len() {
-        if !candidate_sets_same(
-                left.get(index).unwrap(), right.get(index).unwrap()) {
-            return false
-        }
-        index = index + 1
-    }
-    true
-}
-
 fn planner_type_is_callable(
     type_nodes: List<PlannerTypeNode>, type_index: Int
 ) -> Bool {
     planner_type_kind_tag(type_nodes.get(type_index).unwrap().kind) ==
         PLANNER_TYPE_CALLABLE
-}
-
-fn planner_slot_is_callable(
-    body: PlannerBody, type_nodes: List<PlannerTypeNode>, slot: Int
-) -> Bool {
-    planner_type_is_callable(
-        type_nodes, body.slots.get(slot).unwrap().type_index)
-}
-
-fn call_target_candidates(
-    target: PlannerCallTarget, state: List<List<Bool>>,
-    callable_count: Int
-) -> List<Bool> {
-    if planner_call_target_is_direct(target) {
-        return singleton_candidate_set(
-            callable_count, planner_call_target_direct(target))
-    }
-    copy_candidate_set(state.get(
-        planner_call_target_slot(target)).unwrap())
-}
-
-fn provenance_candidate_set(
-    fact: PlannerCallableProvenance,
-    state: List<List<Bool>>, callable_results: List<List<Bool>>,
-    callable_count: Int
-) -> List<Bool> {
-    match fact.origin {
-        PlannerCallableOriginValue::DirectCallableOriginValue(callable) =>
-            singleton_candidate_set(callable_count, callable),
-        PlannerCallableOriginValue::SlotCallableOriginValue(sources) => {
-            let mut result = empty_candidate_set(callable_count)
-            for source in sources {
-                result = join_candidate_sets(
-                    result, state.get(source).unwrap())
-            }
-            result
-        },
-        PlannerCallableOriginValue::CallCallableOriginValue {
-            target, arguments: _
-        } => {
-            let targets = call_target_candidates(
-                target, state, callable_count)
-            let mut result = empty_candidate_set(callable_count)
-            let mut candidate = 0
-            while candidate < callable_count {
-                if targets.get(candidate).unwrap() {
-                    result = join_candidate_sets(
-                        result, callable_results.get(candidate).unwrap())
-                }
-                candidate = candidate + 1
-            }
-            result
-        }
-    }
-}
-
-fn apply_candidate_provenance(
-    event: PlannerEvent, callable_results: List<List<Bool>>,
-    callable_count: Int, mut state: List<List<Bool>>
-) {
-    for fact in event.callable_provenance {
-        let mut result = provenance_candidate_set(
-            fact, state, callable_results, callable_count)
-        match event.value {
-            PlannerEventValue::CallValue {
-                argument_slots, result_origin_argument_ordinals, ..
-            } => {
-                for ordinal in result_origin_argument_ordinals {
-                    result = join_candidate_sets(
-                        result,
-                        state.get(argument_slots.get(ordinal).unwrap()).unwrap())
-                }
-            },
-            _ => {}
-        }
-        state.set(fact.target, result)
-    }
-}
-
-fn apply_event_candidate_state(
-    event: PlannerEvent, body: PlannerBody,
-    callable_results: List<List<Bool>>, callable_count: Int,
-    mut state: List<List<Bool>>
-) {
-    apply_candidate_provenance(
-        event, callable_results, callable_count, state)
-    match event.value {
-        PlannerEventValue::ScopeExitValue(scope_id) => {
-            for slot in cleanup_slot_order(body.slots, [scope_id]) {
-                state.set(slot, empty_candidate_set(callable_count))
-            }
-        },
-        PlannerEventValue::ConsumeValue(slot, _) |
-        PlannerEventValue::DiscardValue(slot) =>
-            state.set(slot, empty_candidate_set(callable_count)),
-        PlannerEventValue::AssignValue { rhs_temp, .. } =>
-            state.set(rhs_temp, empty_candidate_set(callable_count)),
-        _ => {}
-    }
-}
-
-fn apply_candidate_edge_cleanup(
-    edge: PlannerEdge, body: PlannerBody, callable_count: Int,
-    mut state: List<List<Bool>>
-) {
-    for slot in cleanup_slot_order(body.slots, edge.exited_scope_ids) {
-        state.set(slot, empty_candidate_set(callable_count))
-    }
-}
-
-fn join_global_candidate_cell(
-    mut table: List<List<List<Bool>>>, callable: Int, parameter: Int,
-    incoming: List<Bool>
-) -> Bool {
-    let mut row = table.get(callable).unwrap()
-    let previous = row.get(parameter).unwrap()
-    let joined = join_candidate_sets(previous, incoming)
-    if candidate_sets_same(previous, joined) { return false }
-    row.set(parameter, joined)
-    table.set(callable, row)
-    true
-}
-
-fn propagate_call_arguments(
-    event: PlannerEvent, state: List<List<Bool>>,
-    callables: List<PlannerCallable>,
-    mut parameter_inputs: List<List<List<Bool>>>
-) -> Bool {
-    match event.value {
-        PlannerEventValue::CallValue {
-            call_target, argument_slots, ..
-        } => {
-            let targets = call_target_candidates(
-                call_target, state, callables.len())
-            let mut changed = false
-            let mut candidate = 0
-            while candidate < callables.len() {
-                if targets.get(candidate).unwrap() {
-                    let callable = callables.get(candidate).unwrap()
-                    if callable.parameter_type_indices.len() !=
-                       argument_slots.len() {
-                        panic("ResourcePlanner: derived call candidate arity differs")
-                    }
-                    let mut argument = 0
-                    while argument < argument_slots.len() {
-                        if join_global_candidate_cell(
-                                parameter_inputs, candidate, argument,
-                                state.get(argument_slots.get(argument).unwrap()).unwrap()) {
-                            changed = true
-                        }
-                        argument = argument + 1
-                    }
-                }
-                candidate = candidate + 1
-            }
-            changed
-        },
-        _ => false
-    }
-}
-
-struct CandidateBodySolution {
-    reachable: List<Bool>,
-    entry_states: List<List<List<Bool>>>
-}
-
-fn solve_candidate_body(
-    body: PlannerBody, callable_index: Int,
-    type_nodes: List<PlannerTypeNode>, callables: List<PlannerCallable>,
-    parameter_inputs: List<List<List<Bool>>>,
-    callable_results: List<List<Bool>>,
-    mut global_parameter_inputs: List<List<List<Bool>>>,
-    mut global_results: List<List<Bool>>
-) -> CandidateBodySolution {
-    let callable_count = callables.len()
-    let mut reachable: List<Bool> = []
-    let mut entries: List<List<List<Bool>>> = []
-    for _ in body.blocks {
-        reachable.push(false)
-        let mut state: List<List<Bool>> = []
-        for _ in body.slots { state.push(empty_candidate_set(callable_count)) }
-        entries.push(state)
-    }
-    let mut seed: List<List<Bool>> = []
-    for slot in body.slots {
-        let candidates = match slot.parameter_ordinal {
-            some(parameter) => copy_candidate_set(
-                parameter_inputs.get(callable_index).unwrap().get(
-                    parameter).unwrap()),
-            none => empty_candidate_set(callable_count)
-        }
-        seed.push(candidates)
-    }
-    reachable.set(body.entry_block, true)
-    entries.set(body.entry_block, seed)
-    let exact_rank_budget = body.blocks.len() *
-        (body.slots.len() * callable_count + 1)
-    let mut promotions = 1
-    let mut changed = true
-    while changed {
-        changed = false
-        let mut block_index = 0
-        while block_index < body.blocks.len() {
-            if reachable.get(block_index).unwrap() {
-                let block = body.blocks.get(block_index).unwrap()
-                let state = copy_candidate_state(
-                    entries.get(block_index).unwrap())
-                for event in block.events {
-                    if propagate_call_arguments(
-                            event, state, callables,
-                            global_parameter_inputs) {
-                        changed = true
-                    }
-                    apply_event_candidate_state(
-                        event, body, callable_results, callable_count, state)
-                }
-                if block.terminator_kind == 3 &&
-                   planner_type_is_callable(
-                        type_nodes,
-                        callables.get(callable_index).unwrap().result_type_index) {
-                    for usage in block.terminator_uses {
-                        let previous = global_results.get(callable_index).unwrap()
-                        let joined = join_candidate_sets(
-                            previous, state.get(usage.slot).unwrap())
-                        if !candidate_sets_same(previous, joined) {
-                            global_results.set(callable_index, joined)
-                            changed = true
-                        }
-                    }
-                }
-                for edge in block.edges {
-                    match edge.target_block {
-                        some(target) => {
-                            let edge_state = copy_candidate_state(state)
-                            apply_candidate_edge_cleanup(
-                                edge, body, callable_count, edge_state)
-                            if !reachable.get(target).unwrap() {
-                                reachable.set(target, true)
-                                entries.set(target, edge_state)
-                                promotions = promotions + 1
-                                changed = true
-                            } else {
-                                let previous = entries.get(target).unwrap()
-                                let joined = join_candidate_states(
-                                    previous, edge_state)
-                                if !candidate_states_same(previous, joined) {
-                                    entries.set(target, joined)
-                                    promotions = promotions + 1
-                                    changed = true
-                                }
-                            }
-                            if promotions > exact_rank_budget {
-                                panic("ResourcePlanner: callable-slot CFG exceeded rank budget")
-                            }
-                        },
-                        none => {}
-                    }
-                }
-            }
-            block_index = block_index + 1
-        }
-    }
-    CandidateBodySolution { reachable: reachable, entry_states: entries }
-}
-
-fn initialize_candidate_parameter_table(
-    callables: List<PlannerCallable>
-) -> List<List<List<Bool>>> {
-    let mut result: List<List<List<Bool>>> = []
-    for callable in callables {
-        let mut row: List<List<Bool>> = []
-        for _ in callable.parameter_type_indices {
-            row.push(empty_candidate_set(callables.len()))
-        }
-        result.push(row)
-    }
-    result
-}
-
-fn initialize_candidate_result_table(
-    callables: List<PlannerCallable>
-) -> List<List<Bool>> {
-    let mut result: List<List<Bool>> = []
-    for _ in callables { result.push(empty_candidate_set(callables.len())) }
-    result
-}
-
-fn seed_contract_only_callable_results(
-    callables: List<PlannerCallable>, type_nodes: List<PlannerTypeNode>,
-    parameter_inputs: List<List<List<Bool>>>,
-    mut results: List<List<Bool>>
-) -> Bool {
-    let mut changed = false
-    let mut callable_index = 0
-    while callable_index < callables.len() {
-        let callable = callables.get(callable_index).unwrap()
-        if !callable.has_body && planner_type_is_callable(
-                type_nodes, callable.result_type_index) {
-            let mut joined = copy_candidate_set(
-                results.get(callable_index).unwrap())
-            for parameter in callable.result_origin_parameter_ordinals {
-                joined = join_candidate_sets(
-                    joined,
-                    parameter_inputs.get(callable_index).unwrap().get(
-                        parameter).unwrap())
-            }
-            if !candidate_sets_same(
-                    results.get(callable_index).unwrap(), joined) {
-                results.set(callable_index, joined)
-                changed = true
-            }
-        }
-        callable_index = callable_index + 1
-    }
-    changed
-}
-
-struct CallableCandidateFixedPoint {
-    parameter_inputs: List<List<List<Bool>>>,
-    results: List<List<Bool>>
-}
-
-fn solve_callable_candidates(
-    type_nodes: List<PlannerTypeNode>,
-    callables: List<PlannerCallable>, bodies: List<PlannerBody>
-) -> CallableCandidateFixedPoint {
-    let parameter_inputs = initialize_candidate_parameter_table(callables)
-    let results = initialize_candidate_result_table(callables)
-    let mut rank_capacity = callables.len() * callables.len()
-    for callable in callables {
-        rank_capacity = rank_capacity +
-            callable.parameter_type_indices.len() * callables.len()
-    }
-    let mut iterations = 0
-    let mut changed = true
-    while changed {
-        changed = seed_contract_only_callable_results(
-            callables, type_nodes, parameter_inputs, results)
-        let mut callable_index = 0
-        while callable_index < callables.len() {
-            let callable = callables.get(callable_index).unwrap()
-            if callable.has_body {
-                let body = match planner_body_for_reference(
-                        bodies, callable.reference) {
-                    some(value) => value,
-                    none => panic("ResourcePlanner: candidate solve body is absent")
-                }
-                let before_inputs = parameter_inputs.map(fn(row) {
-                    row.map(fn(bits) { copy_candidate_set(bits) })
-                })
-                let before_results = results.map(fn(bits) {
-                    copy_candidate_set(bits)
-                })
-                let _ = solve_candidate_body(
-                    body, callable_index, type_nodes, callables,
-                    parameter_inputs, results, parameter_inputs, results)
-                let mut row_index = 0
-                while row_index < parameter_inputs.len() {
-                    let mut parameter = 0
-                    while parameter < parameter_inputs.get(row_index).unwrap().len() {
-                        if !candidate_sets_same(
-                                before_inputs.get(row_index).unwrap().get(parameter).unwrap(),
-                                parameter_inputs.get(row_index).unwrap().get(parameter).unwrap()) {
-                            changed = true
-                        }
-                        parameter = parameter + 1
-                    }
-                    if !candidate_sets_same(
-                            before_results.get(row_index).unwrap(),
-                            results.get(row_index).unwrap()) {
-                        changed = true
-                    }
-                    row_index = row_index + 1
-                }
-            }
-            callable_index = callable_index + 1
-        }
-        if changed {
-            iterations = iterations + 1
-            if iterations > rank_capacity + 1 {
-                panic("ResourcePlanner: callable candidate LFP exceeded finite rank budget")
-            }
-        }
-    }
-    CallableCandidateFixedPoint {
-        parameter_inputs: parameter_inputs, results: results
-    }
 }
 
 fn replace_call_candidates(
@@ -3524,65 +3084,573 @@ fn replace_call_candidates(
     }
 }
 
-fn resolve_body_call_candidates(
-    body: PlannerBody, callable_index: Int,
-    type_nodes: List<PlannerTypeNode>, callables: List<PlannerCallable>,
-    fixed: CallableCandidateFixedPoint
-) -> PlannerBody {
-    let scratch_inputs = fixed.parameter_inputs.map(fn(row) {
-        row.map(fn(bits) { copy_candidate_set(bits) })
-    })
-    let scratch_results = fixed.results.map(fn(bits) {
-        copy_candidate_set(bits)
-    })
-    let solution = solve_candidate_body(
-        body, callable_index, type_nodes, callables,
-        fixed.parameter_inputs, fixed.results,
-        scratch_inputs, scratch_results)
-    let mut blocks: List<PlannerBlock> = []
-    let mut block_index = 0
-    while block_index < body.blocks.len() {
-        let block = body.blocks.get(block_index).unwrap()
-        let state = copy_candidate_state(
-            solution.entry_states.get(block_index).unwrap())
-        let mut events: List<PlannerEvent> = []
-        for event in block.events {
-            let resolved = match event.value {
-                PlannerEventValue::CallValue { call_target, .. } => {
-                    let candidates = call_target_candidates(
-                        call_target, state, callables.len())
-                    if candidate_set_is_empty(candidates) {
-                        panic("ResourcePlanner: callable slot has no candidate at required call")
-                    }
-                    replace_call_candidates(
-                        event, candidate_set_indices(candidates))
-                },
-                _ => copy_planner_event(event)
-            }
-            events.push(resolved)
-            apply_event_candidate_state(
-                resolved, body, fixed.results, callables.len(), state)
-        }
-        blocks.push(make_planner_block(
-            block.terminator_kind, events,
-            block.terminator_uses, block.edges))
-        block_index = block_index + 1
-    }
-    make_planner_body(
-        body.reference, body.scopes, body.slots,
-        body.entry_block, blocks)
+struct CandidateProofGraph {
+    callable_count: Int,
+    cells: List<CandidateCellSpec>,
+    rules: List<CandidateRule>
 }
 
-fn close_callable_candidate_lfp(
-    type_nodes: List<PlannerTypeNode>,
+fn candidate_cell_index(
+    cells: List<CandidateCellSpec>, kind: CandidateCellKind,
+    owner: Int, block: Int, boundary: Int,
+    component: Int, candidate: Int
+) -> Int {
+    let mut index = 0
+    while index < cells.len() {
+        let cell = cells.get(index).unwrap()
+        if candidate_cell_kind_tag(candidate_cell_spec_kind(cell)) ==
+               candidate_cell_kind_tag(kind) &&
+           candidate_cell_spec_owner(cell) == owner &&
+           candidate_cell_spec_block(cell) == block &&
+           candidate_cell_spec_boundary(cell) == boundary &&
+           candidate_cell_spec_component(cell) == component &&
+           candidate_cell_spec_candidate(cell) == candidate {
+            return index
+        }
+        index = index + 1
+    }
+    panic("ResourcePlanner: callable-candidate proof cell is absent")
+}
+
+fn add_candidate_rule(
+    mut rules: List<CandidateRule>, kind: CandidateRuleKind,
+    site: CandidateRuleSite, target: Int, premises: List<Int>
+) {
+    rules.push(make_candidate_rule(kind, site, target, premises))
+}
+
+fn add_candidate_conjunction_rule(
+    mut rules: List<CandidateRule>, site: CandidateRuleSite,
+    target: Int, left: Int, right: Int
+) {
+    if left == right {
+        add_candidate_rule(
+            rules, candidate_rule_copy(), site, target, [left])
+    } else {
+        add_candidate_rule(
+            rules, candidate_rule_all(), site, target, [left, right])
+    }
+}
+
+fn event_candidate_slot_overwritten(
+    event: PlannerEvent, body: PlannerBody, slot: Int
+) -> Bool {
+    for fact in event.callable_provenance {
+        if fact.target == slot { return true }
+    }
+    match event.value {
+        PlannerEventValue::InitializeEmptyValue(target) |
+        PlannerEventValue::InitializeLiveValue(target) |
+        PlannerEventValue::ConsumeValue(target, _) |
+        PlannerEventValue::DiscardValue(target) => target == slot,
+        PlannerEventValue::ScopeExitValue(scope_id) =>
+            body.slots.get(slot).unwrap().scope_id == scope_id,
+        PlannerEventValue::AssignValue { rhs_temp, .. } => rhs_temp == slot,
+        _ => false
+    }
+}
+
+fn add_candidate_provenance_rules(
+    graph: CandidateProofGraph, body_index: Int, block_index: Int,
+    boundary: Int, event: PlannerEvent,
     callables: List<PlannerCallable>, bodies: List<PlannerBody>
+) {
+    let site = make_instruction_candidate_rule_site(
+        make_flow_instruction_ref(
+            bodies.get(body_index).unwrap().reference,
+            block_index, boundary))
+    for fact in event.callable_provenance {
+        let mut candidate = 0
+        while candidate < graph.callable_count {
+            let target = candidate_cell_index(
+                graph.cells, candidate_cell_state(), body_index,
+                block_index, boundary + 1, fact.target, candidate)
+            match fact.origin {
+                PlannerCallableOriginValue::DirectCallableOriginValue(direct) =>
+                    if direct == candidate {
+                        add_candidate_rule(
+                            graph.rules, candidate_rule_seed(), site,
+                            target, [])
+                    },
+                PlannerCallableOriginValue::SlotCallableOriginValue(sources) =>
+                    { for source in sources {
+                        add_candidate_rule(
+                            graph.rules, candidate_rule_copy(), site, target,
+                            [candidate_cell_index(
+                                graph.cells, candidate_cell_state(), body_index,
+                                block_index, boundary, source, candidate)])
+                    } },
+                PlannerCallableOriginValue::CallCallableOriginValue {
+                    target: call_target, arguments: _
+                } => {
+                    let mut callee = 0
+                    while callee < graph.callable_count {
+                        let result_cell = candidate_cell_index(
+                            graph.cells, candidate_cell_result(), callee,
+                            0, 0, 0, candidate)
+                        if planner_call_target_is_direct(call_target) {
+                            if planner_call_target_direct(call_target) == callee {
+                                add_candidate_rule(
+                                    graph.rules, candidate_rule_copy(), site,
+                                    target, [result_cell])
+                            }
+                        } else {
+                            add_candidate_conjunction_rule(
+                                graph.rules, site, target,
+                                candidate_cell_index(
+                                    graph.cells, candidate_cell_state(),
+                                    body_index, block_index, boundary,
+                                    planner_call_target_slot(call_target), callee),
+                                result_cell)
+                        }
+                        callee = callee + 1
+                    }
+                }
+            }
+            match event.value {
+                PlannerEventValue::CallValue {
+                    argument_slots, result_origin_argument_ordinals, ..
+                } => { for ordinal in result_origin_argument_ordinals {
+                    add_candidate_rule(
+                        graph.rules, candidate_rule_copy(), site, target,
+                        [candidate_cell_index(
+                            graph.cells, candidate_cell_state(), body_index,
+                            block_index, boundary,
+                            argument_slots.get(ordinal).unwrap(), candidate)])
+                } },
+                _ => {}
+            }
+            candidate = candidate + 1
+        }
+    }
+}
+
+fn add_candidate_call_argument_rules(
+    graph: CandidateProofGraph, body_index: Int, block_index: Int,
+    boundary: Int, event: PlannerEvent,
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>
+) {
+    match event.value {
+        PlannerEventValue::CallValue {
+            call_target, argument_slots, ..
+        } => {
+            let site = make_instruction_candidate_rule_site(
+                make_flow_instruction_ref(
+                    bodies.get(body_index).unwrap().reference,
+                    block_index, boundary))
+            let mut callee = 0
+            while callee < graph.callable_count {
+                let parameter_count = callables.get(
+                    callee).unwrap().parameter_type_indices.len()
+                if parameter_count != argument_slots.len() {
+                    callee = callee + 1
+                    continue
+                }
+                let mut parameter = 0
+                while parameter < parameter_count {
+                    let mut candidate = 0
+                    while candidate < graph.callable_count {
+                        let target = candidate_cell_index(
+                            graph.cells, candidate_cell_parameter(), callee,
+                            0, 0, parameter, candidate)
+                        let argument_cell = candidate_cell_index(
+                            graph.cells, candidate_cell_state(), body_index,
+                            block_index, boundary,
+                            argument_slots.get(parameter).unwrap(), candidate)
+                        if planner_call_target_is_direct(call_target) {
+                            if planner_call_target_direct(call_target) == callee {
+                                add_candidate_rule(
+                                    graph.rules, candidate_rule_copy(), site,
+                                    target, [argument_cell])
+                            }
+                        } else {
+                            add_candidate_conjunction_rule(
+                                graph.rules, site, target,
+                                candidate_cell_index(
+                                    graph.cells, candidate_cell_state(),
+                                    body_index, block_index, boundary,
+                                    planner_call_target_slot(call_target), callee),
+                                argument_cell)
+                        }
+                        candidate = candidate + 1
+                    }
+                    parameter = parameter + 1
+                }
+                callee = callee + 1
+            }
+        },
+        _ => {}
+    }
+}
+
+fn build_candidate_proof_graph(
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>
+) -> CandidateProofGraph {
+    let mut cells: List<CandidateCellSpec> = []
+    let rules: List<CandidateRule> = []
+    let callable_count = callables.len()
+    let mut callable_index = 0
+    while callable_index < callable_count {
+        let callable = callables.get(callable_index).unwrap()
+        let mut parameter = 0
+        while parameter < callable.parameter_type_indices.len() {
+            let mut candidate = 0
+            while candidate < callable_count {
+                cells.push(make_candidate_cell_spec(
+                    candidate_cell_parameter(), callable_index,
+                    0, 0, parameter, candidate))
+                candidate = candidate + 1
+            }
+            parameter = parameter + 1
+        }
+        let mut candidate = 0
+        while candidate < callable_count {
+            cells.push(make_candidate_cell_spec(
+                candidate_cell_result(), callable_index,
+                0, 0, 0, candidate))
+            candidate = candidate + 1
+        }
+        callable_index = callable_index + 1
+    }
+    let mut body_index = 0
+    while body_index < bodies.len() {
+        let body = bodies.get(body_index).unwrap()
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            let mut boundary = 0
+            while boundary <= block.events.len() {
+                let mut slot = 0
+                while slot < body.slots.len() {
+                    let mut candidate = 0
+                    while candidate < callable_count {
+                        cells.push(make_candidate_cell_spec(
+                            candidate_cell_state(), body_index,
+                            block_index, boundary, slot, candidate))
+                        candidate = candidate + 1
+                    }
+                    slot = slot + 1
+                }
+                boundary = boundary + 1
+            }
+            block_index = block_index + 1
+        }
+        body_index = body_index + 1
+    }
+    let graph = CandidateProofGraph {
+        callable_count: callable_count, cells: cells, rules: rules
+    }
+    // ContractOnly callable result aliases are global copy rules.
+    callable_index = 0
+    while callable_index < callable_count {
+        let callable = callables.get(callable_index).unwrap()
+        if !callable.has_body {
+            for parameter in callable.result_origin_parameter_ordinals {
+                let mut candidate = 0
+                while candidate < callable_count {
+                    add_candidate_rule(
+                        graph.rules, candidate_rule_copy(),
+                        make_global_candidate_rule_site(),
+                        candidate_cell_index(
+                            graph.cells, candidate_cell_result(),
+                            callable_index, 0, 0, 0, candidate),
+                        [candidate_cell_index(
+                            graph.cells, candidate_cell_parameter(),
+                            callable_index, 0, 0, parameter, candidate)])
+                    candidate = candidate + 1
+                }
+            }
+        }
+        callable_index = callable_index + 1
+    }
+    body_index = 0
+    while body_index < bodies.len() {
+        let body = bodies.get(body_index).unwrap()
+        let callable = flow_callable_index_for_planner(
+            callables, body.reference)
+        // Entry parameter cells.
+        let mut slot_index = 0
+        while slot_index < body.slots.len() {
+            match body.slots.get(slot_index).unwrap().parameter_ordinal {
+                some(parameter) => {
+                    let mut candidate = 0
+                    while candidate < callable_count {
+                        add_candidate_rule(
+                            graph.rules, candidate_rule_copy(),
+                            make_global_candidate_rule_site(),
+                            candidate_cell_index(
+                                graph.cells, candidate_cell_state(), body_index,
+                                body.entry_block, 0, slot_index, candidate),
+                            [candidate_cell_index(
+                                graph.cells, candidate_cell_parameter(),
+                                callable, 0, 0, parameter, candidate)])
+                        candidate = candidate + 1
+                    }
+                },
+                none => {}
+            }
+            slot_index = slot_index + 1
+        }
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            let mut boundary = 0
+            while boundary < block.events.len() {
+                let event = block.events.get(boundary).unwrap()
+                let site = make_instruction_candidate_rule_site(
+                    make_flow_instruction_ref(
+                        body.reference, block_index, boundary))
+                let mut slot = 0
+                while slot < body.slots.len() {
+                    if !event_candidate_slot_overwritten(event, body, slot) {
+                        let mut candidate = 0
+                        while candidate < callable_count {
+                            add_candidate_rule(
+                                graph.rules, candidate_rule_copy(), site,
+                                candidate_cell_index(
+                                    graph.cells, candidate_cell_state(),
+                                    body_index, block_index, boundary + 1,
+                                    slot, candidate),
+                                [candidate_cell_index(
+                                    graph.cells, candidate_cell_state(),
+                                    body_index, block_index, boundary,
+                                    slot, candidate)])
+                            candidate = candidate + 1
+                        }
+                    }
+                    slot = slot + 1
+                }
+                add_candidate_provenance_rules(
+                    graph, body_index, block_index, boundary,
+                    event, callables, bodies)
+                add_candidate_call_argument_rules(
+                    graph, body_index, block_index, boundary,
+                    event, callables, bodies)
+                boundary = boundary + 1
+            }
+            let end_boundary = block.events.len()
+            if block.terminator_kind == 3 {
+                for usage in block.terminator_uses {
+                    let mut candidate = 0
+                    while candidate < callable_count {
+                        add_candidate_rule(
+                            graph.rules, candidate_rule_copy(),
+                            make_terminator_candidate_rule_site(
+                                make_flow_block_ref(body.reference, block_index)),
+                            candidate_cell_index(
+                                graph.cells, candidate_cell_result(),
+                                callable, 0, 0, 0, candidate),
+                            [candidate_cell_index(
+                                graph.cells, candidate_cell_state(), body_index,
+                                block_index, end_boundary,
+                                usage.slot, candidate)])
+                        candidate = candidate + 1
+                    }
+                }
+            }
+            let mut edge_index = 0
+            while edge_index < block.edges.len() {
+                let edge = block.edges.get(edge_index).unwrap()
+                match edge.target_block {
+                    some(target_block) => {
+                        let mut slot = 0
+                        while slot < body.slots.len() {
+                            if !int_list_contains(
+                                    edge.exited_scope_ids,
+                                    body.slots.get(slot).unwrap().scope_id) {
+                                let mut candidate = 0
+                                while candidate < callable_count {
+                                    add_candidate_rule(
+                                        graph.rules, candidate_rule_copy(),
+                                        make_edge_candidate_rule_site(
+                                            make_flow_block_ref(
+                                                body.reference, block_index),
+                                            edge_index),
+                                        candidate_cell_index(
+                                            graph.cells, candidate_cell_state(),
+                                            body_index, target_block, 0,
+                                            slot, candidate),
+                                        [candidate_cell_index(
+                                            graph.cells, candidate_cell_state(),
+                                            body_index, block_index,
+                                            end_boundary, slot, candidate)])
+                                    candidate = candidate + 1
+                                }
+                            }
+                            slot = slot + 1
+                        }
+                    },
+                    none => {}
+                }
+                edge_index = edge_index + 1
+            }
+            block_index = block_index + 1
+        }
+        body_index = body_index + 1
+    }
+    graph
+}
+
+fn candidate_rule_is_enabled(
+    rule: CandidateRule, values: List<Bool>
+) -> Bool {
+    if candidate_rule_kind_tag(candidate_rule_kind(rule)) ==
+       candidate_rule_kind_tag(candidate_rule_seed()) {
+        return true
+    }
+    for premise in candidate_rule_premise_cells(rule) {
+        if !values.get(premise).unwrap() { return false }
+    }
+    true
+}
+
+fn solve_candidate_proof_graph(
+    graph: CandidateProofGraph
+) -> CallableCandidateProof {
+    let mut values: List<Bool> = []
+    for _ in graph.cells { values.push(false) }
+    let mut promotions: List<CandidatePromotion> = []
+    let mut changed = true
+    while changed {
+        changed = false
+        let mut rule_index = 0
+        while rule_index < graph.rules.len() {
+            let rule = graph.rules.get(rule_index).unwrap()
+            let target = candidate_rule_target_cell(rule)
+            if !values.get(target).unwrap() &&
+               candidate_rule_is_enabled(rule, values) {
+                let mut premises: List<Bool> = []
+                for premise in candidate_rule_premise_cells(rule) {
+                    premises.push(values.get(premise).unwrap())
+                }
+                promotions.push(make_candidate_promotion(
+                    rule_index, target, premises))
+                values.set(target, true)
+                changed = true
+                if promotions.len() > graph.cells.len() {
+                    panic("ResourcePlanner: candidate proof exceeds strict rank budget")
+                }
+            }
+            rule_index = rule_index + 1
+        }
+    }
+    make_callable_candidate_proof(
+        graph.callable_count, graph.cells, graph.rules,
+        promotions, values, [])
+}
+
+fn proof_state_candidate_set(
+    proof: CallableCandidateProof, body: Int, block: Int,
+    boundary: Int, slot: Int
+) -> List<Bool> {
+    let cells = callable_candidate_proof_cells(proof)
+    let values = callable_candidate_proof_final_values(proof)
+    let mut result = empty_candidate_set(
+        callable_candidate_proof_callable_count(proof))
+    let mut candidate = 0
+    while candidate < result.len() {
+        let cell = candidate_cell_index(
+            cells, candidate_cell_state(), body,
+            block, boundary, slot, candidate)
+        result.set(candidate, values.get(cell).unwrap())
+        candidate = candidate + 1
+    }
+    result
+}
+
+fn derive_candidate_selections(
+    proof: CallableCandidateProof, bodies: List<PlannerBody>
+) -> List<CandidateSelection> {
+    let mut result: List<CandidateSelection> = []
+    let mut body_index = 0
+    while body_index < bodies.len() {
+        let body = bodies.get(body_index).unwrap()
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            let mut boundary = 0
+            while boundary < block.events.len() {
+                match block.events.get(boundary).unwrap().value {
+                    PlannerEventValue::CallValue { call_target, .. } => {
+                        let candidates = if planner_call_target_is_direct(
+                                call_target) {
+                            [planner_call_target_direct(call_target)]
+                        } else {
+                            candidate_set_indices(proof_state_candidate_set(
+                                proof, body_index, block_index, boundary,
+                                planner_call_target_slot(call_target)))
+                        }
+                        result.push(make_candidate_selection(
+                            make_flow_instruction_ref(
+                                body.reference, block_index, boundary),
+                            candidates))
+                    },
+                    _ => {}
+                }
+                boundary = boundary + 1
+            }
+            block_index = block_index + 1
+        }
+        body_index = body_index + 1
+    }
+    result
+}
+
+fn with_candidate_selections(
+    value: CallableCandidateProof, selections: List<CandidateSelection>
+) -> CallableCandidateProof {
+    make_callable_candidate_proof(
+        callable_candidate_proof_callable_count(value),
+        callable_candidate_proof_cells(value),
+        callable_candidate_proof_rules(value),
+        callable_candidate_proof_promotions(value),
+        callable_candidate_proof_final_values(value), selections)
+}
+
+fn resolve_bodies_from_candidate_proof(
+    proof: CallableCandidateProof, bodies: List<PlannerBody>
 ) -> List<PlannerBody> {
-    let fixed = solve_callable_candidates(type_nodes, callables, bodies)
     let mut result: List<PlannerBody> = []
-    for body in bodies {
-        result.push(resolve_body_call_candidates(
-            body, flow_callable_index_for_planner(callables, body.reference),
-            type_nodes, callables, fixed))
+    let mut body_index = 0
+    while body_index < bodies.len() {
+        let body = bodies.get(body_index).unwrap()
+        let mut blocks: List<PlannerBlock> = []
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            let mut events: List<PlannerEvent> = []
+            let mut boundary = 0
+            while boundary < block.events.len() {
+                let event = block.events.get(boundary).unwrap()
+                let resolved = match event.value {
+                    PlannerEventValue::CallValue { call_target, .. } => {
+                        let candidates = if planner_call_target_is_direct(
+                                call_target) {
+                            [planner_call_target_direct(call_target)]
+                        } else {
+                            candidate_set_indices(proof_state_candidate_set(
+                                proof, body_index, block_index, boundary,
+                                planner_call_target_slot(call_target)))
+                        }
+                        if candidates.len() == 0 {
+                            panic("ResourcePlanner: certified required call is empty")
+                        }
+                        replace_call_candidates(event, candidates)
+                    },
+                    _ => copy_planner_event(event)
+                }
+                events.push(resolved)
+                boundary = boundary + 1
+            }
+            blocks.push(make_planner_block(
+                block.terminator_kind, events,
+                block.terminator_uses, block.edges))
+            block_index = block_index + 1
+        }
+        result.push(make_planner_body(
+            body.reference, body.scopes, body.slots,
+            body.entry_block, blocks))
+        body_index = body_index + 1
     }
     result
 }
@@ -4969,13 +5037,19 @@ fn make_frozen_planner_input_from_flow(
         bodies.push(planner_body_from_flow(
             body, flow_types, flow_callables))
     }
-    let candidate_closed_bodies = close_callable_candidate_lfp(
-        types, callables, bodies)
+    let candidate_graph = build_candidate_proof_graph(callables, bodies)
+    let candidate_base_proof = solve_candidate_proof_graph(candidate_graph)
+    let candidate_proof = with_candidate_selections(
+        candidate_base_proof,
+        derive_candidate_selections(candidate_base_proof, bodies))
+    let candidate_closed_bodies = resolve_bodies_from_candidate_proof(
+        candidate_proof, bodies)
     let closed_callables = close_callable_body_dataflow(
         callables, candidate_closed_bodies)
     make_frozen_planner_input(
         flow_topology_fingerprint_canonical(
             flow_program_topology_fingerprint(program)),
+        candidate_proof,
         types, closed_callables, candidate_closed_bodies)
 }
 
@@ -5079,7 +5153,8 @@ fn plan_resources(input: FrozenPlannerInput) -> PlannedResources {
         input.flow_fingerprint, input.type_nodes.len(),
         input.callables.len(), rc_bodies)
     let certificate = make_resource_certificate(
-        input.flow_fingerprint, solved.fixed_point, cfg_certificates)
+        input.flow_fingerprint, input.candidate_proof,
+        solved.fixed_point, cfg_certificates)
     verify_resource_certificate(rc_program, certificate)
     if rc_program_flow_fingerprint(rc_program) != input.flow_fingerprint {
         panic("ResourcePlanner: RcIR changed frozen FlowIR identity")
@@ -5150,6 +5225,103 @@ fn verify_fixed_graph_contract(
             panic("ResourcePlanner verifier: finite proof constraint graph drifted")
         }
         constraint_index = constraint_index + 1
+    }
+}
+
+fn candidate_rule_sites_same(
+    left: CandidateRuleSite, right: CandidateRuleSite
+) -> Bool {
+    if candidate_rule_site_kind_tag(left) !=
+       candidate_rule_site_kind_tag(right) {
+        return false
+    }
+    let tag = candidate_rule_site_kind_tag(left)
+    if tag == 0 { return true }
+    if tag == 1 {
+        return flow_instruction_ref_same(
+            candidate_rule_site_instruction(left),
+            candidate_rule_site_instruction(right))
+    }
+    if !flow_block_ref_same(
+            candidate_rule_site_block(left),
+            candidate_rule_site_block(right)) {
+        return false
+    }
+    tag == 2 || candidate_rule_site_successor_ordinal(left) ==
+        candidate_rule_site_successor_ordinal(right)
+}
+
+fn candidate_cells_same(
+    left: CandidateCellSpec, right: CandidateCellSpec
+) -> Bool {
+    candidate_cell_kind_tag(candidate_cell_spec_kind(left)) ==
+        candidate_cell_kind_tag(candidate_cell_spec_kind(right)) &&
+        candidate_cell_spec_owner(left) == candidate_cell_spec_owner(right) &&
+        candidate_cell_spec_block(left) == candidate_cell_spec_block(right) &&
+        candidate_cell_spec_boundary(left) ==
+            candidate_cell_spec_boundary(right) &&
+        candidate_cell_spec_component(left) ==
+            candidate_cell_spec_component(right) &&
+        candidate_cell_spec_candidate(left) ==
+            candidate_cell_spec_candidate(right)
+}
+
+fn verify_candidate_graph_contract(
+    input: FrozenPlannerInput, certificate: ResourceCertificate
+) {
+    let proof = resource_certificate_candidate_proof(certificate)
+    let expected = build_candidate_proof_graph(
+        input.callables, input.bodies)
+    let cells = callable_candidate_proof_cells(proof)
+    let rules = callable_candidate_proof_rules(proof)
+    if callable_candidate_proof_callable_count(proof) !=
+           expected.callable_count || cells.len() != expected.cells.len() ||
+       rules.len() != expected.rules.len() {
+        panic("ResourcePlanner verifier: callable-candidate graph census drifted")
+    }
+    let mut index = 0
+    while index < cells.len() {
+        if !candidate_cells_same(
+                cells.get(index).unwrap(), expected.cells.get(index).unwrap()) {
+            panic("ResourcePlanner verifier: callable-candidate cell drifted")
+        }
+        index = index + 1
+    }
+    index = 0
+    while index < rules.len() {
+        let actual = rules.get(index).unwrap()
+        let wanted = expected.rules.get(index).unwrap()
+        if candidate_rule_kind_tag(candidate_rule_kind(actual)) !=
+               candidate_rule_kind_tag(candidate_rule_kind(wanted)) ||
+           candidate_rule_target_cell(actual) !=
+               candidate_rule_target_cell(wanted) ||
+           !int_lists_same(
+                candidate_rule_premise_cells(actual),
+                candidate_rule_premise_cells(wanted)) ||
+           !candidate_rule_sites_same(
+                candidate_rule_site(actual), candidate_rule_site(wanted)) {
+            panic("ResourcePlanner verifier: callable-candidate rule drifted")
+        }
+        index = index + 1
+    }
+    let expected_selections = derive_candidate_selections(proof, input.bodies)
+    let actual_selections = callable_candidate_proof_selections(proof)
+    if expected_selections.len() != actual_selections.len() {
+        panic("ResourcePlanner verifier: call-site selection census drifted")
+    }
+    index = 0
+    while index < expected_selections.len() {
+        let actual = actual_selections.get(index).unwrap()
+        let wanted = expected_selections.get(index).unwrap()
+        if !flow_instruction_ref_same(
+                candidate_selection_instruction(actual),
+                candidate_selection_instruction(wanted)) ||
+           !int_lists_same(
+                candidate_selection_candidates(actual),
+                candidate_selection_candidates(wanted)) {
+            panic("ResourcePlanner verifier: certified call-site selection drifted")
+        }
+        index = index + 1
     }
 }
 
@@ -5515,15 +5687,15 @@ pub fn verify_and_plan_resource_program(
     validate_flow_program(program)
     let planning_input = make_frozen_planner_input_from_flow(program)
     let planned = plan_resources(planning_input)
-    // Rebuild independently from the immutable FlowProgram rather than trust
-    // the planner's adapter snapshot or certificate-supplied graph.
-    let verification_input = make_frozen_planner_input_from_flow(program)
-    verify_fixed_graph_contract(verification_input, planned.certificate)
+    // Rebuild rule graphs from the typed adapter facts, but never rerun either
+    // fixed-point solver. Ranked certificate promotions prove both solutions.
+    verify_candidate_graph_contract(planning_input, planned.certificate)
+    verify_fixed_graph_contract(planning_input, planned.certificate)
     verify_rc_topology_contract(
-        verification_input, planned.rc_program, planned.certificate)
+        planning_input, planned.rc_program, planned.certificate)
     verify_resource_certificate(planned.rc_program, planned.certificate)
     VerifiedResourceProgram {
-        flow_fingerprint: verification_input.flow_fingerprint,
+        flow_fingerprint: planning_input.flow_fingerprint,
         rc_program: planned.rc_program,
         certificate: planned.certificate
     }
