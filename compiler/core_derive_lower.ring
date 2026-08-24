@@ -716,16 +716,12 @@ pub struct CoreDerivedOrdPlan {
     target_type: CoreTypeRef,
     int_type: CoreTypeRef,
     bool_type: CoreTypeRef,
-    zero_test: CoreDerivedCallPlan,
-    discriminator_cmp: CoreDerivedCallPlan,
     value: CoreDerivedOrdShapeValue
 }
 
 pub fn make_core_derived_struct_ord_plan(
     header: CoreDerivedHeader, owner: RegisteredNominalRef,
     target_type: CoreTypeRef, int_type: CoreTypeRef, bool_type: CoreTypeRef,
-    zero_test: CoreDerivedCallPlan,
-    discriminator_cmp: CoreDerivedCallPlan,
     fields: List<CoreDerivedOrdFieldPlan>
 ) -> CoreDerivedOrdPlan {
     if header.other_slot.is_none() ||
@@ -733,9 +729,7 @@ pub fn make_core_derived_struct_ord_plan(
        !core_type_ref_same(
             binder_type(header.binders, header.self_slot), target_type) ||
        !core_type_ref_same(
-            binder_type(header.binders, header.other_slot.unwrap()), target_type) ||
-       !core_type_ref_same(zero_test.result_type, bool_type) ||
-       !core_type_ref_same(discriminator_cmp.result_type, int_type) {
+            binder_type(header.binders, header.other_slot.unwrap()), target_type) {
         panic("Core derive Ord: header/call result type differs")
     }
     for field in fields {
@@ -749,7 +743,6 @@ pub fn make_core_derived_struct_ord_plan(
     CoreDerivedOrdPlan {
         header: header, owner: owner, target_type: target_type,
         int_type: int_type, bool_type: bool_type,
-        zero_test: zero_test, discriminator_cmp: discriminator_cmp,
         value: CoreDerivedOrdShapeValue::StructOrd(copy_ord_fields(fields))
     }
 }
@@ -757,8 +750,6 @@ pub fn make_core_derived_struct_ord_plan(
 pub fn make_core_derived_enum_ord_plan(
     header: CoreDerivedHeader, owner: RegisteredNominalRef,
     target_type: CoreTypeRef, int_type: CoreTypeRef, bool_type: CoreTypeRef,
-    zero_test: CoreDerivedCallPlan,
-    discriminator_cmp: CoreDerivedCallPlan,
     variants: List<CoreDerivedOrdVariantPlan>
 ) -> CoreDerivedOrdPlan {
     if variants.len() == 0 || header.other_slot.is_none() ||
@@ -766,9 +757,7 @@ pub fn make_core_derived_enum_ord_plan(
        !core_type_ref_same(
             binder_type(header.binders, header.self_slot), target_type) ||
        !core_type_ref_same(
-            binder_type(header.binders, header.other_slot.unwrap()), target_type) ||
-       !core_type_ref_same(zero_test.result_type, bool_type) ||
-       !core_type_ref_same(discriminator_cmp.result_type, int_type) {
+            binder_type(header.binders, header.other_slot.unwrap()), target_type) {
         panic("Core derive Ord: enum header/call result type differs")
     }
     let mut exact_variants: List<CoreDerivedVariantPlan> = []
@@ -791,7 +780,6 @@ pub fn make_core_derived_enum_ord_plan(
     CoreDerivedOrdPlan {
         header: header, owner: owner, target_type: target_type,
         int_type: int_type, bool_type: bool_type,
-        zero_test: zero_test, discriminator_cmp: discriminator_cmp,
         value: CoreDerivedOrdShapeValue::EnumOrd(copy_ord_variants(variants))
     }
 }
@@ -807,16 +795,33 @@ fn ord_fields(
     let compared = field_binary_call(field.field)
     let bind = make_core_bind_stmt(
         field.result_slot, compared, false, field.field.operation.origin)
-    let read_for_test = make_core_read_expr(
+    let read_for_lt = make_core_read_expr(
         plan.int_type, make_core_effect_set([]), origin, field.result_slot)
-    let is_zero = derived_call(plan.zero_test, [read_for_test])
+    let is_negative = make_core_primitive_expr(
+        plan.bool_type, make_core_effect_set([]), origin,
+        make_core_primitive_op(7), [
+            read_for_lt, int_literal(plan.int_type, 0, origin)
+        ])
+    let read_for_gt = make_core_read_expr(
+        plan.int_type, make_core_effect_set([]), origin, field.result_slot)
+    let is_positive = make_core_primitive_expr(
+        plan.bool_type, make_core_effect_set([]), origin,
+        make_core_primitive_op(9), [
+            read_for_gt, int_literal(plan.int_type, 0, origin)
+        ])
     let next = ord_fields(fields, index + 1, plan, origin)
-    let current = make_core_read_expr(
+    let negative_value = make_core_read_expr(
         plan.int_type, make_core_effect_set([]), origin, field.result_slot)
+    let positive_value = make_core_read_expr(
+        plan.int_type, make_core_effect_set([]), origin, field.result_slot)
+    let non_negative = make_core_if_expr(
+        plan.int_type, plan.header.result_effects, origin, is_positive,
+        make_core_block([], some(positive_value), origin),
+        make_core_block([], some(next), origin))
     let selected = make_core_if_expr(
-        plan.int_type, plan.header.result_effects, origin, is_zero,
-        make_core_block([], some(next), origin),
-        make_core_block([], some(current), origin))
+        plan.int_type, plan.header.result_effects, origin, is_negative,
+        make_core_block([], some(negative_value), origin),
+        make_core_block([], some(non_negative), origin))
     make_core_block_expr(
         plan.int_type, plan.header.result_effects, origin,
         make_core_block([bind], some(selected), origin))
@@ -826,10 +831,29 @@ fn discriminator_compare(
     left: Int, right: Int, plan: CoreDerivedOrdPlan,
     origin: OriginRef
 ) -> CoreExpr {
-    derived_call(plan.discriminator_cmp, [
-        int_literal(plan.int_type, left, origin),
-        int_literal(plan.int_type, right, origin)
-    ])
+    let is_less = make_core_primitive_expr(
+        plan.bool_type, make_core_effect_set([]), origin,
+        make_core_primitive_op(7), [
+            int_literal(plan.int_type, left, origin),
+            int_literal(plan.int_type, right, origin)
+        ])
+    let is_greater = make_core_primitive_expr(
+        plan.bool_type, make_core_effect_set([]), origin,
+        make_core_primitive_op(9), [
+            int_literal(plan.int_type, left, origin),
+            int_literal(plan.int_type, right, origin)
+        ])
+    let non_less = make_core_if_expr(
+        plan.int_type, plan.header.result_effects, origin, is_greater,
+        make_core_block([], some(
+            int_literal(plan.int_type, 1, origin)), origin),
+        make_core_block([], some(
+            int_literal(plan.int_type, 0, origin)), origin))
+    make_core_if_expr(
+        plan.int_type, plan.header.result_effects, origin, is_less,
+        make_core_block([], some(
+            int_literal(plan.int_type, 0 - 1, origin)), origin),
+        make_core_block([], some(non_less), origin))
 }
 
 fn derived_ord_expr(plan: CoreDerivedOrdPlan) -> CoreExpr {
