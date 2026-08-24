@@ -1,0 +1,2608 @@
+// Mechanical verified Core/Flow/RcIR -> legacy HIR bridge for the 0.1 C
+// cutover.  This module never invokes Core->Flow lowering or ResourcePlanner.
+// It accepts only the opaque result that retains the exact three verified
+// stages and relates every Rc site to the sole lowerer's Core node map.
+
+use ir_identity::{
+    OriginRef, SlotRef, CalleeRef, ImplOwnerRef, ImplMethodRef,
+    RegisteredNominalRef, VariantRef,
+    SymbolRef, PathRef,
+    origin_ref_same, slot_ref_same,
+    symbol_ref_canonical_payload, symbol_ref_same,
+    handled_effect_ref_symbol,
+    registered_nominal_ref_display_name, registered_nominal_ref_symbol,
+    nominal_field_ref_owner,
+    nominal_field_ref_name, nominal_field_ref_index,
+    variant_ref_owner, variant_ref_member,
+    variant_ref_same,
+    variant_field_ref_member, variant_field_ref_index,
+    impl_owner_ref_provider, impl_method_ref_member, impl_method_ref_name,
+    impl_owner_ref_same, impl_method_ref_same,
+    trait_method_ref_name, intrinsic_ref_symbol,
+    make_named_callee_ref,
+    path_ref_normalized_child_path
+}
+use ir_inventory::{
+    ExecutableRef, ExecutableKind,
+    executable_ref_same, executable_ref_is_named,
+    make_named_executable_ref,
+    executable_ref_named_symbol, executable_ref_anonymous_path,
+    executable_kind_same, executable_kind_fn,
+    executable_kind_impl_method, executable_kind_trait_default,
+    executable_kind_test,
+    executable_kind_const_initializer, executable_kind_lambda,
+    executable_kind_handler, executable_kind_default_specialization,
+    executable_kind_derived_impl,
+    executable_kind_dict_helper,
+    effect_operation_ref_effect, effect_operation_ref_member,
+    system_host_callable_executable
+}
+use ast::{
+    Span, Pattern, LiteralValue, BinOp, UnaryOp,
+    TypeParam, TypeBound, NamedPatternField, span_zero
+}
+use types::{Type, Effect, EffectRow, EMPTY_ROW, nominal_display_name, types_equal}
+use hir::{
+    HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HPatternBinding,
+    HEffectHandler, HLambdaCapture, HAssocType, HEnumVariant,
+    HEffectOp, HTraitMethod, TraitBound,
+    HFieldAccessKind, HNominalStructFieldInit, HStructFieldInit,
+    HResourceSite,
+    DictRef, MethodCallRef,
+    method_call_ref_is_intrinsic, method_call_ref_is_concrete,
+    method_call_ref_intrinsic, method_call_ref_impl,
+    method_call_ref_bound,
+    validate_hir_binder_def_ids,
+    make_h_instruction_resource_site, make_h_terminator_resource_site,
+    h_resource_reason_take, h_resource_reason_drop,
+    h_resource_reason_cleanup, h_resource_reason_drop_projected_old
+}
+use flow_ir::{
+    FlowProgram, FlowBody, FlowSemanticStepRef,
+    make_flow_instruction_step_ref, make_flow_terminator_step_ref,
+    flow_semantic_step_same, flow_semantic_step_is_instruction,
+    flow_semantic_step_instruction, flow_semantic_step_terminator,
+    flow_instruction_ref_owner, flow_instruction_ref_block_ordinal,
+    flow_instruction_ref_ordinal,
+    flow_block_ref_owner, flow_block_ref_ordinal,
+    flow_program_bodies, flow_program_topology_fingerprint,
+    flow_topology_fingerprint_canonical,
+    flow_body_reference
+}
+use core_hir::{
+    CoreProgram, CoreBodyEntry,
+    core_program_bodies, core_program_type_graph, core_program_callables,
+    core_program_impls,
+    core_body_entry_reference, core_body_entry_body
+}
+use core_expr::{
+    CoreBody, CoreBlock, CoreStmt, CoreExpr, CoreMatchArm,
+    CoreTypeRef, CoreEffectSet,
+    CorePattern, CorePatternField, CoreFieldRef, CoreFieldValue,
+    CoreCalleeRef, CoreEvidenceRef, CoreConstructorRef, CorePlaceRef,
+    CoreImplMetadata, CoreHandlerEntry, core_type_graph_count,
+    core_callable_reference,
+    core_body_reference, core_body_origin, core_body_block,
+    core_body_slots,
+    core_slot_reference, core_slot_type,
+    core_block_statements, core_block_tail,
+    core_stmt_kind_tag, core_stmt_origin, core_stmt_value,
+    core_stmt_target,
+    core_stmt_while_condition, core_stmt_while_body,
+    core_stmt_return_value,
+    core_expr_kind_tag, core_expr_origin, core_expr_result,
+    core_expr_type, core_expr_effects,
+    core_expr_literal, core_literal_kind_tag, core_literal_int,
+    core_literal_float, core_literal_str, core_literal_bool,
+    core_expr_read_source, core_expr_callable_executable,
+    core_expr_primitive_operation, core_primitive_op_tag,
+    core_expr_primitive_operands,
+    core_expr_call_callee, core_expr_call_arguments,
+    core_expr_call_evidence, core_expr_method_ref,
+    core_expr_method_receiver, core_expr_effect_operation,
+    core_expr_system_host, core_expr_dict_constructor,
+    core_expr_dict_project_dictionary, core_expr_dict_project_method,
+    core_expr_project_base, core_expr_project_field,
+    core_expr_constructor, core_expr_constructor_fields,
+    core_expr_lambda_executable, core_expr_lambda_captures,
+    core_capture_source, core_capture_target,
+    core_expr_block, core_expr_then_block, core_expr_else_block,
+    core_expr_condition, core_expr_scrutinee,
+    core_expr_match_arms, core_expr_try_body, core_expr_handle_body,
+    core_expr_error_slot, core_expr_handlers,
+    core_match_arm_pattern, core_match_arm_guard, core_match_arm_body,
+    core_pattern_kind_tag, core_pattern_type, core_pattern_binding,
+    core_pattern_literal, core_pattern_elements, core_pattern_fields,
+    core_pattern_struct_owner, core_pattern_variant,
+    core_pattern_field_ref, core_pattern_field_pattern,
+    core_field_ref_kind_tag, core_field_ref_nominal,
+    core_field_ref_variant, core_field_ref_tuple_index,
+    core_field_ref_record_path,
+    core_field_value_field, core_field_value_slot,
+    core_place_is_slot, core_place_slot, core_place_base,
+    core_place_field, core_place_evaluated_index, core_place_value_type,
+    core_constructor_kind_tag, core_constructor_struct_owner,
+    core_constructor_variant,
+    core_callee_ref, core_callee_kind_tag, core_callee_direct,
+    core_callee_local, core_callee_dynamic,
+    core_evidence_is_local, core_evidence_local, core_evidence_callable,
+    core_handler_operation, core_handler_executable,
+    core_handler_parameter_slots, core_handler_resume_slot,
+    core_impl_owner, core_impl_methods, core_impl_assoc_bindings,
+    core_assoc_binding_member
+}
+use flow_lower::{
+    CoreFlowNodeRef, CoreFlowStepMap, CoreFlowStepRelation, CoreFlowStepRole,
+    core_flow_step_map_node_count, core_flow_step_map_nodes,
+    core_flow_step_map_relations,
+    core_flow_step_node, core_flow_step, core_flow_step_role,
+    core_flow_step_role_ordinal,
+    core_flow_step_role_is_expr_primary,
+    core_flow_step_role_is_stmt_assign,
+    core_flow_step_role_is_control_dispatch,
+    core_flow_step_role_is_branch_merge,
+    core_flow_step_role_is_control_exit,
+    core_flow_step_role_is_body_return,
+    core_flow_node_owner, core_flow_node_ordinal,
+    core_flow_node_kind_tag, core_flow_node_origin,
+    core_flow_node_anchor_slot
+}
+use rc_ir::{
+    RcProgram, RcBody, RcBlock, RcStep, RcEdge, RcOperation,
+    rc_program_bodies, rc_body_reference, rc_body_blocks,
+    rc_block_source_ref, rc_block_steps, rc_block_before_terminator,
+    rc_block_edges, rc_step_instruction, rc_step_before, rc_step_after,
+    rc_edge_successor_ordinal, rc_edge_cleanup,
+    rc_operation_site,
+    rc_operation_kind, rc_operation_source, rc_operation_target,
+    rc_op_kind_same, rc_op_kind_clone, rc_op_kind_take,
+    rc_op_kind_drop, rc_op_kind_cleanup,
+    rc_semantic_site_is_instruction, rc_semantic_site_instruction,
+    rc_semantic_site_block, rc_semantic_site_successor_ordinal,
+    rc_semantic_site_operand_ordinal, rc_semantic_site_placement,
+    rc_site_placement_tag
+}
+use legacy_projection::{
+    LegacyProjectionTable, LegacyTypeProjection, LegacyEffectProjection,
+    LegacyBinderProjection, LegacyCallableProjection,
+    LegacyTypeParameterProjection, LegacyTraitBoundProjection,
+    LegacyImplProjection, LegacyAssocBindingProjection,
+    legacy_projection_core_type_count,
+    legacy_projection_type_for, legacy_projection_effect_for,
+    legacy_projection_binder_for, legacy_projection_callable_for,
+    legacy_projection_impl_for,
+    legacy_type_projection_type, legacy_effect_projection_row,
+    legacy_binder_projection_name, legacy_binder_projection_def_id,
+    legacy_binder_projection_type, legacy_binder_projection_is_mutable,
+    legacy_callable_reference, legacy_callable_kind,
+    legacy_callable_type_parameters, legacy_callable_bounds,
+    legacy_callable_parameters, legacy_callable_result_type,
+    legacy_callable_effects, legacy_callable_is_public,
+    legacy_type_parameter_name, legacy_type_parameter_bounds,
+    legacy_trait_bound_parameter_index, legacy_trait_bound_trait,
+    legacy_impl_owner, legacy_impl_target_type, legacy_impl_trait,
+    legacy_impl_target_nominal,
+    legacy_impl_type_parameters, legacy_impl_assoc_bindings,
+    legacy_impl_methods, legacy_impl_container,
+    legacy_container_is_module,
+    legacy_assoc_binding_member, legacy_assoc_binding_type
+}
+use resource_planner::{
+    VerifiedResourceProgram,
+    verified_resource_program_flow_fingerprint,
+    verified_resource_program_rc_ir
+}
+use ownership_pipeline::{
+    VerifiedOwnershipProgram,
+    verified_ownership_program_core,
+    verified_ownership_program_flow,
+    verified_ownership_program_resources,
+    verified_ownership_program_step_map
+}
+
+const BRIDGE_RC_BEFORE_INSTRUCTION: Int = 0
+const BRIDGE_RC_AFTER_INSTRUCTION: Int = 1
+const BRIDGE_RC_BEFORE_TERMINATOR: Int = 2
+const BRIDGE_RC_EDGE_CLEANUP: Int = 3
+
+pub struct BridgeRcEvent {
+    ordinal: Int,
+    node: CoreFlowNodeRef,
+    step: FlowSemanticStepRef,
+    role: CoreFlowStepRole,
+    placement: Int,
+    operand_ordinal: Int,
+    successor_ordinal: Int?,
+    operation: RcOperation
+}
+pub fn bridge_rc_event_ordinal(value: BridgeRcEvent) -> Int { value.ordinal }
+
+pub fn bridge_rc_event_node(value: BridgeRcEvent) -> CoreFlowNodeRef {
+    value.node
+}
+pub fn bridge_rc_event_step(value: BridgeRcEvent) -> FlowSemanticStepRef {
+    value.step
+}
+pub fn bridge_rc_event_role(value: BridgeRcEvent) -> CoreFlowStepRole {
+    value.role
+}
+pub fn bridge_rc_event_placement(value: BridgeRcEvent) -> Int {
+    value.placement
+}
+pub fn bridge_rc_event_operand_ordinal(value: BridgeRcEvent) -> Int {
+    value.operand_ordinal
+}
+pub fn bridge_rc_event_successor_ordinal(value: BridgeRcEvent) -> Int? {
+    value.successor_ordinal
+}
+pub fn bridge_rc_event_operation(value: BridgeRcEvent) -> RcOperation {
+    value.operation
+}
+
+struct VerifiedBridgeStages {
+    core: CoreProgram,
+    flow: FlowProgram,
+    resources: VerifiedResourceProgram,
+    rc: RcProgram,
+    step_map: CoreFlowStepMap,
+    events: List<BridgeRcEvent>
+}
+
+struct HirBridgeCtx {
+    shell: HProgram,
+    stages: VerifiedBridgeStages,
+    projection: LegacyProjectionTable,
+    next_node_ordinal: Int,
+    consumed_bodies: List<ExecutableRef>,
+    consumed_events: List<Int>
+}
+
+fn consume_event(mut ctx: HirBridgeCtx, value: BridgeRcEvent) {
+    if ctx.consumed_events.contains(value.ordinal) {
+        panic("RcHIR bridge: verified resource event serialized twice")
+    }
+    ctx.consumed_events.push(value.ordinal)
+}
+
+fn nominal_owner_in_decls_opt(
+    decls: List<HDecl>, symbol: SymbolRef
+) -> RegisteredNominalRef? {
+    let mut found: RegisteredNominalRef? = none
+    for decl in decls {
+        match decl {
+            HDecl::Struct { owner_ref, .. } |
+            HDecl::Enum { owner_ref, .. } => if symbol_ref_same(
+                registered_nominal_ref_symbol(owner_ref), symbol) {
+                if found.is_some() {
+                    panic("RcHIR bridge: nominal shell owner repeats")
+                }
+                found = some(owner_ref)
+            },
+            HDecl::ModBlock { decls: nested, .. } => {
+                let nested_owner = nominal_owner_in_decls_opt(nested, symbol)
+                match nested_owner {
+                    some(owner) => {
+                        if found.is_some() {
+                            panic("RcHIR bridge: nominal shell owner repeats")
+                        }
+                        found = some(owner)
+                    },
+                    none => {}
+                }
+            },
+            _ => {}
+        }
+    }
+    found
+}
+fn nominal_owner_in_decls(
+    decls: List<HDecl>, symbol: SymbolRef
+) -> RegisteredNominalRef {
+    match nominal_owner_in_decls_opt(decls, symbol) {
+        some(value) => value,
+        none => panic("RcHIR bridge: exact nominal shell owner is absent")
+    }
+}
+
+fn legacy_type_for(
+    projection: LegacyProjectionTable, core_type: CoreTypeRef
+) -> Type {
+    legacy_type_projection_type(
+        legacy_projection_type_for(projection, core_type))
+}
+
+fn legacy_effects_for(
+    projection: LegacyProjectionTable,
+    core_effects: CoreEffectSet
+) -> EffectRow {
+    validate_legacy_effect_row(legacy_effect_projection_row(
+        legacy_projection_effect_for(projection, core_effects)))
+}
+fn validate_legacy_effect_row(row: EffectRow) -> EffectRow {
+    if row.tail.is_some() {
+        panic("RcHIR bridge: open effect row crossed Core closure")
+    }
+    row
+}
+
+fn binder_for(
+    projection: LegacyProjectionTable, slot: SlotRef
+) -> LegacyBinderProjection {
+    legacy_projection_binder_for(projection, slot)
+}
+
+fn binder_ident(
+    projection: LegacyProjectionTable, slot: SlotRef
+) -> HExpr {
+    let binder = binder_for(projection, slot)
+    HExpr::Ident {
+        name: legacy_binder_projection_name(binder),
+        resolved_name: none,
+        def_id: some(legacy_binder_projection_def_id(binder)),
+        dict_closure_dicts: none,
+        ty: legacy_binder_projection_type(binder),
+        effects: EMPTY_ROW,
+        span: span_zero()
+    }
+}
+
+fn executable_identity(value: ExecutableRef) -> Str {
+    if executable_ref_is_named(value) {
+        symbol_ref_canonical_payload(executable_ref_named_symbol(value))
+    } else {
+        let parts = path_ref_normalized_child_path(
+            executable_ref_anonymous_path(value))
+        if parts.len() == 0 {
+            panic("RcHIR bridge: anonymous executable path is empty")
+        }
+        parts.join("$")
+    }
+}
+
+fn executable_ident(
+    projection: LegacyProjectionTable, executable: ExecutableRef,
+    ty: Type
+) -> HExpr {
+    let _ = legacy_projection_callable_for(projection, executable)
+    let identity = executable_identity(executable)
+    HExpr::Ident {
+        name: identity, resolved_name: some(identity), def_id: none,
+        dict_closure_dicts: none, ty: ty, effects: EMPTY_ROW,
+        span: span_zero()
+    }
+}
+
+fn evidence_dict(
+    projection: LegacyProjectionTable, value: CoreEvidenceRef
+) -> DictRef {
+    if core_evidence_is_local(value) {
+        DictRef::Simple(legacy_binder_projection_name(
+            binder_for(projection, core_evidence_local(value))))
+    } else {
+        DictRef::Static(executable_identity(core_evidence_callable(value)))
+    }
+}
+
+fn legacy_type_params(
+    values: List<LegacyTypeParameterProjection>
+) -> List<TypeParam> {
+    values.map(fn(value) {
+        TypeParam {
+            name: legacy_type_parameter_name(value),
+            bounds: legacy_type_parameter_bounds(value).map(fn(bound) {
+                TypeBound {
+                    trait_name: symbol_ref_canonical_payload(bound),
+                    type_args: [], assoc_constraints: [], span: span_zero()
+                }
+            }),
+            span: span_zero()
+        }
+    })
+}
+
+fn legacy_trait_bounds(
+    callable: LegacyCallableProjection
+) -> List<TraitBound> {
+    let parameters = legacy_callable_type_parameters(callable)
+    legacy_callable_bounds(callable).map(fn(bound) {
+        let index = legacy_trait_bound_parameter_index(bound)
+        let parameter = parameters.get(index).unwrap_or_else(fn() {
+            panic("RcHIR bridge: callable trait-bound parameter is absent")
+        })
+        TraitBound {
+            type_param: legacy_type_parameter_name(parameter),
+            trait_name: symbol_ref_canonical_payload(
+                legacy_trait_bound_trait(bound))
+        }
+    })
+}
+
+fn legacy_params(callable: LegacyCallableProjection) -> List<HParam> {
+    legacy_callable_parameters(callable).map(fn(value) {
+        HParam {
+            name: legacy_binder_projection_name(value),
+            ty: legacy_binder_projection_type(value),
+            def_id: some(legacy_binder_projection_def_id(value)),
+            is_mutable: legacy_binder_projection_is_mutable(value)
+        }
+    })
+}
+
+fn callable_fn_type(callable: LegacyCallableProjection) -> Type {
+    Type::FnType {
+        params: legacy_callable_parameters(callable).map(fn(parameter) {
+            legacy_binder_projection_type(parameter)
+        }),
+        return_type: legacy_callable_result_type(callable),
+        effects: validate_legacy_effect_row(legacy_callable_effects(callable))
+    }
+}
+
+fn h_resource_site_for_step(step: FlowSemanticStepRef) -> HResourceSite {
+    if flow_semantic_step_is_instruction(step) {
+        let instruction = flow_semantic_step_instruction(step)
+        make_h_instruction_resource_site(
+            flow_instruction_ref_owner(instruction),
+            flow_instruction_ref_block_ordinal(instruction),
+            flow_instruction_ref_ordinal(instruction))
+    } else {
+        let block = flow_semantic_step_terminator(step)
+        make_h_terminator_resource_site(
+            flow_block_ref_owner(block), flow_block_ref_ordinal(block))
+    }
+}
+
+fn events_for_node(
+    stages: VerifiedBridgeStages, node_ordinal: Int,
+    placement: Int
+) -> List<BridgeRcEvent> {
+    let mut result: List<BridgeRcEvent> = []
+    for event in stages.events {
+        if core_flow_node_ordinal(event.node) == node_ordinal &&
+           event.placement == placement {
+            result.push(event)
+        }
+    }
+    result
+}
+
+const BRIDGE_ROLE_EXPR_PRIMARY: Int = 0
+const BRIDGE_ROLE_STMT_ASSIGN: Int = 1
+const BRIDGE_ROLE_CONTROL_DISPATCH: Int = 2
+const BRIDGE_ROLE_BRANCH_MERGE: Int = 3
+const BRIDGE_ROLE_CONTROL_EXIT: Int = 4
+const BRIDGE_ROLE_BODY_RETURN: Int = 5
+
+fn role_matches(
+    value: CoreFlowStepRole, selector: Int, ordinal: Int
+) -> Bool {
+    let kind_matches = if selector == BRIDGE_ROLE_EXPR_PRIMARY {
+        core_flow_step_role_is_expr_primary(value)
+    } else if selector == BRIDGE_ROLE_STMT_ASSIGN {
+        core_flow_step_role_is_stmt_assign(value)
+    } else if selector == BRIDGE_ROLE_CONTROL_DISPATCH {
+        core_flow_step_role_is_control_dispatch(value)
+    } else if selector == BRIDGE_ROLE_BRANCH_MERGE {
+        core_flow_step_role_is_branch_merge(value)
+    } else if selector == BRIDGE_ROLE_CONTROL_EXIT {
+        core_flow_step_role_is_control_exit(value)
+    } else if selector == BRIDGE_ROLE_BODY_RETURN {
+        core_flow_step_role_is_body_return(value)
+    } else {
+        panic("RcHIR bridge: unknown Core/Flow role selector")
+    }
+    kind_matches && core_flow_step_role_ordinal(value) == ordinal
+}
+
+fn events_for_node_role(
+    stages: VerifiedBridgeStages, node_ordinal: Int,
+    placement: Int, selector: Int, role_ordinal: Int
+) -> List<BridgeRcEvent> {
+    events_for_node(stages, node_ordinal, placement).filter(fn(event) {
+        role_matches(event.role, selector, role_ordinal)
+    })
+}
+
+fn wrap_resource_operand(
+    ctx: HirBridgeCtx, node_ordinal: Int,
+    operand_ordinal: Int, slot: SlotRef,
+    selector: Int, role_ordinal: Int
+) -> HExpr {
+    let mut result = binder_ident(ctx.projection, slot)
+    let mut transfer_count = 0
+    for event in events_for_node_role(
+            ctx.stages, node_ordinal, BRIDGE_RC_BEFORE_INSTRUCTION,
+            selector, role_ordinal) {
+        if event.operand_ordinal == operand_ordinal {
+            let operation = event.operation
+            let kind = rc_operation_kind(operation)
+            if (rc_op_kind_same(kind, rc_op_kind_clone()) ||
+                rc_op_kind_same(kind, rc_op_kind_take())) &&
+               slot_ref_same(rc_operation_source(operation), slot) {
+                transfer_count = transfer_count + 1
+                consume_event(ctx, event)
+                let binder = binder_for(ctx.projection, slot)
+                if rc_op_kind_same(kind, rc_op_kind_clone()) {
+                    result = HExpr::Clone {
+                        inner: result,
+                        ty: legacy_binder_projection_type(binder),
+                        effects: EMPTY_ROW, span: span_zero()
+                    }
+                } else {
+                    result = HExpr::Take {
+                        source: result, source_slot: slot,
+                        saved_slot: rc_operation_target(operation),
+                        site: h_resource_site_for_step(event.step),
+                        ty: legacy_binder_projection_type(binder),
+                        effects: EMPTY_ROW, span: span_zero()
+                    }
+                }
+            }
+        }
+    }
+    if transfer_count > 1 {
+        panic("RcHIR bridge: operand has multiple transfer operations")
+    }
+    result
+}
+
+fn drop_statement(
+    projection: LegacyProjectionTable, event: BridgeRcEvent,
+    projected_old: Bool
+) -> HStmt {
+    let operation = event.operation
+    let slot = rc_operation_source(operation)
+    let binder = binder_for(projection, slot)
+    let kind = rc_operation_kind(operation)
+    let reason = if rc_op_kind_same(kind, rc_op_kind_cleanup()) {
+        h_resource_reason_cleanup()
+    } else if rc_op_kind_same(kind, rc_op_kind_drop()) {
+        if projected_old {
+            h_resource_reason_drop_projected_old()
+        } else {
+            h_resource_reason_drop()
+        }
+    } else {
+        panic("RcHIR bridge: non-drop operation used as Drop statement")
+    }
+    HStmt::Drop {
+        name: legacy_binder_projection_name(binder),
+        def_id: legacy_binder_projection_def_id(binder),
+        slot: slot, site: h_resource_site_for_step(event.step),
+        reason: reason, ty: legacy_binder_projection_type(binder),
+        span: span_zero()
+    }
+}
+
+fn before_drop_statements(
+    ctx: HirBridgeCtx, node_ordinal: Int, projected_old: Bool,
+    selector: Int, role_ordinal: Int
+) -> List<HStmt> {
+    let mut result: List<HStmt> = []
+    for event in events_for_node_role(
+            ctx.stages, node_ordinal, BRIDGE_RC_BEFORE_INSTRUCTION,
+            selector, role_ordinal) {
+        let kind = rc_operation_kind(event.operation)
+        if rc_op_kind_same(kind, rc_op_kind_drop()) ||
+           rc_op_kind_same(kind, rc_op_kind_cleanup()) {
+            consume_event(ctx, event)
+            result.push(drop_statement(ctx.projection, event, projected_old))
+        }
+    }
+    result
+}
+
+fn after_resource_statements(
+    ctx: HirBridgeCtx, node_ordinal: Int,
+    selector: Int, role_ordinal: Int
+) -> List<HStmt> {
+    let mut result: List<HStmt> = []
+    for event in events_for_node_role(
+            ctx.stages, node_ordinal, BRIDGE_RC_AFTER_INSTRUCTION,
+            selector, role_ordinal) {
+        let operation = event.operation
+        let kind = rc_operation_kind(operation)
+        if rc_op_kind_same(kind, rc_op_kind_clone()) {
+            consume_event(ctx, event)
+            let slot = rc_operation_source(operation)
+            let binder = binder_for(ctx.projection, slot)
+            result.push(HStmt::ExprStmt {
+                expr: HExpr::Clone {
+                    inner: binder_ident(ctx.projection, slot),
+                    ty: legacy_binder_projection_type(binder),
+                    effects: EMPTY_ROW, span: span_zero()
+                },
+                span: span_zero()
+            })
+        } else {
+            panic("RcHIR bridge: unsupported post-instruction resource op")
+        }
+    }
+    result
+}
+
+fn wrap_terminator_operand(
+    ctx: HirBridgeCtx, node_ordinal: Int,
+    operand_ordinal: Int, slot: SlotRef,
+    selector: Int, role_ordinal: Int
+) -> HExpr {
+    let mut result = binder_ident(ctx.projection, slot)
+    let mut transfer_count = 0
+    for event in events_for_node_role(
+            ctx.stages, node_ordinal, BRIDGE_RC_BEFORE_TERMINATOR,
+            selector, role_ordinal) {
+        if event.operand_ordinal == operand_ordinal {
+            let operation = event.operation
+            let kind = rc_operation_kind(operation)
+            if (rc_op_kind_same(kind, rc_op_kind_clone()) ||
+                rc_op_kind_same(kind, rc_op_kind_take())) &&
+               slot_ref_same(rc_operation_source(operation), slot) {
+                transfer_count = transfer_count + 1
+                consume_event(ctx, event)
+                let binder = binder_for(ctx.projection, slot)
+                if rc_op_kind_same(kind, rc_op_kind_clone()) {
+                    result = HExpr::Clone {
+                        inner: result,
+                        ty: legacy_binder_projection_type(binder),
+                        effects: EMPTY_ROW, span: span_zero()
+                    }
+                } else {
+                    result = HExpr::Take {
+                        source: result, source_slot: slot,
+                        saved_slot: rc_operation_target(operation),
+                        site: h_resource_site_for_step(event.step),
+                        ty: legacy_binder_projection_type(binder),
+                        effects: EMPTY_ROW, span: span_zero()
+                    }
+                }
+            }
+        }
+    }
+    if transfer_count > 1 {
+        panic("RcHIR bridge: terminator operand has multiple transfers")
+    }
+    result
+}
+
+fn before_terminator_drops(
+    ctx: HirBridgeCtx, node_ordinal: Int,
+    selector: Int, role_ordinal: Int
+) -> List<HStmt> {
+    let mut result: List<HStmt> = []
+    for event in events_for_node_role(
+            ctx.stages, node_ordinal, BRIDGE_RC_BEFORE_TERMINATOR,
+            selector, role_ordinal) {
+        let kind = rc_operation_kind(event.operation)
+        if rc_op_kind_same(kind, rc_op_kind_drop()) ||
+           rc_op_kind_same(kind, rc_op_kind_cleanup()) {
+            consume_event(ctx, event)
+            result.push(drop_statement(ctx.projection, event, false))
+        }
+    }
+    result
+}
+
+fn edge_cleanup_statements(
+    ctx: HirBridgeCtx, node_ordinal: Int,
+    selector: Int, role_ordinal: Int,
+    successor_ordinal: Int
+) -> List<HStmt> {
+    let mut result: List<HStmt> = []
+    for event in events_for_node_role(
+            ctx.stages, node_ordinal, BRIDGE_RC_EDGE_CLEANUP,
+            selector, role_ordinal) {
+        if event.successor_ordinal == some(successor_ordinal) {
+            if !rc_op_kind_same(
+                    rc_operation_kind(event.operation), rc_op_kind_cleanup()) {
+                panic("RcHIR bridge: edge carries non-cleanup operation")
+            }
+            consume_event(ctx, event)
+            result.push(drop_statement(ctx.projection, event, false))
+        }
+    }
+    result
+}
+
+struct SerializedExpr {
+    node_ordinal: Int,
+    prefix: List<HStmt>,
+    value: HExpr,
+    after: List<HStmt>
+}
+
+fn enter_materialize_node(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef,
+    kind_tag: Int, origin: OriginRef, anchor: SlotRef?
+) -> Int {
+    let ordinal = ctx.next_node_ordinal
+    // The complete visitor already proved relation identity.  Rechecking any
+    // relation attached to this ordinal protects against a mismatched table
+    // being passed between validation and materialization.
+    for relation in core_flow_step_map_relations(ctx.stages.step_map) {
+        let node = core_flow_step_node(relation)
+        if core_flow_node_ordinal(node) == ordinal {
+            if !executable_ref_same(core_flow_node_owner(node), owner) ||
+               core_flow_node_kind_tag(node) != kind_tag ||
+               !origin_ref_same(core_flow_node_origin(node), origin) ||
+               !optional_slots_same(core_flow_node_anchor_slot(node), anchor) {
+                panic("RcHIR bridge: materialization Core node drifted")
+            }
+        }
+    }
+    ctx.next_node_ordinal = ctx.next_node_ordinal + 1
+    ordinal
+}
+
+fn primitive_bin_op(tag: Int) -> BinOp {
+    if tag == 0 { return BinOp::Add }
+    if tag == 1 { return BinOp::Sub }
+    if tag == 2 { return BinOp::Mul }
+    if tag == 3 { return BinOp::Div }
+    if tag == 4 { return BinOp::Mod }
+    if tag == 7 { return BinOp::Lt }
+    if tag == 8 { return BinOp::Lte }
+    if tag == 9 { return BinOp::Gt }
+    if tag == 10 { return BinOp::Gte }
+    panic("RcHIR bridge: primitive is not binary")
+}
+
+fn callee_expr(
+    ctx: HirBridgeCtx, callee: CoreCalleeRef, ty: Type
+) -> HExpr {
+    let kind = core_callee_kind_tag(callee)
+    if kind == 0 {
+        executable_ident(ctx.projection, core_callee_direct(callee), ty)
+    } else if kind == 1 {
+        binder_ident(ctx.projection, core_callee_local(callee))
+    } else if kind == 2 {
+        let path = path_ref_normalized_child_path(core_callee_dynamic(callee))
+        if path.len() == 0 {
+            panic("RcHIR bridge: dynamic callee path is empty")
+        }
+        let identity = path.join("$")
+        HExpr::Ident {
+            name: identity, resolved_name: some(identity), def_id: none,
+            dict_closure_dicts: none, ty: ty, effects: EMPTY_ROW,
+            span: span_zero()
+        }
+    } else {
+        panic("RcHIR bridge: unknown Core callee kind")
+    }
+}
+
+fn method_name(value: MethodCallRef) -> Str {
+    if method_call_ref_is_intrinsic(value) {
+        symbol_ref_canonical_payload(intrinsic_ref_symbol(
+            method_call_ref_intrinsic(value)))
+    } else if method_call_ref_is_concrete(value) {
+        impl_method_ref_name(method_call_ref_impl(value))
+    } else {
+        trait_method_ref_name(method_call_ref_bound(value))
+    }
+}
+
+fn field_name(value: CoreFieldRef) -> Str {
+    let kind = core_field_ref_kind_tag(value)
+    if kind == 0 {
+        nominal_field_ref_name(core_field_ref_nominal(value))
+    } else if kind == 1 {
+        core_field_ref_tuple_index(value).to_str()
+    } else if kind == 2 {
+        let path = path_ref_normalized_child_path(
+            core_field_ref_record_path(value))
+        if path.len() == 0 {
+            panic("RcHIR bridge: structural field path is empty")
+        }
+        path.last().unwrap()
+    } else if kind == 3 {
+        symbol_ref_canonical_payload(variant_field_ref_member(
+            core_field_ref_variant(value)))
+    } else {
+        panic("RcHIR bridge: unknown Core field kind")
+    }
+}
+
+fn projected_field_access(
+    ctx: HirBridgeCtx, base: HExpr, field: CoreFieldRef,
+    ty: Type, effects: EffectRow
+) -> HExpr {
+    let kind = core_field_ref_kind_tag(field)
+    let access_kind = if kind == 0 {
+        let reference = core_field_ref_nominal(field)
+        HFieldAccessKind::NominalField {
+            owner_ref: nominal_owner_in_decls(
+                ctx.shell.decls, nominal_field_ref_owner(reference)),
+            field_ref: reference,
+            field_index: nominal_field_ref_index(reference)
+        }
+    } else if kind == 1 {
+        HFieldAccessKind::TupleField
+    } else {
+        HFieldAccessKind::RecordField
+    }
+    HExpr::FieldAccess {
+        receiver: base, field: field_name(field), access_kind: access_kind,
+        ty: ty, effects: effects, span: span_zero()
+    }
+}
+
+fn simple_core_expr(
+    ctx: HirBridgeCtx, owner: ExecutableRef,
+    expr: CoreExpr, node_ordinal: Int
+) -> HExpr {
+    let kind = core_expr_kind_tag(expr)
+    let ty = legacy_type_for(ctx.projection, core_expr_type(expr))
+    let effects = legacy_effects_for(ctx.projection, core_expr_effects(expr))
+    if kind == 0 {
+        let literal = core_expr_literal(expr)
+        let literal_kind = core_literal_kind_tag(literal)
+        if literal_kind == 0 {
+            return HExpr::IntLit { value: core_literal_int(literal),
+                ty: ty, effects: effects, span: span_zero() }
+        }
+        if literal_kind == 1 {
+            return HExpr::FloatLit { value: core_literal_float(literal),
+                ty: ty, effects: effects, span: span_zero() }
+        }
+        if literal_kind == 2 {
+            return HExpr::StrLit { value: core_literal_str(literal),
+                ty: ty, effects: effects, span: span_zero() }
+        }
+        if literal_kind == 3 {
+            return HExpr::BoolLit { value: core_literal_bool(literal),
+                ty: ty, effects: effects, span: span_zero() }
+        }
+        return HExpr::TupleLit {
+            elements: [], ty: ty, effects: effects, span: span_zero()
+        }
+    }
+    if kind == 1 {
+        return wrap_resource_operand(
+            ctx, node_ordinal, 0, core_expr_read_source(expr),
+            BRIDGE_ROLE_EXPR_PRIMARY, 0)
+    }
+    if kind == 2 {
+        let operation = core_primitive_op_tag(
+            core_expr_primitive_operation(expr))
+        let operands = core_expr_primitive_operands(expr)
+        if operation == 5 || operation == 6 {
+            if operands.len() != 1 {
+                panic("RcHIR bridge: unary primitive arity differs")
+            }
+            return HExpr::UnaryOp {
+                op: if operation == 5 { UnaryOp::Neg } else { UnaryOp::Not },
+                operand: wrap_resource_operand(
+                    ctx, node_ordinal, 0, operands.get(0).unwrap(),
+                    BRIDGE_ROLE_EXPR_PRIMARY, 0),
+                ty: ty, effects: effects, span: span_zero()
+            }
+        }
+        if operands.len() != 2 {
+            panic("RcHIR bridge: binary primitive arity differs")
+        }
+        return HExpr::BinOp {
+            op: primitive_bin_op(operation),
+            left: wrap_resource_operand(
+                ctx, node_ordinal, 0, operands.get(0).unwrap(),
+                BRIDGE_ROLE_EXPR_PRIMARY, 0),
+            right: wrap_resource_operand(
+                ctx, node_ordinal, 1, operands.get(1).unwrap(),
+                BRIDGE_ROLE_EXPR_PRIMARY, 0),
+            eq_dispatch: none, ord_dispatch: none,
+            ty: ty, effects: effects, span: span_zero()
+        }
+    }
+    if kind == 3 || kind == 4 {
+        let callee = core_expr_call_callee(expr)
+        let evidence = core_expr_call_evidence(expr).map(fn(value) {
+            evidence_dict(ctx.projection, value)
+        })
+        let mut operand_index = 0
+        let call_callee = if kind == 4 {
+            let method = core_expr_method_ref(expr)
+            let receiver = core_expr_method_receiver(expr)
+            operand_index = 1
+            let mut method_params = [legacy_binder_projection_type(
+                binder_for(ctx.projection, receiver))]
+            for argument in core_expr_call_arguments(expr) {
+                method_params.push(legacy_binder_projection_type(
+                    binder_for(ctx.projection, argument)))
+            }
+            HExpr::FieldAccess {
+                receiver: wrap_resource_operand(
+                    ctx, node_ordinal, 0, receiver,
+                    BRIDGE_ROLE_EXPR_PRIMARY, 0),
+                field: method_name(method), access_kind: HFieldAccessKind::Method,
+                ty: Type::FnType {
+                    params: method_params, return_type: ty, effects: effects
+                },
+                effects: EMPTY_ROW, span: span_zero()
+            }
+        } else {
+            let callee_type = if core_callee_kind_tag(callee) == 0 {
+                callable_fn_type(legacy_projection_callable_for(
+                    ctx.projection, core_callee_direct(callee)))
+            } else {
+                Type::FnType {
+                    params: core_expr_call_arguments(expr).map(fn(slot) {
+                        legacy_binder_projection_type(
+                            binder_for(ctx.projection, slot))
+                    }),
+                    return_type: ty, effects: effects
+                }
+            }
+            callee_expr(ctx, callee, callee_type)
+        }
+        let args = core_expr_call_arguments(expr).map(fn(slot) {
+            let value = wrap_resource_operand(
+                ctx, node_ordinal, operand_index, slot,
+                BRIDGE_ROLE_EXPR_PRIMARY, 0)
+            operand_index = operand_index + 1
+            value
+        })
+        return HExpr::Call {
+            callee: call_callee, args: args, type_args: [],
+            resolved_dicts: evidence,
+            callee_ref: some(core_callee_ref(callee)),
+            method_ref: if kind == 4 {
+                some(core_expr_method_ref(expr))
+            } else { none },
+            system_host: none,
+            ty: ty, effects: effects, span: span_zero()
+        }
+    }
+    if kind == 5 {
+        let operation = core_expr_effect_operation(expr)
+        let arguments = core_expr_call_arguments(expr)
+        let mut index = 0
+        return HExpr::EffectOp {
+            effect_name: symbol_ref_canonical_payload(
+                handled_effect_ref_symbol(effect_operation_ref_effect(operation))),
+            op_name: symbol_ref_canonical_payload(
+                effect_operation_ref_member(operation)),
+            operation_ref: some(operation),
+            args: arguments.map(fn(slot) {
+                let value = wrap_resource_operand(
+                    ctx, node_ordinal, index, slot,
+                    BRIDGE_ROLE_EXPR_PRIMARY, 0)
+                index = index + 1
+                value
+            }),
+            ty: ty, effects: effects, span: span_zero()
+        }
+    }
+    if kind == 6 {
+        let executable = system_host_callable_executable(
+            core_expr_system_host(expr))
+        let callable = legacy_projection_callable_for(ctx.projection, executable)
+        let mut index = 0
+        return HExpr::Call {
+            callee: executable_ident(
+                ctx.projection, executable, callable_fn_type(callable)),
+            args: core_expr_call_arguments(expr).map(fn(slot) {
+                let value = wrap_resource_operand(
+                    ctx, node_ordinal, index, slot,
+                    BRIDGE_ROLE_EXPR_PRIMARY, 0)
+                index = index + 1
+                value
+            }),
+            type_args: [], resolved_dicts: [],
+            callee_ref: some(make_named_callee_ref(
+                executable_ref_named_symbol(executable))), method_ref: none,
+            system_host: some(core_expr_system_host(expr)),
+            ty: ty, effects: effects, span: span_zero()
+        }
+    }
+    if kind == 7 || kind == 8 {
+        let executable = if kind == 7 {
+            core_expr_dict_constructor(expr)
+        } else {
+            core_expr_dict_project_method(expr)
+        }
+        let callable = legacy_projection_callable_for(ctx.projection, executable)
+        let arguments = if kind == 7 {
+            []
+        } else {
+            [wrap_resource_operand(
+                ctx, node_ordinal, 0,
+                core_expr_dict_project_dictionary(expr),
+                BRIDGE_ROLE_EXPR_PRIMARY, 0)]
+        }
+        return HExpr::Call {
+            callee: executable_ident(
+                ctx.projection, executable, callable_fn_type(callable)),
+            args: arguments, type_args: [],
+            resolved_dicts: if kind == 7 {
+                core_expr_call_evidence(expr).map(fn(value) {
+                    evidence_dict(ctx.projection, value)
+                })
+            } else { [] },
+            callee_ref: some(make_named_callee_ref(
+                executable_ref_named_symbol(executable))), method_ref: none,
+            system_host: none,
+            ty: ty, effects: effects, span: span_zero()
+        }
+    }
+    if kind == 9 {
+        return projected_field_access(
+            ctx,
+            wrap_resource_operand(
+                ctx, node_ordinal, 0, core_expr_project_base(expr),
+                BRIDGE_ROLE_EXPR_PRIMARY, 0),
+            core_expr_project_field(expr), ty, effects)
+    }
+    if kind == 10 {
+        let constructor = core_expr_constructor(expr)
+        let fields = core_expr_constructor_fields(expr)
+        let constructor_kind = core_constructor_kind_tag(constructor)
+        let mut index = 0
+        if constructor_kind == 0 {
+            let owner_ref = core_constructor_struct_owner(constructor)
+            return HExpr::StructLit {
+                name: registered_nominal_ref_display_name(owner_ref),
+                owner_ref: owner_ref, type_args: [],
+                fields: fields.map(fn(field) {
+                    let reference = core_field_ref_nominal(
+                        core_field_value_field(field))
+                    let result = HNominalStructFieldInit {
+                        name: nominal_field_ref_name(reference),
+                        field_ref: reference,
+                        field_index: nominal_field_ref_index(reference),
+                        value: wrap_resource_operand(
+                            ctx, node_ordinal, index,
+                            core_field_value_slot(field),
+                            BRIDGE_ROLE_EXPR_PRIMARY, 0)
+                    }
+                    index = index + 1
+                    result
+                }),
+                spread: none, ty: ty, effects: effects, span: span_zero()
+            }
+        }
+        if constructor_kind == 1 {
+            let variant = core_constructor_variant(constructor)
+            let variant_shell = match enum_variant_in_decls_opt(
+                    ctx.shell.decls, variant) {
+                some(found) => found,
+                none => panic("RcHIR bridge: exact variant shell is absent")
+            }
+            if variant_shell.fields.len() != fields.len() {
+                panic("RcHIR bridge: variant constructor field census differs")
+            }
+            return HExpr::NamedVariantConstruct {
+                enum_name: registered_nominal_ref_display_name(
+                    variant_ref_owner(variant)),
+                variant_name: variant_shell.name,
+                variant_ref: variant,
+                fields: fields.map(fn(field) {
+                    let reference = core_field_ref_variant(
+                        core_field_value_field(field))
+                    let result = HStructFieldInit {
+                        name: match variant_shell.field_names {
+                            some(names) => names.get(index).unwrap_or_else(fn() {
+                                panic("RcHIR bridge: variant field name is absent")
+                            }),
+                            none => index.to_str()
+                        },
+                        field_ref: reference,
+                        value: wrap_resource_operand(
+                            ctx, node_ordinal, index,
+                            core_field_value_slot(field),
+                            BRIDGE_ROLE_EXPR_PRIMARY, 0)
+                    }
+                    index = index + 1
+                    result
+                }),
+                spread: none, ty: ty, effects: effects, span: span_zero()
+            }
+        }
+        if constructor_kind == 2 {
+            return HExpr::TupleLit {
+                elements: fields.map(fn(field) {
+                    let value = wrap_resource_operand(
+                        ctx, node_ordinal, index,
+                        core_field_value_slot(field),
+                        BRIDGE_ROLE_EXPR_PRIMARY, 0)
+                    index = index + 1
+                    value
+                }),
+                ty: ty, effects: effects, span: span_zero()
+            }
+        }
+        panic("RcHIR bridge: 0.1 has no structural record literal")
+    }
+    if kind == 11 {
+        let executable = core_expr_lambda_executable(expr)
+        let callable = legacy_projection_callable_for(ctx.projection, executable)
+        let mut capture_ordinal = 0
+        let captures = core_expr_lambda_captures(expr).map(fn(capture) {
+            let source = core_capture_source(capture)
+            let mut site: HResourceSite? = none
+            for event in events_for_node_role(
+                    ctx.stages, node_ordinal,
+                    BRIDGE_RC_BEFORE_INSTRUCTION,
+                    BRIDGE_ROLE_EXPR_PRIMARY, 0) {
+                if event.operand_ordinal == capture_ordinal &&
+                   slot_ref_same(rc_operation_source(event.operation), source) &&
+                   (rc_op_kind_same(
+                        rc_operation_kind(event.operation), rc_op_kind_clone()) ||
+                    rc_op_kind_same(
+                        rc_operation_kind(event.operation), rc_op_kind_take())) {
+                    site = some(h_resource_site_for_step(event.step))
+                }
+            }
+            let result = HLambdaCapture {
+                source: source, target: core_capture_target(capture),
+                value: some(wrap_resource_operand(
+                    ctx, node_ordinal, capture_ordinal, source,
+                    BRIDGE_ROLE_EXPR_PRIMARY, 0)),
+                resource_site: site
+            }
+            capture_ordinal = capture_ordinal + 1
+            result
+        })
+        return HExpr::Lambda {
+            executable_ref: executable,
+            params: legacy_params(callable), captures: captures,
+            return_type: legacy_callable_result_type(callable),
+            body: serialize_callable_body(ctx, executable),
+            ty: ty, effects: effects, span: span_zero()
+        }
+    }
+    if kind == 17 {
+        let executable = core_expr_callable_executable(expr)
+        return executable_ident(
+            ctx.projection, executable,
+            legacy_type_for(ctx.projection, core_expr_type(expr)))
+    }
+    panic("RcHIR bridge: structured Core expression used simple serializer")
+}
+
+fn serialize_core_expr(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef, expr: CoreExpr
+) -> SerializedExpr {
+    let kind = core_expr_kind_tag(expr)
+    let node_ordinal = enter_materialize_node(
+        ctx, owner, kind, core_expr_origin(expr),
+        some(core_expr_result(expr)))
+    if kind <= 11 || kind == 17 {
+        SerializedExpr {
+            node_ordinal: node_ordinal,
+            prefix: before_drop_statements(
+                ctx, node_ordinal, false,
+                BRIDGE_ROLE_EXPR_PRIMARY, 0),
+            value: simple_core_expr(ctx, owner, expr, node_ordinal),
+            after: after_resource_statements(
+                ctx, node_ordinal, BRIDGE_ROLE_EXPR_PRIMARY, 0)
+        }
+    } else {
+        serialize_structured_core_expr(ctx, owner, expr, node_ordinal)
+    }
+}
+
+fn materialize_expr_slot(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef, expr: CoreExpr
+) -> List<HStmt> {
+    let serialized = serialize_core_expr(ctx, owner, expr)
+    let slot = core_expr_result(expr)
+    let binder = binder_for(ctx.projection, slot)
+    let mut result = serialized.prefix
+    let initialize = if legacy_binder_projection_is_mutable(binder) {
+        HStmt::Var {
+            name: legacy_binder_projection_name(binder),
+            name_span: span_zero(),
+            def_id: some(legacy_binder_projection_def_id(binder)),
+            ty: legacy_binder_projection_type(binder),
+            init: serialized.value, span: span_zero()
+        }
+    } else {
+        HStmt::Let {
+            name: legacy_binder_projection_name(binder),
+            name_span: span_zero(),
+            def_id: some(legacy_binder_projection_def_id(binder)),
+            ty: legacy_binder_projection_type(binder),
+            init: serialized.value, span: span_zero()
+        }
+    }
+    result.push(initialize)
+    for statement in serialized.after { result.push(statement) }
+    result
+}
+
+fn assignment_target(
+    ctx: HirBridgeCtx, value: CorePlaceRef
+) -> HExpr {
+    if core_place_is_slot(value) {
+        return binder_ident(ctx.projection, core_place_slot(value))
+    }
+    let base = binder_ident(ctx.projection, core_place_base(value))
+    let ty = legacy_type_for(ctx.projection, core_place_value_type(value))
+    match core_place_field(value) {
+        some(field) => projected_field_access(
+            ctx, base, field, ty, EMPTY_ROW),
+        none => HExpr::IndexExpr {
+            receiver: base,
+            index: binder_ident(
+                ctx.projection,
+                core_place_evaluated_index(value).unwrap_or_else(fn() {
+                    panic("RcHIR bridge: indexed place lacks index slot")
+                })),
+            ty: ty, effects: EMPTY_ROW, span: span_zero()
+        }
+    }
+}
+
+fn append_all(mut target: List<HStmt>, values: List<HStmt>) {
+    for value in values { target.push(value) }
+}
+
+fn serialized_expr_block(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef,
+    expr: CoreExpr, tail: HExpr, suffix: List<HStmt>
+) -> HExpr {
+    let serialized = serialize_core_expr(ctx, owner, expr)
+    let mut statements = serialized.prefix
+    let binder = binder_for(ctx.projection, core_expr_result(expr))
+    statements.push(HStmt::Let {
+        name: legacy_binder_projection_name(binder),
+        name_span: span_zero(),
+        def_id: some(legacy_binder_projection_def_id(binder)),
+        ty: legacy_binder_projection_type(binder),
+        init: serialized.value, span: span_zero()
+    })
+    append_all(statements, serialized.after)
+    append_all(statements, suffix)
+    HExpr::Block {
+        stmts: statements, tail: some(tail),
+        ty: legacy_binder_projection_type(binder),
+        effects: legacy_effects_for(ctx.projection, core_expr_effects(expr)),
+        span: span_zero()
+    }
+}
+
+fn serialize_core_statement(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef, statement: CoreStmt
+) -> List<HStmt> {
+    let kind = core_stmt_kind_tag(statement)
+    let anchor = if kind == 0 || kind == 1 || kind == 2 {
+        some(core_expr_result(core_stmt_value(statement)))
+    } else if kind == 3 {
+        some(core_expr_result(core_stmt_while_condition(statement)))
+    } else if kind == 6 {
+        match core_stmt_return_value(statement) {
+            some(expr) => some(core_expr_result(expr)),
+            none => none
+        }
+    } else { none }
+    let node_ordinal = enter_materialize_node(
+        ctx, owner, kind, core_stmt_origin(statement), anchor)
+    if kind == 0 || kind == 2 {
+        return materialize_expr_slot(ctx, owner, core_stmt_value(statement))
+    }
+    if kind == 1 {
+        let value = core_stmt_value(statement)
+        let mut result = materialize_expr_slot(ctx, owner, value)
+        let projected_old = !core_place_is_slot(core_stmt_target(statement))
+        append_all(result, before_drop_statements(
+            ctx, node_ordinal, projected_old,
+            BRIDGE_ROLE_STMT_ASSIGN, 0))
+        result.push(HStmt::Assign {
+            target: assignment_target(ctx, core_stmt_target(statement)),
+            value: wrap_resource_operand(
+                ctx, node_ordinal, 0, core_expr_result(value),
+                BRIDGE_ROLE_STMT_ASSIGN, 0),
+            span: span_zero()
+        })
+        append_all(result, after_resource_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_STMT_ASSIGN, 0))
+        return result
+    }
+    if kind == 3 {
+        let condition = core_stmt_while_condition(statement)
+        let condition_value = wrap_terminator_operand(
+            ctx, node_ordinal, 0, core_expr_result(condition),
+            BRIDGE_ROLE_CONTROL_DISPATCH, 1)
+        let condition_expr = serialized_expr_block(
+            ctx, owner, condition, condition_value,
+            before_terminator_drops(
+                ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 1))
+        let mut body_prefix = edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 1, 0)
+        let body = serialize_core_block(
+            ctx, owner, core_stmt_while_body(statement),
+            Type::UnitType, EMPTY_ROW,
+            none, 0, body_prefix,
+            edge_cleanup_statements(
+                ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
+        let mut result = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+        append_all(result, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 0))
+        result.push(HStmt::While {
+            condition: condition_expr, body: body, span: span_zero()
+        })
+        append_all(result, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 1, 1))
+        return result
+    }
+    if kind == 4 || kind == 5 {
+        let mut result = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0)
+        append_all(result, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
+        result.push(if kind == 4 {
+            HStmt::Break { span: span_zero() }
+        } else {
+            HStmt::Continue { span: span_zero() }
+        })
+        return result
+    }
+    if kind == 6 {
+        let returned = core_stmt_return_value(statement)
+        let mut result: List<HStmt> = []
+        match returned {
+            some(expr) => append_all(result, materialize_expr_slot(
+                ctx, owner, expr)),
+            none => {}
+        }
+        append_all(result, before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0))
+        append_all(result, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
+        result.push(HStmt::Return {
+            value: match returned {
+                some(expr) => some(wrap_terminator_operand(
+                    ctx, node_ordinal, 0, core_expr_result(expr),
+                    BRIDGE_ROLE_CONTROL_EXIT, 0)),
+                none => none
+            },
+            span: span_zero()
+        })
+        return result
+    }
+    panic("RcHIR bridge: unknown Core statement kind")
+}
+
+fn serialize_core_block(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef, block: CoreBlock,
+    result_type: Type, effects: EffectRow,
+    merge_node: Int?, merge_ordinal: Int,
+    prefix: List<HStmt>, suffix: List<HStmt>
+) -> HExpr {
+    let mut statements = prefix
+    for statement in core_block_statements(block) {
+        append_all(statements, serialize_core_statement(ctx, owner, statement))
+    }
+    let mut tail: HExpr? = none
+    match core_block_tail(block) {
+        some(expr) => {
+            append_all(statements, materialize_expr_slot(ctx, owner, expr))
+            tail = some(match merge_node {
+                some(node) => wrap_resource_operand(
+                    ctx, node, 0, core_expr_result(expr),
+                    BRIDGE_ROLE_BRANCH_MERGE, merge_ordinal),
+                none => binder_ident(ctx.projection, core_expr_result(expr))
+            })
+        },
+        none => {}
+    }
+    append_all(statements, suffix)
+    HExpr::Block {
+        stmts: statements, tail: tail,
+        ty: result_type, effects: effects, span: span_zero()
+    }
+}
+
+fn consume_body(mut ctx: HirBridgeCtx, reference: ExecutableRef) {
+    for existing in ctx.consumed_bodies {
+        if executable_ref_same(existing, reference) {
+            panic("RcHIR bridge: executable body serialized twice")
+        }
+    }
+    ctx.consumed_bodies.push(reference)
+}
+
+fn body_node_ordinal(
+    step_map: CoreFlowStepMap, body: CoreBody
+) -> Int {
+    let mut found: Int? = none
+    for node in core_flow_step_map_nodes(step_map) {
+        if executable_ref_same(
+                core_flow_node_owner(node), core_body_reference(body)) &&
+           core_flow_node_kind_tag(node) == 0 &&
+           core_flow_node_anchor_slot(node).is_none() &&
+           origin_ref_same(
+                core_flow_node_origin(node), core_body_origin(body)) {
+            if found.is_some() {
+                panic("RcHIR bridge: Core body node repeats")
+            }
+            found = some(core_flow_node_ordinal(node))
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: Core body node is absent")
+    }
+}
+
+fn serialize_callable_body(
+    mut ctx: HirBridgeCtx, reference: ExecutableRef
+) -> HExpr {
+    let entry = core_body_for(
+        core_program_bodies(ctx.stages.core), reference)
+    consume_body(ctx, reference)
+    let body = core_body_entry_body(entry)
+    let callable = legacy_projection_callable_for(ctx.projection, reference)
+    let saved_node_ordinal = ctx.next_node_ordinal
+    ctx.next_node_ordinal = body_node_ordinal(ctx.stages.step_map, body)
+    let node_ordinal = enter_materialize_node(
+        ctx, reference, 0, core_body_origin(body), none)
+    let block = core_body_block(body)
+    let mut statements: List<HStmt> = []
+    for statement in core_block_statements(block) {
+        append_all(statements, serialize_core_statement(ctx, reference, statement))
+    }
+    let mut tail: HExpr? = none
+    match core_block_tail(block) {
+        some(expr) => {
+            append_all(statements, materialize_expr_slot(ctx, reference, expr))
+            append_all(statements, before_terminator_drops(
+                ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, 0))
+            append_all(statements, edge_cleanup_statements(
+                ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, 0, 0))
+            tail = some(wrap_terminator_operand(
+                ctx, node_ordinal, 0, core_expr_result(expr),
+                BRIDGE_ROLE_BODY_RETURN, 0))
+        },
+        none => {
+            append_all(statements, before_terminator_drops(
+                ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, 0))
+            append_all(statements, edge_cleanup_statements(
+                ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, 0, 0))
+        }
+    }
+    let result = HExpr::Block {
+        stmts: statements, tail: tail,
+        ty: legacy_callable_result_type(callable),
+        effects: validate_legacy_effect_row(
+            legacy_callable_effects(callable)), span: span_zero()
+    }
+    ctx.next_node_ordinal = saved_node_ordinal
+    result
+}
+
+fn serialize_handler(
+    mut ctx: HirBridgeCtx, handler: CoreHandlerEntry
+) -> HEffectHandler {
+    let operation = core_handler_operation(handler)
+    let callable = legacy_projection_callable_for(
+        ctx.projection, core_handler_executable(handler))
+    let parameters = legacy_params(callable)
+    if parameters.len() != core_handler_parameter_slots(handler).len() {
+        panic("RcHIR bridge: handler parameter projection differs")
+    }
+    HEffectHandler {
+        handled_ref: some(effect_operation_ref_effect(operation)),
+        effect_name: symbol_ref_canonical_payload(
+            handled_effect_ref_symbol(effect_operation_ref_effect(operation))),
+        op_name: symbol_ref_canonical_payload(
+            effect_operation_ref_member(operation)),
+        params: parameters,
+        resume_binding: match core_handler_resume_slot(handler) {
+            some(slot) => {
+                let binder = binder_for(ctx.projection, slot)
+                some(HPatternBinding {
+                    name: legacy_binder_projection_name(binder),
+                    def_id: legacy_binder_projection_def_id(binder),
+                    ty: legacy_binder_projection_type(binder)
+                })
+            },
+            none => none
+        },
+        body: serialize_callable_body(ctx, core_handler_executable(handler))
+    }
+}
+
+fn serialize_trait_method(
+    mut ctx: HirBridgeCtx, value: HTraitMethod
+) -> HTraitMethod {
+    let body = match value.executable_ref {
+        some(reference) => some(serialize_callable_body(ctx, reference)),
+        none => {
+            if value.body.is_some() {
+                panic("RcHIR bridge: trait body lacks ExecutableRef")
+            }
+            none
+        }
+    }
+    HTraitMethod {
+        name: value.name, method_ref: value.method_ref,
+        params: value.params, return_type: value.return_type,
+        effects: validate_legacy_effect_row(value.effects),
+        has_default: value.has_default,
+        executable_ref: value.executable_ref, body: body
+    }
+}
+
+fn serialize_effect_op(
+    mut ctx: HirBridgeCtx, value: HEffectOp
+) -> HEffectOp {
+    let _ = ctx
+    HEffectOp {
+        name: value.name, operation_ref: value.operation_ref,
+        params: value.params, return_type: value.return_type
+    }
+}
+
+fn core_impl_for(
+    values: List<CoreImplMetadata>, owner: ImplOwnerRef
+) -> CoreImplMetadata {
+    let mut found: CoreImplMetadata? = none
+    for value in values {
+        if impl_owner_ref_same(core_impl_owner(value), owner) {
+            if found.is_some() {
+                panic("RcHIR bridge: Core impl owner repeats")
+            }
+            found = some(value)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: shell impl has no CoreImplMetadata")
+    }
+}
+
+fn core_has_body(core: CoreProgram, reference: ExecutableRef) -> Bool {
+    for entry in core_program_bodies(core) {
+        if executable_ref_same(core_body_entry_reference(entry), reference) {
+            return true
+        }
+    }
+    false
+}
+
+fn generated_method_decl(
+    mut ctx: HirBridgeCtx, method: ImplMethodRef
+) -> HDecl {
+    let executable = make_named_executable_ref(impl_method_ref_member(method))
+    let callable = legacy_projection_callable_for(ctx.projection, executable)
+    HDecl::Fn {
+        name: impl_method_ref_name(method), def_id: none,
+        executable_ref: executable, impl_method_ref: some(method),
+        type_params: legacy_type_params(
+            legacy_callable_type_parameters(callable)),
+        params: legacy_params(callable),
+        return_type: legacy_callable_result_type(callable),
+        effects: validate_legacy_effect_row(
+            legacy_callable_effects(callable)),
+        body: serialize_callable_body(ctx, executable),
+        is_pub: legacy_callable_is_public(callable),
+        trait_bounds: legacy_trait_bounds(callable), span: span_zero()
+    }
+}
+
+fn generated_standalone_decl(
+    mut ctx: HirBridgeCtx, reference: ExecutableRef
+) -> HDecl {
+    let callable = legacy_projection_callable_for(ctx.projection, reference)
+    HDecl::Fn {
+        name: executable_identity(reference), def_id: none,
+        executable_ref: reference, impl_method_ref: none,
+        type_params: legacy_type_params(
+            legacy_callable_type_parameters(callable)),
+        params: legacy_params(callable),
+        return_type: legacy_callable_result_type(callable),
+        effects: validate_legacy_effect_row(
+            legacy_callable_effects(callable)),
+        body: serialize_callable_body(ctx, reference),
+        is_pub: legacy_callable_is_public(callable),
+        trait_bounds: legacy_trait_bounds(callable), span: span_zero()
+    }
+}
+
+fn impl_method_is_present(values: List<HDecl>, method: ImplMethodRef) -> Bool {
+    for value in values {
+        match value {
+            HDecl::Fn { impl_method_ref: some(existing), .. } => if
+                    impl_method_ref_same(existing, method) { return true },
+            _ => {}
+        }
+    }
+    false
+}
+
+fn legacy_impl_assoc_types(
+    value: LegacyImplProjection
+) -> List<HAssocType> {
+    legacy_impl_assoc_bindings(value).map(fn(binding) {
+        HAssocType {
+            name: symbol_ref_canonical_payload(
+                legacy_assoc_binding_member(binding)),
+            bounds: [], concrete: some(legacy_assoc_binding_type(binding))
+        }
+    })
+}
+
+fn legacy_impl_target_name(value: Type) -> Str {
+    match value {
+        Type::StructType { name, .. } | Type::EnumType { name, .. } =>
+            nominal_display_name(name),
+        Type::GenericType { base, .. } => legacy_impl_target_name(base),
+        _ => panic("RcHIR bridge: impl target is not nominal")
+    }
+}
+
+fn generated_impl_decl(
+    mut ctx: HirBridgeCtx, metadata: CoreImplMetadata
+) -> HDecl {
+    let owner = core_impl_owner(metadata)
+    let projection = legacy_projection_impl_for(ctx.projection, owner)
+    let mut methods: List<HDecl> = []
+    for method in core_impl_methods(metadata) {
+        let executable = make_named_executable_ref(impl_method_ref_member(method))
+        if core_has_body(ctx.stages.core, executable) {
+            methods.push(generated_method_decl(ctx, method))
+        }
+    }
+    HDecl::Impl {
+        target_type: legacy_impl_target_name(
+            legacy_impl_target_type(projection)),
+        owner_ref: owner, provider_ref: impl_owner_ref_provider(owner),
+        trait_ref: legacy_impl_trait(projection),
+        type_params: legacy_type_params(
+            legacy_impl_type_parameters(projection)),
+        trait_name: match legacy_impl_trait(projection) {
+            some(reference) => some(symbol_ref_canonical_payload(reference)),
+            none => none
+        },
+        methods: methods,
+        assoc_types: legacy_impl_assoc_types(projection),
+        span: span_zero()
+    }
+}
+
+fn decls_have_impl_owner(values: List<HDecl>, owner: ImplOwnerRef) -> Bool {
+    for value in values {
+        match value {
+            HDecl::Impl { owner_ref, .. } => if
+                impl_owner_ref_same(owner_ref, owner) { return true },
+            HDecl::ModBlock { decls, .. } => if
+                decls_have_impl_owner(decls, owner) { return true },
+            _ => {}
+        }
+    }
+    false
+}
+
+fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
+    match value {
+        HDecl::Fn {
+            name, def_id, executable_ref, impl_method_ref,
+            type_params, params, return_type, effects,
+            is_pub, trait_bounds, span, ..
+        } => HDecl::Fn {
+            name: name, def_id: def_id,
+            executable_ref: executable_ref,
+            impl_method_ref: impl_method_ref,
+            type_params: type_params, params: params,
+            return_type: return_type,
+            effects: validate_legacy_effect_row(effects),
+            body: serialize_callable_body(ctx, executable_ref),
+            is_pub: is_pub, trait_bounds: trait_bounds, span: span
+        },
+        HDecl::Test { description, executable_ref, span, .. } => HDecl::Test {
+            description: description, executable_ref: executable_ref,
+            body: serialize_callable_body(ctx, executable_ref), span: span
+        },
+        HDecl::Const {
+            name, def_id, executable_ref, ty, is_pub, span, ..
+        } => HDecl::Const {
+            name: name, def_id: def_id, executable_ref: executable_ref,
+            ty: ty, init: serialize_callable_body(ctx, executable_ref),
+            is_pub: is_pub, span: span
+        },
+        HDecl::Impl {
+            target_type, owner_ref, provider_ref, trait_ref,
+            type_params, trait_name, methods, assoc_types, span
+        } => {
+            let metadata = core_impl_for(
+                core_program_impls(ctx.stages.core), owner_ref)
+            let mut serialized = methods.map(fn(method) {
+                serialize_shell_decl(ctx, method)
+            })
+            for method in core_impl_methods(metadata) {
+                if !impl_method_is_present(serialized, method) &&
+                   core_has_body(ctx.stages.core, make_named_executable_ref(
+                       impl_method_ref_member(method))) {
+                    serialized.push(generated_method_decl(ctx, method))
+                }
+            }
+            HDecl::Impl {
+                target_type: target_type, owner_ref: owner_ref,
+                provider_ref: provider_ref, trait_ref: trait_ref,
+                type_params: type_params, trait_name: trait_name,
+                methods: serialized, assoc_types: assoc_types, span: span
+            }
+        },
+        HDecl::Trait {
+            name, owner_ref, type_params, methods,
+            supertraits, assoc_types, is_pub, span
+        } => HDecl::Trait {
+            name: name, owner_ref: owner_ref, type_params: type_params,
+            methods: methods.map(fn(method) {
+                serialize_trait_method(ctx, method)
+            }),
+            supertraits: supertraits, assoc_types: assoc_types,
+            is_pub: is_pub, span: span
+        },
+        HDecl::Effect {
+            name, owner_ref, handled_ref, type_params,
+            ops, is_pub, span
+        } => HDecl::Effect {
+            name: name, owner_ref: owner_ref, handled_ref: handled_ref,
+            type_params: type_params,
+            ops: ops.map(fn(op) { serialize_effect_op(ctx, op) }),
+            is_pub: is_pub, span: span
+        },
+        HDecl::ModBlock { name, decls, is_pub, span } => HDecl::ModBlock {
+            name: name, decls: decls.map(fn(decl) {
+                serialize_shell_decl(ctx, decl)
+            }), is_pub: is_pub, span: span
+        },
+        HDecl::ExternFn {
+            name, abi_name, def_id, executable_ref,
+            type_params, params, return_type, effects, is_pub, span
+        } => HDecl::ExternFn {
+            name: name, abi_name: abi_name, def_id: def_id,
+            executable_ref: executable_ref, type_params: type_params,
+            params: params, return_type: return_type,
+            effects: validate_legacy_effect_row(effects),
+            is_pub: is_pub, span: span
+        },
+        HDecl::Struct { .. } | HDecl::Enum { .. } |
+        HDecl::ExternType { .. } |
+        HDecl::TypeAlias { .. } => value
+    }
+}
+
+fn body_was_consumed(values: List<ExecutableRef>, reference: ExecutableRef) -> Bool {
+    for value in values {
+        if executable_ref_same(value, reference) { return true }
+    }
+    false
+}
+
+fn validate_projection_against_core(
+    core: CoreProgram, projection: LegacyProjectionTable
+) {
+    if legacy_projection_core_type_count(projection) !=
+       core_type_graph_count(core_program_type_graph(core)) {
+        panic("RcHIR bridge: projection/Core type census differs")
+    }
+    for callable in core_program_callables(core) {
+        let projected = legacy_projection_callable_for(
+            projection, core_callable_reference(callable))
+        if !executable_ref_same(
+                legacy_callable_reference(projected),
+                core_callable_reference(callable)) {
+            panic("RcHIR bridge: projection callable identity differs")
+        }
+    }
+    for metadata in core_program_impls(core) {
+        let projected = legacy_projection_impl_for(
+            projection, core_impl_owner(metadata))
+        if !impl_owner_ref_same(
+                legacy_impl_owner(projected), core_impl_owner(metadata)) {
+            panic("RcHIR bridge: projection impl identity differs")
+        }
+    }
+    for entry in core_program_bodies(core) {
+        let body = core_body_entry_body(entry)
+        for slot in core_body_slots(body) {
+            let binder = legacy_projection_binder_for(
+                projection, core_slot_reference(slot))
+            if !types_equal(
+                    legacy_binder_projection_type(binder),
+                    legacy_type_for(projection, core_slot_type(slot))) {
+                panic("RcHIR bridge: projection binder type differs")
+            }
+        }
+    }
+}
+
+pub fn materialize_verified_hir(
+    shell: HProgram, verified: VerifiedOwnershipProgram,
+    projection: LegacyProjectionTable
+) -> HProgram {
+    let stages = validate_and_index_stages(verified)
+    validate_projection_against_core(stages.core, projection)
+    let mut ctx = HirBridgeCtx {
+        shell: shell, stages: stages, projection: projection,
+        next_node_ordinal: 0, consumed_bodies: [], consumed_events: []
+    }
+    let mut decls = shell.decls.map(fn(decl) {
+        serialize_shell_decl(ctx, decl)
+    })
+    for metadata in core_program_impls(stages.core) {
+        let owner = core_impl_owner(metadata)
+        if !decls_have_impl_owner(decls, owner) {
+            let projected = legacy_projection_impl_for(projection, owner)
+            if !legacy_container_is_module(legacy_impl_container(projected)) {
+                panic("RcHIR bridge: generated nested impl has no shell container")
+            }
+            let mut has_body = false
+            for method in core_impl_methods(metadata) {
+                if core_has_body(stages.core, make_named_executable_ref(
+                        impl_method_ref_member(method))) {
+                    has_body = true
+                }
+            }
+            if has_body || legacy_impl_assoc_bindings(projected).len() != 0 {
+                decls.push(generated_impl_decl(ctx, metadata))
+            }
+        }
+    }
+    for entry in core_program_bodies(stages.core) {
+        let reference = core_body_entry_reference(entry)
+        if !body_was_consumed(ctx.consumed_bodies, reference) {
+            let callable = legacy_projection_callable_for(projection, reference)
+            let kind = legacy_callable_kind(callable)
+            if executable_kind_same(kind, executable_kind_dict_helper()) {
+                decls.push(generated_standalone_decl(ctx, reference))
+                continue
+            }
+            if executable_kind_same(kind, executable_kind_lambda()) ||
+               executable_kind_same(kind, executable_kind_handler()) ||
+               executable_kind_same(kind, executable_kind_impl_method()) ||
+               executable_kind_same(kind, executable_kind_default_specialization()) ||
+               executable_kind_same(kind, executable_kind_derived_impl()) ||
+               executable_kind_same(kind, executable_kind_trait_default()) {
+                panic("RcHIR bridge: nested/generated body was not materialized")
+            }
+            panic("RcHIR bridge: source executable shell is absent")
+        }
+    }
+    if ctx.consumed_bodies.len() != core_program_bodies(stages.core).len() ||
+       ctx.consumed_events.len() != stages.events.len() {
+        panic("RcHIR bridge: executable/Core node materialization is not total")
+    }
+    let result = HProgram {
+        decls: decls,
+        derived_impls: [],
+        boxed_vars: shell.boxed_vars,
+        static_dicts: shell.static_dicts,
+        extern_type_names: shell.extern_type_names,
+        drop_types: shell.drop_types
+    }
+    validate_hir_binder_def_ids(result)
+    result
+}
+
+fn enum_variant_in_decls_opt(
+    decls: List<HDecl>, variant: VariantRef
+) -> HEnumVariant? {
+    let mut found: HEnumVariant? = none
+    for decl in decls {
+        match decl {
+            HDecl::Enum { variants, .. } => {
+                for candidate in variants {
+                    if variant_ref_same(candidate.variant_ref, variant) {
+                        if found.is_some() {
+                            panic("RcHIR bridge: exact enum variant shell repeats")
+                        }
+                        found = some(candidate)
+                    }
+                }
+            },
+            HDecl::ModBlock { decls: nested, .. } => match
+                    enum_variant_in_decls_opt(nested, variant) {
+                some(candidate) => {
+                    if found.is_some() {
+                        panic("RcHIR bridge: exact enum variant shell repeats")
+                    }
+                    found = some(candidate)
+                },
+                none => {}
+            },
+            _ => {}
+        }
+    }
+    found
+}
+
+fn core_pattern_bindings(
+    projection: LegacyProjectionTable, value: CorePattern,
+    mut result: List<HPatternBinding>
+) {
+    let kind = core_pattern_kind_tag(value)
+    if kind == 1 {
+        let binder = binder_for(projection, core_pattern_binding(value))
+        result.push(HPatternBinding {
+            name: legacy_binder_projection_name(binder),
+            def_id: legacy_binder_projection_def_id(binder),
+            ty: legacy_binder_projection_type(binder)
+        })
+    } else if kind == 3 {
+        for element in core_pattern_elements(value) {
+            core_pattern_bindings(projection, element, result)
+        }
+    } else if kind == 4 || kind == 5 {
+        for field in core_pattern_fields(value) {
+            core_pattern_bindings(
+                projection, core_pattern_field_pattern(field), result)
+        }
+    }
+}
+
+fn serialize_pattern(
+    ctx: HirBridgeCtx, value: CorePattern
+) -> Pattern {
+    let kind = core_pattern_kind_tag(value)
+    if kind == 0 { return Pattern::Wildcard { span: span_zero() } }
+    if kind == 1 {
+        return Pattern::Binding {
+            name: legacy_binder_projection_name(
+                binder_for(ctx.projection, core_pattern_binding(value))),
+            span: span_zero()
+        }
+    }
+    if kind == 2 {
+        let literal = core_pattern_literal(value)
+        let literal_kind = core_literal_kind_tag(literal)
+        if literal_kind == 4 {
+            return Pattern::Constructor {
+                name: "Unit", qualifier: none, fields: [], span: span_zero()
+            }
+        }
+        return Pattern::Literal {
+            value: if literal_kind == 0 {
+                LiteralValue::IntVal(core_literal_int(literal))
+            } else if literal_kind == 1 {
+                LiteralValue::FloatVal(core_literal_float(literal))
+            } else if literal_kind == 2 {
+                LiteralValue::StrVal(core_literal_str(literal))
+            } else {
+                LiteralValue::BoolVal(core_literal_bool(literal))
+            },
+            span: span_zero()
+        }
+    }
+    if kind == 3 {
+        return Pattern::TuplePattern {
+            elements: core_pattern_elements(value).map(fn(element) {
+                serialize_pattern(ctx, element)
+            }),
+            span: span_zero()
+        }
+    }
+    if kind == 4 {
+        let owner = core_pattern_struct_owner(value)
+        return Pattern::NamedConstructor {
+            name: registered_nominal_ref_display_name(owner),
+            qualifier: none,
+            fields: core_pattern_fields(value).map(fn(field) {
+                NamedPatternField {
+                    name: field_name(core_pattern_field_ref(field)),
+                    pattern: serialize_pattern(
+                        ctx, core_pattern_field_pattern(field)),
+                    span: span_zero()
+                }
+            }),
+            rest: false, span: span_zero()
+        }
+    }
+    if kind == 5 {
+        let variant = core_pattern_variant(value)
+        let shell = match enum_variant_in_decls_opt(ctx.shell.decls, variant) {
+            some(found) => found,
+            none => panic("RcHIR bridge: exact variant shell is absent")
+        }
+        let fields = core_pattern_fields(value)
+        let name = shell.name
+        match shell.field_names {
+            some(names) => {
+                if names.len() != fields.len() {
+                    panic("RcHIR bridge: named variant pattern arity differs")
+                }
+                let mut index = 0
+                return Pattern::NamedConstructor {
+                    name: name, qualifier: none,
+                    fields: fields.map(fn(field) {
+                        let result = NamedPatternField {
+                            name: names.get(index).unwrap(),
+                            pattern: serialize_pattern(
+                                ctx, core_pattern_field_pattern(field)),
+                            span: span_zero()
+                        }
+                        index = index + 1
+                        result
+                    }),
+                    rest: false, span: span_zero()
+                }
+            },
+            none => return Pattern::Constructor {
+                name: name, qualifier: none,
+                fields: fields.map(fn(field) {
+                    serialize_pattern(ctx, core_pattern_field_pattern(field))
+                }),
+                span: span_zero()
+            }
+        }
+    }
+    panic("RcHIR bridge: unknown Core pattern kind")
+}
+
+fn require_no_edge_cleanup(
+    ctx: HirBridgeCtx, node: Int,
+    selector: Int, role_ordinal: Int, successor: Int,
+    detail: Str
+) {
+    if edge_cleanup_statements(
+            ctx, node, selector, role_ordinal, successor).len() != 0 {
+        panic("RcHIR bridge: unrepresentable cleanup on ${detail}")
+    }
+}
+
+fn serialize_guard_expr(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef,
+    guard: CoreExpr, parent_node: Int, dispatch_ordinal: Int
+) -> HExpr {
+    let serialized = serialize_core_expr(ctx, owner, guard)
+    let binder = binder_for(ctx.projection, core_expr_result(guard))
+    let mut statements = serialized.prefix
+    statements.push(HStmt::Let {
+        name: legacy_binder_projection_name(binder),
+        name_span: span_zero(),
+        def_id: some(legacy_binder_projection_def_id(binder)),
+        ty: legacy_binder_projection_type(binder),
+        init: serialized.value, span: span_zero()
+    })
+    append_all(statements, serialized.after)
+    append_all(statements, before_terminator_drops(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+        dispatch_ordinal))
+    require_no_edge_cleanup(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+        dispatch_ordinal, 1, "guard-false edge")
+    HExpr::Block {
+        stmts: statements,
+        tail: some(wrap_terminator_operand(
+            ctx, parent_node, 0, core_expr_result(guard),
+            BRIDGE_ROLE_CONTROL_DISPATCH, dispatch_ordinal)),
+        ty: legacy_binder_projection_type(binder),
+        effects: legacy_effects_for(ctx.projection, core_expr_effects(guard)),
+        span: span_zero()
+    }
+}
+
+fn serialize_match_arm(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef,
+    arm: CoreMatchArm, parent_node: Int,
+    arm_ordinal: Int, dispatch_ordinal: Int,
+    result_type: Type, effects: EffectRow,
+    entry_prefix: List<HStmt>
+) -> HMatchArm {
+    let pattern = core_match_arm_pattern(arm)
+    let guard = match core_match_arm_guard(arm) {
+        some(value) => some(serialize_guard_expr(
+            ctx, owner, value, parent_node, dispatch_ordinal + 1)),
+        none => none
+    }
+    let mut prefix = entry_prefix
+    append_all(prefix, edge_cleanup_statements(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+        dispatch_ordinal, 0))
+    if guard.is_some() {
+        append_all(prefix, edge_cleanup_statements(
+            ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+            dispatch_ordinal + 1, 0))
+    }
+    require_no_edge_cleanup(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+        dispatch_ordinal, 1, "pattern-unmatched edge")
+    if dispatch_ordinal != 0 && before_terminator_drops(
+            ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+            dispatch_ordinal).len() != 0 {
+        panic("RcHIR bridge: later pattern test has resource drops")
+    }
+    let mut suffix = before_terminator_drops(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_EXIT, arm_ordinal)
+    append_all(suffix, edge_cleanup_statements(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_EXIT, arm_ordinal, 0))
+    HMatchArm {
+        pattern: serialize_pattern(ctx, pattern),
+        bindings: {
+            let mut values: List<HPatternBinding> = []
+            core_pattern_bindings(ctx.projection, pattern, values)
+            values
+        },
+        guard: guard,
+        body: serialize_core_block(
+            ctx, owner, core_match_arm_body(arm),
+            result_type, effects, some(parent_node), arm_ordinal,
+            prefix, suffix),
+        span: span_zero()
+    }
+}
+
+fn serialize_structured_core_expr(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef,
+    expr: CoreExpr, node_ordinal: Int
+) -> SerializedExpr {
+    let kind = core_expr_kind_tag(expr)
+    let ty = legacy_type_for(ctx.projection, core_expr_type(expr))
+    let effects = legacy_effects_for(ctx.projection, core_expr_effects(expr))
+    if kind == 12 {
+        let mut prefix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+        append_all(prefix, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 0))
+        let mut suffix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0)
+        append_all(suffix, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
+        return SerializedExpr {
+            node_ordinal: node_ordinal, prefix: prefix,
+            value: serialize_core_block(
+                ctx, owner, core_expr_block(expr), ty, effects,
+                some(node_ordinal), 0, [], suffix),
+            after: []
+        }
+    }
+    if kind == 13 {
+        let mut prefix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+        let condition = wrap_terminator_operand(
+            ctx, node_ordinal, 0, core_expr_condition(expr),
+            BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+        let mut then_suffix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0)
+        append_all(then_suffix, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
+        let mut else_suffix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 1)
+        append_all(else_suffix, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 1, 0))
+        return SerializedExpr {
+            node_ordinal: node_ordinal, prefix: prefix,
+            value: HExpr::IfExpr {
+                condition: condition,
+                then_branch: serialize_core_block(
+                    ctx, owner, core_expr_then_block(expr), ty, effects,
+                    some(node_ordinal), 0,
+                    edge_cleanup_statements(
+                        ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 0),
+                    then_suffix),
+                else_branch: some(serialize_core_block(
+                    ctx, owner, core_expr_else_block(expr), ty, effects,
+                    some(node_ordinal), 1,
+                    edge_cleanup_statements(
+                        ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 1),
+                    else_suffix)),
+                ty: ty, effects: effects, span: span_zero()
+            },
+            after: []
+        }
+    }
+    if kind == 14 {
+        let arms = core_expr_match_arms(expr)
+        let mut serialized_arms: List<HMatchArm> = []
+        let mut index = 0
+        for arm in arms {
+            serialized_arms.push(serialize_match_arm(
+                ctx, owner, arm, node_ordinal, index, index * 2,
+                ty, effects, []))
+            index = index + 1
+        }
+        let mut prefix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+        require_no_edge_cleanup(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT,
+            arms.len(), 0, "final unmatched edge")
+        return SerializedExpr {
+            node_ordinal: node_ordinal, prefix: prefix,
+            value: HExpr::MatchExpr {
+                scrutinee: wrap_terminator_operand(
+                    ctx, node_ordinal, 0, core_expr_scrutinee(expr),
+                    BRIDGE_ROLE_CONTROL_DISPATCH, 0),
+                arms: serialized_arms,
+                ty: ty, effects: effects, span: span_zero()
+            },
+            after: []
+        }
+    }
+    if kind == 15 {
+        let mut prefix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+        let mut protected_suffix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0)
+        append_all(protected_suffix, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
+        let protected = serialize_core_block(
+            ctx, owner, core_expr_try_body(expr), ty, effects,
+            some(node_ordinal), 0,
+            edge_cleanup_statements(
+                ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 0),
+            protected_suffix)
+        let arms = core_expr_match_arms(expr)
+        if arms.len() == 0 {
+            panic("RcHIR bridge: TryCatch has no exact catch arms")
+        }
+        let caught_entry_cleanup = edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 1)
+        let mut serialized_arms: List<HMatchArm> = []
+        let mut index = 0
+        for arm in arms {
+            serialized_arms.push(serialize_match_arm(
+                ctx, owner, arm, node_ordinal,
+                index + 1, 1 + index * 2, ty, effects,
+                caught_entry_cleanup))
+            index = index + 1
+        }
+        return SerializedExpr {
+            node_ordinal: node_ordinal, prefix: prefix,
+            value: HExpr::TryCatch {
+                body: protected, arms: serialized_arms,
+                ty: ty, effects: effects, span: span_zero()
+            },
+            after: []
+        }
+    }
+    if kind == 16 {
+        let mut prefix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+        let mut suffix = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0)
+        append_all(suffix, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
+        return SerializedExpr {
+            node_ordinal: node_ordinal, prefix: prefix,
+            value: HExpr::HandleExpr {
+                body: serialize_core_block(
+                    ctx, owner, core_expr_handle_body(expr), ty, effects,
+                    some(node_ordinal), 0,
+                    edge_cleanup_statements(
+                        ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 0),
+                    suffix),
+                handlers: core_expr_handlers(expr).map(fn(handler) {
+                    serialize_handler(ctx, handler)
+                }),
+                ty: ty, effects: effects, span: span_zero()
+            },
+            after: []
+        }
+    }
+    panic("RcHIR bridge: unknown structured Core expression")
+}
+
+struct CoreNodeCursor {
+    next_ordinal: Int,
+    step_map: CoreFlowStepMap
+}
+
+fn optional_slots_same(left: SlotRef?, right: SlotRef?) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => slot_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn enter_verified_core_node(
+    mut cursor: CoreNodeCursor, owner: ExecutableRef,
+    kind_tag: Int, origin: OriginRef, anchor: SlotRef?
+) {
+    let ordinal = cursor.next_ordinal
+    for relation in core_flow_step_map_relations(cursor.step_map) {
+        let node = core_flow_step_node(relation)
+        if core_flow_node_ordinal(node) == ordinal {
+            if !executable_ref_same(core_flow_node_owner(node), owner) ||
+               core_flow_node_kind_tag(node) != kind_tag ||
+               !origin_ref_same(core_flow_node_origin(node), origin) ||
+               !optional_slots_same(core_flow_node_anchor_slot(node), anchor) {
+                panic("RcHIR bridge: canonical Core node relation drifted")
+            }
+        }
+    }
+    cursor.next_ordinal = cursor.next_ordinal + 1
+}
+
+fn validate_core_expr_nodes(
+    mut cursor: CoreNodeCursor, owner: ExecutableRef, expr: CoreExpr
+) {
+    let kind = core_expr_kind_tag(expr)
+    enter_verified_core_node(
+        cursor, owner, kind, core_expr_origin(expr),
+        some(core_expr_result(expr)))
+    if kind == 12 {
+        validate_core_block_nodes(cursor, owner, core_expr_block(expr))
+    } else if kind == 13 {
+        validate_core_block_nodes(cursor, owner, core_expr_then_block(expr))
+        validate_core_block_nodes(cursor, owner, core_expr_else_block(expr))
+    } else if kind == 14 {
+        for arm in core_expr_match_arms(expr) {
+            validate_core_arm_nodes(cursor, owner, arm)
+        }
+    } else if kind == 15 {
+        validate_core_block_nodes(cursor, owner, core_expr_try_body(expr))
+        for arm in core_expr_match_arms(expr) {
+            validate_core_arm_nodes(cursor, owner, arm)
+        }
+    } else if kind == 16 {
+        validate_core_block_nodes(cursor, owner, core_expr_handle_body(expr))
+    }
+}
+
+fn validate_core_arm_nodes(
+    mut cursor: CoreNodeCursor, owner: ExecutableRef, arm: CoreMatchArm
+) {
+    match core_match_arm_guard(arm) {
+        some(guard) => validate_core_expr_nodes(cursor, owner, guard),
+        none => {}
+    }
+    validate_core_block_nodes(cursor, owner, core_match_arm_body(arm))
+}
+
+fn validate_core_stmt_nodes(
+    mut cursor: CoreNodeCursor, owner: ExecutableRef, statement: CoreStmt
+) {
+    let kind = core_stmt_kind_tag(statement)
+    let anchor = if kind == 0 || kind == 1 || kind == 2 {
+        some(core_expr_result(core_stmt_value(statement)))
+    } else if kind == 3 {
+        some(core_expr_result(core_stmt_while_condition(statement)))
+    } else if kind == 6 {
+        match core_stmt_return_value(statement) {
+            some(expr) => some(core_expr_result(expr)),
+            none => none
+        }
+    } else {
+        none
+    }
+    enter_verified_core_node(
+        cursor, owner, kind, core_stmt_origin(statement), anchor)
+    if kind == 0 || kind == 1 || kind == 2 {
+        validate_core_expr_nodes(cursor, owner, core_stmt_value(statement))
+    } else if kind == 3 {
+        validate_core_expr_nodes(
+            cursor, owner, core_stmt_while_condition(statement))
+        validate_core_block_nodes(
+            cursor, owner, core_stmt_while_body(statement))
+    } else if kind == 6 {
+        match core_stmt_return_value(statement) {
+            some(expr) => validate_core_expr_nodes(cursor, owner, expr),
+            none => {}
+        }
+    }
+}
+
+fn validate_core_block_nodes(
+    mut cursor: CoreNodeCursor, owner: ExecutableRef, block: CoreBlock
+) {
+    for statement in core_block_statements(block) {
+        validate_core_stmt_nodes(cursor, owner, statement)
+    }
+    match core_block_tail(block) {
+        some(expr) => validate_core_expr_nodes(cursor, owner, expr),
+        none => {}
+    }
+}
+
+fn validate_core_body_nodes(
+    mut cursor: CoreNodeCursor, body: CoreBody
+) {
+    let owner = core_body_reference(body)
+    enter_verified_core_node(cursor, owner, 0, core_body_origin(body), none)
+    validate_core_block_nodes(cursor, owner, core_body_block(body))
+}
+
+fn core_body_for(
+    values: List<CoreBodyEntry>, reference: ExecutableRef
+) -> CoreBodyEntry {
+    let mut found: CoreBodyEntry? = none
+    for value in values {
+        if executable_ref_same(core_body_entry_reference(value), reference) {
+            if found.is_some() {
+                panic("RcHIR bridge: Core body identity repeats")
+            }
+            found = some(value)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: Rc body has no exact Core body")
+    }
+}
+
+fn flow_body_for(
+    values: List<FlowBody>, reference: ExecutableRef
+) -> FlowBody {
+    let mut found: FlowBody? = none
+    for value in values {
+        if executable_ref_same(flow_body_reference(value), reference) {
+            if found.is_some() {
+                panic("RcHIR bridge: Flow body identity repeats")
+            }
+            found = some(value)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: Rc body has no exact Flow body")
+    }
+}
+
+fn relation_for_step(
+    step_map: CoreFlowStepMap, step: FlowSemanticStepRef
+) -> CoreFlowStepRelation {
+    let mut found: CoreFlowStepRelation? = none
+    for relation in core_flow_step_map_relations(step_map) {
+        if flow_semantic_step_same(core_flow_step(relation), step) {
+            if found.is_some() {
+                panic("RcHIR bridge: Flow step has multiple Core relations")
+            }
+            found = some(relation)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: Rc site has no Core/Flow relation")
+    }
+}
+
+fn append_instruction_events(
+    step_map: CoreFlowStepMap, step: RcStep,
+    mut events: List<BridgeRcEvent>
+) {
+    let semantic_step = make_flow_instruction_step_ref(rc_step_instruction(step))
+    let relation = relation_for_step(step_map, semantic_step)
+    for operation in rc_step_before(step) {
+        let site = rc_operation_site(operation)
+        if !rc_semantic_site_is_instruction(site) ||
+           rc_site_placement_tag(rc_semantic_site_placement(site)) !=
+                BRIDGE_RC_BEFORE_INSTRUCTION ||
+           !flow_semantic_step_same(
+                make_flow_instruction_step_ref(
+                    rc_semantic_site_instruction(site)), semantic_step) {
+            panic("RcHIR bridge: before-operation site drifted")
+        }
+        events.push(BridgeRcEvent {
+            ordinal: events.len(),
+            node: core_flow_step_node(relation), step: semantic_step,
+            role: core_flow_step_role(relation),
+            placement: BRIDGE_RC_BEFORE_INSTRUCTION,
+            operand_ordinal: rc_semantic_site_operand_ordinal(site),
+            successor_ordinal: none, operation: operation
+        })
+    }
+    for operation in rc_step_after(step) {
+        let site = rc_operation_site(operation)
+        if !rc_semantic_site_is_instruction(site) ||
+           rc_site_placement_tag(rc_semantic_site_placement(site)) !=
+                BRIDGE_RC_AFTER_INSTRUCTION ||
+           !flow_semantic_step_same(
+                make_flow_instruction_step_ref(
+                    rc_semantic_site_instruction(site)), semantic_step) {
+            panic("RcHIR bridge: after-operation site drifted")
+        }
+        events.push(BridgeRcEvent {
+            ordinal: events.len(),
+            node: core_flow_step_node(relation), step: semantic_step,
+            role: core_flow_step_role(relation),
+            placement: BRIDGE_RC_AFTER_INSTRUCTION,
+            operand_ordinal: rc_semantic_site_operand_ordinal(site),
+            successor_ordinal: none, operation: operation
+        })
+    }
+}
+
+fn append_terminator_events(
+    step_map: CoreFlowStepMap, block: RcBlock,
+    mut events: List<BridgeRcEvent>
+) {
+    let semantic_step = make_flow_terminator_step_ref(rc_block_source_ref(block))
+    let relation = relation_for_step(step_map, semantic_step)
+    for operation in rc_block_before_terminator(block) {
+        let site = rc_operation_site(operation)
+        if rc_semantic_site_is_instruction(site) ||
+           rc_site_placement_tag(rc_semantic_site_placement(site)) !=
+                BRIDGE_RC_BEFORE_TERMINATOR ||
+           !flow_semantic_step_same(
+                make_flow_terminator_step_ref(
+                    rc_semantic_site_block(site)), semantic_step) ||
+           rc_semantic_site_successor_ordinal(site).is_some() {
+            panic("RcHIR bridge: terminator operation site drifted")
+        }
+        events.push(BridgeRcEvent {
+            ordinal: events.len(),
+            node: core_flow_step_node(relation), step: semantic_step,
+            role: core_flow_step_role(relation),
+            placement: BRIDGE_RC_BEFORE_TERMINATOR,
+            operand_ordinal: rc_semantic_site_operand_ordinal(site),
+            successor_ordinal: none, operation: operation
+        })
+    }
+    for edge in rc_block_edges(block) {
+        for operation in rc_edge_cleanup(edge) {
+            let site = rc_operation_site(operation)
+            if rc_semantic_site_is_instruction(site) ||
+               rc_site_placement_tag(rc_semantic_site_placement(site)) !=
+                    BRIDGE_RC_EDGE_CLEANUP ||
+               !flow_semantic_step_same(
+                    make_flow_terminator_step_ref(
+                        rc_semantic_site_block(site)), semantic_step) ||
+               rc_semantic_site_successor_ordinal(site) !=
+                    some(rc_edge_successor_ordinal(edge)) {
+                panic("RcHIR bridge: edge cleanup site drifted")
+            }
+            events.push(BridgeRcEvent {
+                ordinal: events.len(),
+                node: core_flow_step_node(relation), step: semantic_step,
+                role: core_flow_step_role(relation),
+                placement: BRIDGE_RC_EDGE_CLEANUP,
+                operand_ordinal: rc_semantic_site_operand_ordinal(site),
+                successor_ordinal: some(rc_edge_successor_ordinal(edge)),
+                operation: operation
+            })
+        }
+    }
+}
+
+fn validate_and_index_stages(
+    verified: VerifiedOwnershipProgram
+) -> VerifiedBridgeStages {
+    let core = verified_ownership_program_core(verified)
+    let flow = verified_ownership_program_flow(verified)
+    let resources = verified_ownership_program_resources(verified)
+    let step_map = verified_ownership_program_step_map(verified)
+    let rc = verified_resource_program_rc_ir(resources)
+    let flow_fingerprint = flow_topology_fingerprint_canonical(
+        flow_program_topology_fingerprint(flow))
+    if verified_resource_program_flow_fingerprint(resources) !=
+       flow_fingerprint {
+        panic("RcHIR bridge: verified RcIR belongs to another FlowProgram")
+    }
+    let core_bodies = core_program_bodies(core)
+    let flow_bodies = flow_program_bodies(flow)
+    let rc_bodies = rc_program_bodies(rc)
+    if core_bodies.len() != flow_bodies.len() ||
+       core_bodies.len() != rc_bodies.len() {
+        panic("RcHIR bridge: Core/Flow/Rc body census differs")
+    }
+    let mut node_cursor = CoreNodeCursor {
+        next_ordinal: 0, step_map: step_map
+    }
+    for entry in core_bodies {
+        validate_core_body_nodes(node_cursor, core_body_entry_body(entry))
+    }
+    if node_cursor.next_ordinal != core_flow_step_map_node_count(step_map) {
+        panic("RcHIR bridge: canonical Core node census differs")
+    }
+    let mut events: List<BridgeRcEvent> = []
+    let mut body_index = 0
+    while body_index < rc_bodies.len() {
+        let rc_body = rc_bodies.get(body_index).unwrap()
+        let reference = rc_body_reference(rc_body)
+        if !executable_ref_same(
+                core_body_entry_reference(
+                    core_bodies.get(body_index).unwrap()), reference) ||
+           !executable_ref_same(
+                flow_body_reference(
+                    flow_bodies.get(body_index).unwrap()), reference) {
+            panic("RcHIR bridge: Core/Flow/Rc body order differs")
+        }
+        let _ = core_body_for(core_bodies, reference)
+        let _ = flow_body_for(flow_bodies, reference)
+        for block in rc_body_blocks(rc_body) {
+            for step in rc_block_steps(block) {
+                append_instruction_events(step_map, step, events)
+            }
+            append_terminator_events(step_map, block, events)
+        }
+        body_index = body_index + 1
+    }
+    VerifiedBridgeStages {
+        core: core, flow: flow, resources: resources, rc: rc,
+        step_map: step_map, events: events
+    }
+}
