@@ -14,6 +14,7 @@ use ir_inventory::{ExecutableRef}
 use hir::{MethodCallRef}
 use core_expr::{
     CoreTypeRef, CoreEffectSet, CoreCalleeRef, CoreEvidenceRef,
+    CoreHandledEvidenceUse,
     CoreFieldRef, CoreFieldValue, CoreConstructorRef,
     CoreBinder, CoreBody, CoreBlock, CoreStmt, CoreExpr,
     CorePattern, CorePatternField, CoreMatchArm,
@@ -50,6 +51,13 @@ fn copy_slots(values: List<SlotRef>) -> List<SlotRef> {
 }
 fn copy_evidence(values: List<CoreEvidenceRef>) -> List<CoreEvidenceRef> {
     let mut result: List<CoreEvidenceRef> = []
+    for value in values { result.push(value) }
+    result
+}
+fn copy_handled_uses(
+    values: List<CoreHandledEvidenceUse>
+) -> List<CoreHandledEvidenceUse> {
+    let mut result: List<CoreHandledEvidenceUse> = []
     for value in values { result.push(value) }
     result
 }
@@ -174,18 +182,22 @@ pub struct CoreDerivedCallPlan {
     result_type: CoreTypeRef,
     effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
+    handled_evidence: List<CoreHandledEvidenceUse>,
     origin: OriginRef
 }
 
 pub fn make_core_derived_call_plan(
     callee: CoreCalleeRef, method: MethodCallRef?,
     result_type: CoreTypeRef, effects: CoreEffectSet,
-    evidence: List<CoreEvidenceRef>, origin: OriginRef
+    evidence: List<CoreEvidenceRef>,
+    handled_evidence: List<CoreHandledEvidenceUse>, origin: OriginRef
 ) -> CoreDerivedCallPlan {
     CoreDerivedCallPlan {
         callee: callee, method: method, result_type: result_type,
         effects: make_core_effect_set(core_effect_set_atoms(effects)),
-        evidence: copy_evidence(evidence), origin: origin
+        evidence: copy_evidence(evidence),
+        handled_evidence: copy_handled_uses(handled_evidence),
+        origin: origin
     }
 }
 
@@ -206,11 +218,12 @@ fn derived_call(
             }
             make_core_method_call_expr(
                 plan.result_type, plan.effects, plan.origin,
-                plan.callee, method, receiver, params, plan.evidence)
+                plan.callee, method, receiver, params, plan.evidence,
+                plan.handled_evidence)
         },
         none => make_core_call_expr(
             plan.result_type, plan.effects, plan.origin,
-            plan.callee, arguments, plan.evidence)
+            plan.callee, arguments, plan.evidence, plan.handled_evidence)
     }
 }
 

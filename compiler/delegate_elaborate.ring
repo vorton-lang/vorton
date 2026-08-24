@@ -4,9 +4,7 @@
 // representation used by source/default/derived methods.  No delegate kind,
 // root, identity, provider lookup, or fallback survives this boundary.
 
-use ir_identity::{
-    SlotRef, NominalFieldRef, handled_effect_ref_symbol, slot_ref_same
-}
+use ir_identity::{SlotRef, NominalFieldRef, slot_ref_same}
 
 use core_expr::{
     CoreTypeRef, CoreBody, CoreImplMetadata,
@@ -28,11 +26,8 @@ use delegate_plan::{
     delegate_typed_plan_field, delegate_typed_plan_methods,
     delegate_typed_plan_outer_owner,
     delegate_typed_plan_assoc_bindings,
-    delegate_typed_plan_effect_evidence,
     delegate_typed_plan_dict_evidence,
     delegate_assoc_binding_member, delegate_assoc_binding_type,
-    delegate_handled_evidence_requirement,
-    delegate_handled_evidence_value,
     delegate_evidence_requirement, delegate_evidence_value,
     delegate_method_executable, delegate_method_origin,
     delegate_method_generated,
@@ -43,6 +38,7 @@ use delegate_plan::{
     delegate_body_result_type, delegate_body_wrapper_receiver,
     delegate_body_forwarded_arguments,
     delegate_body_effects, delegate_body_evidence,
+    delegate_body_handled_uses,
     delegate_body_origin
 }
 
@@ -91,7 +87,8 @@ fn elaborate_delegate_method(
         delegate_method_child_callee(method),
         delegate_method_child_call(method),
         projected, forwarded_arguments,
-        delegate_body_evidence(body))
+        delegate_body_evidence(body),
+        delegate_body_handled_uses(body))
     let block = make_core_block([], some(forwarded), body_origin)
     let result = make_core_body(
         delegate_method_executable(method), delegate_method_origin(method),
@@ -118,12 +115,6 @@ pub fn elaborate_delegate_to_core(
             delegate_assoc_binding_type(binding))
     })
     let mut obligations = []
-    for binding in delegate_typed_plan_effect_evidence(plan) {
-        obligations.push(make_core_obligation_binding(
-            handled_effect_ref_symbol(
-                delegate_handled_evidence_requirement(binding)),
-            delegate_handled_evidence_value(binding)))
-    }
     for binding in delegate_typed_plan_dict_evidence(plan) {
         obligations.push(make_core_obligation_binding(
             delegate_evidence_requirement(binding),

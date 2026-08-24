@@ -1440,6 +1440,7 @@ pub struct CoreHandlerOperation {
     executable: ExecutableRef,
     parameter_slots: List<SlotRef>,
     resume_slot: SlotRef?,
+    captures: List<CoreCapture>,
     handled_captures: List<CoreHandledEvidenceCapture>,
     origin: OriginRef
 }
@@ -1474,6 +1475,7 @@ fn copy_handler_operations(
             operation: value.operation, executable: value.executable,
             parameter_slots: copy_slot_refs(value.parameter_slots),
             resume_slot: value.resume_slot,
+            captures: copy_captures(value.captures),
             handled_captures: copy_handled_evidence_captures(
                 value.handled_captures),
             origin: value.origin
@@ -1670,6 +1672,7 @@ pub fn make_core_handler_operation(
     operation: EffectOperationRef, executable: ExecutableRef,
     parameter_slots: List<SlotRef>,
     resume_slot: SlotRef?,
+    captures: List<CoreCapture>,
     handled_captures: List<CoreHandledEvidenceCapture>,
     origin: OriginRef
 ) -> CoreHandlerOperation {
@@ -1677,6 +1680,7 @@ pub fn make_core_handler_operation(
         operation: operation, executable: executable,
         parameter_slots: copy_slot_refs(parameter_slots),
         resume_slot: resume_slot,
+        captures: copy_captures(captures),
         handled_captures: copy_handled_evidence_captures(handled_captures),
         origin: origin
     }
@@ -2183,6 +2187,9 @@ pub fn core_handler_operation_resume_slot(
 ) -> SlotRef? {
     value.resume_slot
 }
+pub fn core_handler_operation_captures(
+    value: CoreHandlerOperation
+) -> List<CoreCapture> { copy_captures(value.captures) }
 pub fn core_handler_operation_handled_captures(
     value: CoreHandlerOperation
 ) -> List<CoreHandledEvidenceCapture> {
@@ -2694,6 +2701,9 @@ fn validate_expr_with_loop_depth(
                 validate_handled_installation(installation, body)
                 for operation in installation.operations {
                     validate_origin(operation.origin, operation.executable)
+                    for capture in operation.captures {
+                        require_binder(body.binders, capture.source)
+                    }
                     validate_handled_captures(
                         operation.handled_captures,
                         body, operation.executable)
@@ -3281,6 +3291,7 @@ fn remap_core_expr_types(
                                 parameter_slots: copy_slot_refs(
                                     operation.parameter_slots),
                                 resume_slot: operation.resume_slot,
+                                captures: copy_captures(operation.captures),
                                 handled_captures:
                                     operation.handled_captures.map(fn(capture) {
                                         make_core_handled_evidence_capture(

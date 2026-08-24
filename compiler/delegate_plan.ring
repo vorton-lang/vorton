@@ -6,12 +6,11 @@
 // partial override, or retains a pending/fallback state.
 
 use ir_identity::{
-    SymbolRef, NominalFieldRef, TraitMethodRef,
-    HandledEffectRef,
+    SymbolRef, NominalFieldRef, TraitMethodRef, HandledEffectRef,
     ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     SlotRef, OriginRef,
     symbol_ref_same, symbol_ref_namespace_kind,
-    namespace_kind_same, namespace_member, namespace_trait, namespace_effect,
+    namespace_kind_same, namespace_member, namespace_trait,
     registered_trait_ref_symbol,
     handled_effect_ref_same,
     nominal_field_ref_owner,
@@ -44,7 +43,6 @@ use env::{
     registered_trait_contract_owner,
     registered_trait_contract_methods,
     registered_trait_contract_assoc_items,
-    registered_trait_contract_handled_effects,
     registered_trait_contract_dict_obligations,
     registered_trait_method_ref,
     registered_trait_assoc_member
@@ -52,9 +50,15 @@ use env::{
 use core_expr::{
     CoreTypeRef, CoreTypeGraph, CoreEffectSet,
     CoreCalleeRef, CoreEvidenceRef, CoreBinder,
+    CoreHandledEvidenceBinding, CoreHandledEvidenceUse,
     core_type_ref_same, core_type_ref_index,
     core_effect_set_atoms, make_core_effect_set,
+    core_effect_atom_kind_tag, core_effect_atom_handled_ref,
     core_evidence_is_local, core_evidence_local, core_evidence_callable,
+    core_handled_evidence_requirement, core_handled_evidence_slot,
+    core_handled_evidence_type,
+    core_handled_use_requirement, core_handled_use_slot,
+    core_handled_use_type,
     core_binder_reference, core_binder_type,
     core_type_graph_count, core_type_graph_node,
     core_type_graph_nodes, make_core_type_graph, copy_core_type_graph
@@ -119,32 +123,22 @@ fn copy_evidence_bindings(
     result
 }
 
-pub struct DelegateHandledEvidenceBinding {
-    requirement: HandledEffectRef,
-    evidence: CoreEvidenceRef
-}
-pub fn make_delegate_handled_evidence_binding(
-    requirement: HandledEffectRef, evidence: CoreEvidenceRef
-) -> DelegateHandledEvidenceBinding {
-    DelegateHandledEvidenceBinding {
-        requirement: requirement, evidence: evidence
-    }
-}
-pub fn delegate_handled_evidence_requirement(
-    value: DelegateHandledEvidenceBinding
-) -> HandledEffectRef { value.requirement }
-pub fn delegate_handled_evidence_value(
-    value: DelegateHandledEvidenceBinding
-) -> CoreEvidenceRef { value.evidence }
-fn copy_handled_evidence_bindings(
-    values: List<DelegateHandledEvidenceBinding>
-) -> List<DelegateHandledEvidenceBinding> {
-    let mut result: List<DelegateHandledEvidenceBinding> = []
+fn copy_evidence(values: List<CoreEvidenceRef>) -> List<CoreEvidenceRef> {
+    let mut result: List<CoreEvidenceRef> = []
     for value in values { result.push(value) }
     result
 }
-fn copy_evidence(values: List<CoreEvidenceRef>) -> List<CoreEvidenceRef> {
-    let mut result: List<CoreEvidenceRef> = []
+fn copy_handled_bindings(
+    values: List<CoreHandledEvidenceBinding>
+) -> List<CoreHandledEvidenceBinding> {
+    let mut result: List<CoreHandledEvidenceBinding> = []
+    for value in values { result.push(value) }
+    result
+}
+fn copy_handled_uses(
+    values: List<CoreHandledEvidenceUse>
+) -> List<CoreHandledEvidenceUse> {
+    let mut result: List<CoreHandledEvidenceUse> = []
     for value in values { result.push(value) }
     result
 }
@@ -174,6 +168,8 @@ pub struct DelegateMethodBodyPlan {
     forwarded_argument_slots: List<SlotRef>,
     effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
+    handled_bindings: List<CoreHandledEvidenceBinding>,
+    handled_uses: List<CoreHandledEvidenceUse>,
     body_origin: OriginRef
 }
 
@@ -195,6 +191,8 @@ pub fn make_delegate_method_body_plan(
     wrapper_receiver_slot: SlotRef,
     forwarded_argument_slots: List<SlotRef>,
     effects: CoreEffectSet, evidence: List<CoreEvidenceRef>,
+    handled_bindings: List<CoreHandledEvidenceBinding>,
+    handled_uses: List<CoreHandledEvidenceUse>,
     body_origin: OriginRef
 ) -> DelegateMethodBodyPlan {
     DelegateMethodBodyPlan {
@@ -205,7 +203,10 @@ pub fn make_delegate_method_body_plan(
         wrapper_receiver_slot: wrapper_receiver_slot,
         forwarded_argument_slots: copy_slot_refs(forwarded_argument_slots),
         effects: make_core_effect_set(core_effect_set_atoms(effects)),
-        evidence: copy_evidence(evidence), body_origin: body_origin
+        evidence: copy_evidence(evidence),
+        handled_bindings: copy_handled_bindings(handled_bindings),
+        handled_uses: copy_handled_uses(handled_uses),
+        body_origin: body_origin
     }
 }
 
@@ -304,6 +305,16 @@ pub fn delegate_body_effects(value: DelegateMethodBodyPlan) -> CoreEffectSet {
 pub fn delegate_body_evidence(
     value: DelegateMethodBodyPlan
 ) -> List<CoreEvidenceRef> { copy_evidence(value.evidence) }
+pub fn delegate_body_handled_bindings(
+    value: DelegateMethodBodyPlan
+) -> List<CoreHandledEvidenceBinding> {
+    copy_handled_bindings(value.handled_bindings)
+}
+pub fn delegate_body_handled_uses(
+    value: DelegateMethodBodyPlan
+) -> List<CoreHandledEvidenceUse> {
+    copy_handled_uses(value.handled_uses)
+}
 pub fn delegate_body_origin(value: DelegateMethodBodyPlan) -> OriginRef {
     value.body_origin
 }
@@ -327,7 +338,6 @@ pub struct DelegatePlanInput {
     trait_contract: RegisteredTraitContract,
     method_plans: List<DelegateMethodPlan>,
     assoc_bindings: List<DelegateAssocBinding>,
-    effect_evidence: List<DelegateHandledEvidenceBinding>,
     dict_evidence: List<DelegateEvidenceBinding>,
     manual_conflict: Bool
 }
@@ -342,7 +352,6 @@ pub fn make_delegate_plan_input(
     field_type: CoreTypeRef, trait_contract: RegisteredTraitContract,
     method_plans: List<DelegateMethodPlan>,
     assoc_bindings: List<DelegateAssocBinding>,
-    effect_evidence: List<DelegateHandledEvidenceBinding>,
     dict_evidence: List<DelegateEvidenceBinding>,
     manual_conflict: Bool
 ) -> DelegatePlanInput {
@@ -358,7 +367,6 @@ pub fn make_delegate_plan_input(
         trait_contract: trait_contract,
         method_plans: copy_method_plans(method_plans),
         assoc_bindings: copy_assoc_bindings(assoc_bindings),
-        effect_evidence: copy_handled_evidence_bindings(effect_evidence),
         dict_evidence: copy_evidence_bindings(dict_evidence),
         manual_conflict: manual_conflict
     }
@@ -432,7 +440,6 @@ pub struct DelegateTypedPlan {
     trait_ref: SymbolRef,
     methods: List<DelegateMethodPlan>,
     assoc_bindings: List<DelegateAssocBinding>,
-    effect_evidence: List<DelegateHandledEvidenceBinding>,
     dict_evidence: List<DelegateEvidenceBinding>
 }
 
@@ -552,6 +559,20 @@ fn method_body_is_closed(
             return false
         }
     }
+    for binding in value.handled_bindings {
+        match body_binder_type(value, core_handled_evidence_slot(binding)) {
+            some(ty) => if !core_type_ref_same(
+                    ty, core_handled_evidence_type(binding)) {
+                return false
+            },
+            none => return false
+        }
+    }
+    for use_ in value.handled_uses {
+        if body_binder_index(value, core_handled_use_slot(use_)).is_none() {
+            return false
+        }
+    }
     true
 }
 
@@ -660,23 +681,44 @@ fn evidence_requirements_match(
     true
 }
 
-fn handled_evidence_requirements_match(input: DelegatePlanInput) -> Bool {
-    let required = registered_trait_contract_handled_effects(
-        input.trait_contract)
-    if required.len() != input.effect_evidence.len() { return false }
+fn handled_evidence_requirements_match(body: DelegateMethodBodyPlan) -> Bool {
+    let mut required: List<HandledEffectRef> = []
+    for atom in core_effect_set_atoms(body.effects) {
+        if core_effect_atom_kind_tag(atom) == 3 {
+            required.push(core_effect_atom_handled_ref(atom))
+        }
+    }
+    if required.len() != body.handled_bindings.len() ||
+       required.len() != body.handled_uses.len() {
+        return false
+    }
     let mut index = 0
     while index < required.len() {
-        let binding = input.effect_evidence.get(index).unwrap()
+        let binding = body.handled_bindings.get(index).unwrap()
+        let use_ = body.handled_uses.get(index).unwrap()
         if !handled_effect_ref_same(
-                required.get(index).unwrap(), binding.requirement) {
+                required.get(index).unwrap(),
+                core_handled_evidence_requirement(binding)) ||
+           !handled_effect_ref_same(
+                required.get(index).unwrap(),
+                core_handled_use_requirement(use_)) ||
+           !core_type_ref_same(
+                core_handled_evidence_type(binding),
+                core_handled_use_type(use_)) ||
+           !slot_ref_same(
+                core_handled_evidence_slot(binding),
+                core_handled_use_slot(use_)) {
             return false
         }
         let mut right_index = index + 1
-        while right_index < input.effect_evidence.len() {
-            let right = input.effect_evidence.get(right_index).unwrap()
+        while right_index < body.handled_bindings.len() {
+            let right = body.handled_bindings.get(right_index).unwrap()
             if handled_effect_ref_same(
-                    binding.requirement, right.requirement) ||
-               core_evidence_same(binding.evidence, right.evidence) {
+                    core_handled_evidence_requirement(binding),
+                    core_handled_evidence_requirement(right)) ||
+               slot_ref_same(
+                    core_handled_evidence_slot(binding),
+                    core_handled_evidence_slot(right)) {
                 return false
             }
             right_index = right_index + 1
@@ -689,13 +731,6 @@ fn handled_evidence_requirements_match(input: DelegatePlanInput) -> Bool {
 fn method_contains_plan_evidence(
     method: DelegateMethodPlan, input: DelegatePlanInput
 ) -> Bool {
-    for binding in input.effect_evidence {
-        let mut found = false
-        for evidence in method.body.evidence {
-            if core_evidence_same(binding.evidence, evidence) { found = true }
-        }
-        if !found { return false }
-    }
     for binding in input.dict_evidence {
         let mut found = false
         for evidence in method.body.evidence {
@@ -790,6 +825,7 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
         }
         if !core_type_ref_same(method.body.field_type, input.field_type) ||
            !core_type_ref_same(method.body.outer_type, input.outer_type) ||
+           !handled_evidence_requirements_match(method.body) ||
            !method_contains_plan_evidence(method, input) ||
            !method_body_is_closed(
                 method.body, core_type_graph_count(input.type_graph),
@@ -803,8 +839,7 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
     if !binding_requirements_match_assoc(input) {
         return invalid_outcome(input, DELEGATE_INVALID_ASSOC_BINDING)
     }
-    if !handled_evidence_requirements_match(input) ||
-       !evidence_requirements_match(
+    if !evidence_requirements_match(
             registered_trait_contract_dict_obligations(input.trait_contract),
             input.dict_evidence) {
         return invalid_outcome(input, DELEGATE_INVALID_EVIDENCE)
@@ -820,7 +855,6 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
         field_type: input.field_type, trait_ref: contract_trait,
         methods: copy_method_plans(input.method_plans),
         assoc_bindings: copy_assoc_bindings(input.assoc_bindings),
-        effect_evidence: copy_handled_evidence_bindings(input.effect_evidence),
         dict_evidence: copy_evidence_bindings(input.dict_evidence)
     }
     DelegatePlanOutcome {
@@ -864,11 +898,6 @@ pub fn delegate_typed_plan_methods(
 pub fn delegate_typed_plan_assoc_bindings(
     value: DelegateTypedPlan
 ) -> List<DelegateAssocBinding> { copy_assoc_bindings(value.assoc_bindings) }
-pub fn delegate_typed_plan_effect_evidence(
-    value: DelegateTypedPlan
-) -> List<DelegateHandledEvidenceBinding> {
-    copy_handled_evidence_bindings(value.effect_evidence)
-}
 pub fn delegate_typed_plan_dict_evidence(
     value: DelegateTypedPlan
 ) -> List<DelegateEvidenceBinding> {

@@ -10,12 +10,12 @@ use types::{
     Type, Effect, EffectRow, EMPTY_ROW, effects_equal, types_equal
 }
 use ir_identity::{
-    SymbolRef, CalleeRef, SlotRef,
+    SymbolRef, CalleeRef, SlotRef, HandledEffectRef,
     make_named_callee_ref, make_dynamic_callee_ref,
-    make_source_slot_ref, slot_domain_lexical,
     callee_ref_is_named, callee_ref_named_symbol,
     symbol_ref_canonical_payload, symbol_ref_same,
     system_effect_ref_same,
+    handled_effect_ref_same,
     make_registered_nominal_ref,
     nominal_field_ref_owner, nominal_field_ref_index, nominal_field_ref_name,
     nominal_field_ref_same,
@@ -26,11 +26,12 @@ use ir_identity::{
     slot_ref_same, slot_ref_is_source, slot_ref_source_def_id
 }
 use ir_inventory::{
-    ExecutableRef, BinderEntry,
+    ExecutableRef, BinderEntry, HandledEvidenceRef,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_anonymous_path, executable_ref_origin_module_key,
     system_host_callable_effect, system_host_callable_executable,
-    binder_entry_slot
+    binder_entry_slot, handled_evidence_requirement,
+    effect_operation_ref_effect
 }
 use env::{TypeEnv}
 use hir::{
@@ -45,6 +46,7 @@ use hir::{
     HFieldAccessKind,
     make_h_exact_call_plan,
     h_exact_call_callee, h_exact_call_method, h_exact_call_evidence,
+    h_exact_call_handled_evidence,
     h_constructor_kind, h_constructor_executable,
     h_constructor_fields, h_constructor_tuple_arity,
     h_string_interp_builder_binder, h_string_interp_builder,
@@ -217,6 +219,7 @@ fn exact_call(
             HExpr::Call {
                 callee: callee, args: params, type_args: [],
                 resolved_dicts: h_exact_call_evidence(plan),
+                handled_evidence: h_exact_call_handled_evidence(plan),
                 callee_ref: none, method_ref: some(method),
                 system_host: none, ty: result_type,
                 effects: call_effects, span: span
@@ -231,6 +234,7 @@ fn exact_call(
                 callee: diagnostic_callee(callee_ref, signature, span),
                 args: arguments, type_args: [],
                 resolved_dicts: h_exact_call_evidence(plan),
+                handled_evidence: h_exact_call_handled_evidence(plan),
                 callee_ref: some(callee_ref), method_ref: none,
                 system_host: none, ty: result_type,
                 effects: call_effects, span: span
@@ -250,7 +254,7 @@ fn executable_call(
         make_dynamic_callee_ref(executable_ref_anonymous_path(executable))
     }
     exact_call(
-        make_h_exact_call_plan(callee, none, evidence),
+        make_h_exact_call_plan(callee, none, evidence, []),
         arguments, result_type, effects, span)
 }
 
@@ -896,70 +900,81 @@ fn close_block_statements(values: List<HStmt>) -> List<HStmt> {
     result
 }
 
+fn close_captures(values: List<HLambdaCapture>) -> List<HLambdaCapture> {
+    let mut result: List<HLambdaCapture> = []
+    for capture in values {
+        result.push(HLambdaCapture {
+            source: capture.source, target: capture.target,
+            value: close_optional_expr(capture.value),
+            resource_site: capture.resource_site
+        })
+    }
+    result
+}
+
 fn close_handlers(values: List<HEffectHandler>) -> List<HEffectHandler> {
-    values.map(fn(handler) {
-        if handler.operation_ref.is_none() || handler.handled_ref.is_none() ||
-           handler.fail_ref.is_some() {
-            panic("PreCore closure: handler exact identity is absent")
+    let mut result: List<HEffectHandler> = []
+    for handler in values {
+        match (handler.handled_ref, handler.operation_ref, handler.fail_ref) {
+            (some(effect_ref), some(operation_ref), none) => {
+                let _ = effect_ref
+                let _ = operation_ref
+            },
+            (none, none, some(fail_ref)) => if
+                h_fail_operation_tag(fail_ref) != 0 ||
+                handler.params.len() != 1 {
+                panic("PreCore closure: invalid dedicated fail handler")
+            },
+            _ => panic("PreCore closure: handler exact identity is ambiguous")
         }
-        HEffectHandler {
+        result.push(HEffectHandler {
             effect_name: handler.effect_name,
             handled_ref: handler.handled_ref,
             operation_ref: handler.operation_ref,
-            fail_ref: none,
+            fail_ref: handler.fail_ref,
             executable_ref: handler.executable_ref,
+            captures: close_captures(handler.captures),
+            handled_evidence_bindings: handler.handled_evidence_bindings,
+            evidence_captures: handler.evidence_captures,
             op_name: handler.op_name, params: handler.params,
             resume_binding: handler.resume_binding,
             body: close_expr(handler.body)
-        }
-    })
+        })
+    }
+    result
 }
 
 fn close_handle_expr(
     body: HExpr, handlers: List<HEffectHandler>,
+    installed_evidence: List<HandledEvidenceRef>,
     ty: Type, effects: EffectRow, span: Span
 ) -> HExpr {
-    let mut fail_arms: List<HMatchArm> = []
-    let mut custom_handlers: List<HEffectHandler> = []
+    let mut custom_effects: List<HandledEffectRef> = []
     for handler in handlers {
-        if handler.fail_ref.is_some() {
-            if handler.params.len() != 1 || handler.handled_ref.is_some() ||
-               handler.operation_ref.is_some() ||
-               h_fail_operation_tag(handler.fail_ref.unwrap()) != 0 {
-                panic("PreCore closure: invalid dedicated fail handler")
-            }
-            let param = handler.params.get(0).unwrap()
-            let def_id = match param.def_id {
-                some(value) => value,
-                none => panic("PreCore closure: fail handler binder lacks DefId")
-            }
-            let binding = HPatternBinding {
-                name: param.name, def_id: def_id,
-                slot: make_source_slot_ref(
-                    executable_ref_origin_module_key(handler.executable_ref),
-                    slot_domain_lexical(), def_id),
-                ty: param.ty
-            }
-            fail_arms.push(HMatchArm {
-                pattern: Pattern::Binding { name: param.name, span: span },
-                pattern_plan: some(h_pattern_binding(binding)),
-                bindings: [binding], guard: none,
-                body: close_expr(handler.body), span: span
-            })
-        } else {
-            custom_handlers.push(handler)
+        match handler.handled_ref {
+            some(effect_ref) => if !custom_effects.any(fn(existing) {
+                    handled_effect_ref_same(existing, effect_ref) }) {
+                custom_effects.push(effect_ref)
+            },
+            none => {}
         }
     }
-    let mut closed_body = close_expr(body)
-    if fail_arms.len() > 0 {
-        closed_body = HExpr::TryCatch {
-            body: closed_body, arms: fail_arms,
-            ty: ty, effects: effects, span: span
-        }
+    if custom_effects.len() != installed_evidence.len() {
+        panic("PreCore closure: handled installation census differs")
     }
-    if custom_handlers.len() == 0 { return closed_body }
+    let mut index = 0
+    while index < installed_evidence.len() {
+        if !handled_effect_ref_same(
+                custom_effects.get(index).unwrap(),
+                handled_evidence_requirement(
+                    installed_evidence.get(index).unwrap())) {
+            panic("PreCore closure: handled installation order differs")
+        }
+        index = index + 1
+    }
     HExpr::HandleExpr {
-        body: closed_body, handlers: close_handlers(custom_handlers),
+        body: close_expr(body), handlers: close_handlers(handlers),
+        installed_evidence: installed_evidence,
         ty: ty, effects: effects, span: span
     }
 }
@@ -1038,13 +1053,16 @@ fn close_expr(value: HExpr) -> HExpr {
             ty: ty, effects: effects, span: span
         },
         HExpr::Call {
-            callee, args, type_args, resolved_dicts,
+            callee, args, type_args, resolved_dicts, handled_evidence,
             callee_ref, method_ref, system_host, ty, effects, span
         } => {
             match (callee_ref, method_ref, system_host) {
                 (none, some(_), none) => {},
                 (some(_), none, none) => {},
                 (some(exact_callee), none, some(host)) => {
+                    if handled_evidence.len() != 0 {
+                        panic("PreCore closure: system call entered handled evidence")
+                    }
                     let host_executable = system_host_callable_executable(host)
                     if !callee_ref_is_named(exact_callee) ||
                        !executable_ref_is_named(host_executable) ||
@@ -1074,6 +1092,7 @@ fn close_expr(value: HExpr) -> HExpr {
                 callee: close_expr(callee),
                 args: close_expr_list(args),
                 type_args: type_args, resolved_dicts: resolved_dicts,
+                handled_evidence: handled_evidence,
                 callee_ref: callee_ref, method_ref: method_ref,
                 system_host: system_host,
                 ty: ty, effects: effects, span: span
@@ -1191,30 +1210,40 @@ fn close_expr(value: HExpr) -> HExpr {
             body: close_expr(body), arms: close_arms(arms),
             ty: ty, effects: effects, span: span
         },
-        HExpr::HandleExpr { body, handlers, ty, effects, span } =>
-            close_handle_expr(body, handlers, ty, effects, span),
+        HExpr::HandleExpr {
+            body, handlers, installed_evidence, ty, effects, span
+        } => close_handle_expr(
+            body, handlers, installed_evidence, ty, effects, span),
         HExpr::Lambda {
-            executable_ref, params, captures, return_type,
+            executable_ref, params, captures,
+            handled_evidence_bindings, evidence_captures, return_type,
             body, ty, effects, span
         } => HExpr::Lambda {
             executable_ref: executable_ref, params: params,
-            captures: captures.map(fn(capture) { HLambdaCapture {
-                source: capture.source, target: capture.target,
-                value: close_optional_expr(capture.value),
-                resource_site: capture.resource_site
-            } }),
+            captures: close_captures(captures),
+            handled_evidence_bindings: handled_evidence_bindings,
+            evidence_captures: evidence_captures,
             return_type: return_type, body: close_expr(body),
             ty: ty, effects: effects, span: span
         },
         HExpr::EffectOp {
             effect_name, op_name, operation_ref, fail_ref,
-            args, ty, effects, span
+            handled_evidence, args, ty, effects, span
         } => {
             match (operation_ref, fail_ref) {
-                (some(_), none) => {},
+                (some(operation), none) => {
+                    if handled_evidence.len() != 1 ||
+                       !handled_effect_ref_same(
+                            handled_evidence_requirement(
+                                handled_evidence.get(0).unwrap()),
+                            effect_operation_ref_effect(operation)) {
+                        panic("PreCore closure: custom effect evidence differs")
+                    }
+                },
                 (none, some(reference)) => if
                     h_fail_operation_tag(reference) != 0 ||
-                    !contains_fail_effect(effects) || args.len() != 1 {
+                    !contains_fail_effect(effects) || args.len() != 1 ||
+                    handled_evidence.len() != 0 {
                     panic("PreCore closure: fail operation contract differs")
                 },
                 _ => panic("PreCore closure: effect operation identity is absent")
@@ -1223,6 +1252,7 @@ fn close_expr(value: HExpr) -> HExpr {
                 effect_name: effect_name, op_name: op_name,
                 operation_ref: operation_ref,
                 fail_ref: fail_ref,
+                handled_evidence: handled_evidence,
                 args: close_expr_list(args),
                 ty: ty, effects: effects, span: span
             }
@@ -1295,11 +1325,12 @@ fn close_decl(value: HDecl) -> HDecl {
         HDecl::Fn {
             name, def_id, executable_ref, impl_method_ref,
             type_params, params, return_type, effects,
-            body, is_pub, trait_bounds, span
+            handled_evidence_bindings, body, is_pub, trait_bounds, span
         } => HDecl::Fn {
             name: name, def_id: def_id, executable_ref: executable_ref,
             impl_method_ref: impl_method_ref, type_params: type_params,
             params: params, return_type: return_type, effects: effects,
+            handled_evidence_bindings: handled_evidence_bindings,
             body: close_expr(body), is_pub: is_pub,
             trait_bounds: trait_bounds, span: span
         },
@@ -1345,8 +1376,11 @@ fn close_decl(value: HDecl) -> HDecl {
             } }),
             is_pub: is_pub, span: span
         },
-        HDecl::Test { description, executable_ref, body, span } => HDecl::Test {
+        HDecl::Test {
+            description, executable_ref, handled_evidence_bindings, body, span
+        } => HDecl::Test {
             description: description, executable_ref: executable_ref,
+            handled_evidence_bindings: handled_evidence_bindings,
             body: close_expr(body), span: span
         },
         HDecl::Trait {
@@ -1359,6 +1393,8 @@ fn close_decl(value: HDecl) -> HDecl {
                 params: method.params, return_type: method.return_type,
                 effects: method.effects, has_default: method.has_default,
                 executable_ref: method.executable_ref,
+                handled_evidence_bindings:
+                    method.handled_evidence_bindings,
                 body: close_optional_expr(method.body)
             } }),
             supertraits: supertraits, assoc_types: assoc_types,
@@ -1366,11 +1402,13 @@ fn close_decl(value: HDecl) -> HDecl {
         },
         HDecl::ExternFn {
             name, abi_name, def_id, executable_ref, type_params,
-            params, return_type, effects, is_pub, span
+            params, return_type, effects, handled_evidence_bindings,
+            is_pub, span
         } => HDecl::ExternFn {
             name: name, abi_name: abi_name, def_id: def_id,
             executable_ref: executable_ref, type_params: type_params,
             params: params, return_type: return_type, effects: effects,
+            handled_evidence_bindings: handled_evidence_bindings,
             is_pub: is_pub, span: span
         },
         HDecl::ExternType { name, type_params, is_pub, span } =>
@@ -1382,9 +1420,11 @@ fn close_decl(value: HDecl) -> HDecl {
             name: name, ty: ty, is_pub: is_pub, span: span
         },
         HDecl::Const {
-            name, def_id, executable_ref, ty, init, is_pub, span
+            name, def_id, executable_ref, handled_evidence_bindings,
+            ty, init, is_pub, span
         } => HDecl::Const {
             name: name, def_id: def_id, executable_ref: executable_ref,
+            handled_evidence_bindings: handled_evidence_bindings,
             ty: ty, init: close_expr(init), is_pub: is_pub, span: span
         },
         HDecl::ModBlock { name, decls, is_pub, span } => HDecl::ModBlock {
