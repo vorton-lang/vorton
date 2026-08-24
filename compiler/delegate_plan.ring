@@ -1,6 +1,6 @@
 // Exact 0.1 delegate TypedPlan.
 //
-// The resolver/checker supplies every typed identity and body-local slot.  This
+// The resolver/checker supplies every typed identity and source binder.  This
 // module only validates the closed full-trait forwarding relation.  It never
 // resolves a name/span, discovers a provider, fills a missing method, permits a
 // partial override, or retains a pending/fallback state.
@@ -29,11 +29,9 @@ use ir_identity::{
     origin_ref_is_symbol, origin_ref_symbol
 }
 use ir_inventory::{
-    ExecutableRef, BinderManifest,
+    ExecutableRef,
     executable_ref_same, executable_ref_is_named,
-    executable_ref_named_symbol,
-    binder_manifest_owner, binder_manifest_entries,
-    binder_entry_slot
+    executable_ref_named_symbol
 }
 use hir::{
     MethodCallRef,
@@ -53,18 +51,15 @@ use env::{
 }
 use core_expr::{
     CoreTypeRef, CoreTypeGraph, CoreEffectSet,
-    CoreCalleeRef, CoreEvidenceRef, CoreSlot,
+    CoreCalleeRef, CoreEvidenceRef, CoreBinder,
     core_type_ref_same, core_type_ref_index,
     core_effect_set_atoms, make_core_effect_set,
     core_evidence_is_local, core_evidence_local, core_evidence_callable,
-    core_slot_reference, core_slot_type,
+    core_binder_reference, core_binder_type,
     core_type_graph_count, core_type_graph_node,
     core_type_graph_nodes, make_core_type_graph, copy_core_type_graph
 }
-use flow_ir::{
-    FlowScope, FlowScopeRef,
-    flow_type_node_nominal
-}
+use flow_ir::{flow_type_node_nominal}
 
 // ============================================================
 // Exact associated/evidence facts
@@ -170,31 +165,20 @@ fn core_evidence_same(left: CoreEvidenceRef, right: CoreEvidenceRef) -> Bool {
 // ============================================================
 
 pub struct DelegateMethodBodyPlan {
-    type_count: Int,
-    manifest: BinderManifest,
-    scopes: List<FlowScope>,
-    slots: List<CoreSlot>,
+    binders: List<CoreBinder>,
     parameter_slots: List<SlotRef>,
     outer_type: CoreTypeRef,
     field_type: CoreTypeRef,
     result_type: CoreTypeRef,
     wrapper_receiver_slot: SlotRef,
-    field_receiver_slot: SlotRef,
     forwarded_argument_slots: List<SlotRef>,
-    result_slot: SlotRef,
     effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
-    body_origin: OriginRef,
-    body_scope: FlowScopeRef
+    body_origin: OriginRef
 }
 
-fn copy_core_slots(values: List<CoreSlot>) -> List<CoreSlot> {
-    let mut result: List<CoreSlot> = []
-    for value in values { result.push(value) }
-    result
-}
-fn copy_scopes(values: List<FlowScope>) -> List<FlowScope> {
-    let mut result: List<FlowScope> = []
+fn copy_core_binders(values: List<CoreBinder>) -> List<CoreBinder> {
+    let mut result: List<CoreBinder> = []
     for value in values { result.push(value) }
     result
 }
@@ -205,34 +189,23 @@ fn copy_slot_refs(values: List<SlotRef>) -> List<SlotRef> {
 }
 
 pub fn make_delegate_method_body_plan(
-    type_count: Int, manifest: BinderManifest,
-    scopes: List<FlowScope>, slots: List<CoreSlot>,
+    binders: List<CoreBinder>,
     parameter_slots: List<SlotRef>, outer_type: CoreTypeRef,
     field_type: CoreTypeRef, result_type: CoreTypeRef,
-    wrapper_receiver_slot: SlotRef, field_receiver_slot: SlotRef,
-    forwarded_argument_slots: List<SlotRef>, result_slot: SlotRef,
+    wrapper_receiver_slot: SlotRef,
+    forwarded_argument_slots: List<SlotRef>,
     effects: CoreEffectSet, evidence: List<CoreEvidenceRef>,
-    body_origin: OriginRef, body_scope: FlowScopeRef
+    body_origin: OriginRef
 ) -> DelegateMethodBodyPlan {
-    if type_count <= 0 || slot_ref_same(
-            wrapper_receiver_slot, field_receiver_slot) ||
-       slot_ref_same(field_receiver_slot, result_slot) {
-        panic("delegate plan: invalid method body slot relation")
-    }
     DelegateMethodBodyPlan {
-        type_count: type_count, manifest: manifest,
-        scopes: copy_scopes(scopes),
-        slots: copy_core_slots(slots),
+        binders: copy_core_binders(binders),
         parameter_slots: copy_slot_refs(parameter_slots),
         outer_type: outer_type, field_type: field_type,
         result_type: result_type,
         wrapper_receiver_slot: wrapper_receiver_slot,
-        field_receiver_slot: field_receiver_slot,
         forwarded_argument_slots: copy_slot_refs(forwarded_argument_slots),
-        result_slot: result_slot,
         effects: make_core_effect_set(core_effect_set_atoms(effects)),
-        evidence: copy_evidence(evidence), body_origin: body_origin,
-        body_scope: body_scope
+        evidence: copy_evidence(evidence), body_origin: body_origin
     }
 }
 
@@ -304,17 +277,8 @@ pub fn delegate_method_body(value: DelegateMethodPlan) -> DelegateMethodBodyPlan
     value.body
 }
 
-pub fn delegate_body_type_count(value: DelegateMethodBodyPlan) -> Int {
-    value.type_count
-}
-pub fn delegate_body_manifest(value: DelegateMethodBodyPlan) -> BinderManifest {
-    value.manifest
-}
-pub fn delegate_body_slots(value: DelegateMethodBodyPlan) -> List<CoreSlot> {
-    copy_core_slots(value.slots)
-}
-pub fn delegate_body_scopes(value: DelegateMethodBodyPlan) -> List<FlowScope> {
-    copy_scopes(value.scopes)
+pub fn delegate_body_binders(value: DelegateMethodBodyPlan) -> List<CoreBinder> {
+    copy_core_binders(value.binders)
 }
 pub fn delegate_body_parameter_slots(
     value: DelegateMethodBodyPlan
@@ -331,15 +295,9 @@ pub fn delegate_body_result_type(value: DelegateMethodBodyPlan) -> CoreTypeRef {
 pub fn delegate_body_wrapper_receiver(
     value: DelegateMethodBodyPlan
 ) -> SlotRef { value.wrapper_receiver_slot }
-pub fn delegate_body_field_receiver(value: DelegateMethodBodyPlan) -> SlotRef {
-    value.field_receiver_slot
-}
 pub fn delegate_body_forwarded_arguments(
     value: DelegateMethodBodyPlan
 ) -> List<SlotRef> { copy_slot_refs(value.forwarded_argument_slots) }
-pub fn delegate_body_result_slot(value: DelegateMethodBodyPlan) -> SlotRef {
-    value.result_slot
-}
 pub fn delegate_body_effects(value: DelegateMethodBodyPlan) -> CoreEffectSet {
     make_core_effect_set(core_effect_set_atoms(value.effects))
 }
@@ -348,9 +306,6 @@ pub fn delegate_body_evidence(
 ) -> List<CoreEvidenceRef> { copy_evidence(value.evidence) }
 pub fn delegate_body_origin(value: DelegateMethodBodyPlan) -> OriginRef {
     value.body_origin
-}
-pub fn delegate_body_scope(value: DelegateMethodBodyPlan) -> FlowScopeRef {
-    value.body_scope
 }
 
 // ============================================================
@@ -514,89 +469,74 @@ pub fn delegate_plan_outcome_invalid(
     }
 }
 
-fn body_slot_index(value: DelegateMethodBodyPlan, target: SlotRef) -> Int? {
+fn body_binder_index(value: DelegateMethodBodyPlan, target: SlotRef) -> Int? {
     let mut index = 0
-    for slot in value.slots {
-        if slot_ref_same(core_slot_reference(slot), target) {
+    for binder in value.binders {
+        if slot_ref_same(core_binder_reference(binder), target) {
             return some(index)
         }
         index = index + 1
     }
     none
 }
-fn body_slot_type(value: DelegateMethodBodyPlan, target: SlotRef) -> CoreTypeRef? {
-    match body_slot_index(value, target) {
-        some(index) => some(core_slot_type(value.slots.get(index).unwrap())),
+fn body_binder_type(value: DelegateMethodBodyPlan, target: SlotRef) -> CoreTypeRef? {
+    match body_binder_index(value, target) {
+        some(index) => some(core_binder_type(value.binders.get(index).unwrap())),
         none => none
     }
 }
 fn method_body_is_closed(
     value: DelegateMethodBodyPlan,
-    generated_executable: ExecutableRef,
+    expected_type_count: Int,
     expected_outer_type: CoreTypeRef,
     expected_field_type: CoreTypeRef,
     expected_forwarded_types: List<CoreTypeRef>,
     expected_result_type: CoreTypeRef
 ) -> Bool {
-    if value.type_count <= 0 ||
-       !executable_ref_same(
-            binder_manifest_owner(value.manifest), generated_executable) ||
-       value.slots.len() != binder_manifest_entries(value.manifest).len() ||
-       !core_type_ref_same(value.outer_type, expected_outer_type) ||
+    if !core_type_ref_same(value.outer_type, expected_outer_type) ||
        !core_type_ref_same(value.field_type, expected_field_type) ||
        !core_type_ref_same(value.result_type, expected_result_type) ||
        value.parameter_slots.len() !=
             value.forwarded_argument_slots.len() + 1 ||
        value.forwarded_argument_slots.len() != expected_forwarded_types.len() ||
        !slot_ref_same(
-            value.parameter_slots.get(0).unwrap_or(value.result_slot),
+            value.parameter_slots.get(0).unwrap_or(value.wrapper_receiver_slot),
             value.wrapper_receiver_slot) {
         return false
     }
-    let mut slot_index = 0
-    while slot_index < value.slots.len() {
-        let slot = value.slots.get(slot_index).unwrap()
-        let binder = binder_manifest_entries(value.manifest).get(
-            slot_index).unwrap()
-        if !slot_ref_same(
-                core_slot_reference(slot), binder_entry_slot(binder)) ||
-           core_type_ref_index(core_slot_type(slot)) < 0 ||
-           core_type_ref_index(core_slot_type(slot)) >= value.type_count {
+    let mut binder_index = 0
+    while binder_index < value.binders.len() {
+        let binder = value.binders.get(binder_index).unwrap()
+        if core_type_ref_index(core_binder_type(binder)) < 0 ||
+           core_type_ref_index(core_binder_type(binder)) >= expected_type_count {
             return false
         }
-        let mut right_index = slot_index + 1
-        while right_index < value.slots.len() {
+        let mut right_index = binder_index + 1
+        while right_index < value.binders.len() {
             if slot_ref_same(
-                    core_slot_reference(slot),
-                    core_slot_reference(value.slots.get(right_index).unwrap())) {
+                    core_binder_reference(binder),
+                    core_binder_reference(
+                        value.binders.get(right_index).unwrap())) {
                 return false
             }
             right_index = right_index + 1
         }
-        slot_index = slot_index + 1
+        binder_index = binder_index + 1
     }
-    match body_slot_type(value, value.wrapper_receiver_slot) {
+    match body_binder_type(value, value.wrapper_receiver_slot) {
         some(ty) => if !core_type_ref_same(ty, value.outer_type) { return false },
-        none => return false
-    }
-    match body_slot_type(value, value.field_receiver_slot) {
-        some(ty) => if !core_type_ref_same(ty, value.field_type) { return false },
-        none => return false
-    }
-    match body_slot_type(value, value.result_slot) {
-        some(ty) => if !core_type_ref_same(ty, value.result_type) { return false },
         none => return false
     }
     let mut argument_index = 0
     while argument_index < value.forwarded_argument_slots.len() {
         let argument = value.forwarded_argument_slots.get(argument_index).unwrap()
-        if body_slot_index(value, argument).is_none() ||
+        if body_binder_index(value, argument).is_none() ||
            !slot_ref_same(
                 value.parameter_slots.get(argument_index + 1).unwrap(),
                 argument) {
             return false
         }
-        match body_slot_type(value, argument) {
+        match body_binder_type(value, argument) {
             some(ty) => if !core_type_ref_same(
                     ty, expected_forwarded_types.get(
                         argument_index).unwrap()) {
@@ -608,7 +548,7 @@ fn method_body_is_closed(
     }
     for evidence in value.evidence {
         if core_evidence_is_local(evidence) &&
-           body_slot_index(value, core_evidence_local(evidence)).is_none() {
+           body_binder_index(value, core_evidence_local(evidence)).is_none() {
             return false
         }
     }
@@ -627,10 +567,7 @@ fn method_identity_is_exact(
        !origin_ref_is_symbol(value.generated_origin) ||
        !symbol_ref_same(
             origin_ref_symbol(value.generated_origin),
-            impl_method_ref_member(value.generated_method)) ||
-       !executable_ref_same(
-            binder_manifest_owner(value.body.manifest),
-            value.generated_executable) {
+            impl_method_ref_member(value.generated_method)) {
         return false
     }
     impl_method_ref_callable_slot_index(value.generated_method) ==
@@ -853,10 +790,9 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
         }
         if !core_type_ref_same(method.body.field_type, input.field_type) ||
            !core_type_ref_same(method.body.outer_type, input.outer_type) ||
-           method.body.type_count != core_type_graph_count(input.type_graph) ||
            !method_contains_plan_evidence(method, input) ||
            !method_body_is_closed(
-                method.body, method.generated_executable,
+                method.body, core_type_graph_count(input.type_graph),
                 input.outer_type, input.field_type,
                 method.forwarded_parameter_types,
                 method.result_type) {

@@ -5,22 +5,24 @@
 // root, identity, provider lookup, or fallback survives this boundary.
 
 use ir_identity::{
-    NominalFieldRef, handled_effect_ref_symbol
+    SlotRef, NominalFieldRef, handled_effect_ref_symbol, slot_ref_same
 }
 
 use core_expr::{
-    CoreBody, CoreImplMetadata,
+    CoreTypeRef, CoreBody, CoreImplMetadata,
     make_core_assoc_binding, make_core_obligation_binding,
     make_core_impl_metadata,
     make_core_effect_set,
     make_core_nominal_field,
+    make_core_read_expr,
     make_core_project_expr,
     make_core_method_call_expr,
-    make_core_initialize_stmt,
     make_core_block,
     make_core_body,
-    validate_core_body
+    validate_core_body,
+    core_binder_reference, core_binder_type
 }
+
 use delegate_plan::{
     DelegateTypedPlan, DelegateMethodPlan, DelegateMethodBodyPlan,
     delegate_typed_plan_field, delegate_typed_plan_methods,
@@ -36,13 +38,30 @@ use delegate_plan::{
     delegate_method_generated,
     delegate_method_child_call, delegate_method_child_callee,
     delegate_method_body,
-    delegate_body_type_count, delegate_body_manifest,
-    delegate_body_scopes, delegate_body_slots, delegate_body_parameter_slots,
-    delegate_body_field_type, delegate_body_result_type,
-    delegate_body_wrapper_receiver, delegate_body_field_receiver,
-    delegate_body_forwarded_arguments, delegate_body_result_slot,
+    delegate_body_binders, delegate_body_parameter_slots,
+    delegate_body_outer_type, delegate_body_field_type,
+    delegate_body_result_type, delegate_body_wrapper_receiver,
+    delegate_body_forwarded_arguments,
     delegate_body_effects, delegate_body_evidence,
-    delegate_body_origin, delegate_body_scope
+    delegate_body_origin
+}
+
+fn delegate_argument_type(
+    body: DelegateMethodBodyPlan, argument: SlotRef
+) -> CoreTypeRef {
+    let mut result: CoreTypeRef? = none
+    for binder in delegate_body_binders(body) {
+        if slot_ref_same(core_binder_reference(binder), argument) {
+            if result.is_some() {
+                panic("delegate elaboration: forwarded binder is duplicated")
+            }
+            result = some(core_binder_type(binder))
+        }
+    }
+    match result {
+        some(value) => value,
+        none => panic("delegate elaboration: forwarded binder is absent")
+    }
 }
 
 fn elaborate_delegate_method(
@@ -51,30 +70,32 @@ fn elaborate_delegate_method(
 ) -> CoreBody {
     let body = delegate_method_body(method)
     let body_origin = delegate_body_origin(body)
+    let receiver = make_core_read_expr(
+        delegate_body_outer_type(body), make_core_effect_set([]), body_origin,
+        delegate_body_wrapper_receiver(body))
     let projected = make_core_project_expr(
-        delegate_body_field_receiver(body),
         delegate_body_field_type(body),
         make_core_effect_set([]), body_origin,
-        delegate_body_wrapper_receiver(body),
+        receiver,
         make_core_nominal_field(field), false)
-    let project_stmt = make_core_initialize_stmt(
-        delegate_body_field_receiver(body), projected, body_origin)
+    let forwarded_arguments = delegate_body_forwarded_arguments(body).map(
+        fn(argument) {
+            // The TypedPlan validates argument order and exact binder types.
+            make_core_read_expr(
+                delegate_argument_type(body, argument),
+                make_core_effect_set([]), body_origin, argument)
+        })
     let forwarded = make_core_method_call_expr(
-        delegate_body_result_slot(body),
         delegate_body_result_type(body),
         delegate_body_effects(body), body_origin,
         delegate_method_child_callee(method),
         delegate_method_child_call(method),
-        delegate_body_field_receiver(body),
-        delegate_body_forwarded_arguments(body),
+        projected, forwarded_arguments,
         delegate_body_evidence(body))
-    let block = make_core_block(
-        [project_stmt], some(forwarded), body_origin,
-        delegate_body_scope(body))
+    let block = make_core_block([], some(forwarded), body_origin)
     let result = make_core_body(
         delegate_method_executable(method), delegate_method_origin(method),
-        delegate_body_type_count(body), delegate_body_manifest(body),
-        delegate_body_scopes(body), delegate_body_slots(body),
+        delegate_body_binders(body),
         delegate_body_parameter_slots(body),
         delegate_body_result_type(body), block)
     validate_core_body(result)
