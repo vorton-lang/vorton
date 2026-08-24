@@ -11,11 +11,10 @@ use env::{TypeEnv, TypeScheme, add_impl, find_impl,
     find_impl_by_provider, impl_entry_exact_key_same,
     optional_symbol_ref_same, install_method_core}
 use builtins::{register_builtins, register_hof_intrinsics,
-    finalize_std_hof_fallbacks, validate_builtin_method_core_shadow,
+    finalize_std_hof_fallbacks,
     checker_only_builtin_values, checker_builtin_value_name,
     checker_builtin_value_symbol}
-use derive::{prepend_builtin_option_derived_impls,
-    validate_derived_impls}
+use derive::{validate_derived_impls}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
 use dict_lower::{lower_dicts}
 use andor_lower::{lower_andor}
@@ -37,6 +36,8 @@ use parser::{parse}
 use ir_identity::{SymbolRef, impl_owner_ref_same, impl_method_ref_owner,
     impl_owner_ref_trait, impl_owner_ref_provider, impl_method_ref_same}
 use union_find::{UnionFind}
+use core_from_hir::{FrozenCoreAssemblyFacts}
+use legacy_projection::{LegacyProjectionFacts}
 
 pub struct CheckResult {
     pub program: HProgram,
@@ -50,6 +51,8 @@ pub struct CheckResult {
     // pub-use hops without falling back to leaf-name guesses.
     pub value_binding_kinds: Map<Int, ValueBindingKind>,
     pub value_symbols: Map<Int, SymbolRef>,
+    pub core_facts: FrozenCoreAssemblyFacts?,
+    pub legacy_facts: LegacyProjectionFacts?,
     // User-declared impl blocks with the canonical target identity resolved
     // during checking (while namespace frames were live). Collected from the
     // module's own HIR before prelude decls are prepended, so exports never
@@ -72,6 +75,8 @@ fn duplicate_direct_declaration_error_result(ctx: InferCtx) -> CheckResult {
         value_origins: map_clone(ctx.use_aliases),
         value_binding_kinds: map_clone(ctx.value_binding_kinds),
         value_symbols: map_clone(ctx.value_symbols),
+        core_facts: none,
+        legacy_facts: none,
         impl_facts: []
     }
 }
@@ -257,8 +262,10 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                             ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
                         match result {
                             some(HDecl::ExternFn {
-                                name, abi_name, def_id, type_params, params,
-                                return_type, effects, is_pub, span
+                                name, abi_name, def_id, executable_ref,
+                                type_params, params,
+                                return_type, effects,
+                                handled_evidence_bindings, is_pub, span
                             }) => {
                                 // A small number of compiler-owned extern
                                 // bridges carry an unspellable exact origin on
@@ -273,9 +280,14 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                 }
                                 prelude_hdecls.push(HDecl::ExternFn {
                                     name: exact_name, abi_name: abi_name,
-                                    def_id: def_id, type_params: type_params,
+                                    def_id: def_id,
+                                    executable_ref: executable_ref,
+                                    type_params: type_params,
                                     params: params, return_type: return_type,
-                                    effects: effects, is_pub: is_pub, span: span
+                                    effects: effects,
+                                    handled_evidence_bindings:
+                                        handled_evidence_bindings,
+                                    is_pub: is_pub, span: span
                                 })
                             },
                             some(_) => {},
@@ -290,12 +302,14 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
             finalize_std_hof_fallbacks(ctx.env, ctx.sink)
         },
     }
-    validate_builtin_method_core_shadow(ctx.env)
     prelude_hdecls
 }
 
-fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
-    let mut ctx = new_base_infer_ctx(sink)
+fn new_infer_ctx(
+    sink: CollectingSink, module_key: Str, module_order: Int
+) -> InferCtx {
+    let mut ctx = new_base_infer_ctx(
+        sink, module_key, module_order)
     register_builtins(ctx.env, sink)
     register_hof_intrinsics(ctx.env, sink)
     // These bindings are created only by register_builtins above. Record their
@@ -434,7 +448,8 @@ fn collect_module_impl_facts(
 }
 
 pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
-    let mut ctx = new_infer_ctx(sink)
+    let file_key = single_namespace_file_key(program)
+    let mut ctx = new_infer_ctx(sink, file_key, 0)
     match first_duplicate_direct_declaration(program) {
         some(duplicate) => {
             ctx.sink.report(duplicate_direct_declaration_diagnostic(duplicate))
@@ -444,7 +459,7 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     }
     let prelude_hdecls = load_prelude(ctx)
     install_struct_identity_ledger(
-        ctx, single_namespace_file_key(program),
+        ctx, file_key,
         resolve_single_namespace_plan(program))
     let hprogram = infer_check(ctx, program)
     let mut impl_facts: List<ModuleImplFact> = []
@@ -457,8 +472,7 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     // B-104 D7: lower `&&`/`||` to if-else (andor_lower), then B-104 D4:
     // first-class the dict evidence (static singleton set + local
     // constructions for dynamic wrapped dicts) — both before perceus/codegen.
-    let derived_impls = prepend_builtin_option_derived_impls(
-        ctx.env, hprogram.derived_impls)
+    let derived_impls = hprogram.derived_impls
     validate_derived_impls(ctx.env, derived_impls)
     let assembled = HProgram { decls: all_decls, derived_impls: derived_impls, boxed_vars: hprogram.boxed_vars, static_dicts: [], extern_type_names: hprogram.extern_type_names, drop_types: hprogram.drop_types }
     let has_errors = ctx.sink.has_errors()
@@ -478,6 +492,8 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         value_origins: map_clone(ctx.use_aliases),
         value_binding_kinds: map_clone(ctx.value_binding_kinds),
         value_symbols: map_clone(ctx.value_symbols),
+        core_facts: none,
+        legacy_facts: none,
         impl_facts: impl_facts
     }
 }
@@ -675,6 +691,7 @@ fn report_namespace_plan_issues(
 
 pub fn check_module(
     program: Program, module_key: Str, module_prefix: Str,
+    module_order: Int,
     namespace_plan: ResolvedNamespacePlan,
     module_exports: List<ModuleExports>, sink: CollectingSink
 ) -> CheckResult {
@@ -687,7 +704,8 @@ pub fn check_module(
             "unreachable: project checker received duplicate direct declaration"),
         none => {}
     }
-    let mut ctx = new_infer_ctx(sink)
+    let mut ctx = new_infer_ctx(
+        sink, module_key, module_order)
     let prelude_hdecls = load_prelude(ctx)
     inject_module_exports(ctx, module_exports)
     let _ = install_project_namespace_plan(ctx, module_key, namespace_plan)
@@ -726,6 +744,8 @@ pub fn check_module(
         value_origins: map_clone(ctx.use_aliases),
         value_binding_kinds: map_clone(ctx.value_binding_kinds),
         value_symbols: map_clone(ctx.value_symbols),
+        core_facts: none,
+        legacy_facts: none,
         impl_facts: impl_facts
     }
 }
@@ -1095,6 +1115,9 @@ fn check_moves_expr(expr: HExpr, mut consumed: Map<Str, Span>, drop_types: Set<S
         },
         HExpr::Clone { inner, .. } => {
             check_moves_expr(inner, consumed, drop_types, sink)
+        },
+        HExpr::Take { source, .. } => {
+            check_moves_expr(source, consumed, drop_types, sink)
         },
         HExpr::UnsafeBlock { body, .. } => {
             check_moves_expr(body, consumed, drop_types, sink)

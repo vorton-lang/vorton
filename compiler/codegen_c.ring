@@ -30,6 +30,7 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTy
 use codegen_c_expr::{gen_c_expr, emit_c_stmt, c_resolve_dict_ref,
     ensure_c_dict_getter, gen_c_closure_call, emit_c_receiver_load}
 use effect_analysis::{extract_effect_names, collect_fn_callees}
+use ir_identity::{symbol_ref_canonical_payload}
 use resolver::{module_prefix}
 
 // ============================================================
@@ -1843,9 +1844,11 @@ fn emit_c_derived_dict_call(mut ctx: CCtx, base_dict: DictRef, extra_dicts: List
     for a in args { call_args.push(a) }
     for ed in extra_dicts {
         match ed {
-            DictRef::Wrapped { dict, trait_name, inner_dicts } => {
+            DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
+                let trait_name = symbol_ref_canonical_payload(trait_ref)
                 let reference = c_resolve_dict_ref(ctx, DictRef::Wrapped {
-                    dict: dict, trait_name: trait_name, inner_dicts: inner_dicts
+                    dict: dict, trait_ref: trait_ref,
+                    inner_dicts: inner_dicts
                 })
                 let value = c_ref_c_name(reference)
                 call_args.push(value)
@@ -1902,14 +1905,14 @@ fn emit_c_field_eq_flag(mut ctx: CCtx, lhs: Str, rhs: Str, action: FieldAction) 
             c_emit(ctx, "${f} = (${lhs} == ${rhs});")
             f
         },
-        FieldAction::Call { base_dict, extra_dicts } => {
+        FieldAction::Call { base_dict, extra_dicts, .. } => {
             let r = emit_c_derived_dict_call(
                 ctx, base_dict, extra_dicts, [lhs, rhs])
             let f = fresh_i64(ctx)
             c_emit(ctx, "${f} = (RING_UNTAG(${r}) != 0);")
             f
         },
-        FieldAction::Tuple { element_actions } => {
+        FieldAction::Tuple { element_actions, .. } => {
             // Short-circuit: first unequal element fails the whole tuple.
             rt_use(ctx, "ring_list_get", 2)
             let f = fresh_i64(ctx)
@@ -2112,14 +2115,14 @@ fn emit_c_hash_combine(mut ctx: CCtx, lhs: Str, rhs: Str) -> Str {
 // fallbacks and never inspect a pointer address.
 fn emit_c_field_hash_raw(mut ctx: CCtx, value: Str, action: FieldAction) -> Str {
     match action {
-        FieldAction::Call { base_dict, extra_dicts } => {
+        FieldAction::Call { base_dict, extra_dicts, .. } => {
             let boxed = emit_c_derived_dict_call(
                 ctx, base_dict, extra_dicts, [value])
             let raw = fresh_i64(ctx)
             c_emit(ctx, "${raw} = RING_UNTAG(${boxed});")
             raw
         },
-        FieldAction::Tuple { element_actions } => {
+        FieldAction::Tuple { element_actions, .. } => {
             rt_use(ctx, "ring_list_get", 2)
             let mut acc = fresh_i64(ctx)
             c_emit(ctx, "${acc} = ${DERIVED_HASH_SEED};")
@@ -2288,10 +2291,10 @@ fn emit_c_field_cmp_val(mut ctx: CCtx, lhs: Str, rhs: Str, action: FieldAction) 
             c_emit(ctx, "${cv} = RING_INT(${li} < ${ri} ? -1 : (${li} > ${ri} ? 1 : 0));")
             cv
         },
-        FieldAction::Call { base_dict, extra_dicts } => {
+        FieldAction::Call { base_dict, extra_dicts, .. } => {
             emit_c_derived_dict_call(ctx, base_dict, extra_dicts, [lhs, rhs])
         },
-        FieldAction::Tuple { element_actions } => {
+        FieldAction::Tuple { element_actions, .. } => {
             rt_use(ctx, "ring_list_get", 2)
             let cv = fresh_tmp(ctx)
             c_emit(ctx, "${cv} = RING_INT(0);")
@@ -2492,10 +2495,10 @@ fn emit_c_debug_field_str(mut ctx: CCtx, v: Str, action: FieldAction) -> Str {
             c_emit(ctx, "${s} = ring_bool_to_str(RING_UNTAG(${v}));")
             s
         },
-        FieldAction::Call { base_dict, extra_dicts } => {
+        FieldAction::Call { base_dict, extra_dicts, .. } => {
             emit_c_derived_dict_call(ctx, base_dict, extra_dicts, [v])
         },
-        FieldAction::Tuple { element_actions } => {
+        FieldAction::Tuple { element_actions, .. } => {
             if element_actions.len() == 0 {
                 return c_derived_str_lit(ctx, "()")
             }
@@ -2708,7 +2711,7 @@ fn predeclare_c_json_derived_impls(
 
 fn emit_c_json_field_str(mut ctx: CCtx, value: Str, action: FieldAction) -> Str {
     match action {
-        FieldAction::Call { base_dict, extra_dicts } =>
+        FieldAction::Call { base_dict, extra_dicts, .. } =>
             emit_c_derived_dict_call(ctx, base_dict, extra_dicts, [value]),
         // Json derivation only produces Call actions. Keep the backend
         // fail-loud if a future derive rule violates that evidence boundary.

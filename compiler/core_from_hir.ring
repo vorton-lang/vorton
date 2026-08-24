@@ -7,15 +7,24 @@
 use ast::{Pattern, LiteralValue, BinOp, UnaryOp, span_zero}
 use types::{Type, Effect, EffectRow, types_equal}
 use env::{TypeEnv}
+use builtins::{
+    BuiltinMethodContractFact, builtin_method_contract_facts,
+    builtin_method_contract_intrinsic, builtin_method_contract_scheme
+}
 use precore_lower::{close_hir_surface}
 use core_type_source::{
-    CoreTypeSourceFact, core_type_source_type, core_type_source_fact
+    CoreTypeSourceFact, CoreHandledEvidenceTypeSource,
+    core_type_source_type, core_type_source_fact,
+    core_handled_evidence_source_requirement,
+    core_handled_evidence_source_aggregate_fact,
+    core_handled_evidence_type_source_same
 }
 use ir_identity::{
     SymbolRef, PathRef, PathOwnerRef, PathRole, SlotRef, CalleeRef,
     ModuleBodyRef, make_module_body_ref,
     OriginRef, ImplOwnerRef, ImplMethodRef,
-    RegisteredNominalRef, VariantRef,
+    RegisteredNominalRef, VariantRef, HandledEffectRef,
+    handled_effect_ref_same,
     path_owner_for_symbol, path_ref_owner, path_ref_normalized_child_path,
     path_role_child, path_role_parameter, path_role_declaration,
     path_role_capture, path_role_handler, path_role_synthetic,
@@ -27,6 +36,8 @@ use ir_identity::{
     impl_owner_ref_same, impl_method_ref_same,
     impl_method_ref_member,
     intrinsic_ref_symbol, trait_method_ref_member,
+    intrinsic_ref_same,
+    BUILTIN_METHOD_SITE_COUNT,
     registered_nominal_ref_symbol,
     slot_ref_same, slot_ref_source_def_id
 }
@@ -54,8 +65,13 @@ use ir_inventory::{
     binder_kind_match_pattern, binder_kind_catch_pattern,
     binder_kind_lambda_param, binder_kind_handler_param,
     binder_kind_handler_resume, binder_kind_lambda_capture,
-    EffectOperationRef, SystemHostCallableRef,
-    effect_operation_ref_callable
+    binder_kind_handled_evidence_local,
+    binder_entry_slot, binder_entry_kind, binder_entry_site,
+    EffectOperationRef, SystemHostCallableRef, HandledEvidenceRef,
+    HandledEvidenceCapture,
+    handled_evidence_requirement, handled_evidence_binding,
+    handled_evidence_capture_target,
+    effect_operation_ref_callable, effect_operation_ref_source_index
 }
 use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
@@ -79,7 +95,7 @@ use hir::{
     h_pattern_field_pattern,
     h_operator_is_tuple, h_operator_method_ref,
     h_constructor_kind, h_constructor_executable,
-    h_constructor_tuple_arity,
+    h_constructor_fields, h_constructor_tuple_arity,
     h_fail_operation_tag
 }
 use flow_ir::{
@@ -104,7 +120,7 @@ use flow_ir::{
     flow_type_seed_shareable,
     make_flow_call_contract, make_module_flow_call_contract,
     flow_semantic_role_read, flow_semantic_role_mutate,
-    make_fresh_flow_value_origin, flow_own_storage,
+    make_fresh_flow_value_origin, flow_own_storage, flow_borrow_storage,
     flow_callable_mode_concrete_body, flow_callable_mode_contract_only,
     flow_callable_mode_same, flow_type_ref_index, flow_type_node_reference,
     flow_type_node_intern_ready, flow_type_node_intern_key_same,
@@ -117,7 +133,9 @@ use core_expr::{
     CoreBody, CoreBinder, CoreBlock, CoreStmt, CoreExpr, CorePlaceRef,
     CorePattern, CorePatternField, CoreFieldRef, CoreFieldValue,
     CoreConstructorRef, CoreCalleeRef, CoreEvidenceRef,
-    CoreMatchArm, CoreHandlerEntry,
+    CoreHandledEvidenceBinding, CoreHandledEvidenceUse,
+    CoreHandledEvidenceCapture,
+    CoreMatchArm, CoreHandlerOperation, CoreHandlerInstallation,
     new_core_type_fact_allocator, reserve_core_type_fact_ref,
     core_type_fact_module_key, core_type_fact_ordinal,
     core_type_fact_same, core_type_fact_local_ref,
@@ -147,16 +165,20 @@ use core_expr::{
     make_core_local_evidence, make_core_callable_evidence,
     make_core_dict_evidence, make_core_direct_callee,
     make_core_local_callee, make_core_dynamic_callee,
+    make_core_handled_evidence_binding,
+    make_core_handled_evidence_use,
+    make_core_handled_evidence_capture,
     make_core_wildcard_pattern, make_core_binding_pattern,
     make_core_literal_pattern, make_core_tuple_pattern,
     make_core_struct_pattern, make_core_variant_pattern,
     make_core_pattern_field, make_core_match_arm,
-    make_core_handler_entry,
+    make_core_handler_operation, make_core_handler_installation,
     remap_core_callable_types, remap_core_impl_types,
     remap_core_body_types, core_body_effect_sets,
     core_effect_set_atoms, core_effect_set_same,
     core_body_reference, core_body_origin,
-    core_binder_reference, core_type_ref_index
+    core_binder_reference, core_type_ref_index,
+    core_handler_operation_ref
 }
 use core_hir::{
     CoreProgram, CoreBodyEntry, make_core_body_entry, make_core_program,
@@ -358,11 +380,15 @@ fn materialize_type(
 pub struct FrozenCoreAssemblyFacts {
     module_key: Str, module_order: Int,
     type_refs: List<CoreTypeFactRef>, type_nodes: List<FlowTypeNode>,
-    type_sources: List<CoreTypeSourceFact>, program: HProgram
+    type_sources: List<CoreTypeSourceFact>,
+    handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
+    builtin_methods: List<BuiltinMethodContractFact>,
+    program: HProgram
 }
 pub fn freeze_core_assembly_facts(
     mut recorder: CoreAssemblyRecorder, program: HProgram, env: TypeEnv,
-    type_sources: List<CoreTypeSourceFact>
+    type_sources: List<CoreTypeSourceFact>,
+    handled_evidence_types: List<CoreHandledEvidenceTypeSource>
 ) -> FrozenCoreAssemblyFacts {
     require_open(recorder); recorder.frozen = true
     if recorder.refs.len() == 0 || recorder.refs.len() != recorder.specs.len() {
@@ -381,10 +407,36 @@ pub fn freeze_core_assembly_facts(
             panic("Core assembly: type source crosses module")
         }
     }
+    let mut evidence_index = 0
+    while evidence_index < handled_evidence_types.len() {
+        let source = handled_evidence_types.get(evidence_index).unwrap()
+        let aggregate = core_handled_evidence_source_aggregate_fact(source)
+        if core_type_fact_module_key(aggregate) != recorder.module_key ||
+           core_type_fact_ordinal(aggregate) < 0 ||
+           core_type_fact_ordinal(aggregate) >= recorder.refs.len() {
+            panic("Core assembly: handled evidence type is outside recorder")
+        }
+        let mut right = evidence_index + 1
+        while right < handled_evidence_types.len() {
+            let other = handled_evidence_types.get(right).unwrap()
+            if core_handled_evidence_type_source_same(source, other) ||
+               handled_effect_ref_same(
+                    core_handled_evidence_source_requirement(source),
+                    core_handled_evidence_source_requirement(other)) {
+                panic("Core assembly: handled evidence type repeats")
+            }
+            right = right + 1
+        }
+        evidence_index = evidence_index + 1
+    }
     FrozenCoreAssemblyFacts {
         module_key: recorder.module_key, module_order: recorder.module_order,
         type_refs: recorder.refs, type_nodes: nodes,
         type_sources: type_sources,
+        handled_evidence_types: handled_evidence_types,
+        builtin_methods: if recorder.module_order == 0 {
+            builtin_method_contract_facts(env)
+        } else { [] },
         program: close_hir_surface(program, env)
     }
 }
@@ -458,6 +510,49 @@ fn type_fact_for(
     core_type_fact_local_ref(result)
 }
 
+fn handled_evidence_type_for(
+    values: List<CoreHandledEvidenceTypeSource>, requirement: HandledEffectRef
+) -> CoreTypeRef {
+    let mut found: CoreTypeFactRef? = none
+    for source in values {
+        if handled_effect_ref_same(
+                core_handled_evidence_source_requirement(source),
+                requirement) {
+            if found.is_some() {
+                panic("Core assembly: handled evidence has two aggregate types")
+            }
+            found = some(core_handled_evidence_source_aggregate_fact(source))
+        }
+    }
+    match found {
+        some(value) => core_type_fact_local_ref(value),
+        none => panic("Core assembly: handled evidence aggregate type is absent")
+    }
+}
+fn core_handled_binding(
+    types: List<CoreHandledEvidenceTypeSource>, value: HandledEvidenceRef
+) -> CoreHandledEvidenceBinding {
+    make_core_handled_evidence_binding(
+        value, handled_evidence_type_for(
+            types, handled_evidence_requirement(value)))
+}
+fn core_handled_use(
+    types: List<CoreHandledEvidenceTypeSource>, value: HandledEvidenceRef
+) -> CoreHandledEvidenceUse {
+    make_core_handled_evidence_use(
+        value, handled_evidence_type_for(
+            types, handled_evidence_requirement(value)))
+}
+fn core_handled_capture(
+    types: List<CoreHandledEvidenceTypeSource>,
+    value: HandledEvidenceCapture
+) -> CoreHandledEvidenceCapture {
+    let target = handled_evidence_capture_target(value)
+    make_core_handled_evidence_capture(
+        value, handled_evidence_type_for(
+            types, handled_evidence_requirement(target)))
+}
+
 fn core_effects(
     values: List<CoreTypeSourceFact>, row: EffectRow, module_key: Str
 ) -> CoreEffectSet {
@@ -509,6 +604,7 @@ fn capture_slot_maps(values: List<HLambdaCapture>) -> List<CaptureSlotMap> {
 struct LowerCtx {
     module_key: Str, owner: ExecutableRef,
     types: List<CoreTypeSourceFact>,
+    handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
     binders: List<CoreBinder>, captures: List<CaptureSlotMap>, next_origin: Int
 }
 fn fresh_origin(mut ctx: LowerCtx, label: Str) -> OriginRef {
@@ -571,6 +667,26 @@ fn ensure_binder(
         resolved, type_fact_for(ctx.types, ty, ctx.module_key), exact_kind, site,
         flow_own_storage(), is_mutable))
     resolved
+}
+fn activate_handled_evidence_binder(
+    mut ctx: LowerCtx, value: HandledEvidenceRef
+) {
+    let binding = handled_evidence_binding(value)
+    let slot = binder_entry_slot(binding)
+    for existing in ctx.binders {
+        if slot_ref_same(core_binder_reference(existing), slot) { return }
+    }
+    let kind = binder_entry_kind(binding)
+    let storage = if binder_kind_tag(kind) ==
+            binder_kind_tag(binder_kind_handled_evidence_local()) {
+        flow_own_storage()
+    } else { flow_borrow_storage() }
+    ctx.binders.push(make_core_binder(
+        slot,
+        handled_evidence_type_for(
+            ctx.handled_evidence_types,
+            handled_evidence_requirement(value)),
+        kind, binder_entry_site(binding), storage, false))
 }
 fn param_slot(ctx: LowerCtx, param: HParam, kind: BinderKind) -> SlotRef {
     let id = match param.def_id { some(v) => v,
@@ -742,7 +858,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                         if method_call_ref_is_bound(method) {
                             [make_core_dict_evidence(
                                 method_call_ref_bound_evidence(method))]
-                        } else { [] })
+                        } else { [] }, [])
                 },
                 none => make_core_primitive_expr(
                     ty, effects, origin, make_core_primitive_op(primitive_tag(op)),
@@ -750,12 +866,17 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
             }
         },
         HExpr::Call {
-            callee, args, resolved_dicts, callee_ref,
+            callee, args, resolved_dicts, handled_evidence, callee_ref,
             method_ref, system_host, ..
         } => match system_host {
-            some(host) => make_core_system_call_expr(
-                ty, effects, origin, host,
-                args.map(fn(v) { lower_expr(ctx, v) })),
+            some(host) => {
+                if handled_evidence.len() != 0 {
+                    panic("Core assembly: system call carries handled evidence")
+                }
+                make_core_system_call_expr(
+                    ty, effects, origin, host,
+                    args.map(fn(v) { lower_expr(ctx, v) }))
+            },
             none => match method_ref {
                 some(method) => {
                     let receiver = match callee {
@@ -771,7 +892,10 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                         if method_call_ref_is_bound(method) {
                             [make_core_dict_evidence(
                                 method_call_ref_bound_evidence(method))]
-                        } else { evidence(resolved_dicts) })
+                        } else { evidence(resolved_dicts) },
+                        handled_evidence.map(fn(value) {
+                            core_handled_use(ctx.handled_evidence_types, value)
+                        }))
                 },
                 none => {
                     let exact = match callee_ref { some(v) => v,
@@ -780,7 +904,10 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                         ty, effects, origin,
                         core_callee(ctx, exact, hexpr_type(callee)),
                         args.map(fn(v) { lower_expr(ctx, v) }),
-                        evidence(resolved_dicts))
+                        evidence(resolved_dicts),
+                        handled_evidence.map(fn(value) {
+                            core_handled_use(ctx.handled_evidence_types, value)
+                        }))
                 }
             }
         },
@@ -790,12 +917,13 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
         HExpr::FieldAccess { .. } =>
             panic("Core assembly: field access lacks exact projection"),
         HExpr::StructLit { owner_ref, fields, constructor: some(plan), spread, .. } => {
-            if spread.is_some() || h_constructor_kind(plan) != 0 {
+            if spread.is_some() || h_constructor_kind(plan) != 2 ||
+               h_constructor_fields(plan).len() != fields.len() {
                 panic("Core assembly: struct literal is not field-complete")
             }
             make_core_construct_expr(ty, effects, origin,
-                make_core_struct_constructor(owner_ref,
-                    h_constructor_executable(plan)),
+                make_core_struct_constructor(
+                    owner_ref, fields.map(fn(field) { field.field_ref })),
                 fields.map(fn(field) { make_core_field_value(
                     make_core_nominal_field(field.field_ref),
                     lower_expr(ctx, field.value)) }))
@@ -853,19 +981,36 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                 block_from_expr(ctx, body), error,
                 arms.map(fn(arm) { lower_arm(ctx, arm, true) }))
         },
-        HExpr::HandleExpr { body, handlers, .. } => make_core_handle_expr(
+        HExpr::HandleExpr {
+            body, handlers, installed_evidence, ..
+        } => make_core_handle_expr(
             ty, effects, origin, block_from_expr(ctx, body),
-            handlers.map(fn(handler) { lower_handler(ctx, handler) })),
-        HExpr::Lambda { executable_ref, captures, .. } => make_core_lambda_expr(
+            lower_handler_installations(
+                ctx, installed_evidence, handlers)),
+        HExpr::Lambda {
+            executable_ref, captures, evidence_captures, ..
+        } => make_core_lambda_expr(
             ty, effects, origin, executable_ref,
             captures.map(fn(c) {
                 make_core_capture(resolved_slot(ctx, c.source), c.target)
+            }), evidence_captures.map(fn(value) {
+                core_handled_capture(ctx.handled_evidence_types, value)
             })),
-        HExpr::EffectOp { operation_ref: some(op), args, .. } =>
+        HExpr::EffectOp {
+            operation_ref: some(op), handled_evidence, args, ..
+        } =>
             make_core_effect_call_expr(ty, effects, origin, op,
-                args.map(fn(v) { lower_expr(ctx, v) }), []),
-        HExpr::EffectOp { fail_ref: some(fail_ref), args, .. } => {
+                args.map(fn(v) { lower_expr(ctx, v) }), [],
+                handled_evidence.map(fn(value) {
+                    core_handled_use(ctx.handled_evidence_types, value)
+                })),
+        HExpr::EffectOp {
+            fail_ref: some(fail_ref), handled_evidence, args, ..
+        } => {
             let _ = h_fail_operation_tag(fail_ref)
+            if handled_evidence.len() != 0 {
+                panic("Core assembly: fail.raise carries handled evidence")
+            }
             if args.len() != 1 { panic("Core assembly: fail.raise arity differs") }
             make_core_fail_raise_expr(
                 ty, effects, origin, lower_expr(ctx, args.get(0).unwrap()))
@@ -909,7 +1054,9 @@ fn lower_arm(ctx: LowerCtx, value: HMatchArm, is_catch: Bool) -> CoreMatchArm {
         block_from_expr(ctx, value.body), fresh_origin(ctx, "arm"))
 }
 
-fn lower_handler(ctx: LowerCtx, value: HEffectHandler) -> CoreHandlerEntry {
+fn lower_handler_operation(
+    ctx: LowerCtx, value: HEffectHandler
+) -> CoreHandlerOperation {
     let operation = match value.operation_ref { some(v) => v,
         none => panic("Core assembly: dedicated fail handler crossed Handle") }
     let mut params: List<SlotRef> = []
@@ -921,8 +1068,47 @@ fn lower_handler(ctx: LowerCtx, value: HEffectHandler) -> CoreHandlerEntry {
         params.push(source_slot(ctx.module_key, id))
     }
     let resume = value.resume_binding.map(fn(binding) { binding.slot })
-    make_core_handler_entry(operation, value.executable_ref, params, resume,
-        fresh_origin(ctx, "handler"))
+    make_core_handler_operation(
+        operation, value.executable_ref, params, resume,
+        value.captures.map(fn(capture) {
+            make_core_capture(
+                resolved_slot(ctx, capture.source), capture.target)
+        }),
+        value.evidence_captures.map(fn(capture) {
+            core_handled_capture(ctx.handled_evidence_types, capture)
+        }), fresh_origin(ctx, "handler"))
+}
+
+fn lower_handler_installations(
+    mut ctx: LowerCtx, installed: List<HandledEvidenceRef>,
+    handlers: List<HEffectHandler>
+) -> List<CoreHandlerInstallation> {
+    let mut result: List<CoreHandlerInstallation> = []
+    for evidence_ref in installed {
+        activate_handled_evidence_binder(ctx, evidence_ref)
+        let requirement = handled_evidence_requirement(evidence_ref)
+        let mut operations: List<CoreHandlerOperation> = []
+        for handler in handlers {
+            match handler.handled_ref {
+                some(reference) => if handled_effect_ref_same(
+                        reference, requirement) {
+                    operations.push(lower_handler_operation(ctx, handler))
+                },
+                none => panic(
+                    "Core assembly: dedicated fail handler crossed Handle")
+            }
+        }
+        operations.sort_by(fn(left, right) {
+            effect_operation_ref_source_index(
+                core_handler_operation_ref(left)) -
+                effect_operation_ref_source_index(
+                    core_handler_operation_ref(right))
+        })
+        result.push(make_core_handler_installation(
+            core_handled_binding(ctx.handled_evidence_types, evidence_ref),
+            operations, fresh_origin(ctx, "installation")))
+    }
+    result
 }
 
 fn lower_place(ctx: LowerCtx, value: HExpr) -> CorePlaceRef {
@@ -994,9 +1180,15 @@ fn parameter_roles(params: List<HParam>) -> List<FlowSemanticRole> {
     params.map(fn(p) { if p.is_mutable { flow_semantic_role_mutate() }
         else { flow_semantic_role_read() } })
 }
+fn read_roles(count: Int) -> List<FlowSemanticRole> {
+    let mut result: List<FlowSemanticRole> = []
+    for _ in 0..count { result.push(flow_semantic_role_read()) }
+    result
+}
 fn callable_contract(
     facts: FrozenCoreAssemblyFacts, reference: ExecutableRef,
-    params: List<HParam>, result: Type, mode: FlowCallableMode
+    params: List<HParam>, result: Type, mode: FlowCallableMode,
+    handled_evidence: List<HandledEvidenceRef>
 ) -> CoreCallableContract {
     let parameter_types = params.map(fn(p) {
         type_fact_for(facts.type_sources, p.ty, facts.module_key)
@@ -1013,12 +1205,77 @@ fn callable_contract(
         make_module_flow_call_contract(facts.module_key,
             parameter_types.map(fn(t) { make_flow_type_ref(core_type_ref_index(t)) }),
             parameter_roles(params), make_flow_type_ref(core_type_ref_index(result_type)),
-            flow_semantic_role_read(), make_fresh_flow_value_origin()), [])
+            flow_semantic_role_read(), make_fresh_flow_value_origin()),
+        handled_evidence.map(fn(value) {
+            core_handled_binding(facts.handled_evidence_types, value)
+        }))
+}
+fn add_builtin_method_contracts(
+    facts: FrozenCoreAssemblyFacts, mut assembly: ModuleAssembly
+) {
+    if facts.module_order != 0 {
+        if facts.builtin_methods.len() != 0 {
+            panic("Core assembly: non-root module carries builtin contracts")
+        }
+        return
+    }
+    if facts.builtin_methods.len() != BUILTIN_METHOD_SITE_COUNT {
+        panic("Core assembly: builtin method contract census differs")
+    }
+    let parent = make_module_body_parent(make_module_body_ref(
+        "$builtin", "builtin-methods"))
+    let mut index = 0
+    while index < facts.builtin_methods.len() {
+        let fact = facts.builtin_methods.get(index).unwrap()
+        let intrinsic = builtin_method_contract_intrinsic(fact)
+        let mut prior = 0
+        while prior < index {
+            if intrinsic_ref_same(
+                    intrinsic,
+                    builtin_method_contract_intrinsic(
+                        facts.builtin_methods.get(prior).unwrap())) {
+                panic("Core assembly: builtin method contract repeats")
+            }
+            prior = prior + 1
+        }
+        let scheme = builtin_method_contract_scheme(fact)
+        let (params, result) = match scheme.ty {
+            Type::FnType { params, return_type, .. } =>
+                (params, return_type),
+            _ => panic("Core assembly: builtin method scheme is not callable")
+        }
+        let parameter_types = params.map(fn(ty) {
+            type_fact_for(facts.type_sources, ty, facts.module_key)
+        })
+        let result_type = type_fact_for(
+            facts.type_sources, result, facts.module_key)
+        let reference = make_named_executable_ref(
+            intrinsic_ref_symbol(intrinsic))
+        assembly.entries.push(make_executable_entry(
+            reference, parent, executable_kind_builtin_intrinsic(),
+            make_contract_only()))
+        assembly.callables.push(make_core_callable_contract(
+            reference,
+            make_symbol_origin_ref(intrinsic_ref_symbol(intrinsic)),
+            parameter_types, [], result_type,
+            flow_callable_mode_contract_only(),
+            make_module_flow_call_contract(
+                facts.module_key,
+                parameter_types.map(fn(ty) { make_flow_type_ref(
+                    core_type_ref_index(ty)) }),
+                read_roles(parameter_types.len()),
+                make_flow_type_ref(core_type_ref_index(result_type)),
+                flow_semantic_role_read(), make_fresh_flow_value_origin()),
+            []))
+        index = index + 1
+    }
 }
 fn add_executable_body(
     facts: FrozenCoreAssemblyFacts, parent: ExecutableParentRef,
     reference: ExecutableRef, kind: ExecutableKind,
     params: List<HParam>, result_type: Type, body_expr: HExpr,
+    handled_evidence: List<HandledEvidenceRef>,
+    handled_captures: List<HandledEvidenceCapture>,
     capture_bindings: List<CaptureSlotMap>,
     mut assembly: ModuleAssembly
 ) {
@@ -1027,10 +1284,18 @@ fn add_executable_body(
         reference, parent, kind, make_concrete_body_contract(anchor)))
     assembly.callables.push(callable_contract(
         facts, reference, params, result_type,
-        flow_callable_mode_concrete_body()))
+        flow_callable_mode_concrete_body(), handled_evidence))
     let mut ctx = LowerCtx { module_key: facts.module_key,
         owner: reference, types: facts.type_sources,
+        handled_evidence_types: facts.handled_evidence_types,
         binders: [], captures: capture_bindings, next_origin: 0 }
+    for value in handled_evidence {
+        activate_handled_evidence_binder(ctx, value)
+    }
+    for capture in handled_captures {
+        activate_handled_evidence_binder(
+            ctx, handled_evidence_capture_target(capture))
+    }
     let mut parameter_slots: List<SlotRef> = []
     for param in params {
         parameter_slots.push(param_slot(ctx, param, binder_kind_source_param()))
@@ -1046,13 +1311,15 @@ fn add_executable_body(
 fn add_contract_only(
     facts: FrozenCoreAssemblyFacts, parent: ExecutableParentRef,
     reference: ExecutableRef, kind: ExecutableKind,
-    params: List<HParam>, result_type: Type, mut assembly: ModuleAssembly
+    params: List<HParam>, result_type: Type,
+    handled_evidence: List<HandledEvidenceRef>,
+    mut assembly: ModuleAssembly
 ) {
     assembly.entries.push(make_executable_entry(
         reference, parent, kind, make_contract_only()))
     assembly.callables.push(callable_contract(
         facts, reference, params, result_type,
-        flow_callable_mode_contract_only()))
+        flow_callable_mode_contract_only(), handled_evidence))
 }
 
 fn scan_nested_stmt(
@@ -1084,10 +1351,12 @@ fn scan_nested_expr(
 ) {
     match value {
         HExpr::Lambda { executable_ref, params, return_type, body,
-                        captures, .. } => {
+                        captures, handled_evidence_bindings,
+                        evidence_captures, .. } => {
             add_executable_body(facts, make_executable_parent(parent),
                 executable_ref, executable_kind_lambda(), params,
-                return_type, body, capture_slot_maps(captures), assembly)
+                return_type, body, handled_evidence_bindings,
+                evidence_captures, capture_slot_maps(captures), assembly)
         },
         HExpr::HandleExpr { body, handlers, .. } => {
             scan_nested_expr(facts, parent, body, assembly)
@@ -1102,7 +1371,10 @@ fn scan_nested_expr(
                 }
                 add_executable_body(facts, make_executable_parent(parent),
                     handler.executable_ref, executable_kind_handler(), params,
-                    hexpr_type(handler.body), handler.body, [], assembly)
+                    hexpr_type(handler.body), handler.body,
+                    handler.handled_evidence_bindings,
+                    handler.evidence_captures,
+                    capture_slot_maps(handler.captures), assembly)
             }
         },
         HExpr::Block { stmts, tail, .. } => {
@@ -1172,21 +1444,28 @@ fn assemble_decls(
     for decl in decls {
         match decl {
             HDecl::Fn { executable_ref, impl_method_ref, params,
-                return_type, body, .. } => add_executable_body(
+                return_type, handled_evidence_bindings, body, .. } =>
+                add_executable_body(
                     facts, make_module_body_parent(module_body), executable_ref,
                     if impl_method_ref.is_some() { executable_kind_impl_method() }
                     else { executable_kind_fn() },
-                    params, return_type, body, [], assembly),
-            HDecl::Test { executable_ref, body, .. } => add_executable_body(
+                    params, return_type, body, handled_evidence_bindings,
+                    [], [], assembly),
+            HDecl::Test { executable_ref, handled_evidence_bindings,
+                          body, .. } => add_executable_body(
                 facts, make_module_body_parent(module_body), executable_ref,
-                executable_kind_test(), [], hexpr_type(body), body, [], assembly),
-            HDecl::Const { executable_ref, ty, init, .. } => add_executable_body(
+                executable_kind_test(), [], hexpr_type(body), body,
+                handled_evidence_bindings, [], [], assembly),
+            HDecl::Const { executable_ref, handled_evidence_bindings,
+                           ty, init, .. } => add_executable_body(
                 facts, make_module_body_parent(module_body), executable_ref,
-                executable_kind_const_initializer(), [], ty, init, [], assembly),
-            HDecl::ExternFn { executable_ref, params, return_type, .. } =>
+                executable_kind_const_initializer(), [], ty, init,
+                handled_evidence_bindings, [], [], assembly),
+            HDecl::ExternFn { executable_ref, params, return_type,
+                              handled_evidence_bindings, .. } =>
                 add_contract_only(facts, make_module_body_parent(module_body),
                     executable_ref, executable_kind_extern_fn(),
-                    params, return_type, assembly),
+                    params, return_type, handled_evidence_bindings, assembly),
             HDecl::Trait { methods, .. } => {
                 for method in methods {
                     let reference = method.executable_ref
@@ -1197,11 +1476,14 @@ fn assemble_decls(
                         some(body) => add_executable_body(
                             facts, make_module_body_parent(module_body), reference,
                             executable_kind_trait_default(), method.params,
-                            method.return_type, body, [], assembly),
+                            method.return_type, body,
+                            method.handled_evidence_bindings,
+                            [], [], assembly),
                         none => add_contract_only(
                             facts, make_module_body_parent(module_body),
                             reference, executable_kind_bodyless_trait_member(),
-                            method.params, method.return_type, assembly)
+                            method.params, method.return_type,
+                            method.handled_evidence_bindings, assembly)
                     }
                 }
             },
@@ -1231,7 +1513,7 @@ fn assemble_decls(
                             facts, make_module_body_parent(module_body),
                             effect_operation_ref_callable(reference),
                             executable_kind_bodyless_effect_operation(),
-                            op.params, op.return_type, assembly),
+                            op.params, op.return_type, [], assembly),
                         none => panic("Core assembly: effect op lacks exact reference")
                     }
                 }
@@ -1350,6 +1632,23 @@ fn intern_project_types(values: List<FrozenCoreAssemblyFacts>) -> ProjectTypes {
     }
     ProjectTypes { graph: make_core_type_graph(nodes), mappings: closed }
 }
+fn push_effect_remap(
+    mut entries: List<CoreAssemblyEffectRemapEntry>, module_key: Str,
+    source: CoreEffectSet, target: CoreEffectSet
+) {
+    for entry in entries {
+        if entry.module_key == module_key &&
+           core_effect_set_same(entry.source, source) {
+            if !core_effect_set_same(entry.target, target) {
+                panic("Core assembly: one local effect set has two project remaps")
+            }
+            return
+        }
+    }
+    entries.push(CoreAssemblyEffectRemapEntry {
+        module_key: module_key, source: source, target: target
+    })
+}
 fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
     if values.len() == 0 { panic("Core assembly: project has no modules") }
     validate_fact_order(values)
@@ -1366,6 +1665,7 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
         let mapping = project.mappings.get(module_index).unwrap()
         let module_body = make_module_body_ref(facts.module_key, "module-body")
         let assembly = empty_module_assembly()
+        add_builtin_method_contracts(facts, assembly)
         assemble_decls(facts, module_body, facts.program.decls, assembly)
         for value in assembly.callables {
             callables.push(remap_core_callable_types(
@@ -1382,11 +1682,10 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
             let global_effects = core_body_effect_sets(global)
             let mut effect_index = 0
             while effect_index < local_effects.len() {
-                effect_entries.push(CoreAssemblyEffectRemapEntry {
-                    module_key: facts.module_key,
-                    source: local_effects.get(effect_index).unwrap(),
-                    target: global_effects.get(effect_index).unwrap()
-                })
+                push_effect_remap(
+                    effect_entries, facts.module_key,
+                    local_effects.get(effect_index).unwrap(),
+                    global_effects.get(effect_index).unwrap())
                 effect_index = effect_index + 1
             }
             bodies.push(make_core_body_entry(

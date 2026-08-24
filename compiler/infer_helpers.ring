@@ -4,6 +4,10 @@ use types::{Type, Effect, EffectRow,
     type_to_builtin_name}
 use ast::{Expr, Pattern, Span, NamedPatternField}
 use hir::{HExpr, HStmt, TraitDispatch, DictRef, ValueBindingKind,
+    MethodCallRef,
+    HOperatorPlan, h_operator_method, h_operator_tuple,
+    make_intrinsic_method_call_ref, make_concrete_method_call_ref,
+    make_bound_method_call_ref,
     trait_dict_name, trait_bound_param_name,
     hexpr_type, compare_by_first}
 use diagnostics::{DiagnosticContext, DiagnosticNote}
@@ -14,10 +18,50 @@ use env::{TypeEnv, TypeScheme, ImplEntry, ImplMethodSchemeCore,
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     type_error, unify_at, resolve_relative_qualifier,
     resolve_dict_ref_for_type, resolve_dicts_from_scheme, variant_ctor_origin,
-    value_binding_kind, value_symbol_ref}
+    value_binding_kind, value_symbol_ref, current_identity_file_key}
 use ir_identity::{IntrinsicRef, ImplMethodRef,
     impl_method_ref_owner, impl_owner_ref_trait, impl_owner_ref_provider,
-    make_named_callee_ref}
+    make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
+    slot_domain_lexical}
+
+fn make_inferred_ident(
+    ctx: InferCtx, name: Str, resolved_name: Str?, scheme: TypeScheme?,
+    ty: Type, span: Span
+) -> HExpr {
+    let def_id = match scheme { some(value) => value.def_id, none => none }
+    let kind = value_binding_kind(ctx, def_id)
+    let is_constructor = resolved_name.is_some()
+    let source_slot = match (def_id, kind) {
+        (some(id), ValueBindingKind::LocalBorrow) => if is_constructor {
+            none
+        } else { some(
+            make_source_slot_ref(
+                current_identity_file_key(ctx), slot_domain_lexical(), id)) },
+        _ => none
+    }
+    let is_callable = match ty { Type::FnType { .. } => true, _ => false }
+    let callee_identity = match def_id {
+        some(id) => if is_constructor ||
+                match kind {
+                    ValueBindingKind::DirectCallable |
+                    ValueBindingKind::ExternCallable |
+                    ValueBindingKind::ConstGetter => true,
+                    ValueBindingKind::LocalBorrow => false
+                } {
+            some(make_named_callee_ref(value_symbol_ref(ctx, id)))
+        } else if is_callable {
+            match source_slot {
+                some(slot) => some(make_local_callee_ref(slot)),
+                none => panic("Ident identity: callable local has no SlotRef")
+            }
+        } else { none },
+        none => none
+    }
+    HExpr::Ident { name: name, resolved_name: resolved_name,
+        def_id: def_id, source_slot: source_slot,
+        callee_identity: callee_identity, dict_closure_dicts: none,
+        ty: ty, effects: EMPTY_ROW, span: span }
+}
 
 
 pub struct MethodLookupResult {
@@ -307,7 +351,8 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
                             "Cannot use '${q}' — relative path exceeds module nesting depth",
                             span, DiagnosticContext::OtherContext { detail: some("relative path out of scope") })
                         return InferResult {
-                            hexpr: HExpr::Ident { name: name, resolved_name: none, def_id: none, dict_closure_dicts: none, ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                            hexpr: make_inferred_ident(
+                                ctx, name, none, none, Type::ErrorType, span),
                             subst: subst, effects: EMPTY_ROW
                         }
                     }
@@ -327,7 +372,9 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
                     let t = ctx.env.instantiate(ms)
                     let actual_name = exact_value_origin(ctx, qualified_name, ms)
                     return InferResult {
-                        hexpr: HExpr::Ident { name: actual_name, resolved_name: variant_ctor_origin(ctx, ms), def_id: ms.def_id, dict_closure_dicts: none, ty: t, effects: EMPTY_ROW, span: span },
+                        hexpr: make_inferred_ident(
+                            ctx, actual_name, variant_ctor_origin(ctx, ms),
+                            some(ms), t, span),
                         subst: subst, effects: EMPTY_ROW
                     }
                 },
@@ -343,7 +390,10 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
                                 let t = ctx.env.instantiate(fs)
                                 let actual_name = exact_value_origin(ctx, full_qualified, fs)
                                 return InferResult {
-                                    hexpr: HExpr::Ident { name: actual_name, resolved_name: variant_ctor_origin(ctx, fs), def_id: fs.def_id, dict_closure_dicts: none, ty: t, effects: EMPTY_ROW, span: span },
+                                    hexpr: make_inferred_ident(
+                                        ctx, actual_name,
+                                        variant_ctor_origin(ctx, fs),
+                                        some(fs), t, span),
                                     subst: subst, effects: EMPTY_ROW
                                 }
                             },
@@ -365,7 +415,8 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
                     let _ = type_error(ctx.sink, E0201, "'${qualifier_display}' has no member '${name}'", span,
                         DiagnosticContext::UndefinedVariable { name: name, scope_locals: none })
                     return InferResult {
-                        hexpr: HExpr::Ident { name: name, resolved_name: none, def_id: none, dict_closure_dicts: none, ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                        hexpr: make_inferred_ident(
+                            ctx, name, none, none, Type::ErrorType, span),
                         subst: subst, effects: EMPTY_ROW
                     }
                 },
@@ -374,7 +425,8 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
             let _ = type_error(ctx.sink, E0201, "Undefined variable: ${name}", span,
                 DiagnosticContext::UndefinedVariable { name: name, scope_locals: none })
             InferResult {
-                hexpr: HExpr::Ident { name: name, resolved_name: none, def_id: none, dict_closure_dicts: none, ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: make_inferred_ident(
+                    ctx, name, none, none, Type::ErrorType, span),
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -419,7 +471,9 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
                 none => {}
             }
             InferResult {
-                hexpr: HExpr::Ident { name: actual_name, resolved_name: variant_ctor_origin(ctx, s), def_id: s.def_id, dict_closure_dicts: none, ty: t, effects: EMPTY_ROW, span: span },
+                hexpr: make_inferred_ident(
+                    ctx, actual_name, variant_ctor_origin(ctx, s),
+                    some(s), t, span),
                 subst: subst, effects: EMPTY_ROW
             }
         }
@@ -695,7 +749,8 @@ pub fn is_bounded_direct_callable_ident(ctx: InferCtx, expr: HExpr) -> Bool {
 pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
     let metadata = resolve_callee_metadata(ctx, harg)
     match harg {
-        HExpr::Ident { name, resolved_name, def_id, dict_closure_dicts, ty, effects, span } => {
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity, dict_closure_dicts, ty, effects, span } => {
             let kind = match metadata {
                 some(m) => m.kind,
                 none => ValueBindingKind::LocalBorrow
@@ -711,6 +766,8 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                     }
                     let getter = HExpr::Ident {
                         name: name, resolved_name: none, def_id: def_id,
+                        source_slot: source_slot,
+                        callee_identity: callee_identity,
                         // This synthetic direct getter Call is returned from
                         // zonk and will not pass through zonk_direct_callee.
                         dict_closure_dicts: some([]), ty: getter_ty,
@@ -719,6 +776,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                     return HExpr::Call {
                         callee: getter, args: [], type_args: [],
                         resolved_dicts: [],
+                        handled_evidence: [],
                         callee_ref: match def_id {
                             some(id) => some(make_named_callee_ref(
                                 value_symbol_ref(ctx, id))),
@@ -752,7 +810,9 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                             if as_.bounds.len() == 0 {
                                 HExpr::Ident {
                                     name: name, resolved_name: resolved_name,
-                                    def_id: def_id, dict_closure_dicts: some([]),
+                                    def_id: def_id, source_slot: source_slot,
+                                    callee_identity: callee_identity,
+                                    dict_closure_dicts: some([]),
                                     ty: ty, effects: effects, span: span
                                 }
                             } else {
@@ -763,8 +823,11 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                                 // Never attach partial evidence.  resolve_dicts_from_scheme
                                 // has already emitted one E0503 for every missing bound.
                                 if dicts.len() == as_.bounds.len() {
-                                    HExpr::Ident { name: name, resolved_name: resolved_name, def_id: def_id,
-                                        dict_closure_dicts: some(dicts), ty: ty, effects: effects, span: span }
+                                    HExpr::Ident { name: name, resolved_name: resolved_name,
+                                        def_id: def_id, source_slot: source_slot,
+                                        callee_identity: callee_identity,
+                                        dict_closure_dicts: some(dicts), ty: ty,
+                                        effects: effects, span: span }
                                 } else { harg }
                             }
                         },
@@ -787,7 +850,9 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                             if valid {
                                 HExpr::Ident {
                                     name: name, resolved_name: resolved_name,
-                                    def_id: def_id, dict_closure_dicts: some([]),
+                                    def_id: def_id, source_slot: source_slot,
+                                    callee_identity: callee_identity,
+                                    dict_closure_dicts: some([]),
                                     ty: ty, effects: effects, span: span
                                 }
                             } else {
@@ -805,7 +870,9 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                     match resolved_name {
                         some(_) => HExpr::Ident {
                             name: name, resolved_name: resolved_name,
-                            def_id: def_id, dict_closure_dicts: some([]),
+                            def_id: def_id, source_slot: source_slot,
+                            callee_identity: callee_identity,
+                            dict_closure_dicts: some([]),
                             ty: ty, effects: effects, span: span
                         },
                         none => harg
@@ -945,6 +1012,95 @@ pub fn lookup_impl_method(mut ctx: InferCtx, type_name: Str, method: Str) -> Met
             method_type: none, method_core: none, impl_owner: none,
             impl_method_ref: none,
             intrinsic_ref: none
+        }
+    }
+}
+
+pub fn exact_operator_plan(
+    ctx: InferCtx, resolved: Type, trait_name: Str,
+    method_name: Str, subst: UnionFind, span: Span
+) -> HOperatorPlan? {
+    let exact_type = apply_subst(subst, resolved)
+    match exact_type {
+        Type::TupleType { elements } => {
+            let mut plans: List<HOperatorPlan> = []
+            for element in elements {
+                match exact_operator_plan(
+                        ctx, element, trait_name, method_name, subst, span) {
+                    some(plan) => plans.push(plan),
+                    none => return none
+                }
+            }
+            some(h_operator_tuple(plans))
+        },
+        Type::TypeVar { id, .. } => {
+            let bound = match ctx.current_fn_bounds.find(fn(item) {
+                item.trait_name == trait_name &&
+                    (item.type_param_var_id == id ||
+                     uf_find(subst, item.type_param_var_id) == id)
+            }) {
+                some(value) => value,
+                none => return none
+            }
+            let trait_def = match ctx.env.trait_reg.traits.get(trait_name) {
+                some(value) => value,
+                none => return none
+            }
+            let method = match trait_def.methods.find(fn(item) {
+                item.name == method_name
+            }) {
+                some(value) => value,
+                none => return none
+            }
+            some(h_operator_method(make_bound_method_call_ref(
+                method.method_ref,
+                DictRef::Simple(trait_bound_param_name(
+                    bound.type_param_name, trait_name)),
+                method.ty, false)))
+        },
+        _ => {
+            let type_name = match type_to_builtin_name(exact_type) {
+                some(value) => value,
+                none => match exact_type {
+                    Type::StructType { name, .. } |
+                    Type::EnumType { name, .. } => name,
+                    _ => return none
+                }
+            }
+            let lookup = lookup_impl_method(ctx, type_name, method_name)
+            let signature = match lookup.method_type {
+                some(value) => value,
+                none => return none
+            }
+            match lookup.intrinsic_ref {
+                some(intrinsic) => some(h_operator_method(
+                    make_intrinsic_method_call_ref(intrinsic, signature))),
+                none => match lookup.impl_method_ref {
+                    some(method) => some(h_operator_method(
+                        make_concrete_method_call_ref(
+                            method, signature, false))),
+                    none => none
+                }
+            }
+        }
+    }
+}
+
+pub fn exact_nominal_method_call(
+    ctx: InferCtx, type_name: Str, method_name: Str
+) -> MethodCallRef {
+    let lookup = lookup_impl_method(ctx, type_name, method_name)
+    let signature = match lookup.method_type {
+        some(value) => value,
+        none => panic("method plan: exact signature is absent")
+    }
+    match lookup.intrinsic_ref {
+        some(intrinsic) => make_intrinsic_method_call_ref(
+            intrinsic, signature),
+        none => match lookup.impl_method_ref {
+            some(method) => make_concrete_method_call_ref(
+                method, signature, false),
+            none => panic("method plan: exact impl method is absent")
         }
     }
 }

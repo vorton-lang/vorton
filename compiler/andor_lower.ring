@@ -57,29 +57,35 @@ pub fn lower_andor(program: HProgram) -> HProgram {
 
 fn al_decl(d: HDecl) -> HDecl {
     match d {
-        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } =>
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } =>
             HDecl::Fn { name: name, def_id: def_id,
                 executable_ref: executable_ref,
                 impl_method_ref: impl_method_ref,
                 type_params: type_params, params: params,
                 return_type: return_type, effects: effects,
+                handled_evidence_bindings: handled_evidence_bindings,
                 body: al_expr(body),
                 is_pub: is_pub, trait_bounds: trait_bounds, span: span },
-        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
+        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref,
+                      delegate_plan, type_params, trait_name, methods,
+                      assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
             for m in methods { new_methods.push(al_decl(m)) }
             HDecl::Impl { target_type: target_type, owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
+                delegate_plan: delegate_plan,
                 type_params: type_params, trait_name: trait_name,
                 methods: new_methods, assoc_types: assoc_types, span: span }
         },
-        HDecl::Test { description, executable_ref, body, span } =>
+        HDecl::Test { description, executable_ref, handled_evidence_bindings, body, span } =>
             HDecl::Test { description: description,
                 executable_ref: executable_ref,
+                handled_evidence_bindings: handled_evidence_bindings,
                 body: al_expr(body), span: span },
-        HDecl::Const { name, def_id, executable_ref, ty, init, is_pub, span } =>
+        HDecl::Const { name, def_id, executable_ref, handled_evidence_bindings, ty, init, is_pub, span } =>
             HDecl::Const { name: name, def_id: def_id,
                 executable_ref: executable_ref, ty: ty,
+                handled_evidence_bindings: handled_evidence_bindings,
                 init: al_expr(init), is_pub: is_pub, span: span },
         HDecl::ModBlock { name, decls, is_pub, span } => {
             let mut new_inner: List<HDecl> = []
@@ -98,7 +104,10 @@ fn al_decl(d: HDecl) -> HDecl {
                     method_ref: tm.method_ref, params: tm.params,
                     return_type: tm.return_type, effects: tm.effects,
                     has_default: tm.has_default,
-                    executable_ref: tm.executable_ref, body: new_body })
+                    executable_ref: tm.executable_ref,
+                    handled_evidence_bindings:
+                        tm.handled_evidence_bindings,
+                    body: new_body })
             }
             HDecl::Trait { name: name, owner_ref: trait_owner_ref,
                 type_params: type_params, methods: new_methods,
@@ -120,10 +129,11 @@ fn al_decl(d: HDecl) -> HDecl {
             }
             HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
-        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, is_pub, span } =>
+        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, handled_evidence_bindings, is_pub, span } =>
             HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id,
                 executable_ref: executable_ref, type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
+                handled_evidence_bindings: handled_evidence_bindings,
                 is_pub: is_pub, span: span },
         HDecl::ExternType { name, type_params, is_pub, span } =>
             HDecl::ExternType { name: name, type_params: type_params, is_pub: is_pub, span: span },
@@ -146,9 +156,15 @@ fn al_expr(e: HExpr) -> HExpr {
             HExpr::StrLit { value: value, ty: ty, effects: effects, span: span },
         HExpr::BoolLit { value, ty, effects, span } =>
             HExpr::BoolLit { value: value, ty: ty, effects: effects, span: span },
-        HExpr::Ident { name, resolved_name, def_id, dict_closure_dicts, ty, effects, span } =>
-            HExpr::Ident { name: name, resolved_name: resolved_name, def_id: def_id, dict_closure_dicts: dict_closure_dicts, ty: ty, effects: effects, span: span },
-        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch, ty, effects, span } => {
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity, dict_closure_dicts, ty, effects, span } =>
+            HExpr::Ident { name: name, resolved_name: resolved_name,
+                def_id: def_id, source_slot: source_slot,
+                callee_identity: callee_identity,
+                dict_closure_dicts: dict_closure_dicts,
+                ty: ty, effects: effects, span: span },
+        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch,
+                       eq_plan, ord_plan, ty, effects, span } => {
             let new_left = al_expr(left)
             let new_right = al_expr(right)
             match op {
@@ -171,25 +187,30 @@ fn al_expr(e: HExpr) -> HExpr {
                 },
                 _ => HExpr::BinOp { op: op, left: new_left, right: new_right,
                     eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
+                    eq_plan: eq_plan, ord_plan: ord_plan,
                     ty: ty, effects: effects, span: span },
             }
         },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: al_expr(operand), ty: ty, effects: effects, span: span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref,
+        HExpr::Call { callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             let new_callee = al_expr(callee)
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(al_expr(a)) }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
-                resolved_dicts: resolved_dicts, callee_ref: callee_ref,
+                resolved_dicts: resolved_dicts,
+                handled_evidence: handled_evidence, callee_ref: callee_ref,
                 method_ref: method_ref, system_host: system_host,
                 ty: ty, effects: effects, span: span }
         },
-        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } =>
+        HExpr::FieldAccess { receiver, field, access_kind, projection,
+                             ty, effects, span } =>
             HExpr::FieldAccess { receiver: al_expr(receiver), field: field,
-                access_kind: access_kind, ty: ty, effects: effects, span: span },
-        HExpr::StructLit { name, owner_ref, type_args, fields, spread, ty, effects, span } => {
+                access_kind: access_kind, projection: projection,
+                ty: ty, effects: effects, span: span },
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread,
+                           constructor, ty, effects, span } => {
             let mut new_fields: List<HNominalStructFieldInit> = []
             for f in fields {
                 new_fields.push(HNominalStructFieldInit {
@@ -203,9 +224,12 @@ fn al_expr(e: HExpr) -> HExpr {
             }
             HExpr::StructLit { name: name, owner_ref: owner_ref,
                 type_args: type_args, fields: new_fields,
-                spread: new_spread, ty: ty, effects: effects, span: span }
+                spread: new_spread, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
-        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, ty, effects, span } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref,
+                                       fields, spread, constructor,
+                                       ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []
             for f in fields {
                 new_fields.push(HStructFieldInit { name: f.name, field_ref: f.field_ref, value: al_expr(f.value) })
@@ -214,7 +238,11 @@ fn al_expr(e: HExpr) -> HExpr {
                 some(s) => some(al_expr(s)),
                 none => none,
             }
-            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, variant_ref: variant_ref, fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
+            HExpr::NamedVariantConstruct { enum_name: enum_name,
+                variant_name: variant_name, variant_ref: variant_ref,
+                fields: new_fields, spread: new_spread,
+                constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
         HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
             HExpr::MatchExpr { scrutinee: al_expr(scrutinee),
@@ -237,7 +265,7 @@ fn al_expr(e: HExpr) -> HExpr {
                 then_branch: al_expr(then_branch),
                 else_branch: new_else, ty: ty, effects: effects, span: span }
         },
-        HExpr::StringInterp { parts, ty, effects, span } => {
+        HExpr::StringInterp { parts, plan, ty, effects, span } => {
             let mut new_parts: List<HStringInterpPart> = []
             for p in parts {
                 match p {
@@ -245,54 +273,79 @@ fn al_expr(e: HExpr) -> HExpr {
                     HStringInterpPart::Expression(ex) => new_parts.push(HStringInterpPart::Expression(al_expr(ex))),
                 }
             }
-            HExpr::StringInterp { parts: new_parts, ty: ty, effects: effects, span: span }
+            HExpr::StringInterp { parts: new_parts, plan: plan,
+                ty: ty, effects: effects, span: span }
         },
         HExpr::TryCatch { body, arms, ty, effects, span } =>
             HExpr::TryCatch { body: al_expr(body),
                 arms: al_arms(arms), ty: ty, effects: effects, span: span },
-        HExpr::HandleExpr { body, handlers, ty, effects, span } => {
+        HExpr::HandleExpr { body, handlers, installed_evidence, ty, effects, span } => {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
                 new_handlers.push(HEffectHandler { effect_name: h.effect_name,
-                    handled_ref: h.handled_ref, op_name: h.op_name,
+                    handled_ref: h.handled_ref,
+                    operation_ref: h.operation_ref,
+                    fail_ref: h.fail_ref,
+                    executable_ref: h.executable_ref, op_name: h.op_name,
+                    captures: h.captures.map(fn(capture) { HLambdaCapture {
+                        source: capture.source, target: capture.target,
+                        value: capture.value.map(fn(value) { al_expr(value) }),
+                        resource_site: capture.resource_site } }),
+                    handled_evidence_bindings:
+                        h.handled_evidence_bindings,
+                    evidence_captures: h.evidence_captures,
                     params: h.params, resume_binding: h.resume_binding,
                     body: al_expr(h.body) })
             }
-            HExpr::HandleExpr { body: al_expr(body), handlers: new_handlers, ty: ty, effects: effects, span: span }
+            HExpr::HandleExpr { body: al_expr(body), handlers: new_handlers,
+                installed_evidence: installed_evidence,
+                ty: ty, effects: effects, span: span }
         },
-        HExpr::Lambda { executable_ref, params, captures, return_type, body, ty, effects, span } =>
+        HExpr::Lambda { executable_ref, params, captures, handled_evidence_bindings, evidence_captures, return_type, body, ty, effects, span } =>
             HExpr::Lambda { executable_ref: executable_ref,
                 params: params,
                 captures: captures.map(fn(capture) { HLambdaCapture {
                     source: capture.source, target: capture.target,
                     value: capture.value.map(fn(value) { al_expr(value) }),
                     resource_site: capture.resource_site } }),
+                handled_evidence_bindings: handled_evidence_bindings,
+                evidence_captures: evidence_captures,
                 return_type: return_type,
                 body: al_expr(body), ty: ty, effects: effects, span: span },
-        HExpr::EffectOp { effect_name, op_name, operation_ref, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, handled_evidence,
+                          args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(al_expr(a)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: new_args, ty: ty, effects: effects, span: span }
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                operation_ref: operation_ref, fail_ref: fail_ref,
+                handled_evidence: handled_evidence,
+                args: new_args, ty: ty, effects: effects, span: span }
         },
-        HExpr::RangeExpr { start, end, inclusive, ty, effects, span } =>
+        HExpr::RangeExpr { start, end, inclusive, constructor, ty, effects, span } =>
             HExpr::RangeExpr { start: al_expr(start),
-                end: al_expr(end), inclusive: inclusive, ty: ty, effects: effects, span: span },
-        HExpr::ListLit { elements, ty, effects, span } => {
+                end: al_expr(end), inclusive: inclusive,
+                constructor: constructor, ty: ty, effects: effects, span: span },
+        HExpr::ListLit { elements, constructor, ty, effects, span } => {
             let mut new_elems: List<HExpr> = []
             for el in elements { new_elems.push(al_expr(el)) }
-            HExpr::ListLit { elements: new_elems, ty: ty, effects: effects, span: span }
+            HExpr::ListLit { elements: new_elems, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
-        HExpr::TupleLit { elements, ty, effects, span } => {
+        HExpr::TupleLit { elements, constructor, ty, effects, span } => {
             let mut new_elems: List<HExpr> = []
             for el in elements { new_elems.push(al_expr(el)) }
-            HExpr::TupleLit { elements: new_elems, ty: ty, effects: effects, span: span }
+            HExpr::TupleLit { elements: new_elems, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
-        HExpr::IndexExpr { receiver, index, ty, effects, span } =>
+        HExpr::IndexExpr { receiver, index, call_plan, projection,
+                           ty, effects, span } =>
             HExpr::IndexExpr { receiver: al_expr(receiver),
-                index: al_expr(index), ty: ty, effects: effects, span: span },
+                index: al_expr(index), call_plan: call_plan,
+                projection: projection, ty: ty, effects: effects, span: span },
         // Created by dict_lower, which runs AFTER this pass — never present.
-        HExpr::DictConstruct { base_dict, trait_name, inner, ty, effects, span } =>
-            HExpr::DictConstruct { base_dict: base_dict, trait_name: trait_name, inner: inner, ty: ty, effects: effects, span: span },
+        HExpr::DictConstruct { base_dict, plan, inner, ty, effects, span } =>
+            HExpr::DictConstruct { base_dict: base_dict, plan: plan,
+                inner: inner, ty: ty, effects: effects, span: span },
         // Clone is inserted by perceus (runs after this pass) — never present.
         HExpr::Clone { inner, ty, effects, span } =>
             HExpr::Clone { inner: al_expr(inner), ty: ty, effects: effects, span: span },
@@ -318,7 +371,8 @@ fn al_arms(arms: List<HMatchArm>) -> List<HMatchArm> {
             some(g) => some(al_expr(g)),
             none => none,
         }
-        out.push(HMatchArm { pattern: arm.pattern, bindings: arm.bindings,
+        out.push(HMatchArm { pattern: arm.pattern,
+            pattern_plan: arm.pattern_plan, bindings: arm.bindings,
             guard: new_guard,
             body: al_expr(arm.body), span: arm.span })
     }
@@ -348,23 +402,27 @@ fn al_stmt(s: HStmt) -> HStmt {
         HStmt::While { condition, body, span } =>
             HStmt::While { condition: al_expr(condition),
                 body: al_expr(body), span: span },
-        HStmt::ForIn { binding, binding_span, def_id, destructure, iterable, body, iterable_type_name, iter_type_name, span } =>
+        HStmt::ForIn { binding, binding_span, def_id, destructure, plan,
+                       iterable, body, iterable_type_name, iter_type_name, span } =>
             HStmt::ForIn { binding: binding, binding_span: binding_span, def_id: def_id,
-                destructure: destructure,
+                destructure: destructure, plan: plan,
                 iterable: al_expr(iterable),
                 body: al_expr(body),
                 iterable_type_name: iterable_type_name, iter_type_name: iter_type_name, span: span },
         HStmt::Break { span } => HStmt::Break { span: span },
         HStmt::Continue { span } => HStmt::Continue { span: span },
-        HStmt::LetDestructure { pattern, bindings, init, span } =>
-            HStmt::LetDestructure { pattern: pattern, bindings: bindings,
+        HStmt::LetDestructure { pattern, pattern_plan, bindings, init, span } =>
+            HStmt::LetDestructure { pattern: pattern,
+                pattern_plan: pattern_plan, bindings: bindings,
                 init: al_expr(init), span: span },
-        HStmt::IfLet { pattern, bindings, expr, then_block, else_block, span } => {
+        HStmt::IfLet { pattern, pattern_plan, bindings, expr,
+                       then_block, else_block, span } => {
             let new_else = match else_block {
                 some(eb) => some(al_expr(eb)),
                 none => none,
             }
-            HStmt::IfLet { pattern: pattern, bindings: bindings,
+            HStmt::IfLet { pattern: pattern, pattern_plan: pattern_plan,
+                bindings: bindings,
                 expr: al_expr(expr),
                 then_block: al_expr(then_block), else_block: new_else, span: span }
         },

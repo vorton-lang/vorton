@@ -133,13 +133,14 @@ fn mutate_drop_params(decls: List<HDecl>) -> List<HDecl> {
     let mut out: List<HDecl> = []
     for d in decls {
         match d {
-            HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } => {
+            HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } => {
                 out.push(HDecl::Fn {
                     name: name, def_id: def_id,
                     executable_ref: executable_ref,
                     impl_method_ref: impl_method_ref,
                     type_params: type_params,
                     params: params, return_type: return_type, effects: effects,
+                    handled_evidence_bindings: handled_evidence_bindings,
                     body: mutate_append_param_drops(
                         body, params, executable_ref),
                     is_pub: is_pub, trait_bounds: trait_bounds, span: span
@@ -251,39 +252,45 @@ fn fresh_anf_tmp(mut counter: List<Int>) -> (Str, Int) {
 
 fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
     match decl {
-        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } => {
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } => {
             HDecl::Fn {
                 name: name, def_id: def_id,
                 executable_ref: executable_ref,
                 impl_method_ref: impl_method_ref,
                 type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
+                handled_evidence_bindings: handled_evidence_bindings,
                 body: anf_fn_body(body, externs, counter), is_pub: is_pub,
                 trait_bounds: trait_bounds, span: span
             }
         },
-        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
+        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref,
+                      delegate_plan, type_params, trait_name, methods,
+                      assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
             for m in methods { new_methods.push(anf_decl(m, externs, counter)) }
             HDecl::Impl {
                 target_type: target_type, owner_ref: owner_ref,
                 type_params: type_params,
                 provider_ref: provider_ref, trait_ref: trait_ref,
+                delegate_plan: delegate_plan,
                 trait_name: trait_name, methods: new_methods,
                 assoc_types: assoc_types, span: span
             }
         },
-        HDecl::Test { description, executable_ref, body, span } => {
+        HDecl::Test { description, executable_ref, handled_evidence_bindings, body, span } => {
             HDecl::Test { description: description,
                 executable_ref: executable_ref,
+                handled_evidence_bindings: handled_evidence_bindings,
                 body: anf_fn_body(body, externs, counter), span: span }
         },
-        HDecl::Const { name, def_id, executable_ref, ty, init, is_pub, span } => {
+        HDecl::Const { name, def_id, executable_ref, handled_evidence_bindings, ty, init, is_pub, span } => {
             // Const init is in escape position with no enclosing statement list to
             // hoist into; normalise its nested subexprs into a Block tail if any
             // materialisation is needed.
             HDecl::Const { name: name, def_id: def_id,
                 executable_ref: executable_ref, ty: ty,
+                handled_evidence_bindings: handled_evidence_bindings,
                 init: anf_value_in_own_scope(init, externs, counter), is_pub: is_pub, span: span }
         },
         HDecl::ModBlock { name, decls: mod_decls, is_pub, span } => {
@@ -618,6 +625,7 @@ fn anf_materialize(expr: HExpr, mut hoists: List<HStmt>, mut counter: List<Int>)
         span: synthetic_span() })
     HExpr::Ident { name: tmp, resolved_name: none,
         def_id: some(tmp_def_id),
+        source_slot: none, callee_identity: none,
         dict_closure_dicts: none, ty: t, effects: e, span: s }
 }
 
@@ -773,7 +781,8 @@ fn anf_stmt(stmt: HStmt, externs: Set<Str>, mut counter: List<Int>) -> List<HStm
             let new_body = anf_block_expr(body, externs, counter)
             [HStmt::While { condition: new_cond, body: new_body, span: span }]
         },
-        HStmt::ForIn { binding, binding_span, def_id, destructure, iterable, body, iterable_type_name, iter_type_name, span } => {
+        HStmt::ForIn { binding, binding_span, def_id, destructure, plan,
+                       iterable, body, iterable_type_name, iter_type_name, span } => {
             // The iterable is evaluated ONCE before the loop → its temps may hoist
             // before the ForIn statement.  The body is its own per-iteration scope.
             //
@@ -800,12 +809,13 @@ fn anf_stmt(stmt: HStmt, externs: Set<Str>, mut counter: List<Int>) -> List<HStm
             let new_body = anf_block_expr(body, externs, counter)
             hoists.push(HStmt::ForIn {
                 binding: binding, binding_span: binding_span, def_id: def_id,
-                destructure: destructure, iterable: new_iter, body: new_body,
+                destructure: destructure, plan: plan,
+                iterable: new_iter, body: new_body,
                 iterable_type_name: iterable_type_name, iter_type_name: iter_type_name, span: span
             })
             hoists
         },
-        HStmt::LetDestructure { pattern, bindings, init, span } => {
+        HStmt::LetDestructure { pattern, pattern_plan, bindings, init, span } => {
             // B-104 D1 Stage 2 — DESTRUCTURE INIT position: `let (a, b) = f()` /
             // `let (a, b) = (x, y)`.  The destructure only PROJECTS borrows out
             // of the init value (codegen emit_let_destructure: ring_list_get
@@ -818,10 +828,13 @@ fn anf_stmt(stmt: HStmt, externs: Set<Str>, mut counter: List<Int>) -> List<HStm
             // see rc_stmt's LetDestructure arm.
             let mut hoists: List<HStmt> = []
             let new_init = anf_operand(init, hoists, externs, counter)
-            hoists.push(HStmt::LetDestructure { pattern: pattern, bindings: bindings, init: new_init, span: span })
+            hoists.push(HStmt::LetDestructure { pattern: pattern,
+                pattern_plan: pattern_plan, bindings: bindings,
+                init: new_init, span: span })
             hoists
         },
-        HStmt::IfLet { pattern, bindings, expr, then_block, else_block, span } => {
+        HStmt::IfLet { pattern, pattern_plan, bindings, expr,
+                       then_block, else_block, span } => {
             // Scrutinee evaluated once → hoist before the IfLet.  Branch blocks are
             // their own scopes (R2).
             //
@@ -842,7 +855,8 @@ fn anf_stmt(stmt: HStmt, externs: Set<Str>, mut counter: List<Int>) -> List<HStm
                 none => none,
             }
             hoists.push(HStmt::IfLet { pattern: pattern,
-                bindings: bindings, expr: new_expr,
+                pattern_plan: pattern_plan, bindings: bindings,
+                expr: new_expr,
                 then_block: new_then, else_block: new_else, span: span })
             hoists
         },
@@ -874,20 +888,28 @@ fn anf_cond_in_own_scope(cond: HExpr, externs: Set<Str>, mut counter: List<Int>)
 // never materialise — a write destination is a place, not an owned value.
 fn anf_lvalue(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter: List<Int>) -> HExpr {
     match expr {
-        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } => {
+        HExpr::FieldAccess { receiver, field, access_kind, projection,
+                             ty, effects, span } => {
             HExpr::FieldAccess { receiver: anf_lvalue(receiver, hoists, externs, counter),
-                field: field, access_kind: access_kind,
+                field: field, access_kind: access_kind, projection: projection,
                 ty: ty, effects: effects, span: span }
         },
-        HExpr::IndexExpr { receiver, index, ty, effects, span } => {
+        HExpr::IndexExpr { receiver, index, call_plan, projection,
+                           ty, effects, span } => {
             // The index expression IS a read operand — it can be materialised.
             HExpr::IndexExpr { receiver: anf_lvalue(receiver, hoists, externs, counter),
                 index: anf_operand(index, hoists, externs, counter),
+                call_plan: call_plan, projection: projection,
                 ty: ty, effects: effects, span: span }
         },
         // Ident lvalue (plain variable) — nothing to normalise.
-        HExpr::Ident { name, resolved_name, def_id, dict_closure_dicts, ty, effects, span } =>
-            HExpr::Ident { name: name, resolved_name: resolved_name, def_id: def_id, dict_closure_dicts: dict_closure_dicts, ty: ty, effects: effects, span: span },
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity, dict_closure_dicts, ty, effects, span } =>
+            HExpr::Ident { name: name, resolved_name: resolved_name,
+                def_id: def_id, source_slot: source_slot,
+                callee_identity: callee_identity,
+                dict_closure_dicts: dict_closure_dicts,
+                ty: ty, effects: effects, span: span },
         // Other HExpr variants are unreachable as lvalues.
         _ => expr,
     }
@@ -910,15 +932,22 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             HExpr::StrLit { value: value, ty: ty, effects: effects, span: span },
         HExpr::BoolLit { value, ty, effects, span } =>
             HExpr::BoolLit { value: value, ty: ty, effects: effects, span: span },
-        HExpr::Ident { name, resolved_name, def_id, dict_closure_dicts, ty, effects, span } =>
-            HExpr::Ident { name: name, resolved_name: resolved_name, def_id: def_id, dict_closure_dicts: dict_closure_dicts, ty: ty, effects: effects, span: span },
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity, dict_closure_dicts, ty, effects, span } =>
+            HExpr::Ident { name: name, resolved_name: resolved_name,
+                def_id: def_id, source_slot: source_slot,
+                callee_identity: callee_identity,
+                dict_closure_dicts: dict_closure_dicts,
+                ty: ty, effects: effects, span: span },
         // B-104 D4: a dict construction is a leaf (its inners are DictRefs, not
         // sub-expressions) and is ALWAYS the init of a dict_lower-synthesised
         // `let __ring_dictlocal_N` — already bound, nothing to materialise.
-        HExpr::DictConstruct { base_dict, trait_name, inner, ty, effects, span } =>
-            HExpr::DictConstruct { base_dict: base_dict, trait_name: trait_name, inner: inner, ty: ty, effects: effects, span: span },
+        HExpr::DictConstruct { base_dict, plan, inner, ty, effects, span } =>
+            HExpr::DictConstruct { base_dict: base_dict, plan: plan,
+                inner: inner, ty: ty, effects: effects, span: span },
 
-        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch, ty, effects, span } => {
+        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch,
+                       eq_plan, ord_plan, ty, effects, span } => {
             // B-104 D7: `&&`/`||` never reach this pass — andor_lower (checker
             // end) rewrites them to IfExpr, whose branch blocks are their own
             // materialisation scopes (the R2 lazy boundary that
@@ -934,6 +963,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             let new_right = anf_operand(right, hoists, externs, counter)
             HExpr::BinOp { op: op, left: new_left, right: new_right,
                 eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
+                eq_plan: eq_plan, ord_plan: ord_plan,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -942,7 +972,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref,
+        HExpr::Call { callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             // Callee is a borrow read (FieldAccess receiver / Ident) — normalise its
             // subexprs but it is not itself a materialisable value.
@@ -965,12 +995,14 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 new_args.push(anf_operand(a, hoists, externs, counter))
             }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
-                resolved_dicts: resolved_dicts, callee_ref: callee_ref,
+                resolved_dicts: resolved_dicts,
+                handled_evidence: handled_evidence, callee_ref: callee_ref,
                 method_ref: method_ref, system_host: system_host,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } => {
+        HExpr::FieldAccess { receiver, field, access_kind, projection,
+                             ty, effects, span } => {
             // B-104 D1 Stage 2 — RECEIVER position: a FRESH-OWNED receiver
             // (`f(x).method()`, `make().field`, `s.char_at(i).unwrap_or("")`'s
             // char_at Option — the lexer per-char leak) was read in place and
@@ -997,21 +1029,24 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             // Evaluation order preserved: the receiver's hoist precedes the
             // args' hoists (anf_callee runs before the args loop in the Call arm).
             HExpr::FieldAccess { receiver: anf_operand(receiver, hoists, externs, counter),
-                field: field, access_kind: access_kind,
+                field: field, access_kind: access_kind, projection: projection,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::IndexExpr { receiver, index, ty, effects, span } => {
+        HExpr::IndexExpr { receiver, index, call_plan, projection,
+                           ty, effects, span } => {
             // Read: receiver follows the same Stage 2 receiver-position rule as
             // FieldAccess above (`f(x)[0]` materialises f(x); the element read
             // borrows __anf, Clone-wrapped on escape, dropped at scope end);
             // index is a read operand.
             HExpr::IndexExpr { receiver: anf_operand(receiver, hoists, externs, counter),
                 index: anf_operand(index, hoists, externs, counter),
+                call_plan: call_plan, projection: projection,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::StructLit { name, owner_ref, type_args, fields, spread, ty, effects, span } => {
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread,
+                           constructor, ty, effects, span } => {
             // Each field value escapes into the struct → tail/escape position; its
             // OWN nested subexprs hoist, but the field value itself is not
             // materialised (it is stored directly into the struct by the RC pass).
@@ -1028,10 +1063,13 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             }
             HExpr::StructLit { name: name, owner_ref: owner_ref,
                 type_args: type_args, fields: new_fields,
-                spread: new_spread, ty: ty, effects: effects, span: span }
+                spread: new_spread, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, ty, effects, span } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref,
+                                       fields, spread, constructor,
+                                       ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []
             for f in fields {
                 new_fields.push(HStructFieldInit { name: f.name, field_ref: f.field_ref, value: anf_tail_value(f.value, hoists, externs, counter) })
@@ -1040,29 +1078,35 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 some(s) => some(anf_borrow(s, hoists, externs, counter)),
                 none => none,
             }
-            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, variant_ref: variant_ref,
-                fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
+            HExpr::NamedVariantConstruct { enum_name: enum_name,
+                variant_name: variant_name, variant_ref: variant_ref,
+                fields: new_fields, spread: new_spread,
+                constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::ListLit { elements, ty, effects, span } => {
+        HExpr::ListLit { elements, constructor, ty, effects, span } => {
             let mut new_elems: List<HExpr> = []
             for e in elements { new_elems.push(anf_tail_value(e, hoists, externs, counter)) }
-            HExpr::ListLit { elements: new_elems, ty: ty, effects: effects, span: span }
+            HExpr::ListLit { elements: new_elems, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::TupleLit { elements, ty, effects, span } => {
+        HExpr::TupleLit { elements, constructor, ty, effects, span } => {
             let mut new_elems: List<HExpr> = []
             for e in elements { new_elems.push(anf_tail_value(e, hoists, externs, counter)) }
-            HExpr::TupleLit { elements: new_elems, ty: ty, effects: effects, span: span }
+            HExpr::TupleLit { elements: new_elems, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::RangeExpr { start, end, inclusive, ty, effects, span } => {
+        HExpr::RangeExpr { start, end, inclusive, constructor, ty, effects, span } => {
             HExpr::RangeExpr { start: anf_tail_value(start, hoists, externs, counter),
                 end: anf_tail_value(end, hoists, externs, counter),
-                inclusive: inclusive, ty: ty, effects: effects, span: span }
+                inclusive: inclusive, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::StringInterp { parts, ty, effects, span } => {
+        HExpr::StringInterp { parts, plan, ty, effects, span } => {
             // Interpolated expressions are read (stringified) operands — materialise
             // each fresh-owned piece so it is reclaimed (the boxed temps that feed
             // string building are a notable Str-leak source).
@@ -1075,7 +1119,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                         new_parts.push(HStringInterpPart::Literal(s)),
                 }
             }
-            HExpr::StringInterp { parts: new_parts, ty: ty, effects: effects, span: span }
+            HExpr::StringInterp { parts: new_parts, plan: plan,
+                ty: ty, effects: effects, span: span }
         },
 
         HExpr::Block { stmts, tail, ty, effects, span } => {
@@ -1132,6 +1177,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 }
                 let new_body = anf_block_expr(arm.body, externs, counter)
                 new_arms.push(HMatchArm { pattern: arm.pattern,
+                    pattern_plan: arm.pattern_plan,
                     bindings: arm.bindings, guard: new_guard,
                     body: new_body, span: arm.span })
             }
@@ -1150,28 +1196,42 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 }
                 let new_body_arm = anf_block_expr(arm.body, externs, counter)
                 new_arms.push(HMatchArm { pattern: arm.pattern,
+                    pattern_plan: arm.pattern_plan,
                     bindings: arm.bindings, guard: new_guard,
                     body: new_body_arm, span: arm.span })
             }
             HExpr::TryCatch { body: new_body, arms: new_arms, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::HandleExpr { body, handlers, ty, effects, span } => {
+        HExpr::HandleExpr { body, handlers, installed_evidence, ty, effects, span } => {
             let new_body = anf_block_expr(body, externs, counter)
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
                 let h_body = anf_block_expr(h.body, externs, counter)
                 new_handlers.push(HEffectHandler {
                     effect_name: h.effect_name, handled_ref: h.handled_ref,
+                    operation_ref: h.operation_ref,
+                    fail_ref: h.fail_ref,
+                    executable_ref: h.executable_ref,
+                    captures: h.captures.map(fn(capture) { HLambdaCapture {
+                        source: capture.source, target: capture.target,
+                        value: capture.value.map(fn(value) {
+                            anf_operand(value, hoists, externs, counter) }),
+                        resource_site: capture.resource_site } }),
+                    handled_evidence_bindings:
+                        h.handled_evidence_bindings,
+                    evidence_captures: h.evidence_captures,
                     op_name: h.op_name,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
             }
-            HExpr::HandleExpr { body: new_body, handlers: new_handlers, ty: ty, effects: effects, span: span }
+            HExpr::HandleExpr { body: new_body, handlers: new_handlers,
+                installed_evidence: installed_evidence,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Lambda { executable_ref, params, captures, return_type, body, ty, effects, span } => {
+        HExpr::Lambda { executable_ref, params, captures, handled_evidence_bindings, evidence_captures, return_type, body, ty, effects, span } => {
             // The lambda body is its own function scope.  Captures are dup'd by
             // gen_lambda; perceus handles the body.  Normalise the body in place.
             HExpr::Lambda { executable_ref: executable_ref,
@@ -1181,12 +1241,15 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                     value: capture.value.map(fn(value) {
                         anf_operand(value, hoists, externs, counter) }),
                     resource_site: capture.resource_site } }),
+                handled_evidence_bindings: handled_evidence_bindings,
+                evidence_captures: evidence_captures,
                 return_type: return_type,
                 body: anf_block_expr(body, externs, counter),
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, operation_ref, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, handled_evidence,
+                          args, ty, effects, span } => {
             // B-104 D1 Stage 2 — EFFECT-OP ARG position (closes the W1-era
             // conservative hold-out).  Args are BORROW-passed to the handler
             // closure (gen_effect_op → gen_closure_call; closure params are
@@ -1208,7 +1271,9 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             //     never released).
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(anf_operand(a, hoists, externs, counter)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: new_args,
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                operation_ref: operation_ref, fail_ref: fail_ref,
+                handled_evidence: handled_evidence, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -1286,7 +1351,7 @@ fn transform_decl(
     drop_types: Set<Str>, mut gensym: List<Int>
 ) -> HDecl {
     match decl {
-        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } => {
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } => {
             let new_body = transform_fn_body(
                 params, body, boxed, externs, drop_types, gensym)
             HDecl::Fn {
@@ -1295,35 +1360,41 @@ fn transform_decl(
                 impl_method_ref: impl_method_ref,
                 type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
+                handled_evidence_bindings: handled_evidence_bindings,
                 body: new_body, is_pub: is_pub, trait_bounds: trait_bounds, span: span
             }
         },
-        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
+        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref,
+                      delegate_plan, type_params, trait_name, methods,
+                      assoc_types, span } => {
             let new_methods = transform_decls(
                 methods, boxed, externs, drop_types, gensym)
             HDecl::Impl {
                 target_type: target_type, owner_ref: owner_ref,
                 type_params: type_params,
                 provider_ref: provider_ref, trait_ref: trait_ref,
+                delegate_plan: delegate_plan,
                 trait_name: trait_name, methods: new_methods,
                 assoc_types: assoc_types, span: span
             }
         },
-        HDecl::Test { description, executable_ref, body, span } => {
+        HDecl::Test { description, executable_ref, handled_evidence_bindings, body, span } => {
             // Transform test bodies as parameterless functions
             let new_body = transform_fn_body(
                 [], body, boxed, externs, drop_types, gensym)
             HDecl::Test { description: description,
                 executable_ref: executable_ref,
+                handled_evidence_bindings: handled_evidence_bindings,
                 body: new_body, span: span }
         },
-        HDecl::Const { name, def_id, executable_ref, ty, init, is_pub, span } => {
+        HDecl::Const { name, def_id, executable_ref, handled_evidence_bindings, ty, init, is_pub, span } => {
             // B-098: the const owns its value → the initialiser is in escape
             // position, with an empty enclosing owned scope (no locals at top level).
             let owned: List<OwnedSlot> = []
             let new_init = rc_escape(init, owned, boxed, externs, drop_types, gensym, 0 - 1)
             HDecl::Const { name: name, def_id: def_id,
                 executable_ref: executable_ref, ty: ty,
+                handled_evidence_bindings: handled_evidence_bindings,
                 init: new_init, is_pub: is_pub, span: span }
         },
         HDecl::ModBlock { name, decls: mod_decls, is_pub, span } => {
@@ -2027,6 +2098,7 @@ fn rc_block_inner(stmts: List<HStmt>, tail: HExpr?, escape: Bool, owned: List<Ow
                 for d in drops { new_stmts.push(d) }
                 let tmp_tail = HExpr::Ident { name: tmp, resolved_name: none,
                     def_id: some(tmp_def_id),
+                    source_slot: none, callee_identity: none,
                     dict_closure_dicts: none, ty: tt, effects: te, span: ts }
                 ((new_stmts, some(tmp_tail)))
             },
@@ -2461,6 +2533,7 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
                     let tmp_id = HExpr::Ident {
                         name: tmp, resolved_name: none,
                         def_id: some(tmp_def_id),
+                        source_slot: none, callee_identity: none,
                         dict_closure_dicts: none, ty: vt,
                         effects: hexpr_effects(value), span: hexpr_span(value)
                     }
@@ -2502,6 +2575,7 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
                     for d in drops_for(owned) { out.push(d) }
                     let tmp_id = HExpr::Ident { name: tmp, resolved_name: none,
                         def_id: some(tmp_def_id),
+                        source_slot: none, callee_identity: none,
                         dict_closure_dicts: none, ty: tt, effects: te, span: ts }
                     out.push(HStmt::Return { value: some(tmp_id), span: span })
                     out
@@ -2528,7 +2602,8 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
             let new_body = rc_block_root(body, false, owned, boxed, externs, drop_types, gensym, owned.len())
             [HStmt::While { condition: new_cond, body: new_body, span: span }]
         },
-        HStmt::ForIn { binding, binding_span, def_id, destructure, iterable, body, iterable_type_name, iter_type_name, span } => {
+        HStmt::ForIn { binding, binding_span, def_id, destructure, plan,
+                       iterable, body, iterable_type_name, iter_type_name, span } => {
             // The iterable is read once (borrow).  The for-binding (and any
             // destructure names) alias a BORROWED container element each iteration
             // (codegen's ring_list_get no longer dups — B-098 read-borrow), so they
@@ -2542,7 +2617,7 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
             let new_body = rc_block_root(body, false, owned, boxed, externs, drop_types, gensym, owned.len())
             [HStmt::ForIn {
                 binding: binding, binding_span: binding_span, def_id: def_id,
-                destructure: destructure, iterable: new_iter,
+                destructure: destructure, plan: plan, iterable: new_iter,
                 body: new_body, iterable_type_name: iterable_type_name,
                 iter_type_name: iter_type_name, span: span
             }]
@@ -2571,7 +2646,7 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
             out.push(HStmt::Continue { span: span })
             out
         },
-        HStmt::LetDestructure { pattern, bindings, init, span } => {
+        HStmt::LetDestructure { pattern, pattern_plan, bindings, init, span } => {
             // B-104 D1 Stage 2: the destructure does NOT take ownership of the
             // init — codegen (emit_let_destructure) PROJECTS each element via
             // ring_list_get (a borrow load, no dup) into the binding allocas,
@@ -2585,9 +2660,12 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
             // dropped binding; binding escapes are Clone-wrapped as usual
             // (dup-before-drop balance, same as the W2 scrutinee).
             let new_init = rc_expr(init, false, owned, boxed, externs, drop_types, gensym, loop_base)
-            [HStmt::LetDestructure { pattern: pattern, bindings: bindings, init: new_init, span: span }]
+            [HStmt::LetDestructure { pattern: pattern,
+                pattern_plan: pattern_plan, bindings: bindings,
+                init: new_init, span: span }]
         },
-        HStmt::IfLet { pattern, bindings, expr, then_block, else_block, span } => {
+        HStmt::IfLet { pattern, pattern_plan, bindings, expr,
+                       then_block, else_block, span } => {
             // Scrutinee is a borrow.  Pattern bindings PROJECT borrows from the
             // scrutinee (codegen loads them without a dup), so they are NOT owned
             // and are excluded from the branch's owned set — no scope-end drop, no
@@ -2598,7 +2676,8 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
                 some(eb) => some(rc_block_root(eb, false, owned, boxed, externs, drop_types, gensym, loop_base)),
                 none => none,
             }
-            [HStmt::IfLet { pattern: pattern, bindings: bindings,
+            [HStmt::IfLet { pattern: pattern, pattern_plan: pattern_plan,
+                bindings: bindings,
                 expr: new_expr, then_block: new_then,
                 else_block: new_else, span: span }]
         },
@@ -2617,8 +2696,13 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
     match expr {
         // Leaves: nothing to transform.  Owner-bearing leaves (Ident) are cloned
         // by rc_escape at the escape site, never here (here = value position).
-        HExpr::Ident { name, resolved_name, def_id, dict_closure_dicts, ty, effects, span } =>
-            HExpr::Ident { name: name, resolved_name: resolved_name, def_id: def_id, dict_closure_dicts: dict_closure_dicts, ty: ty, effects: effects, span: span },
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity, dict_closure_dicts, ty, effects, span } =>
+            HExpr::Ident { name: name, resolved_name: resolved_name,
+                def_id: def_id, source_slot: source_slot,
+                callee_identity: callee_identity,
+                dict_closure_dicts: dict_closure_dicts,
+                ty: ty, effects: effects, span: span },
         HExpr::IntLit { value, ty, effects, span } =>
             HExpr::IntLit { value: value, ty: ty, effects: effects, span: span },
         HExpr::FloatLit { value, ty, effects, span } =>
@@ -2631,15 +2715,18 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
         // DictRef borrows of params/locals/singletons, not sub-expressions).
         // It only occurs as a dict_lower-synthesised Let init: the binding is
         // owned (is_droppable_init → true) and scope-end-dropped.
-        HExpr::DictConstruct { base_dict, trait_name, inner, ty, effects, span } =>
-            HExpr::DictConstruct { base_dict: base_dict, trait_name: trait_name, inner: inner, ty: ty, effects: effects, span: span },
+        HExpr::DictConstruct { base_dict, plan, inner, ty, effects, span } =>
+            HExpr::DictConstruct { base_dict: base_dict, plan: plan,
+                inner: inner, ty: ty, effects: effects, span: span },
 
-        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch, ty, effects, span } => {
+        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch,
+                       eq_plan, ord_plan, ty, effects, span } => {
             // Operands are borrows (read for the operation; comparison/arith does
             // not take ownership).
             HExpr::BinOp { op: op, left: rc_expr(left, false, owned, boxed, externs, drop_types, gensym, loop_base),
                 right: rc_expr(right, false, owned, boxed, externs, drop_types, gensym, loop_base),
                 eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
+                eq_plan: eq_plan, ord_plan: ord_plan,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -2648,7 +2735,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref,
+        HExpr::Call { callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             // Callee is a borrow.  Arguments BORROW by default (the callee does not
             // drop them — point 4) EXCEPT two ownership-taking sinks:
@@ -2680,21 +2767,24 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 i = i + 1
             }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
-                resolved_dicts: resolved_dicts, callee_ref: callee_ref,
+                resolved_dicts: resolved_dicts,
+                handled_evidence: handled_evidence, callee_ref: callee_ref,
                 method_ref: method_ref, system_host: system_host,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } => {
+        HExpr::FieldAccess { receiver, field, access_kind, projection,
+                             ty, effects, span } => {
             // Read: receiver is a borrow.  (If this field access itself escapes,
             // rc_escape wraps the whole node in Clone before we get here in value
             // position — so here the result is just a borrow.)
             HExpr::FieldAccess { receiver: rc_expr(receiver, false, owned, boxed, externs, drop_types, gensym, loop_base),
-                field: field, access_kind: access_kind,
+                field: field, access_kind: access_kind, projection: projection,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::StructLit { name, owner_ref, type_args, fields, spread, ty, effects, span } => {
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread,
+                           constructor, ty, effects, span } => {
             // Each field value escapes into the new struct (the struct owns it).
             let mut new_fields: List<HNominalStructFieldInit> = []
             for f in fields {
@@ -2713,10 +2803,13 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             }
             HExpr::StructLit { name: name, owner_ref: owner_ref,
                 type_args: type_args, fields: new_fields,
-                spread: new_spread, ty: ty, effects: effects, span: span }
+                spread: new_spread, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, ty, effects, span } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref,
+                                       fields, spread, constructor,
+                                       ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []
             for f in fields {
                 new_fields.push(HStructFieldInit { name: f.name, field_ref: f.field_ref, value: rc_escape(f.value, owned, boxed, externs, drop_types, gensym, loop_base) })
@@ -2725,8 +2818,11 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 some(s) => some(rc_expr(s, false, owned, boxed, externs, drop_types, gensym, loop_base)),
                 none => none,
             }
-            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, variant_ref: variant_ref,
-                fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
+            HExpr::NamedVariantConstruct { enum_name: enum_name,
+                variant_name: variant_name, variant_ref: variant_ref,
+                fields: new_fields, spread: new_spread,
+                constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
         HExpr::Block { stmts, tail, ty, effects, span } => {
@@ -2768,13 +2864,14 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 }
                 let new_body = rc_block_root(arm.body, escape, owned, boxed, externs, drop_types, gensym, loop_base)
                 new_arms.push(HMatchArm { pattern: arm.pattern,
+                    pattern_plan: arm.pattern_plan,
                     bindings: arm.bindings, guard: new_guard,
                     body: new_body, span: arm.span })
             }
             HExpr::MatchExpr { scrutinee: new_scrutinee, arms: new_arms, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::StringInterp { parts, ty, effects, span } => {
+        HExpr::StringInterp { parts, plan, ty, effects, span } => {
             // Interpolated parts are read (stringified) — borrows.
             let mut new_parts: List<HStringInterpPart> = []
             for p in parts {
@@ -2785,7 +2882,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                         new_parts.push(HStringInterpPart::Literal(s)),
                 }
             }
-            HExpr::StringInterp { parts: new_parts, ty: ty, effects: effects, span: span }
+            HExpr::StringInterp { parts: new_parts, plan: plan,
+                ty: ty, effects: effects, span: span }
         },
 
         HExpr::TryCatch { body, arms, ty, effects, span } => {
@@ -2804,13 +2902,14 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 }
                 let new_body_arm = rc_block_root(arm.body, escape, owned, boxed, externs, drop_types, gensym, loop_base)
                 new_arms.push(HMatchArm { pattern: arm.pattern,
+                    pattern_plan: arm.pattern_plan,
                     bindings: arm.bindings, guard: new_guard,
                     body: new_body_arm, span: arm.span })
             }
             HExpr::TryCatch { body: new_body, arms: new_arms, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::HandleExpr { body, handlers, ty, effects, span } => {
+        HExpr::HandleExpr { body, handlers, installed_evidence, ty, effects, span } => {
             // body inherits escape.  Each handler arm becomes a closure at codegen
             // (gen_handle_expr → build_handler_evidence).  B-098 closure model:
             // captures are owned and DUP'd at construction by gen_lambda (not in
@@ -2828,15 +2927,29 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 let h_body = rc_block_root(h.body, true, [], boxed, externs, drop_types, gensym, 0 - 1)
                 new_handlers.push(HEffectHandler {
                     effect_name: h.effect_name, handled_ref: h.handled_ref,
+                    operation_ref: h.operation_ref,
+                    fail_ref: h.fail_ref,
+                    executable_ref: h.executable_ref,
+                    captures: h.captures.map(fn(capture) { HLambdaCapture {
+                        source: capture.source, target: capture.target,
+                        value: capture.value.map(fn(value) {
+                            rc_escape(value, owned, boxed, externs,
+                                drop_types, gensym, loop_base) }),
+                        resource_site: capture.resource_site } }),
+                    handled_evidence_bindings:
+                        h.handled_evidence_bindings,
+                    evidence_captures: h.evidence_captures,
                     op_name: h.op_name,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
             }
-            HExpr::HandleExpr { body: new_body, handlers: new_handlers, ty: ty, effects: effects, span: span }
+            HExpr::HandleExpr { body: new_body, handlers: new_handlers,
+                installed_evidence: installed_evidence,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Lambda { executable_ref, params, captures, return_type, body, ty, effects, span } => {
+        HExpr::Lambda { executable_ref, params, captures, handled_evidence_bindings, evidence_captures, return_type, body, ty, effects, span } => {
             // Conservative closure model (B-098 all-owned captures): every captured
             // outer owned local is DUP'd at CONSTRUCTION by gen_lambda (the env
             // takes its own reference), released when the env dies (B-084
@@ -2854,44 +2967,54 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                         rc_escape(value, owned, boxed, externs, drop_types,
                             gensym, loop_base) }),
                     resource_site: capture.resource_site } }),
+                handled_evidence_bindings: handled_evidence_bindings,
+                evidence_captures: evidence_captures,
                 return_type: return_type, body: new_body,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, operation_ref, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, handled_evidence,
+                          args, ty, effects, span } => {
             // Effect-op args: treat like ordinary call args — borrow (the handler
             // closure receives them; full effect-arg ownership is B-096 scope).
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(rc_expr(a, false, owned, boxed, externs, drop_types, gensym, loop_base)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: new_args,
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                operation_ref: operation_ref, fail_ref: fail_ref,
+                handled_evidence: handled_evidence, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::RangeExpr { start, end, inclusive, ty, effects, span } => {
+        HExpr::RangeExpr { start, end, inclusive, constructor, ty, effects, span } => {
             // Range stores start/end into a fresh range struct → they escape.
             HExpr::RangeExpr { start: rc_escape(start, owned, boxed, externs, drop_types, gensym, loop_base),
                 end: rc_escape(end, owned, boxed, externs, drop_types, gensym, loop_base),
-                inclusive: inclusive, ty: ty, effects: effects, span: span }
+                inclusive: inclusive, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::ListLit { elements, ty, effects, span } => {
+        HExpr::ListLit { elements, constructor, ty, effects, span } => {
             // Each element escapes into the new list (the list owns it).
             let mut new_elems: List<HExpr> = []
             for e in elements { new_elems.push(rc_escape(e, owned, boxed, externs, drop_types, gensym, loop_base)) }
-            HExpr::ListLit { elements: new_elems, ty: ty, effects: effects, span: span }
+            HExpr::ListLit { elements: new_elems, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::TupleLit { elements, ty, effects, span } => {
+        HExpr::TupleLit { elements, constructor, ty, effects, span } => {
             let mut new_elems: List<HExpr> = []
             for e in elements { new_elems.push(rc_escape(e, owned, boxed, externs, drop_types, gensym, loop_base)) }
-            HExpr::TupleLit { elements: new_elems, ty: ty, effects: effects, span: span }
+            HExpr::TupleLit { elements: new_elems, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
 
-        HExpr::IndexExpr { receiver, index, ty, effects, span } => {
+        HExpr::IndexExpr { receiver, index, call_plan, projection,
+                           ty, effects, span } => {
             // Read: receiver + index are borrows.  (Escape wrapping of the whole
             // index result happens in rc_escape before reaching value position.)
             HExpr::IndexExpr { receiver: rc_expr(receiver, false, owned, boxed, externs, drop_types, gensym, loop_base),
                 index: rc_expr(index, false, owned, boxed, externs, drop_types, gensym, loop_base),
+                call_plan: call_plan, projection: projection,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -2925,6 +3048,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 for d in drops_for(owned) { out.push(d) }
                 let tmp_id = HExpr::Ident { name: tmp, resolved_name: none,
                     def_id: some(tmp_def_id),
+                    source_slot: none, callee_identity: none,
                     dict_closure_dicts: none, ty: tt, effects: te, span: ts }
                 let ret_expr = HExpr::ReturnExpr { value: some(tmp_id), ty: ty, effects: effects, span: span }
                 HExpr::Block { stmts: out, tail: some(ret_expr),

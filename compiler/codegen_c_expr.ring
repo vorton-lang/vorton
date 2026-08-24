@@ -10,8 +10,8 @@
 // a test-and-fall-through lowering.  Arm order = source order,
 // pattern tests jump to the next arm's label on mismatch (if/goto+label).
 //
-// Step 6 adds effect handlers (tail-resumptive + abort), try/catch and
-// default evidence — see the "Step 6" section below for the mechanism notes.
+// Step 6 adds explicit custom-effect handlers (tail-resumptive + abort) and
+// try/catch; Ring 0.1 has no default evidence path.
 //
 use types::{Type, EffectRow, EMPTY_ROW, type_to_builtin_name, types_equal,
     BUILTIN_RANGE}
@@ -20,6 +20,7 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
     HNominalStructFieldInit, HFieldAccessKind,
     HEffectHandler, HEffectOp, DictRef,
+    h_dict_construct_trait,
     TraitDispatch, MethodCallRef,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_is_bound,
@@ -168,8 +169,14 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
         // B-104 D4: local construction of a DYNAMIC wrapped dict (dict_lower's
         // `let __ring_dictlocal_N = …` init) — a fresh owned value, reclaimed
         // by the binding's Perceus scope-end drop.
-        HExpr::DictConstruct { base_dict, trait_name, inner, .. } =>
-            build_c_wrapped_dict(ctx, base_dict, trait_name, inner),
+        HExpr::DictConstruct { base_dict, plan, inner, .. } => {
+            let exact = match plan {
+                some(value) => value,
+                none => panic("C codegen: dictionary construct lacks exact plan")
+            }
+            build_c_wrapped_dict(ctx, base_dict,
+                symbol_ref_canonical_payload(h_dict_construct_trait(exact)), inner)
+        },
         HExpr::Clone { inner, .. } => {
             // Perceus value-level clone: eval, ring_dup, yield the same ptr.
             let v = gen_c_expr(ctx, inner)
@@ -411,6 +418,7 @@ fn gen_c_extern_closure_wrapper(
         c_register_name_only_value(ctx, param_name, "p${i}")
         synthetic_args.push(HExpr::Ident {
             name: param_name, resolved_name: none, def_id: none,
+            source_slot: none, callee_identity: none,
             dict_closure_dicts: none, ty: param_ty,
             effects: EMPTY_ROW, span: span
         })
@@ -418,11 +426,13 @@ fn gen_c_extern_closure_wrapper(
     }
     let synthetic_callee = HExpr::Ident {
         name: name, resolved_name: some(lookup_name), def_id: none,
+        source_slot: none, callee_identity: none,
         dict_closure_dicts: none, ty: ty, effects: EMPTY_ROW, span: span
     }
     let result = gen_c_expr(ctx, HExpr::Call {
         callee: synthetic_callee, args: synthetic_args, type_args: [],
-        resolved_dicts: [], callee_ref: none, method_ref: none,
+        resolved_dicts: [], handled_evidence: [],
+        callee_ref: none, method_ref: none,
         system_host: none,
         ty: return_type,
         effects: fn_effects, span: span
@@ -479,9 +489,9 @@ fn gen_c_dict_closure_wrapper(mut ctx: CCtx, lookup_name: Str, name: Str, dict_r
     let mut owned_dict_vals: List<Str> = []
     for dr in dict_refs {
         match dr {
-            DictRef::Wrapped { dict, trait_name, inner_dicts } => {
+            DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
                 let reference = c_resolve_dict_ref(ctx, DictRef::Wrapped {
-                    dict: dict, trait_name: trait_name,
+                    dict: dict, trait_ref: trait_ref,
                     inner_dicts: inner_dicts
                 })
                 let value = c_ref_c_name(reference)
@@ -924,7 +934,8 @@ pub fn c_resolve_dict_ref(mut ctx: CCtx, dr: DictRef) -> CTypedRef {
             }
         },
         DictRef::Static(n) => c_ref_static(resolve_c_static_dict(ctx, n), n),
-        DictRef::Wrapped { dict, trait_name, inner_dicts } => {
+        DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
+            let trait_name = symbol_ref_canonical_payload(trait_ref)
             // Post-dict_lower this survives in BinOp dispatch and dynamic
             // derived FieldAction evidence.
             let value = build_c_wrapped_dict(ctx, dict, trait_name, inner_dicts)
@@ -1035,9 +1046,10 @@ pub fn build_c_wrapped_dict_typed(mut ctx: CCtx, dict_name: Str, trait_name: Str
     let mut owned_inner_vals: List<Str> = []
     for d in inner_dicts {
         match d {
-            DictRef::Wrapped { dict, trait_name, inner_dicts } => {
+            DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
                 let reference = c_resolve_dict_ref(ctx, DictRef::Wrapped {
-                    dict: dict, trait_name: trait_name, inner_dicts: inner_dicts
+                    dict: dict, trait_ref: trait_ref,
+                    inner_dicts: inner_dicts
                 })
                 let value = c_ref_c_name(reference)
                 inner_vals.push(value)

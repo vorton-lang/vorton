@@ -30,9 +30,12 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     impl_provider_ref_same, impl_provider_ref_kind,
     impl_provider_kind_tag}
 use ir_inventory::{ExecutableRef, EffectOperationRef, SystemHostCallableRef,
-    BinderEntry,
+    BinderEntry, HandledEvidenceRef, HandledEvidenceCapture,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_same,
+    handled_evidence_requirement,
+    handled_evidence_contract_owner, handled_evidence_ordinal,
+    handled_evidence_capture_source, handled_evidence_capture_target,
     effect_operation_ref_effect,
     effect_operation_ref_source_index,
     system_host_callable_effect, system_host_callable_executable}
@@ -46,7 +49,8 @@ pub use hir_exact::{
     h_variant_projection, h_structural_projection, h_tuple_projection, h_intrinsic_projection,
     h_projection_kind, h_projection_nominal, h_projection_variant, h_projection_structural,
     h_projection_structural_name, h_projection_tuple_index, h_projection_intrinsic, HExactCallPlan,
-    make_h_exact_call_plan, h_exact_call_callee, h_exact_call_method, h_exact_call_evidence,
+    make_h_exact_call_plan, h_exact_call_callee, h_exact_call_method,
+    h_exact_call_evidence, h_exact_call_handled_evidence,
     HOperatorPlan, h_operator_method, h_operator_tuple, h_operator_is_tuple,
     h_operator_method_ref, h_operator_elements, HConstructorPlan, make_h_executable_constructor_plan,
     make_h_tuple_constructor_plan, make_h_record_constructor_plan, h_constructor_kind, h_constructor_executable,
@@ -56,7 +60,9 @@ pub use hir_exact::{
     h_dict_construct_executable, h_dict_construct_trait, HDelegateMethodPlan, make_h_delegate_method_plan,
     h_delegate_method_required, h_delegate_method_generated, h_delegate_method_executable, h_delegate_method_origin,
     h_delegate_method_child_call, h_delegate_method_child_callee, h_delegate_method_binders, h_delegate_method_parameter_types,
-    h_delegate_method_result_type, h_delegate_method_effects, h_delegate_method_evidence, HDelegateAssocPlan,
+    h_delegate_method_result_type, h_delegate_method_effects,
+    h_delegate_method_evidence, h_delegate_method_handled_bindings,
+    h_delegate_method_handled_uses, HDelegateAssocPlan,
     make_h_delegate_assoc_plan, h_delegate_assoc_member, h_delegate_assoc_type, HDelegateTypedPlan,
     make_h_delegate_typed_plan, h_delegate_outer_owner, h_delegate_child_owner, h_delegate_child_provider,
     h_delegate_field_owner, h_delegate_field_provider, h_delegate_field_target, h_delegate_field,
@@ -315,6 +321,9 @@ pub struct HEffectHandler {
     pub operation_ref: EffectOperationRef?,
     pub fail_ref: HFailOperationRef?,
     pub executable_ref: ExecutableRef,
+    pub captures: List<HLambdaCapture>,
+    pub handled_evidence_bindings: List<HandledEvidenceRef>,
+    pub evidence_captures: List<HandledEvidenceCapture>,
     pub op_name: Str,
     pub params: List<HParam>,
     pub resume_binding: HPatternBinding?,
@@ -437,7 +446,7 @@ pub enum HExpr {
             eq_plan: HOperatorPlan?, ord_plan: HOperatorPlan?,
             ty: Type, effects: EffectRow, span: Span },
     UnaryOp { op: UnaryOp, operand: HExpr, ty: Type, effects: EffectRow, span: Span },
-    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, callee_ref: CalleeRef?, method_ref: MethodCallRef?, system_host: SystemHostCallableRef?, ty: Type, effects: EffectRow, span: Span },
+    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, handled_evidence: List<HandledEvidenceRef>, callee_ref: CalleeRef?, method_ref: MethodCallRef?, system_host: SystemHostCallableRef?, ty: Type, effects: EffectRow, span: Span },
     FieldAccess { receiver: HExpr, field: Str,
                   access_kind: HFieldAccessKind,
                   projection: HProjectionRef?, ty: Type,
@@ -457,13 +466,16 @@ pub enum HExpr {
     StringInterp { parts: List<HStringInterpPart>, plan: HStringInterpPlan?,
                    ty: Type, effects: EffectRow, span: Span },
     TryCatch { body: HExpr, arms: List<HMatchArm>, ty: Type, effects: EffectRow, span: Span },
-    HandleExpr { body: HExpr, handlers: List<HEffectHandler>, ty: Type, effects: EffectRow, span: Span },
+    HandleExpr { body: HExpr, handlers: List<HEffectHandler>, installed_evidence: List<HandledEvidenceRef>, ty: Type, effects: EffectRow, span: Span },
     Lambda { executable_ref: ExecutableRef, params: List<HParam>,
-             captures: List<HLambdaCapture>, return_type: Type,
+             captures: List<HLambdaCapture>,
+             handled_evidence_bindings: List<HandledEvidenceRef>,
+             evidence_captures: List<HandledEvidenceCapture>, return_type: Type,
              body: HExpr, ty: Type, effects: EffectRow, span: Span },
     EffectOp { effect_name: Str, op_name: Str,
                operation_ref: EffectOperationRef?,
-               fail_ref: HFailOperationRef?, args: List<HExpr>,
+               fail_ref: HFailOperationRef?,
+               handled_evidence: List<HandledEvidenceRef>, args: List<HExpr>,
                ty: Type, effects: EffectRow, span: Span },
     RangeExpr { start: HExpr, end: HExpr, inclusive: Bool,
                 constructor: HConstructorPlan?, ty: Type,
@@ -571,7 +583,8 @@ pub struct HTraitMethod {
     pub return_type: Type,
     pub effects: EffectRow,
     pub has_default: Bool,
-    pub executable_ref: ExecutableRef?,
+    pub executable_ref: ExecutableRef,
+    pub handled_evidence_bindings: List<HandledEvidenceRef>,
     pub body: HExpr?
 }
 
@@ -582,6 +595,7 @@ pub struct TraitBound {
 
 pub struct HAssocType {
     pub name: Str,
+    pub member_ref: SymbolRef,
     pub bounds: List<Str>,
     pub concrete: Type?
 }
@@ -590,6 +604,7 @@ pub enum HDecl {
     Fn { name: Str, def_id: Int?, executable_ref: ExecutableRef,
          impl_method_ref: ImplMethodRef?, type_params: List<TypeParam>,
          params: List<HParam>, return_type: Type, effects: EffectRow,
+         handled_evidence_bindings: List<HandledEvidenceRef>,
          body: HExpr, is_pub: Bool, trait_bounds: List<TraitBound>, span: Span },
     Struct { name: Str, owner_ref: RegisteredNominalRef, type_params: List<TypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
     Enum { name: Str, owner_ref: RegisteredNominalRef, type_params: List<TypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
@@ -600,15 +615,18 @@ pub enum HDecl {
            methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
     Effect { name: Str, owner_ref: SymbolRef?, handled_ref: HandledEffectRef?, type_params: List<TypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
     Test { description: Str, executable_ref: ExecutableRef,
+           handled_evidence_bindings: List<HandledEvidenceRef>,
            body: HExpr, span: Span },
     Trait { name: Str, owner_ref: RegisteredTraitRef, type_params: List<TypeParam>, methods: List<HTraitMethod>, supertraits: List<Str>, assoc_types: List<HAssocType>, is_pub: Bool, span: Span },
     ExternFn { name: Str, abi_name: Str, def_id: Int?,
                executable_ref: ExecutableRef, type_params: List<TypeParam>,
                params: List<HParam>, return_type: Type, effects: EffectRow,
+               handled_evidence_bindings: List<HandledEvidenceRef>,
                is_pub: Bool, span: Span },
     ExternType { name: Str, type_params: List<TypeParam>, is_pub: Bool, span: Span },
     TypeAlias { name: Str, ty: Type, is_pub: Bool, span: Span },
     Const { name: Str, def_id: Int?, executable_ref: ExecutableRef,
+            handled_evidence_bindings: List<HandledEvidenceRef>,
             ty: Type, init: HExpr, is_pub: Bool, span: Span },
     ModBlock { name: Str, decls: List<HDecl>, is_pub: Bool, span: Span }
 }
@@ -623,25 +641,64 @@ pub enum FieldAction {
     // Base and trailing type-param evidence both retain explicit provenance.
     // A bound base is Simple; a module singleton base is Static.  Wrapped
     // bases normalize to Static(base) plus their tagged inner refs.
-    Call { base_dict: DictRef, extra_dicts: List<DictRef> },
-    Tuple { element_actions: List<FieldAction> },
+    Call { method_ref: MethodCallRef, base_dict: DictRef,
+           extra_dicts: List<DictRef> },
+    Tuple { element_types: List<Type>,
+            element_projections: List<HProjectionRef>,
+            element_actions: List<FieldAction> },
     FnLiteral
+}
+
+pub enum DerivedFieldRef {
+    NominalDerivedField(NominalFieldRef),
+    VariantDerivedField(VariantFieldRef)
 }
 
 pub struct DerivedField {
     pub name: Str,
     pub positional_index: Int?,
-    pub action: FieldAction
+    pub field_ref: DerivedFieldRef,
+    pub ty: Type,
+    pub action: FieldAction,
+    // Ord comparison results are semantic generated lets: the same exact
+    // value feeds both the zero test and early return, so Core must never
+    // duplicate the method call while lowering structured control.
+    pub ord_result_binder: BinderEntry?
 }
 
 pub struct DerivedVariant {
     pub name: Str,
+    pub variant_ref: VariantRef,
     // Stable declaration-order discriminator mixed into derived Hash before
     // payload fields.  This is a front-end contract, not a backend type/name
     // hash or allocation-dependent value.
     pub discriminator: Int,
     pub fields: List<DerivedField>,
     pub has_named_fields: Bool
+}
+
+pub enum DerivedTextPiece {
+    DerivedLiteralText(Str),
+    DerivedFieldText(DerivedFieldRef)
+}
+
+pub struct DerivedTextSequence {
+    pub pieces: List<DerivedTextPiece>
+}
+
+pub struct DerivedTextVariant {
+    pub variant_ref: VariantRef,
+    pub sequence: DerivedTextSequence
+}
+
+pub struct DerivedTextPlan {
+    pub builder_binder: BinderEntry,
+    pub builder: HExactCallPlan,
+    pub builder_signature: Type,
+    pub append: HExactCallPlan,
+    pub finish: HExactCallPlan,
+    pub struct_sequence: DerivedTextSequence?,
+    pub variants: List<DerivedTextVariant>?
 }
 
 pub enum TypeKind { StructKind, EnumKind }
@@ -651,9 +708,28 @@ pub enum TypeKind { StructKind, EnumKind }
 // backends.
 pub const DERIVED_HASH_SEED: Int = 1469598103934665603
 
+pub struct DerivedMethod {
+    pub method_ref: ImplMethodRef,
+    pub executable_ref: ExecutableRef,
+    pub signature: Type,
+    pub binders: List<BinderEntry>,
+    pub handled_evidence_bindings: List<HandledEvidenceRef>
+}
+
+pub struct DerivedDirectCall {
+    pub plan: HExactCallPlan,
+    pub signature: Type
+}
+
 pub struct DerivedImpl {
+    pub owner_ref: ImplOwnerRef,
     pub provider_ref: ImplProviderRef,
     pub trait_ref: SymbolRef,
+    pub target_owner: RegisteredNominalRef,
+    pub target_type: Type,
+    pub methods: List<DerivedMethod>,
+    pub hash_mix: DerivedDirectCall?,
+    pub text_plan: DerivedTextPlan?,
     pub type_name: Str,
     pub trait_name: Str,
     pub type_params: List<Str>,
@@ -1117,6 +1193,53 @@ fn validate_hir_expr_values(
     }
 }
 
+fn handled_requirements(row: EffectRow) -> List<HandledEffectRef> {
+    let mut result: List<HandledEffectRef> = []
+    for atom in row.effects {
+        match atom {
+            Effect::CustomEffect { reference, .. } => if !result.any(
+                    fn(existing) {
+                        handled_effect_ref_same(existing, reference)
+                    }) {
+                result.push(reference)
+            },
+            _ => {}
+        }
+    }
+    result
+}
+
+fn validate_handled_evidence_uses(
+    row: EffectRow, values: List<HandledEvidenceRef>, label: Str
+) {
+    let required = handled_requirements(row)
+    if required.len() != values.len() {
+        panic("HIR ${label}: handled evidence arity differs")
+    }
+    for index in 0..required.len() {
+        if !handled_effect_ref_same(
+                required.get(index).unwrap(),
+                handled_evidence_requirement(values.get(index).unwrap())) {
+            panic("HIR ${label}: handled evidence order differs")
+        }
+    }
+}
+
+fn validate_callable_handled_bindings(
+    row: EffectRow, values: List<HandledEvidenceRef>,
+    owner: ExecutableRef, label: Str
+) {
+    validate_handled_evidence_uses(row, values, label)
+    for index in 0..values.len() {
+        let value = values.get(index).unwrap()
+        if !executable_ref_same(
+                handled_evidence_contract_owner(value), owner) ||
+           handled_evidence_ordinal(value) != index {
+            panic("HIR ${label}: handled evidence owner/ordinal differs")
+        }
+    }
+}
+
 fn validate_hir_expr(
     expr: HExpr, mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
@@ -1174,7 +1297,8 @@ fn validate_hir_expr(
         },
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
-        HExpr::Call { callee, args, callee_ref, method_ref, system_host,
+        HExpr::Call { callee, args, handled_evidence,
+                      callee_ref, method_ref, system_host,
                       effects, .. } => {
             if callee_ref.is_some() && method_ref.is_some() {
                 panic("HIR call: ordinary and method identities overlap")
@@ -1187,6 +1311,18 @@ fn validate_hir_expr(
                 },
                 _ => {}
             }
+            let callable_effects = match method_ref {
+                some(method) => match method_call_ref_signature(method) {
+                    Type::FnType { effects, .. } => effects,
+                    _ => panic("HIR call: method signature is not callable")
+                },
+                none => match hexpr_type(callee) {
+                    Type::FnType { effects, .. } => effects,
+                    _ => panic("HIR call: callee type is not callable")
+                }
+            }
+            validate_handled_evidence_uses(
+                callable_effects, handled_evidence, "call")
             match system_host {
                 some(host) => {
                     if method_ref.is_some() {
@@ -1328,8 +1464,9 @@ fn validate_hir_expr(
                 validate_hir_arm(arm, seen, scope, "catch arm")
             }
         },
-        HExpr::HandleExpr { body, handlers, .. } => {
+        HExpr::HandleExpr { body, handlers, installed_evidence, .. } => {
             validate_hir_expr(body, seen, scope)
+            let mut installed_requirements: List<HandledEffectRef> = []
             for handler in handlers {
                 if executable_ref_is_named(handler.executable_ref) {
                     panic("HIR effect handler: handler body executable is named")
@@ -1337,6 +1474,11 @@ fn validate_hir_expr(
                 match (handler.handled_ref, handler.operation_ref,
                        handler.fail_ref) {
                     (some(effect_ref), some(operation_ref), none) => {
+                        if !installed_requirements.any(fn(existing) {
+                                handled_effect_ref_same(existing, effect_ref)
+                            }) {
+                            installed_requirements.push(effect_ref)
+                        }
                         if !handled_effect_ref_same(
                                 effect_ref,
                                 effect_operation_ref_effect(operation_ref)) {
@@ -1347,6 +1489,18 @@ fn validate_hir_expr(
                         let _ = h_fail_operation_tag(fail_ref)
                     },
                     _ => panic("HIR effect handler: operation identity presence drifted")
+                }
+                validate_callable_handled_bindings(
+                    hexpr_effects(handler.body),
+                    handler.handled_evidence_bindings,
+                    handler.executable_ref, "handler")
+                for capture in handler.evidence_captures {
+                    if !executable_ref_same(
+                            handled_evidence_contract_owner(
+                                handled_evidence_capture_target(capture)),
+                            handler.executable_ref) {
+                        panic("HIR handler: evidence capture target owner differs")
+                    }
                 }
                 let label = "handler '${handler.effect_name}.${handler.op_name}'"
                 push_hir_validation_scope(scope)
@@ -1363,8 +1517,21 @@ fn validate_hir_expr(
                 validate_hir_expr(handler.body, seen, scope)
                 pop_hir_validation_scope(scope)
             }
+            if installed_requirements.len() != installed_evidence.len() {
+                panic("HIR handle: installed evidence arity differs")
+            }
+            for index in 0..installed_requirements.len() {
+                if !handled_effect_ref_same(
+                        installed_requirements.get(index).unwrap(),
+                        handled_evidence_requirement(
+                            installed_evidence.get(index).unwrap())) {
+                    panic("HIR handle: installed evidence order differs")
+                }
+            }
         },
-        HExpr::Lambda { params, captures, body, .. } => {
+        HExpr::Lambda { executable_ref, params, captures,
+                        handled_evidence_bindings, evidence_captures,
+                        body, ty, .. } => {
             let mut capture_index = 0
             while capture_index < captures.len() {
                 let capture = captures.get(capture_index).unwrap()
@@ -1386,16 +1553,43 @@ fn validate_hir_expr(
                 }
                 capture_index = capture_index + 1
             }
+            let lambda_effects = match ty {
+                Type::FnType { effects, .. } => effects,
+                _ => panic("HIR lambda: callable type is absent")
+            }
+            validate_callable_handled_bindings(
+                lambda_effects, handled_evidence_bindings,
+                executable_ref, "lambda")
+            for capture in evidence_captures {
+                if !executable_ref_same(
+                        handled_evidence_contract_owner(
+                            handled_evidence_capture_target(capture)),
+                        executable_ref) {
+                    panic("HIR lambda: evidence capture target owner differs")
+                }
+            }
             push_hir_validation_scope(scope)
             validate_hir_params(params, seen, scope, "lambda")
             validate_hir_expr(body, seen, scope)
             pop_hir_validation_scope(scope)
         },
-        HExpr::EffectOp { operation_ref, fail_ref, args, .. } => {
+        HExpr::EffectOp { operation_ref, fail_ref,
+                          handled_evidence, args, .. } => {
             match (operation_ref, fail_ref) {
-                (some(_), none) => {},
+                (some(operation), none) => {
+                    if handled_evidence.len() != 1 ||
+                       !handled_effect_ref_same(
+                            effect_operation_ref_effect(operation),
+                            handled_evidence_requirement(
+                                handled_evidence.get(0).unwrap())) {
+                        panic("HIR identity: effect operation evidence differs")
+                    }
+                },
                 (none, some(exact_fail)) => {
                     let _ = h_fail_operation_tag(exact_fail)
+                    if handled_evidence.len() != 0 {
+                        panic("HIR identity: fail operation carries handled evidence")
+                    }
                 },
                 _ => panic("HIR identity: effect operation domain is ambiguous/absent")
             }
@@ -1606,25 +1800,23 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                         panic("HIR identity: trait method relation drifted")
                     }
                     previous_source_member_index = source_member_index
+                    if !executable_ref_is_named(method.executable_ref) ||
+                       !symbol_ref_same(
+                            executable_ref_named_symbol(method.executable_ref),
+                            trait_method_ref_member(method.method_ref)) {
+                        panic("HIR identity: trait method executable drifted")
+                    }
+                    if method.has_default != method.body.is_some() {
+                        panic("HIR identity: trait default/body relation drifted")
+                    }
                     match method.body {
                         some(body) => {
-                            match method.executable_ref {
-                                some(executable) => if !symbol_ref_same(
-                                        executable_ref_named_symbol(executable),
-                                        trait_method_ref_member(method.method_ref)) {
-                                    panic("HIR identity: trait default executable drifted")
-                                },
-                                none => panic(
-                                    "HIR identity: trait default has no executable")
-                            }
                             let mut scope = new_hir_validation_scope()
                             validate_hir_params(method.params, seen, scope,
                                 "trait default '${name}.${method.name}'")
                             validate_hir_expr(body, seen, scope)
                         },
-                        none => if method.executable_ref.is_some() {
-                            panic("HIR identity: bodyless trait method has executable")
-                        }
+                        none => {}
                     }
                 }
             },

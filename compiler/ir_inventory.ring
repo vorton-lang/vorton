@@ -650,11 +650,15 @@ const BINDER_PATTERN_PROJECTION: Int = 17
 const BINDER_SCOPE_RESULT: Int = 18
 const BINDER_CONTROL_RESULT: Int = 19
 const BINDER_ASSIGN_TEMP: Int = 20
-const BINDER_KIND_COUNT: Int = 21
+const BINDER_HANDLED_EVIDENCE_PARAM: Int = 21
+const BINDER_HANDLED_EVIDENCE_LOCAL: Int = 22
+const BINDER_HANDLED_EVIDENCE_CAPTURE: Int = 23
+const BINDER_KIND_COUNT: Int = 24
 
 const BINDER_KIND_PATH_ROLE_TAGS: List<Int> = [
     2, 0, 0, 0, 0, 0, 0, 0, 2, 5, 5,
-    4, 0, 2, 1, 3, 6, 1, 3, 3, 6
+    4, 0, 2, 1, 3, 6, 1, 3, 3, 6,
+    2, 5, 4
 ]
 
 pub struct BinderKind { tag: Int }
@@ -691,6 +695,22 @@ pub fn binder_kind_pattern_projection() -> BinderKind { binder_kind_from_tag(BIN
 pub fn binder_kind_scope_result() -> BinderKind { binder_kind_from_tag(BINDER_SCOPE_RESULT) }
 pub fn binder_kind_control_result() -> BinderKind { binder_kind_from_tag(BINDER_CONTROL_RESULT) }
 pub fn binder_kind_assign_temp() -> BinderKind { binder_kind_from_tag(BINDER_ASSIGN_TEMP) }
+pub fn binder_kind_handled_evidence_param() -> BinderKind {
+    binder_kind_from_tag(BINDER_HANDLED_EVIDENCE_PARAM)
+}
+pub fn binder_kind_handled_evidence_local() -> BinderKind {
+    binder_kind_from_tag(BINDER_HANDLED_EVIDENCE_LOCAL)
+}
+pub fn binder_kind_handled_evidence_capture() -> BinderKind {
+    binder_kind_from_tag(BINDER_HANDLED_EVIDENCE_CAPTURE)
+}
+
+fn binder_kind_is_handled_evidence(kind: BinderKind) -> Bool {
+    let tag = binder_kind_tag(kind)
+    tag == BINDER_HANDLED_EVIDENCE_PARAM ||
+        tag == BINDER_HANDLED_EVIDENCE_LOCAL ||
+        tag == BINDER_HANDLED_EVIDENCE_CAPTURE
+}
 
 fn binder_kind_is_source(kind: BinderKind) -> Bool {
     let tag = binder_kind_tag(kind)
@@ -752,6 +772,9 @@ pub fn make_source_binder_entry(
 pub fn make_synthetic_binder_entry(
     slot: SlotRef, owner: ExecutableRef, kind: BinderKind, site: PathRef
 ) -> BinderEntry {
+    if binder_kind_is_handled_evidence(kind) {
+        panic("IR inventory: handled evidence requires semantic binder constructor")
+    }
     if binder_kind_is_source(kind) {
         panic("IR inventory: source BinderEntry activation is deferred")
     }
@@ -771,10 +794,105 @@ pub fn make_synthetic_binder_entry(
     BinderEntry { slot: slot, owner: owner, kind: kind, site: site }
 }
 
+// Hidden handled evidence is semantic Core input but has no source spelling
+// or source DefId.  This narrow constructor is the only pre-Flow authority
+// allowed to pair a deterministic synthetic SlotRef with the three evidence
+// binder domains.
+pub fn make_semantic_evidence_binder(
+    slot: SlotRef, owner: ExecutableRef, kind: BinderKind, site: PathRef
+) -> BinderEntry {
+    if !binder_kind_is_handled_evidence(kind) || slot_ref_is_source(slot) ||
+       !executable_ref_contains_path(owner, site) ||
+       !path_role_same(
+            path_ref_role(site), binder_kind_expected_path_role(kind)) ||
+       !path_ref_same(slot_ref_synthetic_path(slot), site) {
+        panic("IR inventory: invalid semantic handled-evidence binder")
+    }
+    BinderEntry { slot: slot, owner: owner, kind: kind, site: site }
+}
+
 pub fn binder_entry_slot(value: BinderEntry) -> SlotRef { value.slot }
 pub fn binder_entry_owner(value: BinderEntry) -> ExecutableRef { value.owner }
 pub fn binder_entry_kind(value: BinderEntry) -> BinderKind { value.kind }
 pub fn binder_entry_site(value: BinderEntry) -> PathRef { value.site }
+
+pub struct HandledEvidenceRef {
+    requirement: HandledEffectRef,
+    binding: BinderEntry,
+    contract_owner: ExecutableRef,
+    ordinal: Int
+}
+
+pub fn make_handled_evidence_ref(
+    requirement: HandledEffectRef, binding: BinderEntry,
+    contract_owner: ExecutableRef, ordinal: Int
+) -> HandledEvidenceRef {
+    if ordinal < 0 || !binder_kind_is_handled_evidence(binding.kind) ||
+       !executable_ref_same(binding.owner, contract_owner) {
+        panic("IR inventory: invalid handled evidence contract binding")
+    }
+    HandledEvidenceRef {
+        requirement: requirement, binding: binding,
+        contract_owner: contract_owner, ordinal: ordinal
+    }
+}
+
+pub fn handled_evidence_requirement(
+    value: HandledEvidenceRef
+) -> HandledEffectRef { value.requirement }
+pub fn handled_evidence_binding(
+    value: HandledEvidenceRef
+) -> BinderEntry { value.binding }
+pub fn handled_evidence_slot(value: HandledEvidenceRef) -> SlotRef {
+    value.binding.slot
+}
+pub fn handled_evidence_contract_owner(
+    value: HandledEvidenceRef
+) -> ExecutableRef { value.contract_owner }
+pub fn handled_evidence_ordinal(value: HandledEvidenceRef) -> Int {
+    value.ordinal
+}
+pub fn handled_evidence_ref_same(
+    left: HandledEvidenceRef, right: HandledEvidenceRef
+) -> Bool {
+    handled_effect_ref_same(left.requirement, right.requirement) &&
+        slot_ref_same(left.binding.slot, right.binding.slot) &&
+        executable_ref_same(left.contract_owner, right.contract_owner) &&
+        left.ordinal == right.ordinal &&
+        path_ref_same(left.binding.site, right.binding.site)
+}
+
+pub struct HandledEvidenceCapture {
+    requirement: HandledEffectRef,
+    source: HandledEvidenceRef,
+    target: HandledEvidenceRef
+}
+
+pub fn make_handled_evidence_capture(
+    requirement: HandledEffectRef,
+    source: HandledEvidenceRef, target: HandledEvidenceRef
+) -> HandledEvidenceCapture {
+    if !handled_effect_ref_same(
+            requirement, source.requirement) ||
+       !handled_effect_ref_same(requirement, target.requirement) ||
+       binder_kind_tag(target.binding.kind) !=
+            BINDER_HANDLED_EVIDENCE_CAPTURE ||
+       slot_ref_same(source.binding.slot, target.binding.slot) {
+        panic("IR inventory: invalid handled evidence capture")
+    }
+    HandledEvidenceCapture {
+        requirement: requirement, source: source, target: target }
+}
+
+pub fn handled_evidence_capture_requirement(
+    value: HandledEvidenceCapture
+) -> HandledEffectRef { value.requirement }
+pub fn handled_evidence_capture_source(
+    value: HandledEvidenceCapture
+) -> HandledEvidenceRef { value.source }
+pub fn handled_evidence_capture_target(
+    value: HandledEvidenceCapture
+) -> HandledEvidenceRef { value.target }
 
 fn copy_binder_entries(values: List<BinderEntry>) -> List<BinderEntry> {
     let mut result: List<BinderEntry> = []

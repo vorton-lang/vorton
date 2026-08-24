@@ -29,7 +29,6 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     IntrinsicRef, BuiltinMethodSite, BuiltinValueSite,
     make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
-    make_symbol_origin_ref,
     VariantRef, VariantFieldRef, make_variant_ref, make_variant_field_ref,
     make_registered_nominal_ref, make_registered_trait_ref,
     make_module_body_ref, path_owner_for_module_body, make_path_ref,
@@ -63,29 +62,6 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     BUILTIN_VALUE_DEALLOC, BUILTIN_VALUE_PTR_COPY,
     BUILTIN_VALUE_PTR_FROM_ADDR,
     namespace_value, namespace_nominal, namespace_trait, namespace_member}
-use ir_inventory::{ExecutableEntry, ExecutableInventory, BinderManifest,
-    make_named_executable_ref, make_module_body_parent,
-    make_executable_entry, make_contract_only,
-    make_executable_inventory, make_binder_manifest,
-    executable_kind_builtin_intrinsic,
-    executable_inventory_count}
-use core_hir::{make_core_program, core_program_body_count,
-    core_program_inventory, core_program_manifests}
-use core_expr::{CoreTypeRef, CoreTypeGraph, CoreCallableContract,
-    make_core_type_ref, make_core_type_graph,
-    core_type_ref_index, make_core_callable_contract}
-use flow_ir::{FlowTypeNode, FlowTypeRef, FlowNominalFieldFact,
-    FlowGenericParamFact, FlowResourceDependencyEdge,
-    FlowSemanticRole,
-    make_flow_type_ref, make_flow_int_type_node,
-    make_flow_float_type_node, make_flow_str_type_node,
-    make_flow_bool_type_node, make_flow_unit_type_node,
-    make_flow_never_type_node, make_flow_struct_type_node,
-    make_flow_enum_type_node, make_flow_callable_type_node,
-    make_flow_parameter_type_node, make_flow_generic_param_fact,
-    flow_type_seed_unique,
-    make_flow_call_contract, flow_callable_mode_contract_only,
-    flow_semantic_role_read, make_fresh_flow_value_origin}
 
 // ============================================================
 // Struct for open_row return value
@@ -767,10 +743,10 @@ fn registered_intrinsic_scheme(
                     let core = match owner.method_schemes.get(method_name) {
                         some(value) => value,
                         none => panic(
-                            "builtin method Core shadow: exact core is missing")
+                            "builtin method contract: exact scheme is missing")
                     }
                     if found.is_some() {
-                        panic("builtin method Core shadow: core is not unique")
+                        panic("builtin method contract: scheme is not unique")
                     }
                     found = some(impl_method_core_as_scheme(core))
                 }
@@ -779,186 +755,54 @@ fn registered_intrinsic_scheme(
     }
     match found {
         some(value) => value,
-        none => panic("builtin method Core shadow: core was not registered")
+        none => panic("builtin method contract: scheme was not registered")
     }
 }
 
-fn append_builtin_core_type(
-    env: TypeEnv, owner: SymbolRef, scheme_vars: List<Int>,
-    ty: Type, mut nodes: List<FlowTypeNode>
-) -> CoreTypeRef {
-    match ty {
-        Type::IntType => {
-            let reference = make_flow_type_ref(nodes.len())
-            nodes.push(make_flow_int_type_node(reference))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        Type::FloatType => {
-            let reference = make_flow_type_ref(nodes.len())
-            nodes.push(make_flow_float_type_node(reference))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        Type::StrType => {
-            let reference = make_flow_type_ref(nodes.len())
-            nodes.push(make_flow_str_type_node(reference))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        Type::BoolType => {
-            let reference = make_flow_type_ref(nodes.len())
-            nodes.push(make_flow_bool_type_node(reference))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        Type::UnitType => {
-            let reference = make_flow_type_ref(nodes.len())
-            nodes.push(make_flow_unit_type_node(reference))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        Type::NeverType => {
-            let reference = make_flow_type_ref(nodes.len())
-            nodes.push(make_flow_never_type_node(reference))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        Type::TypeVar { id, .. } => {
-            let parameter_index = scheme_vars.index_of(id).unwrap_or(-1)
-            if parameter_index < 0 || scheme_vars.len() == 0 {
-                panic("builtin method Core shadow: unbound type variable")
-            }
-            let parameter = make_flow_generic_param_fact(
-                owner, parameter_index, scheme_vars.len(), [])
-            let reference = make_flow_type_ref(nodes.len())
-            nodes.push(make_flow_parameter_type_node(reference, parameter))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        Type::StructType { name, type_params } => {
-            let mut arguments: List<FlowTypeRef> = []
-            for argument in type_params {
-                let core_ref = append_builtin_core_type(
-                    env, owner, scheme_vars, argument, nodes)
-                arguments.push(make_flow_type_ref(
-                    core_type_ref_index(core_ref)))
-            }
-            let nominal = match impl_target_symbol(env, name) {
-                some(symbol) => symbol,
-                none => panic(
-                    "builtin method Core shadow: struct owner is missing")
-            }
-            let reference = make_flow_type_ref(nodes.len())
-            let fields: List<FlowNominalFieldFact> = []
-            let parameters: List<FlowGenericParamFact> = []
-            let edges: List<FlowResourceDependencyEdge> = []
-            nodes.push(make_flow_struct_type_node(
-                reference, nominal, arguments, fields,
-                flow_type_seed_unique(), none, parameters, edges))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        Type::EnumType { name, type_params } => {
-            let mut arguments: List<FlowTypeRef> = []
-            for argument in type_params {
-                let core_ref = append_builtin_core_type(
-                    env, owner, scheme_vars, argument, nodes)
-                arguments.push(make_flow_type_ref(
-                    core_type_ref_index(core_ref)))
-            }
-            let nominal = match impl_target_symbol(env, name) {
-                some(symbol) => symbol,
-                none => panic(
-                    "builtin method Core shadow: enum owner is missing")
-            }
-            let reference = make_flow_type_ref(nodes.len())
-            let fields: List<FlowNominalFieldFact> = []
-            let parameters: List<FlowGenericParamFact> = []
-            let edges: List<FlowResourceDependencyEdge> = []
-            nodes.push(make_flow_enum_type_node(
-                reference, nominal, arguments, fields,
-                flow_type_seed_unique(), none, parameters, edges))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        Type::FnType { params, return_type, .. } => {
-            let mut parameters: List<FlowTypeRef> = []
-            for param in params {
-                let core_ref = append_builtin_core_type(
-                    env, owner, scheme_vars, param, nodes)
-                parameters.push(make_flow_type_ref(
-                    core_type_ref_index(core_ref)))
-            }
-            let result_ref = append_builtin_core_type(
-                env, owner, scheme_vars, return_type, nodes)
-            let reference = make_flow_type_ref(nodes.len())
-            nodes.push(make_flow_callable_type_node(
-                reference, parameters,
-                make_flow_type_ref(core_type_ref_index(result_ref))))
-            make_core_type_ref(nodes.len() - 1)
-        },
-        _ => panic("builtin method Core shadow: unsupported exact type")
-    }
+pub struct BuiltinMethodContractFact {
+    intrinsic: IntrinsicRef,
+    scheme: TypeScheme
 }
 
-// Live C0/B-201 producer+consumer.  It closes the exact ContractOnly builtin
-// method inventory on every checker construction and then discards the shadow;
-// ordinary compilation still consumes the same registry owner payload.
-pub fn validate_builtin_method_core_shadow(env: TypeEnv) {
-    let module_body = make_module_body_ref(
-        "$builtin", "builtin:method-sites")
-    let mut entries: List<ExecutableEntry> = []
-    let mut manifests: List<BinderManifest> = []
-    let mut type_nodes: List<FlowTypeNode> = []
-    let mut callables: List<CoreCallableContract> = []
+fn make_builtin_method_contract_fact(
+    intrinsic: IntrinsicRef, scheme: TypeScheme
+) -> BuiltinMethodContractFact {
+    match scheme.ty {
+        Type::FnType { .. } => {},
+        _ => panic("builtin method contract: scheme is not callable")
+    }
+    BuiltinMethodContractFact { intrinsic: intrinsic, scheme: scheme }
+}
+
+pub fn builtin_method_contract_intrinsic(
+    value: BuiltinMethodContractFact
+) -> IntrinsicRef { value.intrinsic }
+
+pub fn builtin_method_contract_scheme(
+    value: BuiltinMethodContractFact
+) -> TypeScheme { value.scheme }
+
+// Sole typed builtin-method payload consumed by the real module-order-0 Core
+// assembler.  It carries no shadow Core/Flow graph and owns no second type
+// interner, executable inventory, manifest, or semantic fallback.
+pub fn builtin_method_contract_facts(
+    env: TypeEnv
+) -> List<BuiltinMethodContractFact> {
+    let mut result: List<BuiltinMethodContractFact> = []
     for tag in 0..BUILTIN_METHOD_SITE_COUNT {
         let intrinsic = builtin_method_intrinsic(
             builtin_method_site_from_tag(tag))
         if registered_intrinsic_count(env, intrinsic) != 1 {
-            panic("builtin method Core shadow: registry relation is not unique")
+            panic("builtin method contract: registry relation is not unique")
         }
-        let executable = make_named_executable_ref(
-            intrinsic_ref_symbol(intrinsic))
-        entries.push(make_executable_entry(
-            executable, make_module_body_parent(module_body),
-            executable_kind_builtin_intrinsic(), make_contract_only()))
-        manifests.push(make_binder_manifest(executable, []))
-        let scheme = registered_intrinsic_scheme(env, intrinsic)
-        match scheme.ty {
-            Type::FnType { params, return_type, .. } => {
-                let mut parameter_types: List<CoreTypeRef> = []
-                let mut flow_parameter_types: List<FlowTypeRef> = []
-                let mut parameter_roles: List<FlowSemanticRole> = []
-                for param in params {
-                    let param_ref = append_builtin_core_type(
-                        env, intrinsic_ref_symbol(intrinsic),
-                        scheme.type_vars, param, type_nodes)
-                    parameter_types.push(param_ref)
-                    flow_parameter_types.push(make_flow_type_ref(
-                        core_type_ref_index(param_ref)))
-                    parameter_roles.push(flow_semantic_role_read())
-                }
-                let result_type = append_builtin_core_type(
-                    env, intrinsic_ref_symbol(intrinsic),
-                    scheme.type_vars, return_type, type_nodes)
-                let semantic_contract = make_flow_call_contract(
-                    flow_parameter_types, parameter_roles,
-                    make_flow_type_ref(core_type_ref_index(result_type)),
-                    flow_semantic_role_read(),
-                    make_fresh_flow_value_origin())
-                callables.push(make_core_callable_contract(
-                    executable,
-                    make_symbol_origin_ref(intrinsic_ref_symbol(intrinsic)),
-                    parameter_types, [], result_type,
-                    flow_callable_mode_contract_only(),
-                    semantic_contract, []))
-            },
-            _ => panic("builtin method Core shadow: core is not callable")
-        }
+        result.push(make_builtin_method_contract_fact(
+            intrinsic, registered_intrinsic_scheme(env, intrinsic)))
     }
-    let program = make_core_program(
-        make_core_type_graph(type_nodes), callables, [], [],
-        make_executable_inventory(entries), manifests)
-    if core_program_body_count(program) != 0 ||
-       executable_inventory_count(core_program_inventory(program)) !=
-            BUILTIN_METHOD_SITE_COUNT ||
-       core_program_manifests(program).len() != BUILTIN_METHOD_SITE_COUNT {
-        panic("builtin method Core shadow: closed census drifted")
+    if result.len() != BUILTIN_METHOD_SITE_COUNT {
+        panic("builtin method contract: exact site census drifted")
     }
+    result
 }
-
 // Only checker.load_prelude's no-std branch may consume this fallback.
 pub fn finalize_std_hof_fallbacks(
     mut env: TypeEnv, sink: CollectingSink

@@ -118,7 +118,7 @@ pub struct EffectOpDef {
     pub return_type: Type
 }
 
-pub enum BuiltInKind { BkFail, BkMut }
+pub enum BuiltInKind { BkFail }
 
 pub struct EffectDef {
     pub name: Str,

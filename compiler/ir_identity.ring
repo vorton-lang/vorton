@@ -250,6 +250,57 @@ pub fn symbol_ref_same(left: SymbolRef, right: SymbolRef) -> Bool {
         left.declaration_site_path == right.declaration_site_path
 }
 
+pub fn builtin_dict_constructor_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "dict.wrap",
+        "builtin:dict-wrap")
+}
+pub fn builtin_list_constructor_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "list.construct",
+        "builtin:list-construct")
+}
+pub fn builtin_range_constructor_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "range.construct",
+        "builtin:range-construct")
+}
+pub fn builtin_str_identity_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "str.identity",
+        "builtin:str-identity")
+}
+pub fn builtin_bool_to_str_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "bool.to_str",
+        "builtin:bool-to-str")
+}
+pub fn builtin_list_index_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "list.index",
+        "builtin:list-index")
+}
+pub fn builtin_str_index_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "str.index",
+        "builtin:str-index")
+}
+pub fn builtin_range_iter_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "range.iter",
+        "builtin:range-iter")
+}
+pub fn builtin_range_has_next_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "range.has-next",
+        "builtin:range-has-next")
+}
+pub fn builtin_range_next_symbol() -> SymbolRef {
+    make_symbol_ref(
+        "$builtin", namespace_value(), "range.next",
+        "builtin:range-next")
+}
+
 // Registration gives a resolver-produced nominal a local typed display name
 // without changing or reconstructing its source identity.
 pub struct RegisteredNominalRef {
@@ -896,7 +947,10 @@ pub const BUILTIN_VALUE_ALLOC: Int = 1
 pub const BUILTIN_VALUE_DEALLOC: Int = 2
 pub const BUILTIN_VALUE_PTR_COPY: Int = 3
 pub const BUILTIN_VALUE_PTR_FROM_ADDR: Int = 4
-pub const BUILTIN_VALUE_SITE_COUNT: Int = 5
+// Compiler-only Hash derive atom.  It is intentionally absent from
+// checker_only_builtin_values: no Ring source spelling can name it.
+pub const BUILTIN_VALUE_HASH_COMBINE: Int = 5
+pub const BUILTIN_VALUE_SITE_COUNT: Int = 6
 
 pub struct BuiltinValueSite { tag: Int }
 
@@ -1172,6 +1226,10 @@ pub fn slot_ref_source_domain(value: SlotRef) -> SlotDomain {
         SlotRefValue::SyntheticSlotValue(_) =>
             panic("IR identity: synthetic SlotRef has no source domain")
     }
+}
+
+pub fn slot_ref_source_domain_is_lexical(value: SlotRef) -> Bool {
+    slot_domain_is_lexical(slot_ref_source_domain(value))
 }
 
 pub fn slot_ref_source_def_id(value: SlotRef) -> Int {

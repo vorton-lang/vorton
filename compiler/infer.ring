@@ -8,6 +8,15 @@ use ast::{Program, Decl, Expr, Stmt, Param, MatchArm, StructFieldInit,
     EffectOpDecl}
 use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HPatternBinding, HLambdaCapture,
+    HPatternPlan, HOperatorPlan,
+    HProjectionRef, h_nominal_projection, h_structural_projection,
+    h_tuple_projection, HConstructorPlan,
+    make_h_executable_constructor_plan, make_h_tuple_constructor_plan,
+    make_h_record_constructor_plan, h_variant_projection,
+    HExactCallPlan, HStringInterpPlan, make_h_exact_call_plan,
+    make_h_string_interp_plan, method_call_ref_callee_identity,
+    HForInPlan, make_h_for_in_plan,
+    h_fail_raise_ref,
     HStructFieldInit, HNominalStructFieldInit, HFieldAccessKind,
     HStringInterpPart, HProgram, DerivedImpl,
     TraitDispatch, DictRef, TraitBound,
@@ -34,6 +43,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     type_error, type_error_with_notes, merge_effects, unify_at, unify_at_noted, update_fn_effects,
     resolve_type_expr, resolve_self_type, resolve_named_type,
     bind_pattern, resolve_dict_ref_for_type,
+    exact_pattern_plan,
     resolve_or_defer_dicts_from_scheme,
     resolve_or_defer_dicts_from_impl_owner,
     register_callable_value_shadow,
@@ -43,13 +53,21 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
     has_variant_ctor_origin_def_id, fresh_child_executable,
     enter_executable_owner, exit_executable_owner,
-    executable_capture_slot}
+    resolve_handled_evidence, install_handled_evidence,
+    uninstall_handled_evidence,
+    current_handled_evidence_bindings,
+    current_handled_evidence_captures,
+    executable_capture_slot, fresh_semantic_path,
+    fresh_semantic_let_binder, semantic_for_binder,
+    semantic_destructure_binder}
 use exhaustive::{check_exhaustive}
 use infer_helpers::{MethodLookupResult, StmtResult,
     is_value_type, cancel_local_mut_effects, resolve_var_id,
     check_assign_target_mutable, find_root_expr, get_assign_target_root_def_id, get_hexpr_root_type,
     infer_ident, infer_numeric_op, is_primitive_ord,
     resolve_trait_dispatch, resolve_eq_dispatch,
+    exact_operator_plan,
+    exact_nominal_method_call,
     is_bounded_direct_callable_ident, resolve_callee_metadata,
     check_expr_is_let_def, get_expr_def_id, is_mut_method_call, check_receiver_mutability,
     lookup_impl_method, lookup_trait_method,
@@ -57,31 +75,63 @@ use infer_helpers::{MethodLookupResult, StmtResult,
 use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
     HandledEffectRef, SystemEffectRef, handled_effect_ref_same,
     make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
+    builtin_list_constructor_symbol,
+    builtin_range_constructor_symbol,
+    builtin_str_identity_symbol, builtin_bool_to_str_symbol,
+    builtin_list_index_symbol, builtin_str_index_symbol,
+    builtin_range_iter_symbol, builtin_range_has_next_symbol,
+    builtin_range_next_symbol,
     callee_ref_is_named, callee_ref_named_symbol,
-    slot_domain_lexical, slot_ref_same}
-use ir_inventory::{ExecutableRef, SystemHostCallableRef,
+    slot_domain_lexical, slot_ref_same,
+    path_owner_for_symbol, make_path_ref, path_role_synthetic,
+    variant_ref_member}
+use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
+    HandledEvidenceRef,
+    handled_evidence_requirement,
     make_named_executable_ref, make_system_host_callable_ref}
 
+fn exact_handled_evidence_for_row(
+    mut ctx: InferCtx, row: EffectRow
+) -> List<HandledEvidenceRef> {
+    let mut result: List<HandledEvidenceRef> = []
+    for atom in row.effects {
+        match atom {
+            Effect::CustomEffect { reference, .. } => if !result.any(
+                    fn(existing) { handled_effect_ref_same(
+                        handled_evidence_requirement(existing),
+                        reference) }) {
+                result.push(resolve_handled_evidence(ctx, reference))
+            },
+            _ => {}
+        }
+    }
+    result
+}
+
+fn exact_handled_evidence_for_callable(
+    ctx: InferCtx, callable: Type
+) -> List<HandledEvidenceRef> {
+    match callable {
+        Type::FnType { effects, .. } =>
+            exact_handled_evidence_for_row(ctx, effects),
+        _ => []
+    }
+}
+
 fn exact_call_callee_ref(ctx: InferCtx, callee: HExpr) -> CalleeRef? {
+    let _ = ctx
     match callee {
-        HExpr::Ident { def_id: some(def_id), .. } => {
-            if has_variant_ctor_origin_def_id(ctx, def_id) {
-                return some(make_named_callee_ref(
-                    value_symbol_ref(ctx, def_id)))
-            }
-            match value_binding_kind(ctx, some(def_id)) {
-                ValueBindingKind::DirectCallable |
-                ValueBindingKind::ExternCallable |
-                ValueBindingKind::ConstGetter => some(make_named_callee_ref(
-                    value_symbol_ref(ctx, def_id))),
-                ValueBindingKind::LocalBorrow => some(make_local_callee_ref(
-                    make_source_slot_ref(
-                        current_identity_file_key(ctx),
-                        slot_domain_lexical(), def_id)))
-            }
-        },
+        HExpr::Ident { callee_identity, .. } => callee_identity,
         _ => none
     }
+}
+
+fn sequence_constructor_plan(
+    executable: ExecutableRef, arity: Int
+) -> HConstructorPlan {
+    let mut fields: List<HProjectionRef> = []
+    for index in 0..arity { fields.push(h_tuple_projection(index)) }
+    make_h_executable_constructor_plan(executable, fields)
 }
 
 fn exact_system_host_callable(
@@ -831,9 +881,17 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                                             },
                                             _ => {}
                                         }
-                                        hd.push(HForInDestructure { name: dname, def_id: ds.def_id })
+                                        hd.push(HForInDestructure { name: dname,
+                                            def_id: ds.def_id,
+                                            slot: ds.def_id.map(fn(id) {
+                                                make_source_slot_ref(
+                                                    current_identity_file_key(ctx),
+                                                    slot_domain_lexical(), id) }),
+                                            projection: some(h_tuple_projection(di)) })
                                     },
-                                    none => { hd.push(HForInDestructure { name: dname, def_id: none }) }
+                                    none => { hd.push(HForInDestructure {
+                                        name: dname, def_id: none, slot: none,
+                                        projection: some(h_tuple_projection(di)) }) }
                                 }
                             },
                             none => {}
@@ -857,6 +915,39 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 },
                 none => {}
             }
+            let binding_binder = match binding_scheme {
+                some(bs) => match bs.def_id {
+                    some(id) => semantic_for_binder(
+                        ctx, id, "for-binding"),
+                    none => fresh_semantic_let_binder(
+                        ctx, "for-payload")
+                },
+                none => fresh_semantic_let_binder(ctx, "for-payload")
+            }
+            let mut destructure_binders: List<BinderEntry> = []
+            match hdestructure {
+                some(bindings) => {
+                    for item in bindings {
+                        match item.def_id {
+                            some(id) => destructure_binders.push(
+                                semantic_destructure_binder(
+                                    ctx, id, "for-destructure")),
+                            none => {}
+                        }
+                    }
+                },
+                none => {}
+            }
+            let range_plan = make_h_for_in_plan(
+                make_h_exact_call_plan(make_named_callee_ref(
+                    builtin_range_iter_symbol()), none, [], []),
+                make_h_exact_call_plan(make_named_callee_ref(
+                    builtin_range_has_next_symbol()), none, [], []),
+                make_h_exact_call_plan(make_named_callee_ref(
+                    builtin_range_next_symbol()), none, [], []),
+                fresh_semantic_let_binder(ctx, "range-iterator"),
+                fresh_semantic_let_binder(ctx, "range-item"),
+                binding_binder, destructure_binders)
             ctx.loop_depth = ctx.loop_depth + 1
             let body_result = some(infer_block(ctx, body, some(s))) catch { _ => none }
             ctx.loop_depth = ctx.loop_depth - 1
@@ -869,7 +960,7 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                         hstmt: HStmt::ForIn {
                             binding: binding, binding_span: binding_span,
                             def_id: match binding_scheme { some(bs) => bs.def_id, none => none },
-                            destructure: hdestructure,
+                            destructure: hdestructure, plan: some(range_plan),
                             iterable: iter_r.hexpr, body: body_r.hexpr,
                             iterable_type_name: none,
                             iter_type_name: none,
@@ -936,15 +1027,29 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                                                     },
                                                     none => {}
                                                 }
-                                                bindings.push(HLetDestructureBinding { name: name, def_id: bs.def_id, ty: elem_type })
+                                                bindings.push(HLetDestructureBinding {
+                                                    name: name, def_id: bs.def_id,
+                                                    slot: bs.def_id.map(fn(id) {
+                                                        make_source_slot_ref(
+                                                            current_identity_file_key(ctx),
+                                                            slot_domain_lexical(), id) }),
+                                                    projection: some(h_tuple_projection(bi)),
+                                                    ty: elem_type })
                                             },
                                             none => {
-                                                bindings.push(HLetDestructureBinding { name: name, def_id: none, ty: elem_type })
+                                                bindings.push(HLetDestructureBinding {
+                                                    name: name, def_id: none,
+                                                    slot: none,
+                                                    projection: some(h_tuple_projection(bi)),
+                                                    ty: elem_type })
                                             }
                                         }
                                     },
                                     Pattern::Wildcard { .. } => {
-                                        bindings.push(HLetDestructureBinding { name: "_", def_id: none, ty: elem_type })
+                                        bindings.push(HLetDestructureBinding {
+                                            name: "_", def_id: none, slot: none,
+                                            projection: some(h_tuple_projection(bi)),
+                                            ty: elem_type })
                                     },
                                     _ => {
                                         let _ = type_error(ctx.sink, E0301,
@@ -958,7 +1063,11 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                         bi = bi + 1
                     }
                     StmtResult {
-                        hstmt: HStmt::LetDestructure { pattern: pattern, bindings: bindings, init: init_r.hexpr, span: span },
+                        hstmt: HStmt::LetDestructure { pattern: pattern,
+                            pattern_plan: exact_pattern_plan(
+                                ctx, pattern, init_type, s),
+                            bindings: bindings,
+                            init: init_r.hexpr, span: span },
                         subst: s,
                         effects: init_r.effects
                     }
@@ -992,11 +1101,13 @@ fn infer_if_let_from_result(
     let iflet_pattern = rewrite_bare_enum_bindings(ctx.env, pattern)
 
     let mut pattern_bindings: List<HPatternBinding> = []
+    let mut pattern_plan: HPatternPlan? = none
     ctx.env.push_scope()
     let then_result = some({
         s = bind_pattern(ctx, iflet_pattern, expr_type, s)
-        pattern_bindings = exact_pattern_bindings(
-            ctx.env, iflet_pattern)
+        pattern_bindings = exact_pattern_bindings(ctx, iflet_pattern)
+        pattern_plan = exact_pattern_plan(
+            ctx, iflet_pattern, expr_type, s)
         infer_block(ctx, then_block, some(s))
     }) catch { _ => none }
     ctx.env.pop_scope()
@@ -1035,7 +1146,8 @@ fn infer_if_let_from_result(
 
             StmtResult {
                 hstmt: HStmt::IfLet {
-                    pattern: iflet_pattern, bindings: pattern_bindings,
+                    pattern: iflet_pattern, pattern_plan: pattern_plan,
+                    bindings: pattern_bindings,
                     expr: expr_r.hexpr,
                     then_block: then_r.hexpr,
                     else_block: else_hblock, span: span
@@ -1336,7 +1448,9 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
             // () — unit literal: 0-element tuple is Unit
             if elements.len() == 0 {
                 return InferResult {
-                    hexpr: HExpr::TupleLit { elements: [], ty: UNIT, effects: EMPTY_ROW, span: span },
+                    hexpr: HExpr::TupleLit { elements: [],
+                        constructor: some(make_h_tuple_constructor_plan(0)),
+                        ty: UNIT, effects: EMPTY_ROW, span: span },
                     subst: subst, effects: EMPTY_ROW
                 }
             }
@@ -1355,7 +1469,10 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
             for he in helements { elem_types.push(apply_subst(s, hexpr_type(he))) }
             let tuple_type = Type::TupleType { elements: elem_types }
             InferResult {
-                hexpr: HExpr::TupleLit { elements: helements, ty: tuple_type, effects: combined_effects, span: span },
+                hexpr: HExpr::TupleLit { elements: helements,
+                    constructor: some(make_h_tuple_constructor_plan(
+                        helements.len())),
+                    ty: tuple_type, effects: combined_effects, span: span },
                 subst: s, effects: combined_effects
             }
         },
@@ -1371,6 +1488,9 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
             InferResult {
                 hexpr: HExpr::RangeExpr {
                     start: start_r.hexpr, end: end_r.hexpr, inclusive: inclusive,
+                    constructor: some(sequence_constructor_plan(
+                        make_named_executable_ref(
+                            builtin_range_constructor_symbol()), 3)),
                     ty: range_type, effects: range_effects, span: span
                 },
                 subst: s, effects: range_effects
@@ -1464,6 +1584,8 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
 
     let mut result_ty: Type = Type::ErrorType
     let mut map_key_type: Type? = none
+    let mut index_call_plan: HExactCallPlan? = none
+    let mut index_projection: HProjectionRef? = none
 
     match recv_type {
         Type::StructType { name, type_params, .. } => {
@@ -1471,6 +1593,12 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 // list[i]: index must be Int, result is element type T
                 s = unify_at(ctx.sink, ctx.env, idx_type, INT, s, span)
                 result_ty = if type_params.len() > 0 { type_params.get(0).unwrap() } else { Type::ErrorType }
+                let symbol = builtin_list_index_symbol()
+                index_call_plan = some(make_h_exact_call_plan(
+                    make_named_callee_ref(symbol), none, [], []))
+                index_projection = some(h_structural_projection(make_path_ref(
+                    path_owner_for_symbol(symbol), ["result"],
+                    path_role_synthetic()), "result"))
             } else if name == BUILTIN_MAP {
                 // map[key]: index must be key type K, result is value type V
                 if type_params.len() >= 2 {
@@ -1492,6 +1620,12 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
             // str[i]: index must be Int, result is Str
             s = unify_at(ctx.sink, ctx.env, idx_type, INT, s, span)
             result_ty = STR
+            let symbol = builtin_str_index_symbol()
+            index_call_plan = some(make_h_exact_call_plan(
+                make_named_callee_ref(symbol), none, [], []))
+            index_projection = some(h_structural_projection(make_path_ref(
+                path_owner_for_symbol(symbol), ["result"],
+                path_role_synthetic()), "result"))
         },
         Type::ErrorType => {
             result_ty = Type::ErrorType
@@ -1519,7 +1653,13 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
             let callee_ty = ctx.env.instantiate(callee_scheme)
             let callee = HExpr::Ident {
                 name: callee_name, resolved_name: none,
-                def_id: callee_scheme.def_id, dict_closure_dicts: none,
+                def_id: callee_scheme.def_id, source_slot: none,
+                callee_identity: match callee_scheme.def_id {
+                    some(id) => some(make_named_callee_ref(
+                        value_symbol_ref(ctx, id))),
+                    none => panic("map index helper: exact DefId is absent")
+                },
+                dict_closure_dicts: none,
                 ty: callee_ty, effects: EMPTY_ROW, span: span
             }
             let effect_tail = ctx.env.fresh_var_id()
@@ -1553,6 +1693,8 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                     args: [recv_r.hexpr, idx_r.hexpr],
                     type_args: [],
                     resolved_dicts: resolved_dicts, method_ref: none,
+                    handled_evidence: exact_handled_evidence_for_callable(
+                        ctx, apply_subst(s, hexpr_type(callee))),
                     callee_ref: exact_call_callee_ref(ctx, callee),
                     system_host: none,
                     ty: final_result_ty,
@@ -1565,6 +1707,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
         none => InferResult {
             hexpr: HExpr::IndexExpr {
                 receiver: recv_r.hexpr, index: idx_r.hexpr,
+                call_plan: index_call_plan, projection: index_projection,
                 ty: result_ty, effects: combined_effects, span: span
             },
             subst: s, effects: combined_effects
@@ -1583,6 +1726,8 @@ fn infer_bin_op(mut ctx: InferCtx, op: BinOp, left: Expr, right: Expr, span: Spa
     let mut result_type: Type = UNIT
     let mut eq_dispatch: TraitDispatch? = none
     let mut ord_dispatch: TraitDispatch? = none
+    let mut eq_plan: HOperatorPlan? = none
+    let mut ord_plan: HOperatorPlan? = none
 
     match op {
         BinOp::Add => { result_type = infer_numeric_op(ctx, lr.hexpr, rr.hexpr, s, span, "+"); s = unify_at(ctx.sink, ctx.env, hexpr_type(lr.hexpr), hexpr_type(rr.hexpr), s, span) },
@@ -1596,6 +1741,8 @@ fn infer_bin_op(mut ctx: InferCtx, op: BinOp, left: Expr, right: Expr, span: Spa
             let resolved = apply_subst(s, hexpr_type(lr.hexpr))
             let op_sym = match op { BinOp::Eq => "==", _ => "!=" }
             eq_dispatch = some(resolve_eq_dispatch(ctx, resolved, s, span, op_sym))
+            eq_plan = exact_operator_plan(
+                ctx, resolved, "Eq", "eq", s, span)
         },
         BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte => {
             s = unify_at(ctx.sink, ctx.env, hexpr_type(lr.hexpr), hexpr_type(rr.hexpr), s, span)
@@ -1603,6 +1750,8 @@ fn infer_bin_op(mut ctx: InferCtx, op: BinOp, left: Expr, right: Expr, span: Spa
             let resolved = apply_subst(s, hexpr_type(lr.hexpr))
             let op_sym = match op { BinOp::Lt => "<", BinOp::Lte => "<=", BinOp::Gt => ">", _ => ">=" }
             ord_dispatch = some(resolve_trait_dispatch(ctx, resolved, "Ord", E0308, s, span, op_sym, is_primitive_ord(resolved)))
+            ord_plan = exact_operator_plan(
+                ctx, resolved, "Ord", "cmp", s, span)
         },
         BinOp::And => {
             s = unify_at(ctx.sink, ctx.env, hexpr_type(lr.hexpr), BOOL, s, span)
@@ -1620,7 +1769,10 @@ fn infer_bin_op(mut ctx: InferCtx, op: BinOp, left: Expr, right: Expr, span: Spa
     let mut effects = me.0
     s = me.1
     InferResult {
-        hexpr: HExpr::BinOp { op: op, left: lr.hexpr, right: rr.hexpr, eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch, ty: result_type, effects: effects, span: span },
+        hexpr: HExpr::BinOp { op: op, left: lr.hexpr, right: rr.hexpr,
+            eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
+            eq_plan: eq_plan, ord_plan: ord_plan,
+            ty: result_type, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -1821,6 +1973,8 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
         hexpr: HExpr::Call {
             callee: callee_r.hexpr, args: hargs, type_args: [],
             resolved_dicts: resolved_dicts,
+            handled_evidence: exact_handled_evidence_for_callable(
+                ctx, resolved_callee_type),
             callee_ref: exact_callee,
             method_ref: none,
             system_host: system_host,
@@ -2170,8 +2324,11 @@ fn infer_method_call_from_receiver(
             callee: HExpr::FieldAccess {
                 receiver: recv_r.hexpr, field: method,
                 access_kind: HFieldAccessKind::Method,
+                projection: none,
                 ty: callee_type, effects: EMPTY_ROW, span: span },
             args: hargs, type_args: [], resolved_dicts: resolved_dicts,
+            handled_evidence: exact_handled_evidence_for_callable(
+                ctx, callee_type),
             callee_ref: none,
             method_ref: exact_method_ref,
             system_host: none,
@@ -2194,7 +2351,11 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
                 "Unknown effect: ${effect_display}",
                 span, DiagnosticContext::OtherContext { detail: some("effect '${effect_display}' not found") })
             return InferResult {
-                hexpr: HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: none, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::EffectOp { effect_name: effect_name,
+                    op_name: op_name, operation_ref: none, fail_ref: none,
+                    handled_evidence: [],
+                    args: [], ty: Type::ErrorType,
+                    effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2212,7 +2373,11 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
                 "Effect ${effect_display} has no operation ${op_name}",
                 span, DiagnosticContext::OtherContext { detail: some("no operation '${op_name}' on effect '${effect_display}'") })
             return InferResult {
-                hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, operation_ref: none, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::EffectOp { effect_name: canonical_effect_name,
+                    op_name: op_name, operation_ref: none, fail_ref: none,
+                    handled_evidence: [],
+                    args: [], ty: Type::ErrorType,
+                    effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2269,9 +2434,7 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
             BuiltInKind::BkFail => {
                 let error_type = if hargs.len() > 0 { apply_subst(s, hexpr_type(match hargs.first() { some(h) => h, none => panic("unreachable: hargs.first() after len > 0 check") })) } else { UNIT }
                 Effect::FailEffect { error_type: error_type }
-            },
-            BuiltInKind::BkMut => Effect::MutEffect {
-                state_type: ctx.env.fresh_var() }
+            }
         },
         none => match effect_def.handled_ref {
             some(reference) => Effect::CustomEffect {
@@ -2287,7 +2450,18 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
     s = me.1
 
     InferResult {
-        hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, operation_ref: op.operation_ref, args: hargs, ty: inst_ret, effects: effects, span: span },
+        hexpr: HExpr::EffectOp { effect_name: canonical_effect_name,
+            op_name: op_name, operation_ref: op.operation_ref,
+            fail_ref: match effect_def.built_in_kind {
+                some(BuiltInKind::BkFail) => some(h_fail_raise_ref()),
+                _ => none
+            },
+            handled_evidence: match effect_def.handled_ref {
+                some(requirement) => [resolve_handled_evidence(
+                    ctx, requirement)],
+                none => []
+            },
+            args: hargs, ty: inst_ret, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -2303,6 +2477,7 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
 
     let mut field_type: Type = ctx.env.fresh_var()
     let mut access_kind = HFieldAccessKind::ErrorRecovery
+    let mut projection: HProjectionRef? = none
     match recv_type {
         Type::StructType { name, type_params, .. } => {
             match ctx.env.types.structs.get(name) {
@@ -2315,6 +2490,8 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
                                 field_ref: found_field.field_ref,
                                 field_index: found_field.field_index
                             }
+                            projection = some(h_nominal_projection(
+                                found_field.field_ref))
                             let mut inst_map: Map<Int, Type> = map_new()
                             let mut fi = 0
                             while fi < struct_def.type_param_vars.len() && fi < type_params.len() {
@@ -2338,6 +2515,8 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
         },
         Type::RecordType { fields: rec_fields, tail, .. } => {
             access_kind = HFieldAccessKind::RecordField
+            projection = some(h_structural_projection(
+                fresh_semantic_path(ctx, "record-field"), field))
             let f = rec_fields.find(fn(f_) { f_.name == field })
             match f {
                 some(found_field) => { field_type = found_field.ty },
@@ -2362,6 +2541,7 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
                             span, DiagnosticContext::MissingField { field: field, ty: "tuple", available: none })
                         field_type = Type::ErrorType
                     } else {
+                        projection = some(h_tuple_projection(i))
                         match elements.get(i) {
                             some(t) => { field_type = t },
                             none => { field_type = Type::ErrorType }
@@ -2379,7 +2559,8 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
     InferResult {
         hexpr: HExpr::FieldAccess {
             receiver: recv_r.hexpr, field: field,
-            access_kind: access_kind, ty: field_type,
+            access_kind: access_kind, projection: projection,
+            ty: field_type,
             effects: recv_r.effects, span: span },
         subst: s, effects: recv_r.effects
     }
@@ -2598,6 +2779,10 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
         hexpr: HExpr::StructLit {
             name: struct_def.name, owner_ref: struct_def.owner_ref,
             type_args: [], fields: hfields, spread: hspread,
+            constructor: some(make_h_record_constructor_plan(
+                hfields.map(fn(field) {
+                    h_nominal_projection(field.field_ref)
+                }))),
             ty: struct_type, effects: effects, span: span },
         subst: s, effects: effects
     }
@@ -2655,26 +2840,23 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
         s = me.1
         let field_idx = field_names.index_of(field.name)
         match field_idx {
-            some(idx) => match variant.fields.get(idx) {
-                some(ftype) => {
+            some(idx) => match (variant.fields.get(idx),
+                                exact_field_refs.get(idx)) {
+                (some(ftype), some(field_ref)) => {
                     let ft = apply_subst_map(inst_map, ftype)
                     s = unify_at(ctx.sink, ctx.env, hexpr_type(fr.hexpr), ft, s, span)
+                    hfields.push(HStructFieldInit {
+                        name: field.name, field_ref: field_ref,
+                        value: fr.hexpr
+                    })
                 },
-                none => {}
+                _ => panic(
+                    "variant identity: registered field inventory drifted")
             },
             none => { let _ = type_error(ctx.sink, E0203,
                 "Variant '${variant_name}' has no field '${field.name}'",
                 field.span, DiagnosticContext::MissingField { field: field.name, ty: variant_name, available: none }) }
         }
-        let exact_field_index = match field_idx {
-            some(index) => index,
-            none => panic("variant identity: named field index is missing")
-        }
-        hfields.push(HStructFieldInit {
-            name: field.name,
-            field_ref: exact_field_refs.get(exact_field_index).unwrap(),
-            value: fr.hexpr
-        })
     }
 
     if spread.is_none() {
@@ -2695,7 +2877,14 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
         hexpr: HExpr::NamedVariantConstruct {
             enum_name: enum_name, variant_name: variant_name,
             variant_ref: exact_variant_ref,
-            fields: hfields, spread: hspread, ty: enum_type, effects: effects, span: span
+            fields: hfields, spread: hspread,
+            constructor: some(make_h_executable_constructor_plan(
+                make_named_executable_ref(
+                    variant_ref_member(exact_variant_ref)),
+                hfields.map(fn(field) {
+                    h_variant_projection(field.field_ref)
+                }))),
+            ty: enum_type, effects: effects, span: span
         },
         subst: s, effects: effects
     }
@@ -2706,7 +2895,7 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
 // ============================================================
 
 fn collect_exact_pattern_bindings(
-    env: TypeEnv, pattern: Pattern, mut seen: Set<Str>,
+    ctx: InferCtx, pattern: Pattern, mut seen: Set<Str>,
     mut out: List<HPatternBinding>
 ) {
     match pattern {
@@ -2714,51 +2903,56 @@ fn collect_exact_pattern_bindings(
         Pattern::Binding { name, .. } => {
             if name != "_" && !seen.contains(name) {
                 seen.insert(name)
-                let scheme = match env.lookup(name) {
+                let scheme = match ctx.env.lookup(name) {
                     some(value) => value,
-                    none => panic(
-                        "unreachable: inferred pattern binding is absent from its lexical scope")
+                    // Pattern binding already emitted the source diagnostic.
+                    // Error recovery must not invent a SlotRef or turn that
+                    // diagnostic into an internal failure.
+                    none => return
                 }
                 let def_id = match scheme.def_id {
                     some(id) => id,
-                    none => panic(
-                        "unreachable: inferred pattern binding has no exact DefId")
+                    none => return
                 }
                 out.push(HPatternBinding {
-                    name: name, def_id: def_id, ty: scheme.ty
+                    name: name, def_id: def_id,
+                    slot: make_source_slot_ref(
+                        current_identity_file_key(ctx),
+                        slot_domain_lexical(), def_id),
+                    ty: scheme.ty
                 })
             }
         },
         Pattern::Constructor { fields, .. } => {
             for field in fields {
-                collect_exact_pattern_bindings(env, field, seen, out)
+                collect_exact_pattern_bindings(ctx, field, seen, out)
             }
         },
         Pattern::NamedConstructor { fields, .. } => {
             for field in fields {
                 collect_exact_pattern_bindings(
-                    env, field.pattern, seen, out)
+                    ctx, field.pattern, seen, out)
             }
         },
         Pattern::TuplePattern { elements, .. } => {
             for element in elements {
-                collect_exact_pattern_bindings(env, element, seen, out)
+                collect_exact_pattern_bindings(ctx, element, seen, out)
             }
         },
         Pattern::OrPattern { patterns, .. } => {
             for alternative in patterns {
-                collect_exact_pattern_bindings(env, alternative, seen, out)
+                collect_exact_pattern_bindings(ctx, alternative, seen, out)
             }
         }
     }
 }
 
 fn exact_pattern_bindings(
-    env: TypeEnv, pattern: Pattern
+    ctx: InferCtx, pattern: Pattern
 ) -> List<HPatternBinding> {
     let mut result: List<HPatternBinding> = []
     let mut seen: Set<Str> = set_new()
-    collect_exact_pattern_bindings(env, pattern, seen, result)
+    collect_exact_pattern_bindings(ctx, pattern, seen, result)
     result
 }
 
@@ -2778,8 +2972,9 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
         let arm_result = some({
             let match_pattern = rewrite_bare_enum_bindings(ctx.env, arm.pattern)
             s = bind_pattern(ctx, match_pattern, hexpr_type(scrut_r.hexpr), s)
-            let pattern_bindings = exact_pattern_bindings(
-                ctx.env, match_pattern)
+            let pattern_bindings = exact_pattern_bindings(ctx, match_pattern)
+            let pattern_plan = exact_pattern_plan(
+                ctx, match_pattern, hexpr_type(scrut_r.hexpr), s)
 
             let mut guard_hexpr: HExpr? = none
             match arm.guard {
@@ -2824,7 +3019,8 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
             }
 
             harms.push(HMatchArm { pattern: match_pattern,
-                bindings: pattern_bindings, guard: guard_hexpr,
+                pattern_plan: pattern_plan, bindings: pattern_bindings,
+                guard: guard_hexpr,
                 body: body_r.hexpr, span: arm.span })
             true
         }) catch { _ => none }
@@ -2934,18 +3130,71 @@ fn is_interpolatable_type(t: Type) -> Bool {
         Type::FloatType => true,
         Type::StrType => true,
         Type::BoolType => true,
-        // TypeVar means the type is not yet resolved — allow it (may resolve later)
-        Type::TypeVar { .. } => true,
+        // An unconstrained generic value has no exact 0.1 conversion
+        // authority.  It must be rejected here instead of reaching Core or
+        // codegen for a name/type fallback.
+        Type::TypeVar { .. } => false,
         // ErrorType — already has an error, don't cascade
         Type::ErrorType => true,
         _ => false,
     }
 }
 
+fn exact_method_plan(method: MethodCallRef) -> HExactCallPlan {
+    make_h_exact_call_plan(
+        method_call_ref_callee_identity(method), some(method), [], [])
+}
+
+fn exact_string_conversion_plan(
+    ctx: InferCtx, ty: Type
+) -> HExactCallPlan? {
+    match ty {
+        Type::StrType => some(make_h_exact_call_plan(
+            make_named_callee_ref(builtin_str_identity_symbol()), none, [], [])),
+        Type::BoolType => some(make_h_exact_call_plan(
+            make_named_callee_ref(builtin_bool_to_str_symbol()), none, [], [])),
+        Type::IntType => some(exact_method_plan(
+            exact_nominal_method_call(ctx, "Int", "to_str"))),
+        Type::FloatType => some(exact_method_plan(
+            exact_nominal_method_call(ctx, "Float", "to_str"))),
+        _ => none
+    }
+}
+
+fn exact_string_interp_plan(
+    mut ctx: InferCtx, value_types: List<Type>
+) -> HStringInterpPlan? {
+    let mut conversions: List<HExactCallPlan> = []
+    for ty in value_types {
+        match exact_string_conversion_plan(ctx, ty) {
+            some(plan) => conversions.push(plan),
+            none => return none
+        }
+    }
+    let builder_scheme = ctx.env.lookup("string_builder").unwrap_or_else(fn() {
+        panic("string interpolation plan: builder function is absent")
+    })
+    let builder_def_id = match builder_scheme.def_id {
+        some(id) => id,
+        none => panic("string interpolation plan: builder has no DefId")
+    }
+    let builder = make_h_exact_call_plan(
+        make_named_callee_ref(value_symbol_ref(ctx, builder_def_id)),
+        none, [], [])
+    let add = exact_method_plan(
+        exact_nominal_method_call(ctx, "StringBuilder", "add"))
+    let finish = exact_method_plan(
+        exact_nominal_method_call(ctx, "StringBuilder", "to_str"))
+    some(make_h_string_interp_plan(
+        fresh_semantic_let_binder(ctx, "string-interp-builder"),
+        builder, add, add, finish, conversions))
+}
+
 fn infer_string_interp(mut ctx: InferCtx, parts: List<StringInterpPart>, span: Span, subst: UnionFind) -> InferResult {
     let mut s = subst
     let mut effects: EffectRow = EMPTY_ROW
     let mut hparts: List<HStringInterpPart> = []
+    let mut value_types: List<Type> = []
 
     for part in parts {
         match part {
@@ -2968,13 +3217,16 @@ fn infer_string_interp(mut ctx: InferCtx, parts: List<StringInterpPart>, span: S
                             expression: none
                         })
                 }
+                value_types.push(resolved)
                 hparts.push(HStringInterpPart::Expression(r.hexpr))
             }
         }
     }
 
     InferResult {
-        hexpr: HExpr::StringInterp { parts: hparts, ty: STR, effects: effects, span: span },
+        hexpr: HExpr::StringInterp { parts: hparts,
+            plan: exact_string_interp_plan(ctx, value_types),
+            ty: STR, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -3029,8 +3281,9 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
         let arm_result = some({
             let catch_pattern = rewrite_bare_enum_bindings(ctx.env, arm.pattern)
             s = bind_pattern(ctx, catch_pattern, error_type, s)
-            let pattern_bindings = exact_pattern_bindings(
-                ctx.env, catch_pattern)
+            let pattern_bindings = exact_pattern_bindings(ctx, catch_pattern)
+            let pattern_plan = exact_pattern_plan(
+                ctx, catch_pattern, error_type, s)
 
             let mut guard_hexpr: HExpr? = none
             match arm.guard {
@@ -3054,7 +3307,8 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
             s = unify_at(ctx.sink, ctx.env, hexpr_type(body_r.hexpr), result_type, s, arm.span)
 
             harms.push(HMatchArm { pattern: catch_pattern,
-                bindings: pattern_bindings, guard: guard_hexpr,
+                pattern_plan: pattern_plan, bindings: pattern_bindings,
+                guard: guard_hexpr,
                 body: body_r.hexpr, span: arm.span })
             true
         }) catch { _ => none }
@@ -3097,7 +3351,28 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
 // ============================================================
 
 fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, span: Span, subst: UnionFind) -> InferResult {
-    let body_r = infer_expr(ctx, body, subst)
+    let mut installed_requirements: List<HandledEffectRef> = []
+    for handler in handlers {
+        match ctx.env.types.effects.get(handler.effect_name) {
+            some(def) => match def.handled_ref {
+                some(requirement) => if !installed_requirements.any(
+                        fn(existing) { handled_effect_ref_same(
+                            existing, requirement) }) {
+                    installed_requirements.push(requirement)
+                },
+                none => {}
+            },
+            none => {}
+        }
+    }
+    let installed_evidence = install_handled_evidence(
+        ctx, installed_requirements)
+    let body_result = some(infer_expr(ctx, body, subst)) catch { _ => none }
+    uninstall_handled_evidence(ctx)
+    let body_r = match body_result {
+        some(value) => value,
+        none => fail.raise(CompileError {})
+    }
     let mut s = body_r.subst
     let mut effects = body_r.effects
     // #251: an abort arm is an alternate exit from the handled body, so its
@@ -3128,6 +3403,8 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
     let mut handler_inst_type_args_by_effect: Map<Str, List<Type>> = map_new()
 
     for handler in handlers {
+        let handler_executable = fresh_child_executable(ctx, "handler")
+        enter_executable_owner(ctx, handler_executable)
         ctx.env.push_scope()
         // Tail-resumptive arms are lowered to closures; #251 abort arms execute
         // inline after the current handler is inactive. Infer both at one deeper
@@ -3409,7 +3686,11 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     }
                     ctx.env.record_def_span(resume_def_id, handler.span)
                     resume_binding = some(HPatternBinding {
-                        name: rn, def_id: resume_def_id, ty: resume_type
+                        name: rn, def_id: resume_def_id,
+                        slot: make_source_slot_ref(
+                            current_identity_file_key(ctx),
+                            slot_domain_lexical(), resume_def_id),
+                        ty: resume_type
                     })
                 },
                 none => {}
@@ -3495,9 +3776,26 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     none => {}
                 }
             }
+            let mut handler_captures: List<HLambdaCapture> = []
+            collect_lambda_capture_expr(
+                ctx, hbr.hexpr, ctx.lambda_depth,
+                handler_executable, handler_captures)
             hhandlers.push(HEffectHandler {
                 effect_name: canonical_effect_name,
                 handled_ref: handler_handled_ref,
+                operation_ref: match op_def {
+                    some(operation) => operation.operation_ref,
+                    none => none
+                },
+                fail_ref: if is_abort_handler {
+                    some(h_fail_raise_ref())
+                } else { none },
+                executable_ref: handler_executable,
+                captures: handler_captures,
+                handled_evidence_bindings:
+                    current_handled_evidence_bindings(ctx),
+                evidence_captures:
+                    current_handled_evidence_captures(ctx),
                 op_name: handler.op_name,
                 params: hparams, resume_binding: resume_binding,
                 body: hbr.hexpr
@@ -3516,6 +3814,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
         }) catch { _ => none }
         ctx.lambda_depth = enclosing_lambda_depth
         ctx.env.pop_scope()
+        exit_executable_owner(ctx)
 
         match handler_result {
             some(_) => {},
@@ -3563,6 +3862,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
     InferResult {
         hexpr: HExpr::HandleExpr {
             body: body_r.hexpr, handlers: hhandlers,
+            installed_evidence: installed_evidence,
             ty: apply_subst(s, result_type), effects: effects, span: span
         },
         subst: s, effects: effects
@@ -3818,7 +4118,6 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
     let body_result = some(infer_expr(ctx, body, s)) catch { _ => none }
     ctx.lambda_depth = ctx.lambda_depth - 1
     ctx.env.pop_scope()
-    exit_executable_owner(ctx)
 
     match body_result {
         some(body_r) => {
@@ -3838,18 +4137,29 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
             collect_lambda_capture_expr(
                 ctx, body_r.hexpr, exact_lambda_depth,
                 lambda_executable, captures)
+            let handled_evidence_bindings =
+                current_handled_evidence_bindings(ctx)
+            let evidence_captures =
+                current_handled_evidence_captures(ctx)
+            exit_executable_owner(ctx)
 
             InferResult {
                 hexpr: HExpr::Lambda {
                     executable_ref: lambda_executable,
                     params: final_hparams, captures: captures,
+                    handled_evidence_bindings:
+                        handled_evidence_bindings,
+                    evidence_captures: evidence_captures,
                     return_type: applied_ret,
                     body: body_r.hexpr, ty: fn_type, effects: EMPTY_ROW, span: span
                 },
                 subst: s, effects: EMPTY_ROW
             }
         },
-        none => fail.raise(CompileError {})
+        none => {
+            exit_executable_owner(ctx)
+            fail.raise(CompileError {})
+        }
     }
 }
 
@@ -3862,7 +4172,11 @@ fn infer_list_literal(mut ctx: InferCtx, elements: List<Expr>, span: Span, subst
         let elem_type = ctx.env.fresh_var()
         let list_type = Type::StructType { name: BUILTIN_LIST, type_params: [elem_type] }
         return InferResult {
-            hexpr: HExpr::ListLit { elements: [], ty: list_type, effects: EMPTY_ROW, span: span },
+            hexpr: HExpr::ListLit { elements: [],
+                constructor: some(sequence_constructor_plan(
+                    make_named_executable_ref(
+                        builtin_list_constructor_symbol()), 0)),
+                ty: list_type, effects: EMPTY_ROW, span: span },
             subst: subst, effects: EMPTY_ROW
         }
     }
@@ -3882,7 +4196,11 @@ fn infer_list_literal(mut ctx: InferCtx, elements: List<Expr>, span: Span, subst
     }
     let list_type = Type::StructType { name: BUILTIN_LIST, type_params: [apply_subst(s, elem_type)] }
     InferResult {
-        hexpr: HExpr::ListLit { elements: helements, ty: list_type, effects: combined_effects, span: span },
+        hexpr: HExpr::ListLit { elements: helements,
+            constructor: some(sequence_constructor_plan(
+                make_named_executable_ref(
+                    builtin_list_constructor_symbol()), helements.len())),
+            ty: list_type, effects: combined_effects, span: span },
         subst: s, effects: combined_effects
     }
 }

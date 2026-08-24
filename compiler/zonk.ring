@@ -5,6 +5,8 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     HStructFieldInit, HNominalStructFieldInit,
     HStringInterpPart, HForInDestructure, HLambdaCapture,
     HLetDestructureBinding, HPatternBinding, ValueBindingKind, TraitDispatch,
+    HOperatorPlan, h_operator_is_tuple, h_operator_elements,
+    h_operator_method_ref, h_operator_method, h_operator_tuple,
     MethodCallRef, make_intrinsic_method_call_ref,
     make_concrete_method_call_ref, make_bound_method_call_ref,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
@@ -50,6 +52,27 @@ fn zonk_method_call_ref(
                     method_call_ref_bound_evidence(exact), signature,
                     method_call_ref_receiver_mutable(exact)))
             }
+        },
+        none => none
+    }
+}
+
+fn zonk_operator_plan(ctx: ZonkCtx, value: HOperatorPlan?) -> HOperatorPlan? {
+    match value {
+        some(plan) => if h_operator_is_tuple(plan) {
+            some(h_operator_tuple(h_operator_elements(plan).map(fn(item) {
+                match zonk_operator_plan(ctx, some(item)) {
+                    some(lowered) => lowered,
+                    none => panic("zonk: operator element disappeared")
+                }
+            })))
+        } else {
+            let method = match zonk_method_call_ref(
+                    ctx, some(h_operator_method_ref(plan))) {
+                some(value) => value,
+                none => panic("zonk: operator method disappeared")
+            }
+            some(h_operator_method(method))
         },
         none => none
     }
@@ -209,24 +232,36 @@ fn zonk_stmt(ctx: ZonkCtx, stmt: HStmt) -> HStmt {
         },
         HStmt::While { condition, body, span } =>
             HStmt::While { condition: zonk_expr(ctx, condition), body: zonk_block(ctx, body), span: span },
-        HStmt::ForIn { binding, binding_span, def_id, destructure, iterable, body, iterable_type_name, iter_type_name, span } =>
-            HStmt::ForIn { binding: binding, binding_span: binding_span, def_id: def_id, destructure: destructure, iterable: zonk_expr(ctx, iterable), body: zonk_block(ctx, body), iterable_type_name: iterable_type_name, iter_type_name: iter_type_name, span: span },
+        HStmt::ForIn { binding, binding_span, def_id, destructure, plan,
+                       iterable, body, iterable_type_name, iter_type_name, span } =>
+            HStmt::ForIn { binding: binding, binding_span: binding_span,
+                def_id: def_id, destructure: destructure, plan: plan,
+                iterable: zonk_expr(ctx, iterable), body: zonk_block(ctx, body),
+                iterable_type_name: iterable_type_name,
+                iter_type_name: iter_type_name, span: span },
         HStmt::Break { span } => stmt,
         HStmt::Continue { span } => stmt,
-        HStmt::LetDestructure { pattern, bindings, init, span } => {
+        HStmt::LetDestructure { pattern, pattern_plan, bindings, init, span } => {
             let z_bindings = bindings.map(fn(b) {
-                HLetDestructureBinding { name: b.name, def_id: b.def_id, ty: zonk_type(ctx, b.ty) }
+                HLetDestructureBinding { name: b.name, def_id: b.def_id,
+                    slot: b.slot, projection: b.projection,
+                    ty: zonk_type(ctx, b.ty) }
             })
-            HStmt::LetDestructure { pattern: pattern, bindings: z_bindings, init: zonk_expr(ctx, init), span: span }
+            HStmt::LetDestructure { pattern: pattern,
+                pattern_plan: pattern_plan, bindings: z_bindings,
+                init: zonk_expr(ctx, init), span: span }
         },
-        HStmt::IfLet { pattern, bindings, expr, then_block, else_block, span } => {
+        HStmt::IfLet { pattern, pattern_plan, bindings, expr,
+                       then_block, else_block, span } => {
             let z_else = match else_block {
                 some(eb) => some(zonk_block(ctx, eb)),
                 none => none,
             }
             HStmt::IfLet { pattern: pattern,
+                pattern_plan: pattern_plan,
                 bindings: bindings.map(fn(b) { HPatternBinding {
                     name: b.name, def_id: b.def_id,
+                    slot: b.slot,
                     ty: zonk_type(ctx, b.ty) } }),
                 expr: zonk_expr(ctx, expr),
                 then_block: zonk_block(ctx, then_block),
@@ -253,9 +288,11 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
             HExpr::StrLit { value: value, ty: z_ty, effects: z_eff, span: z_span },
         HExpr::BoolLit { value, .. } =>
             HExpr::BoolLit { value: value, ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::Ident { name, resolved_name, def_id, dict_closure_dicts, .. } => {
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity, dict_closure_dicts, .. } => {
             let ident = HExpr::Ident {
                 name: name, resolved_name: resolved_name, def_id: def_id,
+                source_slot: source_slot, callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
                 ty: z_ty, effects: z_eff, span: z_span
             }
@@ -267,13 +304,21 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
         },
         // B-104 D4: synthesised by dict_lower AFTER checking/zonking — never
         // seen here; ty is already concrete (TupleType{[]}).  Pass through.
-        HExpr::DictConstruct { base_dict, trait_name, inner, .. } =>
-            HExpr::DictConstruct { base_dict: base_dict, trait_name: trait_name, inner: inner, ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch, .. } =>
-            HExpr::BinOp { op: op, left: zonk_expr(ctx, left), right: zonk_expr(ctx, right), eq_dispatch: zonk_dispatch(ctx, eq_dispatch), ord_dispatch: zonk_dispatch(ctx, ord_dispatch), ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::DictConstruct { base_dict, plan, inner, .. } =>
+            HExpr::DictConstruct { base_dict: base_dict, plan: plan,
+                inner: inner, ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch,
+                       eq_plan, ord_plan, .. } =>
+            HExpr::BinOp { op: op, left: zonk_expr(ctx, left),
+                right: zonk_expr(ctx, right),
+                eq_dispatch: zonk_dispatch(ctx, eq_dispatch),
+                ord_dispatch: zonk_dispatch(ctx, ord_dispatch),
+                eq_plan: zonk_operator_plan(ctx, eq_plan),
+                ord_plan: zonk_operator_plan(ctx, ord_plan),
+                ty: z_ty, effects: z_eff, span: z_span },
         HExpr::UnaryOp { op, operand, .. } =>
             HExpr::UnaryOp { op: op, operand: zonk_expr(ctx, operand), ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref,
+        HExpr::Call { callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
                       method_ref, system_host, .. } =>
             HExpr::Call {
                 // A syntactic Ident callee uses the direct ABI and gets its
@@ -283,16 +328,18 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 args: args.map(fn(a) { zonk_expr(ctx, a) }),
                 type_args: type_args.map(fn(t) { zonk_type(ctx, t) }),
                 resolved_dicts: resolved_dicts,
+                handled_evidence: handled_evidence,
                 callee_ref: callee_ref,
                 method_ref: zonk_method_call_ref(ctx, method_ref),
                 system_host: system_host,
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::FieldAccess { receiver, field, access_kind, .. } =>
+        HExpr::FieldAccess { receiver, field, access_kind, projection, .. } =>
             HExpr::FieldAccess { receiver: zonk_expr(ctx, receiver),
-                field: field, access_kind: access_kind,
+                field: field, access_kind: access_kind, projection: projection,
                 ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::StructLit { name, owner_ref, type_args, fields, spread, .. } => {
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread,
+                           constructor, .. } => {
             let z_spread = match spread {
                 some(s) => some(zonk_expr(ctx, s)),
                 none => none,
@@ -306,10 +353,12 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                     field_index: f.field_index,
                     value: zonk_expr(ctx, f.value) } }),
                 spread: z_spread,
+                constructor: constructor,
                 ty: z_ty, effects: z_eff, span: z_span
             }
         },
-        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, .. } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref,
+                                       fields, spread, constructor, .. } => {
             let z_spread = match spread {
                 some(s) => some(zonk_expr(ctx, s)),
                 none => none,
@@ -319,6 +368,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 variant_ref: variant_ref,
                 fields: fields.map(fn(f) { HStructFieldInit { name: f.name, field_ref: f.field_ref, value: zonk_expr(ctx, f.value) } }),
                 spread: z_spread,
+                constructor: constructor,
                 ty: z_ty, effects: z_eff, span: z_span
             }
         },
@@ -331,8 +381,10 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                         none => none,
                     }
                     HMatchArm { pattern: a.pattern,
+                        pattern_plan: a.pattern_plan,
                         bindings: a.bindings.map(fn(b) { HPatternBinding {
                             name: b.name, def_id: b.def_id,
+                            slot: b.slot,
                             ty: zonk_type(ctx, b.ty) } }),
                         guard: z_guard, body: zonk_expr(ctx, a.body),
                         span: a.span }
@@ -362,7 +414,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 ty: z_ty, effects: z_eff, span: z_span
             }
         },
-        HExpr::StringInterp { parts, .. } =>
+        HExpr::StringInterp { parts, plan, .. } =>
             HExpr::StringInterp {
                 parts: parts.map(fn(p) {
                     match p {
@@ -370,6 +422,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                         HStringInterpPart::Expression(e) => HStringInterpPart::Expression(zonk_expr(ctx, e)),
                     }
                 }),
+                plan: plan,
                 ty: z_ty, effects: z_eff, span: z_span
             },
         HExpr::TryCatch { body, arms, .. } =>
@@ -378,8 +431,10 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 arms: arms.map(fn(a) {
                     HMatchArm {
                         pattern: a.pattern,
+                        pattern_plan: a.pattern_plan,
                         bindings: a.bindings.map(fn(b) { HPatternBinding {
                             name: b.name, def_id: b.def_id,
+                            slot: b.slot,
                             ty: zonk_type(ctx, b.ty) } }),
                         guard: match a.guard {
                             some(g) => some(zonk_expr(ctx, g)),
@@ -391,18 +446,30 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 }),
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::HandleExpr { body, handlers, .. } =>
+        HExpr::HandleExpr { body, handlers, installed_evidence, .. } =>
             HExpr::HandleExpr {
                 body: zonk_expr(ctx, body),
                 handlers: handlers.map(fn(h) {
                     HEffectHandler {
                         effect_name: h.effect_name,
-                        handled_ref: h.handled_ref, op_name: h.op_name,
+                        handled_ref: h.handled_ref,
+                        operation_ref: h.operation_ref,
+                        fail_ref: h.fail_ref,
+                        executable_ref: h.executable_ref, op_name: h.op_name,
+                        captures: h.captures.map(fn(capture) { HLambdaCapture {
+                            source: capture.source, target: capture.target,
+                            value: capture.value.map(fn(value) {
+                                zonk_expr(ctx, value) }),
+                            resource_site: capture.resource_site } }),
+                        handled_evidence_bindings:
+                            h.handled_evidence_bindings,
+                        evidence_captures: h.evidence_captures,
                         params: h.params.map(fn(p) { zonk_param(ctx, p) }),
                         resume_binding: match h.resume_binding {
                             some(binding) => some(HPatternBinding {
                                 name: binding.name,
                                 def_id: binding.def_id,
+                                slot: binding.slot,
                                 ty: zonk_type(ctx, binding.ty)
                             }),
                             none => none
@@ -410,9 +477,10 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                         body: zonk_expr(ctx, h.body)
                     }
                 }),
+                installed_evidence: installed_evidence,
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::Lambda { executable_ref, params, captures, return_type, body, .. } =>
+        HExpr::Lambda { executable_ref, params, captures, handled_evidence_bindings, evidence_captures, return_type, body, .. } =>
             HExpr::Lambda {
                 executable_ref: executable_ref,
                 params: params.map(fn(p) { zonk_param(ctx, p) }),
@@ -421,20 +489,33 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                     value: capture.value.map(fn(value) {
                         zonk_expr(ctx, value) }),
                     resource_site: capture.resource_site } }),
+                handled_evidence_bindings: handled_evidence_bindings,
+                evidence_captures: evidence_captures,
                 return_type: zonk_type(ctx, return_type),
                 body: zonk_expr(ctx, body),
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::EffectOp { effect_name, op_name, operation_ref, args, .. } =>
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: args.map(fn(a) { zonk_expr(ctx, a) }), ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::RangeExpr { start, end, inclusive, .. } =>
-            HExpr::RangeExpr { start: zonk_expr(ctx, start), end: zonk_expr(ctx, end), inclusive: inclusive, ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::ListLit { elements, .. } =>
-            HExpr::ListLit { elements: elements.map(fn(e) { zonk_expr(ctx, e) }), ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::TupleLit { elements, .. } =>
-            HExpr::TupleLit { elements: elements.map(fn(e) { zonk_expr(ctx, e) }), ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::IndexExpr { receiver, index, .. } =>
-            HExpr::IndexExpr { receiver: zonk_expr(ctx, receiver), index: zonk_expr(ctx, index), ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, handled_evidence,
+                          args, .. } =>
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                operation_ref: operation_ref, fail_ref: fail_ref,
+                handled_evidence: handled_evidence,
+                args: args.map(fn(a) { zonk_expr(ctx, a) }),
+                ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::RangeExpr { start, end, inclusive, constructor, .. } =>
+            HExpr::RangeExpr { start: zonk_expr(ctx, start),
+                end: zonk_expr(ctx, end), inclusive: inclusive,
+                constructor: constructor, ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::ListLit { elements, constructor, .. } =>
+            HExpr::ListLit { elements: elements.map(fn(e) { zonk_expr(ctx, e) }),
+                constructor: constructor, ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::TupleLit { elements, constructor, .. } =>
+            HExpr::TupleLit { elements: elements.map(fn(e) { zonk_expr(ctx, e) }),
+                constructor: constructor, ty: z_ty, effects: z_eff, span: z_span },
+        HExpr::IndexExpr { receiver, index, call_plan, projection, .. } =>
+            HExpr::IndexExpr { receiver: zonk_expr(ctx, receiver),
+                index: zonk_expr(ctx, index), call_plan: call_plan,
+                projection: projection, ty: z_ty, effects: z_eff, span: z_span },
         // B-098: Clone is inserted by the Perceus pass (post-zonk), so it never
         // reaches zonk in practice; the arm exists only for match exhaustiveness.
         HExpr::Clone { inner, .. } =>
@@ -474,12 +555,14 @@ fn clear_zonk_local_callee_marker(ident: HExpr) -> HExpr {
 
 fn zonk_direct_callee(ctx: ZonkCtx, callee: HExpr) -> HExpr {
     match callee {
-        HExpr::Ident { name, resolved_name, def_id, dict_closure_dicts, .. } => {
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity, dict_closure_dicts, .. } => {
             let z_ty = zonk_type(ctx, hexpr_type(callee))
             let z_eff = zonk_row(ctx, hexpr_effects(callee))
             let z_span = hexpr_span(callee)
             let ident = HExpr::Ident {
                 name: name, resolved_name: resolved_name, def_id: def_id,
+                source_slot: source_slot, callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
                 ty: z_ty, effects: z_eff, span: z_span
             }

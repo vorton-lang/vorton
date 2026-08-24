@@ -15,7 +15,7 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_target,
     impl_owner_ref_same, impl_method_ref_member, impl_method_ref_owner,
     variant_ref_member, impl_provider_ref_same}
-use ir_inventory::{ExecutableRef, BinderEntry,
+use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
     executable_ref_is_named, executable_ref_named_symbol}
 
 // B-104 D4 (#151): dict evidence is FIRST-CLASS in HIR.  Three reference forms:
@@ -298,10 +298,12 @@ pub fn h_projection_intrinsic(value: HProjectionRef) -> IntrinsicRef {
 pub struct HExactCallPlan {
     callee: CalleeRef,
     method: MethodCallRef?,
-    evidence: List<DictRef>
+    evidence: List<DictRef>,
+    handled_evidence: List<HandledEvidenceRef>
 }
 pub fn make_h_exact_call_plan(
-    callee: CalleeRef, method: MethodCallRef?, evidence: List<DictRef>
+    callee: CalleeRef, method: MethodCallRef?, evidence: List<DictRef>,
+    handled_evidence: List<HandledEvidenceRef>
 ) -> HExactCallPlan {
     match method {
         some(exact) => {
@@ -315,7 +317,8 @@ pub fn make_h_exact_call_plan(
         none => {}
     }
     HExactCallPlan { callee: callee, method: method,
-        evidence: evidence.map(fn(value) { value }) }
+        evidence: evidence.map(fn(value) { value }),
+        handled_evidence: handled_evidence.map(fn(value) { value }) }
 }
 pub fn h_exact_call_callee(value: HExactCallPlan) -> CalleeRef {
     value.callee
@@ -325,6 +328,11 @@ pub fn h_exact_call_method(value: HExactCallPlan) -> MethodCallRef? {
 }
 pub fn h_exact_call_evidence(value: HExactCallPlan) -> List<DictRef> {
     value.evidence.map(fn(item) { item })
+}
+pub fn h_exact_call_handled_evidence(
+    value: HExactCallPlan
+) -> List<HandledEvidenceRef> {
+    value.handled_evidence.map(fn(item) { item })
 }
 
 enum HOperatorPlanValue {
@@ -477,14 +485,18 @@ pub struct HDelegateMethodPlan {
     parameter_types: List<Type>,
     result_type: Type,
     effects: EffectRow,
-    evidence: List<DictRef>
+    evidence: List<DictRef>,
+    handled_evidence_bindings: List<HandledEvidenceRef>,
+    handled_evidence_uses: List<HandledEvidenceRef>
 }
 pub fn make_h_delegate_method_plan(
     required_method: TraitMethodRef, generated_method: ImplMethodRef,
     executable: ExecutableRef, origin: OriginRef,
     child_call: MethodCallRef, child_callee: CalleeRef,
     binders: List<BinderEntry>, parameter_types: List<Type>,
-    result_type: Type, effects: EffectRow, evidence: List<DictRef>
+    result_type: Type, effects: EffectRow, evidence: List<DictRef>,
+    handled_evidence_bindings: List<HandledEvidenceRef>,
+    handled_evidence_uses: List<HandledEvidenceRef>
 ) -> HDelegateMethodPlan {
     if !executable_ref_is_named(executable) ||
        !symbol_ref_same(executable_ref_named_symbol(executable),
@@ -499,7 +511,11 @@ pub fn make_h_delegate_method_plan(
         parameter_types: parameter_types.map(fn(value) { value }),
         result_type: result_type,
         effects: EffectRow { effects: effects.effects, tail: effects.tail },
-        evidence: evidence.map(fn(value) { value })
+        evidence: evidence.map(fn(value) { value }),
+        handled_evidence_bindings:
+            handled_evidence_bindings.map(fn(value) { value }),
+        handled_evidence_uses:
+            handled_evidence_uses.map(fn(value) { value })
     }
 }
 pub fn h_delegate_method_required(value: HDelegateMethodPlan) -> TraitMethodRef {
@@ -534,6 +550,16 @@ pub fn h_delegate_method_effects(value: HDelegateMethodPlan) -> EffectRow {
 }
 pub fn h_delegate_method_evidence(value: HDelegateMethodPlan) -> List<DictRef> {
     value.evidence.map(fn(item) { item })
+}
+pub fn h_delegate_method_handled_bindings(
+    value: HDelegateMethodPlan
+) -> List<HandledEvidenceRef> {
+    value.handled_evidence_bindings.map(fn(item) { item })
+}
+pub fn h_delegate_method_handled_uses(
+    value: HDelegateMethodPlan
+) -> List<HandledEvidenceRef> {
+    value.handled_evidence_uses.map(fn(item) { item })
 }
 
 pub struct HDelegateAssocPlan { member: SymbolRef, ty: Type }

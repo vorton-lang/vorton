@@ -43,13 +43,19 @@ use hir::{HProgram, HDecl, HStmt, HExpr, HMatchArm, HStructFieldInit,
     HStringInterpPart, HEffectHandler, HEffectOp, HTraitMethod,
     HLambdaCapture,
     DictRef, TraitDispatch, MethodCallRef,
+    HOperatorPlan, h_operator_is_tuple, h_operator_elements,
+    h_operator_method_ref, h_operator_method, h_operator_tuple,
     make_bound_method_call_ref, method_call_ref_is_bound,
     method_call_ref_bound, method_call_ref_bound_evidence,
     method_call_ref_signature, method_call_ref_receiver_mutable,
     HDictDef, DerivedImpl, DerivedField, DerivedVariant, FieldAction,
     dict_instance_name, hexpr_type, hexpr_effects, hexpr_span,
     synthetic_def_id, SYNTHETIC_DICT_DEF_ID_BASE,
+    make_h_dict_construct_plan,
     validate_hir_binder_def_ids}
+use ir_identity::{builtin_dict_constructor_symbol,
+    symbol_ref_canonical_payload}
+use ir_inventory::{make_named_executable_ref}
 
 pub fn lower_dicts(program: HProgram) -> HProgram {
     let mut defs: List<HDictDef> = []
@@ -80,22 +86,28 @@ pub fn lower_dicts(program: HProgram) -> HProgram {
 fn dl_derived_action(action: FieldAction, mut defs: List<HDictDef>,
                      mut seen: Set<Str>) -> FieldAction {
     match action {
-        FieldAction::Call { base_dict, extra_dicts } => {
+        FieldAction::Call { method_ref, base_dict, extra_dicts } => {
             let lowered_base = dl_ref_static_only(base_dict, defs, seen)
             let mut lowered: List<DictRef> = []
             for dr in extra_dicts {
                 lowered.push(dl_ref_static_only(dr, defs, seen))
             }
             FieldAction::Call {
+                method_ref: method_ref,
                 base_dict: lowered_base, extra_dicts: lowered
             }
         },
-        FieldAction::Tuple { element_actions } => {
+        FieldAction::Tuple {
+            element_types, element_projections, element_actions
+        } => {
             let mut lowered: List<FieldAction> = []
             for elem in element_actions {
                 lowered.push(dl_derived_action(elem, defs, seen))
             }
-            FieldAction::Tuple { element_actions: lowered }
+            FieldAction::Tuple {
+                element_types: element_types,
+                element_projections: element_projections,
+                element_actions: lowered }
         },
         FieldAction::Identity => FieldAction::Identity,
         FieldAction::FloatIdentity => FieldAction::FloatIdentity,
@@ -111,7 +123,9 @@ fn dl_derived_fields(fields: List<DerivedField>, mut defs: List<HDictDef>,
         lowered.push(DerivedField {
             name: field.name,
             positional_index: field.positional_index,
-            action: dl_derived_action(field.action, defs, seen)
+            field_ref: field.field_ref, ty: field.ty,
+            action: dl_derived_action(field.action, defs, seen),
+            ord_result_binder: field.ord_result_binder
         })
     }
     lowered
@@ -129,6 +143,7 @@ fn dl_derived_impl(di: DerivedImpl, mut defs: List<HDictDef>,
             for variant in variants {
                 lowered.push(DerivedVariant {
                     name: variant.name,
+                    variant_ref: variant.variant_ref,
                     discriminator: variant.discriminator,
                     fields: dl_derived_fields(variant.fields, defs, seen),
                     has_named_fields: variant.has_named_fields
@@ -139,8 +154,14 @@ fn dl_derived_impl(di: DerivedImpl, mut defs: List<HDictDef>,
         none => none,
     }
     DerivedImpl {
+        owner_ref: di.owner_ref,
         provider_ref: di.provider_ref,
         trait_ref: di.trait_ref,
+        target_owner: di.target_owner,
+        target_type: di.target_type,
+        methods: di.methods,
+        hash_mix: di.hash_mix,
+        text_plan: di.text_plan,
         type_name: di.type_name,
         trait_name: di.trait_name,
         type_params: di.type_params,
@@ -153,29 +174,35 @@ fn dl_derived_impl(di: DerivedImpl, mut defs: List<HDictDef>,
 
 fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: List<Int>) -> HDecl {
     match d {
-        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, body, is_pub, trait_bounds, span } =>
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } =>
             HDecl::Fn { name: name, def_id: def_id,
                 executable_ref: executable_ref,
                 impl_method_ref: impl_method_ref,
                 type_params: type_params, params: params,
                 return_type: return_type, effects: effects,
+                handled_evidence_bindings: handled_evidence_bindings,
                 body: dl_expr(body, defs, seen, counter),
                 is_pub: is_pub, trait_bounds: trait_bounds, span: span },
-        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref, type_params, trait_name, methods, assoc_types, span } => {
+        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref,
+                      delegate_plan, type_params, trait_name, methods,
+                      assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
             for m in methods { new_methods.push(dl_decl(m, defs, seen, counter)) }
             HDecl::Impl { target_type: target_type, owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
+                delegate_plan: delegate_plan,
                 type_params: type_params, trait_name: trait_name,
                 methods: new_methods, assoc_types: assoc_types, span: span }
         },
-        HDecl::Test { description, executable_ref, body, span } =>
+        HDecl::Test { description, executable_ref, handled_evidence_bindings, body, span } =>
             HDecl::Test { description: description,
                 executable_ref: executable_ref,
+                handled_evidence_bindings: handled_evidence_bindings,
                 body: dl_expr(body, defs, seen, counter), span: span },
-        HDecl::Const { name, def_id, executable_ref, ty, init, is_pub, span } =>
+        HDecl::Const { name, def_id, executable_ref, handled_evidence_bindings, ty, init, is_pub, span } =>
             HDecl::Const { name: name, def_id: def_id,
                 executable_ref: executable_ref, ty: ty,
+                handled_evidence_bindings: handled_evidence_bindings,
                 init: dl_expr(init, defs, seen, counter), is_pub: is_pub, span: span },
         HDecl::ModBlock { name, decls, is_pub, span } => {
             let mut new_inner: List<HDecl> = []
@@ -194,7 +221,10 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                     method_ref: tm.method_ref, params: tm.params,
                     return_type: tm.return_type, effects: tm.effects,
                     has_default: tm.has_default,
-                    executable_ref: tm.executable_ref, body: new_body })
+                    executable_ref: tm.executable_ref,
+                    handled_evidence_bindings:
+                        tm.handled_evidence_bindings,
+                    body: new_body })
             }
             HDecl::Trait { name: name, owner_ref: trait_owner_ref,
                 type_params: type_params, methods: new_methods,
@@ -216,10 +246,11 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             }
             HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
-        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, is_pub, span } =>
+        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, handled_evidence_bindings, is_pub, span } =>
             HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id,
                 executable_ref: executable_ref, type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
+                handled_evidence_bindings: handled_evidence_bindings,
                 is_pub: is_pub, span: span },
         HDecl::ExternType { name, type_params, is_pub, span } =>
             HDecl::ExternType { name: name, type_params: type_params, is_pub: is_pub, span: span },
@@ -250,7 +281,8 @@ fn dl_ref_dyn(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>,
             dl_register(defs, seen, HDictDef { name: name, base_dict: name, trait_name: "", inner: [] })
             DictRef::Static(name)
         },
-        DictRef::Wrapped { dict, trait_name, inner_dicts } => {
+        DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
+            let trait_name = symbol_ref_canonical_payload(trait_ref)
             let mut inner_refs: List<DictRef> = []
             for i in inner_dicts {
                 inner_refs.push(dl_ref_dyn(i, defs, seen, counter, lets, span))
@@ -274,7 +306,11 @@ fn dl_ref_dyn(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>,
                 let local_def_id = synthetic_def_id(
                     SYNTHETIC_DICT_DEF_ID_BASE, ordinal)
                 let construct = HExpr::DictConstruct {
-                    base_dict: dict, trait_name: trait_name, inner: inner_refs,
+                    base_dict: dict,
+                    plan: some(make_h_dict_construct_plan(
+                        make_named_executable_ref(
+                            builtin_dict_constructor_symbol()), trait_ref)),
+                    inner: inner_refs,
                     ty: Type::TupleType { elements: [] }, effects: EMPTY_ROW, span: span
                 }
                 lets.push(HStmt::Let { name: lname, name_span: span,
@@ -296,7 +332,8 @@ fn dl_ref_static_only(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>)
             dl_register(defs, seen, HDictDef { name: name, base_dict: name, trait_name: "", inner: [] })
             DictRef::Static(name)
         },
-        DictRef::Wrapped { dict, trait_name, inner_dicts } => {
+        DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
+            let trait_name = symbol_ref_canonical_payload(trait_ref)
             let mut inner_refs: List<DictRef> = []
             for i in inner_dicts {
                 inner_refs.push(dl_ref_static_only(i, defs, seen))
@@ -314,7 +351,8 @@ fn dl_ref_static_only(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>)
                 dl_register(defs, seen, HDictDef { name: inst, base_dict: dict, trait_name: trait_name, inner: inner_names })
                 DictRef::Static(inst)
             } else {
-                DictRef::Wrapped { dict: dict, trait_name: trait_name, inner_dicts: inner_refs }
+                DictRef::Wrapped { dict: dict, trait_ref: trait_ref,
+                    inner_dicts: inner_refs }
             }
         },
     }
@@ -366,6 +404,29 @@ fn dl_method_call_ref(
     }
 }
 
+fn dl_operator_plan(
+    value: HOperatorPlan?, mut defs: List<HDictDef>, mut seen: Set<Str>
+) -> HOperatorPlan? {
+    match value {
+        some(plan) => if h_operator_is_tuple(plan) {
+            some(h_operator_tuple(h_operator_elements(plan).map(fn(item) {
+                match dl_operator_plan(some(item), defs, seen) {
+                    some(lowered) => lowered,
+                    none => panic("dict_lower: operator element disappeared")
+                }
+            })))
+        } else {
+            let lowered = match dl_method_call_ref(
+                    some(h_operator_method_ref(plan)), defs, seen) {
+                some(method) => method,
+                none => panic("dict_lower: operator method disappeared")
+            }
+            some(h_operator_method(lowered))
+        },
+        none => none
+    }
+}
+
 // ============================================================
 // Structural walkers
 // ============================================================
@@ -380,7 +441,8 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             HExpr::StrLit { value: value, ty: ty, effects: effects, span: span },
         HExpr::BoolLit { value, ty, effects, span } =>
             HExpr::BoolLit { value: value, ty: ty, effects: effects, span: span },
-        HExpr::Ident { name, resolved_name, def_id, dict_closure_dicts, ty, effects, span } => {
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity, dict_closure_dicts, ty, effects, span } => {
             let mut lets: List<HStmt> = []
             let lowered_dicts = match dict_closure_dicts {
                 some(dicts) => {
@@ -394,6 +456,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             }
             let ident = HExpr::Ident {
                 name: name, resolved_name: resolved_name, def_id: def_id,
+                source_slot: source_slot, callee_identity: callee_identity,
                 dict_closure_dicts: lowered_dicts,
                 ty: ty, effects: effects, span: span
             }
@@ -409,16 +472,19 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 }
             }
         },
-        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch, ty, effects, span } =>
+        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch,
+                       eq_plan, ord_plan, ty, effects, span } =>
             HExpr::BinOp { op: op,
                 left: dl_expr(left, defs, seen, counter),
                 right: dl_expr(right, defs, seen, counter),
                 eq_dispatch: dl_dispatch(eq_dispatch, defs, seen),
                 ord_dispatch: dl_dispatch(ord_dispatch, defs, seen),
+                eq_plan: dl_operator_plan(eq_plan, defs, seen),
+                ord_plan: dl_operator_plan(ord_plan, defs, seen),
                 ty: ty, effects: effects, span: span },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: dl_expr(operand, defs, seen, counter), ty: ty, effects: effects, span: span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, callee_ref,
+        HExpr::Call { callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             let new_callee = dl_expr(callee, defs, seen, counter)
             let mut new_args: List<HExpr> = []
@@ -430,6 +496,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             }
             let call = HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
                 resolved_dicts: new_dicts,
+                handled_evidence: handled_evidence,
                 callee_ref: callee_ref,
                 method_ref: dl_method_call_ref(method_ref, defs, seen),
                 system_host: system_host,
@@ -442,11 +509,13 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 HExpr::Block { stmts: lets, tail: some(call), ty: ty, effects: effects, span: span }
             }
         },
-        HExpr::FieldAccess { receiver, field, access_kind, ty, effects, span } =>
+        HExpr::FieldAccess { receiver, field, access_kind, projection,
+                             ty, effects, span } =>
             HExpr::FieldAccess { receiver: dl_expr(receiver, defs, seen, counter),
-                field: field, access_kind: access_kind,
+                field: field, access_kind: access_kind, projection: projection,
                 ty: ty, effects: effects, span: span },
-        HExpr::StructLit { name, owner_ref, type_args, fields, spread, ty, effects, span } => {
+        HExpr::StructLit { name, owner_ref, type_args, fields, spread,
+                           constructor, ty, effects, span } => {
             let mut new_fields: List<HNominalStructFieldInit> = []
             for f in fields {
                 new_fields.push(HNominalStructFieldInit {
@@ -460,9 +529,12 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             }
             HExpr::StructLit { name: name, owner_ref: owner_ref,
                 type_args: type_args, fields: new_fields,
-                spread: new_spread, ty: ty, effects: effects, span: span }
+                spread: new_spread, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
-        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref, fields, spread, ty, effects, span } => {
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref,
+                                       fields, spread, constructor,
+                                       ty, effects, span } => {
             let mut new_fields: List<HStructFieldInit> = []
             for f in fields {
                 new_fields.push(HStructFieldInit { name: f.name, field_ref: f.field_ref, value: dl_expr(f.value, defs, seen, counter) })
@@ -471,7 +543,11 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 some(s) => some(dl_expr(s, defs, seen, counter)),
                 none => none,
             }
-            HExpr::NamedVariantConstruct { enum_name: enum_name, variant_name: variant_name, variant_ref: variant_ref, fields: new_fields, spread: new_spread, ty: ty, effects: effects, span: span }
+            HExpr::NamedVariantConstruct { enum_name: enum_name,
+                variant_name: variant_name, variant_ref: variant_ref,
+                fields: new_fields, spread: new_spread,
+                constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
         HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
             HExpr::MatchExpr { scrutinee: dl_expr(scrutinee, defs, seen, counter),
@@ -494,7 +570,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 then_branch: dl_expr(then_branch, defs, seen, counter),
                 else_branch: new_else, ty: ty, effects: effects, span: span }
         },
-        HExpr::StringInterp { parts, ty, effects, span } => {
+        HExpr::StringInterp { parts, plan, ty, effects, span } => {
             let mut new_parts: List<HStringInterpPart> = []
             for p in parts {
                 match p {
@@ -502,22 +578,36 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                     HStringInterpPart::Expression(ex) => new_parts.push(HStringInterpPart::Expression(dl_expr(ex, defs, seen, counter))),
                 }
             }
-            HExpr::StringInterp { parts: new_parts, ty: ty, effects: effects, span: span }
+            HExpr::StringInterp { parts: new_parts, plan: plan,
+                ty: ty, effects: effects, span: span }
         },
         HExpr::TryCatch { body, arms, ty, effects, span } =>
             HExpr::TryCatch { body: dl_expr(body, defs, seen, counter),
                 arms: dl_arms(arms, defs, seen, counter), ty: ty, effects: effects, span: span },
-        HExpr::HandleExpr { body, handlers, ty, effects, span } => {
+        HExpr::HandleExpr { body, handlers, installed_evidence, ty, effects, span } => {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
                 new_handlers.push(HEffectHandler { effect_name: h.effect_name,
-                    handled_ref: h.handled_ref, op_name: h.op_name,
+                    handled_ref: h.handled_ref,
+                    operation_ref: h.operation_ref,
+                    fail_ref: h.fail_ref,
+                    executable_ref: h.executable_ref, op_name: h.op_name,
+                    captures: h.captures.map(fn(capture) { HLambdaCapture {
+                        source: capture.source, target: capture.target,
+                        value: capture.value.map(fn(value) {
+                            dl_expr(value, defs, seen, counter) }),
+                        resource_site: capture.resource_site } }),
+                    handled_evidence_bindings:
+                        h.handled_evidence_bindings,
+                    evidence_captures: h.evidence_captures,
                     params: h.params, resume_binding: h.resume_binding,
                     body: dl_expr(h.body, defs, seen, counter) })
             }
-            HExpr::HandleExpr { body: dl_expr(body, defs, seen, counter), handlers: new_handlers, ty: ty, effects: effects, span: span }
+            HExpr::HandleExpr { body: dl_expr(body, defs, seen, counter),
+                handlers: new_handlers, installed_evidence: installed_evidence,
+                ty: ty, effects: effects, span: span }
         },
-        HExpr::Lambda { executable_ref, params, captures, return_type, body, ty, effects, span } =>
+        HExpr::Lambda { executable_ref, params, captures, handled_evidence_bindings, evidence_captures, return_type, body, ty, effects, span } =>
             HExpr::Lambda { executable_ref: executable_ref,
                 params: params,
                 captures: captures.map(fn(capture) { HLambdaCapture {
@@ -525,32 +615,45 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                     value: capture.value.map(fn(value) {
                         dl_expr(value, defs, seen, counter) }),
                     resource_site: capture.resource_site } }),
+                handled_evidence_bindings: handled_evidence_bindings,
+                evidence_captures: evidence_captures,
                 return_type: return_type,
                 body: dl_expr(body, defs, seen, counter), ty: ty, effects: effects, span: span },
-        HExpr::EffectOp { effect_name, op_name, operation_ref, args, ty, effects, span } => {
+        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, handled_evidence,
+                          args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(dl_expr(a, defs, seen, counter)) }
-            HExpr::EffectOp { effect_name: effect_name, op_name: op_name, operation_ref: operation_ref, args: new_args, ty: ty, effects: effects, span: span }
+            HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
+                operation_ref: operation_ref, fail_ref: fail_ref,
+                handled_evidence: handled_evidence,
+                args: new_args, ty: ty, effects: effects, span: span }
         },
-        HExpr::RangeExpr { start, end, inclusive, ty, effects, span } =>
+        HExpr::RangeExpr { start, end, inclusive, constructor, ty, effects, span } =>
             HExpr::RangeExpr { start: dl_expr(start, defs, seen, counter),
-                end: dl_expr(end, defs, seen, counter), inclusive: inclusive, ty: ty, effects: effects, span: span },
-        HExpr::ListLit { elements, ty, effects, span } => {
+                end: dl_expr(end, defs, seen, counter), inclusive: inclusive,
+                constructor: constructor, ty: ty, effects: effects, span: span },
+        HExpr::ListLit { elements, constructor, ty, effects, span } => {
             let mut new_elems: List<HExpr> = []
             for el in elements { new_elems.push(dl_expr(el, defs, seen, counter)) }
-            HExpr::ListLit { elements: new_elems, ty: ty, effects: effects, span: span }
+            HExpr::ListLit { elements: new_elems, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
-        HExpr::TupleLit { elements, ty, effects, span } => {
+        HExpr::TupleLit { elements, constructor, ty, effects, span } => {
             let mut new_elems: List<HExpr> = []
             for el in elements { new_elems.push(dl_expr(el, defs, seen, counter)) }
-            HExpr::TupleLit { elements: new_elems, ty: ty, effects: effects, span: span }
+            HExpr::TupleLit { elements: new_elems, constructor: constructor,
+                ty: ty, effects: effects, span: span }
         },
-        HExpr::IndexExpr { receiver, index, ty, effects, span } =>
+        HExpr::IndexExpr { receiver, index, call_plan, projection,
+                           ty, effects, span } =>
             HExpr::IndexExpr { receiver: dl_expr(receiver, defs, seen, counter),
-                index: dl_expr(index, defs, seen, counter), ty: ty, effects: effects, span: span },
+                index: dl_expr(index, defs, seen, counter),
+                call_plan: call_plan, projection: projection,
+                ty: ty, effects: effects, span: span },
         // Created by this pass only — never present in input HIR.
-        HExpr::DictConstruct { base_dict, trait_name, inner, ty, effects, span } =>
-            HExpr::DictConstruct { base_dict: base_dict, trait_name: trait_name, inner: inner, ty: ty, effects: effects, span: span },
+        HExpr::DictConstruct { base_dict, plan, inner, ty, effects, span } =>
+            HExpr::DictConstruct { base_dict: base_dict, plan: plan,
+                inner: inner, ty: ty, effects: effects, span: span },
         // Clone is inserted by perceus (runs after this pass) — never present.
         HExpr::Clone { inner, ty, effects, span } =>
             HExpr::Clone { inner: dl_expr(inner, defs, seen, counter), ty: ty, effects: effects, span: span },
@@ -576,7 +679,8 @@ fn dl_arms(arms: List<HMatchArm>, mut defs: List<HDictDef>, mut seen: Set<Str>, 
             some(g) => some(dl_expr(g, defs, seen, counter)),
             none => none,
         }
-        out.push(HMatchArm { pattern: arm.pattern, bindings: arm.bindings,
+        out.push(HMatchArm { pattern: arm.pattern,
+            pattern_plan: arm.pattern_plan, bindings: arm.bindings,
             guard: new_guard,
             body: dl_expr(arm.body, defs, seen, counter), span: arm.span })
     }
@@ -606,23 +710,27 @@ fn dl_stmt(s: HStmt, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
         HStmt::While { condition, body, span } =>
             HStmt::While { condition: dl_expr(condition, defs, seen, counter),
                 body: dl_expr(body, defs, seen, counter), span: span },
-        HStmt::ForIn { binding, binding_span, def_id, destructure, iterable, body, iterable_type_name, iter_type_name, span } =>
+        HStmt::ForIn { binding, binding_span, def_id, destructure, plan,
+                       iterable, body, iterable_type_name, iter_type_name, span } =>
             HStmt::ForIn { binding: binding, binding_span: binding_span, def_id: def_id,
-                destructure: destructure,
+                destructure: destructure, plan: plan,
                 iterable: dl_expr(iterable, defs, seen, counter),
                 body: dl_expr(body, defs, seen, counter),
                 iterable_type_name: iterable_type_name, iter_type_name: iter_type_name, span: span },
         HStmt::Break { span } => HStmt::Break { span: span },
         HStmt::Continue { span } => HStmt::Continue { span: span },
-        HStmt::LetDestructure { pattern, bindings, init, span } =>
-            HStmt::LetDestructure { pattern: pattern, bindings: bindings,
+        HStmt::LetDestructure { pattern, pattern_plan, bindings, init, span } =>
+            HStmt::LetDestructure { pattern: pattern,
+                pattern_plan: pattern_plan, bindings: bindings,
                 init: dl_expr(init, defs, seen, counter), span: span },
-        HStmt::IfLet { pattern, bindings, expr, then_block, else_block, span } => {
+        HStmt::IfLet { pattern, pattern_plan, bindings, expr,
+                       then_block, else_block, span } => {
             let new_else = match else_block {
                 some(eb) => some(dl_expr(eb, defs, seen, counter)),
                 none => none,
             }
-            HStmt::IfLet { pattern: pattern, bindings: bindings,
+            HStmt::IfLet { pattern: pattern, pattern_plan: pattern_plan,
+                bindings: bindings,
                 expr: dl_expr(expr, defs, seen, counter),
                 then_block: dl_expr(then_block, defs, seen, counter), else_block: new_else, span: span }
         },

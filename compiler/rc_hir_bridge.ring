@@ -35,6 +35,8 @@ use ir_inventory::{
     executable_kind_handler, executable_kind_default_specialization,
     executable_kind_derived_impl,
     executable_kind_dict_helper,
+    HandledEvidenceRef, HandledEvidenceCapture,
+    make_handled_evidence_capture,
     effect_operation_ref_effect, effect_operation_ref_member,
     system_host_callable_executable
 }
@@ -54,6 +56,7 @@ use hir::{
     h_pattern_wildcard, h_pattern_binding, h_pattern_literal,
     h_pattern_tuple, h_pattern_struct, h_pattern_variant,
     make_h_executable_constructor_plan, make_h_tuple_constructor_plan,
+    make_h_record_constructor_plan,
     HFieldAccessKind, HNominalStructFieldInit, HStructFieldInit,
     HResourceSite,
     DictRef, MethodCallRef,
@@ -93,9 +96,12 @@ use core_expr::{
     CoreTypeRef, CoreEffectSet,
     CorePattern, CorePatternField, CoreFieldRef, CoreFieldValue,
     CoreCalleeRef, CoreEvidenceRef, CoreConstructorRef, CorePlaceRef,
-    CoreImplMetadata, CoreHandlerEntry, core_type_graph_count,
+    CoreImplMetadata, CoreCallableContract, CoreHandledEvidenceCapture,
+    CoreHandlerOperation, CoreHandlerInstallation,
+    core_type_graph_count,
     make_core_type_ref,
-    core_callable_reference,
+    core_callable_reference, core_callable_handled_evidence,
+    core_handled_evidence_reference,
     core_body_reference, core_body_origin, core_body_block,
     core_body_binders,
     core_binder_reference, core_binder_type,
@@ -113,7 +119,9 @@ use core_expr::{
     core_expr_primitive_operation, core_primitive_op_tag,
     core_expr_primitive_operands,
     core_expr_call_callee, core_expr_call_arguments,
-    core_expr_call_evidence, core_expr_method_ref,
+    core_expr_call_evidence, core_expr_call_handled_evidence,
+    core_handled_use_reference,
+    core_expr_method_ref,
     core_expr_method_receiver, core_expr_effect_operation,
     core_expr_system_host, core_expr_dict_constructor,
     core_expr_fail_payload,
@@ -121,11 +129,14 @@ use core_expr::{
     core_expr_project_base, core_expr_project_field,
     core_expr_constructor, core_expr_constructor_fields,
     core_expr_lambda_executable, core_expr_lambda_captures,
+    core_expr_lambda_handled_captures,
     core_capture_source, core_capture_target,
+    core_handled_capture_requirement, core_handled_capture_source,
+    core_handled_capture_target,
     core_expr_block, core_expr_then_block, core_expr_else_block,
     core_expr_condition, core_expr_scrutinee,
     core_expr_match_arms, core_expr_try_body, core_expr_handle_body,
-    core_expr_error_slot, core_expr_handlers,
+    core_expr_error_slot, core_expr_handler_installations,
     core_match_arm_pattern, core_match_arm_guard, core_match_arm_body,
     core_pattern_kind_tag, core_pattern_type, core_pattern_binding,
     core_pattern_literal, core_pattern_elements, core_pattern_fields,
@@ -139,13 +150,18 @@ use core_expr::{
     core_place_field, core_place_evaluated_index, core_place_intrinsic,
     core_place_value_type,
     core_constructor_kind_tag, core_constructor_struct_owner,
-    core_constructor_variant,
+    core_constructor_variant, core_constructor_executable,
     core_callee_ref, core_callee_kind_tag, core_callee_direct,
     core_callee_local, core_callee_dynamic,
     core_evidence_is_local, core_evidence_is_dict,
     core_evidence_local, core_evidence_callable, core_evidence_dict,
-    core_handler_operation, core_handler_executable,
-    core_handler_parameter_slots, core_handler_resume_slot,
+    core_handler_installation_evidence,
+    core_handler_installation_operations,
+    core_handler_operation_ref, core_handler_operation_executable,
+    core_handler_operation_parameter_slots,
+    core_handler_operation_resume_slot,
+    core_handler_operation_captures,
+    core_handler_operation_handled_captures,
     core_impl_owner, core_impl_methods, core_impl_assoc_bindings,
     core_assoc_binding_member
 }
@@ -1155,6 +1171,10 @@ fn simple_core_expr(
         return SerializedOperand { prefix: prefix, value: HExpr::Call {
             callee: call_callee, args: args, type_args: [],
             resolved_dicts: evidence,
+            handled_evidence:
+                core_expr_call_handled_evidence(expr).map(fn(value) {
+                    core_handled_use_reference(value)
+                }),
             callee_ref: if kind == 3 {
                 some(core_callee_ref(callee))
             } else { none },
@@ -1185,6 +1205,10 @@ fn simple_core_expr(
                 effect_operation_ref_member(operation)),
             operation_ref: some(operation),
             fail_ref: none,
+            handled_evidence:
+                core_expr_call_handled_evidence(expr).map(fn(value) {
+                    core_handled_use_reference(value)
+                }),
             args: args,
             ty: ty, effects: effects, span: span_zero()
         } }
@@ -1208,6 +1232,7 @@ fn simple_core_expr(
                 ctx.projection, executable, callable_fn_type(callable)),
             args: args,
             type_args: [], resolved_dicts: [],
+            handled_evidence: [],
             callee_ref: some(make_named_callee_ref(
                 executable_ref_named_symbol(executable))), method_ref: none,
             system_host: some(core_expr_system_host(expr)),
@@ -1239,6 +1264,7 @@ fn simple_core_expr(
                     evidence_dict(ctx.projection, value)
                 })
             } else { [] },
+            handled_evidence: [],
             callee_ref: some(make_named_callee_ref(
                 executable_ref_named_symbol(executable))), method_ref: none,
             system_host: none,
@@ -1283,8 +1309,7 @@ fn simple_core_expr(
                 owner_ref: owner_ref, type_args: [],
                 fields: values,
                 spread: none,
-                constructor: some(make_h_executable_constructor_plan(
-                    core_constructor_executable(constructor).unwrap(),
+                constructor: some(make_h_record_constructor_plan(
                     fields.map(fn(field) {
                         hir_projection(core_field_value_field(field))
                     }))),
@@ -1386,6 +1411,12 @@ fn simple_core_expr(
         return simple_operand(HExpr::Lambda {
             executable_ref: executable,
             params: legacy_params(callable), captures: captures,
+            handled_evidence_bindings: core_callable_handled_refs(
+                ctx.stages.core, executable),
+            evidence_captures:
+                core_expr_lambda_handled_captures(expr).map(fn(capture) {
+                    core_handled_capture_ref(capture)
+                }),
             return_type: legacy_callable_result_type(callable),
             body: serialize_callable_body(ctx, executable),
             ty: ty, effects: effects, span: span_zero()
@@ -1430,6 +1461,7 @@ fn serialize_core_expr(
             value: HExpr::EffectOp {
                 effect_name: "fail", op_name: "raise",
                 operation_ref: none, fail_ref: some(h_fail_raise_ref()),
+                handled_evidence: [],
                 args: [bridge_binder_ident(ctx, sink)],
                 ty: legacy_type_for(ctx.projection, core_expr_type(expr)),
                 effects: legacy_effects_for(
@@ -1859,26 +1891,70 @@ fn serialize_callable_body(
 }
 
 fn serialize_handler(
-    mut ctx: HirBridgeCtx, handler: CoreHandlerEntry
+    mut ctx: HirBridgeCtx, handler: CoreHandlerOperation,
+    node_ordinal: Int, dispatch_ordinal: Int
 ) -> HEffectHandler {
-    let operation = core_handler_operation(handler)
+    let operation = core_handler_operation_ref(handler)
     let callable = legacy_projection_callable_for(
-        ctx.projection, core_handler_executable(handler))
-    let parameters = legacy_params(callable)
-    if parameters.len() != core_handler_parameter_slots(handler).len() {
+        ctx.projection, core_handler_operation_executable(handler))
+    let all_parameters = legacy_params(callable)
+    let parameter_slots = core_handler_operation_parameter_slots(handler)
+    let resume_count = if core_handler_operation_resume_slot(handler).is_some() {
+        1
+    } else { 0 }
+    if all_parameters.len() != parameter_slots.len() + resume_count {
         panic("RcHIR bridge: handler parameter projection differs")
     }
+    let mut parameters: List<HParam> = []
+    let mut parameter_index = 0
+    while parameter_index < parameter_slots.len() {
+        parameters.push(all_parameters.get(parameter_index).unwrap())
+        parameter_index = parameter_index + 1
+    }
+    let mut capture_ordinal = 0
+    let captures = core_handler_operation_captures(handler).map(fn(capture) {
+        let source = core_capture_source(capture)
+        let mut site: HResourceSite? = none
+        for event in events_for_node_role(
+                ctx.stages, node_ordinal,
+                BRIDGE_RC_BEFORE_INSTRUCTION,
+                BRIDGE_ROLE_CONTROL_DISPATCH, dispatch_ordinal) {
+            if event.operand_ordinal == capture_ordinal &&
+               slot_ref_same(rc_operation_source(event.operation), source) &&
+               (rc_op_kind_same(
+                    rc_operation_kind(event.operation), rc_op_kind_clone()) ||
+                rc_op_kind_same(
+                    rc_operation_kind(event.operation), rc_op_kind_take())) {
+                site = some(h_resource_site_for_step(event.step))
+            }
+        }
+        let result = HLambdaCapture {
+            source: source, target: core_capture_target(capture),
+            value: some(wrap_resource_operand(
+                ctx, node_ordinal, capture_ordinal, source,
+                BRIDGE_ROLE_CONTROL_DISPATCH, dispatch_ordinal)),
+            resource_site: site
+        }
+        capture_ordinal = capture_ordinal + 1
+        result
+    })
     HEffectHandler {
         handled_ref: some(effect_operation_ref_effect(operation)),
         operation_ref: some(operation),
         fail_ref: none,
-        executable_ref: core_handler_executable(handler),
+        executable_ref: core_handler_operation_executable(handler),
+        captures: captures,
+        handled_evidence_bindings: core_callable_handled_refs(
+            ctx.stages.core, core_handler_operation_executable(handler)),
+        evidence_captures:
+            core_handler_operation_handled_captures(handler).map(
+                fn(capture) { core_handled_capture_ref(capture) }),
         effect_name: symbol_ref_canonical_payload(
             handled_effect_ref_symbol(effect_operation_ref_effect(operation))),
         op_name: symbol_ref_canonical_payload(
             effect_operation_ref_member(operation)),
         params: parameters,
-        resume_binding: match core_handler_resume_slot(handler) {
+        resume_binding: match core_handler_operation_resume_slot(handler) {
             some(slot) => {
                 let binder = projected_binder_for(ctx.projection, slot)
                 some(HPatternBinding {
@@ -1890,7 +1966,8 @@ fn serialize_handler(
             },
             none => none
         },
-        body: serialize_callable_body(ctx, core_handler_executable(handler))
+        body: serialize_callable_body(
+            ctx, core_handler_operation_executable(handler))
     }
 }
 
@@ -1905,7 +1982,10 @@ fn serialize_trait_method(
         params: value.params, return_type: value.return_type,
         effects: validate_legacy_effect_row(value.effects),
         has_default: value.has_default,
-        executable_ref: value.executable_ref, body: body
+        executable_ref: value.executable_ref,
+        handled_evidence_bindings: core_callable_handled_refs(
+            ctx.stages.core, value.executable_ref),
+        body: body
     }
 }
 
@@ -1946,6 +2026,42 @@ fn core_has_body(core: CoreProgram, reference: ExecutableRef) -> Bool {
     false
 }
 
+fn exact_core_callable(
+    core: CoreProgram, reference: ExecutableRef
+) -> CoreCallableContract {
+    let mut found: CoreCallableContract? = none
+    for callable in core_program_callables(core) {
+        if executable_ref_same(core_callable_reference(callable), reference) {
+            if found.is_some() {
+                panic("RcHIR bridge: duplicate Core callable")
+            }
+            found = some(callable)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: exact Core callable is absent")
+    }
+}
+
+fn core_callable_handled_refs(
+    core: CoreProgram, reference: ExecutableRef
+) -> List<HandledEvidenceRef> {
+    core_callable_handled_evidence(
+        exact_core_callable(core, reference)).map(fn(binding) {
+            core_handled_evidence_reference(binding)
+        })
+}
+
+fn core_handled_capture_ref(
+    value: CoreHandledEvidenceCapture
+) -> HandledEvidenceCapture {
+    make_handled_evidence_capture(
+        core_handled_capture_requirement(value),
+        core_handled_capture_source(value),
+        core_handled_capture_target(value))
+}
+
 fn generated_method_decl(
     mut ctx: HirBridgeCtx, method: ImplMethodRef
 ) -> HDecl {
@@ -1960,6 +2076,8 @@ fn generated_method_decl(
         return_type: legacy_callable_result_type(callable),
         effects: validate_legacy_effect_row(
             legacy_callable_effects(callable)),
+        handled_evidence_bindings: core_callable_handled_refs(
+            ctx.stages.core, executable),
         body: serialize_callable_body(ctx, executable),
         is_pub: legacy_callable_is_public(callable),
         trait_bounds: legacy_trait_bounds(callable), span: span_zero()
@@ -1979,6 +2097,8 @@ fn generated_standalone_decl(
         return_type: legacy_callable_result_type(callable),
         effects: validate_legacy_effect_row(
             legacy_callable_effects(callable)),
+        handled_evidence_bindings: core_callable_handled_refs(
+            ctx.stages.core, reference),
         body: serialize_callable_body(ctx, reference),
         is_pub: legacy_callable_is_public(callable),
         trait_bounds: legacy_trait_bounds(callable), span: span_zero()
@@ -2074,17 +2194,23 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
             type_params: type_params, params: params,
             return_type: return_type,
             effects: validate_legacy_effect_row(effects),
+            handled_evidence_bindings: core_callable_handled_refs(
+                ctx.stages.core, executable_ref),
             body: serialize_callable_body(ctx, executable_ref),
             is_pub: is_pub, trait_bounds: trait_bounds, span: span
         },
         HDecl::Test { description, executable_ref, span, .. } => HDecl::Test {
             description: description, executable_ref: executable_ref,
+            handled_evidence_bindings: core_callable_handled_refs(
+                ctx.stages.core, executable_ref),
             body: serialize_callable_body(ctx, executable_ref), span: span
         },
         HDecl::Const {
             name, def_id, executable_ref, ty, is_pub, span, ..
         } => HDecl::Const {
             name: name, def_id: def_id, executable_ref: executable_ref,
+            handled_evidence_bindings: core_callable_handled_refs(
+                ctx.stages.core, executable_ref),
             ty: ty, init: serialize_callable_body(ctx, executable_ref),
             is_pub: is_pub, span: span
         },
@@ -2147,6 +2273,8 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
             executable_ref: executable_ref, type_params: type_params,
             params: params, return_type: return_type,
             effects: validate_legacy_effect_row(effects),
+            handled_evidence_bindings: core_callable_handled_refs(
+                ctx.stages.core, executable_ref),
             is_pub: is_pub, span: span
         },
         HDecl::Struct { .. } | HDecl::Enum { .. } |
@@ -2691,6 +2819,22 @@ fn serialize_structured_core_expr(
             ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0)
         append_all(suffix, edge_cleanup_statements(
             ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
+        let installations = core_expr_handler_installations(expr)
+        let mut installed_evidence: List<HandledEvidenceRef> = []
+        let mut handlers: List<HEffectHandler> = []
+        let mut dispatch_ordinal = 1
+        for installation in installations {
+            installed_evidence.push(core_handled_evidence_reference(
+                core_handler_installation_evidence(installation)))
+            for operation in core_handler_installation_operations(installation) {
+                handlers.push(serialize_handler(
+                    ctx, operation, node_ordinal, dispatch_ordinal))
+                dispatch_ordinal = dispatch_ordinal + 1
+            }
+            // Flow lowering emits one aggregate Initialize after each effect's
+            // ordered handler closures.
+            dispatch_ordinal = dispatch_ordinal + 1
+        }
         return SerializedExpr {
             node_ordinal: node_ordinal, prefix: prefix,
             value: HExpr::HandleExpr {
@@ -2700,9 +2844,8 @@ fn serialize_structured_core_expr(
                     edge_cleanup_statements(
                         ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 0),
                     suffix),
-                handlers: core_expr_handlers(expr).map(fn(handler) {
-                    serialize_handler(ctx, handler)
-                }),
+                handlers: handlers,
+                installed_evidence: installed_evidence,
                 ty: ty, effects: effects, span: span_zero()
             },
             after: []

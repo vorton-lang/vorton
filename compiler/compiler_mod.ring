@@ -5,8 +5,6 @@ use diagnostics::{Severity, DiagnosticContext, CollectingSink, Diagnostic, new_c
 use formatter::{format_human, format_llm}
 use env::{TypeEnv}
 use checker::{check_module}
-use derive::{prepend_builtin_option_derived_impls,
-    validate_derived_impls}
 use codegen_c::{generate_c_project}
 use resolver::{ModuleGraph, ModuleId, module_key, module_prefix,
     build_module_graph}
@@ -39,35 +37,6 @@ struct CompilePhaseResult {
 // Keep builtin derived bodies in the first deterministic physical carrier so
 // project codegen observes the same builtin-before-user order as single-file
 // codegen without per-module synthesis or backend deduplication.
-fn assemble_project_builtin_derived_impls(
-    graph: ModuleGraph, mut module_hirs: Map<Str, HProgram>,
-    module_envs: Map<Str, TypeEnv>
-) {
-    let carrier_key = match graph.topo_order.get(0) {
-        some(key) => key,
-        none => panic("project derived assembly has no physical carrier")
-    }
-    match (module_hirs.get(carrier_key), module_envs.get(carrier_key)) {
-        (some(hir), some(env)) => {
-            let derived_impls = prepend_builtin_option_derived_impls(
-                env, hir.derived_impls)
-            // This call is intentionally after check_module/lower_dicts. The
-            // fixed Option descriptors contain only parameter DictRefs, so no
-            // dictionary construction is skipped at this boundary.
-            validate_derived_impls(env, derived_impls)
-            module_hirs.insert(carrier_key, HProgram {
-                decls: hir.decls,
-                derived_impls: derived_impls,
-                boxed_vars: hir.boxed_vars,
-                static_dicts: hir.static_dicts,
-                extern_type_names: hir.extern_type_names,
-                drop_types: hir.drop_types
-            })
-        },
-        _ => panic("project derived assembly lost physical carrier")
-    }
-}
-
 struct ProjectRingFnCandidate {
     module_key: Str,
     identity: Str,
@@ -284,6 +253,7 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
             // B-145: store each module's type env so the extern-type union below
             // can filter by StructDef.is_extern, avoiding bare-name collisions.
             let mut module_envs: Map<Str, TypeEnv> = map_new()
+            let mut module_order = 0
             for key in graph.topo_order {
                 if check_ok {
                     match module_asts.get(key) {
@@ -306,6 +276,7 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                             }
                             let result = check_module(
                                 ast, key, current_prefix,
+                                module_order,
                                 graph.namespace_plan, dep_exports, sink)
                             if sink.has_errors() {
                                 let mod_file = match graph.modules.get(key) { some(m) => m.file_path, none => "" }
@@ -345,14 +316,12 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                         none => { check_ok = false },
                     }
                 }
+                module_order = module_order + 1
             }
             if check_ok == false {
                 timing.finish_phase(PHASE_TYPE_EFFECT_CHECK_LOWER, check_start)
                 return none
             }
-
-            assemble_project_builtin_derived_impls(
-                graph, module_hirs, module_envs)
 
             // B-144 + B-145: compute per-module extern type names.
             // Step 1: collect the global union of all modules' extern type names

@@ -5,6 +5,11 @@ use types::{Type, Effect, EffectRow, RecordField, StructField,
 use ast::{Span, Pattern, TypeExpr, RecordTypeField, NamedPatternField, span_zero, EffectExpr,
     UseDecl, UseImport}
 use hir::{HExpr, HStmt, HParam, DictRef, ValueBindingKind,
+    HPatternBinding, HPatternPlan, HPatternFieldPlan,
+    h_pattern_wildcard, h_pattern_binding, h_pattern_literal,
+    h_pattern_tuple, h_pattern_struct, h_pattern_variant, h_pattern_or,
+    make_h_pattern_field_plan, h_tuple_projection,
+    h_nominal_projection, h_variant_projection,
     trait_dict_name, trait_bound_param_name,
     BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL, BUILTIN_OPTION, compare_by_first}
 use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink, Severity, Suggestion, make_diag, make_diagnostic}
@@ -27,7 +32,8 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     EffectIdentityFact,
     SourceImplProviderFact,
     DelegateProviderFact, NominalDerivedProviderPlanFact, NamespaceKind}
-use ir_identity::{SymbolRef, SlotRef, symbol_ref_canonical_payload,
+use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
+    symbol_ref_canonical_payload,
     symbol_ref_origin_module_key, symbol_ref_same,
     ImplProviderRef, ImplOwnerRef,
     impl_provider_ref_same, impl_owner_ref_same,
@@ -37,14 +43,30 @@ use ir_identity::{SymbolRef, SlotRef, symbol_ref_canonical_payload,
     handled_effect_ref_same, system_effect_console, system_effect_fs,
     system_effect_process,
     registered_nominal_ref_symbol, registered_trait_ref_symbol,
+    handled_effect_ref_symbol,
     registered_trait_ref_display_name, registered_trait_ref_same,
     make_path_ref, make_synthetic_slot_ref, make_module_body_ref,
     path_owner_for_symbol, path_owner_for_module_body, path_ref_owner,
     path_ref_normalized_child_path, path_role_child,
-    path_role_capture, path_role_synthetic}
+    path_role_capture, path_role_handler,
+    path_role_synthetic, path_role_declaration,
+    path_role_parameter,
+    slot_domain_lexical, make_source_slot_ref}
 use ir_inventory::{ExecutableRef, effect_operation_ref_same,
+    EffectOperationRef, effect_operation_ref_member,
     make_anonymous_executable_ref, executable_ref_is_named,
-    executable_ref_named_symbol, executable_ref_anonymous_path}
+    executable_ref_named_symbol, executable_ref_anonymous_path,
+    executable_ref_same,
+    BinderEntry, BinderKind, make_source_binder_entry, binder_kind_let,
+    binder_kind_for, binder_kind_destructure, binder_kind_source_param,
+    HandledEvidenceRef, HandledEvidenceCapture,
+    make_semantic_evidence_binder, make_handled_evidence_ref,
+    make_handled_evidence_capture,
+    handled_evidence_requirement, handled_evidence_contract_owner,
+    handled_evidence_ordinal,
+    binder_kind_handled_evidence_param,
+    binder_kind_handled_evidence_local,
+    binder_kind_handled_evidence_capture}
 use core_from_hir::{CoreAssemblyRecorder,
     CoreNominalFieldSpec, new_core_assembly_recorder,
     reserve_core_type_fact, define_core_atomic_type_fact,
@@ -63,8 +85,12 @@ use flow_ir::{FlowGenericParamFact,
     flow_type_seed_shareable, make_borrowed_flow_foreign_contract,
     make_nominal_flow_field_identity, make_variant_flow_field_identity,
     make_path_flow_field_identity}
-use legacy_projection::{LegacyTypeFactProjection,
-    make_legacy_type_fact_projection}
+use core_type_source::{CoreTypeSourceFact, make_core_type_source_fact,
+    CoreHandledEvidenceOperationTypeSource,
+    CoreHandledEvidenceTypeSource,
+    make_core_handled_evidence_operation_type_source,
+    make_core_handled_evidence_type_source,
+    core_handled_evidence_source_requirement}
 
 struct RecordedCoreTypeFact {
     ty: Type,
@@ -187,9 +213,16 @@ pub struct InferCtx {
     pub core_module_order: Int,
     recorded_core_types: List<RecordedCoreTypeFact>,
     core_parameter_facts: Map<Int, FlowGenericParamFact>,
-    pub legacy_type_facts: List<LegacyTypeFactProjection>,
+    pub core_type_sources: List<CoreTypeSourceFact>,
+    pub core_handled_evidence_type_sources:
+        List<CoreHandledEvidenceTypeSource>,
     pub executable_stack: List<ExecutableRef>,
     anonymous_child_counters: List<Int>,
+    semantic_site_counters: List<Int>,
+    handled_evidence_bindings_stack: List<List<HandledEvidenceRef>>,
+    handled_evidence_captures_stack: List<List<HandledEvidenceCapture>>,
+    handled_evidence_frames: List<List<HandledEvidenceRef>>,
+    handled_evidence_frame_bases: List<Int>,
     pub env: TypeEnv,
     pub subst: UnionFind,
     pub sink: CollectingSink,
@@ -269,9 +302,15 @@ pub fn new_infer_ctx(
         core_module_order: module_order,
         recorded_core_types: [],
         core_parameter_facts: map_new(),
-        legacy_type_facts: [],
+        core_type_sources: [],
+        core_handled_evidence_type_sources: [],
         executable_stack: [],
         anonymous_child_counters: [],
+        semantic_site_counters: [],
+        handled_evidence_bindings_stack: [],
+        handled_evidence_captures_stack: [],
+        handled_evidence_frames: [],
+        handled_evidence_frame_bases: [],
         env: new_type_env(),
         subst: empty_subst(),
         sink: sink,
@@ -1381,14 +1420,34 @@ pub fn current_impl_check_site(ctx: InferCtx) -> (Str, Int) {
 }
 
 pub fn enter_executable_owner(mut ctx: InferCtx, value: ExecutableRef) {
+    ctx.handled_evidence_frame_bases.push(
+        ctx.handled_evidence_frames.len())
     ctx.executable_stack.push(value)
     ctx.anonymous_child_counters.push(0)
+    ctx.semantic_site_counters.push(0)
+    ctx.handled_evidence_bindings_stack.push([])
+    ctx.handled_evidence_captures_stack.push([])
+    ctx.handled_evidence_frames.push([])
 }
 
 pub fn exit_executable_owner(mut ctx: InferCtx) {
     if ctx.executable_stack.pop().is_none() ||
        ctx.anonymous_child_counters.pop().is_none() {
         panic("executable identity: owner stack underflow")
+    }
+    if ctx.semantic_site_counters.pop().is_none() {
+        panic("semantic identity: site stack underflow")
+    }
+    if ctx.handled_evidence_bindings_stack.pop().is_none() ||
+       ctx.handled_evidence_captures_stack.pop().is_none() {
+        panic("handled evidence: executable stack underflow")
+    }
+    let frame_base = match ctx.handled_evidence_frame_bases.pop() {
+        some(value) => value,
+        none => panic("handled evidence: frame base underflow")
+    }
+    while ctx.handled_evidence_frames.len() > frame_base {
+        ctx.handled_evidence_frames.pop()
     }
 }
 
@@ -1397,6 +1456,208 @@ pub fn current_executable_owner(ctx: InferCtx) -> ExecutableRef {
         some(value) => value,
         none => panic("executable identity: no current body owner")
     }
+}
+
+fn copy_handled_evidence_refs(
+    values: List<HandledEvidenceRef>
+) -> List<HandledEvidenceRef> {
+    let mut result: List<HandledEvidenceRef> = []
+    for value in values { result.push(value) }
+    result
+}
+
+fn copy_handled_evidence_captures(
+    values: List<HandledEvidenceCapture>
+) -> List<HandledEvidenceCapture> {
+    let mut result: List<HandledEvidenceCapture> = []
+    for value in values { result.push(value) }
+    result
+}
+
+pub fn current_handled_evidence_bindings(
+    ctx: InferCtx
+) -> List<HandledEvidenceRef> {
+    match ctx.handled_evidence_bindings_stack.last() {
+        some(values) => copy_handled_evidence_refs(values),
+        none => panic("handled evidence: no current executable bindings")
+    }
+}
+
+pub fn current_handled_evidence_captures(
+    ctx: InferCtx
+) -> List<HandledEvidenceCapture> {
+    match ctx.handled_evidence_captures_stack.last() {
+        some(values) => copy_handled_evidence_captures(values),
+        none => panic("handled evidence: no current executable captures")
+    }
+}
+
+fn handled_evidence_site(
+    executable: ExecutableRef, label: Str, ordinal: Int,
+    role: PathRole
+) -> PathRef {
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("${label}:${ordinal.to_str()}")
+    make_path_ref(owner, child_path, role)
+}
+
+fn make_handled_evidence_for_executable(
+    requirement: HandledEffectRef, executable: ExecutableRef,
+    kind: BinderKind, label: Str, path_ordinal: Int,
+    contract_ordinal: Int,
+    role: PathRole
+) -> HandledEvidenceRef {
+    let site = handled_evidence_site(
+        executable, label, path_ordinal, role)
+    let binding = make_semantic_evidence_binder(
+        make_synthetic_slot_ref(site), executable, kind, site)
+    make_handled_evidence_ref(
+        requirement, binding, executable, contract_ordinal)
+}
+
+fn make_current_handled_evidence(
+    ctx: InferCtx, requirement: HandledEffectRef,
+    kind: BinderKind, label: Str, path_ordinal: Int,
+    contract_ordinal: Int, role: PathRole
+) -> HandledEvidenceRef {
+    make_handled_evidence_for_executable(
+        requirement, current_executable_owner(ctx), kind, label,
+        path_ordinal, contract_ordinal, role)
+}
+
+fn append_current_handled_evidence_inventory(
+    mut ctx: InferCtx, value: HandledEvidenceRef
+) {
+    let stack_index = ctx.handled_evidence_bindings_stack.len() - 1
+    let mut bindings = ctx.handled_evidence_bindings_stack.get(
+        stack_index).unwrap()
+    bindings.push(value)
+    ctx.handled_evidence_bindings_stack.set(stack_index, bindings)
+}
+
+fn append_current_handled_evidence_binding(
+    mut ctx: InferCtx, value: HandledEvidenceRef
+) {
+    append_current_handled_evidence_inventory(ctx, value)
+    let frame_index = ctx.handled_evidence_frame_bases.last().unwrap()
+    let mut frame = ctx.handled_evidence_frames.get(frame_index).unwrap()
+    frame.push(value)
+    ctx.handled_evidence_frames.set(frame_index, frame)
+}
+
+fn capture_outer_handled_evidence(
+    mut ctx: InferCtx, source: HandledEvidenceRef
+) -> HandledEvidenceRef {
+    let capture_index = ctx.handled_evidence_captures_stack.len() - 1
+    let mut captures = ctx.handled_evidence_captures_stack.get(
+        capture_index).unwrap()
+    let path_ordinal = captures.len()
+    let contract_ordinal = current_handled_evidence_bindings(ctx).len()
+    let target = make_current_handled_evidence(
+        ctx, handled_evidence_requirement(source),
+        binder_kind_handled_evidence_capture(),
+        "handled-evidence-capture", path_ordinal, contract_ordinal,
+        path_role_capture())
+    captures.push(make_handled_evidence_capture(
+        handled_evidence_requirement(source), source, target))
+    ctx.handled_evidence_captures_stack.set(capture_index, captures)
+    append_current_handled_evidence_inventory(ctx, target)
+    let frame_index = ctx.handled_evidence_frame_bases.last().unwrap()
+    let mut frame = ctx.handled_evidence_frames.get(frame_index).unwrap()
+    frame.push(target)
+    ctx.handled_evidence_frames.set(frame_index, frame)
+    target
+}
+
+pub fn resolve_handled_evidence(
+    mut ctx: InferCtx, requirement: HandledEffectRef
+) -> HandledEvidenceRef {
+    let current = current_executable_owner(ctx)
+    let mut frame_index = ctx.handled_evidence_frames.len() - 1
+    while frame_index >= 0 {
+        let frame = ctx.handled_evidence_frames.get(frame_index).unwrap()
+        let mut item_index = frame.len() - 1
+        while item_index >= 0 {
+            let candidate = frame.get(item_index).unwrap()
+            if handled_effect_ref_same(
+                    handled_evidence_requirement(candidate), requirement) {
+                if executable_ref_same(
+                        handled_evidence_contract_owner(candidate), current) {
+                    return candidate
+                }
+                return capture_outer_handled_evidence(ctx, candidate)
+            }
+            item_index = item_index - 1
+        }
+        frame_index = frame_index - 1
+    }
+    if ctx.executable_stack.len() > 1 {
+        let parent_stack_index = ctx.executable_stack.len() - 2
+        let parent = ctx.executable_stack.get(parent_stack_index).unwrap()
+        let mut parent_bindings = ctx.handled_evidence_bindings_stack.get(
+            parent_stack_index).unwrap()
+        let parent_ordinal = parent_bindings.len()
+        let source = make_handled_evidence_for_executable(
+            requirement, parent,
+            binder_kind_handled_evidence_param(),
+            "handled-evidence-param", parent_ordinal, parent_ordinal,
+            path_role_parameter())
+        parent_bindings.push(source)
+        ctx.handled_evidence_bindings_stack.set(
+            parent_stack_index, parent_bindings)
+        let parent_frame_index = ctx.handled_evidence_frame_bases.get(
+            parent_stack_index).unwrap()
+        let mut parent_frame = ctx.handled_evidence_frames.get(
+            parent_frame_index).unwrap()
+        parent_frame.push(source)
+        ctx.handled_evidence_frames.set(parent_frame_index, parent_frame)
+        return capture_outer_handled_evidence(ctx, source)
+    }
+    let ordinal = current_handled_evidence_bindings(ctx).len()
+    let binding = make_current_handled_evidence(
+        ctx, requirement, binder_kind_handled_evidence_param(),
+        "handled-evidence-param", ordinal, ordinal,
+        path_role_parameter())
+    append_current_handled_evidence_binding(ctx, binding)
+    binding
+}
+
+pub fn install_handled_evidence(
+    mut ctx: InferCtx, requirements: List<HandledEffectRef>
+) -> List<HandledEvidenceRef> {
+    let mut installed: List<HandledEvidenceRef> = []
+    let counter_index = ctx.semantic_site_counters.len() - 1
+    for requirement in requirements {
+        if installed.any(fn(existing) {
+                handled_effect_ref_same(
+                    handled_evidence_requirement(existing), requirement)
+            }) {
+            continue
+        }
+        let ordinal = ctx.semantic_site_counters.get(counter_index).unwrap()
+        ctx.semantic_site_counters.set(counter_index, ordinal + 1)
+        installed.push(make_current_handled_evidence(
+            ctx, requirement, binder_kind_handled_evidence_local(),
+            "handled-evidence-local", ordinal, ordinal,
+            path_role_handler()))
+    }
+    ctx.handled_evidence_frames.push(
+        copy_handled_evidence_refs(installed))
+    installed
+}
+
+pub fn uninstall_handled_evidence(mut ctx: InferCtx) {
+    let base = ctx.handled_evidence_frame_bases.last().unwrap()
+    if ctx.handled_evidence_frames.len() <= base + 1 {
+        panic("handled evidence: no installed frame")
+    }
+    ctx.handled_evidence_frames.pop()
 }
 
 pub fn fresh_child_executable(mut ctx: InferCtx, role: Str) -> ExecutableRef {
@@ -1436,6 +1697,87 @@ pub fn executable_capture_slot(
         owner, child_path, path_role_capture()))
 }
 
+fn semantic_declaration_binder(
+    ctx: InferCtx, def_id: Int, kind: BinderKind, label: Str
+) -> BinderEntry {
+    if label.len() == 0 {
+        panic("semantic binder: empty role label")
+    }
+    let executable = current_executable_owner(ctx)
+    let slot = make_source_slot_ref(
+        current_identity_file_key(ctx), slot_domain_lexical(), def_id)
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("semantic:${label}:${def_id.to_str()}")
+    let site = make_path_ref(owner, child_path, path_role_declaration())
+    make_source_binder_entry(slot, executable, kind, site)
+}
+
+pub fn fresh_semantic_let_binder(
+    mut ctx: InferCtx, label: Str
+) -> BinderEntry {
+    let def_id = ctx.env.fresh_def_id()
+    semantic_declaration_binder(ctx, def_id, binder_kind_let(), label)
+}
+
+pub fn semantic_for_binder(
+    ctx: InferCtx, def_id: Int, label: Str
+) -> BinderEntry {
+    semantic_declaration_binder(ctx, def_id, binder_kind_for(), label)
+}
+
+pub fn semantic_destructure_binder(
+    ctx: InferCtx, def_id: Int, label: Str
+) -> BinderEntry {
+    semantic_declaration_binder(
+        ctx, def_id, binder_kind_destructure(), label)
+}
+
+pub fn semantic_parameter_binder(
+    ctx: InferCtx, executable: ExecutableRef,
+    def_id: Int, index: Int, label: Str
+) -> BinderEntry {
+    if index < 0 || label.len() == 0 {
+        panic("semantic parameter binder: invalid index/label")
+    }
+    let slot = make_source_slot_ref(
+        current_identity_file_key(ctx), slot_domain_lexical(), def_id)
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("parameter:${label}:${index.to_str()}")
+    make_source_binder_entry(
+        slot, executable, binder_kind_source_param(),
+        make_path_ref(owner, child_path, path_role_parameter()))
+}
+
+pub fn fresh_semantic_path(mut ctx: InferCtx, label: Str) -> PathRef {
+    if label.len() == 0 { panic("semantic identity: empty site label") }
+    let executable = current_executable_owner(ctx)
+    let counter_index = ctx.semantic_site_counters.len() - 1
+    let ordinal = ctx.semantic_site_counters.get(
+        counter_index).unwrap_or(0)
+    ctx.semantic_site_counters.set(counter_index, ordinal + 1)
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("semantic:${label}:${ordinal.to_str()}")
+    make_path_ref(owner, child_path, path_role_synthetic())
+}
+
 pub fn record_core_parameter_fact(
     mut ctx: InferCtx, type_var_id: Int, owner: SymbolRef,
     index: Int, arity: Int, bounds: List<SymbolRef>
@@ -1468,7 +1810,7 @@ pub fn record_core_type_fact(mut ctx: InferCtx, ty: Type) -> CoreTypeFactRef {
     }
     let fact = reserve_core_type_fact(ctx.core_recorder)
     ctx.recorded_core_types.push(RecordedCoreTypeFact { ty: ty, fact: fact })
-    ctx.legacy_type_facts.push(make_legacy_type_fact_projection(fact, ty))
+    ctx.core_type_sources.push(make_core_type_source_fact(ty, fact))
     match ty {
         Type::IntType => define_core_atomic_type_fact(
             ctx.core_recorder, fact, flow_type_kind_int()),
@@ -1604,6 +1946,54 @@ pub fn record_core_type_fact(mut ctx: InferCtx, ty: Type) -> CoreTypeFactRef {
             panic("Core type producer: non-canonical type crossed Core closure")
     }
     fact
+}
+
+pub fn record_handled_evidence_type_source(
+    mut ctx: InferCtx, def: EffectDef
+) {
+    let requirement = match def.handled_ref {
+        some(value) => value,
+        none => return
+    }
+    for existing in ctx.core_handled_evidence_type_sources {
+        if handled_effect_ref_same(
+                core_handled_evidence_source_requirement(existing),
+                requirement) {
+            return
+        }
+    }
+    let aggregate_fact = reserve_core_type_fact(ctx.core_recorder)
+    let effect_symbol = handled_effect_ref_symbol(requirement)
+    let mut operations: List<CoreHandledEvidenceOperationTypeSource> = []
+    let mut fields: List<CoreNominalFieldSpec> = []
+    let mut index = 0
+    for op in def.ops {
+        let operation = match op.operation_ref {
+            some(value) => value,
+            none => panic(
+                "Core type producer: handled effect op lacks exact identity")
+        }
+        let signature = Type::FnType {
+            params: op.params, return_type: op.return_type,
+            effects: EMPTY_ROW
+        }
+        let signature_fact = record_core_type_fact(ctx, signature)
+        operations.push(make_core_handled_evidence_operation_type_source(
+            operation, signature_fact))
+        let field_path = make_path_ref(
+            path_owner_for_symbol(effect_symbol),
+            ["handled-evidence-op:${index.to_str()}"],
+            path_role_child())
+        fields.push(make_core_nominal_field_spec(
+            make_path_flow_field_identity(field_path), signature_fact))
+        index = index + 1
+    }
+    define_core_record_type_fact(
+        ctx.core_recorder, aggregate_fact, fields,
+        flow_type_seed_shareable(), none, [], [])
+    ctx.core_handled_evidence_type_sources.push(
+        make_core_handled_evidence_type_source(
+            requirement, aggregate_fact, operations))
 }
 
 pub fn value_binding_kind(ctx: InferCtx, def_id: Int?) -> ValueBindingKind {
@@ -1752,9 +2142,14 @@ fn resolve_named_impl_dict_evidence(
                 }
             }
             if has_pending { return DictEvidenceResolution::Pending }
+            let trait_ref = match env.trait_reg.traits.get(trait_name) {
+                some(definition) => registered_trait_ref_symbol(
+                    definition.owner_ref),
+                none => panic("dictionary evidence: exact trait owner is absent")
+            }
             DictEvidenceResolution::Resolved { dict_ref: DictRef::Wrapped {
                 dict: dict_name,
-                trait_name: trait_name,
+                trait_ref: trait_ref,
                 inner_dicts: inner_dicts
             } }
         }
@@ -2928,6 +3323,191 @@ pub fn bind_pattern(mut ctx: InferCtx, pattern: Pattern, expected_type: Type, su
                 alternative_index = alternative_index + 1
             }
             s
+        }
+    }
+}
+
+pub fn exact_pattern_plan(
+    ctx: InferCtx, pattern: Pattern, expected_type: Type, subst: UnionFind
+) -> HPatternPlan? {
+    let resolved = apply_subst(subst, expected_type)
+    match pattern {
+        Pattern::Wildcard { .. } => some(h_pattern_wildcard()),
+        Pattern::Literal { .. } => some(h_pattern_literal()),
+        Pattern::Binding { name, .. } => {
+            let scheme = match ctx.env.lookup(name) {
+                some(value) => value,
+                none => return none
+            }
+            let def_id = match scheme.def_id {
+                some(id) => id,
+                none => return none
+            }
+            some(h_pattern_binding(HPatternBinding {
+                name: name, def_id: def_id,
+                slot: make_source_slot_ref(
+                    current_identity_file_key(ctx),
+                    slot_domain_lexical(), def_id),
+                ty: apply_subst(subst, scheme.ty)
+            }))
+        },
+        Pattern::TuplePattern { elements, .. } => {
+            let type_elements = match resolved {
+                Type::TupleType { elements: values } => values,
+                _ => return none
+            }
+            if elements.len() != type_elements.len() { return none }
+            let mut plans: List<HPatternPlan> = []
+            let mut index = 0
+            while index < elements.len() {
+                match exact_pattern_plan(
+                        ctx, elements.get(index).unwrap(),
+                        type_elements.get(index).unwrap(), subst) {
+                    some(plan) => plans.push(plan),
+                    none => return none
+                }
+                index = index + 1
+            }
+            some(h_pattern_tuple(plans))
+        },
+        Pattern::Constructor { name, fields, .. } => {
+            let enum_name = match resolved {
+                Type::EnumType { name: value, .. } => value,
+                _ => return none
+            }
+            let enum_def = match ctx.env.types.enums.get(enum_name) {
+                some(value) => value,
+                none => return none
+            }
+            let variant_index = match enum_def.variant_index.get(name) {
+                some(value) => value,
+                none => return none
+            }
+            let variant = match enum_def.variants.get(variant_index) {
+                some(value) => value,
+                none => return none
+            }
+            let variant_ref = match enum_def.variant_refs.get(variant_index) {
+                some(value) => value,
+                none => return none
+            }
+            let field_refs = match enum_def.variant_field_refs.get(variant_index) {
+                some(value) => value,
+                none => return none
+            }
+            if fields.len() != variant.fields.len() ||
+               fields.len() != field_refs.len() { return none }
+            let inst_map = build_instantiation_map(
+                enum_def.type_param_vars, resolved)
+            let mut plans: List<HPatternFieldPlan> = []
+            let mut index = 0
+            while index < fields.len() {
+                let child = match exact_pattern_plan(
+                        ctx, fields.get(index).unwrap(),
+                        apply_subst_map(
+                            inst_map, variant.fields.get(index).unwrap()),
+                        subst) {
+                    some(value) => value,
+                    none => return none
+                }
+                plans.push(make_h_pattern_field_plan(
+                    h_variant_projection(field_refs.get(index).unwrap()),
+                    child))
+                index = index + 1
+            }
+            some(h_pattern_variant(variant_ref, plans))
+        },
+        Pattern::NamedConstructor { name, fields, .. } => match resolved {
+            Type::EnumType { name: enum_name, .. } => {
+                let enum_def = match ctx.env.types.enums.get(enum_name) {
+                    some(value) => value,
+                    none => return none
+                }
+                let variant_index = match enum_def.variant_index.get(name) {
+                    some(value) => value,
+                    none => return none
+                }
+                let variant = match enum_def.variants.get(variant_index) {
+                    some(value) => value,
+                    none => return none
+                }
+                let variant_ref = match enum_def.variant_refs.get(variant_index) {
+                    some(value) => value,
+                    none => return none
+                }
+                let field_refs = match enum_def.variant_field_refs.get(variant_index) {
+                    some(value) => value,
+                    none => return none
+                }
+                let names = match variant.field_names {
+                    some(values) => values,
+                    none => return none
+                }
+                let inst_map = build_instantiation_map(
+                    enum_def.type_param_vars, resolved)
+                let mut plans: List<HPatternFieldPlan> = []
+                for field in fields {
+                    let index = match names.index_of(field.name) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    let child_type = match variant.fields.get(index) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    let field_ref = match field_refs.get(index) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    let child = match exact_pattern_plan(
+                            ctx, field.pattern,
+                            apply_subst_map(inst_map, child_type), subst) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    plans.push(make_h_pattern_field_plan(
+                        h_variant_projection(field_ref), child))
+                }
+                some(h_pattern_variant(variant_ref, plans))
+            },
+            Type::StructType { name: struct_name, .. } => {
+                let struct_def = match ctx.env.types.structs.get(struct_name) {
+                    some(value) => value,
+                    none => return none
+                }
+                let inst_map = build_instantiation_map(
+                    struct_def.type_param_vars, resolved)
+                let mut plans: List<HPatternFieldPlan> = []
+                for field in fields {
+                    let exact = match struct_def.fields.find(fn(item) {
+                        item.name == field.name
+                    }) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    let child = match exact_pattern_plan(
+                            ctx, field.pattern,
+                            apply_subst_map(inst_map, exact.ty), subst) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    plans.push(make_h_pattern_field_plan(
+                        h_nominal_projection(exact.field_ref),
+                        child))
+                }
+                some(h_pattern_struct(struct_def.owner_ref, plans))
+            },
+            _ => none
+        },
+        Pattern::OrPattern { patterns, .. } => {
+            let mut plans: List<HPatternPlan> = []
+            for alternative in patterns {
+                match exact_pattern_plan(ctx, alternative, resolved, subst) {
+                    some(plan) => plans.push(plan),
+                    none => return none
+                }
+            }
+            if plans.len() < 2 { none } else { some(h_pattern_or(plans)) }
         }
     }
 }

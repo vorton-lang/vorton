@@ -11,6 +11,7 @@
 use ir_identity::{
     SymbolRef, PathRef, PathOwnerRef, SlotRef,
     NominalFieldRef, VariantRef, VariantFieldRef, IntrinsicRef,
+    HandledEffectRef, handled_effect_ref_same, handled_effect_ref_symbol,
     symbol_ref_same, symbol_ref_origin_module_key,
     symbol_ref_namespace_kind, symbol_ref_canonical_payload,
     symbol_ref_declaration_site_path,
@@ -44,7 +45,11 @@ use ir_inventory::{
     executable_ref_origin_module_key,
     EffectOperationRef, effect_operation_ref_member,
     effect_operation_ref_callable,
-    effect_operation_ref_same,
+    effect_operation_ref_same, effect_operation_ref_effect,
+    effect_operation_ref_source_index,
+    HandledEvidenceRef, handled_evidence_requirement,
+    handled_evidence_slot, handled_evidence_contract_owner,
+    handled_evidence_ordinal, handled_evidence_ref_same,
     BinderManifest, BinderEntry,
     binder_manifest_owner, binder_manifest_entries,
     binder_entry_slot, make_binder_manifest
@@ -1844,6 +1849,88 @@ pub fn flow_callable_mode_same(
     left: FlowCallableMode, right: FlowCallableMode
 ) -> Bool { left.tag == right.tag }
 
+pub struct FlowHandledEvidenceBinding {
+    reference: HandledEvidenceRef,
+    aggregate_type: FlowTypeRef
+}
+
+pub fn make_flow_handled_evidence_binding(
+    reference: HandledEvidenceRef, aggregate_type: FlowTypeRef
+) -> FlowHandledEvidenceBinding {
+    if flow_type_ref_index(aggregate_type) < 0 {
+        panic("FlowIR: handled evidence has invalid aggregate type")
+    }
+    FlowHandledEvidenceBinding {
+        reference: reference, aggregate_type: aggregate_type
+    }
+}
+pub fn flow_handled_evidence_reference(
+    value: FlowHandledEvidenceBinding
+) -> HandledEvidenceRef { value.reference }
+pub fn flow_handled_evidence_requirement(
+    value: FlowHandledEvidenceBinding
+) -> HandledEffectRef { handled_evidence_requirement(value.reference) }
+pub fn flow_handled_evidence_slot(
+    value: FlowHandledEvidenceBinding
+) -> SlotRef { handled_evidence_slot(value.reference) }
+pub fn flow_handled_evidence_owner(
+    value: FlowHandledEvidenceBinding
+) -> ExecutableRef { handled_evidence_contract_owner(value.reference) }
+pub fn flow_handled_evidence_ordinal(
+    value: FlowHandledEvidenceBinding
+) -> Int { handled_evidence_ordinal(value.reference) }
+pub fn flow_handled_evidence_type(
+    value: FlowHandledEvidenceBinding
+) -> FlowTypeRef { value.aggregate_type }
+fn copy_flow_handled_evidence_bindings(
+    values: List<FlowHandledEvidenceBinding>
+) -> List<FlowHandledEvidenceBinding> {
+    values.map(fn(value) {
+        make_flow_handled_evidence_binding(
+            value.reference, value.aggregate_type)
+    })
+}
+
+pub struct FlowHandledEvidenceUse {
+    reference: HandledEvidenceRef,
+    aggregate_type: FlowTypeRef
+}
+pub fn make_flow_handled_evidence_use(
+    reference: HandledEvidenceRef, aggregate_type: FlowTypeRef
+) -> FlowHandledEvidenceUse {
+    if flow_type_ref_index(aggregate_type) < 0 {
+        panic("FlowIR: handled evidence use has invalid aggregate type")
+    }
+    FlowHandledEvidenceUse {
+        reference: reference, aggregate_type: aggregate_type
+    }
+}
+pub fn flow_handled_use_reference(
+    value: FlowHandledEvidenceUse
+) -> HandledEvidenceRef { value.reference }
+pub fn flow_handled_use_requirement(
+    value: FlowHandledEvidenceUse
+) -> HandledEffectRef { handled_evidence_requirement(value.reference) }
+pub fn flow_handled_use_slot(value: FlowHandledEvidenceUse) -> SlotRef {
+    handled_evidence_slot(value.reference)
+}
+pub fn flow_handled_use_owner(value: FlowHandledEvidenceUse) -> ExecutableRef {
+    handled_evidence_contract_owner(value.reference)
+}
+pub fn flow_handled_use_ordinal(value: FlowHandledEvidenceUse) -> Int {
+    handled_evidence_ordinal(value.reference)
+}
+pub fn flow_handled_use_type(value: FlowHandledEvidenceUse) -> FlowTypeRef {
+    value.aggregate_type
+}
+fn copy_flow_handled_evidence_uses(
+    values: List<FlowHandledEvidenceUse>
+) -> List<FlowHandledEvidenceUse> {
+    values.map(fn(value) {
+        make_flow_handled_evidence_use(value.reference, value.aggregate_type)
+    })
+}
+
 pub struct FlowCallable {
     reference: ExecutableRef,
     origin: OriginRef,
@@ -1852,7 +1939,7 @@ pub struct FlowCallable {
     result_type: FlowTypeRef,
     mode: FlowCallableMode,
     semantic_contract: FlowCallContract,
-    evidence_requirements: List<SymbolRef>,
+    handled_evidence: List<FlowHandledEvidenceBinding>,
     call_edges: List<FlowCallEdge>
 }
 
@@ -1862,7 +1949,7 @@ pub fn make_flow_callable(
     result_type: FlowTypeRef,
     mode: FlowCallableMode,
     semantic_contract: FlowCallContract,
-    evidence_requirements: List<SymbolRef>
+    handled_evidence: List<FlowHandledEvidenceBinding>
 ) -> FlowCallable {
     if parameter_types.len() != semantic_contract.parameter_roles.len() ||
        parameter_types.len() != semantic_contract.parameter_types.len() ||
@@ -1897,6 +1984,30 @@ pub fn make_flow_callable(
         }
         left_index = left_index + 1
     }
+    left_index = 0
+    while left_index < handled_evidence.len() {
+        let left = handled_evidence.get(left_index).unwrap()
+        if flow_handled_evidence_ordinal(left) != left_index ||
+           !executable_ref_same(
+                flow_handled_evidence_owner(left), reference) {
+            panic("FlowIR: callable handled evidence owner/order differs")
+        }
+        let mut right_index = left_index + 1
+        while right_index < handled_evidence.len() {
+            let right = handled_evidence.get(right_index).unwrap()
+            if handled_effect_ref_same(
+                    flow_handled_evidence_requirement(left),
+                    flow_handled_evidence_requirement(right)) ||
+               slot_ref_same(
+                    flow_handled_evidence_slot(left),
+                    flow_handled_evidence_slot(right)) ||
+               handled_evidence_ref_same(left.reference, right.reference) {
+                panic("FlowIR: callable repeats handled evidence")
+            }
+            right_index = right_index + 1
+        }
+        left_index = left_index + 1
+    }
     FlowCallable {
         reference: reference, origin: origin,
         parameter_types: copy_type_refs(parameter_types),
@@ -1904,7 +2015,8 @@ pub fn make_flow_callable(
         result_type: result_type,
         mode: flow_callable_mode_from_tag(mode.tag),
         semantic_contract: copy_call_contract(semantic_contract),
-        evidence_requirements: copy_symbols(evidence_requirements),
+        handled_evidence:
+            copy_flow_handled_evidence_bindings(handled_evidence),
         call_edges: []
     }
 }
@@ -1929,8 +2041,10 @@ pub fn flow_callable_parameter_role_lower_bounds(
 pub fn flow_callable_semantic_contract(value: FlowCallable) -> FlowCallContract {
     copy_call_contract(value.semantic_contract)
 }
-pub fn flow_callable_evidence_requirements(value: FlowCallable) -> List<SymbolRef> {
-    copy_symbols(value.evidence_requirements)
+pub fn flow_callable_handled_evidence(
+    value: FlowCallable
+) -> List<FlowHandledEvidenceBinding> {
+    copy_flow_handled_evidence_bindings(value.handled_evidence)
 }
 
 // ============================================================
@@ -2399,7 +2513,9 @@ enum FlowOperationValue {
     IntrinsicOperationValue(IntrinsicRef),
     TupleAggregateOperationValue(Int),
     RecordAggregateOperationValue(Int),
-    ClosureOperationValue(ExecutableRef),
+    ClosureOperationValue {
+        executable: ExecutableRef, capture_targets: List<SlotRef>
+    },
     CallableValueOperationValue(ExecutableRef)
 }
 
@@ -2530,10 +2646,30 @@ pub fn make_flow_record_aggregate_contract(
 }
 pub fn make_flow_closure_contract(
     executable: ExecutableRef, input_types: List<FlowTypeRef>,
-    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef
+    input_roles: List<FlowSemanticRole>,
+    capture_targets: List<SlotRef>, target_type: FlowTypeRef
 ) -> FlowOperationContract {
+    if capture_targets.len() != input_types.len() {
+        panic("FlowIR: closure capture source/target arity differs")
+    }
+    let mut left_index = 0
+    while left_index < capture_targets.len() {
+        let mut right_index = left_index + 1
+        while right_index < capture_targets.len() {
+            if slot_ref_same(
+                    capture_targets.get(left_index).unwrap(),
+                    capture_targets.get(right_index).unwrap()) {
+                panic("FlowIR: closure repeats a capture target")
+            }
+            right_index = right_index + 1
+        }
+        left_index = left_index + 1
+    }
     make_flow_operation_contract(
-        FlowOperationValue::ClosureOperationValue(executable),
+        FlowOperationValue::ClosureOperationValue {
+            executable: executable,
+            capture_targets: copy_slot_refs(capture_targets)
+        },
         input_types, input_roles, target_type,
         flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
@@ -2559,7 +2695,7 @@ pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
         FlowOperationValue::IntrinsicOperationValue(_) => 8,
         FlowOperationValue::TupleAggregateOperationValue(_) => 9,
         FlowOperationValue::RecordAggregateOperationValue(_) => 10,
-        FlowOperationValue::ClosureOperationValue(_) => 11,
+        FlowOperationValue::ClosureOperationValue { .. } => 11,
         FlowOperationValue::CallableValueOperationValue(_) => 12
     }
 }
@@ -2601,6 +2737,24 @@ pub fn flow_operation_contract_intrinsic(
     match value.value {
         FlowOperationValue::IntrinsicOperationValue(intrinsic) => intrinsic,
         _ => panic("FlowIR: operation is not intrinsic")
+    }
+}
+pub fn flow_operation_contract_closure_executable(
+    value: FlowOperationContract
+) -> ExecutableRef {
+    match value.value {
+        FlowOperationValue::ClosureOperationValue { executable, .. } =>
+            executable,
+        _ => panic("FlowIR: operation is not a closure")
+    }
+}
+pub fn flow_operation_contract_capture_targets(
+    value: FlowOperationContract
+) -> List<SlotRef> {
+    match value.value {
+        FlowOperationValue::ClosureOperationValue { capture_targets, .. } =>
+            copy_slot_refs(capture_targets),
+        _ => panic("FlowIR: operation is not a closure")
     }
 }
 pub fn flow_operation_contract_int_literal(value: FlowOperationContract) -> Int {
@@ -2876,7 +3030,9 @@ enum FlowInstructionValue {
     AssignValue { rhs_temp: SlotRef, target: FlowPlaceRef },
     CallValue {
         target: FlowCallTarget, arguments: List<SlotRef>,
-        evidence: List<FlowEvidenceRef>, result: SlotRef?
+        evidence: List<FlowEvidenceRef>,
+        handled_evidence: List<FlowHandledEvidenceUse>,
+        result: SlotRef?
     },
     ProjectValue {
         contract: FlowProjectionContract,
@@ -3000,14 +3156,18 @@ pub fn make_flow_assign(
 pub fn make_flow_call(
     reference: FlowInstructionRef, origin: OriginRef,
     target: FlowCallTarget, arguments: List<SlotRef>,
-    evidence: List<FlowEvidenceRef>, result: SlotRef?
+    evidence: List<FlowEvidenceRef>,
+    handled_evidence: List<FlowHandledEvidenceUse>, result: SlotRef?
 ) -> FlowInstruction {
     FlowInstruction {
         reference: reference, origin: origin,
         value: FlowInstructionValue::CallValue {
             target: copy_call_target(target),
             arguments: copy_slot_refs(arguments),
-            evidence: copy_flow_evidence(evidence), result: result
+            evidence: copy_flow_evidence(evidence),
+            handled_evidence:
+                copy_flow_handled_evidence_uses(handled_evidence),
+            result: result
         }
     }
 }
@@ -3203,6 +3363,15 @@ pub fn flow_call_evidence(value: FlowInstruction) -> List<FlowEvidenceRef> {
     match value.value {
         FlowInstructionValue::CallValue { evidence, .. } =>
             copy_flow_evidence(evidence),
+        _ => panic("FlowIR: instruction is not Call")
+    }
+}
+pub fn flow_call_handled_evidence(
+    value: FlowInstruction
+) -> List<FlowHandledEvidenceUse> {
+    match value.value {
+        FlowInstructionValue::CallValue { handled_evidence, .. } =>
+            copy_flow_handled_evidence_uses(handled_evidence),
         _ => panic("FlowIR: instruction is not Call")
     }
 }
@@ -3425,12 +3594,20 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
                 }
             }
         },
-        FlowInstructionValue::CallValue { target, arguments, .. } => {
+        FlowInstructionValue::CallValue {
+            target, arguments, handled_evidence, ..
+        } => {
             let mut index = 0
             while index < arguments.len() {
                 result.push(make_instruction_operand(
                     value, index, arguments.get(index).unwrap(),
                     target.contract.parameter_roles.get(index).unwrap()))
+                index = index + 1
+            }
+            for evidence in handled_evidence {
+                result.push(make_instruction_operand(
+                    value, index, flow_handled_use_slot(evidence),
+                    flow_semantic_role_read()))
                 index = index + 1
             }
         },
@@ -3744,12 +3921,15 @@ pub fn flow_successor_entered_scopes(
 
 pub struct FlowHandlerBinding {
     operation: EffectOperationRef,
-    handler: ExecutableRef
+    handler: ExecutableRef,
+    closure: SlotRef
 }
 pub fn make_flow_handler_binding(
-    operation: EffectOperationRef, handler: ExecutableRef
+    operation: EffectOperationRef, handler: ExecutableRef, closure: SlotRef
 ) -> FlowHandlerBinding {
-    FlowHandlerBinding { operation: operation, handler: handler }
+    FlowHandlerBinding {
+        operation: operation, handler: handler, closure: closure
+    }
 }
 pub fn flow_handler_binding_operation(
     value: FlowHandlerBinding
@@ -3757,10 +3937,56 @@ pub fn flow_handler_binding_operation(
 pub fn flow_handler_binding_handler(value: FlowHandlerBinding) -> ExecutableRef {
     value.handler
 }
+pub fn flow_handler_binding_closure(value: FlowHandlerBinding) -> SlotRef {
+    value.closure
+}
 fn copy_handler_bindings(values: List<FlowHandlerBinding>) -> List<FlowHandlerBinding> {
     let mut result: List<FlowHandlerBinding> = []
-    for value in values { result.push(value) }
+    for value in values {
+        result.push(make_flow_handler_binding(
+            value.operation, value.handler, value.closure))
+    }
     result
+}
+
+pub struct FlowHandlerInstallation {
+    evidence: FlowHandledEvidenceBinding,
+    handlers: List<FlowHandlerBinding>
+}
+pub fn make_flow_handler_installation(
+    evidence: FlowHandledEvidenceBinding,
+    handlers: List<FlowHandlerBinding>
+) -> FlowHandlerInstallation {
+    if handlers.len() == 0 {
+        panic("FlowIR: handled installation has no handlers")
+    }
+    let requirement = flow_handled_evidence_requirement(evidence)
+    let mut index = 0
+    while index < handlers.len() {
+        let handler = handlers.get(index).unwrap()
+        if !handled_effect_ref_same(
+                effect_operation_ref_effect(handler.operation), requirement) ||
+           effect_operation_ref_source_index(handler.operation) != index {
+            panic("FlowIR: handled installation operation order differs")
+        }
+        index = index + 1
+    }
+    FlowHandlerInstallation {
+        evidence: evidence, handlers: copy_handler_bindings(handlers)
+    }
+}
+pub fn flow_handler_installation_evidence(
+    value: FlowHandlerInstallation
+) -> FlowHandledEvidenceBinding { value.evidence }
+pub fn flow_handler_installation_handlers(
+    value: FlowHandlerInstallation
+) -> List<FlowHandlerBinding> { copy_handler_bindings(value.handlers) }
+fn copy_handler_installations(
+    values: List<FlowHandlerInstallation>
+) -> List<FlowHandlerInstallation> {
+    values.map(fn(value) {
+        make_flow_handler_installation(value.evidence, value.handlers)
+    })
 }
 
 enum FlowTerminatorValue {
@@ -3801,7 +4027,7 @@ enum FlowTerminatorValue {
     },
     HandleInstallValue {
         body: FlowSuccessor,
-        handlers: List<FlowHandlerBinding>
+        installations: List<FlowHandlerInstallation>
     },
     UnreachableValue { exited_scopes: List<FlowScopeRef> },
     DivergeValue { exited_scopes: List<FlowScopeRef> }
@@ -3917,12 +4143,15 @@ pub fn make_flow_try(
 }
 pub fn make_flow_handle_install(
     origin: OriginRef, body: FlowSuccessor,
-    handlers: List<FlowHandlerBinding>
+    installations: List<FlowHandlerInstallation>
 ) -> FlowTerminator {
-    if handlers.len() == 0 { panic("FlowIR: handle has no exact handlers") }
+    if installations.len() == 0 {
+        panic("FlowIR: handle has no exact installations")
+    }
     FlowTerminator { origin: origin,
         value: FlowTerminatorValue::HandleInstallValue {
-            body: body, handlers: copy_handler_bindings(handlers) } }
+            body: body,
+            installations: copy_handler_installations(installations) } }
 }
 
 pub fn make_flow_unreachable(
@@ -4016,6 +4245,10 @@ pub fn flow_terminator_read_slots(value: FlowTerminator) -> List<SlotRef> {
         FlowTerminatorValue::HandlerValue { operation, .. } => [operation],
         FlowTerminatorValue::PatternValue { scrutinee, .. } => [scrutinee],
         FlowTerminatorValue::TryValue { error, .. } => [error],
+        FlowTerminatorValue::HandleInstallValue { installations, .. } =>
+            installations.map(fn(installation) {
+                flow_handled_evidence_slot(installation.evidence)
+            }),
         _ => []
     }
 }
@@ -4075,9 +4308,9 @@ fn copy_terminator(value: FlowTerminator) -> FlowTerminator {
         } => make_flow_try(
             value.origin, error,
             copy_successor(protected), copy_successor(caught)),
-        FlowTerminatorValue::HandleInstallValue { body, handlers } =>
+        FlowTerminatorValue::HandleInstallValue { body, installations } =>
             make_flow_handle_install(
-                value.origin, copy_successor(body), handlers),
+                value.origin, copy_successor(body), installations),
         FlowTerminatorValue::UnreachableValue { exited_scopes } =>
             make_flow_unreachable(value.origin, exited_scopes),
         FlowTerminatorValue::DivergeValue { exited_scopes } =>
@@ -4133,11 +4366,11 @@ fn copy_instructions(values: List<FlowInstruction>) -> List<FlowInstruction> {
                 make_flow_assign(
                     value.reference, value.origin, rhs_temp, target),
             FlowInstructionValue::CallValue {
-                target, arguments, evidence, result
+                target, arguments, evidence, handled_evidence, result
             } =>
                 make_flow_call(
                     value.reference, value.origin, target, arguments,
-                    evidence, result),
+                    evidence, handled_evidence, result),
             FlowInstructionValue::ProjectValue {
                 contract, base, result: projected
             } => make_flow_project(
@@ -4222,6 +4455,19 @@ pub fn flow_block_terminator_operands(value: FlowBlock) -> List<FlowOperandRef> 
             step: step, ordinal: 0, slot: scrutinee,
             role: flow_semantic_role_read()
         }],
+        FlowTerminatorValue::HandleInstallValue { installations, .. } => {
+            let mut result: List<FlowOperandRef> = []
+            let mut ordinal = 0
+            for installation in installations {
+                result.push(FlowOperandRef {
+                    step: step, ordinal: ordinal,
+                    slot: flow_handled_evidence_slot(installation.evidence),
+                    role: flow_semantic_role_read()
+                })
+                ordinal = ordinal + 1
+            }
+            result
+        },
         _ => []
     }
 }
@@ -4360,6 +4606,7 @@ pub struct FlowCallEdge {
     target: FlowCallTarget,
     arguments: List<SlotRef>,
     evidence: List<FlowEvidenceRef>,
+    handled_evidence: List<FlowHandledEvidenceUse>,
     result: SlotRef?
 }
 
@@ -4379,6 +4626,11 @@ pub fn flow_call_edge_result(value: FlowCallEdge) -> SlotRef? { value.result }
 pub fn flow_call_edge_evidence(value: FlowCallEdge) -> List<FlowEvidenceRef> {
     copy_flow_evidence(value.evidence)
 }
+pub fn flow_call_edge_handled_evidence(
+    value: FlowCallEdge
+) -> List<FlowHandledEvidenceUse> {
+    copy_flow_handled_evidence_uses(value.handled_evidence)
+}
 
 fn copy_call_edges(values: List<FlowCallEdge>) -> List<FlowCallEdge> {
     let mut result: List<FlowCallEdge> = []
@@ -4388,7 +4640,10 @@ fn copy_call_edges(values: List<FlowCallEdge>) -> List<FlowCallEdge> {
             target: copy_call_target(value.target),
             // target owns role/candidate lists and must not alias the caller.
             arguments: copy_slot_refs(value.arguments),
-            evidence: copy_flow_evidence(value.evidence), result: value.result
+            evidence: copy_flow_evidence(value.evidence),
+            handled_evidence:
+                copy_flow_handled_evidence_uses(value.handled_evidence),
+            result: value.result
         })
     }
     result
@@ -4533,12 +4788,15 @@ pub fn flow_body_call_edges(value: FlowBody) -> List<FlowCallEdge> {
         for instruction in block.instructions {
             match instruction.value {
                 FlowInstructionValue::CallValue {
-                    target, arguments, evidence, result: call_result
+                    target, arguments, evidence, handled_evidence,
+                    result: call_result
                 } => result.push(FlowCallEdge {
                     caller: value.reference, site: instruction.reference,
                     target: copy_call_target(target),
                     arguments: copy_slot_refs(arguments),
                     evidence: copy_flow_evidence(evidence),
+                    handled_evidence:
+                        copy_flow_handled_evidence_uses(handled_evidence),
                     result: call_result
                 }),
                 _ => {}
@@ -4743,15 +5001,14 @@ fn validate_callables(
         }
         let _ = flow_semantic_role_tag(left.semantic_contract.result_role)
         let mut evidence_index = 0
-        while evidence_index < left.evidence_requirements.len() {
-            let mut right_evidence = evidence_index + 1
-            while right_evidence < left.evidence_requirements.len() {
-                if symbol_ref_same(
-                        left.evidence_requirements.get(evidence_index).unwrap(),
-                        left.evidence_requirements.get(right_evidence).unwrap()) {
-                    panic("FlowIR: callable repeats evidence requirement")
-                }
-                right_evidence = right_evidence + 1
+        while evidence_index < left.handled_evidence.len() {
+            let binding = left.handled_evidence.get(evidence_index).unwrap()
+            if flow_handled_evidence_ordinal(binding) != evidence_index ||
+               !executable_ref_same(
+                    flow_handled_evidence_owner(binding), left.reference) ||
+               !type_ref_exists(
+                    type_nodes, flow_handled_evidence_type(binding)) {
+                panic("FlowIR: callable handled evidence contract differs")
             }
             evidence_index = evidence_index + 1
         }
@@ -4927,14 +5184,49 @@ fn validate_body_callable_parameters(body: FlowBody, callable: FlowCallable) {
         }
         ordinal = ordinal + 1
     }
+    for evidence in callable.handled_evidence {
+        let mut matches = 0
+        for slot in body.slots {
+            if flow_storage_class_same(
+                    slot.storage, flow_storage_parameter()) &&
+               slot.parameter_ordinal.is_none() &&
+               slot_ref_same(
+                    slot.reference,
+                    flow_handled_evidence_slot(evidence)) {
+                if !flow_type_ref_same(
+                        slot.ty, flow_handled_evidence_type(evidence)) ||
+                   slot.initial_state.tag != FLOW_SLOT_LIVE ||
+                   flow_storage_contract_tag(slot.storage_contract) !=
+                        FLOW_BORROW_STORAGE {
+                    panic("FlowIR: handled evidence parameter contract differs")
+                }
+                matches = matches + 1
+            }
+        }
+        if matches != 1 {
+            panic("FlowIR: handled evidence parameter is missing/duplicated")
+        }
+    }
     for slot in body.slots {
         if flow_storage_class_same(slot.storage, flow_storage_parameter()) {
-            let slot_ordinal = match slot.parameter_ordinal {
-                some(value) => value,
-                none => panic("FlowIR: parameter ordinal disappeared")
-            }
-            if slot_ordinal >= callable.parameter_slots.len() {
-                panic("FlowIR: body has an extra parameter ordinal")
+            match slot.parameter_ordinal {
+                some(slot_ordinal) => if
+                        slot_ordinal >= callable.parameter_slots.len() {
+                    panic("FlowIR: body has an extra parameter ordinal")
+                },
+                none => {
+                    let mut matches = 0
+                    for evidence in callable.handled_evidence {
+                        if slot_ref_same(
+                                slot.reference,
+                                flow_handled_evidence_slot(evidence)) {
+                            matches = matches + 1
+                        }
+                    }
+                    if matches != 1 {
+                        panic("FlowIR: hidden parameter lacks exact evidence")
+                    }
+                }
             }
         }
     }
@@ -5057,29 +5349,31 @@ fn validate_typed_terminators(
                 scrutinee, pattern, ..
             } => validate_typed_flow_pattern(
                 pattern, slot_type_for(body, scrutinee), body, type_nodes),
-            FlowTerminatorValue::HandleInstallValue { handlers, .. } => {
-                let mut index = 0
-                while index < handlers.len() {
-                    let binding = handlers.get(index).unwrap()
-                    let _ = callable_for_ref(
-                        callables, effect_operation_ref_callable(
-                            binding.operation))
-                    let handler = callable_for_ref(callables, binding.handler)
-                    if !flow_callable_mode_same(
-                            handler.mode,
-                            flow_callable_mode_concrete_body()) {
-                        panic("FlowIR: installed handler is bodyless")
-                    }
-                    let mut right_index = index + 1
-                    while right_index < handlers.len() {
-                        if effect_operation_ref_same(
-                                binding.operation,
-                                handlers.get(right_index).unwrap().operation) {
-                            panic("FlowIR: handle repeats an operation")
+            FlowTerminatorValue::HandleInstallValue {
+                installations, ..
+            } => {
+                for installation in installations {
+                    let evidence = installation.evidence
+                    let evidence_slot = slot_for_ref(
+                        body.slots,
+                        flow_handled_evidence_slot(evidence))
+                    require_same_flow_type(
+                        evidence_slot.ty,
+                        flow_handled_evidence_type(evidence),
+                        "FlowIR: handled installation evidence type differs")
+                    for binding in installation.handlers {
+                        let _ = callable_for_ref(
+                            callables, effect_operation_ref_callable(
+                                binding.operation))
+                        let handler = callable_for_ref(
+                            callables, binding.handler)
+                        if !flow_callable_mode_same(
+                                handler.mode,
+                                flow_callable_mode_concrete_body()) {
+                            panic("FlowIR: installed handler is bodyless")
                         }
-                        right_index = right_index + 1
+                        let _ = slot_for_ref(body.slots, binding.closure)
                     }
-                    index = index + 1
                 }
             },
             _ => {}
@@ -5220,7 +5514,7 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
             }
         },
         FlowInstructionValue::CallValue {
-            target, arguments, evidence, result
+            target, arguments, evidence, handled_evidence, result
         } => {
             for argument in arguments {
                 let _ = slot_for_ref(body.slots, argument)
@@ -5233,6 +5527,10 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
                 if flow_evidence_is_local(item) {
                     let _ = slot_for_ref(body.slots, flow_evidence_local(item))
                 }
+            }
+            for item in handled_evidence {
+                let _ = slot_for_ref(
+                    body.slots, flow_handled_use_slot(item))
             }
             if flow_call_target_is_local(target) {
                 let _ = slot_for_ref(body.slots, flow_call_target_local(target))
@@ -5459,8 +5757,25 @@ fn validate_direct_calls(
                         candidate.semantic_contract, contract) {
                     panic("FlowIR: direct callable contract differs")
                 }
-                if candidate.evidence_requirements.len() != edge.evidence.len() {
-                    panic("FlowIR: direct call evidence census differs")
+                if candidate.handled_evidence.len() !=
+                        edge.handled_evidence.len() {
+                    panic("FlowIR: direct handled-evidence census differs")
+                }
+                let mut handled_index = 0
+                while handled_index < edge.handled_evidence.len() {
+                    let actual = edge.handled_evidence.get(
+                        handled_index).unwrap()
+                    let expected = candidate.handled_evidence.get(
+                        handled_index).unwrap()
+                    if !handled_effect_ref_same(
+                            flow_handled_use_requirement(actual),
+                            flow_handled_evidence_requirement(expected)) ||
+                       !flow_type_ref_same(
+                            flow_handled_use_type(actual),
+                            flow_handled_evidence_type(expected)) {
+                        panic("FlowIR: direct handled-evidence contract differs")
+                    }
+                    handled_index = handled_index + 1
                 }
             }
             for evidence in edge.evidence {
@@ -5581,7 +5896,9 @@ pub fn flow_instruction_callable_provenance(
         FlowInstructionValue::InitializeValue { operation, target, .. } => {
             if slot_has_callable_type(slots, type_nodes, target) {
                 match operation.value {
-                    FlowOperationValue::ClosureOperationValue(executable) =>
+                    FlowOperationValue::ClosureOperationValue {
+                        executable, ..
+                    } =>
                         result.push(FlowCallableProvenanceFact {
                             step: step, target: target,
                             origin: make_flow_direct_callable_origin(executable)
@@ -5935,13 +6252,53 @@ fn validate_typed_instructions(
                                         callables,
                                         intrinsic_ref_symbol(intrinsic)))
                             },
-                            FlowOperationValue::ClosureOperationValue(executable) |
-                            FlowOperationValue::CallableValueOperationValue(executable) => {
+                            FlowOperationValue::ClosureOperationValue {
+                                executable, capture_targets
+                            } => {
                                 let callable = callable_for_ref(callables, executable)
                                 if !flow_callable_mode_same(
                                         callable.mode,
                                         flow_callable_mode_concrete_body()) {
                                     panic("FlowIR: closure executable is bodyless")
+                                }
+                                let mut child: FlowBody? = none
+                                for candidate in bodies {
+                                    if executable_ref_same(
+                                            candidate.reference, executable) {
+                                        if child.is_some() {
+                                            panic("FlowIR: closure executable repeats a body")
+                                        }
+                                        child = some(candidate)
+                                    }
+                                }
+                                let child_body = match child {
+                                    some(value) => value,
+                                    none => panic(
+                                        "FlowIR: closure executable has no body")
+                                }
+                                if capture_targets.len() !=
+                                        operation.input_types.len() {
+                                    panic("FlowIR: closure capture contract is partial")
+                                }
+                                let mut capture_index = 0
+                                while capture_index < capture_targets.len() {
+                                    require_same_flow_type(
+                                        slot_type_for(
+                                            child_body,
+                                            capture_targets.get(
+                                                capture_index).unwrap()),
+                                        operation.input_types.get(
+                                            capture_index).unwrap(),
+                                        "FlowIR: closure capture target type differs")
+                                    capture_index = capture_index + 1
+                                }
+                            },
+                            FlowOperationValue::CallableValueOperationValue(executable) => {
+                                let callable = callable_for_ref(callables, executable)
+                                if !flow_callable_mode_same(
+                                        callable.mode,
+                                        flow_callable_mode_concrete_body()) {
+                                    panic("FlowIR: callable value executable is bodyless")
                                 }
                             },
                             _ => {}
@@ -5974,7 +6331,7 @@ fn validate_typed_instructions(
                         slot_type_for(body, target),
                         "FlowIR: Capture source/target type differs"),
                     FlowInstructionValue::CallValue {
-                        target, arguments, result, ..
+                        target, arguments, handled_evidence, result, ..
                     } => {
                         let contract = target.contract
                         if arguments.len() != contract.parameter_types.len() {
@@ -6029,6 +6386,35 @@ fn validate_typed_instructions(
                                     callable_type.parameter_count).unwrap(),
                                 contract.result_type,
                                 "FlowIR: local callee result type differs")
+                        }
+                        let mut handled_index = 0
+                        while handled_index < handled_evidence.len() {
+                            let use_ref = handled_evidence.get(
+                                handled_index).unwrap()
+                            if !executable_ref_same(
+                                    flow_handled_use_owner(use_ref),
+                                    body.reference) {
+                                panic("FlowIR: handled evidence use crosses caller")
+                            }
+                            require_same_flow_type(
+                                slot_type_for(
+                                    body, flow_handled_use_slot(use_ref)),
+                                flow_handled_use_type(use_ref),
+                                "FlowIR: handled evidence use type differs")
+                            let mut right = handled_index + 1
+                            while right < handled_evidence.len() {
+                                let other = handled_evidence.get(right).unwrap()
+                                if handled_effect_ref_same(
+                                        flow_handled_use_requirement(use_ref),
+                                        flow_handled_use_requirement(other)) ||
+                                   slot_ref_same(
+                                        flow_handled_use_slot(use_ref),
+                                        flow_handled_use_slot(other)) {
+                                    panic("FlowIR: call repeats handled evidence")
+                                }
+                                right = right + 1
+                            }
+                            handled_index = handled_index + 1
                         }
                     },
                     FlowInstructionValue::ProjectValue {
@@ -6197,9 +6583,14 @@ fn encode_operation(value: FlowOperationContract) -> Str {
             parts.push("tuple:${arity.to_str()}"),
         FlowOperationValue::RecordAggregateOperationValue(arity) =>
             parts.push("record:${arity.to_str()}"),
-                    FlowOperationValue::ClosureOperationValue(executable) |
-                    FlowOperationValue::CallableValueOperationValue(executable) =>
-            parts.push("closure:${encode_executable(executable)}"),
+        FlowOperationValue::ClosureOperationValue {
+            executable, capture_targets
+        } => {
+            parts.push("closure:${encode_executable(executable)}")
+            for target in capture_targets {
+                parts.push("capture:${encode_slot(target)}")
+            }
+        },
         FlowOperationValue::CallableValueOperationValue(executable) =>
             parts.push("callable:${encode_executable(executable)}")
     }
@@ -6312,7 +6703,7 @@ fn encode_instruction(value: FlowInstruction) -> Str {
             parts.push(encode_slot(rhs_temp)); parts.push(encode_flow_place(target))
         },
         FlowInstructionValue::CallValue {
-            target, arguments, evidence, result
+            target, arguments, evidence, handled_evidence, result
         } => {
             parts.push(encode_call_target(target))
             for argument in arguments { parts.push(encode_slot(argument)) }
@@ -6324,6 +6715,15 @@ fn encode_instruction(value: FlowInstruction) -> Str {
                 } else {
                     "ED${encode_dict_evidence(flow_evidence_dict(item))}"
                 })
+            }
+            for item in handled_evidence {
+                parts.push("EH${encode_executable(
+                    flow_handled_use_owner(item))}/${
+                    flow_handled_use_ordinal(item).to_str()}/${
+                    encode_symbol(handled_effect_ref_symbol(
+                        flow_handled_use_requirement(item)))}/${
+                    encode_slot(flow_handled_use_slot(item))}/${
+                    encode_type_ref(flow_handled_use_type(item))}")
             }
             match result {
                 some(slot) => parts.push(encode_slot(slot)),
@@ -6443,10 +6843,25 @@ fn encode_terminator(value: FlowTerminator) -> Str {
             parts.push(encode_successor(protected))
             parts.push(encode_successor(caught))
         },
-        FlowTerminatorValue::HandleInstallValue { body, handlers } => {
+        FlowTerminatorValue::HandleInstallValue {
+            body, installations
+        } => {
             parts.push(encode_successor(body))
-            for handler in handlers {
-                parts.push("H${encode_symbol(effect_operation_ref_member(handler.operation))}/${encode_executable(handler.handler)}")
+            for installation in installations {
+                let evidence = installation.evidence
+                parts.push("I${encode_executable(
+                    flow_handled_evidence_owner(evidence))}/${
+                    flow_handled_evidence_ordinal(evidence).to_str()}/${
+                    encode_symbol(handled_effect_ref_symbol(
+                        flow_handled_evidence_requirement(evidence)))}/${
+                    encode_slot(flow_handled_evidence_slot(evidence))}/${
+                    encode_type_ref(flow_handled_evidence_type(evidence))}")
+                for handler in installation.handlers {
+                    parts.push("H${encode_symbol(
+                        effect_operation_ref_member(handler.operation))}/${
+                        encode_executable(handler.handler)}/${
+                        encode_slot(handler.closure)}")
+                }
             }
         },
         FlowTerminatorValue::UnreachableValue { exited_scopes } |
@@ -6553,8 +6968,14 @@ fn compute_topology_encoding(
         }
         item.push("O${flow_semantic_role_tag(callable.semantic_contract.result_role).to_str()}")
         item.push("G${encode_value_origin(callable.semantic_contract.result_origin)}")
-        for requirement in callable.evidence_requirements {
-            item.push("E${encode_symbol(requirement)}")
+        for binding in callable.handled_evidence {
+            item.push("E${encode_executable(
+                flow_handled_evidence_owner(binding))}/${
+                flow_handled_evidence_ordinal(binding).to_str()}/${
+                encode_symbol(handled_effect_ref_symbol(
+                    flow_handled_evidence_requirement(binding)))}/${
+                encode_slot(flow_handled_evidence_slot(binding))}/${
+                encode_type_ref(flow_handled_evidence_type(binding))}")
         }
         parts.push(item.join(";"))
     }
@@ -6636,8 +7057,9 @@ fn freeze_callables_with_edges(
             parameter_slots: copy_slot_refs(callable.parameter_slots),
             result_type: callable.result_type, mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
-            evidence_requirements: copy_symbols(
-                callable.evidence_requirements),
+            handled_evidence:
+                copy_flow_handled_evidence_bindings(
+                    callable.handled_evidence),
             call_edges: copy_call_edges(edges)
         })
     }
@@ -6679,8 +7101,9 @@ pub fn flow_program_callables(value: FlowProgram) -> List<FlowCallable> {
             parameter_slots: copy_slot_refs(callable.parameter_slots),
             result_type: callable.result_type, mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
-            evidence_requirements: copy_symbols(
-                callable.evidence_requirements),
+            handled_evidence:
+                copy_flow_handled_evidence_bindings(
+                    callable.handled_evidence),
             call_edges: copy_call_edges(callable.call_edges)
         })
     }
@@ -6703,7 +7126,7 @@ pub fn validate_flow_program(value: FlowProgram) {
                 callable.parameter_types, callable.parameter_slots,
                 callable.result_type,
                 callable.mode, callable.semantic_contract,
-                callable.evidence_requirements)
+                callable.handled_evidence)
         }), value.bodies)
     if !flow_topology_fingerprint_same(
             rebuilt.topology_fingerprint, value.topology_fingerprint) {
