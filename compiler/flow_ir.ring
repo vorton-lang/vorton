@@ -831,6 +831,334 @@ fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {
     result
 }
 
+// A module recorder owns only module-local type ordinals.  Project assembly
+// uses these helpers to intern the structural graph once, then rewrites every
+// local edge to the resulting project-global ordinal.  Keeping this logic in
+// FlowIR avoids exposing the private node payload or making checker modules
+// coordinate offsets/side maps.
+fn mapped_type_index(mapping: List<Int?>, reference: FlowTypeRef) -> Int? {
+    match mapping.get(reference.index) {
+        some(value) => value,
+        none => panic("FlowIR: module-local type reference is out of range")
+    }
+}
+
+fn mapped_type_ref(mapping: List<Int>, reference: FlowTypeRef) -> FlowTypeRef {
+    match mapping.get(reference.index) {
+        some(index) => make_flow_type_ref(index),
+        none => panic("FlowIR: module-local type reference is out of range")
+    }
+}
+
+fn all_type_refs_mapped(
+    references: List<FlowTypeRef>, mapping: List<Int?>
+) -> Bool {
+    for reference in references {
+        if mapped_type_index(mapping, reference).is_none() { return false }
+    }
+    true
+}
+
+// Nominal field recursion is deliberately excluded from readiness: exact
+// nominal identity plus mapped generic arguments reserves the canonical node,
+// after which the full remapped payload is checked for equality.  Structural
+// nodes require every child first, so the worklist is finite and deterministic.
+pub fn flow_type_node_intern_ready(
+    value: FlowTypeNode, mapping: List<Int?>
+) -> Bool {
+    let tag = flow_type_kind_tag(value.kind)
+    if tag == FLOW_TYPE_STRUCT || tag == FLOW_TYPE_ENUM ||
+       tag == FLOW_TYPE_EXTERN {
+        return all_type_refs_mapped(value.generic_arguments, mapping)
+    }
+    if tag == FLOW_TYPE_TUPLE || tag == FLOW_TYPE_RECORD ||
+       tag == FLOW_TYPE_CALLABLE || tag == FLOW_TYPE_PTR {
+        return all_type_refs_mapped(value.children, mapping)
+    }
+    true
+}
+
+fn mapped_reference_lists_same(
+    left: List<FlowTypeRef>, left_mapping: List<Int?>,
+    right: List<FlowTypeRef>, right_mapping: List<Int?>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if mapped_type_index(
+                left_mapping, left.get(index).unwrap()) !=
+           mapped_type_index(
+                right_mapping, right.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn optional_symbols_same(left: SymbolRef?, right: SymbolRef?) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => symbol_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+// Equality of the allocation key, not of the complete contract.  Complete
+// equality is checked after all edges have been remapped.  A repeated exact
+// nominal identity with a different field/resource contract is therefore a
+// hard producer disagreement, never a second type.
+pub fn flow_type_node_intern_key_same(
+    left: FlowTypeNode, left_mapping: List<Int?>,
+    right: FlowTypeNode, right_mapping: List<Int?>
+) -> Bool {
+    let tag = flow_type_kind_tag(left.kind)
+    if tag != flow_type_kind_tag(right.kind) { return false }
+    if tag >= FLOW_TYPE_INT && tag <= FLOW_TYPE_NEVER { return true }
+    if tag == FLOW_TYPE_PARAMETER {
+        return match (left.generic_param, right.generic_param) {
+            (some(a), some(b)) => flow_generic_param_fact_same(a, b),
+            _ => false
+        }
+    }
+    if tag == FLOW_TYPE_STRUCT || tag == FLOW_TYPE_ENUM ||
+       tag == FLOW_TYPE_EXTERN {
+        return optional_symbols_same(left.nominal, right.nominal) &&
+            mapped_reference_lists_same(
+                left.generic_arguments, left_mapping,
+                right.generic_arguments, right_mapping)
+    }
+    if tag == FLOW_TYPE_TUPLE || tag == FLOW_TYPE_CALLABLE ||
+       tag == FLOW_TYPE_PTR {
+        return left.parameter_count == right.parameter_count &&
+            mapped_reference_lists_same(
+                left.children, left_mapping, right.children, right_mapping)
+    }
+    if tag == FLOW_TYPE_RECORD {
+        if left.nominal_fields.len() != right.nominal_fields.len() ||
+           !mapped_reference_lists_same(
+                left.children, left_mapping, right.children, right_mapping) {
+            return false
+        }
+        let mut index = 0
+        while index < left.nominal_fields.len() {
+            if !flow_field_identity_same(
+                    left.nominal_fields.get(index).unwrap().identity,
+                    right.nominal_fields.get(index).unwrap().identity) {
+                return false
+            }
+            index = index + 1
+        }
+        return true
+    }
+    false
+}
+
+fn remap_resource_target(
+    value: FlowResourceDependencyTarget, mapping: List<Int>
+) -> FlowResourceDependencyTarget {
+    match value.value {
+        FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
+            parameter) => make_flow_parent_parameter_dependency(parameter),
+        FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) =>
+            make_flow_concrete_type_dependency(mapped_type_ref(mapping, ty))
+    }
+}
+
+fn remap_resource_edge(
+    value: FlowResourceDependencyEdge, mapping: List<Int>
+) -> FlowResourceDependencyEdge {
+    let child = mapped_type_ref(mapping, value.child)
+    let target = remap_resource_target(value.target, mapping)
+    if value.is_application {
+        make_flow_application_resource_dependency_edge(
+            value.child_ordinal, child, value.child_dependency_ordinal,
+            match value.application_parameter {
+                some(parameter) => parameter,
+                none => panic("FlowIR: application resource edge lacks parameter")
+            },
+            target)
+    } else {
+        make_flow_resource_dependency_edge(
+            value.child_ordinal, child, value.child_dependency_ordinal, target)
+    }
+}
+
+pub fn remap_flow_type_node(
+    value: FlowTypeNode, project_index: Int, mapping: List<Int>
+) -> FlowTypeNode {
+    let mut fields: List<FlowNominalFieldFact> = []
+    for field in value.nominal_fields {
+        fields.push(make_flow_nominal_field_fact(
+            field.identity, mapped_type_ref(mapping, field.ty)))
+    }
+    let mut edges: List<FlowResourceDependencyEdge> = []
+    for edge in value.resource_edges {
+        edges.push(remap_resource_edge(edge, mapping))
+    }
+    FlowTypeNode {
+        reference: make_flow_type_ref(project_index), kind: value.kind,
+        nominal: value.nominal,
+        children: value.children.map(fn(reference) {
+            mapped_type_ref(mapping, reference)
+        }),
+        generic_arguments: value.generic_arguments.map(fn(reference) {
+            mapped_type_ref(mapping, reference)
+        }),
+        nominal_fields: fields, parameter_count: value.parameter_count,
+        generic_param: match value.generic_param {
+            some(parameter) => some(copy_generic_param_fact(parameter)),
+            none => none
+        },
+        semantic_seed: value.semantic_seed,
+        drop_contract: value.drop_contract,
+        foreign_contract: value.foreign_contract,
+        resource_parameters: value.resource_parameters.map(fn(parameter) {
+            copy_generic_param_fact(parameter)
+        }),
+        resource_edges: edges
+    }
+}
+
+fn optional_drop_contracts_same(
+    left: FlowDropContract?, right: FlowDropContract?
+) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => executable_ref_same(a.provider, b.provider),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn optional_foreign_contracts_same(
+    left: FlowForeignContract?, right: FlowForeignContract?
+) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => match (a.value, b.value) {
+            (FlowForeignContractValue::BorrowedForeignValue,
+             FlowForeignContractValue::BorrowedForeignValue) => true,
+            (FlowForeignContractValue::ManagedForeignValue {
+                retain: ar, release: al },
+             FlowForeignContractValue::ManagedForeignValue {
+                retain: br, release: bl }) =>
+                executable_ref_same(ar, br) && executable_ref_same(al, bl),
+            _ => false
+        },
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn resource_targets_same(
+    left: FlowResourceDependencyTarget,
+    right: FlowResourceDependencyTarget
+) -> Bool {
+    match (left.value, right.value) {
+        (FlowResourceDependencyTargetValue::ParentParameterDependencyValue(a),
+         FlowResourceDependencyTargetValue::ParentParameterDependencyValue(b)) =>
+            flow_generic_param_fact_same(a, b),
+        (FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(a),
+         FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(b)) =>
+            flow_type_ref_same(a, b),
+        _ => false
+    }
+}
+
+fn resource_edges_same(
+    left: List<FlowResourceDependencyEdge>,
+    right: List<FlowResourceDependencyEdge>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        let a = left.get(index).unwrap()
+        let b = right.get(index).unwrap()
+        if a.is_application != b.is_application ||
+           a.child_ordinal != b.child_ordinal ||
+           !flow_type_ref_same(a.child, b.child) ||
+           a.child_dependency_ordinal != b.child_dependency_ordinal ||
+           !resource_targets_same(a.target, b.target) ||
+           match (a.application_parameter, b.application_parameter) {
+               (some(ap), some(bp)) => !flow_generic_param_fact_same(ap, bp),
+               (none, none) => false,
+               _ => true
+           } {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+pub fn flow_type_node_contract_same(
+    left: FlowTypeNode, right: FlowTypeNode
+) -> Bool {
+    if !flow_type_kind_same(left.kind, right.kind) ||
+       !optional_symbols_same(left.nominal, right.nominal) ||
+       left.parameter_count != right.parameter_count ||
+       flow_type_semantic_seed_tag(left.semantic_seed) !=
+            flow_type_semantic_seed_tag(right.semantic_seed) ||
+       !optional_drop_contracts_same(left.drop_contract, right.drop_contract) ||
+       !optional_foreign_contracts_same(
+            left.foreign_contract, right.foreign_contract) ||
+       left.children.len() != right.children.len() ||
+       left.generic_arguments.len() != right.generic_arguments.len() ||
+       left.nominal_fields.len() != right.nominal_fields.len() ||
+       left.resource_parameters.len() != right.resource_parameters.len() ||
+       !resource_edges_same(left.resource_edges, right.resource_edges) {
+        return false
+    }
+    let mut index = 0
+    while index < left.children.len() {
+        if !flow_type_ref_same(
+                left.children.get(index).unwrap(),
+                right.children.get(index).unwrap()) { return false }
+        index = index + 1
+    }
+    index = 0
+    while index < left.generic_arguments.len() {
+        if !flow_type_ref_same(
+                left.generic_arguments.get(index).unwrap(),
+                right.generic_arguments.get(index).unwrap()) { return false }
+        index = index + 1
+    }
+    index = 0
+    while index < left.nominal_fields.len() {
+        let a = left.nominal_fields.get(index).unwrap()
+        let b = right.nominal_fields.get(index).unwrap()
+        if !flow_field_identity_same(a.identity, b.identity) ||
+           !flow_type_ref_same(a.ty, b.ty) { return false }
+        index = index + 1
+    }
+    match (left.generic_param, right.generic_param) {
+        (some(a), some(b)) => if !flow_generic_param_fact_same(a, b) {
+            return false
+        },
+        (none, none) => {},
+        _ => return false
+    }
+    index = 0
+    while index < left.resource_parameters.len() {
+        if !flow_generic_param_fact_same(
+                left.resource_parameters.get(index).unwrap(),
+                right.resource_parameters.get(index).unwrap()) { return false }
+        index = index + 1
+    }
+    true
+}
+
+pub fn remap_flow_call_contract(
+    value: FlowCallContract, mapping: List<Int>
+) -> FlowCallContract {
+    make_flow_call_contract(
+        value.parameter_types.map(fn(reference) {
+            mapped_type_ref(mapping, reference)
+        }),
+        value.parameter_roles,
+        mapped_type_ref(mapping, value.result_type),
+        value.result_role, value.result_origin)
+}
+
 fn validate_type_nodes(values: List<FlowTypeNode>) {
     let mut ordinal = 0
     for value in values {

@@ -75,7 +75,8 @@ use flow_ir::{
     flow_scope_reference, flow_scope_ref_same,
     flow_scope_ref_owner, flow_scope_ref_ordinal,
     flow_initial_slot_state_tag, flow_storage_class_tag,
-    flow_storage_contract_tag
+    flow_storage_contract_tag,
+    remap_flow_call_contract
 }
 
 // ============================================================
@@ -2377,6 +2378,292 @@ pub fn core_body_parameter_slots(value: CoreBody) -> List<SlotRef> {
 }
 pub fn core_body_result_type(value: CoreBody) -> CoreTypeRef { value.result_type }
 pub fn core_body_block(value: CoreBody) -> CoreBlock { value.body }
+
+// Core assembly first closes each module against its own opaque type-fact
+// ordinals, then the project interner assigns the only global CoreTypeRef
+// domain.  These rebuilders are the single typed rewrite boundary; downstream
+// Flow lowering never sees module-local ordinals.
+fn remap_core_type_reference(
+    value: CoreTypeRef, mapping: List<Int>
+) -> CoreTypeRef {
+    match mapping.get(value.index) {
+        some(index) => make_core_type_ref(index),
+        none => panic("CoreHIR: module-local type reference is out of range")
+    }
+}
+
+fn remap_core_effect_atom(
+    value: CoreEffectAtom, mapping: List<Int>
+) -> CoreEffectAtom {
+    match value.value {
+        CoreEffectAtomValue::FailEffectValue(ty) =>
+            make_core_fail_effect(remap_core_type_reference(ty, mapping)),
+        CoreEffectAtomValue::MutEffectValue(ty) =>
+            make_core_mut_effect(remap_core_type_reference(ty, mapping)),
+        CoreEffectAtomValue::UnsafeEffectValue => make_core_unsafe_effect(),
+        CoreEffectAtomValue::HandledEffectValue(effect_ref) =>
+            make_core_handled_effect(effect_ref),
+        CoreEffectAtomValue::SystemEffectValue(effect_ref) =>
+            make_core_system_effect(effect_ref)
+    }
+}
+
+fn remap_core_effect_set(
+    value: CoreEffectSet, mapping: List<Int>
+) -> CoreEffectSet {
+    make_core_effect_set(value.atoms.map(fn(atom) {
+        remap_core_effect_atom(atom, mapping)
+    }))
+}
+
+fn remap_core_callee(
+    value: CoreCalleeRef, mapping: List<Int>
+) -> CoreCalleeRef {
+    let contract = remap_flow_call_contract(value.contract, mapping)
+    if value.kind == CORE_CALLEE_DIRECT {
+        make_core_direct_callee(value.direct.unwrap(), contract)
+    } else if value.kind == CORE_CALLEE_LOCAL {
+        make_core_local_callee(value.local.unwrap(), contract)
+    } else if value.kind == CORE_CALLEE_DYNAMIC {
+        make_core_dynamic_callee(value.dynamic.unwrap(), contract)
+    } else {
+        panic("CoreHIR: unknown callee form during type remap")
+    }
+}
+
+fn remap_core_place(
+    value: CorePlaceRef, mapping: List<Int>
+) -> CorePlaceRef {
+    match value.value {
+        CorePlaceRefValue::CoreSlotPlaceValue(slot) => make_core_slot_place(slot),
+        CorePlaceRefValue::CoreProjectPlaceValue {
+            base, field, evaluated_index, value_type
+        } => make_core_project_place(
+            base, field, evaluated_index,
+            remap_core_type_reference(value_type, mapping))
+    }
+}
+
+fn remap_core_pattern(
+    value: CorePattern, mapping: List<Int>
+) -> CorePattern {
+    let ty = remap_core_type_reference(value.ty, mapping)
+    match value.value {
+        CorePatternValue::WildcardPatternValue => make_core_wildcard_pattern(ty),
+        CorePatternValue::BindingPatternValue(slot) =>
+            make_core_binding_pattern(ty, slot),
+        CorePatternValue::LiteralPatternValue(literal) =>
+            make_core_literal_pattern(ty, literal),
+        CorePatternValue::TuplePatternValue(elements) =>
+            make_core_tuple_pattern(ty, elements.map(fn(element) {
+                remap_core_pattern(element, mapping)
+            })),
+        CorePatternValue::StructPatternValue { owner, fields } =>
+            make_core_struct_pattern(ty, owner, fields.map(fn(field) {
+                make_core_pattern_field(
+                    field.field, remap_core_pattern(field.pattern, mapping))
+            })),
+        CorePatternValue::VariantPatternValue { variant, fields } =>
+            make_core_variant_pattern(ty, variant, fields.map(fn(field) {
+                make_core_pattern_field(
+                    field.field, remap_core_pattern(field.pattern, mapping))
+            }))
+    }
+}
+
+fn remap_core_block_types(
+    value: CoreBlock, mapping: List<Int>
+) -> CoreBlock {
+    make_core_block(
+        value.statements.map(fn(statement) {
+            remap_core_statement_types(statement, mapping)
+        }),
+        match value.tail {
+            some(tail) => some(remap_core_expr_types(tail, mapping)),
+            none => none
+        },
+        value.origin, value.scope)
+}
+
+fn remap_core_match_arm_types(
+    value: CoreMatchArm, mapping: List<Int>
+) -> CoreMatchArm {
+    make_core_match_arm(
+        remap_core_pattern(value.pattern, mapping),
+        match value.guard {
+            some(guard) => some(remap_core_expr_types(guard, mapping)),
+            none => none
+        },
+        remap_core_block_types(value.body, mapping), value.origin)
+}
+
+fn remap_core_expr_types(
+    value: CoreExpr, mapping: List<Int>
+) -> CoreExpr {
+    let ty = remap_core_type_reference(value.ty, mapping)
+    let effects = remap_core_effect_set(value.effects, mapping)
+    let payload = match value.value {
+        CoreExprValue::LiteralExprValue(literal) =>
+            CoreExprValue::LiteralExprValue(literal),
+        CoreExprValue::CallableValueExprValue(executable) =>
+            CoreExprValue::CallableValueExprValue(executable),
+        CoreExprValue::ReadExprValue(source) =>
+            CoreExprValue::ReadExprValue(source),
+        CoreExprValue::PrimitiveExprValue { operation, operands } =>
+            CoreExprValue::PrimitiveExprValue {
+                operation: operation, operands: copy_slot_refs(operands)
+            },
+        CoreExprValue::CallExprValue { callee, arguments, evidence } =>
+            CoreExprValue::CallExprValue {
+                callee: remap_core_callee(callee, mapping),
+                arguments: copy_slot_refs(arguments),
+                evidence: copy_evidence(evidence)
+            },
+        CoreExprValue::MethodCallExprValue {
+            callee, method, receiver, arguments, evidence
+        } => CoreExprValue::MethodCallExprValue {
+            callee: remap_core_callee(callee, mapping), method: method,
+            receiver: receiver, arguments: copy_slot_refs(arguments),
+            evidence: copy_evidence(evidence)
+        },
+        CoreExprValue::EffectCallExprValue {
+            operation, arguments, evidence
+        } => CoreExprValue::EffectCallExprValue {
+            operation: operation, arguments: copy_slot_refs(arguments),
+            evidence: copy_evidence(evidence)
+        },
+        CoreExprValue::SystemCallExprValue { host, arguments } =>
+            CoreExprValue::SystemCallExprValue {
+                host: host, arguments: copy_slot_refs(arguments)
+            },
+        CoreExprValue::DictConstructExprValue { constructor, evidence } =>
+            CoreExprValue::DictConstructExprValue {
+                constructor: constructor, evidence: copy_evidence(evidence)
+            },
+        CoreExprValue::DictProjectExprValue { dictionary, method } =>
+            CoreExprValue::DictProjectExprValue {
+                dictionary: dictionary, method: method
+            },
+        CoreExprValue::ProjectExprValue { base, field, partial } =>
+            CoreExprValue::ProjectExprValue {
+                base: base, field: field, partial: partial
+            },
+        CoreExprValue::ConstructExprValue { constructor, fields } =>
+            CoreExprValue::ConstructExprValue {
+                constructor: constructor, fields: copy_field_values(fields)
+            },
+        CoreExprValue::LambdaExprValue {
+            executable, manifest, captures
+        } => CoreExprValue::LambdaExprValue {
+            executable: executable, manifest: copy_manifest(manifest),
+            captures: copy_captures(captures)
+        },
+        CoreExprValue::BlockExprValue(block) =>
+            CoreExprValue::BlockExprValue(
+                remap_core_block_types(block, mapping)),
+        CoreExprValue::IfExprValue {
+            condition, then_block, else_block
+        } => CoreExprValue::IfExprValue {
+            condition: condition,
+            then_block: remap_core_block_types(then_block, mapping),
+            else_block: remap_core_block_types(else_block, mapping)
+        },
+        CoreExprValue::MatchExprValue { scrutinee, arms } =>
+            CoreExprValue::MatchExprValue {
+                scrutinee: scrutinee,
+                arms: arms.map(fn(arm) {
+                    remap_core_match_arm_types(arm, mapping)
+                })
+            },
+        CoreExprValue::TryCatchExprValue { body, error_slot, arms } =>
+            CoreExprValue::TryCatchExprValue {
+                body: remap_core_block_types(body, mapping),
+                error_slot: error_slot,
+                arms: arms.map(fn(arm) {
+                    remap_core_match_arm_types(arm, mapping)
+                })
+            },
+        CoreExprValue::HandleExprValue { body, handlers } =>
+            CoreExprValue::HandleExprValue {
+                body: remap_core_block_types(body, mapping),
+                handlers: copy_handler_entries(handlers)
+            }
+    }
+    make_core_expr(value.result, ty, effects, value.origin, payload)
+}
+
+fn remap_core_statement_types(
+    value: CoreStmt, mapping: List<Int>
+) -> CoreStmt {
+    match value.value {
+        CoreStmtValue::Initialize { target, value: expr, origin } =>
+            make_core_initialize_stmt(
+                target, remap_core_expr_types(expr, mapping), origin),
+        CoreStmtValue::Assign { target, value: expr, origin } =>
+            make_core_assign_stmt(
+                remap_core_place(target, mapping),
+                remap_core_expr_types(expr, mapping), origin),
+        CoreStmtValue::ExprStmt { value: expr, origin } =>
+            make_core_expr_stmt(remap_core_expr_types(expr, mapping), origin),
+        CoreStmtValue::While { condition, body, origin } =>
+            make_core_while_stmt(
+                remap_core_expr_types(condition, mapping),
+                remap_core_block_types(body, mapping), origin),
+        CoreStmtValue::Break { origin } => make_core_break_stmt(origin),
+        CoreStmtValue::Continue { origin } => make_core_continue_stmt(origin),
+        CoreStmtValue::Return { value: returned, origin } =>
+            make_core_return_stmt(match returned {
+                some(expr) => some(remap_core_expr_types(expr, mapping)),
+                none => none
+            }, origin)
+    }
+}
+
+pub fn remap_core_callable_types(
+    value: CoreCallableContract, mapping: List<Int>
+) -> CoreCallableContract {
+    make_core_callable_contract(
+        value.reference, value.origin,
+        value.parameter_types.map(fn(ty) {
+            remap_core_type_reference(ty, mapping)
+        }),
+        value.parameter_slots,
+        remap_core_type_reference(value.result_type, mapping),
+        value.mode,
+        remap_flow_call_contract(value.semantic_contract, mapping),
+        value.evidence_requirements)
+}
+
+pub fn remap_core_impl_types(
+    value: CoreImplMetadata, mapping: List<Int>
+) -> CoreImplMetadata {
+    make_core_impl_metadata(
+        value.owner, value.methods,
+        value.assoc_bindings.map(fn(binding) {
+            make_core_assoc_binding(
+                binding.member,
+                remap_core_type_reference(binding.ty, mapping))
+        }),
+        value.obligations)
+}
+
+pub fn remap_core_body_types(
+    value: CoreBody, mapping: List<Int>, project_type_count: Int
+) -> CoreBody {
+    make_core_body(
+        value.reference, value.origin, project_type_count,
+        value.manifest, value.scopes,
+        value.slots.map(fn(slot) {
+            make_core_slot(
+                slot.reference,
+                remap_core_type_reference(slot.ty, mapping),
+                slot.scope, slot.reverse_ordinal, slot.initial_state,
+                slot.storage, slot.storage_contract, slot.parameter_ordinal)
+        }),
+        value.parameter_slots,
+        remap_core_type_reference(value.result_type, mapping),
+        remap_core_block_types(value.body, mapping))
+}
 
 // ============================================================
 // Collection-complete CoreProgram validation

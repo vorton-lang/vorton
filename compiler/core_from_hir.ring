@@ -30,7 +30,9 @@ use hir::{
 }
 use flow_ir::{
     FlowScope, FlowScopeRef, FlowTypeNode,
-    flow_type_node_reference, flow_type_ref_index
+    flow_type_node_reference, flow_type_ref_index,
+    flow_type_node_intern_ready, flow_type_node_intern_key_same,
+    remap_flow_type_node, flow_type_node_contract_same
 }
 use core_expr::{
     CoreTypeGraph, CoreTypeRef, CoreEffectSet,
@@ -73,12 +75,14 @@ use core_expr::{
     core_field_ref_same,
     core_type_graph_count, core_type_graph_nodes, make_core_type_graph,
     copy_core_callables, copy_core_impl_metadata,
-    core_callable_reference, core_impl_owner
+    core_callable_reference, core_impl_owner,
+    remap_core_callable_types, remap_core_impl_types, remap_core_body_types
 }
 use core_hir::{
     CoreProgram, CoreBodyEntry,
     make_core_body_entry, make_core_program,
-    core_body_entry_reference
+    core_body_entry_reference, core_body_entry_body,
+    core_body_entry_origin, core_body_entry_anchor
 }
 use core_elaborate::{
     CoreElaboratedBody, CoreOrdinaryBodyPlan,
@@ -512,6 +516,21 @@ pub struct CoreAssemblyRecorder {
     frozen: Bool
 }
 
+// This reference belongs to one module recorder.  It is never a project
+// CoreTypeRef and therefore cannot collide with another module's ordinal.
+// Project assembly consumes it through the recorder's frozen node order and
+// allocates the only global CoreTypeRef domain.
+pub struct CoreTypeFactRef {
+    module_key: Str,
+    ordinal: Int
+}
+pub fn core_type_fact_module_key(value: CoreTypeFactRef) -> Str {
+    value.module_key
+}
+pub fn core_type_fact_ordinal(value: CoreTypeFactRef) -> Int {
+    value.ordinal
+}
+
 pub fn new_core_assembly_recorder(
     module_key: Str, module_order: Int
 ) -> CoreAssemblyRecorder {
@@ -530,16 +549,16 @@ fn require_recorder_open(value: CoreAssemblyRecorder) {
     if value.frozen { panic("Core assembly: recorder is frozen") }
 }
 
-pub fn record_core_type_node(
+pub fn record_core_type_spec(
     mut recorder: CoreAssemblyRecorder, node: FlowTypeNode
-) {
+) -> CoreTypeFactRef {
     require_recorder_open(recorder)
     let index = flow_type_ref_index(flow_type_node_reference(node))
-    if recorder.type_nodes.len() > 0 && index <= flow_type_ref_index(
-            flow_type_node_reference(recorder.type_nodes.last().unwrap())) {
-        panic("Core assembly: type nodes are not globally ordered")
+    if index != recorder.type_nodes.len() {
+        panic("Core assembly: type spec is not in module-local ordinal order")
     }
     recorder.type_nodes.push(node)
+    CoreTypeFactRef { module_key: recorder.module_key, ordinal: index }
 }
 
 pub fn record_core_callable(
@@ -1752,18 +1771,38 @@ fn order_entries_by_inventory(
     result
 }
 
-fn assemble_frozen_core_facts(
-    facts: List<FrozenCoreAssemblyFacts>
-) -> CoreProgram {
-    if facts.len() == 0 { panic("Core assembly: project has no frozen facts") }
-    let mut type_nodes: List<FlowTypeNode> = []
-    let mut callables: List<CoreCallableContract> = []
-    let mut impls: List<CoreImplMetadata> = []
-    let mut inventory_entries: List<ExecutableEntry> = []
-    let mut manifests: List<BinderManifest> = []
-    let mut source_bodies: List<CoreSourceBodyInput> = []
-    let mut generated_plans: List<CoreGeneratedPlan> = []
-    let mut delegates: List<DelegateTypedPlan> = []
+struct CoreTypePrototype {
+    module_index: Int,
+    local_index: Int
+}
+
+struct ProjectTypeInterning {
+    graph: CoreTypeGraph,
+    module_mappings: List<List<Int>>
+}
+
+fn unresolved_type_mapping(count: Int) -> List<Int?> {
+    let mut result: List<Int?> = []
+    let mut index = 0
+    while index < count {
+        result.push(none)
+        index = index + 1
+    }
+    result
+}
+
+fn close_type_mapping(values: List<Int?>) -> List<Int> {
+    let mut result: List<Int> = []
+    for value in values {
+        result.push(match value {
+            some(index) => index,
+            none => panic("Core assembly: type interner left an unresolved fact")
+        })
+    }
+    result
+}
+
+fn validate_project_fact_order(facts: List<FrozenCoreAssemblyFacts>) {
     let mut fact_index = 0
     while fact_index < facts.len() {
         let fact = facts.get(fact_index).unwrap()
@@ -1777,39 +1816,178 @@ fn assemble_frozen_core_facts(
             }
             prior_index = prior_index + 1
         }
-        for node in fact.type_nodes { type_nodes.push(node) }
-        for callable in fact.callables { callables.push(callable) }
-        for item in fact.impls { impls.push(item) }
-        for entry in fact.inventory_entries { inventory_entries.push(entry) }
-        for manifest in fact.manifests { manifests.push(manifest) }
-        for body in fact.source_bodies { source_bodies.push(body) }
-        for generated in fact.generated { generated_plans.push(generated) }
-        for delegate in fact.delegates { delegates.push(delegate) }
         fact_index = fact_index + 1
     }
-    let type_graph = make_core_type_graph(type_nodes)
-    let inventory = make_executable_inventory(inventory_entries)
-    let mut body_pool: List<CoreBodyEntry> = []
-    for source in source_bodies {
-        let hir = source.source
-        body_pool.push(assemble_source_body(
-            source, hir, type_graph))
+}
+
+// Deterministic finite worklist.  Atomic/parameter/exact-nominal keys are
+// reservable without their recursive field edges; structural types wait until
+// every child key is known.  A later full-contract comparison rejects two
+// producers that claim the same exact nominal key with different payloads.
+fn intern_project_types(
+    facts: List<FrozenCoreAssemblyFacts>
+) -> ProjectTypeInterning {
+    let mut mappings: List<List<Int?>> = []
+    let mut total = 0
+    for fact in facts {
+        mappings.push(unresolved_type_mapping(fact.type_nodes.len()))
+        total = total + fact.type_nodes.len()
     }
-    for generated in generated_plans {
-        body_pool.push(entry_for_body(
-            materialize_generated(generated), inventory))
-    }
-    let mut all_impls = copy_core_impl_metadata(impls)
-    for delegate in delegates {
-        let (metadata, bodies) = elaborate_delegate_to_core(delegate)
-        all_impls.push(metadata)
-        for body in bodies {
-            body_pool.push(entry_for_body(body, inventory))
+    let mut prototypes: List<CoreTypePrototype> = []
+    let mut resolved = 0
+    while resolved < total {
+        let mut progress = false
+        let mut fact_index = 0
+        while fact_index < facts.len() {
+            let fact = facts.get(fact_index).unwrap()
+            let mut mapping = mappings.get(fact_index).unwrap()
+            let mut local_index = 0
+            while local_index < fact.type_nodes.len() {
+                if mapping.get(local_index).unwrap().is_none() {
+                    let node = fact.type_nodes.get(local_index).unwrap()
+                    if flow_type_node_intern_ready(node, mapping) {
+                        let mut chosen: Int? = none
+                        let mut prototype_index = 0
+                        while prototype_index < prototypes.len() {
+                            let prototype = prototypes.get(
+                                prototype_index).unwrap()
+                            let candidate_fact = facts.get(
+                                prototype.module_index).unwrap()
+                            let candidate_node = candidate_fact.type_nodes.get(
+                                prototype.local_index).unwrap()
+                            let candidate_mapping = mappings.get(
+                                prototype.module_index).unwrap()
+                            if flow_type_node_intern_key_same(
+                                    node, mapping,
+                                    candidate_node, candidate_mapping) {
+                                chosen = some(prototype_index)
+                                prototype_index = prototypes.len()
+                            } else {
+                                prototype_index = prototype_index + 1
+                            }
+                        }
+                        let project_index = match chosen {
+                            some(index) => index,
+                            none => {
+                                let index = prototypes.len()
+                                prototypes.push(CoreTypePrototype {
+                                    module_index: fact_index,
+                                    local_index: local_index
+                                })
+                                index
+                            }
+                        }
+                        mapping.set(local_index, some(project_index))
+                        mappings.set(fact_index, mapping)
+                        resolved = resolved + 1
+                        progress = true
+                    }
+                }
+                local_index = local_index + 1
+            }
+            fact_index = fact_index + 1
         }
+        if !progress {
+            panic("Core assembly: structural type interning dependency cycle")
+        }
+    }
+
+    let mut closed_mappings: List<List<Int>> = []
+    for mapping in mappings { closed_mappings.push(close_type_mapping(mapping)) }
+    let mut project_nodes: List<FlowTypeNode> = []
+    let mut project_index = 0
+    while project_index < prototypes.len() {
+        let prototype = prototypes.get(project_index).unwrap()
+        let fact = facts.get(prototype.module_index).unwrap()
+        let node = fact.type_nodes.get(prototype.local_index).unwrap()
+        project_nodes.push(remap_flow_type_node(
+            node, project_index,
+            closed_mappings.get(prototype.module_index).unwrap()))
+        project_index = project_index + 1
+    }
+    let mut fact_index = 0
+    while fact_index < facts.len() {
+        let fact = facts.get(fact_index).unwrap()
+        let mapping = closed_mappings.get(fact_index).unwrap()
+        let mut local_index = 0
+        while local_index < fact.type_nodes.len() {
+            let target = mapping.get(local_index).unwrap()
+            let remapped = remap_flow_type_node(
+                fact.type_nodes.get(local_index).unwrap(), target, mapping)
+            if !flow_type_node_contract_same(
+                    remapped, project_nodes.get(target).unwrap()) {
+                panic("Core assembly: repeated type key has a different contract")
+            }
+            local_index = local_index + 1
+        }
+        fact_index = fact_index + 1
+    }
+    ProjectTypeInterning {
+        graph: make_core_type_graph(project_nodes),
+        module_mappings: closed_mappings
+    }
+}
+
+fn assemble_frozen_core_facts(
+    facts: List<FrozenCoreAssemblyFacts>
+) -> CoreProgram {
+    if facts.len() == 0 { panic("Core assembly: project has no frozen facts") }
+    validate_project_fact_order(facts)
+    let interning = intern_project_types(facts)
+    let mut inventory_entries: List<ExecutableEntry> = []
+    let mut manifests: List<BinderManifest> = []
+    for fact in facts {
+        for entry in fact.inventory_entries { inventory_entries.push(entry) }
+        for manifest in fact.manifests { manifests.push(manifest) }
+    }
+    let inventory = make_executable_inventory(inventory_entries)
+    let project_type_count = core_type_graph_count(interning.graph)
+    let mut callables: List<CoreCallableContract> = []
+    let mut all_impls: List<CoreImplMetadata> = []
+    let mut body_pool: List<CoreBodyEntry> = []
+    let mut fact_index = 0
+    while fact_index < facts.len() {
+        let fact = facts.get(fact_index).unwrap()
+        let mapping = interning.module_mappings.get(fact_index).unwrap()
+        let local_graph = make_core_type_graph(fact.type_nodes)
+        for callable in fact.callables {
+            callables.push(remap_core_callable_types(callable, mapping))
+        }
+        for item in fact.impls {
+            all_impls.push(remap_core_impl_types(item, mapping))
+        }
+        for source in fact.source_bodies {
+            let hir = source.source
+            let local_entry = assemble_source_body(source, hir, local_graph)
+            body_pool.push(make_core_body_entry(
+                core_body_entry_reference(local_entry),
+                core_body_entry_origin(local_entry),
+                core_body_entry_anchor(local_entry),
+                remap_core_body_types(
+                    core_body_entry_body(local_entry), mapping,
+                    project_type_count)))
+        }
+        for generated in fact.generated {
+            body_pool.push(entry_for_body(
+                remap_core_body_types(
+                    materialize_generated(generated), mapping,
+                    project_type_count),
+                inventory))
+        }
+        for delegate in fact.delegates {
+            let (metadata, bodies) = elaborate_delegate_to_core(delegate)
+            all_impls.push(remap_core_impl_types(metadata, mapping))
+            for body in bodies {
+                body_pool.push(entry_for_body(
+                    remap_core_body_types(
+                        body, mapping, project_type_count), inventory))
+            }
+        }
+        fact_index = fact_index + 1
     }
     let ordered = order_entries_by_inventory(body_pool, inventory)
     make_core_program(
-        type_graph, callables, all_impls, ordered,
+        interning.graph, callables, all_impls, ordered,
         inventory, manifests)
 }
 
