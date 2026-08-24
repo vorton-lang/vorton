@@ -12,25 +12,24 @@
 use types::{Type, Effect, EffectRow, effect_kind_name}
 use ast::{Span, UseDecl, UseImport}
 use hir::{HExpr, HStmt, HDecl, HParam, HProgram, HStructField, HEnumVariant,
-    HTraitMethod, HEffectOp, TraitBound, evidence_param_name, trait_bound_param_name,
+    HEffectOp, TraitBound, evidence_param_name, trait_bound_param_name,
     variant_ctor_name, compare_by_first, hexpr_type, trait_dict_name,
-    default_method_self_name, scan_trait_method_order, collect_all_supertraits,
-    type_contains_extern_handle,
-    DerivedImpl, DerivedField, DerivedVariant, FieldAction, DictRef, TypeKind,
-    DERIVED_HASH_SEED}
+    scan_trait_method_order, type_contains_extern_handle}
 use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTypedRef,
     CEmitState, new_c_ctx, c_emit, c_raw, c_param, c_param_def,
     c_local, c_mangle_fn,
     c_mangle_fn_with_prefix, c_mangle_method, c_sanitize, c_symbol_for_fn_key, c_symbol_fragment,
     c_line_directive,
     rt_use, rt_use_raw,
-    get_or_assign_c_typeid, is_runtime_symbol, fresh_tmp, fresh_i64, fresh_dbl,
+    get_or_assign_c_typeid, is_runtime_symbol, fresh_tmp,
     fresh_label, c_push_fn, c_pop_fn, c_global_cstr, c_ref_c_name,
     c_enable_identity_ledger, c_identity_ledger_text}
-use codegen_c_expr::{gen_c_expr, emit_c_stmt, c_resolve_dict_ref,
-    ensure_c_dict_getter, gen_c_closure_call, emit_c_receiver_load}
+use codegen_c_expr::{gen_c_expr, emit_c_stmt, ensure_c_dict_getter}
 use effect_analysis::{extract_effect_names, collect_fn_callees}
-use ir_identity::{symbol_ref_canonical_payload}
+use ir_identity::{
+    symbol_ref_canonical_payload,
+    impl_method_ref_callable_slot_index
+}
 use resolver::{module_prefix}
 
 // ============================================================
@@ -43,6 +42,9 @@ pub fn generate_c(
     program: HProgram, c_path: Str, o_path: Str, emit_lines: Bool,
     emit_identity_ledger: Bool
 ) -> Bool {
+    if program.derived_impls.len() != 0 {
+        panic("C ABI boundary: semantic DerivedImpl carrier was not retired")
+    }
     let mut ctx = new_c_ctx(emit_lines)
     if emit_identity_ledger { c_enable_identity_ledger(ctx) }
 
@@ -78,8 +80,7 @@ pub fn generate_c(
     // First pass: prototypes + registries (enum variant ctors are declared
     // AND defined here — their bodies depend on nothing but the registries).
     // Also pre-registers every impl trait dict's build fn (dict_build_fns) so
-    // getter routing is decl-order-independent, and forward-declares default
-    // trait method fns (__<Trait>_<method>).
+    // getter routing is declaration-order-independent.
     c_forward_declare(ctx, program.decls)
 
     // Struct constructors after the whole forward pass: a Ring fn sharing the
@@ -88,13 +89,7 @@ pub fn generate_c(
     // after every fn was declared).
     c_declare_struct_ctors(ctx, program.decls)
 
-    // Derived trait impls (Eq/Clone/Ord/Debug/Json) BEFORE the body pass — method
-    // calls in bodies need ring_<Type>_clone etc. registered. Builtin Option
-    // descriptors are already part of the checker-owned HProgram inventory.
-    emit_c_derived_impls(ctx, program.derived_impls)
-
-    // Second pass: function bodies (+ impl trait dict build fns, default
-    // trait method bodies, default-method forwarding stubs).
+    // Second pass: ordinary function bodies + mechanical impl dict build fns.
     for decl in program.decls {
         emit_c_decl(ctx, decl)
     }
@@ -136,6 +131,9 @@ pub fn generate_c_project(
     // set per-module in the body pass below.
     for m in modules {
         let (prefix, program, _uses) = m
+        if program.derived_impls.len() != 0 {
+            panic("C ABI boundary: project DerivedImpl carrier was not retired")
+        }
         // B-144: program-level extern type names (per-module filtered set
         // from compile_phases — union across modules is safe, B-145).
         for en in program.extern_type_names { ctx.extern_types.insert(en) }
@@ -171,19 +169,6 @@ pub fn generate_c_project(
     for m in modules {
         let (_prefix, program, _uses) = m
         c_declare_struct_ctors(ctx, program.decls)
-    }
-
-    // Derived trait impls before the body pass. The project assembler prepends
-    // builtin Option descriptors to its one physical carrier HProgram.
-    // Register every Json method/builder/getter across the project before any
-    // Json body is emitted, so declaration order cannot select a fallback.
-    for m in modules {
-        let (_prefix, program, _uses) = m
-        predeclare_c_json_derived_impls(ctx, program.derived_impls)
-    }
-    for m in modules {
-        let (_prefix, program, _uses) = m
-        emit_c_derived_impl_bodies(ctx, program.derived_impls)
     }
 
     // Second pass: per-module body emission.  module_prefix / boxed_vars /
@@ -503,10 +488,7 @@ fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?
                 match trait_name {
                     some(tn) => {
                         let dict_name = trait_dict_name(target_type, tn)
-                        let has_methods = match ctx.trait_method_order.get(tn) {
-                            some(order) => order.len() > 0,
-                            none => methods.len() > 0,
-                        }
+                        let has_methods = methods.len() > 0
                         if has_methods && ctx.dict_build_fns.contains(dict_name) == false {
                             ctx.dict_build_fns.insert(dict_name)
                             ctx.fn_protos.push("void* ring_dict_build_${c_symbol_fragment(dict_name)}(void);")
@@ -515,35 +497,7 @@ fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?
                     none => {},
                 }
             },
-            HDecl::Trait { name: trait_name, methods: trait_methods, .. } => {
-                // B-141: forward-declare default trait method bodies as
-                // __<Trait>_<method>(self_dict, ...supertrait_dicts, ...params,
-                // ...evidence) — port of the LLVM forward pass Trait arm.
-                let all_supers = collect_all_supertraits(ctx.trait_supertraits, trait_name)
-                for tm in trait_methods {
-                    if tm.has_default {
-                        match tm.body {
-                            some(_) => {
-                                let default_fn_name = "__${trait_name}_${tm.name}"
-                                if ctx.functions.contains_key(default_fn_name) == false {
-                                    let mut ev_params: List<Str> = []
-                                    for en in extract_effect_names(tm.effects) {
-                                        ev_params.push(evidence_param_name(en))
-                                    }
-                                    let total = 1 + all_supers.len() + tm.params.len() + ev_params.len()
-                                    let c_name = c_symbol_fragment(default_fn_name)
-                                    ctx.functions.insert(default_fn_name, CFnInfo { c_name: c_name, total_params: total })
-                                    ctx.fn_evidence_params.insert(default_fn_name, ev_params)
-                                    let mut ps: List<Str> = []
-                                    for _i in 0..total { ps.push("void*") }
-                                    ctx.fn_protos.push("void* ${c_name}(${ps.join(", ")});")
-                                }
-                            },
-                            none => {},
-                        }
-                    }
-                }
-            },
+            HDecl::Trait { .. } => {},
             HDecl::Struct { name, fields, .. } => {
                 let mut fnames: List<Str> = []
                 // B-104 D1 rule ① (audit #139): mark fields whose Ring type
@@ -800,13 +754,11 @@ fn emit_c_decl(mut ctx: CCtx, decl: HDecl) {
                     _ => {},
                 }
             }
-            // Trait impl: build the dict, then emit forwarding stubs for
-            // default methods the impl doesn't override (stub AFTER dict so
-            // the dict getter routes to the real dict — LLVM parity).
+            // Core has already elaborated every trait/default/derived method
+            // into an ordinary exact HDecl::Fn.  C only assembles the ABI dict.
             match trait_name {
                 some(tn) => {
                     emit_c_trait_dict(ctx, target_type, tn, methods)
-                    emit_c_default_method_stubs(ctx, target_type, tn, methods)
                 },
                 none => {},
             }
@@ -819,10 +771,7 @@ fn emit_c_decl(mut ctx: CCtx, decl: HDecl) {
             ctx.test_emit_idx = ctx.test_emit_idx + 1
             emit_c_zero_arg_fn(ctx, test_name, body, span)
         },
-        HDecl::Trait { name: trait_name, methods: trait_methods, .. } => {
-            // B-141: emit default trait method bodies.
-            emit_c_trait_default_methods(ctx, trait_name, trait_methods)
-        },
+        HDecl::Trait { .. } => {},
         HDecl::ExternFn { .. } => {},
         HDecl::ExternType { .. } => {},
         HDecl::TypeAlias { .. } => {},
@@ -1454,69 +1403,7 @@ fn propagate_transitive_effects_c(fn_callees: Map<Str, Set<Str>>, mut local_fn_e
 }
 
 // ============================================================
-// B-141: default trait method bodies (port of emit_trait_default_methods /
-// emit_one_default_method).  __<Trait>_<method>(self_dict,
-// ...supertrait_dicts, ...params, ...evidence): self_dict is registered as
-// __ring_self_<Trait> so exact bound-call DictRef evidence finds it.
-// ============================================================
-
-fn emit_c_trait_default_methods(mut ctx: CCtx, trait_name: Str, methods: List<HTraitMethod>) {
-    for method in methods {
-        if !method.has_default { continue }
-        match method.body {
-            some(body) => {
-                let default_fn_name = "__${trait_name}_${method.name}"
-                match ctx.functions.get(default_fn_name) {
-                    some(fi) => {
-                        emit_c_one_default_method(ctx, fi.c_name, default_fn_name, trait_name, method, body)
-                    },
-                    none => {},  // not forward-declared, skip
-                }
-            },
-            none => {},
-        }
-    }
-}
-
-fn emit_c_one_default_method(mut ctx: CCtx, c_name: Str, default_fn_name: Str, trait_name: Str, method: HTraitMethod, body: HExpr) {
-    if ctx.emitted_fns.contains(c_name) { return }
-    ctx.emitted_fns.insert(c_name)
-
-    let saved = c_push_fn(ctx, default_fn_name)
-    let mut sig_parts: List<Str> = []
-
-    // Param 0: self_dict, registered under __ring_self_<Trait>.
-    let self_dict_name = default_method_self_name(trait_name)
-    let sd = c_param(ctx, self_dict_name)
-    sig_parts.push("void* ${sd}")
-
-    // Supertrait dict params, each under __ring_self_<SuperTrait>.
-    let all_supers = collect_all_supertraits(ctx.trait_supertraits, trait_name)
-    for st in all_supers {
-        let sv = c_param(ctx, default_method_self_name(st))
-        sig_parts.push("void* ${sv}")
-    }
-
-    // Regular params (including self).
-    for p in method.params {
-        let pv = c_param_def(ctx, p.name, p.def_id)
-        sig_parts.push("void* ${pv}")
-    }
-
-    // Evidence params from the method effects.
-    for en in extract_effect_names(method.effects) {
-        let ev = c_param(ctx, evidence_param_name(en))
-        sig_parts.push("void* ${ev}")
-    }
-
-    let val = gen_c_expr(ctx, body)
-    c_emit(ctx, "return ${val};")
-    c_pop_fn(ctx, c_name, sig_parts.join(", "), saved)
-}
-
-// ============================================================
-// Trait dict emission for impl blocks (port of emit_trait_dict /
-// emit_dict_method_slot / emit_dict_method_thunk / emit_default_method_thunk).
+// Mechanical trait dict emission for exact ordinary impl methods.
 // Dict layout { i64 method_count, ptr m0, ... } typeid 16 (DICT_STATIC);
 // each slot is a {thunk, env} closure (typeid 7).
 // ============================================================
@@ -1524,16 +1411,23 @@ fn emit_c_one_default_method(mut ctx: CCtx, c_name: Str, default_fn_name: Str, t
 fn emit_c_trait_dict(mut ctx: CCtx, target_type: Str, trait_name: Str, methods: List<HDecl>) {
     let dict_name = trait_dict_name(target_type, trait_name)
 
-    let mut impl_methods: List<Str> = []
+    let mut method_order: List<Str> = []
     for m in methods {
         match m {
-            HDecl::Fn { name, .. } => impl_methods.push(name),
-            _ => {},
+            HDecl::Fn { name, impl_method_ref, .. } => {
+                let exact = match impl_method_ref {
+                    some(value) => value,
+                    none => panic(
+                        "C ABI dict: ordinary impl method lacks exact identity")
+                }
+                if impl_method_ref_callable_slot_index(exact) !=
+                        method_order.len() {
+                    panic("C ABI dict: exact method slot order differs")
+                }
+                method_order.push(name)
+            },
+            _ => panic("C ABI dict: impl method carrier is not a function"),
         }
-    }
-    let method_order = match ctx.trait_method_order.get(trait_name) {
-        some(order) => order,
-        none => impl_methods,
     }
     let method_count = method_order.len()
     if method_count == 0 { return }
@@ -1541,8 +1435,7 @@ fn emit_c_trait_dict(mut ctx: CCtx, target_type: Str, trait_name: Str, methods: 
     let build_fn_name = "ring_dict_build_${c_symbol_fragment(dict_name)}"
     if ctx.emitted_fns.contains(build_fn_name) { return }
     ctx.emitted_fns.insert(build_fn_name)
-    // Defensive: a dict whose forward pass was skipped (trait_method_order
-    // miss) still needs registration + prototype.
+    // Defensive ABI registration if the forward pass did not predeclare it.
     if ctx.dict_build_fns.contains(dict_name) == false {
         ctx.dict_build_fns.insert(dict_name)
         ctx.fn_protos.push("void* ${build_fn_name}(void);")
@@ -1556,7 +1449,8 @@ fn emit_c_trait_dict(mut ctx: CCtx, target_type: Str, trait_name: Str, methods: 
     for i in 0..method_count {
         match method_order.get(i) {
             some(method_name) => {
-                emit_c_dict_method_slot(ctx, target_type, trait_name, method_name, dict, i)
+                emit_c_dict_method_slot(
+                    ctx, target_type, method_name, dict, i)
             },
             none => {},
         }
@@ -1568,7 +1462,10 @@ fn emit_c_trait_dict(mut ctx: CCtx, target_type: Str, trait_name: Str, methods: 
     let _g = ensure_c_dict_getter(ctx, dict_name)
 }
 
-fn emit_c_dict_method_slot(mut ctx: CCtx, target_type: Str, trait_name: Str, method_name: Str, dict_var: Str, slot_idx: Int) {
+fn emit_c_dict_method_slot(
+    mut ctx: CCtx, target_type: Str, method_name: Str,
+    dict_var: Str, slot_idx: Int
+) {
     let mangled = c_mangle_method(target_type, method_name)
     match ctx.functions.get(mangled) {
         some(fi) => {
@@ -1580,24 +1477,7 @@ fn emit_c_dict_method_slot(mut ctx: CCtx, target_type: Str, trait_name: Str, met
             c_emit(ctx, "((void**)${cls})[1] = RING_UNIT;")
             c_emit(ctx, "((void**)${dict_var})[${slot_idx + 1}] = ${cls};")
         },
-        none => {
-            // B-141: default trait method — env = the dict itself, so the
-            // default body dispatches self.method() through it.
-            let default_fn_name = "__${trait_name}_${method_name}"
-            match ctx.functions.get(default_fn_name) {
-                some(dfi) => {
-                    let thunk = ensure_c_default_method_thunk(ctx, default_fn_name, dfi, target_type, trait_name)
-                    let cls = fresh_tmp(ctx)
-                    c_emit(ctx, "${cls} = ring_alloc((int64_t)(2 * sizeof(void*)), 7);")
-                    c_emit(ctx, "((void**)${cls})[0] = (void*)${thunk};")
-                    c_emit(ctx, "((void**)${cls})[1] = ${dict_var};")
-                    c_emit(ctx, "((void**)${dict_var})[${slot_idx + 1}] = ${cls};")
-                },
-                none => {
-                    c_emit(ctx, "((void**)${dict_var})[${slot_idx + 1}] = RING_UNIT;")
-                },
-            }
-        },
+        none => panic("C ABI dict: exact ordinary method was not declared"),
     }
 }
 
@@ -1623,1267 +1503,5 @@ fn ensure_c_dict_method_thunk(mut ctx: CCtx, method_c_name: Str, method_arity: I
     thunk_name
 }
 
-// B-141: default-method thunk — FORWARDS env (= dict ptr) as self_dict,
-// resolves supertrait dicts statically for the concrete target type.
-fn ensure_c_default_method_thunk(mut ctx: CCtx, default_fn_name: Str, dfi: CFnInfo, target_type: Str, trait_name: Str) -> Str {
-    let thunk_name = "${dfi.c_name}__defaultthunk_${c_symbol_fragment(target_type)}"
-    if ctx.emitted_fns.contains(thunk_name) { return thunk_name }
-    ctx.emitted_fns.insert(thunk_name)
-
-    let all_supers = collect_all_supertraits(ctx.trait_supertraits, trait_name)
-    let thunk_arity = dfi.total_params - all_supers.len()
-
-    // Supertrait dict getters (ensure BEFORE assembling the thunk text).
-    let mut super_calls: List<Str> = []
-    for st in all_supers {
-        let g = ensure_c_dict_getter(ctx, trait_dict_name(target_type, st))
-        super_calls.push("${g}()")
-    }
-
-    let mut sig_parts: List<Str> = []
-    for i in 0..thunk_arity {
-        sig_parts.push("void* p${i}")
-    }
-    let mut fwd: List<Str> = ["p0"]
-    for sc in super_calls { fwd.push(sc) }
-    for i in 1..thunk_arity { fwd.push("p${i}") }
-    ctx.fn_protos.push("void* ${thunk_name}(${sig_parts.join(", ")});")
-    let mut def: List<Str> = []
-    def.push("void* ${thunk_name}(${sig_parts.join(", ")}) {")
-    def.push("    return ${dfi.c_name}(${fwd.join(", ")});")
-    def.push("}")
-    ctx.fn_defs.push(def.join("\n"))
-    thunk_name
-}
-
-// B-141: forwarding stubs ring_<Type>_<method> for default methods the impl
-// does not override (direct calls like cat.greet() compile to these).
-fn emit_c_default_method_stubs(mut ctx: CCtx, target_type: Str, trait_name: Str, impl_methods: List<HDecl>) {
-    let mut impl_method_names: Set<Str> = set_new()
-    for m in impl_methods {
-        match m {
-            HDecl::Fn { name, .. } => { impl_method_names.insert(name) },
-            _ => {},
-        }
-    }
-    let method_order_opt = ctx.trait_method_order.get(trait_name)
-    if method_order_opt.is_none() { return }
-    let method_order = method_order_opt.unwrap()
-    let all_supers = collect_all_supertraits(ctx.trait_supertraits, trait_name)
-    let super_count = all_supers.len()
-
-    for method_name in method_order {
-        if impl_method_names.contains(method_name) { continue }
-        let default_fn_name = "__${trait_name}_${method_name}"
-        match ctx.functions.get(default_fn_name) {
-            some(dfi) => {
-                let mangled = c_mangle_method(target_type, method_name)
-                if ctx.functions.contains_key(mangled) { continue }
-                let stub_arity = dfi.total_params - 1 - super_count
-                let c_name = if is_runtime_symbol(mangled) { "${mangled}__ring" } else { mangled }
-                ctx.functions.insert(mangled, CFnInfo { c_name: c_name, total_params: stub_arity })
-                match ctx.fn_evidence_params.get(default_fn_name) {
-                    some(ev) => { ctx.fn_evidence_params.insert(mangled, ev) },
-                    none => {},
-                }
-
-                // Dict getters resolved statically for the concrete type.
-                let dict_getter = ensure_c_dict_getter(ctx, trait_dict_name(target_type, trait_name))
-                let mut fwd: List<Str> = ["${dict_getter}()"]
-                for st in all_supers {
-                    let g = ensure_c_dict_getter(ctx, trait_dict_name(target_type, st))
-                    fwd.push("${g}()")
-                }
-                let mut sig_parts: List<Str> = []
-                for i in 0..stub_arity {
-                    sig_parts.push("void* p${i}")
-                    fwd.push("p${i}")
-                }
-                let params_str = if sig_parts.len() == 0 { "void" } else { sig_parts.join(", ") }
-                ctx.fn_protos.push("void* ${c_name}(${params_str});")
-                let mut def: List<Str> = []
-                def.push("void* ${c_name}(${params_str}) {")
-                def.push("    return ${dfi.c_name}(${fwd.join(", ")});")
-                def.push("}")
-                ctx.fn_defs.push(def.join("\n"))
-            },
-            none => {},
-        }
-    }
-}
-
-// ============================================================
-// B-100 Fix 2 port: C codegen for auto-derived trait impls
-// (Eq/Hash/Clone/Ord/Debug) and the per-trait method emitters, rendered as
-// plain C (no phi/bb bookkeeping). Identity and builtin descriptor assembly
-// are checker responsibilities; this backend consumes the list mechanically.
-// ============================================================
-
-pub fn emit_c_derived_impls(mut ctx: CCtx, derived_impls: List<DerivedImpl>) {
-    predeclare_c_json_derived_impls(ctx, derived_impls)
-    emit_c_derived_impl_bodies(ctx, derived_impls)
-}
-
-fn emit_c_derived_impl_bodies(mut ctx: CCtx, derived_impls: List<DerivedImpl>) {
-    for di in derived_impls {
-        match di.trait_name {
-            "Eq" => emit_c_derived_eq(ctx, di),
-            "Clone" => emit_c_derived_clone(ctx, di),
-            "Debug" => emit_c_derived_debug(ctx, di),
-            "Ord" => emit_c_derived_ord(ctx, di),
-            "Hash" => emit_c_derived_hash(ctx, di),
-            "Json" => emit_c_derived_json(ctx, di),
-            _ => {},
-        }
-    }
-}
-
-// ── scaffold ─────────────────────────────────────────────────
-
-struct CDerivedFn {
-    c_name: Str,
-    params_str: Str,
-    self_var: Str,
-    other_var: Str,
-    saved: CEmitState
-}
-
-// Collect every bound's type parameter and trait in exact registered ABI order.
-fn collect_c_derived_dict_params(bounds: List<TraitBound>) -> List<Str> {
-    let mut params: List<Str> = []
-    for b in bounds {
-        params.push(trait_bound_param_name(b.type_param, b.trait_name))
-    }
-    params
-}
-
-fn predeclare_c_derived_fn(
-    mut ctx: CCtx, type_name: Str, method_name: Str,
-    is_binary: Bool, bounds: List<TraitBound>
-) {
-    let mangled = c_mangle_method(type_name, method_name)
-    if ctx.functions.contains_key(mangled) { return }
-    let dict_params = collect_c_derived_dict_params(bounds)
-    let base = if is_binary { 2 } else { 1 }
-    let total = base + dict_params.len()
-    let c_name = if is_runtime_symbol(mangled) { "${mangled}__ring" } else { mangled }
-    ctx.functions.insert(mangled, CFnInfo {
-        c_name: c_name,
-        total_params: total
-    })
-    ctx.predeclared_derived_fns.insert(mangled)
-    let mut no_ev: List<Str> = []
-    ctx.fn_evidence_params.insert(mangled, no_ev)
-    ctx.fn_trait_bounds.insert(mangled, bounds)
-    let mut ps: List<Str> = []
-    for _i in 0..total { ps.push("void*") }
-    ctx.fn_protos.push("void* ${c_name}(${ps.join(", ")});")
-}
-
-// Begin a derived method fn: register + prototype + nested push + param
-// binds (dict params land in named_values for resolve_c_dict_for_derived).
-// Returns none when the method already exists (manual impl wins).
-fn begin_c_derived_fn(mut ctx: CCtx, type_name: Str, method_name: Str, trait_name: Str, is_binary: Bool, bounds: List<TraitBound>) -> CDerivedFn? {
-    let mangled = c_mangle_method(type_name, method_name)
-    if !ctx.predeclared_derived_fns.contains(mangled) {
-        if ctx.functions.contains_key(mangled) { return none }
-        predeclare_c_derived_fn(ctx, type_name, method_name, is_binary, bounds)
-    }
-
-    let fn_info = match ctx.functions.get(mangled) {
-        some(found) => found,
-        none => return none
-    }
-    if ctx.emitted_fns.contains(fn_info.c_name) { return none }
-    ctx.emitted_fns.insert(fn_info.c_name)
-
-    let dict_params = collect_c_derived_dict_params(bounds)
-    let base = if is_binary { 2 } else { 1 }
-    let total = base + dict_params.len()
-    if fn_info.total_params != total {
-        panic("C codegen invariant: derived method ABI changed after predeclaration")
-    }
-    let c_name = fn_info.c_name
-
-    let saved = c_push_fn(ctx, c_name)
-    let mut sig_parts: List<Str> = []
-    let self_var = c_param(ctx, "self")
-    sig_parts.push("void* ${self_var}")
-    let other_var = if is_binary {
-        let ov = c_param(ctx, "other")
-        sig_parts.push("void* ${ov}")
-        ov
-    } else {
-        ""
-    }
-    for dp in dict_params {
-        let dv = c_param(ctx, dp)
-        sig_parts.push("void* ${dv}")
-    }
-    let params_str = sig_parts.join(", ")
-    some(CDerivedFn { c_name: c_name, params_str: params_str, self_var: self_var, other_var: other_var, saved: saved })
-}
-
-fn end_c_derived_fn(mut ctx: CCtx, d: CDerivedFn) {
-    c_pop_fn(ctx, d.c_name, d.params_str, d.saved)
-}
-
-// Resolve an explicitly tagged derived base.  Bound bases are Simple and
-// module singleton bases are Static; spelling never selects the domain.
-fn resolve_c_dict_for_derived(mut ctx: CCtx, base_dict: DictRef) -> CTypedRef {
-    c_resolve_dict_ref(ctx, base_dict)
-}
-
-// Call a dict's slot-0 closure on the given args (+ resolved extra dicts) —
-// shared shape of the derived eq/cmp/debug dict calls.
-fn emit_c_derived_dict_call(mut ctx: CCtx, base_dict: DictRef, extra_dicts: List<DictRef>, args: List<Str>) -> Str {
-    let resolved_dict = resolve_c_dict_for_derived(ctx, base_dict)
-    let cls_ref = emit_c_receiver_load(ctx, resolved_dict, 1, "dict")
-    let mut call_args: List<Str> = []
-    let mut owned_extra_dicts: List<Str> = []
-    for a in args { call_args.push(a) }
-    for ed in extra_dicts {
-        match ed {
-            DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
-                let trait_name = symbol_ref_canonical_payload(trait_ref)
-                let reference = c_resolve_dict_ref(ctx, DictRef::Wrapped {
-                    dict: dict, trait_ref: trait_ref,
-                    inner_dicts: inner_dicts
-                })
-                let value = c_ref_c_name(reference)
-                call_args.push(value)
-                owned_extra_dicts.push(value)
-            },
-            DictRef::Simple(name) => {
-                let reference = c_resolve_dict_ref(ctx, DictRef::Simple(name))
-                call_args.push(c_ref_c_name(reference))
-            },
-            DictRef::Static(name) => {
-                let reference = c_resolve_dict_ref(ctx, DictRef::Static(name))
-                call_args.push(c_ref_c_name(reference))
-            },
-        }
-    }
-    let result = gen_c_closure_call(ctx, cls_ref, call_args)
-    for owned in owned_extra_dicts {
-        rt_use(ctx, "ring_drop", 1)
-        c_emit(ctx, "ring_drop(${owned});")
-    }
-    result
-}
-
-// A fresh Str literal value (fresh alloc, RC=1) — derived debug pieces.
-fn c_derived_str_lit(mut ctx: CCtx, s: Str) -> Str {
-    rt_use(ctx, "ring_str_from_cstr", 1)
-    let g = c_global_cstr(ctx, s)
-    let t = fresh_tmp(ctx)
-    c_emit(ctx, "${t} = ring_str_from_cstr(${g});")
-    t
-}
-
-// ── Eq ───────────────────────────────────────────────────────
-
-// i64 flag (1/0): are the two field values equal under `action`?
-fn emit_c_field_eq_flag(mut ctx: CCtx, lhs: Str, rhs: Str, action: FieldAction) -> Str {
-    match action {
-        FieldAction::Identity => {
-            // Tagged (Int/Bool/Unit) → raw compare; heap → ring_str_eq (Str is
-            // the only Identity heap type in Eq derivation).
-            rt_use(ctx, "ring_str_eq", 2)
-            let f = fresh_i64(ctx)
-            c_emit(ctx, "if (((intptr_t)${lhs}) & 1) { ${f} = (${lhs} == ${rhs}); } else { ${f} = ring_str_eq(${lhs}, ${rhs}); }")
-            f
-        },
-        FieldAction::FloatIdentity => {
-            rt_use(ctx, "ring_unbox_float", 1)
-            let f = fresh_i64(ctx)
-            c_emit(ctx, "${f} = (ring_unbox_float(${lhs}) == ring_unbox_float(${rhs}));")
-            f
-        },
-        FieldAction::BoolIdentity => {
-            let f = fresh_i64(ctx)
-            c_emit(ctx, "${f} = (${lhs} == ${rhs});")
-            f
-        },
-        FieldAction::Call { base_dict, extra_dicts, .. } => {
-            let r = emit_c_derived_dict_call(
-                ctx, base_dict, extra_dicts, [lhs, rhs])
-            let f = fresh_i64(ctx)
-            c_emit(ctx, "${f} = (RING_UNTAG(${r}) != 0);")
-            f
-        },
-        FieldAction::Tuple { element_actions, .. } => {
-            // Short-circuit: first unequal element fails the whole tuple.
-            rt_use(ctx, "ring_list_get", 2)
-            let f = fresh_i64(ctx)
-            c_emit(ctx, "${f} = 0;")
-            let fail_lbl = fresh_label(ctx, "teq")
-            for i in 0..element_actions.len() {
-                match element_actions.get(i) {
-                    some(act) => {
-                        let le = fresh_tmp(ctx)
-                        c_emit(ctx, "${le} = ring_list_get(${lhs}, ${i});")
-                        let re = fresh_tmp(ctx)
-                        c_emit(ctx, "${re} = ring_list_get(${rhs}, ${i});")
-                        let ef = emit_c_field_eq_flag(ctx, le, re, act)
-                        c_emit(ctx, "if (!${ef}) goto ${fail_lbl};")
-                    },
-                    none => {},
-                }
-            }
-            c_emit(ctx, "${f} = 1;")
-            c_raw(ctx, "${fail_lbl}:;")
-            f
-        },
-        FieldAction::FnLiteral => {
-            let f = fresh_i64(ctx)
-            c_emit(ctx, "${f} = 1;")
-            f
-        },
-    }
-}
-
-fn emit_c_derived_eq(mut ctx: CCtx, di: DerivedImpl) {
-    let type_name = di.type_name
-    match di.type_kind {
-        TypeKind::StructKind => match di.struct_fields {
-            some(fields) => {
-                emit_c_struct_eq_fn(ctx, type_name, fields, di.bounds)
-                emit_c_ne_fn(ctx, type_name)
-                emit_c_derived_trait_dict(ctx, type_name, "Eq")
-            },
-            none => {},
-        },
-        TypeKind::EnumKind => match di.enum_variants {
-            some(variants) => {
-                emit_c_enum_eq_fn(ctx, type_name, variants, di.bounds)
-                emit_c_ne_fn(ctx, type_name)
-                emit_c_derived_trait_dict(ctx, type_name, "Eq")
-            },
-            none => {},
-        },
-    }
-}
-
-fn c_find_field_index(field_names: List<Str>, target: Str) -> Int {
-    for i in 0..field_names.len() {
-        if field_names[i] == target { return i }
-    }
-    0 - 1
-}
-
-fn emit_c_struct_eq_fn(mut ctx: CCtx, type_name: Str, fields: List<DerivedField>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "eq", "Eq", true, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    let struct_info_opt = ctx.struct_types.get(type_name)
-    if fields.len() == 0 || struct_info_opt.is_none() {
-        c_emit(ctx, "return RING_TRUE;")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-    let struct_info = struct_info_opt.unwrap()
-    for field in fields {
-        let field_idx = c_find_field_index(struct_info.field_names, field.name)
-        if field_idx < 0 { continue }
-        let sfv = fresh_tmp(ctx)
-        c_emit(ctx, "${sfv} = ((void**)${scaffold.self_var})[${field_idx}];")
-        let ofv = fresh_tmp(ctx)
-        c_emit(ctx, "${ofv} = ((void**)${scaffold.other_var})[${field_idx}];")
-        let f = emit_c_field_eq_flag(ctx, sfv, ofv, field.action)
-        c_emit(ctx, "if (!${f}) return RING_FALSE;")
-    }
-    c_emit(ctx, "return RING_TRUE;")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-fn emit_c_enum_eq_fn(mut ctx: CCtx, type_name: Str, variants: List<DerivedVariant>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "eq", "Eq", true, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    let enum_info_opt = ctx.enum_types.get(type_name)
-    if enum_info_opt.is_none() {
-        c_emit(ctx, "return RING_TRUE;")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-    let enum_info = enum_info_opt.unwrap()
-    let st = fresh_i64(ctx)
-    c_emit(ctx, "${st} = *(int64_t*)${scaffold.self_var};")
-    let ot = fresh_i64(ctx)
-    c_emit(ctx, "${ot} = *(int64_t*)${scaffold.other_var};")
-
-    let mut any_fields = false
-    for v in variants {
-        if v.fields.len() > 0 { any_fields = true }
-    }
-    if !any_fields {
-        c_emit(ctx, "return RING_BOOL(${st} == ${ot});")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-
-    c_emit(ctx, "if (${st} != ${ot}) return RING_FALSE;")
-    let mut vi = 0
-    for variant in variants {
-        let var_tag = match enum_info.variants.get(variant.name) {
-            some(vinfo) => vinfo.tag,
-            none => vi,
-        }
-        vi = vi + 1
-        if variant.fields.len() == 0 {
-            c_emit(ctx, "if (${st} == ${var_tag}) return RING_TRUE;")
-        } else {
-            c_emit(ctx, "if (${st} == ${var_tag}) {")
-            ctx.indent = ctx.indent + 1
-            let mut fi = 0
-            for field in variant.fields {
-                let sfv = fresh_tmp(ctx)
-                c_emit(ctx, "${sfv} = ((void**)${scaffold.self_var})[${fi + 1}];")
-                let ofv = fresh_tmp(ctx)
-                c_emit(ctx, "${ofv} = ((void**)${scaffold.other_var})[${fi + 1}];")
-                let f = emit_c_field_eq_flag(ctx, sfv, ofv, field.action)
-                c_emit(ctx, "if (!${f}) return RING_FALSE;")
-                fi = fi + 1
-            }
-            c_emit(ctx, "return RING_TRUE;")
-            ctx.indent = ctx.indent - 1
-            c_emit(ctx, "}")
-        }
-    }
-    // Default (unreached for well-formed enums): equal.
-    c_emit(ctx, "return RING_TRUE;")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-// ne = !eq, same signature (incl. trailing dict params), pure forwarding.
-fn emit_c_ne_fn(mut ctx: CCtx, type_name: Str) {
-    let mangled_ne = c_mangle_method(type_name, "ne")
-    if ctx.functions.contains_key(mangled_ne) { return }
-    let mangled_eq = c_mangle_method(type_name, "eq")
-    let eq_fi_opt = ctx.functions.get(mangled_eq)
-    if eq_fi_opt.is_none() { return }
-    let eq_fi = eq_fi_opt.unwrap()
-    let arity = eq_fi.total_params
-    let c_name = if is_runtime_symbol(mangled_ne) { "${mangled_ne}__ring" } else { mangled_ne }
-    ctx.functions.insert(mangled_ne, CFnInfo { c_name: c_name, total_params: arity })
-    let mut no_ev: List<Str> = []
-    ctx.fn_evidence_params.insert(mangled_ne, no_ev)
-    let mut sig_parts: List<Str> = []
-    let mut fwd: List<Str> = []
-    for i in 0..arity {
-        sig_parts.push("void* p${i}")
-        fwd.push("p${i}")
-    }
-    ctx.fn_protos.push("void* ${c_name}(${sig_parts.join(", ")});")
-    let mut def: List<Str> = []
-    def.push("void* ${c_name}(${sig_parts.join(", ")}) {")
-    def.push("    return RING_BOOL(1 - RING_UNTAG(${eq_fi.c_name}(${fwd.join(", ")})));")
-    def.push("}")
-    ctx.fn_defs.push(def.join("\n"))
-}
-
-// ── Hash ─────────────────────────────────────────────────────
-
-fn emit_c_derived_hash(mut ctx: CCtx, di: DerivedImpl) {
-    let type_name = di.type_name
-    match di.type_kind {
-        TypeKind::StructKind => match di.struct_fields {
-            some(fields) => {
-                emit_c_struct_hash_fn(ctx, type_name, fields, di.bounds)
-            },
-            none => {},
-        },
-        TypeKind::EnumKind => match di.enum_variants {
-            some(variants) => {
-                emit_c_enum_hash_fn(ctx, type_name, variants, di.bounds)
-            },
-            none => {},
-        },
-    }
-}
-
-fn emit_c_hash_combine(mut ctx: CCtx, lhs: Str, rhs: Str) -> Str {
-    rt_use(ctx, "ring_hash_combine", 2)
-    let combined = fresh_i64(ctx)
-    c_emit(ctx, "${combined} = ring_hash_combine(${lhs}, ${rhs});")
-    combined
-}
-
-// Return an unboxed deterministic hash for a field.  Hash derivation emits
-// Call/Tuple actions only; the remaining arms are deterministic fail-closed
-// fallbacks and never inspect a pointer address.
-fn emit_c_field_hash_raw(mut ctx: CCtx, value: Str, action: FieldAction) -> Str {
-    match action {
-        FieldAction::Call { base_dict, extra_dicts, .. } => {
-            let boxed = emit_c_derived_dict_call(
-                ctx, base_dict, extra_dicts, [value])
-            let raw = fresh_i64(ctx)
-            c_emit(ctx, "${raw} = RING_UNTAG(${boxed});")
-            raw
-        },
-        FieldAction::Tuple { element_actions, .. } => {
-            rt_use(ctx, "ring_list_get", 2)
-            let mut acc = fresh_i64(ctx)
-            c_emit(ctx, "${acc} = ${DERIVED_HASH_SEED};")
-            for i in 0..element_actions.len() {
-                match element_actions.get(i) {
-                    some(elem_action) => {
-                        let elem = fresh_tmp(ctx)
-                        c_emit(ctx, "${elem} = ring_list_get(${value}, ${i});")
-                        let elem_hash = emit_c_field_hash_raw(ctx, elem, elem_action)
-                        acc = emit_c_hash_combine(ctx, acc, elem_hash)
-                    },
-                    none => {},
-                }
-            }
-            acc
-        },
-        FieldAction::Identity => {
-            let raw = fresh_i64(ctx)
-            c_emit(ctx, "${raw} = 0;")
-            raw
-        },
-        FieldAction::FloatIdentity => {
-            let raw = fresh_i64(ctx)
-            c_emit(ctx, "${raw} = 0;")
-            raw
-        },
-        FieldAction::BoolIdentity => {
-            let raw = fresh_i64(ctx)
-            c_emit(ctx, "${raw} = 0;")
-            raw
-        },
-        FieldAction::FnLiteral => {
-            let raw = fresh_i64(ctx)
-            c_emit(ctx, "${raw} = 0;")
-            raw
-        },
-    }
-}
-
-fn emit_c_struct_hash_fn(mut ctx: CCtx, type_name: Str, fields: List<DerivedField>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "hash", "Hash", false, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    // Register the dictionary after the direct method is known but before its
-    // body resolves field evidence. Recursive Hash fields can now call this
-    // singleton instead of falling through to a nonexistent builtin dict.
-    emit_c_derived_trait_dict(ctx, type_name, "Hash")
-    let struct_info_opt = ctx.struct_types.get(type_name)
-    let mut acc = fresh_i64(ctx)
-    c_emit(ctx, "${acc} = ${DERIVED_HASH_SEED};")
-    match struct_info_opt {
-        some(struct_info) => {
-            for field in fields {
-                let field_idx = c_find_field_index(struct_info.field_names, field.name)
-                if field_idx >= 0 {
-                    let field_value = fresh_tmp(ctx)
-                    c_emit(ctx, "${field_value} = ((void**)${scaffold.self_var})[${field_idx}];")
-                    let field_hash = emit_c_field_hash_raw(ctx, field_value, field.action)
-                    acc = emit_c_hash_combine(ctx, acc, field_hash)
-                }
-            }
-        },
-        none => {},
-    }
-    c_emit(ctx, "return RING_INT(${acc});")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-fn emit_c_enum_hash_fn(mut ctx: CCtx, type_name: Str, variants: List<DerivedVariant>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "hash", "Hash", false, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    emit_c_derived_trait_dict(ctx, type_name, "Hash")
-    let enum_info_opt = ctx.enum_types.get(type_name)
-    if enum_info_opt.is_none() {
-        c_emit(ctx, "return RING_INT(${DERIVED_HASH_SEED});")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-    let enum_info = enum_info_opt.unwrap()
-    let tag = fresh_i64(ctx)
-    c_emit(ctx, "${tag} = *(int64_t*)${scaffold.self_var};")
-    let mut vi = 0
-    for variant in variants {
-        let runtime_tag = match enum_info.variants.get(variant.name) {
-            some(vinfo) => vinfo.tag,
-            none => vi,
-        }
-        vi = vi + 1
-        c_emit(ctx, "if (${tag} == ${runtime_tag}) {")
-        ctx.indent = ctx.indent + 1
-        let seed = fresh_i64(ctx)
-        c_emit(ctx, "${seed} = ${DERIVED_HASH_SEED};")
-        let discriminator = fresh_i64(ctx)
-        c_emit(ctx, "${discriminator} = ${variant.discriminator};")
-        let mut acc = emit_c_hash_combine(ctx, seed, discriminator)
-        let mut fi = 0
-        for field in variant.fields {
-            let field_value = fresh_tmp(ctx)
-            c_emit(ctx, "${field_value} = ((void**)${scaffold.self_var})[${fi + 1}];")
-            let field_hash = emit_c_field_hash_raw(ctx, field_value, field.action)
-            acc = emit_c_hash_combine(ctx, acc, field_hash)
-            fi = fi + 1
-        }
-        c_emit(ctx, "return RING_INT(${acc});")
-        ctx.indent = ctx.indent - 1
-        c_emit(ctx, "}")
-    }
-    c_emit(ctx, "return RING_INT(${DERIVED_HASH_SEED});")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-// ── Ord ──────────────────────────────────────────────────────
-
-fn emit_c_derived_ord(mut ctx: CCtx, di: DerivedImpl) {
-    let type_name = di.type_name
-    match di.type_kind {
-        TypeKind::StructKind => match di.struct_fields {
-            some(fields) => {
-                emit_c_struct_cmp_fn(ctx, type_name, fields, di.bounds)
-                emit_c_derived_trait_dict(ctx, type_name, "Ord")
-            },
-            none => {},
-        },
-        TypeKind::EnumKind => match di.enum_variants {
-            some(variants) => {
-                emit_c_enum_cmp_fn(ctx, type_name, variants, di.bounds)
-                emit_c_derived_trait_dict(ctx, type_name, "Ord")
-            },
-            none => {},
-        },
-    }
-}
-
-// Boxed Int (-1/0/1) comparing two field values under `action`.
-fn emit_c_field_cmp_val(mut ctx: CCtx, lhs: Str, rhs: Str, action: FieldAction) -> Str {
-    match action {
-        FieldAction::Identity => {
-            // Tagged → signed compare of untagged values; heap → the runtime
-            // Str cmp helper (null env).
-            rt_use(ctx, "ring_cl_cmp_str", 3)
-            let li = fresh_i64(ctx)
-            let ri = fresh_i64(ctx)
-            let cv = fresh_tmp(ctx)
-            c_emit(ctx, "if (((intptr_t)${lhs}) & 1) { ${li} = RING_UNTAG(${lhs}); ${ri} = RING_UNTAG(${rhs}); ${cv} = RING_INT(${li} < ${ri} ? -1 : (${li} > ${ri} ? 1 : 0)); } else { ${cv} = ring_cl_cmp_str(RING_UNIT, ${lhs}, ${rhs}); }")
-            cv
-        },
-        FieldAction::FloatIdentity => {
-            rt_use(ctx, "ring_unbox_float", 1)
-            let ld = fresh_dbl(ctx)
-            let rd = fresh_dbl(ctx)
-            c_emit(ctx, "${ld} = ring_unbox_float(${lhs});")
-            c_emit(ctx, "${rd} = ring_unbox_float(${rhs});")
-            let cv = fresh_tmp(ctx)
-            c_emit(ctx, "${cv} = RING_INT(${ld} < ${rd} ? -1 : (${ld} > ${rd} ? 1 : 0));")
-            cv
-        },
-        FieldAction::BoolIdentity => {
-            // Tagged like Int — LLVM routes BoolIdentity through the same
-            // identity cmp; both operands are tagged so only that leg runs.
-            let li = fresh_i64(ctx)
-            let ri = fresh_i64(ctx)
-            let cv = fresh_tmp(ctx)
-            c_emit(ctx, "${li} = RING_UNTAG(${lhs});")
-            c_emit(ctx, "${ri} = RING_UNTAG(${rhs});")
-            c_emit(ctx, "${cv} = RING_INT(${li} < ${ri} ? -1 : (${li} > ${ri} ? 1 : 0));")
-            cv
-        },
-        FieldAction::Call { base_dict, extra_dicts, .. } => {
-            emit_c_derived_dict_call(ctx, base_dict, extra_dicts, [lhs, rhs])
-        },
-        FieldAction::Tuple { element_actions, .. } => {
-            rt_use(ctx, "ring_list_get", 2)
-            let cv = fresh_tmp(ctx)
-            c_emit(ctx, "${cv} = RING_INT(0);")
-            let done_lbl = fresh_label(ctx, "tcmp")
-            let n = element_actions.len()
-            for i in 0..n {
-                match element_actions.get(i) {
-                    some(act) => {
-                        let le = fresh_tmp(ctx)
-                        c_emit(ctx, "${le} = ring_list_get(${lhs}, ${i});")
-                        let re = fresh_tmp(ctx)
-                        c_emit(ctx, "${re} = ring_list_get(${rhs}, ${i});")
-                        let ecv = emit_c_field_cmp_val(ctx, le, re, act)
-                        c_emit(ctx, "${cv} = ${ecv};")
-                        if i < n - 1 {
-                            c_emit(ctx, "if (RING_UNTAG(${cv}) != 0) goto ${done_lbl};")
-                        }
-                    },
-                    none => {},
-                }
-            }
-            c_raw(ctx, "${done_lbl}:;")
-            cv
-        },
-        FieldAction::FnLiteral => {
-            let cv = fresh_tmp(ctx)
-            c_emit(ctx, "${cv} = RING_INT(0);")
-            cv
-        },
-    }
-}
-
-fn emit_c_struct_cmp_fn(mut ctx: CCtx, type_name: Str, fields: List<DerivedField>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "cmp", "Ord", true, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    let struct_info_opt = ctx.struct_types.get(type_name)
-    if fields.len() == 0 || struct_info_opt.is_none() {
-        c_emit(ctx, "return RING_INT(0);")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-    let struct_info = struct_info_opt.unwrap()
-    let n = fields.len()
-    for fi in 0..n {
-        match fields.get(fi) {
-            some(field) => {
-                let field_idx = c_find_field_index(struct_info.field_names, field.name)
-                if field_idx >= 0 {
-                    let sfv = fresh_tmp(ctx)
-                    c_emit(ctx, "${sfv} = ((void**)${scaffold.self_var})[${field_idx}];")
-                    let ofv = fresh_tmp(ctx)
-                    c_emit(ctx, "${ofv} = ((void**)${scaffold.other_var})[${field_idx}];")
-                    let cv = emit_c_field_cmp_val(ctx, sfv, ofv, field.action)
-                    if fi < n - 1 {
-                        c_emit(ctx, "if (RING_UNTAG(${cv}) != 0) return ${cv};")
-                    } else {
-                        c_emit(ctx, "return ${cv};")
-                    }
-                }
-            },
-            none => {},
-        }
-    }
-    // Fallback (all field indices missing — cannot happen for well-formed input).
-    c_emit(ctx, "return RING_INT(0);")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-fn emit_c_enum_cmp_fn(mut ctx: CCtx, type_name: Str, variants: List<DerivedVariant>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "cmp", "Ord", true, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    let enum_info_opt = ctx.enum_types.get(type_name)
-    if enum_info_opt.is_none() {
-        c_emit(ctx, "return RING_INT(0);")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-    let enum_info = enum_info_opt.unwrap()
-    let st = fresh_i64(ctx)
-    c_emit(ctx, "${st} = *(int64_t*)${scaffold.self_var};")
-    let ot = fresh_i64(ctx)
-    c_emit(ctx, "${ot} = *(int64_t*)${scaffold.other_var};")
-    c_emit(ctx, "if (${st} != ${ot}) return RING_INT(${st} < ${ot} ? -1 : 1);")
-    let mut vi = 0
-    for variant in variants {
-        let var_tag = match enum_info.variants.get(variant.name) {
-            some(vinfo) => vinfo.tag,
-            none => vi,
-        }
-        vi = vi + 1
-        if variant.fields.len() == 0 {
-            c_emit(ctx, "if (${st} == ${var_tag}) return RING_INT(0);")
-        } else {
-            c_emit(ctx, "if (${st} == ${var_tag}) {")
-            ctx.indent = ctx.indent + 1
-            let n = variant.fields.len()
-            for fi in 0..n {
-                match variant.fields.get(fi) {
-                    some(field) => {
-                        let sfv = fresh_tmp(ctx)
-                        c_emit(ctx, "${sfv} = ((void**)${scaffold.self_var})[${fi + 1}];")
-                        let ofv = fresh_tmp(ctx)
-                        c_emit(ctx, "${ofv} = ((void**)${scaffold.other_var})[${fi + 1}];")
-                        let cv = emit_c_field_cmp_val(ctx, sfv, ofv, field.action)
-                        if fi < n - 1 {
-                            c_emit(ctx, "if (RING_UNTAG(${cv}) != 0) return ${cv};")
-                        } else {
-                            c_emit(ctx, "return ${cv};")
-                        }
-                    },
-                    none => {},
-                }
-            }
-            ctx.indent = ctx.indent - 1
-            c_emit(ctx, "}")
-        }
-    }
-    c_emit(ctx, "return RING_INT(0);")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-// ── Clone ────────────────────────────────────────────────────
-// Clone under Perceus RC = ring_dup (RC increment; values are immutable).
-
-fn emit_c_derived_clone(mut ctx: CCtx, di: DerivedImpl) {
-    emit_c_clone_fn(ctx, di.type_name, di.bounds)
-    emit_c_derived_trait_dict(ctx, di.type_name, "Clone")
-}
-
-// The clone SIGNATURE must match the checker-registered scheme: derive.ring
-// registers clone with the impl's [T: Clone] bounds, so call sites pass the
-// dicts.  The LLVM backend declares clone with empty bounds and survives on
-// call-arity overflow being silently harmless — clang makes that a hard
-// error, so the C backend declares the dict params (body ignores them:
-// clone = shallow ring_dup).  Recorded in worker_feedback.
-fn emit_c_clone_fn(mut ctx: CCtx, type_name: Str, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "clone", "Clone", false, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    rt_use(ctx, "ring_dup", 1)
-    c_emit(ctx, "ring_dup(${scaffold.self_var});")
-    c_emit(ctx, "return ${scaffold.self_var};")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-// ── Debug ────────────────────────────────────────────────────
-// "Point { x: 1, y: 2 }" / "Red" / "Circle(7)" via the runtime SB shims.
-
-fn emit_c_derived_debug(mut ctx: CCtx, di: DerivedImpl) {
-    let type_name = di.type_name
-    // #196: only emit the trait dict when a debug method was generated.
-    let mut emitted = false
-    match di.type_kind {
-        TypeKind::StructKind => match di.struct_fields {
-            some(fields) => {
-                emit_c_struct_debug_fn(ctx, type_name, fields, di.bounds)
-                emitted = true
-            },
-            none => {},
-        },
-        TypeKind::EnumKind => match di.enum_variants {
-            some(variants) => {
-                emit_c_enum_debug_fn(ctx, type_name, variants, di.bounds)
-                emitted = true
-            },
-            none => {},
-        },
-    }
-    if emitted {
-        emit_c_derived_trait_dict(ctx, type_name, "Debug")
-    }
-}
-
-// Fresh Str with the debug rendering of one field value.
-fn emit_c_debug_field_str(mut ctx: CCtx, v: Str, action: FieldAction) -> Str {
-    match action {
-        FieldAction::Identity => {
-            // Tagged → Int rendering; heap → it IS a Str (dup so the caller
-            // can drop uniformly).
-            rt_use(ctx, "ring_int_to_str", 1)
-            rt_use(ctx, "ring_dup", 1)
-            let s = fresh_tmp(ctx)
-            c_emit(ctx, "if (((intptr_t)${v}) & 1) { ${s} = ring_int_to_str(RING_UNTAG(${v})); } else { ring_dup(${v}); ${s} = ${v}; }")
-            s
-        },
-        FieldAction::FloatIdentity => {
-            rt_use(ctx, "ring_unbox_float", 1)
-            rt_use(ctx, "ring_float_to_str", 1)
-            let s = fresh_tmp(ctx)
-            c_emit(ctx, "${s} = ring_float_to_str(ring_unbox_float(${v}));")
-            s
-        },
-        FieldAction::BoolIdentity => {
-            rt_use(ctx, "ring_bool_to_str", 1)
-            let s = fresh_tmp(ctx)
-            c_emit(ctx, "${s} = ring_bool_to_str(RING_UNTAG(${v}));")
-            s
-        },
-        FieldAction::Call { base_dict, extra_dicts, .. } => {
-            emit_c_derived_dict_call(ctx, base_dict, extra_dicts, [v])
-        },
-        FieldAction::Tuple { element_actions, .. } => {
-            if element_actions.len() == 0 {
-                return c_derived_str_lit(ctx, "()")
-            }
-            rt_use(ctx, "ring_sb_new", 0)
-            rt_use(ctx, "ring_sb_add", 2)
-            rt_use(ctx, "ring_sb_to_str", 1)
-            rt_use(ctx, "ring_drop", 1)
-            rt_use(ctx, "ring_list_get", 2)
-            let sb = fresh_tmp(ctx)
-            c_emit(ctx, "${sb} = ring_sb_new();")
-            emit_c_sb_add_lit(ctx, sb, "(")
-            for i in 0..element_actions.len() {
-                match element_actions.get(i) {
-                    some(act) => {
-                        if i > 0 {
-                            emit_c_sb_add_lit(ctx, sb, ", ")
-                        }
-                        let elem = fresh_tmp(ctx)
-                        c_emit(ctx, "${elem} = ring_list_get(${v}, ${i});")
-                        let es = emit_c_debug_field_str(ctx, elem, act)
-                        c_emit(ctx, "ring_sb_add(${sb}, ${es});")
-                        c_emit(ctx, "ring_drop(${es});")
-                    },
-                    none => {},
-                }
-            }
-            emit_c_sb_add_lit(ctx, sb, ")")
-            let res = fresh_tmp(ctx)
-            c_emit(ctx, "${res} = ring_sb_to_str(${sb});")
-            c_emit(ctx, "ring_drop(${sb});")
-            res
-        },
-        FieldAction::FnLiteral => c_derived_str_lit(ctx, "<fn>"),
-    }
-}
-
-// Append a fresh string literal to a SB and drop the literal.
-fn emit_c_sb_add_lit(mut ctx: CCtx, sb: Str, s: Str) {
-    rt_use(ctx, "ring_sb_add", 2)
-    rt_use(ctx, "ring_drop", 1)
-    let lit = c_derived_str_lit(ctx, s)
-    c_emit(ctx, "ring_sb_add(${sb}, ${lit});")
-    c_emit(ctx, "ring_drop(${lit});")
-}
-
-fn emit_c_struct_debug_fn(mut ctx: CCtx, type_name: Str, fields: List<DerivedField>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "debug", "Debug", false, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    let struct_info_opt = ctx.struct_types.get(type_name)
-    if fields.len() == 0 || struct_info_opt.is_none() {
-        let lit = c_derived_str_lit(ctx, type_name)
-        c_emit(ctx, "return ${lit};")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-    let struct_info = struct_info_opt.unwrap()
-    rt_use(ctx, "ring_sb_new", 0)
-    rt_use(ctx, "ring_sb_add", 2)
-    rt_use(ctx, "ring_sb_to_str", 1)
-    rt_use(ctx, "ring_drop", 1)
-    let sb = fresh_tmp(ctx)
-    c_emit(ctx, "${sb} = ring_sb_new();")
-    emit_c_sb_add_lit(ctx, sb, "${type_name} { ")
-    let mut first = true
-    for field in fields {
-        let field_idx = c_find_field_index(struct_info.field_names, field.name)
-        if field_idx >= 0 {
-            if first {
-                emit_c_sb_add_lit(ctx, sb, "${field.name}: ")
-            } else {
-                emit_c_sb_add_lit(ctx, sb, ", ${field.name}: ")
-            }
-            first = false
-            let fv = fresh_tmp(ctx)
-            c_emit(ctx, "${fv} = ((void**)${scaffold.self_var})[${field_idx}];")
-            let sv = emit_c_debug_field_str(ctx, fv, field.action)
-            c_emit(ctx, "ring_sb_add(${sb}, ${sv});")
-            c_emit(ctx, "ring_drop(${sv});")
-        }
-    }
-    emit_c_sb_add_lit(ctx, sb, " }")
-    let res = fresh_tmp(ctx)
-    c_emit(ctx, "${res} = ring_sb_to_str(${sb});")
-    c_emit(ctx, "ring_drop(${sb});")
-    c_emit(ctx, "return ${res};")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-fn emit_c_enum_debug_fn(mut ctx: CCtx, type_name: Str, variants: List<DerivedVariant>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "debug", "Debug", false, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    let enum_info_opt = ctx.enum_types.get(type_name)
-    if enum_info_opt.is_none() {
-        let lit = c_derived_str_lit(ctx, type_name)
-        c_emit(ctx, "return ${lit};")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-    let enum_info = enum_info_opt.unwrap()
-    let tag = fresh_i64(ctx)
-    c_emit(ctx, "${tag} = *(int64_t*)${scaffold.self_var};")
-    let mut vi = 0
-    for variant in variants {
-        let var_tag = match enum_info.variants.get(variant.name) {
-            some(vinfo) => vinfo.tag,
-            none => vi,
-        }
-        vi = vi + 1
-        c_emit(ctx, "if (${tag} == ${var_tag}) {")
-        ctx.indent = ctx.indent + 1
-        if variant.fields.len() == 0 {
-            let lit = c_derived_str_lit(ctx, variant.name)
-            c_emit(ctx, "return ${lit};")
-        } else {
-            let res = emit_c_enum_variant_debug_str(ctx, scaffold.self_var, variant)
-            c_emit(ctx, "return ${res};")
-        }
-        ctx.indent = ctx.indent - 1
-        c_emit(ctx, "}")
-    }
-    // Default: type name (unreached for well-formed enums).
-    let dflt = c_derived_str_lit(ctx, type_name)
-    c_emit(ctx, "return ${dflt};")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-fn emit_c_enum_variant_debug_str(mut ctx: CCtx, self_var: Str, variant: DerivedVariant) -> Str {
-    rt_use(ctx, "ring_sb_new", 0)
-    rt_use(ctx, "ring_sb_add", 2)
-    rt_use(ctx, "ring_sb_to_str", 1)
-    rt_use(ctx, "ring_drop", 1)
-    let sb = fresh_tmp(ctx)
-    c_emit(ctx, "${sb} = ring_sb_new();")
-    if variant.has_named_fields {
-        emit_c_sb_add_lit(ctx, sb, "${variant.name} { ")
-    } else {
-        emit_c_sb_add_lit(ctx, sb, "${variant.name}(")
-    }
-    for fi in 0..variant.fields.len() {
-        match variant.fields.get(fi) {
-            some(field) => {
-                if fi > 0 {
-                    emit_c_sb_add_lit(ctx, sb, ", ")
-                }
-                if variant.has_named_fields {
-                    emit_c_sb_add_lit(ctx, sb, "${field.name}: ")
-                }
-                let fv = fresh_tmp(ctx)
-                c_emit(ctx, "${fv} = ((void**)${self_var})[${fi + 1}];")
-                let sv = emit_c_debug_field_str(ctx, fv, field.action)
-                c_emit(ctx, "ring_sb_add(${sb}, ${sv});")
-                c_emit(ctx, "ring_drop(${sv});")
-            },
-            none => {},
-        }
-    }
-    if variant.has_named_fields {
-        emit_c_sb_add_lit(ctx, sb, " }")
-    } else {
-        emit_c_sb_add_lit(ctx, sb, ")")
-    }
-    let res = fresh_tmp(ctx)
-    c_emit(ctx, "${res} = ring_sb_to_str(${sb});")
-    c_emit(ctx, "ring_drop(${sb});")
-    res
-}
-
-// ── Json ────────────────────────────────────────────────────
-// Historical JSON shape: structs are objects in declaration order; enums are
-// objects beginning with the textual `_tag`, followed by named fields or
-// positional `_0`, `_1`, ... fields. Every value is encoded through ordinary
-// Json dictionary evidence, never through runtime representation guessing.
-
-fn emit_c_derived_json(mut ctx: CCtx, di: DerivedImpl) {
-    match di.type_kind {
-        TypeKind::StructKind => match di.struct_fields {
-            some(fields) => emit_c_struct_json_fn(ctx, di.type_name, fields, di.bounds),
-            none => {}
-        },
-        TypeKind::EnumKind => match di.enum_variants {
-            some(variants) => emit_c_enum_json_fn(ctx, di.type_name, variants, di.bounds),
-            none => {}
-        }
-    }
-}
-
-// Json SCC prepass. The derive pass has already registered the whole nominal
-// SCC in TypeEnv; mirror that atomicity in C registries before any field action
-// can ask for a peer dictionary.
-fn predeclare_c_json_derived_impls(
-    mut ctx: CCtx, derived_impls: List<DerivedImpl>
-) {
-    for di in derived_impls {
-        if di.trait_name == "Json" {
-            predeclare_c_derived_fn(
-                ctx, di.type_name, "to_json", false, di.bounds)
-            predeclare_c_derived_trait_dict(ctx, di.type_name, "Json")
-        }
-    }
-    // All builders are known before any getter selects its route.
-    for di in derived_impls {
-        if di.trait_name == "Json" {
-            let _getter = ensure_c_dict_getter(
-                ctx, trait_dict_name(di.type_name, "Json"))
-        }
-    }
-}
-
-fn emit_c_json_field_str(mut ctx: CCtx, value: Str, action: FieldAction) -> Str {
-    match action {
-        FieldAction::Call { base_dict, extra_dicts, .. } =>
-            emit_c_derived_dict_call(ctx, base_dict, extra_dicts, [value]),
-        // Json derivation only produces Call actions. Keep the backend
-        // fail-loud if a future derive rule violates that evidence boundary.
-        _ => {
-            rt_use(ctx, "ring_panic", 1)
-            let msg = c_derived_str_lit(ctx, "invalid Json derive field action")
-            c_emit(ctx, "ring_panic(${msg});")
-            c_derived_str_lit(ctx, "null")
-        }
-    }
-}
-
-fn emit_c_struct_json_fn(mut ctx: CCtx, type_name: Str, fields: List<DerivedField>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "to_json", "Json", false, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    emit_c_derived_trait_dict(ctx, type_name, "Json")
-    let struct_info_opt = ctx.struct_types.get(type_name)
-    if struct_info_opt.is_none() {
-        rt_use(ctx, "ring_panic", 1)
-        let msg = c_derived_str_lit(ctx, "Json derive missing struct layout")
-        c_emit(ctx, "return ring_panic(${msg});")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-    let struct_info = struct_info_opt.unwrap()
-    rt_use(ctx, "ring_sb_new", 0)
-    rt_use(ctx, "ring_sb_add", 2)
-    rt_use(ctx, "ring_sb_to_str", 1)
-    rt_use(ctx, "ring_drop", 1)
-    let sb = fresh_tmp(ctx)
-    c_emit(ctx, "${sb} = ring_sb_new();")
-    emit_c_sb_add_lit(ctx, sb, "{")
-    let mut first = true
-    for field in fields {
-        let field_idx = c_find_field_index(struct_info.field_names, field.name)
-        if field_idx < 0 {
-            rt_use(ctx, "ring_panic", 1)
-            let msg = c_derived_str_lit(ctx, "Json derive field is absent from struct layout")
-            c_emit(ctx, "return ring_panic(${msg});")
-        } else {
-            if first {
-                emit_c_sb_add_lit(ctx, sb, "\"${field.name}\":")
-                first = false
-            } else {
-                emit_c_sb_add_lit(ctx, sb, ",\"${field.name}\":")
-            }
-            let field_value = fresh_tmp(ctx)
-            c_emit(ctx, "${field_value} = ((void**)${scaffold.self_var})[${field_idx}];")
-            let encoded = emit_c_json_field_str(ctx, field_value, field.action)
-            c_emit(ctx, "ring_sb_add(${sb}, ${encoded});")
-            c_emit(ctx, "ring_drop(${encoded});")
-        }
-    }
-    emit_c_sb_add_lit(ctx, sb, "}")
-    let result = fresh_tmp(ctx)
-    c_emit(ctx, "${result} = ring_sb_to_str(${sb});")
-    c_emit(ctx, "ring_drop(${sb});")
-    c_emit(ctx, "return ${result};")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-fn emit_c_enum_json_fn(mut ctx: CCtx, type_name: Str, variants: List<DerivedVariant>, bounds: List<TraitBound>) {
-    let scaffold_opt = begin_c_derived_fn(ctx, type_name, "to_json", "Json", false, bounds)
-    if scaffold_opt.is_none() { return }
-    let scaffold = scaffold_opt.unwrap()
-    emit_c_derived_trait_dict(ctx, type_name, "Json")
-    let enum_info_opt = ctx.enum_types.get(type_name)
-    if enum_info_opt.is_none() {
-        rt_use(ctx, "ring_panic", 1)
-        let msg = c_derived_str_lit(ctx, "Json derive missing enum layout")
-        c_emit(ctx, "return ring_panic(${msg});")
-        end_c_derived_fn(ctx, scaffold)
-        return
-    }
-    let enum_info = enum_info_opt.unwrap()
-    let tag = fresh_i64(ctx)
-    c_emit(ctx, "${tag} = *(int64_t*)${scaffold.self_var};")
-    for variant in variants {
-        let runtime_tag = match enum_info.variants.get(variant.name) {
-            some(vinfo) => vinfo.tag,
-            none => panic("C codegen invariant: Json derive variant '${type_name}::${variant.name}' is absent from enum metadata")
-        }
-        c_emit(ctx, "if (${tag} == ${runtime_tag}) {")
-        ctx.indent = ctx.indent + 1
-        rt_use(ctx, "ring_sb_new", 0)
-        rt_use(ctx, "ring_sb_add", 2)
-        rt_use(ctx, "ring_sb_to_str", 1)
-        rt_use(ctx, "ring_drop", 1)
-        let sb = fresh_tmp(ctx)
-        c_emit(ctx, "${sb} = ring_sb_new();")
-        emit_c_sb_add_lit(ctx, sb, "{\"_tag\":\"${variant.name}\"")
-        for field_index in 0..variant.fields.len() {
-            match variant.fields.get(field_index) {
-                some(field) => {
-                    emit_c_sb_add_lit(ctx, sb, ",\"${field.name}\":")
-                    let field_value = fresh_tmp(ctx)
-                    c_emit(ctx, "${field_value} = ((void**)${scaffold.self_var})[${field_index + 1}];")
-                    let encoded = emit_c_json_field_str(ctx, field_value, field.action)
-                    c_emit(ctx, "ring_sb_add(${sb}, ${encoded});")
-                    c_emit(ctx, "ring_drop(${encoded});")
-                },
-                none => {}
-            }
-        }
-        emit_c_sb_add_lit(ctx, sb, "}")
-        let result = fresh_tmp(ctx)
-        c_emit(ctx, "${result} = ring_sb_to_str(${sb});")
-        c_emit(ctx, "ring_drop(${sb});")
-        c_emit(ctx, "return ${result};")
-        ctx.indent = ctx.indent - 1
-        c_emit(ctx, "}")
-    }
-    rt_use(ctx, "ring_panic", 1)
-    let msg = c_derived_str_lit(ctx, "invalid enum tag in Json derive")
-    c_emit(ctx, "return ring_panic(${msg});")
-    end_c_derived_fn(ctx, scaffold)
-}
-
-// ── derived trait dict ───────────────────────────────────────
-// Build fn + memoised getter for a derived impl's dict.  A user-written impl
-// dict (pre-registered in the forward pass) wins — skip.
-
-fn emit_c_derived_trait_dict(mut ctx: CCtx, target_type: Str, trait_name: Str) {
-    let dict_name = trait_dict_name(target_type, trait_name)
-    let method_order_opt = ctx.trait_method_order.get(trait_name)
-    if method_order_opt.is_none() { return }
-    let method_order = method_order_opt.unwrap()
-    let method_count = method_order.len()
-    if method_count == 0 { return }
-
-    let build_fn_name = "ring_dict_build_${c_symbol_fragment(dict_name)}"
-    if ctx.emitted_fns.contains(build_fn_name) { return }
-    ctx.emitted_fns.insert(build_fn_name)
-    if !ctx.dict_build_fns.contains(dict_name) {
-        ctx.dict_build_fns.insert(dict_name)
-        ctx.fn_protos.push("void* ${build_fn_name}(void);")
-    }
-
-    let saved = c_push_fn(ctx, build_fn_name)
-    rt_use(ctx, "ring_alloc", 2)
-    let dict = fresh_tmp(ctx)
-    c_emit(ctx, "${dict} = ring_alloc((int64_t)(sizeof(int64_t) + ${method_count} * sizeof(void*)), 16);")
-    c_emit(ctx, "*(int64_t*)${dict} = ${method_count};")
-    for i in 0..method_count {
-        match method_order.get(i) {
-            some(method_name) => {
-                emit_c_dict_method_slot(ctx, target_type, trait_name, method_name, dict, i)
-            },
-            none => {},
-        }
-    }
-    c_emit(ctx, "return ${dict};")
-    c_pop_fn(ctx, build_fn_name, "void", saved)
-
-    let _g = ensure_c_dict_getter(ctx, dict_name)
-}
-
-fn predeclare_c_derived_trait_dict(
-    mut ctx: CCtx, target_type: Str, trait_name: Str
-) {
-    let method_order = match ctx.trait_method_order.get(trait_name) {
-        some(found) => found,
-        none => panic("C codegen invariant: derived trait '${trait_name}' has no method metadata")
-    }
-    if method_order.len() == 0 {
-        panic("C codegen invariant: derived trait '${trait_name}' has an empty dictionary")
-    }
-    let dict_name = trait_dict_name(target_type, trait_name)
-    if !ctx.dict_build_fns.contains(dict_name) {
-        ctx.dict_build_fns.insert(dict_name)
-        ctx.fn_protos.push(
-            "void* ring_dict_build_${c_symbol_fragment(dict_name)}(void);")
-    }
-}
+// All trait-default and derived executable semantics are ordinary Core-generated
+// HDecl::Fn bodies before this mechanical C ABI boundary.
