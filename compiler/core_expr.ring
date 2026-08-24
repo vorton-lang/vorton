@@ -48,7 +48,8 @@ use hir::{
     MethodCallRef,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_is_bound, method_call_ref_intrinsic,
-    method_call_ref_impl, method_call_ref_bound
+    method_call_ref_impl, method_call_ref_bound,
+    method_call_ref_bound_evidence
 }
 use flow_ir::{
     FlowTypeNode, FlowTypeRef, FlowFieldIdentity, FlowNominalFieldFact,
@@ -351,30 +352,7 @@ pub struct CoreCalleeRef {
     direct: ExecutableRef?,
     local: SlotRef?,
     dynamic: PathRef?,
-    contract: FlowCallContract,
-    candidates: List<ExecutableRef>
-}
-
-fn copy_executables(values: List<ExecutableRef>) -> List<ExecutableRef> {
-    let mut result: List<ExecutableRef> = []
-    for value in values { result.push(value) }
-    result
-}
-fn validate_core_callee_candidates(values: List<ExecutableRef>) {
-    if values.len() == 0 { panic("CoreHIR: callee candidate set is empty") }
-    let mut left_index = 0
-    while left_index < values.len() {
-        let mut right_index = left_index + 1
-        while right_index < values.len() {
-            if executable_ref_same(
-                    values.get(left_index).unwrap(),
-                    values.get(right_index).unwrap()) {
-                panic("CoreHIR: callee candidate set repeats identity")
-            }
-            right_index = right_index + 1
-        }
-        left_index = left_index + 1
-    }
+    contract: FlowCallContract
 }
 
 pub fn make_core_direct_callee(
@@ -387,29 +365,25 @@ pub fn make_core_direct_callee(
     CoreCalleeRef {
         callee: callee, kind: CORE_CALLEE_DIRECT,
         direct: some(value), local: none, dynamic: none,
-        contract: contract, candidates: [value]
+        contract: contract
     }
 }
 pub fn make_core_local_callee(
-    value: SlotRef, contract: FlowCallContract,
-    candidates: List<ExecutableRef>
+    value: SlotRef, contract: FlowCallContract
 ) -> CoreCalleeRef {
-    validate_core_callee_candidates(candidates)
     CoreCalleeRef {
         callee: make_local_callee_ref(value), kind: CORE_CALLEE_LOCAL,
         direct: none, local: some(value), dynamic: none,
-        contract: contract, candidates: copy_executables(candidates)
+        contract: contract
     }
 }
 pub fn make_core_dynamic_callee(
-    value: PathRef, contract: FlowCallContract,
-    candidates: List<ExecutableRef>
+    value: PathRef, contract: FlowCallContract
 ) -> CoreCalleeRef {
-    validate_core_callee_candidates(candidates)
     CoreCalleeRef {
         callee: make_dynamic_callee_ref(value), kind: CORE_CALLEE_DYNAMIC,
         direct: none, local: none, dynamic: some(value),
-        contract: contract, candidates: copy_executables(candidates)
+        contract: contract
     }
 }
 pub fn core_callee_ref(value: CoreCalleeRef) -> CalleeRef { value.callee }
@@ -434,9 +408,6 @@ pub fn core_callee_dynamic(value: CoreCalleeRef) -> PathRef {
 }
 pub fn core_callee_contract(value: CoreCalleeRef) -> FlowCallContract {
     value.contract
-}
-pub fn core_callee_candidates(value: CoreCalleeRef) -> List<ExecutableRef> {
-    copy_executables(value.candidates)
 }
 
 enum CoreEvidenceRefValue {
@@ -665,6 +636,70 @@ pub fn core_field_ref_same(left: CoreFieldRef, right: CoreFieldRef) -> Bool {
         (CoreFieldRefValue::RecordFieldValue(a),
          CoreFieldRefValue::RecordFieldValue(b)) => path_ref_same(a, b),
         _ => false
+    }
+}
+
+enum CorePlaceRefValue {
+    CoreSlotPlaceValue(SlotRef),
+    CoreProjectPlaceValue {
+        base: SlotRef,
+        field: CoreFieldRef?,
+        evaluated_index: SlotRef?,
+        value_type: CoreTypeRef
+    }
+}
+pub struct CorePlaceRef { value: CorePlaceRefValue }
+pub fn make_core_slot_place(slot: SlotRef) -> CorePlaceRef {
+    CorePlaceRef { value: CorePlaceRefValue::CoreSlotPlaceValue(slot) }
+}
+pub fn make_core_project_place(
+    base: SlotRef, field: CoreFieldRef?, evaluated_index: SlotRef?,
+    value_type: CoreTypeRef
+) -> CorePlaceRef {
+    if (field.is_some() && evaluated_index.is_some()) ||
+       (field.is_none() && evaluated_index.is_none()) {
+        panic("CoreHIR: project place must select field xor index")
+    }
+    CorePlaceRef { value: CorePlaceRefValue::CoreProjectPlaceValue {
+        base: base, field: field, evaluated_index: evaluated_index,
+        value_type: value_type
+    } }
+}
+pub fn core_place_is_slot(value: CorePlaceRef) -> Bool {
+    match value.value {
+        CorePlaceRefValue::CoreSlotPlaceValue(_) => true,
+        CorePlaceRefValue::CoreProjectPlaceValue { .. } => false
+    }
+}
+pub fn core_place_slot(value: CorePlaceRef) -> SlotRef {
+    match value.value {
+        CorePlaceRefValue::CoreSlotPlaceValue(slot) => slot,
+        _ => panic("CoreHIR: projected place has no direct slot")
+    }
+}
+pub fn core_place_base(value: CorePlaceRef) -> SlotRef {
+    match value.value {
+        CorePlaceRefValue::CoreProjectPlaceValue { base, .. } => base,
+        _ => panic("CoreHIR: slot place has no projection base")
+    }
+}
+pub fn core_place_field(value: CorePlaceRef) -> CoreFieldRef? {
+    match value.value {
+        CorePlaceRefValue::CoreProjectPlaceValue { field, .. } => field,
+        _ => panic("CoreHIR: slot place has no projection field")
+    }
+}
+pub fn core_place_evaluated_index(value: CorePlaceRef) -> SlotRef? {
+    match value.value {
+        CorePlaceRefValue::CoreProjectPlaceValue { evaluated_index, .. } =>
+            evaluated_index,
+        _ => panic("CoreHIR: slot place has no evaluated index")
+    }
+}
+pub fn core_place_value_type(value: CorePlaceRef) -> CoreTypeRef {
+    match value.value {
+        CorePlaceRefValue::CoreProjectPlaceValue { value_type, .. } => value_type,
+        _ => panic("CoreHIR: slot place type comes from body slot table")
     }
 }
 
@@ -1000,6 +1035,7 @@ fn copy_captures(values: List<CoreCapture>) -> List<CoreCapture> {
 
 enum CoreExprValue {
     LiteralExprValue(CoreLiteral),
+    CallableValueExprValue(ExecutableRef),
     ReadExprValue(SlotRef),
     PrimitiveExprValue { operation: CorePrimitiveOp, operands: List<SlotRef> },
     CallExprValue {
@@ -1079,7 +1115,7 @@ enum CoreStmtValue {
         target: SlotRef, value: CoreExpr, origin: OriginRef
     },
     Assign {
-        target: SlotRef, value: CoreExpr, origin: OriginRef
+        target: CorePlaceRef, value: CoreExpr, origin: OriginRef
     },
     ExprStmt { value: CoreExpr, origin: OriginRef },
     While {
@@ -1164,6 +1200,13 @@ pub fn make_core_read_expr(
 ) -> CoreExpr {
     make_core_expr(result, ty, effects, origin,
         CoreExprValue::ReadExprValue(source))
+}
+pub fn make_core_callable_value_expr(
+    result: SlotRef, ty: CoreTypeRef, origin: OriginRef,
+    executable: ExecutableRef
+) -> CoreExpr {
+    make_core_expr(result, ty, make_core_effect_set([]), origin,
+        CoreExprValue::CallableValueExprValue(executable))
 }
 pub fn make_core_primitive_expr(
     result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
@@ -1365,7 +1408,7 @@ pub fn make_core_initialize_stmt(
     } }
 }
 pub fn make_core_assign_stmt(
-    target: SlotRef, value: CoreExpr, origin: OriginRef
+    target: CorePlaceRef, value: CoreExpr, origin: OriginRef
 ) -> CoreStmt {
     CoreStmt { value: CoreStmtValue::Assign {
         target: target, value: value, origin: origin
@@ -1417,11 +1460,11 @@ pub fn core_stmt_origin(value: CoreStmt) -> OriginRef {
         CoreStmtValue::Return { origin, .. } => origin
     }
 }
-pub fn core_stmt_target(value: CoreStmt) -> SlotRef {
+pub fn core_stmt_target(value: CoreStmt) -> CorePlaceRef {
     match value.value {
-        CoreStmtValue::Initialize { target, .. } |
+        CoreStmtValue::Initialize { target, .. } => make_core_slot_place(target),
         CoreStmtValue::Assign { target, .. } => target,
-        _ => panic("CoreHIR: statement has no target")
+        _ => panic("CoreHIR: statement has no place target")
     }
 }
 pub fn core_stmt_value(value: CoreStmt) -> CoreExpr {
@@ -1475,7 +1518,8 @@ pub fn core_expr_kind_tag(value: CoreExpr) -> Int {
         CoreExprValue::IfExprValue { .. } => 13,
         CoreExprValue::MatchExprValue { .. } => 14,
         CoreExprValue::TryCatchExprValue { .. } => 15,
-        CoreExprValue::HandleExprValue { .. } => 16
+        CoreExprValue::HandleExprValue { .. } => 16,
+        CoreExprValue::CallableValueExprValue(_) => 17
     }
 }
 pub fn core_expr_literal(value: CoreExpr) -> CoreLiteral {
@@ -1488,6 +1532,12 @@ pub fn core_expr_read_source(value: CoreExpr) -> SlotRef {
     match value.value {
         CoreExprValue::ReadExprValue(source) => source,
         _ => panic("CoreHIR: expression is not Read")
+    }
+}
+pub fn core_expr_callable_executable(value: CoreExpr) -> ExecutableRef {
+    match value.value {
+        CoreExprValue::CallableValueExprValue(executable) => executable,
+        _ => panic("CoreHIR: expression is not an exact callable value")
     }
 }
 pub fn core_expr_primitive_operation(value: CoreExpr) -> CorePrimitiveOp {
@@ -2024,6 +2074,7 @@ fn validate_expr_with_loop_depth(
     validate_effect_set(value.effects, body.type_count)
     match value.value {
         CoreExprValue::LiteralExprValue(_) => {},
+        CoreExprValue::CallableValueExprValue(_) => {},
         CoreExprValue::ReadExprValue(source) => require_slot(body.slots, source),
         CoreExprValue::PrimitiveExprValue { operation, operands } => {
             let _ = core_primitive_op_tag(operation)
@@ -2150,10 +2201,22 @@ fn validate_match_arm(
 
 fn validate_statement(value: CoreStmt, body: CoreBody, loop_depth: Int) {
     match value.value {
-        CoreStmtValue::Initialize { target, value: expr, origin } |
-        CoreStmtValue::Assign { target, value: expr, origin } => {
+        CoreStmtValue::Initialize { target, value: expr, origin } => {
             validate_origin(origin, body.reference)
             require_slot(body.slots, target)
+            validate_expr_with_loop_depth(expr, body, loop_depth)
+        },
+        CoreStmtValue::Assign { target, value: expr, origin } => {
+            validate_origin(origin, body.reference)
+            if core_place_is_slot(target) {
+                require_slot(body.slots, core_place_slot(target))
+            } else {
+                require_slot(body.slots, core_place_base(target))
+                match core_place_evaluated_index(target) {
+                    some(index) => require_slot(body.slots, index),
+                    none => {}
+                }
+            }
             validate_expr_with_loop_depth(expr, body, loop_depth)
         },
         CoreStmtValue::ExprStmt { value: expr, origin } => {
@@ -2403,9 +2466,6 @@ fn validate_call_signature(
     evidence: List<CoreEvidenceRef>, body: CoreBody,
     graph: CoreTypeGraph, callables: List<CoreCallableContract>
 ) {
-    if callee.candidates.len() == 0 {
-        panic("CoreHIR: call has no finite candidate set")
-    }
     let flow_parameters = flow_call_contract_parameter_types(callee.contract)
     if arguments.len() != flow_parameters.len() {
         panic("CoreHIR: call argument arity differs from exact contract")
@@ -2422,45 +2482,13 @@ fn validate_call_signature(
             flow_call_contract_result_type(callee.contract)) {
         panic("CoreHIR: call result type differs from exact contract")
     }
-    let mut evidence_contract: CoreCallableContract? = none
-    for candidate_ref in callee.candidates {
-        let candidate = core_callable_for(callables, candidate_ref)
+    if callee.kind == CORE_CALLEE_DIRECT {
+        let candidate = core_callable_for(callables, core_callee_direct(callee))
         if !flow_call_contract_same(
                 candidate.semantic_contract, callee.contract) {
-            panic("CoreHIR: call candidate semantic contract differs")
+            panic("CoreHIR: direct call semantic contract differs")
         }
-        match evidence_contract {
-            some(existing) => {
-                if existing.evidence_requirements.len() !=
-                   candidate.evidence_requirements.len() {
-                    panic("CoreHIR: call candidates have different evidence")
-                }
-                let mut requirement_index = 0
-                while requirement_index < existing.evidence_requirements.len() {
-                    if !symbol_ref_same(
-                            existing.evidence_requirements.get(
-                                requirement_index).unwrap(),
-                            candidate.evidence_requirements.get(
-                                requirement_index).unwrap()) {
-                        panic("CoreHIR: call candidate evidence order differs")
-                    }
-                    requirement_index = requirement_index + 1
-                }
-            },
-            none => { evidence_contract = some(candidate) }
-        }
-    }
-    let exact = match evidence_contract {
-        some(value) => value,
-        none => panic("CoreHIR: call evidence contract is absent")
-    }
-    validate_evidence_count(evidence, exact, body)
-    if callee.kind == CORE_CALLEE_DIRECT {
-        if callee.candidates.len() != 1 ||
-           !executable_ref_same(
-                callee.candidates.get(0).unwrap(), core_callee_direct(callee)) {
-            panic("CoreHIR: direct call candidate differs")
-        }
+        validate_evidence_count(evidence, candidate, body)
     } else if callee.kind == CORE_CALLEE_LOCAL {
         let callable_ty = core_type_graph_node(
             graph, core_slot_type_for(body, core_callee_local(callee)))
@@ -2469,6 +2497,11 @@ fn validate_call_signature(
            flow_type_node_parameter_count(callable_ty) != arguments.len() {
             panic("CoreHIR: local callee slot is not exact callable type")
         }
+        validate_evidence(evidence, body.slots)
+    } else if callee.kind == CORE_CALLEE_DYNAMIC {
+        validate_evidence(evidence, body.slots)
+    } else {
+        panic("CoreHIR: unknown callee identity form")
     }
 }
 
@@ -2777,6 +2810,33 @@ fn projection_result_type(
     }
 }
 
+fn core_place_type(
+    place: CorePlaceRef, body: CoreBody, graph: CoreTypeGraph
+) -> CoreTypeRef {
+    if core_place_is_slot(place) {
+        return core_slot_type_for(body, core_place_slot(place))
+    }
+    let base_type = core_slot_type_for(body, core_place_base(place))
+    let expected = match core_place_field(place) {
+        some(field) => projection_result_type(field, base_type, graph),
+        none => {
+            let index = match core_place_evaluated_index(place) {
+                some(value) => value,
+                none => panic("CoreHIR: indexed place has no index slot")
+            }
+            if type_kind(graph, core_slot_type_for(body, index)) !=
+               flow_type_kind_tag(flow_type_kind_int()) {
+                panic("CoreHIR: place index is not Int")
+            }
+            core_place_value_type(place)
+        }
+    }
+    require_core_type_same(
+        expected, core_place_value_type(place),
+        "CoreHIR: project place value type differs")
+    expected
+}
+
 fn block_tail_type(value: CoreBlock) -> CoreTypeRef? {
     match value.tail {
         some(expr) => some(expr.ty),
@@ -2799,16 +2859,11 @@ fn require_block_result_type(
     }
 }
 
-fn callee_candidates_contain_symbol(
-    callee: CoreCalleeRef, symbol: SymbolRef
-) -> Bool {
-    for candidate in callee.candidates {
-        if executable_ref_is_named(candidate) &&
-           symbol_ref_same(executable_ref_named_symbol(candidate), symbol) {
-            return true
-        }
-    }
-    false
+fn callee_direct_matches_symbol(callee: CoreCalleeRef, symbol: SymbolRef) -> Bool {
+    callee.kind == CORE_CALLEE_DIRECT &&
+        executable_ref_is_named(core_callee_direct(callee)) &&
+        symbol_ref_same(
+            executable_ref_named_symbol(core_callee_direct(callee)), symbol)
 }
 
 fn validate_method_call_identity(
@@ -2816,22 +2871,20 @@ fn validate_method_call_identity(
     evidence: List<CoreEvidenceRef>
 ) {
     if method_call_ref_is_intrinsic(method) {
-        if !callee_candidates_contain_symbol(
+        if !callee_direct_matches_symbol(
                 callee, intrinsic_ref_symbol(
                     method_call_ref_intrinsic(method))) {
             panic("CoreHIR: intrinsic MethodCallRef/callee differs")
         }
     } else if method_call_ref_is_concrete(method) {
-        if !callee_candidates_contain_symbol(
+        if !callee_direct_matches_symbol(
                 callee, impl_method_ref_member(
                     method_call_ref_impl(method))) {
             panic("CoreHIR: concrete MethodCallRef/callee differs")
         }
     } else if method_call_ref_is_bound(method) {
         let _ = trait_method_ref_member(method_call_ref_bound(method))
-        if evidence.len() == 0 {
-            panic("CoreHIR: bound MethodCallRef has no exact evidence")
-        }
+        let _ = method_call_ref_bound_evidence(method)
     } else {
         panic("CoreHIR: MethodCallRef identity is not closed")
     }
@@ -2850,6 +2903,30 @@ fn validate_expr_with_program(
     match value.value {
         CoreExprValue::LiteralExprValue(literal) =>
             validate_core_literal_type(literal, value.ty, graph),
+        CoreExprValue::CallableValueExprValue(executable) => {
+            let callable = core_callable_for(callables, executable)
+            let node = core_type_graph_node(graph, value.ty)
+            if flow_type_kind_tag(flow_type_node_kind(node)) !=
+                    flow_type_kind_tag(flow_type_kind_callable()) ||
+               flow_type_node_parameter_count(node) !=
+                    callable.parameter_types.len() {
+                panic("CoreHIR: callable value type/contract differs")
+            }
+            let mut index = 0
+            while index < callable.parameter_types.len() {
+                if flow_type_ref_index(
+                        flow_type_node_children(node).get(index).unwrap()) !=
+                   callable.parameter_types.get(index).unwrap().index {
+                    panic("CoreHIR: callable value parameter type differs")
+                }
+                index = index + 1
+            }
+            if flow_type_ref_index(flow_type_node_children(node).get(
+                    flow_type_node_parameter_count(node)).unwrap()) !=
+               callable.result_type.index {
+                panic("CoreHIR: callable value result type differs")
+            }
+        },
         CoreExprValue::ReadExprValue(source) => require_core_type_same(
             core_slot_type_for(body, source), value.ty,
             "CoreHIR: Read source/result type differs"),
@@ -3060,7 +3137,7 @@ fn validate_statement_with_program(
             validate_expr_with_program(
                 expr, body, graph, callables, current_callable, loop_depth)
             require_core_type_same(
-                core_slot_type_for(body, target), expr.ty,
+                core_place_type(target, body, graph), expr.ty,
                 "CoreHIR: Assign target/value type differs")
         },
         CoreStmtValue::ExprStmt { value: expr, .. } =>

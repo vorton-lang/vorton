@@ -49,6 +49,7 @@ use ir_inventory::{
     binder_manifest_owner, binder_manifest_entries,
     binder_entry_slot, make_binder_manifest
 }
+use hir::{DictRef}
 
 // ============================================================
 // Finite, exact type graph
@@ -1855,34 +1856,9 @@ enum FlowCallTargetValue {
     DynamicTargetValue(PathRef)
 }
 
-fn copy_executable_refs(values: List<ExecutableRef>) -> List<ExecutableRef> {
-    let mut result: List<ExecutableRef> = []
-    for value in values { result.push(value) }
-    result
-}
-
-fn validate_callable_candidates(values: List<ExecutableRef>) {
-    if values.len() == 0 {
-        panic("FlowIR: dynamic callable set is empty")
-    }
-    let mut left_index = 0
-    while left_index < values.len() {
-        let left = values.get(left_index).unwrap()
-        let mut right_index = left_index + 1
-        while right_index < values.len() {
-            if executable_ref_same(left, values.get(right_index).unwrap()) {
-                panic("FlowIR: dynamic callable set repeats a candidate")
-            }
-            right_index = right_index + 1
-        }
-        left_index = left_index + 1
-    }
-}
-
 pub struct FlowCallTarget {
     value: FlowCallTargetValue,
-    contract: FlowCallContract,
-    candidates: List<ExecutableRef>
+    contract: FlowCallContract
 }
 
 pub fn make_direct_flow_call_target(
@@ -1890,31 +1866,25 @@ pub fn make_direct_flow_call_target(
 ) -> FlowCallTarget {
     FlowCallTarget {
         value: FlowCallTargetValue::DirectTargetValue(target),
-        contract: copy_call_contract(contract), candidates: [target]
+        contract: copy_call_contract(contract)
     }
 }
 
 pub fn make_local_flow_call_target(
-    target: SlotRef, contract: FlowCallContract,
-    candidates: List<ExecutableRef>
+    target: SlotRef, contract: FlowCallContract
 ) -> FlowCallTarget {
-    validate_callable_candidates(candidates)
     FlowCallTarget {
         value: FlowCallTargetValue::LocalTargetValue(target),
-        contract: copy_call_contract(contract),
-        candidates: copy_executable_refs(candidates)
+        contract: copy_call_contract(contract)
     }
 }
 
 pub fn make_dynamic_flow_call_target(
-    target: PathRef, contract: FlowCallContract,
-    candidates: List<ExecutableRef>
+    target: PathRef, contract: FlowCallContract
 ) -> FlowCallTarget {
-    validate_callable_candidates(candidates)
     FlowCallTarget {
         value: FlowCallTargetValue::DynamicTargetValue(target),
-        contract: copy_call_contract(contract),
-        candidates: copy_executable_refs(candidates)
+        contract: copy_call_contract(contract)
     }
 }
 
@@ -1951,25 +1921,11 @@ pub fn flow_call_target_dynamic(value: FlowCallTarget) -> PathRef {
 pub fn flow_call_target_contract(value: FlowCallTarget) -> FlowCallContract {
     copy_call_contract(value.contract)
 }
-pub fn flow_call_target_candidates(value: FlowCallTarget) -> List<ExecutableRef> {
-    copy_executable_refs(value.candidates)
-}
-
 fn flow_call_target_same(
     left: FlowCallTarget, right: FlowCallTarget
 ) -> Bool {
-    if !flow_call_contract_same(left.contract, right.contract) ||
-       left.candidates.len() != right.candidates.len() {
+    if !flow_call_contract_same(left.contract, right.contract) {
         return false
-    }
-    let mut candidate_index = 0
-    while candidate_index < left.candidates.len() {
-        if !executable_ref_same(
-                left.candidates.get(candidate_index).unwrap(),
-                right.candidates.get(candidate_index).unwrap()) {
-            return false
-        }
-        candidate_index = candidate_index + 1
     }
     match (left.value, right.value) {
         (FlowCallTargetValue::DirectTargetValue(a),
@@ -1984,14 +1940,14 @@ fn flow_call_target_same(
 
 fn copy_call_target(value: FlowCallTarget) -> FlowCallTarget {
     FlowCallTarget {
-        value: value.value, contract: copy_call_contract(value.contract),
-        candidates: copy_executable_refs(value.candidates)
+        value: value.value, contract: copy_call_contract(value.contract)
     }
 }
 
 enum FlowEvidenceRefValue {
     FlowLocalEvidenceValue(SlotRef),
-    FlowCallableEvidenceValue(ExecutableRef)
+    FlowCallableEvidenceValue(ExecutableRef),
+    FlowDictEvidenceValue(DictRef)
 }
 pub struct FlowEvidenceRef { value: FlowEvidenceRefValue }
 pub fn make_flow_local_evidence(slot: SlotRef) -> FlowEvidenceRef {
@@ -2002,10 +1958,19 @@ pub fn make_flow_callable_evidence(executable: ExecutableRef) -> FlowEvidenceRef
         value: FlowEvidenceRefValue::FlowCallableEvidenceValue(executable)
     }
 }
+pub fn make_flow_dict_evidence(value: DictRef) -> FlowEvidenceRef {
+    FlowEvidenceRef { value: FlowEvidenceRefValue::FlowDictEvidenceValue(value) }
+}
 pub fn flow_evidence_is_local(value: FlowEvidenceRef) -> Bool {
     match value.value {
         FlowEvidenceRefValue::FlowLocalEvidenceValue(_) => true,
-        FlowEvidenceRefValue::FlowCallableEvidenceValue(_) => false
+        _ => false
+    }
+}
+pub fn flow_evidence_is_callable(value: FlowEvidenceRef) -> Bool {
+    match value.value {
+        FlowEvidenceRefValue::FlowCallableEvidenceValue(_) => true,
+        _ => false
     }
 }
 pub fn flow_evidence_local(value: FlowEvidenceRef) -> SlotRef {
@@ -2018,6 +1983,12 @@ pub fn flow_evidence_callable(value: FlowEvidenceRef) -> ExecutableRef {
     match value.value {
         FlowEvidenceRefValue::FlowCallableEvidenceValue(executable) => executable,
         _ => panic("FlowIR: local evidence has no executable")
+    }
+}
+pub fn flow_evidence_dict(value: FlowEvidenceRef) -> DictRef {
+    match value.value {
+        FlowEvidenceRefValue::FlowDictEvidenceValue(dict) => dict,
+        _ => panic("FlowIR: non-dict evidence has no DictRef")
     }
 }
 fn copy_flow_evidence(values: List<FlowEvidenceRef>) -> List<FlowEvidenceRef> {
@@ -2073,7 +2044,8 @@ enum FlowOperationValue {
     IntrinsicOperationValue(IntrinsicRef),
     TupleAggregateOperationValue(Int),
     RecordAggregateOperationValue(Int),
-    ClosureOperationValue(ExecutableRef)
+    ClosureOperationValue(ExecutableRef),
+    CallableValueOperationValue(ExecutableRef)
 }
 
 pub struct FlowOperationContract {
@@ -2210,6 +2182,14 @@ pub fn make_flow_closure_contract(
         input_types, input_roles, target_type,
         flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
+pub fn make_flow_callable_value_contract(
+    executable: ExecutableRef, target_type: FlowTypeRef
+) -> FlowOperationContract {
+    make_flow_operation_contract(
+        FlowOperationValue::CallableValueOperationValue(executable),
+        [], [], target_type, flow_semantic_role_read(),
+        make_fresh_flow_value_origin())
+}
 
 pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
     match value.value {
@@ -2224,7 +2204,8 @@ pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
         FlowOperationValue::IntrinsicOperationValue(_) => 8,
         FlowOperationValue::TupleAggregateOperationValue(_) => 9,
         FlowOperationValue::RecordAggregateOperationValue(_) => 10,
-        FlowOperationValue::ClosureOperationValue(_) => 11
+        FlowOperationValue::ClosureOperationValue(_) => 11,
+        FlowOperationValue::CallableValueOperationValue(_) => 12
     }
 }
 pub fn flow_operation_contract_input_roles(
@@ -2434,6 +2415,82 @@ fn copy_projection_contract(
     }
 }
 
+enum FlowPlaceRefValue {
+    FlowSlotPlaceValue(SlotRef),
+    FlowProjectPlaceValue {
+        base: SlotRef,
+        projection: FlowProjectionContract?,
+        evaluated_index: SlotRef?,
+        value_type: FlowTypeRef
+    }
+}
+pub struct FlowPlaceRef { value: FlowPlaceRefValue }
+pub fn make_flow_slot_place(slot: SlotRef) -> FlowPlaceRef {
+    FlowPlaceRef { value: FlowPlaceRefValue::FlowSlotPlaceValue(slot) }
+}
+pub fn make_flow_project_place(
+    base: SlotRef, projection: FlowProjectionContract?,
+    evaluated_index: SlotRef?, value_type: FlowTypeRef
+) -> FlowPlaceRef {
+    if (projection.is_some() && evaluated_index.is_some()) ||
+       (projection.is_none() && evaluated_index.is_none()) {
+        panic("FlowIR: project place must select projection xor index")
+    }
+    FlowPlaceRef { value: FlowPlaceRefValue::FlowProjectPlaceValue {
+        base: base, projection: projection,
+        evaluated_index: evaluated_index, value_type: value_type
+    } }
+}
+pub fn flow_place_is_slot(value: FlowPlaceRef) -> Bool {
+    match value.value {
+        FlowPlaceRefValue::FlowSlotPlaceValue(_) => true,
+        FlowPlaceRefValue::FlowProjectPlaceValue { .. } => false
+    }
+}
+pub fn flow_place_slot(value: FlowPlaceRef) -> SlotRef {
+    match value.value {
+        FlowPlaceRefValue::FlowSlotPlaceValue(slot) => slot,
+        _ => panic("FlowIR: projected place has no direct slot")
+    }
+}
+pub fn flow_place_base(value: FlowPlaceRef) -> SlotRef {
+    match value.value {
+        FlowPlaceRefValue::FlowProjectPlaceValue { base, .. } => base,
+        _ => panic("FlowIR: slot place has no base")
+    }
+}
+pub fn flow_place_projection(value: FlowPlaceRef) -> FlowProjectionContract? {
+    match value.value {
+        FlowPlaceRefValue::FlowProjectPlaceValue { projection, .. } => projection,
+        _ => panic("FlowIR: slot place has no projection")
+    }
+}
+pub fn flow_place_evaluated_index(value: FlowPlaceRef) -> SlotRef? {
+    match value.value {
+        FlowPlaceRefValue::FlowProjectPlaceValue { evaluated_index, .. } =>
+            evaluated_index,
+        _ => panic("FlowIR: slot place has no evaluated index")
+    }
+}
+pub fn flow_place_value_type(value: FlowPlaceRef) -> FlowTypeRef {
+    match value.value {
+        FlowPlaceRefValue::FlowProjectPlaceValue { value_type, .. } => value_type,
+        _ => panic("FlowIR: slot place type comes from slot table")
+    }
+}
+fn copy_flow_place(value: FlowPlaceRef) -> FlowPlaceRef {
+    match value.value {
+        FlowPlaceRefValue::FlowSlotPlaceValue(slot) => make_flow_slot_place(slot),
+        FlowPlaceRefValue::FlowProjectPlaceValue {
+            base, projection, evaluated_index, value_type
+        } => make_flow_project_place(
+            base, match projection {
+                some(contract) => some(copy_projection_contract(contract)),
+                none => none
+            }, evaluated_index, value_type)
+    }
+}
+
 enum FlowInstructionValue {
     InitializeValue {
         operation: FlowOperationContract,
@@ -2446,7 +2503,7 @@ enum FlowInstructionValue {
     },
     ConsumeValue { source: SlotRef },
     DiscardValue { source: SlotRef },
-    AssignValue { rhs_temp: SlotRef, target: SlotRef },
+    AssignValue { rhs_temp: SlotRef, target: FlowPlaceRef },
     CallValue {
         target: FlowCallTarget, arguments: List<SlotRef>,
         evidence: List<FlowEvidenceRef>, result: SlotRef?
@@ -2542,15 +2599,16 @@ pub fn make_flow_discard(
 
 pub fn make_flow_assign(
     reference: FlowInstructionRef, origin: OriginRef,
-    rhs_temp: SlotRef, target: SlotRef
+    rhs_temp: SlotRef, target: FlowPlaceRef
 ) -> FlowInstruction {
-    if slot_ref_same(rhs_temp, target) {
+    if flow_place_is_slot(target) &&
+       slot_ref_same(rhs_temp, flow_place_slot(target)) {
         panic("FlowIR: Assign RHS temp aliases target")
     }
     FlowInstruction {
         reference: reference, origin: origin,
         value: FlowInstructionValue::AssignValue {
-            rhs_temp: rhs_temp, target: target
+            rhs_temp: rhs_temp, target: copy_flow_place(target)
         }
     }
 }
@@ -2718,9 +2776,10 @@ pub fn flow_assign_rhs_temp(value: FlowInstruction) -> SlotRef {
         _ => panic("FlowIR: instruction is not Assign")
     }
 }
-pub fn flow_assign_target(value: FlowInstruction) -> SlotRef {
+pub fn flow_assign_target(value: FlowInstruction) -> FlowPlaceRef {
     match value.value {
-        FlowInstructionValue::AssignValue { target, .. } => target,
+        FlowInstructionValue::AssignValue { target, .. } =>
+            copy_flow_place(target),
         _ => panic("FlowIR: instruction is not Assign")
     }
 }
@@ -2951,8 +3010,20 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
         FlowInstructionValue::AssignValue { rhs_temp, target } => {
             result.push(make_instruction_operand(
                 value, 0, rhs_temp, flow_semantic_role_consume()))
-            result.push(make_instruction_operand(
-                value, 1, target, flow_semantic_role_mutate()))
+            if flow_place_is_slot(target) {
+                result.push(make_instruction_operand(
+                    value, 1, flow_place_slot(target),
+                    flow_semantic_role_mutate()))
+            } else {
+                result.push(make_instruction_operand(
+                    value, 1, flow_place_base(target),
+                    flow_semantic_role_mutate()))
+                match flow_place_evaluated_index(target) {
+                    some(index) => result.push(make_instruction_operand(
+                        value, 2, index, flow_semantic_role_read())),
+                    none => {}
+                }
+            }
         },
         FlowInstructionValue::CallValue { target, arguments, .. } => {
             let mut index = 0
@@ -2986,8 +3057,11 @@ pub fn flow_instruction_results(value: FlowInstruction) -> List<FlowResultRef> {
             [make_instruction_result(
                 value, 0, target, make_aliasing_flow_value_origin([0]))],
         FlowInstructionValue::AssignValue { target, .. } =>
-            [make_instruction_result(
-                value, 0, target, make_aliasing_flow_value_origin([0]))],
+            if flow_place_is_slot(target) {
+                [make_instruction_result(
+                    value, 0, flow_place_slot(target),
+                    make_aliasing_flow_value_origin([0]))]
+            } else { [] },
         FlowInstructionValue::CallValue { target, result, .. } => match result {
             some(slot) => [make_instruction_result(
                 value, 0, slot, target.contract.result_origin)],
@@ -3000,6 +3074,107 @@ pub fn flow_instruction_results(value: FlowInstruction) -> List<FlowResultRef> {
         _ => []
     }
 }
+
+enum FlowCallableValueOriginValue {
+    FlowDirectExecutableOrigin(ExecutableRef),
+    FlowFromSlotsOrigin(List<SlotRef>),
+    FlowFromCallOrigin {
+        target: FlowCallTarget,
+        arguments: List<SlotRef>
+    }
+}
+pub struct FlowCallableValueOrigin { value: FlowCallableValueOriginValue }
+pub fn make_flow_direct_callable_origin(
+    executable: ExecutableRef
+) -> FlowCallableValueOrigin {
+    FlowCallableValueOrigin {
+        value: FlowCallableValueOriginValue::FlowDirectExecutableOrigin(executable)
+    }
+}
+pub fn make_flow_slots_callable_origin(
+    sources: List<SlotRef>
+) -> FlowCallableValueOrigin {
+    if sources.len() == 0 {
+        panic("FlowIR: callable slot provenance is empty")
+    }
+    FlowCallableValueOrigin {
+        value: FlowCallableValueOriginValue::FlowFromSlotsOrigin(
+            copy_slot_refs(sources))
+    }
+}
+pub fn make_flow_call_callable_origin(
+    target: FlowCallTarget, arguments: List<SlotRef>
+) -> FlowCallableValueOrigin {
+    FlowCallableValueOrigin {
+        value: FlowCallableValueOriginValue::FlowFromCallOrigin {
+            target: copy_call_target(target),
+            arguments: copy_slot_refs(arguments)
+        }
+    }
+}
+pub fn flow_callable_origin_is_direct(value: FlowCallableValueOrigin) -> Bool {
+    match value.value {
+        FlowCallableValueOriginValue::FlowDirectExecutableOrigin(_) => true,
+        _ => false
+    }
+}
+pub fn flow_callable_origin_is_call(value: FlowCallableValueOrigin) -> Bool {
+    match value.value {
+        FlowCallableValueOriginValue::FlowFromCallOrigin { .. } => true,
+        _ => false
+    }
+}
+pub fn flow_callable_origin_direct(
+    value: FlowCallableValueOrigin
+) -> ExecutableRef {
+    match value.value {
+        FlowCallableValueOriginValue::FlowDirectExecutableOrigin(executable) =>
+            executable,
+        _ => panic("FlowIR: callable provenance is not direct")
+    }
+}
+pub fn flow_callable_origin_slots(
+    value: FlowCallableValueOrigin
+) -> List<SlotRef> {
+    match value.value {
+        FlowCallableValueOriginValue::FlowFromSlotsOrigin(sources) =>
+            copy_slot_refs(sources),
+        _ => panic("FlowIR: callable provenance is not from slots")
+    }
+}
+pub fn flow_callable_origin_call_target(
+    value: FlowCallableValueOrigin
+) -> FlowCallTarget {
+    match value.value {
+        FlowCallableValueOriginValue::FlowFromCallOrigin { target, .. } =>
+            copy_call_target(target),
+        _ => panic("FlowIR: callable provenance is not from a call")
+    }
+}
+pub fn flow_callable_origin_call_arguments(
+    value: FlowCallableValueOrigin
+) -> List<SlotRef> {
+    match value.value {
+        FlowCallableValueOriginValue::FlowFromCallOrigin { arguments, .. } =>
+            copy_slot_refs(arguments),
+        _ => panic("FlowIR: callable provenance is not from a call")
+    }
+}
+
+pub struct FlowCallableProvenanceFact {
+    step: FlowSemanticStepRef,
+    target: SlotRef,
+    origin: FlowCallableValueOrigin
+}
+pub fn flow_callable_provenance_step(
+    value: FlowCallableProvenanceFact
+) -> FlowSemanticStepRef { value.step }
+pub fn flow_callable_provenance_target(
+    value: FlowCallableProvenanceFact
+) -> SlotRef { value.target }
+pub fn flow_callable_provenance_origin(
+    value: FlowCallableProvenanceFact
+) -> FlowCallableValueOrigin { value.origin }
 
 // ============================================================
 // Fixed control topology
@@ -4620,7 +4795,15 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
         },
         FlowInstructionValue::AssignValue { rhs_temp, target } => {
             let rhs = slot_for_ref(body.slots, rhs_temp)
-            let _ = slot_for_ref(body.slots, target)
+            if flow_place_is_slot(target) {
+                let _ = slot_for_ref(body.slots, flow_place_slot(target))
+            } else {
+                let _ = slot_for_ref(body.slots, flow_place_base(target))
+                match flow_place_evaluated_index(target) {
+                    some(index) => { let _ = slot_for_ref(body.slots, index) },
+                    none => {}
+                }
+            }
             if !flow_storage_class_same(rhs.storage, flow_storage_temp()) {
                 panic("FlowIR: Assign RHS is not an explicit temp slot")
             }
@@ -4857,50 +5040,23 @@ fn validate_direct_calls(
             if edge.arguments.len() != contract.parameter_roles.len() {
                 panic("FlowIR: call arguments/semantic contract arity differs")
             }
-            let mut expected_requirements: List<SymbolRef>? = none
-            for candidate_ref in edge.target.candidates {
-                let candidate = callable_for_ref(callables, candidate_ref)
+            if flow_call_target_is_direct(edge.target) {
+                let candidate = callable_for_ref(
+                    callables, flow_call_target_direct(edge.target))
                 if candidate.parameter_types.len() != edge.arguments.len() ||
                    !flow_call_contract_same(
                         candidate.semantic_contract, contract) {
-                    panic("FlowIR: callable candidate contract differs")
+                    panic("FlowIR: direct callable contract differs")
                 }
-                match expected_requirements {
-                    some(required) => {
-                        if required.len() != candidate.evidence_requirements.len() {
-                            panic("FlowIR: call candidates differ in evidence arity")
-                        }
-                        let mut requirement_index = 0
-                        while requirement_index < required.len() {
-                            if !symbol_ref_same(
-                                    required.get(requirement_index).unwrap(),
-                                    candidate.evidence_requirements.get(
-                                        requirement_index).unwrap()) {
-                                panic("FlowIR: call candidate evidence order differs")
-                            }
-                            requirement_index = requirement_index + 1
-                        }
-                    },
-                    none => { expected_requirements = some(
-                        copy_symbols(candidate.evidence_requirements)) }
+                if candidate.evidence_requirements.len() != edge.evidence.len() {
+                    panic("FlowIR: direct call evidence census differs")
                 }
-            }
-            let requirements = expected_requirements.unwrap_or([])
-            if requirements.len() != edge.evidence.len() {
-                panic("FlowIR: call evidence census differs")
             }
             for evidence in edge.evidence {
-                if !flow_evidence_is_local(evidence) {
+                if flow_evidence_is_callable(evidence) {
                     let _ = callable_for_ref(
                         callables, flow_evidence_callable(evidence))
                 }
-            }
-            if flow_call_target_is_direct(edge.target) &&
-               (edge.target.candidates.len() != 1 ||
-                !executable_ref_same(
-                    edge.target.candidates.get(0).unwrap(),
-                    flow_call_target_direct(edge.target))) {
-                panic("FlowIR: direct call candidate set differs from target")
             }
         }
     }
@@ -4985,6 +5141,127 @@ fn type_node_for(
 
 fn slot_type_for(body: FlowBody, slot: SlotRef) -> FlowTypeRef {
     slot_for_ref(body.slots, slot).ty
+}
+
+fn standalone_slot_type_for(
+    slots: List<FlowSlot>, target: SlotRef
+) -> FlowTypeRef {
+    for slot in slots {
+        if slot_ref_same(slot.reference, target) { return slot.ty }
+    }
+    panic("FlowIR: callable provenance target slot is absent")
+}
+
+fn slot_has_callable_type(
+    slots: List<FlowSlot>, type_nodes: List<FlowTypeNode>, target: SlotRef
+) -> Bool {
+    let ty = standalone_slot_type_for(slots, target)
+    flow_type_kind_tag(type_nodes.get(ty.index).unwrap().kind) ==
+        FLOW_TYPE_CALLABLE
+}
+
+pub fn flow_instruction_callable_provenance(
+    instruction: FlowInstruction,
+    slots: List<FlowSlot>, type_nodes: List<FlowTypeNode>
+) -> List<FlowCallableProvenanceFact> {
+    let step = make_flow_instruction_step_ref(instruction.reference)
+    let mut result: List<FlowCallableProvenanceFact> = []
+    match instruction.value {
+        FlowInstructionValue::InitializeValue { operation, target, .. } => {
+            if slot_has_callable_type(slots, type_nodes, target) {
+                match operation.value {
+                    FlowOperationValue::ClosureOperationValue(executable) =>
+                        result.push(FlowCallableProvenanceFact {
+                            step: step, target: target,
+                            origin: make_flow_direct_callable_origin(executable)
+                        }),
+                    _ => panic(
+                        "FlowIR: callable Initialize lacks exact executable provenance")
+                }
+            }
+        },
+        FlowInstructionValue::ReadValue { source, target } => {
+            if slot_has_callable_type(slots, type_nodes, target) {
+                result.push(FlowCallableProvenanceFact {
+                    step: step, target: target,
+                    origin: make_flow_slots_callable_origin([source])
+                })
+            }
+        },
+        FlowInstructionValue::AssignValue { rhs_temp, target } => {
+            if flow_place_is_slot(target) && slot_has_callable_type(
+                    slots, type_nodes, flow_place_slot(target)) {
+                result.push(FlowCallableProvenanceFact {
+                    step: step, target: flow_place_slot(target),
+                    origin: make_flow_slots_callable_origin([rhs_temp])
+                })
+            }
+        },
+        FlowInstructionValue::CallValue {
+            target: callee, arguments, result: call_result, ..
+        } => match call_result {
+            some(target) => if slot_has_callable_type(
+                    slots, type_nodes, target) {
+                result.push(FlowCallableProvenanceFact {
+                    step: step, target: target,
+                    origin: make_flow_call_callable_origin(callee, arguments)
+                })
+            },
+            none => {}
+        },
+        FlowInstructionValue::ProjectValue { base, result: target, .. } => {
+            if slot_has_callable_type(slots, type_nodes, target) {
+                result.push(FlowCallableProvenanceFact {
+                    step: step, target: target,
+                    origin: make_flow_slots_callable_origin([base])
+                })
+            }
+        },
+        FlowInstructionValue::CaptureValue { source, target, .. } => {
+            if slot_has_callable_type(slots, type_nodes, target) {
+                result.push(FlowCallableProvenanceFact {
+                    step: step, target: target,
+                    origin: make_flow_slots_callable_origin([source])
+                })
+            }
+        },
+        _ => {}
+    }
+    result
+}
+
+fn flow_place_type(
+    body: FlowBody, type_nodes: List<FlowTypeNode>, place: FlowPlaceRef
+) -> FlowTypeRef {
+    if flow_place_is_slot(place) {
+        return slot_type_for(body, flow_place_slot(place))
+    }
+    let value_type = flow_place_value_type(place)
+    match flow_place_projection(place) {
+        some(contract) => {
+            require_same_flow_type(
+                slot_type_for(body, flow_place_base(place)), contract.base_type,
+                "FlowIR: place base type differs")
+            require_same_flow_type(
+                contract.result_type, value_type,
+                "FlowIR: place projection value type differs")
+            if contract.partial {
+                panic("FlowIR: assign place projection cannot be partial")
+            }
+            validate_projection_contract(contract, type_nodes)
+        },
+        none => {
+            let index = match flow_place_evaluated_index(place) {
+                some(value) => value,
+                none => panic("FlowIR: indexed place has no index")
+            }
+            if flow_type_kind_tag(type_node_for(
+                    type_nodes, slot_type_for(body, index)).kind) != FLOW_TYPE_INT {
+                panic("FlowIR: indexed place index is not Int")
+            }
+        }
+    }
+    value_type
 }
 
 fn callable_for_symbol(
@@ -5230,7 +5507,8 @@ fn validate_typed_instructions(
                                         callables,
                                         intrinsic_ref_symbol(intrinsic)))
                             },
-                            FlowOperationValue::ClosureOperationValue(executable) => {
+                            FlowOperationValue::ClosureOperationValue(executable) |
+                            FlowOperationValue::CallableValueOperationValue(executable) => {
                                 let callable = callable_for_ref(callables, executable)
                                 if !flow_callable_mode_same(
                                         callable.mode,
@@ -5254,7 +5532,7 @@ fn validate_typed_instructions(
                     FlowInstructionValue::AssignValue { rhs_temp, target } =>
                         require_same_flow_type(
                             slot_type_for(body, rhs_temp),
-                            slot_type_for(body, target),
+                            flow_place_type(body, type_nodes, target),
                             "FlowIR: Assign RHS/target type differs"),
                     FlowInstructionValue::CaptureValue {
                         source, target, ..
@@ -5455,9 +5733,6 @@ fn encode_call_target(value: FlowCallTarget) -> Str {
     parts.push("R${flow_semantic_role_tag(value.contract.result_role).to_str()}")
     parts.push("Y${encode_type_ref(value.contract.result_type)}")
     parts.push("O${encode_value_origin(value.contract.result_origin)}")
-    for candidate in value.candidates {
-        parts.push("C${encode_executable(candidate)}")
-    }
     parts.join("/")
 }
 
@@ -5489,8 +5764,11 @@ fn encode_operation(value: FlowOperationContract) -> Str {
             parts.push("tuple:${arity.to_str()}"),
         FlowOperationValue::RecordAggregateOperationValue(arity) =>
             parts.push("record:${arity.to_str()}"),
-        FlowOperationValue::ClosureOperationValue(executable) =>
-            parts.push("closure:${encode_executable(executable)}")
+                    FlowOperationValue::ClosureOperationValue(executable) |
+                    FlowOperationValue::CallableValueOperationValue(executable) =>
+            parts.push("closure:${encode_executable(executable)}"),
+        FlowOperationValue::CallableValueOperationValue(executable) =>
+            parts.push("callable:${encode_executable(executable)}")
     }
     for ty in value.input_types {
         parts.push("T${encode_type_ref(ty)}")
@@ -5502,6 +5780,38 @@ fn encode_operation(value: FlowOperationContract) -> Str {
     parts.push("Y${encode_type_ref(value.target_type)}")
     parts.push("A${encode_value_origin(value.target_origin)}")
     parts.join("/")
+}
+
+fn encode_flow_place(value: FlowPlaceRef) -> Str {
+    if flow_place_is_slot(value) {
+        return "PS/${encode_slot(flow_place_slot(value))}"
+    }
+    let mut parts: List<Str> = [
+        "PP", encode_slot(flow_place_base(value)),
+        encode_type_ref(flow_place_value_type(value))
+    ]
+    match flow_place_projection(value) {
+        some(contract) => parts.push(encode_projection_contract(contract)),
+        none => match flow_place_evaluated_index(value) {
+            some(index) => parts.push("index:${encode_slot(index)}"),
+            none => panic("FlowIR: place fingerprint lacks projection/index")
+        }
+    }
+    parts.join("/")
+}
+
+fn encode_dict_evidence(value: DictRef) -> Str {
+    match value {
+        DictRef::Simple(name) => "simple:${encode_atom(name)}",
+        DictRef::Static(name) => "static:${encode_atom(name)}",
+        DictRef::Wrapped { dict, trait_name, inner_dicts } => {
+            let mut parts: List<Str> = [
+                "wrapped", encode_atom(dict), encode_atom(trait_name)
+            ]
+            for inner in inner_dicts { parts.push(encode_dict_evidence(inner)) }
+            parts.join("/")
+        }
+    }
 }
 
 fn encode_projection_contract(value: FlowProjectionContract) -> Str {
@@ -5555,7 +5865,7 @@ fn encode_instruction(value: FlowInstruction) -> Str {
         FlowInstructionValue::DiscardValue { source } =>
             parts.push(encode_slot(source)),
         FlowInstructionValue::AssignValue { rhs_temp, target } => {
-            parts.push(encode_slot(rhs_temp)); parts.push(encode_slot(target))
+            parts.push(encode_slot(rhs_temp)); parts.push(encode_flow_place(target))
         },
         FlowInstructionValue::CallValue {
             target, arguments, evidence, result
@@ -5565,8 +5875,10 @@ fn encode_instruction(value: FlowInstruction) -> Str {
             for item in evidence {
                 parts.push(if flow_evidence_is_local(item) {
                     "EL${encode_slot(flow_evidence_local(item))}"
-                } else {
+                } else if flow_evidence_is_callable(item) {
                     "EC${encode_executable(flow_evidence_callable(item))}"
+                } else {
+                    "ED${encode_dict_evidence(flow_evidence_dict(item))}"
                 })
             }
             match result {
