@@ -38,7 +38,7 @@ use hir::{
     HProgram, HDecl, HStmt, HExpr, HMatchArm, HEffectHandler, DictRef,
     HStringInterpPart, HLambdaCapture,
     HNominalStructFieldInit, HStructFieldInit,
-    HTraitMethod, HEffectOp,
+    HTraitMethod, HEffectOp, TraitBound,
     HForInDestructure, HLetDestructureBinding, HPatternBinding,
     HProjectionRef, HExactCallPlan, HConstructorPlan,
     HStringInterpPlan, HDictConstructPlan,
@@ -783,6 +783,26 @@ fn close_decl_list(values: List<HDecl>) -> List<HDecl> {
     result
 }
 
+fn exact_trait_bounds(values: List<TraitBound>) -> List<TraitBound> {
+    let mut result: List<TraitBound> = []
+    let mut index = 0
+    while index < values.len() {
+        let value = values.get(index).unwrap()
+        let mut right = index + 1
+        while right < values.len() {
+            if symbol_ref_same(
+                    value.trait_ref,
+                    values.get(right).unwrap().trait_ref) {
+                panic("PreCore closure: trait bound identity is duplicated")
+            }
+            right = right + 1
+        }
+        result.push(value)
+        index = index + 1
+    }
+    result
+}
+
 fn close_stmt(value: HStmt) -> List<HStmt> {
     match value {
         HStmt::Let { name, name_span, def_id, ty, init, span } => [
@@ -1332,7 +1352,7 @@ fn close_decl(value: HDecl) -> HDecl {
             params: params, return_type: return_type, effects: effects,
             handled_evidence_bindings: handled_evidence_bindings,
             body: close_expr(body), is_pub: is_pub,
-            trait_bounds: trait_bounds, span: span
+            trait_bounds: exact_trait_bounds(trait_bounds), span: span
         },
         HDecl::Struct {
             name, owner_ref, type_params, fields, is_pub, span
@@ -1403,12 +1423,13 @@ fn close_decl(value: HDecl) -> HDecl {
         HDecl::ExternFn {
             name, abi_name, def_id, executable_ref, type_params,
             params, return_type, effects, handled_evidence_bindings,
-            is_pub, span
+            trait_bounds, is_pub, span
         } => HDecl::ExternFn {
             name: name, abi_name: abi_name, def_id: def_id,
             executable_ref: executable_ref, type_params: type_params,
             params: params, return_type: return_type, effects: effects,
             handled_evidence_bindings: handled_evidence_bindings,
+            trait_bounds: exact_trait_bounds(trait_bounds),
             is_pub: is_pub, span: span
         },
         HDecl::ExternType { name, type_params, is_pub, span } =>
