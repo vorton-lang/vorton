@@ -7,7 +7,8 @@
 
 use ir_identity::{
     SlotRef, OriginRef, RegisteredNominalRef, VariantRef,
-    slot_ref_same, variant_ref_same,
+    VariantFieldRef,
+    slot_ref_same, variant_ref_same, variant_field_ref_variant,
     registered_nominal_ref_same
 }
 use ir_inventory::{ExecutableRef}
@@ -33,7 +34,7 @@ use core_expr::{
     make_core_body, validate_core_body,
     core_binder_reference, core_binder_type,
     core_field_ref_kind_tag, core_field_ref_same,
-    core_field_ref_tuple_index,
+    core_field_ref_tuple_index, core_field_ref_variant,
     core_constructor_kind_tag, core_constructor_struct_owner,
     core_constructor_variant, core_constructor_arity,
     core_type_ref_same
@@ -1108,14 +1109,45 @@ pub fn elaborate_core_derived_ord_body(plan: CoreDerivedOrdPlan) -> CoreBody {
 // Debug / Json — exact literal segments and exact builder calls
 // ============================================================
 
+enum CoreDerivedTextRenderPlanValue {
+    RenderLeaf(CoreDerivedCallPlan),
+    RenderTuple {
+        fields: List<CoreFieldRef>,
+        field_types: List<CoreTypeRef>,
+        pieces: List<CoreDerivedTextPiece>
+    },
+    RenderLiteralOnly { pieces: List<CoreDerivedTextPiece> }
+}
+pub struct CoreDerivedTextRenderPlan {
+    field: CoreFieldRef,
+    ty: CoreTypeRef,
+    value: CoreDerivedValueRef?,
+    value_kind: CoreDerivedTextRenderPlanValue
+}
+
+pub fn make_core_derived_text_render_leaf(
+    field: CoreFieldRef, ty: CoreTypeRef,
+    value: CoreDerivedValueRef, render: CoreDerivedCallPlan
+) -> CoreDerivedTextRenderPlan {
+    if render.method.is_none() || !core_type_ref_same(value.ty, ty) ||
+       (value.projections.len() > 0 && !core_field_ref_same(
+            value.projections.get(value.projections.len() - 1).unwrap(),
+            field)) {
+        panic("Core derive text: render leaf lacks exact MethodCallRef")
+    }
+    CoreDerivedTextRenderPlan {
+        field: field, ty: ty, value: some(value),
+        value_kind: CoreDerivedTextRenderPlanValue::RenderLeaf(render)
+    }
+}
+
 enum CoreDerivedTextPieceValue {
     LiteralText {
         value: Str, ty: CoreTypeRef, append: CoreDerivedCallPlan
     },
     RenderedValue {
-        value: CoreDerivedValueRef,
-        render: CoreDerivedCallPlan,
-        append: CoreDerivedCallPlan
+        render: CoreDerivedTextRenderPlan,
+        append: CoreDerivedCallPlan?
     }
 }
 pub struct CoreDerivedTextPiece { value: CoreDerivedTextPieceValue }
@@ -1131,17 +1163,101 @@ pub fn make_core_derived_literal_text_piece(
     } }
 }
 pub fn make_core_derived_rendered_text_piece(
-    value: CoreDerivedValueRef, render: CoreDerivedCallPlan,
-    append: CoreDerivedCallPlan
+    render: CoreDerivedTextRenderPlan,
+    append: CoreDerivedCallPlan?
 ) -> CoreDerivedTextPiece {
+    match render.value_kind {
+        CoreDerivedTextRenderPlanValue::RenderLeaf(_) => if append.is_none() {
+            panic("Core derive text: leaf render lacks append call")
+        },
+        CoreDerivedTextRenderPlanValue::RenderTuple { .. } => if
+                append.is_some() {
+            panic("Core derive text: tuple render has redundant append call")
+        },
+        CoreDerivedTextRenderPlanValue::RenderLiteralOnly { .. } => if
+                append.is_some() {
+            panic("Core derive text: literal-only render has append call")
+        }
+    }
     CoreDerivedTextPiece { value: CoreDerivedTextPieceValue::RenderedValue {
-        value: value, render: render, append: append
+        render: render, append: append
     } }
 }
 fn copy_text_pieces(values: List<CoreDerivedTextPiece>) -> List<CoreDerivedTextPiece> {
     let mut result: List<CoreDerivedTextPiece> = []
     for value in values { result.push(value) }
     result
+}
+
+pub fn make_core_derived_text_render_tuple(
+    field: CoreFieldRef, ty: CoreTypeRef, value: CoreDerivedValueRef,
+    fields: List<CoreFieldRef>, field_types: List<CoreTypeRef>,
+    pieces: List<CoreDerivedTextPiece>
+) -> CoreDerivedTextRenderPlan {
+    if !core_type_ref_same(value.ty, ty) ||
+       (value.projections.len() > 0 && !core_field_ref_same(
+            value.projections.get(value.projections.len() - 1).unwrap(),
+            field)) || fields.len() != field_types.len() {
+        panic("Core derive text: tuple render field/type arity differs")
+    }
+    let mut render_index = 0
+    for piece in pieces {
+        match piece.value {
+            CoreDerivedTextPieceValue::RenderedValue { render, .. } => {
+                if render_index >= fields.len() {
+                    panic("Core derive text: tuple render has extra value")
+                }
+                if !core_field_ref_same(
+                        render.field, fields.get(render_index).unwrap()) ||
+                   !core_type_ref_same(
+                        render.ty, field_types.get(render_index).unwrap()) {
+                    panic("Core derive text: tuple child field/type order differs")
+                }
+                match render.value {
+                    some(child_value) => require_derived_child_projection(
+                        value, child_value, fields.get(render_index).unwrap(),
+                        field_types.get(render_index).unwrap(), render_index),
+                    none => match render.value_kind {
+                        CoreDerivedTextRenderPlanValue::RenderLiteralOnly { .. } => {},
+                        _ => panic("Core derive text: tuple child source is absent")
+                    }
+                }
+                render_index = render_index + 1
+            },
+            _ => {}
+        }
+    }
+    if render_index != fields.len() {
+        panic("Core derive text: tuple render omits an element")
+    }
+    CoreDerivedTextRenderPlan {
+        field: field, ty: ty, value: some(value),
+        value_kind: CoreDerivedTextRenderPlanValue::RenderTuple {
+            fields: copy_fields(fields), field_types: copy_types(field_types),
+            pieces: copy_text_pieces(pieces)
+        }
+    }
+}
+
+pub fn make_core_derived_text_render_literal_only(
+    field: CoreFieldRef, ty: CoreTypeRef,
+    pieces: List<CoreDerivedTextPiece>
+) -> CoreDerivedTextRenderPlan {
+    if pieces.len() == 0 {
+        panic("Core derive text: literal-only field has no literal")
+    }
+    for piece in pieces {
+        match piece.value {
+            CoreDerivedTextPieceValue::LiteralText { .. } => {},
+            _ => panic("Core derive text: literal-only field has operation")
+        }
+    }
+    CoreDerivedTextRenderPlan {
+        field: field, ty: ty, value: none,
+        value_kind: CoreDerivedTextRenderPlanValue::RenderLiteralOnly {
+            pieces: copy_text_pieces(pieces)
+        }
+    }
 }
 
 pub struct CoreDerivedTextSequence { pieces: List<CoreDerivedTextPiece> }
@@ -1154,18 +1270,117 @@ pub fn make_core_derived_text_sequence(
     CoreDerivedTextSequence { pieces: copy_text_pieces(pieces) }
 }
 
+pub struct CoreDerivedTextPatternField {
+    field: CoreFieldRef,
+    ty: CoreTypeRef,
+    binding: SlotRef?,
+    rendered: Bool
+}
+pub fn make_core_derived_text_pattern_field(
+    field: CoreFieldRef, ty: CoreTypeRef,
+    binding: SlotRef?, rendered: Bool
+) -> CoreDerivedTextPatternField {
+    if core_field_ref_kind_tag(field) != 1 ||
+       rendered != binding.is_some() {
+        panic("Core derive text: variant pattern field contract differs")
+    }
+    CoreDerivedTextPatternField {
+        field: field, ty: ty, binding: binding, rendered: rendered
+    }
+}
+fn copy_text_pattern_fields(
+    values: List<CoreDerivedTextPatternField>
+) -> List<CoreDerivedTextPatternField> {
+    let mut result: List<CoreDerivedTextPatternField> = []
+    for value in values { result.push(value) }
+    result
+}
+
 pub struct CoreDerivedTextVariantPlan {
-    variant: CoreDerivedVariantPlan,
-    sequence: CoreDerivedTextSequence
+    variant: VariantRef,
+    fields: List<CoreDerivedTextPatternField>,
+    sequence: CoreDerivedTextSequence,
+    origin: OriginRef
 }
 pub fn make_core_derived_text_variant_plan(
-    variant: CoreDerivedVariantPlan,
-    sequence: CoreDerivedTextSequence
+    variant: VariantRef, fields: List<CoreDerivedTextPatternField>,
+    sequence: CoreDerivedTextSequence, origin: OriginRef
 ) -> CoreDerivedTextVariantPlan {
-    if variant.right_pattern_slots.len() != 0 {
-        panic("Core derive text: variant unexpectedly has right pattern")
+    let mut field_index = 0
+    while field_index < fields.len() {
+        let field = fields.get(field_index).unwrap()
+        if !variant_ref_same(
+                variant_field_ref_variant(core_field_ref_variant(field.field)),
+                variant) {
+            panic("Core derive text: pattern field crosses variant")
+        }
+        let mut right = field_index + 1
+        while right < fields.len() {
+            if core_field_ref_same(
+                    field.field, fields.get(right).unwrap().field) {
+                panic("Core derive text: pattern field is duplicated")
+            }
+            right = right + 1
+        }
+        let mut coverage_count = 0
+        let mut render_count = 0
+        for piece in sequence.pieces {
+            match piece.value {
+                CoreDerivedTextPieceValue::RenderedValue { render, .. } => if
+                        core_field_ref_same(render.field, field.field) &&
+                        core_type_ref_same(render.ty, field.ty) {
+                    coverage_count = coverage_count + 1
+                    match (field.binding, render.value) {
+                        (some(slot), some(source)) => if
+                                slot_ref_same(source.root, slot) &&
+                                core_type_ref_same(source.root_type, field.ty) &&
+                                source.projections.len() == 0 {
+                            render_count = render_count + 1
+                        },
+                        (none, none) => {},
+                        _ => panic(
+                            "Core derive text: pattern/source presence differs")
+                    }
+                },
+                _ => {}
+            }
+        }
+        if coverage_count != 1 ||
+           (field.rendered && render_count != 1) ||
+           (!field.rendered && render_count != 0) {
+            panic("Core derive text: pattern binding/render use differs")
+        }
+        field_index = field_index + 1
     }
-    CoreDerivedTextVariantPlan { variant: variant, sequence: sequence }
+    for piece in sequence.pieces {
+        match piece.value {
+            CoreDerivedTextPieceValue::RenderedValue { render, .. } => {
+                let mut found = false
+                for field in fields {
+                    if core_field_ref_same(render.field, field.field) &&
+                       core_type_ref_same(render.ty, field.ty) {
+                        match (field.binding, render.value) {
+                            (some(slot), some(source)) => if
+                                    slot_ref_same(source.root, slot) &&
+                                    source.projections.len() == 0 {
+                                found = true
+                            },
+                            (none, none) => { found = true },
+                            _ => {}
+                        }
+                    }
+                }
+                if !found {
+                    panic("Core derive text: rendered value lacks pattern binding")
+                }
+            },
+            _ => {}
+        }
+    }
+    CoreDerivedTextVariantPlan {
+        variant: variant, fields: copy_text_pattern_fields(fields),
+        sequence: sequence, origin: origin
+    }
 }
 fn copy_text_variants(
     values: List<CoreDerivedTextVariantPlan>
@@ -1192,11 +1407,11 @@ pub struct CoreDerivedTextPlan {
     value: CoreDerivedTextShapeValue
 }
 
-fn validate_text_sequence(
-    value: CoreDerivedTextSequence,
+fn validate_text_pieces(
+    pieces: List<CoreDerivedTextPiece>,
     string_type: CoreTypeRef, unit_type: CoreTypeRef
 ) {
-    for piece in value.pieces {
+    for piece in pieces {
         match piece.value {
             CoreDerivedTextPieceValue::LiteralText { ty, append, .. } => {
                 if !core_type_ref_same(ty, string_type) ||
@@ -1207,13 +1422,47 @@ fn validate_text_sequence(
             CoreDerivedTextPieceValue::RenderedValue {
                 render, append, ..
             } => {
-                if !core_type_ref_same(render.result_type, string_type) ||
-                   !core_type_ref_same(append.result_type, unit_type) {
-                    panic("Core derive text: render/append type differs")
+                match render.value_kind {
+                    CoreDerivedTextRenderPlanValue::RenderLeaf(call) => {
+                        let exact_append = match append {
+                            some(value) => value,
+                            none => panic(
+                                "Core derive text: leaf append is absent")
+                        }
+                        if !core_type_ref_same(call.result_type, string_type) ||
+                           !core_type_ref_same(
+                                exact_append.result_type, unit_type) {
+                            panic("Core derive text: leaf render/append type differs")
+                        }
+                    },
+                    CoreDerivedTextRenderPlanValue::RenderTuple {
+                        pieces: nested, ..
+                    } => {
+                        if append.is_some() {
+                            panic("Core derive text: tuple has append call")
+                        }
+                        validate_text_pieces(nested, string_type, unit_type)
+                    },
+                    CoreDerivedTextRenderPlanValue::RenderLiteralOnly {
+                        pieces: literals
+                    } => {
+                        if append.is_some() {
+                            panic("Core derive text: literal-only has append call")
+                        }
+                        validate_text_pieces(
+                            literals, string_type, unit_type)
+                    }
                 }
             }
         }
     }
+}
+
+fn validate_text_sequence(
+    value: CoreDerivedTextSequence,
+    string_type: CoreTypeRef, unit_type: CoreTypeRef
+) {
+    validate_text_pieces(value.pieces, string_type, unit_type)
 }
 
 pub fn make_core_derived_struct_text_plan(
@@ -1259,9 +1508,19 @@ pub fn make_core_derived_enum_text_plan(
        !core_type_ref_same(finish.result_type, string_type) {
         panic("Core derive text: enum header/builder type differs")
     }
-    let mut exact_variants: List<CoreDerivedVariantPlan> = []
-    for variant in variants { exact_variants.push(variant.variant) }
-    require_unique_variants(exact_variants)
+    let mut left = 0
+    while left < variants.len() {
+        let mut right = left + 1
+        while right < variants.len() {
+            if variant_ref_same(
+                    variants.get(left).unwrap().variant,
+                    variants.get(right).unwrap().variant) {
+                panic("Core derive text: enum variant is duplicated")
+            }
+            right = right + 1
+        }
+        left = left + 1
+    }
     for variant in variants {
         validate_text_sequence(variant.sequence, string_type, unit_type)
     }
@@ -1275,6 +1534,58 @@ pub fn make_core_derived_enum_text_plan(
     }
 }
 
+fn append_text_pieces(
+    plan: CoreDerivedTextPlan, pieces: List<CoreDerivedTextPiece>,
+    origin: OriginRef, mut statements: List<CoreStmt>
+) -> List<CoreStmt> {
+    for piece in pieces {
+        match piece.value {
+            CoreDerivedTextPieceValue::LiteralText { value, ty, append } => {
+                let text = make_core_literal_expr(
+                    ty, origin, make_core_str_literal(value))
+                let builder_read = make_core_read_expr(
+                    plan.builder_type, make_core_effect_set([]),
+                    origin, plan.builder_slot)
+                statements.push(make_core_expr_stmt(
+                    derived_call(append, [builder_read, text]), origin))
+            },
+            CoreDerivedTextPieceValue::RenderedValue { render, append } =>
+                match render.value_kind {
+                    CoreDerivedTextRenderPlanValue::RenderLeaf(call) => {
+                        let exact_append = append.unwrap()
+                        let text = derived_call(
+                            call, [derived_value_expr(render.value.unwrap())])
+                        let builder_read = make_core_read_expr(
+                            plan.builder_type, make_core_effect_set([]),
+                            origin, plan.builder_slot)
+                        statements.push(make_core_expr_stmt(
+                            derived_call(
+                                exact_append, [builder_read, text]), origin))
+                    },
+                    CoreDerivedTextRenderPlanValue::RenderTuple {
+                        pieces: nested, ..
+                    } => {
+                        if append.is_some() {
+                            panic("Core derive text: tuple render append drifted")
+                        }
+                        statements = append_text_pieces(
+                            plan, nested, origin, statements)
+                    },
+                    CoreDerivedTextRenderPlanValue::RenderLiteralOnly {
+                        pieces: literals
+                    } => {
+                        if append.is_some() {
+                            panic("Core derive text: literal-only append drifted")
+                        }
+                        statements = append_text_pieces(
+                            plan, literals, origin, statements)
+                    }
+                }
+        }
+    }
+    statements
+}
+
 fn text_sequence_block(
     plan: CoreDerivedTextPlan, sequence: CoreDerivedTextSequence,
     origin: OriginRef
@@ -1282,29 +1593,27 @@ fn text_sequence_block(
     let builder_value = derived_call(plan.builder, [])
     let mut statements: List<CoreStmt> = [make_core_bind_stmt(
         plan.builder_slot, builder_value, true, origin)]
-    for piece in sequence.pieces {
-        let (text, append) = match piece.value {
-            CoreDerivedTextPieceValue::LiteralText { value, ty, append } => (
-                make_core_literal_expr(
-                    ty, origin, make_core_str_literal(value)), append),
-            CoreDerivedTextPieceValue::RenderedValue {
-                value, render, append
-            } => (derived_call(render, [derived_value_expr(value)]), append)
-        }
-        if !core_type_ref_same(append.result_type, plan.unit_type) {
-            panic("Core derive text: append result is not Unit")
-        }
-        let builder_read = make_core_read_expr(
-            plan.builder_type, make_core_effect_set([]),
-            origin, plan.builder_slot)
-        statements.push(make_core_expr_stmt(
-            derived_call(append, [builder_read, text]), origin))
-    }
+    statements = append_text_pieces(
+        plan, sequence.pieces, origin, statements)
     let finish_receiver = make_core_read_expr(
         plan.builder_type, make_core_effect_set([]), origin,
         plan.builder_slot)
     let finished = derived_call(plan.finish, [finish_receiver])
     make_core_block(statements, some(finished), origin)
+}
+
+fn text_pattern_for_variant(
+    target_type: CoreTypeRef, value: CoreDerivedTextVariantPlan
+) -> CorePattern {
+    let mut fields: List<CorePatternField> = []
+    for field in value.fields {
+        let pattern = match field.binding {
+            some(slot) => make_core_binding_pattern(field.ty, slot),
+            none => make_core_wildcard_pattern(field.ty)
+        }
+        fields.push(make_core_pattern_field(field.field, pattern))
+    }
+    make_core_variant_pattern(target_type, value.variant, fields)
 }
 
 fn elaborate_text_body(plan: CoreDerivedTextPlan) -> CoreBody {
@@ -1318,11 +1627,10 @@ fn elaborate_text_body(plan: CoreDerivedTextPlan) -> CoreBody {
             let mut arms: List<CoreMatchArm> = []
             for variant in variants {
                 let body = text_sequence_block(
-                    plan, variant.sequence, variant.variant.origin)
+                    plan, variant.sequence, variant.origin)
                 arms.push(make_core_match_arm(
-                    pattern_for_variant(
-                        plan.target_type, variant.variant, false),
-                    none, body, variant.variant.origin))
+                    text_pattern_for_variant(plan.target_type, variant),
+                    none, body, variant.origin))
             }
             make_core_block([], some(make_core_match_expr(
                 plan.string_type, plan.header.result_effects,
