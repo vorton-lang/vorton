@@ -48,7 +48,11 @@ const RESOURCE_CELL_PHYSICAL_SHAPE: Int = 1
 const RESOURCE_CELL_CALLABLE_PARAM_MODE: Int = 2
 const RESOURCE_CELL_CALLABLE_FORCE: Int = 3
 const RESOURCE_CELL_CALLABLE_RESULT: Int = 4
-const RESOURCE_CELL_KIND_COUNT: Int = 5
+const RESOURCE_CELL_CALLABLE_RESULT_ORIGIN: Int = 5
+const RESOURCE_CELL_BODY_SLOT_ORIGIN: Int = 6
+const RESOURCE_CELL_BODY_SLOT_OWNED: Int = 7
+const RESOURCE_CELL_BODY_BLOCK_REACHABLE: Int = 8
+const RESOURCE_CELL_KIND_COUNT: Int = 9
 
 pub struct ResourceCellKind { tag: Int }
 
@@ -77,6 +81,18 @@ pub fn resource_cell_kind_callable_force() -> ResourceCellKind {
 }
 pub fn resource_cell_kind_callable_result() -> ResourceCellKind {
     resource_cell_kind_from_tag(RESOURCE_CELL_CALLABLE_RESULT)
+}
+pub fn resource_cell_kind_callable_result_origin() -> ResourceCellKind {
+    resource_cell_kind_from_tag(RESOURCE_CELL_CALLABLE_RESULT_ORIGIN)
+}
+pub fn resource_cell_kind_body_slot_origin() -> ResourceCellKind {
+    resource_cell_kind_from_tag(RESOURCE_CELL_BODY_SLOT_ORIGIN)
+}
+pub fn resource_cell_kind_body_slot_owned() -> ResourceCellKind {
+    resource_cell_kind_from_tag(RESOURCE_CELL_BODY_SLOT_OWNED)
+}
+pub fn resource_cell_kind_body_block_reachable() -> ResourceCellKind {
+    resource_cell_kind_from_tag(RESOURCE_CELL_BODY_BLOCK_REACHABLE)
 }
 
 pub struct ResourceCellSpec {
@@ -141,7 +157,8 @@ pub struct ResourceConstraint {
     rule_tag: Int,
     target_cell: Int,
     floor_rank: Int,
-    premise_cells: List<Int>
+    premise_cells: List<Int>,
+    requires_all: Bool
 }
 
 pub fn make_resource_constraint(
@@ -162,8 +179,21 @@ pub fn make_resource_constraint(
         rule_tag: rule_tag,
         target_cell: target_cell,
         floor_rank: floor_rank,
-        premise_cells: copied
+        premise_cells: copied, requires_all: false
     }
+}
+
+pub fn make_resource_all_constraint(
+    rule_tag: Int, target_cell: Int,
+    floor_rank: Int, premise_cells: List<Int>
+) -> ResourceConstraint {
+    if premise_cells.len() < 2 {
+        panic("resource certificate: conjunctive constraint is incomplete")
+    }
+    let mut result = make_resource_constraint(
+        rule_tag, target_cell, floor_rank, premise_cells)
+    result.requires_all = true
+    result
 }
 
 pub fn resource_constraint_rule_tag(value: ResourceConstraint) -> Int {
@@ -182,15 +212,24 @@ pub fn resource_constraint_premise_cells(
     for premise in value.premise_cells { result.push(premise) }
     result
 }
+pub fn resource_constraint_requires_all(value: ResourceConstraint) -> Bool {
+    value.requires_all
+}
 
 fn copy_resource_constraints(
     values: List<ResourceConstraint>
 ) -> List<ResourceConstraint> {
     let mut result: List<ResourceConstraint> = []
     for value in values {
-        result.push(make_resource_constraint(
-            value.rule_tag, value.target_cell,
-            value.floor_rank, value.premise_cells))
+        result.push(if value.requires_all {
+            make_resource_all_constraint(
+                value.rule_tag, value.target_cell,
+                value.floor_rank, value.premise_cells)
+        } else {
+            make_resource_constraint(
+                value.rule_tag, value.target_cell,
+                value.floor_rank, value.premise_cells)
+        })
     }
     result
 }
@@ -302,6 +341,19 @@ pub fn resource_fixed_point_final_ranks(
 fn constraint_required_rank(
     constraint: ResourceConstraint, ranks: List<Int>
 ) -> Int {
+    if constraint.requires_all {
+        let mut all = true
+        for premise in constraint.premise_cells {
+            let rank = match ranks.get(premise) {
+                some(value) => value,
+                none => panic(
+                    "resource certificate: premise cell is outside graph")
+            }
+            if rank == 0 { all = false }
+        }
+        if all && constraint.floor_rank < 1 { return 1 }
+        return constraint.floor_rank
+    }
     let mut required = constraint.floor_rank
     for premise in constraint.premise_cells {
         let rank = match ranks.get(premise) {
@@ -341,6 +393,10 @@ fn verify_fixed_point_proof(value: ResourceFixedPointProof) {
         }
         if constraint.floor_rank > target.max_rank {
             panic("resource certificate: constraint floor exceeds lattice")
+        }
+        if constraint.requires_all &&
+           (constraint.premise_cells.len() < 2 || target.max_rank != 1) {
+            panic("resource certificate: conjunctive proof rule domain differs")
         }
         for premise in constraint.premise_cells {
             if premise < 0 || premise >= value.cells.len() {
@@ -439,11 +495,20 @@ fn verify_fixed_point_domains(
                 panic("resource certificate: callable mode cell domain drifted")
             }
         } else if kind == RESOURCE_CELL_CALLABLE_FORCE ||
-                  kind == RESOURCE_CELL_CALLABLE_RESULT {
+                  kind == RESOURCE_CELL_CALLABLE_RESULT ||
+                  kind == RESOURCE_CELL_CALLABLE_RESULT_ORIGIN {
             if cell.owner_index < 0 ||
                cell.owner_index >= rc_program_callable_count(rc_program) ||
                cell.max_rank != 1 {
                 panic("resource certificate: callable bit cell domain drifted")
+            }
+        } else if kind == RESOURCE_CELL_BODY_SLOT_ORIGIN ||
+                  kind == RESOURCE_CELL_BODY_SLOT_OWNED ||
+                  kind == RESOURCE_CELL_BODY_BLOCK_REACHABLE {
+            if cell.owner_index < 0 ||
+               cell.owner_index >= rc_program_bodies(rc_program).len() ||
+               cell.max_rank != 1 {
+                panic("resource certificate: body dataflow cell domain drifted")
             }
         } else {
             panic("resource certificate: unknown proof cell domain")

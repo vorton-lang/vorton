@@ -101,7 +101,8 @@ use resource_model::{
     param_mode_bottom, param_mode_borrow, param_mode_mut_borrow,
     param_mode_own, param_mode_is_conflict,
     make_transfer_demand, transfer_demand_mode,
-    transfer_demand_force, transfer_demand_join, transfer_demand_leq,
+    transfer_demand_force, transfer_demand_join, transfer_demand_same,
+    transfer_demand_rank, transfer_demand_leq,
     make_logical_ownership_shape,
     logical_ownership_shape_direct_drop,
     logical_ownership_shape_may_unique,
@@ -149,6 +150,7 @@ use resource_certificate::{
     CfgStepCertificate, CfgEdgeCertificate,
     SlotTransitionReason, SlotTransitionWitness,
     make_resource_cell_spec, make_resource_constraint,
+    make_resource_all_constraint,
     make_resource_promotion, make_resource_fixed_point_proof,
     make_resource_certificate,
     make_candidate_cell_spec,
@@ -169,6 +171,10 @@ use resource_certificate::{
     resource_cell_kind_callable_param_mode,
     resource_cell_kind_callable_force,
     resource_cell_kind_callable_result,
+    resource_cell_kind_callable_result_origin,
+    resource_cell_kind_body_slot_origin,
+    resource_cell_kind_body_slot_owned,
+    resource_cell_kind_body_block_reachable,
     resource_cell_spec_max_rank,
     resource_cell_spec_kind, resource_cell_spec_owner_index,
     resource_cell_spec_component_index, resource_cell_kind_tag,
@@ -176,6 +182,7 @@ use resource_certificate::{
     resource_constraint_target_cell,
     resource_constraint_floor_rank,
     resource_constraint_premise_cells,
+    resource_constraint_requires_all,
     resource_fixed_point_final_ranks,
     resource_fixed_point_cells, resource_fixed_point_constraints,
     resource_certificate_fixed_point,
@@ -1407,7 +1414,7 @@ fn validate_event(
                     argument = argument + 1
                 }
                 if result_type_index != candidate.result_type_index ||
-                   result_owned != candidate.result_owned_seed {
+                   (result_owned && !candidate.result_owned_seed) {
                     panic("ResourcePlanner: derived callable result contract differs")
                 }
             }
@@ -1710,7 +1717,54 @@ struct CallableCellLayout {
     mode_start: Int,
     force_start: Int,
     result_cell: Int,
+    result_origin_start: Int,
     parameter_count: Int
+}
+
+struct BodyOriginBoundaryLayout {
+    origin_start: Int,
+    owned_start: Int
+}
+
+struct BodyOriginBlockLayout {
+    boundaries: List<BodyOriginBoundaryLayout>
+}
+
+struct BodyOriginCellLayout {
+    parameter_count: Int,
+    slot_count: Int,
+    reach_start: Int,
+    blocks: List<BodyOriginBlockLayout>
+}
+
+fn body_origin_cell(
+    layout: BodyOriginCellLayout, block: Int, boundary: Int,
+    slot: Int, parameter: Int
+) -> Int {
+    if slot < 0 || slot >= layout.slot_count ||
+       parameter < 0 || parameter >= layout.parameter_count {
+        panic("ResourcePlanner: body origin proof coordinate is invalid")
+    }
+    layout.blocks.get(block).unwrap().boundaries.get(
+        boundary).unwrap().origin_start +
+        slot * layout.parameter_count + parameter
+}
+
+fn body_owned_cell(
+    layout: BodyOriginCellLayout, block: Int, boundary: Int, slot: Int
+) -> Int {
+    if slot < 0 || slot >= layout.slot_count {
+        panic("ResourcePlanner: body owned proof coordinate is invalid")
+    }
+    layout.blocks.get(block).unwrap().boundaries.get(
+        boundary).unwrap().owned_start + slot
+}
+
+fn body_reach_cell(layout: BodyOriginCellLayout, block: Int) -> Int {
+    if block < 0 || block >= layout.blocks.len() {
+        panic("ResourcePlanner: body reachability proof coordinate is invalid")
+    }
+    layout.reach_start + block
 }
 
 fn add_cell(
@@ -1733,18 +1787,326 @@ fn add_constraint(
         rule_tag, target, floor_rank, premises))
 }
 
+fn add_all_constraint(
+    mut constraints: List<ResourceConstraint>,
+    rule_tag: Int, target: Int, premises: List<Int>
+) {
+    constraints.push(make_resource_all_constraint(
+        rule_tag, target, 0, premises))
+}
+
 const RULE_TYPE_SEED: Int = 0
 const RULE_TYPE_CHILD: Int = 1
 const RULE_DIRECT_IMPLIES_UNIQUE: Int = 2
 const RULE_CALLABLE_SEED: Int = 3
 const RULE_CALLABLE_EDGE: Int = 4
 const RULE_CALLABLE_RESULT_EDGE: Int = 5
+const RULE_RESULT_ORIGIN_SEED: Int = 6
+const RULE_RESULT_ORIGIN_COPY: Int = 7
+const RULE_RESULT_ORIGIN_CALL: Int = 8
+const RULE_RESULT_OWNED_BODY: Int = 9
+const RULE_RESULT_CFG_EDGE: Int = 10
 
 struct ConstraintGraphBuild {
     cells: List<ResourceCellSpec>,
     constraints: List<ResourceConstraint>,
     type_layouts: List<TypeCellLayout>,
+    callable_layouts: List<CallableCellLayout>,
+    body_origin_layouts: List<BodyOriginCellLayout>
+}
+
+fn event_origin_slot_overwritten(
+    event: PlannerEvent, body: PlannerBody, slot: Int
+) -> Bool {
+    match event.value {
+        PlannerEventValue::NoOpValue => false,
+        PlannerEventValue::ScopeExitValue(scope_id) =>
+            body.slots.get(slot).unwrap().scope_id == scope_id,
+        PlannerEventValue::InitializeValue { target, .. } |
+        PlannerEventValue::InitializeEmptyValue(target) |
+        PlannerEventValue::InitializeLiveValue(target) => slot == target,
+        PlannerEventValue::ReadValue { target, .. } => slot == target,
+        PlannerEventValue::MutateValue { .. } => false,
+        PlannerEventValue::ConsumeValue(source, _, target) =>
+            slot == source || match target {
+                some(value) => slot == value,
+                none => false
+            },
+        PlannerEventValue::DiscardValue(source) => slot == source,
+        PlannerEventValue::AssignValue { rhs_temp, target } =>
+            slot == rhs_temp || (planner_place_is_slot(target) &&
+                slot == planner_place_slot(target)),
+        PlannerEventValue::CallValue { result_slot, .. } => match result_slot {
+            some(value) => slot == value,
+            none => false
+        },
+        PlannerEventValue::ProjectValue { target, .. } => slot == target,
+        PlannerEventValue::CaptureValue { source, target, demand } =>
+            slot == target || (slot == source &&
+                param_mode_same(
+                    transfer_demand_mode(demand), param_mode_own()) &&
+                transfer_demand_force(demand))
+    }
+}
+
+fn add_body_event_result_constraints(
+    mut constraints: List<ResourceConstraint>,
+    body: PlannerBody, layout: BodyOriginCellLayout,
+    block_index: Int, boundary: Int, event: PlannerEvent,
+    callables: List<PlannerCallable>,
     callable_layouts: List<CallableCellLayout>
+) {
+    let next = boundary + 1
+    let mut slot = 0
+    while slot < body.slots.len() {
+        if !event_origin_slot_overwritten(event, body, slot) {
+            let mut parameter = 0
+            while parameter < layout.parameter_count {
+                add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                    body_origin_cell(
+                        layout, block_index, next, slot, parameter), 0,
+                    [body_origin_cell(
+                        layout, block_index, boundary, slot, parameter)])
+                parameter = parameter + 1
+            }
+            add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                body_owned_cell(layout, block_index, next, slot), 0,
+                [body_owned_cell(layout, block_index, boundary, slot)])
+        }
+        slot = slot + 1
+    }
+    match event.value {
+        PlannerEventValue::InitializeValue {
+            input_slots, origin_input_ordinals, target, ..
+        } => {
+            for ordinal in origin_input_ordinals {
+                let source = input_slots.get(ordinal).unwrap()
+                let mut parameter = 0
+                while parameter < layout.parameter_count {
+                    add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                        body_origin_cell(
+                            layout, block_index, next, target, parameter), 0,
+                        [body_origin_cell(
+                            layout, block_index, boundary, source, parameter)])
+                    parameter = parameter + 1
+                }
+            }
+            if body.slots.get(target).unwrap().owns_storage {
+                add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                    body_owned_cell(layout, block_index, next, target), 0,
+                    [body_reach_cell(layout, block_index)])
+            }
+        },
+        PlannerEventValue::InitializeLiveValue(target) => if
+                body.slots.get(target).unwrap().owns_storage {
+            add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                body_owned_cell(layout, block_index, next, target), 0,
+                [body_reach_cell(layout, block_index)])
+        },
+        PlannerEventValue::ReadValue { source, target } => {
+            let mut parameter = 0
+            while parameter < layout.parameter_count {
+                add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                    body_origin_cell(
+                        layout, block_index, next, target, parameter), 0,
+                    [body_origin_cell(
+                        layout, block_index, boundary, source, parameter)])
+                parameter = parameter + 1
+            }
+            if body.slots.get(target).unwrap().owns_storage {
+                add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                    body_owned_cell(layout, block_index, next, target), 0,
+                    [body_reach_cell(layout, block_index)])
+            }
+        },
+        PlannerEventValue::ConsumeValue(source, _, target) => match target {
+            some(value) => {
+                let mut parameter = 0
+                while parameter < layout.parameter_count {
+                    add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                        body_origin_cell(
+                            layout, block_index, next, value, parameter), 0,
+                        [body_origin_cell(
+                            layout, block_index, boundary, source, parameter)])
+                    parameter = parameter + 1
+                }
+                if body.slots.get(value).unwrap().owns_storage {
+                    add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                        body_owned_cell(layout, block_index, next, value), 0,
+                        [body_reach_cell(layout, block_index)])
+                }
+            },
+            none => {}
+        },
+        PlannerEventValue::AssignValue { rhs_temp, target } => if
+                planner_place_is_slot(target) {
+            let target_slot = planner_place_slot(target)
+            let mut parameter = 0
+            while parameter < layout.parameter_count {
+                add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                    body_origin_cell(
+                        layout, block_index, next, target_slot, parameter), 0,
+                    [body_origin_cell(
+                        layout, block_index, boundary, rhs_temp, parameter)])
+                parameter = parameter + 1
+            }
+            if body.slots.get(target_slot).unwrap().owns_storage {
+                add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                    body_owned_cell(layout, block_index, next, target_slot), 0,
+                    [body_reach_cell(layout, block_index)])
+            }
+        },
+        PlannerEventValue::CallValue {
+            callable_indices, argument_slots, result_slot, ..
+        } => match result_slot {
+            some(target) => {
+                for callable_index in callable_indices {
+                    let callable = callables.get(callable_index).unwrap()
+                    let callee_layout = callable_layouts.get(
+                        callable_index).unwrap()
+                    let mut callee_parameter = 0
+                    while callee_parameter <
+                            callable.parameter_type_indices.len() {
+                        let argument = argument_slots.get(
+                            callee_parameter).unwrap()
+                        let mut caller_parameter = 0
+                        while caller_parameter < layout.parameter_count {
+                            add_all_constraint(constraints,
+                                RULE_RESULT_ORIGIN_CALL,
+                                body_origin_cell(layout, block_index, next,
+                                    target, caller_parameter),
+                                [callee_layout.result_origin_start +
+                                    callee_parameter,
+                                 body_origin_cell(layout, block_index, boundary,
+                                    argument, caller_parameter)])
+                            caller_parameter = caller_parameter + 1
+                        }
+                        callee_parameter = callee_parameter + 1
+                    }
+                    add_all_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                        body_owned_cell(layout, block_index, next, target),
+                        [body_reach_cell(layout, block_index),
+                         callee_layout.result_cell])
+                }
+            },
+            none => {}
+        },
+        PlannerEventValue::ProjectValue { source, target, .. } |
+        PlannerEventValue::CaptureValue { source, target, .. } => {
+            let mut parameter = 0
+            while parameter < layout.parameter_count {
+                add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                    body_origin_cell(
+                        layout, block_index, next, target, parameter), 0,
+                    [body_origin_cell(
+                        layout, block_index, boundary, source, parameter)])
+                parameter = parameter + 1
+            }
+            if body.slots.get(target).unwrap().owns_storage {
+                add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                    body_owned_cell(layout, block_index, next, target), 0,
+                    [body_reach_cell(layout, block_index)])
+            }
+        },
+        _ => {}
+    }
+}
+
+fn add_body_result_constraints(
+    mut constraints: List<ResourceConstraint>, body_index: Int,
+    body: PlannerBody, layout: BodyOriginCellLayout,
+    callable_index: Int, callable_layout: CallableCellLayout,
+    callables: List<PlannerCallable>,
+    callable_layouts: List<CallableCellLayout>
+) {
+    add_constraint(constraints, RULE_RESULT_ORIGIN_SEED,
+        body_reach_cell(layout, body.entry_block), 1, [])
+    let mut slot = 0
+    while slot < body.slots.len() {
+        let value = body.slots.get(slot).unwrap()
+        match value.parameter_ordinal {
+            some(parameter) => add_constraint(constraints,
+                RULE_RESULT_ORIGIN_SEED,
+                body_origin_cell(
+                    layout, body.entry_block, 0, slot, parameter), 0,
+                [body_reach_cell(layout, body.entry_block)]),
+            none => {}
+        }
+        if value.initially_live && value.owns_storage {
+            add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                body_owned_cell(layout, body.entry_block, 0, slot), 0,
+                [body_reach_cell(layout, body.entry_block)])
+        }
+        slot = slot + 1
+    }
+    let mut block_index = 0
+    while block_index < body.blocks.len() {
+        let block = body.blocks.get(block_index).unwrap()
+        let mut boundary = 0
+        while boundary < block.events.len() {
+            add_body_event_result_constraints(
+                constraints, body, layout, block_index, boundary,
+                block.events.get(boundary).unwrap(),
+                callables, callable_layouts)
+            boundary = boundary + 1
+        }
+        let end = block.events.len()
+        if block.terminator_kind == 3 {
+            for usage in block.terminator_uses {
+                let mut parameter = 0
+                while parameter < layout.parameter_count {
+                    add_all_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                        callable_layout.result_origin_start + parameter,
+                        [body_reach_cell(layout, block_index),
+                         body_origin_cell(layout, block_index, end,
+                            usage.slot, parameter)])
+                    parameter = parameter + 1
+                }
+                add_all_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                    callable_layout.result_cell,
+                    [body_reach_cell(layout, block_index),
+                     body_owned_cell(layout, block_index, end, usage.slot)])
+            }
+        }
+        let mut edge_index = 0
+        while edge_index < block.edges.len() {
+            let edge = block.edges.get(edge_index).unwrap()
+            match edge.target_block {
+                some(target) => {
+                    add_constraint(constraints, RULE_RESULT_CFG_EDGE,
+                        body_reach_cell(layout, target), 0,
+                        [body_reach_cell(layout, block_index)])
+                    slot = 0
+                    while slot < body.slots.len() {
+                        if !int_list_contains(edge.exited_scope_ids,
+                                body.slots.get(slot).unwrap().scope_id) {
+                            let mut parameter = 0
+                            while parameter < layout.parameter_count {
+                                add_constraint(constraints,
+                                    RULE_RESULT_CFG_EDGE,
+                                    body_origin_cell(layout, target, 0,
+                                        slot, parameter), 0,
+                                    [body_origin_cell(layout, block_index, end,
+                                        slot, parameter)])
+                                parameter = parameter + 1
+                            }
+                            add_constraint(constraints,
+                                RULE_RESULT_CFG_EDGE,
+                                body_owned_cell(layout, target, 0, slot), 0,
+                                [body_owned_cell(
+                                    layout, block_index, end, slot)])
+                        }
+                        slot = slot + 1
+                    }
+                },
+                none => {}
+            }
+            edge_index = edge_index + 1
+        }
+        block_index = block_index + 1
+    }
+    let _ = body_index
+    let _ = callable_index
 }
 
 fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
@@ -1752,6 +2114,7 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
     let constraints: List<ResourceConstraint> = []
     let mut type_layouts: List<TypeCellLayout> = []
     let mut callable_layouts: List<CallableCellLayout> = []
+    let mut body_origin_layouts: List<BodyOriginCellLayout> = []
 
     let mut type_index = 0
     while type_index < input.type_nodes.len() {
@@ -1798,13 +2161,80 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
         let result_cell = add_cell(
             cells, resource_cell_kind_callable_result(),
             callable_index, 0, 1)
+        let result_origin_start = cells.len()
+        parameter = 0
+        while parameter < callable.parameter_type_indices.len() {
+            add_cell(cells, resource_cell_kind_callable_result_origin(),
+                callable_index, parameter, 1)
+            parameter = parameter + 1
+        }
         callable_layouts.push(CallableCellLayout {
             mode_start: mode_start,
             force_start: force_start,
             result_cell: result_cell,
+            result_origin_start: result_origin_start,
             parameter_count: callable.parameter_type_indices.len()
         })
         callable_index = callable_index + 1
+    }
+
+
+    let mut body_index = 0
+    while body_index < input.bodies.len() {
+        let body = input.bodies.get(body_index).unwrap()
+        let callable_index = flow_callable_index_for_planner(
+            input.callables, body.reference)
+        let parameter_count = input.callables.get(
+            callable_index).unwrap().parameter_type_indices.len()
+        let mut block_layouts: List<BodyOriginBlockLayout> = []
+        let reach_start = cells.len()
+        let mut reach_block = 0
+        while reach_block < body.blocks.len() {
+            add_cell(cells, resource_cell_kind_body_block_reachable(),
+                body_index, reach_block, 1)
+            reach_block = reach_block + 1
+        }
+        let mut origin_component = 0
+        let mut owned_component = 0
+        for block in body.blocks {
+            let mut boundaries: List<BodyOriginBoundaryLayout> = []
+            let mut boundary = 0
+            while boundary <= block.events.len() {
+                let origin_start = cells.len()
+                let mut slot = 0
+                while slot < body.slots.len() {
+                    let mut parameter = 0
+                    while parameter < parameter_count {
+                        add_cell(cells, resource_cell_kind_body_slot_origin(),
+                            body_index, origin_component, 1)
+                        origin_component = origin_component + 1
+                        parameter = parameter + 1
+                    }
+                    slot = slot + 1
+                }
+                let owned_start = cells.len()
+                slot = 0
+                while slot < body.slots.len() {
+                    add_cell(cells, resource_cell_kind_body_slot_owned(),
+                        body_index, owned_component, 1)
+                    owned_component = owned_component + 1
+                    slot = slot + 1
+                }
+                boundaries.push(BodyOriginBoundaryLayout {
+                    origin_start: origin_start, owned_start: owned_start
+                })
+                boundary = boundary + 1
+            }
+            block_layouts.push(BodyOriginBlockLayout {
+                boundaries: boundaries
+            })
+        }
+        body_origin_layouts.push(BodyOriginCellLayout {
+            parameter_count: parameter_count,
+            slot_count: body.slots.len(), reach_start: reach_start,
+            blocks: block_layouts
+        })
+        body_index = body_index + 1
     }
 
     // Type seeds and exact recursive child edges.
@@ -1912,9 +2342,15 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
                 if transfer_demand_force(seed) { 1 } else { 0 }, [])
             parameter = parameter + 1
         }
-        add_constraint(constraints, RULE_CALLABLE_SEED,
-            layout.result_cell,
-            if callable.result_owned_seed { 1 } else { 0 }, [])
+        if !callable.has_body {
+            add_constraint(constraints, RULE_CALLABLE_SEED,
+                layout.result_cell,
+                if callable.result_owned_seed { 1 } else { 0 }, [])
+            for origin in callable.result_origin_parameter_ordinals {
+                add_constraint(constraints, RULE_RESULT_ORIGIN_SEED,
+                    layout.result_origin_start + origin, 1, [])
+            }
+        }
         for edge in callable.call_edges {
             let callee = callable_layouts.get(edge.callee_index).unwrap()
             let mut argument = 0
@@ -1930,24 +2366,41 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
                 }
                 argument = argument + 1
             }
-            if edge.forwards_result {
-                add_constraint(constraints, RULE_CALLABLE_RESULT_EDGE,
-                    layout.result_cell, 0, [callee.result_cell])
-            }
         }
         callable_index = callable_index + 1
+    }
+    let mut body_index = 0
+    while body_index < input.bodies.len() {
+        let body = input.bodies.get(body_index).unwrap()
+        let callable_index = flow_callable_index_for_planner(
+            input.callables, body.reference)
+        add_body_result_constraints(
+            constraints, body_index, body,
+            body_origin_layouts.get(body_index).unwrap(),
+            callable_index, callable_layouts.get(callable_index).unwrap(),
+            input.callables, callable_layouts)
+        body_index = body_index + 1
     }
     ConstraintGraphBuild {
         cells: cells,
         constraints: constraints,
         type_layouts: type_layouts,
-        callable_layouts: callable_layouts
+        callable_layouts: callable_layouts,
+        body_origin_layouts: body_origin_layouts
     }
 }
 
 fn required_constraint_rank(
     constraint: ResourceConstraint, ranks: List<Int>
 ) -> Int {
+    if resource_constraint_requires_all(constraint) {
+        let mut all = true
+        for premise in resource_constraint_premise_cells(constraint) {
+            if ranks.get(premise).unwrap() == 0 { all = false }
+        }
+        if all && resource_constraint_floor_rank(constraint) < 1 { return 1 }
+        return resource_constraint_floor_rank(constraint)
+    }
     let mut required = resource_constraint_floor_rank(constraint)
     for premise in resource_constraint_premise_cells(constraint) {
         let rank = ranks.get(premise).unwrap()
@@ -2071,9 +2524,24 @@ fn materialize_solved_graph(
             parameter = parameter + 1
         }
         callable_demands.push(demands)
-        callable_results_owned.push(bool_rank(ranks, layout.result_cell))
+        let certified_owned = bool_rank(ranks, layout.result_cell)
+        let callable = input.callables.get(callable_index).unwrap()
+        if certified_owned != callable.result_owned_seed {
+            panic("ResourcePlanner: certified callable owned result differs")
+        }
+        parameter = 0
+        while parameter < layout.parameter_count {
+            let certified_origin = bool_rank(
+                ranks, layout.result_origin_start + parameter)
+            if certified_origin != int_list_contains(
+                    callable.result_origin_parameter_ordinals, parameter) {
+                panic("ResourcePlanner: certified callable result origin differs")
+            }
+            parameter = parameter + 1
+        }
+        callable_results_owned.push(certified_owned)
         callable_result_type_indices.push(
-            input.callables.get(callable_index).unwrap().result_type_index)
+            callable.result_type_index)
         callable_index = callable_index + 1
     }
     SolvedResourceGraph {
@@ -2646,6 +3114,7 @@ fn body_call_token_ordinal(
 fn apply_event_origin(
     event: PlannerEvent, body: PlannerBody,
     origin_width: Int, call_token: Int?,
+    callables: List<PlannerCallable>,
     mut states: List<List<Bool>>
 ) {
     match event.value {
@@ -2665,7 +3134,14 @@ fn apply_event_origin(
         PlannerEventValue::ReadValue { source, target } =>
             states.set(target, copy_origin_bits(states.get(source).unwrap())),
         PlannerEventValue::MutateValue { .. } => {},
-        PlannerEventValue::ConsumeValue(slot, _, _) |
+        PlannerEventValue::ConsumeValue(slot, _, target) => {
+            match target {
+                some(value) => states.set(
+                    value, copy_origin_bits(states.get(slot).unwrap())),
+                none => {}
+            }
+            states.set(slot, empty_origin_bits(origin_width))
+        },
         PlannerEventValue::DiscardValue(slot) =>
             states.set(slot, empty_origin_bits(origin_width)),
         PlannerEventValue::AssignValue { rhs_temp, target } => {
@@ -2677,13 +3153,22 @@ fn apply_event_origin(
             states.set(rhs_temp, empty_origin_bits(origin_width))
         },
         PlannerEventValue::CallValue {
-            argument_slots, result_origin_argument_ordinals,
+            callable_indices, argument_slots,
             result_slot, ..
         } => match result_slot {
             some(target) => {
-                let mut origins = origin_from_inputs(
-                    states, argument_slots,
-                    result_origin_argument_ordinals, origin_width)
+                let mut origins = empty_origin_bits(origin_width)
+                for callable_index in callable_indices {
+                    let callable = callables.get(callable_index).unwrap()
+                    for ordinal in callable.result_origin_parameter_ordinals {
+                        if ordinal < 0 || ordinal >= argument_slots.len() {
+                            panic("ResourcePlanner: callee result origin escapes call arity")
+                        }
+                        origins = join_origin_bits(
+                            origins, states.get(
+                                argument_slots.get(ordinal).unwrap()).unwrap())
+                    }
+                }
                 match call_token {
                     some(token) => {
                         if token < 0 || token >= origin_width {
@@ -2713,6 +3198,61 @@ fn apply_event_origin(
     }
 }
 
+fn apply_event_owned(
+    event: PlannerEvent, body: PlannerBody,
+    callables: List<PlannerCallable>, mut states: List<Bool>
+) {
+    match event.value {
+        PlannerEventValue::NoOpValue => {},
+        PlannerEventValue::ScopeExitValue(scope_id) => {
+            for slot_index in cleanup_slot_order(body.slots, [scope_id]) {
+                states.set(slot_index, false)
+            }
+        },
+        PlannerEventValue::InitializeValue { target, .. } |
+        PlannerEventValue::InitializeLiveValue(target) =>
+            states.set(target, body.slots.get(target).unwrap().owns_storage),
+        PlannerEventValue::InitializeEmptyValue(slot) => states.set(slot, false),
+        PlannerEventValue::ReadValue { target, .. } =>
+            states.set(target, body.slots.get(target).unwrap().owns_storage),
+        PlannerEventValue::MutateValue { .. } => {},
+        PlannerEventValue::ConsumeValue(slot, _, target) => {
+            match target {
+                some(value) => states.set(
+                    value, body.slots.get(value).unwrap().owns_storage),
+                none => {}
+            }
+            states.set(slot, false)
+        },
+        PlannerEventValue::DiscardValue(slot) => states.set(slot, false),
+        PlannerEventValue::AssignValue { rhs_temp, target } => {
+            if planner_place_is_slot(target) {
+                let target_slot = planner_place_slot(target)
+                states.set(target_slot,
+                    body.slots.get(target_slot).unwrap().owns_storage)
+            }
+            states.set(rhs_temp, false)
+        },
+        PlannerEventValue::CallValue {
+            callable_indices, result_slot, ..
+        } => match result_slot {
+            some(target) => {
+                let mut owned = false
+                for callable_index in callable_indices {
+                    if callables.get(callable_index).unwrap().result_owned_seed {
+                        owned = true
+                    }
+                }
+                states.set(target, owned)
+            },
+            none => {}
+        },
+        PlannerEventValue::ProjectValue { target, .. } |
+        PlannerEventValue::CaptureValue { target, .. } =>
+            states.set(target, body.slots.get(target).unwrap().owns_storage)
+    }
+}
+
 fn apply_origin_edge_cleanup(
     edge: PlannerEdge, body: PlannerBody,
     origin_width: Int, mut states: List<List<Bool>>
@@ -2722,26 +3262,39 @@ fn apply_origin_edge_cleanup(
     }
 }
 
+fn apply_owned_edge_cleanup(
+    edge: PlannerEdge, body: PlannerBody, mut states: List<Bool>
+) {
+    for slot_index in cleanup_slot_order(body.slots, edge.exited_scope_ids) {
+        states.set(slot_index, false)
+    }
+}
+
 struct BodyOriginSolution {
     parameter_count: Int,
     origin_width: Int,
     reachable: List<Bool>,
-    entry_states: List<List<List<Bool>>>
+    entry_states: List<List<List<Bool>>>,
+    entry_owned_states: List<List<Bool>>
 }
 
 fn solve_body_origins(
-    body: PlannerBody, parameter_count: Int
+    body: PlannerBody, parameter_count: Int,
+    callables: List<PlannerCallable>
 ) -> BodyOriginSolution {
     let origin_width = parameter_count + body_call_event_count(body)
     let mut reachable: List<Bool> = []
     let mut entries: List<List<List<Bool>>> = []
+    let mut owned_entries: List<List<Bool>> = []
     for _ in body.blocks {
         reachable.push(false)
         let mut state: List<List<Bool>> = []
         for _ in body.slots { state.push(empty_origin_bits(origin_width)) }
         entries.push(state)
+        owned_entries.push(empty_origin_bits(body.slots.len()))
     }
     let mut seed: List<List<Bool>> = []
+    let mut owned_seed: List<Bool> = []
     for slot in body.slots {
         let mut origins = empty_origin_bits(origin_width)
         match slot.parameter_ordinal {
@@ -2754,11 +3307,13 @@ fn solve_body_origins(
             none => {}
         }
         seed.push(origins)
+        owned_seed.push(slot.initially_live && slot.owns_storage)
     }
     reachable.set(body.entry_block, true)
     entries.set(body.entry_block, seed)
+    owned_entries.set(body.entry_block, owned_seed)
     let exact_rank_budget = body.blocks.len() *
-        (body.slots.len() * origin_width + 1)
+        (body.slots.len() * (origin_width + 1) + 1)
     let mut promotions = 1
     let mut changed = true
     while changed {
@@ -2768,6 +3323,8 @@ fn solve_body_origins(
             if reachable.get(block_index).unwrap() {
                 let block = body.blocks.get(block_index).unwrap()
                 let state = copy_origin_state(entries.get(block_index).unwrap())
+                let owned_state = copy_origin_bits(
+                    owned_entries.get(block_index).unwrap())
                 let mut event_index = 0
                 while event_index < block.events.len() {
                     let event = block.events.get(event_index).unwrap()
@@ -2777,7 +3334,8 @@ fn solve_body_origins(
                         none => none
                     }
                     apply_event_origin(
-                        event, body, origin_width, token, state)
+                        event, body, origin_width, token, callables, state)
+                    apply_event_owned(event, body, callables, owned_state)
                     event_index = event_index + 1
                 }
                 for edge in block.edges {
@@ -2786,16 +3344,25 @@ fn solve_body_origins(
                             let edge_state = copy_origin_state(state)
                             apply_origin_edge_cleanup(
                                 edge, body, origin_width, edge_state)
+                            let edge_owned_state = copy_origin_bits(owned_state)
+                            apply_owned_edge_cleanup(
+                                edge, body, edge_owned_state)
                             if !reachable.get(target).unwrap() {
                                 reachable.set(target, true)
                                 entries.set(target, edge_state)
+                                owned_entries.set(target, edge_owned_state)
                                 promotions = promotions + 1
                                 changed = true
                             } else {
                                 let previous = entries.get(target).unwrap()
                                 let joined = join_origin_states(previous, edge_state)
-                                if !origin_states_same(previous, joined) {
+                                let previous_owned = owned_entries.get(target).unwrap()
+                                let joined_owned = join_origin_bits(
+                                    previous_owned, edge_owned_state)
+                                if !origin_states_same(previous, joined) ||
+                                   !origin_bits_same(previous_owned, joined_owned) {
                                     entries.set(target, joined)
+                                    owned_entries.set(target, joined_owned)
                                     promotions = promotions + 1
                                     changed = true
                                 }
@@ -2814,7 +3381,8 @@ fn solve_body_origins(
     BodyOriginSolution {
         parameter_count: parameter_count,
         origin_width: origin_width,
-        reachable: reachable, entry_states: entries
+        reachable: reachable, entry_states: entries,
+        entry_owned_states: owned_entries
     }
 }
 
@@ -2925,7 +3493,7 @@ fn seed_event_demands(
 
 fn body_direct_parameter_seeds(
     body: PlannerBody, parameter_count: Int,
-    solution: BodyOriginSolution
+    solution: BodyOriginSolution, callables: List<PlannerCallable>
 ) -> List<TransferDemand> {
     let mut seeds: List<TransferDemand> = []
     let mut parameter = 0
@@ -2949,7 +3517,8 @@ fn body_direct_parameter_seeds(
                     none => none
                 }
                 apply_event_origin(
-                    event, body, solution.origin_width, token, state)
+                    event, body, solution.origin_width, token,
+                    callables, state)
                 event_index = event_index + 1
             }
             for usage in block.terminator_uses {
@@ -2964,7 +3533,7 @@ fn body_direct_parameter_seeds(
 
 fn body_call_token_is_returned(
     body: PlannerBody, solution: BodyOriginSolution,
-    call_token_ordinal: Int
+    call_token_ordinal: Int, callables: List<PlannerCallable>
 ) -> Bool {
     let token_index = solution.parameter_count + call_token_ordinal
     let mut block_index = 0
@@ -2982,7 +3551,8 @@ fn body_call_token_is_returned(
                     none => none
                 }
                 apply_event_origin(
-                    event, body, solution.origin_width, token, state)
+                    event, body, solution.origin_width, token,
+                    callables, state)
                 event_index = event_index + 1
             }
             if block.terminator_kind == 3 {
@@ -3001,7 +3571,7 @@ fn body_call_token_is_returned(
 
 fn body_callable_edges(
     body: PlannerBody, parameter_count: Int,
-    solution: BodyOriginSolution
+    solution: BodyOriginSolution, callables: List<PlannerCallable>
 ) -> List<PlannerCallEdge> {
     let mut result: List<PlannerCallEdge> = []
     let mut block_index = 0
@@ -3036,7 +3606,7 @@ fn body_callable_edges(
                             none => panic("ResourcePlanner: call edge lacks origin token")
                         }
                         let forwards = body_call_token_is_returned(
-                            body, solution, call_token)
+                            body, solution, call_token, callables)
                         for callee in callable_indices {
                             result.push(make_planner_call_edge(
                                 callee, sources, forwards))
@@ -3050,13 +3620,86 @@ fn body_callable_edges(
                     none => none
                 }
                 apply_event_origin(
-                    event, body, solution.origin_width, token, state)
+                    event, body, solution.origin_width, token,
+                    callables, state)
                 event_index = event_index + 1
             }
         }
         block_index = block_index + 1
     }
     result
+}
+
+fn body_result_parameter_origins(
+    body: PlannerBody, solution: BodyOriginSolution,
+    callables: List<PlannerCallable>
+) -> List<Int> {
+    let mut result_bits = empty_origin_bits(solution.parameter_count)
+    let mut block_index = 0
+    while block_index < body.blocks.len() {
+        if solution.reachable.get(block_index).unwrap() {
+            let block = body.blocks.get(block_index).unwrap()
+            let state = copy_origin_state(
+                solution.entry_states.get(block_index).unwrap())
+            let mut event_index = 0
+            while event_index < block.events.len() {
+                let event = block.events.get(event_index).unwrap()
+                let token = match body_call_token_ordinal(
+                        body, block_index, event_index) {
+                    some(value) => some(solution.parameter_count + value),
+                    none => none
+                }
+                apply_event_origin(
+                    event, body, solution.origin_width, token,
+                    callables, state)
+                event_index = event_index + 1
+            }
+            if block.terminator_kind == 3 {
+                for usage in block.terminator_uses {
+                    let origins = state.get(usage.slot).unwrap()
+                    let mut parameter = 0
+                    while parameter < solution.parameter_count {
+                        if origins.get(parameter).unwrap() {
+                            result_bits.set(parameter, true)
+                        }
+                        parameter = parameter + 1
+                    }
+                }
+            }
+        }
+        block_index = block_index + 1
+    }
+    let mut result: List<Int> = []
+    let mut parameter = 0
+    while parameter < result_bits.len() {
+        if result_bits.get(parameter).unwrap() { result.push(parameter) }
+        parameter = parameter + 1
+    }
+    result
+}
+
+fn body_result_owned(
+    body: PlannerBody, solution: BodyOriginSolution,
+    callables: List<PlannerCallable>
+) -> Bool {
+    let mut block_index = 0
+    while block_index < body.blocks.len() {
+        if solution.reachable.get(block_index).unwrap() {
+            let block = body.blocks.get(block_index).unwrap()
+            let state = copy_origin_bits(
+                solution.entry_owned_states.get(block_index).unwrap())
+            for event in block.events {
+                apply_event_owned(event, body, callables, state)
+            }
+            if block.terminator_kind == 3 {
+                for usage in block.terminator_uses {
+                    if state.get(usage.slot).unwrap() { return true }
+                }
+            }
+        }
+        block_index = block_index + 1
+    }
+    false
 }
 
 fn planner_body_for_reference(
@@ -3700,6 +4343,36 @@ fn flow_callable_index_for_planner(
     panic("ResourcePlanner: body has no planner callable")
 }
 
+fn join_result_origin_ordinals(
+    left: List<Int>, right: List<Int>, parameter_count: Int
+) -> List<Int> {
+    let mut result: List<Int> = []
+    let mut parameter = 0
+    while parameter < parameter_count {
+        if int_list_contains(left, parameter) ||
+           int_list_contains(right, parameter) {
+            result.push(parameter)
+        }
+        parameter = parameter + 1
+    }
+    result
+}
+
+fn demand_lists_same(
+    left: List<TransferDemand>, right: List<TransferDemand>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if !transfer_demand_same(
+                left.get(index).unwrap(), right.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
 fn close_callable_body_dataflow(
     callables: List<PlannerCallable>, bodies: List<PlannerBody>
 ) -> List<PlannerCallable> {
@@ -3713,30 +4386,113 @@ fn close_callable_body_dataflow(
                 callable.result_origin_parameter_ordinals,
                 [], false))
         } else {
-            let body = match planner_body_for_reference(
-                    bodies, callable.reference) {
-                some(value) => value,
-                none => panic("ResourcePlanner: callable body dataflow is absent")
-            }
-            let parameter_count = callable.parameter_type_indices.len()
-            let solution = solve_body_origins(body, parameter_count)
-            let direct = body_direct_parameter_seeds(
-                body, parameter_count, solution)
-            let mut seeds: List<TransferDemand> = []
-            let mut parameter = 0
-            while parameter < parameter_count {
-                seeds.push(transfer_demand_join(
-                    callable.parameter_seeds.get(parameter).unwrap(),
-                    direct.get(parameter).unwrap()))
-                parameter = parameter + 1
-            }
             result.push(make_planner_callable(
                 callable.reference, callable.parameter_type_indices,
-                callable.result_type_index, seeds,
-                callable.result_owned_seed,
-                callable.result_origin_parameter_ordinals,
-                body_callable_edges(body, parameter_count, solution), true))
+                callable.result_type_index, callable.parameter_seeds,
+                false, [], [], true))
         }
+    }
+    let mut exact_rank_budget = 1
+    for callable in result {
+        exact_rank_budget = exact_rank_budget +
+            callable.parameter_type_indices.len() * 9 + 1
+    }
+    let mut promotions = 0
+    let mut changed = true
+    while changed {
+        changed = false
+        let mut callable_index = 0
+        while callable_index < result.len() {
+            let callable = result.get(callable_index).unwrap()
+            if callable.has_body {
+                let body = match planner_body_for_reference(
+                        bodies, callable.reference) {
+                    some(value) => value,
+                    none => panic(
+                        "ResourcePlanner: callable body dataflow is absent")
+                }
+                let parameter_count = callable.parameter_type_indices.len()
+                let solution = solve_body_origins(
+                    body, parameter_count, result)
+                let direct = body_direct_parameter_seeds(
+                    body, parameter_count, solution, result)
+                let mut seeds: List<TransferDemand> = []
+                let mut parameter = 0
+                while parameter < parameter_count {
+                    let before = callable.parameter_seeds.get(parameter).unwrap()
+                    let after = transfer_demand_join(
+                        before, direct.get(parameter).unwrap())
+                    seeds.push(after)
+                    if !transfer_demand_same(before, after) {
+                        promotions = promotions +
+                            transfer_demand_rank(after) -
+                            transfer_demand_rank(before)
+                    }
+                    parameter = parameter + 1
+                }
+                let derived_origins = body_result_parameter_origins(
+                    body, solution, result)
+                let origins = join_result_origin_ordinals(
+                    callable.result_origin_parameter_ordinals,
+                    derived_origins, parameter_count)
+                promotions = promotions + origins.len() -
+                    callable.result_origin_parameter_ordinals.len()
+                let owned = callable.result_owned_seed ||
+                    body_result_owned(body, solution, result)
+                if owned && !callable.result_owned_seed {
+                    promotions = promotions + 1
+                }
+                let edges = body_callable_edges(
+                    body, parameter_count, solution, result)
+                if !demand_lists_same(callable.parameter_seeds, seeds) ||
+                   !int_lists_same(
+                        callable.result_origin_parameter_ordinals, origins) ||
+                   callable.result_owned_seed != owned {
+                    changed = true
+                }
+                result.set(callable_index, make_planner_callable(
+                    callable.reference, callable.parameter_type_indices,
+                    callable.result_type_index, seeds, owned, origins,
+                    edges, true))
+                if promotions > exact_rank_budget {
+                    panic("ResourcePlanner: callable result-origin LFP exceeds finite rank budget")
+                }
+            }
+            callable_index = callable_index + 1
+        }
+    }
+    // Closed-world check: one additional structural evaluation may not add an
+    // origin bit, owned bit, or direct parameter demand.  This is the planner
+    // side of the ranked certificate graph built from the same frozen bodies.
+    let mut callable_index = 0
+    while callable_index < result.len() {
+        let callable = result.get(callable_index).unwrap()
+        if callable.has_body {
+            let body = planner_body_for_reference(
+                bodies, callable.reference).unwrap()
+            let parameter_count = callable.parameter_type_indices.len()
+            let solution = solve_body_origins(body, parameter_count, result)
+            let origins = body_result_parameter_origins(
+                body, solution, result)
+            let direct = body_direct_parameter_seeds(
+                body, parameter_count, solution, result)
+            let mut parameter = 0
+            while parameter < parameter_count {
+                if !transfer_demand_leq(
+                        direct.get(parameter).unwrap(),
+                        callable.parameter_seeds.get(parameter).unwrap()) {
+                    panic("ResourcePlanner: callable demand LFP is incomplete")
+                }
+                parameter = parameter + 1
+            }
+            if !int_lists_same(
+                    origins, callable.result_origin_parameter_ordinals) ||
+               body_result_owned(body, solution, result) !=
+                    callable.result_owned_seed {
+                panic("ResourcePlanner: callable result-origin LFP is incomplete")
+            }
+        }
+        callable_index = callable_index + 1
     }
     result
 }
@@ -4698,8 +5454,12 @@ fn planner_callable_from_flow(
         flow_callable_reference(callable), parameter_types,
         flow_type_ref_index(flow_callable_result_type(callable)),
         seeds,
-        flow_role_is_owned(flow_call_contract_result_role(contract)),
-        flow_origin_ordinals(flow_call_contract_result_origin(contract)),
+        if has_body { false } else {
+            flow_role_is_owned(flow_call_contract_result_role(contract))
+        },
+        if has_body { [] } else {
+            flow_origin_ordinals(flow_call_contract_result_origin(contract))
+        },
         [], has_body)
 }
 
@@ -4869,10 +5629,9 @@ fn planner_event_value_from_flow(
             if flow_call_target_is_direct(target) {
                 [flow_callable_index(callables, flow_call_target_direct(target))]
             } else { [] },
-            arguments, demands,
-            flow_role_is_owned(flow_call_contract_result_role(contract)),
+            arguments, demands, false,
             flow_type_ref_index(flow_call_contract_result_type(contract)),
-            flow_origin_ordinals(flow_call_contract_result_origin(contract)),
+            [],
             result)
     }
     if tag == 7 {
@@ -5269,6 +6028,8 @@ fn verify_fixed_graph_contract(
                resource_constraint_target_cell(right) ||
            resource_constraint_floor_rank(left) !=
                resource_constraint_floor_rank(right) ||
+           resource_constraint_requires_all(left) !=
+               resource_constraint_requires_all(right) ||
            !int_lists_same(
                 resource_constraint_premise_cells(left),
                 resource_constraint_premise_cells(right)) {
