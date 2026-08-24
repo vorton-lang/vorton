@@ -287,11 +287,16 @@ pub fn core_flow_step_role_is_body_return(value: CoreFlowStepRole) -> Bool {
 }
 
 pub struct CoreFlowStepMap {
-    node_count: Int,
+    nodes: List<CoreFlowNodeRef>,
     relations: List<CoreFlowStepRelation>
 }
 pub fn core_flow_step_map_node_count(value: CoreFlowStepMap) -> Int {
-    value.node_count
+    value.nodes.len()
+}
+pub fn core_flow_step_map_nodes(
+    value: CoreFlowStepMap
+) -> List<CoreFlowNodeRef> {
+    value.nodes.map(fn(node) { node })
 }
 pub fn core_flow_step_map_relations(
     value: CoreFlowStepMap
@@ -306,8 +311,16 @@ pub fn core_flow_step_map_relations(
 fn validate_core_flow_step_map(
     program: FlowProgram, value: CoreFlowStepMap
 ) {
-    if value.node_count <= 0 {
+    if value.nodes.len() <= 0 {
         panic("Flow lowering: Core semantic node census is empty")
+    }
+    let mut node_index = 0
+    while node_index < value.nodes.len() {
+        let node = value.nodes.get(node_index).unwrap()
+        if node.ordinal != node_index {
+            panic("Flow lowering: Core semantic node order differs")
+        }
+        node_index = node_index + 1
     }
     let mut expected: List<FlowSemanticStepRef> = []
     for body in flow_program_bodies(program) {
@@ -327,7 +340,10 @@ fn validate_core_flow_step_map(
     while relation_index < value.relations.len() {
         let relation = value.relations.get(relation_index).unwrap()
         if relation.node.ordinal < 0 ||
-           relation.node.ordinal >= value.node_count ||
+           relation.node.ordinal >= value.nodes.len() ||
+           !core_flow_node_same(
+                relation.node,
+                value.nodes.get(relation.node.ordinal).unwrap()) ||
            !executable_ref_same(
                 relation.node.owner, flow_semantic_step_owner(relation.step)) {
             panic("Flow lowering: semantic step crosses Core node owner")
@@ -424,6 +440,7 @@ struct FlowLowerCtx {
     core_body: CoreBody,
     active_node: CoreFlowNodeRef?,
     next_node_ordinal: Int,
+    nodes: List<CoreFlowNodeRef>,
     step_relations: List<CoreFlowStepRelation>
 }
 
@@ -436,6 +453,7 @@ fn enter_core_node(
         ctx.owner, ctx.next_node_ordinal, node_class, kind_tag,
         origin, anchor_slot)
     ctx.next_node_ordinal = ctx.next_node_ordinal + 1
+    ctx.nodes.push(node)
     ctx.active_node = some(node)
     previous
 }
@@ -1307,6 +1325,7 @@ fn freeze_drafts(ctx: FlowLowerCtx) -> List<FlowBlock> {
 struct LoweredFlowBody {
     body: FlowBody,
     next_node_ordinal: Int,
+    nodes: List<CoreFlowNodeRef>,
     relations: List<CoreFlowStepRelation>
 }
 
@@ -1321,7 +1340,7 @@ fn lower_core_body(
         owner: owner, scopes: scopes, drafts: [], current: 0,
         callables: callables, core_body: body,
         active_node: none, next_node_ordinal: first_node_ordinal,
-        step_relations: []
+        nodes: [], step_relations: []
     }
     let _ = enter_core_node(
         ctx, CORE_FLOW_NODE_BODY, 0, core_body_origin(body), none)
@@ -1352,6 +1371,7 @@ fn lower_core_body(
         scopes, slots, entry, freeze_drafts(ctx))
     LoweredFlowBody {
         body: lowered, next_node_ordinal: ctx.next_node_ordinal,
+        nodes: ctx.nodes.map(fn(node) { node }),
         relations: ctx.step_relations.map(fn(relation) {
             CoreFlowStepRelation {
                 node: relation.node, step: relation.step, role: relation.role
@@ -1379,11 +1399,13 @@ pub fn lower_core_to_flow(program: CoreProgram) -> FlowLoweringResult {
     })
     let mut bodies: List<FlowBody> = []
     let mut relations: List<CoreFlowStepRelation> = []
+    let mut nodes: List<CoreFlowNodeRef> = []
     let mut next_node_ordinal = 0
     for entry in core_program_bodies(program) {
         let lowered = lower_core_body(
             core_body_entry_body(entry), core_callables, next_node_ordinal)
         bodies.push(lowered.body)
+        for node in lowered.nodes { nodes.push(node) }
         for relation in lowered.relations { relations.push(relation) }
         next_node_ordinal = lowered.next_node_ordinal
     }
@@ -1391,6 +1413,6 @@ pub fn lower_core_to_flow(program: CoreProgram) -> FlowLoweringResult {
         copy_flow_type_graph_nodes(core_type_graph_nodes(graph)),
         callables, bodies)
     make_flow_lowering_result(flow, CoreFlowStepMap {
-        node_count: next_node_ordinal, relations: relations
+        nodes: nodes, relations: relations
     })
 }
