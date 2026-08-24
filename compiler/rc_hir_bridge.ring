@@ -1897,15 +1897,9 @@ fn serialize_handler(
 fn serialize_trait_method(
     mut ctx: HirBridgeCtx, value: HTraitMethod
 ) -> HTraitMethod {
-    let body = match value.executable_ref {
-        some(reference) => some(serialize_callable_body(ctx, reference)),
-        none => {
-            if value.body.is_some() {
-                panic("RcHIR bridge: trait body lacks ExecutableRef")
-            }
-            none
-        }
-    }
+    let body = if value.has_default {
+        some(serialize_callable_body(ctx, value.executable_ref))
+    } else { none }
     HTraitMethod {
         name: value.name, method_ref: value.method_ref,
         params: value.params, return_type: value.return_type,
@@ -2009,6 +2003,7 @@ fn legacy_impl_assoc_types(
         HAssocType {
             name: symbol_ref_canonical_payload(
                 legacy_assoc_binding_member(binding)),
+            member_ref: legacy_assoc_binding_member(binding),
             bounds: [], concrete: some(legacy_assoc_binding_type(binding))
         }
     })

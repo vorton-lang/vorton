@@ -33,6 +33,10 @@ use core_expr::{
     core_effect_atom_kind_tag, core_effect_atom_type,
     core_effect_atom_handled_ref, core_effect_atom_system_ref}
 use core_hir::{core_program_type_graph, core_program_inventory}
+use core_type_source::{
+    CoreTypeSourceFact,
+    core_type_source_type, core_type_source_fact
+}
 use core_from_hir::{
     CoreEffectSetFact, CoreAssemblyResult,
     CoreAssemblyTypeRemap,
@@ -807,26 +811,6 @@ pub fn legacy_executable_shell_for(
 // Module-domain projection facts (no project CoreTypeRef)
 // ============================================================
 
-pub struct LegacyTypeFactProjection {
-    fact: CoreTypeFactRef,
-    legacy_type: Type
-}
-pub fn make_legacy_type_fact_projection(
-    fact: CoreTypeFactRef, legacy_type: Type
-) -> LegacyTypeFactProjection {
-    match legacy_type {
-        Type::ErrorType => panic("legacy projection: module Type fact is ErrorType"),
-        _ => {}
-    }
-    LegacyTypeFactProjection { fact: fact, legacy_type: legacy_type }
-}
-pub fn legacy_type_fact_projection_fact(
-    value: LegacyTypeFactProjection
-) -> CoreTypeFactRef { value.fact }
-pub fn legacy_type_fact_projection_type(
-    value: LegacyTypeFactProjection
-) -> Type { value.legacy_type }
-
 pub struct LegacyEffectFactProjection {
     fact: CoreEffectSetFact,
     legacy_effects: EffectRow
@@ -1030,7 +1014,7 @@ pub struct LegacyProjectionFacts {
     module_key: Str,
     module_order: Int,
     local_type_count: Int,
-    types: List<LegacyTypeFactProjection>,
+    types: List<CoreTypeSourceFact>,
     effects: List<LegacyEffectFactProjection>,
     binders: List<LegacyBinderFactProjection>,
     callables: List<LegacyCallableFactProjection>,
@@ -1040,7 +1024,7 @@ pub struct LegacyProjectionFacts {
 
 pub fn make_legacy_projection_facts(
     module_key: Str, module_order: Int, local_type_count: Int,
-    types: List<LegacyTypeFactProjection>,
+    types: List<CoreTypeSourceFact>,
     effects: List<LegacyEffectFactProjection>,
     binders: List<LegacyBinderFactProjection>,
     callables: List<LegacyCallableFactProjection>,
@@ -1054,8 +1038,8 @@ pub fn make_legacy_projection_facts(
     let mut index = 0
     while index < types.len() {
         let value = types.get(index).unwrap()
-        if core_type_fact_module_key(value.fact) != module_key ||
-           core_type_fact_ordinal(value.fact) != index {
+        if core_type_fact_module_key(core_type_source_fact(value)) != module_key ||
+           core_type_fact_ordinal(core_type_source_fact(value)) != index {
             panic("legacy projection: module Type facts are not dense/ordered")
         }
         index = index + 1
@@ -1538,8 +1522,9 @@ pub fn assemble_legacy_projection(
         for value in facts.types {
             append_assembled_type_projection(
                 projected_types, make_legacy_type_projection(
-                    core_assembly_remap_type(type_remap, value.fact),
-                    value.legacy_type))
+                    core_assembly_remap_type(
+                        type_remap, core_type_source_fact(value)),
+                    core_type_source_type(value)))
         }
         for value in facts.effects {
             let local = core_effect_set_fact_local_set(value.fact)
