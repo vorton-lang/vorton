@@ -28,7 +28,10 @@ use flow_ir::{
     flow_topology_fingerprint_canonical,
     flow_callable_reference, flow_callable_origin,
     flow_body_reference, flow_body_origin}
-use flow_lower::{lower_core_to_flow}
+use flow_lower::{
+    CoreFlowStepMap, lower_core_to_flow,
+    flow_lowering_program, flow_lowering_step_map
+}
 use resource_planner::{
     VerifiedResourceProgram,
     verify_and_plan_resource_program,
@@ -107,7 +110,8 @@ fn validate_core_flow_relation(core: CoreProgram, flow: FlowProgram) {
 pub struct VerifiedOwnershipProgram {
     core: CoreProgram,
     flow: FlowProgram,
-    resources: VerifiedResourceProgram
+    resources: VerifiedResourceProgram,
+    step_map: CoreFlowStepMap
 }
 
 pub fn verified_ownership_program_core(
@@ -121,6 +125,9 @@ pub fn verified_ownership_program_flow(
 pub fn verified_ownership_program_resources(
     value: VerifiedOwnershipProgram
 ) -> VerifiedResourceProgram { value.resources }
+pub fn verified_ownership_program_step_map(
+    value: VerifiedOwnershipProgram
+) -> CoreFlowStepMap { value.step_map }
 
 pub fn run_ownership_pipeline(
     core: CoreProgram
@@ -136,7 +143,9 @@ pub fn run_ownership_pipeline(
         core_program_manifests(core))
     validate_nonempty_core(validated_core)
 
-    let flow = lower_core_to_flow(validated_core)
+    let lowering = lower_core_to_flow(validated_core)
+    let flow = flow_lowering_program(lowering)
+    let step_map = flow_lowering_step_map(lowering)
     validate_core_flow_relation(validated_core, flow)
     let resources = verify_and_plan_resource_program(flow)
     let flow_fingerprint = flow_topology_fingerprint_canonical(
@@ -148,6 +157,7 @@ pub fn run_ownership_pipeline(
     VerifiedOwnershipProgram {
         core: validated_core,
         flow: flow,
-        resources: resources
+        resources: resources,
+        step_map: step_map
     }
 }

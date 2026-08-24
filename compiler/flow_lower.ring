@@ -7,7 +7,7 @@
 
 use ir_identity::{
     OriginRef, SlotRef,
-    slot_ref_same, registered_nominal_ref_symbol
+    slot_ref_same, registered_nominal_ref_symbol, origin_ref_same
 }
 use ir_inventory::{
     ExecutableRef, BinderManifest,
@@ -91,6 +91,7 @@ use flow_ir::{
     FlowProgram, FlowTypeNode, FlowTypeRef, FlowCallable, FlowBody,
     FlowScope, FlowScopeRef, FlowSlot,
     FlowBlock, FlowBlockRef, FlowInstructionRef, FlowInstruction,
+    FlowSemanticStepRef,
     FlowTerminator, FlowSuccessor, FlowHandlerBinding,
     FlowPatternContract, FlowPatternField,
     FlowSemanticRole, FlowPrimitiveOp,
@@ -144,7 +145,159 @@ use flow_ir::{
     flow_call_contract_result_origin,
     flow_scope_reference, flow_scope_has_parent, flow_scope_parent,
     flow_scope_ref_same,
-    flow_block_reference, flow_block_scope, flow_block_ref_ordinal
+    flow_block_reference, flow_block_scope, flow_block_ref_ordinal,
+    flow_instruction_reference,
+    make_flow_instruction_step_ref, make_flow_terminator_step_ref,
+    flow_semantic_step_owner, flow_semantic_step_same,
+    flow_program_bodies, flow_body_blocks, flow_block_instructions
+}
+
+// Exact relation emitted by the sole Core->Flow lowering.  Node ordinals are
+// deterministic pre-order positions in that lowering's Core traversal; the
+// exact origin/anchor tuple makes drift fail loudly rather than degrading to
+// a source name/span lookup.
+const CORE_FLOW_NODE_BODY: Int = 0
+const CORE_FLOW_NODE_EXPR: Int = 1
+const CORE_FLOW_NODE_STMT: Int = 2
+
+pub struct CoreFlowNodeRef {
+    owner: ExecutableRef,
+    ordinal: Int,
+    node_class: Int,
+    kind_tag: Int,
+    origin: OriginRef,
+    anchor_slot: SlotRef?
+}
+
+fn make_core_flow_node_ref(
+    owner: ExecutableRef, ordinal: Int, node_class: Int, kind_tag: Int,
+    origin: OriginRef, anchor_slot: SlotRef?
+) -> CoreFlowNodeRef {
+    if ordinal < 0 || node_class < CORE_FLOW_NODE_BODY ||
+       node_class > CORE_FLOW_NODE_STMT || kind_tag < 0 {
+        panic("Flow lowering: invalid Core semantic node reference")
+    }
+    CoreFlowNodeRef {
+        owner: owner, ordinal: ordinal, node_class: node_class,
+        kind_tag: kind_tag, origin: origin, anchor_slot: anchor_slot
+    }
+}
+pub fn core_flow_node_owner(value: CoreFlowNodeRef) -> ExecutableRef {
+    value.owner
+}
+pub fn core_flow_node_ordinal(value: CoreFlowNodeRef) -> Int { value.ordinal }
+pub fn core_flow_node_class(value: CoreFlowNodeRef) -> Int { value.node_class }
+pub fn core_flow_node_kind_tag(value: CoreFlowNodeRef) -> Int { value.kind_tag }
+pub fn core_flow_node_origin(value: CoreFlowNodeRef) -> OriginRef { value.origin }
+pub fn core_flow_node_anchor_slot(value: CoreFlowNodeRef) -> SlotRef? {
+    value.anchor_slot
+}
+
+fn core_flow_node_same(left: CoreFlowNodeRef, right: CoreFlowNodeRef) -> Bool {
+    if !executable_ref_same(left.owner, right.owner) ||
+       left.ordinal != right.ordinal || left.node_class != right.node_class ||
+       left.kind_tag != right.kind_tag ||
+       !origin_ref_same(left.origin, right.origin) {
+        return false
+    }
+    match (left.anchor_slot, right.anchor_slot) {
+        (some(a), some(b)) => slot_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+pub struct CoreFlowStepRelation {
+    node: CoreFlowNodeRef,
+    step: FlowSemanticStepRef
+}
+pub fn core_flow_step_node(value: CoreFlowStepRelation) -> CoreFlowNodeRef {
+    value.node
+}
+pub fn core_flow_step(value: CoreFlowStepRelation) -> FlowSemanticStepRef {
+    value.step
+}
+
+pub struct CoreFlowStepMap {
+    node_count: Int,
+    relations: List<CoreFlowStepRelation>
+}
+pub fn core_flow_step_map_node_count(value: CoreFlowStepMap) -> Int {
+    value.node_count
+}
+pub fn core_flow_step_map_relations(
+    value: CoreFlowStepMap
+) -> List<CoreFlowStepRelation> {
+    value.relations.map(fn(relation) {
+        CoreFlowStepRelation { node: relation.node, step: relation.step }
+    })
+}
+
+fn validate_core_flow_step_map(
+    program: FlowProgram, value: CoreFlowStepMap
+) {
+    if value.node_count <= 0 {
+        panic("Flow lowering: Core semantic node census is empty")
+    }
+    let mut expected: List<FlowSemanticStepRef> = []
+    for body in flow_program_bodies(program) {
+        for block in flow_body_blocks(body) {
+            for instruction in flow_block_instructions(block) {
+                expected.push(make_flow_instruction_step_ref(
+                    flow_instruction_reference(instruction)))
+            }
+            expected.push(make_flow_terminator_step_ref(
+                flow_block_reference(block)))
+        }
+    }
+    if expected.len() != value.relations.len() {
+        panic("Flow lowering: Core/Flow semantic step census differs")
+    }
+    let mut relation_index = 0
+    while relation_index < value.relations.len() {
+        let relation = value.relations.get(relation_index).unwrap()
+        if relation.node.ordinal < 0 ||
+           relation.node.ordinal >= value.node_count ||
+           !executable_ref_same(
+                relation.node.owner, flow_semantic_step_owner(relation.step)) {
+            panic("Flow lowering: semantic step crosses Core node owner")
+        }
+        let mut duplicate_index = relation_index + 1
+        while duplicate_index < value.relations.len() {
+            let duplicate = value.relations.get(duplicate_index).unwrap()
+            if flow_semantic_step_same(relation.step, duplicate.step) {
+                panic("Flow lowering: Flow semantic step relation repeats")
+            }
+            duplicate_index = duplicate_index + 1
+        }
+        let mut matches = 0
+        for step in expected {
+            if flow_semantic_step_same(step, relation.step) {
+                matches = matches + 1
+            }
+        }
+        if matches != 1 {
+            panic("Flow lowering: semantic step relation is not total")
+        }
+        relation_index = relation_index + 1
+    }
+}
+
+pub struct FlowLoweringResult {
+    program: FlowProgram,
+    step_map: CoreFlowStepMap
+}
+fn make_flow_lowering_result(
+    program: FlowProgram, step_map: CoreFlowStepMap
+) -> FlowLoweringResult {
+    validate_core_flow_step_map(program, step_map)
+    FlowLoweringResult { program: program, step_map: step_map }
+}
+pub fn flow_lowering_program(value: FlowLoweringResult) -> FlowProgram {
+    value.program
+}
+pub fn flow_lowering_step_map(value: FlowLoweringResult) -> CoreFlowStepMap {
+    value.step_map
 }
 
 struct FlowBlockDraft {
@@ -161,7 +314,38 @@ struct FlowLowerCtx {
     drafts: List<FlowBlockDraft>,
     current: Int,
     callables: List<CoreCallableContract>,
-    core_body: CoreBody
+    core_body: CoreBody,
+    active_node: CoreFlowNodeRef?,
+    next_node_ordinal: Int,
+    step_relations: List<CoreFlowStepRelation>
+}
+
+fn enter_core_node(
+    mut ctx: FlowLowerCtx, node_class: Int, kind_tag: Int,
+    origin: OriginRef, anchor_slot: SlotRef?
+) -> CoreFlowNodeRef? {
+    let previous = ctx.active_node
+    let node = make_core_flow_node_ref(
+        ctx.owner, ctx.next_node_ordinal, node_class, kind_tag,
+        origin, anchor_slot)
+    ctx.next_node_ordinal = ctx.next_node_ordinal + 1
+    ctx.active_node = some(node)
+    previous
+}
+fn restore_core_node(mut ctx: FlowLowerCtx, previous: CoreFlowNodeRef?) {
+    ctx.active_node = previous
+}
+fn record_current_step(
+    mut ctx: FlowLowerCtx, step: FlowSemanticStepRef
+) {
+    let node = match ctx.active_node {
+        some(value) => value,
+        none => panic("Flow lowering: semantic step has no Core node")
+    }
+    if !executable_ref_same(node.owner, flow_semantic_step_owner(step)) {
+        panic("Flow lowering: semantic step/Core owner differs")
+    }
+    ctx.step_relations.push(CoreFlowStepRelation { node: node, step: step })
 }
 
 fn new_draft(
@@ -192,6 +376,8 @@ fn emit_instruction(mut ctx: FlowLowerCtx, instruction: FlowInstruction) {
     if draft.terminator.is_some() {
         panic("Flow lowering: instruction after terminator")
     }
+    record_current_step(ctx, make_flow_instruction_step_ref(
+        flow_instruction_reference(instruction)))
     draft.instructions.push(instruction)
     ctx.drafts.set(ctx.current, draft)
 }
@@ -206,6 +392,7 @@ fn terminate(mut ctx: FlowLowerCtx, value: FlowTerminator) {
     if draft.terminator.is_some() {
         panic("Flow lowering: block terminator replay")
     }
+    record_current_step(ctx, make_flow_terminator_step_ref(draft.reference))
     draft.terminator = some(value)
     ctx.drafts.set(ctx.current, draft)
 }
@@ -832,8 +1019,14 @@ fn lower_expr(
     mut ctx: FlowLowerCtx, expr: CoreExpr,
     continue_target: FlowBlockRef?, break_target: FlowBlockRef?
 ) {
-    if emit_simple_expr(ctx, expr) { return }
     let kind = core_expr_kind_tag(expr)
+    let previous = enter_core_node(
+        ctx, CORE_FLOW_NODE_EXPR, kind,
+        core_expr_origin(expr), some(core_expr_result(expr)))
+    if emit_simple_expr(ctx, expr) {
+        restore_core_node(ctx, previous)
+        return
+    }
     if kind == 12 {
         lower_block_expression(
             ctx, expr, core_expr_block(expr), continue_target, break_target)
@@ -848,6 +1041,7 @@ fn lower_expr(
     } else {
         panic("Flow lowering: Core expression is not closed")
     }
+    restore_core_node(ctx, previous)
 }
 
 fn lower_while_statement(
@@ -879,6 +1073,20 @@ fn lower_statement(
 ) {
     let kind = core_stmt_kind_tag(statement)
     let origin = core_stmt_origin(statement)
+    let anchor = if kind == 0 || kind == 1 || kind == 2 {
+        some(core_expr_result(core_stmt_value(statement)))
+    } else if kind == 3 {
+        some(core_expr_result(core_stmt_while_condition(statement)))
+    } else if kind == 6 {
+        match core_stmt_return_value(statement) {
+            some(expr) => some(core_expr_result(expr)),
+            none => none
+        }
+    } else {
+        none
+    }
+    let previous = enter_core_node(
+        ctx, CORE_FLOW_NODE_STMT, kind, origin, anchor)
     if kind == 0 {
         lower_expr(ctx, core_stmt_value(statement), continue_target, break_target)
     } else if kind == 1 {
@@ -917,6 +1125,7 @@ fn lower_statement(
     } else {
         panic("Flow lowering: unknown Core statement")
     }
+    restore_core_node(ctx, previous)
 }
 
 fn lower_core_block(
@@ -949,16 +1158,27 @@ fn freeze_drafts(ctx: FlowLowerCtx) -> List<FlowBlock> {
     result
 }
 
+struct LoweredFlowBody {
+    body: FlowBody,
+    next_node_ordinal: Int,
+    relations: List<CoreFlowStepRelation>
+}
+
 fn lower_core_body(
-    body: CoreBody, callables: List<CoreCallableContract>
-) -> FlowBody {
+    body: CoreBody, callables: List<CoreCallableContract>,
+    first_node_ordinal: Int
+) -> LoweredFlowBody {
     let owner = core_body_reference(body)
     let scopes = core_body_scopes(body)
     let root_block = core_body_block(body)
     let mut ctx = FlowLowerCtx {
         owner: owner, scopes: scopes, drafts: [], current: 0,
-        callables: callables, core_body: body
+        callables: callables, core_body: body,
+        active_node: none, next_node_ordinal: first_node_ordinal,
+        step_relations: []
     }
+    let _ = enter_core_node(
+        ctx, CORE_FLOW_NODE_BODY, 0, core_body_origin(body), none)
     let entry = new_draft(
         ctx, core_block_origin(root_block), core_block_scope(root_block))
     set_current(ctx, entry)
@@ -980,9 +1200,15 @@ fn lower_core_body(
             core_slot_storage_contract(slot),
             core_slot_parameter_ordinal(slot))
     })
-    make_flow_body(
+    let lowered = make_flow_body(
         owner, core_body_origin(body), core_body_manifest(body),
         scopes, slots, entry, freeze_drafts(ctx))
+    LoweredFlowBody {
+        body: lowered, next_node_ordinal: ctx.next_node_ordinal,
+        relations: ctx.step_relations.map(fn(relation) {
+            CoreFlowStepRelation { node: relation.node, step: relation.step }
+        })
+    }
 }
 
 fn lower_core_callable(value: CoreCallableContract) -> FlowCallable {
@@ -996,18 +1222,26 @@ fn lower_core_callable(value: CoreCallableContract) -> FlowCallable {
         core_callable_evidence_requirements(value))
 }
 
-pub fn lower_core_to_flow(program: CoreProgram) -> FlowProgram {
+pub fn lower_core_to_flow(program: CoreProgram) -> FlowLoweringResult {
     let graph = core_program_type_graph(program)
     let core_callables = core_program_callables(program)
     let callables = core_callables.map(fn(value) {
         lower_core_callable(value)
     })
     let mut bodies: List<FlowBody> = []
+    let mut relations: List<CoreFlowStepRelation> = []
+    let mut next_node_ordinal = 0
     for entry in core_program_bodies(program) {
-        bodies.push(lower_core_body(
-            core_body_entry_body(entry), core_callables))
+        let lowered = lower_core_body(
+            core_body_entry_body(entry), core_callables, next_node_ordinal)
+        bodies.push(lowered.body)
+        for relation in lowered.relations { relations.push(relation) }
+        next_node_ordinal = lowered.next_node_ordinal
     }
-    make_flow_program(
+    let flow = make_flow_program(
         copy_flow_type_graph_nodes(core_type_graph_nodes(graph)),
         callables, bodies)
+    make_flow_lowering_result(flow, CoreFlowStepMap {
+        node_count: next_node_ordinal, relations: relations
+    })
 }
