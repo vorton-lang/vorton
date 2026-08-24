@@ -7,8 +7,10 @@
 use ast::{Pattern, LiteralValue}
 use types::{Type, EffectRow, effects_equal, types_equal}
 use ir_identity::{
-    OriginRef, SlotRef, PathRef,
+    OriginRef, SlotRef, PathRef, SymbolRef,
     RegisteredNominalRef, VariantRef,
+    HandledEffectRef, SystemEffectRef,
+    ImplOwnerRef, ImplMethodRef,
     slot_ref_same, variant_ref_same, impl_owner_ref_same
 }
 use ir_inventory::{
@@ -29,21 +31,54 @@ use hir::{
     hexpr_type, hexpr_effects, method_call_ref_same
 }
 use flow_ir::{
-    FlowScope, FlowScopeRef, FlowTypeNode,
+    FlowScope, FlowScopeRef, FlowTypeNode, FlowTypeRef,
+    FlowSemanticRole, FlowValueOriginContract, FlowCallableMode,
+    FlowCallContract,
+    FlowTypeKind, FlowGenericParamFact, FlowTypeSemanticSeed,
+    FlowDropContract, FlowForeignContract,
+    FlowFieldIdentity, FlowNominalFieldFact,
+    FlowResourceDependencyEdge, FlowResourceDependencyTarget,
+    FlowInitialSlotState, FlowStorageClass, FlowStorageContract,
     flow_type_node_reference, flow_type_ref_index,
     flow_type_node_intern_ready, flow_type_node_intern_key_same,
-    remap_flow_type_node, flow_type_node_contract_same
+    remap_flow_type_node, flow_type_node_contract_same,
+    make_flow_type_ref, make_flow_call_contract,
+    make_module_flow_call_contract,
+    flow_type_kind_tag, flow_type_kind_int, flow_type_kind_float,
+    flow_type_kind_str, flow_type_kind_bool, flow_type_kind_unit,
+    flow_type_kind_never, flow_type_kind_struct, flow_type_kind_enum,
+    make_flow_int_type_node, make_flow_float_type_node,
+    make_flow_str_type_node, make_flow_bool_type_node,
+    make_flow_unit_type_node, make_flow_never_type_node,
+    make_flow_struct_type_node, make_flow_enum_type_node,
+    make_flow_extern_type_node, make_flow_tuple_type_node,
+    make_flow_record_type_node, make_flow_callable_type_node,
+    make_flow_ptr_type_node, make_flow_parameter_type_node,
+    make_flow_nominal_field_fact,
+    make_flow_parent_parameter_dependency,
+    make_flow_concrete_type_dependency,
+    make_flow_resource_dependency_edge,
+    make_flow_application_resource_dependency_edge
 }
 use core_expr::{
-    CoreTypeGraph, CoreTypeRef, CoreEffectSet,
+    CoreTypeGraph, CoreTypeRef, CoreTypeFactRef, CoreEffectSet,
     CoreCallableContract, CoreImplMetadata,
+    CoreObligationBinding,
     CoreSlot, CoreBody, CoreBlock, CoreStmt, CoreExpr, CoreLiteral,
     CorePlaceRef,
     CorePattern, CorePatternField, CoreFieldRef,
     CoreHandlerEntry, CoreMatchArm,
     CoreConstructorRef, CoreCalleeRef, CoreEvidenceRef,
     CoreCapture, CorePrimitiveOp,
-    make_core_effect_set,
+    make_core_type_ref, make_core_type_fact_ref,
+    core_type_fact_module_key, core_type_fact_ordinal,
+    core_type_fact_same, core_type_fact_local_ref,
+    core_type_ref_module_key, make_core_effect_set,
+    make_core_callable_contract, make_core_assoc_binding,
+    make_core_impl_metadata,
+    make_core_fail_effect, make_core_mut_effect, make_core_unsafe_effect,
+    make_core_handled_effect, make_core_system_effect,
+    make_core_direct_callee, make_core_local_callee, make_core_dynamic_callee,
     make_core_literal_expr, make_core_int_literal,
     make_core_float_literal, make_core_str_literal,
     make_core_bool_literal, make_core_unit_literal,
@@ -64,19 +99,22 @@ use core_expr::{
     make_core_literal_pattern, make_core_tuple_pattern,
     make_core_struct_pattern, make_core_variant_pattern,
     make_core_pattern_field, make_core_field_value,
-    make_core_body,
+    make_core_body, make_core_slot, make_core_slot_place,
+    make_core_project_place,
     core_expr_result, core_expr_type, core_expr_effects, core_expr_origin,
     core_block_origin,
     core_block_statements, core_block_tail, core_block_scope,
-    core_body_reference, core_body_origin,
+    core_body_reference, core_body_origin, core_body_result_type,
     core_constructor_variant,
     core_place_is_slot, core_place_slot,
     core_place_base, core_place_field, core_place_evaluated_index,
     core_field_ref_same,
     core_type_graph_count, core_type_graph_nodes, make_core_type_graph,
+    make_module_core_type_graph,
     copy_core_callables, copy_core_impl_metadata,
     core_callable_reference, core_impl_owner,
-    remap_core_callable_types, remap_core_impl_types, remap_core_body_types
+    remap_core_callable_types, remap_core_impl_types, remap_core_body_types,
+    validate_core_body_type_domain, validate_core_impl_type_domain
 }
 use core_hir::{
     CoreProgram, CoreBodyEntry,
@@ -96,16 +134,430 @@ use core_elaborate::{
     elaborate_core_derived_json,
     core_elaborated_body
 }
-use delegate_plan::{DelegateTypedPlan}
+use delegate_plan::{
+    DelegateTypedPlan,
+    delegate_typed_plan_outer_type, delegate_typed_plan_field_type,
+    delegate_typed_plan_type_count
+}
 use delegate_elaborate::{elaborate_delegate_to_core}
 
-enum CoreExprAdapterValue {
+fn require_type_fact_module(value: CoreTypeFactRef, module_key: Str) {
+    if core_type_fact_module_key(value) != module_key {
+        panic("Core assembly: type fact belongs to another module recorder")
+    }
+}
+fn local_core_type_ref(value: CoreTypeFactRef, module_key: Str) -> CoreTypeRef {
+    require_type_fact_module(value, module_key)
+    core_type_fact_local_ref(value)
+}
+fn local_flow_type_ref(
+    value: CoreTypeFactRef, module_key: Str
+) -> FlowTypeRef {
+    require_type_fact_module(value, module_key)
+    make_flow_type_ref(core_type_fact_ordinal(value))
+}
+
+pub struct CoreNominalFieldSpec {
+    identity: FlowFieldIdentity,
+    ty: CoreTypeFactRef
+}
+pub fn make_core_nominal_field_spec(
+    identity: FlowFieldIdentity, ty: CoreTypeFactRef
+) -> CoreNominalFieldSpec {
+    CoreNominalFieldSpec { identity: identity, ty: ty }
+}
+
+enum CoreResourceDependencyTargetSpecValue {
+    ParentParameterTargetSpec(FlowGenericParamFact),
+    ConcreteTypeTargetSpec(CoreTypeFactRef)
+}
+pub struct CoreResourceDependencyTargetSpec {
+    value: CoreResourceDependencyTargetSpecValue
+}
+pub fn make_core_parent_parameter_target_spec(
+    parameter: FlowGenericParamFact
+) -> CoreResourceDependencyTargetSpec {
+    CoreResourceDependencyTargetSpec {
+        value: CoreResourceDependencyTargetSpecValue::ParentParameterTargetSpec(
+            parameter)
+    }
+}
+pub fn make_core_concrete_type_target_spec(
+    ty: CoreTypeFactRef
+) -> CoreResourceDependencyTargetSpec {
+    CoreResourceDependencyTargetSpec {
+        value: CoreResourceDependencyTargetSpecValue::ConcreteTypeTargetSpec(ty)
+    }
+}
+pub struct CoreResourceDependencyEdgeSpec {
+    is_application: Bool,
+    child_ordinal: Int,
+    child: CoreTypeFactRef,
+    child_dependency_ordinal: Int,
+    application_parameter: FlowGenericParamFact?,
+    target: CoreResourceDependencyTargetSpec
+}
+pub fn make_core_resource_dependency_edge_spec(
+    child_ordinal: Int, child: CoreTypeFactRef,
+    child_dependency_ordinal: Int,
+    target: CoreResourceDependencyTargetSpec
+) -> CoreResourceDependencyEdgeSpec {
+    CoreResourceDependencyEdgeSpec {
+        is_application: false, child_ordinal: child_ordinal, child: child,
+        child_dependency_ordinal: child_dependency_ordinal,
+        application_parameter: none, target: target
+    }
+}
+pub fn make_core_application_resource_dependency_edge_spec(
+    argument_ordinal: Int, argument: CoreTypeFactRef,
+    argument_dependency_ordinal: Int,
+    owner_parameter: FlowGenericParamFact,
+    target: CoreResourceDependencyTargetSpec
+) -> CoreResourceDependencyEdgeSpec {
+    CoreResourceDependencyEdgeSpec {
+        is_application: true, child_ordinal: argument_ordinal,
+        child: argument,
+        child_dependency_ordinal: argument_dependency_ordinal,
+        application_parameter: some(owner_parameter), target: target
+    }
+}
+
+enum CoreTypeSpecValue {
+    AtomicTypeSpec(FlowTypeKind),
+    ParameterTypeSpec(FlowGenericParamFact),
+    NominalTypeSpec {
+        kind: FlowTypeKind, nominal: SymbolRef,
+        arguments: List<CoreTypeFactRef>,
+        fields: List<CoreNominalFieldSpec>,
+        semantic_seed: FlowTypeSemanticSeed,
+        drop_contract: FlowDropContract?,
+        resource_parameters: List<FlowGenericParamFact>,
+        resource_edges: List<CoreResourceDependencyEdgeSpec>
+    },
+    ExternTypeSpec {
+        nominal: SymbolRef, arguments: List<CoreTypeFactRef>,
+        contract: FlowForeignContract,
+        resource_edges: List<CoreResourceDependencyEdgeSpec>
+    },
+    TupleTypeSpec {
+        elements: List<CoreTypeFactRef>,
+        semantic_seed: FlowTypeSemanticSeed,
+        drop_contract: FlowDropContract?,
+        resource_parameters: List<FlowGenericParamFact>,
+        resource_edges: List<CoreResourceDependencyEdgeSpec>
+    },
+    RecordTypeSpec {
+        fields: List<CoreNominalFieldSpec>,
+        semantic_seed: FlowTypeSemanticSeed,
+        drop_contract: FlowDropContract?,
+        resource_parameters: List<FlowGenericParamFact>,
+        resource_edges: List<CoreResourceDependencyEdgeSpec>
+    },
+    CallableTypeSpec {
+        parameters: List<CoreTypeFactRef>, result: CoreTypeFactRef
+    },
+    PtrTypeSpec(CoreTypeFactRef)
+}
+struct CoreTypeSpec { value: CoreTypeSpecValue }
+
+fn materialize_resource_target_spec(
+    value: CoreResourceDependencyTargetSpec, module_key: Str
+) -> FlowResourceDependencyTarget {
+    match value.value {
+        CoreResourceDependencyTargetSpecValue::ParentParameterTargetSpec(
+            parameter) => make_flow_parent_parameter_dependency(parameter),
+        CoreResourceDependencyTargetSpecValue::ConcreteTypeTargetSpec(ty) =>
+            make_flow_concrete_type_dependency(
+                local_flow_type_ref(ty, module_key))
+    }
+}
+fn materialize_resource_edge_spec(
+    value: CoreResourceDependencyEdgeSpec, module_key: Str
+) -> FlowResourceDependencyEdge {
+    let child = local_flow_type_ref(value.child, module_key)
+    let target = materialize_resource_target_spec(value.target, module_key)
+    if value.is_application {
+        make_flow_application_resource_dependency_edge(
+            value.child_ordinal, child, value.child_dependency_ordinal,
+            value.application_parameter.unwrap(), target)
+    } else {
+        make_flow_resource_dependency_edge(
+            value.child_ordinal, child, value.child_dependency_ordinal, target)
+    }
+}
+fn materialize_type_spec(
+    value: CoreTypeSpec, reference: CoreTypeFactRef,
+    module_key: Str
+) -> FlowTypeNode {
+    require_type_fact_module(reference, module_key)
+    let flow_ref = local_flow_type_ref(reference, module_key)
+    match value.value {
+        CoreTypeSpecValue::AtomicTypeSpec(kind) => {
+            let tag = flow_type_kind_tag(kind)
+            if tag == flow_type_kind_tag(flow_type_kind_int()) {
+                make_flow_int_type_node(flow_ref)
+            } else if tag == flow_type_kind_tag(flow_type_kind_float()) {
+                make_flow_float_type_node(flow_ref)
+            } else if tag == flow_type_kind_tag(flow_type_kind_str()) {
+                make_flow_str_type_node(flow_ref)
+            } else if tag == flow_type_kind_tag(flow_type_kind_bool()) {
+                make_flow_bool_type_node(flow_ref)
+            } else if tag == flow_type_kind_tag(flow_type_kind_unit()) {
+                make_flow_unit_type_node(flow_ref)
+            } else if tag == flow_type_kind_tag(flow_type_kind_never()) {
+                make_flow_never_type_node(flow_ref)
+            } else {
+                panic("Core assembly: non-atomic kind used atomic type fact")
+            }
+        },
+        CoreTypeSpecValue::ParameterTypeSpec(parameter) =>
+            make_flow_parameter_type_node(flow_ref, parameter),
+        CoreTypeSpecValue::NominalTypeSpec {
+            kind, nominal, arguments, fields, semantic_seed,
+            drop_contract, resource_parameters, resource_edges
+        } => {
+            let args = arguments.map(fn(ty) {
+                local_flow_type_ref(ty, module_key)
+            })
+            let exact_fields = fields.map(fn(field) {
+                make_flow_nominal_field_fact(
+                    field.identity, local_flow_type_ref(field.ty, module_key))
+            })
+            let edges = resource_edges.map(fn(edge) {
+                materialize_resource_edge_spec(edge, module_key)
+            })
+            let tag = flow_type_kind_tag(kind)
+            if tag == flow_type_kind_tag(flow_type_kind_struct()) {
+                make_flow_struct_type_node(
+                    flow_ref, nominal, args, exact_fields, semantic_seed,
+                    drop_contract, resource_parameters, edges)
+            } else if tag == flow_type_kind_tag(flow_type_kind_enum()) {
+                make_flow_enum_type_node(
+                    flow_ref, nominal, args, exact_fields, semantic_seed,
+                    drop_contract, resource_parameters, edges)
+            } else {
+                panic("Core assembly: nominal fact kind is not struct/enum")
+            }
+        },
+        CoreTypeSpecValue::ExternTypeSpec {
+            nominal, arguments, contract, resource_edges
+        } => make_flow_extern_type_node(
+            flow_ref, nominal,
+            arguments.map(fn(ty) { local_flow_type_ref(ty, module_key) }),
+            contract,
+            resource_edges.map(fn(edge) {
+                materialize_resource_edge_spec(edge, module_key)
+            })),
+        CoreTypeSpecValue::TupleTypeSpec {
+            elements, semantic_seed, drop_contract,
+            resource_parameters, resource_edges
+        } => make_flow_tuple_type_node(
+            flow_ref,
+            elements.map(fn(ty) { local_flow_type_ref(ty, module_key) }),
+            semantic_seed, drop_contract, resource_parameters,
+            resource_edges.map(fn(edge) {
+                materialize_resource_edge_spec(edge, module_key)
+            })),
+        CoreTypeSpecValue::RecordTypeSpec {
+            fields, semantic_seed, drop_contract,
+            resource_parameters, resource_edges
+        } => make_flow_record_type_node(
+            flow_ref,
+            fields.map(fn(field) {
+                make_flow_nominal_field_fact(
+                    field.identity, local_flow_type_ref(field.ty, module_key))
+            }),
+            semantic_seed, drop_contract, resource_parameters,
+            resource_edges.map(fn(edge) {
+                materialize_resource_edge_spec(edge, module_key)
+            })),
+        CoreTypeSpecValue::CallableTypeSpec { parameters, result } =>
+            make_flow_callable_type_node(
+                flow_ref,
+                parameters.map(fn(ty) {
+                    local_flow_type_ref(ty, module_key)
+                }),
+                local_flow_type_ref(result, module_key)),
+        CoreTypeSpecValue::PtrTypeSpec(pointee) =>
+            make_flow_ptr_type_node(
+                flow_ref, local_flow_type_ref(pointee, module_key))
+    }
+}
+
+pub struct CoreCallContractFact {
+    module_key: Str,
+    parameter_types: List<CoreTypeFactRef>,
+    parameter_roles: List<FlowSemanticRole>,
+    result_type: CoreTypeFactRef,
+    result_role: FlowSemanticRole,
+    result_origin: FlowValueOriginContract
+}
+pub fn make_core_call_contract_fact(
+    parameter_types: List<CoreTypeFactRef>,
+    parameter_roles: List<FlowSemanticRole>,
+    result_type: CoreTypeFactRef, result_role: FlowSemanticRole,
+    result_origin: FlowValueOriginContract
+) -> CoreCallContractFact {
+    if parameter_types.len() != parameter_roles.len() {
+        panic("Core assembly: call contract type/role arity differs")
+    }
+    let module_key = core_type_fact_module_key(result_type)
+    require_type_fact_module(result_type, module_key)
+    for ty in parameter_types { require_type_fact_module(ty, module_key) }
+    CoreCallContractFact {
+        module_key: module_key,
+        parameter_types: parameter_types.map(fn(value) { value }),
+        parameter_roles: parameter_roles.map(fn(value) { value }),
+        result_type: result_type, result_role: result_role,
+        result_origin: result_origin
+    }
+}
+fn materialize_call_contract_fact(
+    value: CoreCallContractFact, module_key: Str
+) -> FlowCallContract {
+    if value.module_key != module_key {
+        panic("Core assembly: call contract belongs to another recorder")
+    }
+    make_module_flow_call_contract(
+        module_key,
+        value.parameter_types.map(fn(ty) {
+            local_flow_type_ref(ty, module_key)
+        }),
+        value.parameter_roles,
+        local_flow_type_ref(value.result_type, module_key),
+        value.result_role, value.result_origin)
+}
+pub fn core_call_contract_fact_local_contract(
+    value: CoreCallContractFact
+) -> FlowCallContract {
+    materialize_call_contract_fact(value, value.module_key)
+}
+
+enum CoreCalleeFactValue {
+    DirectCalleeFact(ExecutableRef),
+    LocalCalleeFact(SlotRef),
+    DynamicCalleeFact(PathRef)
+}
+pub struct CoreCalleeFact {
+    value: CoreCalleeFactValue,
+    contract: CoreCallContractFact
+}
+pub fn make_core_direct_callee_fact(
+    value: ExecutableRef, contract: CoreCallContractFact
+) -> CoreCalleeFact {
+    CoreCalleeFact { value: CoreCalleeFactValue::DirectCalleeFact(value),
+        contract: contract }
+}
+pub fn make_core_local_callee_fact(
+    value: SlotRef, contract: CoreCallContractFact
+) -> CoreCalleeFact {
+    CoreCalleeFact { value: CoreCalleeFactValue::LocalCalleeFact(value),
+        contract: contract }
+}
+pub fn make_core_dynamic_callee_fact(
+    value: PathRef, contract: CoreCallContractFact
+) -> CoreCalleeFact {
+    CoreCalleeFact { value: CoreCalleeFactValue::DynamicCalleeFact(value),
+        contract: contract }
+}
+fn materialize_callee_fact(
+    value: CoreCalleeFact, module_key: Str
+) -> CoreCalleeRef {
+    let contract = materialize_call_contract_fact(value.contract, module_key)
+    match value.value {
+        CoreCalleeFactValue::DirectCalleeFact(executable) =>
+            make_core_direct_callee(executable, contract),
+        CoreCalleeFactValue::LocalCalleeFact(slot) =>
+            make_core_local_callee(slot, contract),
+        CoreCalleeFactValue::DynamicCalleeFact(path) =>
+            make_core_dynamic_callee(path, contract)
+    }
+}
+pub fn core_callee_fact_local_ref(value: CoreCalleeFact) -> CoreCalleeRef {
+    materialize_callee_fact(value, value.contract.module_key)
+}
+
+enum CoreEffectAtomFactValue {
+    FailEffectFact(CoreTypeFactRef),
+    MutEffectFact(CoreTypeFactRef),
+    UnsafeEffectFact,
+    HandledEffectFact(HandledEffectRef),
+    SystemEffectFact(SystemEffectRef)
+}
+pub struct CoreEffectAtomFact { value: CoreEffectAtomFactValue }
+pub fn core_fail_effect_fact(ty: CoreTypeFactRef) -> CoreEffectAtomFact {
+    CoreEffectAtomFact { value: CoreEffectAtomFactValue::FailEffectFact(ty) }
+}
+pub fn core_mut_effect_fact(ty: CoreTypeFactRef) -> CoreEffectAtomFact {
+    CoreEffectAtomFact { value: CoreEffectAtomFactValue::MutEffectFact(ty) }
+}
+pub fn core_unsafe_effect_fact() -> CoreEffectAtomFact {
+    CoreEffectAtomFact { value: CoreEffectAtomFactValue::UnsafeEffectFact }
+}
+pub fn core_handled_effect_fact(
+    effect_ref: HandledEffectRef
+) -> CoreEffectAtomFact {
+    CoreEffectAtomFact {
+        value: CoreEffectAtomFactValue::HandledEffectFact(effect_ref) }
+}
+pub fn core_system_effect_fact(
+    effect_ref: SystemEffectRef
+) -> CoreEffectAtomFact {
+    CoreEffectAtomFact {
+        value: CoreEffectAtomFactValue::SystemEffectFact(effect_ref) }
+}
+pub struct CoreEffectSetFact {
+    module_key: Str,
+    atoms: List<CoreEffectAtomFact>
+}
+pub fn make_core_effect_set_fact(
+    anchor: CoreTypeFactRef, atoms: List<CoreEffectAtomFact>
+) -> CoreEffectSetFact {
+    let module_key = core_type_fact_module_key(anchor)
+    for atom in atoms {
+        match atom.value {
+            CoreEffectAtomFactValue::FailEffectFact(ty) |
+            CoreEffectAtomFactValue::MutEffectFact(ty) =>
+                require_type_fact_module(ty, module_key),
+            _ => {}
+        }
+    }
+    CoreEffectSetFact { module_key: module_key,
+        atoms: atoms.map(fn(value) { value }) }
+}
+fn materialize_effect_set_fact(
+    value: CoreEffectSetFact, module_key: Str
+) -> CoreEffectSet {
+    if value.module_key != module_key {
+        panic("Core assembly: effect set belongs to another recorder")
+    }
+    make_core_effect_set(value.atoms.map(fn(atom) {
+        match atom.value {
+            CoreEffectAtomFactValue::FailEffectFact(ty) =>
+                make_core_fail_effect(local_core_type_ref(ty, module_key)),
+            CoreEffectAtomFactValue::MutEffectFact(ty) =>
+                make_core_mut_effect(local_core_type_ref(ty, module_key)),
+            CoreEffectAtomFactValue::UnsafeEffectFact => make_core_unsafe_effect(),
+            CoreEffectAtomFactValue::HandledEffectFact(effect_ref) =>
+                make_core_handled_effect(effect_ref),
+            CoreEffectAtomFactValue::SystemEffectFact(effect_ref) =>
+                make_core_system_effect(effect_ref)
+        }
+    }))
+}
+pub fn core_effect_set_fact_local_set(
+    value: CoreEffectSetFact
+) -> CoreEffectSet {
+    materialize_effect_set_fact(value, value.module_key)
+}
+
+enum RecordedCoreExprAdapterValue {
     PlainAdapter,
     ReadAdapter(SlotRef),
     DirectCallableAdapter(ExecutableRef),
     PrimitiveAdapter(CorePrimitiveOp),
-    CallAdapter { callee: CoreCalleeRef, evidence: List<CoreEvidenceRef> },
-    MethodAdapter { callee: CoreCalleeRef, method: MethodCallRef,
+    CallAdapter { callee: CoreCalleeFact, evidence: List<CoreEvidenceRef> },
+    MethodAdapter { callee: CoreCalleeFact, method: MethodCallRef,
                     receiver: SlotRef,
                     evidence: List<CoreEvidenceRef> },
     ProjectAdapter { field: CoreFieldRef, partial: Bool },
@@ -120,21 +572,21 @@ enum CoreExprAdapterValue {
                     captures: List<CoreCapture> },
     HandleAdapter { handlers: List<CoreHandlerEntry> },
     StringInterpAdapter {
-        callee: CoreCalleeRef,
+        callee: CoreCalleeFact,
         evidence: List<CoreEvidenceRef>,
         literals: List<CoreStringLiteralFact>
     }
 }
-pub struct CoreExprAdapter { value: CoreExprAdapterValue }
+pub struct CoreExprAdapter { value: RecordedCoreExprAdapterValue }
 
 pub struct CoreStringLiteralFact {
     value: Str,
     slot: SlotRef,
-    ty: CoreTypeRef,
+    ty: CoreTypeFactRef,
     origin: OriginRef
 }
 pub fn make_core_string_literal_fact(
-    value: Str, slot: SlotRef, ty: CoreTypeRef, origin: OriginRef
+    value: Str, slot: SlotRef, ty: CoreTypeFactRef, origin: OriginRef
 ) -> CoreStringLiteralFact {
     CoreStringLiteralFact { value: value, slot: slot, ty: ty, origin: origin }
 }
@@ -155,81 +607,81 @@ fn copy_captures(values: List<CoreCapture>) -> List<CoreCapture> {
     result
 }
 pub fn core_expr_plain_adapter() -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::PlainAdapter }
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::PlainAdapter }
 }
 pub fn core_expr_read_adapter(source: SlotRef) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::ReadAdapter(source) }
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::ReadAdapter(source) }
 }
 pub fn core_expr_direct_callable_adapter(
     executable: ExecutableRef
 ) -> CoreExprAdapter {
     CoreExprAdapter { value:
-        CoreExprAdapterValue::DirectCallableAdapter(executable) }
+        RecordedCoreExprAdapterValue::DirectCallableAdapter(executable) }
 }
 pub fn core_expr_primitive_adapter(operation: CorePrimitiveOp) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::PrimitiveAdapter(operation) }
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::PrimitiveAdapter(operation) }
 }
 pub fn core_expr_call_adapter(
-    callee: CoreCalleeRef, evidence: List<CoreEvidenceRef>
+    callee: CoreCalleeFact, evidence: List<CoreEvidenceRef>
 ) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::CallAdapter {
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::CallAdapter {
         callee: callee, evidence: copy_evidence(evidence) } }
 }
 pub fn core_expr_method_adapter(
-    callee: CoreCalleeRef, method: MethodCallRef,
+    callee: CoreCalleeFact, method: MethodCallRef,
     receiver: SlotRef,
     evidence: List<CoreEvidenceRef>
 ) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::MethodAdapter {
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::MethodAdapter {
         callee: callee, method: method, receiver: receiver,
         evidence: copy_evidence(evidence) } }
 }
 pub fn core_expr_project_adapter(
     field: CoreFieldRef, partial: Bool
 ) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::ProjectAdapter {
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::ProjectAdapter {
         field: field, partial: partial } }
 }
 pub fn core_expr_construct_adapter(
     constructor: CoreConstructorRef, fields: List<CoreFieldRef>
 ) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::ConstructAdapter {
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::ConstructAdapter {
         constructor: constructor, fields: copy_fields(fields) } }
 }
 pub fn core_expr_effect_adapter(
     operation: EffectOperationRef, evidence: List<CoreEvidenceRef>
 ) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::EffectAdapter {
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::EffectAdapter {
         operation: operation, evidence: copy_evidence(evidence) } }
 }
 pub fn core_expr_system_adapter(host: SystemHostCallableRef) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::SystemAdapter(host) }
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::SystemAdapter(host) }
 }
 pub fn core_expr_dict_adapter(
     constructor: ExecutableRef, evidence: List<CoreEvidenceRef>
 ) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::DictAdapter {
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::DictAdapter {
         constructor: constructor, evidence: copy_evidence(evidence) } }
 }
 pub fn core_expr_lambda_adapter(
     executable: ExecutableRef, manifest: BinderManifest,
     captures: List<CoreCapture>
 ) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::LambdaAdapter {
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::LambdaAdapter {
         executable: executable, manifest: manifest,
         captures: copy_captures(captures) } }
 }
 pub fn core_expr_handle_adapter(
     handlers: List<CoreHandlerEntry>
 ) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::HandleAdapter {
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::HandleAdapter {
         handlers: handlers.map(fn(value) { value }) } }
 }
 pub fn core_expr_string_interp_adapter(
-    callee: CoreCalleeRef, evidence: List<CoreEvidenceRef>,
+    callee: CoreCalleeFact, evidence: List<CoreEvidenceRef>,
     literals: List<CoreStringLiteralFact>
 ) -> CoreExprAdapter {
-    CoreExprAdapter { value: CoreExprAdapterValue::StringInterpAdapter {
+    CoreExprAdapter { value: RecordedCoreExprAdapterValue::StringInterpAdapter {
         callee: callee, evidence: copy_evidence(evidence),
         literals: literals.map(fn(value) { value }) } }
 }
@@ -238,14 +690,14 @@ pub struct CoreExprFact {
     source_type: Type,
     source_effects: EffectRow,
     result: SlotRef,
-    ty: CoreTypeRef,
-    effects: CoreEffectSet,
+    ty: CoreTypeFactRef,
+    effects: CoreEffectSetFact,
     origin: OriginRef,
     adapter: CoreExprAdapter
 }
 pub fn make_core_expr_fact(
     source_type: Type, source_effects: EffectRow,
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
+    result: SlotRef, ty: CoreTypeFactRef, effects: CoreEffectSetFact,
     origin: OriginRef, adapter: CoreExprAdapter
 ) -> CoreExprFact {
     CoreExprFact { source_type: source_type, source_effects: source_effects,
@@ -255,11 +707,11 @@ pub fn make_core_expr_fact(
 
 pub struct CoreDestructureBinding {
     base: SlotRef, field: CoreFieldRef,
-    target: SlotRef, ty: CoreTypeRef, origin: OriginRef
+    target: SlotRef, ty: CoreTypeFactRef, origin: OriginRef
 }
 pub fn make_core_destructure_binding(
     base: SlotRef, field: CoreFieldRef,
-    target: SlotRef, ty: CoreTypeRef, origin: OriginRef
+    target: SlotRef, ty: CoreTypeFactRef, origin: OriginRef
 ) -> CoreDestructureBinding {
     CoreDestructureBinding {
         base: base, field: field, target: target, ty: ty, origin: origin
@@ -267,33 +719,34 @@ pub fn make_core_destructure_binding(
 }
 
 pub struct CoreForInPlan {
-    iterator_slot: SlotRef, iterator_type: CoreTypeRef,
-    iter_callee: CoreCalleeRef, iter_method: MethodCallRef,
-    iter_effects: CoreEffectSet, iter_evidence: List<CoreEvidenceRef>,
+    iterator_slot: SlotRef, iterator_type: CoreTypeFactRef,
+    iter_callee: CoreCalleeFact, iter_method: MethodCallRef,
+    iter_effects: CoreEffectSetFact, iter_evidence: List<CoreEvidenceRef>,
     iter_origin: OriginRef,
-    condition_slot: SlotRef, condition_type: CoreTypeRef,
-    has_next_callee: CoreCalleeRef, has_next_method: MethodCallRef,
-    has_next_effects: CoreEffectSet, has_next_evidence: List<CoreEvidenceRef>,
+    condition_slot: SlotRef, condition_type: CoreTypeFactRef,
+    has_next_callee: CoreCalleeFact, has_next_method: MethodCallRef,
+    has_next_effects: CoreEffectSetFact,
+    has_next_evidence: List<CoreEvidenceRef>,
     has_next_origin: OriginRef,
-    item_slot: SlotRef, item_type: CoreTypeRef,
-    next_callee: CoreCalleeRef, next_method: MethodCallRef,
-    next_effects: CoreEffectSet, next_evidence: List<CoreEvidenceRef>,
+    item_slot: SlotRef, item_type: CoreTypeFactRef,
+    next_callee: CoreCalleeFact, next_method: MethodCallRef,
+    next_effects: CoreEffectSetFact, next_evidence: List<CoreEvidenceRef>,
     next_origin: OriginRef,
     binding_slot: SlotRef,
     destructure: List<CoreDestructureBinding>
 }
 pub fn make_core_for_in_plan(
-    iterator_slot: SlotRef, iterator_type: CoreTypeRef,
-    iter_callee: CoreCalleeRef, iter_method: MethodCallRef,
-    iter_effects: CoreEffectSet, iter_evidence: List<CoreEvidenceRef>,
+    iterator_slot: SlotRef, iterator_type: CoreTypeFactRef,
+    iter_callee: CoreCalleeFact, iter_method: MethodCallRef,
+    iter_effects: CoreEffectSetFact, iter_evidence: List<CoreEvidenceRef>,
     iter_origin: OriginRef,
-    condition_slot: SlotRef, condition_type: CoreTypeRef,
-    has_next_callee: CoreCalleeRef, has_next_method: MethodCallRef,
-    has_next_effects: CoreEffectSet,
+    condition_slot: SlotRef, condition_type: CoreTypeFactRef,
+    has_next_callee: CoreCalleeFact, has_next_method: MethodCallRef,
+    has_next_effects: CoreEffectSetFact,
     has_next_evidence: List<CoreEvidenceRef>, has_next_origin: OriginRef,
-    item_slot: SlotRef, item_type: CoreTypeRef,
-    next_callee: CoreCalleeRef, next_method: MethodCallRef,
-    next_effects: CoreEffectSet, next_evidence: List<CoreEvidenceRef>,
+    item_slot: SlotRef, item_type: CoreTypeFactRef,
+    next_callee: CoreCalleeFact, next_method: MethodCallRef,
+    next_effects: CoreEffectSetFact, next_evidence: List<CoreEvidenceRef>,
     next_origin: OriginRef, binding_slot: SlotRef,
     destructure: List<CoreDestructureBinding>
 ) -> CoreForInPlan {
@@ -316,28 +769,66 @@ pub fn make_core_for_in_plan(
 }
 
 pub struct CoreIfLetPlan {
-    result_slot: SlotRef, result_type: CoreTypeRef,
-    scrutinee_type: CoreTypeRef, effects: CoreEffectSet,
+    result_slot: SlotRef, result_type: CoreTypeFactRef,
+    scrutinee_type: CoreTypeFactRef, effects: CoreEffectSetFact,
     origin: OriginRef
 }
 pub fn make_core_if_let_plan(
-    result_slot: SlotRef, result_type: CoreTypeRef,
-    scrutinee_type: CoreTypeRef, effects: CoreEffectSet,
+    result_slot: SlotRef, result_type: CoreTypeFactRef,
+    scrutinee_type: CoreTypeFactRef, effects: CoreEffectSetFact,
     origin: OriginRef
 ) -> CoreIfLetPlan {
     CoreIfLetPlan { result_slot: result_slot, result_type: result_type,
         scrutinee_type: scrutinee_type, effects: effects, origin: origin }
 }
 
+enum CorePlaceFactValue {
+    SlotPlaceFact(SlotRef),
+    ProjectPlaceFact {
+        base: SlotRef, field: CoreFieldRef?, evaluated_index: SlotRef?,
+        value_type: CoreTypeFactRef
+    }
+}
+pub struct CorePlaceFact { value: CorePlaceFactValue }
+pub fn make_core_slot_place_fact(slot: SlotRef) -> CorePlaceFact {
+    CorePlaceFact { value: CorePlaceFactValue::SlotPlaceFact(slot) }
+}
+pub fn make_core_project_place_fact(
+    base: SlotRef, field: CoreFieldRef?, evaluated_index: SlotRef?,
+    value_type: CoreTypeFactRef
+) -> CorePlaceFact {
+    if (field.is_some() && evaluated_index.is_some()) ||
+       (field.is_none() && evaluated_index.is_none()) {
+        panic("Core assembly: projected place must select field xor index")
+    }
+    CorePlaceFact { value: CorePlaceFactValue::ProjectPlaceFact {
+        base: base, field: field, evaluated_index: evaluated_index,
+        value_type: value_type
+    } }
+}
+fn materialize_place_fact(
+    value: CorePlaceFact, module_key: Str
+) -> CorePlaceRef {
+    match value.value {
+        CorePlaceFactValue::SlotPlaceFact(slot) =>
+            make_core_slot_place(slot),
+        CorePlaceFactValue::ProjectPlaceFact {
+            base, field, evaluated_index, value_type
+        } => make_core_project_place(
+            base, field, evaluated_index,
+            local_core_type_ref(value_type, module_key))
+    }
+}
+
 pub struct CoreStmtFact {
     origin: OriginRef,
-    target: CorePlaceRef?,
+    target: CorePlaceFact?,
     for_in: CoreForInPlan?,
     destructure: List<CoreDestructureBinding>?,
     if_let: CoreIfLetPlan?
 }
 pub fn make_core_stmt_fact(
-    origin: OriginRef, target: CorePlaceRef?
+    origin: OriginRef, target: CorePlaceFact?
 ) -> CoreStmtFact {
     CoreStmtFact { origin: origin, target: target,
         for_in: none, destructure: none, if_let: none }
@@ -377,47 +868,83 @@ enum CorePatternAdapterValue {
     PatternOr
 }
 pub struct CorePatternFact {
-    ty: CoreTypeRef,
+    ty: CoreTypeFactRef,
     value: CorePatternAdapterValue
 }
-pub fn core_pattern_wildcard_fact(ty: CoreTypeRef) -> CorePatternFact {
+pub fn core_pattern_wildcard_fact(ty: CoreTypeFactRef) -> CorePatternFact {
     CorePatternFact { ty: ty, value: CorePatternAdapterValue::PatternWildcard }
 }
 pub fn core_pattern_binding_fact(
-    ty: CoreTypeRef, slot: SlotRef
+    ty: CoreTypeFactRef, slot: SlotRef
 ) -> CorePatternFact {
     CorePatternFact { ty: ty,
         value: CorePatternAdapterValue::PatternBinding(slot) }
 }
-pub fn core_pattern_literal_fact(ty: CoreTypeRef) -> CorePatternFact {
+pub fn core_pattern_literal_fact(ty: CoreTypeFactRef) -> CorePatternFact {
     CorePatternFact { ty: ty, value: CorePatternAdapterValue::PatternLiteral }
 }
-pub fn core_pattern_tuple_fact(ty: CoreTypeRef) -> CorePatternFact {
+pub fn core_pattern_tuple_fact(ty: CoreTypeFactRef) -> CorePatternFact {
     CorePatternFact { ty: ty, value: CorePatternAdapterValue::PatternTuple }
 }
 pub fn core_pattern_struct_fact(
-    ty: CoreTypeRef, owner: RegisteredNominalRef,
+    ty: CoreTypeFactRef, owner: RegisteredNominalRef,
     fields: List<CoreFieldRef>
 ) -> CorePatternFact {
     CorePatternFact { ty: ty, value: CorePatternAdapterValue::PatternStruct {
         owner: owner, fields: copy_fields(fields) } }
 }
 pub fn core_pattern_variant_fact(
-    ty: CoreTypeRef, variant: VariantRef,
+    ty: CoreTypeFactRef, variant: VariantRef,
     fields: List<CoreFieldRef>
 ) -> CorePatternFact {
     CorePatternFact { ty: ty, value: CorePatternAdapterValue::PatternVariant {
         variant: variant, fields: copy_fields(fields) } }
 }
-pub fn core_pattern_or_fact(ty: CoreTypeRef) -> CorePatternFact {
+pub fn core_pattern_or_fact(ty: CoreTypeFactRef) -> CorePatternFact {
     CorePatternFact { ty: ty, value: CorePatternAdapterValue::PatternOr }
 }
 
+pub struct CoreSlotFact {
+    reference: SlotRef,
+    ty: CoreTypeFactRef,
+    scope: FlowScopeRef,
+    reverse_ordinal: Int,
+    initial_state: FlowInitialSlotState,
+    storage: FlowStorageClass,
+    storage_contract: FlowStorageContract,
+    parameter_ordinal: Int?
+}
+pub fn make_core_slot_fact(
+    reference: SlotRef, ty: CoreTypeFactRef, scope: FlowScopeRef,
+    reverse_ordinal: Int, initial_state: FlowInitialSlotState,
+    storage: FlowStorageClass, storage_contract: FlowStorageContract,
+    parameter_ordinal: Int?
+) -> CoreSlotFact {
+    CoreSlotFact {
+        reference: reference, ty: ty, scope: scope,
+        reverse_ordinal: reverse_ordinal, initial_state: initial_state,
+        storage: storage, storage_contract: storage_contract,
+        parameter_ordinal: parameter_ordinal
+    }
+}
+fn materialize_slot_fact(
+    value: CoreSlotFact, module_key: Str
+) -> CoreSlot {
+    make_core_slot(
+        value.reference, local_core_type_ref(value.ty, module_key),
+        value.scope, value.reverse_ordinal, value.initial_state,
+        value.storage, value.storage_contract, value.parameter_ordinal)
+}
+pub fn core_slot_fact_local_slot(value: CoreSlotFact) -> CoreSlot {
+    materialize_slot_fact(value, core_type_fact_module_key(value.ty))
+}
+
 pub struct CoreSourceBodyInput {
+    module_key: Str,
     source: HExpr,
     executable: ExecutableRef, origin: OriginRef, body_anchor: PathRef,
-    manifest: BinderManifest, scopes: List<FlowScope>, slots: List<CoreSlot>,
-    parameter_slots: List<SlotRef>, result_type: CoreTypeRef,
+    manifest: BinderManifest, scopes: List<FlowScope>, slots: List<CoreSlotFact>,
+    parameter_slots: List<SlotRef>, result_type: CoreTypeFactRef,
     expr_facts: List<CoreExprFact>, stmt_facts: List<CoreStmtFact>,
     block_facts: List<CoreBlockFact>, pattern_facts: List<CorePatternFact>
 }
@@ -426,8 +953,8 @@ fn copy_scopes(values: List<FlowScope>) -> List<FlowScope> {
     for value in values { result.push(value) }
     result
 }
-fn copy_slots(values: List<CoreSlot>) -> List<CoreSlot> {
-    let mut result: List<CoreSlot> = []
+fn copy_slot_facts(values: List<CoreSlotFact>) -> List<CoreSlotFact> {
+    let mut result: List<CoreSlotFact> = []
     for value in values { result.push(value) }
     result
 }
@@ -440,16 +967,48 @@ pub fn make_core_source_body_input(
     source: HExpr,
     executable: ExecutableRef, origin: OriginRef, body_anchor: PathRef,
     manifest: BinderManifest, scopes: List<FlowScope>,
-    slots: List<CoreSlot>, parameter_slots: List<SlotRef>,
-    result_type: CoreTypeRef, expr_facts: List<CoreExprFact>,
+    slots: List<CoreSlotFact>, parameter_slots: List<SlotRef>,
+    result_type: CoreTypeFactRef, expr_facts: List<CoreExprFact>,
     stmt_facts: List<CoreStmtFact>, block_facts: List<CoreBlockFact>,
     pattern_facts: List<CorePatternFact>
 ) -> CoreSourceBodyInput {
+    let module_key = core_type_fact_module_key(result_type)
+    require_type_fact_module(result_type, module_key)
+    for slot in slots { require_type_fact_module(slot.ty, module_key) }
+    for fact in expr_facts {
+        require_type_fact_module(fact.ty, module_key)
+        let _ = materialize_effect_set_fact(fact.effects, module_key)
+        let _ = materialize_expr_adapter(fact.adapter, module_key)
+    }
+    for fact in pattern_facts {
+        require_type_fact_module(fact.ty, module_key)
+    }
+    for fact in stmt_facts {
+        match fact.target {
+            some(value) => { let _ = materialize_place_fact(value, module_key) },
+            none => {}
+        }
+        match fact.for_in {
+            some(value) => { let _ = materialize_for_in_plan(value, module_key) },
+            none => {}
+        }
+        match fact.destructure {
+            some(values) => {
+                let _ = materialize_destructure_bindings(values, module_key)
+            },
+            none => {}
+        }
+        match fact.if_let {
+            some(value) => { let _ = materialize_if_let_plan(value, module_key) },
+            none => {}
+        }
+    }
     CoreSourceBodyInput {
+        module_key: module_key,
         source: source,
         executable: executable, origin: origin, body_anchor: body_anchor,
         manifest: manifest, scopes: copy_scopes(scopes),
-        slots: copy_slots(slots),
+        slots: copy_slot_facts(slots),
         parameter_slots: copy_slot_refs(parameter_slots), result_type: result_type,
         expr_facts: expr_facts.map(fn(value) { value }),
         stmt_facts: stmt_facts.map(fn(value) { value }),
@@ -470,65 +1029,226 @@ enum CoreGeneratedPlanValue {
     GeneratedDerivedDebug(CoreOrdinaryBodyPlan),
     GeneratedDerivedJson(CoreOrdinaryBodyPlan)
 }
-pub struct CoreGeneratedPlan { value: CoreGeneratedPlanValue }
-pub fn core_generated_trait_default(value: CoreOrdinaryBodyPlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedTraitDefault(value) }
+pub struct CoreGeneratedPlan {
+    module_key: Str,
+    value: CoreGeneratedPlanValue
 }
-pub fn core_generated_default_specialization(value: CoreOrdinaryBodyPlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedDefaultSpecialization(value) }
+fn bind_generated_plan(
+    anchor: CoreTypeFactRef, value: CoreGeneratedPlanValue
+) -> CoreGeneratedPlan {
+    let result = CoreGeneratedPlan {
+        module_key: core_type_fact_module_key(anchor), value: value
+    }
+    let body = materialize_generated(result)
+    validate_core_body_type_domain(body, core_type_fact_module_key(anchor))
+    result
 }
-pub fn core_generated_derived_eq(value: CoreOrdinaryBodyPlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedDerivedEq(value) }
+pub fn core_generated_trait_default(
+    anchor: CoreTypeFactRef, value: CoreOrdinaryBodyPlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(
+        anchor, CoreGeneratedPlanValue::GeneratedTraitDefault(value))
 }
-pub fn core_generated_derived_ne(value: CoreOrdinaryBodyPlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedDerivedNe(value) }
+pub fn core_generated_default_specialization(
+    anchor: CoreTypeFactRef, value: CoreOrdinaryBodyPlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(
+        anchor, CoreGeneratedPlanValue::GeneratedDefaultSpecialization(value))
 }
-pub fn core_generated_derived_hash(value: CoreOrdinaryBodyPlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedDerivedHash(value) }
+pub fn core_generated_derived_eq(
+    anchor: CoreTypeFactRef, value: CoreOrdinaryBodyPlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(anchor, CoreGeneratedPlanValue::GeneratedDerivedEq(value))
 }
-pub fn core_generated_struct_clone(value: CoreStructClonePlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedStructClone(value) }
+pub fn core_generated_derived_ne(
+    anchor: CoreTypeFactRef, value: CoreOrdinaryBodyPlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(anchor, CoreGeneratedPlanValue::GeneratedDerivedNe(value))
 }
-pub fn core_generated_enum_clone(value: CoreEnumClonePlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedEnumClone(value) }
+pub fn core_generated_derived_hash(
+    anchor: CoreTypeFactRef, value: CoreOrdinaryBodyPlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(anchor, CoreGeneratedPlanValue::GeneratedDerivedHash(value))
 }
-pub fn core_generated_derived_ord(value: CoreOrdinaryBodyPlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedDerivedOrd(value) }
+pub fn core_generated_struct_clone(
+    anchor: CoreTypeFactRef, value: CoreStructClonePlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(anchor, CoreGeneratedPlanValue::GeneratedStructClone(value))
 }
-pub fn core_generated_derived_debug(value: CoreOrdinaryBodyPlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedDerivedDebug(value) }
+pub fn core_generated_enum_clone(
+    anchor: CoreTypeFactRef, value: CoreEnumClonePlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(anchor, CoreGeneratedPlanValue::GeneratedEnumClone(value))
 }
-pub fn core_generated_derived_json(value: CoreOrdinaryBodyPlan) -> CoreGeneratedPlan {
-    CoreGeneratedPlan { value: CoreGeneratedPlanValue::GeneratedDerivedJson(value) }
+pub fn core_generated_derived_ord(
+    anchor: CoreTypeFactRef, value: CoreOrdinaryBodyPlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(anchor, CoreGeneratedPlanValue::GeneratedDerivedOrd(value))
+}
+pub fn core_generated_derived_debug(
+    anchor: CoreTypeFactRef, value: CoreOrdinaryBodyPlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(anchor, CoreGeneratedPlanValue::GeneratedDerivedDebug(value))
+}
+pub fn core_generated_derived_json(
+    anchor: CoreTypeFactRef, value: CoreOrdinaryBodyPlan
+) -> CoreGeneratedPlan {
+    bind_generated_plan(anchor, CoreGeneratedPlanValue::GeneratedDerivedJson(value))
+}
+
+fn type_facts_same(left: CoreTypeFactRef, right: CoreTypeFactRef) -> Bool {
+    core_type_fact_same(left, right)
+}
+
+pub struct CoreCallableFact {
+    module_key: Str,
+    reference: ExecutableRef,
+    origin: OriginRef,
+    parameter_types: List<CoreTypeFactRef>,
+    parameter_slots: List<SlotRef>,
+    result_type: CoreTypeFactRef,
+    mode: FlowCallableMode,
+    semantic_contract: CoreCallContractFact,
+    evidence_requirements: List<SymbolRef>
+}
+pub fn make_core_callable_fact(
+    reference: ExecutableRef, origin: OriginRef,
+    parameter_types: List<CoreTypeFactRef>, parameter_slots: List<SlotRef>,
+    result_type: CoreTypeFactRef, mode: FlowCallableMode,
+    semantic_contract: CoreCallContractFact,
+    evidence_requirements: List<SymbolRef>
+) -> CoreCallableFact {
+    let module_key = core_type_fact_module_key(result_type)
+    if semantic_contract.module_key != module_key ||
+       parameter_types.len() != semantic_contract.parameter_types.len() ||
+       !type_facts_same(result_type, semantic_contract.result_type) {
+        panic("Core assembly: callable fact signature contract differs")
+    }
+    let mut index = 0
+    while index < parameter_types.len() {
+        let ty = parameter_types.get(index).unwrap()
+        require_type_fact_module(ty, module_key)
+        if !type_facts_same(
+                ty, semantic_contract.parameter_types.get(index).unwrap()) {
+            panic("Core assembly: callable fact parameter contract differs")
+        }
+        index = index + 1
+    }
+    CoreCallableFact {
+        module_key: module_key, reference: reference, origin: origin,
+        parameter_types: parameter_types.map(fn(value) { value }),
+        parameter_slots: parameter_slots.map(fn(value) { value }),
+        result_type: result_type, mode: mode,
+        semantic_contract: semantic_contract,
+        evidence_requirements: evidence_requirements.map(fn(value) { value })
+    }
+}
+fn core_callable_fact_reference(value: CoreCallableFact) -> ExecutableRef {
+    value.reference
+}
+fn materialize_callable_fact(
+    value: CoreCallableFact, module_key: Str
+) -> CoreCallableContract {
+    if value.module_key != module_key {
+        panic("Core assembly: callable fact belongs to another recorder")
+    }
+    make_core_callable_contract(
+        value.reference, value.origin,
+        value.parameter_types.map(fn(ty) {
+            local_core_type_ref(ty, module_key)
+        }),
+        value.parameter_slots,
+        local_core_type_ref(value.result_type, module_key), value.mode,
+        materialize_call_contract_fact(value.semantic_contract, module_key),
+        value.evidence_requirements)
+}
+
+pub struct CoreAssocBindingFact {
+    member: SymbolRef,
+    ty: CoreTypeFactRef
+}
+pub fn make_core_assoc_binding_fact(
+    member: SymbolRef, ty: CoreTypeFactRef
+) -> CoreAssocBindingFact {
+    CoreAssocBindingFact { member: member, ty: ty }
+}
+pub struct CoreImplFact {
+    module_key: Str,
+    owner: ImplOwnerRef,
+    methods: List<ImplMethodRef>,
+    assoc_bindings: List<CoreAssocBindingFact>,
+    obligations: List<CoreObligationBinding>
+}
+pub fn make_core_impl_fact(
+    anchor: CoreTypeFactRef, owner: ImplOwnerRef,
+    methods: List<ImplMethodRef>,
+    assoc_bindings: List<CoreAssocBindingFact>,
+    obligations: List<CoreObligationBinding>
+) -> CoreImplFact {
+    for binding in assoc_bindings {
+        require_type_fact_module(binding.ty, core_type_fact_module_key(anchor))
+    }
+    CoreImplFact {
+        module_key: core_type_fact_module_key(anchor), owner: owner,
+        methods: methods.map(fn(value) { value }),
+        assoc_bindings: assoc_bindings.map(fn(value) { value }),
+        obligations: obligations.map(fn(value) { value })
+    }
+}
+fn core_impl_fact_owner(value: CoreImplFact) -> ImplOwnerRef { value.owner }
+fn materialize_impl_fact(
+    value: CoreImplFact, module_key: Str
+) -> CoreImplMetadata {
+    if value.module_key != module_key {
+        panic("Core assembly: impl fact belongs to another recorder")
+    }
+    make_core_impl_metadata(
+        value.owner, value.methods,
+        value.assoc_bindings.map(fn(binding) {
+            make_core_assoc_binding(
+                binding.member, local_core_type_ref(binding.ty, module_key))
+        }),
+        value.obligations)
+}
+
+pub struct CoreDelegatePlanFact {
+    module_key: Str,
+    plan: DelegateTypedPlan
+}
+pub fn make_core_delegate_plan_fact(
+    anchor: CoreTypeFactRef, plan: DelegateTypedPlan
+) -> CoreDelegatePlanFact {
+    if core_type_ref_module_key(delegate_typed_plan_outer_type(plan)) !=
+            some(core_type_fact_module_key(anchor)) ||
+       core_type_ref_module_key(delegate_typed_plan_field_type(plan)) !=
+            some(core_type_fact_module_key(anchor)) {
+        panic("Core assembly: delegate plan has an unowned type domain")
+    }
+    let (metadata, bodies) = elaborate_delegate_to_core(plan)
+    validate_core_impl_type_domain(
+        metadata, delegate_typed_plan_type_count(plan),
+        core_type_fact_module_key(anchor))
+    for body in bodies {
+        validate_core_body_type_domain(
+            body, core_type_fact_module_key(anchor))
+    }
+    CoreDelegatePlanFact {
+        module_key: core_type_fact_module_key(anchor), plan: plan
+    }
 }
 
 pub struct CoreAssemblyRecorder {
     module_key: Str,
     module_order: Int,
-    type_nodes: List<FlowTypeNode>,
-    callables: List<CoreCallableContract>,
-    impls: List<CoreImplMetadata>,
+    type_specs: List<CoreTypeSpec?>,
+    callables: List<CoreCallableFact>,
+    impls: List<CoreImplFact>,
     inventory_entries: List<ExecutableEntry>,
     manifests: List<BinderManifest>,
     source_bodies: List<CoreSourceBodyInput>,
     generated: List<CoreGeneratedPlan>,
-    delegates: List<DelegateTypedPlan>,
+    delegates: List<CoreDelegatePlanFact>,
     frozen: Bool
-}
-
-// This reference belongs to one module recorder.  It is never a project
-// CoreTypeRef and therefore cannot collide with another module's ordinal.
-// Project assembly consumes it through the recorder's frozen node order and
-// allocates the only global CoreTypeRef domain.
-pub struct CoreTypeFactRef {
-    module_key: Str,
-    ordinal: Int
-}
-pub fn core_type_fact_module_key(value: CoreTypeFactRef) -> Str {
-    value.module_key
-}
-pub fn core_type_fact_ordinal(value: CoreTypeFactRef) -> Int {
-    value.ordinal
 }
 
 pub fn new_core_assembly_recorder(
@@ -539,7 +1259,7 @@ pub fn new_core_assembly_recorder(
     }
     CoreAssemblyRecorder {
         module_key: module_key, module_order: module_order,
-        type_nodes: [], callables: [], impls: [], inventory_entries: [],
+        type_specs: [], callables: [], impls: [], inventory_entries: [],
         manifests: [], source_bodies: [], generated: [], delegates: [],
         frozen: false
     }
@@ -549,26 +1269,222 @@ fn require_recorder_open(value: CoreAssemblyRecorder) {
     if value.frozen { panic("Core assembly: recorder is frozen") }
 }
 
-pub fn record_core_type_spec(
-    mut recorder: CoreAssemblyRecorder, node: FlowTypeNode
+pub fn reserve_core_type_fact(
+    mut recorder: CoreAssemblyRecorder
 ) -> CoreTypeFactRef {
     require_recorder_open(recorder)
-    let index = flow_type_ref_index(flow_type_node_reference(node))
-    if index != recorder.type_nodes.len() {
-        panic("Core assembly: type spec is not in module-local ordinal order")
+    let reference = make_core_type_fact_ref(
+        recorder.module_key, recorder.type_specs.len())
+    recorder.type_specs.push(none)
+    reference
+}
+fn require_reserved_type_fact(
+    recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef
+) {
+    require_type_fact_module(reference, recorder.module_key)
+    let ordinal = core_type_fact_ordinal(reference)
+    if ordinal < 0 || ordinal >= recorder.type_specs.len() {
+        panic("Core assembly: type dependency was not reserved by this recorder")
     }
-    recorder.type_nodes.push(node)
-    CoreTypeFactRef { module_key: recorder.module_key, ordinal: index }
+}
+fn validate_resource_target_spec_owner(
+    recorder: CoreAssemblyRecorder,
+    value: CoreResourceDependencyTargetSpec
+) {
+    match value.value {
+        CoreResourceDependencyTargetSpecValue::ConcreteTypeTargetSpec(ty) =>
+            require_reserved_type_fact(recorder, ty),
+        _ => {}
+    }
+}
+fn validate_resource_edge_spec_owner(
+    recorder: CoreAssemblyRecorder, value: CoreResourceDependencyEdgeSpec
+) {
+    require_reserved_type_fact(recorder, value.child)
+    validate_resource_target_spec_owner(recorder, value.target)
+}
+fn validate_type_spec_owner(
+    recorder: CoreAssemblyRecorder, value: CoreTypeSpec
+) {
+    match value.value {
+        CoreTypeSpecValue::AtomicTypeSpec(_) |
+        CoreTypeSpecValue::ParameterTypeSpec(_) => {},
+        CoreTypeSpecValue::NominalTypeSpec {
+            arguments, fields, resource_edges, ..
+        } => {
+            for ty in arguments { require_reserved_type_fact(recorder, ty) }
+            for field in fields {
+                require_reserved_type_fact(recorder, field.ty)
+            }
+            for edge in resource_edges {
+                validate_resource_edge_spec_owner(recorder, edge)
+            }
+        },
+        CoreTypeSpecValue::ExternTypeSpec {
+            arguments, resource_edges, ..
+        } => {
+            for ty in arguments { require_reserved_type_fact(recorder, ty) }
+            for edge in resource_edges {
+                validate_resource_edge_spec_owner(recorder, edge)
+            }
+        },
+        CoreTypeSpecValue::TupleTypeSpec {
+            elements, resource_edges, ..
+        } => {
+            for ty in elements { require_reserved_type_fact(recorder, ty) }
+            for edge in resource_edges {
+                validate_resource_edge_spec_owner(recorder, edge)
+            }
+        },
+        CoreTypeSpecValue::RecordTypeSpec {
+            fields, resource_edges, ..
+        } => {
+            for field in fields {
+                require_reserved_type_fact(recorder, field.ty)
+            }
+            for edge in resource_edges {
+                validate_resource_edge_spec_owner(recorder, edge)
+            }
+        },
+        CoreTypeSpecValue::CallableTypeSpec { parameters, result } => {
+            for ty in parameters { require_reserved_type_fact(recorder, ty) }
+            require_reserved_type_fact(recorder, result)
+        },
+        CoreTypeSpecValue::PtrTypeSpec(pointee) =>
+            require_reserved_type_fact(recorder, pointee)
+    }
+}
+fn define_core_type_fact(
+    mut recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef,
+    spec: CoreTypeSpec
+) {
+    require_recorder_open(recorder)
+    require_type_fact_module(reference, recorder.module_key)
+    let ordinal = core_type_fact_ordinal(reference)
+    if ordinal < 0 || ordinal >= recorder.type_specs.len() {
+        panic("Core assembly: type fact was not reserved by this recorder")
+    }
+    if recorder.type_specs.get(ordinal).unwrap().is_some() {
+        panic("Core assembly: type fact was defined twice")
+    }
+    validate_type_spec_owner(recorder, spec)
+    // Materialization validates exact payload shape.  A reserved but
+    // not-yet-defined recursive child is allowed here.
+    let _ = materialize_type_spec(spec, reference, recorder.module_key)
+    recorder.type_specs.set(ordinal, some(spec))
+}
+pub fn define_core_atomic_type_fact(
+    mut recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef,
+    kind: FlowTypeKind
+) {
+    define_core_type_fact(
+        recorder, reference,
+        CoreTypeSpec { value: CoreTypeSpecValue::AtomicTypeSpec(kind) })
+}
+pub fn define_core_parameter_type_fact(
+    mut recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef,
+    parameter: FlowGenericParamFact
+) {
+    define_core_type_fact(
+        recorder, reference,
+        CoreTypeSpec { value: CoreTypeSpecValue::ParameterTypeSpec(parameter) })
+}
+pub fn define_core_nominal_type_fact(
+    mut recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef,
+    kind: FlowTypeKind, nominal: SymbolRef,
+    arguments: List<CoreTypeFactRef>, fields: List<CoreNominalFieldSpec>,
+    semantic_seed: FlowTypeSemanticSeed,
+    drop_contract: FlowDropContract?,
+    resource_parameters: List<FlowGenericParamFact>,
+    resource_edges: List<CoreResourceDependencyEdgeSpec>
+) {
+    define_core_type_fact(recorder, reference, CoreTypeSpec {
+        value: CoreTypeSpecValue::NominalTypeSpec {
+            kind: kind, nominal: nominal,
+            arguments: arguments.map(fn(value) { value }),
+            fields: fields.map(fn(value) { value }),
+            semantic_seed: semantic_seed, drop_contract: drop_contract,
+            resource_parameters: resource_parameters.map(fn(value) { value }),
+            resource_edges: resource_edges.map(fn(value) { value })
+        }
+    })
+}
+pub fn define_core_extern_type_fact(
+    mut recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef,
+    nominal: SymbolRef, arguments: List<CoreTypeFactRef>,
+    contract: FlowForeignContract,
+    resource_edges: List<CoreResourceDependencyEdgeSpec>
+) {
+    define_core_type_fact(recorder, reference, CoreTypeSpec {
+        value: CoreTypeSpecValue::ExternTypeSpec {
+            nominal: nominal, arguments: arguments.map(fn(value) { value }),
+            contract: contract,
+            resource_edges: resource_edges.map(fn(value) { value })
+        }
+    })
+}
+pub fn define_core_tuple_type_fact(
+    mut recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef,
+    elements: List<CoreTypeFactRef>, semantic_seed: FlowTypeSemanticSeed,
+    drop_contract: FlowDropContract?,
+    resource_parameters: List<FlowGenericParamFact>,
+    resource_edges: List<CoreResourceDependencyEdgeSpec>
+) {
+    define_core_type_fact(recorder, reference, CoreTypeSpec {
+        value: CoreTypeSpecValue::TupleTypeSpec {
+            elements: elements.map(fn(value) { value }),
+            semantic_seed: semantic_seed, drop_contract: drop_contract,
+            resource_parameters: resource_parameters.map(fn(value) { value }),
+            resource_edges: resource_edges.map(fn(value) { value })
+        }
+    })
+}
+pub fn define_core_record_type_fact(
+    mut recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef,
+    fields: List<CoreNominalFieldSpec>,
+    semantic_seed: FlowTypeSemanticSeed, drop_contract: FlowDropContract?,
+    resource_parameters: List<FlowGenericParamFact>,
+    resource_edges: List<CoreResourceDependencyEdgeSpec>
+) {
+    define_core_type_fact(recorder, reference, CoreTypeSpec {
+        value: CoreTypeSpecValue::RecordTypeSpec {
+            fields: fields.map(fn(value) { value }),
+            semantic_seed: semantic_seed, drop_contract: drop_contract,
+            resource_parameters: resource_parameters.map(fn(value) { value }),
+            resource_edges: resource_edges.map(fn(value) { value })
+        }
+    })
+}
+pub fn define_core_callable_type_fact(
+    mut recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef,
+    parameters: List<CoreTypeFactRef>, result: CoreTypeFactRef
+) {
+    define_core_type_fact(recorder, reference, CoreTypeSpec {
+        value: CoreTypeSpecValue::CallableTypeSpec {
+            parameters: parameters.map(fn(value) { value }), result: result
+        }
+    })
+}
+pub fn define_core_ptr_type_fact(
+    mut recorder: CoreAssemblyRecorder, reference: CoreTypeFactRef,
+    pointee: CoreTypeFactRef
+) {
+    define_core_type_fact(
+        recorder, reference,
+        CoreTypeSpec { value: CoreTypeSpecValue::PtrTypeSpec(pointee) })
 }
 
 pub fn record_core_callable(
-    mut recorder: CoreAssemblyRecorder, value: CoreCallableContract
+    mut recorder: CoreAssemblyRecorder, value: CoreCallableFact
 ) {
     require_recorder_open(recorder)
+    if value.module_key != recorder.module_key {
+        panic("Core assembly: callable belongs to another module recorder")
+    }
     for existing in recorder.callables {
         if executable_ref_same(
-                core_callable_reference(existing),
-                core_callable_reference(value)) {
+                core_callable_fact_reference(existing),
+                core_callable_fact_reference(value)) {
             panic("Core assembly: callable was recorded twice")
         }
     }
@@ -576,12 +1492,15 @@ pub fn record_core_callable(
 }
 
 pub fn record_core_impl(
-    mut recorder: CoreAssemblyRecorder, value: CoreImplMetadata
+    mut recorder: CoreAssemblyRecorder, value: CoreImplFact
 ) {
     require_recorder_open(recorder)
+    if value.module_key != recorder.module_key {
+        panic("Core assembly: impl belongs to another module recorder")
+    }
     for existing in recorder.impls {
         if impl_owner_ref_same(
-                core_impl_owner(existing), core_impl_owner(value)) {
+                core_impl_fact_owner(existing), core_impl_fact_owner(value)) {
             panic("Core assembly: impl metadata was recorded twice")
         }
     }
@@ -619,6 +1538,9 @@ pub fn record_core_source_body(
     mut recorder: CoreAssemblyRecorder, value: CoreSourceBodyInput
 ) {
     require_recorder_open(recorder)
+    if value.module_key != recorder.module_key {
+        panic("Core assembly: source body belongs to another module recorder")
+    }
     if !executable_ref_same(
             value.executable, binder_manifest_owner(value.manifest)) {
         panic("Core assembly: source body executable/manifest differs")
@@ -639,13 +1561,19 @@ pub fn record_core_generated(
     mut recorder: CoreAssemblyRecorder, value: CoreGeneratedPlan
 ) {
     require_recorder_open(recorder)
+    if value.module_key != recorder.module_key {
+        panic("Core assembly: generated plan belongs to another recorder")
+    }
     recorder.generated.push(value)
 }
 
 pub fn record_core_delegate(
-    mut recorder: CoreAssemblyRecorder, value: DelegateTypedPlan
+    mut recorder: CoreAssemblyRecorder, value: CoreDelegatePlanFact
 ) {
     require_recorder_open(recorder)
+    if value.module_key != recorder.module_key {
+        panic("Core assembly: delegate plan belongs to another recorder")
+    }
     recorder.delegates.push(value)
 }
 
@@ -669,10 +1597,39 @@ fn recorded_body_refs(recorder: CoreAssemblyRecorder) -> List<ExecutableRef> {
         result.push(core_body_reference(materialize_generated(generated)))
     }
     for delegate in recorder.delegates {
-        let (_metadata, bodies) = elaborate_delegate_to_core(delegate)
+        let (_metadata, bodies) = elaborate_delegate_to_core(delegate.plan)
         for body in bodies { result.push(core_body_reference(body)) }
     }
     result
+}
+
+fn materialize_recorder_type_nodes(
+    recorder: CoreAssemblyRecorder
+) -> List<FlowTypeNode> {
+    let mut result: List<FlowTypeNode> = []
+    let mut ordinal = 0
+    while ordinal < recorder.type_specs.len() {
+        let spec = match recorder.type_specs.get(ordinal).unwrap() {
+            some(value) => value,
+            none => panic("Core assembly: reserved type fact was never defined")
+        }
+        let reference = make_core_type_fact_ref(recorder.module_key, ordinal)
+        result.push(materialize_type_spec(
+            spec, reference, recorder.module_key))
+        ordinal = ordinal + 1
+    }
+    // This rejects unresolved refs, malformed recursion/resource edges, and
+    // any duplicate/invalid local ordinal before the project interner runs.
+    let _ = make_core_type_graph(result)
+    result
+}
+
+pub fn snapshot_core_recorder_type_graph(
+    recorder: CoreAssemblyRecorder
+) -> CoreTypeGraph {
+    require_recorder_open(recorder)
+    make_module_core_type_graph(
+        recorder.module_key, materialize_recorder_type_nodes(recorder))
 }
 
 pub fn freeze_core_assembly_facts(
@@ -680,10 +1637,17 @@ pub fn freeze_core_assembly_facts(
 ) -> FrozenCoreAssemblyFacts {
     require_recorder_open(recorder)
     recorder.frozen = true
+    let type_nodes = materialize_recorder_type_nodes(recorder)
     if recorder.inventory_entries.len() != recorder.callables.len() ||
        recorder.manifests.len() != recorder.callables.len() {
         panic("Core assembly: executable/callable/manifest census differs")
     }
+    let callables = recorder.callables.map(fn(value) {
+        materialize_callable_fact(value, recorder.module_key)
+    })
+    let impls = recorder.impls.map(fn(value) {
+        materialize_impl_fact(value, recorder.module_key)
+    })
     let body_refs = recorded_body_refs(recorder)
     let mut index = 0
     while index < recorder.inventory_entries.len() {
@@ -691,7 +1655,7 @@ pub fn freeze_core_assembly_facts(
         let reference = executable_entry_reference(entry)
         if !executable_ref_same(
                 reference,
-                core_callable_reference(recorder.callables.get(index).unwrap())) ||
+                core_callable_reference(callables.get(index).unwrap())) ||
            !executable_ref_same(
                 reference,
                 binder_manifest_owner(recorder.manifests.get(index).unwrap())) {
@@ -726,20 +1690,210 @@ pub fn freeze_core_assembly_facts(
     FrozenCoreAssemblyFacts {
         module_key: recorder.module_key,
         module_order: recorder.module_order,
-        type_nodes: recorder.type_nodes.map(fn(value) { value }),
-        callables: copy_core_callables(recorder.callables),
-        impls: copy_core_impl_metadata(recorder.impls),
+        type_nodes: type_nodes.map(fn(value) { value }),
+        callables: copy_core_callables(callables),
+        impls: copy_core_impl_metadata(impls),
         inventory_entries: recorder.inventory_entries.map(fn(value) { value }),
         manifests: recorder.manifests.map(fn(value) { value }),
         source_bodies: recorder.source_bodies.map(fn(value) { value }),
         generated: recorder.generated.map(fn(value) { value }),
-        delegates: recorder.delegates.map(fn(value) { value })
+        delegates: recorder.delegates.map(fn(value) { value.plan })
     }
 }
 
 struct BodyCursor {
     input: CoreSourceBodyInput,
     expr_index: Int, stmt_index: Int, block_index: Int, pattern_index: Int
+}
+
+struct MaterializedCoreStringLiteralFact {
+    value: Str, slot: SlotRef, ty: CoreTypeRef, origin: OriginRef
+}
+enum CoreExprAdapterValue {
+    PlainAdapter,
+    ReadAdapter(SlotRef),
+    DirectCallableAdapter(ExecutableRef),
+    PrimitiveAdapter(CorePrimitiveOp),
+    CallAdapter { callee: CoreCalleeRef, evidence: List<CoreEvidenceRef> },
+    MethodAdapter { callee: CoreCalleeRef, method: MethodCallRef,
+                    receiver: SlotRef,
+                    evidence: List<CoreEvidenceRef> },
+    ProjectAdapter { field: CoreFieldRef, partial: Bool },
+    ConstructAdapter { constructor: CoreConstructorRef,
+                       fields: List<CoreFieldRef> },
+    EffectAdapter { operation: EffectOperationRef,
+                    evidence: List<CoreEvidenceRef> },
+    SystemAdapter(SystemHostCallableRef),
+    DictAdapter { constructor: ExecutableRef,
+                  evidence: List<CoreEvidenceRef> },
+    LambdaAdapter { executable: ExecutableRef, manifest: BinderManifest,
+                    captures: List<CoreCapture> },
+    HandleAdapter { handlers: List<CoreHandlerEntry> },
+    StringInterpAdapter {
+        callee: CoreCalleeRef, evidence: List<CoreEvidenceRef>,
+        literals: List<MaterializedCoreStringLiteralFact>
+    }
+}
+struct MaterializedCoreExprAdapter { value: CoreExprAdapterValue }
+struct MaterializedCoreExprFact {
+    source_type: Type, source_effects: EffectRow,
+    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
+    origin: OriginRef, adapter: MaterializedCoreExprAdapter
+}
+fn materialize_expr_adapter(
+    value: CoreExprAdapter, module_key: Str
+) -> MaterializedCoreExprAdapter {
+    let payload = match value.value {
+        RecordedCoreExprAdapterValue::PlainAdapter =>
+            CoreExprAdapterValue::PlainAdapter,
+        RecordedCoreExprAdapterValue::ReadAdapter(slot) =>
+            CoreExprAdapterValue::ReadAdapter(slot),
+        RecordedCoreExprAdapterValue::DirectCallableAdapter(executable) =>
+            CoreExprAdapterValue::DirectCallableAdapter(executable),
+        RecordedCoreExprAdapterValue::PrimitiveAdapter(operation) =>
+            CoreExprAdapterValue::PrimitiveAdapter(operation),
+        RecordedCoreExprAdapterValue::CallAdapter { callee, evidence } =>
+            CoreExprAdapterValue::CallAdapter {
+                callee: materialize_callee_fact(callee, module_key),
+                evidence: copy_evidence(evidence)
+            },
+        RecordedCoreExprAdapterValue::MethodAdapter {
+            callee, method, receiver, evidence
+        } => CoreExprAdapterValue::MethodAdapter {
+            callee: materialize_callee_fact(callee, module_key),
+            method: method, receiver: receiver, evidence: copy_evidence(evidence)
+        },
+        RecordedCoreExprAdapterValue::ProjectAdapter { field, partial } =>
+            CoreExprAdapterValue::ProjectAdapter {
+                field: field, partial: partial
+            },
+        RecordedCoreExprAdapterValue::ConstructAdapter { constructor, fields } =>
+            CoreExprAdapterValue::ConstructAdapter {
+                constructor: constructor, fields: copy_fields(fields)
+            },
+        RecordedCoreExprAdapterValue::EffectAdapter { operation, evidence } =>
+            CoreExprAdapterValue::EffectAdapter {
+                operation: operation, evidence: copy_evidence(evidence)
+            },
+        RecordedCoreExprAdapterValue::SystemAdapter(host) =>
+            CoreExprAdapterValue::SystemAdapter(host),
+        RecordedCoreExprAdapterValue::DictAdapter { constructor, evidence } =>
+            CoreExprAdapterValue::DictAdapter {
+                constructor: constructor, evidence: copy_evidence(evidence)
+            },
+        RecordedCoreExprAdapterValue::LambdaAdapter {
+            executable, manifest, captures
+        } => CoreExprAdapterValue::LambdaAdapter {
+            executable: executable, manifest: manifest,
+            captures: copy_captures(captures)
+        },
+        RecordedCoreExprAdapterValue::HandleAdapter { handlers } =>
+            CoreExprAdapterValue::HandleAdapter {
+                handlers: handlers.map(fn(item) { item })
+            },
+        RecordedCoreExprAdapterValue::StringInterpAdapter {
+            callee, evidence, literals
+        } => CoreExprAdapterValue::StringInterpAdapter {
+            callee: materialize_callee_fact(callee, module_key),
+            evidence: copy_evidence(evidence),
+            literals: literals.map(fn(item) {
+                MaterializedCoreStringLiteralFact {
+                    value: item.value, slot: item.slot,
+                    ty: local_core_type_ref(item.ty, module_key),
+                    origin: item.origin
+                }
+            })
+        }
+    }
+    MaterializedCoreExprAdapter { value: payload }
+}
+
+struct MaterializedCoreDestructureBinding {
+    base: SlotRef, field: CoreFieldRef,
+    target: SlotRef, ty: CoreTypeRef, origin: OriginRef
+}
+struct MaterializedCoreForInPlan {
+    iterator_slot: SlotRef, iterator_type: CoreTypeRef,
+    iter_callee: CoreCalleeRef, iter_method: MethodCallRef,
+    iter_effects: CoreEffectSet, iter_evidence: List<CoreEvidenceRef>,
+    iter_origin: OriginRef,
+    condition_slot: SlotRef, condition_type: CoreTypeRef,
+    has_next_callee: CoreCalleeRef, has_next_method: MethodCallRef,
+    has_next_effects: CoreEffectSet,
+    has_next_evidence: List<CoreEvidenceRef>, has_next_origin: OriginRef,
+    item_slot: SlotRef, item_type: CoreTypeRef,
+    next_callee: CoreCalleeRef, next_method: MethodCallRef,
+    next_effects: CoreEffectSet, next_evidence: List<CoreEvidenceRef>,
+    next_origin: OriginRef, binding_slot: SlotRef,
+    destructure: List<MaterializedCoreDestructureBinding>
+}
+fn materialize_destructure_bindings(
+    values: List<CoreDestructureBinding>, module_key: Str
+) -> List<MaterializedCoreDestructureBinding> {
+    values.map(fn(value) {
+        MaterializedCoreDestructureBinding {
+            base: value.base, field: value.field, target: value.target,
+            ty: local_core_type_ref(value.ty, module_key), origin: value.origin
+        }
+    })
+}
+fn materialize_for_in_plan(
+    value: CoreForInPlan, module_key: Str
+) -> MaterializedCoreForInPlan {
+    MaterializedCoreForInPlan {
+        iterator_slot: value.iterator_slot,
+        iterator_type: local_core_type_ref(value.iterator_type, module_key),
+        iter_callee: materialize_callee_fact(value.iter_callee, module_key),
+        iter_method: value.iter_method,
+        iter_effects: materialize_effect_set_fact(
+            value.iter_effects, module_key),
+        iter_evidence: copy_evidence(value.iter_evidence),
+        iter_origin: value.iter_origin,
+        condition_slot: value.condition_slot,
+        condition_type: local_core_type_ref(value.condition_type, module_key),
+        has_next_callee: materialize_callee_fact(
+            value.has_next_callee, module_key),
+        has_next_method: value.has_next_method,
+        has_next_effects: materialize_effect_set_fact(
+            value.has_next_effects, module_key),
+        has_next_evidence: copy_evidence(value.has_next_evidence),
+        has_next_origin: value.has_next_origin,
+        item_slot: value.item_slot,
+        item_type: local_core_type_ref(value.item_type, module_key),
+        next_callee: materialize_callee_fact(value.next_callee, module_key),
+        next_method: value.next_method,
+        next_effects: materialize_effect_set_fact(
+            value.next_effects, module_key),
+        next_evidence: copy_evidence(value.next_evidence),
+        next_origin: value.next_origin, binding_slot: value.binding_slot,
+        destructure: materialize_destructure_bindings(
+            value.destructure, module_key)
+    }
+}
+struct MaterializedCoreIfLetPlan {
+    result_slot: SlotRef, result_type: CoreTypeRef,
+    scrutinee_type: CoreTypeRef, effects: CoreEffectSet,
+    origin: OriginRef
+}
+fn materialize_if_let_plan(
+    value: CoreIfLetPlan, module_key: Str
+) -> MaterializedCoreIfLetPlan {
+    MaterializedCoreIfLetPlan {
+        result_slot: value.result_slot,
+        result_type: local_core_type_ref(value.result_type, module_key),
+        scrutinee_type: local_core_type_ref(value.scrutinee_type, module_key),
+        effects: materialize_effect_set_fact(value.effects, module_key),
+        origin: value.origin
+    }
+}
+struct MaterializedCoreStmtFact {
+    origin: OriginRef, target: CorePlaceRef?,
+    for_in: MaterializedCoreForInPlan?,
+    destructure: List<MaterializedCoreDestructureBinding>?,
+    if_let: MaterializedCoreIfLetPlan?
+}
+struct MaterializedCorePatternFact {
+    ty: CoreTypeRef, value: CorePatternAdapterValue
 }
 fn effect_rows_same(left: EffectRow, right: EffectRow) -> Bool {
     if left.tail != right.tail || left.effects.len() != right.effects.len() {
@@ -753,7 +1907,9 @@ fn effect_rows_same(left: EffectRow, right: EffectRow) -> Bool {
     }
     true
 }
-fn next_expr_fact(mut cursor: BodyCursor, expr: HExpr) -> CoreExprFact {
+fn next_expr_fact(
+    mut cursor: BodyCursor, expr: HExpr
+) -> MaterializedCoreExprFact {
     let fact = match cursor.input.expr_facts.get(cursor.expr_index) {
         some(value) => value,
         none => panic("Core assembly: expression fact census is short")
@@ -763,14 +1919,45 @@ fn next_expr_fact(mut cursor: BodyCursor, expr: HExpr) -> CoreExprFact {
        !effect_rows_same(hexpr_effects(expr), fact.source_effects) {
         panic("Core assembly: HIR expression type/effect fact drifted")
     }
-    fact
+    MaterializedCoreExprFact {
+        source_type: fact.source_type, source_effects: fact.source_effects,
+        result: fact.result,
+        ty: local_core_type_ref(fact.ty, cursor.input.module_key),
+        effects: materialize_effect_set_fact(
+            fact.effects, cursor.input.module_key),
+        origin: fact.origin,
+        adapter: materialize_expr_adapter(
+            fact.adapter, cursor.input.module_key)
+    }
 }
-fn next_stmt_fact(mut cursor: BodyCursor) -> CoreStmtFact {
+fn next_stmt_fact(mut cursor: BodyCursor) -> MaterializedCoreStmtFact {
     let fact = cursor.input.stmt_facts.get(cursor.stmt_index).unwrap_or_else(fn() {
         panic("Core assembly: statement fact census is short")
     })
     cursor.stmt_index = cursor.stmt_index + 1
-    fact
+    MaterializedCoreStmtFact {
+        origin: fact.origin,
+        target: match fact.target {
+            some(value) => some(materialize_place_fact(
+                value, cursor.input.module_key)),
+            none => none
+        },
+        for_in: match fact.for_in {
+            some(value) => some(materialize_for_in_plan(
+                value, cursor.input.module_key)),
+            none => none
+        },
+        destructure: match fact.destructure {
+            some(values) => some(materialize_destructure_bindings(
+                values, cursor.input.module_key)),
+            none => none
+        },
+        if_let: match fact.if_let {
+            some(value) => some(materialize_if_let_plan(
+                value, cursor.input.module_key)),
+            none => none
+        }
+    }
 }
 fn next_block_fact(mut cursor: BodyCursor) -> CoreBlockFact {
     let fact = cursor.input.block_facts.get(cursor.block_index).unwrap_or_else(fn() {
@@ -779,12 +1966,15 @@ fn next_block_fact(mut cursor: BodyCursor) -> CoreBlockFact {
     cursor.block_index = cursor.block_index + 1
     fact
 }
-fn next_pattern_fact(mut cursor: BodyCursor) -> CorePatternFact {
+fn next_pattern_fact(mut cursor: BodyCursor) -> MaterializedCorePatternFact {
     let fact = cursor.input.pattern_facts.get(cursor.pattern_index).unwrap_or_else(fn() {
         panic("Core assembly: pattern fact census is short")
     })
     cursor.pattern_index = cursor.pattern_index + 1
-    fact
+    MaterializedCorePatternFact {
+        ty: local_core_type_ref(fact.ty, cursor.input.module_key),
+        value: fact.value
+    }
 }
 
 fn lower_literal_pattern(value: LiteralValue) -> CoreLiteral {
@@ -1324,7 +2514,8 @@ fn lower_expr(mut cursor: BodyCursor, expr: HExpr) -> LoweredExpr {
 }
 
 fn lower_sequence_construct(
-    mut cursor: BodyCursor, fact: CoreExprFact, values: List<HExpr>
+    mut cursor: BodyCursor, fact: MaterializedCoreExprFact,
+    values: List<HExpr>
 ) -> LoweredExpr {
     let (constructor, fields) = match fact.adapter.value {
         CoreExprAdapterValue::ConstructAdapter { constructor, fields } =>
@@ -1458,7 +2649,7 @@ fn lower_place_target(
 }
 
 fn lower_destructure_bindings(
-    source: SlotRef, values: List<CoreDestructureBinding>
+    source: SlotRef, values: List<MaterializedCoreDestructureBinding>
 ) -> List<CoreStmt> {
     let mut result: List<CoreStmt> = []
     let mut available: List<SlotRef> = [source]
@@ -1482,7 +2673,7 @@ fn lower_destructure_bindings(
 
 fn lower_for_in_stmt(
     mut cursor: BodyCursor, iterable: HExpr, body: HExpr,
-    plan: CoreForInPlan, origin: OriginRef
+    plan: MaterializedCoreForInPlan, origin: OriginRef
 ) -> List<CoreStmt> {
     let iterable_lowered = lower_expr(cursor, iterable)
     let mut result = iterable_lowered.prefix
@@ -1529,7 +2720,7 @@ fn lower_for_in_stmt(
 fn lower_if_let_stmt(
     mut cursor: BodyCursor, pattern: Pattern, expr: HExpr,
     then_block: HExpr, else_block: HExpr?,
-    plan: CoreIfLetPlan, origin: OriginRef
+    plan: MaterializedCoreIfLetPlan, origin: OriginRef
 ) -> List<CoreStmt> {
     let mut prefix: List<CoreStmt> = []
     let scrutinee = materialize(prefix, lower_expr(cursor, expr))
@@ -1678,8 +2869,12 @@ fn assemble_source_body(
     }
     let body = make_core_body(
         input.executable, input.origin, core_type_graph_count(graph),
-        input.manifest, input.scopes, input.slots,
-        input.parameter_slots, input.result_type, block)
+        input.manifest, input.scopes,
+        input.slots.map(fn(slot) {
+            materialize_slot_fact(slot, input.module_key)
+        }),
+        input.parameter_slots,
+        local_core_type_ref(input.result_type, input.module_key), block)
     make_core_body_entry(
         input.executable, input.origin, input.body_anchor, body)
 }
@@ -1949,12 +3144,15 @@ fn assemble_frozen_core_facts(
     while fact_index < facts.len() {
         let fact = facts.get(fact_index).unwrap()
         let mapping = interning.module_mappings.get(fact_index).unwrap()
-        let local_graph = make_core_type_graph(fact.type_nodes)
+        let local_graph = make_module_core_type_graph(
+            fact.module_key, fact.type_nodes)
         for callable in fact.callables {
-            callables.push(remap_core_callable_types(callable, mapping))
+            callables.push(remap_core_callable_types(
+                callable, mapping, fact.module_key))
         }
         for item in fact.impls {
-            all_impls.push(remap_core_impl_types(item, mapping))
+            all_impls.push(remap_core_impl_types(
+                item, mapping, fact.module_key))
         }
         for source in fact.source_bodies {
             let hir = source.source
@@ -1965,22 +3163,24 @@ fn assemble_frozen_core_facts(
                 core_body_entry_anchor(local_entry),
                 remap_core_body_types(
                     core_body_entry_body(local_entry), mapping,
-                    project_type_count)))
+                    project_type_count, fact.module_key)))
         }
         for generated in fact.generated {
             body_pool.push(entry_for_body(
                 remap_core_body_types(
                     materialize_generated(generated), mapping,
-                    project_type_count),
+                    project_type_count, fact.module_key),
                 inventory))
         }
         for delegate in fact.delegates {
             let (metadata, bodies) = elaborate_delegate_to_core(delegate)
-            all_impls.push(remap_core_impl_types(metadata, mapping))
+            all_impls.push(remap_core_impl_types(
+                metadata, mapping, fact.module_key))
             for body in bodies {
                 body_pool.push(entry_for_body(
                     remap_core_body_types(
-                        body, mapping, project_type_count), inventory))
+                        body, mapping, project_type_count,
+                        fact.module_key), inventory))
             }
         }
         fact_index = fact_index + 1

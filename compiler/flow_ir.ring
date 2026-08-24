@@ -1148,8 +1148,11 @@ pub fn flow_type_node_contract_same(
 }
 
 pub fn remap_flow_call_contract(
-    value: FlowCallContract, mapping: List<Int>
+    value: FlowCallContract, mapping: List<Int>, module_key: Str
 ) -> FlowCallContract {
+    if value.module_key != some(module_key) {
+        panic("FlowIR: call contract belongs to another type domain")
+    }
     make_flow_call_contract(
         value.parameter_types.map(fn(reference) {
             mapped_type_ref(mapping, reference)
@@ -1721,6 +1724,7 @@ fn validate_value_origin_arity(
 }
 
 pub struct FlowCallContract {
+    module_key: Str?,
     parameter_types: List<FlowTypeRef>,
     parameter_roles: List<FlowSemanticRole>,
     result_type: FlowTypeRef,
@@ -1741,11 +1745,28 @@ pub fn make_flow_call_contract(
     let _ = flow_semantic_role_tag(result_role)
     validate_value_origin_arity(result_origin, parameter_types.len())
     FlowCallContract {
+        module_key: none,
         parameter_types: copy_type_refs(parameter_types),
         parameter_roles: copy_semantic_roles(parameter_roles),
         result_type: result_type, result_role: result_role,
         result_origin: copy_value_origin(result_origin)
     }
+}
+pub fn make_module_flow_call_contract(
+    module_key: Str, parameter_types: List<FlowTypeRef>,
+    parameter_roles: List<FlowSemanticRole>,
+    result_type: FlowTypeRef, result_role: FlowSemanticRole,
+    result_origin: FlowValueOriginContract
+) -> FlowCallContract {
+    if module_key == "" { panic("FlowIR: empty call-contract type domain") }
+    let mut result = make_flow_call_contract(
+        parameter_types, parameter_roles, result_type, result_role,
+        result_origin)
+    result.module_key = some(module_key)
+    result
+}
+pub fn flow_call_contract_module_key(value: FlowCallContract) -> Str? {
+    value.module_key
 }
 pub fn flow_call_contract_parameter_types(
     value: FlowCallContract
@@ -1765,7 +1786,8 @@ pub fn flow_call_contract_result_origin(
 pub fn flow_call_contract_same(
     left: FlowCallContract, right: FlowCallContract
 ) -> Bool {
-    if left.parameter_roles.len() != right.parameter_roles.len() ||
+    if left.module_key != right.module_key ||
+       left.parameter_roles.len() != right.parameter_roles.len() ||
        left.parameter_types.len() != right.parameter_types.len() ||
        !flow_type_ref_same(left.result_type, right.result_type) ||
        flow_semantic_role_tag(left.result_role) !=
@@ -1789,9 +1811,14 @@ pub fn flow_call_contract_same(
     true
 }
 fn copy_call_contract(value: FlowCallContract) -> FlowCallContract {
-    make_flow_call_contract(
-        value.parameter_types, value.parameter_roles,
-        value.result_type, value.result_role, value.result_origin)
+    match value.module_key {
+        some(module_key) => make_module_flow_call_contract(
+            module_key, value.parameter_types, value.parameter_roles,
+            value.result_type, value.result_role, value.result_origin),
+        none => make_flow_call_contract(
+            value.parameter_types, value.parameter_roles,
+            value.result_type, value.result_role, value.result_origin)
+    }
 }
 
 const FLOW_CALLABLE_CONCRETE_BODY: Int = 0

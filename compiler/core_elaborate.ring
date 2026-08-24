@@ -37,7 +37,8 @@ use core_expr::{
     core_body_reference, core_body_origin,
     core_slot_reference, core_slot_type,
     core_type_graph_count, core_type_graph_node,
-    core_type_graph_nodes, make_core_type_graph,
+    core_type_graph_nodes, make_core_type_graph, copy_core_type_graph,
+    core_type_graph_ref_from_flow,
     core_type_ref_same, flow_type_ref_to_core
 }
 use flow_ir::{
@@ -108,7 +109,7 @@ pub fn make_core_ordinary_body_plan(
 ) -> CoreOrdinaryBodyPlan {
     CoreOrdinaryBodyPlan {
         reference: reference, origin: origin,
-        graph: make_core_type_graph(core_type_graph_nodes(graph)),
+        graph: copy_core_type_graph(graph),
         type_count: core_type_graph_count(graph),
         manifest: manifest, scopes: copy_scopes(scopes),
         slots: copy_slots(slots),
@@ -254,7 +255,7 @@ pub fn make_core_nominal_contract(
         panic("CoreHIR elaboration: nominal contract is not struct/enum")
     }
     CoreNominalContract {
-        graph: make_core_type_graph(core_type_graph_nodes(graph)),
+        graph: copy_core_type_graph(graph),
         owner: owner, ty: ty, variants: copy_variants(variants)
     }
 }
@@ -322,7 +323,7 @@ pub fn make_core_body_header(
     }
     CoreBodyHeader {
         reference: reference, origin: origin,
-        graph: make_core_type_graph(core_type_graph_nodes(graph)),
+        graph: copy_core_type_graph(graph),
         type_count: core_type_graph_count(graph),
         manifest: manifest, scopes: copy_scopes(scopes),
         slots: copy_slots(slots),
@@ -495,8 +496,8 @@ pub fn make_core_struct_clone_plan(
         }
         expected_fields.push(make_core_nominal_field(
             flow_field_identity_nominal(identity)))
-        expected_types.push(flow_type_ref_to_core(
-            flow_nominal_field_type(fact)))
+        expected_types.push(core_type_graph_ref_from_flow(
+            contract.graph, flow_nominal_field_type(fact)))
     }
     if expected_fields.len() != fields.len() {
         panic("CoreHIR elaboration: struct Clone field census differs")
@@ -624,8 +625,8 @@ pub fn make_core_enum_clone_plan(
                     left.variant) {
                 expected_fields.push(make_core_variant_field(
                     flow_field_identity_variant(identity)))
-                expected_types.push(flow_type_ref_to_core(
-                    flow_nominal_field_type(fact)))
+                expected_types.push(core_type_graph_ref_from_flow(
+                    contract.graph, flow_nominal_field_type(fact)))
             }
         }
         if expected_fields.len() != left.fields.len() {

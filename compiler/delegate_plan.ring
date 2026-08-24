@@ -59,7 +59,7 @@ use core_expr::{
     core_evidence_is_local, core_evidence_local, core_evidence_callable,
     core_slot_reference, core_slot_type,
     core_type_graph_count, core_type_graph_node,
-    core_type_graph_nodes, make_core_type_graph
+    core_type_graph_nodes, make_core_type_graph, copy_core_type_graph
 }
 use flow_ir::{
     FlowScope, FlowScopeRef,
@@ -398,7 +398,7 @@ pub fn make_delegate_plan_input(
         field_impl_provider: field_impl_provider,
         field_target: field_target,
         source_member_index: source_member_index,
-        type_graph: make_core_type_graph(core_type_graph_nodes(type_graph)),
+        type_graph: copy_core_type_graph(type_graph),
         field: field, outer_type: outer_type, field_type: field_type,
         trait_contract: trait_contract,
         method_plans: copy_method_plans(method_plans),
@@ -465,6 +465,7 @@ pub fn delegate_invalid_evidence_reason() -> Int {
 pub fn delegate_invalid_body_reason() -> Int { DELEGATE_INVALID_BODY }
 
 pub struct DelegateTypedPlan {
+    type_count: Int,
     outer_owner: ImplOwnerRef,
     child_provider: ImplProviderRef,
     field_impl_owner: ImplOwnerRef,
@@ -873,6 +874,7 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegatePlanOutcome {
         return invalid_outcome(input, DELEGATE_INVALID_EVIDENCE)
     }
     let plan = DelegateTypedPlan {
+        type_count: core_type_graph_count(input.type_graph),
         outer_owner: input.outer_owner,
         child_provider: input.child_provider,
         field_impl_owner: input.field_impl_owner,
@@ -913,6 +915,9 @@ pub fn delegate_typed_plan_outer_type(value: DelegateTypedPlan) -> CoreTypeRef {
 }
 pub fn delegate_typed_plan_field_type(value: DelegateTypedPlan) -> CoreTypeRef {
     value.field_type
+}
+pub fn delegate_typed_plan_type_count(value: DelegateTypedPlan) -> Int {
+    value.type_count
 }
 pub fn delegate_typed_plan_trait(value: DelegateTypedPlan) -> SymbolRef {
     value.trait_ref

@@ -83,15 +83,51 @@ use flow_ir::{
 // Exact typed/effect references
 // ============================================================
 
-pub struct CoreTypeRef { index: Int }
+pub struct CoreTypeRef { index: Int, module_key: Str? }
 
 pub fn make_core_type_ref(index: Int) -> CoreTypeRef {
     if index < 0 { panic("CoreHIR: negative type reference") }
-    CoreTypeRef { index: index }
+    CoreTypeRef { index: index, module_key: none }
+}
+pub fn make_module_core_type_ref(
+    module_key: Str, index: Int
+) -> CoreTypeRef {
+    if module_key == "" || index < 0 {
+        panic("CoreHIR: invalid module-local type reference")
+    }
+    CoreTypeRef { index: index, module_key: some(module_key) }
 }
 pub fn core_type_ref_index(value: CoreTypeRef) -> Int { value.index }
+pub fn core_type_ref_module_key(value: CoreTypeRef) -> Str? {
+    value.module_key
+}
 pub fn core_type_ref_same(left: CoreTypeRef, right: CoreTypeRef) -> Bool {
-    left.index == right.index
+    left.index == right.index && left.module_key == right.module_key
+}
+
+// Recorder-owned pre-project reference.  The project assembler is the only
+// producer of global CoreTypeRef; semantic plan constructors accept this
+// domain-bearing fact and materialize a module-local CoreTypeRef internally.
+pub struct CoreTypeFactRef { module_key: Str, ordinal: Int }
+pub fn make_core_type_fact_ref(
+    module_key: Str, ordinal: Int
+) -> CoreTypeFactRef {
+    if module_key == "" || ordinal < 0 {
+        panic("CoreHIR: invalid recorder type fact")
+    }
+    CoreTypeFactRef { module_key: module_key, ordinal: ordinal }
+}
+pub fn core_type_fact_module_key(value: CoreTypeFactRef) -> Str {
+    value.module_key
+}
+pub fn core_type_fact_ordinal(value: CoreTypeFactRef) -> Int { value.ordinal }
+pub fn core_type_fact_same(
+    left: CoreTypeFactRef, right: CoreTypeFactRef
+) -> Bool {
+    left.module_key == right.module_key && left.ordinal == right.ordinal
+}
+pub fn core_type_fact_local_ref(value: CoreTypeFactRef) -> CoreTypeRef {
+    make_module_core_type_ref(value.module_key, value.ordinal)
 }
 
 pub fn core_type_ref_to_flow(value: CoreTypeRef) -> FlowTypeRef {
@@ -101,11 +137,26 @@ pub fn flow_type_ref_to_core(value: FlowTypeRef) -> CoreTypeRef {
     make_core_type_ref(flow_type_ref_index(value))
 }
 
-pub struct CoreTypeGraph { nodes: List<FlowTypeNode> }
+pub struct CoreTypeGraph { nodes: List<FlowTypeNode>, module_key: Str? }
 
 pub fn make_core_type_graph(nodes: List<FlowTypeNode>) -> CoreTypeGraph {
     validate_flow_type_graph_nodes(nodes)
-    CoreTypeGraph { nodes: copy_flow_type_graph_nodes(nodes) }
+    CoreTypeGraph { nodes: copy_flow_type_graph_nodes(nodes), module_key: none }
+}
+pub fn make_module_core_type_graph(
+    module_key: Str, nodes: List<FlowTypeNode>
+) -> CoreTypeGraph {
+    if module_key == "" { panic("CoreHIR: empty module type graph key") }
+    validate_flow_type_graph_nodes(nodes)
+    CoreTypeGraph {
+        nodes: copy_flow_type_graph_nodes(nodes), module_key: some(module_key)
+    }
+}
+pub fn copy_core_type_graph(value: CoreTypeGraph) -> CoreTypeGraph {
+    CoreTypeGraph {
+        nodes: copy_flow_type_graph_nodes(value.nodes),
+        module_key: value.module_key
+    }
 }
 pub fn core_type_graph_count(value: CoreTypeGraph) -> Int {
     value.nodes.len()
@@ -116,9 +167,21 @@ pub fn core_type_graph_nodes(value: CoreTypeGraph) -> List<FlowTypeNode> {
 pub fn core_type_graph_node(
     value: CoreTypeGraph, reference: CoreTypeRef
 ) -> FlowTypeNode {
+    if value.module_key != reference.module_key {
+        panic("CoreHIR: type reference belongs to another graph domain")
+    }
     match value.nodes.get(reference.index) {
         some(node) => node,
         none => panic("CoreHIR: type reference is absent from CoreTypeGraph")
+    }
+}
+pub fn core_type_graph_ref_from_flow(
+    value: CoreTypeGraph, reference: FlowTypeRef
+) -> CoreTypeRef {
+    match value.module_key {
+        some(module_key) => make_module_core_type_ref(
+            module_key, flow_type_ref_index(reference)),
+        none => make_core_type_ref(flow_type_ref_index(reference))
     }
 }
 
@@ -2384,8 +2447,11 @@ pub fn core_body_block(value: CoreBody) -> CoreBlock { value.body }
 // domain.  These rebuilders are the single typed rewrite boundary; downstream
 // Flow lowering never sees module-local ordinals.
 fn remap_core_type_reference(
-    value: CoreTypeRef, mapping: List<Int>
+    value: CoreTypeRef, mapping: List<Int>, module_key: Str
 ) -> CoreTypeRef {
+    if value.module_key != some(module_key) {
+        panic("CoreHIR: type reference belongs to another module recorder")
+    }
     match mapping.get(value.index) {
         some(index) => make_core_type_ref(index),
         none => panic("CoreHIR: module-local type reference is out of range")
@@ -2393,13 +2459,15 @@ fn remap_core_type_reference(
 }
 
 fn remap_core_effect_atom(
-    value: CoreEffectAtom, mapping: List<Int>
+    value: CoreEffectAtom, mapping: List<Int>, module_key: Str
 ) -> CoreEffectAtom {
     match value.value {
         CoreEffectAtomValue::FailEffectValue(ty) =>
-            make_core_fail_effect(remap_core_type_reference(ty, mapping)),
+            make_core_fail_effect(remap_core_type_reference(
+                ty, mapping, module_key)),
         CoreEffectAtomValue::MutEffectValue(ty) =>
-            make_core_mut_effect(remap_core_type_reference(ty, mapping)),
+            make_core_mut_effect(remap_core_type_reference(
+                ty, mapping, module_key)),
         CoreEffectAtomValue::UnsafeEffectValue => make_core_unsafe_effect(),
         CoreEffectAtomValue::HandledEffectValue(effect_ref) =>
             make_core_handled_effect(effect_ref),
@@ -2409,17 +2477,17 @@ fn remap_core_effect_atom(
 }
 
 fn remap_core_effect_set(
-    value: CoreEffectSet, mapping: List<Int>
+    value: CoreEffectSet, mapping: List<Int>, module_key: Str
 ) -> CoreEffectSet {
     make_core_effect_set(value.atoms.map(fn(atom) {
-        remap_core_effect_atom(atom, mapping)
+        remap_core_effect_atom(atom, mapping, module_key)
     }))
 }
 
 fn remap_core_callee(
-    value: CoreCalleeRef, mapping: List<Int>
+    value: CoreCalleeRef, mapping: List<Int>, module_key: Str
 ) -> CoreCalleeRef {
-    let contract = remap_flow_call_contract(value.contract, mapping)
+    let contract = remap_flow_call_contract(value.contract, mapping, module_key)
     if value.kind == CORE_CALLEE_DIRECT {
         make_core_direct_callee(value.direct.unwrap(), contract)
     } else if value.kind == CORE_CALLEE_LOCAL {
@@ -2432,7 +2500,7 @@ fn remap_core_callee(
 }
 
 fn remap_core_place(
-    value: CorePlaceRef, mapping: List<Int>
+    value: CorePlaceRef, mapping: List<Int>, module_key: Str
 ) -> CorePlaceRef {
     match value.value {
         CorePlaceRefValue::CoreSlotPlaceValue(slot) => make_core_slot_place(slot),
@@ -2440,14 +2508,14 @@ fn remap_core_place(
             base, field, evaluated_index, value_type
         } => make_core_project_place(
             base, field, evaluated_index,
-            remap_core_type_reference(value_type, mapping))
+            remap_core_type_reference(value_type, mapping, module_key))
     }
 }
 
 fn remap_core_pattern(
-    value: CorePattern, mapping: List<Int>
+    value: CorePattern, mapping: List<Int>, module_key: Str
 ) -> CorePattern {
-    let ty = remap_core_type_reference(value.ty, mapping)
+    let ty = remap_core_type_reference(value.ty, mapping, module_key)
     match value.value {
         CorePatternValue::WildcardPatternValue => make_core_wildcard_pattern(ty),
         CorePatternValue::BindingPatternValue(slot) =>
@@ -2456,52 +2524,56 @@ fn remap_core_pattern(
             make_core_literal_pattern(ty, literal),
         CorePatternValue::TuplePatternValue(elements) =>
             make_core_tuple_pattern(ty, elements.map(fn(element) {
-                remap_core_pattern(element, mapping)
+                remap_core_pattern(element, mapping, module_key)
             })),
         CorePatternValue::StructPatternValue { owner, fields } =>
             make_core_struct_pattern(ty, owner, fields.map(fn(field) {
                 make_core_pattern_field(
-                    field.field, remap_core_pattern(field.pattern, mapping))
+                    field.field, remap_core_pattern(
+                        field.pattern, mapping, module_key))
             })),
         CorePatternValue::VariantPatternValue { variant, fields } =>
             make_core_variant_pattern(ty, variant, fields.map(fn(field) {
                 make_core_pattern_field(
-                    field.field, remap_core_pattern(field.pattern, mapping))
+                    field.field, remap_core_pattern(
+                        field.pattern, mapping, module_key))
             }))
     }
 }
 
 fn remap_core_block_types(
-    value: CoreBlock, mapping: List<Int>
+    value: CoreBlock, mapping: List<Int>, module_key: Str
 ) -> CoreBlock {
     make_core_block(
         value.statements.map(fn(statement) {
-            remap_core_statement_types(statement, mapping)
+            remap_core_statement_types(statement, mapping, module_key)
         }),
         match value.tail {
-            some(tail) => some(remap_core_expr_types(tail, mapping)),
+            some(tail) => some(remap_core_expr_types(
+                tail, mapping, module_key)),
             none => none
         },
         value.origin, value.scope)
 }
 
 fn remap_core_match_arm_types(
-    value: CoreMatchArm, mapping: List<Int>
+    value: CoreMatchArm, mapping: List<Int>, module_key: Str
 ) -> CoreMatchArm {
     make_core_match_arm(
-        remap_core_pattern(value.pattern, mapping),
+        remap_core_pattern(value.pattern, mapping, module_key),
         match value.guard {
-            some(guard) => some(remap_core_expr_types(guard, mapping)),
+            some(guard) => some(remap_core_expr_types(
+                guard, mapping, module_key)),
             none => none
         },
-        remap_core_block_types(value.body, mapping), value.origin)
+        remap_core_block_types(value.body, mapping, module_key), value.origin)
 }
 
 fn remap_core_expr_types(
-    value: CoreExpr, mapping: List<Int>
+    value: CoreExpr, mapping: List<Int>, module_key: Str
 ) -> CoreExpr {
-    let ty = remap_core_type_reference(value.ty, mapping)
-    let effects = remap_core_effect_set(value.effects, mapping)
+    let ty = remap_core_type_reference(value.ty, mapping, module_key)
+    let effects = remap_core_effect_set(value.effects, mapping, module_key)
     let payload = match value.value {
         CoreExprValue::LiteralExprValue(literal) =>
             CoreExprValue::LiteralExprValue(literal),
@@ -2515,14 +2587,15 @@ fn remap_core_expr_types(
             },
         CoreExprValue::CallExprValue { callee, arguments, evidence } =>
             CoreExprValue::CallExprValue {
-                callee: remap_core_callee(callee, mapping),
+                callee: remap_core_callee(callee, mapping, module_key),
                 arguments: copy_slot_refs(arguments),
                 evidence: copy_evidence(evidence)
             },
         CoreExprValue::MethodCallExprValue {
             callee, method, receiver, arguments, evidence
         } => CoreExprValue::MethodCallExprValue {
-            callee: remap_core_callee(callee, mapping), method: method,
+            callee: remap_core_callee(callee, mapping, module_key),
+            method: method,
             receiver: receiver, arguments: copy_slot_refs(arguments),
             evidence: copy_evidence(evidence)
         },
@@ -2560,32 +2633,34 @@ fn remap_core_expr_types(
         },
         CoreExprValue::BlockExprValue(block) =>
             CoreExprValue::BlockExprValue(
-                remap_core_block_types(block, mapping)),
+                remap_core_block_types(block, mapping, module_key)),
         CoreExprValue::IfExprValue {
             condition, then_block, else_block
         } => CoreExprValue::IfExprValue {
             condition: condition,
-            then_block: remap_core_block_types(then_block, mapping),
-            else_block: remap_core_block_types(else_block, mapping)
+            then_block: remap_core_block_types(
+                then_block, mapping, module_key),
+            else_block: remap_core_block_types(
+                else_block, mapping, module_key)
         },
         CoreExprValue::MatchExprValue { scrutinee, arms } =>
             CoreExprValue::MatchExprValue {
                 scrutinee: scrutinee,
                 arms: arms.map(fn(arm) {
-                    remap_core_match_arm_types(arm, mapping)
+                    remap_core_match_arm_types(arm, mapping, module_key)
                 })
             },
         CoreExprValue::TryCatchExprValue { body, error_slot, arms } =>
             CoreExprValue::TryCatchExprValue {
-                body: remap_core_block_types(body, mapping),
+                body: remap_core_block_types(body, mapping, module_key),
                 error_slot: error_slot,
                 arms: arms.map(fn(arm) {
-                    remap_core_match_arm_types(arm, mapping)
+                    remap_core_match_arm_types(arm, mapping, module_key)
                 })
             },
         CoreExprValue::HandleExprValue { body, handlers } =>
             CoreExprValue::HandleExprValue {
-                body: remap_core_block_types(body, mapping),
+                body: remap_core_block_types(body, mapping, module_key),
                 handlers: copy_handler_entries(handlers)
             }
     }
@@ -2593,62 +2668,65 @@ fn remap_core_expr_types(
 }
 
 fn remap_core_statement_types(
-    value: CoreStmt, mapping: List<Int>
+    value: CoreStmt, mapping: List<Int>, module_key: Str
 ) -> CoreStmt {
     match value.value {
         CoreStmtValue::Initialize { target, value: expr, origin } =>
             make_core_initialize_stmt(
-                target, remap_core_expr_types(expr, mapping), origin),
+                target, remap_core_expr_types(expr, mapping, module_key), origin),
         CoreStmtValue::Assign { target, value: expr, origin } =>
             make_core_assign_stmt(
-                remap_core_place(target, mapping),
-                remap_core_expr_types(expr, mapping), origin),
+                remap_core_place(target, mapping, module_key),
+                remap_core_expr_types(expr, mapping, module_key), origin),
         CoreStmtValue::ExprStmt { value: expr, origin } =>
-            make_core_expr_stmt(remap_core_expr_types(expr, mapping), origin),
+            make_core_expr_stmt(
+                remap_core_expr_types(expr, mapping, module_key), origin),
         CoreStmtValue::While { condition, body, origin } =>
             make_core_while_stmt(
-                remap_core_expr_types(condition, mapping),
-                remap_core_block_types(body, mapping), origin),
+                remap_core_expr_types(condition, mapping, module_key),
+                remap_core_block_types(body, mapping, module_key), origin),
         CoreStmtValue::Break { origin } => make_core_break_stmt(origin),
         CoreStmtValue::Continue { origin } => make_core_continue_stmt(origin),
         CoreStmtValue::Return { value: returned, origin } =>
             make_core_return_stmt(match returned {
-                some(expr) => some(remap_core_expr_types(expr, mapping)),
+                some(expr) => some(remap_core_expr_types(
+                    expr, mapping, module_key)),
                 none => none
             }, origin)
     }
 }
 
 pub fn remap_core_callable_types(
-    value: CoreCallableContract, mapping: List<Int>
+    value: CoreCallableContract, mapping: List<Int>, module_key: Str
 ) -> CoreCallableContract {
     make_core_callable_contract(
         value.reference, value.origin,
         value.parameter_types.map(fn(ty) {
-            remap_core_type_reference(ty, mapping)
+            remap_core_type_reference(ty, mapping, module_key)
         }),
         value.parameter_slots,
-        remap_core_type_reference(value.result_type, mapping),
+        remap_core_type_reference(value.result_type, mapping, module_key),
         value.mode,
-        remap_flow_call_contract(value.semantic_contract, mapping),
+        remap_flow_call_contract(value.semantic_contract, mapping, module_key),
         value.evidence_requirements)
 }
 
 pub fn remap_core_impl_types(
-    value: CoreImplMetadata, mapping: List<Int>
+    value: CoreImplMetadata, mapping: List<Int>, module_key: Str
 ) -> CoreImplMetadata {
     make_core_impl_metadata(
         value.owner, value.methods,
         value.assoc_bindings.map(fn(binding) {
             make_core_assoc_binding(
                 binding.member,
-                remap_core_type_reference(binding.ty, mapping))
+                remap_core_type_reference(binding.ty, mapping, module_key))
         }),
         value.obligations)
 }
 
 pub fn remap_core_body_types(
-    value: CoreBody, mapping: List<Int>, project_type_count: Int
+    value: CoreBody, mapping: List<Int>, project_type_count: Int,
+    module_key: Str
 ) -> CoreBody {
     make_core_body(
         value.reference, value.origin, project_type_count,
@@ -2656,13 +2734,43 @@ pub fn remap_core_body_types(
         value.slots.map(fn(slot) {
             make_core_slot(
                 slot.reference,
-                remap_core_type_reference(slot.ty, mapping),
+                remap_core_type_reference(slot.ty, mapping, module_key),
                 slot.scope, slot.reverse_ordinal, slot.initial_state,
                 slot.storage, slot.storage_contract, slot.parameter_ordinal)
         }),
         value.parameter_slots,
-        remap_core_type_reference(value.result_type, mapping),
-        remap_core_block_types(value.body, mapping))
+        remap_core_type_reference(value.result_type, mapping, module_key),
+        remap_core_block_types(value.body, mapping, module_key))
+}
+
+fn identity_type_mapping(count: Int) -> List<Int> {
+    let mut result: List<Int> = []
+    let mut index = 0
+    while index < count {
+        result.push(index)
+        index = index + 1
+    }
+    result
+}
+
+pub fn validate_core_callable_type_domain(
+    value: CoreCallableContract, type_count: Int, module_key: Str
+) {
+    let _ = remap_core_callable_types(
+        value, identity_type_mapping(type_count), module_key)
+}
+pub fn validate_core_impl_type_domain(
+    value: CoreImplMetadata, type_count: Int, module_key: Str
+) {
+    let _ = remap_core_impl_types(
+        value, identity_type_mapping(type_count), module_key)
+}
+pub fn validate_core_body_type_domain(
+    value: CoreBody, module_key: Str
+) {
+    let _ = remap_core_body_types(
+        value, identity_type_mapping(value.type_count),
+        value.type_count, module_key)
 }
 
 // ============================================================
