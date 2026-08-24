@@ -28,24 +28,24 @@ use ir_identity::{
     path_owner_ref_is_symbol, path_owner_ref_symbol,
     path_owner_ref_module_body,
     module_body_ref_origin_module_key,
-    slot_ref_same,
+    slot_ref_same, slot_ref_is_source,
     make_named_callee_ref, make_local_callee_ref, make_dynamic_callee_ref,
     callee_ref_same, origin_ref_same,
     origin_ref_is_symbol, origin_ref_symbol, origin_ref_path
 }
 use ir_inventory::{
-    ExecutableRef, BinderManifest,
+    ExecutableRef, BinderKind,
     EffectOperationRef, SystemHostCallableRef,
     executable_ref_same, executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_origin_module_key,
-    binder_manifest_owner, binder_manifest_entries,
-    binder_entry_slot, make_binder_manifest,
+    make_source_binder_entry, make_synthetic_binder_entry,
+    binder_entry_slot, binder_entry_kind, binder_entry_site,
     effect_operation_ref_effect, effect_operation_ref_callable,
     effect_operation_ref_same,
     system_host_callable_effect, system_host_callable_executable
 }
 use hir::{
-    MethodCallRef,
+    MethodCallRef, DictRef,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_is_bound, method_call_ref_intrinsic,
     method_call_ref_impl, method_call_ref_bound,
@@ -53,9 +53,7 @@ use hir::{
 }
 use flow_ir::{
     FlowTypeNode, FlowTypeRef, FlowFieldIdentity, FlowNominalFieldFact,
-    FlowCallableMode, FlowCallContract,
-    FlowScope, FlowScopeRef,
-    FlowInitialSlotState, FlowStorageClass, FlowStorageContract,
+    FlowCallableMode, FlowCallContract, FlowStorageContract,
     make_flow_type_ref,
     validate_flow_type_graph_nodes, copy_flow_type_graph_nodes,
     flow_type_ref_index, flow_type_node_kind, flow_type_node_children,
@@ -72,9 +70,6 @@ use flow_ir::{
     flow_field_identity_is_nominal, flow_field_identity_nominal,
     flow_field_identity_is_variant, flow_field_identity_variant,
     flow_field_identity_path,
-    flow_scope_reference, flow_scope_ref_same,
-    flow_scope_ref_owner, flow_scope_ref_ordinal,
-    flow_initial_slot_state_tag, flow_storage_class_tag,
     flow_storage_contract_tag,
     remap_flow_call_contract
 }
@@ -496,7 +491,8 @@ pub fn core_callee_contract(value: CoreCalleeRef) -> FlowCallContract {
 
 enum CoreEvidenceRefValue {
     LocalEvidenceValue(SlotRef),
-    CallableEvidenceValue(ExecutableRef)
+    CallableEvidenceValue(ExecutableRef),
+    DictEvidenceValue(DictRef)
 }
 
 pub struct CoreEvidenceRef { value: CoreEvidenceRefValue }
@@ -507,10 +503,19 @@ pub fn make_core_local_evidence(value: SlotRef) -> CoreEvidenceRef {
 pub fn make_core_callable_evidence(value: ExecutableRef) -> CoreEvidenceRef {
     CoreEvidenceRef { value: CoreEvidenceRefValue::CallableEvidenceValue(value) }
 }
+pub fn make_core_dict_evidence(value: DictRef) -> CoreEvidenceRef {
+    CoreEvidenceRef { value: CoreEvidenceRefValue::DictEvidenceValue(value) }
+}
 pub fn core_evidence_is_local(value: CoreEvidenceRef) -> Bool {
     match value.value {
         CoreEvidenceRefValue::LocalEvidenceValue(_) => true,
-        CoreEvidenceRefValue::CallableEvidenceValue(_) => false
+        _ => false
+    }
+}
+pub fn core_evidence_is_dict(value: CoreEvidenceRef) -> Bool {
+    match value.value {
+        CoreEvidenceRefValue::DictEvidenceValue(_) => true,
+        _ => false
     }
 }
 pub fn core_evidence_local(value: CoreEvidenceRef) -> SlotRef {
@@ -523,6 +528,12 @@ pub fn core_evidence_callable(value: CoreEvidenceRef) -> ExecutableRef {
     match value.value {
         CoreEvidenceRefValue::CallableEvidenceValue(executable) => executable,
         _ => panic("CoreHIR: local evidence has no executable")
+    }
+}
+pub fn core_evidence_dict(value: CoreEvidenceRef) -> DictRef {
+    match value.value {
+        CoreEvidenceRefValue::DictEvidenceValue(dict) => dict,
+        _ => panic("CoreHIR: non-dictionary evidence has no DictRef")
     }
 }
 fn copy_evidence(values: List<CoreEvidenceRef>) -> List<CoreEvidenceRef> {
@@ -726,9 +737,9 @@ pub fn core_field_ref_same(left: CoreFieldRef, right: CoreFieldRef) -> Bool {
 enum CorePlaceRefValue {
     CoreSlotPlaceValue(SlotRef),
     CoreProjectPlaceValue {
-        base: SlotRef,
+        base: CoreExpr,
         field: CoreFieldRef?,
-        evaluated_index: SlotRef?,
+        evaluated_index: CoreExpr?,
         value_type: CoreTypeRef
     }
 }
@@ -737,7 +748,7 @@ pub fn make_core_slot_place(slot: SlotRef) -> CorePlaceRef {
     CorePlaceRef { value: CorePlaceRefValue::CoreSlotPlaceValue(slot) }
 }
 pub fn make_core_project_place(
-    base: SlotRef, field: CoreFieldRef?, evaluated_index: SlotRef?,
+    base: CoreExpr, field: CoreFieldRef?, evaluated_index: CoreExpr?,
     value_type: CoreTypeRef
 ) -> CorePlaceRef {
     if (field.is_some() && evaluated_index.is_some()) ||
@@ -761,7 +772,7 @@ pub fn core_place_slot(value: CorePlaceRef) -> SlotRef {
         _ => panic("CoreHIR: projected place has no direct slot")
     }
 }
-pub fn core_place_base(value: CorePlaceRef) -> SlotRef {
+pub fn core_place_base(value: CorePlaceRef) -> CoreExpr {
     match value.value {
         CorePlaceRefValue::CoreProjectPlaceValue { base, .. } => base,
         _ => panic("CoreHIR: slot place has no projection base")
@@ -773,7 +784,7 @@ pub fn core_place_field(value: CorePlaceRef) -> CoreFieldRef? {
         _ => panic("CoreHIR: slot place has no projection field")
     }
 }
-pub fn core_place_evaluated_index(value: CorePlaceRef) -> SlotRef? {
+pub fn core_place_evaluated_index(value: CorePlaceRef) -> CoreExpr? {
     match value.value {
         CorePlaceRefValue::CoreProjectPlaceValue { evaluated_index, .. } =>
             evaluated_index,
@@ -864,14 +875,14 @@ pub fn core_constructor_executable(value: CoreConstructorRef) -> ExecutableRef? 
 
 pub struct CoreFieldValue {
     field: CoreFieldRef,
-    value: SlotRef
+    value: CoreExpr
 }
 
 pub fn make_core_field_value(
-    field: CoreFieldRef, value: SlotRef
+    field: CoreFieldRef, value: CoreExpr
 ) -> CoreFieldValue { CoreFieldValue { field: field, value: value } }
 pub fn core_field_value_field(value: CoreFieldValue) -> CoreFieldRef { value.field }
-pub fn core_field_value_slot(value: CoreFieldValue) -> SlotRef { value.value }
+pub fn core_field_value_expr(value: CoreFieldValue) -> CoreExpr { value.value }
 fn copy_field_values(values: List<CoreFieldValue>) -> List<CoreFieldValue> {
     let mut result: List<CoreFieldValue> = []
     for value in values { result.push(value) }
@@ -1121,38 +1132,38 @@ enum CoreExprValue {
     LiteralExprValue(CoreLiteral),
     CallableValueExprValue(ExecutableRef),
     ReadExprValue(SlotRef),
-    PrimitiveExprValue { operation: CorePrimitiveOp, operands: List<SlotRef> },
+    PrimitiveExprValue { operation: CorePrimitiveOp, operands: List<CoreExpr> },
     CallExprValue {
         callee: CoreCalleeRef,
-        arguments: List<SlotRef>,
+        arguments: List<CoreExpr>,
         evidence: List<CoreEvidenceRef>
     },
     MethodCallExprValue {
         callee: CoreCalleeRef,
         method: MethodCallRef,
-        receiver: SlotRef,
-        arguments: List<SlotRef>,
+        receiver: CoreExpr,
+        arguments: List<CoreExpr>,
         evidence: List<CoreEvidenceRef>
     },
     EffectCallExprValue {
         operation: EffectOperationRef,
-        arguments: List<SlotRef>,
+        arguments: List<CoreExpr>,
         evidence: List<CoreEvidenceRef>
     },
     SystemCallExprValue {
         host: SystemHostCallableRef,
-        arguments: List<SlotRef>
+        arguments: List<CoreExpr>
     },
     DictConstructExprValue {
         constructor: ExecutableRef,
         evidence: List<CoreEvidenceRef>
     },
     DictProjectExprValue {
-        dictionary: SlotRef,
+        dictionary: CoreExpr,
         method: ExecutableRef
     },
     ProjectExprValue {
-        base: SlotRef,
+        base: CoreExpr,
         field: CoreFieldRef,
         partial: Bool
     },
@@ -1162,17 +1173,16 @@ enum CoreExprValue {
     },
     LambdaExprValue {
         executable: ExecutableRef,
-        manifest: BinderManifest,
         captures: List<CoreCapture>
     },
     BlockExprValue(CoreBlock),
     IfExprValue {
-        condition: SlotRef,
+        condition: CoreExpr,
         then_block: CoreBlock,
         else_block: CoreBlock
     },
     MatchExprValue {
-        scrutinee: SlotRef,
+        scrutinee: CoreExpr,
         arms: List<CoreMatchArm>
     },
     TryCatchExprValue {
@@ -1187,7 +1197,6 @@ enum CoreExprValue {
 }
 
 pub struct CoreExpr {
-    result: SlotRef,
     ty: CoreTypeRef,
     effects: CoreEffectSet,
     origin: OriginRef,
@@ -1195,8 +1204,9 @@ pub struct CoreExpr {
 }
 
 enum CoreStmtValue {
-    Initialize {
-        target: SlotRef, value: CoreExpr, origin: OriginRef
+    Bind {
+        target: SlotRef, value: CoreExpr, is_mutable: Bool,
+        origin: OriginRef
     },
     Assign {
         target: CorePlaceRef, value: CoreExpr, origin: OriginRef
@@ -1215,8 +1225,7 @@ pub struct CoreStmt { value: CoreStmtValue }
 pub struct CoreBlock {
     statements: List<CoreStmt>,
     tail: CoreExpr?,
-    origin: OriginRef,
-    scope: FlowScopeRef
+    origin: OriginRef
 }
 
 pub struct CoreMatchArm {
@@ -1229,7 +1238,6 @@ pub struct CoreMatchArm {
 pub struct CoreHandlerEntry {
     operation: EffectOperationRef,
     executable: ExecutableRef,
-    manifest: BinderManifest,
     parameter_slots: List<SlotRef>,
     resume_slot: SlotRef?,
     origin: OriginRef
@@ -1255,158 +1263,145 @@ fn copy_handler_entries(values: List<CoreHandlerEntry>) -> List<CoreHandlerEntry
     for value in values { result.push(value) }
     result
 }
-fn copy_manifest(value: BinderManifest) -> BinderManifest {
-    make_binder_manifest(
-        binder_manifest_owner(value), binder_manifest_entries(value))
-}
-
 fn make_core_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
+    ty: CoreTypeRef, effects: CoreEffectSet,
     origin: OriginRef, value: CoreExprValue
 ) -> CoreExpr {
     CoreExpr {
-        result: result, ty: ty,
+        ty: ty,
         effects: make_core_effect_set(effects.atoms),
         origin: origin, value: value
     }
 }
 
 pub fn make_core_literal_expr(
-    result: SlotRef, ty: CoreTypeRef, origin: OriginRef, literal: CoreLiteral
+    ty: CoreTypeRef, origin: OriginRef, literal: CoreLiteral
 ) -> CoreExpr {
-    make_core_expr(
-        result, ty, make_core_effect_set([]), origin,
+    make_core_expr(ty, make_core_effect_set([]), origin,
         CoreExprValue::LiteralExprValue(literal))
 }
 pub fn make_core_read_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, source: SlotRef
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    source: SlotRef
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::ReadExprValue(source))
 }
 pub fn make_core_callable_value_expr(
-    result: SlotRef, ty: CoreTypeRef, origin: OriginRef,
-    executable: ExecutableRef
+    ty: CoreTypeRef, origin: OriginRef, executable: ExecutableRef
 ) -> CoreExpr {
-    make_core_expr(result, ty, make_core_effect_set([]), origin,
+    make_core_expr(ty, make_core_effect_set([]), origin,
         CoreExprValue::CallableValueExprValue(executable))
 }
+fn copy_core_exprs(values: List<CoreExpr>) -> List<CoreExpr> {
+    values.map(fn(value) { value })
+}
 pub fn make_core_primitive_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, operation: CorePrimitiveOp,
-    operands: List<SlotRef>
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    operation: CorePrimitiveOp, operands: List<CoreExpr>
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::PrimitiveExprValue {
-            operation: operation, operands: copy_slot_refs(operands)
+            operation: operation, operands: copy_core_exprs(operands)
         })
 }
 pub fn make_core_call_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, callee: CoreCalleeRef,
-    arguments: List<SlotRef>, evidence: List<CoreEvidenceRef>
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    callee: CoreCalleeRef, arguments: List<CoreExpr>,
+    evidence: List<CoreEvidenceRef>
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::CallExprValue {
-            callee: callee, arguments: copy_slot_refs(arguments),
+            callee: callee, arguments: copy_core_exprs(arguments),
             evidence: copy_evidence(evidence)
         })
 }
 pub fn make_core_method_call_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, callee: CoreCalleeRef, method: MethodCallRef,
-    receiver: SlotRef, arguments: List<SlotRef>,
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    callee: CoreCalleeRef, method: MethodCallRef,
+    receiver: CoreExpr, arguments: List<CoreExpr>,
     evidence: List<CoreEvidenceRef>
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::MethodCallExprValue {
             callee: callee, method: method, receiver: receiver,
-            arguments: copy_slot_refs(arguments),
+            arguments: copy_core_exprs(arguments),
             evidence: copy_evidence(evidence)
         })
 }
 pub fn make_core_effect_call_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, operation: EffectOperationRef,
-    arguments: List<SlotRef>, evidence: List<CoreEvidenceRef>
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    operation: EffectOperationRef, arguments: List<CoreExpr>,
+    evidence: List<CoreEvidenceRef>
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::EffectCallExprValue {
-            operation: operation, arguments: copy_slot_refs(arguments),
+            operation: operation, arguments: copy_core_exprs(arguments),
             evidence: copy_evidence(evidence)
         })
 }
 pub fn make_core_system_call_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, host: SystemHostCallableRef,
-    arguments: List<SlotRef>
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    host: SystemHostCallableRef, arguments: List<CoreExpr>
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::SystemCallExprValue {
-            host: host, arguments: copy_slot_refs(arguments)
+            host: host, arguments: copy_core_exprs(arguments)
         })
 }
 pub fn make_core_dict_construct_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, constructor: ExecutableRef,
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    constructor: ExecutableRef,
     evidence: List<CoreEvidenceRef>
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::DictConstructExprValue {
             constructor: constructor, evidence: copy_evidence(evidence)
         })
 }
 pub fn make_core_dict_project_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, dictionary: SlotRef, method: ExecutableRef
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    dictionary: CoreExpr, method: ExecutableRef
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::DictProjectExprValue {
             dictionary: dictionary, method: method
         })
 }
 pub fn make_core_project_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, base: SlotRef, field: CoreFieldRef, partial: Bool
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    base: CoreExpr, field: CoreFieldRef, partial: Bool
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::ProjectExprValue {
             base: base, field: field, partial: partial
         })
 }
 pub fn make_core_construct_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, constructor: CoreConstructorRef,
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    constructor: CoreConstructorRef,
     fields: List<CoreFieldValue>
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::ConstructExprValue {
             constructor: constructor, fields: copy_field_values(fields)
         })
 }
 pub fn make_core_lambda_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, executable: ExecutableRef,
-    manifest: BinderManifest, captures: List<CoreCapture>
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    executable: ExecutableRef, captures: List<CoreCapture>
 ) -> CoreExpr {
-    if !executable_ref_same(executable, binder_manifest_owner(manifest)) {
-        panic("CoreHIR: lambda executable/manifest identity differs")
-    }
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::LambdaExprValue {
-            executable: executable, manifest: copy_manifest(manifest),
-            captures: copy_captures(captures)
+            executable: executable, captures: copy_captures(captures)
         })
 }
 
 pub fn make_core_block(
-    statements: List<CoreStmt>, tail: CoreExpr?, origin: OriginRef,
-    scope: FlowScopeRef
+    statements: List<CoreStmt>, tail: CoreExpr?, origin: OriginRef
 ) -> CoreBlock {
     CoreBlock {
-        statements: copy_statements(statements), tail: tail,
-        origin: origin, scope: scope
+        statements: copy_statements(statements), tail: tail, origin: origin
     }
 }
 pub fn make_core_match_arm(
@@ -1419,76 +1414,73 @@ pub fn make_core_match_arm(
 }
 pub fn make_core_handler_entry(
     operation: EffectOperationRef, executable: ExecutableRef,
-    manifest: BinderManifest, parameter_slots: List<SlotRef>,
+    parameter_slots: List<SlotRef>,
     resume_slot: SlotRef?, origin: OriginRef
 ) -> CoreHandlerEntry {
-    if !executable_ref_same(executable, binder_manifest_owner(manifest)) {
-        panic("CoreHIR: handler executable/manifest identity differs")
-    }
     CoreHandlerEntry {
         operation: operation, executable: executable,
-        manifest: copy_manifest(manifest),
         parameter_slots: copy_slot_refs(parameter_slots),
         resume_slot: resume_slot, origin: origin
     }
 }
 pub fn make_core_block_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, block: CoreBlock
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    block: CoreBlock
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::BlockExprValue(block))
 }
 pub fn make_core_if_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, condition: SlotRef,
+    ty: CoreTypeRef, effects: CoreEffectSet,
+    origin: OriginRef, condition: CoreExpr,
     then_block: CoreBlock, else_block: CoreBlock
 ) -> CoreExpr {
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::IfExprValue {
             condition: condition,
             then_block: then_block, else_block: else_block
         })
 }
 pub fn make_core_match_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, scrutinee: SlotRef, arms: List<CoreMatchArm>
+    ty: CoreTypeRef, effects: CoreEffectSet,
+    origin: OriginRef, scrutinee: CoreExpr, arms: List<CoreMatchArm>
 ) -> CoreExpr {
     if arms.len() == 0 { panic("CoreHIR: match has no arms") }
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::MatchExprValue {
             scrutinee: scrutinee, arms: copy_match_arms(arms)
         })
 }
 pub fn make_core_try_catch_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
+    ty: CoreTypeRef, effects: CoreEffectSet,
     origin: OriginRef, body: CoreBlock, error_slot: SlotRef,
     arms: List<CoreMatchArm>
 ) -> CoreExpr {
     if arms.len() == 0 { panic("CoreHIR: catch has no arms") }
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::TryCatchExprValue {
             body: body, error_slot: error_slot,
             arms: copy_match_arms(arms)
         })
 }
 pub fn make_core_handle_expr(
-    result: SlotRef, ty: CoreTypeRef, effects: CoreEffectSet,
+    ty: CoreTypeRef, effects: CoreEffectSet,
     origin: OriginRef, body: CoreBlock,
     handlers: List<CoreHandlerEntry>
 ) -> CoreExpr {
     if handlers.len() == 0 { panic("CoreHIR: handle has no handlers") }
-    make_core_expr(result, ty, effects, origin,
+    make_core_expr(ty, effects, origin,
         CoreExprValue::HandleExprValue {
             body: body, handlers: copy_handler_entries(handlers)
         })
 }
 
-pub fn make_core_initialize_stmt(
-    target: SlotRef, value: CoreExpr, origin: OriginRef
+pub fn make_core_bind_stmt(
+    target: SlotRef, value: CoreExpr, is_mutable: Bool,
+    origin: OriginRef
 ) -> CoreStmt {
-    CoreStmt { value: CoreStmtValue::Initialize {
-        target: target, value: value, origin: origin
+    CoreStmt { value: CoreStmtValue::Bind {
+        target: target, value: value, is_mutable: is_mutable, origin: origin
     } }
 }
 pub fn make_core_assign_stmt(
@@ -1524,7 +1516,7 @@ pub fn make_core_return_stmt(value: CoreExpr?, origin: OriginRef) -> CoreStmt {
 
 pub fn core_stmt_kind_tag(value: CoreStmt) -> Int {
     match value.value {
-        CoreStmtValue::Initialize { .. } => 0,
+        CoreStmtValue::Bind { .. } => 0,
         CoreStmtValue::Assign { .. } => 1,
         CoreStmtValue::ExprStmt { .. } => 2,
         CoreStmtValue::While { .. } => 3,
@@ -1535,7 +1527,7 @@ pub fn core_stmt_kind_tag(value: CoreStmt) -> Int {
 }
 pub fn core_stmt_origin(value: CoreStmt) -> OriginRef {
     match value.value {
-        CoreStmtValue::Initialize { origin, .. } |
+        CoreStmtValue::Bind { origin, .. } |
         CoreStmtValue::Assign { origin, .. } |
         CoreStmtValue::ExprStmt { origin, .. } |
         CoreStmtValue::While { origin, .. } |
@@ -1546,17 +1538,23 @@ pub fn core_stmt_origin(value: CoreStmt) -> OriginRef {
 }
 pub fn core_stmt_target(value: CoreStmt) -> CorePlaceRef {
     match value.value {
-        CoreStmtValue::Initialize { target, .. } => make_core_slot_place(target),
+        CoreStmtValue::Bind { target, .. } => make_core_slot_place(target),
         CoreStmtValue::Assign { target, .. } => target,
         _ => panic("CoreHIR: statement has no place target")
     }
 }
 pub fn core_stmt_value(value: CoreStmt) -> CoreExpr {
     match value.value {
-        CoreStmtValue::Initialize { value: expr, .. } |
+        CoreStmtValue::Bind { value: expr, .. } |
         CoreStmtValue::Assign { value: expr, .. } |
         CoreStmtValue::ExprStmt { value: expr, .. } => expr,
         _ => panic("CoreHIR: statement has no required expression")
+    }
+}
+pub fn core_stmt_bind_is_mutable(value: CoreStmt) -> Bool {
+    match value.value {
+        CoreStmtValue::Bind { is_mutable, .. } => is_mutable,
+        _ => panic("CoreHIR: statement is not a source binding")
     }
 }
 pub fn core_stmt_while_condition(value: CoreStmt) -> CoreExpr {
@@ -1578,7 +1576,6 @@ pub fn core_stmt_return_value(value: CoreStmt) -> CoreExpr? {
     }
 }
 
-pub fn core_expr_result(value: CoreExpr) -> SlotRef { value.result }
 pub fn core_expr_type(value: CoreExpr) -> CoreTypeRef { value.ty }
 pub fn core_expr_effects(value: CoreExpr) -> CoreEffectSet {
     make_core_effect_set(value.effects.atoms)
@@ -1630,10 +1627,10 @@ pub fn core_expr_primitive_operation(value: CoreExpr) -> CorePrimitiveOp {
         _ => panic("CoreHIR: expression is not Primitive")
     }
 }
-pub fn core_expr_primitive_operands(value: CoreExpr) -> List<SlotRef> {
+pub fn core_expr_primitive_operands(value: CoreExpr) -> List<CoreExpr> {
     match value.value {
         CoreExprValue::PrimitiveExprValue { operands, .. } =>
-            copy_slot_refs(operands),
+            copy_core_exprs(operands),
         _ => panic("CoreHIR: expression is not Primitive")
     }
 }
@@ -1644,13 +1641,13 @@ pub fn core_expr_call_callee(value: CoreExpr) -> CoreCalleeRef {
         _ => panic("CoreHIR: expression has no callee")
     }
 }
-pub fn core_expr_call_arguments(value: CoreExpr) -> List<SlotRef> {
+pub fn core_expr_call_arguments(value: CoreExpr) -> List<CoreExpr> {
     match value.value {
         CoreExprValue::CallExprValue { arguments, .. } |
         CoreExprValue::MethodCallExprValue { arguments, .. } |
         CoreExprValue::EffectCallExprValue { arguments, .. } |
         CoreExprValue::SystemCallExprValue { arguments, .. } =>
-            copy_slot_refs(arguments),
+            copy_core_exprs(arguments),
         _ => panic("CoreHIR: expression has no call arguments")
     }
 }
@@ -1670,7 +1667,7 @@ pub fn core_expr_method_ref(value: CoreExpr) -> MethodCallRef {
         _ => panic("CoreHIR: expression is not MethodCall")
     }
 }
-pub fn core_expr_method_receiver(value: CoreExpr) -> SlotRef {
+pub fn core_expr_method_receiver(value: CoreExpr) -> CoreExpr {
     match value.value {
         CoreExprValue::MethodCallExprValue { receiver, .. } => receiver,
         _ => panic("CoreHIR: expression is not MethodCall")
@@ -1694,7 +1691,7 @@ pub fn core_expr_dict_constructor(value: CoreExpr) -> ExecutableRef {
         _ => panic("CoreHIR: expression is not DictConstruct")
     }
 }
-pub fn core_expr_dict_project_dictionary(value: CoreExpr) -> SlotRef {
+pub fn core_expr_dict_project_dictionary(value: CoreExpr) -> CoreExpr {
     match value.value {
         CoreExprValue::DictProjectExprValue { dictionary, .. } => dictionary,
         _ => panic("CoreHIR: expression is not DictProject")
@@ -1706,7 +1703,7 @@ pub fn core_expr_dict_project_method(value: CoreExpr) -> ExecutableRef {
         _ => panic("CoreHIR: expression is not DictProject")
     }
 }
-pub fn core_expr_project_base(value: CoreExpr) -> SlotRef {
+pub fn core_expr_project_base(value: CoreExpr) -> CoreExpr {
     match value.value {
         CoreExprValue::ProjectExprValue { base, .. } => base,
         _ => panic("CoreHIR: expression is not Project")
@@ -1743,12 +1740,6 @@ pub fn core_expr_lambda_executable(value: CoreExpr) -> ExecutableRef {
         _ => panic("CoreHIR: expression is not Lambda")
     }
 }
-pub fn core_expr_lambda_manifest(value: CoreExpr) -> BinderManifest {
-    match value.value {
-        CoreExprValue::LambdaExprValue { manifest, .. } => copy_manifest(manifest),
-        _ => panic("CoreHIR: expression is not Lambda")
-    }
-}
 pub fn core_expr_lambda_captures(value: CoreExpr) -> List<CoreCapture> {
     match value.value {
         CoreExprValue::LambdaExprValue { captures, .. } => copy_captures(captures),
@@ -1761,7 +1752,7 @@ pub fn core_expr_block(value: CoreExpr) -> CoreBlock {
         _ => panic("CoreHIR: expression is not Block")
     }
 }
-pub fn core_expr_condition(value: CoreExpr) -> SlotRef {
+pub fn core_expr_condition(value: CoreExpr) -> CoreExpr {
     match value.value {
         CoreExprValue::IfExprValue { condition, .. } => condition,
         _ => panic("CoreHIR: expression is not If")
@@ -1779,7 +1770,7 @@ pub fn core_expr_else_block(value: CoreExpr) -> CoreBlock {
         _ => panic("CoreHIR: expression is not If")
     }
 }
-pub fn core_expr_scrutinee(value: CoreExpr) -> SlotRef {
+pub fn core_expr_scrutinee(value: CoreExpr) -> CoreExpr {
     match value.value {
         CoreExprValue::MatchExprValue { scrutinee, .. } => scrutinee,
         _ => panic("CoreHIR: expression is not Match")
@@ -1822,7 +1813,6 @@ pub fn core_block_statements(value: CoreBlock) -> List<CoreStmt> {
 }
 pub fn core_block_tail(value: CoreBlock) -> CoreExpr? { value.tail }
 pub fn core_block_origin(value: CoreBlock) -> OriginRef { value.origin }
-pub fn core_block_scope(value: CoreBlock) -> FlowScopeRef { value.scope }
 pub fn core_match_arm_pattern(value: CoreMatchArm) -> CorePattern { value.pattern }
 pub fn core_match_arm_guard(value: CoreMatchArm) -> CoreExpr? { value.guard }
 pub fn core_match_arm_body(value: CoreMatchArm) -> CoreBlock { value.body }
@@ -1832,9 +1822,6 @@ pub fn core_handler_operation(
 ) -> EffectOperationRef { value.operation }
 pub fn core_handler_executable(value: CoreHandlerEntry) -> ExecutableRef {
     value.executable
-}
-pub fn core_handler_manifest(value: CoreHandlerEntry) -> BinderManifest {
-    copy_manifest(value.manifest)
 }
 pub fn core_handler_parameter_slots(value: CoreHandlerEntry) -> List<SlotRef> {
     copy_slot_refs(value.parameter_slots)
@@ -1848,53 +1835,41 @@ pub fn core_handler_origin(value: CoreHandlerEntry) -> OriginRef { value.origin 
 // Closed structured body and recursive validator
 // ============================================================
 
-pub struct CoreSlot {
+// Core carries only language-semantic binders. Administrative result/temp,
+// scope and control slots are allocated once by CoreHIR -> FlowIR lowering.
+pub struct CoreBinder {
     reference: SlotRef,
     ty: CoreTypeRef,
-    scope: FlowScopeRef,
-    reverse_ordinal: Int,
-    initial_state: FlowInitialSlotState,
-    storage: FlowStorageClass,
+    kind: BinderKind,
+    site: PathRef,
     storage_contract: FlowStorageContract,
-    parameter_ordinal: Int?
+    is_mutable: Bool
 }
 
-pub fn make_core_slot(
-    reference: SlotRef, ty: CoreTypeRef, scope: FlowScopeRef,
-    reverse_ordinal: Int, initial_state: FlowInitialSlotState,
-    storage: FlowStorageClass, storage_contract: FlowStorageContract,
-    parameter_ordinal: Int?
-) -> CoreSlot {
-    if reverse_ordinal < 0 {
-        panic("CoreHIR: negative reverse slot ordinal")
+pub fn make_core_binder(
+    reference: SlotRef, ty: CoreTypeRef, kind: BinderKind,
+    site: PathRef, storage_contract: FlowStorageContract,
+    is_mutable: Bool
+) -> CoreBinder {
+    if core_type_ref_index(ty) < 0 {
+        panic("CoreHIR: binder has a negative type reference")
     }
-    let _ = flow_initial_slot_state_tag(initial_state)
-    let _ = flow_storage_class_tag(storage)
     let _ = flow_storage_contract_tag(storage_contract)
-    CoreSlot {
-        reference: reference, ty: ty, scope: scope,
-        reverse_ordinal: reverse_ordinal,
-        initial_state: initial_state, storage: storage,
-        storage_contract: storage_contract,
-        parameter_ordinal: parameter_ordinal
+    CoreBinder {
+        reference: reference, ty: ty, kind: kind, site: site,
+        storage_contract: storage_contract, is_mutable: is_mutable
     }
 }
-pub fn core_slot_reference(value: CoreSlot) -> SlotRef { value.reference }
-pub fn core_slot_type(value: CoreSlot) -> CoreTypeRef { value.ty }
-pub fn core_slot_scope(value: CoreSlot) -> FlowScopeRef { value.scope }
-pub fn core_slot_reverse_ordinal(value: CoreSlot) -> Int { value.reverse_ordinal }
-pub fn core_slot_initial_state(value: CoreSlot) -> FlowInitialSlotState {
-    value.initial_state
-}
-pub fn core_slot_storage(value: CoreSlot) -> FlowStorageClass { value.storage }
-pub fn core_slot_storage_contract(value: CoreSlot) -> FlowStorageContract {
-    value.storage_contract
-}
-pub fn core_slot_parameter_ordinal(value: CoreSlot) -> Int? {
-    value.parameter_ordinal
-}
-fn copy_core_slots(values: List<CoreSlot>) -> List<CoreSlot> {
-    let mut result: List<CoreSlot> = []
+pub fn core_binder_reference(value: CoreBinder) -> SlotRef { value.reference }
+pub fn core_binder_type(value: CoreBinder) -> CoreTypeRef { value.ty }
+pub fn core_binder_kind(value: CoreBinder) -> BinderKind { value.kind }
+pub fn core_binder_site(value: CoreBinder) -> PathRef { value.site }
+pub fn core_binder_storage_contract(
+    value: CoreBinder
+) -> FlowStorageContract { value.storage_contract }
+pub fn core_binder_is_mutable(value: CoreBinder) -> Bool { value.is_mutable }
+fn copy_core_binders(values: List<CoreBinder>) -> List<CoreBinder> {
+    let mut result: List<CoreBinder> = []
     for value in values { result.push(value) }
     result
 }
@@ -1902,19 +1877,10 @@ fn copy_core_slots(values: List<CoreSlot>) -> List<CoreSlot> {
 pub struct CoreBody {
     reference: ExecutableRef,
     origin: OriginRef,
-    type_count: Int,
-    manifest: BinderManifest,
-    scopes: List<FlowScope>,
-    slots: List<CoreSlot>,
+    binders: List<CoreBinder>,
     parameter_slots: List<SlotRef>,
     result_type: CoreTypeRef,
     body: CoreBlock
-}
-
-fn copy_flow_scopes(values: List<FlowScope>) -> List<FlowScope> {
-    let mut result: List<FlowScope> = []
-    for value in values { result.push(value) }
-    result
 }
 
 fn path_module_key(value: PathRef) -> Str {
@@ -1940,7 +1906,7 @@ fn validate_origin(value: OriginRef, owner: ExecutableRef) {
 fn type_ref_valid(value: CoreTypeRef, type_count: Int) -> Bool {
     value.index >= 0 && value.index < type_count
 }
-fn slot_index(values: List<CoreSlot>, target: SlotRef) -> Int? {
+fn binder_index(values: List<CoreBinder>, target: SlotRef) -> Int? {
     let mut index = 0
     for value in values {
         if slot_ref_same(value.reference, target) { return some(index) }
@@ -1948,8 +1914,8 @@ fn slot_index(values: List<CoreSlot>, target: SlotRef) -> Int? {
     }
     none
 }
-fn require_slot(values: List<CoreSlot>, target: SlotRef) {
-    if slot_index(values, target).is_none() {
+fn require_binder(values: List<CoreBinder>, target: SlotRef) {
+    if binder_index(values, target).is_none() {
         panic("CoreHIR: expression references an undeclared slot")
     }
 }
@@ -1966,30 +1932,36 @@ fn validate_effect_set(value: CoreEffectSet, type_count: Int) {
         }
     }
 }
-fn validate_evidence(values: List<CoreEvidenceRef>, slots: List<CoreSlot>) {
+fn validate_open_effect_set(value: CoreEffectSet) {
+    let _ = make_core_effect_set(value.atoms)
+    for atom in value.atoms {
+        match atom.value {
+            CoreEffectAtomValue::FailEffectValue(ty) |
+            CoreEffectAtomValue::MutEffectValue(ty) => if
+                    core_type_ref_index(ty) < 0 {
+                panic("CoreHIR: effect atom has an invalid type")
+            },
+            _ => {}
+        }
+    }
+}
+fn validate_evidence(values: List<CoreEvidenceRef>, binders: List<CoreBinder>) {
     for value in values {
         if core_evidence_is_local(value) {
-            require_slot(slots, core_evidence_local(value))
+            require_binder(binders, core_evidence_local(value))
         }
     }
 }
 
-fn manifest_contains_slot(value: BinderManifest, target: SlotRef) -> Bool {
-    for binder in binder_manifest_entries(value) {
-        if slot_ref_same(binder_entry_slot(binder), target) { return true }
-    }
-    false
-}
-
 fn validate_pattern(
-    value: CorePattern, slots: List<CoreSlot>, seen: List<SlotRef>
+    value: CorePattern, binders: List<CoreBinder>, seen: List<SlotRef>
 ) -> List<SlotRef> {
     let mut result = copy_slot_refs(seen)
     match value.value {
         CorePatternValue::WildcardPatternValue |
         CorePatternValue::LiteralPatternValue(_) => {},
         CorePatternValue::BindingPatternValue(slot) => {
-            require_slot(slots, slot)
+            require_binder(binders, slot)
             for existing in result {
                 if slot_ref_same(existing, slot) {
                     panic("CoreHIR: pattern binds a slot twice")
@@ -1999,7 +1971,7 @@ fn validate_pattern(
         },
         CorePatternValue::TuplePatternValue(elements) => {
             for element in elements {
-                result = validate_pattern(element, slots, result)
+                result = validate_pattern(element, binders, result)
             }
         },
         CorePatternValue::StructPatternValue { owner, fields } => {
@@ -2025,7 +1997,7 @@ fn validate_pattern(
                     }
                     right_index = right_index + 1
                 }
-                result = validate_pattern(field.pattern, slots, result)
+                result = validate_pattern(field.pattern, binders, result)
                 field_index = field_index + 1
             }
         },
@@ -2051,7 +2023,7 @@ fn validate_pattern(
                     }
                     right_index = right_index + 1
                 }
-                result = validate_pattern(field.pattern, slots, result)
+                result = validate_pattern(field.pattern, binders, result)
                 field_index = field_index + 1
             }
         }
@@ -2075,7 +2047,7 @@ fn validate_callee(value: CoreCalleeRef, body: CoreBody) {
             some(item) => item,
             none => panic("CoreHIR: local callee lacks slot")
         }
-        require_slot(body.slots, slot)
+        require_binder(body.binders, slot)
         if !callee_ref_same(value.callee, make_local_callee_ref(slot)) {
             panic("CoreHIR: local CalleeRef/slot differs")
         }
@@ -2096,12 +2068,12 @@ fn validate_callee(value: CoreCalleeRef, body: CoreBody) {
 
 fn validate_constructor_fields(
     constructor: CoreConstructorRef, fields: List<CoreFieldValue>,
-    slots: List<CoreSlot>
+    body: CoreBody, loop_depth: Int
 ) {
     let mut index = 0
     while index < fields.len() {
         let field = fields.get(index).unwrap()
-        require_slot(slots, field.value)
+        validate_expr_with_loop_depth(field.value, body, loop_depth)
         let mut right_index = index + 1
         while right_index < fields.len() {
             if core_field_ref_same(
@@ -2150,62 +2122,63 @@ fn validate_constructor_fields(
 fn validate_expr_with_loop_depth(
     value: CoreExpr, body: CoreBody, loop_depth: Int
 ) {
-    require_slot(body.slots, value.result)
-    if !type_ref_valid(value.ty, body.type_count) {
-        panic("CoreHIR: expression has an unresolved type")
+    if core_type_ref_index(value.ty) < 0 {
+        panic("CoreHIR: expression has an invalid type")
     }
     validate_origin(value.origin, body.reference)
-    validate_effect_set(value.effects, body.type_count)
+    validate_open_effect_set(value.effects)
     match value.value {
         CoreExprValue::LiteralExprValue(_) => {},
         CoreExprValue::CallableValueExprValue(_) => {},
-        CoreExprValue::ReadExprValue(source) => require_slot(body.slots, source),
+        CoreExprValue::ReadExprValue(source) =>
+            require_binder(body.binders, source),
         CoreExprValue::PrimitiveExprValue { operation, operands } => {
             let _ = core_primitive_op_tag(operation)
-            for operand in operands { require_slot(body.slots, operand) }
+            for operand in operands {
+                validate_expr_with_loop_depth(operand, body, loop_depth)
+            }
         },
         CoreExprValue::CallExprValue { callee, arguments, evidence } => {
             validate_callee(callee, body)
-            for argument in arguments { require_slot(body.slots, argument) }
-            validate_evidence(evidence, body.slots)
+            for argument in arguments {
+                validate_expr_with_loop_depth(argument, body, loop_depth)
+            }
+            validate_evidence(evidence, body.binders)
         },
         CoreExprValue::MethodCallExprValue {
             callee, receiver, arguments, evidence, ..
         } => {
             validate_callee(callee, body)
-            require_slot(body.slots, receiver)
-            for argument in arguments { require_slot(body.slots, argument) }
-            validate_evidence(evidence, body.slots)
+            validate_expr_with_loop_depth(receiver, body, loop_depth)
+            for argument in arguments {
+                validate_expr_with_loop_depth(argument, body, loop_depth)
+            }
+            validate_evidence(evidence, body.binders)
         },
         CoreExprValue::EffectCallExprValue {
             arguments, evidence, ..
         } => {
-            for argument in arguments { require_slot(body.slots, argument) }
-            validate_evidence(evidence, body.slots)
+            for argument in arguments {
+                validate_expr_with_loop_depth(argument, body, loop_depth)
+            }
+            validate_evidence(evidence, body.binders)
         },
         CoreExprValue::SystemCallExprValue { arguments, .. } => {
-            for argument in arguments { require_slot(body.slots, argument) }
+            for argument in arguments {
+                validate_expr_with_loop_depth(argument, body, loop_depth)
+            }
         },
         CoreExprValue::DictConstructExprValue { evidence, .. } =>
-            validate_evidence(evidence, body.slots),
+            validate_evidence(evidence, body.binders),
         CoreExprValue::DictProjectExprValue { dictionary, .. } =>
-            require_slot(body.slots, dictionary),
+            validate_expr_with_loop_depth(dictionary, body, loop_depth),
         CoreExprValue::ProjectExprValue { base, .. } =>
-            require_slot(body.slots, base),
+            validate_expr_with_loop_depth(base, body, loop_depth),
         CoreExprValue::ConstructExprValue { constructor, fields } =>
-            validate_constructor_fields(constructor, fields, body.slots),
-        CoreExprValue::LambdaExprValue {
-            executable, manifest, captures
-        } => {
-            if !executable_ref_same(
-                    executable, binder_manifest_owner(manifest)) {
-                panic("CoreHIR: lambda manifest drifted")
-            }
+            validate_constructor_fields(constructor, fields, body, loop_depth),
+        CoreExprValue::LambdaExprValue { captures, .. } => {
             for capture in captures {
-                require_slot(body.slots, capture.source)
-                if !manifest_contains_slot(manifest, capture.target) {
-                    panic("CoreHIR: lambda capture target is absent from manifest")
-                }
+                require_binder(body.binders, capture.source)
             }
         },
         CoreExprValue::BlockExprValue(block) =>
@@ -2213,18 +2186,18 @@ fn validate_expr_with_loop_depth(
         CoreExprValue::IfExprValue {
             condition, then_block, else_block
         } => {
-            require_slot(body.slots, condition)
+            validate_expr_with_loop_depth(condition, body, loop_depth)
             validate_block_with_loop_depth(then_block, body, loop_depth)
             validate_block_with_loop_depth(else_block, body, loop_depth)
         },
         CoreExprValue::MatchExprValue { scrutinee, arms } => {
-            require_slot(body.slots, scrutinee)
+            validate_expr_with_loop_depth(scrutinee, body, loop_depth)
             for arm in arms { validate_match_arm(arm, body, loop_depth) }
         },
         CoreExprValue::TryCatchExprValue {
             body: protected, error_slot, arms
         } => {
-            require_slot(body.slots, error_slot)
+            require_binder(body.binders, error_slot)
             validate_block_with_loop_depth(protected, body, loop_depth)
             for arm in arms { validate_match_arm(arm, body, loop_depth) }
         },
@@ -2234,23 +2207,6 @@ fn validate_expr_with_loop_depth(
             while index < handlers.len() {
                 let handler = handlers.get(index).unwrap()
                 validate_origin(handler.origin, body.reference)
-                if !executable_ref_same(
-                        handler.executable,
-                        binder_manifest_owner(handler.manifest)) {
-                    panic("CoreHIR: handler manifest drifted")
-                }
-                for parameter in handler.parameter_slots {
-                    if !manifest_contains_slot(handler.manifest, parameter) {
-                        panic("CoreHIR: handler parameter is absent from manifest")
-                    }
-                }
-                match handler.resume_slot {
-                    some(slot) => if !manifest_contains_slot(
-                            handler.manifest, slot) {
-                        panic("CoreHIR: handler resume slot is absent from manifest")
-                    },
-                    none => {}
-                }
                 let mut right_index = index + 1
                 while right_index < handlers.len() {
                     let right = handlers.get(right_index).unwrap()
@@ -2274,7 +2230,7 @@ fn validate_match_arm(
     value: CoreMatchArm, body: CoreBody, loop_depth: Int
 ) {
     validate_origin(value.origin, body.reference)
-    let _ = validate_pattern(value.pattern, body.slots, [])
+    let _ = validate_pattern(value.pattern, body.binders, [])
     match value.guard {
         some(guard) => validate_expr_with_loop_depth(
             guard, body, loop_depth),
@@ -2285,19 +2241,21 @@ fn validate_match_arm(
 
 fn validate_statement(value: CoreStmt, body: CoreBody, loop_depth: Int) {
     match value.value {
-        CoreStmtValue::Initialize { target, value: expr, origin } => {
+        CoreStmtValue::Bind { target, value: expr, origin, .. } => {
             validate_origin(origin, body.reference)
-            require_slot(body.slots, target)
+            require_binder(body.binders, target)
             validate_expr_with_loop_depth(expr, body, loop_depth)
         },
         CoreStmtValue::Assign { target, value: expr, origin } => {
             validate_origin(origin, body.reference)
             if core_place_is_slot(target) {
-                require_slot(body.slots, core_place_slot(target))
+                require_binder(body.binders, core_place_slot(target))
             } else {
-                require_slot(body.slots, core_place_base(target))
+                validate_expr_with_loop_depth(
+                    core_place_base(target), body, loop_depth)
                 match core_place_evaluated_index(target) {
-                    some(index) => require_slot(body.slots, index),
+                    some(index) => validate_expr_with_loop_depth(
+                        index, body, loop_depth),
                     none => {}
                 }
             }
@@ -2333,15 +2291,6 @@ fn validate_block_with_loop_depth(
     value: CoreBlock, body: CoreBody, loop_depth: Int
 ) {
     validate_origin(value.origin, body.reference)
-    let mut scope_found = false
-    for scope in body.scopes {
-        if flow_scope_ref_same(flow_scope_reference(scope), value.scope) {
-            scope_found = true
-        }
-    }
-    if !scope_found {
-        panic("CoreHIR: block scope is absent from body")
-    }
     for statement in value.statements {
         validate_statement(statement, body, loop_depth)
     }
@@ -2354,80 +2303,65 @@ fn validate_block(value: CoreBlock, body: CoreBody) {
     validate_block_with_loop_depth(value, body, 0)
 }
 
-pub fn make_core_body(
-    reference: ExecutableRef, origin: OriginRef, type_count: Int,
-    manifest: BinderManifest, scopes: List<FlowScope>, slots: List<CoreSlot>,
-    parameter_slots: List<SlotRef>, result_type: CoreTypeRef,
-    body: CoreBlock
-) -> CoreBody {
-    if type_count <= 0 || !type_ref_valid(result_type, type_count) {
-        panic("CoreHIR: body has no closed result type graph")
-    }
-    if !executable_ref_same(reference, binder_manifest_owner(manifest)) {
-        panic("CoreHIR: body executable/manifest identity differs")
-    }
-    if scopes.len() == 0 {
-        panic("CoreHIR: body has no exact scope table")
-    }
-    let mut scope_index = 0
-    while scope_index < scopes.len() {
-        let scope = flow_scope_reference(scopes.get(scope_index).unwrap())
-        if !executable_ref_same(flow_scope_ref_owner(scope), reference) ||
-           flow_scope_ref_ordinal(scope) != scope_index {
-            panic("CoreHIR: scope owner/order differs")
+pub fn validate_core_body(value: CoreBody) {
+    validate_origin(value.origin, value.reference)
+    let mut binder_index_value = 0
+    while binder_index_value < value.binders.len() {
+        let binder = value.binders.get(binder_index_value).unwrap()
+        if core_type_ref_index(binder.ty) < 0 {
+            panic("CoreHIR: binder has an invalid type")
         }
-        scope_index = scope_index + 1
-    }
-    let binders = binder_manifest_entries(manifest)
-    if binders.len() != slots.len() {
-        panic("CoreHIR: binder/typed-slot census differs")
-    }
-    let mut index = 0
-    while index < slots.len() {
-        let slot = slots.get(index).unwrap()
-        if !slot_ref_same(
-                slot.reference, binder_entry_slot(binders.get(index).unwrap())) ||
-           !type_ref_valid(slot.ty, type_count) {
-            panic("CoreHIR: typed slot order/type is invalid")
+        let entry = if slot_ref_is_source(binder.reference) {
+            make_source_binder_entry(
+                binder.reference, value.reference, binder.kind, binder.site)
+        } else {
+            make_synthetic_binder_entry(
+                binder.reference, value.reference, binder.kind, binder.site)
         }
-        let mut scope_found = false
-        for scope in scopes {
-            if flow_scope_ref_same(
-                    flow_scope_reference(scope), slot.scope) {
-                scope_found = true
-            }
+        if !slot_ref_same(binder_entry_slot(entry), binder.reference) ||
+           !path_ref_same(binder_entry_site(entry), binder.site) {
+            panic("CoreHIR: binder identity changed during validation")
         }
-        if !scope_found {
-            panic("CoreHIR: typed slot scope is absent")
-        }
-        let mut right_index = index + 1
-        while right_index < slots.len() {
+        let mut right_index = binder_index_value + 1
+        while right_index < value.binders.len() {
             if slot_ref_same(
-                    slot.reference, slots.get(right_index).unwrap().reference) {
-                panic("CoreHIR: body repeats a slot")
+                    binder.reference,
+                    value.binders.get(right_index).unwrap().reference) {
+                panic("CoreHIR: body repeats a semantic binder")
             }
             right_index = right_index + 1
         }
-        index = index + 1
+        binder_index_value = binder_index_value + 1
     }
     let mut parameter_index = 0
-    while parameter_index < parameter_slots.len() {
-        let parameter = parameter_slots.get(parameter_index).unwrap()
-        require_slot(slots, parameter)
+    while parameter_index < value.parameter_slots.len() {
+        let parameter = value.parameter_slots.get(parameter_index).unwrap()
+        require_binder(value.binders, parameter)
         let mut right_index = parameter_index + 1
-        while right_index < parameter_slots.len() {
+        while right_index < value.parameter_slots.len() {
             if slot_ref_same(
-                    parameter, parameter_slots.get(right_index).unwrap()) {
+                    parameter,
+                    value.parameter_slots.get(right_index).unwrap()) {
                 panic("CoreHIR: body repeats a parameter slot")
             }
             right_index = right_index + 1
         }
         parameter_index = parameter_index + 1
     }
+    validate_block(value.body, value)
+}
+
+pub fn make_core_body(
+    reference: ExecutableRef, origin: OriginRef,
+    binders: List<CoreBinder>, parameter_slots: List<SlotRef>,
+    result_type: CoreTypeRef, body: CoreBlock
+) -> CoreBody {
+    if core_type_ref_index(result_type) < 0 {
+        panic("CoreHIR: body has an invalid result type")
+    }
     let result = CoreBody {
-        reference: reference, origin: origin, type_count: type_count,
-        manifest: copy_manifest(manifest), scopes: copy_flow_scopes(scopes),
-        slots: copy_core_slots(slots),
+        reference: reference, origin: origin,
+        binders: copy_core_binders(binders),
         parameter_slots: copy_slot_refs(parameter_slots),
         result_type: result_type, body: body
     }
@@ -2435,26 +2369,10 @@ pub fn make_core_body(
     result
 }
 
-pub fn validate_core_body(value: CoreBody) {
-    validate_origin(value.origin, value.reference)
-    if !executable_ref_same(
-            value.reference, binder_manifest_owner(value.manifest)) {
-        panic("CoreHIR: body manifest identity drifted")
-    }
-    validate_block(value.body, value)
-}
-
 pub fn core_body_reference(value: CoreBody) -> ExecutableRef { value.reference }
 pub fn core_body_origin(value: CoreBody) -> OriginRef { value.origin }
-pub fn core_body_type_count(value: CoreBody) -> Int { value.type_count }
-pub fn core_body_manifest(value: CoreBody) -> BinderManifest {
-    copy_manifest(value.manifest)
-}
-pub fn core_body_scopes(value: CoreBody) -> List<FlowScope> {
-    copy_flow_scopes(value.scopes)
-}
-pub fn core_body_slots(value: CoreBody) -> List<CoreSlot> {
-    copy_core_slots(value.slots)
+pub fn core_body_binders(value: CoreBody) -> List<CoreBinder> {
+    copy_core_binders(value.binders)
 }
 pub fn core_body_parameter_slots(value: CoreBody) -> List<SlotRef> {
     copy_slot_refs(value.parameter_slots)
@@ -2467,13 +2385,34 @@ fn collect_expr_effect_sets(
 ) {
     result.push(make_core_effect_set(value.effects.atoms))
     match value.value {
+        CoreExprValue::PrimitiveExprValue { operands, .. } => {
+            for operand in operands { collect_expr_effect_sets(operand, result) }
+        },
+        CoreExprValue::CallExprValue { arguments, .. } |
+        CoreExprValue::EffectCallExprValue { arguments, .. } |
+        CoreExprValue::SystemCallExprValue { arguments, .. } => {
+            for argument in arguments { collect_expr_effect_sets(argument, result) }
+        },
+        CoreExprValue::MethodCallExprValue { receiver, arguments, .. } => {
+            collect_expr_effect_sets(receiver, result)
+            for argument in arguments { collect_expr_effect_sets(argument, result) }
+        },
+        CoreExprValue::DictProjectExprValue { dictionary, .. } =>
+            collect_expr_effect_sets(dictionary, result),
+        CoreExprValue::ProjectExprValue { base, .. } =>
+            collect_expr_effect_sets(base, result),
+        CoreExprValue::ConstructExprValue { fields, .. } => {
+            for field in fields { collect_expr_effect_sets(field.value, result) }
+        },
         CoreExprValue::BlockExprValue(block) =>
             collect_block_effect_sets(block, result),
-        CoreExprValue::IfExprValue { then_block, else_block, .. } => {
+        CoreExprValue::IfExprValue { condition, then_block, else_block } => {
+            collect_expr_effect_sets(condition, result)
             collect_block_effect_sets(then_block, result)
             collect_block_effect_sets(else_block, result)
         },
-        CoreExprValue::MatchExprValue { arms, .. } => {
+        CoreExprValue::MatchExprValue { scrutinee, arms } => {
+            collect_expr_effect_sets(scrutinee, result)
             for arm in arms {
                 match arm.guard {
                     some(guard) => collect_expr_effect_sets(guard, result),
@@ -2502,10 +2441,19 @@ fn collect_statement_effect_sets(
     value: CoreStmt, mut result: List<CoreEffectSet>
 ) {
     match value.value {
-        CoreStmtValue::Initialize { value: expr, .. } |
-        CoreStmtValue::Assign { value: expr, .. } |
+        CoreStmtValue::Bind { value: expr, .. } |
         CoreStmtValue::ExprStmt { value: expr, .. } =>
             collect_expr_effect_sets(expr, result),
+        CoreStmtValue::Assign { target, value: expr, .. } => {
+            if !core_place_is_slot(target) {
+                collect_expr_effect_sets(core_place_base(target), result)
+                match core_place_evaluated_index(target) {
+                    some(index) => collect_expr_effect_sets(index, result),
+                    none => {}
+                }
+            }
+            collect_expr_effect_sets(expr, result)
+        },
         CoreStmtValue::While { condition, body, .. } => {
             collect_expr_effect_sets(condition, result)
             collect_block_effect_sets(body, result)
@@ -2601,7 +2549,12 @@ fn remap_core_place(
         CorePlaceRefValue::CoreProjectPlaceValue {
             base, field, evaluated_index, value_type
         } => make_core_project_place(
-            base, field, evaluated_index,
+            remap_core_expr_types(base, mapping, module_key), field,
+            match evaluated_index {
+                some(index) => some(remap_core_expr_types(
+                    index, mapping, module_key)),
+                none => none
+            },
             remap_core_type_reference(value_type, mapping, module_key))
     }
 }
@@ -2647,7 +2600,7 @@ fn remap_core_block_types(
                 tail, mapping, module_key)),
             none => none
         },
-        value.origin, value.scope)
+        value.origin)
 }
 
 fn remap_core_match_arm_types(
@@ -2677,12 +2630,16 @@ fn remap_core_expr_types(
             CoreExprValue::ReadExprValue(source),
         CoreExprValue::PrimitiveExprValue { operation, operands } =>
             CoreExprValue::PrimitiveExprValue {
-                operation: operation, operands: copy_slot_refs(operands)
+                operation: operation, operands: operands.map(fn(operand) {
+                    remap_core_expr_types(operand, mapping, module_key)
+                })
             },
         CoreExprValue::CallExprValue { callee, arguments, evidence } =>
             CoreExprValue::CallExprValue {
                 callee: remap_core_callee(callee, mapping, module_key),
-                arguments: copy_slot_refs(arguments),
+                arguments: arguments.map(fn(argument) {
+                    remap_core_expr_types(argument, mapping, module_key)
+                }),
                 evidence: copy_evidence(evidence)
             },
         CoreExprValue::MethodCallExprValue {
@@ -2690,18 +2647,25 @@ fn remap_core_expr_types(
         } => CoreExprValue::MethodCallExprValue {
             callee: remap_core_callee(callee, mapping, module_key),
             method: method,
-            receiver: receiver, arguments: copy_slot_refs(arguments),
+            receiver: remap_core_expr_types(receiver, mapping, module_key),
+            arguments: arguments.map(fn(argument) {
+                remap_core_expr_types(argument, mapping, module_key)
+            }),
             evidence: copy_evidence(evidence)
         },
         CoreExprValue::EffectCallExprValue {
             operation, arguments, evidence
         } => CoreExprValue::EffectCallExprValue {
-            operation: operation, arguments: copy_slot_refs(arguments),
+            operation: operation, arguments: arguments.map(fn(argument) {
+                remap_core_expr_types(argument, mapping, module_key)
+            }),
             evidence: copy_evidence(evidence)
         },
         CoreExprValue::SystemCallExprValue { host, arguments } =>
             CoreExprValue::SystemCallExprValue {
-                host: host, arguments: copy_slot_refs(arguments)
+                host: host, arguments: arguments.map(fn(argument) {
+                    remap_core_expr_types(argument, mapping, module_key)
+                })
             },
         CoreExprValue::DictConstructExprValue { constructor, evidence } =>
             CoreExprValue::DictConstructExprValue {
@@ -2709,20 +2673,25 @@ fn remap_core_expr_types(
             },
         CoreExprValue::DictProjectExprValue { dictionary, method } =>
             CoreExprValue::DictProjectExprValue {
-                dictionary: dictionary, method: method
+                dictionary: remap_core_expr_types(
+                    dictionary, mapping, module_key), method: method
             },
         CoreExprValue::ProjectExprValue { base, field, partial } =>
             CoreExprValue::ProjectExprValue {
-                base: base, field: field, partial: partial
+                base: remap_core_expr_types(base, mapping, module_key),
+                field: field, partial: partial
             },
         CoreExprValue::ConstructExprValue { constructor, fields } =>
             CoreExprValue::ConstructExprValue {
-                constructor: constructor, fields: copy_field_values(fields)
+                constructor: constructor, fields: fields.map(fn(field) {
+                    make_core_field_value(
+                        field.field, remap_core_expr_types(
+                            field.value, mapping, module_key))
+                })
             },
-        CoreExprValue::LambdaExprValue {
-            executable, manifest, captures
-        } => CoreExprValue::LambdaExprValue {
-            executable: executable, manifest: copy_manifest(manifest),
+        CoreExprValue::LambdaExprValue { executable, captures } =>
+            CoreExprValue::LambdaExprValue {
+            executable: executable,
             captures: copy_captures(captures)
         },
         CoreExprValue::BlockExprValue(block) =>
@@ -2731,7 +2700,8 @@ fn remap_core_expr_types(
         CoreExprValue::IfExprValue {
             condition, then_block, else_block
         } => CoreExprValue::IfExprValue {
-            condition: condition,
+            condition: remap_core_expr_types(
+                condition, mapping, module_key),
             then_block: remap_core_block_types(
                 then_block, mapping, module_key),
             else_block: remap_core_block_types(
@@ -2739,7 +2709,8 @@ fn remap_core_expr_types(
         },
         CoreExprValue::MatchExprValue { scrutinee, arms } =>
             CoreExprValue::MatchExprValue {
-                scrutinee: scrutinee,
+                scrutinee: remap_core_expr_types(
+                    scrutinee, mapping, module_key),
                 arms: arms.map(fn(arm) {
                     remap_core_match_arm_types(arm, mapping, module_key)
                 })
@@ -2758,16 +2729,18 @@ fn remap_core_expr_types(
                 handlers: copy_handler_entries(handlers)
             }
     }
-    make_core_expr(value.result, ty, effects, value.origin, payload)
+    make_core_expr(ty, effects, value.origin, payload)
 }
 
 fn remap_core_statement_types(
     value: CoreStmt, mapping: List<Int>, module_key: Str
 ) -> CoreStmt {
     match value.value {
-        CoreStmtValue::Initialize { target, value: expr, origin } =>
-            make_core_initialize_stmt(
-                target, remap_core_expr_types(expr, mapping, module_key), origin),
+        CoreStmtValue::Bind {
+            target, value: expr, is_mutable, origin
+        } => make_core_bind_stmt(
+            target, remap_core_expr_types(expr, mapping, module_key),
+            is_mutable, origin),
         CoreStmtValue::Assign { target, value: expr, origin } =>
             make_core_assign_stmt(
                 remap_core_place(target, mapping, module_key),
@@ -2819,18 +2792,16 @@ pub fn remap_core_impl_types(
 }
 
 pub fn remap_core_body_types(
-    value: CoreBody, mapping: List<Int>, project_type_count: Int,
-    module_key: Str
+    value: CoreBody, mapping: List<Int>, module_key: Str
 ) -> CoreBody {
     make_core_body(
-        value.reference, value.origin, project_type_count,
-        value.manifest, value.scopes,
-        value.slots.map(fn(slot) {
-            make_core_slot(
-                slot.reference,
-                remap_core_type_reference(slot.ty, mapping, module_key),
-                slot.scope, slot.reverse_ordinal, slot.initial_state,
-                slot.storage, slot.storage_contract, slot.parameter_ordinal)
+        value.reference, value.origin,
+        value.binders.map(fn(binder) {
+            make_core_binder(
+                binder.reference,
+                remap_core_type_reference(binder.ty, mapping, module_key),
+                binder.kind, binder.site, binder.storage_contract,
+                binder.is_mutable)
         }),
         value.parameter_slots,
         remap_core_type_reference(value.result_type, mapping, module_key),
@@ -2860,21 +2831,20 @@ pub fn validate_core_impl_type_domain(
         value, identity_type_mapping(type_count), module_key)
 }
 pub fn validate_core_body_type_domain(
-    value: CoreBody, module_key: Str
+    value: CoreBody, type_count: Int, module_key: Str
 ) {
     let _ = remap_core_body_types(
-        value, identity_type_mapping(value.type_count),
-        value.type_count, module_key)
+        value, identity_type_mapping(type_count), module_key)
 }
 
 // ============================================================
 // Collection-complete CoreProgram validation
 // ============================================================
 
-fn core_slot_type_for(value: CoreBody, slot: SlotRef) -> CoreTypeRef {
-    match slot_index(value.slots, slot) {
-        some(index) => core_slot_type(value.slots.get(index).unwrap()),
-        none => panic("CoreHIR: program validation found an absent slot")
+fn core_binder_type_for(value: CoreBody, slot: SlotRef) -> CoreTypeRef {
+    match binder_index(value.binders, slot) {
+        some(index) => value.binders.get(index).unwrap().ty,
+        none => panic("CoreHIR: program validation found an absent binder")
     }
 }
 
@@ -2947,11 +2917,11 @@ fn validate_evidence_count(
     if evidence.len() != contract.evidence_requirements.len() {
         panic("CoreHIR: call evidence census differs from exact contract")
     }
-    validate_evidence(evidence, body.slots)
+    validate_evidence(evidence, body.binders)
 }
 
 fn validate_call_signature(
-    callee: CoreCalleeRef, arguments: List<SlotRef>, result_type: CoreTypeRef,
+    callee: CoreCalleeRef, arguments: List<CoreExpr>, result_type: CoreTypeRef,
     evidence: List<CoreEvidenceRef>, body: CoreBody,
     graph: CoreTypeGraph, callables: List<CoreCallableContract>
 ) {
@@ -2961,7 +2931,7 @@ fn validate_call_signature(
     }
     let mut index = 0
     while index < arguments.len() {
-        if core_slot_type_for(body, arguments.get(index).unwrap()).index !=
+        if core_expr_type(arguments.get(index).unwrap()).index !=
            flow_type_ref_index(flow_parameters.get(index).unwrap()) {
             panic("CoreHIR: call argument type differs from exact contract")
         }
@@ -2980,15 +2950,15 @@ fn validate_call_signature(
         validate_evidence_count(evidence, candidate, body)
     } else if callee.kind == CORE_CALLEE_LOCAL {
         let callable_ty = core_type_graph_node(
-            graph, core_slot_type_for(body, core_callee_local(callee)))
+            graph, core_binder_type_for(body, core_callee_local(callee)))
         if flow_type_kind_tag(flow_type_node_kind(callable_ty)) !=
            flow_type_kind_tag(flow_type_kind_callable()) ||
            flow_type_node_parameter_count(callable_ty) != arguments.len() {
             panic("CoreHIR: local callee slot is not exact callable type")
         }
-        validate_evidence(evidence, body.slots)
+        validate_evidence(evidence, body.binders)
     } else if callee.kind == CORE_CALLEE_DYNAMIC {
-        validate_evidence(evidence, body.slots)
+        validate_evidence(evidence, body.binders)
     } else {
         panic("CoreHIR: unknown callee identity form")
     }
@@ -3030,7 +3000,7 @@ fn validate_core_literal_type(
 }
 
 fn validate_core_primitive_signature(
-    operation: CorePrimitiveOp, operands: List<SlotRef>,
+    operation: CorePrimitiveOp, operands: List<CoreExpr>,
     result_type: CoreTypeRef, body: CoreBody, graph: CoreTypeGraph
 ) {
     let tag = core_primitive_op_tag(operation)
@@ -3039,14 +3009,13 @@ fn validate_core_primitive_signature(
             panic("CoreHIR: negate arity differs")
         }
         require_core_type_same(
-            core_slot_type_for(body, operands.get(0).unwrap()), result_type,
+            core_expr_type(operands.get(0).unwrap()), result_type,
             "CoreHIR: negate input/result type differs")
     } else if tag == CORE_PRIMITIVE_NOT {
         if operands.len() != 1 ||
            type_kind(graph, result_type) !=
                 flow_type_kind_tag(flow_type_kind_bool()) ||
-           type_kind(graph, core_slot_type_for(
-                body, operands.get(0).unwrap())) !=
+           type_kind(graph, core_expr_type(operands.get(0).unwrap())) !=
                 flow_type_kind_tag(flow_type_kind_bool()) {
             panic("CoreHIR: not signature differs")
         }
@@ -3054,8 +3023,8 @@ fn validate_core_primitive_signature(
         if operands.len() != 2 {
             panic("CoreHIR: binary primitive arity differs")
         }
-        let left = core_slot_type_for(body, operands.get(0).unwrap())
-        let right = core_slot_type_for(body, operands.get(1).unwrap())
+        let left = core_expr_type(operands.get(0).unwrap())
+        let right = core_expr_type(operands.get(1).unwrap())
         require_core_type_same(
             left, right, "CoreHIR: binary operand types differ")
         if tag >= CORE_PRIMITIVE_LT && tag <= CORE_PRIMITIVE_GE {
@@ -3100,7 +3069,7 @@ fn validate_field_sequence(
         let fact = expected.get(index).unwrap()
         if !core_field_matches_flow(
                 actual.field, flow_nominal_field_identity(fact)) ||
-           core_slot_type_for(body, actual.value).index !=
+           core_expr_type(actual.value).index !=
                 flow_type_ref_index(flow_nominal_field_type(fact)) {
             panic("CoreHIR: constructor field identity/type order differs")
         }
@@ -3159,7 +3128,7 @@ fn validate_construct_with_graph(
                     },
                     _ => panic("CoreHIR: tuple constructor field identity differs")
                 }
-                if core_slot_type_for(body, field.value).index !=
+                if core_expr_type(field.value).index !=
                    flow_type_ref_index(children.get(index).unwrap()) {
                     panic("CoreHIR: tuple constructor field type differs")
                 }
@@ -3189,7 +3158,7 @@ fn validate_pattern_with_graph(
     match pattern.value {
         CorePatternValue::WildcardPatternValue => {},
         CorePatternValue::BindingPatternValue(slot) => require_core_type_same(
-            core_slot_type_for(body, slot), pattern.ty,
+            core_binder_type_for(body, slot), pattern.ty,
             "CoreHIR: pattern binding type differs"),
         CorePatternValue::LiteralPatternValue(literal) =>
             validate_core_literal_type(literal, pattern.ty, graph),
@@ -3303,9 +3272,9 @@ fn core_place_type(
     place: CorePlaceRef, body: CoreBody, graph: CoreTypeGraph
 ) -> CoreTypeRef {
     if core_place_is_slot(place) {
-        return core_slot_type_for(body, core_place_slot(place))
+        return core_binder_type_for(body, core_place_slot(place))
     }
-    let base_type = core_slot_type_for(body, core_place_base(place))
+    let base_type = core_expr_type(core_place_base(place))
     let expected = match core_place_field(place) {
         some(field) => projection_result_type(field, base_type, graph),
         none => {
@@ -3313,7 +3282,7 @@ fn core_place_type(
                 some(value) => value,
                 none => panic("CoreHIR: indexed place has no index slot")
             }
-            if type_kind(graph, core_slot_type_for(body, index)) !=
+            if type_kind(graph, core_expr_type(index)) !=
                flow_type_kind_tag(flow_type_kind_int()) {
                 panic("CoreHIR: place index is not Int")
             }
@@ -3385,9 +3354,6 @@ fn validate_expr_with_program(
     current_callable: CoreCallableContract, loop_depth: Int
 ) {
     validate_expr_with_loop_depth(value, body, loop_depth)
-    require_core_type_same(
-        core_slot_type_for(body, value.result), value.ty,
-        "CoreHIR: expression result slot/type differs")
     let _ = core_type_graph_node(graph, value.ty)
     match value.value {
         CoreExprValue::LiteralExprValue(literal) =>
@@ -3417,21 +3383,41 @@ fn validate_expr_with_program(
             }
         },
         CoreExprValue::ReadExprValue(source) => require_core_type_same(
-            core_slot_type_for(body, source), value.ty,
+            core_binder_type_for(body, source), value.ty,
             "CoreHIR: Read source/result type differs"),
-        CoreExprValue::PrimitiveExprValue { operation, operands } =>
+        CoreExprValue::PrimitiveExprValue { operation, operands } => {
+            for operand in operands {
+                validate_expr_with_program(
+                    operand, body, graph, callables,
+                    current_callable, loop_depth)
+            }
             validate_core_primitive_signature(
-                operation, operands, value.ty, body, graph),
-        CoreExprValue::CallExprValue { callee, arguments, evidence } =>
+                operation, operands, value.ty, body, graph)
+        },
+        CoreExprValue::CallExprValue { callee, arguments, evidence } => {
+            for argument in arguments {
+                validate_expr_with_program(
+                    argument, body, graph, callables,
+                    current_callable, loop_depth)
+            }
             validate_call_signature(
                 callee, arguments, value.ty, evidence,
-                body, graph, callables),
+                body, graph, callables)
+        },
         CoreExprValue::MethodCallExprValue {
             callee, method, receiver, arguments, evidence
         } => {
             validate_method_call_identity(method, callee, evidence)
-            let mut all_arguments: List<SlotRef> = [receiver]
-            for argument in arguments { all_arguments.push(argument) }
+            validate_expr_with_program(
+                receiver, body, graph, callables,
+                current_callable, loop_depth)
+            let mut all_arguments: List<CoreExpr> = [receiver]
+            for argument in arguments {
+                validate_expr_with_program(
+                    argument, body, graph, callables,
+                    current_callable, loop_depth)
+                all_arguments.push(argument)
+            }
             validate_call_signature(
                 callee, all_arguments, value.ty, evidence,
                 body, graph, callables)
@@ -3439,6 +3425,11 @@ fn validate_expr_with_program(
         CoreExprValue::EffectCallExprValue {
             operation, arguments, evidence
         } => {
+            for argument in arguments {
+                validate_expr_with_program(
+                    argument, body, graph, callables,
+                    current_callable, loop_depth)
+            }
             let callable = core_callable_for(
                 callables, effect_operation_ref_callable(operation))
             validate_call_signature(
@@ -3461,6 +3452,11 @@ fn validate_expr_with_program(
             }
         },
         CoreExprValue::SystemCallExprValue { host, arguments } => {
+            for argument in arguments {
+                validate_expr_with_program(
+                    argument, body, graph, callables,
+                    current_callable, loop_depth)
+            }
             let callable = core_callable_for(
                 callables, system_host_callable_executable(host))
             if callable.evidence_requirements.len() != 0 {
@@ -3493,18 +3489,30 @@ fn validate_expr_with_program(
                 [], value.ty, evidence, body, graph, callables)
         },
         CoreExprValue::DictProjectExprValue { dictionary, method } => {
+            validate_expr_with_program(
+                dictionary, body, graph, callables,
+                current_callable, loop_depth)
             let callable = core_callable_for(callables, method)
             validate_call_signature(
                 make_core_direct_callee(
                     callable.reference, callable.semantic_contract),
                 [dictionary], value.ty, [], body, graph, callables)
         },
-        CoreExprValue::ProjectExprValue { base, field, .. } =>
+        CoreExprValue::ProjectExprValue { base, field, .. } => {
+            validate_expr_with_program(
+                base, body, graph, callables,
+                current_callable, loop_depth)
             require_core_type_same(
                 projection_result_type(
-                    field, core_slot_type_for(body, base), graph),
-                value.ty, "CoreHIR: projection result type differs"),
+                    field, core_expr_type(base), graph),
+                value.ty, "CoreHIR: projection result type differs")
+        },
         CoreExprValue::ConstructExprValue { constructor, fields } => {
+            for field in fields {
+                validate_expr_with_program(
+                    field.value, body, graph, callables,
+                    current_callable, loop_depth)
+            }
             validate_construct_with_graph(
                 constructor, fields, value.ty, body, graph)
             match constructor.executable {
@@ -3531,7 +3539,10 @@ fn validate_expr_with_program(
         CoreExprValue::IfExprValue {
             condition, then_block, else_block
         } => {
-            if type_kind(graph, core_slot_type_for(body, condition)) !=
+            validate_expr_with_program(
+                condition, body, graph, callables,
+                current_callable, loop_depth)
+            if type_kind(graph, core_expr_type(condition)) !=
                flow_type_kind_tag(flow_type_kind_bool()) {
                 panic("CoreHIR: If condition is not Bool")
             }
@@ -3545,7 +3556,10 @@ fn validate_expr_with_program(
             require_block_result_type(else_block, value.ty, graph)
         },
         CoreExprValue::MatchExprValue { scrutinee, arms } => {
-            let scrutinee_type = core_slot_type_for(body, scrutinee)
+            validate_expr_with_program(
+                scrutinee, body, graph, callables,
+                current_callable, loop_depth)
+            let scrutinee_type = core_expr_type(scrutinee)
             for arm in arms {
                 validate_pattern_with_graph(
                     arm.pattern, scrutinee_type, body, graph)
@@ -3574,7 +3588,7 @@ fn validate_expr_with_program(
                 protected, body, graph, callables,
                 current_callable, loop_depth)
             require_block_result_type(protected, value.ty, graph)
-            let error_type = core_slot_type_for(body, error_slot)
+            let error_type = core_binder_type_for(body, error_slot)
             for arm in arms {
                 validate_pattern_with_graph(
                     arm.pattern, error_type, body, graph)
@@ -3612,17 +3626,25 @@ fn validate_statement_with_program(
 ) {
     validate_statement(value, body, loop_depth)
     match value.value {
-        CoreStmtValue::Initialize { target, value: expr, .. } => {
+        CoreStmtValue::Bind { target, value: expr, .. } => {
             validate_expr_with_program(
                 expr, body, graph, callables, current_callable, loop_depth)
             require_core_type_same(
-                core_slot_type_for(body, target), expr.ty,
-                "CoreHIR: Initialize target/value type differs")
-            if !slot_ref_same(target, expr.result) {
-                panic("CoreHIR: Initialize result is not target slot")
-            }
+                core_binder_type_for(body, target), expr.ty,
+                "CoreHIR: Bind target/value type differs")
         },
         CoreStmtValue::Assign { target, value: expr, .. } => {
+            if !core_place_is_slot(target) {
+                validate_expr_with_program(
+                    core_place_base(target), body, graph, callables,
+                    current_callable, loop_depth)
+                match core_place_evaluated_index(target) {
+                    some(index) => validate_expr_with_program(
+                        index, body, graph, callables,
+                        current_callable, loop_depth),
+                    none => {}
+                }
+            }
             validate_expr_with_program(
                 expr, body, graph, callables, current_callable, loop_depth)
             require_core_type_same(
@@ -3688,8 +3710,7 @@ pub fn validate_core_body_with_program(
     current_callable: CoreCallableContract
 ) {
     validate_core_body(value)
-    if value.type_count != core_type_graph_count(graph) ||
-       !executable_ref_same(value.reference, current_callable.reference) ||
+    if !executable_ref_same(value.reference, current_callable.reference) ||
        !origin_ref_same(value.origin, current_callable.origin) ||
        !core_type_ref_same(value.result_type, current_callable.result_type) ||
        value.parameter_slots.len() != current_callable.parameter_slots.len() {
@@ -3701,7 +3722,7 @@ pub fn validate_core_body_with_program(
                 value.parameter_slots.get(index).unwrap(),
                 current_callable.parameter_slots.get(index).unwrap()) ||
            !core_type_ref_same(
-                core_slot_type_for(
+                core_binder_type_for(
                     value, value.parameter_slots.get(index).unwrap()),
                 current_callable.parameter_types.get(index).unwrap()) {
             panic("CoreHIR: body parameter slot/type order differs")

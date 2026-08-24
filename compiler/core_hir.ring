@@ -11,7 +11,6 @@ use ir_identity::{
 }
 use ir_inventory::{
     ExecutableRef, ExecutableInventory,
-    BinderManifest, IrInventoryClosure,
     executable_ref_same,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_entry_reference, executable_entry_contract,
@@ -20,9 +19,7 @@ use ir_inventory::{
     executable_contract_mode_contract_only,
     executable_contract_body_path,
     executable_inventory_entries,
-    close_ir_inventory,
-    ir_inventory_closure_inventory,
-    ir_inventory_closure_manifests}
+    make_executable_inventory}
 use core_expr::{
     CoreBody, CoreTypeGraph, CoreCallableContract, CoreImplMetadata,
     validate_core_body, validate_core_callable_contracts,
@@ -199,7 +196,7 @@ fn validate_core_impls(
 }
 
 pub struct CoreProgram {
-    closure: IrInventoryClosure,
+    inventory: ExecutableInventory,
     type_graph: CoreTypeGraph,
     callables: List<CoreCallableContract>,
     impls: List<CoreImplMetadata>,
@@ -210,10 +207,10 @@ pub fn make_core_program(
     type_graph: CoreTypeGraph,
     callables: List<CoreCallableContract>,
     impls: List<CoreImplMetadata>, bodies: List<CoreBodyEntry>,
-    inventory: ExecutableInventory, manifests: List<BinderManifest>
+    inventory: ExecutableInventory
 ) -> CoreProgram {
-    let closure = close_ir_inventory(inventory, manifests)
-    let closed_inventory = ir_inventory_closure_inventory(closure)
+    let closed_inventory = make_executable_inventory(
+        executable_inventory_entries(inventory))
     let closed_callables = copy_core_callables(callables)
     validate_core_callable_contracts(type_graph, closed_callables)
     validate_core_callable_inventory(closed_callables, closed_inventory)
@@ -231,7 +228,7 @@ pub fn make_core_program(
     }
     validate_core_impls(impls, type_graph, closed_callables)
     CoreProgram {
-        closure: closure,
+        inventory: closed_inventory,
         type_graph: make_core_type_graph(core_type_graph_nodes(type_graph)),
         callables: copy_core_callables(closed_callables),
         impls: copy_core_impl_metadata(impls),
@@ -267,9 +264,5 @@ pub fn core_program_impls(value: CoreProgram) -> List<CoreImplMetadata> {
 }
 
 pub fn core_program_inventory(value: CoreProgram) -> ExecutableInventory {
-    ir_inventory_closure_inventory(value.closure)
-}
-
-pub fn core_program_manifests(value: CoreProgram) -> List<BinderManifest> {
-    ir_inventory_closure_manifests(value.closure)
+    make_executable_inventory(executable_inventory_entries(value.inventory))
 }
