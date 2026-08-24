@@ -24,12 +24,15 @@ use core_hir::{
 use flow_ir::{
     FlowProgram,
     flow_program_type_nodes, flow_program_callables, flow_program_bodies,
+    flow_program_topology_fingerprint,
+    flow_topology_fingerprint_canonical,
     flow_callable_reference, flow_callable_origin,
     flow_body_reference, flow_body_origin}
 use flow_lower::{lower_core_to_flow}
 use resource_planner::{
     VerifiedResourceProgram,
-    verify_and_plan_resource_program}
+    verify_and_plan_resource_program,
+    verified_resource_program_flow_fingerprint}
 
 fn validate_nonempty_core(value: CoreProgram) {
     let types = core_type_graph_count(core_program_type_graph(value))
@@ -98,9 +101,30 @@ fn validate_core_flow_relation(core: CoreProgram, flow: FlowProgram) {
     }
 }
 
+// Opaque bridge result.  Keeping all three exact stage values together makes
+// it impossible for a downstream adapter to pair verified RcIR with a
+// different Core/Flow program or to invoke Core->Flow lowering a second time.
+pub struct VerifiedOwnershipProgram {
+    core: CoreProgram,
+    flow: FlowProgram,
+    resources: VerifiedResourceProgram
+}
+
+pub fn verified_ownership_program_core(
+    value: VerifiedOwnershipProgram
+) -> CoreProgram { value.core }
+
+pub fn verified_ownership_program_flow(
+    value: VerifiedOwnershipProgram
+) -> FlowProgram { value.flow }
+
+pub fn verified_ownership_program_resources(
+    value: VerifiedOwnershipProgram
+) -> VerifiedResourceProgram { value.resources }
+
 pub fn run_ownership_pipeline(
     core: CoreProgram
-) -> VerifiedResourceProgram {
+) -> VerifiedOwnershipProgram {
     // Re-enter the sole Core closure constructor instead of trusting a copied
     // field or adding a second validator authority.
     let validated_core = make_core_program(
@@ -114,6 +138,16 @@ pub fn run_ownership_pipeline(
 
     let flow = lower_core_to_flow(validated_core)
     validate_core_flow_relation(validated_core, flow)
-    verify_and_plan_resource_program(flow)
+    let resources = verify_and_plan_resource_program(flow)
+    let flow_fingerprint = flow_topology_fingerprint_canonical(
+        flow_program_topology_fingerprint(flow))
+    if verified_resource_program_flow_fingerprint(resources) !=
+       flow_fingerprint {
+        panic("ownership pipeline: verified resources bind another FlowProgram")
+    }
+    VerifiedOwnershipProgram {
+        core: validated_core,
+        flow: flow,
+        resources: resources
+    }
 }
-
