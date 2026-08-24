@@ -930,7 +930,6 @@ fn emit_simple_expr(
     continue_target: FlowBlockRef?, break_target: FlowBlockRef?
 ) -> Bool {
     let kind = core_expr_kind_tag(expr)
-    let reference = next_instruction_ref(ctx)
     let origin = core_expr_origin(expr)
     let result_type = core_type_ref_to_flow(core_expr_type(expr))
     if kind == 0 {
@@ -948,14 +947,15 @@ fn emit_simple_expr(
             make_flow_unit_literal_contract(result_type)
         }
         emit_instruction(ctx, make_flow_initialize(
-            reference, origin, contract, [], result),
+            next_instruction_ref(ctx), origin, contract, [], result),
             core_flow_role_expr_primary())
         return true
     }
     if kind == 1 {
         let _ = frozen_slot_type_at(ctx, core_expr_read_source(expr))
         emit_instruction(ctx, make_flow_read(
-            reference, origin, core_expr_read_source(expr), result),
+            next_instruction_ref(ctx), origin,
+            core_expr_read_source(expr), result),
             core_flow_role_expr_primary())
         return true
     }
@@ -975,7 +975,7 @@ fn emit_simple_expr(
             result_type, flow_semantic_role_read(),
             make_fresh_flow_value_origin())
         emit_instruction(ctx, make_flow_initialize(
-            reference, origin, contract, operands, result),
+            next_instruction_ref(ctx), origin, contract, operands, result),
             core_flow_role_expr_primary())
         return true
     }
@@ -1002,7 +1002,8 @@ fn emit_simple_expr(
             }
         }
         emit_instruction(ctx, make_flow_call(
-            reference, origin, flow_call_target(callee), arguments,
+            next_instruction_ref(ctx), origin,
+            flow_call_target(callee), arguments,
             evidence, some(result)), core_flow_role_expr_primary())
         return true
     }
@@ -1016,7 +1017,7 @@ fn emit_simple_expr(
             ctx, effect_operation_ref_callable(
                 core_expr_effect_operation(expr)))
         emit_instruction(ctx, make_flow_call(
-            reference, origin,
+            next_instruction_ref(ctx), origin,
             make_direct_flow_call_target(
                 core_callable_reference(callable),
                 core_callable_semantic_contract(callable)),
@@ -1034,7 +1035,7 @@ fn emit_simple_expr(
         let callable = callable_for(
             ctx, system_host_callable_executable(core_expr_system_host(expr)))
         emit_instruction(ctx, make_flow_call(
-            reference, origin,
+            next_instruction_ref(ctx), origin,
             make_direct_flow_call_target(
                 core_callable_reference(callable),
                 core_callable_semantic_contract(callable)),
@@ -1054,7 +1055,7 @@ fn emit_simple_expr(
                 continue_target, break_target)]
         }
         emit_instruction(ctx, make_flow_call(
-            reference, origin,
+            next_instruction_ref(ctx), origin,
             make_direct_flow_call_target(
                 executable, core_callable_semantic_contract(callable)),
             arguments,
@@ -1089,7 +1090,7 @@ fn emit_simple_expr(
                 flow_semantic_role_read(), partial)
         }
         emit_instruction(ctx, make_flow_project(
-            reference, origin, contract, base, result),
+            next_instruction_ref(ctx), origin, contract, base, result),
             core_flow_role_expr_primary())
         return true
     }
@@ -1128,7 +1129,7 @@ fn emit_simple_expr(
             }
         }
         emit_instruction(ctx, make_flow_initialize(
-            reference, origin, contract, inputs, result),
+            next_instruction_ref(ctx), origin, contract, inputs, result),
             core_flow_role_expr_primary())
         return true
     }
@@ -1144,7 +1145,7 @@ fn emit_simple_expr(
             repeated_role(captures.len(), flow_semantic_role_read()),
             result_type)
         emit_instruction(ctx, make_flow_initialize(
-            reference, origin, contract, captures, result),
+            next_instruction_ref(ctx), origin, contract, captures, result),
             core_flow_role_expr_primary())
         return true
     }
@@ -1152,7 +1153,7 @@ fn emit_simple_expr(
         let executable = core_expr_callable_executable(expr)
         let _ = callable_for(ctx, executable)
         emit_instruction(ctx, make_flow_initialize(
-            reference, origin,
+            next_instruction_ref(ctx), origin,
             make_flow_callable_value_contract(executable, result_type),
             [], result), core_flow_role_expr_primary())
         return true
