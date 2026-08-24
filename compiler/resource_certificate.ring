@@ -469,7 +469,8 @@ const SLOT_REASON_ASSIGN_SCALAR: Int = 10
 const SLOT_REASON_CALL_RESULT: Int = 11
 const SLOT_REASON_JOIN: Int = 12
 const SLOT_REASON_SCOPE_END: Int = 13
-const SLOT_REASON_COUNT: Int = 14
+const SLOT_REASON_DROP_PROJECTED_OLD: Int = 14
+const SLOT_REASON_COUNT: Int = 15
 
 pub struct SlotTransitionReason { tag: Int }
 
@@ -498,6 +499,9 @@ pub fn slot_reason_assign_scalar() -> SlotTransitionReason { slot_transition_rea
 pub fn slot_reason_call_result() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_CALL_RESULT) }
 pub fn slot_reason_join() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_JOIN) }
 pub fn slot_reason_scope_end() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_SCOPE_END) }
+pub fn slot_reason_drop_projected_old() -> SlotTransitionReason {
+    slot_transition_reason_from_tag(SLOT_REASON_DROP_PROJECTED_OLD)
+}
 
 pub struct SlotTransitionWitness {
     slot_index: Int,
@@ -609,6 +613,11 @@ fn verify_slot_transition(value: SlotTransitionWitness) {
         if slot_flow_same(before, slot_flow_unreachable()) ||
            !slot_flow_same(after, slot_flow_empty()) {
             panic("resource certificate: lexical scope exit does not clear slot state")
+        }
+    } else if transition_reason_is(reason, SLOT_REASON_DROP_PROJECTED_OLD) {
+        if !slot_flow_same(before, slot_flow_live()) ||
+           !slot_flow_same(after, slot_flow_live()) {
+            panic("resource certificate: projected overwrite changed base ownership")
         }
     }
 }
@@ -936,7 +945,8 @@ fn rc_slot_index_for(slots: List<RcSlot>, target: SlotRef) -> Int {
 fn reason_is_resource_source(reason: SlotTransitionReason) -> Bool {
     let tag = slot_transition_reason_tag(reason)
     tag == SLOT_REASON_CLONE_SOURCE || tag == SLOT_REASON_TAKE_SOURCE ||
-        tag == SLOT_REASON_DROP || tag == SLOT_REASON_CLEANUP
+        tag == SLOT_REASON_DROP || tag == SLOT_REASON_CLEANUP ||
+        tag == SLOT_REASON_DROP_PROJECTED_OLD
 }
 
 fn resource_source_transitions(
@@ -961,7 +971,8 @@ fn operation_matches_source_reason(
         return transition_reason_is(reason, SLOT_REASON_TAKE_SOURCE)
     }
     if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_drop()) {
-        return transition_reason_is(reason, SLOT_REASON_DROP)
+        return transition_reason_is(reason, SLOT_REASON_DROP) ||
+            transition_reason_is(reason, SLOT_REASON_DROP_PROJECTED_OLD)
     }
     if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_cleanup()) {
         return transition_reason_is(reason, SLOT_REASON_CLEANUP)

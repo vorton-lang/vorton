@@ -13,7 +13,7 @@ use flow_ir::{
     FlowProgram, FlowTypeNode, FlowTypeRef,
     FlowSemanticRole, FlowValueOriginContract,
     FlowCallable, FlowBody, FlowSlot, FlowScope, FlowScopeRef,
-    FlowInstruction, FlowInstructionRef, FlowBlockRef,
+    FlowInstruction, FlowInstructionRef, FlowBlockRef, FlowPlaceRef,
     FlowTerminator, FlowCallTarget,
     validate_flow_program,
     flow_program_type_nodes, flow_program_callables, flow_program_bodies,
@@ -69,6 +69,9 @@ use flow_ir::{
     flow_mutate_target_role, flow_mutate_value_role,
     flow_consume_source, flow_discard_source,
     flow_assign_rhs_temp, flow_assign_target,
+    flow_place_is_slot, flow_place_slot, flow_place_base,
+    flow_place_projection, flow_place_evaluated_index,
+    flow_place_value_type,
     flow_call_target, flow_call_arguments, flow_call_result,
     flow_project_base, flow_project_result, flow_project_is_partial,
     flow_capture_source, flow_capture_target, flow_capture_source_role,
@@ -166,7 +169,7 @@ use resource_certificate::{
     slot_reason_take_source, slot_reason_take_target,
     slot_reason_drop, slot_reason_cleanup,
     slot_reason_assign_scalar, slot_reason_call_result,
-    slot_reason_scope_end,
+    slot_reason_scope_end, slot_reason_drop_projected_old,
     verify_resource_certificate}
 
 // ============================================================
@@ -579,6 +582,96 @@ fn copy_planner_slots(values: List<PlannerSlot>) -> List<PlannerSlot> {
     result
 }
 
+enum PlannerPlaceValue {
+    SlotPlaceValue(Int),
+    ProjectPlaceValue {
+        base: Int,
+        has_static_projection: Bool,
+        evaluated_index: Int?,
+        value_type_index: Int
+    }
+}
+
+pub struct PlannerPlace { value: PlannerPlaceValue }
+
+pub fn make_planner_slot_place(slot: Int) -> PlannerPlace {
+    if slot < 0 { panic("ResourcePlanner: negative slot place") }
+    PlannerPlace { value: PlannerPlaceValue::SlotPlaceValue(slot) }
+}
+
+pub fn make_planner_project_place(
+    base: Int, has_static_projection: Bool,
+    evaluated_index: Int?, value_type_index: Int
+) -> PlannerPlace {
+    if base < 0 || value_type_index < 0 {
+        panic("ResourcePlanner: invalid projected place")
+    }
+    match evaluated_index {
+        some(index) => if index < 0 {
+            panic("ResourcePlanner: negative evaluated place index")
+        },
+        none => {}
+    }
+    if has_static_projection == evaluated_index.is_some() {
+        panic("ResourcePlanner: projected place must select field xor index")
+    }
+    PlannerPlace {
+        value: PlannerPlaceValue::ProjectPlaceValue {
+            base: base, has_static_projection: has_static_projection,
+            evaluated_index: evaluated_index,
+            value_type_index: value_type_index
+        }
+    }
+}
+
+fn copy_planner_place(value: PlannerPlace) -> PlannerPlace {
+    match value.value {
+        PlannerPlaceValue::SlotPlaceValue(slot) =>
+            make_planner_slot_place(slot),
+        PlannerPlaceValue::ProjectPlaceValue {
+            base, has_static_projection, evaluated_index, value_type_index
+        } => make_planner_project_place(
+            base, has_static_projection, evaluated_index, value_type_index)
+    }
+}
+
+fn planner_place_is_slot(value: PlannerPlace) -> Bool {
+    match value.value {
+        PlannerPlaceValue::SlotPlaceValue(_) => true,
+        PlannerPlaceValue::ProjectPlaceValue { .. } => false
+    }
+}
+
+fn planner_place_slot(value: PlannerPlace) -> Int {
+    match value.value {
+        PlannerPlaceValue::SlotPlaceValue(slot) => slot,
+        _ => panic("ResourcePlanner: projected place has no target slot")
+    }
+}
+
+fn planner_place_base(value: PlannerPlace) -> Int {
+    match value.value {
+        PlannerPlaceValue::ProjectPlaceValue { base, .. } => base,
+        _ => panic("ResourcePlanner: slot place has no projection base")
+    }
+}
+
+fn planner_place_evaluated_index(value: PlannerPlace) -> Int? {
+    match value.value {
+        PlannerPlaceValue::ProjectPlaceValue { evaluated_index, .. } =>
+            evaluated_index,
+        _ => panic("ResourcePlanner: slot place has no evaluated index")
+    }
+}
+
+fn planner_place_value_type(value: PlannerPlace) -> Int {
+    match value.value {
+        PlannerPlaceValue::ProjectPlaceValue { value_type_index, .. } =>
+            value_type_index,
+        _ => panic("ResourcePlanner: slot place type comes from slot table")
+    }
+}
+
 enum PlannerEventValue {
     NoOpValue,
     ScopeExitValue(Int),
@@ -598,7 +691,7 @@ enum PlannerEventValue {
     },
     ConsumeValue(Int, Bool),
     DiscardValue(Int),
-    AssignValue { rhs_temp: Int, target: Int },
+    AssignValue { rhs_temp: Int, target: PlannerPlace },
     CallValue {
         callable_indices: List<Int>,
         argument_demands: List<TransferDemand>,
@@ -698,12 +791,17 @@ pub fn make_planner_consume(slot: Int, force: Bool) -> PlannerEvent {
 pub fn make_planner_discard(slot: Int) -> PlannerEvent {
     PlannerEvent { value: PlannerEventValue::DiscardValue(slot) }
 }
-pub fn make_planner_assign(rhs_temp: Int, target: Int) -> PlannerEvent {
-    PlannerEvent {
-        value: PlannerEventValue::AssignValue {
-            rhs_temp: rhs_temp, target: target
-        }
+pub fn make_planner_assign(
+    rhs_temp: Int, target: PlannerPlace
+) -> PlannerEvent {
+    if rhs_temp < 0 ||
+       (planner_place_is_slot(target) &&
+        rhs_temp == planner_place_slot(target)) {
+        panic("ResourcePlanner: Assign RHS aliases target place")
     }
+    PlannerEvent { value: PlannerEventValue::AssignValue {
+        rhs_temp: rhs_temp, target: copy_planner_place(target)
+    } }
 }
 pub fn make_planner_call(
     callable_indices: List<Int>, argument_slots: List<Int>,
@@ -988,13 +1086,30 @@ fn validate_event(
             validate_slot_index(slot, slots),
         PlannerEventValue::AssignValue { rhs_temp, target } => {
             validate_slot_index(rhs_temp, slots)
-            validate_slot_index(target, slots)
-            if rhs_temp == target {
-                panic("ResourcePlanner: Assign temp aliases target")
+            if !slots.get(rhs_temp).unwrap().owns_storage {
+                panic("ResourcePlanner: Assign RHS lacks precreated owning storage")
             }
-            if !slots.get(rhs_temp).unwrap().owns_storage ||
-               !slots.get(target).unwrap().owns_storage {
-                panic("ResourcePlanner: Assign lacks precreated owning storage")
+            if planner_place_is_slot(target) {
+                let target_slot = planner_place_slot(target)
+                validate_slot_index(target_slot, slots)
+                if rhs_temp == target_slot ||
+                   !slots.get(target_slot).unwrap().owns_storage ||
+                   slots.get(rhs_temp).unwrap().type_index !=
+                        slots.get(target_slot).unwrap().type_index {
+                    panic("ResourcePlanner: direct Assign place contract differs")
+                }
+            } else {
+                let base = planner_place_base(target)
+                validate_slot_index(base, slots)
+                match planner_place_evaluated_index(target) {
+                    some(index) => validate_slot_index(index, slots),
+                    none => {}
+                }
+                let value_type = planner_place_value_type(target)
+                if value_type < 0 || value_type >= type_nodes.len() ||
+                   slots.get(rhs_temp).unwrap().type_index != value_type {
+                    panic("ResourcePlanner: projected Assign value type differs")
+                }
             }
         },
         PlannerEventValue::CallValue {
@@ -1929,18 +2044,35 @@ fn apply_event_abstract(
         },
         PlannerEventValue::AssignValue { rhs_temp, target } => {
             require_live_state(states.get(rhs_temp).unwrap(), "Assign RHS temp")
-            require_writable_state(states.get(target).unwrap(), "Assign")
             let rhs_type = slots.get(rhs_temp).unwrap().type_index
-            let target_type = slots.get(target).unwrap().type_index
             require_concrete_resource_shape(
                 logical_shapes.get(rhs_type).unwrap(),
                 physical_shapes.get(rhs_type).unwrap(), "Assign RHS")
-            require_concrete_resource_shape(
-                logical_shapes.get(target_type).unwrap(),
-                physical_shapes.get(target_type).unwrap(), "Assign target")
             // The semantic event occurs only after its RHS-producing events.
             // Resource materialization later emits Drop-old then Take(temp).
-            states.set(target, slot_flow_live())
+            if planner_place_is_slot(target) {
+                let target_slot = planner_place_slot(target)
+                require_writable_state(
+                    states.get(target_slot).unwrap(), "Assign")
+                let target_type = slots.get(target_slot).unwrap().type_index
+                require_concrete_resource_shape(
+                    logical_shapes.get(target_type).unwrap(),
+                    physical_shapes.get(target_type).unwrap(), "Assign target")
+                states.set(target_slot, slot_flow_live())
+            } else {
+                let base = planner_place_base(target)
+                require_live_state(states.get(base).unwrap(), "Assign place base")
+                match planner_place_evaluated_index(target) {
+                    some(index) => require_live_state(
+                        states.get(index).unwrap(), "Assign evaluated index"),
+                    none => {}
+                }
+                let value_type = planner_place_value_type(target)
+                require_concrete_resource_shape(
+                    logical_shapes.get(value_type).unwrap(),
+                    physical_shapes.get(value_type).unwrap(),
+                    "projected Assign value")
+            }
             states.set(rhs_temp, slot_flow_moved())
         },
         PlannerEventValue::CallValue {
@@ -2245,7 +2377,11 @@ fn apply_event_origin(
         PlannerEventValue::DiscardValue(slot) =>
             states.set(slot, empty_origin_bits(origin_width)),
         PlannerEventValue::AssignValue { rhs_temp, target } => {
-            states.set(target, copy_origin_bits(states.get(rhs_temp).unwrap()))
+            if planner_place_is_slot(target) {
+                states.set(
+                    planner_place_slot(target),
+                    copy_origin_bits(states.get(rhs_temp).unwrap()))
+            }
             states.set(rhs_temp, empty_origin_bits(origin_width))
         },
         PlannerEventValue::CallValue {
@@ -2412,8 +2548,7 @@ fn seed_event_demands(
         PlannerEventValue::NoOpValue |
         PlannerEventValue::ScopeExitValue(_) |
         PlannerEventValue::InitializeEmptyValue(_) |
-        PlannerEventValue::InitializeLiveValue(_) |
-        PlannerEventValue::AssignValue { .. } => {},
+        PlannerEventValue::InitializeLiveValue(_) => {},
         PlannerEventValue::InitializeValue {
             input_slots, input_demands, ..
         } => {
@@ -2450,6 +2585,26 @@ fn seed_event_demands(
             add_demand_to_origins(
                 states.get(slot).unwrap(),
                 make_transfer_demand(param_mode_own(), false), seeds),
+        PlannerEventValue::AssignValue { rhs_temp, target } => {
+            add_demand_to_origins(
+                states.get(rhs_temp).unwrap(),
+                make_transfer_demand(param_mode_own(), false), seeds)
+            if planner_place_is_slot(target) {
+                add_demand_to_origins(
+                    states.get(planner_place_slot(target)).unwrap(),
+                    make_transfer_demand(param_mode_own(), false), seeds)
+            } else {
+                add_demand_to_origins(
+                    states.get(planner_place_base(target)).unwrap(),
+                    make_transfer_demand(param_mode_mut_borrow(), false), seeds)
+                match planner_place_evaluated_index(target) {
+                    some(index) => add_demand_to_origins(
+                        states.get(index).unwrap(),
+                        make_transfer_demand(param_mode_borrow(), false), seeds),
+                    none => {}
+                }
+            }
+        },
         PlannerEventValue::CallValue {
             argument_slots, argument_demands, ..
         } => {
@@ -2981,47 +3136,84 @@ fn materialize_event(
         },
         PlannerEventValue::AssignValue { rhs_temp, target } => {
             let rhs_before = states.get(rhs_temp).unwrap()
-            let target_before = states.get(target).unwrap()
             require_live_state(rhs_before, "Assign RHS temp")
-            require_writable_state(target_before, "Assign")
-            let target_type = body.slots.get(target).unwrap().type_index
-            let target_logical = solved.logical_shapes.get(target_type).unwrap()
-            let target_physical = solved.physical_shapes.get(target_type).unwrap()
             let rhs_type = body.slots.get(rhs_temp).unwrap().type_index
             require_concrete_resource_shape(
                 solved.logical_shapes.get(rhs_type).unwrap(),
                 solved.physical_shapes.get(rhs_type).unwrap(), "Assign RHS")
-            require_concrete_resource_shape(
-                target_logical, target_physical, "Assign target")
-            if physical_shape_may_drop(target_physical) ||
-               logical_shape_may_take(target_logical) {
-                // Exact order: all RHS events already ran; only now Drop old.
-                before_ops.push(make_rc_drop_at(
-                    make_rc_instruction_site(
-                        instruction, rc_site_before_instruction(), 1),
-                    rc_slot_for(body, target)))
-                states.set(target, slot_flow_empty())
-                push_transition(before_transitions, target, target_before,
-                    slot_flow_empty(), slot_reason_drop())
+            let target_ref: SlotRef? = if planner_place_is_slot(target) {
+                let target_slot = planner_place_slot(target)
+                let target_before = states.get(target_slot).unwrap()
+                require_writable_state(target_before, "Assign")
+                let target_type = body.slots.get(target_slot).unwrap().type_index
+                let target_logical = solved.logical_shapes.get(target_type).unwrap()
+                let target_physical = solved.physical_shapes.get(target_type).unwrap()
+                require_concrete_resource_shape(
+                    target_logical, target_physical, "Assign target")
+                if physical_shape_may_drop(target_physical) ||
+                   logical_shape_may_take(target_logical) {
+                    // Exact order: all RHS events already ran; only now Drop old.
+                    before_ops.push(make_rc_drop_at(
+                        make_rc_instruction_site(
+                            instruction, rc_site_before_instruction(), 1),
+                        rc_slot_for(body, target_slot)))
+                    states.set(target_slot, slot_flow_empty())
+                    push_transition(before_transitions, target_slot, target_before,
+                        slot_flow_empty(), slot_reason_drop())
+                }
+                some(rc_slot_for(body, target_slot))
+            } else {
+                let base = planner_place_base(target)
+                let base_before = states.get(base).unwrap()
+                require_live_state(base_before, "Assign place base")
+                let value_type = planner_place_value_type(target)
+                let value_logical = solved.logical_shapes.get(value_type).unwrap()
+                let value_physical = solved.physical_shapes.get(value_type).unwrap()
+                require_concrete_resource_shape(
+                    value_logical, value_physical, "projected Assign value")
+                push_transition(semantic_transitions, base, base_before,
+                    base_before, slot_reason_mutate())
+                match planner_place_evaluated_index(target) {
+                    some(index) => {
+                        let index_before = states.get(index).unwrap()
+                        require_live_state(index_before, "Assign evaluated index")
+                        push_transition(semantic_transitions, index, index_before,
+                            index_before, slot_reason_borrow())
+                    },
+                    none => {}
+                }
+                if physical_shape_may_drop(value_physical) ||
+                   logical_shape_may_take(value_logical) {
+                    before_ops.push(make_rc_drop_at(
+                        make_rc_instruction_site(
+                            instruction, rc_site_before_instruction(), 1),
+                        rc_slot_for(body, base)))
+                    push_transition(before_transitions, base, base_before,
+                        base_before, slot_reason_drop_projected_old())
+                }
+                none
             }
             // Take saves the already-evaluated temp, clears it, and feeds the
-            // existing semantic Assign destination.  No slot is created here.
+            // existing semantic place. No result temp or binder is created.
             before_ops.push(make_rc_take_at(
                 make_rc_instruction_site(
                     instruction, rc_site_before_instruction(), 0),
-                rc_slot_for(body, rhs_temp), some(rc_slot_for(body, target))))
+                rc_slot_for(body, rhs_temp), target_ref))
             states.set(rhs_temp, slot_flow_moved())
             push_transition(before_transitions, rhs_temp, rhs_before,
                 slot_flow_moved(), slot_reason_take_source())
-            let before_target_write = states.get(target).unwrap()
-            states.set(target, slot_flow_live())
-            push_transition(semantic_transitions, target, before_target_write,
-                slot_flow_live(),
-                if slot_flow_same(before_target_write, slot_flow_empty()) {
-                    slot_reason_take_target()
-                } else {
-                    slot_reason_assign_scalar()
-                })
+            if planner_place_is_slot(target) {
+                let target_slot = planner_place_slot(target)
+                let before_target_write = states.get(target_slot).unwrap()
+                states.set(target_slot, slot_flow_live())
+                push_transition(semantic_transitions, target_slot,
+                    before_target_write, slot_flow_live(),
+                    if slot_flow_same(before_target_write, slot_flow_empty()) {
+                        slot_reason_take_target()
+                    } else {
+                        slot_reason_assign_scalar()
+                    })
+            }
         },
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
@@ -3611,6 +3803,24 @@ fn flow_slot_index(slots: List<FlowSlot>, target: SlotRef) -> Int {
     panic("ResourcePlanner: FlowIR operand lacks frozen slot")
 }
 
+fn planner_place_from_flow(
+    value: FlowPlaceRef, slots: List<FlowSlot>
+) -> PlannerPlace {
+    if flow_place_is_slot(value) {
+        return make_planner_slot_place(
+            flow_slot_index(slots, flow_place_slot(value)))
+    }
+    let projection = flow_place_projection(value)
+    let index = match flow_place_evaluated_index(value) {
+        some(slot) => some(flow_slot_index(slots, slot)),
+        none => none
+    }
+    make_planner_project_place(
+        flow_slot_index(slots, flow_place_base(value)),
+        projection.is_some(), index,
+        flow_type_ref_index(flow_place_value_type(value)))
+}
+
 fn flow_call_candidate_indices(
     target: FlowCallTarget, callables: List<FlowCallable>
 ) -> List<Int> {
@@ -3688,7 +3898,7 @@ fn planner_event_from_flow(
     if tag == 5 {
         return make_planner_assign(
             flow_slot_index(slots, flow_assign_rhs_temp(instruction)),
-            flow_slot_index(slots, flow_assign_target(instruction)))
+            planner_place_from_flow(flow_assign_target(instruction), slots))
     }
     if tag == 6 {
         let target = flow_call_target(instruction)
@@ -4165,10 +4375,19 @@ fn verify_event_operation_contract(
                 if operand == 0 {
                     verify_operation_slots_exact(
                         operation, body.slots.get(rhs_temp).unwrap().reference,
-                        some(body.slots.get(target).unwrap().reference))
+                        if planner_place_is_slot(target) {
+                            some(body.slots.get(
+                                planner_place_slot(target)).unwrap().reference)
+                        } else { none })
                 } else if operand == 1 {
                     verify_operation_slots_exact(
-                        operation, body.slots.get(target).unwrap().reference, none)
+                        operation,
+                        body.slots.get(if planner_place_is_slot(target) {
+                            planner_place_slot(target)
+                        } else {
+                            planner_place_base(target)
+                        }).unwrap().reference,
+                        none)
                 } else {
                     panic("ResourcePlanner verifier: Assign operand ordinal drifted")
                 }
