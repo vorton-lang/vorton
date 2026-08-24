@@ -227,18 +227,32 @@ fn derived_call(
     }
 }
 
+enum CoreDerivedFieldPlanValue {
+    DerivedLeaf {
+        operation: CoreDerivedCallPlan,
+        result_slot: SlotRef?
+    },
+    DerivedTuple {
+        constructor: CoreConstructorRef?,
+        fields: List<CoreFieldRef>,
+        field_types: List<CoreTypeRef>,
+        children: List<CoreDerivedFieldPlan>,
+        effects: CoreEffectSet,
+        origin: OriginRef
+    }
+}
 pub struct CoreDerivedFieldPlan {
     field: CoreFieldRef,
     ty: CoreTypeRef,
     left: CoreDerivedValueRef,
     right: CoreDerivedValueRef?,
-    operation: CoreDerivedCallPlan
+    value: CoreDerivedFieldPlanValue
 }
 
 pub fn make_core_derived_field_plan(
     field: CoreFieldRef, ty: CoreTypeRef,
     left: CoreDerivedValueRef, right: CoreDerivedValueRef?,
-    operation: CoreDerivedCallPlan
+    operation: CoreDerivedCallPlan, result_slot: SlotRef?
 ) -> CoreDerivedFieldPlan {
     if !core_type_ref_same(left.ty, ty) ||
        match right {
@@ -265,7 +279,9 @@ pub fn make_core_derived_field_plan(
     }
     CoreDerivedFieldPlan {
         field: field, ty: ty, left: left, right: right,
-        operation: operation
+        value: CoreDerivedFieldPlanValue::DerivedLeaf {
+            operation: operation, result_slot: result_slot
+        }
     }
 }
 
@@ -275,6 +291,92 @@ fn copy_derived_fields(
     let mut result: List<CoreDerivedFieldPlan> = []
     for value in values { result.push(value) }
     result
+}
+
+fn require_derived_child_projection(
+    parent: CoreDerivedValueRef, child: CoreDerivedValueRef,
+    field: CoreFieldRef, field_type: CoreTypeRef, ordinal: Int
+) {
+    if !slot_ref_same(parent.root, child.root) ||
+       !core_type_ref_same(parent.root_type, child.root_type) ||
+       child.projections.len() != parent.projections.len() + 1 ||
+       child.projection_types.len() != parent.projection_types.len() + 1 ||
+       !core_field_ref_same(
+            child.projections.get(child.projections.len() - 1).unwrap(), field) ||
+       !core_type_ref_same(child.ty, field_type) ||
+       core_field_ref_kind_tag(field) != 2 ||
+       core_field_ref_tuple_index(field) != ordinal {
+        panic("Core derive: tuple child projection/order differs")
+    }
+    let mut index = 0
+    while index < parent.projections.len() {
+        if !core_field_ref_same(
+                parent.projections.get(index).unwrap(),
+                child.projections.get(index).unwrap()) ||
+           !core_type_ref_same(
+                parent.projection_types.get(index).unwrap(),
+                child.projection_types.get(index).unwrap()) {
+            panic("Core derive: tuple child path prefix differs")
+        }
+        index = index + 1
+    }
+}
+
+pub fn make_core_derived_tuple_field_plan(
+    field: CoreFieldRef, ty: CoreTypeRef,
+    left: CoreDerivedValueRef, right: CoreDerivedValueRef?,
+    constructor: CoreConstructorRef?,
+    fields: List<CoreFieldRef>, field_types: List<CoreTypeRef>,
+    children: List<CoreDerivedFieldPlan>,
+    effects: CoreEffectSet, origin: OriginRef
+) -> CoreDerivedFieldPlan {
+    if !core_type_ref_same(left.ty, ty) ||
+       match right {
+            some(value) => !core_type_ref_same(value.ty, ty),
+            none => false
+       } || fields.len() != field_types.len() ||
+       fields.len() != children.len() {
+        panic("Core derive: tuple field shape/type differs")
+    }
+    match constructor {
+        some(exact) => if core_constructor_kind_tag(exact) != 2 ||
+                core_constructor_arity(exact) != fields.len() {
+            panic("Core derive: tuple constructor arity differs")
+        },
+        none => {}
+    }
+    let mut index = 0
+    while index < children.len() {
+        let child = children.get(index).unwrap()
+        require_derived_child_projection(
+            left, child.left, fields.get(index).unwrap(),
+            field_types.get(index).unwrap(), index)
+        match right {
+            some(right_value) => match child.right {
+                some(child_right) => require_derived_child_projection(
+                    right_value, child_right, fields.get(index).unwrap(),
+                    field_types.get(index).unwrap(), index),
+                none => panic("Core derive: binary tuple child lacks right value")
+            },
+            none => if child.right.is_some() {
+                panic("Core derive: unary tuple child has right value")
+            }
+        }
+        if !core_type_ref_same(child.ty, field_types.get(index).unwrap()) {
+            panic("Core derive: tuple child result type differs")
+        }
+        index = index + 1
+    }
+    CoreDerivedFieldPlan {
+        field: field, ty: ty, left: left, right: right,
+        value: CoreDerivedFieldPlanValue::DerivedTuple {
+            constructor: constructor, fields: copy_fields(fields),
+            field_types: copy_types(field_types),
+            children: copy_derived_fields(children),
+            effects: make_core_effect_set(core_effect_set_atoms(effects)),
+            origin: origin
+        }
+    }
 }
 
 pub struct CoreDerivedVariantPlan {
@@ -432,6 +534,28 @@ pub struct CoreDerivedEqPlan {
     bool_type: CoreTypeRef
 }
 
+fn validate_eq_field(value: CoreDerivedFieldPlan, bool_type: CoreTypeRef) {
+    if value.right.is_none() {
+        panic("Core derive Eq: field lacks right operand")
+    }
+    match value.value {
+        CoreDerivedFieldPlanValue::DerivedLeaf { operation, result_slot } => {
+            if result_slot.is_some() ||
+               !core_type_ref_same(operation.result_type, bool_type) {
+                panic("Core derive Eq: leaf result is not Bool")
+            }
+        },
+        CoreDerivedFieldPlanValue::DerivedTuple {
+            constructor, children, ..
+        } => {
+            if constructor.is_some() {
+                panic("Core derive Eq: tuple comparison carries constructor")
+            }
+            for child in children { validate_eq_field(child, bool_type) }
+        }
+    }
+}
+
 pub fn make_core_derived_eq_plan(
     header: CoreDerivedHeader, shape: CoreDerivedShape,
     bool_type: CoreTypeRef
@@ -447,21 +571,12 @@ pub fn make_core_derived_eq_plan(
     }
     match shape.value {
         CoreDerivedShapeValue::StructShape(fields) => {
-            for field in fields {
-                if field.right.is_none() ||
-                   !core_type_ref_same(field.operation.result_type, bool_type) {
-                    panic("Core derive Eq: field result is not Bool")
-                }
-            }
+            for field in fields { validate_eq_field(field, bool_type) }
         },
         CoreDerivedShapeValue::EnumShape(variants) => {
             for variant in variants {
                 for field in variant.fields {
-                    if field.right.is_none() ||
-                       !core_type_ref_same(
-                            field.operation.result_type, bool_type) {
-                        panic("Core derive Eq: enum field result is not Bool")
-                    }
+                    validate_eq_field(field, bool_type)
                 }
             }
         }
@@ -476,9 +591,25 @@ fn field_binary_call(value: CoreDerivedFieldPlan) -> CoreExpr {
         some(item) => item,
         none => panic("Core derive: binary field operation lacks right operand")
     }
-    derived_call(value.operation, [
-        derived_value_expr(value.left), derived_value_expr(right)
-    ])
+    match value.value {
+        CoreDerivedFieldPlanValue::DerivedLeaf { operation, .. } =>
+            derived_call(operation, [
+                derived_value_expr(value.left), derived_value_expr(right)
+            ]),
+        _ => panic("Core derive: tuple field is not one binary leaf")
+    }
+}
+
+fn eq_field(
+    value: CoreDerivedFieldPlan,
+    bool_type: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef
+) -> CoreExpr {
+    match value.value {
+        CoreDerivedFieldPlanValue::DerivedLeaf { .. } =>
+            field_binary_call(value),
+        CoreDerivedFieldPlanValue::DerivedTuple { children, .. } =>
+            eq_fields(children, 0, bool_type, effects, origin)
+    }
 }
 
 fn eq_fields(
@@ -486,7 +617,8 @@ fn eq_fields(
     bool_type: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef
 ) -> CoreExpr {
     if index >= fields.len() { return bool_literal(bool_type, true, origin) }
-    let condition = field_binary_call(fields.get(index).unwrap())
+    let condition = eq_field(
+        fields.get(index).unwrap(), bool_type, effects, origin)
     let success = eq_fields(fields, index + 1, bool_type, effects, origin)
     make_core_if_expr(
         bool_type, effects, origin, condition,
@@ -573,6 +705,28 @@ pub struct CoreDerivedHashPlan {
     mix: CoreDerivedCallPlan
 }
 
+fn validate_hash_field(value: CoreDerivedFieldPlan, int_type: CoreTypeRef) {
+    if value.right.is_some() {
+        panic("Core derive Hash: field unexpectedly has right operand")
+    }
+    match value.value {
+        CoreDerivedFieldPlanValue::DerivedLeaf { operation, result_slot } => {
+            if result_slot.is_some() ||
+               !core_type_ref_same(operation.result_type, int_type) {
+                panic("Core derive Hash: leaf result is not Int")
+            }
+        },
+        CoreDerivedFieldPlanValue::DerivedTuple {
+            constructor, children, ..
+        } => {
+            if constructor.is_some() {
+                panic("Core derive Hash: tuple fold carries constructor")
+            }
+            for child in children { validate_hash_field(child, int_type) }
+        }
+    }
+}
+
 pub fn make_core_derived_hash_plan(
     header: CoreDerivedHeader, shape: CoreDerivedShape,
     int_type: CoreTypeRef, seed: Int, mix: CoreDerivedCallPlan
@@ -585,21 +739,12 @@ pub fn make_core_derived_hash_plan(
     }
     match shape.value {
         CoreDerivedShapeValue::StructShape(fields) => {
-            for field in fields {
-                if field.right.is_some() ||
-                   !core_type_ref_same(field.operation.result_type, int_type) {
-                    panic("Core derive Hash: field result is not Int")
-                }
-            }
+            for field in fields { validate_hash_field(field, int_type) }
         },
         CoreDerivedShapeValue::EnumShape(variants) => {
             for variant in variants {
                 for field in variant.fields {
-                    if field.right.is_some() ||
-                       !core_type_ref_same(
-                            field.operation.result_type, int_type) {
-                        panic("Core derive Hash: enum field result is not Int")
-                    }
+                    validate_hash_field(field, int_type)
                 }
             }
         }
@@ -615,12 +760,16 @@ fn hash_fields(
     mix: CoreDerivedCallPlan
 ) -> CoreExpr {
     for field in fields {
-        if field.right.is_some() {
-            panic("Core derive Hash: field unexpectedly has right operand")
+        match field.value {
+            CoreDerivedFieldPlanValue::DerivedLeaf { operation, .. } => {
+                let hashed = derived_call(
+                    operation, [derived_value_expr(field.left)])
+                accumulator = derived_call(mix, [accumulator, hashed])
+            },
+            CoreDerivedFieldPlanValue::DerivedTuple { children, .. } => {
+                accumulator = hash_fields(children, accumulator, mix)
+            }
         }
-        let hashed = derived_call(
-            field.operation, [derived_value_expr(field.left)])
-        accumulator = derived_call(mix, [accumulator, hashed])
     }
     accumulator
 }
@@ -667,33 +816,13 @@ pub fn elaborate_core_derived_hash_body(
 // Ord — lexicographic exact cmp, each cmp evaluated once
 // ============================================================
 
-pub struct CoreDerivedOrdFieldPlan {
-    field: CoreDerivedFieldPlan,
-    result_slot: SlotRef
-}
-pub fn make_core_derived_ord_field_plan(
-    field: CoreDerivedFieldPlan, result_slot: SlotRef
-) -> CoreDerivedOrdFieldPlan {
-    if field.right.is_none() {
-        panic("Core derive Ord: field has no right operand")
-    }
-    CoreDerivedOrdFieldPlan { field: field, result_slot: result_slot }
-}
-fn copy_ord_fields(
-    values: List<CoreDerivedOrdFieldPlan>
-) -> List<CoreDerivedOrdFieldPlan> {
-    let mut result: List<CoreDerivedOrdFieldPlan> = []
-    for value in values { result.push(value) }
-    result
-}
-
 pub struct CoreDerivedOrdVariantPlan {
     variant: CoreDerivedVariantPlan,
-    fields: List<CoreDerivedOrdFieldPlan>
+    fields: List<CoreDerivedFieldPlan>
 }
 pub fn make_core_derived_ord_variant_plan(
     variant: CoreDerivedVariantPlan,
-    fields: List<CoreDerivedOrdFieldPlan>
+    fields: List<CoreDerivedFieldPlan>
 ) -> CoreDerivedOrdVariantPlan {
     if variant.fields.len() != fields.len() {
         panic("Core derive Ord: variant field census differs")
@@ -702,13 +831,13 @@ pub fn make_core_derived_ord_variant_plan(
     while index < fields.len() {
         if !core_field_ref_same(
                 variant.fields.get(index).unwrap().field,
-                fields.get(index).unwrap().field.field) {
+                fields.get(index).unwrap().field) {
             panic("Core derive Ord: variant field order differs")
         }
         index = index + 1
     }
     CoreDerivedOrdVariantPlan {
-        variant: variant, fields: copy_ord_fields(fields)
+        variant: variant, fields: copy_derived_fields(fields)
     }
 }
 fn copy_ord_variants(
@@ -720,7 +849,7 @@ fn copy_ord_variants(
 }
 
 enum CoreDerivedOrdShapeValue {
-    StructOrd(List<CoreDerivedOrdFieldPlan>),
+    StructOrd(List<CoreDerivedFieldPlan>),
     EnumOrd(List<CoreDerivedOrdVariantPlan>)
 }
 pub struct CoreDerivedOrdPlan {
@@ -732,10 +861,44 @@ pub struct CoreDerivedOrdPlan {
     value: CoreDerivedOrdShapeValue
 }
 
+fn validate_ord_field(
+    value: CoreDerivedFieldPlan,
+    header: CoreDerivedHeader, int_type: CoreTypeRef
+) {
+    if value.right.is_none() {
+        panic("Core derive Ord: field lacks right operand")
+    }
+    match value.value {
+        CoreDerivedFieldPlanValue::DerivedLeaf {
+            operation, result_slot
+        } => {
+            let slot = match result_slot {
+                some(exact) => exact,
+                none => panic("Core derive Ord: leaf cmp binder is absent")
+            }
+            if !core_type_ref_same(
+                    binder_type(header.binders, slot), int_type) ||
+               !core_type_ref_same(operation.result_type, int_type) {
+                panic("Core derive Ord: cmp binder/result is not Int")
+            }
+        },
+        CoreDerivedFieldPlanValue::DerivedTuple {
+            constructor, children, ..
+        } => {
+            if constructor.is_some() {
+                panic("Core derive Ord: tuple comparison carries constructor")
+            }
+            for child in children {
+                validate_ord_field(child, header, int_type)
+            }
+        }
+    }
+}
+
 pub fn make_core_derived_struct_ord_plan(
     header: CoreDerivedHeader, owner: RegisteredNominalRef,
     target_type: CoreTypeRef, int_type: CoreTypeRef, bool_type: CoreTypeRef,
-    fields: List<CoreDerivedOrdFieldPlan>
+    fields: List<CoreDerivedFieldPlan>
 ) -> CoreDerivedOrdPlan {
     if header.other_slot.is_none() ||
        !core_type_ref_same(header.result_type, int_type) ||
@@ -745,18 +908,11 @@ pub fn make_core_derived_struct_ord_plan(
             binder_type(header.binders, header.other_slot.unwrap()), target_type) {
         panic("Core derive Ord: header/call result type differs")
     }
-    for field in fields {
-        if !core_type_ref_same(
-                binder_type(header.binders, field.result_slot), int_type) ||
-           !core_type_ref_same(
-                field.field.operation.result_type, int_type) {
-            panic("Core derive Ord: cmp binder is not Int")
-        }
-    }
+    for field in fields { validate_ord_field(field, header, int_type) }
     CoreDerivedOrdPlan {
         header: header, owner: owner, target_type: target_type,
         int_type: int_type, bool_type: bool_type,
-        value: CoreDerivedOrdShapeValue::StructOrd(copy_ord_fields(fields))
+        value: CoreDerivedOrdShapeValue::StructOrd(copy_derived_fields(fields))
     }
 }
 
@@ -782,12 +938,7 @@ pub fn make_core_derived_enum_ord_plan(
             panic("Core derive Ord: enum right pattern is incomplete")
         }
         for field in variant.fields {
-            if !core_type_ref_same(
-                    binder_type(header.binders, field.result_slot), int_type) ||
-               !core_type_ref_same(
-                    field.field.operation.result_type, int_type) {
-                panic("Core derive Ord: cmp binder is not Int")
-            }
+            validate_ord_field(field, header, int_type)
         }
     }
     CoreDerivedOrdPlan {
@@ -797,26 +948,48 @@ pub fn make_core_derived_enum_ord_plan(
     }
 }
 
+fn flatten_ord_fields(
+    values: List<CoreDerivedFieldPlan>,
+    mut result: List<CoreDerivedFieldPlan>
+) -> List<CoreDerivedFieldPlan> {
+    for value in values {
+        match value.value {
+            CoreDerivedFieldPlanValue::DerivedLeaf { .. } =>
+                result.push(value),
+            CoreDerivedFieldPlanValue::DerivedTuple { children, .. } => {
+                result = flatten_ord_fields(children, result)
+            }
+        }
+    }
+    result
+}
+
 fn ord_fields(
-    fields: List<CoreDerivedOrdFieldPlan>, index: Int,
+    fields: List<CoreDerivedFieldPlan>, index: Int,
     plan: CoreDerivedOrdPlan, origin: OriginRef
 ) -> CoreExpr {
     if index >= fields.len() {
         return int_literal(plan.int_type, 0, origin)
     }
     let field = fields.get(index).unwrap()
-    let compared = field_binary_call(field.field)
+    let (operation, result_slot) = match field.value {
+        CoreDerivedFieldPlanValue::DerivedLeaf {
+            operation, result_slot
+        } => (operation, result_slot.unwrap()),
+        _ => panic("Core derive Ord: unflattened tuple reached leaf fold")
+    }
+    let compared = field_binary_call(field)
     let bind = make_core_bind_stmt(
-        field.result_slot, compared, false, field.field.operation.origin)
+        result_slot, compared, false, operation.origin)
     let read_for_lt = make_core_read_expr(
-        plan.int_type, make_core_effect_set([]), origin, field.result_slot)
+        plan.int_type, make_core_effect_set([]), origin, result_slot)
     let is_negative = make_core_primitive_expr(
         plan.bool_type, make_core_effect_set([]), origin,
         make_core_primitive_op(7), [
             read_for_lt, int_literal(plan.int_type, 0, origin)
         ])
     let read_for_gt = make_core_read_expr(
-        plan.int_type, make_core_effect_set([]), origin, field.result_slot)
+        plan.int_type, make_core_effect_set([]), origin, result_slot)
     let is_positive = make_core_primitive_expr(
         plan.bool_type, make_core_effect_set([]), origin,
         make_core_primitive_op(9), [
@@ -824,9 +997,9 @@ fn ord_fields(
         ])
     let next = ord_fields(fields, index + 1, plan, origin)
     let negative_value = make_core_read_expr(
-        plan.int_type, make_core_effect_set([]), origin, field.result_slot)
+        plan.int_type, make_core_effect_set([]), origin, result_slot)
     let positive_value = make_core_read_expr(
-        plan.int_type, make_core_effect_set([]), origin, field.result_slot)
+        plan.int_type, make_core_effect_set([]), origin, result_slot)
     let non_negative = make_core_if_expr(
         plan.int_type, plan.header.result_effects, origin, is_positive,
         make_core_block([], some(positive_value), origin),
@@ -872,7 +1045,9 @@ fn discriminator_compare(
 fn derived_ord_expr(plan: CoreDerivedOrdPlan) -> CoreExpr {
     match plan.value {
         CoreDerivedOrdShapeValue::StructOrd(fields) =>
-            ord_fields(fields, 0, plan, plan.header.body_origin),
+            ord_fields(
+                flatten_ord_fields(fields, []), 0,
+                plan, plan.header.body_origin),
         CoreDerivedOrdShapeValue::EnumOrd(variants) => {
             let left = make_core_read_expr(
                 plan.target_type, make_core_effect_set([]),
@@ -889,7 +1064,8 @@ fn derived_ord_expr(plan: CoreDerivedOrdPlan) -> CoreExpr {
                             left_variant.variant.variant,
                             right_variant.variant.variant) {
                         ord_fields(
-                            left_variant.fields, 0, plan,
+                            flatten_ord_fields(left_variant.fields, []),
+                            0, plan,
                             left_variant.variant.origin)
                     } else {
                         discriminator_compare(
@@ -1180,171 +1356,80 @@ pub fn elaborate_core_derived_json_body(
 // Clone — recursive typed tuple reconstruction and outer nominal construct
 // ============================================================
 
-enum CoreDerivedCloneValuePlanValue {
-    CloneLeaf(CoreDerivedCallPlan),
-    CloneTuple {
-        constructor: CoreConstructorRef,
-        fields: List<CoreFieldRef>,
-        field_types: List<CoreTypeRef>,
-        children: List<CoreDerivedCloneValuePlan>,
-        effects: CoreEffectSet,
-        origin: OriginRef
+fn validate_clone_field(value: CoreDerivedFieldPlan) {
+    if value.right.is_some() {
+        panic("Core derive Clone: field unexpectedly has right operand")
     }
-}
-pub struct CoreDerivedCloneValuePlan {
-    source: CoreDerivedValueRef,
-    result_type: CoreTypeRef,
-    value: CoreDerivedCloneValuePlanValue
-}
-
-fn copy_clone_values(
-    values: List<CoreDerivedCloneValuePlan>
-) -> List<CoreDerivedCloneValuePlan> {
-    let mut result: List<CoreDerivedCloneValuePlan> = []
-    for value in values { result.push(value) }
-    result
-}
-
-pub fn make_core_derived_clone_leaf(
-    source: CoreDerivedValueRef, call: CoreDerivedCallPlan
-) -> CoreDerivedCloneValuePlan {
-    if call.method.is_none() ||
-       !core_type_ref_same(source.ty, call.result_type) {
-        panic("Core derive Clone: leaf lacks exact Clone method/result")
-    }
-    CoreDerivedCloneValuePlan {
-        source: source, result_type: source.ty,
-        value: CoreDerivedCloneValuePlanValue::CloneLeaf(call)
-    }
-}
-
-fn require_child_projection(
-    parent: CoreDerivedValueRef, child: CoreDerivedValueRef,
-    field: CoreFieldRef, field_type: CoreTypeRef, ordinal: Int
-) {
-    if !slot_ref_same(parent.root, child.root) ||
-       !core_type_ref_same(parent.root_type, child.root_type) ||
-       child.projections.len() != parent.projections.len() + 1 ||
-       child.projection_types.len() != parent.projection_types.len() + 1 ||
-       !core_field_ref_same(
-            child.projections.get(child.projections.len() - 1).unwrap(), field) ||
-       !core_type_ref_same(child.ty, field_type) ||
-       core_field_ref_kind_tag(field) != 2 ||
-       core_field_ref_tuple_index(field) != ordinal {
-        panic("Core derive Clone: tuple child projection/order differs")
-    }
-    let mut index = 0
-    while index < parent.projections.len() {
-        if !core_field_ref_same(
-                parent.projections.get(index).unwrap(),
-                child.projections.get(index).unwrap()) ||
-           !core_type_ref_same(
-                parent.projection_types.get(index).unwrap(),
-                child.projection_types.get(index).unwrap()) {
-            panic("Core derive Clone: tuple child path prefix differs")
-        }
-        index = index + 1
-    }
-}
-
-pub fn make_core_derived_clone_tuple(
-    source: CoreDerivedValueRef, constructor: CoreConstructorRef,
-    fields: List<CoreFieldRef>, field_types: List<CoreTypeRef>,
-    children: List<CoreDerivedCloneValuePlan>,
-    effects: CoreEffectSet, origin: OriginRef
-) -> CoreDerivedCloneValuePlan {
-    if core_constructor_kind_tag(constructor) != 2 ||
-       core_constructor_arity(constructor) != fields.len() ||
-       fields.len() != field_types.len() || fields.len() != children.len() {
-        panic("Core derive Clone: tuple constructor/child arity differs")
-    }
-    let mut index = 0
-    while index < fields.len() {
-        let child = children.get(index).unwrap()
-        require_child_projection(
-            source, child.source, fields.get(index).unwrap(),
-            field_types.get(index).unwrap(), index)
-        if !core_type_ref_same(
-                child.result_type, field_types.get(index).unwrap()) {
-            panic("Core derive Clone: tuple child result type differs")
-        }
-        index = index + 1
-    }
-    CoreDerivedCloneValuePlan {
-        source: source, result_type: source.ty,
-        value: CoreDerivedCloneValuePlanValue::CloneTuple {
-            constructor: constructor, fields: copy_fields(fields),
-            field_types: copy_types(field_types),
-            children: copy_clone_values(children),
-            effects: make_core_effect_set(core_effect_set_atoms(effects)),
-            origin: origin
-        }
-    }
-}
-
-fn clone_value_expr(value: CoreDerivedCloneValuePlan) -> CoreExpr {
     match value.value {
-        CoreDerivedCloneValuePlanValue::CloneLeaf(call) =>
-            derived_call(call, [derived_value_expr(value.source)]),
-        CoreDerivedCloneValuePlanValue::CloneTuple {
+        CoreDerivedFieldPlanValue::DerivedLeaf {
+            operation, result_slot
+        } => {
+            if result_slot.is_some() ||
+               !core_type_ref_same(operation.result_type, value.ty) {
+                panic("Core derive Clone: leaf result/binder differs")
+            }
+        },
+        CoreDerivedFieldPlanValue::DerivedTuple {
+            constructor, children, ..
+        } => {
+            if constructor.is_none() {
+                panic("Core derive Clone: tuple constructor is absent")
+            }
+            for child in children { validate_clone_field(child) }
+        }
+    }
+}
+
+fn clone_field_expr(value: CoreDerivedFieldPlan) -> CoreExpr {
+    if value.right.is_some() {
+        panic("Core derive Clone: field unexpectedly has right operand")
+    }
+    match value.value {
+        CoreDerivedFieldPlanValue::DerivedLeaf {
+            operation, result_slot
+        } => {
+            if result_slot.is_some() ||
+               !core_type_ref_same(operation.result_type, value.ty) {
+                panic("Core derive Clone: leaf result/binder differs")
+            }
+            derived_call(operation, [derived_value_expr(value.left)])
+        },
+        CoreDerivedFieldPlanValue::DerivedTuple {
             constructor, fields, field_types, children, effects, origin
         } => {
+            let exact = match constructor {
+                some(item) => item,
+                none => panic("Core derive Clone: tuple constructor is absent")
+            }
             let mut values: List<CoreFieldValue> = []
             let mut index = 0
             while index < children.len() {
-                let cloned = clone_value_expr(children.get(index).unwrap())
+                let child = children.get(index).unwrap()
                 if !core_type_ref_same(
-                        children.get(index).unwrap().result_type,
-                        field_types.get(index).unwrap()) {
+                        child.ty, field_types.get(index).unwrap()) {
                     panic("Core derive Clone: tuple child type drifted")
                 }
                 values.push(make_core_field_value(
-                    fields.get(index).unwrap(), cloned))
+                    fields.get(index).unwrap(), clone_field_expr(child)))
                 index = index + 1
             }
             make_core_construct_expr(
-                value.result_type, effects, origin, constructor, values)
+                value.ty, effects, origin, exact, values)
         }
     }
-}
-
-pub struct CoreDerivedCloneFieldPlan {
-    field: CoreFieldRef,
-    ty: CoreTypeRef,
-    value: CoreDerivedCloneValuePlan
-}
-pub fn make_core_derived_clone_field_plan(
-    field: CoreFieldRef, ty: CoreTypeRef,
-    value: CoreDerivedCloneValuePlan
-) -> CoreDerivedCloneFieldPlan {
-    if !core_type_ref_same(value.result_type, ty) ||
-       (value.source.projections.len() > 0 &&
-        !core_field_ref_same(
-            value.source.projections.get(
-                value.source.projections.len() - 1).unwrap(), field)) {
-        panic("Core derive Clone: outer field/value relation differs")
-    }
-    CoreDerivedCloneFieldPlan { field: field, ty: ty, value: value }
-}
-fn copy_clone_fields(
-    values: List<CoreDerivedCloneFieldPlan>
-) -> List<CoreDerivedCloneFieldPlan> {
-    let mut result: List<CoreDerivedCloneFieldPlan> = []
-    for value in values { result.push(value) }
-    result
 }
 
 pub struct CoreDerivedCloneVariantPlan {
     variant: VariantRef,
     constructor: CoreConstructorRef,
     pattern_slots: List<SlotRef>,
-    fields: List<CoreDerivedCloneFieldPlan>,
+    fields: List<CoreDerivedFieldPlan>,
     origin: OriginRef
 }
 pub fn make_core_derived_clone_variant_plan(
     variant: VariantRef, constructor: CoreConstructorRef,
     pattern_slots: List<SlotRef>,
-    fields: List<CoreDerivedCloneFieldPlan>, origin: OriginRef
+    fields: List<CoreDerivedFieldPlan>, origin: OriginRef
 ) -> CoreDerivedCloneVariantPlan {
     if core_constructor_kind_tag(constructor) != 1 ||
        !variant_ref_same(core_constructor_variant(constructor), variant) ||
@@ -1354,7 +1439,7 @@ pub fn make_core_derived_clone_variant_plan(
     CoreDerivedCloneVariantPlan {
         variant: variant, constructor: constructor,
         pattern_slots: copy_slots(pattern_slots),
-        fields: copy_clone_fields(fields), origin: origin
+        fields: copy_derived_fields(fields), origin: origin
     }
 }
 fn copy_clone_variants(
@@ -1368,7 +1453,7 @@ fn copy_clone_variants(
 enum CoreDerivedClonePlanValue {
     StructClone {
         constructor: CoreConstructorRef,
-        fields: List<CoreDerivedCloneFieldPlan>
+        fields: List<CoreDerivedFieldPlan>
     },
     EnumClone(List<CoreDerivedCloneVariantPlan>)
 }
@@ -1382,7 +1467,7 @@ pub struct CoreDerivedClonePlan {
 pub fn make_core_derived_struct_clone_plan(
     header: CoreDerivedHeader, owner: RegisteredNominalRef,
     target_type: CoreTypeRef, constructor: CoreConstructorRef,
-    fields: List<CoreDerivedCloneFieldPlan>
+    fields: List<CoreDerivedFieldPlan>
 ) -> CoreDerivedClonePlan {
     if header.other_slot.is_some() ||
        !core_type_ref_same(header.result_type, target_type) ||
@@ -1395,8 +1480,10 @@ pub fn make_core_derived_struct_clone_plan(
     }
     let mut exact_fields: List<CoreFieldRef> = []
     for field in fields {
-        if !slot_ref_same(field.value.source.root, header.self_slot) ||
-           !core_type_ref_same(field.value.source.root_type, target_type) {
+        validate_clone_field(field)
+        if field.right.is_some() ||
+           !slot_ref_same(field.left.root, header.self_slot) ||
+           !core_type_ref_same(field.left.root_type, target_type) {
             panic("Core derive Clone: struct field source is not self")
         }
         exact_fields.push(field.field)
@@ -1417,7 +1504,7 @@ pub fn make_core_derived_struct_clone_plan(
     CoreDerivedClonePlan {
         header: header, owner: owner, target_type: target_type,
         value: CoreDerivedClonePlanValue::StructClone {
-            constructor: constructor, fields: copy_clone_fields(fields)
+            constructor: constructor, fields: copy_derived_fields(fields)
         }
     }
 }
@@ -1439,9 +1526,11 @@ pub fn make_core_derived_enum_clone_plan(
         let mut field_index = 0
         while field_index < current.fields.len() {
             let field = current.fields.get(field_index).unwrap()
+            validate_clone_field(field)
             let slot = current.pattern_slots.get(field_index).unwrap()
-            if !slot_ref_same(field.value.source.root, slot) ||
-               !core_type_ref_same(field.value.source.root_type, field.ty) ||
+            if field.right.is_some() ||
+               !slot_ref_same(field.left.root, slot) ||
+               !core_type_ref_same(field.left.root_type, field.ty) ||
                !core_type_ref_same(
                     binder_type(header.binders, slot), field.ty) {
                 panic("Core derive Clone: enum payload source/binder differs")
@@ -1489,7 +1578,7 @@ pub fn elaborate_core_derived_clone_body(
             let mut values: List<CoreFieldValue> = []
             for field in fields {
                 values.push(make_core_field_value(
-                    field.field, clone_value_expr(field.value)))
+                    field.field, clone_field_expr(field)))
             }
             make_core_construct_expr(
                 plan.target_type, plan.header.result_effects,
@@ -1504,7 +1593,7 @@ pub fn elaborate_core_derived_clone_body(
                 let mut values: List<CoreFieldValue> = []
                 for field in variant.fields {
                     values.push(make_core_field_value(
-                        field.field, clone_value_expr(field.value)))
+                        field.field, clone_field_expr(field)))
                 }
                 let constructed = make_core_construct_expr(
                     plan.target_type, plan.header.result_effects,
