@@ -109,13 +109,22 @@ pub fn core_type_ref_same(left: CoreTypeRef, right: CoreTypeRef) -> Bool {
 // producer of global CoreTypeRef; semantic plan constructors accept this
 // domain-bearing fact and materialize a module-local CoreTypeRef internally.
 pub struct CoreTypeFactRef { module_key: Str, ordinal: Int }
-pub fn make_core_type_fact_ref(
-    module_key: Str, ordinal: Int
+pub struct CoreTypeFactAllocator { module_key: Str, next_ordinal: Int }
+pub fn new_core_type_fact_allocator(
+    module_key: Str
+) -> CoreTypeFactAllocator {
+    if module_key == "" { panic("CoreHIR: empty recorder type domain") }
+    CoreTypeFactAllocator { module_key: module_key, next_ordinal: 0 }
+}
+pub fn reserve_core_type_fact_ref(
+    mut allocator: CoreTypeFactAllocator
 ) -> CoreTypeFactRef {
-    if module_key == "" || ordinal < 0 {
-        panic("CoreHIR: invalid recorder type fact")
+    let result = CoreTypeFactRef {
+        module_key: allocator.module_key,
+        ordinal: allocator.next_ordinal
     }
-    CoreTypeFactRef { module_key: module_key, ordinal: ordinal }
+    allocator.next_ordinal = allocator.next_ordinal + 1
+    result
 }
 pub fn core_type_fact_module_key(value: CoreTypeFactRef) -> Str {
     value.module_key

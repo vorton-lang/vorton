@@ -61,7 +61,8 @@ use flow_ir::{
     make_flow_application_resource_dependency_edge
 }
 use core_expr::{
-    CoreTypeGraph, CoreTypeRef, CoreTypeFactRef, CoreEffectSet,
+    CoreTypeGraph, CoreTypeRef, CoreTypeFactRef, CoreTypeFactAllocator,
+    CoreEffectSet,
     CoreCallableContract, CoreImplMetadata,
     CoreObligationBinding,
     CoreSlot, CoreBody, CoreBlock, CoreStmt, CoreExpr, CoreLiteral,
@@ -70,7 +71,8 @@ use core_expr::{
     CoreHandlerEntry, CoreMatchArm,
     CoreConstructorRef, CoreCalleeRef, CoreEvidenceRef,
     CoreCapture, CorePrimitiveOp,
-    make_core_type_ref, make_core_type_fact_ref,
+    make_core_type_ref, new_core_type_fact_allocator,
+    reserve_core_type_fact_ref,
     core_type_fact_module_key, core_type_fact_ordinal,
     core_type_fact_same, core_type_fact_local_ref,
     core_type_ref_module_key, make_core_effect_set,
@@ -1240,6 +1242,8 @@ pub fn make_core_delegate_plan_fact(
 pub struct CoreAssemblyRecorder {
     module_key: Str,
     module_order: Int,
+    type_allocator: CoreTypeFactAllocator,
+    type_refs: List<CoreTypeFactRef>,
     type_specs: List<CoreTypeSpec?>,
     callables: List<CoreCallableFact>,
     impls: List<CoreImplFact>,
@@ -1259,7 +1263,9 @@ pub fn new_core_assembly_recorder(
     }
     CoreAssemblyRecorder {
         module_key: module_key, module_order: module_order,
-        type_specs: [], callables: [], impls: [], inventory_entries: [],
+        type_allocator: new_core_type_fact_allocator(module_key),
+        type_refs: [], type_specs: [], callables: [], impls: [],
+        inventory_entries: [],
         manifests: [], source_bodies: [], generated: [], delegates: [],
         frozen: false
     }
@@ -1273,8 +1279,13 @@ pub fn reserve_core_type_fact(
     mut recorder: CoreAssemblyRecorder
 ) -> CoreTypeFactRef {
     require_recorder_open(recorder)
-    let reference = make_core_type_fact_ref(
-        recorder.module_key, recorder.type_specs.len())
+    let mut allocator = recorder.type_allocator
+    let reference = reserve_core_type_fact_ref(allocator)
+    recorder.type_allocator = allocator
+    if core_type_fact_ordinal(reference) != recorder.type_specs.len() {
+        panic("Core assembly: type allocator/spec census differs")
+    }
+    recorder.type_refs.push(reference)
     recorder.type_specs.push(none)
     reference
 }
@@ -1613,7 +1624,9 @@ fn materialize_recorder_type_nodes(
             some(value) => value,
             none => panic("Core assembly: reserved type fact was never defined")
         }
-        let reference = make_core_type_fact_ref(recorder.module_key, ordinal)
+        let reference = recorder.type_refs.get(ordinal).unwrap_or_else(fn() {
+            panic("Core assembly: reserved type reference census is short")
+        })
         result.push(materialize_type_spec(
             spec, reference, recorder.module_key))
         ordinal = ordinal + 1
