@@ -7,7 +7,9 @@
 // semantic binder/block/edge.  The final FlowProgram adapter constructor is
 // intentionally the only glue point to the concurrently landed flow_ir API.
 
-use ir_identity::{SlotRef, slot_ref_same}
+use ir_identity::{
+    SlotRef, PathRef, slot_ref_same, slot_ref_is_source, slot_ref_synthetic_path,
+    path_ref_same}
 use ir_inventory::{ExecutableRef, executable_ref_same}
 use flow_ir::{
     FlowProgram, FlowTypeNode, FlowTypeRef,
@@ -36,7 +38,8 @@ use flow_ir::{
     flow_generic_param_index, flow_generic_param_arity,
     flow_foreign_contract_is_managed,
     flow_semantic_role_tag,
-    flow_call_contract_parameter_roles, flow_call_contract_result_role,
+    flow_call_contract_parameter_roles, flow_call_contract_result_type,
+    flow_call_contract_result_role,
     flow_call_contract_result_origin,
     flow_value_origin_is_fresh, flow_value_origin_alias_ordinals,
     flow_callable_reference, flow_callable_parameter_types,
@@ -44,7 +47,16 @@ use flow_ir::{
     flow_callable_result_type, flow_callable_mode,
     flow_callable_mode_concrete_body, flow_callable_mode_same,
     flow_callable_semantic_contract,
-    flow_call_target_contract, flow_call_target_candidates,
+    flow_call_target_contract,
+    flow_call_target_is_direct, flow_call_target_is_local,
+    flow_call_target_direct, flow_call_target_local,
+    flow_call_target_dynamic,
+    flow_instruction_callable_provenance,
+    flow_callable_provenance_target, flow_callable_provenance_origin,
+    flow_callable_origin_is_direct, flow_callable_origin_is_call,
+    flow_callable_origin_direct, flow_callable_origin_slots,
+    flow_callable_origin_call_target,
+    flow_callable_origin_call_arguments,
     flow_body_reference, flow_body_scopes, flow_body_slots,
     flow_body_entry, flow_body_blocks,
     flow_scope_reference, flow_scope_has_parent, flow_scope_parent,
@@ -88,7 +100,7 @@ use resource_model::{
     param_mode_bottom, param_mode_borrow, param_mode_mut_borrow,
     param_mode_own, param_mode_is_conflict,
     make_transfer_demand, transfer_demand_mode,
-    transfer_demand_force, transfer_demand_join,
+    transfer_demand_force, transfer_demand_join, transfer_demand_leq,
     make_logical_ownership_shape,
     logical_ownership_shape_direct_drop,
     logical_ownership_shape_may_unique,
@@ -452,6 +464,7 @@ pub struct PlannerCallable {
     result_type_index: Int,
     parameter_seeds: List<TransferDemand>,
     result_owned_seed: Bool,
+    result_origin_parameter_ordinals: List<Int>,
     call_edges: List<PlannerCallEdge>,
     has_body: Bool
 }
@@ -460,6 +473,7 @@ pub fn make_planner_callable(
     reference: ExecutableRef,
     parameter_type_indices: List<Int>, result_type_index: Int,
     parameter_seeds: List<TransferDemand>, result_owned_seed: Bool,
+    result_origin_parameter_ordinals: List<Int>,
     call_edges: List<PlannerCallEdge>, has_body: Bool
 ) -> PlannerCallable {
     if result_type_index < 0 ||
@@ -479,6 +493,14 @@ pub fn make_planner_callable(
         seeds.push(make_transfer_demand(
             transfer_demand_mode(seed), transfer_demand_force(seed)))
     }
+    let mut result_origins: List<Int> = []
+    for ordinal in result_origin_parameter_ordinals {
+        if ordinal < 0 || ordinal >= parameter_types.len() ||
+           int_list_contains(result_origins, ordinal) {
+            panic("ResourcePlanner: callable result origin set is invalid")
+        }
+        result_origins.push(ordinal)
+    }
     let mut edges: List<PlannerCallEdge> = []
     for edge in call_edges {
         edges.push(make_planner_call_edge(
@@ -490,6 +512,7 @@ pub fn make_planner_callable(
         result_type_index: result_type_index,
         parameter_seeds: seeds,
         result_owned_seed: result_owned_seed,
+        result_origin_parameter_ordinals: result_origins,
         call_edges: edges,
         has_body: has_body
     }
@@ -501,7 +524,9 @@ fn copy_planner_callables(values: List<PlannerCallable>) -> List<PlannerCallable
         result.push(make_planner_callable(
             value.reference, value.parameter_type_indices,
             value.result_type_index, value.parameter_seeds,
-            value.result_owned_seed, value.call_edges, value.has_body))
+            value.result_owned_seed,
+            value.result_origin_parameter_ordinals,
+            value.call_edges, value.has_body))
     }
     result
 }
@@ -672,6 +697,57 @@ fn planner_place_value_type(value: PlannerPlace) -> Int {
     }
 }
 
+enum PlannerCallTargetValue {
+    DirectCallTargetValue(Int),
+    SlotCallTargetValue(Int)
+}
+
+pub struct PlannerCallTarget { value: PlannerCallTargetValue }
+
+pub fn make_planner_direct_call_target(index: Int) -> PlannerCallTarget {
+    if index < 0 { panic("ResourcePlanner: negative direct callable index") }
+    PlannerCallTarget {
+        value: PlannerCallTargetValue::DirectCallTargetValue(index)
+    }
+}
+
+pub fn make_planner_slot_call_target(slot: Int) -> PlannerCallTarget {
+    if slot < 0 { panic("ResourcePlanner: negative callable slot index") }
+    PlannerCallTarget {
+        value: PlannerCallTargetValue::SlotCallTargetValue(slot)
+    }
+}
+
+fn copy_planner_call_target(value: PlannerCallTarget) -> PlannerCallTarget {
+    match value.value {
+        PlannerCallTargetValue::DirectCallTargetValue(index) =>
+            make_planner_direct_call_target(index),
+        PlannerCallTargetValue::SlotCallTargetValue(slot) =>
+            make_planner_slot_call_target(slot)
+    }
+}
+
+fn planner_call_target_is_direct(value: PlannerCallTarget) -> Bool {
+    match value.value {
+        PlannerCallTargetValue::DirectCallTargetValue(_) => true,
+        PlannerCallTargetValue::SlotCallTargetValue(_) => false
+    }
+}
+
+fn planner_call_target_direct(value: PlannerCallTarget) -> Int {
+    match value.value {
+        PlannerCallTargetValue::DirectCallTargetValue(index) => index,
+        _ => panic("ResourcePlanner: slot call target has no direct callable")
+    }
+}
+
+fn planner_call_target_slot(value: PlannerCallTarget) -> Int {
+    match value.value {
+        PlannerCallTargetValue::SlotCallTargetValue(slot) => slot,
+        _ => panic("ResourcePlanner: direct call target has no callable slot")
+    }
+}
+
 enum PlannerEventValue {
     NoOpValue,
     ScopeExitValue(Int),
@@ -693,6 +769,7 @@ enum PlannerEventValue {
     DiscardValue(Int),
     AssignValue { rhs_temp: Int, target: PlannerPlace },
     CallValue {
+        call_target: PlannerCallTarget,
         callable_indices: List<Int>,
         argument_demands: List<TransferDemand>,
         result_owned: Bool,
@@ -713,15 +790,114 @@ enum PlannerEventValue {
     }
 }
 
-pub struct PlannerEvent { value: PlannerEventValue }
+enum PlannerCallableOriginValue {
+    DirectCallableOriginValue(Int),
+    SlotCallableOriginValue(List<Int>),
+    CallCallableOriginValue {
+        target: PlannerCallTarget,
+        arguments: List<Int>
+    }
+}
+
+pub struct PlannerCallableProvenance {
+    target: Int,
+    origin: PlannerCallableOriginValue
+}
+
+fn make_direct_planner_callable_provenance(
+    target: Int, callable: Int
+) -> PlannerCallableProvenance {
+    if target < 0 || callable < 0 {
+        panic("ResourcePlanner: negative direct callable provenance")
+    }
+    PlannerCallableProvenance {
+        target: target,
+        origin: PlannerCallableOriginValue::DirectCallableOriginValue(callable)
+    }
+}
+
+fn make_slots_planner_callable_provenance(
+    target: Int, sources: List<Int>
+) -> PlannerCallableProvenance {
+    if target < 0 || sources.len() == 0 {
+        panic("ResourcePlanner: callable slot provenance is empty")
+    }
+    let mut copied: List<Int> = []
+    for source in sources {
+        if source < 0 || int_list_contains(copied, source) {
+            panic("ResourcePlanner: callable slot provenance is invalid")
+        }
+        copied.push(source)
+    }
+    PlannerCallableProvenance {
+        target: target,
+        origin: PlannerCallableOriginValue::SlotCallableOriginValue(copied)
+    }
+}
+
+fn make_call_planner_callable_provenance(
+    target: Int, call_target: PlannerCallTarget, arguments: List<Int>
+) -> PlannerCallableProvenance {
+    if target < 0 { panic("ResourcePlanner: negative call result provenance") }
+    let mut copied: List<Int> = []
+    for argument in arguments {
+        if argument < 0 { panic("ResourcePlanner: negative provenance argument") }
+        copied.push(argument)
+    }
+    PlannerCallableProvenance {
+        target: target,
+        origin: PlannerCallableOriginValue::CallCallableOriginValue {
+            target: copy_planner_call_target(call_target), arguments: copied
+        }
+    }
+}
+
+fn copy_planner_callable_provenance(
+    values: List<PlannerCallableProvenance>
+) -> List<PlannerCallableProvenance> {
+    let mut result: List<PlannerCallableProvenance> = []
+    for value in values {
+        match value.origin {
+            PlannerCallableOriginValue::DirectCallableOriginValue(callable) =>
+                result.push(make_direct_planner_callable_provenance(
+                    value.target, callable)),
+            PlannerCallableOriginValue::SlotCallableOriginValue(sources) =>
+                result.push(make_slots_planner_callable_provenance(
+                    value.target, sources)),
+            PlannerCallableOriginValue::CallCallableOriginValue {
+                target, arguments
+            } => result.push(make_call_planner_callable_provenance(
+                value.target, target, arguments))
+        }
+    }
+    result
+}
+
+pub struct PlannerEvent {
+    value: PlannerEventValue,
+    callable_provenance: List<PlannerCallableProvenance>
+}
+
+fn make_planner_event(value: PlannerEventValue) -> PlannerEvent {
+    PlannerEvent { value: value, callable_provenance: [] }
+}
+
+fn with_planner_callable_provenance(
+    value: PlannerEvent, provenance: List<PlannerCallableProvenance>
+) -> PlannerEvent {
+    PlannerEvent {
+        value: value.value,
+        callable_provenance: copy_planner_callable_provenance(provenance)
+    }
+}
 
 pub fn make_planner_noop() -> PlannerEvent {
-    PlannerEvent { value: PlannerEventValue::NoOpValue }
+    make_planner_event(PlannerEventValue::NoOpValue)
 }
 
 pub fn make_planner_scope_exit(scope_id: Int) -> PlannerEvent {
     if scope_id < 0 { panic("ResourcePlanner: negative lexical scope exit") }
-    PlannerEvent { value: PlannerEventValue::ScopeExitValue(scope_id) }
+    make_planner_event(PlannerEventValue::ScopeExitValue(scope_id))
 }
 
 pub fn make_planner_initialize(
@@ -749,26 +925,22 @@ pub fn make_planner_initialize(
         }
         origins.push(ordinal)
     }
-    PlannerEvent {
-        value: PlannerEventValue::InitializeValue {
+    make_planner_event(PlannerEventValue::InitializeValue {
             input_slots: slots, input_demands: demands,
             origin_input_ordinals: origins, target: target
-        }
-    }
+        })
 }
 
 pub fn make_planner_initialize_empty(slot: Int) -> PlannerEvent {
-    PlannerEvent { value: PlannerEventValue::InitializeEmptyValue(slot) }
+    make_planner_event(PlannerEventValue::InitializeEmptyValue(slot))
 }
 pub fn make_planner_initialize_live(slot: Int) -> PlannerEvent {
-    PlannerEvent { value: PlannerEventValue::InitializeLiveValue(slot) }
+    make_planner_event(PlannerEventValue::InitializeLiveValue(slot))
 }
 pub fn make_planner_read(source: Int, target: Int) -> PlannerEvent {
-    PlannerEvent {
-        value: PlannerEventValue::ReadValue {
+    make_planner_event(PlannerEventValue::ReadValue {
             source: source, target: target
-        }
-    }
+        })
 }
 pub fn make_planner_mutate(
     target: Int, value: Int, value_demand: TransferDemand
@@ -776,20 +948,18 @@ pub fn make_planner_mutate(
     if param_mode_is_conflict(transfer_demand_mode(value_demand)) {
         panic("ResourcePlanner: mutate value demand is conflicting")
     }
-    PlannerEvent {
-        value: PlannerEventValue::MutateValue {
+    make_planner_event(PlannerEventValue::MutateValue {
             target: target, value: value,
             value_demand: make_transfer_demand(
                 transfer_demand_mode(value_demand),
                 transfer_demand_force(value_demand))
-        }
-    }
+        })
 }
 pub fn make_planner_consume(slot: Int, force: Bool) -> PlannerEvent {
-    PlannerEvent { value: PlannerEventValue::ConsumeValue(slot, force) }
+    make_planner_event(PlannerEventValue::ConsumeValue(slot, force))
 }
 pub fn make_planner_discard(slot: Int) -> PlannerEvent {
-    PlannerEvent { value: PlannerEventValue::DiscardValue(slot) }
+    make_planner_event(PlannerEventValue::DiscardValue(slot))
 }
 pub fn make_planner_assign(
     rhs_temp: Int, target: PlannerPlace
@@ -799,18 +969,18 @@ pub fn make_planner_assign(
         rhs_temp == planner_place_slot(target)) {
         panic("ResourcePlanner: Assign RHS aliases target place")
     }
-    PlannerEvent { value: PlannerEventValue::AssignValue {
+    make_planner_event(PlannerEventValue::AssignValue {
         rhs_temp: rhs_temp, target: copy_planner_place(target)
-    } }
+    })
 }
 pub fn make_planner_call(
+    call_target: PlannerCallTarget,
     callable_indices: List<Int>, argument_slots: List<Int>,
     argument_demands: List<TransferDemand>,
     result_owned: Bool, result_type_index: Int,
     result_origin_argument_ordinals: List<Int>, result_slot: Int?
 ) -> PlannerEvent {
-    if callable_indices.len() == 0 ||
-       argument_slots.len() != argument_demands.len() ||
+    if argument_slots.len() != argument_demands.len() ||
        result_type_index < 0 {
         panic("ResourcePlanner: call contract is incomplete")
     }
@@ -839,8 +1009,8 @@ pub fn make_planner_call(
         }
         result_origins.push(ordinal)
     }
-    PlannerEvent {
-        value: PlannerEventValue::CallValue {
+    make_planner_event(PlannerEventValue::CallValue {
+            call_target: copy_planner_call_target(call_target),
             callable_indices: candidates,
             argument_demands: demands,
             result_owned: result_owned,
@@ -848,17 +1018,14 @@ pub fn make_planner_call(
             result_origin_argument_ordinals: result_origins,
             argument_slots: arguments,
             result_slot: result_slot
-        }
-    }
+        })
 }
 pub fn make_planner_project(
     source: Int, target: Int, whole_slot: Bool
 ) -> PlannerEvent {
-    PlannerEvent {
-        value: PlannerEventValue::ProjectValue {
+    make_planner_event(PlannerEventValue::ProjectValue {
             source: source, target: target, whole_slot: whole_slot
-        }
-    }
+        })
 }
 pub fn make_planner_capture(
     source: Int, target: Int, demand: TransferDemand
@@ -866,19 +1033,17 @@ pub fn make_planner_capture(
     if param_mode_is_conflict(transfer_demand_mode(demand)) {
         panic("ResourcePlanner: capture demand is conflicting")
     }
-    PlannerEvent {
-        value: PlannerEventValue::CaptureValue {
+    make_planner_event(PlannerEventValue::CaptureValue {
             source: source,
             target: target,
             demand: make_transfer_demand(
                 transfer_demand_mode(demand),
                 transfer_demand_force(demand))
-        }
-    }
+        })
 }
 
 fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
-    match value.value {
+    let copied = match value.value {
         PlannerEventValue::NoOpValue => make_planner_noop(),
         PlannerEventValue::ScopeExitValue(scope_id) =>
             make_planner_scope_exit(scope_id),
@@ -901,12 +1066,13 @@ fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
         PlannerEventValue::AssignValue { rhs_temp, target } =>
             make_planner_assign(rhs_temp, target),
         PlannerEventValue::CallValue {
-            callable_indices, argument_demands,
+            call_target, callable_indices, argument_demands,
             result_owned, result_type_index,
             result_origin_argument_ordinals,
             argument_slots, result_slot
         } => make_planner_call(
-            callable_indices, argument_slots, argument_demands,
+            call_target, callable_indices,
+            argument_slots, argument_demands,
             result_owned, result_type_index,
             result_origin_argument_ordinals, result_slot),
         PlannerEventValue::ProjectValue {
@@ -915,6 +1081,7 @@ fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
         PlannerEventValue::CaptureValue { source, target, demand } =>
             make_planner_capture(source, target, demand)
     }
+    with_planner_callable_provenance(copied, value.callable_provenance)
 }
 
 pub struct PlannerEdge {
@@ -1047,6 +1214,36 @@ fn validate_event(
     scopes: List<PlannerScope>, callables: List<PlannerCallable>,
     type_nodes: List<PlannerTypeNode>
 ) {
+    for fact in event.callable_provenance {
+        validate_slot_index(fact.target, slots)
+        if !planner_type_is_callable(
+                type_nodes, slots.get(fact.target).unwrap().type_index) {
+            panic("ResourcePlanner: callable provenance targets non-callable slot")
+        }
+        match fact.origin {
+            PlannerCallableOriginValue::DirectCallableOriginValue(callable) =>
+                if callable < 0 || callable >= callables.len() {
+                    panic("ResourcePlanner: direct callable provenance is absent")
+                },
+            PlannerCallableOriginValue::SlotCallableOriginValue(sources) =>
+                { for source in sources { validate_slot_index(source, slots) } },
+            PlannerCallableOriginValue::CallCallableOriginValue {
+                target, arguments
+            } => {
+                if planner_call_target_is_direct(target) {
+                    let callable = planner_call_target_direct(target)
+                    if callable < 0 || callable >= callables.len() {
+                        panic("ResourcePlanner: provenance call target is absent")
+                    }
+                } else {
+                    validate_slot_index(planner_call_target_slot(target), slots)
+                }
+                for argument in arguments {
+                    validate_slot_index(argument, slots)
+                }
+            }
+        }
+    }
     match event.value {
         PlannerEventValue::NoOpValue => {},
         PlannerEventValue::ScopeExitValue(scope_id) => {
@@ -1113,8 +1310,8 @@ fn validate_event(
             }
         },
         PlannerEventValue::CallValue {
-            callable_indices, argument_demands,
-            result_owned: _, result_type_index,
+            call_target, callable_indices, argument_demands,
+            result_owned, result_type_index,
             argument_slots, result_slot, ..
         } => {
             if callable_indices.len() == 0 ||
@@ -1123,6 +1320,20 @@ fn validate_event(
                result_type_index >= type_nodes.len() {
                 panic("ResourcePlanner: call contract is incomplete")
             }
+            if planner_call_target_is_direct(call_target) {
+                if callable_indices.len() != 1 ||
+                   callable_indices.get(0).unwrap() !=
+                        planner_call_target_direct(call_target) {
+                    panic("ResourcePlanner: direct call candidate differs")
+                }
+            } else {
+                let target_slot = planner_call_target_slot(call_target)
+                validate_slot_index(target_slot, slots)
+                if !planner_type_is_callable(
+                        type_nodes, slots.get(target_slot).unwrap().type_index) {
+                    panic("ResourcePlanner: indirect call target is not callable")
+                }
+            }
             for callable_index in callable_indices {
                 if callable_index < 0 || callable_index >= callables.len() {
                     panic("ResourcePlanner: call lacks exact callable candidate")
@@ -1130,6 +1341,22 @@ fn validate_event(
                 if argument_slots.len() != callables.get(
                         callable_index).unwrap().parameter_type_indices.len() {
                     panic("ResourcePlanner: call candidate arity differs")
+                }
+                let candidate = callables.get(callable_index).unwrap()
+                let mut argument = 0
+                while argument < argument_slots.len() {
+                    if slots.get(argument_slots.get(argument).unwrap()).unwrap().type_index !=
+                           candidate.parameter_type_indices.get(argument).unwrap() ||
+                       !transfer_demand_leq(
+                            argument_demands.get(argument).unwrap(),
+                            candidate.parameter_seeds.get(argument).unwrap()) {
+                        panic("ResourcePlanner: derived callable contract differs")
+                    }
+                    argument = argument + 1
+                }
+                if result_type_index != candidate.result_type_index ||
+                   result_owned != candidate.result_owned_seed {
+                    panic("ResourcePlanner: derived callable result contract differs")
                 }
             }
             for slot in argument_slots { validate_slot_index(slot, slots) }
@@ -2776,6 +3003,603 @@ fn planner_body_for_reference(
     none
 }
 
+// ============================================================
+// Planner-owned callable-slot candidate fixed point
+// ============================================================
+
+fn empty_candidate_set(callable_count: Int) -> List<Bool> {
+    let mut result: List<Bool> = []
+    let mut index = 0
+    while index < callable_count {
+        result.push(false)
+        index = index + 1
+    }
+    result
+}
+
+fn singleton_candidate_set(
+    callable_count: Int, candidate: Int
+) -> List<Bool> {
+    if candidate < 0 || candidate >= callable_count {
+        panic("ResourcePlanner: callable candidate is outside frozen table")
+    }
+    let mut result = empty_candidate_set(callable_count)
+    result.set(candidate, true)
+    result
+}
+
+fn copy_candidate_set(values: List<Bool>) -> List<Bool> {
+    let mut result: List<Bool> = []
+    for value in values { result.push(value) }
+    result
+}
+
+fn join_candidate_sets(left: List<Bool>, right: List<Bool>) -> List<Bool> {
+    if left.len() != right.len() {
+        panic("ResourcePlanner: callable candidate domain differs")
+    }
+    let mut result: List<Bool> = []
+    let mut index = 0
+    while index < left.len() {
+        result.push(left.get(index).unwrap() || right.get(index).unwrap())
+        index = index + 1
+    }
+    result
+}
+
+fn candidate_sets_same(left: List<Bool>, right: List<Bool>) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if left.get(index).unwrap() != right.get(index).unwrap() {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn candidate_set_is_empty(values: List<Bool>) -> Bool {
+    for value in values { if value { return false } }
+    true
+}
+
+fn candidate_set_indices(values: List<Bool>) -> List<Int> {
+    let mut result: List<Int> = []
+    let mut index = 0
+    while index < values.len() {
+        if values.get(index).unwrap() { result.push(index) }
+        index = index + 1
+    }
+    result
+}
+
+fn copy_candidate_state(
+    values: List<List<Bool>>
+) -> List<List<Bool>> {
+    let mut result: List<List<Bool>> = []
+    for value in values { result.push(copy_candidate_set(value)) }
+    result
+}
+
+fn join_candidate_states(
+    left: List<List<Bool>>, right: List<List<Bool>>
+) -> List<List<Bool>> {
+    if left.len() != right.len() {
+        panic("ResourcePlanner: callable slot-state census differs")
+    }
+    let mut result: List<List<Bool>> = []
+    let mut index = 0
+    while index < left.len() {
+        result.push(join_candidate_sets(
+            left.get(index).unwrap(), right.get(index).unwrap()))
+        index = index + 1
+    }
+    result
+}
+
+fn candidate_states_same(
+    left: List<List<Bool>>, right: List<List<Bool>>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if !candidate_sets_same(
+                left.get(index).unwrap(), right.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn planner_type_is_callable(
+    type_nodes: List<PlannerTypeNode>, type_index: Int
+) -> Bool {
+    planner_type_kind_tag(type_nodes.get(type_index).unwrap().kind) ==
+        PLANNER_TYPE_CALLABLE
+}
+
+fn planner_slot_is_callable(
+    body: PlannerBody, type_nodes: List<PlannerTypeNode>, slot: Int
+) -> Bool {
+    planner_type_is_callable(
+        type_nodes, body.slots.get(slot).unwrap().type_index)
+}
+
+fn call_target_candidates(
+    target: PlannerCallTarget, state: List<List<Bool>>,
+    callable_count: Int
+) -> List<Bool> {
+    if planner_call_target_is_direct(target) {
+        return singleton_candidate_set(
+            callable_count, planner_call_target_direct(target))
+    }
+    copy_candidate_set(state.get(
+        planner_call_target_slot(target)).unwrap())
+}
+
+fn provenance_candidate_set(
+    fact: PlannerCallableProvenance,
+    state: List<List<Bool>>, callable_results: List<List<Bool>>,
+    callable_count: Int
+) -> List<Bool> {
+    match fact.origin {
+        PlannerCallableOriginValue::DirectCallableOriginValue(callable) =>
+            singleton_candidate_set(callable_count, callable),
+        PlannerCallableOriginValue::SlotCallableOriginValue(sources) => {
+            let mut result = empty_candidate_set(callable_count)
+            for source in sources {
+                result = join_candidate_sets(
+                    result, state.get(source).unwrap())
+            }
+            result
+        },
+        PlannerCallableOriginValue::CallCallableOriginValue {
+            target, arguments: _
+        } => {
+            let targets = call_target_candidates(
+                target, state, callable_count)
+            let mut result = empty_candidate_set(callable_count)
+            let mut candidate = 0
+            while candidate < callable_count {
+                if targets.get(candidate).unwrap() {
+                    result = join_candidate_sets(
+                        result, callable_results.get(candidate).unwrap())
+                }
+                candidate = candidate + 1
+            }
+            result
+        }
+    }
+}
+
+fn apply_candidate_provenance(
+    event: PlannerEvent, callable_results: List<List<Bool>>,
+    callable_count: Int, mut state: List<List<Bool>>
+) {
+    for fact in event.callable_provenance {
+        let mut result = provenance_candidate_set(
+            fact, state, callable_results, callable_count)
+        match event.value {
+            PlannerEventValue::CallValue {
+                argument_slots, result_origin_argument_ordinals, ..
+            } => {
+                for ordinal in result_origin_argument_ordinals {
+                    result = join_candidate_sets(
+                        result,
+                        state.get(argument_slots.get(ordinal).unwrap()).unwrap())
+                }
+            },
+            _ => {}
+        }
+        state.set(fact.target, result)
+    }
+}
+
+fn apply_event_candidate_state(
+    event: PlannerEvent, body: PlannerBody,
+    callable_results: List<List<Bool>>, callable_count: Int,
+    mut state: List<List<Bool>>
+) {
+    apply_candidate_provenance(
+        event, callable_results, callable_count, state)
+    match event.value {
+        PlannerEventValue::ScopeExitValue(scope_id) => {
+            for slot in cleanup_slot_order(body.slots, [scope_id]) {
+                state.set(slot, empty_candidate_set(callable_count))
+            }
+        },
+        PlannerEventValue::ConsumeValue(slot, _) |
+        PlannerEventValue::DiscardValue(slot) =>
+            state.set(slot, empty_candidate_set(callable_count)),
+        PlannerEventValue::AssignValue { rhs_temp, .. } =>
+            state.set(rhs_temp, empty_candidate_set(callable_count)),
+        _ => {}
+    }
+}
+
+fn apply_candidate_edge_cleanup(
+    edge: PlannerEdge, body: PlannerBody, callable_count: Int,
+    mut state: List<List<Bool>>
+) {
+    for slot in cleanup_slot_order(body.slots, edge.exited_scope_ids) {
+        state.set(slot, empty_candidate_set(callable_count))
+    }
+}
+
+fn join_global_candidate_cell(
+    mut table: List<List<List<Bool>>>, callable: Int, parameter: Int,
+    incoming: List<Bool>
+) -> Bool {
+    let mut row = table.get(callable).unwrap()
+    let previous = row.get(parameter).unwrap()
+    let joined = join_candidate_sets(previous, incoming)
+    if candidate_sets_same(previous, joined) { return false }
+    row.set(parameter, joined)
+    table.set(callable, row)
+    true
+}
+
+fn propagate_call_arguments(
+    event: PlannerEvent, state: List<List<Bool>>,
+    callables: List<PlannerCallable>,
+    mut parameter_inputs: List<List<List<Bool>>>
+) -> Bool {
+    match event.value {
+        PlannerEventValue::CallValue {
+            call_target, argument_slots, ..
+        } => {
+            let targets = call_target_candidates(
+                call_target, state, callables.len())
+            let mut changed = false
+            let mut candidate = 0
+            while candidate < callables.len() {
+                if targets.get(candidate).unwrap() {
+                    let callable = callables.get(candidate).unwrap()
+                    if callable.parameter_type_indices.len() !=
+                       argument_slots.len() {
+                        panic("ResourcePlanner: derived call candidate arity differs")
+                    }
+                    let mut argument = 0
+                    while argument < argument_slots.len() {
+                        if join_global_candidate_cell(
+                                parameter_inputs, candidate, argument,
+                                state.get(argument_slots.get(argument).unwrap()).unwrap()) {
+                            changed = true
+                        }
+                        argument = argument + 1
+                    }
+                }
+                candidate = candidate + 1
+            }
+            changed
+        },
+        _ => false
+    }
+}
+
+struct CandidateBodySolution {
+    reachable: List<Bool>,
+    entry_states: List<List<List<Bool>>>
+}
+
+fn solve_candidate_body(
+    body: PlannerBody, callable_index: Int,
+    type_nodes: List<PlannerTypeNode>, callables: List<PlannerCallable>,
+    parameter_inputs: List<List<List<Bool>>>,
+    callable_results: List<List<Bool>>,
+    mut global_parameter_inputs: List<List<List<Bool>>>,
+    mut global_results: List<List<Bool>>
+) -> CandidateBodySolution {
+    let callable_count = callables.len()
+    let mut reachable: List<Bool> = []
+    let mut entries: List<List<List<Bool>>> = []
+    for _ in body.blocks {
+        reachable.push(false)
+        let mut state: List<List<Bool>> = []
+        for _ in body.slots { state.push(empty_candidate_set(callable_count)) }
+        entries.push(state)
+    }
+    let mut seed: List<List<Bool>> = []
+    for slot in body.slots {
+        let candidates = match slot.parameter_ordinal {
+            some(parameter) => copy_candidate_set(
+                parameter_inputs.get(callable_index).unwrap().get(
+                    parameter).unwrap()),
+            none => empty_candidate_set(callable_count)
+        }
+        seed.push(candidates)
+    }
+    reachable.set(body.entry_block, true)
+    entries.set(body.entry_block, seed)
+    let exact_rank_budget = body.blocks.len() *
+        (body.slots.len() * callable_count + 1)
+    let mut promotions = 1
+    let mut changed = true
+    while changed {
+        changed = false
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            if reachable.get(block_index).unwrap() {
+                let block = body.blocks.get(block_index).unwrap()
+                let state = copy_candidate_state(
+                    entries.get(block_index).unwrap())
+                for event in block.events {
+                    if propagate_call_arguments(
+                            event, state, callables,
+                            global_parameter_inputs) {
+                        changed = true
+                    }
+                    apply_event_candidate_state(
+                        event, body, callable_results, callable_count, state)
+                }
+                if block.terminator_kind == 3 &&
+                   planner_type_is_callable(
+                        type_nodes,
+                        callables.get(callable_index).unwrap().result_type_index) {
+                    for usage in block.terminator_uses {
+                        let previous = global_results.get(callable_index).unwrap()
+                        let joined = join_candidate_sets(
+                            previous, state.get(usage.slot).unwrap())
+                        if !candidate_sets_same(previous, joined) {
+                            global_results.set(callable_index, joined)
+                            changed = true
+                        }
+                    }
+                }
+                for edge in block.edges {
+                    match edge.target_block {
+                        some(target) => {
+                            let edge_state = copy_candidate_state(state)
+                            apply_candidate_edge_cleanup(
+                                edge, body, callable_count, edge_state)
+                            if !reachable.get(target).unwrap() {
+                                reachable.set(target, true)
+                                entries.set(target, edge_state)
+                                promotions = promotions + 1
+                                changed = true
+                            } else {
+                                let previous = entries.get(target).unwrap()
+                                let joined = join_candidate_states(
+                                    previous, edge_state)
+                                if !candidate_states_same(previous, joined) {
+                                    entries.set(target, joined)
+                                    promotions = promotions + 1
+                                    changed = true
+                                }
+                            }
+                            if promotions > exact_rank_budget {
+                                panic("ResourcePlanner: callable-slot CFG exceeded rank budget")
+                            }
+                        },
+                        none => {}
+                    }
+                }
+            }
+            block_index = block_index + 1
+        }
+    }
+    CandidateBodySolution { reachable: reachable, entry_states: entries }
+}
+
+fn initialize_candidate_parameter_table(
+    callables: List<PlannerCallable>
+) -> List<List<List<Bool>>> {
+    let mut result: List<List<List<Bool>>> = []
+    for callable in callables {
+        let mut row: List<List<Bool>> = []
+        for _ in callable.parameter_type_indices {
+            row.push(empty_candidate_set(callables.len()))
+        }
+        result.push(row)
+    }
+    result
+}
+
+fn initialize_candidate_result_table(
+    callables: List<PlannerCallable>
+) -> List<List<Bool>> {
+    let mut result: List<List<Bool>> = []
+    for _ in callables { result.push(empty_candidate_set(callables.len())) }
+    result
+}
+
+fn seed_contract_only_callable_results(
+    callables: List<PlannerCallable>, type_nodes: List<PlannerTypeNode>,
+    parameter_inputs: List<List<List<Bool>>>,
+    mut results: List<List<Bool>>
+) -> Bool {
+    let mut changed = false
+    let mut callable_index = 0
+    while callable_index < callables.len() {
+        let callable = callables.get(callable_index).unwrap()
+        if !callable.has_body && planner_type_is_callable(
+                type_nodes, callable.result_type_index) {
+            let mut joined = copy_candidate_set(
+                results.get(callable_index).unwrap())
+            for parameter in callable.result_origin_parameter_ordinals {
+                joined = join_candidate_sets(
+                    joined,
+                    parameter_inputs.get(callable_index).unwrap().get(
+                        parameter).unwrap())
+            }
+            if !candidate_sets_same(
+                    results.get(callable_index).unwrap(), joined) {
+                results.set(callable_index, joined)
+                changed = true
+            }
+        }
+        callable_index = callable_index + 1
+    }
+    changed
+}
+
+struct CallableCandidateFixedPoint {
+    parameter_inputs: List<List<List<Bool>>>,
+    results: List<List<Bool>>
+}
+
+fn solve_callable_candidates(
+    type_nodes: List<PlannerTypeNode>,
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>
+) -> CallableCandidateFixedPoint {
+    let parameter_inputs = initialize_candidate_parameter_table(callables)
+    let results = initialize_candidate_result_table(callables)
+    let mut rank_capacity = callables.len() * callables.len()
+    for callable in callables {
+        rank_capacity = rank_capacity +
+            callable.parameter_type_indices.len() * callables.len()
+    }
+    let mut iterations = 0
+    let mut changed = true
+    while changed {
+        changed = seed_contract_only_callable_results(
+            callables, type_nodes, parameter_inputs, results)
+        let mut callable_index = 0
+        while callable_index < callables.len() {
+            let callable = callables.get(callable_index).unwrap()
+            if callable.has_body {
+                let body = match planner_body_for_reference(
+                        bodies, callable.reference) {
+                    some(value) => value,
+                    none => panic("ResourcePlanner: candidate solve body is absent")
+                }
+                let before_inputs = parameter_inputs.map(fn(row) {
+                    row.map(fn(bits) { copy_candidate_set(bits) })
+                })
+                let before_results = results.map(fn(bits) {
+                    copy_candidate_set(bits)
+                })
+                let _ = solve_candidate_body(
+                    body, callable_index, type_nodes, callables,
+                    parameter_inputs, results, parameter_inputs, results)
+                let mut row_index = 0
+                while row_index < parameter_inputs.len() {
+                    let mut parameter = 0
+                    while parameter < parameter_inputs.get(row_index).unwrap().len() {
+                        if !candidate_sets_same(
+                                before_inputs.get(row_index).unwrap().get(parameter).unwrap(),
+                                parameter_inputs.get(row_index).unwrap().get(parameter).unwrap()) {
+                            changed = true
+                        }
+                        parameter = parameter + 1
+                    }
+                    if !candidate_sets_same(
+                            before_results.get(row_index).unwrap(),
+                            results.get(row_index).unwrap()) {
+                        changed = true
+                    }
+                    row_index = row_index + 1
+                }
+            }
+            callable_index = callable_index + 1
+        }
+        if changed {
+            iterations = iterations + 1
+            if iterations > rank_capacity + 1 {
+                panic("ResourcePlanner: callable candidate LFP exceeded finite rank budget")
+            }
+        }
+    }
+    CallableCandidateFixedPoint {
+        parameter_inputs: parameter_inputs, results: results
+    }
+}
+
+fn replace_call_candidates(
+    event: PlannerEvent, candidates: List<Int>
+) -> PlannerEvent {
+    match event.value {
+        PlannerEventValue::CallValue {
+            call_target, argument_demands, result_owned,
+            result_type_index, result_origin_argument_ordinals,
+            argument_slots, result_slot, ..
+        } => with_planner_callable_provenance(make_planner_call(
+            call_target, candidates, argument_slots, argument_demands,
+            result_owned, result_type_index,
+            result_origin_argument_ordinals, result_slot),
+            event.callable_provenance),
+        _ => copy_planner_event(event)
+    }
+}
+
+fn resolve_body_call_candidates(
+    body: PlannerBody, callable_index: Int,
+    type_nodes: List<PlannerTypeNode>, callables: List<PlannerCallable>,
+    fixed: CallableCandidateFixedPoint
+) -> PlannerBody {
+    let scratch_inputs = fixed.parameter_inputs.map(fn(row) {
+        row.map(fn(bits) { copy_candidate_set(bits) })
+    })
+    let scratch_results = fixed.results.map(fn(bits) {
+        copy_candidate_set(bits)
+    })
+    let solution = solve_candidate_body(
+        body, callable_index, type_nodes, callables,
+        fixed.parameter_inputs, fixed.results,
+        scratch_inputs, scratch_results)
+    let mut blocks: List<PlannerBlock> = []
+    let mut block_index = 0
+    while block_index < body.blocks.len() {
+        let block = body.blocks.get(block_index).unwrap()
+        let state = copy_candidate_state(
+            solution.entry_states.get(block_index).unwrap())
+        let mut events: List<PlannerEvent> = []
+        for event in block.events {
+            let resolved = match event.value {
+                PlannerEventValue::CallValue { call_target, .. } => {
+                    let candidates = call_target_candidates(
+                        call_target, state, callables.len())
+                    if candidate_set_is_empty(candidates) {
+                        panic("ResourcePlanner: callable slot has no candidate at required call")
+                    }
+                    replace_call_candidates(
+                        event, candidate_set_indices(candidates))
+                },
+                _ => copy_planner_event(event)
+            }
+            events.push(resolved)
+            apply_event_candidate_state(
+                resolved, body, fixed.results, callables.len(), state)
+        }
+        blocks.push(make_planner_block(
+            block.terminator_kind, events,
+            block.terminator_uses, block.edges))
+        block_index = block_index + 1
+    }
+    make_planner_body(
+        body.reference, body.scopes, body.slots,
+        body.entry_block, blocks)
+}
+
+fn close_callable_candidate_lfp(
+    type_nodes: List<PlannerTypeNode>,
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>
+) -> List<PlannerBody> {
+    let fixed = solve_callable_candidates(type_nodes, callables, bodies)
+    let mut result: List<PlannerBody> = []
+    for body in bodies {
+        result.push(resolve_body_call_candidates(
+            body, flow_callable_index_for_planner(callables, body.reference),
+            type_nodes, callables, fixed))
+    }
+    result
+}
+
+fn flow_callable_index_for_planner(
+    callables: List<PlannerCallable>, reference: ExecutableRef
+) -> Int {
+    let mut index = 0
+    while index < callables.len() {
+        if executable_ref_same(callables.get(index).unwrap().reference, reference) {
+            return index
+        }
+        index = index + 1
+    }
+    panic("ResourcePlanner: body has no planner callable")
+}
+
 fn close_callable_body_dataflow(
     callables: List<PlannerCallable>, bodies: List<PlannerBody>
 ) -> List<PlannerCallable> {
@@ -2785,7 +3609,9 @@ fn close_callable_body_dataflow(
             result.push(make_planner_callable(
                 callable.reference, callable.parameter_type_indices,
                 callable.result_type_index, callable.parameter_seeds,
-                callable.result_owned_seed, [], false))
+                callable.result_owned_seed,
+                callable.result_origin_parameter_ordinals,
+                [], false))
         } else {
             let body = match planner_body_for_reference(
                     bodies, callable.reference) {
@@ -2808,6 +3634,7 @@ fn close_callable_body_dataflow(
                 callable.reference, callable.parameter_type_indices,
                 callable.result_type_index, seeds,
                 callable.result_owned_seed,
+                callable.result_origin_parameter_ordinals,
                 body_callable_edges(body, parameter_count, solution), true))
         }
     }
@@ -3761,6 +4588,7 @@ fn planner_callable_from_flow(
         flow_type_ref_index(flow_callable_result_type(callable)),
         seeds,
         flow_role_is_owned(flow_call_contract_result_role(contract)),
+        flow_origin_ordinals(flow_call_contract_result_origin(contract)),
         [], has_body)
 }
 
@@ -3821,36 +4649,45 @@ fn planner_place_from_flow(
         flow_type_ref_index(flow_place_value_type(value)))
 }
 
-fn flow_call_candidate_indices(
-    target: FlowCallTarget, callables: List<FlowCallable>
-) -> List<Int> {
-    let mut result: List<Int> = []
-    for candidate in flow_call_target_candidates(target) {
-        result.push(flow_callable_index(callables, candidate))
-    }
-    result
-}
-
-fn flow_call_result_type_index(
-    target: FlowCallTarget, callables: List<FlowCallable>
+fn flow_dynamic_call_slot(
+    path: PathRef, slots: List<FlowSlot>
 ) -> Int {
-    let candidates = flow_call_target_candidates(target)
-    let first = match candidates.get(0) {
-        some(value) => flow_callable_result_type(
-            callables.get(flow_callable_index(callables, value)).unwrap()),
-        none => panic("ResourcePlanner: call target has empty candidate set")
-    }
-    for candidate in candidates {
-        let result = flow_callable_result_type(
-            callables.get(flow_callable_index(callables, candidate)).unwrap())
-        if !flow_type_ref_same(first, result) {
-            panic("ResourcePlanner: dynamic callable result type differs")
+    let mut found: Int? = none
+    let mut index = 0
+    while index < slots.len() {
+        let reference = flow_slot_reference(slots.get(index).unwrap())
+        if !slot_ref_is_source(reference) &&
+           path_ref_same(slot_ref_synthetic_path(reference), path) {
+            if found.is_some() {
+                panic("ResourcePlanner: dynamic callable path maps to multiple slots")
+            }
+            found = some(index)
         }
+        index = index + 1
     }
-    flow_type_ref_index(first)
+    match found {
+        some(value) => value,
+        none => panic("ResourcePlanner: dynamic callable path lacks exact slot")
+    }
 }
 
-fn planner_event_from_flow(
+fn planner_call_target_from_flow(
+    target: FlowCallTarget, slots: List<FlowSlot>,
+    callables: List<FlowCallable>
+) -> PlannerCallTarget {
+    if flow_call_target_is_direct(target) {
+        return make_planner_direct_call_target(flow_callable_index(
+            callables, flow_call_target_direct(target)))
+    }
+    if flow_call_target_is_local(target) {
+        return make_planner_slot_call_target(flow_slot_index(
+            slots, flow_call_target_local(target)))
+    }
+    make_planner_slot_call_target(flow_dynamic_call_slot(
+        flow_call_target_dynamic(target), slots))
+}
+
+fn planner_event_value_from_flow(
     instruction: FlowInstruction, slots: List<FlowSlot>,
     callables: List<FlowCallable>
 ) -> PlannerEvent {
@@ -3916,10 +4753,13 @@ fn planner_event_from_flow(
             none => none
         }
         return make_planner_call(
-            flow_call_candidate_indices(target, callables),
+            planner_call_target_from_flow(target, slots, callables),
+            if flow_call_target_is_direct(target) {
+                [flow_callable_index(callables, flow_call_target_direct(target))]
+            } else { [] },
             arguments, demands,
             flow_role_is_owned(flow_call_contract_result_role(contract)),
-            flow_call_result_type_index(target, callables),
+            flow_type_ref_index(flow_call_contract_result_type(contract)),
             flow_origin_ordinals(flow_call_contract_result_origin(contract)),
             result)
     }
@@ -3950,6 +4790,53 @@ fn planner_event_from_flow(
             flow_scope_instruction_scope(instruction)))
     }
     panic("ResourcePlanner: unknown FlowIR instruction kind")
+}
+
+fn planner_callable_provenance_from_flow(
+    instruction: FlowInstruction, slots: List<FlowSlot>,
+    type_nodes: List<FlowTypeNode>, callables: List<FlowCallable>
+) -> List<PlannerCallableProvenance> {
+    let mut result: List<PlannerCallableProvenance> = []
+    for fact in flow_instruction_callable_provenance(
+            instruction, slots, type_nodes) {
+        let target = flow_slot_index(
+            slots, flow_callable_provenance_target(fact))
+        let origin = flow_callable_provenance_origin(fact)
+        if flow_callable_origin_is_direct(origin) {
+            result.push(make_direct_planner_callable_provenance(
+                target, flow_callable_index(
+                    callables, flow_callable_origin_direct(origin))))
+        } else if flow_callable_origin_is_call(origin) {
+            let mut arguments: List<Int> = []
+            for argument in flow_callable_origin_call_arguments(origin) {
+                arguments.push(flow_slot_index(slots, argument))
+            }
+            result.push(make_call_planner_callable_provenance(
+                target,
+                planner_call_target_from_flow(
+                    flow_callable_origin_call_target(origin),
+                    slots, callables),
+                arguments))
+        } else {
+            let mut sources: List<Int> = []
+            for source in flow_callable_origin_slots(origin) {
+                sources.push(flow_slot_index(slots, source))
+            }
+            result.push(make_slots_planner_callable_provenance(
+                target, sources))
+        }
+    }
+    result
+}
+
+fn planner_event_from_flow(
+    instruction: FlowInstruction, slots: List<FlowSlot>,
+    type_nodes: List<FlowTypeNode>, callables: List<FlowCallable>
+) -> PlannerEvent {
+    with_planner_callable_provenance(
+        planner_event_value_from_flow(instruction, slots, callables),
+        planner_callable_provenance_from_flow(
+            instruction, slots, type_nodes, callables))
 }
 
 fn planner_terminator_uses_from_flow(
@@ -3997,7 +4884,8 @@ fn planner_edges_from_flow(terminator: FlowTerminator) -> List<PlannerEdge> {
 }
 
 fn planner_body_from_flow(
-    body: FlowBody, callables: List<FlowCallable>
+    body: FlowBody, type_nodes: List<FlowTypeNode>,
+    callables: List<FlowCallable>
 ) -> PlannerBody {
     let flow_slots = flow_body_slots(body)
     let callable = callables.get(flow_callable_index(
@@ -4037,7 +4925,7 @@ fn planner_body_from_flow(
         let mut events: List<PlannerEvent> = []
         for instruction in flow_block_instructions(block) {
             events.push(planner_event_from_flow(
-                instruction, flow_slots, callables))
+                instruction, flow_slots, type_nodes, callables))
         }
         let terminator = flow_block_terminator(block)
         blocks.push(make_planner_block(
@@ -4078,13 +4966,17 @@ fn make_frozen_planner_input_from_flow(
     }
     let mut bodies: List<PlannerBody> = []
     for body in flow_bodies {
-        bodies.push(planner_body_from_flow(body, flow_callables))
+        bodies.push(planner_body_from_flow(
+            body, flow_types, flow_callables))
     }
-    let closed_callables = close_callable_body_dataflow(callables, bodies)
+    let candidate_closed_bodies = close_callable_candidate_lfp(
+        types, callables, bodies)
+    let closed_callables = close_callable_body_dataflow(
+        callables, candidate_closed_bodies)
     make_frozen_planner_input(
         flow_topology_fingerprint_canonical(
             flow_program_topology_fingerprint(program)),
-        types, closed_callables, bodies)
+        types, closed_callables, candidate_closed_bodies)
 }
 
 // ============================================================
