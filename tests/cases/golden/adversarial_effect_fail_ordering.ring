@@ -5,7 +5,7 @@
 
 enum E { Boom }
 
-fn fail_mid() -> Int with {io, fail<E>} {
+fn fail_mid() -> Int with {console, fail<E>} {
     print("before-fail")
     fail.raise(E::Boom)
     // everything below should be unreachable
@@ -13,7 +13,7 @@ fn fail_mid() -> Int with {io, fail<E>} {
     42
 }
 
-fn fail_in_branch(flag: Bool) -> Str with {io, fail<E>} {
+fn fail_in_branch(flag: Bool) -> Str with {console, fail<E>} {
     print("enter")
     if flag {
         print("branch-true-before")
@@ -24,7 +24,7 @@ fn fail_in_branch(flag: Bool) -> Str with {io, fail<E>} {
     "ok"
 }
 
-fn multi_print_fail() -> Int with {io, fail<E>} {
+fn multi_print_fail() -> Int with {console, fail<E>} {
     print("step-1")
     print("step-2")
     print("step-3")

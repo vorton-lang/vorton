@@ -10,7 +10,7 @@ impl ApplyOnce for Runner {
     }
 }
 
-fn noisy(value: Int) -> Int with {io} {
+fn noisy(value: Int) -> Int with {console} {
     print("noisy=${value}")
     value + 2
 }

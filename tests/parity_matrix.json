@@ -545,38 +545,6 @@
     },
 
     {
-      "feature_id": "backend.default_effect_topo",
-      "evidence": ["tests/cases/default_effect_topo.ring"],
-      "oracle": "handwritten-golden+c-native",
-      "lane": ["e2e-c"],
-      "status": "covered",
-      "reason": "Topologically ordered default-effect evidence executes against the handwritten golden through the C-native backend."
-    },
-    {
-      "feature_id": "backend.default_effect_body_pipeline",
-      "evidence": ["tests/cases/default_effect_body_io.ring"],
-      "oracle": "c-native-golden",
-      "lane": ["e2e-c"],
-      "status": "covered",
-      "reason": "Default effect bodies run through and/or, dictionary, ANF, Perceus, and RC verification before C-native emission."
-    },
-    {
-      "feature_id": "backend.module_effect_evidence",
-      "evidence": ["tests/cases/mod_effect_evidence.ring"],
-      "oracle": "e2e-golden+c-native",
-      "lane": ["e2e-c"],
-      "status": "covered",
-      "reason": "Unqualified, module-qualified, and nested module-qualified default effect evidence executes under the C-native backend."
-    },
-    {
-      "feature_id": "backend.file_module_effect_evidence",
-      "evidence": ["tests/cases/modules/module_default_effect_evidence/main.ring"],
-      "oracle": "module-golden+c-native",
-      "lane": ["module-c"],
-      "status": "covered",
-      "reason": "A nested file-module path preserves its canonical $-prefix while top-level and inline-child default effect evidence executes under the C-native backend."
-    },
-    {
       "feature_id": "collections.api_clone",
       "evidence": ["tests/cases/api_clone.ring"],
       "oracle": "handwritten-golden+c-native",
@@ -701,6 +669,48 @@
       "reason": "A custom effect and fail handler coexist; the abort arm maps its payload under the C-native backend."
     },
     {
+      "feature_id": "frontend.effect_operation_signature_only",
+      "evidence": [
+        "tests/cases/custom_effect.ring",
+        "tests/cases/error_removed_effect_default_body.ring"
+      ],
+      "oracle": "handwritten-golden+c-native+diagnostic-substring",
+      "lane": ["e2e-c", "check"],
+      "status": "covered",
+      "reason": "Ring 0.1 custom effects retain explicit handlers while effect-operation bodies are rejected and locally recovered without automatic default evidence."
+    },
+    {
+      "feature_id": "backend.system_effect_capabilities",
+      "evidence": ["tests/cases/system_effect_surface.ring"],
+      "oracle": "c-native-check+golden",
+      "lane": ["e2e-c"],
+      "status": "covered",
+      "reason": "Console, filesystem, and process calls carry distinct exact system capabilities while pure path operations remain effect-free."
+    },
+    {
+      "feature_id": "backend.system_effect_custom_adapter",
+      "evidence": [
+        "tests/cases/system_effect_custom_adapter.ring",
+        "tests/cases/error_handle_system_effect.ring",
+        "tests/cases/error_removed_io_effect_annotation.ring"
+      ],
+      "oracle": "c-native-golden+diagnostic-substring",
+      "lane": ["e2e-c", "check"],
+      "status": "covered",
+      "reason": "A custom handled effect can explicitly adapt to a system API, while system effects cannot be handled and the removed broad io atom is rejected."
+    },
+    {
+      "feature_id": "backend.core_ownership_cutover",
+      "evidence": [
+        "tests/cases/ownership_core_cutover.ring",
+        "tests/cases/modules/ownership_core_cutover_project/main.ring"
+      ],
+      "oracle": "handwritten-golden+c-native+project-c",
+      "lane": ["e2e-c", "module-c"],
+      "status": "covered",
+      "reason": "Single and project compilation share the structured Core to Flow ownership pipeline before materialized HIR reaches the C backend, including generated default, derive, delegate, and handled-effect bodies."
+    },
+    {
       "feature_id": "backend.effect_abort_handler_arm",
       "evidence": ["tests/cases/golden/abort_handler_arm.ring"],
       "oracle": "handwritten-golden+c-native",
@@ -717,7 +727,7 @@
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
-      "reason": "Abort handlers refine explicit, unannotated, nested, mixed, and owner-qualified associated-type HOF rows to an exact fail payload contract, preserve residual io, and leave ordinary effect-polymorphic HOF calls and closed handled bodies valid."
+      "reason": "Abort handlers refine explicit, unannotated, nested, mixed, and owner-qualified associated-type HOF rows to an exact fail payload contract, preserve residual console capability, and leave ordinary effect-polymorphic HOF calls and closed handled bodies valid."
     },
     {
       "feature_id": "backend.module_abort_handler_assoc_constraint",

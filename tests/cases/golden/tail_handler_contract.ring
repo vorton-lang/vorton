@@ -22,7 +22,7 @@ effect OpenEcho<T> {
     fn second(value: T) -> T
 }
 
-fn direct_io_handler() -> Int with {io} {
+fn direct_io_handler() -> Int with {console} {
     handle {
         Probe.value(4)
     } with {

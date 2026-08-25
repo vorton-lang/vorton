@@ -2,12 +2,12 @@
 // The same extern value remains statically bounded: selecting T=Float must be
 // rejected even though a successful extern closure captures no runtime dict.
 
-extern fn print<T: Hash>(value: T) -> Unit with {io}
+extern fn print<T: Hash>(value: T) -> Unit with {console}
 
 fn call_float(
-    f: fn(Float) -> Unit with {io},
+    f: fn(Float) -> Unit with {console},
     value: Float
-) -> Unit with {io} {
+) -> Unit with {console} {
     f(value)
 }
 

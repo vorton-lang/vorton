@@ -1,6 +1,6 @@
-effect alias IO = {io, fail<Str>}
+effect alias IO = {console, fail<Str>}
 
-fn do_io() with {IO, io} {
+fn do_io() with {IO, console} {
     print("hello")
 }
 

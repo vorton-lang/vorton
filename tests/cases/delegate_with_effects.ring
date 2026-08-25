@@ -1,13 +1,13 @@
 // Test: delegate forwarding correctly passes effect evidence
 
 trait Loggable {
-    fn log_self(self) -> Str with {io}
+    fn log_self(self) -> Str with {console}
 }
 
 struct Inner { name: Str }
 
 impl Loggable for Inner {
-    fn log_self(self) -> Str with {io} {
+    fn log_self(self) -> Str with {console} {
         print("logging: ${self.name}")
         self.name
     }

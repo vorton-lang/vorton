@@ -3,12 +3,12 @@
 // Re-declaring the exact builtin identity gives this test a real runtime target:
 // an accidental dictionary capture/argument would corrupt the print call.
 
-extern fn print<T: Hash>(value: T) -> Unit with {io}
+extern fn print<T: Hash>(value: T) -> Unit with {console}
 
 fn call_bounded(
-    f: fn(Int) -> Unit with {io},
+    f: fn(Int) -> Unit with {console},
     value: Int
-) -> Unit with {io} {
+) -> Unit with {console} {
     f(value)
 }
 

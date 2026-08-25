@@ -12,7 +12,7 @@ fn parse<T>(s: Str, default_val: T) -> T with {Failable<Str>} {
 
 // Nested alias: alias type param T should not collide with
 // outer usage of T in another alias
-effect alias MyIO<T> = {io, fail<T>}
+effect alias MyIO<T> = {console, fail<T>}
 
 fn greet(name: Str) -> Str with {MyIO<Str>} {
     print("hello ${name}")

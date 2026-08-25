@@ -3,12 +3,12 @@
 // when one side is closed and the other is open.
 
 // A function with explicit (closed) effect annotation
-fn effectful_io() -> Int with {io} {
+fn effectful_io() -> Int with {console} {
     42
 }
 
 // A function with explicit closed row [io, fail<Str>]
-fn effectful_io_fail() -> Int with {io, fail<Str>} {
+fn effectful_io_fail() -> Int with {console, fail<Str>} {
     42
 }
 

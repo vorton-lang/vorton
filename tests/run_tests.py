@@ -3713,7 +3713,7 @@ def identity_ledger_event_shape_errors(
             or event.producer
         ):
             errors.append(f"exact event {event.event_id} has malformed shape")
-    elif event.domain in {"name-only", "static", "default-evidence"}:
+    elif event.domain in {"name-only", "static"}:
         if (
             event.def_id != -1 or not event.canonical_key
             or event.producer
@@ -3745,9 +3745,7 @@ def identity_ledger_event_shape_errors(
             errors.append(
                 f"dict receiver {event.event_id} has {event.domain} domain")
     elif event.kind == "effect-receiver-load":
-        if event.domain not in {
-            "name-only", "default-evidence", "computed",
-        }:
+        if event.domain not in {"name-only", "computed"}:
             errors.append(
                 f"effect receiver {event.event_id} has {event.domain} domain")
     elif event.kind == "closure-call":
@@ -4023,7 +4021,7 @@ def identity_ledger_mutation_matrix_errors() -> List[str]:
                             "computed", -1, "", "dict-receiver-load",
                             "t_method", "t_result", 0, 2),
         IdentityLedgerEvent(9, "effect-receiver-load", 0, 2, "child_b", "",
-                            "default-evidence", -1, "__ring_default_E", "",
+                            "name-only", -1, "__ring_ev_E", "",
                             "r_effect", "t_effect", 1, 0),
         IdentityLedgerEvent(10, "closure-call", 0, 2, "child_b", "",
                             "computed", -1, "", "effect-receiver-load",
@@ -4089,7 +4087,8 @@ def identity_ledger_mutation_matrix_errors() -> List[str]:
         ("dict exact domain", lambda rows: rows.__setitem__(6, replace(
             rows[6], domain="exact", def_id=73, canonical_key="dict_local"))),
         ("dict effect-only domain", lambda rows: rows.__setitem__(6, replace(
-            rows[6], domain="default-evidence"))),
+            rows[6], domain="fresh", canonical_key="",
+            producer="forged-dict"))),
         ("effect exact domain", lambda rows: rows.__setitem__(8, replace(
             rows[8], domain="exact", def_id=74, canonical_key="effect_local"))),
         ("effect dict-only domain", lambda rows: rows.__setitem__(8, replace(
@@ -4100,7 +4099,7 @@ def identity_ledger_mutation_matrix_errors() -> List[str]:
             rows[10], canonical_key=""))),
         ("Static producer", lambda rows: rows.__setitem__(10, replace(
             rows[10], producer="forged"))),
-        ("empty DefaultEvidence key", lambda rows: rows.__setitem__(8, replace(
+        ("empty effect NameOnly key", lambda rows: rows.__setitem__(8, replace(
             rows[8], canonical_key=""))),
         ("empty Computed producer", lambda rows: rows.__setitem__(12, replace(
             rows[12], producer=""))),
@@ -5227,7 +5226,6 @@ def identity_ledger_contract_errors(
             'validate_identity_domain_shape("exact", def_id, source_name, "")',
             'validate_identity_domain_shape("name-only", -1, canonical_key, "")',
             'validate_identity_domain_shape("static", -1, canonical_key, "")',
-            '"default-evidence", -1, canonical_key, ""',
             'validate_identity_domain_shape("computed", -1, "", producer)',
             'validate_identity_domain_shape("fresh", -1, "", producer)',
         ):
@@ -5275,7 +5273,7 @@ def identity_ledger_contract_errors(
     else:
         for token in (
             'domain != "name-only" && domain != "static" && domain != "computed"',
-            'domain != "name-only" && domain != "default-evidence" &&',
+            'domain != "name-only" && domain != "computed"',
             'domain != "computed"',
             "dict receiver has forbidden '${domain}' identity domain",
             "effect receiver has forbidden '${domain}' identity domain",
@@ -5300,7 +5298,8 @@ def identity_ledger_contract_errors(
             'event.producer != "closure-edge:${event.child_frame}"',
             'event.domain != "exact" && event.domain != "name-only"',
             'event.domain != "name-only" && event.domain != "static" &&',
-            'event.domain != "default-evidence" &&',
+            'event.domain != "name-only" &&\n'
+            '           event.domain != "computed"',
             'event.domain != "computed"',
             'event.kind == "closure-call"',
             'event.load_id != 0',
@@ -5628,9 +5627,33 @@ def identity_checkpoint_contract_errors(
     errors: List[str] = []
     errors.extend(identity_ledger_contract_errors(sources))
     required_tokens = {
+        "identity": (
+            "pub const BUILTIN_VALUE_SITE_COUNT: Int = 6",
+            "pub const BUILTIN_VALUE_HASH_COMBINE: Int = 5",
+            "pub struct BuiltinValueSite",
+            "pub fn builtin_value_symbol(",
+            '"builtin-value:${tag.to_str()}"',
+            '"builtin:value-site:${tag.to_str()}"',
+        ),
+        "builtins": (
+            "pub struct CheckerBuiltinValue",
+            "pub fn checker_only_builtin_values(",
+            "pub fn checker_builtin_value_name(",
+            "pub fn checker_builtin_value_symbol(",
+            "BUILTIN_VALUE_CELL_CONSTRUCTOR",
+            "BUILTIN_VALUE_ALLOC", "BUILTIN_VALUE_DEALLOC",
+            "BUILTIN_VALUE_PTR_COPY", "BUILTIN_VALUE_PTR_FROM_ADDR",
+            "builtin_value_symbol(site)",
+        ),
         "hir": (
             "pub struct HPatternBinding",
-            "Drop { name: Str, def_id: Int, ty: Type, span: Span }",
+            "Drop { name: Str, def_id: Int, slot: SlotRef, site: HResourceSite,",
+            "reason: HResourceReason, ty: Type, span: Span }",
+            "Take { source: HExpr, source_slot: SlotRef, saved_slot: SlotRef?,",
+            "pub struct HResourceSite",
+            "pub struct HResourceReason",
+            "executable_ref: ExecutableRef",
+            "impl_method_ref: ImplMethodRef?",
             "SYNTHETIC_DICT_DEF_ID_BASE",
             "SYNTHETIC_ANF_DEF_ID_BASE",
             "SYNTHETIC_RC_DEF_ID_BASE",
@@ -5640,33 +5663,54 @@ def identity_checkpoint_contract_errors(
             "block_local_init(stmts, id)",
             "pub fn is_exact_direct_call_ident(",
             "def_id: some(_), dict_closure_dicts: some(_)",
-            "pub dict_ref: DictRef",
+            "BoundMethodValue { method: TraitMethodRef, evidence: DictRef }",
+            "pub fn method_call_ref_bound_evidence(",
+            "callee_ref: CalleeRef?",
+            "system_host: SystemHostCallableRef?",
             "Call { base_dict: DictRef, extra_dicts: List<DictRef> }",
         ),
         "infer": (
             "fn infer_scoped_block(",
             "fn exact_pattern_bindings(",
+            "fn exact_call_callee_ref(",
+            "fn exact_system_host_callable(",
+            "make_system_host_callable_ref(",
+            "system_effects.get(0).unwrap(),\n"
+            "        make_named_executable_ref(callee_ref_named_symbol(callee_ref))",
+            "value_symbol_ref(ctx, def_id)",
+            "current_identity_file_key(ctx)",
+            "slot_domain_lexical(), def_id",
             "bindings: pattern_bindings",
             "resume_binding: resume_binding",
-            "dict_ref: DictRef::Simple(trait_bound_param_name(",
+            "bound_evidence = some(DictRef::Simple(",
         ),
         "infer_decl": (
             "trait default parameter has no exact DefId",
-            "effect default parameter has no exact DefId",
-            "def_id: some(effect_param_def_id)",
-            "def_id: some(exact_effect_def_id)",
+            "params: op_params, return_type: op.return_type",
             "def_id: some(trait_param_def_id)",
             "def_id: some(exact_trait_def_id)",
-            "dict_ref: DictRef::Static(dict_name)",
+            "DictRef::Static(dict_name), tm.ty",
             "let fn_def_id = match registration_scheme {",
         ),
         "checker": (
+            "for builtin in checker_only_builtin_values()",
+            "checker_builtin_value_symbol(builtin)",
+            "record_value_symbol_ref(",
             "let has_errors = ctx.sink.has_errors()",
             "if !has_errors && assembled.drop_types.len() > 0",
             "let checked_program = if has_errors {",
             "program: checked_program",
         ),
         "infer_ctx": (
+            "pub value_symbols: Map<Int, SymbolRef>",
+            "value_symbols_by_payload: Map<Str, SymbolRef>",
+            "for binding in plan.bindings {\n        match binding.namespace {",
+            "NamespaceKind::Value",
+            "symbol_ref_canonical_payload(binding.symbol)",
+            "pub fn value_symbol_ref(",
+            "system_effect_console()",
+            "system_effect_fs()",
+            "system_effect_process()",
             "struct OrPatternBindingAuthority",
             "fn collect_or_pattern_binding_names(",
             "fn same_or_pattern_binding_names(",
@@ -5684,7 +5728,8 @@ def identity_checkpoint_contract_errors(
             "synthetic_def_id(",
             "SYNTHETIC_DICT_DEF_ID_BASE",
             "base_dict: lowered_base",
-            "dict_ref: dl_ref_static_only(info.dict_ref, defs, seen)",
+            "method_call_ref_bound_evidence(exact), defs, seen",
+            "callee_ref: callee_ref",
             "validate_hir_binder_def_ids(lowered)",
         ),
         "infer_helpers": (
@@ -5718,6 +5763,7 @@ def identity_checkpoint_contract_errors(
             "mutate_drop_identity_capture(anf_program)",
             "is_exact_direct_call_ident(normalized)",
             "dictionaries remain Call.resolved_dicts",
+            "callee_ref: callee_ref",
         ),
         "cctx": (
             "pub struct CExactSlotRef",
@@ -5743,7 +5789,6 @@ def identity_checkpoint_contract_errors(
             "fn resolve_c_dict_for_derived(mut ctx: CCtx, base_dict: DictRef) -> CTypedRef",
             "c_resolve_dict_ref(ctx, base_dict)",
             "FieldAction::Call { base_dict, extra_dicts }",
-            "c_option_some_variant(DictRef::Simple(",
             '"${c_path}.identity-ledger"',
             "some(c_identity_ledger_text(ctx))",
         ),
@@ -5819,6 +5864,81 @@ def identity_checkpoint_contract_errors(
         for token in tokens:
             if token not in source:
                 errors.append(f"{label}: missing exact-slot contract {token!r}")
+    for label, struct_name, expected_fields in (
+            ("ast", "EffectOpDecl", ["name", "params", "return_type", "span"]),
+            ("env", "EffectOpDef", ["name", "operation_ref", "params", "return_type"]),
+            ("hir", "HEffectOp", ["name", "operation_ref", "params", "return_type"])):
+        fields, field_error = _f0_struct_fields(sources[label], struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None and [name for _, name in fields] != expected_fields:
+            errors.append(f"{label}: {struct_name} retained effect-default fields")
+    effect_def_fields, effect_def_error = _f0_struct_fields(
+        sources["env"], "EffectDef")
+    if effect_def_error:
+        errors.append(effect_def_error)
+    elif effect_def_fields is not None and "all_have_defaults" in (
+            name for _, name in effect_def_fields):
+        errors.append("env: EffectDef retained automatic default evidence")
+    for label, token in (
+            ("inventory", "EXECUTABLE_EFFECT_DEFAULT"),
+            ("cctx", "DefaultEvidence"),
+            ("cctx", "default_evidence"),
+            ("cgen", "default_evidence"),
+            ("cexpr", "default_evidence"),
+            ("types", "IoEffect")):
+        if token in mask_ring_strings_and_comments(sources[label]):
+            errors.append(f"{label}: retired effect authority {token!r} remains")
+    if "Effect::SystemEffect { .. } => {}" not in sources["effect_analysis"] or (
+            "Effect::CustomEffect { .. } => {" not in sources["effect_analysis"]):
+        errors.append("effect_analysis: system/handled evidence split drifted")
+    for token in (
+            '"Effect operation bodies are not supported in Ring 0.1"',
+            "let _ = self.parse_block_expr()",
+            "ops.push(EffectOpDecl { name: op_name, params: params,"):
+        if token not in sources["parser"]:
+            errors.append(f"parser: effect signature-only boundary misses {token!r}")
+    for label, expected in (
+            ("andor", 1), ("dict", 1), ("perceus", 2), ("zonk", 1)):
+        count = sources[label].count("callee_ref: callee_ref")
+        if count != expected:
+            errors.append(
+                f"{label}: CalleeRef transport count was {count}, expected {expected}")
+    builtin_value_body, builtin_value_error = extract_ring_function_body(
+        sources["builtins"], "checker_only_builtin_values")
+    if builtin_value_error:
+        errors.append(builtin_value_error)
+    elif not all(token in builtin_value_body for token in (
+            '"Cell", builtin_value_site_from_tag(',
+            "BUILTIN_VALUE_CELL_CONSTRUCTOR",
+            '"alloc", builtin_value_site_from_tag(BUILTIN_VALUE_ALLOC)',
+            '"dealloc", builtin_value_site_from_tag(BUILTIN_VALUE_DEALLOC)',
+            '"ptr_copy", builtin_value_site_from_tag(BUILTIN_VALUE_PTR_COPY)',
+            '"ptr_from_addr", builtin_value_site_from_tag(',
+            "BUILTIN_VALUE_PTR_FROM_ADDR")):
+        errors.append("builtins: checker-only value site relation drifted")
+    elif "BUILTIN_VALUE_HASH_COMBINE" in builtin_value_body:
+        errors.append("builtins: compiler-only hash atom entered source scope")
+    if "CHECKER_ONLY_EXTERN_CALLABLES" in sources["hir"]:
+        errors.append("hir: duplicate checker-only builtin manifest returned")
+    builtin_fields, builtin_fields_error = _f0_struct_fields(
+        sources["builtins"], "CheckerBuiltinValue")
+    if builtin_fields_error:
+        errors.append(builtin_fields_error)
+    elif builtin_fields is not None and (
+            [name for _, name in builtin_fields] != ["name", "symbol"] or
+            any(is_public for is_public, _ in builtin_fields)):
+        errors.append("builtins: checker-only value carrier is forgeable")
+    checker_ctx_body, checker_ctx_error = extract_ring_function_body(
+        sources["checker"], "new_infer_ctx")
+    if checker_ctx_error:
+        errors.append(checker_ctx_error)
+    elif not all(token in checker_ctx_body for token in (
+            "for builtin in checker_only_builtin_values()",
+            "let name = checker_builtin_value_name(builtin)",
+            "record_value_binding_kind(", "record_value_symbol_ref(",
+            "checker_builtin_value_symbol(builtin)")):
+        errors.append("checker: fixed builtin callable identity relation drifted")
 
     pattern_local_contract = (
         "fn c_pattern_local(\n"
@@ -6059,7 +6179,9 @@ def identity_checkpoint_contract_errors(
             'c_emit(ctx, "${t} = ((void* (*)(${cast_tys.join(", ")}))(((void**)${closure_val})[0]))(${call_args.join(", ")});")',
             "c_record_closure_call(",
         )),
-        ("gen_c_dict_dispatch_call", (
+        ("gen_c_bound_method_call", (
+            "method_call_ref_bound_evidence(exact)",
+            "trait_method_ref_callable_slot_index(",
             'emit_c_receiver_load(\n        ctx, dict_ref, method_idx + 1, "dict")',
             "gen_c_closure_call(ctx, cls_ref, call_args)",
         )),
@@ -6229,16 +6351,18 @@ def identity_checkpoint_contract_errors(
     elif "ctx, dict" in dictref_capture_body:
         errors.append("DictRef::Wrapped static base is captured")
 
-    dict_dispatch_body, dict_dispatch_error = extract_ring_function_body(
-        sources["cexpr"], "gen_c_dict_dispatch_call")
-    if dict_dispatch_error:
-        errors.append(dict_dispatch_error)
-    elif not all(token in dict_dispatch_body for token in (
-            "c_dispatch_dict_name(dd.dict_ref)",
-            "c_resolve_dict_ref(ctx, dd.dict_ref)")):
-        errors.append("DictDispatchInfo tag is not consumed by dispatch codegen")
-    elif "c_name_only_value" in dict_dispatch_body:
-        errors.append("DictDispatchInfo regained ambient name fallback")
+    bound_dispatch_body, bound_dispatch_error = extract_ring_function_body(
+        sources["cexpr"], "gen_c_bound_method_call")
+    if bound_dispatch_error:
+        errors.append(bound_dispatch_error)
+    elif not all(token in bound_dispatch_body for token in (
+            "method_call_ref_bound_evidence(exact)",
+            "trait_method_ref_callable_slot_index(",
+            "method_call_ref_bound(exact)")):
+        errors.append("bound method dispatch does not consume exact evidence/slot")
+    elif any(token in bound_dispatch_body for token in (
+            "method_call_ref_name", "trait_method_order", "c_builtin_method_index")):
+        errors.append("bound method dispatch regained name/order fallback")
 
     derived_resolve_body, derived_resolve_error = extract_ring_function_body(
         sources["cgen"], "resolve_c_dict_for_derived")
@@ -6258,16 +6382,20 @@ def identity_checkpoint_contract_errors(
     elif "fresh_tmp(ctx)" not in wildcard_body or "__ring_for_wildcard" in wildcard_body:
         errors.append("for wildcard regained an ambient name-only binding")
 
-    if "dict_param:" in sources["hir"] or "dict_param:" in sources["infer"]:
-        errors.append("DictDispatchInfo retained untyped dict_param producer")
-    if sources["infer"].count("DictDispatchInfo {") != 1 or (
-        "dict_ref: DictRef::Simple(trait_bound_param_name(" not in sources["infer"]
-    ):
-        errors.append("infer DictDispatchInfo producer is not uniquely bound/Simple")
-    if sources["infer_decl"].count("DictDispatchInfo {") != 1 or (
-        "dict_ref: DictRef::Static(dict_name)" not in sources["infer_decl"]
-    ):
-        errors.append("infer_decl delegated DictDispatchInfo is not uniquely Static")
+    for source_name in ("hir", "infer", "infer_decl", "dict", "cexpr"):
+        if "DictDispatchInfo" in sources[source_name] or (
+                "dict_dispatch" in sources[source_name]):
+            errors.append(f"{source_name}: retired DictDispatchInfo authority returned")
+    if sources["infer"].count(
+            "bound_evidence = some(DictRef::Simple(") != 1 or (
+            "make_bound_method_call_ref(\n"
+            "                        bound, evidence, callee_type," not in
+            sources["infer"]):
+        errors.append("infer bound method producer is not uniquely Simple/exact")
+    if sources["infer_decl"].count(
+            "DictRef::Static(dict_name), tm.ty") != 1 or (
+            "make_bound_method_call_ref(" not in sources["infer_decl"]):
+        errors.append("infer_decl delegated bound evidence is not uniquely Static")
     for label in ("derive", "dict", "cgen"):
         if "FieldAction::Call { dict_name" in sources[label]:
             errors.append(f"{label}: FieldAction base lost explicit DictRef tag")
@@ -6445,10 +6573,7 @@ def identity_checkpoint_contract_errors(
 
     for function_name, required in (
         ("check_effect_decl", (
-            "let effect_param_def_id = ctx.env.fresh_def_id()",
-            "def_id: some(effect_param_def_id)",
-            "let exact_effect_def_id = match p.def_id",
-            "def_id: some(exact_effect_def_id)",
+            "def_id: none, is_mutable: false",
         )),
         ("check_trait_decl", (
             "let trait_param_def_id = ctx.env.fresh_def_id()",
@@ -6467,7 +6592,7 @@ def identity_checkpoint_contract_errors(
             for token in required:
                 if body.count(token) != 1:
                     errors.append(
-                        f"{function_name}: exact default parameter contract "
+                        f"{function_name}: exact declaration parameter contract "
                         f"{token!r} matched {body.count(token)} times")
 
     bind_pattern_body, bind_pattern_error = extract_ring_function_body(
@@ -7723,9 +7848,9 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
 
 
 IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
-F1_EXECUTABLE_KIND_COUNT = 21
-F1_BINDER_KIND_COUNT = 21
-F1_SEMANTIC_MUTATION_COUNT = 65
+F1_EXECUTABLE_KIND_COUNT = 20
+F1_BINDER_KIND_COUNT = 24
+F1_SEMANTIC_MUTATION_COUNT = 73
 F1_SCOPE_GUARD_COUNT = 14
 
 F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
@@ -7734,13 +7859,12 @@ F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
 F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 40
 F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT = 35
-F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT = 34
+F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT = 36
 
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
     ("impl_method", "EXECUTABLE_IMPL_METHOD"),
     ("trait_default", "EXECUTABLE_TRAIT_DEFAULT"),
-    ("effect_default", "EXECUTABLE_EFFECT_DEFAULT"),
     ("test", "EXECUTABLE_TEST"),
     ("const_initializer", "EXECUTABLE_CONST_INITIALIZER"),
     ("module_body", "EXECUTABLE_MODULE_BODY"),
@@ -7782,6 +7906,9 @@ F1_BINDER_KINDS = (
     ("scope_result", "BINDER_SCOPE_RESULT"),
     ("control_result", "BINDER_CONTROL_RESULT"),
     ("assign_temp", "BINDER_ASSIGN_TEMP"),
+    ("handled_evidence_param", "BINDER_HANDLED_EVIDENCE_PARAM"),
+    ("handled_evidence_local", "BINDER_HANDLED_EVIDENCE_LOCAL"),
+    ("handled_evidence_capture", "BINDER_HANDLED_EVIDENCE_CAPTURE"),
 )
 
 
@@ -7823,10 +7950,6 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         errors.append("F1 gained forbidden resource operation")
     if ".sort" in masked or "sort_by" in masked:
         errors.append("F1 input order became identity through sorting")
-    source_binder_constructor_exposed = "pub fn make_binder_entry(" in masked
-    if source_binder_constructor_exposed:
-        errors.append("F1 exposes a source BinderEntry constructor before F2")
-
     for name, expected in {
         "ExecutableRef": ["value"],
         "ExecutableParentRef": ["value"],
@@ -7860,7 +7983,7 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         ), errors)
     if len(F1_EXECUTABLE_KINDS) != F1_EXECUTABLE_KIND_COUNT:
         errors.append("F1 executable kind test census is incomplete")
-    if "const EXECUTABLE_KIND_COUNT: Int = 21" not in source:
+    if "const EXECUTABLE_KIND_COUNT: Int = 20" not in source:
         errors.append("F1 executable kind count drifted")
 
     allowed_modes, allowed_error = _f0_int_list(
@@ -7884,31 +8007,31 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     if parent_form_error:
         errors.append(parent_form_error)
     expected_modes = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0,
         2, 2, 0, 2, 2,
         1, 1, 1, 1,
         2, 2,
     ]
     expected_ref_forms = [
-        0, 0, 0, 0, 1, 0, 1, 1, 1, 1,
+        0, 0, 0, 1, 0, 1, 1, 1, 1,
         0, 0, 1, 0, 0,
         0, 0, 0, 0,
         0, 0,
     ]
     expected_namespaces = [
-        0, 4, 4, 4, 5, 0, 5, 5, 5, 5,
+        0, 4, 4, 5, 0, 5, 5, 5, 5,
         4, 0, 5, 0, 4,
         4, 4, 4, 0,
         0, 0,
     ]
     expected_executable_roles = [
-        7, 7, 7, 7, 0, 7, 0, 1, 5, 1,
+        7, 7, 7, 0, 7, 0, 1, 5, 1,
         7, 7, 6, 7, 7,
         7, 7, 7, 7,
         7, 7,
     ]
     expected_parent_forms = [
-        0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 1, 1, 1,
         0, 0, 2, 0, 0,
         0, 0, 0, 0,
         0, 0,
@@ -7977,7 +8100,7 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         ), errors)
     if len(F1_BINDER_KINDS) != F1_BINDER_KIND_COUNT:
         errors.append("F1 binder kind test census is incomplete")
-    if "const BINDER_KIND_COUNT: Int = 21" not in source:
+    if "const BINDER_KIND_COUNT: Int = 24" not in source:
         errors.append("F1 binder kind count drifted")
     binder_roles, binder_role_error = _f0_int_list(
         source, "BINDER_KIND_PATH_ROLE_TAGS")
@@ -7986,19 +8109,31 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     expected_binder_roles = [
         2, 0, 0, 0, 0, 0, 0, 0, 2, 5, 5,
         4, 0, 2, 1, 3, 6, 1, 3, 3, 6,
+        2, 5, 4,
     ]
     if binder_roles is not None and binder_roles != expected_binder_roles:
         errors.append("F1 binder kind/path-role matrix drifted")
 
-    if not source_binder_constructor_exposed:
-        _f1_require_function_tokens(source, "make_synthetic_binder_entry", (
-            "if binder_kind_is_source(kind)",
-            "if slot_ref_is_source(slot)",
-            "if !executable_ref_contains_path(owner, site)",
-            "if !path_role_same(\n            path_ref_role(site), "
-            "binder_kind_expected_path_role(kind))",
-            "if !path_ref_same(slot_ref_synthetic_path(slot), site)",
-        ), errors)
+    _f1_require_function_tokens(source, "make_source_binder_entry", (
+        "if !binder_kind_is_source(kind)",
+        "if !slot_ref_is_source(slot)",
+        "slot_ref_source_def_id(slot) < 0",
+        "slot_ref_source_domain(slot), slot_domain_lexical()",
+        "slot_ref_source_origin_module_key(slot) !=",
+        "executable_ref_origin_module_key(owner)",
+        "path_owner_origin_module_key(path_ref_owner(site))",
+        "!executable_ref_contains_path(owner, site)",
+        "if !path_role_same(\n            path_ref_role(site), "
+        "binder_kind_expected_path_role(kind))",
+    ), errors)
+    _f1_require_function_tokens(source, "make_synthetic_binder_entry", (
+        "if binder_kind_is_source(kind)",
+        "if slot_ref_is_source(slot)",
+        "if !executable_ref_contains_path(owner, site)",
+        "if !path_role_same(\n            path_ref_role(site), "
+        "binder_kind_expected_path_role(kind))",
+        "if !path_ref_same(slot_ref_synthetic_path(slot), site)",
+    ), errors)
     _f1_require_function_tokens(source, "make_binder_manifest", (
         "if !executable_ref_same(left.owner, owner)",
         "if slot_ref_same(left.slot, right.slot)",
@@ -8099,6 +8234,23 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
          "child_path.len() == root_path.len() + 1", "child_path.len() > root_path.len()"),
         ("anonymous ContractOnly", "make_executable_entry",
          "!executable_ref_is_named(reference)", "false"),
+        ("source binder kind", "make_source_binder_entry",
+         "if !binder_kind_is_source(kind)", "if false"),
+        ("source binder slot", "make_source_binder_entry",
+         "if !slot_ref_is_source(slot)", "if false"),
+        ("source binder DefId", "make_source_binder_entry",
+         "slot_ref_source_def_id(slot) < 0", "false"),
+        ("source binder domain", "make_source_binder_entry",
+         "!slot_domain_same(\n            slot_ref_source_domain(slot), slot_domain_lexical())",
+         "false"),
+        ("source binder module", "make_source_binder_entry",
+         "slot_ref_source_origin_module_key(slot) !=\n           executable_ref_origin_module_key(owner)",
+         "false"),
+        ("source binder site containment", "make_source_binder_entry",
+         "!executable_ref_contains_path(owner, site)", "false"),
+        ("source binder site role", "make_source_binder_entry",
+         "if !path_role_same(\n            path_ref_role(site), "
+         "binder_kind_expected_path_role(kind))", "if false"),
         ("source kind rejected", "make_synthetic_binder_entry",
          "if binder_kind_is_source(kind)", "if false"),
         ("source SlotRef rejected", "make_synthetic_binder_entry",
@@ -8153,30 +8305,16 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
                 f"F1 semantic mutation {label} findings were {findings!r}, "
                 f"expected only {expected!r}")
 
-    count += 1
-    public_constructor_anchor = "pub fn make_synthetic_binder_entry("
-    if source.count(public_constructor_anchor) != 1:
-        errors.append("F1 semantic mutation public source constructor: anchor missing")
-    else:
-        mutated = source.replace(
-            public_constructor_anchor, "pub fn make_binder_entry(", 1)
-        findings = ir_inventory_f1_contract_errors(mutated)
-        expected = "F1 exposes a source BinderEntry constructor before F2"
-        if findings != [expected]:
-            errors.append(
-                f"F1 semantic mutation public source constructor findings were "
-                f"{findings!r}, expected only {expected!r}")
-
     table_mutations = (
-        ("DropGlue body-mode", "EXECUTABLE_KIND_ALLOWED_MODE_TAGS", 14, 0,
+        ("DropGlue body-mode", "EXECUTABLE_KIND_ALLOWED_MODE_TAGS", 13, 0,
          "F1 executable kind/body-mode matrix drifted"),
-        ("dict-helper ref form", "EXECUTABLE_KIND_REF_FORM_TAGS", 12, 0,
+        ("dict-helper ref form", "EXECUTABLE_KIND_REF_FORM_TAGS", 11, 0,
          "F1 executable kind/ref-form matrix drifted"),
         ("Fn namespace", "EXECUTABLE_KIND_NAMESPACE_TAGS", 0, 5,
          "F1 executable kind/namespace matrix drifted"),
-        ("handler executable role", "EXECUTABLE_KIND_PATH_ROLE_TAGS", 8, 1,
+        ("handler executable role", "EXECUTABLE_KIND_PATH_ROLE_TAGS", 7, 1,
          "F1 executable kind/path-role matrix drifted"),
-        ("lambda parent form", "EXECUTABLE_KIND_PARENT_FORM_TAGS", 7, 0,
+        ("lambda parent form", "EXECUTABLE_KIND_PARENT_FORM_TAGS", 6, 0,
          "F1 executable kind/parent-form matrix drifted"),
         ("lambda-capture role", "BINDER_KIND_PATH_ROLE_TAGS", 11, 1,
          "F1 binder kind/path-role matrix drifted"),
@@ -8193,6 +8331,12 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
         ("generated-param role", "BINDER_KIND_PATH_ROLE_TAGS", 13, 0,
          "F1 binder kind/path-role matrix drifted"),
         ("call-result role", "BINDER_KIND_PATH_ROLE_TAGS", 15, 6,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handled-evidence-param role", "BINDER_KIND_PATH_ROLE_TAGS", 21, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handled-evidence-local role", "BINDER_KIND_PATH_ROLE_TAGS", 22, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handled-evidence-capture role", "BINDER_KIND_PATH_ROLE_TAGS", 23, 0,
          "F1 binder kind/path-role matrix drifted"),
     )
     for label, table_name, index, replacement, expected in table_mutations:
@@ -8984,7 +9128,9 @@ def builtin_method_intrinsic_contract_errors(
     if "Type::FnType { .. }" not in method_ctor:
         errors.append("B-201 MethodCallRef accepts a non-callable signature")
     method_same = _b201_function_body(hir, "method_call_ref_same", errors)
-    for token in ("intrinsic_ref_same(", "types_equal("):
+    for token in (
+            "intrinsic_ref_same(", "trait_method_ref_same(",
+            "dict_ref_same(", "types_equal("):
         if token not in method_same:
             errors.append(f"B-201 MethodCallRef equality misses {token!r}")
     if re.search(
@@ -9025,7 +9171,8 @@ def builtin_method_intrinsic_contract_errors(
 
     for file_name, function_name, transport in (
         ("andor_lower.ring", "al_expr", "method_ref: method_ref"),
-        ("dict_lower.ring", "dl_expr", "method_ref: method_ref"),
+        ("dict_lower.ring", "dl_expr",
+         "method_ref: dl_method_call_ref(method_ref, defs, seen)"),
         ("perceus.ring", "anf_expr", "method_ref: method_ref"),
         ("perceus.ring", "rc_expr", "method_ref: method_ref"),
         ("zonk.ring", "zonk_expr", "method_ref: zonk_method_call_ref(ctx, method_ref)"),
@@ -9144,7 +9291,8 @@ def builtin_method_intrinsic_mutation_errors(
         ("andor transport", "andor_lower.ring", "al_expr",
          "method_ref: method_ref", "method_ref: none"),
         ("dict transport", "dict_lower.ring", "dl_expr",
-         "method_ref: method_ref", "method_ref: none"),
+         "method_ref: dl_method_call_ref(method_ref, defs, seen)",
+         "method_ref: none"),
         ("ANF transport", "perceus.ring", "anf_expr",
          "method_ref: method_ref", "method_ref: none"),
         ("RC transport", "perceus.ring", "rc_expr",
@@ -10843,10 +10991,7 @@ def impl_provider_u1c1_contract_errors(
             "type_param_vars", "predicates", "method_names", "assoc_types",
             "method_schemes", "method_refs", "method_intrinsics",
             "provider_ref", "trait_ref", "owner_ref", "delegate_plan",
-            "origin", "span", "owner_state"]),
-        ("MethodOrigin", [
-            "origin", "trait_name", "provider_ref", "trait_ref",
-            "method_ref", "span"]),
+            "span"]),
     )
     for struct_name, expected_fields in env_schemas:
         fields, field_error = _f0_struct_fields(env, struct_name)
@@ -10856,14 +11001,19 @@ def impl_provider_u1c1_contract_errors(
                 name for _, name in fields] != expected_fields:
             errors.append(f"{struct_name} provider inventory drifted")
 
+    for retired in (
+            "MethodOrigin", "ImplOwnerState", "ProvisionalPrelude",
+            "find_impl_by_origin", "impl_decl_origin", "impl_method_origin"):
+        if retired in env or retired in builtins or retired in register:
+            errors.append(f"retired impl provider authority returned: {retired}")
+
     validate_body = _trait_method_function_body(
         sources, "env", "validate_impl_entry", errors)
     for token in (
         "match (entry.trait_name, entry.trait_ref)",
         "registered_trait_ref_symbol(def.owner_ref), trait_ref",
-        "entry.owner_ref.is_some()",
-        "provisional prelude published provider",
-        "match\n                (entry.provider_ref, entry.owner_ref)",
+        "match (entry.provider_ref, entry.owner_ref)",
+        "entry.method_refs.len() != entry.method_schemes.len()",
         "impl owner: final owner lacks typed identity",
     ):
         if token not in validate_body:
@@ -10879,9 +11029,11 @@ def impl_provider_u1c1_contract_errors(
     install_body = _trait_method_function_body(
         sources, "env", "install_method_core", errors)
     for token in (
-        "find_impl_by_provider(", "incoming.trait_ref, incoming.provider_ref",
-        "optional_symbol_ref_same(owner.trait_ref, incoming.trait_ref)",
-        "impl_method_ref_same(",
+        "let incoming_owner = impl_method_ref_owner(incoming)",
+        "find_impl_by_provider(", "impl_owner_ref_trait(incoming_owner)",
+        "impl_owner_ref_provider(incoming_owner)",
+        "impl_method_ref_same(stored_ref, incoming)",
+        "reg.method_index.get(target_type)",
     ):
         if token not in install_body:
             errors.append(f"method origin provider closure misses {token!r}")
@@ -10949,7 +11101,8 @@ def impl_provider_u1c1_contract_errors(
     for token in (
         "provider_ref: some(provider_ref)",
         "trait_ref: resolved_trait_ref",
-        "provider_ref: provider_ref", "trait_ref: resolved_trait_ref",
+        "owner_ref: some(owner_ref)",
+        "method_refs: exact_method_refs",
     ):
         if token not in canonical_impl_body:
             errors.append(f"source impl final owner misses {token!r}")
@@ -11020,16 +11173,17 @@ def impl_provider_u1c1_contract_errors(
         if forbidden in builtin_provider:
             errors.append(
                 f"builtin provider path uses semantic spelling {forbidden!r}")
-    seed_body = _trait_method_function_body(
-        sources, "builtins", "seed_std_hof_owner", errors)
-    if "provider_ref: none" not in seed_body or "trait_ref: none" not in seed_body:
-        errors.append("provisional HOF owner published typed provider facts")
+    for retired in (
+            "seed_std_hof_owner", "require_std_hof_seed",
+            "seed_std_hof_owners"):
+        if retired in builtins:
+            errors.append(f"builtin provisional HOF path returned: {retired}")
     install_builtin = _trait_method_function_body(
         sources, "builtins", "install_builtin_method_owner", errors)
     for token in (
         "builtin_impl_provider(provider_site)",
         "provider_ref: some(provider_ref)", "trait_ref: trait_ref",
-        "provider_ref: provider_ref", "trait_ref: trait_ref",
+        "owner_ref: some(owner_ref)", "method_refs: method_refs",
     ):
         if token not in install_builtin:
             errors.append(f"builtin final owner misses {token!r}")
@@ -11051,7 +11205,7 @@ def impl_provider_u1c1_contract_errors(
         sources, "derive", "register_derived_impl", errors)
     for token in (
         "provider_ref: some(provider_ref)", "trait_ref: some(trait_ref)",
-        "provider_ref: provider_ref", "trait_ref: some(trait_ref)",
+        "owner_ref: some(owner_ref)", "method_refs: method_refs",
     ):
         if token not in derive_register:
             errors.append(f"derived owner provider closure misses {token!r}")
@@ -11078,8 +11232,8 @@ def impl_provider_u1c1_contract_errors(
         sources, "decl", "store_rebound_impl_method_scheme", errors)
     for token in (
         "let owner = match find_impl_by_provider(",
-        "let provider_ref = impl_owner_ref_provider(owner_ref)",
-        "provider_ref: provider_ref, trait_ref: owner.trait_ref",
+        "impl_owner_ref_provider(owner_ref)",
+        "owner.method_refs.get(method_name).unwrap()",
     ):
         if token not in rebind_body:
             errors.append(f"impl rebind provider copy misses {token!r}")
@@ -11158,11 +11312,11 @@ def impl_provider_u1c1_mutation_errors(
          "ctx.delegate_provider_unconsumed.len() != 0", "false"),
         ("close derive facts", "ctx", "close_struct_identity_ledger",
          "ctx.nominal_derived_provider_unconsumed.len() != 0", "false"),
-        ("provisional provider", "env", "validate_impl_entry",
-         "entry.owner_ref.is_some()", "false"),
+        ("method/provider closure", "env", "validate_impl_entry",
+         "entry.method_refs.len() != entry.method_schemes.len()", "false"),
         ("final provider", "env", "validate_impl_entry",
-         "match\n                (entry.provider_ref, entry.owner_ref)",
-         "match (entry.provider_ref, none)"),
+         "match (entry.provider_ref, entry.owner_ref)",
+         "match (none, entry.owner_ref)"),
         ("exact trait relation", "env", "validate_impl_entry",
          "registered_trait_ref_symbol(def.owner_ref), trait_ref", "trait_ref, trait_ref"),
         ("owner key target", "env", "impl_entry_exact_key_same",
@@ -11175,10 +11329,10 @@ def impl_provider_u1c1_mutation_errors(
         ("method owner lookup", "env", "install_method_core",
          "find_impl_by_provider(", "find_impl_by_origin("),
         ("method exact trait", "env", "install_method_core",
-         "optional_symbol_ref_same(owner.trait_ref, incoming.trait_ref)", "true"),
+         "impl_owner_ref_trait(incoming_owner)", "none"),
         ("registry typed key", "env", "add_impl",
          "impl_entry_exact_key_same(existing, entry)",
-         "existing.origin == entry.origin"),
+         "false"),
         ("source provider zero consume", "register", "register_impl",
          "commit_source_impl_provider_fact(ctx, provider_fact)", "{}"),
         ("source owner provider", "register", "register_impl_canonical",
@@ -11207,8 +11361,8 @@ def impl_provider_u1c1_mutation_errors(
         ("builtin site bypass", "builtins", "install_builtin_method_owner",
          "builtin_impl_provider(provider_site)",
          "builtin_impl_provider(builtin_trait_factory_site())"),
-        ("provisional builtin provider", "builtins", "seed_std_hof_owner",
-         "provider_ref: none", "provider_ref: some(builtin_impl_provider([\"broken\"]))"),
+        ("builtin final owner", "builtins", "install_builtin_method_owner",
+         "owner_ref: some(owner_ref)", "owner_ref: none"),
         ("derive remint", "derive", "register_derived_impl",
          "provider_ref: some(provider_ref)",
          "provider_ref: some(make_impl_provider_ref(provider_ref))"),
@@ -11216,8 +11370,8 @@ def impl_provider_u1c1_mutation_errors(
          "implicit_derive_provider(ut)",
          "explicit_derive_request(ut, trait_name).unwrap().provider_ref"),
         ("rebind provider copy", "decl", "store_rebound_impl_method_scheme",
-         "let provider_ref = impl_owner_ref_provider(owner_ref)",
-         "let provider_ref = impl_owner_ref_provider(wrong_owner_ref)"),
+         "owner.method_refs.get(method_name).unwrap()",
+         "wrong_method_ref"),
     )
     killed = 0
     for label, source_name, function_name, anchor, replacement in mutations:
@@ -11289,7 +11443,8 @@ def impl_provider_u1c2_contract_errors(
     elif fact_fields is not None and [
             name for _, name in fact_fields] != [
                 "target", "provider_ref", "trait_ref", "owner_ref",
-                "method_names", "is_top_level"]:
+                "method_names", "public_inherent_method_names",
+                "is_top_level"]:
         errors.append("impl provider carrier: ModuleImplFact inventory drifted")
     if "is_trait_impl" in hir:
         errors.append("impl provider carrier: second trait truth returned")
@@ -11359,7 +11514,7 @@ def impl_provider_u1c2_contract_errors(
             errors.append(f"ModuleImplFact collector misses {token!r}")
     for forbidden in (
             "exact_module_impl_owner", "trait_impls.get(",
-            "method_origins.get("):
+            "method_origins.get(", "MethodOrigin"):
         if forbidden in collect_body or forbidden in checker:
             errors.append(f"ModuleImplFact collector retained {forbidden!r}")
     for function_name in ("check", "check_module"):
@@ -11382,22 +11537,27 @@ def impl_provider_u1c2_contract_errors(
         "find_impl_by_provider(", "fact.trait_ref, fact.provider_ref",
         "impl_owner_ref_same(",
         "impl_entry_exact_key_same(seen, owner)",
-        "method_origin_matches_owner(",
+        "method_ref_matches_owner(",
     ):
         if token not in facts_body:
             errors.append(f"export impl fact closure misses {token!r}")
-    origin_same = _trait_method_function_body(
-        sources, "exports", "method_origin_same", errors)
+    method_insert = _trait_method_function_body(
+        sources, "exports", "insert_exact_method_ref", errors)
     for token in (
-        "impl_method_ref_same(left.method_ref, right.method_ref)",
+        "target_index.get(method_name)",
+        "impl_method_ref_same(existing, method_ref)",
+        "target_index.insert(method_name, method_ref)",
     ):
-        if token not in origin_same:
-            errors.append(f"MethodOrigin typed equality misses {token!r}")
+        if token not in method_insert:
+            errors.append(f"exact export method index misses {token!r}")
     inject_body = _trait_method_function_body(
         sources, "checker", "inject_module_exports", errors)
     for token in (
-        "find_impl_by_provider(", "origin.trait_ref, origin.provider_ref",
-        "impl_method_ref_same(",
+        "let owner_ref = impl_method_ref_owner(method_ref)",
+        "find_impl_by_provider(", "impl_owner_ref_trait(owner_ref)",
+        "impl_owner_ref_provider(owner_ref)",
+        "some(expected) => if !impl_method_ref_same(",
+        "expected, method_ref",
     ):
         if token not in inject_body:
             errors.append(f"hydration typed owner closure misses {token!r}")
@@ -11456,12 +11616,12 @@ def impl_provider_u1c2_mutation_errors(
         ("export fact provider", "exports", "export_impl_facts",
          "fact.trait_ref, fact.provider_ref",
          "fact.trait_ref, wrong_provider_ref"),
-        ("MethodOrigin provider", "exports", "method_origin_same",
-         "impl_method_ref_same(left.method_ref, right.method_ref)",
+        ("exact export method", "exports", "insert_exact_method_ref",
+         "impl_method_ref_same(existing, method_ref)",
          "true"),
         ("hydration provider", "checker", "inject_module_exports",
-         "origin.trait_ref, origin.provider_ref",
-         "origin.trait_ref, wrong_provider_ref"),
+         "impl_owner_ref_provider(owner_ref)",
+         "wrong_provider_ref"),
     )
     killed = 0
     for label, source_name, function_name, anchor, replacement in mutations:
@@ -11544,9 +11704,10 @@ F2_DERIVED_IMPL_CARRIER_PATHS = {
     "checker": REPO / "compiler" / "checker.ring",
     "project": REPO / "compiler" / "compiler_mod.ring",
     "dict": REPO / "compiler" / "dict_lower.ring",
+    "core": REPO / "compiler" / "core_from_hir.ring",
     "codegen": REPO / "compiler" / "codegen_c.ring",
 }
-F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT = 30
+F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT = 17
 
 
 def derived_impl_carrier_u1c4_contract_errors(
@@ -11558,19 +11719,23 @@ def derived_impl_carrier_u1c4_contract_errors(
     builtins = sources["builtins"]
     checker = sources["checker"]
     project = sources["project"]
+    core = sources["core"]
     codegen = sources["codegen"]
 
     fields, field_error = _f0_struct_fields(hir, "DerivedImpl")
     if field_error:
         errors.append(field_error)
     elif fields is not None and [name for _, name in fields] != [
-            "provider_ref", "trait_ref", "type_name", "trait_name",
-            "type_params", "bounds", "type_kind", "struct_fields",
-            "enum_variants"]:
+            "semantic_kind", "owner_ref", "provider_ref", "trait_ref",
+            "target_owner", "target_type", "methods", "hash_mix",
+            "text_plan", "type_name", "trait_name", "type_params",
+            "bounds", "type_kind", "struct_fields", "enum_variants"]:
         errors.append("derived impl carrier inventory drifted")
     if ("pub struct DerivedImpl {\n"
-            "    pub provider_ref: ImplProviderRef,\n"
-            "    pub trait_ref: SymbolRef," not in hir):
+            "    pub semantic_kind: DerivedSemanticKind,\n"
+            "    pub owner_ref: ImplOwnerRef,\n"
+            "    pub provider_ref: ImplProviderRef," not in hir or
+            "pub type_params: List<HTypeParam>" not in hir):
         errors.append("derived impl carrier identity types drifted")
 
     register = _trait_method_function_body(
@@ -11593,7 +11758,8 @@ def derived_impl_carrier_u1c4_contract_errors(
         "let owner_trait = match owner.trait_ref",
         "!impl_provider_ref_same(owner_provider, di.provider_ref)",
         "!symbol_ref_same(owner_trait, di.trait_ref)",
-        "derived_runtime_bounds_from_owner(owner)",
+        "derived_runtime_bounds_from_owner(env, owner)",
+        "type_params: derived_h_type_params(env, owner)",
         "provider_ref: owner_provider",
         "trait_ref: owner_trait",
     ):
@@ -11617,9 +11783,9 @@ def derived_impl_carrier_u1c4_contract_errors(
         sources, "derive", "derived_impl_matches_owner", errors)
     for token in (
         "impl_provider_ref_same(", "symbol_ref_same(",
-        "owner.target_type_name == di.type_name",
-        "string_lists_same(owner.type_params, di.type_params)",
-        "derived_runtime_bounds_from_owner(owner), di.bounds",
+        "owner.target_type_name != di.type_name",
+        "derived_h_type_params(env, owner), di.type_params",
+        "derived_runtime_bounds_from_owner(env, owner), di.bounds",
     ):
         if token not in owner_match:
             errors.append(f"derived descriptor owner relation misses {token!r}")
@@ -11629,7 +11795,7 @@ def derived_impl_carrier_u1c4_contract_errors(
         "derived_impl_key_same(existing, di)",
         "find_impl_by_provider(",
         "some(di.trait_ref), di.provider_ref",
-        "derived_impl_matches_owner(di, owner)",
+        "derived_impl_matches_owner(env, di, owner)",
         "impl_provider_kind_builtin()",
         "impl_provider_kind_derived()",
         "if matches != 1",
@@ -11665,10 +11831,10 @@ def derived_impl_carrier_u1c4_contract_errors(
     option_descriptor = _trait_method_function_body(
         sources, "derive", "builtin_option_derived_impl", errors)
     for token in (
-        "derived_runtime_bounds_from_owner(owner)",
+        "derived_runtime_bounds_from_owner(env, owner)",
         "if bounds.len() != 1",
         'bound.type_param != "T" || bound.trait_name != trait_name',
-        '"Eq" => some([', '"Debug" => some([', '"Clone" => none',
+        '"Eq" => some([', '"Debug" => some([', '"Clone" => some([',
         "provider_ref: provider_ref", "trait_ref: trait_ref",
     ):
         if token not in option_descriptor:
@@ -11683,81 +11849,63 @@ def derived_impl_carrier_u1c4_contract_errors(
     ):
         if token not in option_list:
             errors.append(f"builtin Option descriptor order misses {token!r}")
-    prepend = _trait_method_function_body(
-        sources, "derive", "prepend_builtin_option_derived_impls", errors)
+    derive_pass = _trait_method_function_body(
+        sources, "derive", "run_derive_pass", errors)
     for token in (
-        "builtin_option_derived_impls(env)",
-        "derived_impl_key_same(builtin_di, existing_di)",
-        "builtin Option derived descriptors assembled twice",
-        "for builtin_di in builtin_impls { result.push(builtin_di) }",
-        "for existing_di in existing { result.push(existing_di) }",
-    ):
-        if token not in prepend:
-            errors.append(f"builtin Option prepend misses {token!r}")
+            "if ctx.core_module_order == 0",
+            "for builtin in builtin_option_derived_impls(ctx.env)",
+            "for derived in derived_impls { exact.push(derived) }",
+            "close_derived_text_plans(ctx, exact)"):
+        if token not in derive_pass:
+            errors.append(f"derive pass physical carrier misses {token!r}")
 
-    single = _trait_method_function_body(
-        sources, "checker", "check", errors)
-    single_prepend = single.find("prepend_builtin_option_derived_impls(")
+    single = _trait_method_function_body(sources, "checker", "check", errors)
     single_validate = single.find("validate_derived_impls(")
     single_lower = single.find("lower_dicts(lower_andor(assembled))")
-    if min(single_prepend, single_validate, single_lower) < 0 or not (
-            single_prepend < single_validate < single_lower):
-        errors.append("single checker derived assembly order drifted")
+    if min(single_validate, single_lower) < 0 or single_validate > single_lower:
+        errors.append("single checker derived validation order drifted")
     module_check = _trait_method_function_body(
         sources, "checker", "check_module", errors)
-    if "prepend_builtin_option_derived_impls(" in module_check:
-        errors.append("check_module publishes per-module builtin descriptors")
     module_validate = module_check.find("validate_derived_impls(")
     module_lower = module_check.find("lower_dicts(lower_andor(assembled))")
     if min(module_validate, module_lower) < 0 or module_validate > module_lower:
         errors.append("module checker derived validation order drifted")
-
-    project_assembly = _trait_method_function_body(
-        sources, "project", "assemble_project_builtin_derived_impls", errors)
-    for token in (
-        "graph.topo_order.get(0)",
-        "prepend_builtin_option_derived_impls(",
-        "validate_derived_impls(env, derived_impls)",
-        "derived_impls: derived_impls",
-    ):
-        if token not in project_assembly:
-            errors.append(f"project derived assembly misses {token!r}")
-    for forbidden in ("graph.entry", "entry_key", "for key in graph.topo_order"):
-        if forbidden in project_assembly:
-            errors.append(
-                f"project derived assembly is not one physical carrier: {forbidden!r}")
-    phases = _trait_method_function_body(
-        sources, "project", "compile_phases", errors)
-    if phases.count("assemble_project_builtin_derived_impls(") != 1:
-        errors.append("project derived assembly call census drifted")
-    assembly_at = phases.find("assemble_project_builtin_derived_impls(")
-    module_insert_at = phases.find("module_hirs.insert(key, result.program)")
-    extern_union_at = phases.find("let mut global_externs: Set<Str>")
-    if min(assembly_at, module_insert_at, extern_union_at) < 0 or not (
-            module_insert_at < assembly_at < extern_union_at):
-        errors.append("project derived assembly phase drifted")
+    if "assemble_project_builtin_derived_impls" in project or (
+            "prepend_builtin_option_derived_impls" in project):
+        errors.append("project retained a second builtin derived assembly authority")
 
     dict_body = _trait_method_function_body(
         sources, "dict", "dl_derived_impl", errors)
-    for token in ("provider_ref: di.provider_ref", "trait_ref: di.trait_ref"):
+    for token in (
+            "provider_ref: di.provider_ref", "trait_ref: di.trait_ref",
+            "type_params: di.type_params"):
         if token not in dict_body:
             errors.append(f"dict lowering loses derived carrier {token!r}")
+
+    append_core = _trait_method_function_body(
+        sources, "core", "append_derived_impl", errors)
+    for token in (
+            "derived_semantic_kind_tag(",
+            "make_core_impl_metadata("):
+        if token not in append_core:
+            errors.append(f"Core derived consumer misses {token!r}")
 
     codegen_masked = mask_ring_strings_and_comments(codegen)
     for forbidden in (
         "emit_c_builtin_derived_impls", "c_option_some_variant",
-        "c_option_none_variant", "provider_ref", "trait_ref",
+        "c_option_none_variant", "emit_c_derived_impls",
+        "emit_c_derived_impl_bodies",
     ):
         if forbidden in codegen_masked:
             errors.append(f"C backend retains derived authority {forbidden!r}")
     if "DerivedImpl {" in codegen_masked:
         errors.append("C backend constructs a derived descriptor")
-    if codegen_masked.count(
-            "emit_c_derived_impls(ctx, program.derived_impls)") != 1:
-        errors.append("single C backend derived list consumption drifted")
-    if codegen_masked.count(
-            "emit_c_derived_impl_bodies(ctx, program.derived_impls)") != 1:
-        errors.append("project C backend derived list consumption drifted")
+    if codegen.count(
+            "C ABI boundary: semantic DerivedImpl carrier was not retired") != 1:
+        errors.append("C backend derived retirement boundary drifted")
+    if codegen.count(
+            "C ABI boundary: project DerivedImpl carrier was not retired") != 1:
+        errors.append("project C backend derived retirement boundary drifted")
     return errors
 
 
@@ -11766,58 +11914,32 @@ def derived_impl_carrier_u1c4_mutation_errors(
 ) -> List[str]:
     errors: List[str] = []
     mutations = (
-        ("register provider carrier", "derive", "register_derived_impl",
-         "let provider_ref = di.provider_ref", "let provider_ref = owner.provider_ref.unwrap()"),
         ("register trait relation", "derive", "register_derived_impl",
          "!symbol_ref_same(trait_ref, di.trait_ref)", "false"),
         ("final provider copy", "derive", "finalize_derived_impl",
          "provider_ref: owner_provider", "provider_ref: di.provider_ref"),
-        ("final trait copy", "derive", "finalize_derived_impl",
-         "trait_ref: owner_trait", "trait_ref: di.trait_ref"),
-        ("final frozen bounds", "derive", "finalize_derived_impl",
-         "let bounds = derived_runtime_bounds_from_owner(owner)", "let bounds = di.bounds"),
-        ("Json typed owner", "derive", "derive_json_trait",
-         "find_impl_by_provider(", "find_impl("),
+        ("final exact type params", "derive", "finalize_derived_impl",
+         "type_params: derived_h_type_params(env, owner)",
+         "type_params: []"),
         ("validator typed owner", "derive", "validate_derived_impls",
          "find_impl_by_provider(", "find_impl("),
         ("validator owner relation", "derive", "validate_derived_impls",
-         "derived_impl_matches_owner(di, owner)", "true"),
-        ("validator bounds", "derive", "derived_impl_matches_owner",
-         "derived_runtime_bounds_from_owner(owner), di.bounds", "di.bounds, di.bounds"),
-        ("validator provider domain", "derive", "validate_derived_impls",
-         "kind, impl_provider_kind_derived()", "kind, impl_provider_kind_builtin()"),
-        ("builtin owner typed lookup", "builtins", "require_builtin_option_derived_owner",
-         "find_impl_by_provider(", "find_impl("),
-        ("builtin Ord absence", "builtins", "builtin_option_derived_owners",
-         ").is_some()", ").is_none()"),
+         "derived_impl_matches_owner(env, di, owner)", "true"),
+        ("validator type parameters", "derive", "derived_impl_matches_owner",
+         "derived_h_type_params(env, owner), di.type_params",
+         "di.type_params, di.type_params"),
         ("Option exact predicate", "derive", "builtin_option_derived_impl",
          "if bounds.len() != 1", "if false"),
-        ("Option Clone shape", "derive", "builtin_option_derived_impl",
-         '"Clone" => none', '"Clone" => some([])'),
-        ("Option order", "derive", "builtin_option_derived_impls",
-         'result.get(1).unwrap().trait_name != "Debug"',
-         'result.get(1).unwrap().trait_name != "Ord"'),
-        ("double assembly", "derive", "prepend_builtin_option_derived_impls",
-         "derived_impl_key_same(builtin_di, existing_di)", "false"),
-        ("single prepend", "checker", "check",
-         "prepend_builtin_option_derived_impls(", "builtin_option_derived_impls("),
+        ("order-zero physical carrier", "derive", "run_derive_pass",
+         "if ctx.core_module_order == 0", "if true"),
+        ("dict exact type params", "dict", "dl_derived_impl",
+         "type_params: di.type_params", "type_params: []"),
+        ("Core semantic tag", "core", "append_derived_impl",
+         "derived_semantic_kind_tag(", "derived_semantic_kind_tag_broken("),
         ("single validation", "checker", "check",
          "validate_derived_impls(ctx.env, derived_impls)", "{}"),
         ("module validation", "checker", "check_module",
-         "validate_derived_impls(ctx.env, hprogram.derived_impls)",
-         "prepend_builtin_option_derived_impls(ctx.env, hprogram.derived_impls)"),
-        ("project physical carrier", "project", "assemble_project_builtin_derived_impls",
-         "graph.topo_order.get(0)", "graph.topo_order.get(graph.topo_order.len() - 1)"),
-        ("project prepend", "project", "assemble_project_builtin_derived_impls",
-         "prepend_builtin_option_derived_impls(", "builtin_option_derived_impls("),
-        ("project validation", "project", "assemble_project_builtin_derived_impls",
-         "validate_derived_impls(env, derived_impls)", "{}"),
-        ("project assembly call", "project", "compile_phases",
-         "assemble_project_builtin_derived_impls(", "validate_project_builtin_derived_impls("),
-        ("dict provider transport", "dict", "dl_derived_impl",
-         "provider_ref: di.provider_ref", "provider_ref: broken_provider"),
-        ("dict trait transport", "dict", "dl_derived_impl",
-         "trait_ref: di.trait_ref", "trait_ref: broken_trait"),
+         "validate_derived_impls(ctx.env, hprogram.derived_impls)", "{}"),
     )
     killed = 0
     for label, source_name, function_name, anchor, replacement in mutations:
@@ -11835,19 +11957,24 @@ def derived_impl_carrier_u1c4_mutation_errors(
             killed += 1
 
     manual_mutations = (
-        ("provider schema optional", "hir",
-         "pub struct DerivedImpl {\n    pub provider_ref: ImplProviderRef,",
-         "pub struct DerivedImpl {\n    pub provider_ref: ImplProviderRef?,"),
-        ("trait schema optional", "hir",
-         "pub struct DerivedImpl {\n    pub provider_ref: ImplProviderRef,\n    pub trait_ref: SymbolRef,",
-         "pub struct DerivedImpl {\n    pub provider_ref: ImplProviderRef,\n    pub trait_ref: SymbolRef?,"),
+        ("owner schema optional", "hir",
+         "pub struct DerivedImpl {\n"
+         "    pub semantic_kind: DerivedSemanticKind,\n"
+         "    pub owner_ref: ImplOwnerRef,",
+         "pub struct DerivedImpl {\n"
+         "    pub semantic_kind: DerivedSemanticKind,\n"
+         "    pub owner_ref: ImplOwnerRef?,"),
+        ("type parameters lose exact ids", "hir",
+         "    pub type_params: List<HTypeParam>,",
+         "    pub type_params: List<Str>,"),
         ("Option Ord census", "builtins",
          '["Eq", "Debug", "Clone"]', '["Eq", "Debug", "Ord", "Clone"]'),
-        ("backend builtin emitter", "codegen",
-         "emit_c_derived_impls(ctx, program.derived_impls)",
-         "emit_c_builtin_derived_impls(ctx)\n    emit_c_derived_impls(ctx, program.derived_impls)"),
+        ("backend accepts pending descriptor", "codegen",
+         "C ABI boundary: semantic DerivedImpl carrier was not retired",
+         "C ABI boundary: pending descriptor accepted"),
         ("backend descriptor constructor", "codegen",
-         "struct CDerivedFn {", "fn forged() { let _ = DerivedImpl { } }\nstruct CDerivedFn {"),
+         "pub fn generate_c(",
+         "fn forged() { let _ = DerivedImpl { } }\npub fn generate_c("),
     )
     for label, source_name, anchor, replacement in manual_mutations:
         source = sources[source_name]
@@ -12302,8 +12429,9 @@ def impl_export_closure_contract_errors(
         errors.append(fact_field_error)
     elif fact_fields is not None and [
             name for _, name in fact_fields] != [
-                "target", "provider_ref", "trait_ref", "owner_origin",
-                "method_names", "is_top_level"]:
+                "target", "provider_ref", "trait_ref", "owner_ref",
+                "method_names", "public_inherent_method_names",
+                "is_top_level"]:
         errors.append("impl export closure: ModuleImplFact typed inventory drifted")
     if "is_trait_impl" in hir_source:
         errors.append("impl export closure: ModuleImplFact retained second trait truth")
@@ -12331,21 +12459,21 @@ def impl_export_closure_contract_errors(
     if collect_error:
         errors.append(collect_error)
     elif collect_body is not None:
-        if "HDecl::ExternFn { name, .. } => method_names.push(name)" not in collect_body:
-            errors.append("impl export closure: collector loses extern method indexes")
-        if "owner_origin: owner.origin" not in collect_body:
-            errors.append("impl export closure: collector does not capture owner token")
         for token in (
                 "find_impl_by_provider(",
                 "env.trait_reg, target_type, trait_ref, provider_ref",
                 "provider_ref: provider_ref", "trait_ref: trait_ref",
+                "owner_ref: owner_ref",
                 "optional_symbol_ref_same(",
-                "owner.method_schemes.contains_key(method_name)"):
+                "owner.method_schemes.contains_key(method_name)",
+                "HDecl::Fn { name, is_pub, .. }",
+                "if trait_ref.is_none() && is_pub",
+                "public_inherent_method_names.push(name)"):
             if token not in collect_body:
                 errors.append(
                     f"impl export closure: typed collector misses {token!r}")
         for forbidden in (
-                "trait_impls.get(", "method_origins.get(",
+                "trait_impls.get(", "method_origins.get(", "MethodOrigin",
                 "exact_module_impl_owner("):
             if forbidden in collect_body:
                 errors.append(
@@ -12385,20 +12513,21 @@ def impl_export_closure_contract_errors(
         errors.append(owner_same_error)
     elif owner_same_body is not None and not all(
             token in owner_same_body for token in (
-                "left.origin == right.origin",
                 "optional_impl_provider_ref_same(",
                 "left.provider_ref, right.provider_ref",
                 "impl_entry_owner_shape_same(left, right)",
                 "string_list_same(left.method_names, right.method_names)",
                 "method_core_map_same(left.method_schemes, right.method_schemes)",
-                "impl_owner_span_same(left.span, right.span)",
-                "impl_owner_state_same(left.owner_state, right.owner_state)",
+                "method_ref_map_same(left.method_refs, right.method_refs)",
+                "method_intrinsic_map_same(",
+                "delegate_plan_state_same(left.delegate_plan, right.delegate_plan)",
             )):
         errors.append("impl export closure: shared final-owner equality is incomplete")
 
     exports_source = sources.get("exports", "")
-    if "fn merge_exact_method_origins" in exports_source or (
-            "map_clone(origins)" in exports_source):
+    if any(token in exports_source for token in (
+            "MethodOrigin", "method_origins", "method_origin_same",
+            "insert_exact_method_origin", "map_clone(origins)")):
         errors.append("impl export closure: whole target method map merge remains")
     for helper_name in (
         "copy_inline_export", "extract_decl_export",
@@ -12409,43 +12538,27 @@ def impl_export_closure_contract_errors(
         if helper_error:
             errors.append(helper_error)
         elif helper_body is not None and (
-                "method_origins.insert(" in helper_body or
+                "method_index.insert(" in helper_body or
                 "append_owner_method_indexes(" in helper_body):
             errors.append(
                 f"impl export closure: {helper_name} produces method indexes")
-    replay_body, replay_error = _f0_function_body(
-        exports_source, "method_origin_same")
-    if replay_error:
-        errors.append(replay_error)
-    elif replay_body is not None and not all(token in replay_body for token in (
-        "left.origin == right.origin",
-        "optional_impl_trait_same(left.trait_name, right.trait_name)",
-        "impl_provider_ref_same(left.provider_ref, right.provider_ref)",
-        "optional_symbol_ref_same(left.trait_ref, right.trait_ref)",
-        "method_origin_span_same(left, right)",
-    )):
-        errors.append("impl export closure: same-origin replay is not structurally exact")
     owner_shape_body, owner_shape_error = _f0_function_body(
-        exports_source, "method_origin_matches_owner")
+        exports_source, "method_ref_matches_owner")
     if owner_shape_error:
         errors.append(owner_shape_error)
     elif owner_shape_body is not None and not all(token in owner_shape_body for token in (
-        "origin.origin != owner.origin",
-        "optional_impl_trait_same(origin.trait_name, owner.trait_name)",
-        "optional_symbol_ref_same(origin.trait_ref, owner.trait_ref)",
-        "impl_provider_ref_same(",
-        "origin.provider_ref, provider",
-        "origin.span.file == owner.span.file",
-        "origin.span.end.offset == owner.span.end.offset",
+        "impl_method_ref_owner(method_ref), owner_ref",
+        "owner.method_refs.get(impl_method_ref_name(method_ref))",
+        "impl_method_ref_same(expected, method_ref)",
     )):
         errors.append("impl export closure: method index owner shape is not exact")
     insert_body, insert_error = _f0_function_body(
-        exports_source, "insert_exact_method_origin")
+        exports_source, "insert_exact_method_ref")
     if insert_error:
         errors.append(insert_error)
     elif insert_body is not None and not all(token in insert_body for token in (
-        "some(existing) => if !method_origin_same(existing, origin)",
-        "distinct origins share one method index",
+        "some(existing) => if !impl_method_ref_same(existing, method_ref)",
+        "distinct identities share one method index",
     )):
         errors.append("impl export closure: method map union can silently overwrite")
     dedupe_body, dedupe_error = _f0_function_body(
@@ -12465,8 +12578,9 @@ def impl_export_closure_contract_errors(
     elif indexes_body is not None and not all(token in indexes_body for token in (
         "owner.method_schemes.entries()",
         "for core_entry in sorted_cores",
-        "!method_origin_matches_owner(origin, owner)",
-        "insert_exact_method_origin(",
+        "if !allowed_method_names.contains(method_name) { continue }",
+        "!method_ref_matches_owner(method_ref, owner)",
+        "insert_exact_method_ref(",
     )):
         errors.append("impl export closure: owner indexes are not same-origin exact")
     elif indexes_body is not None and "if method_name" in indexes_body:
@@ -12480,7 +12594,7 @@ def impl_export_closure_contract_errors(
             "find_impl_by_provider(",
             "env.trait_reg, fact.target,",
             "fact.trait_ref, fact.provider_ref",
-            "owner.origin != fact.owner_origin",
+            "registered, fact.owner_ref",
             "append_exact_impl_owner(owner, fact_owners)",
         )):
             errors.append("impl export closure: fact export loses exact owner")
@@ -12491,8 +12605,15 @@ def impl_export_closure_contract_errors(
         )):
             errors.append("impl export closure: user fact is not consumed once")
         if "append_owner_method_indexes(" in facts_body or (
-                "method_origins.insert(" in facts_body):
+                "method_index.insert(" in facts_body):
             errors.append("impl export closure: fact helper produces method indexes")
+        for token in (
+                "fact.trait_ref.is_some() &&",
+                "fact.public_inherent_method_names.len() != 0",
+                "fact.method_names.contains(public_name)"):
+            if token not in facts_body:
+                errors.append(
+                    f"impl export closure: visibility projection misses {token!r}")
 
     extract_body, extract_error = _f0_function_body(
         exports_source, "extract_exports")
@@ -12506,14 +12627,19 @@ def impl_export_closure_contract_errors(
         )):
             errors.append("impl export closure: final owner union omits module facts")
         map_at = extract_body.find(
-            "let mut method_origins: Map<Str, Map<Str, MethodOrigin>> = map_new()")
+            "let mut method_index: Map<Str, Map<Str, ImplMethodRef>> = map_new()")
         final_union_at = extract_body.find("for owner in trait_impls")
         closed_owner_at = extract_body.rfind(
             "append_exact_impl_owner(impl_, trait_impls)")
         if (map_at < 0 or final_union_at < 0 or closed_owner_at < 0 or
                 map_at < closed_owner_at or map_at > final_union_at):
             errors.append("impl export closure: index map is not fresh after owner union")
-        if "validate_impl_export_closure(trait_impls, method_origins)" not in extract_body:
+        if extract_body.count("target_exported &&") != 2 or (
+                "exported_trait_ids.contains(name)" not in extract_body):
+            errors.append("impl export closure: trait impl visibility is not target+trait")
+        if "exported_owner_method_names(owner, inherent_methods)" not in extract_body:
+            errors.append("impl export closure: callable index ignores inherent visibility")
+        if "validate_impl_export_closure(\n        trait_impls, method_index, inherent_methods)" not in extract_body:
             errors.append("impl export closure: final owner/index relation is unvalidated")
     validate_body, validate_error = _f0_function_body(
         exports_source, "validate_impl_export_closure")
@@ -12522,6 +12648,8 @@ def impl_export_closure_contract_errors(
     elif validate_body is not None and not all(token in validate_body for token in (
         "!owner.method_schemes.contains_key(method_name)",
         "if matches != 1",
+        "let allowed = exported_owner_method_names(owner, inherent_methods)",
+        "if !allowed.contains(method_name) { continue }",
         "for core_entry in owner.method_schemes.entries()",
         "owner core has no exported index",
         "owner core index is not exact",
@@ -12534,8 +12662,10 @@ def impl_export_closure_contract_errors(
         errors.append(inject_error)
     elif inject_body is not None and not all(token in inject_body for token in (
         "find_impl_by_provider(",
-        "origin.trait_ref, origin.provider_ref",
-        "owner.origin != origin.origin",
+        "impl_owner_ref_trait(owner_ref)",
+        "impl_owner_ref_provider(owner_ref)",
+        "some(expected) => if !impl_method_ref_same(",
+        "expected, method_ref",
         "impl hydration: exported index has no owner core",
         "impl hydration: exported index owner is missing",
     )):
@@ -12558,15 +12688,15 @@ def impl_export_closure_mutation_errors(
          "typed collector misses"),
         ("checker", "collect_module_impl_facts",
          "owner.method_schemes.contains_key(method_name)",
-         "env.trait_reg.method_origins.get(target_type).is_some()",
-         "collector re-resolves"),
+         "false",
+         "typed collector misses"),
         ("checker", "collect_module_impl_facts",
-         "HDecl::ExternFn { name, .. } => method_names.push(name)",
-         "HDecl::ExternFn { .. } => {}",
-         "collector loses extern method indexes"),
+         "if trait_ref.is_none() && is_pub",
+         "if is_pub",
+         "typed collector misses"),
         ("checker", "collect_module_impl_facts",
-         "owner_origin: owner.origin", "owner_origin: target_type",
-         "collector does not capture owner token"),
+         "owner_ref: owner_ref", "owner_ref: wrong_owner_ref",
+         "typed collector misses"),
         ("checker", "collect_module_impl_facts",
          "if trait_name.is_some() || method_names.len() > 0", "if true",
          "empty inherent skip is not explicit"),
@@ -12576,14 +12706,15 @@ def impl_export_closure_mutation_errors(
         ("checker", "collect_module_impl_facts",
          "none => panic(", "none => {} // swallowed typed owner miss\n                panic(",
          "typed owner miss is not internal"),
-        ("exports", "method_origin_same",
-         "method_origin_span_same(left, right)", "true",
-         "same-origin replay is not structurally exact"),
-        ("exports", "method_origin_matches_owner",
-         "origin.span.file == owner.span.file", "true",
+        ("exports", "method_ref_matches_owner",
+         "impl_method_ref_owner(method_ref), owner_ref", "owner_ref, owner_ref",
          "method index owner shape is not exact"),
-        ("exports", "insert_exact_method_origin",
-         "!method_origin_same(existing, origin)", "false",
+        ("exports", "method_ref_matches_owner",
+         "owner.method_refs.get(impl_method_ref_name(method_ref))",
+         "owner.method_refs.get(\"wrong\")",
+         "method index owner shape is not exact"),
+        ("exports", "insert_exact_method_ref",
+         "!impl_method_ref_same(existing, method_ref)", "false",
          "method map union can silently overwrite"),
         ("exports", "append_exact_impl_owner",
          "impl_entry_exact_key_same(existing, owner)", "true",
@@ -12604,13 +12735,13 @@ def impl_export_closure_mutation_errors(
          "method_core_map_same(left.method_schemes, right.method_schemes)",
          "true", "shared final-owner equality is incomplete"),
         ("env", "impl_entry_final_same",
-         "impl_owner_span_same(left.span, right.span)",
+         "method_ref_map_same(left.method_refs, right.method_refs)",
          "true", "shared final-owner equality is incomplete"),
         ("env", "impl_entry_final_same",
-         "impl_owner_state_same(left.owner_state, right.owner_state)",
+         "method_intrinsic_map_same(\n            left.method_intrinsics, right.method_intrinsics)",
          "true", "shared final-owner equality is incomplete"),
         ("exports", "append_owner_method_indexes",
-         "!method_origin_matches_owner(origin, owner)", "false",
+         "!method_ref_matches_owner(method_ref, owner)", "false",
          "owner indexes are not same-origin exact"),
         ("exports", "export_impl_facts",
          "fact.trait_ref, fact.provider_ref",
@@ -12621,22 +12752,26 @@ def impl_export_closure_mutation_errors(
          "user fact is not consumed once"),
         ("exports", "copy_exported_name",
          "types.insert(local_name, def)",
-         "types.insert(local_name, def)\n            method_origins.insert(canonical_type, map_clone(source.method_origins.get(canonical_type).unwrap()))",
+         "types.insert(local_name, def)\n            method_index.insert(canonical_type, map_clone(source.method_index.get(canonical_type).unwrap()))",
          "copy_exported_name produces method indexes"),
         ("exports", "export_impl_facts",
          "append_exact_impl_owner(owner, fact_owners)",
-         "append_exact_impl_owner(owner, fact_owners)\n        append_owner_method_indexes(owner, env.trait_reg.method_origins, method_origins)",
+         "append_exact_impl_owner(owner, fact_owners)\n        append_owner_method_indexes(owner, env.trait_reg.method_index, fact.method_names, method_index)",
          "fact helper produces method indexes"),
         ("exports", "extract_exports",
-         "for owner in fact_owners {\n        append_exact_impl_owner(owner, trait_impls)\n    }",
-         "for owner in fact_owners { {} }",
+         "for owner in fact_owners {",
+         "for owner in [] {",
          "final owner union omits module facts"),
+        ("exports", "extract_exports",
+         "some(name) => target_exported &&\n                exported_trait_ids.contains(name)",
+         "some(name) => target_exported ||\n                exported_trait_ids.contains(name)",
+         "trait impl visibility is not target+trait"),
         ("exports", "append_owner_method_indexes",
          "for core_entry in sorted_cores {",
          "for core_entry in [] {",
          "owner indexes are not same-origin exact"),
         ("exports", "extract_exports",
-         "validate_impl_export_closure(trait_impls, method_origins)", "{}",
+         "validate_impl_export_closure(\n        trait_impls, method_index, inherent_methods)", "{}",
          "final owner/index relation is unvalidated"),
         ("exports", "validate_impl_export_closure",
          "!owner.method_schemes.contains_key(method_name)", "false",
@@ -12679,7 +12814,7 @@ def impl_export_closure_mutation_errors(
             killed += 1
 
     hir_source = sources["hir"]
-    anchor = "    pub owner_origin: Str,\n"
+    anchor = "    pub owner_ref: ImplOwnerRef,\n"
     if hir_source.count(anchor) != 1:
         errors.append(
             f"impl export closure HIR mutation anchor count was "
@@ -12692,6 +12827,22 @@ def impl_export_closure_mutation_errors(
         if not any(expected in finding for finding in findings):
             errors.append(
                 f"impl export closure HIR mutation missed {expected!r}: "
+                f"{findings!r}")
+        else:
+            killed += 1
+    visibility_anchor = "    pub public_inherent_method_names: List<Str>,\n"
+    if hir_source.count(visibility_anchor) != 1:
+        errors.append(
+            f"impl export closure visibility mutation anchor count was "
+            f"{hir_source.count(visibility_anchor)}")
+    else:
+        mutated = dict(sources)
+        mutated["hir"] = hir_source.replace(visibility_anchor, "", 1)
+        findings = impl_export_closure_contract_errors(mutated)
+        expected = "ModuleImplFact typed inventory drifted"
+        if not any(expected in finding for finding in findings):
+            errors.append(
+                f"impl export closure visibility mutation missed {expected!r}: "
                 f"{findings!r}")
         else:
             killed += 1
@@ -12725,9 +12876,10 @@ def impl_predicate_u1c0_contract_errors(
         "pub struct ImplMethodSchemeCore",
         "pub predicates: FrozenImplPredicateSet",
         "pub method_schemes: Map<Str, ImplMethodSchemeCore>",
+        "pub method_refs: Map<Str, ImplMethodRef>",
+        "pub owner_ref: ImplOwnerRef?",
         "pub trait_name: Str?",
         "pub type_param_vars: List<Int>",
-        "pub enum ImplOwnerState",
         "pub fn instantiate_impl_runtime_requirements",
     ):
         if token not in env_source:
@@ -12763,12 +12915,21 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 owner insertion bypasses relational validation")
     if "expanded predicate path is not a supertrait edge" not in env_source:
         errors.append("U1c0 expanded predicate paths are not relationally validated")
-    for token in (
-        "provisional prelude owner published methods",
-        "provisional owner published a stale method index",
-    ):
-        if token not in env_source:
-            errors.append(f"U1c0 provisional validation missing {token!r}")
+    validate_owner_body, validate_owner_error = extract_ring_function_body(
+        env_source, "validate_impl_entry")
+    if validate_owner_error:
+        errors.append(validate_owner_error)
+    elif validate_owner_body is not None and not all(
+            token in validate_owner_body for token in (
+                "entry.method_refs.len() != entry.method_schemes.len()",
+                "impl_owner_ref_provider(owner), provider",
+                "impl owner: typed owner/method closure drifted")):
+        errors.append("U1c0 final owner exact closure is incomplete")
+    for retired in (
+            "ImplOwnerState", "ProvisionalPrelude",
+            "finalize_provisional_impl_owner", "find_impl_by_origin"):
+        if retired in env_source:
+            errors.append(f"U1c0 retired provisional authority returned: {retired}")
 
     register_source = sources.get("register", "")
     for token in (
@@ -12776,7 +12937,6 @@ def impl_predicate_u1c0_contract_errors(
         "BoundShapeContext::ImplMethodBound",
         "BoundShapeContext::ProtocolImplBound",
         "fn collect_supertraits_dfs",
-        "finalize_provisional_impl_owner",
         "impl_owner_fn_bounds",
         "merge_delegate_owner_predicates",
     ):
@@ -12792,13 +12952,21 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 impl method bound gate is not attached to method registration")
     if "some(found) => merge_delegate_owner_predicates(" not in register_source:
         errors.append("U1c0 delegate does not merge the selected field owner")
-    if "some(_) => finalize_provisional_impl_owner(" not in register_source:
-        errors.append("U1c0 source impl does not finalize its provisional owner")
-    provisional_at = register_source.find("find_impl_by_origin(")
-    fresh_at = register_source.find(
-        "let tv = ctx.env.fresh_var()", provisional_at)
-    if provisional_at < 0 or fresh_at < 0 or provisional_at > fresh_at:
-        errors.append("U1c0 source impl does not reuse provisional owner before mint")
+    canonical_body, canonical_error = extract_ring_function_body(
+        register_source, "register_impl_canonical")
+    if canonical_error:
+        errors.append(canonical_error)
+    elif canonical_body is not None and not all(token in canonical_body for token in (
+            "let tv = ctx.env.fresh_var()",
+            "provider_ref: some(provider_ref)",
+            "owner_ref: some(owner_ref)",
+            "add_impl(ctx.env.trait_reg, owner_entry)")):
+        errors.append("U1c0 source impl does not publish one exact final owner")
+    for retired in (
+            "find_impl_by_origin(", "finalize_provisional_impl_owner(",
+            "ImplOwnerState::ProvisionalPrelude"):
+        if retired in register_source:
+            errors.append(f"U1c0 registration retained provisional route {retired!r}")
     for function_name in (
         "register_fn_common",
         "register_effect",
@@ -12818,39 +12986,31 @@ def impl_predicate_u1c0_contract_errors(
             errors.append(f"U1c0 protocol fail-loud wording missing {token!r}")
 
     builtins = sources.get("builtins", "")
-    for token in (
-        '"<std-predecl>:Map:unbounded"',
-        '"<std-predecl>:Map:bounded"',
-        '"<std-predecl>:Set:unbounded"',
-        '"<std-predecl>:Set:bounded"',
-        "ImplOwnerState::ProvisionalPrelude",
-        "fn seed_std_hof_owners",
-        "fn seed_std_hof_owner",
-        "fn require_std_hof_seed",
-        "pub fn finalize_std_hof_fallbacks",
-    ):
-        if token not in builtins:
-            errors.append(f"U1c0 provisional builtin owner missing {token!r}")
-    seed_body, seed_error = extract_ring_function_body(
-        builtins, "seed_std_hof_owner")
-    if seed_error:
-        errors.append(seed_error)
-    elif seed_body is not None and not all(token in seed_body for token in (
-        "method_names: []",
-        "method_schemes: map_new()",
-        "ImplOwnerState::ProvisionalPrelude",
-    )):
-        errors.append("U1c0 std HOF seed publishes method state")
-    elif seed_body is not None and "install_method_core(" in seed_body:
-        errors.append("U1c0 std HOF seed publishes a method index")
+    for retired in (
+            "<std-predecl>", "ImplOwnerState", "ProvisionalPrelude",
+            "seed_std_hof_owners", "seed_std_hof_owner",
+            "require_std_hof_seed"):
+        if retired in builtins:
+            errors.append(f"U1c0 provisional builtin authority returned: {retired}")
+    install_builtin_body, install_builtin_error = extract_ring_function_body(
+        builtins, "install_builtin_method_owner")
+    if install_builtin_error:
+        errors.append(install_builtin_error)
+    elif install_builtin_body is not None and not all(
+            token in install_builtin_body for token in (
+                "method_schemes: map_clone(cores)",
+                "method_refs: method_refs",
+                "method_intrinsics: map_clone(method_intrinsics)",
+                "provider_ref: some(provider_ref)",
+                "owner_ref: some(owner_ref)")):
+        errors.append("U1c0 builtin owner exact closure is incomplete")
     register_hof_body, register_hof_error = extract_ring_function_body(
         builtins, "register_hof_intrinsics")
     if register_hof_error:
         errors.append(register_hof_error)
     elif register_hof_body is not None:
-        if "seed_std_hof_owners(env)" not in register_hof_body or (
-                "register_option_hof(env, sink)" not in register_hof_body):
-            errors.append("U1c0 normal HOF registration lost seed/Option split")
+        if register_hof_body.count("register_option_hof(env, sink)") != 1:
+            errors.append("U1c0 normal HOF registration lost exact Option builtin")
         for forbidden_call in (
             "register_list_hof(", "register_map_hof(", "register_set_hof("):
             if forbidden_call in register_hof_body:
@@ -12870,8 +13030,13 @@ def impl_predicate_u1c0_contract_errors(
         body, error = extract_ring_function_body(builtins, function_name)
         if error:
             errors.append(error)
-        elif body is not None and "require_std_hof_seed(" not in body:
-            errors.append(f"U1c0 {function_name} mints instead of consuming seed IDs")
+        elif body is not None and not all(token in body for token in (
+                "env.fresh_var_id()", "install_builtin_method_owner(")):
+            errors.append(
+                f"U1c0 {function_name} does not mint one independent final owner")
+        elif function_name == "register_list_hof" and body is not None and (
+                "let t_id = env.fresh_var_id()" not in body):
+            errors.append("U1c0 List fallback lost its exact fresh owner variable")
 
     ctx_source = sources.get("ctx", "")
     for token in (
@@ -12886,10 +13051,11 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 pending obligation does not retain the exact owner")
 
     helpers = sources.get("helpers", "")
-    if "ctx.env.trait_reg.method_origins.get(type_name)" not in helpers or (
-        "find_impl_by_origin(" not in helpers
+    if "ctx.env.trait_reg.method_index.get(type_name)" not in helpers or (
+        "let owner_ref = impl_method_ref_owner(method_ref)" not in helpers or
+        "find_impl_by_provider(" not in helpers
     ):
-        errors.append("U1c0 method lookup does not follow the owner index")
+        errors.append("U1c0 method lookup does not follow the exact owner index")
     infer_source = sources.get("infer", "")
     if "resolve_or_defer_dicts_from_impl_owner(" not in infer_source:
         errors.append("U1c0 method call does not consume owner predicates")
@@ -12909,8 +13075,8 @@ def impl_predicate_u1c0_contract_errors(
     index_install = checker_source.find("install_method_core(", owner_add)
     if owner_add < 0 or index_install < 0 or owner_add > index_install:
         errors.append("U1c0 hydration does not install owners before indexes")
-    if "assert_no_provisional_impl_owners(ctx.env.trait_reg)" not in checker_source:
-        errors.append("U1c0 prelude does not close provisional owners")
+    if "assert_no_provisional_impl_owners" in checker_source:
+        errors.append("U1c0 checker retained provisional close authority")
     load_prelude_body, load_prelude_error = extract_ring_function_body(
         checker_source, "load_prelude")
     if load_prelude_error:
@@ -12922,9 +13088,6 @@ def impl_predicate_u1c0_contract_errors(
         finalize_at = load_prelude_body.find("finalize_std_hof_fallbacks(")
         if fallback_at < 0 or finalize_at < fallback_at:
             errors.append("U1c0 std-present path can reach late HOF fallback")
-        if load_prelude_body.count(
-                "assert_no_provisional_impl_owners(ctx.env.trait_reg)") != 2:
-            errors.append("U1c0 prelude branches do not both close provisional owners")
     return errors
 
 
@@ -12935,34 +13098,34 @@ F2_U1C0_SOURCE_CONTRACT_MUTATIONS = (
     ("env", "panic(\"impl predicate: duplicate owner predicate\")", "{}"),
     ("register", "ctx, mtps, BoundShapeContext::ImplMethodBound, method_span", "ctx, mtps, BoundShapeContext::OrdinaryBound, method_span"),
     ("register", "BoundShapeContext::ProtocolImplBound", "BoundShapeContext::ImplOwnerBound"),
-    ("register", "finalize_provisional_impl_owner(", "add_impl("),
+    ("register", "provider_ref: some(provider_ref),\n            trait_ref: resolved_trait_ref,\n            owner_ref: some(owner_ref)", "provider_ref: none,\n            trait_ref: resolved_trait_ref,\n            owner_ref: some(owner_ref)"),
     ("decl", "let impl_bounds = impl_owner_fn_bounds(impl_owner)", "let impl_bounds: List<FnBoundsEntry> = []"),
     ("register", "some(found) => merge_delegate_owner_predicates(", "some(found) => freeze_impl_predicate_set("),
-    ("env", 'panic("impl owner: provisional prelude owner published methods")', "{}"),
-    ("env", 'panic("impl owner: provisional owner published a stale method index")', "{}"),
-    ("builtins", "method_names: [],", 'method_names: ["map"],'),
-    ("builtins", "method_schemes: map_new(),", "method_schemes: map_clone(cores),"),
-    ("builtins", "owner_state: ImplOwnerState::ProvisionalPrelude", "owner_state: ImplOwnerState::FinalOwner"),
-    ("builtins", "seed_std_hof_owners(env)", "register_list_hof(env, sink)"),
+    ("env", "entry.method_refs.len() != entry.method_schemes.len()", "false"),
+    ("env", "impl_owner_ref_provider(owner), provider", "provider, provider"),
+    ("builtins", "method_intrinsics: map_clone(method_intrinsics),\n        provider_ref: some(provider_ref)", "method_intrinsics: map_clone(method_intrinsics),\n        provider_ref: none"),
+    ("builtins", "trait_ref: trait_ref,\n        owner_ref: some(owner_ref),\n        delegate_plan", "trait_ref: trait_ref,\n        owner_ref: none,\n        delegate_plan"),
+    ("builtins", "method_schemes: map_clone(cores),\n        method_refs: method_refs,\n        method_intrinsics: map_clone(method_intrinsics)", "method_schemes: map_clone(cores),\n        method_refs: map_new(),\n        method_intrinsics: map_clone(method_intrinsics)"),
+    ("builtins", "pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {", "pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {\n    register_list_hof(env, sink)"),
     ("builtins", "register_option_hof(env, sink)", "register_list_hof(env, sink)"),
     ("builtins", "register_list_hof(env, sink)\n", "{}\n"),
     ("builtins", "register_map_hof(env, sink)\n", "{}\n"),
     ("builtins", "register_set_hof(env, sink)\n", "{}\n"),
-    ("builtins", "let owner = require_std_hof_seed(\n        env, BUILTIN_LIST", "let owner = empty_frozen_impl_predicate_set(\n        env, BUILTIN_LIST"),
+    ("builtins", "fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {\n    let mut methods: Map<Str, TypeScheme> = map_new()\n    // map: (List<T>, (T) -> U / e) -> List<U> / e\n    let t_id = env.fresh_var_id()", "fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {\n    let mut methods: Map<Str, TypeScheme> = map_new()\n    // map: (List<T>, (T) -> U / e) -> List<U> / e\n    let t_id = 0"),
     ("checker", "finalize_std_hof_fallbacks(ctx.env, ctx.sink)", "{}"),
     ("checker", "some(std_dir) => {", "some(std_dir) => {\n            finalize_std_hof_fallbacks(ctx.env, ctx.sink)"),
     ("register", "span: Span, check_dup: Bool, track_mut_params: Bool, track_fn_bounds: Bool\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "span: Span, check_dup: Bool, track_mut_params: Bool, track_fn_bounds: Bool\n) {\n    {}"),
-    ("register", "ops: List<EffectOpDecl>, span: Span\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "ops: List<EffectOpDecl>, span: Span\n) {\n    {}"),
+    ("register", "ops: List<EffectOpDecl>, span: Span, decl_index: Int\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "ops: List<EffectOpDecl>, span: Span, decl_index: Int\n) {\n    {}"),
     ("register", "type_expr: TypeExpr, span: Span\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "type_expr: TypeExpr, span: Span\n) {\n    {}"),
     ("register", "fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, span: Span) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, span: Span) {\n    {}"),
     ("register", "that protocol lowering does not yet consume", "that exact dictionary evidence cannot preserve"),
     ("register", "protocol lowering has not consumed nested impl predicates", "nested impl predicates are not yet representable in ImplEntry"),
     ("ctx", "source: PendingEvidenceSource::ImplOwnerEvidenceSource {", "source: PendingEvidenceSource::SchemeEvidenceSource("),
-    ("helpers", "ctx.env.trait_reg.method_origins.get(type_name)", "ctx.env.trait_reg.impl_methods.get(type_name)"),
+    ("helpers", "ctx.env.trait_reg.method_index.get(type_name)", "ctx.env.trait_reg.impl_methods.get(type_name)"),
     ("infer", "resolve_or_defer_dicts_from_impl_owner(", "resolve_or_defer_dicts_from_scheme("),
     ("derive", "freeze_impl_predicate_set(", "empty_frozen_impl_predicate_set("),
     ("exports", "pub trait_impls: List<ImplEntry>,", "pub trait_impls: List<ImplEntry>,\n    pub impl_methods: Map<Str, Map<Str, TypeScheme>>,"),
-    ("checker", "            assert_no_provisional_impl_owners(ctx.env.trait_reg)\n            // Install", "            {}\n            // Install"),
+    ("checker", "add_impl(ctx.env.trait_reg, impl_)", "{}"),
     ("env", "pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {\n    validate_impl_entry(reg, entry)", "pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {\n    {}"),
 )
 
@@ -13061,9 +13224,18 @@ def impl_predicate_u1c0_no_std_errors(ring_exe: str) -> List[str]:
 
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
+        "ast": REPO / "compiler" / "ast.ring",
+        "parser": REPO / "compiler" / "parser.ring",
+        "env": REPO / "compiler" / "env.ring",
+        "types": REPO / "compiler" / "types.ring",
+        "inventory": REPO / "compiler" / "ir_inventory.ring",
+        "effect_analysis": REPO / "compiler" / "effect_analysis.ring",
+        "identity": REPO / "compiler" / "ir_identity.ring",
+        "builtins": REPO / "compiler" / "builtins.ring",
         "hir": REPO / "compiler" / "hir.ring",
         "infer": REPO / "compiler" / "infer.ring",
         "infer_decl": REPO / "compiler" / "infer_decl.ring",
+        "andor": REPO / "compiler" / "andor_lower.ring",
         "checker": REPO / "compiler" / "checker.ring",
         "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
         "infer_helpers": REPO / "compiler" / "infer_helpers.ring",
@@ -13096,8 +13268,32 @@ def identity_checkpoint_source_errors() -> List[str]:
     errors.extend(identity_stdout_canonicalization_errors())
 
     mutations = (
-        ("Drop DefId", "hir", "Drop { name: Str, def_id: Int, ty: Type, span: Span }",
-         "Drop { name: Str, ty: Type, span: Span }"),
+        ("Drop DefId", "hir",
+         "Drop { name: Str, def_id: Int, slot: SlotRef, site: HResourceSite,",
+         "Drop { name: Str, slot: SlotRef, site: HResourceSite,"),
+        ("Take exact source slot", "hir",
+         "Take { source: HExpr, source_slot: SlotRef, saved_slot: SlotRef?,",
+         "Take { source: HExpr, saved_slot: SlotRef?,"),
+        ("HDecl exact executable", "hir",
+         "Fn { name: Str, def_id: Int?, executable_ref: ExecutableRef,",
+         "Fn { name: Str, def_id: Int?,"),
+        ("builtin value site census", "identity",
+         "pub const BUILTIN_VALUE_SITE_COUNT: Int = 6",
+         "pub const BUILTIN_VALUE_SITE_COUNT: Int = 5"),
+        ("builtin value fixed relation", "builtins",
+         '"ptr_copy", builtin_value_site_from_tag(BUILTIN_VALUE_PTR_COPY)',
+         '"ptr_copy", builtin_value_site_from_tag(BUILTIN_VALUE_DEALLOC)'),
+        ("checker builtin SymbolRef relation", "checker",
+         "checker_builtin_value_symbol(builtin)",
+         "value_symbol_ref(ctx, 0)"),
+        ("typed callee carrier", "hir", "callee_ref: CalleeRef?",
+         "callee_ref: Str?"),
+        ("resolver value SymbolRef census", "infer_ctx",
+         "for binding in plan.bindings {\n        match binding.namespace {",
+         "for binding in [] {\n        match binding.namespace {"),
+        ("local callee exact module", "infer",
+         "current_identity_file_key(ctx),\n                        slot_domain_lexical(), def_id",
+         '"forged",\n                        slot_domain_lexical(), def_id'),
         ("assignment exact slot", "cexpr", "c_exact_value_slot(ctx, name, exact_def_id)",
          "ctx.named_values.get(name)"),
         ("exact local closure call", "cexpr",
@@ -13112,16 +13308,17 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("dict receiver atomic domain guard", "cexpr",
          'domain != "name-only" && domain != "static" && domain != "computed"',
          "false"),
-        ("effect receiver atomic domain guard", "cexpr",
-         'domain != "name-only" && domain != "default-evidence" &&',
-         "false &&"),
+        ("system host call carrier", "hir",
+         "system_host: SystemHostCallableRef?",
+         "system_host: Str?"),
         ("dict receiver ledger domain guard", "cctx",
          'event.domain != "name-only" && event.domain != "static" &&',
          "false &&"),
-        ("effect receiver ledger domain guard", "cctx",
-         'event.domain != "name-only" &&\n'
-         '           event.domain != "default-evidence" &&',
-         "false &&\n           false &&"),
+        ("system host producer", "infer",
+         "system_effects.get(0).unwrap(),\n"
+         "        make_named_executable_ref(callee_ref_named_symbol(callee_ref))",
+         "system_effects.last().unwrap(),\n"
+         "        make_named_executable_ref(callee_ref_named_symbol(callee_ref))"),
         ("capture edge environment", "cctx",
          "store.dest_slot != edge.source_slot",
          "store.dest_slot == edge.source_slot"),
@@ -13177,6 +13374,18 @@ def identity_checkpoint_source_errors() -> List[str]:
          "if is_exact_direct_call_ident(normalized) {\n"
          "        return anf_materialize(normalized, hoists, counter)\n"
          "    }"),
+        ("ANF CalleeRef transport", "perceus",
+         "resolved_dicts: resolved_dicts, callee_ref: callee_ref,",
+         "resolved_dicts: resolved_dicts, callee_ref: none,"),
+        ("dict CalleeRef transport", "dict",
+         "callee_ref: callee_ref,\n                method_ref: dl_method_call_ref",
+         "callee_ref: none,\n                method_ref: dl_method_call_ref"),
+        ("andor CalleeRef transport", "andor",
+         "resolved_dicts: resolved_dicts, callee_ref: callee_ref,",
+         "resolved_dicts: resolved_dicts, callee_ref: none,"),
+        ("zonk CalleeRef transport", "zonk",
+         "callee_ref: callee_ref,\n                method_ref: zonk_method_call_ref",
+         "callee_ref: none,\n                method_ref: zonk_method_call_ref"),
         ("direct predicate exact marker shape", "hir",
          "def_id: some(_), dict_closure_dicts: some(_), ..",
          ".."),
@@ -13232,12 +13441,12 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("Wrapped dictionary capture census", "cexpr",
          "DictRef::Wrapped { inner_dicts, .. }",
          "DictRef::Wrapped { dict, inner_dicts, .. }"),
-        ("bound DictDispatchInfo tag", "infer",
-         "dict_ref: DictRef::Simple(trait_bound_param_name(",
-         "dict_ref: DictRef::Static(trait_bound_param_name("),
-        ("delegated DictDispatchInfo tag", "infer_decl",
-         "dict_ref: DictRef::Static(dict_name)",
-         "dict_ref: DictRef::Simple(dict_name)"),
+        ("bound method evidence tag", "infer",
+         "bound_evidence = some(DictRef::Simple(",
+         "bound_evidence = some(DictRef::Static("),
+        ("delegated bound evidence tag", "infer_decl",
+         "DictRef::Static(dict_name), tm.ty",
+         "DictRef::Simple(dict_name), tm.ty"),
         ("FieldAction bound base tag", "derive",
          "base_dict: DictRef::Simple(\n"
          "                    trait_bound_param_name(param_name, trait_name))",
@@ -13372,10 +13581,6 @@ def identity_checkpoint_source_errors() -> List[str]:
          "ctx.names[i] == name"),
         ("or-pattern shared slot", "cexpr", "bind_c_root_pattern_after_success(",
          "bind_c_nested_pattern("),
-        ("effect default HParam identity", "infer_decl", "def_id: some(effect_param_def_id)",
-         "def_id: none"),
-        ("effect default body identity", "infer_decl", "def_id: some(exact_effect_def_id)",
-         "def_id: some(ctx.env.fresh_def_id())"),
         ("trait default HParam identity", "infer_decl", "def_id: some(trait_param_def_id)",
          "def_id: none"),
         ("trait default body identity", "infer_decl", "def_id: some(exact_trait_def_id)",
@@ -13428,6 +13633,143 @@ def identity_checkpoint_source_errors() -> List[str]:
         mutated[source_name] = sources[source_name].replace(anchor, replacement, 1)
         if not identity_checkpoint_contract_errors(mutated):
             errors.append(f"mutation {label} escaped exact-slot source oracle")
+    return errors
+
+
+OWNERSHIP_CUTOVER_PATHS = {
+    "checker": REPO / "compiler" / "checker.ring",
+    "cli": REPO / "compiler" / "cli.ring",
+    "project": REPO / "compiler" / "compiler_mod.ring",
+    "hir_exact": REPO / "compiler" / "hir_exact.ring",
+    "infer_decl": REPO / "compiler" / "infer_decl.ring",
+    "core": REPO / "compiler" / "core_from_hir.ring",
+}
+
+
+def ownership_cutover_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    errors: List[str] = []
+    for label, path in OWNERSHIP_CUTOVER_PATHS.items():
+        try:
+            sources[label] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"cannot read {display_path(path)}: {exc}")
+    if errors:
+        return errors
+
+    for label in ("cli", "project"):
+        masked = mask_ring_strings_and_comments(sources[label])
+        if re.search(r"(?m)^\s*use\s+perceus\b", masked):
+            errors.append(f"{label}: direct Perceus import survived Core cutover")
+        if re.search(r"\bperceus_transform\s*\(", masked):
+            errors.append(f"{label}: direct Perceus call survived Core cutover")
+
+    error_result, error_result_error = extract_ring_function_body(
+        sources["checker"], "duplicate_direct_declaration_error_result")
+    if error_result_error:
+        errors.append(error_result_error)
+    elif not all(token in error_result for token in (
+            "core_facts: none", "legacy_facts: none")):
+        errors.append("checker: diagnostic result published frozen facts")
+
+    for function_name in ("check", "check_module"):
+        body, body_error = extract_ring_function_body(
+            sources["checker"], function_name)
+        if body_error:
+            errors.append(body_error)
+            continue
+        required = (
+            "let frozen = if has_errors { none } else { some(",
+            "freeze_core_and_legacy_facts(",
+            "ctx.core_recorder, checked_program, ctx.env,",
+            "ctx.core_type_sources,",
+            "ctx.core_handled_evidence_type_sources",
+            "core_facts: frozen.map(",
+            "frozen_core_and_legacy_core(value)",
+            "legacy_facts: frozen.map(",
+            "frozen_core_and_legacy_legacy(value)",
+        )
+        for token in required:
+            if token not in body:
+                errors.append(
+                    f"checker.{function_name}: cutover relation misses {token!r}")
+
+    def require_order(
+        label: str, body: str, tokens: Tuple[str, ...],
+    ) -> None:
+        positions = [body.find(token) for token in tokens]
+        if any(position < 0 for position in positions):
+            errors.append(f"{label}: ownership stage census is incomplete")
+        elif positions != sorted(positions) or len(set(positions)) != len(positions):
+            errors.append(f"{label}: ownership stage order drifted")
+
+    single, single_error = extract_ring_function_body(
+        sources["cli"], "materialize_single_ownership")
+    if single_error:
+        errors.append(single_error)
+    else:
+        require_order("cli.materialize_single_ownership", single, (
+            "assemble_single_core(core_facts)",
+            "run_ownership_pipeline(",
+            "assemble_legacy_projection(",
+            "materialize_verified_hir(",
+        ))
+        if "verified_ownership_program_flow(verified)" not in single:
+            errors.append("cli: legacy projection is not bound to verified Flow")
+
+    project, project_error = extract_ring_function_body(
+        sources["project"], "materialize_project_ownership")
+    if project_error:
+        errors.append(project_error)
+    else:
+        require_order("compiler_mod.materialize_project_ownership", project, (
+            "assemble_project_core(core_facts)",
+            "run_ownership_pipeline(",
+            "assemble_legacy_projection(",
+            "materialize_verified_project_hir(",
+        ))
+        for token in (
+                "for key in phases.graph.topo_order",
+                "make_verified_project_hir_shell(",
+                "key, phases.module_hirs.get(key)",
+                "materialized_project_hir_module_key(value)",
+                "result.insert(key, materialized_project_hir_program(value))",
+                "result.len() != phases.graph.topo_order.len()"):
+            if token not in project:
+                errors.append(
+                    f"compiler_mod: project shell partition misses {token!r}")
+        if "verified_ownership_program_flow(verified)" not in project:
+            errors.append(
+                "compiler_mod: legacy projection is not bound to verified Flow")
+
+    for function_name in (
+            "compile_project", "compile_project_c", "verify_project_rc"):
+        body, body_error = extract_ring_function_body(
+            sources["project"], function_name)
+        if body_error:
+            errors.append(body_error)
+        elif "materialize_project_ownership(phases)" not in body:
+            errors.append(
+                f"compiler_mod.{function_name}: project ownership path bypassed")
+    if "--rc-mutate has no typed ownership-pipeline mutation entry" not in (
+            sources["cli"] + sources["project"]):
+        errors.append("ownership cutover: unsupported mutation did not fail loud")
+
+    default_fields, default_fields_error = _f0_struct_fields(
+        sources["hir_exact"], "HDefaultSpecializationPlan")
+    if default_fields_error:
+        errors.append(default_fields_error)
+    elif default_fields is not None and [name for _, name in default_fields] != [
+            "owner", "generated_method", "generated_executable",
+            "source_method", "default_executable", "parameter_types",
+            "parameter_mutabilities", "binders", "result_type", "effects",
+            "forward_call"]:
+        errors.append("default specialization exact carrier drifted")
+    if "trait_method.param_mutabilities, binders" not in sources["infer_decl"]:
+        errors.append("default specialization lost registered mutabilities")
+    if "h_default_specialization_parameter_mutabilities(plan)" not in (
+            sources["core"]):
+        errors.append("Core default elaboration guessed parameter mutability")
     return errors
 
 
@@ -13833,6 +14175,18 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
             TestResult.PASS if not resource_errors else TestResult.FAIL,
             suite, resource_label,
             "; ".join([detail, *resource_errors])))
+
+    ownership_cutover_label = "compiler.core_ownership_cutover"
+    if matches_filter(ownership_cutover_label, name_filter):
+        ownership_cutover_errors = ownership_cutover_source_errors()
+        collector.add(TestResult(
+            TestResult.PASS if not ownership_cutover_errors else TestResult.FAIL,
+            suite, ownership_cutover_label,
+            "; ".join([
+                "single_project_shared_pipeline=true; "
+                "legacy_projection_bound_to_verified_flow=true; "
+                "direct_perceus_authority=retired",
+                *ownership_cutover_errors])))
 
     identity_label = "compiler.identity_checkpoint"
     if matches_filter(identity_label, name_filter):

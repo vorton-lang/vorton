@@ -171,17 +171,17 @@ fn apply_zero(f: fn() -> Int) -> Int {
 // closure ABI while retaining the ordinary backend's scalar-to-display
 // conversion, Unit normalisation, and (on LLVM-C) cross-engine marshalling.
 fn call_print(
-    f: fn(Int) -> Unit with {io},
+    f: fn(Int) -> Unit with {console},
     value: Int
-) -> Unit with {io} {
+) -> Unit with {console} {
     f(value)
 }
 
 fn call_assert(
-    f: fn(Bool, Str) -> Unit with {io},
+    f: fn(Bool, Str) -> Unit with {console},
     condition: Bool,
     message: Str
-) -> Unit with {io} {
+) -> Unit with {console} {
     f(condition, message)
 }
 

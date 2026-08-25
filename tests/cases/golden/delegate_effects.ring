@@ -9,18 +9,18 @@
 // are broken on LLVM (recorded under B-087 in docs/worker_feedback.md).
 
 trait Describe {
-    fn describe(self) -> Str with {io}
-    fn greet(self, who: Str) -> Str with {io}
+    fn describe(self) -> Str with {console}
+    fn greet(self, who: Str) -> Str with {console}
 }
 
 struct Inner { name: Str, value: Int }
 
 impl Describe for Inner {
-    fn describe(self) -> Str with {io} {
+    fn describe(self) -> Str with {console} {
         print("describing ${self.name}")
         "${self.name}=${self.value}"
     }
-    fn greet(self, who: Str) -> Str with {io} {
+    fn greet(self, who: Str) -> Str with {console} {
         print("greeting ${who} from ${self.name}")
         "hi ${who}, I am ${self.name}"
     }

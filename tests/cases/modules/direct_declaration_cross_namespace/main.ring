@@ -14,7 +14,7 @@ mod SharedName {
 effect SharedEffect {
     fn operation(value: Int) -> Int
 }
-effect alias SharedEffect = {io}
+effect alias SharedEffect = {console}
 
 trait MemberTrait {
     fn shared_member(self) -> Int

@@ -38,7 +38,7 @@ pub mod bounded_facade {
 }
 
 pub mod foreign_origin {
-    pub extern fn print<T: Hash>(value: T) -> Unit with {io}
+    pub extern fn print<T: Hash>(value: T) -> Unit with {console}
 }
 
 pub mod foreign_middle {
@@ -72,9 +72,9 @@ fn seven(_value: Float) -> Int {
 }
 
 fn call_emit(
-    emit: fn(Int) -> Unit with {io},
+    emit: fn(Int) -> Unit with {console},
     value: Int
-) -> Unit with {io} {
+) -> Unit with {console} {
     emit(value)
 }
 

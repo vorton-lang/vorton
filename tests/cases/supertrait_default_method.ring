@@ -24,7 +24,7 @@ fn greet_someone<T: Greeter>(x: T) -> Str {
     x.greet()
 }
 
-fn main() with {io} {
+fn main() with {console} {
     let p = Person { first: "Alice" }
     assert(greet_someone(p) == "Hello, Alice!", "supertrait default method should work")
     print("Supertrait default method: passed")

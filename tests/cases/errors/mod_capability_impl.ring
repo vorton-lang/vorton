@@ -3,7 +3,7 @@ mod pure requires {} {
     struct Foo { x: Int }
 
     impl Foo {
-        fn show(self) -> Unit with {io} {
+        fn show(self) -> Unit with {console} {
             print("hello")
         }
     }

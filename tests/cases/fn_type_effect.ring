@@ -1,8 +1,8 @@
-fn apply_with_io(f: fn(Int) -> Str with {io}) -> Str with {io} {
+fn apply_with_io(f: fn(Int) -> Str with {console}) -> Str with {console} {
     f(42)
 }
 
-fn int_to_str(x: Int) -> Str with {io} {
+fn int_to_str(x: Int) -> Str with {console} {
     print("converting")
     x.to_str()
 }

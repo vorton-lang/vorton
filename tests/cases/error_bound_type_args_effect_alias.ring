@@ -1,5 +1,5 @@
 trait GenericTrait<T> {}
 
-effect alias Rejected<T: GenericTrait<Int>> = {io}
+effect alias Rejected<T: GenericTrait<Int>> = {console}
 
 fn main() {}

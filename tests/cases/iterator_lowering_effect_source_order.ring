@@ -1,6 +1,6 @@
 struct LateIter { pub value: Int, pub limit: Int }
 
-fn run_before_impls() with {io} {
+fn run_before_impls() with {console} {
     for value in (LateIter { value: 0, limit: 2 }) {
         print("value=${value}")
     }
