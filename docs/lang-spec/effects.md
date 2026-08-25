@@ -16,6 +16,12 @@ Effect row 中的 atom 共享组合与推断机制，但并不共享同一种运
 
 该分类在 TypedHIR effect freeze 前固定。System effect 绝不能获得 handler evidence；handled effect 绝不能直接降为 HostImport。`main` 可以保留 system effect，由目标环境直接执行；未消除的用户 handled effect 不得逃出 `main`。
 
+## Effect row closure 与多态
+
+进入CoreHIR前，普通effect推断元变量必须完成求解。一个tail只有在函数scheme中被正式量化时才可保留，并转换为带声明owner与ordinal的稳定effect参数；它表示已确定的多态契约，不是“下游稍后再猜”的未知effect。无法归属正式scheme的raw推断tail是编译错误。
+
+因此callable的冻结契约只有两种形态：closed exact atoms，或exact atoms加一个正式effect参数。Effect alias在此前已递归展开；first-class function value与每个调用点保留同一正式参数及exact实例化关系。CoreHIR、FlowIR、ResourcePlanner、AbiIR与后端均不得重新运行effect inference、按函数名恢复row，或把正式effect参数静默当成空row。System effect实例化仍不产生evidence；handled effect实例化必须与ordered typed evidence一致。
+
 ## System effects 与 HostImport
 
 0.1 只定义当前真实 API 所需的三类 system effect：

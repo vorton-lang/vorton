@@ -43,6 +43,8 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **0.1 real-consumer execution boundary（2026-08-24 用户直接决定）**：当前#268/#269与staged-IR authority只实现0.1真实consumer。任何仅服务post-0.1的variant/carrier/fallback/extension hook/validator branch必须删除或不新增；review finding只有在违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI，或阻止#268/#269闭合时才BLOCK。纯未来扩展性、post-0.1 feature兼容或无0.1 consumer的完整性不得阻塞，也不得在本轮顺手新增post-0.1 item；既有deferred items保持原排期，但当前IR不为它们预铺carrier。该裁剪不降低Deep Clone、exact identity、Core closure、RC conservation、single/project、source-build/fixed-point/full/ASan/self-host/exact CI门。
 
+> **Core effect closure（2026-08-26 用户批准）**：TypedHIR freeze必须把普通effect inference变量完全求解，并把合法多态tail generalize为稳定`EffectParamRef(owner, ordinal)`；raw UnionFind/type-var tail禁止进入Core。`CoreCallableEffectContract`保存canonical system/handled/fail/mut/unsafe atoms与可选formal effect参数，call site保存exact实例化；first-class/dynamic candidate逐项核对effect/evidence契约。Core/Flow不重跑effect inference，Planner不消费effect。本边界是现有0.1 effect-polymorphic HOF/B-167与B-194/B-195的真实consumer，不是未来扩展hook。
+
 > **U1a no-partial-inline-module gate（2026-08-22 用户决定）**：0.1 中同一 direct parent scope 的 `mod name` 只能声明一次，第二个 ModBlock 在 resolver source census 立即报 `E0207`；不同 AstSite 不能因 canonical payload 相同合并，`E0707` 只保留给不同 origin 的 import ambiguity。Import/re-export/same-origin diamond 仍幂等复用 exact origin，不同 parent 同 leaf 与多个 impl block 不受影响。仓内 compiler/std/examples 零迁移；3 个 active resolver fixture 机械合为单 block 或改成 duplicate-mod 负例，staged b107 probes 同步重写/退役。验收必须由 source-built exact candidate 的真实 parser/resolver 覆盖 duplicate ModBlock、单 block 内 Fn/Const/Extern/Struct/ExternType/Enum/TypeAlias/Effect/Alias/Trait direct duplicates 及 delivery 非回归；Python source scan 只作非权威 scope guard。未来若有真实大规模 consumer，以显式新 feature 重新设计，不保留隐藏兼容路径。
 
 > **0.1 surface simplification / CoreHIR closure（2026-08-23 用户决定）**：compiler/std/examples 对函数default parameters、sig placeholder、refinement placeholder、user effect default body与delegate surface均无必须保留的真实consumer。0.1 clean break删除函数default parameter、只注册/transport `SigDef`、parse-and-discard `where`与user default evidence全链；trait default method不受影响。Delegate因能表达组合关系而保留，但只在TypedHIR→CoreHIR一次展开成普通trait impl。每个新surface feature必须提供唯一CoreHIR lowering或证明自身为canonical core，禁止把surface-only variant、待生成body/impl/evidence带入下游。Sig/refinement/default provider分别只按B-192/B-001/B-197的完整未来门重入。
@@ -413,9 +415,9 @@ B-116 先以 native probe 选 lowering；归档 JS generator/Promise 不属于 s
 **目标语义**：effectful function value 在调用点接收当前 effect evidence。外部创建的 callback 传入 `with_mock_clock` / `with_mock_fs` / `capture_logs` 等高阶 handler 后，其 effect 由调用点内层 handler 截获，而不是继续使用 callback 创建处的旧 evidence。静态 effect row 仍是 capability 真值；调用点只传递签名要求的 evidence，未知 open tail 必须逐项转发，不能被机械消除。
 
 **涉及修改**：
-1. HIR / function type lowering：为 effectful function value 固化调用点 evidence 参数布局，覆盖 closed row、open row、泛型 effect row、递归与互递归 closure；共享布局 helper，禁止 codegen 按字符串猜参数顺序。
+1. TypedHIR / function type lowering：先完成effect generalization，以稳定`EffectParamRef`固化effectful function value与调用点的effect/evidence参数布局，覆盖closed row、formal open row、泛型effect row、递归与互递归closure；raw inference tail不得进入Core，共享布局helper，禁止codegen按字符串猜参数顺序。
 2. C 后端：统一 closure function-pointer prototype、closure 构造、直接/间接调用、跨模块声明与单态化实例的 evidence ABI；纯函数与无 custom-effect 的调用不承担不必要的动态 evidence。
-3. Perceus / RC：明确 evidence 参数为 borrow 还是 owned，验证 env capture、转发、嵌套 handler 和 early return 的 dup/drop 平衡；不得通过泄漏 evidence 规避生命周期问题。
+3. FlowIR / ResourcePlanner / RcIR：明确 evidence 参数为 borrow 还是 owned，验证env capture、转发、嵌套handler和early return的Clone/Take/Drop平衡；Planner不求解effect，不得通过泄漏evidence规避生命周期问题。
 4. 迁移与诊断：把 C → A 作为 breaking change 记录；若旧代码依赖创建处 handler，诊断应指向 callback 创建/调用边界并给出显式 capability 或重构建议。
 5. 测试：新增外部 callback 动态截获、handler 内创建 callback、嵌套 handler、多 effect、open-tail 转发、跨模块 callback、泛型 HOF、递归 closure 及 RC/负面回归。
 
