@@ -8,25 +8,31 @@
 use types::{Type, EffectRow, types_equal, effects_equal}
 use ir_identity::{
     SymbolRef, ModuleBodyRef, OriginRef, SlotRef,
+    IntrinsicRef, intrinsic_ref_symbol, intrinsic_ref_same,
     ImplOwnerRef, ImplMethodRef,
     handled_effect_ref_same, system_effect_ref_same,
     symbol_ref_same, symbol_ref_origin_module_key,
     module_body_ref_same, module_body_ref_origin_module_key,
     origin_ref_is_symbol, origin_ref_symbol, origin_ref_path, origin_ref_same,
-    path_ref_owner, path_owner_ref_is_symbol,
+    path_ref_owner, path_ref_normalized_child_path,
+    path_owner_ref_is_symbol,
     path_owner_ref_symbol, path_owner_ref_module_body,
     slot_ref_is_source, slot_ref_source_origin_module_key,
     slot_ref_source_def_id, slot_ref_synthetic_path, slot_ref_same,
     impl_owner_ref_target, impl_owner_ref_trait, impl_owner_ref_same,
-    impl_method_ref_owner, impl_method_ref_member, impl_method_ref_same}
+    impl_owner_ref_provider, impl_provider_ref_site,
+    impl_method_ref_owner, impl_method_ref_member, impl_method_ref_same,
+    make_module_body_ref, make_symbol_origin_ref}
 use ir_inventory::{
     ExecutableRef, ExecutableKind,
     make_named_executable_ref,
     executable_inventory_entries, executable_entry_reference,
+    executable_entry_kind,
     executable_ref_same, executable_ref_origin_module_key,
-    executable_kind_same}
+    executable_kind_same, executable_kind_builtin_intrinsic}
 use core_expr::{
     CoreTypeRef, CoreTypeFactRef, CoreEffectAtom, CoreEffectSet,
+    make_core_type_ref,
     core_type_ref_index, core_type_ref_same, core_type_graph_count,
     core_type_fact_module_key, core_type_fact_ordinal, core_type_fact_same,
     make_core_effect_set, core_effect_set_atoms,
@@ -45,14 +51,25 @@ use core_from_hir::{
     core_assembly_result_type_remap,
     core_assembly_result_effect_remap,
     core_assembly_remap_type, core_assembly_remap_effect}
+use flow_ir::{
+    FlowProgram, flow_program_bodies, flow_body_slots,
+    flow_slot_reference, flow_slot_type, flow_type_ref_index
+}
 
 // ============================================================
 // Total CoreTypeRef <-> legacy Type bijection
 // ============================================================
 
+const LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE: Int = 0
+pub struct LegacyInternalTypeKind { tag: Int }
+pub fn legacy_internal_handled_evidence_opaque() -> LegacyInternalTypeKind {
+    LegacyInternalTypeKind { tag: LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE }
+}
+
 pub struct LegacyTypeProjection {
     core_type: CoreTypeRef,
-    legacy_type: Type
+    legacy_type: Type,
+    internal_kind: LegacyInternalTypeKind?
 }
 
 pub fn make_legacy_type_projection(
@@ -66,7 +83,18 @@ pub fn make_legacy_type_projection(
         _ => {}
     }
     LegacyTypeProjection {
-        core_type: core_type, legacy_type: legacy_type
+        core_type: core_type, legacy_type: legacy_type, internal_kind: none
+    }
+}
+fn make_legacy_internal_type_projection(
+    core_type: CoreTypeRef, kind: LegacyInternalTypeKind
+) -> LegacyTypeProjection {
+    if kind.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE {
+        panic("legacy projection: unknown assembled internal type")
+    }
+    LegacyTypeProjection {
+        core_type: core_type, legacy_type: Type::AnyType,
+        internal_kind: some(kind)
     }
 }
 
@@ -82,7 +110,12 @@ pub fn legacy_type_projection_same(
     left: LegacyTypeProjection, right: LegacyTypeProjection
 ) -> Bool {
     core_type_ref_same(left.core_type, right.core_type) &&
-        types_equal(left.legacy_type, right.legacy_type)
+        types_equal(left.legacy_type, right.legacy_type) &&
+        match (left.internal_kind, right.internal_kind) {
+            (none, none) => true,
+            (some(a), some(b)) => a.tag == b.tag,
+            _ => false
+        }
 }
 
 fn copy_legacy_types(
@@ -90,8 +123,12 @@ fn copy_legacy_types(
 ) -> List<LegacyTypeProjection> {
     let mut result: List<LegacyTypeProjection> = []
     for value in values {
-        result.push(make_legacy_type_projection(
-            value.core_type, value.legacy_type))
+        result.push(match value.internal_kind {
+            some(kind) => make_legacy_internal_type_projection(
+                value.core_type, kind),
+            none => make_legacy_type_projection(
+                value.core_type, value.legacy_type)
+        })
     }
     result
 }
@@ -439,10 +476,11 @@ pub struct LegacyCallableProjection {
     result_core_type: CoreTypeRef,
     result_type: Type,
     effects: EffectRow,
-    is_public: Bool
+    is_public: Bool,
+    prelude_physical: Bool
 }
 
-pub fn make_legacy_callable_projection(
+fn make_legacy_callable_projection_with_domain(
     reference: ExecutableRef, origin: OriginRef,
     module_body: ModuleBodyRef, container: LegacyContainerRef,
     kind: ExecutableKind,
@@ -450,12 +488,20 @@ pub fn make_legacy_callable_projection(
     bounds: List<LegacyTraitBoundProjection>,
     parameters: List<LegacyBinderProjection>,
     result_core_type: CoreTypeRef, result_type: Type,
-    effects: EffectRow, is_public: Bool
+    effects: EffectRow, is_public: Bool, prelude_physical: Bool
 ) -> LegacyCallableProjection {
     let module_key = module_body_ref_origin_module_key(module_body)
-    if executable_ref_origin_module_key(reference) != module_key ||
-       origin_module_key(origin) != module_key ||
-       legacy_container_module_key(container) != module_key {
+    let identity_valid = if prelude_physical {
+        executable_ref_origin_module_key(reference) == "$prelude" &&
+            origin_module_key(origin) == "$prelude" &&
+            module_key != "$prelude" &&
+            legacy_container_module_key(container) == module_key
+    } else {
+        executable_ref_origin_module_key(reference) == module_key &&
+            origin_module_key(origin) == module_key &&
+            legacy_container_module_key(container) == module_key
+    }
+    if !identity_valid {
         panic("legacy projection: callable module/container identity differs")
     }
     let mut type_index = 0
@@ -498,8 +544,38 @@ pub fn make_legacy_callable_projection(
         parameters: copy_legacy_binders(parameters),
         result_core_type: result_core_type, result_type: result_type,
         effects: EffectRow { effects: effects.effects, tail: effects.tail },
-        is_public: is_public
+        is_public: is_public, prelude_physical: prelude_physical
     }
+}
+pub fn make_legacy_callable_projection(
+    reference: ExecutableRef, origin: OriginRef,
+    module_body: ModuleBodyRef, container: LegacyContainerRef,
+    kind: ExecutableKind,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    bounds: List<LegacyTraitBoundProjection>,
+    parameters: List<LegacyBinderProjection>,
+    result_core_type: CoreTypeRef, result_type: Type,
+    effects: EffectRow, is_public: Bool
+) -> LegacyCallableProjection {
+    make_legacy_callable_projection_with_domain(
+        reference, origin, module_body, container, kind,
+        type_parameters, bounds, parameters, result_core_type,
+        result_type, effects, is_public, false)
+}
+fn make_legacy_prelude_callable_projection(
+    reference: ExecutableRef, origin: OriginRef,
+    module_body: ModuleBodyRef, container: LegacyContainerRef,
+    kind: ExecutableKind,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    bounds: List<LegacyTraitBoundProjection>,
+    parameters: List<LegacyBinderProjection>,
+    result_core_type: CoreTypeRef, result_type: Type,
+    effects: EffectRow, is_public: Bool
+) -> LegacyCallableProjection {
+    make_legacy_callable_projection_with_domain(
+        reference, origin, module_body, container, kind,
+        type_parameters, bounds, parameters, result_core_type,
+        result_type, effects, is_public, true)
 }
 
 pub fn legacy_callable_reference(value: LegacyCallableProjection) -> ExecutableRef {
@@ -546,11 +622,12 @@ fn copy_callables(
 ) -> List<LegacyCallableProjection> {
     let mut result: List<LegacyCallableProjection> = []
     for value in values {
-        result.push(make_legacy_callable_projection(
+        result.push(make_legacy_callable_projection_with_domain(
             value.reference, value.origin, value.module_body,
             value.container, value.kind, value.type_parameters,
             value.bounds, value.parameters, value.result_core_type,
-            value.result_type, value.effects, value.is_public))
+            value.result_type, value.effects, value.is_public,
+            value.prelude_physical))
     }
     result
 }
@@ -730,23 +807,48 @@ pub struct LegacyExecutableShell {
     origin: OriginRef,
     kind: ExecutableKind,
     module_body: ModuleBodyRef,
-    container: LegacyContainerRef
+    container: LegacyContainerRef,
+    prelude_physical: Bool
 }
 
-pub fn make_legacy_executable_shell(
+fn make_legacy_executable_shell_with_domain(
     reference: ExecutableRef, origin: OriginRef, kind: ExecutableKind,
-    module_body: ModuleBodyRef, container: LegacyContainerRef
+    module_body: ModuleBodyRef, container: LegacyContainerRef,
+    prelude_physical: Bool
 ) -> LegacyExecutableShell {
     let module_key = module_body_ref_origin_module_key(module_body)
-    if executable_ref_origin_module_key(reference) != module_key ||
-       origin_module_key(origin) != module_key ||
-       legacy_container_module_key(container) != module_key {
+    let identity_valid = if prelude_physical {
+        executable_ref_origin_module_key(reference) == "$prelude" &&
+            origin_module_key(origin) == "$prelude" &&
+            module_key != "$prelude" &&
+            legacy_container_module_key(container) == module_key
+    } else {
+        executable_ref_origin_module_key(reference) == module_key &&
+            origin_module_key(origin) == module_key &&
+            legacy_container_module_key(container) == module_key
+    }
+    if !identity_valid {
         panic("legacy projection: executable shell identity differs")
     }
     LegacyExecutableShell {
         reference: reference, origin: origin, kind: kind,
-        module_body: module_body, container: container
+        module_body: module_body, container: container,
+        prelude_physical: prelude_physical
     }
+}
+pub fn make_legacy_executable_shell(
+    reference: ExecutableRef, origin: OriginRef, kind: ExecutableKind,
+    module_body: ModuleBodyRef, container: LegacyContainerRef
+) -> LegacyExecutableShell {
+    make_legacy_executable_shell_with_domain(
+        reference, origin, kind, module_body, container, false)
+}
+pub fn make_legacy_prelude_executable_shell(
+    reference: ExecutableRef, origin: OriginRef, kind: ExecutableKind,
+    module_body: ModuleBodyRef, container: LegacyContainerRef
+) -> LegacyExecutableShell {
+    make_legacy_executable_shell_with_domain(
+        reference, origin, kind, module_body, container, true)
 }
 
 pub fn legacy_executable_shell_reference(
@@ -791,9 +893,9 @@ pub fn legacy_executable_shell_entries(
 ) -> List<LegacyExecutableShell> {
     let mut result: List<LegacyExecutableShell> = []
     for entry in value.entries {
-        result.push(make_legacy_executable_shell(
+        result.push(make_legacy_executable_shell_with_domain(
             entry.reference, entry.origin, entry.kind,
-            entry.module_body, entry.container))
+            entry.module_body, entry.container, entry.prelude_physical))
     }
     result
 }
@@ -815,6 +917,22 @@ pub struct LegacyEffectFactProjection {
     fact: CoreEffectSetFact,
     legacy_effects: EffectRow
 }
+
+pub struct LegacyInternalTypeFactProjection {
+    fact: CoreTypeFactRef,
+    kind: LegacyInternalTypeKind
+}
+pub fn make_legacy_internal_type_fact_projection(
+    fact: CoreTypeFactRef, kind: LegacyInternalTypeKind
+) -> LegacyInternalTypeFactProjection {
+    if kind.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE {
+        panic("legacy projection: unknown internal type projection")
+    }
+    LegacyInternalTypeFactProjection { fact: fact, kind: kind }
+}
+pub fn legacy_internal_type_fact(
+    value: LegacyInternalTypeFactProjection
+) -> CoreTypeFactRef { value.fact }
 pub fn make_legacy_effect_fact_projection(
     fact: CoreEffectSetFact, legacy_effects: EffectRow
 ) -> LegacyEffectFactProjection {
@@ -897,6 +1015,83 @@ pub struct LegacyCallableFactProjection {
     effects: EffectRow,
     is_public: Bool
 }
+
+// Builtin method contracts share module-order-0 Core type facts but their
+// executable identity belongs to the disjoint `$builtin` domain.  Keeping
+// this narrow fact separate preserves the ordinary callable module invariant
+// and intentionally creates no source HDecl shell.
+pub struct LegacyBuiltinCallableFactProjection {
+    intrinsic: IntrinsicRef,
+    parameters: List<LegacyBinderFactProjection>,
+    result_type_fact: CoreTypeFactRef,
+    result_type: Type,
+    effects: EffectRow
+}
+
+pub struct LegacyPreludeCallableFactProjection {
+    reference: ExecutableRef,
+    origin: OriginRef,
+    module_body: ModuleBodyRef,
+    kind: ExecutableKind,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    bounds: List<LegacyTraitBoundProjection>,
+    parameters: List<LegacyBinderFactProjection>,
+    result_type_fact: CoreTypeFactRef,
+    result_type: Type,
+    effects: EffectRow,
+    is_public: Bool
+}
+pub fn make_legacy_prelude_callable_fact_projection(
+    reference: ExecutableRef, origin: OriginRef,
+    module_body: ModuleBodyRef, kind: ExecutableKind,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    bounds: List<LegacyTraitBoundProjection>,
+    parameters: List<LegacyBinderFactProjection>,
+    result_type_fact: CoreTypeFactRef, result_type: Type,
+    effects: EffectRow, is_public: Bool
+) -> LegacyPreludeCallableFactProjection {
+    let physical_key = module_body_ref_origin_module_key(module_body)
+    if executable_ref_origin_module_key(reference) != "$prelude" ||
+       origin_module_key(origin) != "$prelude" ||
+       physical_key == "$prelude" ||
+       core_type_fact_module_key(result_type_fact) != physical_key {
+        panic("legacy projection: prelude physical owner contract differs")
+    }
+    for parameter in parameters {
+        if core_type_fact_module_key(parameter.type_fact) != physical_key {
+            panic("legacy projection: prelude parameter type crosses owner")
+        }
+    }
+    LegacyPreludeCallableFactProjection {
+        reference: reference, origin: origin, module_body: module_body,
+        kind: kind, type_parameters: copy_type_parameters(type_parameters),
+        bounds: copy_trait_bounds(bounds), parameters: parameters,
+        result_type_fact: result_type_fact, result_type: result_type,
+        effects: EffectRow { effects: effects.effects, tail: effects.tail },
+        is_public: is_public
+    }
+}
+pub fn make_legacy_builtin_callable_fact_projection(
+    intrinsic: IntrinsicRef,
+    parameters: List<LegacyBinderFactProjection>,
+    result_type_fact: CoreTypeFactRef,
+    result_type: Type, effects: EffectRow
+) -> LegacyBuiltinCallableFactProjection {
+    let module_key = core_type_fact_module_key(result_type_fact)
+    for parameter in parameters {
+        if core_type_fact_module_key(parameter.type_fact) != module_key {
+            panic("legacy projection: builtin parameter type crosses module0")
+        }
+    }
+    LegacyBuiltinCallableFactProjection {
+        intrinsic: intrinsic, parameters: parameters,
+        result_type_fact: result_type_fact, result_type: result_type,
+        effects: EffectRow { effects: effects.effects, tail: effects.tail }
+    }
+}
+pub fn legacy_builtin_callable_fact_intrinsic(
+    value: LegacyBuiltinCallableFactProjection
+) -> IntrinsicRef { value.intrinsic }
 pub fn make_legacy_callable_fact_projection(
     reference: ExecutableRef, origin: OriginRef,
     module_body: ModuleBodyRef, container: LegacyContainerRef,
@@ -965,9 +1160,18 @@ pub fn make_legacy_impl_fact_projection(
     container: LegacyContainerRef
 ) -> LegacyImplFactProjection {
     let module_key = module_body_ref_origin_module_key(module_body)
+    let provider_owner = path_ref_owner(
+        impl_provider_ref_site(impl_owner_ref_provider(owner)))
+    let provider_module = if path_owner_ref_is_symbol(provider_owner) {
+        symbol_ref_origin_module_key(path_owner_ref_symbol(provider_owner))
+    } else {
+        module_body_ref_origin_module_key(
+            path_owner_ref_module_body(provider_owner))
+    }
     if core_type_fact_module_key(target_type_fact) != module_key ||
        !symbol_ref_same(impl_owner_ref_target(owner), target_nominal) ||
-       legacy_container_module_key(container) != module_key {
+       legacy_container_module_key(container) != module_key ||
+       provider_module != module_key {
         panic("legacy projection: module impl identity/type domain differs")
     }
     match (impl_owner_ref_trait(owner), trait_ref) {
@@ -1015,39 +1219,78 @@ pub struct LegacyProjectionFacts {
     module_order: Int,
     local_type_count: Int,
     types: List<CoreTypeSourceFact>,
+    internal_types: List<LegacyInternalTypeFactProjection>,
     effects: List<LegacyEffectFactProjection>,
     binders: List<LegacyBinderFactProjection>,
     callables: List<LegacyCallableFactProjection>,
+    prelude_callables: List<LegacyPreludeCallableFactProjection>,
+    builtin_callables: List<LegacyBuiltinCallableFactProjection>,
     impls: List<LegacyImplFactProjection>,
+    physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
+}
+
+pub struct LegacyExecutablePhysicalIdentity {
+    reference: ExecutableRef,
+    identity: Str
+}
+pub fn make_legacy_executable_physical_identity(
+    reference: ExecutableRef, identity: Str
+) -> LegacyExecutablePhysicalIdentity {
+    if identity == "" {
+        panic("legacy projection: executable physical identity is empty")
+    }
+    LegacyExecutablePhysicalIdentity {
+        reference: reference, identity: identity
+    }
 }
 
 pub fn make_legacy_projection_facts(
     module_key: Str, module_order: Int, local_type_count: Int,
     types: List<CoreTypeSourceFact>,
+    internal_types: List<LegacyInternalTypeFactProjection>,
     effects: List<LegacyEffectFactProjection>,
     binders: List<LegacyBinderFactProjection>,
     callables: List<LegacyCallableFactProjection>,
+    prelude_callables: List<LegacyPreludeCallableFactProjection>,
+    builtin_callables: List<LegacyBuiltinCallableFactProjection>,
     impls: List<LegacyImplFactProjection>,
+    physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
 ) -> LegacyProjectionFacts {
     if module_key.len() == 0 || module_order < 0 ||
-       local_type_count <= 0 || types.len() != local_type_count {
+       local_type_count <= 0 ||
+       types.len() + internal_types.len() != local_type_count {
         panic("legacy projection: invalid/incomplete module projection facts")
     }
     let mut index = 0
-    while index < types.len() {
-        let value = types.get(index).unwrap()
-        if core_type_fact_module_key(core_type_source_fact(value)) != module_key ||
-           core_type_fact_ordinal(core_type_source_fact(value)) != index {
-            panic("legacy projection: module Type facts are not dense/ordered")
+    while index < local_type_count {
+        let mut matches = 0
+        for value in types {
+            let fact = core_type_source_fact(value)
+            if core_type_fact_module_key(fact) != module_key {
+                panic("legacy projection: source Type fact crosses module")
+            }
+            if core_type_fact_ordinal(fact) == index { matches = matches + 1 }
+        }
+        for value in internal_types {
+            let fact = value.fact
+            if core_type_fact_module_key(fact) != module_key {
+                panic("legacy projection: internal Type fact crosses module")
+            }
+            if core_type_fact_ordinal(fact) == index { matches = matches + 1 }
+        }
+        if matches != 1 {
+            panic("legacy projection: module Type facts are not dense/unique")
         }
         index = index + 1
     }
     index = 0
     while index < binders.len() {
         let left = binders.get(index).unwrap()
-        if slot_projection_module_key(left.slot) != module_key ||
+        let slot_module = slot_projection_module_key(left.slot)
+        if (slot_module != module_key &&
+            !(module_order == 0 && slot_module == "$prelude")) ||
            core_type_fact_module_key(left.type_fact) != module_key {
             panic("legacy projection: module binder fact crosses module")
         }
@@ -1067,16 +1310,54 @@ pub fn make_legacy_projection_facts(
             panic("legacy projection: callable fact crosses module")
         }
     }
+    if module_order != 0 && builtin_callables.len() != 0 {
+        panic("legacy projection: builtin facts escaped module-order zero")
+    }
+    if module_order != 0 && prelude_callables.len() != 0 {
+        panic("legacy projection: prelude facts escaped physical owner")
+    }
+    let mut builtin_index = 0
+    while builtin_index < builtin_callables.len() {
+        let left = builtin_callables.get(builtin_index).unwrap()
+        let mut right = builtin_index + 1
+        while right < builtin_callables.len() {
+            if intrinsic_ref_same(
+                    left.intrinsic,
+                    builtin_callables.get(right).unwrap().intrinsic) {
+                panic("legacy projection: builtin callable fact repeats")
+            }
+            right = right + 1
+        }
+        builtin_index = builtin_index + 1
+    }
     for item in impls {
         if core_type_fact_module_key(item.target_type_fact) != module_key {
             panic("legacy projection: impl fact crosses module")
         }
     }
+    let mut physical_index = 0
+    while physical_index < physical_identities.len() {
+        let left = physical_identities.get(physical_index).unwrap()
+        let mut right = physical_index + 1
+        while right < physical_identities.len() {
+            if executable_ref_same(
+                    left.reference,
+                    physical_identities.get(right).unwrap().reference) ||
+               left.identity == physical_identities.get(right).unwrap().identity {
+                panic("legacy projection: executable physical identity repeats")
+            }
+            right = right + 1
+        }
+        physical_index = physical_index + 1
+    }
     LegacyProjectionFacts {
         module_key: module_key, module_order: module_order,
         local_type_count: local_type_count,
-        types: types, effects: effects, binders: binders,
-        callables: callables, impls: impls,
+        types: types, internal_types: internal_types,
+        effects: effects, binders: binders,
+        callables: callables, prelude_callables: prelude_callables,
+        builtin_callables: builtin_callables,
+        impls: impls, physical_identities: physical_identities,
         shells: make_legacy_executable_shell_map(
             legacy_executable_shell_entries(shells))
     }
@@ -1138,6 +1419,7 @@ pub struct LegacyProjectionTable {
     binders: List<LegacyBinderProjection>,
     callables: List<LegacyCallableProjection>,
     impls: List<LegacyImplProjection>,
+    physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
 }
 
@@ -1147,13 +1429,21 @@ pub fn make_legacy_projection_table(
     binders: List<LegacyBinderProjection>,
     callables: List<LegacyCallableProjection>,
     impls: List<LegacyImplProjection>,
+    physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
 ) -> LegacyProjectionTable {
     if core_type_count <= 0 || types.len() != core_type_count {
         panic("legacy projection: Core type projection is not total")
     }
     let shell_entries = legacy_executable_shell_entries(shells)
-    if shell_entries.len() != callables.len() {
+    let mut shell_callable_count = 0
+    for callable in callables {
+        if !executable_kind_same(
+                callable.kind, executable_kind_builtin_intrinsic()) {
+            shell_callable_count = shell_callable_count + 1
+        }
+    }
+    if shell_entries.len() != shell_callable_count {
         panic("legacy projection: callable/executable shell census differs")
     }
     let mut index = 0
@@ -1166,7 +1456,13 @@ pub fn make_legacy_projection_table(
         while other < types.len() {
             let right = types.get(other).unwrap()
             if core_type_ref_same(left.core_type, right.core_type) ||
-               types_equal(left.legacy_type, right.legacy_type) {
+               (types_equal(left.legacy_type, right.legacy_type) &&
+                match (left.internal_kind, right.internal_kind) {
+                    (some(a), some(b)) =>
+                        a.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE ||
+                        b.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE,
+                    _ => true
+                }) {
                 panic("legacy projection: Core/legacy Type mapping is not bijective")
             }
             other = other + 1
@@ -1213,12 +1509,24 @@ pub fn make_legacy_projection_table(
                 panic("legacy projection: callable parameter/binder table differs")
             }
         }
-        let shell = legacy_executable_shell_for(shells, callable.reference)
-        if !origin_ref_same(shell.origin, callable.origin) ||
-           !executable_kind_same(shell.kind, callable.kind) ||
-           !module_body_ref_same(shell.module_body, callable.module_body) ||
-           !legacy_container_same(shell.container, callable.container) {
-            panic("legacy projection: callable shell relation differs")
+        if !executable_kind_same(
+                callable.kind, executable_kind_builtin_intrinsic()) {
+            let shell = legacy_executable_shell_for(shells, callable.reference)
+            if !origin_ref_same(shell.origin, callable.origin) ||
+               !executable_kind_same(shell.kind, callable.kind) ||
+               !module_body_ref_same(shell.module_body, callable.module_body) ||
+               !legacy_container_same(shell.container, callable.container) {
+                panic("legacy projection: callable shell relation differs")
+            }
+        }
+        let mut physical_matches = 0
+        for physical in physical_identities {
+            if executable_ref_same(physical.reference, callable.reference) {
+                physical_matches = physical_matches + 1
+            }
+        }
+        if physical_matches != 1 {
+            panic("legacy projection: callable physical identity is not exact")
         }
         let mut other = index + 1
         while other < callables.len() {
@@ -1259,6 +1567,10 @@ pub fn make_legacy_projection_table(
         binders: copy_legacy_binders(binders),
         callables: copy_callables(callables),
         impls: copy_impls(impls),
+        physical_identities: physical_identities.map(fn(value) {
+            make_legacy_executable_physical_identity(
+                value.reference, value.identity)
+        }),
         shells: make_legacy_executable_shell_map(
             legacy_executable_shell_entries(shells))
     }
@@ -1282,6 +1594,16 @@ pub fn legacy_projection_callables(
 pub fn legacy_projection_impls(
     value: LegacyProjectionTable
 ) -> List<LegacyImplProjection> { copy_impls(value.impls) }
+pub fn legacy_projection_executable_physical_identity(
+    value: LegacyProjectionTable, reference: ExecutableRef
+) -> Str {
+    for identity in value.physical_identities {
+        if executable_ref_same(identity.reference, reference) {
+            return identity.identity
+        }
+    }
+    panic("legacy projection: executable physical identity is absent")
+}
 pub fn legacy_projection_shells(
     value: LegacyProjectionTable
 ) -> LegacyExecutableShellMap {
@@ -1294,8 +1616,12 @@ pub fn legacy_projection_type_for(
 ) -> LegacyTypeProjection {
     for projection in value.types {
         if core_type_ref_same(projection.core_type, core_type) {
-            return make_legacy_type_projection(
-                projection.core_type, projection.legacy_type)
+            return match projection.internal_kind {
+                some(kind) => make_legacy_internal_type_projection(
+                    projection.core_type, kind),
+                none => make_legacy_type_projection(
+                    projection.core_type, projection.legacy_type)
+            }
         }
     }
     panic("legacy projection: requested Core type is absent")
@@ -1327,13 +1653,14 @@ pub fn legacy_projection_callable_for(
 ) -> LegacyCallableProjection {
     for projection in value.callables {
         if executable_ref_same(projection.reference, reference) {
-            return make_legacy_callable_projection(
+            return make_legacy_callable_projection_with_domain(
                 projection.reference, projection.origin,
                 projection.module_body, projection.container,
                 projection.kind, projection.type_parameters,
                 projection.bounds, projection.parameters,
                 projection.result_core_type, projection.result_type,
-                projection.effects, projection.is_public)
+                projection.effects, projection.is_public,
+                projection.prelude_physical)
         }
     }
     panic("legacy projection: requested callable is absent")
@@ -1364,7 +1691,12 @@ fn append_assembled_type_projection(
 ) {
     for existing in values {
         if core_type_ref_same(existing.core_type, projection.core_type) {
-            if !types_equal(existing.legacy_type, projection.legacy_type) {
+            if !types_equal(existing.legacy_type, projection.legacy_type) ||
+               match (existing.internal_kind, projection.internal_kind) {
+                    (none, none) => false,
+                    (some(a), some(b)) => a.tag != b.tag,
+                    _ => true
+               } {
                 panic("legacy projection: interned Type fact has two physical types")
             }
             return
@@ -1440,6 +1772,40 @@ fn assemble_fact_callable(
         value.result_type, value.effects, value.is_public)
 }
 
+fn assemble_builtin_fact_callable(
+    type_remap: CoreAssemblyTypeRemap,
+    value: LegacyBuiltinCallableFactProjection
+) -> LegacyCallableProjection {
+    let module_body = make_module_body_ref("$builtin", "builtin-methods")
+    let mut parameters: List<LegacyBinderProjection> = []
+    for parameter in value.parameters {
+        parameters.push(assemble_fact_binder(type_remap, parameter))
+    }
+    let symbol = intrinsic_ref_symbol(value.intrinsic)
+    make_legacy_callable_projection(
+        make_named_executable_ref(symbol), make_symbol_origin_ref(symbol),
+        module_body, make_legacy_module_container(module_body),
+        executable_kind_builtin_intrinsic(), [], [], parameters,
+        core_assembly_remap_type(type_remap, value.result_type_fact),
+        value.result_type, value.effects, true)
+}
+
+fn assemble_prelude_fact_callable(
+    type_remap: CoreAssemblyTypeRemap,
+    value: LegacyPreludeCallableFactProjection
+) -> LegacyCallableProjection {
+    let mut parameters: List<LegacyBinderProjection> = []
+    for parameter in value.parameters {
+        parameters.push(assemble_fact_binder(type_remap, parameter))
+    }
+    make_legacy_prelude_callable_projection(
+        value.reference, value.origin, value.module_body,
+        make_legacy_module_container(value.module_body), value.kind,
+        value.type_parameters, value.bounds, parameters,
+        core_assembly_remap_type(type_remap, value.result_type_fact),
+        value.result_type, value.effects, value.is_public)
+}
+
 fn assemble_fact_impl(
     type_remap: CoreAssemblyTypeRemap, value: LegacyImplFactProjection
 ) -> LegacyImplProjection {
@@ -1482,10 +1848,23 @@ fn validate_projection_shells_against_core(
     let inventory = executable_inventory_entries(core_program_inventory(
         core_assembly_result_program(result)))
     let entries = legacy_executable_shell_entries(shells)
-    if inventory.len() != entries.len() {
+    let mut shell_inventory_count = 0
+    for inventory_entry in inventory {
+        if !executable_kind_same(
+                executable_entry_kind(inventory_entry),
+                executable_kind_builtin_intrinsic()) {
+            shell_inventory_count = shell_inventory_count + 1
+        }
+    }
+    if shell_inventory_count != entries.len() {
         panic("legacy projection: executable shells/Core inventory census differs")
     }
     for inventory_entry in inventory {
+        if executable_kind_same(
+                executable_entry_kind(inventory_entry),
+                executable_kind_builtin_intrinsic()) {
+            continue
+        }
         let reference = executable_entry_reference(inventory_entry)
         let mut matches = 0
         for shell in entries {
@@ -1499,9 +1878,43 @@ fn validate_projection_shells_against_core(
     }
 }
 
+const LEGACY_FLOW_SYNTHETIC_DEF_ID_BASE: Int = 0 - 7000000000
+
+fn append_flow_synthetic_binders(
+    flow: FlowProgram, types: List<LegacyTypeProjection>,
+    mut binders: List<LegacyBinderProjection>
+) {
+    let mut synthetic_ordinal = 0
+    for body in flow_program_bodies(flow) {
+        for slot in flow_body_slots(body) {
+            let reference = flow_slot_reference(slot)
+            let mut found = false
+            for existing in binders {
+                if slot_ref_same(existing.slot, reference) { found = true }
+            }
+            if !found {
+                if slot_ref_is_source(reference) {
+                    panic("legacy projection: Flow source binder lacks semantic fact")
+                }
+                let path = path_ref_normalized_child_path(
+                    slot_ref_synthetic_path(reference))
+                let name = "__flow_${path.join("$")}"
+                let def_id = LEGACY_FLOW_SYNTHETIC_DEF_ID_BASE -
+                    synthetic_ordinal
+                let core_type = make_core_type_ref(flow_type_ref_index(
+                    flow_slot_type(slot)))
+                binders.push(make_legacy_binder_projection(
+                    reference, name, def_id, core_type,
+                    projected_type_for(types, core_type), false))
+                synthetic_ordinal = synthetic_ordinal + 1
+            }
+        }
+    }
+}
+
 pub fn assemble_legacy_projection(
     facts_in_topological_order: List<LegacyProjectionFacts>,
-    assembly: CoreAssemblyResult
+    assembly: CoreAssemblyResult, flow: FlowProgram
 ) -> LegacyProjectionTable {
     if facts_in_topological_order.len() == 0 {
         panic("legacy projection: project has no module projection facts")
@@ -1517,6 +1930,7 @@ pub fn assemble_legacy_projection(
     let mut projected_binders: List<LegacyBinderProjection> = []
     let mut projected_callables: List<LegacyCallableProjection> = []
     let mut projected_impls: List<LegacyImplProjection> = []
+    let mut projected_physical: List<LegacyExecutablePhysicalIdentity> = []
     let mut projected_shells: List<LegacyExecutableShell> = []
     for facts in facts_in_topological_order {
         for value in facts.types {
@@ -1525,6 +1939,15 @@ pub fn assemble_legacy_projection(
                     core_assembly_remap_type(
                         type_remap, core_type_source_fact(value)),
                     core_type_source_type(value)))
+        }
+        for value in facts.internal_types {
+            if value.kind.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE {
+                panic("legacy projection: unknown internal type kind")
+            }
+            append_assembled_type_projection(
+                projected_types, make_legacy_internal_type_projection(
+                    core_assembly_remap_type(type_remap, value.fact),
+                    value.kind))
         }
         for value in facts.effects {
             let local = core_effect_set_fact_local_set(value.fact)
@@ -1540,8 +1963,20 @@ pub fn assemble_legacy_projection(
         for value in facts.callables {
             projected_callables.push(assemble_fact_callable(type_remap, value))
         }
+        for value in facts.prelude_callables {
+            projected_callables.push(assemble_prelude_fact_callable(
+                type_remap, value))
+        }
+        for value in facts.builtin_callables {
+            projected_callables.push(assemble_builtin_fact_callable(
+                type_remap, value))
+        }
         for value in facts.impls {
             projected_impls.push(assemble_fact_impl(type_remap, value))
+        }
+        for value in facts.physical_identities {
+            projected_physical.push(make_legacy_executable_physical_identity(
+                value.reference, value.identity))
         }
         for shell in legacy_executable_shell_entries(facts.shells) {
             projected_shells.push(shell)
@@ -1549,10 +1984,12 @@ pub fn assemble_legacy_projection(
     }
     let ordered_types = order_assembled_type_projections(
         projected_types, project_type_count)
+    append_flow_synthetic_binders(
+        flow, ordered_types, projected_binders)
     let shell_map = make_legacy_executable_shell_map(projected_shells)
     validate_projection_shells_against_core(assembly, shell_map)
     make_legacy_projection_table(
         project_type_count, ordered_types, projected_effects,
         projected_binders, projected_callables,
-        projected_impls, shell_map)
+        projected_impls, projected_physical, shell_map)
 }

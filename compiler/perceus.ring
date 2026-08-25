@@ -264,16 +264,19 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
                 trait_bounds: trait_bounds, span: span
             }
         },
-        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref,
-                      delegate_plan, type_params, trait_name, methods,
+        HDecl::Impl { target_type, target_ty, owner_ref, provider_ref, trait_ref,
+                      delegate_plan, default_specializations,
+                      type_params, trait_name, methods,
                       assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
             for m in methods { new_methods.push(anf_decl(m, externs, counter)) }
             HDecl::Impl {
-                target_type: target_type, owner_ref: owner_ref,
+                target_type: target_type, target_ty: target_ty,
+                owner_ref: owner_ref,
                 type_params: type_params,
                 provider_ref: provider_ref, trait_ref: trait_ref,
                 delegate_plan: delegate_plan,
+                default_specializations: default_specializations,
                 trait_name: trait_name, methods: new_methods,
                 assoc_types: assoc_types, span: span
             }
@@ -1364,16 +1367,19 @@ fn transform_decl(
                 body: new_body, is_pub: is_pub, trait_bounds: trait_bounds, span: span
             }
         },
-        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref,
-                      delegate_plan, type_params, trait_name, methods,
+        HDecl::Impl { target_type, target_ty, owner_ref, provider_ref, trait_ref,
+                      delegate_plan, default_specializations,
+                      type_params, trait_name, methods,
                       assoc_types, span } => {
             let new_methods = transform_decls(
                 methods, boxed, externs, drop_types, gensym)
             HDecl::Impl {
-                target_type: target_type, owner_ref: owner_ref,
+                target_type: target_type, target_ty: target_ty,
+                owner_ref: owner_ref,
                 type_params: type_params,
                 provider_ref: provider_ref, trait_ref: trait_ref,
                 delegate_plan: delegate_plan,
+                default_specializations: default_specializations,
                 trait_name: trait_name, methods: new_methods,
                 assoc_types: assoc_types, span: span
             }

@@ -17,10 +17,10 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_target_symbol,
     delegate_plan_not_applicable}
 use builtins::{builtin_option_derived_owners}
-use ast::{Span, DeriveAttribute, span_zero}
+use ast::{Span, DeriveAttribute, TypeParam, TypeBound, span_zero}
 use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
-use hir::{DerivedImpl, DerivedMethod, DerivedDirectCall,
+use hir::{DerivedImpl, DerivedMethod, DerivedSemanticKind, DerivedDirectCall,
     DerivedField, DerivedFieldRef,
     DerivedVariant, DerivedTextPiece, DerivedTextSequence,
     DerivedTextVariant, DerivedTextPlan,
@@ -32,8 +32,9 @@ use hir::{DerivedImpl, DerivedMethod, DerivedDirectCall,
     method_call_ref_bound, method_call_ref_bound_evidence,
     method_call_ref_signature, method_call_ref_receiver_mutable,
     method_call_ref_callee_identity, make_h_exact_call_plan,
-    h_tuple_projection,
-    TraitBound, TypeKind, trait_dict_name, trait_bound_param_name, compare_by_first}
+    h_tuple_projection, derived_semantic_kind_tag,
+    TraitBound, HTypeParam, TypeKind, trait_dict_name,
+    trait_bound_param_name, compare_by_first}
 use ir_identity::{SymbolRef, ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     RegisteredNominalRef,
     make_impl_owner_ref, make_impl_method_ref, make_named_callee_ref,
@@ -213,7 +214,7 @@ fn builtin_option_derived_impl(env: TypeEnv, owner: ImplEntry) -> DerivedImpl {
        !string_lists_same(owner.type_params, ["T"]) {
         panic("builtin Option derived descriptor owner drifted")
     }
-    let bounds = derived_runtime_bounds_from_owner(owner)
+    let bounds = derived_runtime_bounds_from_owner(env, owner)
     if bounds.len() != 1 {
         panic("builtin Option derived descriptor lost exact predicate")
     }
@@ -270,7 +271,9 @@ fn derived_impl_key_same(left: DerivedImpl, right: DerivedImpl) -> Bool {
         symbol_ref_same(left.trait_ref, right.trait_ref)
 }
 
-fn derived_impl_matches_owner(di: DerivedImpl, owner: ImplEntry) -> Bool {
+fn derived_impl_matches_owner(
+    env: TypeEnv, di: DerivedImpl, owner: ImplEntry
+) -> Bool {
     let owner_identity_matches = match owner.owner_ref {
         some(exact) => impl_owner_ref_same(exact, di.owner_ref),
         none => false
@@ -293,14 +296,18 @@ fn derived_impl_matches_owner(di: DerivedImpl, owner: ImplEntry) -> Bool {
         return false
     }
     if owner.target_type_name != di.type_name ||
+       derived_semantic_kind_tag(di.semantic_kind) !=
+            derived_semantic_kind_tag(
+                derived_impl_semantic_kind(di.trait_name)) ||
        !symbol_ref_same(
             impl_owner_ref_target(di.owner_ref),
             registered_nominal_ref_symbol(di.target_owner)) ||
        !types_equal(di.target_type,
             derived_target_type(owner, di.type_kind)) ||
-       !string_lists_same(owner.type_params, di.type_params) ||
+       !derived_h_type_params_same(
+            derived_h_type_params(env, owner), di.type_params) ||
        !trait_bounds_same(
-            derived_runtime_bounds_from_owner(owner), di.bounds) {
+            derived_runtime_bounds_from_owner(env, owner), di.bounds) {
         return false
     }
     let method_names = get_method_names(di.trait_name)
@@ -317,6 +324,10 @@ fn derived_impl_matches_owner(di: DerivedImpl, owner: ImplEntry) -> Bool {
             none => return false
         }
         if !impl_method_ref_same(actual.method_ref, expected_ref) ||
+           derived_semantic_kind_tag(actual.semantic_kind) !=
+                derived_semantic_kind_tag(
+                    derived_method_semantic_kind(
+                        di.trait_name, method_name)) ||
            !types_equal(actual.signature, impl_method_core_type(expected_core)) ||
            !executable_ref_is_named(actual.executable_ref) ||
            !symbol_ref_same(
@@ -349,14 +360,14 @@ pub fn validate_derived_impls(
             some(found) => found,
             none => panic("derived impl descriptor owner is missing")
         }
-        if !derived_impl_matches_owner(di, owner) {
+        if !derived_impl_matches_owner(env, di, owner) {
             panic("derived impl descriptor changed final owner")
         }
         let kind = impl_provider_ref_kind(di.provider_ref)
         if impl_provider_kind_same(kind, impl_provider_kind_builtin()) {
             let mut matches = 0
             for expected in builtin_owners {
-                if derived_impl_matches_owner(di, expected) {
+                if derived_impl_matches_owner(env, di, expected) {
                     matches = matches + 1
                 }
             }
@@ -1001,12 +1012,28 @@ fn json_derived_signature(
             none => return none
         }
     }
+    let type_param_vars = match ut.type_kind {
+        TypeKind::StructKind => match ut.struct_def {
+            some(def) => def.type_param_vars,
+            none => return none
+        },
+        TypeKind::EnumKind => match ut.enum_def {
+            some(def) => def.type_param_vars,
+            none => return none
+        }
+    }
     let mut bounds: List<TraitBound> = []
     for impl_bound in impl_bounds {
         match type_params.get(impl_bound.type_param_index) {
             some(type_param) => bounds.push(TraitBound {
                 type_param: type_param,
-                trait_name: impl_bound.trait_name
+                type_var_id: type_param_vars.get(
+                    impl_bound.type_param_index).unwrap_or_else(fn() {
+                        panic("Json derive bound variable is absent")
+                    }),
+                trait_name: impl_bound.trait_name,
+                trait_ref: registered_derive_trait_ref(
+                    env, impl_bound.trait_name)
             }),
             none => return none
         }
@@ -1048,6 +1075,69 @@ fn string_lists_same(left: List<Str>, right: List<Str>) -> Bool {
     true
 }
 
+fn derived_h_type_params(
+    env: TypeEnv, owner: ImplEntry
+) -> List<HTypeParam> {
+    if owner.type_params.len() != owner.type_param_vars.len() {
+        panic("derived impl type parameters: owner arity differs")
+    }
+    let predicates = frozen_impl_predicates(owner.predicates)
+    let mut result: List<HTypeParam> = []
+    for index in 0..owner.type_params.len() {
+        let name = owner.type_params.get(index).unwrap()
+        let type_var_id = owner.type_param_vars.get(index).unwrap()
+        let mut source_bounds: List<TypeBound> = []
+        let mut bound_refs: List<SymbolRef> = []
+        for predicate in predicates {
+            if impl_predicate_subject_param_index(predicate) == index {
+                if impl_predicate_subject_type_var(predicate) != type_var_id {
+                    panic("derived impl type parameter: predicate variable differs")
+                }
+                let trait_name = impl_predicate_trait_name(predicate)
+                source_bounds.push(TypeBound {
+                    trait_name: trait_name, type_args: [],
+                    assoc_constraints: [], span: span_zero()
+                })
+                bound_refs.push(registered_derive_trait_ref(env, trait_name))
+            }
+        }
+        result.push(HTypeParam {
+            source: TypeParam {
+                name: name, bounds: source_bounds, span: span_zero()
+            },
+            type_var_id: type_var_id,
+            bound_refs: bound_refs
+        })
+    }
+    result
+}
+
+fn derived_h_type_params_same(
+    left: List<HTypeParam>, right: List<HTypeParam>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    for index in 0..left.len() {
+        let expected = left.get(index).unwrap()
+        let actual = right.get(index).unwrap()
+        if expected.source.name != actual.source.name ||
+           expected.type_var_id != actual.type_var_id ||
+           expected.source.bounds.len() != actual.source.bounds.len() ||
+           expected.bound_refs.len() != actual.bound_refs.len() {
+            return false
+        }
+        for bound_index in 0..expected.bound_refs.len() {
+            if expected.source.bounds.get(bound_index).unwrap().trait_name !=
+                   actual.source.bounds.get(bound_index).unwrap().trait_name ||
+               !symbol_ref_same(
+                    expected.bound_refs.get(bound_index).unwrap(),
+                    actual.bound_refs.get(bound_index).unwrap()) {
+                return false
+            }
+        }
+    }
+    true
+}
+
 fn trait_bounds_same(
     left: List<TraitBound>, right: List<TraitBound>
 ) -> Bool {
@@ -1055,7 +1145,10 @@ fn trait_bounds_same(
     for index in 0..left.len() {
         match (left.get(index), right.get(index)) {
             (some(a), some(b)) => if a.type_param != b.type_param ||
-                                      a.trait_name != b.trait_name {
+                                      a.type_var_id != b.type_var_id ||
+                                      a.trait_name != b.trait_name ||
+                                      !symbol_ref_same(
+                                        a.trait_ref, b.trait_ref) {
                 return false
             },
             _ => return false
@@ -1149,6 +1242,8 @@ fn exact_derived_methods(
             }
         }
         result.push(DerivedMethod {
+            semantic_kind: derived_method_semantic_kind(
+                trait_name, method_name),
             method_ref: method_ref,
             executable_ref: executable,
             signature: signature,
@@ -1303,7 +1398,7 @@ fn finalize_derived_impl(
        !string_lists_same(owner.type_params, di.type_params) {
         panic("derived impl descriptor changed exact owner")
     }
-    let bounds = derived_runtime_bounds_from_owner(owner)
+    let bounds = derived_runtime_bounds_from_owner(env, owner)
     let exact_owner = match owner.owner_ref {
         some(value) => value,
         none => panic("derived impl descriptor owner lacks typed identity")
@@ -1350,6 +1445,7 @@ fn finalize_derived_impl(
         none => none
     }
     DerivedImpl {
+        semantic_kind: derived_impl_semantic_kind(di.trait_name),
         owner_ref: exact_owner,
         provider_ref: owner_provider,
         trait_ref: owner_trait,
@@ -1362,7 +1458,7 @@ fn finalize_derived_impl(
         text_plan: none,
         type_name: di.type_name,
         trait_name: di.trait_name,
-        type_params: di.type_params,
+        type_params: derived_h_type_params(env, owner),
         bounds: bounds,
         type_kind: di.type_kind,
         struct_fields: final_struct_fields,
@@ -1370,7 +1466,9 @@ fn finalize_derived_impl(
     }
 }
 
-fn derived_runtime_bounds_from_owner(owner: ImplEntry) -> List<TraitBound> {
+fn derived_runtime_bounds_from_owner(
+    env: TypeEnv, owner: ImplEntry
+) -> List<TraitBound> {
     let mut bounds: List<TraitBound> = []
     for predicate in frozen_impl_predicates(owner.predicates) {
         let param_name = owner.type_params.get(
@@ -1380,7 +1478,10 @@ fn derived_runtime_bounds_from_owner(owner: ImplEntry) -> List<TraitBound> {
         }
         bounds.push(TraitBound {
             type_param: param_name,
-            trait_name: impl_predicate_trait_name(predicate)
+            type_var_id: impl_predicate_subject_type_var(predicate),
+            trait_name: impl_predicate_trait_name(predicate),
+            trait_ref: registered_derive_trait_ref(
+                env, impl_predicate_trait_name(predicate))
         })
     }
     bounds
@@ -1549,6 +1650,7 @@ fn with_derived_text_plan(
     di: DerivedImpl, plan: DerivedTextPlan?
 ) -> DerivedImpl {
     DerivedImpl {
+        semantic_kind: di.semantic_kind,
         owner_ref: di.owner_ref, provider_ref: di.provider_ref,
         trait_ref: di.trait_ref, target_owner: di.target_owner,
         target_type: di.target_type, methods: di.methods,
@@ -1775,6 +1877,28 @@ fn derived_primary_method_name(trait_name: Str) -> Str {
     }
 }
 
+fn derived_impl_semantic_kind(trait_name: Str) -> DerivedSemanticKind {
+    match trait_name {
+        "Eq" => DerivedSemanticKind::DerivedEqPrimary,
+        "Hash" => DerivedSemanticKind::DerivedHash,
+        "Clone" => DerivedSemanticKind::DerivedClone,
+        "Ord" => DerivedSemanticKind::DerivedOrd,
+        "Debug" => DerivedSemanticKind::DerivedDebug,
+        "Json" => DerivedSemanticKind::DerivedJson,
+        _ => panic("derive semantic kind: unsupported trait")
+    }
+}
+
+fn derived_method_semantic_kind(
+    trait_name: Str, method_name: Str
+) -> DerivedSemanticKind {
+    if trait_name == "Eq" && method_name == "ne" {
+        DerivedSemanticKind::DerivedEqNe
+    } else {
+        derived_impl_semantic_kind(trait_name)
+    }
+}
+
 fn derived_actual_type_args(value: Type) -> List<Type> {
     match value {
         Type::StructType { type_params, .. } |
@@ -1944,8 +2068,13 @@ fn resolve_field_action(
             let param_idx = index_of_int(type_param_vars, id)
             if param_idx < 0 { return none }
             let param_name = str_at(type_param_names, param_idx)
-            if has_bound(bounds, param_name, trait_name) == false {
-                bounds.push(TraitBound { type_param: param_name, trait_name: trait_name })
+            if has_bound(bounds, id,
+                    registered_derive_trait_ref(env, trait_name)) == false {
+                bounds.push(TraitBound {
+                    type_param: param_name, type_var_id: id,
+                    trait_name: trait_name,
+                    trait_ref: registered_derive_trait_ref(
+                        env, trait_name) })
             }
             let evidence = DictRef::Simple(
                 trait_bound_param_name(param_name, trait_name))
@@ -2088,10 +2217,14 @@ fn resolve_json_dict_ref(
             let param_idx = index_of_int(owner_type_param_vars, id)
             if param_idx < 0 { return none }
             let param_name = str_at(owner_type_param_names, param_idx)
-            if !has_bound(bounds, param_name, trait_name) {
+            if !has_bound(bounds, id,
+                    registered_derive_trait_ref(env, trait_name)) {
                 bounds.push(TraitBound {
                     type_param: param_name,
-                    trait_name: trait_name
+                    type_var_id: id,
+                    trait_name: trait_name,
+                    trait_ref: registered_derive_trait_ref(
+                        env, trait_name)
                 })
             }
             some(DictRef::Simple(trait_bound_param_name(param_name, trait_name)))
@@ -2192,8 +2325,12 @@ fn resolve_hash_field_action(
             let param_idx = index_of_int(type_param_vars, id)
             if param_idx < 0 { return none }
             let param_name = str_at(type_param_names, param_idx)
-            if has_bound(bounds, param_name, "Hash") == false {
-                bounds.push(TraitBound { type_param: param_name, trait_name: "Hash" })
+            if has_bound(bounds, id,
+                    registered_derive_trait_ref(env, "Hash")) == false {
+                bounds.push(TraitBound {
+                    type_param: param_name, type_var_id: id,
+                    trait_name: "Hash",
+                    trait_ref: registered_derive_trait_ref(env, "Hash") })
             }
             let evidence = DictRef::Simple(
                 trait_bound_param_name(param_name, "Hash"))
@@ -2316,8 +2453,13 @@ fn resolve_type_arg_dict(
             let param_idx = index_of_int(type_param_vars, id)
             if param_idx < 0 { return none }
             let param_name = str_at(type_param_names, param_idx)
-            if has_bound(bounds, param_name, trait_name) == false {
-                bounds.push(TraitBound { type_param: param_name, trait_name: trait_name })
+            if has_bound(bounds, id,
+                    registered_derive_trait_ref(env, trait_name)) == false {
+                bounds.push(TraitBound {
+                    type_param: param_name, type_var_id: id,
+                    trait_name: trait_name,
+                    trait_ref: registered_derive_trait_ref(
+                        env, trait_name) })
             }
             some(DictRef::Simple(trait_bound_param_name(param_name, trait_name)))
         },
@@ -2579,12 +2721,13 @@ fn index_of_str(list: List<Str>, target: Str) -> Int {
     0 - 1
 }
 
-fn has_bound(bounds: List<TraitBound>, type_param: Str, trait_name: Str) -> Bool {
+fn has_bound(
+    bounds: List<TraitBound>, type_var_id: Int, trait_ref: SymbolRef
+) -> Bool {
     for b in bounds {
-        if b.type_param == type_param {
-            if b.trait_name == trait_name {
-                return true
-            }
+        if b.type_var_id == type_var_id &&
+           symbol_ref_same(b.trait_ref, trait_ref) {
+            return true
         }
     }
     false

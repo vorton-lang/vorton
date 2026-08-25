@@ -9,14 +9,23 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     callee_ref_is_named, callee_ref_named_symbol,
     intrinsic_ref_same, impl_method_ref_same, trait_method_ref_same,
     intrinsic_ref_symbol, make_named_callee_ref,
-    RegisteredNominalRef, symbol_ref_same,
+    RegisteredNominalRef, symbol_ref_same, registered_trait_ref_symbol,
+    handled_effect_ref_same,
     nominal_field_ref_owner, nominal_field_ref_same,
     trait_method_ref_trait, trait_method_ref_member,
     impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_target,
     impl_owner_ref_same, impl_method_ref_member, impl_method_ref_owner,
     variant_ref_member, impl_provider_ref_same}
 use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
-    executable_ref_is_named, executable_ref_named_symbol}
+    executable_ref_is_named, executable_ref_named_symbol,
+    handled_evidence_ref_same, handled_evidence_requirement}
+use env::{RegisteredTraitContract,
+    registered_trait_contract_owner,
+    registered_trait_contract_methods,
+    registered_trait_contract_assoc_items,
+    registered_trait_contract_handled_effects,
+    registered_trait_contract_dict_obligations,
+    registered_trait_method_ref, registered_trait_assoc_member}
 
 // B-104 D4 (#151): dict evidence is FIRST-CLASS in HIR.  Three reference forms:
 //   Simple(name)  — a SCOPE reference: a dict PARAM (`__ring_T_Eq`, from
@@ -335,6 +344,47 @@ pub fn h_exact_call_handled_evidence(
     value.handled_evidence.map(fn(item) { item })
 }
 
+pub fn remap_h_handled_evidence_ref(
+    value: HandledEvidenceRef, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> HandledEvidenceRef {
+    if sources.len() != targets.len() {
+        panic("HIR handled evidence remap: mapping arity differs")
+    }
+    for index in 0..sources.len() {
+        let source = sources.get(index).unwrap()
+        let target = targets.get(index).unwrap()
+        if !handled_effect_ref_same(
+                handled_evidence_requirement(source),
+                handled_evidence_requirement(target)) {
+            panic("HIR handled evidence remap: requirement differs")
+        }
+        if handled_evidence_ref_same(value, source) { return target }
+    }
+    value
+}
+
+pub fn remap_h_handled_evidence_refs(
+    values: List<HandledEvidenceRef>, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> List<HandledEvidenceRef> {
+    let mut result: List<HandledEvidenceRef> = []
+    for value in values {
+        result.push(remap_h_handled_evidence_ref(value, sources, targets))
+    }
+    result
+}
+
+pub fn remap_h_exact_call_handled_evidence(
+    value: HExactCallPlan, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> HExactCallPlan {
+    make_h_exact_call_plan(
+        value.callee, value.method, value.evidence,
+        remap_h_handled_evidence_refs(
+            value.handled_evidence, sources, targets))
+}
+
 enum HOperatorPlanValue {
     OperatorMethod(MethodCallRef),
     TupleOperator(List<HOperatorPlan>)
@@ -458,6 +508,28 @@ pub fn h_string_interp_value_to_string(
     value: HStringInterpPlan
 ) -> List<HExactCallPlan> { value.value_to_string.map(fn(item) { item }) }
 
+pub fn remap_h_string_interp_handled_evidence(
+    value: HStringInterpPlan, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> HStringInterpPlan {
+    let mut value_to_string: List<HExactCallPlan> = []
+    for call in value.value_to_string {
+        value_to_string.push(remap_h_exact_call_handled_evidence(
+            call, sources, targets))
+    }
+    make_h_string_interp_plan(
+        value.builder_binder,
+        remap_h_exact_call_handled_evidence(
+            value.builder, sources, targets),
+        remap_h_exact_call_handled_evidence(
+            value.append_literal, sources, targets),
+        remap_h_exact_call_handled_evidence(
+            value.append_value, sources, targets),
+        remap_h_exact_call_handled_evidence(
+            value.finish, sources, targets),
+        value_to_string)
+}
+
 pub struct HDictConstructPlan {
     constructor: ExecutableRef,
     trait_ref: SymbolRef
@@ -572,6 +644,7 @@ pub fn h_delegate_assoc_member(value: HDelegateAssocPlan) -> SymbolRef {
 pub fn h_delegate_assoc_type(value: HDelegateAssocPlan) -> Type { value.ty }
 
 pub struct HDelegateTypedPlan {
+    contract: RegisteredTraitContract,
     outer_owner: ImplOwnerRef,
     child_owner: ImplOwnerRef,
     child_provider: ImplProviderRef,
@@ -587,6 +660,7 @@ pub struct HDelegateTypedPlan {
     dict_evidence: List<DictRef>
 }
 pub fn make_h_delegate_typed_plan(
+    contract: RegisteredTraitContract,
     outer_owner: ImplOwnerRef, child_owner: ImplOwnerRef,
     child_provider: ImplProviderRef, field_owner: ImplOwnerRef,
     field_provider: ImplProviderRef, field_target: SymbolRef,
@@ -595,6 +669,12 @@ pub fn make_h_delegate_typed_plan(
     assoc_bindings: List<HDelegateAssocPlan>,
     handled_evidence: List<HandledEffectRef>, dict_evidence: List<DictRef>
 ) -> HDelegateTypedPlan {
+    if !symbol_ref_same(
+            registered_trait_ref_symbol(
+                registered_trait_contract_owner(contract)),
+            trait_ref) {
+        panic("HIR delegate plan: frozen contract trait differs")
+    }
     if source_member_index < 0 ||
        !impl_provider_ref_same(
             impl_owner_ref_provider(child_owner), child_provider) ||
@@ -621,7 +701,47 @@ pub fn make_h_delegate_typed_plan(
             panic("HIR delegate plan: method owner/trait relation differs")
         }
     }
+    let contract_methods = registered_trait_contract_methods(contract)
+    if contract_methods.len() != methods.len() {
+        panic("HIR delegate plan: frozen method census differs")
+    }
+    for index in 0..contract_methods.len() {
+        if !trait_method_ref_same(
+                registered_trait_method_ref(
+                    contract_methods.get(index).unwrap()),
+                methods.get(index).unwrap().required_method) {
+            panic("HIR delegate plan: frozen method order differs")
+        }
+    }
+    let contract_assoc = registered_trait_contract_assoc_items(contract)
+    if contract_assoc.len() != assoc_bindings.len() {
+        panic("HIR delegate plan: frozen assoc census differs")
+    }
+    for index in 0..contract_assoc.len() {
+        if !symbol_ref_same(
+                registered_trait_assoc_member(
+                    contract_assoc.get(index).unwrap()),
+                assoc_bindings.get(index).unwrap().member) {
+            panic("HIR delegate plan: frozen assoc order differs")
+        }
+    }
+    let contract_effects = registered_trait_contract_handled_effects(contract)
+    if contract_effects.len() != handled_evidence.len() {
+        panic("HIR delegate plan: frozen handled census differs")
+    }
+    for index in 0..contract_effects.len() {
+        if !handled_effect_ref_same(
+                contract_effects.get(index).unwrap(),
+                handled_evidence.get(index).unwrap()) {
+            panic("HIR delegate plan: frozen handled order differs")
+        }
+    }
+    if registered_trait_contract_dict_obligations(contract).len() !=
+           dict_evidence.len() {
+        panic("HIR delegate plan: frozen dictionary census differs")
+    }
     HDelegateTypedPlan {
+        contract: contract,
         outer_owner: outer_owner, child_owner: child_owner,
         child_provider: child_provider, field_owner: field_owner,
         field_provider: field_provider, field_target: field_target,
@@ -633,6 +753,9 @@ pub fn make_h_delegate_typed_plan(
         dict_evidence: dict_evidence.map(fn(value) { value })
     }
 }
+pub fn h_delegate_contract(
+    value: HDelegateTypedPlan
+) -> RegisteredTraitContract { value.contract }
 pub fn h_delegate_outer_owner(value: HDelegateTypedPlan) -> ImplOwnerRef { value.outer_owner }
 pub fn h_delegate_child_owner(value: HDelegateTypedPlan) -> ImplOwnerRef { value.child_owner }
 pub fn h_delegate_child_provider(value: HDelegateTypedPlan) -> ImplProviderRef { value.child_provider }
@@ -654,6 +777,96 @@ pub fn h_delegate_handled_evidence(value: HDelegateTypedPlan) -> List<HandledEff
 pub fn h_delegate_dict_evidence(value: HDelegateTypedPlan) -> List<DictRef> {
     value.dict_evidence.map(fn(item) { item })
 }
+
+pub struct HDefaultSpecializationPlan {
+    owner: ImplOwnerRef,
+    generated_method: ImplMethodRef,
+    generated_executable: ExecutableRef,
+    source_method: TraitMethodRef,
+    default_executable: ExecutableRef,
+    parameter_types: List<Type>,
+    parameter_mutabilities: List<Bool>,
+    binders: List<BinderEntry>,
+    result_type: Type,
+    effects: EffectRow,
+    forward_call: HExactCallPlan
+}
+
+pub fn make_h_default_specialization_plan(
+    owner: ImplOwnerRef, generated_method: ImplMethodRef,
+    generated_executable: ExecutableRef,
+    source_method: TraitMethodRef, default_executable: ExecutableRef,
+    parameter_types: List<Type>, parameter_mutabilities: List<Bool>,
+    binders: List<BinderEntry>,
+    result_type: Type, effects: EffectRow,
+    forward_call: HExactCallPlan
+) -> HDefaultSpecializationPlan {
+    if !impl_owner_ref_same(
+            impl_method_ref_owner(generated_method), owner) ||
+       !executable_ref_is_named(generated_executable) ||
+       !symbol_ref_same(
+            executable_ref_named_symbol(generated_executable),
+            impl_method_ref_member(generated_method)) ||
+       !executable_ref_is_named(default_executable) ||
+       !symbol_ref_same(
+            executable_ref_named_symbol(default_executable),
+            trait_method_ref_member(source_method)) ||
+       parameter_types.len() != parameter_mutabilities.len() ||
+       parameter_types.len() != binders.len() ||
+       !symbol_ref_same(
+            trait_method_ref_trait(source_method),
+            impl_owner_ref_trait(owner).unwrap_or_else(fn() {
+                panic("default specialization: owner is inherent")
+            })) {
+        panic("default specialization: exact owner/method relation differs")
+    }
+    HDefaultSpecializationPlan {
+        owner: owner, generated_method: generated_method,
+        generated_executable: generated_executable,
+        source_method: source_method,
+        default_executable: default_executable,
+        parameter_types: parameter_types.map(fn(value) { value }),
+        parameter_mutabilities:
+            parameter_mutabilities.map(fn(value) { value }),
+        binders: binders.map(fn(value) { value }),
+        result_type: result_type,
+        effects: EffectRow { effects: effects.effects, tail: effects.tail },
+        forward_call: forward_call
+    }
+}
+pub fn h_default_specialization_owner(
+    value: HDefaultSpecializationPlan
+) -> ImplOwnerRef { value.owner }
+pub fn h_default_specialization_generated_method(
+    value: HDefaultSpecializationPlan
+) -> ImplMethodRef { value.generated_method }
+pub fn h_default_specialization_generated_executable(
+    value: HDefaultSpecializationPlan
+) -> ExecutableRef { value.generated_executable }
+pub fn h_default_specialization_source_method(
+    value: HDefaultSpecializationPlan
+) -> TraitMethodRef { value.source_method }
+pub fn h_default_specialization_default_executable(
+    value: HDefaultSpecializationPlan
+) -> ExecutableRef { value.default_executable }
+pub fn h_default_specialization_parameter_types(
+    value: HDefaultSpecializationPlan
+) -> List<Type> { value.parameter_types.map(fn(item) { item }) }
+pub fn h_default_specialization_parameter_mutabilities(
+    value: HDefaultSpecializationPlan
+) -> List<Bool> { value.parameter_mutabilities.map(fn(item) { item }) }
+pub fn h_default_specialization_binders(
+    value: HDefaultSpecializationPlan
+) -> List<BinderEntry> { value.binders.map(fn(item) { item }) }
+pub fn h_default_specialization_result_type(
+    value: HDefaultSpecializationPlan
+) -> Type { value.result_type }
+pub fn h_default_specialization_effects(
+    value: HDefaultSpecializationPlan
+) -> EffectRow { value.effects }
+pub fn h_default_specialization_forward_call(
+    value: HDefaultSpecializationPlan
+) -> HExactCallPlan { value.forward_call }
 
 enum HPatternPlanValue {
     WildcardPattern,
@@ -799,6 +1012,18 @@ pub fn h_for_in_binding_binder(value: HForInPlan) -> BinderEntry {
 }
 pub fn h_for_in_destructure_binders(value: HForInPlan) -> List<BinderEntry> {
     value.destructure_binders.map(fn(item) { item })
+}
+pub fn remap_h_for_in_handled_evidence(
+    value: HForInPlan, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> HForInPlan {
+    make_h_for_in_plan(
+        remap_h_exact_call_handled_evidence(value.iter, sources, targets),
+        remap_h_exact_call_handled_evidence(
+            value.has_next, sources, targets),
+        remap_h_exact_call_handled_evidence(value.next, sources, targets),
+        value.iterator_binder, value.item_binder, value.binding_binder,
+        value.destructure_binders)
 }
 pub struct HFailOperationRef { tag: Int }
 pub fn h_fail_raise_ref() -> HFailOperationRef {

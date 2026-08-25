@@ -6,8 +6,12 @@ use checker::{CheckResult, check as check_single}
 use codegen_c::{generate_c}
 use compiler_mod::{compile_project, compile_project_c, verify_project_rc}
 use parser::{parse}
-use perceus::{perceus_transform, perceus_transform_mutated}
 use verify_rc::{verify_rc_program, rc_fatal_count, format_rc_findings}
+use core_from_hir::{assemble_single_core, core_assembly_result_program}
+use legacy_projection::{assemble_legacy_projection}
+use ownership_pipeline::{run_ownership_pipeline,
+    verified_ownership_program_flow}
+use rc_hir_bridge::{materialize_verified_hir}
 use phase_timing::{
     new_phase_timing,
     PHASE_INPUT_ENTRY_LOAD, PHASE_ENTRY_PARSE,
@@ -133,9 +137,8 @@ pub fn cli_main() {
             exit_process(1)
             return
         }
-        // B-104 D2: static RC leak/UAF verification (post-perceus HIR linear
-        // check; --verify-rc on the `check` command).  Runs the same per-module
-        // perceus_transform as native compilation, then verify_rc_program.
+        // B-104 D2: static RC leak/UAF verification over the same materialized
+        // post-ownership HIR consumed by native project compilation.
         if parsed.command == "check" && (parsed.verify_rc || parsed.verify_strict) {
             let res = verify_project_rc(
                 file_path, parsed.rc_mutate, parsed.verify_strict,
@@ -241,14 +244,22 @@ pub fn cli_main() {
         }
     }
 
+    if parsed.rc_mutate != "" {
+        eprintln("Error: --rc-mutate has no typed ownership-pipeline mutation entry")
+        timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
+        timing.finish_command(false)
+        exit_process(1)
+        return
+    }
+    let resource_start = timing.start_phase()
+    let rc_program = materialize_single_ownership(check_result)
+    timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+
     // B-104 D2: single-file --verify-rc (see the multi-file branch above).
     if parsed.command == "check" && (parsed.verify_rc || parsed.verify_strict) {
-        let resource_start = timing.start_phase()
-        let rc_program = perceus_transform_mutated(check_result.program, parsed.rc_mutate)
         let findings = verify_rc_program(rc_program)
         let fatal = rc_fatal_count(findings)
         let exempt = findings.len() - fatal
-        timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
         print(format_rc_findings(findings, parsed.verify_strict))
         if fatal > 0 || (parsed.verify_strict && exempt > 0) {
             timing.finish_command(false)
@@ -261,14 +272,10 @@ pub fn cli_main() {
     }
 
     if parsed.command == "check" {
-        timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
         print("OK")
         timing.finish_command(true)
     } else {
         if parsed.command == "build" {
-            let resource_start = timing.start_phase()
-            let rc_program = perceus_transform(check_result.program)
-            timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
             // Emit <name>.c, then shell out clang -c → <name>.o.
             // --out-dir redirects both artifacts when explicitly given;
             // the default places them next to the source.
@@ -297,6 +304,24 @@ pub fn cli_main() {
             exit_process(1)
         }
     }
+}
+
+fn materialize_single_ownership(result: CheckResult) -> HProgram {
+    let core_facts = match result.core_facts {
+        some(value) => value,
+        none => panic("ownership pipeline: successful check lacks Core facts")
+    }
+    let legacy_facts = match result.legacy_facts {
+        some(value) => value,
+        none => panic("ownership pipeline: successful check lacks legacy facts")
+    }
+    let assembly = assemble_single_core(core_facts)
+    let verified = run_ownership_pipeline(
+        core_assembly_result_program(assembly))
+    let projection = assemble_legacy_projection(
+        [legacy_facts], assembly,
+        verified_ownership_program_flow(verified))
+    materialize_verified_hir(result.program, verified, projection)
 }
 
 // ============================================================

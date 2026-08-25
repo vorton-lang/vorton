@@ -35,6 +35,8 @@ use ir_inventory::{ExecutableRef, EffectOperationRef, SystemHostCallableRef,
     executable_ref_same,
     handled_evidence_requirement,
     handled_evidence_contract_owner, handled_evidence_ordinal,
+    make_handled_evidence_capture,
+    handled_evidence_capture_requirement,
     handled_evidence_capture_source, handled_evidence_capture_target,
     effect_operation_ref_effect,
     effect_operation_ref_source_index,
@@ -51,12 +53,16 @@ pub use hir_exact::{
     h_projection_structural_name, h_projection_tuple_index, h_projection_intrinsic, HExactCallPlan,
     make_h_exact_call_plan, h_exact_call_callee, h_exact_call_method,
     h_exact_call_evidence, h_exact_call_handled_evidence,
+    remap_h_handled_evidence_ref, remap_h_handled_evidence_refs,
+    remap_h_exact_call_handled_evidence,
     HOperatorPlan, h_operator_method, h_operator_tuple, h_operator_is_tuple,
     h_operator_method_ref, h_operator_elements, HConstructorPlan, make_h_executable_constructor_plan,
     make_h_tuple_constructor_plan, make_h_record_constructor_plan, h_constructor_kind, h_constructor_executable,
     h_constructor_fields, h_constructor_tuple_arity, HStringInterpPlan, make_h_string_interp_plan,
     h_string_interp_builder_binder, h_string_interp_builder, h_string_interp_append_literal, h_string_interp_append_value,
-    h_string_interp_finish, h_string_interp_value_to_string, HDictConstructPlan, make_h_dict_construct_plan,
+    h_string_interp_finish, h_string_interp_value_to_string,
+    remap_h_string_interp_handled_evidence,
+    HDictConstructPlan, make_h_dict_construct_plan,
     h_dict_construct_executable, h_dict_construct_trait, HDelegateMethodPlan, make_h_delegate_method_plan,
     h_delegate_method_required, h_delegate_method_generated, h_delegate_method_executable, h_delegate_method_origin,
     h_delegate_method_child_call, h_delegate_method_child_callee, h_delegate_method_binders, h_delegate_method_parameter_types,
@@ -64,17 +70,31 @@ pub use hir_exact::{
     h_delegate_method_evidence, h_delegate_method_handled_bindings,
     h_delegate_method_handled_uses, HDelegateAssocPlan,
     make_h_delegate_assoc_plan, h_delegate_assoc_member, h_delegate_assoc_type, HDelegateTypedPlan,
-    make_h_delegate_typed_plan, h_delegate_outer_owner, h_delegate_child_owner, h_delegate_child_provider,
+    make_h_delegate_typed_plan, h_delegate_contract,
+    h_delegate_outer_owner, h_delegate_child_owner, h_delegate_child_provider,
     h_delegate_field_owner, h_delegate_field_provider, h_delegate_field_target, h_delegate_field,
     h_delegate_trait, h_delegate_source_member_index, h_delegate_methods, h_delegate_assoc_bindings,
     h_delegate_handled_evidence, h_delegate_dict_evidence, HPatternPlan, HPatternFieldPlan,
+    HDefaultSpecializationPlan, make_h_default_specialization_plan,
+    h_default_specialization_owner,
+    h_default_specialization_generated_method,
+    h_default_specialization_generated_executable,
+    h_default_specialization_source_method,
+    h_default_specialization_default_executable,
+    h_default_specialization_parameter_types,
+    h_default_specialization_parameter_mutabilities,
+    h_default_specialization_binders,
+    h_default_specialization_result_type,
+    h_default_specialization_effects,
+    h_default_specialization_forward_call,
     make_h_pattern_field_plan, h_pattern_field_projection, h_pattern_field_pattern, h_pattern_wildcard,
     h_pattern_binding, h_pattern_literal, h_pattern_tuple, h_pattern_struct,
     h_pattern_variant, h_pattern_or, h_pattern_kind, h_pattern_plan_binding,
     h_pattern_plan_children, h_pattern_plan_fields, h_pattern_plan_struct_owner, h_pattern_plan_variant,
     HForInPlan, make_h_for_in_plan, h_for_in_iter, h_for_in_has_next,
     h_for_in_next, h_for_in_iterator_binder, h_for_in_item_binder, h_for_in_binding_binder,
-    h_for_in_destructure_binders, HFailOperationRef, h_fail_raise_ref, h_fail_operation_tag
+    h_for_in_destructure_binders, remap_h_for_in_handled_evidence,
+    HFailOperationRef, h_fail_raise_ref, h_fail_operation_tag
 }
 
 pub use types::{BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
@@ -590,7 +610,9 @@ pub struct HTraitMethod {
 
 pub struct TraitBound {
     pub type_param: Str,
-    pub trait_name: Str
+    pub type_var_id: Int,
+    pub trait_name: Str,
+    pub trait_ref: SymbolRef
 }
 
 pub struct HAssocType {
@@ -600,30 +622,43 @@ pub struct HAssocType {
     pub concrete: Type?
 }
 
+pub struct HTypeParam {
+    pub source: TypeParam,
+    pub type_var_id: Int,
+    pub bound_refs: List<SymbolRef>
+}
+
+pub fn h_type_param_source(value: HTypeParam) -> TypeParam { value.source }
+pub fn h_type_param_sources(values: List<HTypeParam>) -> List<TypeParam> {
+    values.map(fn(value) { value.source })
+}
+
 pub enum HDecl {
     Fn { name: Str, def_id: Int?, executable_ref: ExecutableRef,
-         impl_method_ref: ImplMethodRef?, type_params: List<TypeParam>,
+         impl_method_ref: ImplMethodRef?, type_params: List<HTypeParam>,
          params: List<HParam>, return_type: Type, effects: EffectRow,
          handled_evidence_bindings: List<HandledEvidenceRef>,
          body: HExpr, is_pub: Bool, trait_bounds: List<TraitBound>, span: Span },
-    Struct { name: Str, owner_ref: RegisteredNominalRef, type_params: List<TypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
-    Enum { name: Str, owner_ref: RegisteredNominalRef, type_params: List<TypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
-    Impl { target_type: Str, owner_ref: ImplOwnerRef,
+    Struct { name: Str, owner_ref: RegisteredNominalRef, type_params: List<HTypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
+    Enum { name: Str, owner_ref: RegisteredNominalRef, type_params: List<HTypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
+    Impl { target_type: Str, target_ty: Type, owner_ref: ImplOwnerRef,
            provider_ref: ImplProviderRef, trait_ref: SymbolRef?,
            delegate_plan: HDelegateTypedPlan?,
-           type_params: List<TypeParam>, trait_name: Str?,
+           default_specializations: List<HDefaultSpecializationPlan>,
+           type_params: List<HTypeParam>, trait_name: Str?,
            methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
-    Effect { name: Str, owner_ref: SymbolRef?, handled_ref: HandledEffectRef?, type_params: List<TypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
+    Effect { name: Str, owner_ref: SymbolRef?, handled_ref: HandledEffectRef?, type_params: List<HTypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
     Test { description: Str, executable_ref: ExecutableRef,
            handled_evidence_bindings: List<HandledEvidenceRef>,
            body: HExpr, span: Span },
-    Trait { name: Str, owner_ref: RegisteredTraitRef, type_params: List<TypeParam>, methods: List<HTraitMethod>, supertraits: List<Str>, assoc_types: List<HAssocType>, is_pub: Bool, span: Span },
+    Trait { name: Str, owner_ref: RegisteredTraitRef, type_params: List<HTypeParam>, methods: List<HTraitMethod>, supertraits: List<Str>, assoc_types: List<HAssocType>, is_pub: Bool, span: Span },
     ExternFn { name: Str, abi_name: Str, def_id: Int?,
-               executable_ref: ExecutableRef, type_params: List<TypeParam>,
+               executable_ref: ExecutableRef, type_params: List<HTypeParam>,
                params: List<HParam>, return_type: Type, effects: EffectRow,
                handled_evidence_bindings: List<HandledEvidenceRef>,
+               trait_bounds: List<TraitBound>,
                is_pub: Bool, span: Span },
-    ExternType { name: Str, type_params: List<TypeParam>, is_pub: Bool, span: Span },
+    ExternType { name: Str, type_params: List<HTypeParam>, is_pub: Bool, span: Span },
     TypeAlias { name: Str, ty: Type, is_pub: Bool, span: Span },
     Const { name: Str, def_id: Int?, executable_ref: ExecutableRef,
             handled_evidence_bindings: List<HandledEvidenceRef>,
@@ -708,7 +743,30 @@ pub enum TypeKind { StructKind, EnumKind }
 // backends.
 pub const DERIVED_HASH_SEED: Int = 1469598103934665603
 
+pub enum DerivedSemanticKind {
+    DerivedEqPrimary,
+    DerivedEqNe,
+    DerivedHash,
+    DerivedClone,
+    DerivedOrd,
+    DerivedDebug,
+    DerivedJson
+}
+
+pub fn derived_semantic_kind_tag(value: DerivedSemanticKind) -> Int {
+    match value {
+        DerivedSemanticKind::DerivedEqPrimary => 0,
+        DerivedSemanticKind::DerivedEqNe => 1,
+        DerivedSemanticKind::DerivedHash => 2,
+        DerivedSemanticKind::DerivedClone => 3,
+        DerivedSemanticKind::DerivedOrd => 4,
+        DerivedSemanticKind::DerivedDebug => 5,
+        DerivedSemanticKind::DerivedJson => 6
+    }
+}
+
 pub struct DerivedMethod {
+    pub semantic_kind: DerivedSemanticKind,
     pub method_ref: ImplMethodRef,
     pub executable_ref: ExecutableRef,
     pub signature: Type,
@@ -722,6 +780,7 @@ pub struct DerivedDirectCall {
 }
 
 pub struct DerivedImpl {
+    pub semantic_kind: DerivedSemanticKind,
     pub owner_ref: ImplOwnerRef,
     pub provider_ref: ImplProviderRef,
     pub trait_ref: SymbolRef,
@@ -732,7 +791,7 @@ pub struct DerivedImpl {
     pub text_plan: DerivedTextPlan?,
     pub type_name: Str,
     pub trait_name: Str,
-    pub type_params: List<Str>,
+    pub type_params: List<HTypeParam>,
     pub bounds: List<TraitBound>,
     pub type_kind: TypeKind,
     pub struct_fields: List<DerivedField>?,
@@ -754,6 +813,436 @@ pub struct HProgram {
     // B-002p1: types with user `impl Drop` — perceus skips dup (move semantics),
     // codegen calls user drop body in ring_drop_T, move checker prevents UAM.
     pub drop_types: Set<Str>
+}
+
+fn remap_h_evidence_capture(
+    value: HandledEvidenceCapture, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> HandledEvidenceCapture {
+    make_handled_evidence_capture(
+        handled_evidence_capture_requirement(value),
+        remap_h_handled_evidence_ref(
+            handled_evidence_capture_source(value), sources, targets),
+        remap_h_handled_evidence_ref(
+            handled_evidence_capture_target(value), sources, targets))
+}
+
+fn remap_h_evidence_captures(
+    values: List<HandledEvidenceCapture>, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> List<HandledEvidenceCapture> {
+    let mut result: List<HandledEvidenceCapture> = []
+    for value in values {
+        result.push(remap_h_evidence_capture(value, sources, targets))
+    }
+    result
+}
+
+fn remap_h_lambda_captures(
+    values: List<HLambdaCapture>, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> List<HLambdaCapture> {
+    let mut result: List<HLambdaCapture> = []
+    for value in values {
+        result.push(HLambdaCapture {
+            source: value.source, target: value.target,
+            value: value.value.map(fn(expr) {
+                remap_hir_handled_evidence(expr, sources, targets)
+            }),
+            resource_site: value.resource_site
+        })
+    }
+    result
+}
+
+fn remap_h_match_arms(
+    values: List<HMatchArm>, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> List<HMatchArm> {
+    let mut result: List<HMatchArm> = []
+    for value in values {
+        result.push(HMatchArm {
+            pattern: value.pattern, pattern_plan: value.pattern_plan,
+            bindings: value.bindings,
+            guard: value.guard.map(fn(expr) {
+                remap_hir_handled_evidence(expr, sources, targets)
+            }),
+            body: remap_hir_handled_evidence(
+                value.body, sources, targets),
+            span: value.span
+        })
+    }
+    result
+}
+
+fn remap_h_stmt_handled_evidence(
+    value: HStmt, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> HStmt {
+    match value {
+        HStmt::Let { name, name_span, def_id, ty, init, span } => HStmt::Let {
+            name: name, name_span: name_span, def_id: def_id, ty: ty,
+            init: remap_hir_handled_evidence(init, sources, targets),
+            span: span
+        },
+        HStmt::Var { name, name_span, def_id, ty, init, span } => HStmt::Var {
+            name: name, name_span: name_span, def_id: def_id, ty: ty,
+            init: remap_hir_handled_evidence(init, sources, targets),
+            span: span
+        },
+        HStmt::Assign { target, value, span } => HStmt::Assign {
+            target: remap_hir_handled_evidence(target, sources, targets),
+            value: remap_hir_handled_evidence(value, sources, targets),
+            span: span
+        },
+        HStmt::ExprStmt { expr, span } => HStmt::ExprStmt {
+            expr: remap_hir_handled_evidence(expr, sources, targets),
+            span: span
+        },
+        HStmt::Return { value, span } => HStmt::Return {
+            value: value.map(fn(expr) {
+                remap_hir_handled_evidence(expr, sources, targets)
+            }), span: span
+        },
+        HStmt::While { condition, body, span } => HStmt::While {
+            condition: remap_hir_handled_evidence(
+                condition, sources, targets),
+            body: remap_hir_handled_evidence(body, sources, targets),
+            span: span
+        },
+        HStmt::ForIn {
+            binding, binding_span, def_id, destructure, plan,
+            iterable, body, iterable_type_name, iter_type_name, span
+        } => HStmt::ForIn {
+            binding: binding, binding_span: binding_span, def_id: def_id,
+            destructure: destructure,
+            plan: plan.map(fn(value) {
+                remap_h_for_in_handled_evidence(value, sources, targets)
+            }),
+            iterable: remap_hir_handled_evidence(
+                iterable, sources, targets),
+            body: remap_hir_handled_evidence(body, sources, targets),
+            iterable_type_name: iterable_type_name,
+            iter_type_name: iter_type_name, span: span
+        },
+        HStmt::Break { span } => HStmt::Break { span: span },
+        HStmt::Continue { span } => HStmt::Continue { span: span },
+        HStmt::LetDestructure {
+            pattern, pattern_plan, bindings, init, span
+        } => HStmt::LetDestructure {
+            pattern: pattern, pattern_plan: pattern_plan, bindings: bindings,
+            init: remap_hir_handled_evidence(init, sources, targets),
+            span: span
+        },
+        HStmt::IfLet {
+            pattern, pattern_plan, bindings, expr,
+            then_block, else_block, span
+        } => HStmt::IfLet {
+            pattern: pattern, pattern_plan: pattern_plan, bindings: bindings,
+            expr: remap_hir_handled_evidence(expr, sources, targets),
+            then_block: remap_hir_handled_evidence(
+                then_block, sources, targets),
+            else_block: else_block.map(fn(value) {
+                remap_hir_handled_evidence(value, sources, targets)
+            }), span: span
+        },
+        HStmt::Drop { name, def_id, slot, site, reason, ty, span } =>
+            HStmt::Drop { name: name, def_id: def_id, slot: slot,
+                site: site, reason: reason, ty: ty, span: span }
+    }
+}
+
+pub fn remap_hir_handled_evidence(
+    value: HExpr, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> HExpr {
+    match value {
+        HExpr::IntLit { value, ty, effects, span } => HExpr::IntLit {
+            value: value, ty: ty, effects: effects, span: span },
+        HExpr::FloatLit { value, ty, effects, span } => HExpr::FloatLit {
+            value: value, ty: ty, effects: effects, span: span },
+        HExpr::StrLit { value, ty, effects, span } => HExpr::StrLit {
+            value: value, ty: ty, effects: effects, span: span },
+        HExpr::BoolLit { value, ty, effects, span } => HExpr::BoolLit {
+            value: value, ty: ty, effects: effects, span: span },
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity, dict_closure_dicts,
+                       ty, effects, span } => HExpr::Ident {
+            name: name, resolved_name: resolved_name, def_id: def_id,
+            source_slot: source_slot, callee_identity: callee_identity,
+            dict_closure_dicts: dict_closure_dicts,
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch,
+                       eq_plan, ord_plan, ty, effects, span } => HExpr::BinOp {
+            op: op,
+            left: remap_hir_handled_evidence(left, sources, targets),
+            right: remap_hir_handled_evidence(right, sources, targets),
+            eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
+            eq_plan: eq_plan, ord_plan: ord_plan,
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::UnaryOp { op, operand, ty, effects, span } => HExpr::UnaryOp {
+            op: op,
+            operand: remap_hir_handled_evidence(
+                operand, sources, targets),
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::Call {
+            callee, args, type_args, resolved_dicts, handled_evidence,
+            callee_ref, method_ref, system_host, ty, effects, span
+        } => {
+            let mut remapped_args: List<HExpr> = []
+            for arg in args {
+                remapped_args.push(remap_hir_handled_evidence(
+                    arg, sources, targets))
+            }
+            HExpr::Call {
+                callee: remap_hir_handled_evidence(
+                    callee, sources, targets),
+                args: remapped_args, type_args: type_args,
+                resolved_dicts: resolved_dicts,
+                handled_evidence: remap_h_handled_evidence_refs(
+                    handled_evidence, sources, targets),
+                callee_ref: callee_ref, method_ref: method_ref,
+                system_host: system_host,
+                ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::FieldAccess {
+            receiver, field, access_kind, projection, ty, effects, span
+        } => HExpr::FieldAccess {
+            receiver: remap_hir_handled_evidence(
+                receiver, sources, targets),
+            field: field, access_kind: access_kind, projection: projection,
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::StructLit {
+            name, owner_ref, type_args, fields, spread, constructor,
+            ty, effects, span
+        } => {
+            let mut remapped_fields: List<HNominalStructFieldInit> = []
+            for field in fields {
+                remapped_fields.push(HNominalStructFieldInit {
+                    name: field.name, field_ref: field.field_ref,
+                    field_index: field.field_index,
+                    value: remap_hir_handled_evidence(
+                        field.value, sources, targets)
+                })
+            }
+            HExpr::StructLit {
+                name: name, owner_ref: owner_ref, type_args: type_args,
+                fields: remapped_fields,
+                spread: spread.map(fn(value) {
+                    remap_hir_handled_evidence(value, sources, targets)
+                }),
+                constructor: constructor,
+                ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::NamedVariantConstruct {
+            enum_name, variant_name, variant_ref, fields, spread,
+            constructor, ty, effects, span
+        } => {
+            let mut remapped_fields: List<HStructFieldInit> = []
+            for field in fields {
+                remapped_fields.push(HStructFieldInit {
+                    name: field.name, field_ref: field.field_ref,
+                    value: remap_hir_handled_evidence(
+                        field.value, sources, targets)
+                })
+            }
+            HExpr::NamedVariantConstruct {
+                enum_name: enum_name, variant_name: variant_name,
+                variant_ref: variant_ref, fields: remapped_fields,
+                spread: spread.map(fn(value) {
+                    remap_hir_handled_evidence(value, sources, targets)
+                }), constructor: constructor,
+                ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
+            HExpr::MatchExpr {
+                scrutinee: remap_hir_handled_evidence(
+                    scrutinee, sources, targets),
+                arms: remap_h_match_arms(arms, sources, targets),
+                ty: ty, effects: effects, span: span
+            },
+        HExpr::Block { stmts, tail, ty, effects, span } => {
+            let mut remapped_stmts: List<HStmt> = []
+            for stmt in stmts {
+                remapped_stmts.push(remap_h_stmt_handled_evidence(
+                    stmt, sources, targets))
+            }
+            HExpr::Block {
+                stmts: remapped_stmts,
+                tail: tail.map(fn(value) {
+                    remap_hir_handled_evidence(value, sources, targets)
+                }), ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::IfExpr {
+            condition, then_branch, else_branch, ty, effects, span
+        } => HExpr::IfExpr {
+            condition: remap_hir_handled_evidence(
+                condition, sources, targets),
+            then_branch: remap_hir_handled_evidence(
+                then_branch, sources, targets),
+            else_branch: else_branch.map(fn(value) {
+                remap_hir_handled_evidence(value, sources, targets)
+            }), ty: ty, effects: effects, span: span
+        },
+        HExpr::StringInterp { parts, plan, ty, effects, span } => {
+            let mut remapped_parts: List<HStringInterpPart> = []
+            for part in parts {
+                match part {
+                    HStringInterpPart::Literal(text) =>
+                        remapped_parts.push(HStringInterpPart::Literal(text)),
+                    HStringInterpPart::Expression(expr) =>
+                        remapped_parts.push(HStringInterpPart::Expression(
+                            remap_hir_handled_evidence(
+                                expr, sources, targets)))
+                }
+            }
+            HExpr::StringInterp {
+                parts: remapped_parts,
+                plan: plan.map(fn(value) {
+                    remap_h_string_interp_handled_evidence(
+                        value, sources, targets)
+                }), ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::TryCatch { body, arms, ty, effects, span } => HExpr::TryCatch {
+            body: remap_hir_handled_evidence(body, sources, targets),
+            arms: remap_h_match_arms(arms, sources, targets),
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::HandleExpr {
+            body, handlers, installed_evidence, ty, effects, span
+        } => {
+            let mut remapped_handlers: List<HEffectHandler> = []
+            for handler in handlers {
+                remapped_handlers.push(HEffectHandler {
+                    effect_name: handler.effect_name,
+                    handled_ref: handler.handled_ref,
+                    operation_ref: handler.operation_ref,
+                    fail_ref: handler.fail_ref,
+                    executable_ref: handler.executable_ref,
+                    captures: remap_h_lambda_captures(
+                        handler.captures, sources, targets),
+                    handled_evidence_bindings:
+                        remap_h_handled_evidence_refs(
+                            handler.handled_evidence_bindings,
+                            sources, targets),
+                    evidence_captures: remap_h_evidence_captures(
+                        handler.evidence_captures, sources, targets),
+                    op_name: handler.op_name, params: handler.params,
+                    resume_binding: handler.resume_binding,
+                    body: remap_hir_handled_evidence(
+                        handler.body, sources, targets)
+                })
+            }
+            HExpr::HandleExpr {
+                body: remap_hir_handled_evidence(body, sources, targets),
+                handlers: remapped_handlers,
+                installed_evidence: remap_h_handled_evidence_refs(
+                    installed_evidence, sources, targets),
+                ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::Lambda {
+            executable_ref, params, captures, handled_evidence_bindings,
+            evidence_captures, return_type, body, ty, effects, span
+        } => HExpr::Lambda {
+            executable_ref: executable_ref, params: params,
+            captures: remap_h_lambda_captures(captures, sources, targets),
+            handled_evidence_bindings: remap_h_handled_evidence_refs(
+                handled_evidence_bindings, sources, targets),
+            evidence_captures: remap_h_evidence_captures(
+                evidence_captures, sources, targets),
+            return_type: return_type,
+            body: remap_hir_handled_evidence(body, sources, targets),
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::EffectOp {
+            effect_name, op_name, operation_ref, fail_ref,
+            handled_evidence, args, ty, effects, span
+        } => {
+            let mut remapped_args: List<HExpr> = []
+            for arg in args {
+                remapped_args.push(remap_hir_handled_evidence(
+                    arg, sources, targets))
+            }
+            HExpr::EffectOp {
+                effect_name: effect_name, op_name: op_name,
+                operation_ref: operation_ref, fail_ref: fail_ref,
+                handled_evidence: remap_h_handled_evidence_refs(
+                    handled_evidence, sources, targets),
+                args: remapped_args, ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::RangeExpr {
+            start, end, inclusive, constructor, ty, effects, span
+        } => HExpr::RangeExpr {
+            start: remap_hir_handled_evidence(start, sources, targets),
+            end: remap_hir_handled_evidence(end, sources, targets),
+            inclusive: inclusive, constructor: constructor,
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::ListLit { elements, constructor, ty, effects, span } => {
+            let mut remapped: List<HExpr> = []
+            for element in elements {
+                remapped.push(remap_hir_handled_evidence(
+                    element, sources, targets))
+            }
+            HExpr::ListLit { elements: remapped, constructor: constructor,
+                ty: ty, effects: effects, span: span }
+        },
+        HExpr::TupleLit { elements, constructor, ty, effects, span } => {
+            let mut remapped: List<HExpr> = []
+            for element in elements {
+                remapped.push(remap_hir_handled_evidence(
+                    element, sources, targets))
+            }
+            HExpr::TupleLit { elements: remapped, constructor: constructor,
+                ty: ty, effects: effects, span: span }
+        },
+        HExpr::IndexExpr {
+            receiver, index, call_plan, projection, ty, effects, span
+        } => HExpr::IndexExpr {
+            receiver: remap_hir_handled_evidence(
+                receiver, sources, targets),
+            index: remap_hir_handled_evidence(index, sources, targets),
+            call_plan: call_plan.map(fn(value) {
+                remap_h_exact_call_handled_evidence(
+                    value, sources, targets)
+            }), projection: projection,
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::DictConstruct { base_dict, plan, inner, ty, effects, span } =>
+            HExpr::DictConstruct { base_dict: base_dict, plan: plan,
+                inner: inner, ty: ty, effects: effects, span: span },
+        HExpr::Clone { inner, ty, effects, span } => HExpr::Clone {
+            inner: remap_hir_handled_evidence(inner, sources, targets),
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::Take {
+            source, source_slot, saved_slot, site, ty, effects, span
+        } => HExpr::Take {
+            source: remap_hir_handled_evidence(source, sources, targets),
+            source_slot: source_slot, saved_slot: saved_slot, site: site,
+            ty: ty, effects: effects, span: span
+        },
+        HExpr::ReturnExpr { value, ty, effects, span } => HExpr::ReturnExpr {
+            value: value.map(fn(expr) {
+                remap_hir_handled_evidence(expr, sources, targets)
+            }), ty: ty, effects: effects, span: span
+        },
+        HExpr::UnsafeBlock { body, ty, effects, span } => HExpr::UnsafeBlock {
+            body: remap_hir_handled_evidence(body, sources, targets),
+            ty: ty, effects: effects, span: span
+        }
+    }
 }
 
 // Definition identity is a cross-pass invariant.  Validate immediately after
@@ -1697,7 +2186,8 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                 validate_hir_expr(body, seen, scope)
             },
             HDecl::Impl { owner_ref, provider_ref, trait_name, trait_ref,
-                          delegate_plan, methods, .. } => {
+                          delegate_plan, default_specializations,
+                          methods, .. } => {
                 let _ = impl_provider_kind_tag(
                     impl_provider_ref_kind(provider_ref))
                 if trait_name.is_some() != trait_ref.is_some() {
@@ -1731,6 +2221,21 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                         }
                     },
                     none => {}
+                }
+                for index in 0..default_specializations.len() {
+                    let plan = default_specializations.get(index).unwrap()
+                    if !impl_owner_ref_same(
+                            h_default_specialization_owner(plan), owner_ref) {
+                        panic("HIR default specialization: HDecl owner differs")
+                    }
+                    for right in index + 1..default_specializations.len() {
+                        if impl_method_ref_same(
+                                h_default_specialization_generated_method(plan),
+                                h_default_specialization_generated_method(
+                                    default_specializations.get(right).unwrap())) {
+                            panic("HIR default specialization: method repeats")
+                        }
+                    }
                 }
                 validate_hir_decls(methods, seen)
             },
@@ -1948,27 +2453,6 @@ pub fn trait_dict_name(type_name: Str, trait_name: Str) -> Str {
 pub fn evidence_param_name(effect_name: Str) -> Str {
     let safe = if effect_name.contains("::") { effect_name.replace("::", "$") } else { effect_name }
     "__ring_ev_${safe}"
-}
-
-// Reverse evidence_param_name back to the canonical effect identity used by
-// checker/codegen registries.  File-module identities have the shape
-// `path$segments$$_Decl::inline`; the `$` before the `$$_` boundary belongs to
-// the resolver module prefix and must stay encoded.  Only `$` after that
-// boundary represents inline `::`.  Without a file-module boundary, every `$`
-// represents an inline module separator because `$` is illegal in source
-// identifiers.
-pub fn effect_name_from_evidence_param(param_name: Str) -> Str {
-    let prefix = "__ring_ev_"
-    let encoded = param_name.slice(prefix.len(), param_name.len())
-    match encoded.index_of("$$_") {
-        some(boundary_start) => {
-            let suffix_start = boundary_start + "$$_".len()
-            let file_identity = encoded.slice(0, suffix_start)
-            let inline_suffix = encoded.slice(suffix_start, encoded.len()).replace("$", "::")
-            "${file_identity}${inline_suffix}"
-        },
-        none => encoded.replace("$", "::"),
-    }
 }
 
 // B-090: declaration-order index of an op within its effect. This is the

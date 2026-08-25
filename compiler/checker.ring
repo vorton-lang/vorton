@@ -38,6 +38,8 @@ use ir_identity::{SymbolRef, impl_owner_ref_same, impl_method_ref_owner,
 use union_find::{UnionFind}
 use core_from_hir::{FrozenCoreAssemblyFacts}
 use legacy_projection::{LegacyProjectionFacts}
+use core_legacy_freeze::{freeze_core_and_legacy_facts,
+    frozen_core_and_legacy_core, frozen_core_and_legacy_legacy}
 
 pub struct CheckResult {
     pub program: HProgram,
@@ -53,6 +55,7 @@ pub struct CheckResult {
     pub value_symbols: Map<Int, SymbolRef>,
     pub core_facts: FrozenCoreAssemblyFacts?,
     pub legacy_facts: LegacyProjectionFacts?,
+    pub prelude_physical_owner_module_key: Str,
     // User-declared impl blocks with the canonical target identity resolved
     // during checking (while namespace frames were live). Collected from the
     // module's own HIR before prelude decls are prepended, so exports never
@@ -60,7 +63,9 @@ pub struct CheckResult {
     pub impl_facts: List<ModuleImplFact>
 }
 
-fn duplicate_direct_declaration_error_result(ctx: InferCtx) -> CheckResult {
+fn duplicate_direct_declaration_error_result(
+    ctx: InferCtx, prelude_physical_owner_module_key: Str
+) -> CheckResult {
     CheckResult {
         program: HProgram {
             decls: [],
@@ -77,6 +82,8 @@ fn duplicate_direct_declaration_error_result(ctx: InferCtx) -> CheckResult {
         value_symbols: map_clone(ctx.value_symbols),
         core_facts: none,
         legacy_facts: none,
+        prelude_physical_owner_module_key:
+            prelude_physical_owner_module_key,
         impl_facts: []
     }
 }
@@ -265,7 +272,8 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                 name, abi_name, def_id, executable_ref,
                                 type_params, params,
                                 return_type, effects,
-                                handled_evidence_bindings, is_pub, span
+                                handled_evidence_bindings, trait_bounds,
+                                is_pub, span
                             }) => {
                                 // A small number of compiler-owned extern
                                 // bridges carry an unspellable exact origin on
@@ -287,6 +295,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                     effects: effects,
                                     handled_evidence_bindings:
                                         handled_evidence_bindings,
+                                    trait_bounds: trait_bounds,
                                     is_pub: is_pub, span: span
                                 })
                             },
@@ -453,7 +462,7 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     match first_duplicate_direct_declaration(program) {
         some(duplicate) => {
             ctx.sink.report(duplicate_direct_declaration_diagnostic(duplicate))
-            return duplicate_direct_declaration_error_result(ctx)
+            return duplicate_direct_declaration_error_result(ctx, file_key)
         },
         none => {}
     }
@@ -475,16 +484,21 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     let derived_impls = hprogram.derived_impls
     validate_derived_impls(ctx.env, derived_impls)
     let assembled = HProgram { decls: all_decls, derived_impls: derived_impls, boxed_vars: hprogram.boxed_vars, static_dicts: [], extern_type_names: hprogram.extern_type_names, drop_types: hprogram.drop_types }
-    let has_errors = ctx.sink.has_errors()
     // B-002p1: check for use-after-move on Drop types (before lowering)
-    if !has_errors && assembled.drop_types.len() > 0 {
+    if !ctx.sink.has_errors() && assembled.drop_types.len() > 0 {
         check_drop_moves(assembled, ctx.sink)
     }
+    let has_errors = ctx.sink.has_errors()
     let checked_program = if has_errors {
         assembled
     } else {
         lower_dicts(lower_andor(assembled))
     }
+    let frozen = if has_errors { none } else { some(
+        freeze_core_and_legacy_facts(
+            ctx.core_recorder, checked_program, ctx.env,
+            ctx.core_type_sources,
+            ctx.core_handled_evidence_type_sources)) }
     CheckResult {
         program: checked_program,
         env: ctx.env,
@@ -492,8 +506,11 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         value_origins: map_clone(ctx.use_aliases),
         value_binding_kinds: map_clone(ctx.value_binding_kinds),
         value_symbols: map_clone(ctx.value_symbols),
-        core_facts: none,
-        legacy_facts: none,
+        core_facts: frozen.map(fn(value) {
+            frozen_core_and_legacy_core(value) }),
+        legacy_facts: frozen.map(fn(value) {
+            frozen_core_and_legacy_legacy(value) }),
+        prelude_physical_owner_module_key: file_key,
         impl_facts: impl_facts
     }
 }
@@ -691,10 +708,15 @@ fn report_namespace_plan_issues(
 
 pub fn check_module(
     program: Program, module_key: Str, module_prefix: Str,
-    module_order: Int,
+    module_order: Int, prelude_physical_owner_module_key: Str,
     namespace_plan: ResolvedNamespacePlan,
     module_exports: List<ModuleExports>, sink: CollectingSink
 ) -> CheckResult {
+    if prelude_physical_owner_module_key == "" ||
+       ((module_order == 0) !=
+            (module_key == prelude_physical_owner_module_key)) {
+        panic("project checker: prelude physical owner relation differs")
+    }
     // Project compilation must have passed through build_module_graph, which
     // applies the same AST authority before constructing resolver frames.
     // Fail closed here without publishing a second diagnostic if an internal
@@ -723,20 +745,27 @@ pub fn check_module(
     collect_module_impl_facts(
         ctx.env, hprogram.decls, true, impl_facts)
     // Prepend prelude hdecls to the program's decls
-    let mut all_decls = list_clone(prelude_hdecls)
+    let mut all_decls: List<HDecl> = if module_order == 0 {
+        list_clone(prelude_hdecls)
+    } else { [] }
     for d in hprogram.decls { all_decls.push(d) }
     // B-104 D7 + D4: see check() above.
     let assembled = HProgram { decls: all_decls, derived_impls: hprogram.derived_impls, boxed_vars: hprogram.boxed_vars, static_dicts: [], extern_type_names: hprogram.extern_type_names, drop_types: hprogram.drop_types }
-    let has_errors = ctx.sink.has_errors()
     // B-002p1: check for use-after-move on Drop types (before lowering)
-    if !has_errors && assembled.drop_types.len() > 0 {
+    if !ctx.sink.has_errors() && assembled.drop_types.len() > 0 {
         check_drop_moves(assembled, ctx.sink)
     }
+    let has_errors = ctx.sink.has_errors()
     let checked_program = if has_errors {
         assembled
     } else {
         lower_dicts(lower_andor(assembled))
     }
+    let frozen = if has_errors { none } else { some(
+        freeze_core_and_legacy_facts(
+            ctx.core_recorder, checked_program, ctx.env,
+            ctx.core_type_sources,
+            ctx.core_handled_evidence_type_sources)) }
     CheckResult {
         program: checked_program,
         env: ctx.env,
@@ -744,8 +773,12 @@ pub fn check_module(
         value_origins: map_clone(ctx.use_aliases),
         value_binding_kinds: map_clone(ctx.value_binding_kinds),
         value_symbols: map_clone(ctx.value_symbols),
-        core_facts: none,
-        legacy_facts: none,
+        core_facts: frozen.map(fn(value) {
+            frozen_core_and_legacy_core(value) }),
+        legacy_facts: frozen.map(fn(value) {
+            frozen_core_and_legacy_legacy(value) }),
+        prelude_physical_owner_module_key:
+            prelude_physical_owner_module_key,
         impl_facts: impl_facts
     }
 }

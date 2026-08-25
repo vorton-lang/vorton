@@ -141,7 +141,8 @@ use rc_ir::{
     rc_op_kind_cleanup, rc_op_kind_same,
     rc_semantic_site_operand_ordinal}
 use resource_certificate::{
-    ResourceCellKind, ResourceCellSpec, ResourceConstraint, ResourcePromotion,
+    ResourceCellKind, ResourceCellSource, ResourceRuleSource,
+    ResourceCellSpec, ResourceConstraint, ResourcePromotion,
     ResourceFixedPointProof, ResourceCertificate,
     CandidateCellKind, CandidateCellSpec, CandidateRuleSite,
     CandidateRuleKind, CandidateRule, CandidatePromotion,
@@ -149,8 +150,16 @@ use resource_certificate::{
     CfgBodyCertificate, CfgBlockCertificate,
     CfgStepCertificate, CfgEdgeCertificate,
     SlotTransitionReason, SlotTransitionWitness,
-    make_resource_cell_spec, make_resource_constraint,
-    make_resource_all_constraint,
+    make_resource_cell_spec, make_resource_cell_spec_with_source,
+    make_resource_constraint, make_resource_constraint_at,
+    make_resource_all_constraint, make_resource_all_constraint_at,
+    make_callable_result_owned_source, make_callable_result_origin_source,
+    make_structural_resource_cell_source,
+    make_body_reach_source, make_body_slot_origin_source,
+    make_body_slot_owned_source,
+    make_callable_resource_rule_source,
+    make_instruction_resource_rule_source,
+    make_block_resource_rule_source, make_edge_resource_rule_source,
     make_resource_promotion, make_resource_fixed_point_proof,
     make_resource_certificate,
     make_candidate_cell_spec,
@@ -177,12 +186,15 @@ use resource_certificate::{
     resource_cell_kind_body_block_reachable,
     resource_cell_spec_max_rank,
     resource_cell_spec_kind, resource_cell_spec_owner_index,
-    resource_cell_spec_component_index, resource_cell_kind_tag,
+    resource_cell_spec_component_index, resource_cell_spec_source,
+    resource_cell_source_same, resource_cell_kind_tag,
     resource_constraint_rule_tag,
     resource_constraint_target_cell,
     resource_constraint_floor_rank,
     resource_constraint_premise_cells,
     resource_constraint_requires_all,
+    resource_constraint_source, resource_rule_source_same,
+    resource_rule_source_is_structural,
     resource_fixed_point_final_ranks,
     resource_fixed_point_cells, resource_fixed_point_constraints,
     resource_certificate_fixed_point,
@@ -1778,6 +1790,17 @@ fn add_cell(
     index
 }
 
+fn add_cell_with_source(
+    mut cells: List<ResourceCellSpec>, kind: ResourceCellKind,
+    owner_index: Int, component_index: Int, max_rank: Int,
+    source: ResourceCellSource
+) -> Int {
+    let index = cells.len()
+    cells.push(make_resource_cell_spec_with_source(
+        kind, owner_index, component_index, max_rank, source))
+    index
+}
+
 fn add_constraint(
     mut constraints: List<ResourceConstraint>,
     rule_tag: Int, target: Int, floor_rank: Int,
@@ -1793,6 +1816,20 @@ fn add_all_constraint(
 ) {
     constraints.push(make_resource_all_constraint(
         rule_tag, target, 0, premises))
+}
+fn add_constraint_at(
+    mut constraints: List<ResourceConstraint>, source: ResourceRuleSource,
+    rule_tag: Int, target: Int, floor_rank: Int, premises: List<Int>
+) {
+    constraints.push(make_resource_constraint_at(
+        source, rule_tag, target, floor_rank, premises))
+}
+fn add_all_constraint_at(
+    mut constraints: List<ResourceConstraint>, source: ResourceRuleSource,
+    rule_tag: Int, target: Int, premises: List<Int>
+) {
+    constraints.push(make_resource_all_constraint_at(
+        source, rule_tag, target, 0, premises))
 }
 
 const RULE_TYPE_SEED: Int = 0
@@ -1857,19 +1894,23 @@ fn add_body_event_result_constraints(
     callable_layouts: List<CallableCellLayout>
 ) {
     let next = boundary + 1
+    let source_site = make_instruction_resource_rule_source(
+        make_flow_instruction_ref(body.reference, block_index, boundary))
     let mut slot = 0
     while slot < body.slots.len() {
         if !event_origin_slot_overwritten(event, body, slot) {
             let mut parameter = 0
             while parameter < layout.parameter_count {
-                add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_ORIGIN_COPY,
                     body_origin_cell(
                         layout, block_index, next, slot, parameter), 0,
                     [body_origin_cell(
                         layout, block_index, boundary, slot, parameter)])
                 parameter = parameter + 1
             }
-            add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+            add_constraint_at(constraints, source_site,
+                RULE_RESULT_ORIGIN_COPY,
                 body_owned_cell(layout, block_index, next, slot), 0,
                 [body_owned_cell(layout, block_index, boundary, slot)])
         }
@@ -1883,7 +1924,8 @@ fn add_body_event_result_constraints(
                 let source = input_slots.get(ordinal).unwrap()
                 let mut parameter = 0
                 while parameter < layout.parameter_count {
-                    add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                    add_constraint_at(constraints, source_site,
+                        RULE_RESULT_ORIGIN_COPY,
                         body_origin_cell(
                             layout, block_index, next, target, parameter), 0,
                         [body_origin_cell(
@@ -1892,21 +1934,24 @@ fn add_body_event_result_constraints(
                 }
             }
             if body.slots.get(target).unwrap().owns_storage {
-                add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_OWNED_BODY,
                     body_owned_cell(layout, block_index, next, target), 0,
                     [body_reach_cell(layout, block_index)])
             }
         },
         PlannerEventValue::InitializeLiveValue(target) => if
                 body.slots.get(target).unwrap().owns_storage {
-            add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+            add_constraint_at(constraints, source_site,
+                RULE_RESULT_OWNED_BODY,
                 body_owned_cell(layout, block_index, next, target), 0,
                 [body_reach_cell(layout, block_index)])
         },
         PlannerEventValue::ReadValue { source, target } => {
             let mut parameter = 0
             while parameter < layout.parameter_count {
-                add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_ORIGIN_COPY,
                     body_origin_cell(
                         layout, block_index, next, target, parameter), 0,
                     [body_origin_cell(
@@ -1914,7 +1959,8 @@ fn add_body_event_result_constraints(
                 parameter = parameter + 1
             }
             if body.slots.get(target).unwrap().owns_storage {
-                add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_OWNED_BODY,
                     body_owned_cell(layout, block_index, next, target), 0,
                     [body_reach_cell(layout, block_index)])
             }
@@ -1923,7 +1969,8 @@ fn add_body_event_result_constraints(
             some(value) => {
                 let mut parameter = 0
                 while parameter < layout.parameter_count {
-                    add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                    add_constraint_at(constraints, source_site,
+                        RULE_RESULT_ORIGIN_COPY,
                         body_origin_cell(
                             layout, block_index, next, value, parameter), 0,
                         [body_origin_cell(
@@ -1931,7 +1978,8 @@ fn add_body_event_result_constraints(
                     parameter = parameter + 1
                 }
                 if body.slots.get(value).unwrap().owns_storage {
-                    add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                    add_constraint_at(constraints, source_site,
+                        RULE_RESULT_OWNED_BODY,
                         body_owned_cell(layout, block_index, next, value), 0,
                         [body_reach_cell(layout, block_index)])
                 }
@@ -1943,7 +1991,8 @@ fn add_body_event_result_constraints(
             let target_slot = planner_place_slot(target)
             let mut parameter = 0
             while parameter < layout.parameter_count {
-                add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_ORIGIN_COPY,
                     body_origin_cell(
                         layout, block_index, next, target_slot, parameter), 0,
                     [body_origin_cell(
@@ -1951,7 +2000,8 @@ fn add_body_event_result_constraints(
                 parameter = parameter + 1
             }
             if body.slots.get(target_slot).unwrap().owns_storage {
-                add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_OWNED_BODY,
                     body_owned_cell(layout, block_index, next, target_slot), 0,
                     [body_reach_cell(layout, block_index)])
             }
@@ -1971,7 +2021,7 @@ fn add_body_event_result_constraints(
                             callee_parameter).unwrap()
                         let mut caller_parameter = 0
                         while caller_parameter < layout.parameter_count {
-                            add_all_constraint(constraints,
+                            add_all_constraint_at(constraints, source_site,
                                 RULE_RESULT_ORIGIN_CALL,
                                 body_origin_cell(layout, block_index, next,
                                     target, caller_parameter),
@@ -1983,7 +2033,8 @@ fn add_body_event_result_constraints(
                         }
                         callee_parameter = callee_parameter + 1
                     }
-                    add_all_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                    add_all_constraint_at(constraints, source_site,
+                        RULE_RESULT_OWNED_BODY,
                         body_owned_cell(layout, block_index, next, target),
                         [body_reach_cell(layout, block_index),
                          callee_layout.result_cell])
@@ -1995,7 +2046,8 @@ fn add_body_event_result_constraints(
         PlannerEventValue::CaptureValue { source, target, .. } => {
             let mut parameter = 0
             while parameter < layout.parameter_count {
-                add_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_ORIGIN_COPY,
                     body_origin_cell(
                         layout, block_index, next, target, parameter), 0,
                     [body_origin_cell(
@@ -2003,7 +2055,8 @@ fn add_body_event_result_constraints(
                 parameter = parameter + 1
             }
             if body.slots.get(target).unwrap().owns_storage {
-                add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_OWNED_BODY,
                     body_owned_cell(layout, block_index, next, target), 0,
                     [body_reach_cell(layout, block_index)])
             }
@@ -2019,13 +2072,15 @@ fn add_body_result_constraints(
     callables: List<PlannerCallable>,
     callable_layouts: List<CallableCellLayout>
 ) {
-    add_constraint(constraints, RULE_RESULT_ORIGIN_SEED,
+    let entry_source = make_block_resource_rule_source(
+        make_flow_block_ref(body.reference, body.entry_block))
+    add_constraint_at(constraints, entry_source, RULE_RESULT_ORIGIN_SEED,
         body_reach_cell(layout, body.entry_block), 1, [])
     let mut slot = 0
     while slot < body.slots.len() {
         let value = body.slots.get(slot).unwrap()
         match value.parameter_ordinal {
-            some(parameter) => add_constraint(constraints,
+            some(parameter) => add_constraint_at(constraints, entry_source,
                 RULE_RESULT_ORIGIN_SEED,
                 body_origin_cell(
                     layout, body.entry_block, 0, slot, parameter), 0,
@@ -2033,7 +2088,8 @@ fn add_body_result_constraints(
             none => {}
         }
         if value.initially_live && value.owns_storage {
-            add_constraint(constraints, RULE_RESULT_OWNED_BODY,
+            add_constraint_at(constraints, entry_source,
+                RULE_RESULT_OWNED_BODY,
                 body_owned_cell(layout, body.entry_block, 0, slot), 0,
                 [body_reach_cell(layout, body.entry_block)])
         }
@@ -2051,18 +2107,22 @@ fn add_body_result_constraints(
             boundary = boundary + 1
         }
         let end = block.events.len()
+        let block_source = make_block_resource_rule_source(
+            make_flow_block_ref(body.reference, block_index))
         if block.terminator_kind == 3 {
             for usage in block.terminator_uses {
                 let mut parameter = 0
                 while parameter < layout.parameter_count {
-                    add_all_constraint(constraints, RULE_RESULT_ORIGIN_COPY,
+                    add_all_constraint_at(constraints, block_source,
+                        RULE_RESULT_ORIGIN_COPY,
                         callable_layout.result_origin_start + parameter,
                         [body_reach_cell(layout, block_index),
                          body_origin_cell(layout, block_index, end,
                             usage.slot, parameter)])
                     parameter = parameter + 1
                 }
-                add_all_constraint(constraints, RULE_RESULT_OWNED_BODY,
+                add_all_constraint_at(constraints, block_source,
+                    RULE_RESULT_OWNED_BODY,
                     callable_layout.result_cell,
                     [body_reach_cell(layout, block_index),
                      body_owned_cell(layout, block_index, end, usage.slot)])
@@ -2073,7 +2133,11 @@ fn add_body_result_constraints(
             let edge = block.edges.get(edge_index).unwrap()
             match edge.target_block {
                 some(target) => {
-                    add_constraint(constraints, RULE_RESULT_CFG_EDGE,
+                    let edge_source = make_edge_resource_rule_source(
+                        make_flow_block_ref(body.reference, block_index),
+                        edge_index)
+                    add_constraint_at(constraints, edge_source,
+                        RULE_RESULT_CFG_EDGE,
                         body_reach_cell(layout, target), 0,
                         [body_reach_cell(layout, block_index)])
                     slot = 0
@@ -2082,7 +2146,7 @@ fn add_body_result_constraints(
                                 body.slots.get(slot).unwrap().scope_id) {
                             let mut parameter = 0
                             while parameter < layout.parameter_count {
-                                add_constraint(constraints,
+                                add_constraint_at(constraints, edge_source,
                                     RULE_RESULT_CFG_EDGE,
                                     body_origin_cell(layout, target, 0,
                                         slot, parameter), 0,
@@ -2090,7 +2154,7 @@ fn add_body_result_constraints(
                                         slot, parameter)])
                                 parameter = parameter + 1
                             }
-                            add_constraint(constraints,
+                            add_constraint_at(constraints, edge_source,
                                 RULE_RESULT_CFG_EDGE,
                                 body_owned_cell(layout, target, 0, slot), 0,
                                 [body_owned_cell(
@@ -2158,14 +2222,18 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
                 callable_index, parameter, 1)
             parameter = parameter + 1
         }
-        let result_cell = add_cell(
+        let result_cell = add_cell_with_source(
             cells, resource_cell_kind_callable_result(),
-            callable_index, 0, 1)
+            callable_index, 0, 1,
+            make_callable_result_owned_source(callable.reference))
         let result_origin_start = cells.len()
         parameter = 0
         while parameter < callable.parameter_type_indices.len() {
-            add_cell(cells, resource_cell_kind_callable_result_origin(),
-                callable_index, parameter, 1)
+            add_cell_with_source(cells,
+                resource_cell_kind_callable_result_origin(),
+                callable_index, parameter, 1,
+                make_callable_result_origin_source(
+                    callable.reference, parameter))
             parameter = parameter + 1
         }
         callable_layouts.push(CallableCellLayout {
@@ -2190,8 +2258,11 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
         let reach_start = cells.len()
         let mut reach_block = 0
         while reach_block < body.blocks.len() {
-            add_cell(cells, resource_cell_kind_body_block_reachable(),
-                body_index, reach_block, 1)
+            add_cell_with_source(cells,
+                resource_cell_kind_body_block_reachable(),
+                body_index, reach_block, 1,
+                make_body_reach_source(make_flow_block_ref(
+                    body.reference, reach_block)))
             reach_block = reach_block + 1
         }
         let mut origin_component = 0
@@ -2205,8 +2276,15 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
                 while slot < body.slots.len() {
                     let mut parameter = 0
                     while parameter < parameter_count {
-                        add_cell(cells, resource_cell_kind_body_slot_origin(),
-                            body_index, origin_component, 1)
+                        add_cell_with_source(cells,
+                            resource_cell_kind_body_slot_origin(),
+                            body_index, origin_component, 1,
+                            make_body_slot_origin_source(
+                                make_flow_block_ref(body.reference,
+                                    block_layouts.len()),
+                                boundary,
+                                body.slots.get(slot).unwrap().reference,
+                                parameter))
                         origin_component = origin_component + 1
                         parameter = parameter + 1
                     }
@@ -2215,8 +2293,14 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
                 let owned_start = cells.len()
                 slot = 0
                 while slot < body.slots.len() {
-                    add_cell(cells, resource_cell_kind_body_slot_owned(),
-                        body_index, owned_component, 1)
+                    add_cell_with_source(cells,
+                        resource_cell_kind_body_slot_owned(),
+                        body_index, owned_component, 1,
+                        make_body_slot_owned_source(
+                            make_flow_block_ref(body.reference,
+                                block_layouts.len()),
+                            boundary,
+                            body.slots.get(slot).unwrap().reference))
                     owned_component = owned_component + 1
                     slot = slot + 1
                 }
@@ -2343,11 +2427,15 @@ fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild {
             parameter = parameter + 1
         }
         if !callable.has_body {
-            add_constraint(constraints, RULE_CALLABLE_SEED,
+            let callable_source = make_callable_resource_rule_source(
+                callable.reference)
+            add_constraint_at(constraints, callable_source,
+                RULE_CALLABLE_SEED,
                 layout.result_cell,
                 if callable.result_owned_seed { 1 } else { 0 }, [])
             for origin in callable.result_origin_parameter_ordinals {
-                add_constraint(constraints, RULE_RESULT_ORIGIN_SEED,
+                add_constraint_at(constraints, callable_source,
+                    RULE_RESULT_ORIGIN_SEED,
                     layout.result_origin_start + origin, 1, [])
             }
         }
@@ -5990,6 +6078,495 @@ fn int_lists_same(left: List<Int>, right: List<Int>) -> Bool {
     true
 }
 
+fn expected_resource_cell_sources(
+    input: FrozenPlannerInput
+) -> List<ResourceCellSource> {
+    let mut result: List<ResourceCellSource> = []
+    let mut type_index = 0
+    while type_index < input.type_nodes.len() {
+        let node = input.type_nodes.get(type_index).unwrap()
+        let mut component = 0
+        while component < 2 + node.type_parameter_count {
+            result.push(make_structural_resource_cell_source(
+                resource_cell_kind_logical_shape(), type_index, component))
+            component = component + 1
+        }
+        component = 0
+        while component < 4 + node.type_parameter_count {
+            result.push(make_structural_resource_cell_source(
+                resource_cell_kind_physical_shape(), type_index, component))
+            component = component + 1
+        }
+        type_index = type_index + 1
+    }
+    let mut callable_index = 0
+    while callable_index < input.callables.len() {
+        let callable = input.callables.get(callable_index).unwrap()
+        let mut parameter = 0
+        while parameter < callable.parameter_type_indices.len() {
+            result.push(make_structural_resource_cell_source(
+                resource_cell_kind_callable_param_mode(),
+                callable_index, parameter))
+            parameter = parameter + 1
+        }
+        parameter = 0
+        while parameter < callable.parameter_type_indices.len() {
+            result.push(make_structural_resource_cell_source(
+                resource_cell_kind_callable_force(),
+                callable_index, parameter))
+            parameter = parameter + 1
+        }
+        result.push(make_callable_result_owned_source(callable.reference))
+        parameter = 0
+        while parameter < callable.parameter_type_indices.len() {
+            result.push(make_callable_result_origin_source(
+                callable.reference, parameter))
+            parameter = parameter + 1
+        }
+        callable_index = callable_index + 1
+    }
+    for body in input.bodies {
+        let callable = input.callables.get(flow_callable_index_for_planner(
+            input.callables, body.reference)).unwrap()
+        let parameter_count = callable.parameter_type_indices.len()
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            result.push(make_body_reach_source(
+                make_flow_block_ref(body.reference, block_index)))
+            block_index = block_index + 1
+        }
+        block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            let mut boundary = 0
+            while boundary <= block.events.len() {
+                let mut slot = 0
+                while slot < body.slots.len() {
+                    let mut parameter = 0
+                    while parameter < parameter_count {
+                        result.push(make_body_slot_origin_source(
+                            make_flow_block_ref(body.reference, block_index),
+                            boundary, body.slots.get(slot).unwrap().reference,
+                            parameter))
+                        parameter = parameter + 1
+                    }
+                    slot = slot + 1
+                }
+                slot = 0
+                while slot < body.slots.len() {
+                    result.push(make_body_slot_owned_source(
+                        make_flow_block_ref(body.reference, block_index),
+                        boundary, body.slots.get(slot).unwrap().reference))
+                    slot = slot + 1
+                }
+                boundary = boundary + 1
+            }
+            block_index = block_index + 1
+        }
+    }
+    result
+}
+
+struct SourceConstraintSpec {
+    source: ResourceRuleSource,
+    rule_tag: Int,
+    floor_rank: Int,
+    requires_all: Bool,
+    target: ResourceCellSource,
+    premises: List<ResourceCellSource>
+}
+
+fn make_source_constraint_spec(
+    source: ResourceRuleSource, rule_tag: Int, floor_rank: Int,
+    requires_all: Bool, target: ResourceCellSource,
+    premises: List<ResourceCellSource>
+) -> SourceConstraintSpec {
+    SourceConstraintSpec { source: source, rule_tag: rule_tag,
+        floor_rank: floor_rank, requires_all: requires_all,
+        target: target, premises: premises }
+}
+
+fn source_constraint_same(
+    left: SourceConstraintSpec, right: SourceConstraintSpec
+) -> Bool {
+    if left.rule_tag != right.rule_tag ||
+       left.floor_rank != right.floor_rank ||
+       left.requires_all != right.requires_all ||
+       !resource_rule_source_same(left.source, right.source) ||
+       !resource_cell_source_same(left.target, right.target) ||
+       left.premises.len() != right.premises.len() {
+        return false
+    }
+    let mut index = 0
+    while index < left.premises.len() {
+        if !resource_cell_source_same(
+                left.premises.get(index).unwrap(),
+                right.premises.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn actual_source_constraints(
+    cells: List<ResourceCellSpec>, constraints: List<ResourceConstraint>
+) -> List<SourceConstraintSpec> {
+    let mut result: List<SourceConstraintSpec> = []
+    for constraint in constraints {
+        let source = resource_constraint_source(constraint)
+        if !resource_rule_source_is_structural(source) {
+            let mut premises: List<ResourceCellSource> = []
+            for premise in resource_constraint_premise_cells(constraint) {
+                premises.push(resource_cell_spec_source(
+                    cells.get(premise).unwrap()))
+            }
+            result.push(make_source_constraint_spec(
+                source, resource_constraint_rule_tag(constraint),
+                resource_constraint_floor_rank(constraint),
+                resource_constraint_requires_all(constraint),
+                resource_cell_spec_source(cells.get(
+                    resource_constraint_target_cell(constraint)).unwrap()),
+                premises))
+        }
+    }
+    result
+}
+
+fn verifier_event_overwrites_slot(
+    event: PlannerEvent, body: PlannerBody, slot: Int
+) -> Bool {
+    match event.value {
+        PlannerEventValue::NoOpValue => false,
+        PlannerEventValue::ScopeExitValue(scope_id) =>
+            body.slots.get(slot).unwrap().scope_id == scope_id,
+        PlannerEventValue::InitializeValue { target, .. } |
+        PlannerEventValue::InitializeEmptyValue(target) |
+        PlannerEventValue::InitializeLiveValue(target) => slot == target,
+        PlannerEventValue::ReadValue { target, .. } => slot == target,
+        PlannerEventValue::MutateValue { .. } => false,
+        PlannerEventValue::ConsumeValue(source, _, target) =>
+            slot == source || match target {
+                some(value) => slot == value,
+                none => false
+            },
+        PlannerEventValue::DiscardValue(source) => slot == source,
+        PlannerEventValue::AssignValue { rhs_temp, target } =>
+            slot == rhs_temp || (planner_place_is_slot(target) &&
+                slot == planner_place_slot(target)),
+        PlannerEventValue::CallValue { result_slot, .. } => match result_slot {
+            some(value) => slot == value,
+            none => false
+        },
+        PlannerEventValue::ProjectValue { target, .. } => slot == target,
+        PlannerEventValue::CaptureValue { source, target, demand } =>
+            slot == target || (slot == source &&
+                param_mode_same(transfer_demand_mode(demand),
+                    param_mode_own()) && transfer_demand_force(demand))
+    }
+}
+
+fn source_body_origin(
+    body: PlannerBody, block: Int, boundary: Int,
+    slot: Int, parameter: Int
+) -> ResourceCellSource {
+    make_body_slot_origin_source(
+        make_flow_block_ref(body.reference, block), boundary,
+        body.slots.get(slot).unwrap().reference, parameter)
+}
+fn source_body_owned(
+    body: PlannerBody, block: Int, boundary: Int, slot: Int
+) -> ResourceCellSource {
+    make_body_slot_owned_source(
+        make_flow_block_ref(body.reference, block), boundary,
+        body.slots.get(slot).unwrap().reference)
+}
+fn source_body_reach(body: PlannerBody, block: Int) -> ResourceCellSource {
+    make_body_reach_source(make_flow_block_ref(body.reference, block))
+}
+
+fn add_expected_event_constraints(
+    mut result: List<SourceConstraintSpec>, body: PlannerBody,
+    block_index: Int, boundary: Int, event: PlannerEvent,
+    parameter_count: Int, callables: List<PlannerCallable>
+) {
+    let next = boundary + 1
+    let site = make_instruction_resource_rule_source(
+        make_flow_instruction_ref(body.reference, block_index, boundary))
+    let mut slot = 0
+    while slot < body.slots.len() {
+        if !verifier_event_overwrites_slot(event, body, slot) {
+            let mut parameter = 0
+            while parameter < parameter_count {
+                result.push(make_source_constraint_spec(
+                    site, RULE_RESULT_ORIGIN_COPY, 0, false,
+                    source_body_origin(
+                        body, block_index, next, slot, parameter),
+                    [source_body_origin(
+                        body, block_index, boundary, slot, parameter)]))
+                parameter = parameter + 1
+            }
+            result.push(make_source_constraint_spec(
+                site, RULE_RESULT_ORIGIN_COPY, 0, false,
+                source_body_owned(body, block_index, next, slot),
+                [source_body_owned(body, block_index, boundary, slot)]))
+        }
+        slot = slot + 1
+    }
+    match event.value {
+        PlannerEventValue::InitializeValue {
+            input_slots, origin_input_ordinals, target, ..
+        } => {
+            for ordinal in origin_input_ordinals {
+                let input = input_slots.get(ordinal).unwrap()
+                let mut parameter = 0
+                while parameter < parameter_count {
+                    result.push(make_source_constraint_spec(
+                        site, RULE_RESULT_ORIGIN_COPY, 0, false,
+                        source_body_origin(body, block_index, next,
+                            target, parameter),
+                        [source_body_origin(body, block_index, boundary,
+                            input, parameter)]))
+                    parameter = parameter + 1
+                }
+            }
+            if body.slots.get(target).unwrap().owns_storage {
+                result.push(make_source_constraint_spec(
+                    site, RULE_RESULT_OWNED_BODY, 0, false,
+                    source_body_owned(body, block_index, next, target),
+                    [source_body_reach(body, block_index)]))
+            }
+        },
+        PlannerEventValue::InitializeLiveValue(target) => if
+                body.slots.get(target).unwrap().owns_storage {
+            result.push(make_source_constraint_spec(
+                site, RULE_RESULT_OWNED_BODY, 0, false,
+                source_body_owned(body, block_index, next, target),
+                [source_body_reach(body, block_index)]))
+        },
+        PlannerEventValue::ReadValue { source, target } |
+        PlannerEventValue::ProjectValue { source, target, .. } |
+        PlannerEventValue::CaptureValue { source, target, .. } => {
+            let mut parameter = 0
+            while parameter < parameter_count {
+                result.push(make_source_constraint_spec(
+                    site, RULE_RESULT_ORIGIN_COPY, 0, false,
+                    source_body_origin(body, block_index, next,
+                        target, parameter),
+                    [source_body_origin(body, block_index, boundary,
+                        source, parameter)]))
+                parameter = parameter + 1
+            }
+            if body.slots.get(target).unwrap().owns_storage {
+                result.push(make_source_constraint_spec(
+                    site, RULE_RESULT_OWNED_BODY, 0, false,
+                    source_body_owned(body, block_index, next, target),
+                    [source_body_reach(body, block_index)]))
+            }
+        },
+        PlannerEventValue::ConsumeValue(source, _, target) => match target {
+            some(target_slot) => {
+                let mut parameter = 0
+                while parameter < parameter_count {
+                    result.push(make_source_constraint_spec(
+                        site, RULE_RESULT_ORIGIN_COPY, 0, false,
+                        source_body_origin(body, block_index, next,
+                            target_slot, parameter),
+                        [source_body_origin(body, block_index, boundary,
+                            source, parameter)]))
+                    parameter = parameter + 1
+                }
+                if body.slots.get(target_slot).unwrap().owns_storage {
+                    result.push(make_source_constraint_spec(
+                        site, RULE_RESULT_OWNED_BODY, 0, false,
+                        source_body_owned(body, block_index, next, target_slot),
+                        [source_body_reach(body, block_index)]))
+                }
+            },
+            none => {}
+        },
+        PlannerEventValue::AssignValue { rhs_temp, target } => if
+                planner_place_is_slot(target) {
+            let target_slot = planner_place_slot(target)
+            let mut parameter = 0
+            while parameter < parameter_count {
+                result.push(make_source_constraint_spec(
+                    site, RULE_RESULT_ORIGIN_COPY, 0, false,
+                    source_body_origin(body, block_index, next,
+                        target_slot, parameter),
+                    [source_body_origin(body, block_index, boundary,
+                        rhs_temp, parameter)]))
+                parameter = parameter + 1
+            }
+            if body.slots.get(target_slot).unwrap().owns_storage {
+                result.push(make_source_constraint_spec(
+                    site, RULE_RESULT_OWNED_BODY, 0, false,
+                    source_body_owned(body, block_index, next, target_slot),
+                    [source_body_reach(body, block_index)]))
+            }
+        },
+        PlannerEventValue::CallValue {
+            callable_indices, argument_slots, result_slot, ..
+        } => match result_slot {
+            some(target) => {
+                for callable_index in callable_indices {
+                    let callee = callables.get(callable_index).unwrap()
+                    let mut callee_parameter = 0
+                    while callee_parameter < callee.parameter_type_indices.len() {
+                        let argument = argument_slots.get(callee_parameter).unwrap()
+                        let mut caller_parameter = 0
+                        while caller_parameter < parameter_count {
+                            result.push(make_source_constraint_spec(
+                                site, RULE_RESULT_ORIGIN_CALL, 0, true,
+                                source_body_origin(body, block_index, next,
+                                    target, caller_parameter),
+                                [make_callable_result_origin_source(
+                                    callee.reference, callee_parameter),
+                                 source_body_origin(body, block_index, boundary,
+                                    argument, caller_parameter)]))
+                            caller_parameter = caller_parameter + 1
+                        }
+                        callee_parameter = callee_parameter + 1
+                    }
+                    result.push(make_source_constraint_spec(
+                        site, RULE_RESULT_OWNED_BODY, 0, true,
+                        source_body_owned(body, block_index, next, target),
+                        [source_body_reach(body, block_index),
+                         make_callable_result_owned_source(callee.reference)]))
+                }
+            },
+            none => {}
+        },
+        _ => {}
+    }
+}
+
+fn expected_source_constraints(
+    input: FrozenPlannerInput
+) -> List<SourceConstraintSpec> {
+    let mut result: List<SourceConstraintSpec> = []
+    for callable in input.callables {
+        if !callable.has_body {
+            let site = make_callable_resource_rule_source(callable.reference)
+            result.push(make_source_constraint_spec(
+                site, RULE_CALLABLE_SEED,
+                if callable.result_owned_seed { 1 } else { 0 }, false,
+                make_callable_result_owned_source(callable.reference), []))
+            for parameter in callable.result_origin_parameter_ordinals {
+                result.push(make_source_constraint_spec(
+                    site, RULE_RESULT_ORIGIN_SEED, 1, false,
+                    make_callable_result_origin_source(
+                        callable.reference, parameter), []))
+            }
+        }
+    }
+    for body in input.bodies {
+        let callable = input.callables.get(flow_callable_index_for_planner(
+            input.callables, body.reference)).unwrap()
+        let parameter_count = callable.parameter_type_indices.len()
+        let entry_site = make_block_resource_rule_source(
+            make_flow_block_ref(body.reference, body.entry_block))
+        result.push(make_source_constraint_spec(
+            entry_site, RULE_RESULT_ORIGIN_SEED, 1, false,
+            source_body_reach(body, body.entry_block), []))
+        let mut slot = 0
+        while slot < body.slots.len() {
+            let value = body.slots.get(slot).unwrap()
+            match value.parameter_ordinal {
+                some(parameter) => result.push(make_source_constraint_spec(
+                    entry_site, RULE_RESULT_ORIGIN_SEED, 0, false,
+                    source_body_origin(body, body.entry_block, 0,
+                        slot, parameter),
+                    [source_body_reach(body, body.entry_block)])),
+                none => {}
+            }
+            if value.initially_live && value.owns_storage {
+                result.push(make_source_constraint_spec(
+                    entry_site, RULE_RESULT_OWNED_BODY, 0, false,
+                    source_body_owned(body, body.entry_block, 0, slot),
+                    [source_body_reach(body, body.entry_block)]))
+            }
+            slot = slot + 1
+        }
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            let mut boundary = 0
+            while boundary < block.events.len() {
+                add_expected_event_constraints(
+                    result, body, block_index, boundary,
+                    block.events.get(boundary).unwrap(),
+                    parameter_count, input.callables)
+                boundary = boundary + 1
+            }
+            let end = block.events.len()
+            let block_site = make_block_resource_rule_source(
+                make_flow_block_ref(body.reference, block_index))
+            if block.terminator_kind == 3 {
+                for usage in block.terminator_uses {
+                    let mut parameter = 0
+                    while parameter < parameter_count {
+                        result.push(make_source_constraint_spec(
+                            block_site, RULE_RESULT_ORIGIN_COPY, 0, true,
+                            make_callable_result_origin_source(
+                                callable.reference, parameter),
+                            [source_body_reach(body, block_index),
+                             source_body_origin(body, block_index, end,
+                                usage.slot, parameter)]))
+                        parameter = parameter + 1
+                    }
+                    result.push(make_source_constraint_spec(
+                        block_site, RULE_RESULT_OWNED_BODY, 0, true,
+                        make_callable_result_owned_source(callable.reference),
+                        [source_body_reach(body, block_index),
+                         source_body_owned(body, block_index, end, usage.slot)]))
+                }
+            }
+            let mut edge_index = 0
+            while edge_index < block.edges.len() {
+                let edge = block.edges.get(edge_index).unwrap()
+                match edge.target_block {
+                    some(target) => {
+                        let edge_site = make_edge_resource_rule_source(
+                            make_flow_block_ref(body.reference, block_index),
+                            edge_index)
+                        result.push(make_source_constraint_spec(
+                            edge_site, RULE_RESULT_CFG_EDGE, 0, false,
+                            source_body_reach(body, target),
+                            [source_body_reach(body, block_index)]))
+                        slot = 0
+                        while slot < body.slots.len() {
+                            if !int_list_contains(edge.exited_scope_ids,
+                                    body.slots.get(slot).unwrap().scope_id) {
+                                let mut parameter = 0
+                                while parameter < parameter_count {
+                                    result.push(make_source_constraint_spec(
+                                        edge_site, RULE_RESULT_CFG_EDGE, 0, false,
+                                        source_body_origin(body, target, 0,
+                                            slot, parameter),
+                                        [source_body_origin(body, block_index,
+                                            end, slot, parameter)]))
+                                    parameter = parameter + 1
+                                }
+                                result.push(make_source_constraint_spec(
+                                    edge_site, RULE_RESULT_CFG_EDGE, 0, false,
+                                    source_body_owned(body, target, 0, slot),
+                                    [source_body_owned(body, block_index,
+                                        end, slot)]))
+                            }
+                            slot = slot + 1
+                        }
+                    },
+                    none => {}
+                }
+                edge_index = edge_index + 1
+            }
+            block_index = block_index + 1
+        }
+    }
+    result
+}
+
 fn verify_fixed_graph_contract(
     input: FrozenPlannerInput, certificate: ResourceCertificate
 ) {
@@ -5997,10 +6574,25 @@ fn verify_fixed_graph_contract(
     let proof = resource_certificate_fixed_point(certificate)
     let actual_cells = resource_fixed_point_cells(proof)
     let actual_constraints = resource_fixed_point_constraints(proof)
+    let source_cells = expected_resource_cell_sources(input)
+    let source_constraints = expected_source_constraints(input)
+    let actual_source_constraints_ = actual_source_constraints(
+        actual_cells, actual_constraints)
     if expected.cells.len() == 0 || expected.constraints.len() == 0 ||
        actual_cells.len() != expected.cells.len() ||
+       actual_cells.len() != source_cells.len() ||
+       actual_source_constraints_.len() != source_constraints.len() ||
        actual_constraints.len() != expected.constraints.len() {
         panic("ResourcePlanner verifier: finite proof graph is empty or incomplete")
+    }
+    let mut source_index = 0
+    while source_index < source_constraints.len() {
+        if !source_constraint_same(
+                source_constraints.get(source_index).unwrap(),
+                actual_source_constraints_.get(source_index).unwrap()) {
+            panic("ResourcePlanner verifier: source constraint topology drifted")
+        }
+        source_index = source_index + 1
     }
     let mut cell_index = 0
     while cell_index < expected.cells.len() {
@@ -6013,7 +6605,10 @@ fn verify_fixed_graph_contract(
            resource_cell_spec_component_index(left) !=
                resource_cell_spec_component_index(right) ||
            resource_cell_spec_max_rank(left) !=
-               resource_cell_spec_max_rank(right) {
+               resource_cell_spec_max_rank(right) ||
+           !resource_cell_source_same(
+                source_cells.get(cell_index).unwrap(),
+                resource_cell_spec_source(right)) {
             panic("ResourcePlanner verifier: finite proof cell graph drifted")
         }
         cell_index = cell_index + 1
@@ -6030,6 +6625,9 @@ fn verify_fixed_graph_contract(
                resource_constraint_floor_rank(right) ||
            resource_constraint_requires_all(left) !=
                resource_constraint_requires_all(right) ||
+           !resource_rule_source_same(
+                resource_constraint_source(left),
+                resource_constraint_source(right)) ||
            !int_lists_same(
                 resource_constraint_premise_cells(left),
                 resource_constraint_premise_cells(right)) {
@@ -6077,6 +6675,32 @@ fn candidate_cells_same(
             candidate_cell_spec_candidate(right)
 }
 
+fn actual_call_selections_from_bodies(
+    bodies: List<PlannerBody>
+) -> List<CandidateSelection> {
+    let mut result: List<CandidateSelection> = []
+    for body in bodies {
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            let mut instruction = 0
+            while instruction < block.events.len() {
+                match block.events.get(instruction).unwrap().value {
+                    PlannerEventValue::CallValue { callable_indices, .. } =>
+                        result.push(make_candidate_selection(
+                            make_flow_instruction_ref(
+                                body.reference, block_index, instruction),
+                            callable_indices)),
+                    _ => {}
+                }
+                instruction = instruction + 1
+            }
+            block_index = block_index + 1
+        }
+    }
+    result
+}
+
 fn verify_candidate_graph_contract(
     input: FrozenPlannerInput, certificate: ResourceCertificate
 ) {
@@ -6115,7 +6739,9 @@ fn verify_candidate_graph_contract(
         }
         index = index + 1
     }
-    let expected_selections = derive_candidate_selections(proof, input.bodies)
+    // Candidate selections are bound to the actual frozen call instructions,
+    // not re-derived from the certificate's own candidate cells.
+    let expected_selections = actual_call_selections_from_bodies(input.bodies)
     let actual_selections = callable_candidate_proof_selections(proof)
     if expected_selections.len() != actual_selections.len() {
         panic("ResourcePlanner verifier: call-site selection census drifted")

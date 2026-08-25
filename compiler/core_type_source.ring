@@ -3,10 +3,7 @@
 // projection; neither consumer may rebuild the relation.
 
 use types::{Type, types_equal}
-use ir_identity::{
-    HandledEffectRef, handled_effect_ref_same, handled_effect_ref_symbol,
-    symbol_ref_origin_module_key
-}
+use ir_identity::{HandledEffectRef, handled_effect_ref_same}
 use ir_inventory::{
     EffectOperationRef, effect_operation_ref_effect,
     effect_operation_ref_source_index, effect_operation_ref_same
@@ -80,11 +77,10 @@ pub fn make_core_handled_evidence_type_source(
     requirement: HandledEffectRef, aggregate_fact: CoreTypeFactRef,
     operations: List<CoreHandledEvidenceOperationTypeSource>
 ) -> CoreHandledEvidenceTypeSource {
-    let module_key = symbol_ref_origin_module_key(
-        handled_effect_ref_symbol(requirement))
-    if core_type_fact_module_key(aggregate_fact) != module_key {
-        panic("Core type source: handled evidence aggregate crosses module")
-    }
+    // An imported handled effect receives one recorder-local aggregate
+    // prototype in every consumer module. The requirement/operation identities
+    // remain anchored at the exporter; only Core type-fact ordinals are local.
+    let module_key = core_type_fact_module_key(aggregate_fact)
     let mut index = 0
     while index < operations.len() {
         let operation = operations.get(index).unwrap()

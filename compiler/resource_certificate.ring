@@ -6,7 +6,7 @@
 // one input graph.
 
 use ir_identity::{SlotRef, slot_ref_same}
-use ir_inventory::{executable_ref_same}
+use ir_inventory::{ExecutableRef, executable_ref_same}
 use flow_ir::{
     FlowInstructionRef, FlowBlockRef,
     flow_instruction_ref_same, flow_block_ref_same}
@@ -95,11 +95,101 @@ pub fn resource_cell_kind_body_block_reachable() -> ResourceCellKind {
     resource_cell_kind_from_tag(RESOURCE_CELL_BODY_BLOCK_REACHABLE)
 }
 
+enum ResourceCellSourceValue {
+    StructuralCellSourceValue(Int, Int, Int),
+    CallableResultOwnedSourceValue(ExecutableRef),
+    CallableResultOriginSourceValue(ExecutableRef, Int),
+    BodyReachSourceValue(FlowBlockRef),
+    BodySlotOriginSourceValue(FlowBlockRef, Int, SlotRef, Int),
+    BodySlotOwnedSourceValue(FlowBlockRef, Int, SlotRef)
+}
+pub struct ResourceCellSource { value: ResourceCellSourceValue }
+pub fn make_structural_resource_cell_source(
+    kind: ResourceCellKind, owner: Int, component: Int
+) -> ResourceCellSource { ResourceCellSource {
+    value: ResourceCellSourceValue::StructuralCellSourceValue(
+        resource_cell_kind_tag(kind), owner, component) } }
+pub fn make_callable_result_owned_source(
+    callable: ExecutableRef
+) -> ResourceCellSource { ResourceCellSource {
+    value: ResourceCellSourceValue::CallableResultOwnedSourceValue(callable) } }
+pub fn make_callable_result_origin_source(
+    callable: ExecutableRef, parameter: Int
+) -> ResourceCellSource {
+    if parameter < 0 { panic("resource certificate: negative result origin") }
+    ResourceCellSource { value:
+        ResourceCellSourceValue::CallableResultOriginSourceValue(
+            callable, parameter) }
+}
+pub fn make_body_reach_source(block: FlowBlockRef) -> ResourceCellSource {
+    ResourceCellSource { value: ResourceCellSourceValue::BodyReachSourceValue(block) }
+}
+pub fn make_body_slot_origin_source(
+    block: FlowBlockRef, boundary: Int, slot: SlotRef, parameter: Int
+) -> ResourceCellSource {
+    if boundary < 0 || parameter < 0 {
+        panic("resource certificate: negative body-origin coordinate")
+    }
+    ResourceCellSource { value: ResourceCellSourceValue::BodySlotOriginSourceValue(
+        block, boundary, slot, parameter) }
+}
+pub fn make_body_slot_owned_source(
+    block: FlowBlockRef, boundary: Int, slot: SlotRef
+) -> ResourceCellSource {
+    if boundary < 0 { panic("resource certificate: negative body-owned boundary") }
+    ResourceCellSource { value: ResourceCellSourceValue::BodySlotOwnedSourceValue(
+        block, boundary, slot) }
+}
+fn copy_resource_cell_source(value: ResourceCellSource) -> ResourceCellSource {
+    match value.value {
+        ResourceCellSourceValue::StructuralCellSourceValue(k, o, c) =>
+            ResourceCellSource { value:
+                ResourceCellSourceValue::StructuralCellSourceValue(k, o, c) },
+        ResourceCellSourceValue::CallableResultOwnedSourceValue(v) =>
+            make_callable_result_owned_source(v),
+        ResourceCellSourceValue::CallableResultOriginSourceValue(v, p) =>
+            make_callable_result_origin_source(v, p),
+        ResourceCellSourceValue::BodyReachSourceValue(v) =>
+            make_body_reach_source(v),
+        ResourceCellSourceValue::BodySlotOriginSourceValue(b, n, s, p) =>
+            make_body_slot_origin_source(b, n, s, p),
+        ResourceCellSourceValue::BodySlotOwnedSourceValue(b, n, s) =>
+            make_body_slot_owned_source(b, n, s)
+    }
+}
+pub fn resource_cell_source_same(
+    left: ResourceCellSource, right: ResourceCellSource
+) -> Bool {
+    match (left.value, right.value) {
+        (ResourceCellSourceValue::StructuralCellSourceValue(ak, ao, ac),
+         ResourceCellSourceValue::StructuralCellSourceValue(bk, bo, bc)) =>
+            ak == bk && ao == bo && ac == bc,
+        (ResourceCellSourceValue::CallableResultOwnedSourceValue(a),
+         ResourceCellSourceValue::CallableResultOwnedSourceValue(b)) =>
+            executable_ref_same(a, b),
+        (ResourceCellSourceValue::CallableResultOriginSourceValue(a, ap),
+         ResourceCellSourceValue::CallableResultOriginSourceValue(b, bp)) =>
+            executable_ref_same(a, b) && ap == bp,
+        (ResourceCellSourceValue::BodyReachSourceValue(a),
+         ResourceCellSourceValue::BodyReachSourceValue(b)) =>
+            flow_block_ref_same(a, b),
+        (ResourceCellSourceValue::BodySlotOriginSourceValue(ab, an, as_, ap),
+         ResourceCellSourceValue::BodySlotOriginSourceValue(bb, bn, bs, bp)) =>
+            flow_block_ref_same(ab, bb) && an == bn &&
+                slot_ref_same(as_, bs) && ap == bp,
+        (ResourceCellSourceValue::BodySlotOwnedSourceValue(ab, an, as_),
+         ResourceCellSourceValue::BodySlotOwnedSourceValue(bb, bn, bs)) =>
+            flow_block_ref_same(ab, bb) && an == bn && slot_ref_same(as_, bs),
+        _ => false
+    }
+}
+
 pub struct ResourceCellSpec {
     kind: ResourceCellKind,
     owner_index: Int,
     component_index: Int,
-    max_rank: Int
+    max_rank: Int,
+    source: ResourceCellSource
 }
 
 pub fn make_resource_cell_spec(
@@ -113,8 +203,19 @@ pub fn make_resource_cell_spec(
         kind: kind,
         owner_index: owner_index,
         component_index: component_index,
-        max_rank: max_rank
+        max_rank: max_rank,
+        source: make_structural_resource_cell_source(
+            kind, owner_index, component_index)
     }
+}
+pub fn make_resource_cell_spec_with_source(
+    kind: ResourceCellKind, owner_index: Int,
+    component_index: Int, max_rank: Int, source: ResourceCellSource
+) -> ResourceCellSpec {
+    let mut result = make_resource_cell_spec(
+        kind, owner_index, component_index, max_rank)
+    result.source = copy_resource_cell_source(source)
+    result
 }
 
 pub fn resource_cell_spec_kind(value: ResourceCellSpec) -> ResourceCellKind {
@@ -128,6 +229,9 @@ pub fn resource_cell_spec_component_index(value: ResourceCellSpec) -> Int {
 }
 pub fn resource_cell_spec_max_rank(value: ResourceCellSpec) -> Int {
     value.max_rank
+}
+pub fn resource_cell_spec_source(value: ResourceCellSpec) -> ResourceCellSource {
+    copy_resource_cell_source(value.source)
 }
 
 fn resource_cell_spec_same(
@@ -143,11 +247,84 @@ fn copy_resource_cell_specs(
 ) -> List<ResourceCellSpec> {
     let mut result: List<ResourceCellSpec> = []
     for value in values {
-        result.push(make_resource_cell_spec(
-            value.kind, value.owner_index,
-            value.component_index, value.max_rank))
+        result.push(make_resource_cell_spec_with_source(
+            value.kind, value.owner_index, value.component_index,
+            value.max_rank, value.source))
     }
     result
+}
+
+enum ResourceRuleSourceValue {
+    StructuralRuleSourceValue(Int),
+    CallableRuleSourceValue(ExecutableRef),
+    InstructionRuleSourceValue(FlowInstructionRef),
+    BlockRuleSourceValue(FlowBlockRef),
+    EdgeRuleSourceValue(FlowBlockRef, Int)
+}
+pub struct ResourceRuleSource { value: ResourceRuleSourceValue }
+pub fn make_structural_resource_rule_source(tag: Int) -> ResourceRuleSource {
+    ResourceRuleSource { value:
+        ResourceRuleSourceValue::StructuralRuleSourceValue(tag) }
+}
+pub fn make_callable_resource_rule_source(
+    value: ExecutableRef
+) -> ResourceRuleSource { ResourceRuleSource { value:
+    ResourceRuleSourceValue::CallableRuleSourceValue(value) } }
+pub fn make_instruction_resource_rule_source(
+    value: FlowInstructionRef
+) -> ResourceRuleSource { ResourceRuleSource { value:
+    ResourceRuleSourceValue::InstructionRuleSourceValue(value) } }
+pub fn make_block_resource_rule_source(
+    value: FlowBlockRef
+) -> ResourceRuleSource { ResourceRuleSource { value:
+    ResourceRuleSourceValue::BlockRuleSourceValue(value) } }
+pub fn make_edge_resource_rule_source(
+    value: FlowBlockRef, successor: Int
+) -> ResourceRuleSource {
+    if successor < 0 { panic("resource certificate: negative source edge") }
+    ResourceRuleSource { value:
+        ResourceRuleSourceValue::EdgeRuleSourceValue(value, successor) }
+}
+fn copy_resource_rule_source(value: ResourceRuleSource) -> ResourceRuleSource {
+    match value.value {
+        ResourceRuleSourceValue::StructuralRuleSourceValue(v) =>
+            make_structural_resource_rule_source(v),
+        ResourceRuleSourceValue::CallableRuleSourceValue(v) =>
+            make_callable_resource_rule_source(v),
+        ResourceRuleSourceValue::InstructionRuleSourceValue(v) =>
+            make_instruction_resource_rule_source(v),
+        ResourceRuleSourceValue::BlockRuleSourceValue(v) =>
+            make_block_resource_rule_source(v),
+        ResourceRuleSourceValue::EdgeRuleSourceValue(v, n) =>
+            make_edge_resource_rule_source(v, n)
+    }
+}
+pub fn resource_rule_source_same(
+    left: ResourceRuleSource, right: ResourceRuleSource
+) -> Bool {
+    match (left.value, right.value) {
+        (ResourceRuleSourceValue::StructuralRuleSourceValue(a),
+         ResourceRuleSourceValue::StructuralRuleSourceValue(b)) => a == b,
+        (ResourceRuleSourceValue::CallableRuleSourceValue(a),
+         ResourceRuleSourceValue::CallableRuleSourceValue(b)) =>
+            executable_ref_same(a, b),
+        (ResourceRuleSourceValue::InstructionRuleSourceValue(a),
+         ResourceRuleSourceValue::InstructionRuleSourceValue(b)) =>
+            flow_instruction_ref_same(a, b),
+        (ResourceRuleSourceValue::BlockRuleSourceValue(a),
+         ResourceRuleSourceValue::BlockRuleSourceValue(b)) =>
+            flow_block_ref_same(a, b),
+        (ResourceRuleSourceValue::EdgeRuleSourceValue(a, an),
+         ResourceRuleSourceValue::EdgeRuleSourceValue(b, bn)) =>
+            flow_block_ref_same(a, b) && an == bn,
+        _ => false
+    }
+}
+pub fn resource_rule_source_is_structural(value: ResourceRuleSource) -> Bool {
+    match value.value {
+        ResourceRuleSourceValue::StructuralRuleSourceValue(_) => true,
+        _ => false
+    }
 }
 
 // A constraint is target >= max(floor_rank, ranks[premises...]).  Splitting
@@ -158,7 +335,8 @@ pub struct ResourceConstraint {
     target_cell: Int,
     floor_rank: Int,
     premise_cells: List<Int>,
-    requires_all: Bool
+    requires_all: Bool,
+    source: ResourceRuleSource
 }
 
 pub fn make_resource_constraint(
@@ -179,8 +357,20 @@ pub fn make_resource_constraint(
         rule_tag: rule_tag,
         target_cell: target_cell,
         floor_rank: floor_rank,
-        premise_cells: copied, requires_all: false
+        premise_cells: copied, requires_all: false,
+        source: make_structural_resource_rule_source(rule_tag)
     }
+}
+
+pub fn make_resource_constraint_at(
+    source: ResourceRuleSource,
+    rule_tag: Int, target_cell: Int,
+    floor_rank: Int, premise_cells: List<Int>
+) -> ResourceConstraint {
+    let mut result = make_resource_constraint(
+        rule_tag, target_cell, floor_rank, premise_cells)
+    result.source = copy_resource_rule_source(source)
+    result
 }
 
 pub fn make_resource_all_constraint(
@@ -192,6 +382,19 @@ pub fn make_resource_all_constraint(
     }
     let mut result = make_resource_constraint(
         rule_tag, target_cell, floor_rank, premise_cells)
+    result.requires_all = true
+    result
+}
+pub fn make_resource_all_constraint_at(
+    source: ResourceRuleSource,
+    rule_tag: Int, target_cell: Int,
+    floor_rank: Int, premise_cells: List<Int>
+) -> ResourceConstraint {
+    let mut result = make_resource_constraint_at(
+        source, rule_tag, target_cell, floor_rank, premise_cells)
+    if premise_cells.len() < 2 {
+        panic("resource certificate: conjunctive constraint is incomplete")
+    }
     result.requires_all = true
     result
 }
@@ -215,6 +418,9 @@ pub fn resource_constraint_premise_cells(
 pub fn resource_constraint_requires_all(value: ResourceConstraint) -> Bool {
     value.requires_all
 }
+pub fn resource_constraint_source(value: ResourceConstraint) -> ResourceRuleSource {
+    copy_resource_rule_source(value.source)
+}
 
 fn copy_resource_constraints(
     values: List<ResourceConstraint>
@@ -222,11 +428,11 @@ fn copy_resource_constraints(
     let mut result: List<ResourceConstraint> = []
     for value in values {
         result.push(if value.requires_all {
-            make_resource_all_constraint(
+            make_resource_all_constraint_at(value.source,
                 value.rule_tag, value.target_cell,
                 value.floor_rank, value.premise_cells)
         } else {
-            make_resource_constraint(
+            make_resource_constraint_at(value.source,
                 value.rule_tag, value.target_cell,
                 value.floor_rank, value.premise_cells)
         })

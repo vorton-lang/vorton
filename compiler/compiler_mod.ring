@@ -1,16 +1,26 @@
 use types::{Type, EffectRow, type_to_string, effect_row_to_string, nominal_display_name}
-use ast::{Program, UseDecl, TypeParam, Span}
-use hir::{HProgram, HDecl, HParam, module_item_identity, is_module_item_identity}
+use ast::{Program, UseDecl, Span}
+use hir::{HProgram, HDecl, HParam, HTypeParam, h_type_param_source,
+    module_item_identity, is_module_item_identity}
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, Diagnostic, new_collecting_sink, make_diag}
 use formatter::{format_human, format_llm}
 use env::{TypeEnv}
 use checker::{check_module}
+use core_from_hir::{FrozenCoreAssemblyFacts}
+use legacy_projection::{LegacyProjectionFacts}
 use codegen_c::{generate_c_project}
 use resolver::{ModuleGraph, ModuleId, module_key, module_prefix,
     build_module_graph}
 use exports::{ModuleExports, extract_exports}
-use perceus::{perceus_transform, perceus_transform_mutated}
 use verify_rc::{RcFinding, verify_rc_program, rc_fatal_count, format_rc_findings}
+use core_from_hir::{assemble_project_core, core_assembly_result_program}
+use legacy_projection::{assemble_legacy_projection}
+use ownership_pipeline::{run_ownership_pipeline,
+    verified_ownership_program_flow}
+use rc_hir_bridge::{VerifiedProjectHirShell,
+    make_verified_project_hir_shell, materialize_verified_project_hir,
+    materialized_project_hir_module_key,
+    materialized_project_hir_program}
 use codes::{E0708}
 use infer_helpers::{is_value_type}
 use phase_timing::{
@@ -27,10 +37,54 @@ pub struct CompileProjectResult {
 
 struct CompilePhaseResult {
     graph: ModuleGraph,
+    prelude_physical_owner_module_key: Str,
     module_asts: Map<Str, Program>,
     module_hirs: Map<Str, HProgram>,
+    module_core_facts: Map<Str, FrozenCoreAssemblyFacts>,
+    module_legacy_facts: Map<Str, LegacyProjectionFacts>,
     module_exports_map: Map<Str, ModuleExports>,
     extern_forward_bridges: Map<Str, Str>
+}
+
+fn materialize_project_ownership(
+    phases: CompilePhaseResult
+) -> Map<Str, HProgram> {
+    let mut core_facts: List<FrozenCoreAssemblyFacts> = []
+    let mut legacy_facts: List<LegacyProjectionFacts> = []
+    let mut shells: List<VerifiedProjectHirShell> = []
+    for key in phases.graph.topo_order {
+        core_facts.push(phases.module_core_facts.get(key).unwrap_or_else(fn() {
+            panic("project ownership: Core facts are absent")
+        }))
+        legacy_facts.push(
+            phases.module_legacy_facts.get(key).unwrap_or_else(fn() {
+                panic("project ownership: legacy facts are absent")
+            }))
+        shells.push(make_verified_project_hir_shell(
+            key, phases.module_hirs.get(key).unwrap_or_else(fn() {
+                panic("project ownership: HIR shell is absent")
+            })))
+    }
+    let assembly = assemble_project_core(core_facts)
+    let verified = run_ownership_pipeline(
+        core_assembly_result_program(assembly))
+    let projection = assemble_legacy_projection(
+        legacy_facts, assembly,
+        verified_ownership_program_flow(verified))
+    let materialized = materialize_verified_project_hir(
+        shells, verified, projection)
+    let mut result: Map<Str, HProgram> = map_new()
+    for value in materialized {
+        let key = materialized_project_hir_module_key(value)
+        if result.contains_key(key) {
+            panic("project ownership: materialized module repeats")
+        }
+        result.insert(key, materialized_project_hir_program(value))
+    }
+    if result.len() != phases.graph.topo_order.len() {
+        panic("project ownership: materialized module census differs")
+    }
+    result
 }
 
 // Project checking produces one already-dict-lowered HProgram per module.
@@ -65,11 +119,12 @@ fn project_identity_leaf(identity: Str) -> Str {
 // independently checked modules. Bounded generics are deliberately not
 // bridged until their constraints can be compared structurally.
 fn project_callable_signature(
-    type_params: List<TypeParam>, params: List<HParam>,
+    type_params: List<HTypeParam>, params: List<HParam>,
     return_type: Type, effects: EffectRow
 ) -> Str? {
     let mut tparams: List<Str> = []
-    for tp in type_params {
+    for exact_param in type_params {
+        let tp = h_type_param_source(exact_param)
         if tp.bounds.len() > 0 { return none }
         tparams.push(tp.name)
     }
@@ -238,7 +293,13 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
             let check_start = timing.start_phase()
             let mut module_asts: Map<Str, Program> = map_new()
             let mut module_hirs: Map<Str, HProgram> = map_new()
+            let mut module_core_facts: Map<Str, FrozenCoreAssemblyFacts> = map_new()
+            let mut module_legacy_facts: Map<Str, LegacyProjectionFacts> = map_new()
             let mut module_exports_map: Map<Str, ModuleExports> = map_new()
+            let prelude_physical_owner_module_key =
+                graph.topo_order.get(0).unwrap_or_else(fn() {
+                    panic("project checker: module graph has no physical prelude owner")
+                })
 
             // Use cached ASTs from resolver (already parsed during graph construction)
             for key in graph.topo_order {
@@ -277,6 +338,7 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                             let result = check_module(
                                 ast, key, current_prefix,
                                 module_order,
+                                prelude_physical_owner_module_key,
                                 graph.namespace_plan, dep_exports, sink)
                             if sink.has_errors() {
                                 let mod_file = match graph.modules.get(key) { some(m) => m.file_path, none => "" }
@@ -288,6 +350,10 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                                 }
                                 check_ok = false
                             } else {
+                                if result.prelude_physical_owner_module_key !=
+                                        prelude_physical_owner_module_key {
+                                    panic("project checker: module prelude owner drifted")
+                                }
                                 // Surface check warnings (non-error diagnostics) without failing the build
                                 if sink.items.len() > 0 {
                                     let mod_file = match graph.modules.get(key) { some(m) => m.file_path, none => "" }
@@ -299,6 +365,16 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                                     }
                                 }
                                 module_hirs.insert(key, result.program)
+                                module_core_facts.insert(key, match result.core_facts {
+                                    some(value) => value,
+                                    none => panic(
+                                        "project ownership: successful module lacks Core facts")
+                                })
+                                module_legacy_facts.insert(key, match result.legacy_facts {
+                                    some(value) => value,
+                                    none => panic(
+                                        "project ownership: successful module lacks legacy facts")
+                                })
                                 module_envs.insert(key, result.env)
                                 match graph.modules.get(key) {
                                     some(mod_) => {
@@ -386,8 +462,12 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                 none => none,
                 some(extern_forward_bridges) => some(CompilePhaseResult {
                     graph: graph,
+                    prelude_physical_owner_module_key:
+                        prelude_physical_owner_module_key,
                     module_asts: module_asts,
                     module_hirs: module_hirs,
+                    module_core_facts: module_core_facts,
+                    module_legacy_facts: module_legacy_facts,
                     module_exports_map: module_exports_map,
                     extern_forward_bridges: extern_forward_bridges
                 })
@@ -406,8 +486,10 @@ pub fn compile_project(entry_file: Str, error_format: Str, mut timing: PhaseTimi
             timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
             CompileProjectResult { success: false }
         },
-        some(_) => {
-            timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
+        some(phases) => {
+            let resource_start = timing.start_phase()
+            let _ = materialize_project_ownership(phases)
+            timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
             CompileProjectResult { success: true }
         },
     }
@@ -435,25 +517,24 @@ pub fn compile_project_c(
         some(phases) => {
             let resource_start = timing.start_phase()
             let entry_key = module_key(phases.graph.entry.path_segments)
+            let materialized = materialize_project_ownership(phases)
 
             // Build list of (module_prefix, HProgram, uses) in topo order
             let mut modules: List<(Str, HProgram, List<UseDecl>)> = []
             let mut entry_prefix = ""
 
             for key in phases.graph.topo_order {
-                match (phases.graph.modules.get(key), phases.module_hirs.get(key), phases.module_asts.get(key)) {
+                match (phases.graph.modules.get(key), materialized.get(key), phases.module_asts.get(key)) {
                     (some(mod_), some(hir), some(ast)) => {
                         let prefix = module_prefix(mod_.path_segments)
-                        let rc_hir = perceus_transform(hir)
-                        modules.push((prefix, rc_hir, ast.uses))
+                        modules.push((prefix, hir, ast.uses))
                         if key == entry_key {
                             entry_prefix = prefix
                         }
                     },
                     (some(mod_), some(hir), none) => {
                         let prefix = module_prefix(mod_.path_segments)
-                        let rc_hir = perceus_transform(hir)
-                        modules.push((prefix, rc_hir, []))
+                        modules.push((prefix, hir, []))
                         if key == entry_key {
                             entry_prefix = prefix
                         }
@@ -472,9 +553,8 @@ pub fn compile_project_c(
 }
 
 // ============================================================
-// B-104 D2: multi-file static RC verification
-// Runs the same per-module perceus_transform as native compilation, then
-// the verify_rc linear check on each module's post-RC HIR.
+// B-104 D2: multi-file static RC verification over the same exact project
+// materialization consumed by native compilation.
 // ============================================================
 
 pub struct RcProjectVerifyResult {
@@ -494,13 +574,20 @@ pub fn verify_project_rc(
             RcProjectVerifyResult { success: false, fatal: 0, exempt: 0, report: "" }
         },
         some(phases) => {
+            if mutate != "" {
+                timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
+                return RcProjectVerifyResult {
+                    success: false, fatal: 1, exempt: 0,
+                    report: "Error: --rc-mutate has no typed ownership-pipeline mutation entry"
+                }
+            }
             let resource_start = timing.start_phase()
+            let materialized = materialize_project_ownership(phases)
             let mut all: List<RcFinding> = []
             for key in phases.graph.topo_order {
-                match phases.module_hirs.get(key) {
+                match materialized.get(key) {
                     some(hir) => {
-                        let rc_hir = perceus_transform_mutated(hir, mutate)
-                        for f in verify_rc_program(rc_hir) { all.push(f) }
+                        for f in verify_rc_program(hir) { all.push(f) }
                     },
                     none => {},
                 }

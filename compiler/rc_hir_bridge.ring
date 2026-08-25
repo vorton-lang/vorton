@@ -21,7 +21,8 @@ use ir_identity::{
     impl_owner_ref_same, impl_method_ref_same,
     trait_method_ref_name, intrinsic_ref_symbol,
     make_named_callee_ref,
-    path_ref_normalized_child_path
+    path_ref_normalized_child_path,
+    module_body_ref_origin_module_key
 }
 use ir_inventory::{
     ExecutableRef, ExecutableKind,
@@ -31,7 +32,7 @@ use ir_inventory::{
     executable_kind_same, executable_kind_fn,
     executable_kind_impl_method, executable_kind_trait_default,
     executable_kind_test,
-    executable_kind_const_initializer, executable_kind_lambda,
+    executable_kind_const_getter, executable_kind_lambda,
     executable_kind_handler, executable_kind_default_specialization,
     executable_kind_derived_impl,
     executable_kind_dict_helper,
@@ -47,7 +48,7 @@ use ast::{
 use types::{Type, Effect, EffectRow, EMPTY_ROW, nominal_display_name, types_equal}
 use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HPatternBinding,
-    HEffectHandler, HLambdaCapture, HAssocType, HEnumVariant,
+    HEffectHandler, HLambdaCapture, HAssocType, HEnumVariant, HTypeParam,
     HEffectOp, HTraitMethod, TraitBound, HPatternPlan, HProjectionRef,
     h_fail_raise_ref,
     h_nominal_projection, h_variant_projection,
@@ -206,6 +207,7 @@ use legacy_projection::{
     legacy_projection_type_for, legacy_projection_effect_for,
     legacy_projection_binder_for, legacy_projection_callable_for,
     legacy_projection_impl_for,
+    legacy_projection_executable_physical_identity,
     legacy_type_projection_type, legacy_effect_projection_row,
     legacy_binder_projection_name, legacy_binder_projection_def_id,
     legacy_binder_projection_type, legacy_binder_projection_is_mutable,
@@ -213,12 +215,13 @@ use legacy_projection::{
     legacy_callable_type_parameters, legacy_callable_bounds,
     legacy_callable_parameters, legacy_callable_result_type,
     legacy_callable_effects, legacy_callable_is_public,
+    legacy_callable_module,
     legacy_type_parameter_name, legacy_type_parameter_bounds,
     legacy_trait_bound_parameter_index, legacy_trait_bound_trait,
     legacy_impl_owner, legacy_impl_target_type, legacy_impl_trait,
     legacy_impl_target_nominal,
     legacy_impl_type_parameters, legacy_impl_assoc_bindings,
-    legacy_impl_methods, legacy_impl_container,
+    legacy_impl_methods, legacy_impl_container, legacy_impl_module,
     legacy_container_is_module,
     legacy_assoc_binding_member, legacy_assoc_binding_type
 }
@@ -442,17 +445,10 @@ fn bridge_binder_ident(ctx: HirBridgeCtx, slot: SlotRef) -> HExpr {
     }
 }
 
-fn executable_identity(value: ExecutableRef) -> Str {
-    if executable_ref_is_named(value) {
-        symbol_ref_canonical_payload(executable_ref_named_symbol(value))
-    } else {
-        let parts = path_ref_normalized_child_path(
-            executable_ref_anonymous_path(value))
-        if parts.len() == 0 {
-            panic("RcHIR bridge: anonymous executable path is empty")
-        }
-        parts.join("$")
-    }
+fn executable_identity(
+    projection: LegacyProjectionTable, value: ExecutableRef
+) -> Str {
+    legacy_projection_executable_physical_identity(projection, value)
 }
 
 fn executable_ident(
@@ -460,7 +456,7 @@ fn executable_ident(
     ty: Type
 ) -> HExpr {
     let _ = legacy_projection_callable_for(projection, executable)
-    let identity = executable_identity(executable)
+    let identity = executable_identity(projection, executable)
     HExpr::Ident {
         name: identity, resolved_name: some(identity), def_id: none,
         source_slot: none,
@@ -481,23 +477,29 @@ fn evidence_dict(
     } else if core_evidence_is_dict(value) {
         core_evidence_dict(value)
     } else {
-        DictRef::Static(executable_identity(core_evidence_callable(value)))
+        DictRef::Static(executable_identity(
+            projection, core_evidence_callable(value)))
     }
 }
 
 fn legacy_type_params(
     values: List<LegacyTypeParameterProjection>
-) -> List<TypeParam> {
+) -> List<HTypeParam> {
     values.map(fn(value) {
-        TypeParam {
-            name: legacy_type_parameter_name(value),
-            bounds: legacy_type_parameter_bounds(value).map(fn(bound) {
+        let bound_refs = legacy_type_parameter_bounds(value)
+        HTypeParam {
+            source: TypeParam {
+                name: legacy_type_parameter_name(value),
+                bounds: bound_refs.map(fn(bound) {
                 TypeBound {
                     trait_name: symbol_ref_canonical_payload(bound),
                     type_args: [], assoc_constraints: [], span: span_zero()
                 }
             }),
-            span: span_zero()
+                span: span_zero()
+            },
+            type_var_id: legacy_type_parameter_var_id(value),
+            bound_refs: bound_refs
         }
     })
 }
@@ -514,7 +516,8 @@ fn legacy_trait_bounds(
         TraitBound {
             type_param: legacy_type_parameter_name(parameter),
             trait_name: symbol_ref_canonical_payload(
-                legacy_trait_bound_trait(bound))
+                legacy_trait_bound_trait(bound)),
+            trait_ref: legacy_trait_bound_trait(bound)
         }
     })
 }
@@ -2089,7 +2092,7 @@ fn generated_standalone_decl(
 ) -> HDecl {
     let callable = legacy_projection_callable_for(ctx.projection, reference)
     HDecl::Fn {
-        name: executable_identity(reference), def_id: none,
+        name: executable_identity(ctx.projection, reference), def_id: none,
         executable_ref: reference, impl_method_ref: none,
         type_params: legacy_type_params(
             legacy_callable_type_parameters(callable)),
@@ -2103,17 +2106,6 @@ fn generated_standalone_decl(
         is_pub: legacy_callable_is_public(callable),
         trait_bounds: legacy_trait_bounds(callable), span: span_zero()
     }
-}
-
-fn impl_method_is_present(values: List<HDecl>, method: ImplMethodRef) -> Bool {
-    for value in values {
-        match value {
-            HDecl::Fn { impl_method_ref: some(existing), .. } => if
-                    impl_method_ref_same(existing, method) { return true },
-            _ => {}
-        }
-    }
-    false
 }
 
 fn legacy_impl_assoc_types(
@@ -2153,9 +2145,11 @@ fn generated_impl_decl(
     HDecl::Impl {
         target_type: legacy_impl_target_name(
             legacy_impl_target_type(projection)),
+        target_ty: legacy_impl_target_type(projection),
         owner_ref: owner, provider_ref: impl_owner_ref_provider(owner),
         trait_ref: legacy_impl_trait(projection),
         delegate_plan: none,
+        default_specializations: [],
         type_params: legacy_type_params(
             legacy_impl_type_parameters(projection)),
         trait_name: match legacy_impl_trait(projection) {
@@ -2215,27 +2209,51 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
             is_pub: is_pub, span: span
         },
         HDecl::Impl {
-            target_type, owner_ref, provider_ref, trait_ref,
+            target_type, target_ty, owner_ref, provider_ref, trait_ref,
             delegate_plan: ignored_delegate_plan,
+            default_specializations: ignored_default_specializations,
             type_params, trait_name, methods, assoc_types, span
         } => {
             let _ = ignored_delegate_plan
+            let _ = ignored_default_specializations
             let metadata = core_impl_for(
                 core_program_impls(ctx.stages.core), owner_ref)
-            let mut serialized = methods.map(fn(method) {
-                serialize_shell_decl(ctx, method)
-            })
+            let mut serialized: List<HDecl> = []
             for method in core_impl_methods(metadata) {
-                if !impl_method_is_present(serialized, method) &&
-                   core_has_body(ctx.stages.core, make_named_executable_ref(
-                       impl_method_ref_member(method))) {
-                    serialized.push(generated_method_decl(ctx, method))
+                let mut source: HDecl? = none
+                for candidate in methods {
+                    match candidate {
+                        HDecl::Fn {
+                            impl_method_ref: some(reference), ..
+                        } => if impl_method_ref_same(reference, method) {
+                            if source.is_some() {
+                                panic("RcHIR bridge: impl method shell repeats")
+                            }
+                            source = some(candidate)
+                        },
+                        _ => {}
+                    }
+                }
+                match source {
+                    some(candidate) => serialized.push(
+                        serialize_shell_decl(ctx, candidate)),
+                    none => {
+                        if !core_has_body(
+                                ctx.stages.core,
+                                make_named_executable_ref(
+                                    impl_method_ref_member(method))) {
+                            panic("RcHIR bridge: impl method body is absent")
+                        }
+                        serialized.push(generated_method_decl(ctx, method))
+                    }
                 }
             }
             HDecl::Impl {
-                target_type: target_type, owner_ref: owner_ref,
+                target_type: target_type, target_ty: target_ty,
+                owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
                 delegate_plan: none,
+                default_specializations: [],
                 type_params: type_params, trait_name: trait_name,
                 methods: serialized, assoc_types: assoc_types, span: span
             }
@@ -2267,7 +2285,8 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
         },
         HDecl::ExternFn {
             name, abi_name, def_id, executable_ref,
-            type_params, params, return_type, effects, is_pub, span
+            type_params, params, return_type, effects,
+            trait_bounds, is_pub, span
         } => HDecl::ExternFn {
             name: name, abi_name: abi_name, def_id: def_id,
             executable_ref: executable_ref, type_params: type_params,
@@ -2275,6 +2294,7 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
             effects: validate_legacy_effect_row(effects),
             handled_evidence_bindings: core_callable_handled_refs(
                 ctx.stages.core, executable_ref),
+            trait_bounds: trait_bounds,
             is_pub: is_pub, span: span
         },
         HDecl::Struct { .. } | HDecl::Enum { .. } |
@@ -2329,23 +2349,115 @@ fn validate_projection_against_core(
     }
 }
 
-pub fn materialize_verified_hir(
-    shell: HProgram, verified: VerifiedOwnershipProgram,
+pub struct VerifiedProjectHirShell {
+    module_key: Str,
+    shell: HProgram
+}
+pub fn make_verified_project_hir_shell(
+    module_key: Str, shell: HProgram
+) -> VerifiedProjectHirShell {
+    if module_key == "" || module_key == "$builtin" {
+        panic("RcHIR bridge: invalid project shell module key")
+    }
+    VerifiedProjectHirShell { module_key: module_key, shell: shell }
+}
+pub fn verified_project_hir_shell_module_key(
+    value: VerifiedProjectHirShell
+) -> Str { value.module_key }
+pub fn verified_project_hir_shell_program(
+    value: VerifiedProjectHirShell
+) -> HProgram { value.shell }
+
+pub struct MaterializedProjectHir {
+    module_key: Str,
+    program: HProgram
+}
+pub fn materialized_project_hir_module_key(
+    value: MaterializedProjectHir
+) -> Str { value.module_key }
+pub fn materialized_project_hir_program(
+    value: MaterializedProjectHir
+) -> HProgram { value.program }
+
+struct ProjectHirDraft {
+    module_key: Str,
+    shell: HProgram,
+    decls: List<HDecl>
+}
+
+fn project_draft_index(values: List<ProjectHirDraft>, module_key: Str) -> Int {
+    let mut found: Int? = none
+    let mut index = 0
+    for value in values {
+        if value.module_key == module_key {
+            if found.is_some() {
+                panic("RcHIR bridge: project shell module repeats")
+            }
+            found = some(index)
+        }
+        index = index + 1
+    }
+    match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: generated executable module has no shell")
+    }
+}
+
+pub fn materialize_verified_project_hir(
+    shells_in_topological_order: List<VerifiedProjectHirShell>,
+    prelude_physical_owner_module_key: Str,
+    verified: VerifiedOwnershipProgram,
     projection: LegacyProjectionTable
-) -> HProgram {
+) -> List<MaterializedProjectHir> {
+    if shells_in_topological_order.len() == 0 {
+        panic("RcHIR bridge: project has no module shells")
+    }
     let stages = validate_and_index_stages(verified)
     validate_projection_against_core(stages.core, projection)
+    let mut combined_decls: List<HDecl> = []
+    let mut shell_index = 0
+    while shell_index < shells_in_topological_order.len() {
+        let shell = shells_in_topological_order.get(shell_index).unwrap()
+        if (shell_index == 0) !=
+               (shell.module_key == prelude_physical_owner_module_key) {
+            panic("RcHIR bridge: prelude physical owner/order differs")
+        }
+        let mut prior = 0
+        while prior < shell_index {
+            if shells_in_topological_order.get(prior).unwrap().module_key ==
+                    shell.module_key {
+                panic("RcHIR bridge: project shell order repeats a module")
+            }
+            prior = prior + 1
+        }
+        for decl in shell.shell.decls { combined_decls.push(decl) }
+        shell_index = shell_index + 1
+    }
+    let lookup_shell = HProgram {
+        decls: combined_decls, derived_impls: [], boxed_vars: set_new(),
+        static_dicts: [], extern_type_names: set_new(), drop_types: set_new()
+    }
     let mut ctx = HirBridgeCtx {
-        shell: shell, stages: stages, projection: projection,
+        shell: lookup_shell, stages: stages, projection: projection,
         next_node_ordinal: 0, consumed_bodies: [], consumed_events: []
     }
-    let mut decls = shell.decls.map(fn(decl) {
-        serialize_shell_decl(ctx, decl)
-    })
+    let mut drafts: List<ProjectHirDraft> = []
+    for shell in shells_in_topological_order {
+        drafts.push(ProjectHirDraft {
+            module_key: shell.module_key, shell: shell.shell,
+            decls: shell.shell.decls.map(fn(decl) {
+                serialize_shell_decl(ctx, decl)
+            })
+        })
+    }
     for metadata in core_program_impls(stages.core) {
         let owner = core_impl_owner(metadata)
-        if !decls_have_impl_owner(decls, owner) {
-            let projected = legacy_projection_impl_for(projection, owner)
+        let projected = legacy_projection_impl_for(projection, owner)
+        let module_key = module_body_ref_origin_module_key(
+            legacy_impl_module(projected))
+        let draft_index = project_draft_index(drafts, module_key)
+        let mut draft = drafts.get(draft_index).unwrap()
+        if !decls_have_impl_owner(draft.decls, owner) {
             if !legacy_container_is_module(legacy_impl_container(projected)) {
                 panic("RcHIR bridge: generated nested impl has no shell container")
             }
@@ -2357,7 +2469,8 @@ pub fn materialize_verified_hir(
                 }
             }
             if has_body || legacy_impl_assoc_bindings(projected).len() != 0 {
-                decls.push(generated_impl_decl(ctx, metadata))
+                draft.decls.push(generated_impl_decl(ctx, metadata))
+                drafts.set(draft_index, draft)
             }
         }
     }
@@ -2367,7 +2480,12 @@ pub fn materialize_verified_hir(
             let callable = legacy_projection_callable_for(projection, reference)
             let kind = legacy_callable_kind(callable)
             if executable_kind_same(kind, executable_kind_dict_helper()) {
-                decls.push(generated_standalone_decl(ctx, reference))
+                let module_key = module_body_ref_origin_module_key(
+                    legacy_callable_module(callable))
+                let draft_index = project_draft_index(drafts, module_key)
+                let mut draft = drafts.get(draft_index).unwrap()
+                draft.decls.push(generated_standalone_decl(ctx, reference))
+                drafts.set(draft_index, draft)
                 continue
             }
             if executable_kind_same(kind, executable_kind_lambda()) ||
@@ -2385,16 +2503,34 @@ pub fn materialize_verified_hir(
        ctx.consumed_events.len() != stages.events.len() {
         panic("RcHIR bridge: executable/Core node materialization is not total")
     }
-    let result = HProgram {
-        decls: decls,
-        derived_impls: [],
-        boxed_vars: shell.boxed_vars,
-        static_dicts: shell.static_dicts,
-        extern_type_names: shell.extern_type_names,
-        drop_types: shell.drop_types
+    let mut result: List<MaterializedProjectHir> = []
+    for draft in drafts {
+        let program = HProgram {
+            decls: draft.decls, derived_impls: [],
+            boxed_vars: draft.shell.boxed_vars,
+            static_dicts: draft.shell.static_dicts,
+            extern_type_names: draft.shell.extern_type_names,
+            drop_types: draft.shell.drop_types
+        }
+        validate_hir_binder_def_ids(program)
+        result.push(MaterializedProjectHir {
+            module_key: draft.module_key, program: program
+        })
     }
-    validate_hir_binder_def_ids(result)
     result
+}
+
+pub fn materialize_verified_hir(
+    module_key: Str, shell: HProgram, verified: VerifiedOwnershipProgram,
+    projection: LegacyProjectionTable
+) -> HProgram {
+    let result = materialize_verified_project_hir(
+        [make_verified_project_hir_shell(module_key, shell)], module_key,
+        verified, projection)
+    match result.get(0) {
+        some(value) => value.program,
+        none => panic("RcHIR bridge: single project materialization is empty")
+    }
 }
 
 fn enum_variant_in_decls_opt(

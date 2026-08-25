@@ -62,8 +62,12 @@ use ir_inventory::{ExecutableRef, effect_operation_ref_same,
     HandledEvidenceRef, HandledEvidenceCapture,
     make_semantic_evidence_binder, make_handled_evidence_ref,
     make_handled_evidence_capture,
-    handled_evidence_requirement, handled_evidence_contract_owner,
-    handled_evidence_ordinal,
+    handled_evidence_requirement, handled_evidence_binding,
+    handled_evidence_contract_owner, handled_evidence_ordinal,
+    handled_evidence_ref_same,
+    handled_evidence_capture_requirement,
+    handled_evidence_capture_source, handled_evidence_capture_target,
+    binder_entry_kind, binder_kind_tag,
     binder_kind_handled_evidence_param,
     binder_kind_handled_evidence_local,
     binder_kind_handled_evidence_capture}
@@ -1578,6 +1582,7 @@ fn capture_outer_handled_evidence(
 pub fn resolve_handled_evidence(
     mut ctx: InferCtx, requirement: HandledEffectRef
 ) -> HandledEvidenceRef {
+    ensure_core_handled_evidence_type(ctx, requirement)
     let current = current_executable_owner(ctx)
     let mut frame_index = ctx.handled_evidence_frames.len() - 1
     while frame_index >= 0 {
@@ -1628,12 +1633,133 @@ pub fn resolve_handled_evidence(
     binding
 }
 
+fn callable_handled_requirements(
+    effects: EffectRow
+) -> List<HandledEffectRef> {
+    let mut result: List<HandledEffectRef> = []
+    for atom in effects.effects {
+        match atom {
+            Effect::CustomEffect { reference, .. } => {
+                if result.any(fn(existing) {
+                        handled_effect_ref_same(existing, reference)
+                    }) {
+                    panic("handled evidence: callable requirement repeats")
+                }
+                result.push(reference)
+            },
+            _ => {}
+        }
+    }
+    result
+}
+
+pub fn prepare_callable_handled_evidence(
+    mut ctx: InferCtx, declared_effects: EffectRow
+) {
+    for requirement in callable_handled_requirements(declared_effects) {
+        let _ = resolve_handled_evidence(ctx, requirement)
+    }
+}
+
+pub fn canonicalize_callable_handled_evidence(
+    mut ctx: InferCtx, final_effects: EffectRow
+) -> (List<HandledEvidenceRef>, List<HandledEvidenceRef>) {
+    let requirements = callable_handled_requirements(final_effects)
+    let existing = current_handled_evidence_bindings(ctx)
+    let current = current_executable_owner(ctx)
+    let mut sources: List<HandledEvidenceRef> = []
+    let mut targets: List<HandledEvidenceRef> = []
+    for index in 0..requirements.len() {
+        let requirement = requirements.get(index).unwrap()
+        let mut found: HandledEvidenceRef? = none
+        for value in existing {
+            if handled_effect_ref_same(
+                    handled_evidence_requirement(value), requirement) {
+                if found.is_some() {
+                    panic("handled evidence: callable requirement is ambiguous")
+                }
+                found = some(value)
+            }
+        }
+        let source = match found {
+            some(value) => value,
+            none => panic(
+                "handled evidence: final callable requirement was not produced")
+        }
+        if !executable_ref_same(
+                handled_evidence_contract_owner(source), current) {
+            panic("handled evidence: final binding owner differs")
+        }
+        let kind = binder_entry_kind(handled_evidence_binding(source))
+        let kind_tag = binder_kind_tag(kind)
+        let target = if kind_tag == binder_kind_tag(
+                binder_kind_handled_evidence_param()) {
+            make_current_handled_evidence(
+                ctx, requirement, binder_kind_handled_evidence_param(),
+                "handled-evidence-param", index, index,
+                path_role_parameter())
+        } else if kind_tag == binder_kind_tag(
+                binder_kind_handled_evidence_capture()) {
+            make_current_handled_evidence(
+                ctx, requirement, binder_kind_handled_evidence_capture(),
+                "handled-evidence-capture", index, index,
+                path_role_capture())
+        } else {
+            panic("handled evidence: callable inventory contains a local")
+        }
+        sources.push(source)
+        targets.push(target)
+    }
+
+    let capture_index = ctx.handled_evidence_captures_stack.len() - 1
+    let existing_captures = ctx.handled_evidence_captures_stack.get(
+        capture_index).unwrap()
+    let mut captures: List<HandledEvidenceCapture> = []
+    for index in 0..sources.len() {
+        let source = sources.get(index).unwrap()
+        let target = targets.get(index).unwrap()
+        if binder_kind_tag(binder_entry_kind(
+                handled_evidence_binding(source))) ==
+                binder_kind_tag(binder_kind_handled_evidence_capture()) {
+            let mut found: HandledEvidenceCapture? = none
+            for capture in existing_captures {
+                if handled_evidence_ref_same(
+                        handled_evidence_capture_target(capture), source) {
+                    if found.is_some() {
+                        panic("handled evidence: capture target repeats")
+                    }
+                    found = some(capture)
+                }
+            }
+            let capture = match found {
+                some(value) => value,
+                none => panic("handled evidence: capture relation is absent")
+            }
+            captures.push(make_handled_evidence_capture(
+                handled_evidence_capture_requirement(capture),
+                handled_evidence_capture_source(capture), target))
+        }
+    }
+    ctx.handled_evidence_captures_stack.set(capture_index, captures)
+    let binding_index = ctx.handled_evidence_bindings_stack.len() - 1
+    ctx.handled_evidence_bindings_stack.set(
+        binding_index, copy_handled_evidence_refs(targets))
+    let frame_index = ctx.handled_evidence_frame_bases.last().unwrap()
+    if ctx.handled_evidence_frames.len() != frame_index + 1 {
+        panic("handled evidence: callable finalized with an installed frame")
+    }
+    ctx.handled_evidence_frames.set(
+        frame_index, copy_handled_evidence_refs(targets))
+    (sources, targets)
+}
+
 pub fn install_handled_evidence(
     mut ctx: InferCtx, requirements: List<HandledEffectRef>
 ) -> List<HandledEvidenceRef> {
     let mut installed: List<HandledEvidenceRef> = []
     let counter_index = ctx.semantic_site_counters.len() - 1
     for requirement in requirements {
+        ensure_core_handled_evidence_type(ctx, requirement)
         if installed.any(fn(existing) {
                 handled_effect_ref_same(
                     handled_evidence_requirement(existing), requirement)
@@ -1994,6 +2120,36 @@ pub fn record_handled_evidence_type_source(
     ctx.core_handled_evidence_type_sources.push(
         make_core_handled_evidence_type_source(
             requirement, aggregate_fact, operations))
+}
+
+pub fn ensure_core_handled_evidence_type(
+    mut ctx: InferCtx, requirement: HandledEffectRef
+) {
+    for existing in ctx.core_handled_evidence_type_sources {
+        if handled_effect_ref_same(
+                core_handled_evidence_source_requirement(existing),
+                requirement) {
+            return
+        }
+    }
+    let mut found: EffectDef? = none
+    for entry in ctx.env.types.effects.entries() {
+        let def = entry.1
+        match def.handled_ref {
+            some(reference) => if handled_effect_ref_same(
+                    reference, requirement) {
+                if found.is_some() {
+                    panic("Core type producer: handled effect owner repeats")
+                }
+                found = some(def)
+            },
+            none => {}
+        }
+    }
+    match found {
+        some(def) => record_handled_evidence_type_source(ctx, def),
+        none => panic("Core type producer: handled effect owner is absent")
+    }
 }
 
 pub fn value_binding_kind(ctx: InferCtx, def_id: Int?) -> ValueBindingKind {

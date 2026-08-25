@@ -38,7 +38,7 @@ use hir::{
     HProgram, HDecl, HStmt, HExpr, HMatchArm, HEffectHandler, DictRef,
     HStringInterpPart, HLambdaCapture,
     HNominalStructFieldInit, HStructFieldInit,
-    HTraitMethod, HEffectOp, TraitBound,
+    HTraitMethod, HEffectOp, TraitBound, HTypeParam,
     HForInDestructure, HLetDestructureBinding, HPatternBinding,
     HProjectionRef, HExactCallPlan, HConstructorPlan,
     HStringInterpPlan, HDictConstructPlan,
@@ -803,6 +803,31 @@ fn exact_trait_bounds(values: List<TraitBound>) -> List<TraitBound> {
     result
 }
 
+fn exact_h_type_params(values: List<HTypeParam>) -> List<HTypeParam> {
+    let mut result: List<HTypeParam> = []
+    for value in values {
+        if value.type_var_id < 0 ||
+           value.source.bounds.len() != value.bound_refs.len() {
+            panic("PreCore closure: type parameter exact relation differs")
+        }
+        let mut index = 0
+        while index < value.bound_refs.len() {
+            let mut right = index + 1
+            while right < value.bound_refs.len() {
+                if symbol_ref_same(
+                        value.bound_refs.get(index).unwrap(),
+                        value.bound_refs.get(right).unwrap()) {
+                    panic("PreCore closure: type parameter bound repeats")
+                }
+                right = right + 1
+            }
+            index = index + 1
+        }
+        result.push(value)
+    }
+    result
+}
+
 fn close_stmt(value: HStmt) -> List<HStmt> {
     match value {
         HStmt::Let { name, name_span, def_id, ty, init, span } => [
@@ -1348,7 +1373,8 @@ fn close_decl(value: HDecl) -> HDecl {
             handled_evidence_bindings, body, is_pub, trait_bounds, span
         } => HDecl::Fn {
             name: name, def_id: def_id, executable_ref: executable_ref,
-            impl_method_ref: impl_method_ref, type_params: type_params,
+            impl_method_ref: impl_method_ref,
+            type_params: exact_h_type_params(type_params),
             params: params, return_type: return_type, effects: effects,
             handled_evidence_bindings: handled_evidence_bindings,
             body: close_expr(body), is_pub: is_pub,
@@ -1357,17 +1383,20 @@ fn close_decl(value: HDecl) -> HDecl {
         HDecl::Struct {
             name, owner_ref, type_params, fields, is_pub, span
         } => HDecl::Struct {
-            name: name, owner_ref: owner_ref, type_params: type_params,
+            name: name, owner_ref: owner_ref,
+            type_params: exact_h_type_params(type_params),
             fields: fields, is_pub: is_pub, span: span
         },
         HDecl::Enum {
             name, owner_ref, type_params, variants, is_pub, span
         } => HDecl::Enum {
-            name: name, owner_ref: owner_ref, type_params: type_params,
+            name: name, owner_ref: owner_ref,
+            type_params: exact_h_type_params(type_params),
             variants: variants, is_pub: is_pub, span: span
         },
         HDecl::Impl {
-            target_type, owner_ref, provider_ref, trait_ref, delegate_plan,
+            target_type, target_ty, owner_ref, provider_ref, trait_ref,
+            delegate_plan, default_specializations,
             type_params, trait_name, methods, assoc_types, span
         } => {
             let is_delegate = impl_provider_kind_same(
@@ -1377,10 +1406,13 @@ fn close_decl(value: HDecl) -> HDecl {
                 panic("PreCore closure: delegate provider/plan presence differs")
             }
             HDecl::Impl {
-                target_type: target_type, owner_ref: owner_ref,
+                target_type: target_type, target_ty: target_ty,
+                owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
                 delegate_plan: delegate_plan,
-                type_params: type_params, trait_name: trait_name,
+                default_specializations: default_specializations,
+                type_params: exact_h_type_params(type_params),
+                trait_name: trait_name,
                 methods: close_decl_list(methods),
                 assoc_types: assoc_types, span: span
             }
@@ -1389,7 +1421,7 @@ fn close_decl(value: HDecl) -> HDecl {
             name, owner_ref, handled_ref, type_params, ops, is_pub, span
         } => HDecl::Effect {
             name: name, owner_ref: owner_ref, handled_ref: handled_ref,
-            type_params: type_params,
+            type_params: exact_h_type_params(type_params),
             ops: ops.map(fn(op) { HEffectOp {
                 name: op.name, operation_ref: op.operation_ref,
                 params: op.params, return_type: op.return_type
@@ -1407,7 +1439,8 @@ fn close_decl(value: HDecl) -> HDecl {
             name, owner_ref, type_params, methods, supertraits,
             assoc_types, is_pub, span
         } => HDecl::Trait {
-            name: name, owner_ref: owner_ref, type_params: type_params,
+            name: name, owner_ref: owner_ref,
+            type_params: exact_h_type_params(type_params),
             methods: methods.map(fn(method) { HTraitMethod {
                 name: method.name, method_ref: method.method_ref,
                 params: method.params, return_type: method.return_type,
@@ -1426,7 +1459,8 @@ fn close_decl(value: HDecl) -> HDecl {
             trait_bounds, is_pub, span
         } => HDecl::ExternFn {
             name: name, abi_name: abi_name, def_id: def_id,
-            executable_ref: executable_ref, type_params: type_params,
+            executable_ref: executable_ref,
+            type_params: exact_h_type_params(type_params),
             params: params, return_type: return_type, effects: effects,
             handled_evidence_bindings: handled_evidence_bindings,
             trait_bounds: exact_trait_bounds(trait_bounds),
@@ -1434,7 +1468,7 @@ fn close_decl(value: HDecl) -> HDecl {
         },
         HDecl::ExternType { name, type_params, is_pub, span } =>
             HDecl::ExternType {
-                name: name, type_params: type_params,
+                name: name, type_params: exact_h_type_params(type_params),
                 is_pub: is_pub, span: span
             },
         HDecl::TypeAlias { name, ty, is_pub, span } => HDecl::TypeAlias {

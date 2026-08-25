@@ -66,14 +66,17 @@ fn al_decl(d: HDecl) -> HDecl {
                 handled_evidence_bindings: handled_evidence_bindings,
                 body: al_expr(body),
                 is_pub: is_pub, trait_bounds: trait_bounds, span: span },
-        HDecl::Impl { target_type, owner_ref, provider_ref, trait_ref,
-                      delegate_plan, type_params, trait_name, methods,
+        HDecl::Impl { target_type, target_ty, owner_ref, provider_ref, trait_ref,
+                      delegate_plan, default_specializations,
+                      type_params, trait_name, methods,
                       assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
             for m in methods { new_methods.push(al_decl(m)) }
-            HDecl::Impl { target_type: target_type, owner_ref: owner_ref,
+            HDecl::Impl { target_type: target_type, target_ty: target_ty,
+                owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
                 delegate_plan: delegate_plan,
+                default_specializations: default_specializations,
                 type_params: type_params, trait_name: trait_name,
                 methods: new_methods, assoc_types: assoc_types, span: span }
         },
@@ -129,11 +132,12 @@ fn al_decl(d: HDecl) -> HDecl {
             }
             HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
-        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, handled_evidence_bindings, is_pub, span } =>
+        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, handled_evidence_bindings, trait_bounds, is_pub, span } =>
             HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id,
                 executable_ref: executable_ref, type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
                 handled_evidence_bindings: handled_evidence_bindings,
+                trait_bounds: trait_bounds,
                 is_pub: is_pub, span: span },
         HDecl::ExternType { name, type_params, is_pub, span } =>
             HDecl::ExternType { name: name, type_params: type_params, is_pub: is_pub, span: span },

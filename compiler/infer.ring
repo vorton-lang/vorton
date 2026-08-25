@@ -26,7 +26,8 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HForInDestructure, HLetDestructureBinding, ValueBindingKind,
     trait_bound_param_name,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET, BUILTIN_OPTION,
-    hexpr_type, hexpr_effects, hexpr_span, map_index_helper_identity}
+    hexpr_type, hexpr_effects, hexpr_span, map_index_helper_identity,
+    remap_hir_handled_evidence}
 use diagnostics::{DiagnosticContext, DiagnosticNote, CollectingSink, Severity, make_diag}
 use codes::{E0201, E0203, E0206, E0301, E0303, E0304, E0305, E0306,
     E0307, E0308, E0309, E0402, E0411, E0503, E0601, E0705, W0001}
@@ -57,6 +58,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     uninstall_handled_evidence,
     current_handled_evidence_bindings,
     current_handled_evidence_captures,
+    canonicalize_callable_handled_evidence,
     executable_capture_slot, fresh_semantic_path,
     fresh_semantic_let_binder, semantic_for_binder,
     semantic_destructure_binder}
@@ -3776,9 +3778,14 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     none => {}
                 }
             }
+            let handler_effects = apply_subst_row(s, hbr.effects)
+            let evidence_remap = canonicalize_callable_handled_evidence(
+                ctx, handler_effects)
+            let handler_body = remap_hir_handled_evidence(
+                hbr.hexpr, evidence_remap.0, evidence_remap.1)
             let mut handler_captures: List<HLambdaCapture> = []
             collect_lambda_capture_expr(
-                ctx, hbr.hexpr, ctx.lambda_depth,
+                ctx, handler_body, ctx.lambda_depth,
                 handler_executable, handler_captures)
             hhandlers.push(HEffectHandler {
                 effect_name: canonical_effect_name,
@@ -3798,7 +3805,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     current_handled_evidence_captures(ctx),
                 op_name: handler.op_name,
                 params: hparams, resume_binding: resume_binding,
-                body: hbr.hexpr
+                body: handler_body
             })
             handled_effects.insert(canonical_effect_name)
             match handler_handled_ref {
@@ -4133,9 +4140,13 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                 final_hparams.push(HParam { name: hp.name, ty: apply_subst(s, hp.ty), def_id: hp.def_id, is_mutable: hp.is_mutable })
             }
 
+            let evidence_remap = canonicalize_callable_handled_evidence(
+                ctx, body_r.effects)
+            let lambda_body = remap_hir_handled_evidence(
+                body_r.hexpr, evidence_remap.0, evidence_remap.1)
             let mut captures: List<HLambdaCapture> = []
             collect_lambda_capture_expr(
-                ctx, body_r.hexpr, exact_lambda_depth,
+                ctx, lambda_body, exact_lambda_depth,
                 lambda_executable, captures)
             let handled_evidence_bindings =
                 current_handled_evidence_bindings(ctx)
@@ -4151,7 +4162,8 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                         handled_evidence_bindings,
                     evidence_captures: evidence_captures,
                     return_type: applied_ret,
-                    body: body_r.hexpr, ty: fn_type, effects: EMPTY_ROW, span: span
+                    body: lambda_body, ty: fn_type,
+                    effects: EMPTY_ROW, span: span
                 },
                 subst: s, effects: EMPTY_ROW
             }
