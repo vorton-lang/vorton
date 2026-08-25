@@ -455,7 +455,7 @@ Ring 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2�
 
 #### 运算符重载（2026-05-24 决策）
 
-通过 trait 实现。算术（`Add/Sub/Mul/Div/Rem/Neg`）、比较（`Eq/Ord`，`Ord: Eq`）、位运算（`BitAnd/BitOr/BitXor/BitNot/Shl/Shr`）、索引（`Index/IndexMut`）。不支持跨类型运算。14 个数值类型各自 impl 全套 trait（编译器内置）。
+通过 trait 实现。算术（`Add/Sub/Mul/Div/Rem/Neg`）、比较（`Eq/Ord`，`Ord: Eq`）、位运算（`BitAnd/BitOr/BitXor/BitNot/Shl/Shr`）与索引读取（`Index`）。不支持跨类型运算。14 个数值类型各自 impl 全套 trait（编译器内置）。0.1 不支持 `IndexMut` 或 `x[i] = value`；容器 mutation 使用具名方法，完整 index-assignment 语义仅由 post-0.1 B-202 在真实 consumer 下重新设计。
 
 #### 尾调用优化（2026-05-24 决策）
 
@@ -1290,7 +1290,8 @@ print(ys)               // ❌ 编译错误：ys 在 xs mutation 后失效
 7. **不跨函数追踪**，不需要 lifetime 标注
 
 **mutation 判定（自底向上，完备要求）**：
-- **赋值** = mutation：字段赋值（`x.field = val`）、index 赋值（`x[i] = val`）
+- **赋值** = mutation：binding 重赋值与字段赋值（`x.field = val`）。0.1 的 index expression 只读；`x[i] = val` 与 compound index assignment 稳定拒绝，不隐式改写成 setter
+- **容器 mutation**：使用显式 mutator，例如 `xs.set(i, value)` 与 `map.insert(key, value)`；这些方法的 `mut self` / callable resource contract 是唯一 mutation authority，不能由赋值语法或后端名称表重建
 - **用户函数**：编译器分析函数体——若函数体 mutates 参数，该参数推断为 `mut T`，该调用即 mutation
 - **extern fn**：必须在声明时显式标注 `mut`（§7.3）——未标注 = 只读
 - **完备性要求**：别名追踪系统上线时 mutation 判定必须覆盖所有路径（赋值 + 推断 + FFI 标注），不接受渐进白名单。否则会出现漏报导致运行时 UAF——与 Rust 对 `&mut` 的要求同等严格

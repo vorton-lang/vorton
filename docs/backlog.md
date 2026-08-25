@@ -13,9 +13,9 @@
 
 **未发布期 clean-break 原则（2026-08-07 用户拍板）**：首次公开 preview/release 之前，一项公开语法、API、ABI 或语义变更一旦按授权边界拍板，就采用最简单的原子切换；兼容性本身不是增加 deprecated alias、双实现路径、旧 ABI fallback 或迁移 shim 的理由。仓内调用点、规范和测试在同一变更中整体迁移，并明确记录 break。此原则不授权降低 correctness、ownership/safety 或测试门槛，也不替代新语义本身的用户保留决定；首次公开发布后的版本兼容政策另行建立。
 
-**近期 break 审核门**：任何修改公开语法、签名、ABI 或可观察语义的 item，在实现前必须标成“已拍板 clean break”“等待 decision dossier”或“仅内部、非 breaking”之一。已拍板的 #268/#269 ownership 真值、B-167 调用点 evidence与B-193~B-196的0.1 surface/effect边界均采用一次性切换；旧 ownership、default evidence、宽泛`io`/host fallback、effectful Drop与refinement placeholder必须在各自原子变更中删除，不形成双轨。B-168/B-169 的探针结论，以及 B-152、B-156、B-171、B-133 等潜在用户面变化在进入实现前仍显式核对 break 边界。每个已拍板 break 的验收都必须列出被删除的旧路径、同步迁移的仓内消费者/规范/测试，并用负例证明旧形式不会经 alias、fallback 或旧 ABI 继续生效。
+**近期 break 审核门**：任何修改公开语法、签名、ABI 或可观察语义的 item，在实现前必须标成“已拍板 clean break”“等待 decision dossier”或“仅内部、非 breaking”之一。已拍板的 #268/#269 ownership 真值、B-167 调用点 evidence、0.1 no-index-assignment 与 B-193~B-196 surface/effect边界均采用一次性切换；旧 ownership、default evidence、宽泛`io`/host fallback、effectful Drop、index-assignment carrier与refinement placeholder必须在各自原子变更中删除，不形成双轨。B-168/B-169 的探针结论，以及 B-152、B-156、B-171、B-133 等潜在用户面变化在进入实现前仍显式核对 break 边界。每个已拍板 break 的验收都必须列出被删除的旧路径、同步迁移的仓内消费者/规范/测试，并用负例证明旧形式不会经 alias、fallback 或旧 ABI 继续生效。
 
-Canonical dependency chain：`#268/#269 -> B-176/B-180 -> B-190 -> B-193/B-194/B-195/B-196 -> remaining correctness/ABI -> B-183 -> B-191 -> B-174/B-177/B-175 -> post-0.1 B-072/B-197/B-198`。
+Canonical dependency chain：`#268/#269 -> B-176/B-180 -> B-190 -> B-193/B-194/B-195/B-196 -> remaining correctness/ABI -> B-183 -> B-191 -> B-174/B-177/B-175 -> post-0.1 B-072/B-197/B-198/B-202`。
 
 B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（check/test/bootstrap 全绿）完成；worktree/ref/WIP、authority、paired-session、push/CI 与 health 约束已转为 `docs/workflow.md` / `docs/repository-health.json` 的持续门，活动历史只留 Git。
 `B-176` 保持 queued；B-180 只保留 runner anchor-object cache，compiler lane 继续冻结到 #268/#269 fixed point 闭环。
@@ -55,11 +55,13 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **0.1 file capability / allocation-effect boundary（2026-08-23 用户批准）**：文件是隐式模块，B-156新增唯一第一项`requires {effects}` header并复用inline-module capability checker；无header不隐式授权unsafe，extern声明要求有效requires集合含unsafe，拒绝逐声明`unsafe extern fn`第二语法。0.1不建立`AllocEffect`、OOM profile或占位carrier；现有unsafe `alloc<T>()` raw-memory intrinsic不变，分配可见性只在post-0.1出现真实no-heap/real-time/embedded consumer后重新Argument，不为它预建backlog item。
 
+> **0.1 no-index-assignment clean break（2026-08-26 用户批准）**：`x[i]` 只作读取；`x[i] = value`及compound index assignment稳定hard-fail并建议具名mutator，绝不按receiver类型隐式改写setter。List使用`set(mut self, index, value)`，Map使用既有`insert(mut self, key, value)`；0.1删除assignment-only Core/Flow/Planner/bridge `IndexPlace` carrier，不保留fallback或未来hook。完整`IndexMut`/嵌套index place由B-202仅在首次0.1后、存在真实consumer时重新设计，当前实现/review/验收视其为不存在。
+
 3. **B-176/B-180 反馈速度**：在 post-ownership 最新 main 重做 baseline；runner 与 compiler 分 checkpoint，但原 2x 量化验收不变。compiler 只允许一个 profile-guided wave。
 4. **B-190 全仓简化**：B-180完成并吸收B-187文档盘点后，以固定snapshot做一次有界过度设计复核与减法refactor；不做rewrite-for-perfection。
 5. **0.1 surface + Remaining correctness / ABI freeze**：先原子关闭 B-193/B-194/B-195/B-196；随后处理 B-162、B-164、#263、#264、#239、#244、#267、#257，再走 B-168 → B-169 → B-167 → B-152 → B-002，并完成 unsafe/Str 等 candidate gate。B-168/B-169只消费system/handled分域后的契约，不再设计root evidence。
 6. **B-183 repository identity / GitHub workflow**：放在 technical ABI/ownership/failure fixed point 之后、产品化之前；不再晚于 B-174 才处理。
-7. **Preview candidate**：B-191 clean-break 删除 `T?` → B-174 → B-177 → B-175；随后 B-181、B-178/B-016、B-111 等证据与工具面按依赖推进。B-072/B-197/B-198只在0.1后按真实consumer与既有优先级重启。
+7. **Preview candidate**：B-191 clean-break 删除 `T?` → B-174 → B-177 → B-175；随后 B-181、B-178/B-016、B-111 等证据与工具面按依赖推进。B-072/B-197/B-198/B-202只在0.1后按真实consumer与既有优先级重启。
 
 B-180 不得以早期 developer-unblock checkpoint 绕过 #268/#269 final fixed point；其已证明的 runner anchor-object cache 可保留，所有 compiler candidates 冻结。B-176 只有在最新 main 可重放完整 baseline 后才算完成。
 
@@ -112,11 +114,11 @@ Phase 1 的 scope-end Drop、move checker 和 drop glue 已完成；稳定语义
 **前置**：B-002（Drop/RAII，提供 Drop 类型信息用于 share vs move 分叉判定）+ NLL 设计探针
 
 **涉及修改**：
-1. **checker：mutation 推断（自底向上）**——分析函数体：赋值字段/index = mutation；调用 mutating 方法 = mutation（递归：callee 的参数已推断 mut → caller 该调用是 mutation）。推断结果标记参数为 `mut T`。extern fn 从声明读取 `mut` 标注
+1. **checker：mutation 推断（自底向上）**——分析函数体：binding/字段赋值 = mutation；调用 mutating 方法 = mutation（递归：callee 的参数已推断 mut → caller 该调用是 mutation）。0.1 index assignment已删除，List/Map mutation只通过显式`mut self` mutator进入本分析。推断结果标记参数为 `mut T`。extern fn 从声明读取 `mut` 标注
 2. **checker：别名追踪 pass（§7.4）**——`let y = x`（非 Drop 复合类型）建立别名关系；对 x 的 mutation 使 y 失效；失效后使用 y = 编译错误（E07xx，`--error-format=llm` 含 `.clone()` 修复建议）。别名生存期到大括号结束，编译器可隐式缩小到最后使用点（NLL）
 3. **调用点检查**——callee 参数推断为 `mut T` 时，caller 实参不能有其他活跃别名
 4. **测试**：别名失效 E2E + mutation 推断 + `.clone()` 独立性 + 编译器自身零错误
-5. **嵌套赋值 codegen 缺口**：`grid[0][1] = v` 必须在当前 C lane 重新复现；实现正确 lowering，做不到时给出显式诊断，禁止生成坏代码或 panic
+5. **赋值边界**：binding/字段赋值必须覆盖mutation与alias失效；`grid[0][1] = v`等index assignment在0.1稳定hard-fail并由B-202 deferred，不进入本项的IR/codegen范围
 
 **编译器自身迁移**：新模型下非 Drop 类型不 move，编译器现有的 `let y = x` 共享模式天然合规——无需大规模迁移。可能需要修复的只有 mutation-after-alias 站点（预期少量）。首步跑 checker 统计错误数。
 
@@ -913,6 +915,14 @@ async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评�
 - 22项builtin method逐项核对public签名、effect、method resolution、generated-C call target与native行为；single/project/prelude/re-export输入一致。缺tag、重复tag、错signature、错runtime target及任何name/span fallback mutation全部fail loud。
 - 活动compiler/std/examples除专用负例外无impl-member extern，backend无`method_to_runtime_c`或等价`(type-name, method-name)`映射；Core closure validator拒绝backend-only executable/intrinsic。
 - 与current aggregate固定SHA一起通过独立review、fresh source-built targeted matrix、deep-Clone scoped delta外的行为/parity门、12GiB fixed point、standard full、targeted ASan、self-host与exact CI；不得用既有sealed packet拼接acceptance。
+
+### B-202 Post-0.1 `IndexMut` / index assignment 重新设计 [feature] [P3] [M] [judgment] [queued] [after: B-175] [deferred: post-0.1-release+real-consumer]
+
+> **2026-08-26 用户决定**：0.1 clean break禁用`x[i] = value`及compound index assignment，只保留index读取与具名mutator；当前IR不为本项保留`IndexPlace`、setter fallback或validator hook。首次0.1后只有真实List/Map/用户类型consumer证明具名方法不足时才重启。
+
+**研究范围**：比较完整`IndexMut` trait、少数内建容器专属语法与继续使用显式mutator；固定List越界、Map缺key时replace-vs-insert、Str不可变、用户类型coherence、`grid[0][1]`嵌套place、求值顺序、`mut self`/alias失效、exact projection与Drop-old/Take-new资源契约。禁止用receiver leaf/name表把赋值偷偷改写成`set`/`insert`。
+
+**进入 / 验收门**：至少一个首次0.1后的真实consumer及用户decision dossier；获批后必须给出唯一ResolvedAST→TypedHIR→CoreHIR place authority、Flow/RcIR exact projected overwrite、single/project与正反例矩阵。获批前parser/checker稳定给可修hard error，仓库只依赖`List.set(mut self, ...)`、`Map.insert(mut self, ...)`等显式API。
 
 ## 基础设施
 
