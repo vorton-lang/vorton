@@ -412,31 +412,40 @@ pub fn h_projection_intrinsic(value: HProjectionRef) -> IntrinsicRef {
 
 pub struct HExactCallPlan {
     callee: CalleeRef,
+    signature: Type,
     method: MethodCallRef?,
     evidence: List<DictRef>,
     handled_evidence: List<HandledEvidenceRef>
 }
 pub fn make_h_exact_call_plan(
-    callee: CalleeRef, method: MethodCallRef?, evidence: List<DictRef>,
-    handled_evidence: List<HandledEvidenceRef>
+    callee: CalleeRef, signature: Type, method: MethodCallRef?,
+    evidence: List<DictRef>, handled_evidence: List<HandledEvidenceRef>
 ) -> HExactCallPlan {
+    match signature {
+        Type::FnType { .. } => {},
+        _ => panic("HIR exact call plan: signature is not callable")
+    }
     match method {
         some(exact) => {
             if !callee_ref_is_named(callee) ||
                !symbol_ref_same(
                     callee_ref_named_symbol(callee),
-                    method_call_ref_named_symbol(exact)) {
-                panic("HIR exact call plan: method/callee identity differs")
+                    method_call_ref_named_symbol(exact)) ||
+               !types_equal(signature, method_call_ref_signature(exact)) {
+                panic("HIR exact call plan: method contract differs")
             }
         },
         none => {}
     }
-    HExactCallPlan { callee: callee, method: method,
+    HExactCallPlan { callee: callee, signature: signature, method: method,
         evidence: evidence.map(fn(value) { value }),
         handled_evidence: handled_evidence.map(fn(value) { value }) }
 }
 pub fn h_exact_call_callee(value: HExactCallPlan) -> CalleeRef {
     value.callee
+}
+pub fn h_exact_call_signature(value: HExactCallPlan) -> Type {
+    value.signature
 }
 pub fn h_exact_call_method(value: HExactCallPlan) -> MethodCallRef? {
     value.method
@@ -486,7 +495,7 @@ pub fn remap_h_exact_call_handled_evidence(
     targets: List<HandledEvidenceRef>
 ) -> HExactCallPlan {
     make_h_exact_call_plan(
-        value.callee, value.method, value.evidence,
+        value.callee, value.signature, value.method, value.evidence,
         remap_h_handled_evidence_refs(
             value.handled_evidence, sources, targets))
 }

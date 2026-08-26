@@ -46,7 +46,8 @@ use hir::{
     HPatternPlan, HPatternFieldPlan, HForInPlan,
     HFieldAccessKind,
     make_h_exact_call_plan,
-    h_exact_call_callee, h_exact_call_method, h_exact_call_evidence,
+    h_exact_call_callee, h_exact_call_signature,
+    h_exact_call_method, h_exact_call_evidence,
     h_exact_call_handled_evidence,
     h_constructor_kind, h_constructor_executable,
     h_constructor_fields, h_constructor_tuple_arity,
@@ -70,7 +71,7 @@ use hir::{
     h_projection_intrinsic,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_intrinsic, method_call_ref_impl,
-    method_call_ref_bound, method_call_ref_signature,
+    method_call_ref_bound,
     hexpr_type, hexpr_effects, hexpr_span,
     validate_hir_binder_def_ids
 }
@@ -149,11 +150,8 @@ fn exact_method_symbol(plan: HExactCallPlan) -> SymbolRef {
     }
 }
 
-fn exact_method_signature(plan: HExactCallPlan) -> Type {
-    match h_exact_call_method(plan) {
-        some(method) => method_call_ref_signature(method),
-        none => panic("PreCore closure: exact method signature is absent")
-    }
+fn exact_plan_signature(plan: HExactCallPlan) -> Type {
+    h_exact_call_signature(plan)
 }
 
 fn fn_result_type(value: Type) -> Type {
@@ -198,14 +196,14 @@ fn exact_call(
     call_effects: EffectRow, span: Span
 ) -> HExpr {
     let callee_ref = h_exact_call_callee(plan)
+    let signature = h_exact_call_signature(plan)
+    if !types_equal(fn_result_type(signature), result_type) {
+        panic("PreCore closure: exact call/result type differs")
+    }
     match h_exact_call_method(plan) {
         some(method) => {
             if arguments.len() == 0 {
                 panic("PreCore closure: method call has no receiver")
-            }
-            let signature = method_call_ref_signature(method)
-            if !types_equal(fn_result_type(signature), result_type) {
-                panic("PreCore closure: exact method/result type differs")
             }
             let receiver = arguments.get(0).unwrap()
             let mut params: List<HExpr> = []
@@ -232,10 +230,6 @@ fn exact_call(
             }
         },
         none => {
-            let signature = Type::FnType {
-                params: expression_types(arguments),
-                return_type: result_type, effects: call_effects
-            }
             HExpr::Call {
                 callee: diagnostic_callee(callee_ref, signature, span),
                 args: arguments, type_args: [],
@@ -250,7 +244,7 @@ fn exact_call(
 }
 
 fn executable_call(
-    executable: ExecutableRef, arguments: List<HExpr>,
+    executable: ExecutableRef, signature: Type, arguments: List<HExpr>,
     evidence: List<DictRef>, result_type: Type,
     effects: EffectRow, span: Span
 ) -> HExpr {
@@ -260,7 +254,7 @@ fn executable_call(
         make_dynamic_callee_ref(executable_ref_anonymous_path(executable))
     }
     exact_call(
-        make_h_exact_call_plan(callee, none, evidence, []),
+        make_h_exact_call_plan(callee, signature, none, evidence, []),
         arguments, result_type, effects, span)
 }
 
@@ -549,7 +543,10 @@ fn executable_constructor_expr(
         panic("PreCore closure: constructor field/value census differs")
     }
     executable_call(
-        h_constructor_executable(plan), values, [], ty, effects, span)
+        h_constructor_executable(plan), Type::FnType {
+            params: expression_types(values), return_type: ty,
+            effects: EMPTY_ROW
+        }, values, [], ty, effects, span)
 }
 
 fn close_string_interp(
@@ -559,7 +556,7 @@ fn close_string_interp(
     let builder_binder = h_string_interp_builder_binder(plan)
     let append_literal = h_string_interp_append_literal(plan)
     let append_value = h_string_interp_append_value(plan)
-    let append_signature = exact_method_signature(append_literal)
+    let append_signature = exact_plan_signature(append_literal)
     let append_params = fn_parameter_types(append_signature)
     if append_params.len() < 1 {
         panic("PreCore closure: interpolation append has no receiver type")
@@ -590,7 +587,7 @@ fn close_string_interp(
                 expression_index = expression_index + 1
                 let conversion_effects = merge_effect_rows(
                     hexpr_effects(closed), fn_effects(
-                        exact_method_signature(conversion)))
+                        exact_plan_signature(conversion)))
                 (exact_call(
                     conversion, [closed], Type::StrType,
                     conversion_effects, span), append_value)
@@ -600,7 +597,7 @@ fn close_string_interp(
             builder_name, builder_binder, builder_type, span)
         let append_effects = merge_effect_rows(
             expression_list_effects([builder_read, text]),
-            fn_effects(exact_method_signature(append_plan)))
+            fn_effects(exact_plan_signature(append_plan)))
         statements.push(HStmt::ExprStmt {
             expr: exact_call(
                 append_plan, [builder_read, text], Type::UnitType,
@@ -615,7 +612,7 @@ fn close_string_interp(
     let finish_expr = exact_call(
         finish,
         [binder_ident(builder_name, builder_binder, builder_type, span)],
-        ty, fn_effects(exact_method_signature(finish)), span)
+        ty, fn_effects(exact_plan_signature(finish)), span)
     HExpr::Block {
         stmts: statements, tail: some(finish_expr),
         ty: ty, effects: effects, span: span
@@ -669,7 +666,7 @@ fn prepend_statements(
 fn exact_binder_type_from_method(
     plan: HExactCallPlan, parameter_index: Int?, use_result: Bool
 ) -> Type {
-    let signature = exact_method_signature(plan)
+    let signature = exact_plan_signature(plan)
     if use_result { return fn_result_type(signature) }
     let index = match parameter_index {
         some(value) => value,
@@ -703,16 +700,16 @@ fn close_for_in(
     let iterator_init = exact_call(
         iter_plan, [closed_iterable], iterator_type,
         merge_effect_rows(hexpr_effects(closed_iterable),
-            fn_effects(exact_method_signature(iter_plan))), span)
+            fn_effects(exact_plan_signature(iter_plan))), span)
     let iterator_read = binder_ident(
         iterator_name, iterator_binder, iterator_type, span)
     let condition = exact_call(
         has_next_plan, [iterator_read], Type::BoolType,
-        fn_effects(exact_method_signature(has_next_plan)), span)
+        fn_effects(exact_plan_signature(has_next_plan)), span)
     let item_init = exact_call(
         next_plan,
         [binder_ident(iterator_name, iterator_binder, iterator_type, span)],
-        item_type, fn_effects(exact_method_signature(next_plan)), span)
+        item_type, fn_effects(exact_plan_signature(next_plan)), span)
     let binding_init = binder_ident(item_name, item_binder, item_type, span)
     let mut prefix: List<HStmt> = [
         binder_let(item_name, item_binder, item_type, item_init, span),
@@ -1386,7 +1383,9 @@ fn close_expr(value: HExpr) -> HExpr {
                 make_exact_wrapped_dict_ref(
                     h_dict_construct_base(exact), exact_inner))
             executable_call(
-                h_dict_construct_executable(exact), [], [wrapped],
+                h_dict_construct_executable(exact), Type::FnType {
+                    params: [], return_type: ty, effects: EMPTY_ROW
+                }, [], [wrapped],
                 ty, effects, span)
         },
         HExpr::Clone { .. } =>

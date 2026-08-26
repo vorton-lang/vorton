@@ -52,7 +52,8 @@ pub use hir_exact::{
     h_variant_projection, h_structural_projection, h_tuple_projection, h_intrinsic_projection,
     h_projection_kind, h_projection_nominal, h_projection_variant, h_projection_structural,
     h_projection_structural_name, h_projection_tuple_index, h_projection_intrinsic, HExactCallPlan,
-    make_h_exact_call_plan, h_exact_call_callee, h_exact_call_method,
+    make_h_exact_call_plan, h_exact_call_callee, h_exact_call_signature,
+    h_exact_call_method,
     h_exact_call_evidence, h_exact_call_handled_evidence,
     remap_h_handled_evidence_ref, remap_h_handled_evidence_refs,
     remap_h_exact_call_handled_evidence,
@@ -752,7 +753,6 @@ pub struct DerivedTextVariant {
 pub struct DerivedTextPlan {
     pub builder_binder: BinderEntry,
     pub builder: HExactCallPlan,
-    pub builder_signature: Type,
     pub append: HExactCallPlan,
     pub finish: HExactCallPlan,
     pub struct_sequence: DerivedTextSequence?,
@@ -798,8 +798,7 @@ pub struct DerivedMethod {
 }
 
 pub struct DerivedDirectCall {
-    pub plan: HExactCallPlan,
-    pub signature: Type
+    pub plan: HExactCallPlan
 }
 
 pub struct DerivedImpl {

@@ -1049,7 +1049,8 @@ fn check_impl_decl_canonical(
                                 make_named_callee_ref(
                                     trait_method_ref_member(
                                         trait_method.method_ref)),
-                                none, dict_evidence, handled_uses)))
+                                signature, none,
+                                dict_evidence, handled_uses)))
                 }
             }
         },

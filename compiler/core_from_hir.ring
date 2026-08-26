@@ -201,7 +201,7 @@ use hir::{
     h_default_specialization_result_type,
     h_default_specialization_effects,
     h_default_specialization_forward_call,
-    h_exact_call_callee, h_exact_call_method,
+    h_exact_call_callee, h_exact_call_signature, h_exact_call_method,
     h_exact_call_evidence, h_exact_call_handled_evidence,
     derived_semantic_kind_tag, DERIVED_HASH_SEED,
     validate_hir_binder_def_ids
@@ -4127,6 +4127,10 @@ fn append_default_specialization(
         return_type: h_default_specialization_result_type(plan),
         effects: h_default_specialization_effects(plan)
     }
+    let forward_signature = h_exact_call_signature(forward)
+    if !types_equal(signature, forward_signature) {
+        panic("Core assembly: default forward signature differs")
+    }
     let call_ctx = LowerCtx {
         module_key: facts.module_key, owner: reference,
         effect_parameters: facts.effect_parameters,
@@ -4138,7 +4142,7 @@ fn append_default_specialization(
         diagnostic_origins: []
     }
     let callee = core_callee(
-        call_ctx, h_exact_call_callee(forward), signature)
+        call_ctx, h_exact_call_callee(forward), forward_signature)
     let arguments = parameter_slots.map(fn(slot) {
         let mut found: CoreTypeRef? = none
         for binder in binders {
@@ -4256,8 +4260,9 @@ fn derived_call_plan_from_method(
 
 fn derived_call_plan_from_exact(
     facts: FrozenCoreAssemblyFacts, owner: ExecutableRef,
-    exact: HExactCallPlan, signature: Type, origin: OriginRef
+    exact: HExactCallPlan, origin: OriginRef
 ) -> CoreDerivedCallPlan {
+    let signature = h_exact_call_signature(exact)
     let (parameters, result, effects) = match signature {
         Type::FnType { params, return_type, effects } =>
             (params, return_type, effects),
@@ -4638,8 +4643,7 @@ fn elaborate_derived_non_text(
     if semantic_tag == 2 {
         let mix = match derived.hash_mix {
             some(value) => derived_call_plan_from_exact(
-                facts, method.executable_ref, value.plan,
-                value.signature, origin),
+                facts, method.executable_ref, value.plan, origin),
             none => panic("Core assembly: derived Hash mix is absent")
         }
         let shape = match derived.type_kind {
@@ -4688,13 +4692,6 @@ fn elaborate_derived_non_text(
         })
     }
     panic("Core assembly: text derive reached non-text elaborator")
-}
-
-fn exact_call_signature(exact: HExactCallPlan) -> Type {
-    match h_exact_call_method(exact) {
-        some(method) => method_call_ref_signature(method),
-        none => panic("Core assembly: direct exact call lacks signature")
-    }
 }
 
 fn derived_field_ref_same(left: DerivedFieldRef, right: DerivedFieldRef) -> Bool {
@@ -4890,10 +4887,9 @@ fn elaborate_derived_text(
     let string_type = type_fact_for(
         facts.type_sources, result_source, facts.module_key)
     let origin = executable_origin(method.executable_ref)
-    let builder_signature = text.builder_signature
+    let builder_signature = h_exact_call_signature(text.builder)
     let builder_call = derived_call_plan_from_exact(
-        facts, method.executable_ref, text.builder,
-        builder_signature, origin)
+        facts, method.executable_ref, text.builder, origin)
     let builder_type = match builder_signature {
         Type::FnType { return_type, .. } => type_fact_for(
             facts.type_sources, return_type, facts.module_key),
@@ -4902,18 +4898,16 @@ fn elaborate_derived_text(
     let builder_binder = core_binder_from_entry(
         facts, text.builder_binder, builder_type)
     append_unique_core_binder(binders, builder_binder)
-    let append_signature = exact_call_signature(text.append)
+    let append_signature = h_exact_call_signature(text.append)
     let append_call = derived_call_plan_from_exact(
-        facts, method.executable_ref, text.append,
-        append_signature, origin)
+        facts, method.executable_ref, text.append, origin)
     let unit_type = match append_signature {
         Type::FnType { return_type, .. } => type_fact_for(
             facts.type_sources, return_type, facts.module_key),
         _ => panic("Core assembly: text append is not callable")
     }
     let finish_call = derived_call_plan_from_exact(
-        facts, method.executable_ref, text.finish,
-        exact_call_signature(text.finish), origin)
+        facts, method.executable_ref, text.finish, origin)
     let header = make_core_derived_header(
         method.executable_ref, origin, binders, slots, string_type,
         slots.get(0).unwrap(), none, origin,

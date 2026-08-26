@@ -23,6 +23,7 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     MethodCallRef, make_intrinsic_method_call_ref,
     make_concrete_method_call_ref, make_bound_method_call_ref,
     method_call_ref_is_bound, method_call_ref_bound_evidence,
+    method_call_ref_signature,
     h_operator_is_tuple, h_operator_elements, h_operator_method_ref,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod,
     HForInDestructure, HLetDestructureBinding, ValueBindingKind,
@@ -966,11 +967,20 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             }
             let range_plan = make_h_for_in_plan(
                 make_h_exact_call_plan(make_named_callee_ref(
-                    builtin_range_iter_symbol()), none, [], []),
+                    builtin_range_iter_symbol()), Type::FnType {
+                        params: [iter_type], return_type: iter_type,
+                        effects: EMPTY_ROW
+                    }, none, [], []),
                 make_h_exact_call_plan(make_named_callee_ref(
-                    builtin_range_has_next_symbol()), none, [], []),
+                    builtin_range_has_next_symbol()), Type::FnType {
+                        params: [iter_type], return_type: BOOL,
+                        effects: EMPTY_ROW
+                    }, none, [], []),
                 make_h_exact_call_plan(make_named_callee_ref(
-                    builtin_range_next_symbol()), none, [], []),
+                    builtin_range_next_symbol()), Type::FnType {
+                        params: [iter_type], return_type: element_type,
+                        effects: EMPTY_ROW
+                    }, none, [], []),
                 fresh_semantic_let_binder(ctx, "range-iterator"),
                 fresh_semantic_let_binder(ctx, "range-item"),
                 binding_binder, destructure_binders)
@@ -1621,7 +1631,11 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 result_ty = if type_params.len() > 0 { type_params.get(0).unwrap() } else { Type::ErrorType }
                 let symbol = builtin_list_index_symbol()
                 index_call_plan = some(make_h_exact_call_plan(
-                    make_named_callee_ref(symbol), none, [], []))
+                    make_named_callee_ref(symbol), Type::FnType {
+                        params: [recv_type, INT],
+                        return_type: apply_subst(s, result_ty),
+                        effects: EMPTY_ROW
+                    }, none, [], []))
                 index_projection = some(h_structural_projection(make_path_ref(
                     path_owner_for_symbol(symbol), ["result"],
                     path_role_synthetic()), "result"))
@@ -1648,7 +1662,10 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
             result_ty = STR
             let symbol = builtin_str_index_symbol()
             index_call_plan = some(make_h_exact_call_plan(
-                make_named_callee_ref(symbol), none, [], []))
+                make_named_callee_ref(symbol), Type::FnType {
+                    params: [STR, INT], return_type: STR,
+                    effects: EMPTY_ROW
+                }, none, [], []))
             index_projection = some(h_structural_projection(make_path_ref(
                 path_owner_for_symbol(symbol), ["result"],
                 path_role_synthetic()), "result"))
@@ -3166,7 +3183,8 @@ fn is_interpolatable_type(t: Type) -> Bool {
 
 fn exact_method_plan(method: MethodCallRef) -> HExactCallPlan {
     make_h_exact_call_plan(
-        method_call_ref_callee_identity(method), some(method), [], [])
+        method_call_ref_callee_identity(method),
+        method_call_ref_signature(method), some(method), [], [])
 }
 
 fn exact_string_conversion_plan(
@@ -3174,9 +3192,15 @@ fn exact_string_conversion_plan(
 ) -> HExactCallPlan? {
     match ty {
         Type::StrType => some(make_h_exact_call_plan(
-            make_named_callee_ref(builtin_str_identity_symbol()), none, [], [])),
+            make_named_callee_ref(builtin_str_identity_symbol()),
+            Type::FnType {
+                params: [STR], return_type: STR, effects: EMPTY_ROW
+            }, none, [], [])),
         Type::BoolType => some(make_h_exact_call_plan(
-            make_named_callee_ref(builtin_bool_to_str_symbol()), none, [], [])),
+            make_named_callee_ref(builtin_bool_to_str_symbol()),
+            Type::FnType {
+                params: [BOOL], return_type: STR, effects: EMPTY_ROW
+            }, none, [], [])),
         Type::IntType => some(exact_method_plan(
             exact_nominal_method_call(ctx, "Int", "to_str"))),
         Type::FloatType => some(exact_method_plan(
@@ -3204,7 +3228,7 @@ fn exact_string_interp_plan(
     }
     let builder = make_h_exact_call_plan(
         make_named_callee_ref(value_symbol_ref(ctx, builder_def_id)),
-        none, [], [])
+        builder_scheme.ty, none, [], [])
     let add = exact_method_plan(
         exact_nominal_method_call(ctx, "StringBuilder", "add"))
     let finish = exact_method_plan(

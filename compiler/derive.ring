@@ -1351,8 +1351,7 @@ fn derived_hash_mix_call() -> DerivedDirectCall {
         BUILTIN_VALUE_HASH_COMBINE))
     DerivedDirectCall {
         plan: make_h_exact_call_plan(
-            make_named_callee_ref(symbol), none, [], []),
-        signature: signature
+            make_named_callee_ref(symbol), signature, none, [], [])
     }
 }
 
@@ -1693,16 +1692,18 @@ fn exact_derived_text_plan(mut ctx: InferCtx, di: DerivedImpl) -> DerivedTextPla
     }
     let builder = make_h_exact_call_plan(
         make_named_callee_ref(value_symbol_ref(ctx, builder_def_id)),
-        none, [], [])
+        builder_scheme.ty, none, [], [])
     let append_method = exact_nominal_method_call(
         ctx, "StringBuilder", "add")
     let finish_method = exact_nominal_method_call(
         ctx, "StringBuilder", "to_str")
     let append = make_h_exact_call_plan(
         method_call_ref_callee_identity(append_method),
+        method_call_ref_signature(append_method),
         some(append_method), [], [])
     let finish = make_h_exact_call_plan(
         method_call_ref_callee_identity(finish_method),
+        method_call_ref_signature(finish_method),
         some(finish_method), [], [])
     let struct_sequence = match di.struct_fields {
         some(fields) => some(derived_struct_text_sequence(di, fields)),
@@ -1725,7 +1726,7 @@ fn exact_derived_text_plan(mut ctx: InferCtx, di: DerivedImpl) -> DerivedTextPla
     }
     DerivedTextPlan {
         builder_binder: derived_text_binder(ctx.env, method.executable_ref),
-        builder: builder, builder_signature: builder_scheme.ty,
+        builder: builder,
         append: append, finish: finish,
         struct_sequence: struct_sequence, variants: variants
     }
