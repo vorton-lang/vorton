@@ -563,6 +563,20 @@ fn dispatch_from_dict_ref(dict_ref: DictRef) -> TraitDispatch {
     }
 }
 
+fn bound_type_var_matches(
+    subst: UnionFind, bound_var_id: Int, resolved_id: Int
+) -> Bool {
+    if bound_var_id == resolved_id ||
+       uf_find(subst, bound_var_id) == resolved_id {
+        return true
+    }
+    match apply_subst(
+            subst, Type::TypeVar { id: bound_var_id, name: none }) {
+        Type::TypeVar { id, .. } => id == resolved_id,
+        _ => false
+    }
+}
+
 pub fn resolve_trait_dispatch(ctx: InferCtx, resolved: Type, trait_name: Str, error_code: Str, subst: UnionFind, span: Span, op: Str, is_builtin: Bool) -> TraitDispatch {
     if is_builtin { return TraitDispatch::Builtin }
     let trait_display = nominal_display_name(trait_name)
@@ -570,18 +584,9 @@ pub fn resolve_trait_dispatch(ctx: InferCtx, resolved: Type, trait_name: Str, er
     match resolved {
         Type::TypeVar { id, .. } => {
             let bound = ctx.current_fn_bounds.find(fn(fb) {
-                if fb.trait_name != trait_name { false } else
-                if fb.type_param_var_id == id { true } else
-                if uf_find(subst, fb.type_param_var_id) == id { true } else {
-                    // Also check through type bindings: uf_bind stores var-to-var
-                    // bindings in the types map, not the parent map, so uf_find alone
-                    // may miss them. Resolve the bound var fully via apply_subst.
-                    let bound_resolved = apply_subst(subst, Type::TypeVar { id: fb.type_param_var_id, name: none })
-                    match bound_resolved {
-                        Type::TypeVar { id: bid, .. } => bid == id,
-                        _ => false
-                    }
-                }
+                fb.trait_name == trait_name &&
+                    bound_type_var_matches(
+                        subst, fb.type_param_var_id, id)
             })
             match bound {
                 some(b) => { return TraitDispatch::Dict { param: trait_bound_param_name(b.type_param_name, trait_name) } },
@@ -1022,8 +1027,8 @@ pub fn exact_operator_plan(
         Type::TypeVar { id, .. } => {
             let bound = match ctx.current_fn_bounds.find(fn(item) {
                 item.trait_name == trait_name &&
-                    (item.type_param_var_id == id ||
-                     uf_find(subst, item.type_param_var_id) == id)
+                    bound_type_var_matches(
+                        subst, item.type_param_var_id, id)
             }) {
                 some(value) => value,
                 none => return none
