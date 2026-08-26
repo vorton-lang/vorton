@@ -21,6 +21,7 @@ use hir::{
     h_default_specialization_result_type,
     h_default_specialization_effects,
     h_default_specialization_forward_call, h_exact_call_evidence,
+    h_exact_call_signature,
     h_exact_call_method,
     h_delegate_methods, h_delegate_method_evidence,
     h_delegate_dict_evidence,
@@ -701,7 +702,7 @@ fn add_derived_impl_facts(
         }
         match derived.text_plan {
             some(text) => {
-                let builder_type = match text.builder_signature {
+                let builder_type = match h_exact_call_signature(text.builder) {
                     Type::FnType { return_type, .. } => return_type,
                     _ => panic("Core/legacy freeze: text builder is not callable")
                 }
