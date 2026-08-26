@@ -133,14 +133,15 @@ fn exact_h_type_params(
 }
 
 fn exact_source_type_var_ids(
-    scheme: TypeScheme, source_count: Int
+    scheme: TypeScheme, source_offset: Int, source_count: Int
 ) -> List<Int> {
-    if source_count < 0 || scheme.type_vars.len() < source_count {
-        panic("HIR type parameters: registered type-variable census is short")
+    if source_offset < 0 || source_count < 0 ||
+       source_offset + source_count > scheme.type_vars.len() {
+        panic("HIR type parameters: registered source range is invalid")
     }
     let mut result: List<Int> = []
     for index in 0..source_count {
-        result.push(scheme.type_vars.get(index).unwrap())
+        result.push(scheme.type_vars.get(source_offset + index).unwrap())
     }
     result
 }
@@ -220,7 +221,8 @@ fn check_decl_inner(
                 frame_decl_index.unwrap_or(-1)),
         Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span, .. } =>
             check_fn_decl(ctx, name, type_params, params, return_type,
-                declared_effects, body, is_pub, span, none, none, none, none),
+                declared_effects, body, is_pub, span,
+                none, none, none, none, 0),
         Decl::Test { description, body, span } =>
             check_test_decl(
                 ctx, description, body, span,
@@ -959,7 +961,7 @@ fn check_impl_decl_canonical(
                     ctx, name, mtps, params, return_type, declared_effects,
                     body, is_pub, mspan, some(impl_self_type),
                     registration_scheme, some(rebind_identity),
-                    some(exact_method))
+                    some(exact_method), impl_owner.type_param_vars.len())
                 // #210: Also register fn_mut_params with qualified key for cross-module export.
                 // check_fn_decl inserts with unqualified `name`; exports.ring looks up
                 // with "${target_type}_${mname}", so we mirror that key here.
@@ -2369,7 +2371,7 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
     exit_executable_owner(ctx)
     let mut trait_bounds: List<TraitBound> = []
     let extern_type_var_ids = exact_source_type_var_ids(
-        scheme, type_params.len())
+        scheme, 0, type_params.len())
     let mut type_param_index = 0
     for type_param in type_params {
         for bound in type_param.bounds {
@@ -2757,7 +2759,7 @@ fn check_fn_decl(
     declared_effects: List<EffectExpr>?, body: Expr,
     is_pub: Bool, span: Span, self_type: Type?,
     registration_override: TypeScheme?, rebind_identity: Str?,
-    impl_method_ref: ImplMethodRef?
+    impl_method_ref: ImplMethodRef?, source_type_var_offset: Int
 ) -> HDecl {
     let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let registered_def_id = match registration_override {
@@ -2778,7 +2780,7 @@ fn check_fn_decl(
         ctx, name, type_params, params, return_type,
         declared_effects, body, is_pub, span, self_type,
         registration_override, rebind_identity, impl_method_ref,
-        executable_ref,
+        executable_ref, source_type_var_offset,
         obligation_checkpoint)) catch { _ => none }
     exit_executable_owner(ctx)
     match result {
@@ -2800,7 +2802,7 @@ fn check_fn_decl_transaction(
     is_pub: Bool, span: Span, self_type: Type?,
     registration_override: TypeScheme?, rebind_identity: Str?,
     impl_method_ref: ImplMethodRef?,
-    executable_ref: ExecutableRef,
+    executable_ref: ExecutableRef, source_type_var_offset: Int,
     obligation_checkpoint: Int
 ) -> HDecl {
     // Save the registration scheme before entering the parameter scope: a
@@ -3040,7 +3042,7 @@ fn check_fn_decl_transaction(
                 match registration_scheme {
                     some(value) => value,
                     none => panic("function HIR: registration scheme is absent")
-                }, type_params.len())),
+                }, source_type_var_offset, type_params.len())),
         params: final_params, return_type: final_ret, effects: final_effects,
         handled_evidence_bindings:
             current_handled_evidence_bindings(ctx),
