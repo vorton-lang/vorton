@@ -77,6 +77,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     exit_project_namespace_frame,
     enter_impl_check_root_frame, enter_impl_check_child_frame,
     exit_impl_check_frame, impl_check_owner, value_symbol_ref,
+    commit_final_prelude_value_symbol_ref,
     current_impl_check_site, enter_executable_owner,
     exit_executable_owner, current_handled_evidence_bindings,
     current_handled_evidence_captures, resolve_handled_evidence,
@@ -4900,13 +4901,22 @@ pub fn resolve_type_expr_public(mut ctx: InferCtx, texpr: TypeExpr) -> Type {
 }
 
 pub fn check_prelude_decl(
-    mut ctx: InferCtx, decl: Decl, file_key: Str, decl_index: Int
+    mut ctx: InferCtx, decl: Decl, file_key: Str, decl_index: Int,
+    final_extern_symbol: SymbolRef?
 ) -> HDecl {
     // Note: check_decl uses fail.raise internally. Due to the known limitation
     // where cross-module effect propagation doesn't work (effects registered as
     // EMPTY_ROW in Pass 1), we must explicitly surface the fail effect here so
     // callers pass the __ring_ev_fail evidence.
     enter_impl_check_root_frame(ctx, file_key)
+    match final_extern_symbol {
+        some(symbol) => match decl {
+            Decl::ExternFn { name, .. } =>
+                commit_final_prelude_value_symbol_ref(ctx, name, symbol),
+            _ => panic("prelude final extern symbol attached to non-extern")
+        },
+        none => {}
+    }
     let result = some(check_decl(ctx, decl, some(decl_index))) catch { _ => {
         exit_impl_check_frame(ctx)
         fail.raise(CompileError {})

@@ -23,7 +23,6 @@ use andor_lower::{lower_andor}
 use infer_ctx::{InferCtx, new_infer_ctx as new_base_infer_ctx,
     type_error, record_value_origin, record_variant_ctor_origin,
     record_value_binding_kind, record_value_symbol_ref,
-    commit_final_prelude_value_symbol_ref,
     install_project_namespace_plan,
     install_struct_identity_ledger, enter_struct_identity_root_frame,
     exit_struct_identity_frame, close_struct_identity_ledger}
@@ -296,7 +295,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                 match decl {
                     Decl::Struct { .. } => {
                         let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
+                            ctx, decl, site.file_key, site.decl_index, none)) catch { _ => none }
                         match result {
                             some(hd) => { prelude_hdecls.push(hd) },
                             none => {}
@@ -304,7 +303,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                     },
                     Decl::Enum { .. } => {
                         let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
+                            ctx, decl, site.file_key, site.decl_index, none)) catch { _ => none }
                         match result {
                             some(hd) => { prelude_hdecls.push(hd) },
                             none => {}
@@ -312,7 +311,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                     },
                     Decl::Trait { .. } => {
                         let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
+                            ctx, decl, site.file_key, site.decl_index, none)) catch { _ => none }
                         match result {
                             some(hd) => { prelude_hdecls.push(hd) },
                             none => {}
@@ -336,7 +335,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                             }
                             let result = some(check_prelude_decl(
                                 ctx, filtered_decl,
-                                site.file_key, site.decl_index)) catch { _ => none }
+                                site.file_key, site.decl_index, none)) catch { _ => none }
                             match result {
                                 some(hd) => { prelude_hdecls.push(hd) },
                                 none => {}
@@ -345,7 +344,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                     },
                     Decl::Fn { .. } => {
                         let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
+                            ctx, decl, site.file_key, site.decl_index, none)) catch { _ => none }
                         match result {
                             some(hd) => { prelude_hdecls.push(hd) },
                             none => {}
@@ -364,14 +363,10 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                             none => true
                         }
                         if publish {
-                            // Only the manifest's unique publication owner
-                            // enters Phase-2 HIR. Shared list/map declaration
-                            // replay must not rebind the final owner's DefId.
-                            commit_final_prelude_value_symbol_ref(
-                                ctx, name, canonical_prelude_extern_symbol(
-                                    ctx.env, source, name))
                             let result = some(check_prelude_decl(
-                                ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
+                                ctx, decl, site.file_key, site.decl_index,
+                                some(canonical_prelude_extern_symbol(
+                                    ctx.env, source, name)))) catch { _ => none }
                             match result {
                                 some(HDecl::ExternFn {
                                     name, abi_name, def_id, executable_ref,
