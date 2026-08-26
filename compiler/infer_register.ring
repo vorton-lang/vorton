@@ -77,7 +77,7 @@ use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
     path_owner_ref_module_body, module_body_ref_origin_module_key,
     make_symbol_ref, namespace_member,
     impl_provider_ref_same,
-    registered_trait_ref_symbol}
+    registered_trait_ref_symbol, symbol_ref_canonical_payload}
 
 // ============================================================
 // Public entry points
@@ -1812,8 +1812,10 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                 }
                 ctor_index = ctor_index + 1
                 let ctor_payload = variant_ctor_name(name, variant.name)
+                let ctor_identity = symbol_ref_canonical_payload(
+                    variant_ref_member(variant_ref))
                 let binding_name = if project_active {
-                    ctor_payload
+                    ctor_identity
                 } else {
                     variant.name
                 }
@@ -1838,7 +1840,7 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                     // payload without changing legacy visibility.
                     match ctx.env.lookup(variant.name) {
                         some(scheme) => {
-                            ctx.env.bind(ctor_payload, TypeScheme {
+                            ctx.env.bind(ctor_identity, TypeScheme {
                                 ty: scheme.ty,
                                 type_vars: scheme.type_vars,
                                 bounds: scheme.bounds,
@@ -1854,15 +1856,17 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                 // HExpr::NamedVariantConstruct instead.
                 if variant.field_names.is_none() {
                     if !project_active {
+                        record_value_origin(ctx, variant.name, ctor_identity)
                         record_variant_ctor_origin(ctx, variant.name,
                             ctor_payload)
                         record_value_symbol_ref(
                             ctx, variant.name, variant_ref_member(variant_ref))
                     }
-                    record_variant_ctor_origin(ctx, ctor_payload,
+                    record_value_origin(ctx, ctor_identity, ctor_identity)
+                    record_variant_ctor_origin(ctx, ctor_identity,
                         ctor_payload)
                     record_value_symbol_ref(
-                        ctx, ctor_payload, variant_ref_member(variant_ref))
+                        ctx, ctor_identity, variant_ref_member(variant_ref))
                 }
             }
 

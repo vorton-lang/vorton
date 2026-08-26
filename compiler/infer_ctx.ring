@@ -1303,10 +1303,6 @@ pub fn record_variant_ctor_origin(mut ctx: InferCtx, local_name: Str, origin: St
         some(scheme) => match scheme.def_id {
             some(def_id) => {
                 ctx.env.types.variant_ctor_origins.insert(def_id, origin)
-                match ctx.value_symbols_by_payload.get(origin) {
-                    some(symbol) => ctx.value_symbols.insert(def_id, symbol),
-                    none => {}
-                }
             },
             none => {}
         },

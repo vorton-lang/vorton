@@ -8,7 +8,8 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef, ImplEntr
     impl_entry_exact_key_same, impl_entry_final_same,
     optional_symbol_ref_same}
 use ir_identity::{ImplMethodRef, impl_provider_ref_same, impl_owner_ref_same,
-    impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same}
+    impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
+    variant_ref_member, symbol_ref_canonical_payload}
 use infer_register::{prefix_decl_name, module_prefix_decl_name}
 
 // ============================================================
@@ -23,9 +24,8 @@ pub struct ModuleExports {
     // Exact registration kind for public value bindings. Absence is a local
     // borrow; variant constructors use variant_ctor_origins independently.
     pub value_binding_kinds: Map<Str, ValueBindingKind>,
-    // Export lookup spelling -> canonical variant constructor symbol. This is
-    // separate from value_origins because only genuine constructor bindings
-    // may influence codegen/ownership classification.
+    // Export lookup spelling -> legacy C constructor spelling. Exact semantic
+    // identity remains in value_origins as the VariantRef member payload.
     pub variant_ctor_origins: Map<Str, Str>,
     pub types: Map<Str, TypeDef>,
     pub type_aliases: Map<Str, TypeAliasDef>,
@@ -268,18 +268,26 @@ fn copy_inline_export(
             // variant from another enum. The fully-qualified facade binding
             // gives inference an exact lookup; the legacy leaf binding keeps
             // named enum imports compatible when it is not already occupied.
+            let mut variant_index = 0
             for variant in def.variants {
+                let variant_ref = match def.variant_refs.get(variant_index) {
+                    some(value) => value,
+                    none => panic("module export: enum VariantRef is missing")
+                }
+                variant_index = variant_index + 1
                 let ctor_scheme = variant_ctor_scheme(def, variant)
                 let ctor_origin = variant_ctor_name(def.name, variant.name)
+                let ctor_identity = symbol_ref_canonical_payload(
+                    variant_ref_member(variant_ref))
                 let facade_ctor = "${local}::${variant.name}"
                 values.insert(facade_ctor, ctor_scheme)
-                value_origins.insert(facade_ctor, ctor_origin)
+                value_origins.insert(facade_ctor, ctor_identity)
                 if variant.field_names.is_none() {
                     variant_ctor_origins.insert(facade_ctor, ctor_origin)
                 }
                 if !values.contains_key(variant.name) {
                     values.insert(variant.name, ctor_scheme)
-                    value_origins.insert(variant.name, ctor_origin)
+                    value_origins.insert(variant.name, ctor_identity)
                     if variant.field_names.is_none() {
                         variant_ctor_origins.insert(variant.name, ctor_origin)
                     }
@@ -369,11 +377,21 @@ fn extract_decl_export(
                         // The module's final leaf scope may contain an unrelated
                         // same-spelled private fn/const. Export the enum's exact
                         // constructor scheme and identity from EnumDef instead.
+                        let mut variant_index = 0
                         for v in edef.variants {
+                            let variant_ref = match edef.variant_refs.get(
+                                variant_index) {
+                                some(value) => value,
+                                none => panic(
+                                    "module export: enum VariantRef is missing")
+                            }
+                            variant_index = variant_index + 1
                             let ctor_scheme = variant_ctor_scheme(edef, v)
                             let ctor_origin = variant_ctor_name(edef.name, v.name)
+                            let ctor_identity = symbol_ref_canonical_payload(
+                                variant_ref_member(variant_ref))
                             values.insert(v.name, ctor_scheme)
-                            value_origins.insert(v.name, ctor_origin)
+                            value_origins.insert(v.name, ctor_identity)
                             // Fieldless and positional constructors lower via
                             // Ident/Call and therefore need provenance. Named
                             // construction uses its dedicated HIR node.

@@ -900,17 +900,12 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
             let (lookup_name, scheme) = entry
             let value_origin = mod_.value_origins.get(lookup_name)
             let ctor_origin = mod_.variant_ctor_origins.get(lookup_name)
+            if ctor_origin.is_some() && value_origin.is_none() {
+                panic("module export: constructor lacks exact value identity")
+            }
             let mut exact_origins: List<Str> = []
             match value_origin {
                 some(origin) => { exact_origins.push(origin) },
-                none => {}
-            }
-            match ctor_origin {
-                some(origin) => {
-                    if !exact_origins.contains(origin) {
-                        exact_origins.push(origin)
-                    }
-                },
                 none => {}
             }
             for origin in exact_origins {

@@ -5,7 +5,7 @@ use parser::{parse}
 use diagnostics::{CollectingSink, Diagnostic, DiagnosticNote, Severity, DiagnosticContext,
     new_collecting_sink, make_diag}
 use formatter::{format_human, format_llm}
-use hir::{compare_by_first, module_item_identity, variant_ctor_name}
+use hir::{compare_by_first, module_item_identity}
 use codes::{E0207, E0702, E0704, E0705}
 use ir_identity::{
     SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
@@ -788,9 +788,24 @@ fn append_namespace_seed(
         use_index: -1,
         item_index: decl_index
     }
-    let symbol = source_seed_symbol(
-        frame.file_key, frame.frame_index, decl_index, origin_site,
-        namespace, canonical_payload, existing_symbol, -1)
+    let symbol = match role {
+        NamespaceSeedRole::EnumLeaf |
+        NamespaceSeedRole::EnumQualifiedMember => match existing_symbol {
+            some(exact) => {
+                if symbol_ref_origin_module_key(exact) != frame.file_key ||
+                   !namespace_kind_same(
+                        symbol_ref_namespace_kind(exact), namespace_member()) ||
+                   symbol_ref_canonical_payload(exact) != canonical_payload {
+                    panic("namespace invariant violated: enum constructor identity drifted")
+                }
+                exact
+            },
+            none => panic("namespace invariant violated: enum constructor identity is absent")
+        },
+        _ => source_seed_symbol(
+            frame.file_key, frame.frame_index, decl_index, origin_site,
+            namespace, canonical_payload, existing_symbol, -1)
+    }
     seeds.push(NamespaceSeed {
         file_key: frame.file_key,
         frame_index: frame.frame_index,
@@ -1275,11 +1290,11 @@ fn collect_decl_seed(
                 variant_identity_facts.push(EnumVariantIdentityFact {
                     variant_ref: variant_ref, fields: field_refs
                 })
-                let ctor_payload = variant_ctor_name(enum_payload, variant.name)
+                let ctor_payload = symbol_ref_canonical_payload(variant_member)
                 let ctor_symbol = append_namespace_seed(
                     frame, decl_index, variant.name,
-                    NamespaceKind::Value, ctor_payload, none, is_pub,
-                    NamespaceSeedRole::EnumLeaf, seeds)
+                    NamespaceKind::Value, ctor_payload, some(variant_member),
+                    is_pub, NamespaceSeedRole::EnumLeaf, seeds)
                 ctor_facts.push(NamespaceSeed {
                     file_key: frame.file_key,
                     frame_index: frame.frame_index,
@@ -1304,8 +1319,8 @@ fn collect_decl_seed(
                 // the same exact-frame Seed/import ledger as every other name.
                 let _ = append_namespace_seed(
                     frame, decl_index, "${name}::${variant.name}",
-                    NamespaceKind::Value, ctor_payload, some(ctor_symbol), is_pub,
-                    NamespaceSeedRole::EnumQualifiedMember, seeds)
+                    NamespaceKind::Value, ctor_payload, some(ctor_symbol),
+                    is_pub, NamespaceSeedRole::EnumQualifiedMember, seeds)
             }
             append_enum_variant_fact_group(
                 enum_symbol, registered_enum,
