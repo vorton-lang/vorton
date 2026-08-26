@@ -210,6 +210,8 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                                     ctx, canonical_decl, decl_index,
                                                     some(symbol_ref_canonical_payload(
                                                         binding.symbol)))
+                                                record_value_symbol_ref(
+                                                    ctx, name, binding.symbol)
                                                 source_symbol = some(binding.symbol)
                                                 match canonical_decl {
                                                     Decl::ExternFn {
