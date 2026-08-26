@@ -8,11 +8,12 @@
 use ir_identity::{SlotRef, slot_ref_same}
 use ir_inventory::{ExecutableRef, executable_ref_same}
 use flow_ir::{
-    FlowInstructionRef, FlowBlockRef,
+    FlowInstructionRef, FlowBlockRef, FlowProjectionContract,
     flow_instruction_ref_same, flow_block_ref_same,
     flow_instruction_ref_owner, flow_instruction_ref_block_ordinal,
     flow_instruction_ref_ordinal,
-    flow_block_ref_owner, flow_block_ref_ordinal}
+    flow_block_ref_owner, flow_block_ref_ordinal,
+    copy_flow_projection_contract}
 
 // ============================================================
 // Exact FlowIR resource sites
@@ -167,7 +168,8 @@ const RC_OP_CLONE: Int = 0
 const RC_OP_TAKE: Int = 1
 const RC_OP_DROP: Int = 2
 const RC_OP_CLEANUP: Int = 3
-const RC_OP_KIND_COUNT: Int = 4
+const RC_OP_DROP_OLD_PLACE: Int = 4
+const RC_OP_KIND_COUNT: Int = 5
 
 pub struct RcOpKind { tag: Int }
 
@@ -198,6 +200,10 @@ pub fn rc_op_kind_cleanup() -> RcOpKind {
     rc_op_kind_from_tag(RC_OP_CLEANUP)
 }
 
+pub fn rc_op_kind_drop_old_place() -> RcOpKind {
+    rc_op_kind_from_tag(RC_OP_DROP_OLD_PLACE)
+}
+
 pub fn rc_op_kind_same(left: RcOpKind, right: RcOpKind) -> Bool {
     rc_op_kind_tag(left) == rc_op_kind_tag(right)
 }
@@ -210,12 +216,23 @@ pub struct RcOperation {
     site: RcSemanticSite,
     kind: RcOpKind,
     source_slot: SlotRef,
-    target_slot: SlotRef?
+    target_slot: SlotRef?,
+    place_projection: FlowProjectionContract?
 }
 
 fn validate_rc_operation(
-    kind: RcOpKind, source_slot: SlotRef, target_slot: SlotRef?
+    kind: RcOpKind, source_slot: SlotRef, target_slot: SlotRef?,
+    place_projection: FlowProjectionContract?
 ) {
+    if rc_op_kind_same(kind, rc_op_kind_drop_old_place()) {
+        if target_slot.is_some() || place_projection.is_none() {
+            panic("RcIR: DropOldPlace requires one exact projection")
+        }
+        return
+    }
+    if place_projection.is_some() {
+        panic("RcIR: only DropOldPlace may carry a projection")
+    }
     if rc_op_kind_same(kind, rc_op_kind_drop()) ||
        rc_op_kind_same(kind, rc_op_kind_cleanup()) {
         if target_slot.is_some() {
@@ -234,38 +251,54 @@ fn validate_rc_operation(
 pub fn make_rc_clone_at(
     site: RcSemanticSite, source: SlotRef, target: SlotRef?
 ) -> RcOperation {
-    validate_rc_operation(rc_op_kind_clone(), source, target)
+    validate_rc_operation(rc_op_kind_clone(), source, target, none)
     RcOperation {
         site: site,
         kind: rc_op_kind_clone(),
         source_slot: source,
-        target_slot: target
+        target_slot: target,
+        place_projection: none
     }
 }
 
 pub fn make_rc_take_at(
     site: RcSemanticSite, source: SlotRef, target: SlotRef?
 ) -> RcOperation {
-    validate_rc_operation(rc_op_kind_take(), source, target)
+    validate_rc_operation(rc_op_kind_take(), source, target, none)
     RcOperation {
         site: site,
         kind: rc_op_kind_take(),
         source_slot: source,
-        target_slot: target
+        target_slot: target,
+        place_projection: none
     }
 }
 
 pub fn make_rc_drop_at(site: RcSemanticSite, slot: SlotRef) -> RcOperation {
     RcOperation {
-        site: site,
-        kind: rc_op_kind_drop(), source_slot: slot, target_slot: none
+        site: site, kind: rc_op_kind_drop(), source_slot: slot,
+        target_slot: none, place_projection: none
     }
 }
 
 pub fn make_rc_cleanup_at(site: RcSemanticSite, slot: SlotRef) -> RcOperation {
     RcOperation {
-        site: site,
-        kind: rc_op_kind_cleanup(), source_slot: slot, target_slot: none
+        site: site, kind: rc_op_kind_cleanup(), source_slot: slot,
+        target_slot: none, place_projection: none
+    }
+}
+
+pub fn make_rc_drop_old_place_at(
+    site: RcSemanticSite, base: SlotRef,
+    projection: FlowProjectionContract
+) -> RcOperation {
+    let copied = copy_flow_projection_contract(projection)
+    validate_rc_operation(
+        rc_op_kind_drop_old_place(), base, none, some(copied))
+    RcOperation {
+        site: site, kind: rc_op_kind_drop_old_place(),
+        source_slot: base, target_slot: none,
+        place_projection: some(copied)
     }
 }
 
@@ -273,6 +306,13 @@ pub fn rc_operation_kind(value: RcOperation) -> RcOpKind { value.kind }
 pub fn rc_operation_site(value: RcOperation) -> RcSemanticSite { value.site }
 pub fn rc_operation_source(value: RcOperation) -> SlotRef { value.source_slot }
 pub fn rc_operation_target(value: RcOperation) -> SlotRef? { value.target_slot }
+pub fn rc_operation_place_projection(
+    value: RcOperation
+) -> FlowProjectionContract? {
+    value.place_projection.map(fn(projection) {
+        copy_flow_projection_contract(projection)
+    })
+}
 
 fn copy_rc_operations(values: List<RcOperation>) -> List<RcOperation> {
     let mut result: List<RcOperation> = []
@@ -281,7 +321,10 @@ fn copy_rc_operations(values: List<RcOperation>) -> List<RcOperation> {
             site: value.site,
             kind: value.kind,
             source_slot: value.source_slot,
-            target_slot: value.target_slot
+            target_slot: value.target_slot,
+            place_projection: value.place_projection.map(fn(projection) {
+                copy_flow_projection_contract(projection)
+            })
         })
     }
     result

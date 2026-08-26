@@ -15,8 +15,12 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     trait_method_ref_trait, trait_method_ref_member,
     impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_target,
     impl_owner_ref_same, impl_method_ref_member, impl_method_ref_owner,
-    variant_ref_member, impl_provider_ref_same}
+    variant_ref_member, impl_provider_ref_same,
+    slot_ref_is_source, slot_ref_source_domain,
+    slot_domain_dictionary, slot_domain_same}
 use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
+    ExactDictRef, dict_ref_same, dict_ref_is_local, dict_ref_is_static,
+    dict_ref_is_wrapped, dict_ref_wrapped_inner,
     executable_ref_is_named, executable_ref_named_symbol,
     handled_evidence_ref_same, handled_evidence_requirement}
 use env::{RegisteredTraitContract,
@@ -46,35 +50,136 @@ use env::{RegisteredTraitContract,
 //                   BinOp eq/ord_dispatch extra_dicts and in dynamic derived
 //                   FieldAction evidence, whose synthetic methods construct
 //                   and reclaim the wrapper directly.
-pub enum DictRef {
-    Simple(Str),
-    Wrapped { dict: Str, trait_ref: SymbolRef,
-              inner_dicts: List<DictRef> },
-    Static(Str)
+enum PhysicalDictRefValue {
+    SimplePhysicalValue(Str),
+    WrappedPhysicalValue {
+        dict: Str, trait_ref: SymbolRef, inner_dicts: List<DictRef>
+    },
+    StaticPhysicalValue(Str)
 }
 
-fn dict_ref_same(left: DictRef, right: DictRef) -> Bool {
-    match (left, right) {
-        (DictRef::Simple(a), DictRef::Simple(b)) => a == b,
-        (DictRef::Static(a), DictRef::Static(b)) => a == b,
-        (DictRef::Wrapped {
-            dict: left_dict, trait_ref: left_trait,
-            inner_dicts: left_inner
-         }, DictRef::Wrapped {
-            dict: right_dict, trait_ref: right_trait,
-            inner_dicts: right_inner
+// Source spellings survive only as physical/diagnostic provenance.  Exact
+// identity is mandatory and is the sole equality/Core authority.
+pub struct DictRef {
+    physical: PhysicalDictRefValue,
+    exact: ExactDictRef
+}
+
+pub fn make_simple_dict_ref(name: Str, exact: ExactDictRef) -> DictRef {
+    if name == "" || !dict_ref_is_local(exact) {
+        panic("HIR dictionary: simple evidence lacks exact local identity")
+    }
+    DictRef {
+        physical: PhysicalDictRefValue::SimplePhysicalValue(name), exact: exact
+    }
+}
+
+pub fn make_static_dict_ref(name: Str, exact: ExactDictRef) -> DictRef {
+    if name == "" || (!dict_ref_is_static(exact) && !dict_ref_is_wrapped(exact)) {
+        panic("HIR dictionary: static evidence lacks exact static identity")
+    }
+    DictRef {
+        physical: PhysicalDictRefValue::StaticPhysicalValue(name), exact: exact
+    }
+}
+
+pub fn make_wrapped_dict_ref(
+    dict: Str, trait_ref: SymbolRef, inner_dicts: List<DictRef>,
+    exact: ExactDictRef
+) -> DictRef {
+    if dict == "" || !dict_ref_is_wrapped(exact) {
+        panic("HIR dictionary: wrapped evidence lacks exact identity")
+    }
+    let exact_inner = dict_ref_wrapped_inner(exact)
+    if exact_inner.len() != inner_dicts.len() {
+        panic("HIR dictionary: wrapped evidence arity differs")
+    }
+    let mut index = 0
+    while index < inner_dicts.len() {
+        if !dict_ref_same(
+                exact_inner.get(index).unwrap(),
+                inner_dicts.get(index).unwrap().exact) {
+            panic("HIR dictionary: wrapped evidence order differs")
+        }
+        index = index + 1
+    }
+    DictRef { physical: PhysicalDictRefValue::WrappedPhysicalValue {
+        dict: dict, trait_ref: trait_ref,
+        inner_dicts: inner_dicts.map(fn(value) { value })
+    }, exact: exact }
+}
+
+pub fn dict_ref_exact(value: DictRef) -> ExactDictRef { value.exact }
+pub fn dict_ref_is_simple_physical(value: DictRef) -> Bool {
+    match value.physical {
+        PhysicalDictRefValue::SimplePhysicalValue(_) => true,
+        _ => false
+    }
+}
+pub fn dict_ref_is_static_physical(value: DictRef) -> Bool {
+    match value.physical {
+        PhysicalDictRefValue::StaticPhysicalValue(_) => true,
+        _ => false
+    }
+}
+pub fn dict_ref_is_wrapped_physical(value: DictRef) -> Bool {
+    match value.physical {
+        PhysicalDictRefValue::WrappedPhysicalValue { .. } => true,
+        _ => false
+    }
+}
+pub fn dict_ref_simple_name(value: DictRef) -> Str {
+    match value.physical {
+        PhysicalDictRefValue::SimplePhysicalValue(name) => name,
+        _ => panic("HIR dictionary: evidence is not physically simple")
+    }
+}
+pub fn dict_ref_static_name(value: DictRef) -> Str {
+    match value.physical {
+        PhysicalDictRefValue::StaticPhysicalValue(name) => name,
+        _ => panic("HIR dictionary: evidence is not physically static")
+    }
+}
+pub fn dict_ref_wrapped_name(value: DictRef) -> Str {
+    match value.physical {
+        PhysicalDictRefValue::WrappedPhysicalValue { dict, .. } => dict,
+        _ => panic("HIR dictionary: evidence is not physically wrapped")
+    }
+}
+pub fn dict_ref_wrapped_trait(value: DictRef) -> SymbolRef {
+    match value.physical {
+        PhysicalDictRefValue::WrappedPhysicalValue { trait_ref, .. } => trait_ref,
+        _ => panic("HIR dictionary: evidence is not physically wrapped")
+    }
+}
+pub fn dict_ref_wrapped_physical_inner(value: DictRef) -> List<DictRef> {
+    match value.physical {
+        PhysicalDictRefValue::WrappedPhysicalValue { inner_dicts, .. } =>
+            inner_dicts.map(fn(item) { item }),
+        _ => panic("HIR dictionary: evidence is not physically wrapped")
+    }
+}
+pub fn dict_ref_physical_same(left: DictRef, right: DictRef) -> Bool {
+    match (left.physical, right.physical) {
+        (PhysicalDictRefValue::SimplePhysicalValue(a),
+         PhysicalDictRefValue::SimplePhysicalValue(b)) => a == b,
+        (PhysicalDictRefValue::StaticPhysicalValue(a),
+         PhysicalDictRefValue::StaticPhysicalValue(b)) => a == b,
+        (PhysicalDictRefValue::WrappedPhysicalValue {
+            dict: ad, trait_ref: at, inner_dicts: ai
+         }, PhysicalDictRefValue::WrappedPhysicalValue {
+            dict: bd, trait_ref: bt, inner_dicts: bi
          }) => {
-            if left_dict != right_dict ||
-               !symbol_ref_same(left_trait, right_trait) ||
-               left_inner.len() != right_inner.len() {
+            if ad != bd || !symbol_ref_same(at, bt) || ai.len() != bi.len() {
                 return false
             }
-            for index in 0..left_inner.len() {
-                if !dict_ref_same(
-                        left_inner.get(index).unwrap(),
-                        right_inner.get(index).unwrap()) {
+            let mut index = 0
+            while index < ai.len() {
+                if !dict_ref_physical_same(
+                        ai.get(index).unwrap(), bi.get(index).unwrap()) {
                     return false
                 }
+                index = index + 1
             }
             true
         },
@@ -207,7 +312,8 @@ pub fn method_call_ref_same(
          }, MethodCallRefValue::BoundMethodValue {
             method: right_method, evidence: right_evidence
          }) => trait_method_ref_same(left_method, right_method) &&
-            dict_ref_same(left_evidence, right_evidence),
+            dict_ref_same(
+                dict_ref_exact(left_evidence), dict_ref_exact(right_evidence)),
         _ => false
     }
     identity_same && types_equal(left.signature, right.signature) &&
@@ -456,7 +562,8 @@ pub fn h_constructor_executable(value: HConstructorPlan) -> ExecutableRef {
 }
 pub fn h_constructor_fields(value: HConstructorPlan) -> List<HProjectionRef> {
     match value.value {
-        HConstructorPlanValue::ExecutableConstructor { fields, .. } |
+        HConstructorPlanValue::ExecutableConstructor { fields, .. } =>
+            fields.map(fn(item) { item }),
         HConstructorPlanValue::RecordStructural { fields } =>
             fields.map(fn(item) { item }),
         HConstructorPlanValue::TupleStructural { .. } =>
@@ -532,18 +639,46 @@ pub fn remap_h_string_interp_handled_evidence(
 
 pub struct HDictConstructPlan {
     constructor: ExecutableRef,
-    trait_ref: SymbolRef
+    base: ImplOwnerRef,
+    inner: List<ExactDictRef>,
+    result: SlotRef
 }
 pub fn make_h_dict_construct_plan(
-    constructor: ExecutableRef, trait_ref: SymbolRef
+    constructor: ExecutableRef, base: ImplOwnerRef,
+    inner: List<ExactDictRef>, result: SlotRef
 ) -> HDictConstructPlan {
-    HDictConstructPlan { constructor: constructor, trait_ref: trait_ref }
+    if impl_owner_ref_trait(base).is_none() {
+        panic("HIR dictionary construct: base is not a trait impl")
+    }
+    if !slot_ref_is_source(result) ||
+       !slot_domain_same(
+            slot_ref_source_domain(result), slot_domain_dictionary()) {
+        panic("HIR dictionary construct: result is not a dictionary local")
+    }
+    HDictConstructPlan {
+        constructor: constructor, base: base,
+        inner: inner.map(fn(item) { item }), result: result
+    }
 }
 pub fn h_dict_construct_executable(value: HDictConstructPlan) -> ExecutableRef {
     value.constructor
 }
+pub fn h_dict_construct_base(value: HDictConstructPlan) -> ImplOwnerRef {
+    value.base
+}
+pub fn h_dict_construct_inner(
+    value: HDictConstructPlan
+) -> List<ExactDictRef> {
+    value.inner.map(fn(item) { item })
+}
+pub fn h_dict_construct_result(value: HDictConstructPlan) -> SlotRef {
+    value.result
+}
 pub fn h_dict_construct_trait(value: HDictConstructPlan) -> SymbolRef {
-    value.trait_ref
+    match impl_owner_ref_trait(value.base) {
+        some(trait_ref) => trait_ref,
+        none => panic("HIR dictionary construct: base is not a trait impl")
+    }
 }
 
 pub struct HDelegateMethodPlan {
@@ -956,14 +1091,15 @@ pub fn h_pattern_plan_binding(value: HPatternPlan) -> HPatternBinding {
 }
 pub fn h_pattern_plan_children(value: HPatternPlan) -> List<HPatternPlan> {
     match value.value {
-        HPatternPlanValue::TuplePattern(values) |
+        HPatternPlanValue::TuplePattern(values) => copy_h_pattern_plans(values),
         HPatternPlanValue::OrPattern(values) => copy_h_pattern_plans(values),
         _ => panic("HIR pattern plan: no positional children")
     }
 }
 pub fn h_pattern_plan_fields(value: HPatternPlan) -> List<HPatternFieldPlan> {
     match value.value {
-        HPatternPlanValue::StructPattern { fields, .. } |
+        HPatternPlanValue::StructPattern { fields, .. } =>
+            copy_h_pattern_field_plans(fields),
         HPatternPlanValue::VariantPattern { fields, .. } =>
             copy_h_pattern_field_plans(fields),
         _ => panic("HIR pattern plan: no projected fields")

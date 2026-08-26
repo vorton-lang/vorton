@@ -4,14 +4,20 @@ use types::{Type, Effect, EffectRow, RecordField, StructField,
     row_merge, effects_match_kind}
 use ast::{Span, Pattern, TypeExpr, RecordTypeField, NamedPatternField, span_zero, EffectExpr,
     UseDecl, UseImport}
-use hir::{HExpr, HStmt, HParam, DictRef, ValueBindingKind,
+use hir::{HExpr, HStmt, HParam, ValueBindingKind,
     HPatternBinding, HPatternPlan, HPatternFieldPlan,
     h_pattern_wildcard, h_pattern_binding, h_pattern_literal,
     h_pattern_tuple, h_pattern_struct, h_pattern_variant, h_pattern_or,
     make_h_pattern_field_plan, h_tuple_projection,
     h_nominal_projection, h_variant_projection,
     trait_dict_name, trait_bound_param_name,
-    BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL, BUILTIN_OPTION, compare_by_first}
+    BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
+    BUILTIN_OPTION, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
+    compare_by_first}
+use hir_exact::{
+    DictRef, dict_ref_exact,
+    make_simple_dict_ref, make_static_dict_ref, make_wrapped_dict_ref
+}
 use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink, Severity, Suggestion, make_diag, make_diagnostic}
 use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
 use union_find::{UnionFind, new_union_find, uf_find}
@@ -22,10 +28,11 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     apply_subst, apply_subst_row, apply_subst_map, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
     impl_method_core_as_scheme, frozen_impl_predicates,
+    impl_method_core_type,
     impl_predicate_subject_type_var, impl_predicate_trait_name,
     impl_predicate_assoc_constraints, impl_assoc_predicate_name,
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
-    registered_trait_contract_owner}
+    registered_trait_contract_owner, compiler_owned_extern_symbol}
 use unify::{UnificationError, empty_subst, unify, occurs_in, unify_effect_params}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     StructIdentityFact, TraitIdentityFact, EnumVariantFactGroup,
@@ -37,6 +44,7 @@ use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     symbol_ref_origin_module_key, symbol_ref_same,
     ImplProviderRef, ImplOwnerRef,
     impl_provider_ref_same, impl_owner_ref_same,
+    impl_method_ref_member,
     nominal_field_ref_same, trait_method_ref_same,
     registered_nominal_ref_same, variant_ref_same,
     variant_field_ref_same,
@@ -52,9 +60,13 @@ use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     path_role_synthetic, path_role_declaration,
     path_role_parameter,
     slot_domain_lexical, make_source_slot_ref}
-use ir_inventory::{ExecutableRef, effect_operation_ref_same,
+use ir_inventory::{ExecutableRef, ExactDictRef,
+    make_parameter_dict_ref, make_exact_static_dict_ref,
+    make_exact_wrapped_dict_ref,
+    effect_operation_ref_same,
     EffectOperationRef, effect_operation_ref_member,
-    make_anonymous_executable_ref, executable_ref_is_named,
+    make_anonymous_executable_ref, make_named_executable_ref,
+    executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_anonymous_path,
     executable_ref_same,
     BinderEntry, BinderKind, make_source_binder_entry, binder_kind_let,
@@ -71,36 +83,6 @@ use ir_inventory::{ExecutableRef, effect_operation_ref_same,
     binder_kind_handled_evidence_param,
     binder_kind_handled_evidence_local,
     binder_kind_handled_evidence_capture}
-use core_from_hir::{CoreAssemblyRecorder,
-    CoreNominalFieldSpec, new_core_assembly_recorder,
-    reserve_core_type_fact, define_core_atomic_type_fact,
-    define_core_parameter_type_fact, define_core_nominal_type_fact,
-    define_core_extern_type_fact, define_core_tuple_type_fact,
-    define_core_record_type_fact, define_core_callable_type_fact,
-    define_core_ptr_type_fact, make_core_nominal_field_spec}
-use core_expr::{CoreTypeFactRef, core_type_fact_ordinal}
-use flow_ir::{FlowGenericParamFact,
-    make_flow_generic_param_fact,
-    flow_generic_param_index, flow_generic_param_arity,
-    flow_generic_param_owner,
-    flow_type_kind_int, flow_type_kind_float, flow_type_kind_str,
-    flow_type_kind_bool, flow_type_kind_unit, flow_type_kind_never,
-    flow_type_kind_struct, flow_type_kind_enum,
-    flow_type_seed_shareable, make_borrowed_flow_foreign_contract,
-    make_nominal_flow_field_identity, make_variant_flow_field_identity,
-    make_path_flow_field_identity}
-use core_type_source::{CoreTypeSourceFact, make_core_type_source_fact,
-    CoreHandledEvidenceOperationTypeSource,
-    CoreHandledEvidenceTypeSource,
-    make_core_handled_evidence_operation_type_source,
-    make_core_handled_evidence_type_source,
-    core_handled_evidence_source_requirement}
-
-struct RecordedCoreTypeFact {
-    ty: Type,
-    fact: CoreTypeFactRef
-}
-
 // ============================================================
 // InferResult — return type for expression inference
 // ============================================================
@@ -119,7 +101,29 @@ pub struct FnBoundsEntry {
     pub type_param_var_id: Int,
     pub trait_name: Str,
     pub type_param_name: Str,
+    pub dict_ordinal: Int,
     pub assoc_constraints: List<AssocConstraintEntry>
+}
+
+pub fn fn_bound_dict_ref(
+    owner: ExecutableRef, value: FnBoundsEntry
+) -> DictRef {
+    if value.dict_ordinal < 0 {
+        panic("dictionary evidence: negative final bound ordinal")
+    }
+    make_simple_dict_ref(
+        trait_bound_param_name(value.type_param_name, value.trait_name),
+        make_parameter_dict_ref(owner, value.dict_ordinal))
+}
+
+pub fn validate_fn_bound_order(values: List<FnBoundsEntry>) {
+    let mut index = 0
+    while index < values.len() {
+        if values.get(index).unwrap().dict_ordinal != index {
+            panic("dictionary evidence: final bound order is not dense")
+        }
+        index = index + 1
+    }
 }
 
 // Checker-only bridge between a function body's fresh associated-type
@@ -152,6 +156,7 @@ pub enum PendingEvidenceSource {
 }
 
 pub struct PendingDictObligation {
+    pub runtime_owner: ExecutableRef,
     pub source: PendingEvidenceSource,
     pub callee_type: Type,
     pub fn_bounds: List<FnBoundsEntry>,
@@ -212,15 +217,10 @@ pub struct ProjectNamespaceFrameState {
 }
 
 pub struct InferCtx {
-    pub core_recorder: CoreAssemblyRecorder,
     pub core_module_key: Str,
     pub core_module_order: Int,
-    recorded_core_types: List<RecordedCoreTypeFact>,
-    core_parameter_facts: Map<Int, FlowGenericParamFact>,
-    pub core_type_sources: List<CoreTypeSourceFact>,
-    pub core_handled_evidence_type_sources:
-        List<CoreHandledEvidenceTypeSource>,
     pub executable_stack: List<ExecutableRef>,
+    dictionary_evidence_owner_stack: List<ExecutableRef>,
     anonymous_child_counters: List<Int>,
     semantic_site_counters: List<Int>,
     handled_evidence_bindings_stack: List<List<HandledEvidenceRef>>,
@@ -300,15 +300,10 @@ pub fn new_infer_ctx(
     sink: CollectingSink, module_key: Str, module_order: Int
 ) -> InferCtx {
     InferCtx {
-        core_recorder: new_core_assembly_recorder(
-            module_key, module_order),
         core_module_key: module_key,
         core_module_order: module_order,
-        recorded_core_types: [],
-        core_parameter_facts: map_new(),
-        core_type_sources: [],
-        core_handled_evidence_type_sources: [],
         executable_stack: [],
+        dictionary_evidence_owner_stack: [],
         anonymous_child_counters: [],
         semantic_site_counters: [],
         handled_evidence_bindings_stack: [],
@@ -1327,7 +1322,7 @@ pub fn has_variant_ctor_origin_def_id(ctx: InferCtx, def_id: Int) -> Bool {
 }
 
 fn resolve_fn_bound_dict_ref(
-    current_fn_bounds: List<FnBoundsEntry>,
+    runtime_owner: ExecutableRef, current_fn_bounds: List<FnBoundsEntry>,
     id: Int, s: UnionFind, trait_name: Str
 ) -> DictRef? {
     let matching = current_fn_bounds.find(fn(fb) {
@@ -1346,8 +1341,7 @@ fn resolve_fn_bound_dict_ref(
         }
     })
     match matching {
-        some(fb) => some(DictRef::Simple(
-            trait_bound_param_name(fb.type_param_name, fb.trait_name))),
+        some(fb) => some(fn_bound_dict_ref(runtime_owner, fb)),
         none => none
     }
 }
@@ -1381,9 +1375,13 @@ pub fn record_value_binding_kind(mut ctx: InferCtx, local_name: Str, kind: Value
 }
 
 pub fn value_symbol_ref(ctx: InferCtx, def_id: Int) -> SymbolRef {
-    match ctx.value_symbols.get(def_id) {
+    let source = match ctx.value_symbols.get(def_id) {
         some(symbol) => symbol,
         none => panic("value identity: callable DefId has no resolver SymbolRef")
+    }
+    match compiler_owned_extern_symbol(ctx.env, source) {
+        some(exact) => exact,
+        none => source
     }
 }
 
@@ -1427,6 +1425,7 @@ pub fn enter_executable_owner(mut ctx: InferCtx, value: ExecutableRef) {
     ctx.handled_evidence_frame_bases.push(
         ctx.handled_evidence_frames.len())
     ctx.executable_stack.push(value)
+    ctx.dictionary_evidence_owner_stack.push(value)
     ctx.anonymous_child_counters.push(0)
     ctx.semantic_site_counters.push(0)
     ctx.handled_evidence_bindings_stack.push([])
@@ -1436,6 +1435,7 @@ pub fn enter_executable_owner(mut ctx: InferCtx, value: ExecutableRef) {
 
 pub fn exit_executable_owner(mut ctx: InferCtx) {
     if ctx.executable_stack.pop().is_none() ||
+       ctx.dictionary_evidence_owner_stack.pop().is_none() ||
        ctx.anonymous_child_counters.pop().is_none() {
         panic("executable identity: owner stack underflow")
     }
@@ -1460,6 +1460,23 @@ pub fn current_executable_owner(ctx: InferCtx) -> ExecutableRef {
         some(value) => value,
         none => panic("executable identity: no current body owner")
     }
+}
+
+pub fn current_dictionary_evidence_owner(ctx: InferCtx) -> ExecutableRef {
+    match ctx.dictionary_evidence_owner_stack.last() {
+        some(value) => value,
+        none => panic("dictionary evidence: no current runtime owner")
+    }
+}
+
+pub fn inherit_dictionary_evidence_owner(
+    mut ctx: InferCtx, value: ExecutableRef
+) {
+    let index = ctx.dictionary_evidence_owner_stack.len() - 1
+    if index < 0 {
+        panic("dictionary evidence: no executable frame to inherit")
+    }
+    ctx.dictionary_evidence_owner_stack.set(index, value)
 }
 
 fn copy_handled_evidence_refs(
@@ -1582,7 +1599,6 @@ fn capture_outer_handled_evidence(
 pub fn resolve_handled_evidence(
     mut ctx: InferCtx, requirement: HandledEffectRef
 ) -> HandledEvidenceRef {
-    ensure_core_handled_evidence_type(ctx, requirement)
     let current = current_executable_owner(ctx)
     let mut frame_index = ctx.handled_evidence_frames.len() - 1
     while frame_index >= 0 {
@@ -1759,7 +1775,6 @@ pub fn install_handled_evidence(
     let mut installed: List<HandledEvidenceRef> = []
     let counter_index = ctx.semantic_site_counters.len() - 1
     for requirement in requirements {
-        ensure_core_handled_evidence_type(ctx, requirement)
         if installed.any(fn(existing) {
                 handled_effect_ref_same(
                     handled_evidence_requirement(existing), requirement)
@@ -1904,254 +1919,6 @@ pub fn fresh_semantic_path(mut ctx: InferCtx, label: Str) -> PathRef {
     make_path_ref(owner, child_path, path_role_synthetic())
 }
 
-pub fn record_core_parameter_fact(
-    mut ctx: InferCtx, type_var_id: Int, owner: SymbolRef,
-    index: Int, arity: Int, bounds: List<SymbolRef>
-) {
-    let fact = make_flow_generic_param_fact(owner, index, arity, bounds)
-    match ctx.core_parameter_facts.get(type_var_id) {
-        some(existing) => {
-            if flow_generic_param_index(existing) != index ||
-               flow_generic_param_arity(existing) != arity ||
-               !symbol_ref_same(
-                    flow_generic_param_owner(existing), owner) {
-                panic("Core type producer: type parameter identity changed")
-            }
-        },
-        none => ctx.core_parameter_facts.insert(type_var_id, fact)
-    }
-}
-
-fn recorded_core_type_fact(ctx: InferCtx, ty: Type) -> CoreTypeFactRef? {
-    for relation in ctx.recorded_core_types {
-        if types_equal(relation.ty, ty) { return some(relation.fact) }
-    }
-    none
-}
-
-pub fn record_core_type_fact(mut ctx: InferCtx, ty: Type) -> CoreTypeFactRef {
-    match recorded_core_type_fact(ctx, ty) {
-        some(fact) => return fact,
-        none => {}
-    }
-    let fact = reserve_core_type_fact(ctx.core_recorder)
-    ctx.recorded_core_types.push(RecordedCoreTypeFact { ty: ty, fact: fact })
-    ctx.core_type_sources.push(make_core_type_source_fact(ty, fact))
-    match ty {
-        Type::IntType => define_core_atomic_type_fact(
-            ctx.core_recorder, fact, flow_type_kind_int()),
-        Type::FloatType => define_core_atomic_type_fact(
-            ctx.core_recorder, fact, flow_type_kind_float()),
-        Type::StrType => define_core_atomic_type_fact(
-            ctx.core_recorder, fact, flow_type_kind_str()),
-        Type::BoolType => define_core_atomic_type_fact(
-            ctx.core_recorder, fact, flow_type_kind_bool()),
-        Type::UnitType => define_core_atomic_type_fact(
-            ctx.core_recorder, fact, flow_type_kind_unit()),
-        Type::NeverType => define_core_atomic_type_fact(
-            ctx.core_recorder, fact, flow_type_kind_never()),
-        Type::TypeVar { id, .. } => match ctx.core_parameter_facts.get(id) {
-            some(parameter) => define_core_parameter_type_fact(
-                ctx.core_recorder, fact, parameter),
-            none => panic("Core type producer: unresolved type parameter fact")
-        },
-        Type::FnType { params, return_type, .. } => {
-            let mut parameter_facts: List<CoreTypeFactRef> = []
-            for parameter in params {
-                parameter_facts.push(record_core_type_fact(ctx, parameter))
-            }
-            define_core_callable_type_fact(
-                ctx.core_recorder, fact, parameter_facts,
-                record_core_type_fact(ctx, return_type))
-        },
-        Type::StructType { name, type_params } => {
-            let def = ctx.env.types.structs.get(name).unwrap_or_else(fn() {
-                panic("Core type producer: struct registry owner is missing")
-            })
-            let mut arguments: List<CoreTypeFactRef> = []
-            let mut type_map: Map<Int, Type> = map_new()
-            let mut index = 0
-            for argument in type_params {
-                arguments.push(record_core_type_fact(ctx, argument))
-                match def.type_param_vars.get(index) {
-                    some(id) => type_map.insert(id, argument),
-                    none => {}
-                }
-                index = index + 1
-            }
-            if def.is_extern {
-                define_core_extern_type_fact(
-                    ctx.core_recorder, fact,
-                    registered_nominal_ref_symbol(def.owner_ref), arguments,
-                    make_borrowed_flow_foreign_contract(), [])
-            } else {
-                let mut fields: List<CoreNominalFieldSpec> = []
-                for field in def.fields {
-                    fields.push(make_core_nominal_field_spec(
-                        make_nominal_flow_field_identity(field.field_ref),
-                        record_core_type_fact(
-                            ctx, apply_subst_map(type_map, field.ty))))
-                }
-                define_core_nominal_type_fact(
-                    ctx.core_recorder, fact, flow_type_kind_struct(),
-                    registered_nominal_ref_symbol(def.owner_ref), arguments,
-                    fields, flow_type_seed_shareable(), none, [], [])
-            }
-        },
-        Type::EnumType { name, type_params } => {
-            let def = ctx.env.types.enums.get(name).unwrap_or_else(fn() {
-                panic("Core type producer: enum registry owner is missing")
-            })
-            let mut arguments: List<CoreTypeFactRef> = []
-            let mut type_map: Map<Int, Type> = map_new()
-            let mut index = 0
-            for argument in type_params {
-                arguments.push(record_core_type_fact(ctx, argument))
-                match def.type_param_vars.get(index) {
-                    some(id) => type_map.insert(id, argument),
-                    none => {}
-                }
-                index = index + 1
-            }
-            let mut fields: List<CoreNominalFieldSpec> = []
-            let mut variant_index = 0
-            for variant in def.variants {
-                let variant_ref = def.variant_refs.get(variant_index).unwrap()
-                let field_refs = def.variant_field_refs.get(variant_index).unwrap()
-                let mut field_index = 0
-                for field_ty in variant.fields {
-                    fields.push(make_core_nominal_field_spec(
-                        make_variant_flow_field_identity(
-                            field_refs.get(field_index).unwrap()),
-                        record_core_type_fact(
-                            ctx, apply_subst_map(type_map, field_ty))))
-                    field_index = field_index + 1
-                }
-                let _ = variant_ref
-                variant_index = variant_index + 1
-            }
-            define_core_nominal_type_fact(
-                ctx.core_recorder, fact, flow_type_kind_enum(),
-                registered_nominal_ref_symbol(def.owner_ref), arguments,
-                fields, flow_type_seed_shareable(), none, [], [])
-        },
-        Type::TupleType { elements } => {
-            let mut element_facts: List<CoreTypeFactRef> = []
-            for element in elements {
-                element_facts.push(record_core_type_fact(ctx, element))
-            }
-            define_core_tuple_type_fact(
-                ctx.core_recorder, fact, element_facts,
-                flow_type_seed_shareable(), none, [], [])
-        },
-        Type::RecordType { fields, tail, .. } => {
-            if tail.is_some() {
-                panic("Core type producer: open record crossed Core closure")
-            }
-            let owner = path_owner_for_module_body(
-                make_module_body_ref(ctx.core_module_key, "module-body"))
-            let mut field_specs: List<CoreNominalFieldSpec> = []
-            let mut index = 0
-            for field in fields {
-                let path = make_path_ref(owner,
-                    ["record:${core_type_fact_ordinal(fact)}",
-                     "field:${index}"], path_role_synthetic())
-                field_specs.push(make_core_nominal_field_spec(
-                    make_path_flow_field_identity(path),
-                    record_core_type_fact(ctx, field.ty)))
-                index = index + 1
-            }
-            define_core_record_type_fact(
-                ctx.core_recorder, fact, field_specs,
-                flow_type_seed_shareable(), none, [], [])
-        },
-        Type::PtrType { pointee } => define_core_ptr_type_fact(
-            ctx.core_recorder, fact, record_core_type_fact(ctx, pointee)),
-        Type::AnyType | Type::GenericType { .. } |
-        Type::EffectRowType { .. } | Type::ErrorType =>
-            panic("Core type producer: non-canonical type crossed Core closure")
-    }
-    fact
-}
-
-pub fn record_handled_evidence_type_source(
-    mut ctx: InferCtx, def: EffectDef
-) {
-    let requirement = match def.handled_ref {
-        some(value) => value,
-        none => return
-    }
-    for existing in ctx.core_handled_evidence_type_sources {
-        if handled_effect_ref_same(
-                core_handled_evidence_source_requirement(existing),
-                requirement) {
-            return
-        }
-    }
-    let aggregate_fact = reserve_core_type_fact(ctx.core_recorder)
-    let effect_symbol = handled_effect_ref_symbol(requirement)
-    let mut operations: List<CoreHandledEvidenceOperationTypeSource> = []
-    let mut fields: List<CoreNominalFieldSpec> = []
-    let mut index = 0
-    for op in def.ops {
-        let operation = match op.operation_ref {
-            some(value) => value,
-            none => panic(
-                "Core type producer: handled effect op lacks exact identity")
-        }
-        let signature = Type::FnType {
-            params: op.params, return_type: op.return_type,
-            effects: EMPTY_ROW
-        }
-        let signature_fact = record_core_type_fact(ctx, signature)
-        operations.push(make_core_handled_evidence_operation_type_source(
-            operation, signature_fact))
-        let field_path = make_path_ref(
-            path_owner_for_symbol(effect_symbol),
-            ["handled-evidence-op:${index.to_str()}"],
-            path_role_child())
-        fields.push(make_core_nominal_field_spec(
-            make_path_flow_field_identity(field_path), signature_fact))
-        index = index + 1
-    }
-    define_core_record_type_fact(
-        ctx.core_recorder, aggregate_fact, fields,
-        flow_type_seed_shareable(), none, [], [])
-    ctx.core_handled_evidence_type_sources.push(
-        make_core_handled_evidence_type_source(
-            requirement, aggregate_fact, operations))
-}
-
-pub fn ensure_core_handled_evidence_type(
-    mut ctx: InferCtx, requirement: HandledEffectRef
-) {
-    for existing in ctx.core_handled_evidence_type_sources {
-        if handled_effect_ref_same(
-                core_handled_evidence_source_requirement(existing),
-                requirement) {
-            return
-        }
-    }
-    let mut found: EffectDef? = none
-    for entry in ctx.env.types.effects.entries() {
-        let def = entry.1
-        match def.handled_ref {
-            some(reference) => if handled_effect_ref_same(
-                    reference, requirement) {
-                if found.is_some() {
-                    panic("Core type producer: handled effect owner repeats")
-                }
-                found = some(def)
-            },
-            none => {}
-        }
-    }
-    match found {
-        some(def) => record_handled_evidence_type_source(ctx, def),
-        none => panic("Core type producer: handled effect owner is absent")
-    }
-}
-
 pub fn value_binding_kind(ctx: InferCtx, def_id: Int?) -> ValueBindingKind {
     match def_id {
         some(id) => match ctx.value_binding_kinds.get(id) {
@@ -2224,6 +1991,7 @@ fn type_has_error(t: Type) -> Bool {
 }
 
 fn resolve_named_impl_dict_evidence(
+    runtime_owner: ExecutableRef,
     env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
     name: Str, type_params: List<Type>, s: UnionFind, trait_name: Str
 ) -> DictEvidenceResolution {
@@ -2238,6 +2006,10 @@ fn resolve_named_impl_dict_evidence(
             }
         },
         some(impl_entry) => {
+            let impl_owner = match impl_entry.owner_ref {
+                some(value) => value,
+                none => panic("dictionary evidence: impl owner is absent")
+            }
             let dict_name = trait_dict_name(name, trait_name)
             let requirements = match instantiate_impl_runtime_requirements(
                 impl_entry, type_params
@@ -2249,7 +2021,8 @@ fn resolve_named_impl_dict_evidence(
             }
             if requirements.len() == 0 {
                 return DictEvidenceResolution::Resolved {
-                    dict_ref: DictRef::Static(dict_name)
+                    dict_ref: make_static_dict_ref(
+                        dict_name, make_exact_static_dict_ref(impl_owner))
                 }
             }
 
@@ -2259,7 +2032,8 @@ fn resolve_named_impl_dict_evidence(
             let mut suppress_missing = true
             for requirement in requirements {
                 match resolve_dict_evidence_for_type(
-                    env, current_fn_bounds, requirement.subject_type, s,
+                    runtime_owner, env, current_fn_bounds,
+                    requirement.subject_type, s,
                     requirement.canonical_trait_name
                 ) {
                     DictEvidenceResolution::Resolved { dict_ref } => {
@@ -2303,23 +2077,26 @@ fn resolve_named_impl_dict_evidence(
                     definition.owner_ref),
                 none => panic("dictionary evidence: exact trait owner is absent")
             }
-            DictEvidenceResolution::Resolved { dict_ref: DictRef::Wrapped {
-                dict: dict_name,
-                trait_ref: trait_ref,
-                inner_dicts: inner_dicts
-            } }
+            DictEvidenceResolution::Resolved { dict_ref:
+                make_wrapped_dict_ref(
+                    dict_name, trait_ref, inner_dicts,
+                    make_exact_wrapped_dict_ref(
+                        impl_owner, inner_dicts.map(fn(value) {
+                            dict_ref_exact(value)
+                        }))) }
         }
     }
 }
 
 fn resolve_dict_evidence_for_type(
+    runtime_owner: ExecutableRef,
     env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
     t: Type, s: UnionFind, trait_name: Str
 ) -> DictEvidenceResolution {
     let concrete = apply_subst(s, t)
     match concrete {
         Type::TypeVar { id, .. } => match resolve_fn_bound_dict_ref(
-            current_fn_bounds, id, s, trait_name
+            runtime_owner, current_fn_bounds, id, s, trait_name
         ) {
             some(dict_ref) => DictEvidenceResolution::Resolved {
                 dict_ref: dict_ref
@@ -2328,10 +2105,12 @@ fn resolve_dict_evidence_for_type(
         },
         Type::StructType { name, type_params, .. } =>
             resolve_named_impl_dict_evidence(
-                env, current_fn_bounds, name, type_params, s, trait_name),
+                runtime_owner, env, current_fn_bounds,
+                name, type_params, s, trait_name),
         Type::EnumType { name, type_params, .. } =>
             resolve_named_impl_dict_evidence(
-                env, current_fn_bounds, name, type_params, s, trait_name),
+                runtime_owner, env, current_fn_bounds,
+                name, type_params, s, trait_name),
         Type::ErrorType => DictEvidenceResolution::Missing {
             suppress_diagnostic: true
         },
@@ -2339,9 +2118,16 @@ fn resolve_dict_evidence_for_type(
             match type_to_builtin_name(concrete) {
                 some(builtin_name) => {
                     match find_impl(env.trait_reg, builtin_name, trait_name) {
-                        some(_) => DictEvidenceResolution::Resolved {
-                            dict_ref: DictRef::Static(
-                                trait_dict_name(builtin_name, trait_name))
+                        some(impl_entry) => {
+                            let impl_owner = match impl_entry.owner_ref {
+                                some(value) => value,
+                                none => panic("dictionary evidence: builtin impl owner is absent")
+                            }
+                            DictEvidenceResolution::Resolved {
+                                dict_ref: make_static_dict_ref(
+                                    trait_dict_name(builtin_name, trait_name),
+                                    make_exact_static_dict_ref(impl_owner))
+                            }
                         },
                         none => DictEvidenceResolution::Missing {
                             suppress_diagnostic: type_has_error(concrete)
@@ -2360,11 +2146,12 @@ fn resolve_dict_evidence_for_type(
 // propagated to the caller so diagnostics can be emitted at the use site;
 // this function never fabricates a base or "__unknown" dictionary.
 pub fn resolve_dict_ref_for_type(
+    runtime_owner: ExecutableRef,
     env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
     t: Type, s: UnionFind, trait_name: Str
 ) -> DictRef? {
     match resolve_dict_evidence_for_type(
-        env, current_fn_bounds, t, s, trait_name
+        runtime_owner, env, current_fn_bounds, t, s, trait_name
     ) {
         DictEvidenceResolution::Resolved { dict_ref } => some(dict_ref),
         DictEvidenceResolution::Pending => none,
@@ -2373,6 +2160,7 @@ pub fn resolve_dict_ref_for_type(
 }
 
 fn resolve_scheme_evidence(
+    runtime_owner: ExecutableRef,
     sink: CollectingSink, env: TypeEnv,
     current_fn_bounds: List<FnBoundsEntry>,
     scheme: TypeScheme, callee_type: Type, s: UnionFind, span: Span,
@@ -2393,7 +2181,8 @@ fn resolve_scheme_evidence(
             some(fresh_var) => {
                 let concrete = apply_subst(s, fresh_var)
                 match resolve_dict_evidence_for_type(
-                    env, current_fn_bounds, concrete, s, bound.trait_name
+                    runtime_owner, env, current_fn_bounds,
+                    concrete, s, bound.trait_name
                 ) {
                     DictEvidenceResolution::Resolved { dict_ref } => {
                         resolved_dicts.push(dict_ref)
@@ -2495,12 +2284,14 @@ fn publish_resolved_dicts(
 }
 
 pub fn resolve_dicts_from_scheme(
+    runtime_owner: ExecutableRef,
     sink: CollectingSink, env: TypeEnv,
     current_fn_bounds: List<FnBoundsEntry>,
     scheme: TypeScheme, callee_type: Type, s: UnionFind, span: Span
 ) -> List<DictRef> {
     match resolve_scheme_evidence(
-        sink, env, current_fn_bounds, scheme, callee_type, s, span, true
+        runtime_owner, sink, env, current_fn_bounds,
+        scheme, callee_type, s, span, true
     ) {
         SchemeEvidenceResolution::Resolved { dicts, .. } => dicts,
         SchemeEvidenceResolution::Pending { failures } => {
@@ -2515,13 +2306,14 @@ pub fn resolve_dicts_from_scheme(
 }
 
 pub fn resolve_dicts_from_impl_owner(
+    runtime_owner: ExecutableRef,
     sink: CollectingSink, env: TypeEnv,
     current_fn_bounds: List<FnBoundsEntry>,
     owner: ImplEntry, method_core: ImplMethodSchemeCore,
     callee_type: Type, s: UnionFind, span: Span
 ) -> List<DictRef> {
     match resolve_impl_owner_evidence(
-        sink, env, current_fn_bounds, owner, method_core,
+        runtime_owner, sink, env, current_fn_bounds, owner, method_core,
         callee_type, s, span, true
     ) {
         SchemeEvidenceResolution::Resolved { dicts, .. } => dicts,
@@ -2545,6 +2337,7 @@ pub fn resolve_or_defer_dicts_from_scheme(
 ) {
     if scheme.bounds.len() == 0 { return }
     match resolve_scheme_evidence(
+        current_dictionary_evidence_owner(ctx),
         ctx.sink, ctx.env, ctx.current_fn_bounds,
         scheme, callee_type, s, span,
         purpose_reports_assoc_mismatch(purpose)
@@ -2553,6 +2346,7 @@ pub fn resolve_or_defer_dicts_from_scheme(
             publish_resolved_dicts(purpose, dicts),
         SchemeEvidenceResolution::Pending { .. } =>
             ctx.pending_dict_obligations.push(PendingDictObligation {
+                runtime_owner: current_dictionary_evidence_owner(ctx),
                 source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
                 callee_type: callee_type,
                 fn_bounds: list_clone(ctx.current_fn_bounds),
@@ -2571,6 +2365,7 @@ pub fn resolve_or_defer_dicts_from_impl_owner(
 ) {
     if frozen_impl_predicates(owner.predicates).len() == 0 { return }
     match resolve_impl_owner_evidence(
+        current_dictionary_evidence_owner(ctx),
         ctx.sink, ctx.env, ctx.current_fn_bounds,
         owner, method_core, callee_type, s, span,
         purpose_reports_assoc_mismatch(purpose)
@@ -2579,6 +2374,7 @@ pub fn resolve_or_defer_dicts_from_impl_owner(
             publish_resolved_dicts(purpose, dicts),
         SchemeEvidenceResolution::Pending { .. } =>
             ctx.pending_dict_obligations.push(PendingDictObligation {
+                runtime_owner: current_dictionary_evidence_owner(ctx),
                 source: PendingEvidenceSource::ImplOwnerEvidenceSource {
                     owner: owner, method_core: method_core
                 },
@@ -2601,12 +2397,14 @@ pub fn register_callable_value_shadow(
 ) {
     if scheme.bounds.len() == 0 { return }
     match resolve_scheme_evidence(
+        current_dictionary_evidence_owner(ctx),
         ctx.sink, ctx.env, ctx.current_fn_bounds,
         scheme, callee_type, s, span, false
     ) {
         SchemeEvidenceResolution::Resolved { .. } => {},
         SchemeEvidenceResolution::Pending { .. } =>
             ctx.pending_dict_obligations.push(PendingDictObligation {
+                runtime_owner: current_dictionary_evidence_owner(ctx),
                 source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
                 callee_type: callee_type,
                 fn_bounds: list_clone(ctx.current_fn_bounds),
@@ -2692,6 +2490,7 @@ pub fn drain_pending_dicts(
         let mut next: List<PendingDictObligation> = []
         for obligation in remaining {
             match resolve_pending_evidence_source(
+                obligation.runtime_owner,
                 ctx.sink, ctx.env, obligation.fn_bounds,
                 obligation.source, obligation.callee_type, s,
                 obligation.span,
@@ -2717,6 +2516,7 @@ pub fn drain_pending_dicts(
     // only owners still unresolved here are genuine no-source obligations.
     for obligation in remaining {
         match resolve_pending_evidence_source(
+            obligation.runtime_owner,
             ctx.sink, ctx.env, obligation.fn_bounds,
             obligation.source, obligation.callee_type, s,
             obligation.span,
@@ -4388,7 +4188,60 @@ pub fn impl_predicate_constraints_satisfied(
     }
 }
 
+fn prove_named_dict_evidence(
+    env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
+    name: Str, type_params: List<Type>, s: UnionFind, trait_name: Str
+) -> Bool {
+    let impl_entry = match find_impl(env.trait_reg, name, trait_name) {
+        some(value) => value,
+        none => return false
+    }
+    let requirements = match instantiate_impl_runtime_requirements(
+            impl_entry, type_params) {
+        some(value) => value,
+        none => return false
+    }
+    for requirement in requirements {
+        if !prove_dict_evidence_for_type(
+                env, current_fn_bounds, requirement.subject_type, s,
+                requirement.canonical_trait_name) {
+            return false
+        }
+        let assoc_valid = match find_matching_fn_bound(
+                current_fn_bounds, requirement.subject_type, s,
+                requirement.canonical_trait_name) {
+            some(bound) => impl_assoc_constraints_match_fn_bound(
+                requirement.assoc_constraints, bound, map_new(), s),
+            none => impl_assoc_constraints_match_concrete(
+                env, requirement.subject_type,
+                requirement.canonical_trait_name,
+                requirement.assoc_constraints, map_new(), s)
+        }
+        if !assoc_valid { return false }
+    }
+    true
+}
+
+pub fn prove_dict_evidence_for_type(
+    env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
+    source: Type, s: UnionFind, trait_name: Str
+) -> Bool {
+    match apply_subst(s, source) {
+        Type::TypeVar { .. } => find_matching_fn_bound(
+            current_fn_bounds, source, s, trait_name).is_some(),
+        Type::StructType { name, type_params } |
+        Type::EnumType { name, type_params } => prove_named_dict_evidence(
+            env, current_fn_bounds, name, type_params, s, trait_name),
+        Type::ErrorType => false,
+        concrete => match type_to_builtin_name(concrete) {
+            some(name) => find_impl(env.trait_reg, name, trait_name).is_some(),
+            none => false
+        }
+    }
+}
+
 fn resolve_impl_owner_evidence(
+    runtime_owner: ExecutableRef,
     sink: CollectingSink, env: TypeEnv,
     current_fn_bounds: List<FnBoundsEntry>,
     owner: ImplEntry, core: ImplMethodSchemeCore,
@@ -4412,7 +4265,8 @@ fn resolve_impl_owner_evidence(
         match var_map.get(impl_predicate_subject_type_var(predicate)) {
             some(subject) => {
                 match resolve_dict_evidence_for_type(
-                    env, current_fn_bounds, subject, s, trait_name
+                    runtime_owner, env, current_fn_bounds,
+                    subject, s, trait_name
                 ) {
                     DictEvidenceResolution::Resolved { dict_ref } => {
                         let constraints = impl_predicate_assoc_constraints(
@@ -4469,6 +4323,7 @@ fn resolve_impl_owner_evidence(
 }
 
 fn resolve_pending_evidence_source(
+    runtime_owner: ExecutableRef,
     sink: CollectingSink, env: TypeEnv,
     fn_bounds: List<FnBoundsEntry>, source: PendingEvidenceSource,
     callee_type: Type, s: UnionFind, span: Span,
@@ -4477,12 +4332,13 @@ fn resolve_pending_evidence_source(
     match source {
         PendingEvidenceSource::SchemeEvidenceSource(scheme) =>
             resolve_scheme_evidence(
-                sink, env, fn_bounds, scheme, callee_type, s, span,
+                runtime_owner, sink, env, fn_bounds,
+                scheme, callee_type, s, span,
                 report_assoc_mismatch),
         PendingEvidenceSource::ImplOwnerEvidenceSource {
             owner, method_core
         } => resolve_impl_owner_evidence(
-            sink, env, fn_bounds, owner, method_core,
+            runtime_owner, sink, env, fn_bounds, owner, method_core,
             callee_type, s, span, report_assoc_mismatch)
     }
 }

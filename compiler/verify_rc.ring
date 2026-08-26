@@ -1351,8 +1351,11 @@ fn v_stmt(stmt: HStmt, mut ctx: VCtx) -> Bool {
             v_merge_two(ctx, rt.1, snap_t, re.1, snap_e, snap0, span)
             rt.1 && re.1
         },
-        HStmt::Drop { name, def_id, span, .. } => {
-            v_drop(name, def_id, span, ctx)
+        HStmt::Drop { name, def_id, place_target, span, .. } => {
+            match place_target {
+                some(target) => { let _ = v_borrow(target, "", ctx) },
+                none => { v_drop(name, def_id, span, ctx) }
+            }
             false
         }
     }

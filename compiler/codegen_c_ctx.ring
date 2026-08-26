@@ -8,9 +8,10 @@
 //     [rc:u32 | typeid:u32] header at ptr-8 (Perceus RC)
 //   * ring_runtime.cpp C ABI functions are called directly by name.
 
-use types::{Type, EffectRow}
+use types::{Type}
 use ast::{Span}
-use hir::{HDictDef, TraitBound, HEffectOp}
+use hir::{HDictDef, TraitBound}
+use ir_identity::{SlotRef, slot_ref_stable_key}
 
 // Per-function registration info (forward-declare pass).
 // total_params = ring params + trait-bound dict params + evidence params —
@@ -139,9 +140,10 @@ pub struct CCtx {
     pub name_only_slots: Map<Str, CNameOnlySlotRef>,
     // Cleanup-visible HIR identity -> exact C slot and declared spelling.
     pub value_slots_by_def_id: Map<Int, CExactSlotRef>,
+    // Semantic/synthetic SlotRef identity is independent from legacy DefId.
+    pub value_slots_by_slot_key: Map<Str, CExactSlotRef>,
     pub functions: Map<Str, CFnInfo>,          // C mangled name -> info
     pub fn_evidence_params: Map<Str, List<Str>>, // C mangled name -> evidence param names
-    pub local_fn_effects: Map<Str, EffectRow>,
     pub fn_mut_params: Map<Str, List<Bool>>,
     pub struct_types: Map<Str, CStructInfo>,
     pub enum_types: Map<Str, CEnumInfo>,
@@ -215,9 +217,7 @@ pub struct CCtx {
     pub identity_edge_counter: Int,
     pub identity_load_counter: Int,
 
-    // ---- step 6: effect handler / catch state ----
-    // Effect op declarations (slot-order contract, hir::effect_op_slot).
-    pub effect_ops: Map<Str, List<HEffectOp>>,
+    // ---- effect handler / catch state ----
     // Enclosing handle/try scopes for `return`-path cleanup (#173).
     pub handle_cleanup_stack: List<CHandleCleanup>,
 
@@ -274,9 +274,9 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         named_values: map_new(),
         name_only_slots: map_new(),
         value_slots_by_def_id: map_new(),
+        value_slots_by_slot_key: map_new(),
         functions: map_new(),
         fn_evidence_params: map_new(),
-        local_fn_effects: map_new(),
         fn_mut_params: map_new(),
         struct_types: map_new(),
         enum_types: map_new(),
@@ -306,7 +306,6 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         identity_event_counter: 0,
         identity_edge_counter: 0,
         identity_load_counter: 0,
-        effect_ops: map_new(),
         handle_cleanup_stack: [],
         loop_continue_stmt: "",
         in_loop: false,
@@ -636,6 +635,48 @@ pub fn c_exact_value_slot(
         },
         none => none
     }
+}
+
+fn c_register_semantic_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str, parameter: Bool
+) -> CExactSlotRef {
+    let key = slot_ref_stable_key(slot)
+    if ctx.value_slots_by_slot_key.contains_key(key) {
+        panic("C codegen: duplicate semantic SlotRef")
+    }
+    let cname = c_unique_local(ctx, suggested_name)
+    if !parameter {
+        ctx.cur_decls.push("    void* ${cname} = NULL;")
+    }
+    let result = CExactSlotRef {
+        c_name: cname, source_name: key, def_id: -2
+    }
+    ctx.value_slots_by_slot_key.insert(key, result)
+    result
+}
+
+pub fn c_local_semantic_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str
+) -> CExactSlotRef {
+    c_register_semantic_slot(ctx, slot, suggested_name, false)
+}
+
+pub fn c_param_semantic_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str
+) -> CExactSlotRef {
+    c_register_semantic_slot(ctx, slot, suggested_name, true)
+}
+
+pub fn c_semantic_value_slot(
+    ctx: CCtx, slot: SlotRef
+) -> CExactSlotRef? {
+    ctx.value_slots_by_slot_key.get(slot_ref_stable_key(slot))
+}
+
+pub fn c_semantic_value_slot_key(
+    ctx: CCtx, key: Str
+) -> CExactSlotRef? {
+    ctx.value_slots_by_slot_key.get(key)
 }
 
 pub fn c_register_name_only_ref(
@@ -1248,6 +1289,7 @@ pub struct CEmitState {
     pub named_values: Map<Str, Str>,
     pub name_only_slots: Map<Str, CNameOnlySlotRef>,
     pub value_slots_by_def_id: Map<Int, CExactSlotRef>,
+    pub value_slots_by_slot_key: Map<Str, CExactSlotRef>,
     pub indent: Int,
     pub in_function: Bool,
     pub current_fn_name: Str,
@@ -1271,6 +1313,7 @@ pub fn c_push_fn(mut ctx: CCtx, fn_name: Str) -> CEmitState {
         named_values: ctx.named_values,
         name_only_slots: ctx.name_only_slots,
         value_slots_by_def_id: ctx.value_slots_by_def_id,
+        value_slots_by_slot_key: ctx.value_slots_by_slot_key,
         indent: ctx.indent,
         in_function: ctx.in_function,
         current_fn_name: ctx.current_fn_name,
@@ -1286,6 +1329,7 @@ pub fn c_push_fn(mut ctx: CCtx, fn_name: Str) -> CEmitState {
     ctx.named_values = map_new()
     ctx.name_only_slots = map_new()
     ctx.value_slots_by_def_id = map_new()
+    ctx.value_slots_by_slot_key = map_new()
     ctx.indent = 1
     ctx.in_function = true
     ctx.current_fn_name = fn_name
@@ -1312,6 +1356,7 @@ pub fn c_pop_fn(mut ctx: CCtx, c_name: Str, params_str: Str, saved: CEmitState) 
     ctx.named_values = saved.named_values
     ctx.name_only_slots = saved.name_only_slots
     ctx.value_slots_by_def_id = saved.value_slots_by_def_id
+    ctx.value_slots_by_slot_key = saved.value_slots_by_slot_key
     ctx.indent = saved.indent
     ctx.in_function = saved.in_function
     ctx.current_fn_name = saved.current_fn_name
@@ -1640,7 +1685,21 @@ fn rt_sig(name: Str) -> Str? {
     if name == "ring_match_fail" { return some("piip>p") }
     // Trait dicts (step 5)
     if name == "ring_get_builtin_dict" { return some("p>p") }
-    if name == "ring_cl_cmp_str" { return some("ppp>p") }
+    if name == "ring_cl_eq_int" || name == "ring_cl_ne_int" ||
+       name == "ring_cl_eq_float" || name == "ring_cl_ne_float" ||
+       name == "ring_cl_eq_str" || name == "ring_cl_ne_str" ||
+       name == "ring_cl_eq_bool" || name == "ring_cl_ne_bool" ||
+       name == "ring_cl_cmp_int" || name == "ring_cl_cmp_float" ||
+       name == "ring_cl_cmp_str" || name == "ring_cl_cmp_bool" {
+        return some("ppp>p")
+    }
+    if name == "ring_cl_debug_int" || name == "ring_cl_debug_float" ||
+       name == "ring_cl_debug_str" || name == "ring_cl_debug_bool" ||
+       name == "ring_cl_hash_int_export" ||
+       name == "ring_cl_hash_str_export" ||
+       name == "ring_cl_hash_bool_export" {
+        return some("pp>p")
+    }
     // Option
     if name == "ring_Option_unwrap_or" { return some("pp>p") }
     if name == "ring_Option_unwrap" { return some("p>p") }

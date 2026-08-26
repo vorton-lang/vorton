@@ -6,6 +6,7 @@
 // tree, while exact slots/scopes/contracts are copied from Core.
 
 use ir_identity::{
+    CoreTypeRef, core_type_ref_same, core_type_ref_index,
     OriginRef, SlotRef, PathRef, PathOwnerRef,
     slot_ref_same, slot_ref_is_source, make_synthetic_slot_ref,
     registered_nominal_ref_symbol, origin_ref_same,
@@ -30,10 +31,10 @@ use ir_inventory::{
     binder_kind_handled_evidence_param,
     binder_kind_handled_evidence_local,
     binder_kind_handled_evidence_capture,
+    binder_kind_dictionary_evidence_param,
     effect_operation_ref_callable,
     system_host_callable_executable
 }
-use hir::{method_call_ref_is_bound, method_call_ref_bound_evidence}
 use core_hir::{
     CoreProgram, CoreBodyEntry,
     core_program_type_graph, core_program_callables,
@@ -46,16 +47,14 @@ use core_expr::{
     CoreCalleeRef, CoreEvidenceRef, CoreHandledEvidenceUse,
     CoreConstructorRef, CorePlaceRef,
     CoreCallableContract,
-    core_type_ref_to_flow,
     core_callable_reference, core_callable_origin,
-    core_callable_parameter_types, core_callable_parameter_slots,
-    core_callable_result_type, core_callable_mode,
+    core_callable_parameter_slots, core_callable_mode,
     core_callable_semantic_contract,
+    core_callable_effect_contract,
     core_callable_handled_evidence,
     core_handled_evidence_reference, core_handled_evidence_type,
     core_body_reference, core_body_origin, core_body_binders,
     core_body_parameter_slots, core_body_block, core_body_result_type,
-    core_type_graph_nodes,
     core_binder_reference, core_binder_type, core_binder_kind,
     core_binder_site, core_binder_storage_contract,
     core_block_statements, core_block_tail, core_block_origin,
@@ -63,22 +62,19 @@ use core_expr::{
     core_stmt_value, core_stmt_while_condition, core_stmt_while_body,
     core_stmt_return_value, core_stmt_bind_is_mutable,
     core_place_is_slot, core_place_slot, core_place_base,
-    core_place_field, core_place_evaluated_index, core_place_intrinsic,
+    core_place_field,
     core_place_value_type,
     core_expr_kind_tag, core_expr_type,
     core_expr_origin, core_expr_literal, core_literal_kind_tag,
-    core_expr_callable_executable,
+    core_expr_callable_executable, core_expr_callable_evidence,
     core_literal_int, core_literal_float, core_literal_str, core_literal_bool,
     core_expr_read_source, core_expr_primitive_operation,
     core_primitive_op_tag, core_expr_primitive_operands,
     core_expr_call_callee, core_expr_call_arguments,
     core_expr_call_evidence, core_expr_call_handled_evidence,
-    core_expr_method_ref,
     core_expr_method_receiver,
     core_expr_effect_operation, core_expr_system_host,
     core_expr_fail_payload,
-    core_expr_dict_constructor, core_expr_dict_project_dictionary,
-    core_expr_dict_project_method,
     core_expr_project_base, core_expr_project_field,
     core_expr_project_is_partial,
     core_expr_constructor, core_expr_constructor_fields,
@@ -111,25 +107,42 @@ use core_expr::{
     core_field_value_field, core_field_value_expr,
     core_callee_kind_tag, core_callee_direct, core_callee_local,
     core_callee_dynamic, core_callee_contract,
-    core_evidence_is_local, core_evidence_is_dict,
-    core_evidence_local, core_evidence_callable, core_evidence_dict,
+    core_callee_effect_instantiation,
+    core_evidence_dict,
     core_handled_use_reference, core_handled_use_type
 }
+use effect_contract::{
+    CoreEffectContract, CoreEffectInstantiation,
+    make_explicit_core_effect_instantiation
+}
+use core_type_source::{
+    core_type_graph_nodes,
+    FlowTypeNode, FlowFieldIdentity,
+    flow_type_node_children, copy_flow_type_graph_nodes,
+    make_nominal_flow_field_identity, make_variant_flow_field_identity,
+    make_path_flow_field_identity
+}
+use resource_model::{
+    FlowStorageContract, flow_own_storage,
+    FlowSemanticRole, flow_semantic_role_read,
+    flow_semantic_role_mutate, flow_semantic_role_consume,
+    make_fresh_flow_value_origin,
+    flow_call_contract_parameter_types,
+    flow_call_contract_parameter_roles,
+    flow_call_contract_result_type, flow_call_contract_result_role,
+    flow_call_contract_result_origin
+}
 use flow_ir::{
-    FlowProgram, FlowTypeNode, FlowTypeRef, FlowCallable, FlowBody,
+    FlowProgram, FlowCallable, FlowBody,
     FlowScope, FlowScopeRef, FlowSlot,
-    FlowInitialSlotState, FlowStorageClass, FlowStorageContract,
+    FlowInitialSlotState, FlowStorageClass,
     FlowBlock, FlowBlockRef, FlowInstructionRef, FlowInstruction,
     FlowSemanticStepRef,
     FlowTerminator, FlowSuccessor, FlowHandlerBinding,
     FlowHandlerInstallation,
-    FlowPatternContract, FlowPatternField,
-    FlowSemanticRole, FlowPrimitiveOp,
+    FlowPatternContract, FlowPatternField, FlowPrimitiveOp,
     FlowEvidenceRef, FlowHandledEvidenceUse,
-    FlowCallTarget, FlowFieldIdentity, FlowPlaceRef,
-    flow_type_ref_same, flow_type_ref_index,
-    flow_type_node_children,
-    copy_flow_type_graph_nodes,
+    FlowCallTarget, FlowPlaceRef,
     make_flow_callable, make_flow_program,
     make_flow_handled_evidence_binding,
     make_flow_slot, make_flow_block_ref, make_flow_instruction_ref,
@@ -138,7 +151,7 @@ use flow_ir::{
     flow_initial_slot_empty, flow_initial_slot_live,
     flow_storage_parameter, flow_storage_local,
     flow_storage_temp, flow_storage_result, flow_storage_capture,
-    flow_own_storage, flow_slot_reference, flow_slot_type, flow_slot_scope,
+    flow_slot_reference, flow_slot_type, flow_slot_scope,
     make_flow_successor,
     make_flow_goto, make_flow_branch, make_flow_loop,
     make_flow_return, make_flow_continue,
@@ -148,27 +161,28 @@ use flow_ir::{
     make_flow_handle_install,
     make_flow_initialize, make_flow_read, make_flow_assign,
     make_flow_fail_raise,
-    make_flow_slot_place, make_flow_project_place, make_flow_index_place,
+    make_flow_slot_place, make_flow_project_place,
     make_flow_call, make_flow_project, make_flow_capture,
     make_flow_int_literal_contract, make_flow_float_literal_contract,
     make_flow_str_literal_contract, make_flow_bool_literal_contract,
     make_flow_unit_literal_contract,
     make_flow_primitive_contract, make_flow_constructor_contract,
-    make_fresh_flow_value_origin,
     make_flow_tuple_aggregate_contract, make_flow_record_aggregate_contract,
     make_flow_closure_contract,
     make_flow_callable_value_contract,
+    FlowAggregateInputRef,
+    make_nominal_flow_aggregate_input,
+    make_variant_flow_aggregate_input,
+    make_tuple_flow_aggregate_input,
+    make_structural_flow_aggregate_input,
     make_direct_flow_call_target, make_local_flow_call_target,
     make_dynamic_flow_call_target,
-    make_flow_local_evidence, make_flow_callable_evidence,
     make_flow_dict_evidence, make_flow_handled_evidence_use,
     flow_handled_evidence_slot, flow_handled_evidence_type,
     make_nominal_flow_projection_contract,
     make_variant_flow_projection_contract,
     make_tuple_flow_projection_contract,
     make_structural_flow_projection_contract,
-    make_nominal_flow_field_identity, make_variant_flow_field_identity,
-    make_path_flow_field_identity,
     make_flow_pattern_int, make_flow_pattern_float,
     make_flow_pattern_str, make_flow_pattern_bool, make_flow_pattern_unit,
     make_flow_wildcard_pattern, make_flow_binding_pattern,
@@ -179,12 +193,6 @@ use flow_ir::{
     flow_primitive_div, flow_primitive_mod, flow_primitive_negate,
     flow_primitive_not, flow_primitive_lt, flow_primitive_le,
     flow_primitive_gt, flow_primitive_ge,
-    flow_semantic_role_read, flow_semantic_role_mutate,
-    flow_semantic_role_consume,
-    flow_call_contract_parameter_types,
-    flow_call_contract_parameter_roles,
-    flow_call_contract_result_type, flow_call_contract_result_role,
-    flow_call_contract_result_origin,
     flow_scope_reference, flow_scope_has_parent, flow_scope_parent,
     flow_scope_ref_same,
     flow_block_reference, flow_block_scope, flow_block_ref_ordinal,
@@ -597,6 +605,8 @@ fn activate_core_binder(
         binder_kind_handled_evidence_local())
     let handled_capture = kind_tag == binder_kind_tag(
         binder_kind_handled_evidence_capture())
+    let dictionary_param = kind_tag == binder_kind_tag(
+        binder_kind_dictionary_evidence_param())
     let entry = if handled_param || handled_local || handled_capture {
         make_semantic_evidence_binder(reference, ctx.owner, kind, site)
     } else if slot_ref_is_source(reference) {
@@ -605,10 +615,11 @@ fn activate_core_binder(
         make_synthetic_binder_entry(reference, ctx.owner, kind, site)
     }
     let ordinal = parameter_ordinal(ctx.core_body, reference)
-    let entry_live = ordinal.is_some() || handled_param || handled_capture
+    let entry_live = ordinal.is_some() || handled_param || handled_capture ||
+        dictionary_param
     let storage = if handled_capture {
         flow_storage_capture()
-    } else if ordinal.is_some() || handled_param {
+    } else if ordinal.is_some() || handled_param || dictionary_param {
         flow_storage_parameter()
     } else { flow_storage_local() }
     let initial = if entry_live {
@@ -618,13 +629,13 @@ fn activate_core_binder(
     }
     ctx.binders.push(entry)
     ctx.slots.push(make_flow_slot(
-        reference, core_type_ref_to_flow(core_binder_type(binder)), scope,
+        reference, core_binder_type(binder), scope,
         scope_slot_count(ctx, scope), initial, storage,
         core_binder_storage_contract(binder), ordinal))
 }
 
 fn new_admin_slot(
-    mut ctx: FlowLowerCtx, ty: FlowTypeRef, scope: FlowScopeRef,
+    mut ctx: FlowLowerCtx, ty: CoreTypeRef, scope: FlowScopeRef,
     kind: BinderKind, label: Str, role_tag: Int,
     storage: FlowStorageClass, initial: FlowInitialSlotState
 ) -> SlotRef {
@@ -784,7 +795,7 @@ fn callable_for(
     }
     panic("Flow lowering: exact Core callable is absent")
 }
-fn frozen_slot_type_at(ctx: FlowLowerCtx, slot: SlotRef) -> FlowTypeRef {
+fn frozen_slot_type_at(ctx: FlowLowerCtx, slot: SlotRef) -> CoreTypeRef {
     for value in ctx.slots {
         if slot_ref_same(flow_slot_reference(value), slot) {
             return flow_slot_type(value)
@@ -811,13 +822,7 @@ fn flow_primitive(tag: Int) -> FlowPrimitiveOp {
 fn flow_evidence(values: List<CoreEvidenceRef>) -> List<FlowEvidenceRef> {
     let mut result: List<FlowEvidenceRef> = []
     for value in values {
-        result.push(if core_evidence_is_local(value) {
-            make_flow_local_evidence(core_evidence_local(value))
-        } else if core_evidence_is_dict(value) {
-            make_flow_dict_evidence(core_evidence_dict(value))
-        } else {
-            make_flow_callable_evidence(core_evidence_callable(value))
-        })
+        result.push(make_flow_dict_evidence(core_evidence_dict(value)))
     }
     result
 }
@@ -827,22 +832,29 @@ fn flow_handled_evidence(
 ) -> List<FlowHandledEvidenceUse> {
     values.map(fn(value) {
         make_flow_handled_evidence_use(
-            core_handled_use_reference(value),
-            core_type_ref_to_flow(core_handled_use_type(value)))
+            core_handled_use_reference(value), core_handled_use_type(value))
     })
 }
 
+fn callable_identity_effects(
+    value: CoreCallableContract
+) -> CoreEffectInstantiation {
+    let effects = core_callable_effect_contract(value)
+    make_explicit_core_effect_instantiation(effects, effects, effects)
+}
 fn flow_call_target(value: CoreCalleeRef) -> FlowCallTarget {
     let contract = core_callee_contract(value)
+    let effects = core_callee_effect_instantiation(value)
     let kind = core_callee_kind_tag(value)
     if kind == 0 {
-        make_direct_flow_call_target(core_callee_direct(value), contract)
+        make_direct_flow_call_target(
+            core_callee_direct(value), contract, effects)
     } else if kind == 1 {
         make_local_flow_call_target(
-            core_callee_local(value), contract)
+            core_callee_local(value), contract, effects)
     } else if kind == 2 {
         make_dynamic_flow_call_target(
-            core_callee_dynamic(value), contract)
+            core_callee_dynamic(value), contract, effects)
     } else {
         panic("Flow lowering: unknown Core callee form")
     }
@@ -861,6 +873,23 @@ fn flow_field(value: CoreFieldRef) -> FlowFieldIdentity {
     }
 }
 
+fn flow_aggregate_input(field: CoreFieldRef) -> FlowAggregateInputRef {
+    let kind = core_field_ref_kind_tag(field)
+    if kind == 0 {
+        return make_nominal_flow_aggregate_input(
+            core_field_ref_nominal(field))
+    }
+    if kind == 1 {
+        return make_tuple_flow_aggregate_input(
+            core_field_ref_tuple_index(field))
+    }
+    if kind == 2 {
+        return make_structural_flow_aggregate_input(
+            core_field_ref_record_path(field))
+    }
+    make_variant_flow_aggregate_input(core_field_ref_variant(field))
+}
+
 fn lower_flow_place(
     mut ctx: FlowLowerCtx, value: CorePlaceRef,
     continue_target: FlowBlockRef?, break_target: FlowBlockRef?
@@ -875,41 +904,27 @@ fn lower_flow_place(
         ctx, core_place_base(value), continue_target, break_target)
     if is_terminated(ctx) { return none }
     let base_type = frozen_slot_type_at(ctx, base)
-    let value_type = core_type_ref_to_flow(core_place_value_type(value))
-    match core_place_field(value) {
-        some(field) => {
-            let kind = core_field_ref_kind_tag(field)
-            let contract = if kind == 0 {
-                make_nominal_flow_projection_contract(
-                    core_field_ref_nominal(field), base_type, value_type,
-                    flow_semantic_role_mutate(), false)
-            } else if kind == 1 {
-                make_tuple_flow_projection_contract(
-                    core_field_ref_tuple_index(field), base_type, value_type,
-                    flow_semantic_role_mutate(), false)
-            } else if kind == 2 {
-                make_structural_flow_projection_contract(
-                    core_field_ref_record_path(field), base_type, value_type,
-                    flow_semantic_role_mutate(), false)
-            } else {
-                make_variant_flow_projection_contract(
-                    core_field_ref_variant(field), base_type, value_type,
-                    flow_semantic_role_mutate(), false)
-            }
-            some(make_flow_project_place(base, contract, value_type))
-        },
-        none => {
-            let index = match core_place_evaluated_index(value) {
-                some(expr) => some(lower_expr(
-                    ctx, expr, continue_target, break_target)),
-                none => none
-            }
-            if is_terminated(ctx) { return none }
-            some(make_flow_index_place(
-                base, index.unwrap(), core_place_intrinsic(value).unwrap(),
-                value_type))
-        }
+    let value_type = core_place_value_type(value)
+    let field = core_place_field(value)
+    let kind = core_field_ref_kind_tag(field)
+    let contract = if kind == 0 {
+        make_nominal_flow_projection_contract(
+            core_field_ref_nominal(field), base_type, value_type,
+            flow_semantic_role_mutate(), false)
+    } else if kind == 1 {
+        make_tuple_flow_projection_contract(
+            core_field_ref_tuple_index(field), base_type, value_type,
+            flow_semantic_role_mutate(), false)
+    } else if kind == 2 {
+        make_structural_flow_projection_contract(
+            core_field_ref_record_path(field), base_type, value_type,
+            flow_semantic_role_mutate(), false)
+    } else {
+        make_variant_flow_projection_contract(
+            core_field_ref_variant(field), base_type, value_type,
+            flow_semantic_role_mutate(), false)
     }
+    some(make_flow_project_place(base, contract, value_type))
 }
 
 fn activate_pattern_binders(
@@ -931,7 +946,7 @@ fn activate_pattern_binders(
 }
 
 fn flow_pattern(value: CorePattern) -> FlowPatternContract {
-    let ty = core_type_ref_to_flow(core_pattern_type(value))
+    let ty = core_pattern_type(value)
     let kind = core_pattern_kind_tag(value)
     if kind == 0 { return make_flow_wildcard_pattern(ty) }
     if kind == 1 {
@@ -988,7 +1003,7 @@ fn emit_simple_expr(
 ) -> Bool {
     let kind = core_expr_kind_tag(expr)
     let origin = core_expr_origin(expr)
-    let result_type = core_type_ref_to_flow(core_expr_type(expr))
+    let result_type = core_expr_type(expr)
     if kind == 0 {
         let literal = core_expr_literal(expr)
         let literal_kind = core_literal_kind_tag(literal)
@@ -1053,16 +1068,7 @@ fn emit_simple_expr(
             if is_terminated(ctx) { return true }
         }
         if is_terminated(ctx) { return true }
-        let mut evidence = flow_evidence(core_expr_call_evidence(expr))
-        if kind == 4 {
-            let method = core_expr_method_ref(expr)
-            if method_call_ref_is_bound(method) {
-                let mut exact = [make_flow_dict_evidence(
-                    method_call_ref_bound_evidence(method))]
-                for item in evidence { exact.push(item) }
-                evidence = exact
-            }
-        }
+        let evidence = flow_evidence(core_expr_call_evidence(expr))
         emit_instruction(ctx, make_flow_call(
             next_instruction_ref(ctx), origin,
             flow_call_target(callee), arguments,
@@ -1087,7 +1093,8 @@ fn emit_simple_expr(
             next_instruction_ref(ctx), origin,
             make_direct_flow_call_target(
                 core_callable_reference(callable),
-                core_callable_semantic_contract(callable)),
+                core_callable_semantic_contract(callable),
+                callable_identity_effects(callable)),
             arguments,
             flow_evidence(core_expr_call_evidence(expr)),
             flow_handled_evidence(
@@ -1110,31 +1117,10 @@ fn emit_simple_expr(
             next_instruction_ref(ctx), origin,
             make_direct_flow_call_target(
                 core_callable_reference(callable),
-                core_callable_semantic_contract(callable)),
+                core_callable_semantic_contract(callable),
+                callable_identity_effects(callable)),
             arguments, [], [], some(result)),
             core_flow_role_expr_primary())
-        return true
-    }
-    if kind == 7 || kind == 8 {
-        let executable = if kind == 7 {
-            core_expr_dict_constructor(expr)
-        } else {
-            core_expr_dict_project_method(expr)
-        }
-        let callable = callable_for(ctx, executable)
-        let arguments: List<SlotRef> = if kind == 7 { [] } else {
-            [lower_expr(ctx, core_expr_dict_project_dictionary(expr),
-                continue_target, break_target)]
-        }
-        if is_terminated(ctx) { return true }
-        emit_instruction(ctx, make_flow_call(
-            next_instruction_ref(ctx), origin,
-            make_direct_flow_call_target(
-                executable, core_callable_semantic_contract(callable)),
-            arguments,
-            if kind == 7 {
-                flow_evidence(core_expr_call_evidence(expr))
-            } else { [] }, [], some(result)), core_flow_role_expr_primary())
         return true
     }
     if kind == 9 {
@@ -1172,10 +1158,13 @@ fn emit_simple_expr(
         let constructor = core_expr_constructor(expr)
         let fields = core_expr_constructor_fields(expr)
         let mut inputs: List<SlotRef> = []
+        let mut input_locations: List<FlowAggregateInputRef?> = []
         for field in fields {
             inputs.push(lower_expr(
                 ctx, core_field_value_expr(field),
                 continue_target, break_target))
+            input_locations.push(some(flow_aggregate_input(
+                core_field_value_field(field))))
             if is_terminated(ctx) { return true }
         }
         if is_terminated(ctx) { return true }
@@ -1190,6 +1179,7 @@ fn emit_simple_expr(
                     executable,
                     flow_call_contract_parameter_types(callable_contract),
                     flow_call_contract_parameter_roles(callable_contract),
+                    input_locations,
                     result_type,
                     flow_call_contract_result_role(callable_contract),
                     flow_call_contract_result_origin(callable_contract))
@@ -1199,7 +1189,8 @@ fn emit_simple_expr(
                     inputs.len(), input_types, roles, result_type)
             } else if constructor_kind == 0 || constructor_kind == 3 {
                 make_flow_record_aggregate_contract(
-                    inputs.len(), input_types, roles, result_type)
+                    inputs.len(), input_types, roles,
+                    input_locations, result_type)
             } else {
                 panic("Flow lowering: variant constructor lacks executable")
             }
@@ -1227,10 +1218,9 @@ fn emit_simple_expr(
                 core_handled_capture_source(capture))
             let target = handled_evidence_slot(
                 core_handled_capture_target(capture))
-            let expected_type = core_type_ref_to_flow(
-                core_handled_capture_type(capture))
+            let expected_type = core_handled_capture_type(capture)
             let actual_type = frozen_slot_type_at(ctx, source)
-            if !flow_type_ref_same(actual_type, expected_type) {
+            if !core_type_ref_same(actual_type, expected_type) {
                 panic("Flow lowering: handled capture source type differs")
             }
             captures.push(source)
@@ -1251,7 +1241,9 @@ fn emit_simple_expr(
         let _ = callable_for(ctx, executable)
         emit_instruction(ctx, make_flow_initialize(
             next_instruction_ref(ctx), origin,
-            make_flow_callable_value_contract(executable, result_type),
+            make_flow_callable_value_contract(
+                executable, result_type,
+                flow_evidence(core_expr_callable_evidence(expr))),
             [], result), core_flow_role_expr_primary())
         return true
     }
@@ -1481,12 +1473,12 @@ fn lower_handle_expression(
         let core_evidence = core_handler_installation_evidence(installation)
         let flow_evidence_binding = make_flow_handled_evidence_binding(
             core_handled_evidence_reference(core_evidence),
-            core_type_ref_to_flow(core_handled_evidence_type(core_evidence)))
+            core_handled_evidence_type(core_evidence))
         let evidence_slot = flow_handled_evidence_slot(flow_evidence_binding)
         activate_core_binder(ctx, evidence_slot, body_scope)
         let aggregate_type = flow_handled_evidence_type(flow_evidence_binding)
         let aggregate_node = match ctx.type_nodes.get(
-                flow_type_ref_index(aggregate_type)) {
+                core_type_ref_index(aggregate_type)) {
             some(value) => value,
             none => panic("Flow lowering: evidence aggregate type is absent")
         }
@@ -1504,7 +1496,7 @@ fn lower_handle_expression(
             let _ = callable_for(ctx, executable)
             let mut capture_sources: List<SlotRef> = []
             let mut capture_targets: List<SlotRef> = []
-            let mut capture_types: List<FlowTypeRef> = []
+            let mut capture_types: List<CoreTypeRef> = []
             for capture in core_handler_operation_captures(operation) {
                 let source = core_capture_source(capture)
                 let target = core_capture_target(capture)
@@ -1517,9 +1509,8 @@ fn lower_handle_expression(
                     core_handled_capture_source(capture))
                 let target = handled_evidence_slot(
                     core_handled_capture_target(capture))
-                let capture_type = core_type_ref_to_flow(
-                    core_handled_capture_type(capture))
-                if !flow_type_ref_same(
+                let capture_type = core_handled_capture_type(capture)
+                if !core_type_ref_same(
                         frozen_slot_type_at(ctx, source), capture_type) {
                     panic("Flow lowering: handler evidence capture type differs")
                 }
@@ -1555,6 +1546,10 @@ fn lower_handle_expression(
                 closure_slots.len(), field_types,
                 repeated_role(
                     closure_slots.len(), flow_semantic_role_consume()),
+                closure_slots.map(fn(_) {
+                    let missing: FlowAggregateInputRef? = none
+                    missing
+                }),
                 aggregate_type),
             closure_slots, evidence_slot),
             core_flow_role_control_dispatch(dispatch_ordinal))
@@ -1581,7 +1576,7 @@ fn lower_expr(
 ) -> SlotRef {
     let kind = core_expr_kind_tag(expr)
     let result = new_admin_slot(
-        ctx, core_type_ref_to_flow(core_expr_type(expr)),
+        ctx, core_expr_type(expr),
         current_draft(ctx).scope, binder_kind_pre_anf(), "expr", 3,
         flow_storage_temp(), flow_initial_slot_empty())
     let previous = enter_core_node(
@@ -1847,15 +1842,13 @@ fn lower_core_body(
 fn lower_core_callable(value: CoreCallableContract) -> FlowCallable {
     make_flow_callable(
         core_callable_reference(value), core_callable_origin(value),
-        core_callable_parameter_types(value).map(fn(ty) {
-            core_type_ref_to_flow(ty)
-        }), core_callable_parameter_slots(value),
-        core_type_ref_to_flow(core_callable_result_type(value)),
+        core_callable_parameter_slots(value),
         core_callable_mode(value), core_callable_semantic_contract(value),
+        core_callable_effect_contract(value),
         core_callable_handled_evidence(value).map(fn(binding) {
             make_flow_handled_evidence_binding(
                 core_handled_evidence_reference(binding),
-                core_type_ref_to_flow(core_handled_evidence_type(binding)))
+                core_handled_evidence_type(binding))
         }))
 }
 

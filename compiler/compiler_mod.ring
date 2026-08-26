@@ -2,20 +2,27 @@ use types::{Type, EffectRow, type_to_string, effect_row_to_string, nominal_displ
 use ast::{Program, UseDecl, Span}
 use hir::{HProgram, HDecl, HParam, HTypeParam, h_type_param_source,
     module_item_identity, is_module_item_identity}
-use diagnostics::{Severity, DiagnosticContext, CollectingSink, Diagnostic, new_collecting_sink, make_diag}
+use diagnostics::{Severity, DiagnosticContext, new_collecting_sink, make_diag}
 use formatter::{format_human, format_llm}
 use env::{TypeEnv}
 use checker::{check_module}
-use core_from_hir::{FrozenCoreAssemblyFacts}
+use core_from_hir::{
+    FrozenCoreAssemblyFacts, CoreAssemblyResult,
+    assemble_project_core, core_assembly_result_program,
+    core_assembly_result_diagnostic_projection}
 use legacy_projection::{LegacyProjectionFacts}
 use codegen_c::{generate_c_project}
 use resolver::{ModuleGraph, ModuleId, module_key, module_prefix,
     build_module_graph}
 use exports::{ModuleExports, extract_exports}
 use verify_rc::{RcFinding, verify_rc_program, rc_fatal_count, format_rc_findings}
-use core_from_hir::{assemble_project_core, core_assembly_result_program}
 use legacy_projection::{assemble_legacy_projection}
-use ownership_pipeline::{run_ownership_pipeline,
+use ownership_pipeline::{
+    VerifiedOwnershipProgram, OwnershipPipelineOutcome,
+    run_ownership_pipeline,
+    ownership_pipeline_outcome_is_verified,
+    ownership_pipeline_outcome_verified,
+    ownership_pipeline_failure_diagnostics,
     verified_ownership_program_flow}
 use rc_hir_bridge::{VerifiedProjectHirShell,
     make_verified_project_hir_shell, materialize_verified_project_hir,
@@ -46,16 +53,71 @@ struct CompilePhaseResult {
     extern_forward_bridges: Map<Str, Str>
 }
 
-fn materialize_project_ownership(
+fn run_project_ownership(
     phases: CompilePhaseResult
-) -> Map<Str, HProgram> {
+) -> (CoreAssemblyResult, OwnershipPipelineOutcome) {
     let mut core_facts: List<FrozenCoreAssemblyFacts> = []
-    let mut legacy_facts: List<LegacyProjectionFacts> = []
-    let mut shells: List<VerifiedProjectHirShell> = []
     for key in phases.graph.topo_order {
         core_facts.push(phases.module_core_facts.get(key).unwrap_or_else(fn() {
             panic("project ownership: Core facts are absent")
         }))
+    }
+    let assembly = assemble_project_core(core_facts)
+    (assembly, run_ownership_pipeline(
+        core_assembly_result_program(assembly)))
+}
+
+fn report_project_ownership_failure(
+    phases: CompilePhaseResult, assembly: CoreAssemblyResult,
+    outcome: OwnershipPipelineOutcome, error_format: Str
+) {
+    let projection = core_assembly_result_diagnostic_projection(assembly)
+    let routed = ownership_pipeline_failure_diagnostics(
+        outcome, projection)
+    for projected in routed {
+        let (finding_module_key, diagnostic) = projected
+        let module = phases.graph.modules.get(
+            finding_module_key).unwrap_or_else(fn() {
+                panic("project ownership diagnostic: projected module is absent")
+            })
+        if diagnostic.span.file != module.file_path {
+            panic("project ownership diagnostic: projected span crosses module file")
+        }
+    }
+    let mut emitted = false
+    for key in phases.graph.topo_order {
+        let mut sink = new_collecting_sink()
+        for routed_diagnostic in routed {
+            let (finding_module_key, diagnostic) = routed_diagnostic
+            if finding_module_key == key {
+                sink.report(diagnostic)
+            }
+        }
+        if sink.has_errors() {
+            emitted = true
+            let module = phases.graph.modules.get(key).unwrap_or_else(fn() {
+                panic("project ownership diagnostic: module is absent")
+            })
+            if error_format == "llm" {
+                eprintln(format_llm(sink.diagnostics(), module.file_path))
+            } else {
+                eprintln(format_human(
+                    sink.diagnostics(), read_file(module.file_path)))
+            }
+        }
+    }
+    if !emitted {
+        panic("project ownership diagnostic: failed plan emitted no error")
+    }
+}
+
+fn materialize_verified_project_ownership(
+    phases: CompilePhaseResult, assembly: CoreAssemblyResult,
+    verified: VerifiedOwnershipProgram
+) -> Map<Str, HProgram> {
+    let mut legacy_facts: List<LegacyProjectionFacts> = []
+    let mut shells: List<VerifiedProjectHirShell> = []
+    for key in phases.graph.topo_order {
         legacy_facts.push(
             phases.module_legacy_facts.get(key).unwrap_or_else(fn() {
                 panic("project ownership: legacy facts are absent")
@@ -65,14 +127,11 @@ fn materialize_project_ownership(
                 panic("project ownership: HIR shell is absent")
             })))
     }
-    let assembly = assemble_project_core(core_facts)
-    let verified = run_ownership_pipeline(
-        core_assembly_result_program(assembly))
     let projection = assemble_legacy_projection(
         legacy_facts, assembly,
         verified_ownership_program_flow(verified))
     let materialized = materialize_verified_project_hir(
-        shells, verified, projection)
+        shells, phases.prelude_physical_owner_module_key, verified, projection)
     let mut result: Map<Str, HProgram> = map_new()
     for value in materialized {
         let key = materialized_project_hir_module_key(value)
@@ -488,7 +547,16 @@ pub fn compile_project(entry_file: Str, error_format: Str, mut timing: PhaseTimi
         },
         some(phases) => {
             let resource_start = timing.start_phase()
-            let _ = materialize_project_ownership(phases)
+            let (assembly, ownership) = run_project_ownership(phases)
+            if !ownership_pipeline_outcome_is_verified(ownership) {
+                report_project_ownership_failure(
+                    phases, assembly, ownership, error_format)
+                timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+                return CompileProjectResult { success: false }
+            }
+            let _ = materialize_verified_project_ownership(
+                phases, assembly,
+                ownership_pipeline_outcome_verified(ownership))
             timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
             CompileProjectResult { success: true }
         },
@@ -517,7 +585,16 @@ pub fn compile_project_c(
         some(phases) => {
             let resource_start = timing.start_phase()
             let entry_key = module_key(phases.graph.entry.path_segments)
-            let materialized = materialize_project_ownership(phases)
+            let (assembly, ownership) = run_project_ownership(phases)
+            if !ownership_pipeline_outcome_is_verified(ownership) {
+                report_project_ownership_failure(
+                    phases, assembly, ownership, error_format)
+                timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+                return CProjectCompileResult { success: false }
+            }
+            let materialized = materialize_verified_project_ownership(
+                phases, assembly,
+                ownership_pipeline_outcome_verified(ownership))
 
             // Build list of (module_prefix, HProgram, uses) in topo order
             let mut modules: List<(Str, HProgram, List<UseDecl>)> = []
@@ -582,7 +659,18 @@ pub fn verify_project_rc(
                 }
             }
             let resource_start = timing.start_phase()
-            let materialized = materialize_project_ownership(phases)
+            let (assembly, ownership) = run_project_ownership(phases)
+            if !ownership_pipeline_outcome_is_verified(ownership) {
+                report_project_ownership_failure(
+                    phases, assembly, ownership, error_format)
+                timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+                return RcProjectVerifyResult {
+                    success: false, fatal: 0, exempt: 0, report: ""
+                }
+            }
+            let materialized = materialize_verified_project_ownership(
+                phases, assembly,
+                ownership_pipeline_outcome_verified(ownership))
             let mut all: List<RcFinding> = []
             for key in phases.graph.topo_order {
                 match materialized.get(key) {

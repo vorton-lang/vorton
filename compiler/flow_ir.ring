@@ -9,9 +9,13 @@
 // planner.
 
 use ir_identity::{
-    SymbolRef, PathRef, PathOwnerRef, SlotRef,
-    NominalFieldRef, VariantRef, VariantFieldRef, IntrinsicRef,
-    HandledEffectRef, handled_effect_ref_same, handled_effect_ref_symbol,
+    CoreTypeRef, make_core_type_ref,
+    core_type_ref_index, core_type_ref_same,
+    SymbolRef, PathRef, PathOwnerRef, SlotRef, ImplOwnerRef,
+    NominalFieldRef, VariantRef, VariantFieldRef,
+    HandledEffectRef, SystemEffectRef,
+    handled_effect_ref_same, handled_effect_ref_symbol,
+    system_effect_ref_same, system_effect_ref_tag,
     symbol_ref_same, symbol_ref_origin_module_key,
     symbol_ref_namespace_kind, symbol_ref_canonical_payload,
     symbol_ref_declaration_site_path,
@@ -34,13 +38,17 @@ use ir_identity::{
     variant_ref_owner, variant_ref_same,
     variant_ref_member,
     registered_nominal_ref_symbol,
-    intrinsic_ref_same, intrinsic_ref_symbol, intrinsic_ref_site,
-    builtin_method_site_tag,
+    impl_owner_ref_target, impl_owner_ref_provider, impl_owner_ref_trait,
+    impl_provider_ref_site, impl_provider_ref_kind, impl_provider_kind_tag,
     OriginRef, origin_ref_is_symbol, origin_ref_symbol, origin_ref_path,
     origin_ref_same
 }
 use ir_inventory::{
-    ExecutableRef, executable_ref_same, executable_ref_is_named,
+    ExecutableRef, ExactDictRef,
+    dict_ref_is_local, dict_ref_is_static,
+    dict_ref_local, dict_ref_static,
+    dict_ref_wrapped_base, dict_ref_wrapped_inner,
+    executable_ref_same, executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_anonymous_path,
     executable_ref_origin_module_key,
     EffectOperationRef, effect_operation_ref_member,
@@ -50,1814 +58,97 @@ use ir_inventory::{
     HandledEvidenceRef, handled_evidence_requirement,
     handled_evidence_slot, handled_evidence_contract_owner,
     handled_evidence_ordinal, handled_evidence_ref_same,
+    ExecutableContractMode, executable_contract_mode_same,
+    executable_contract_mode_concrete_body,
+    executable_contract_mode_contract_only,
     BinderManifest, BinderEntry,
     binder_manifest_owner, binder_manifest_entries,
     binder_entry_slot, make_binder_manifest
 }
-use hir::{DictRef}
+use effect_contract::{
+    EffectParamRef, effect_param_owner, effect_param_ref_same,
+    effect_param_ordinal,
+    CoreEffectAtom, CoreEffectContract, CoreEffectSubstitution,
+    CoreEffectInstantiation,
+    make_core_fail_effect, make_core_mut_effect, make_core_unsafe_effect,
+    make_core_handled_effect, make_core_system_effect,
+    core_effect_atom_kind_tag, core_effect_atom_type,
+    core_effect_atom_handled_ref, core_effect_atom_type_arguments,
+    core_effect_atom_system_ref, core_effect_atom_same,
+    make_core_effect_set, core_effect_set_atoms,
+    make_core_effect_contract, core_effect_contract_exact,
+    core_effect_contract_parameter, core_effect_contract_same,
+    copy_core_effect_contract,
+    make_core_effect_substitution, core_effect_substitution_parameter,
+    core_effect_substitution_replacement,
+    make_core_effect_instantiation,
+    make_explicit_core_effect_instantiation,
+    core_effect_instantiation_source,
+    core_effect_instantiation_substitutions,
+    core_effect_instantiation_result,
+    core_effect_contract_handled_requirements
+}
+use core_type_source::{
+    FlowTypeNode, FlowFieldIdentity, FlowNominalFieldFact,
+    FLOW_TYPE_INT, FLOW_TYPE_FLOAT, FLOW_TYPE_STR, FLOW_TYPE_BOOL,
+    FLOW_TYPE_UNIT, FLOW_TYPE_NEVER, FLOW_TYPE_STRUCT, FLOW_TYPE_ENUM,
+    FLOW_TYPE_TUPLE, FLOW_TYPE_RECORD, FLOW_TYPE_CALLABLE,
+    FLOW_TYPE_PTR, FLOW_TYPE_PARAMETER, FLOW_TYPE_EXTERN,
+    flow_type_kind_tag, flow_type_kind_callable, flow_type_kind_same,
+    flow_field_identity_is_nominal, flow_field_identity_nominal,
+    flow_field_identity_is_variant, flow_field_identity_variant,
+    flow_field_identity_path, flow_field_identity_same,
+    make_nominal_flow_field_identity, make_variant_flow_field_identity,
+    flow_type_actual_satisfies_formal,
+    validate_flow_type_graph_nodes, copy_flow_type_graph_nodes,
+    flow_generic_param_owner, flow_generic_param_index,
+    flow_generic_param_arity,
+    flow_resource_edge_is_application, flow_resource_edge_child,
+    flow_resource_edge_child_ordinal,
+    flow_resource_edge_child_dependency_ordinal,
+    flow_resource_edge_target, flow_resource_edge_application_parameter,
+    flow_resource_dependency_target_is_parent,
+    flow_resource_dependency_target_parent,
+    flow_resource_dependency_target_concrete_type
+}
+use resource_model::{
+    FlowTypeSemanticSeed,
+    flow_type_seed_scalar, flow_type_seed_ptr,
+    flow_type_seed_unique, flow_type_seed_shareable,
+    flow_type_seed_extern, flow_type_seed_parametric,
+    flow_type_semantic_seed_tag,
+    FlowSemanticRole, flow_semantic_role_read,
+    flow_semantic_role_mutate, flow_semantic_role_consume,
+    flow_semantic_role_force, flow_semantic_role_tag,
+    copy_semantic_roles,
+    FlowValueOriginContract, make_fresh_flow_value_origin,
+    make_aliasing_flow_value_origin, flow_value_origin_is_fresh,
+    flow_value_origin_alias_ordinals, copy_value_origin,
+    value_origin_same, validate_value_origin_arity,
+    FlowCallContract, make_flow_call_contract,
+    make_module_flow_call_contract, flow_call_contract_module_key,
+    flow_call_contract_parameter_types,
+    flow_call_contract_parameter_roles,
+    flow_call_contract_result_role, flow_call_contract_result_type,
+    flow_call_contract_result_origin, flow_call_contract_same,
+    copy_call_contract,
+    FlowStorageContract, flow_own_storage, flow_borrow_storage,
+    flow_storage_contract_tag
+}
 
 // ============================================================
 // Finite, exact type graph
 // ============================================================
 
-const FLOW_TYPE_INT: Int = 0
-const FLOW_TYPE_FLOAT: Int = 1
-const FLOW_TYPE_STR: Int = 2
-const FLOW_TYPE_BOOL: Int = 3
-const FLOW_TYPE_UNIT: Int = 4
-const FLOW_TYPE_NEVER: Int = 5
-const FLOW_TYPE_STRUCT: Int = 6
-const FLOW_TYPE_ENUM: Int = 7
-const FLOW_TYPE_TUPLE: Int = 8
-const FLOW_TYPE_RECORD: Int = 9
-const FLOW_TYPE_CALLABLE: Int = 10
-const FLOW_TYPE_PTR: Int = 11
-const FLOW_TYPE_PARAMETER: Int = 12
-const FLOW_TYPE_EXTERN: Int = 13
-const FLOW_TYPE_KIND_COUNT: Int = 14
-
-pub struct FlowTypeRef { index: Int }
-
-pub fn make_flow_type_ref(index: Int) -> FlowTypeRef {
-    if index < 0 { panic("FlowIR: negative type reference") }
-    FlowTypeRef { index: index }
-}
-
-pub fn flow_type_ref_index(value: FlowTypeRef) -> Int { value.index }
-
-pub fn flow_type_ref_same(left: FlowTypeRef, right: FlowTypeRef) -> Bool {
-    left.index == right.index
-}
-
-pub struct FlowTypeKind { tag: Int }
-
-fn flow_type_kind_from_tag(tag: Int) -> FlowTypeKind {
-    if tag < FLOW_TYPE_INT || tag >= FLOW_TYPE_KIND_COUNT {
-        panic("FlowIR: unknown type kind crossed CoreHIR boundary")
-    }
-    FlowTypeKind { tag: tag }
-}
-
-pub fn flow_type_kind_tag(value: FlowTypeKind) -> Int {
-    flow_type_kind_from_tag(value.tag).tag
-}
-
-pub fn flow_type_kind_int() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_INT) }
-pub fn flow_type_kind_float() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_FLOAT) }
-pub fn flow_type_kind_str() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_STR) }
-pub fn flow_type_kind_bool() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_BOOL) }
-pub fn flow_type_kind_unit() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_UNIT) }
-pub fn flow_type_kind_never() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_NEVER) }
-pub fn flow_type_kind_struct() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_STRUCT) }
-pub fn flow_type_kind_enum() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_ENUM) }
-pub fn flow_type_kind_tuple() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_TUPLE) }
-pub fn flow_type_kind_record() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_RECORD) }
-pub fn flow_type_kind_callable() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_CALLABLE) }
-pub fn flow_type_kind_ptr() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_PTR) }
-pub fn flow_type_kind_parameter() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_PARAMETER) }
-pub fn flow_type_kind_extern() -> FlowTypeKind { flow_type_kind_from_tag(FLOW_TYPE_EXTERN) }
-
-fn flow_type_kind_same(left: FlowTypeKind, right: FlowTypeKind) -> Bool {
-    flow_type_kind_tag(left) == flow_type_kind_tag(right)
-}
-
-const FLOW_SEED_SCALAR: Int = 0
-const FLOW_SEED_PTR: Int = 1
-const FLOW_SEED_UNIQUE: Int = 2
-const FLOW_SEED_SHAREABLE: Int = 3
-const FLOW_SEED_EXTERN: Int = 4
-const FLOW_SEED_PARAMETRIC: Int = 5
-
-pub struct FlowTypeSemanticSeed { tag: Int }
-
-fn flow_type_semantic_seed_from_tag(tag: Int) -> FlowTypeSemanticSeed {
-    if tag < FLOW_SEED_SCALAR || tag > FLOW_SEED_PARAMETRIC {
-        panic("FlowIR: invalid type semantic seed")
-    }
-    FlowTypeSemanticSeed { tag: tag }
-}
-
-pub fn flow_type_seed_scalar() -> FlowTypeSemanticSeed {
-    flow_type_semantic_seed_from_tag(FLOW_SEED_SCALAR)
-}
-pub fn flow_type_seed_ptr() -> FlowTypeSemanticSeed {
-    flow_type_semantic_seed_from_tag(FLOW_SEED_PTR)
-}
-pub fn flow_type_seed_unique() -> FlowTypeSemanticSeed {
-    flow_type_semantic_seed_from_tag(FLOW_SEED_UNIQUE)
-}
-pub fn flow_type_seed_shareable() -> FlowTypeSemanticSeed {
-    flow_type_semantic_seed_from_tag(FLOW_SEED_SHAREABLE)
-}
-pub fn flow_type_seed_extern() -> FlowTypeSemanticSeed {
-    flow_type_semantic_seed_from_tag(FLOW_SEED_EXTERN)
-}
-pub fn flow_type_seed_parametric() -> FlowTypeSemanticSeed {
-    flow_type_semantic_seed_from_tag(FLOW_SEED_PARAMETRIC)
-}
-pub fn flow_type_semantic_seed_tag(value: FlowTypeSemanticSeed) -> Int {
-    flow_type_semantic_seed_from_tag(value.tag).tag
-}
-
-pub struct FlowDropContract { provider: ExecutableRef }
-
-pub fn make_flow_drop_contract(provider: ExecutableRef) -> FlowDropContract {
-    FlowDropContract { provider: provider }
-}
-pub fn flow_drop_contract_provider(value: FlowDropContract) -> ExecutableRef {
-    value.provider
-}
-
-enum FlowForeignContractValue {
-    BorrowedForeignValue,
-    ManagedForeignValue { retain: ExecutableRef, release: ExecutableRef }
-}
-
-pub struct FlowForeignContract { value: FlowForeignContractValue }
-
-pub fn make_borrowed_flow_foreign_contract() -> FlowForeignContract {
-    FlowForeignContract { value: FlowForeignContractValue::BorrowedForeignValue }
-}
-pub fn make_managed_flow_foreign_contract(
-    retain: ExecutableRef, release: ExecutableRef
-) -> FlowForeignContract {
-    if executable_ref_same(retain, release) {
-        panic("FlowIR: foreign retain/release contracts alias")
-    }
-    FlowForeignContract { value: FlowForeignContractValue::ManagedForeignValue {
-        retain: retain, release: release
-    } }
-}
-pub fn flow_foreign_contract_is_managed(value: FlowForeignContract) -> Bool {
-    match value.value {
-        FlowForeignContractValue::ManagedForeignValue { .. } => true,
-        FlowForeignContractValue::BorrowedForeignValue => false
-    }
-}
-pub fn flow_foreign_contract_retain(value: FlowForeignContract) -> ExecutableRef {
-    match value.value {
-        FlowForeignContractValue::ManagedForeignValue { retain, .. } => retain,
-        FlowForeignContractValue::BorrowedForeignValue =>
-            panic("FlowIR: borrowed foreign type has no retain contract")
-    }
-}
-pub fn flow_foreign_contract_release(value: FlowForeignContract) -> ExecutableRef {
-    match value.value {
-        FlowForeignContractValue::ManagedForeignValue { release, .. } => release,
-        FlowForeignContractValue::BorrowedForeignValue =>
-            panic("FlowIR: borrowed foreign type has no release contract")
-    }
-}
-
-pub struct FlowGenericParamFact {
-    owner: SymbolRef,
-    index: Int,
-    arity: Int,
-    bounds: List<SymbolRef>
-}
-
-fn copy_symbols(values: List<SymbolRef>) -> List<SymbolRef> {
-    let mut result: List<SymbolRef> = []
-    for value in values { result.push(value) }
-    result
-}
-
-pub fn make_flow_generic_param_fact(
-    owner: SymbolRef, index: Int, arity: Int, bounds: List<SymbolRef>
-) -> FlowGenericParamFact {
-    if arity <= 0 || index < 0 || index >= arity {
-        panic("FlowIR: generic parameter index/arity is invalid")
-    }
-    let mut left_index = 0
-    while left_index < bounds.len() {
-        let left = bounds.get(left_index).unwrap()
-        if !namespace_kind_same(
-                symbol_ref_namespace_kind(left), namespace_trait()) {
-            panic("FlowIR: generic bound is not an exact trait symbol")
-        }
-        let mut right_index = left_index + 1
-        while right_index < bounds.len() {
-            if symbol_ref_same(left, bounds.get(right_index).unwrap()) {
-                panic("FlowIR: generic parameter repeats a bound")
-            }
-            right_index = right_index + 1
-        }
-        left_index = left_index + 1
-    }
-    FlowGenericParamFact {
-        owner: owner, index: index, arity: arity,
-        bounds: copy_symbols(bounds)
-    }
-}
-pub fn flow_generic_param_owner(value: FlowGenericParamFact) -> SymbolRef {
-    value.owner
-}
-pub fn flow_generic_param_index(value: FlowGenericParamFact) -> Int { value.index }
-pub fn flow_generic_param_arity(value: FlowGenericParamFact) -> Int { value.arity }
-pub fn flow_generic_param_bounds(value: FlowGenericParamFact) -> List<SymbolRef> {
-    copy_symbols(value.bounds)
-}
-fn copy_generic_param_fact(value: FlowGenericParamFact) -> FlowGenericParamFact {
-    FlowGenericParamFact {
-        owner: value.owner, index: value.index, arity: value.arity,
-        bounds: copy_symbols(value.bounds)
-    }
-}
-fn flow_generic_param_fact_same(
-    left: FlowGenericParamFact, right: FlowGenericParamFact
-) -> Bool {
-    if !symbol_ref_same(left.owner, right.owner) ||
-       left.index != right.index || left.arity != right.arity ||
-       left.bounds.len() != right.bounds.len() {
-        return false
-    }
-    let mut index = 0
-    while index < left.bounds.len() {
-        if !symbol_ref_same(
-                left.bounds.get(index).unwrap(),
-                right.bounds.get(index).unwrap()) {
-            return false
-        }
-        index = index + 1
-    }
-    true
-}
-
-enum FlowResourceDependencyTargetValue {
-    ParentParameterDependencyValue(FlowGenericParamFact),
-    ConcreteTypeDependencyValue(FlowTypeRef)
-}
-
-pub struct FlowResourceDependencyTarget {
-    value: FlowResourceDependencyTargetValue
-}
-
-pub fn make_flow_parent_parameter_dependency(
-    parameter: FlowGenericParamFact
-) -> FlowResourceDependencyTarget {
-    FlowResourceDependencyTarget {
-        value: FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-            copy_generic_param_fact(parameter))
-    }
-}
-pub fn make_flow_concrete_type_dependency(
-    ty: FlowTypeRef
-) -> FlowResourceDependencyTarget {
-    FlowResourceDependencyTarget {
-        value: FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty)
-    }
-}
-pub fn flow_resource_dependency_target_is_parent(
-    value: FlowResourceDependencyTarget
-) -> Bool {
-    match value.value {
-        FlowResourceDependencyTargetValue::ParentParameterDependencyValue(_) => true,
-        FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(_) => false
-    }
-}
-pub fn flow_resource_dependency_target_parent(
-    value: FlowResourceDependencyTarget
-) -> FlowGenericParamFact {
-    match value.value {
-        FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-            parameter) => copy_generic_param_fact(parameter),
-        _ => panic("FlowIR: resource dependency target is not a parent parameter")
-    }
-}
-pub fn flow_resource_dependency_target_parent_ordinal(
-    value: FlowResourceDependencyTarget
-) -> Int {
-    flow_resource_dependency_target_parent(value).index
-}
-pub fn flow_resource_dependency_target_concrete_type(
-    value: FlowResourceDependencyTarget
-) -> FlowTypeRef {
-    match value.value {
-        FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) => ty,
-        _ => panic("FlowIR: resource dependency target is not a concrete type")
-    }
-}
-
-pub struct FlowResourceDependencyEdge {
-    is_application: Bool,
-    child_ordinal: Int,
-    child: FlowTypeRef,
-    child_dependency_ordinal: Int,
-    application_parameter: FlowGenericParamFact?,
-    target: FlowResourceDependencyTarget
-}
-
-pub fn make_flow_resource_dependency_edge(
-    child_ordinal: Int, child: FlowTypeRef, child_dependency_ordinal: Int,
-    target: FlowResourceDependencyTarget
-) -> FlowResourceDependencyEdge {
-    if child_ordinal < 0 || child_dependency_ordinal < 0 {
-        panic("FlowIR: negative child resource dependency ordinal")
-    }
-    FlowResourceDependencyEdge {
-        is_application: false,
-        child_ordinal: child_ordinal, child: child,
-        child_dependency_ordinal: child_dependency_ordinal,
-        application_parameter: none,
-        target: target
-    }
-}
-pub fn make_flow_application_resource_dependency_edge(
-    argument_ordinal: Int, argument: FlowTypeRef,
-    argument_dependency_ordinal: Int,
-    owner_parameter: FlowGenericParamFact,
-    target: FlowResourceDependencyTarget
-) -> FlowResourceDependencyEdge {
-    if argument_ordinal < 0 || argument_dependency_ordinal < 0 ||
-       owner_parameter.index < 0 {
-        panic("FlowIR: invalid application resource dependency ordinal")
-    }
-    FlowResourceDependencyEdge {
-        is_application: true, child_ordinal: argument_ordinal,
-        child: argument,
-        child_dependency_ordinal: argument_dependency_ordinal,
-        application_parameter: some(copy_generic_param_fact(owner_parameter)),
-        target: target
-    }
-}
-pub fn flow_resource_edge_is_application(
-    value: FlowResourceDependencyEdge
-) -> Bool { value.is_application }
-pub fn flow_resource_edge_child(value: FlowResourceDependencyEdge) -> FlowTypeRef {
-    value.child
-}
-pub fn flow_resource_edge_child_ordinal(
-    value: FlowResourceDependencyEdge
-) -> Int { value.child_ordinal }
-pub fn flow_resource_edge_child_dependency_ordinal(
-    value: FlowResourceDependencyEdge
-) -> Int { value.child_dependency_ordinal }
-pub fn flow_resource_edge_target(
-    value: FlowResourceDependencyEdge
-) -> FlowResourceDependencyTarget { value.target }
-pub fn flow_resource_edge_application_parameter(
-    value: FlowResourceDependencyEdge
-) -> FlowGenericParamFact {
-    match value.application_parameter {
-        some(parameter) => copy_generic_param_fact(parameter),
-        none => panic("FlowIR: child resource edge has no application parameter")
-    }
-}
-fn copy_resource_edges(
-    values: List<FlowResourceDependencyEdge>
-) -> List<FlowResourceDependencyEdge> {
-    let mut result: List<FlowResourceDependencyEdge> = []
-    for value in values {
-        result.push(FlowResourceDependencyEdge {
-            is_application: value.is_application,
-            child_ordinal: value.child_ordinal, child: value.child,
-            child_dependency_ordinal: value.child_dependency_ordinal,
-            application_parameter: match value.application_parameter {
-                some(parameter) => some(copy_generic_param_fact(parameter)),
-                none => none
-            },
-            target: match value.target.value {
-                FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-                    parameter) => make_flow_parent_parameter_dependency(parameter),
-                FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) =>
-                    make_flow_concrete_type_dependency(ty)
-            }
-        })
-    }
-    result
-}
-
-enum FlowFieldIdentityValue {
-    NominalFieldIdentityValue(NominalFieldRef),
-    VariantFieldIdentityValue(VariantFieldRef),
-    PathFieldIdentityValue(PathRef)
-}
-
-pub struct FlowFieldIdentity { value: FlowFieldIdentityValue }
-
-pub fn make_nominal_flow_field_identity(
-    value: NominalFieldRef
-) -> FlowFieldIdentity {
-    FlowFieldIdentity { value: FlowFieldIdentityValue::NominalFieldIdentityValue(value) }
-}
-pub fn make_path_flow_field_identity(value: PathRef) -> FlowFieldIdentity {
-    FlowFieldIdentity { value: FlowFieldIdentityValue::PathFieldIdentityValue(value) }
-}
-pub fn make_variant_flow_field_identity(
-    value: VariantFieldRef
-) -> FlowFieldIdentity {
-    FlowFieldIdentity {
-        value: FlowFieldIdentityValue::VariantFieldIdentityValue(value)
-    }
-}
-pub fn flow_field_identity_is_nominal(value: FlowFieldIdentity) -> Bool {
-    match value.value {
-        FlowFieldIdentityValue::NominalFieldIdentityValue(_) => true,
-        FlowFieldIdentityValue::VariantFieldIdentityValue(_) => false,
-        FlowFieldIdentityValue::PathFieldIdentityValue(_) => false
-    }
-}
-pub fn flow_field_identity_is_variant(value: FlowFieldIdentity) -> Bool {
-    match value.value {
-        FlowFieldIdentityValue::VariantFieldIdentityValue(_) => true,
-        _ => false
-    }
-}
-pub fn flow_field_identity_variant(value: FlowFieldIdentity) -> VariantFieldRef {
-    match value.value {
-        FlowFieldIdentityValue::VariantFieldIdentityValue(field) => field,
-        _ => panic("FlowIR: non-variant field has no VariantFieldRef")
-    }
-}
-pub fn flow_field_identity_nominal(value: FlowFieldIdentity) -> NominalFieldRef {
-    match value.value {
-        FlowFieldIdentityValue::NominalFieldIdentityValue(field) => field,
-        _ => panic("FlowIR: path field has no NominalFieldRef")
-    }
-}
-pub fn flow_field_identity_path(value: FlowFieldIdentity) -> PathRef {
-    match value.value {
-        FlowFieldIdentityValue::PathFieldIdentityValue(path) => path,
-        _ => panic("FlowIR: nominal field has no PathRef")
-    }
-}
-fn flow_field_identity_same(
-    left: FlowFieldIdentity, right: FlowFieldIdentity
-) -> Bool {
-    match (left.value, right.value) {
-        (FlowFieldIdentityValue::NominalFieldIdentityValue(a),
-         FlowFieldIdentityValue::NominalFieldIdentityValue(b)) =>
-            nominal_field_ref_same(a, b),
-        (FlowFieldIdentityValue::VariantFieldIdentityValue(a),
-         FlowFieldIdentityValue::VariantFieldIdentityValue(b)) =>
-            variant_field_ref_same(a, b),
-        (FlowFieldIdentityValue::PathFieldIdentityValue(a),
-         FlowFieldIdentityValue::PathFieldIdentityValue(b)) => path_ref_same(a, b),
-        _ => false
-    }
-}
-
-pub struct FlowNominalFieldFact {
-    identity: FlowFieldIdentity,
-    ty: FlowTypeRef
-}
-
-pub fn make_flow_nominal_field_fact(
-    identity: FlowFieldIdentity, ty: FlowTypeRef
-) -> FlowNominalFieldFact {
-    FlowNominalFieldFact { identity: identity, ty: ty }
-}
-pub fn flow_nominal_field_identity(
-    value: FlowNominalFieldFact
-) -> FlowFieldIdentity { value.identity }
-pub fn flow_nominal_field_type(value: FlowNominalFieldFact) -> FlowTypeRef {
-    value.ty
-}
-fn copy_nominal_fields(values: List<FlowNominalFieldFact>) -> List<FlowNominalFieldFact> {
-    let mut result: List<FlowNominalFieldFact> = []
-    for value in values { result.push(value) }
-    result
-}
-
-pub struct FlowTypeNode {
-    reference: FlowTypeRef,
-    kind: FlowTypeKind,
-    nominal: SymbolRef?,
-    children: List<FlowTypeRef>,
-    generic_arguments: List<FlowTypeRef>,
-    nominal_fields: List<FlowNominalFieldFact>,
-    parameter_count: Int,
-    generic_param: FlowGenericParamFact?,
-    semantic_seed: FlowTypeSemanticSeed,
-    drop_contract: FlowDropContract?,
-    foreign_contract: FlowForeignContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
-}
-
-fn copy_type_refs(values: List<FlowTypeRef>) -> List<FlowTypeRef> {
-    let mut result: List<FlowTypeRef> = []
-    for value in values { result.push(value) }
-    result
-}
-
-fn make_atomic_flow_type_node(
-    reference: FlowTypeRef, kind: FlowTypeKind
-) -> FlowTypeNode {
-    let tag = flow_type_kind_tag(kind)
-    if tag < FLOW_TYPE_INT || tag > FLOW_TYPE_NEVER {
-        panic("FlowIR: non-atomic type used atomic constructor")
-    }
-    let seed = if tag == FLOW_TYPE_STR {
-        flow_type_seed_shareable()
-    } else {
-        flow_type_seed_scalar()
-    }
-    FlowTypeNode {
-        reference: reference, kind: kind, nominal: none, children: [],
-        generic_arguments: [], nominal_fields: [], parameter_count: 0,
-        generic_param: none, semantic_seed: seed,
-        drop_contract: none, foreign_contract: none,
-        resource_parameters: [], resource_edges: []
-    }
-}
-
-pub fn make_flow_int_type_node(reference: FlowTypeRef) -> FlowTypeNode {
-    make_atomic_flow_type_node(reference, flow_type_kind_int())
-}
-pub fn make_flow_float_type_node(reference: FlowTypeRef) -> FlowTypeNode {
-    make_atomic_flow_type_node(reference, flow_type_kind_float())
-}
-pub fn make_flow_str_type_node(reference: FlowTypeRef) -> FlowTypeNode {
-    make_atomic_flow_type_node(reference, flow_type_kind_str())
-}
-pub fn make_flow_bool_type_node(reference: FlowTypeRef) -> FlowTypeNode {
-    make_atomic_flow_type_node(reference, flow_type_kind_bool())
-}
-pub fn make_flow_unit_type_node(reference: FlowTypeRef) -> FlowTypeNode {
-    make_atomic_flow_type_node(reference, flow_type_kind_unit())
-}
-pub fn make_flow_never_type_node(reference: FlowTypeRef) -> FlowTypeNode {
-    make_atomic_flow_type_node(reference, flow_type_kind_never())
-}
-
-fn make_nominal_flow_type_node(
-    reference: FlowTypeRef, kind: FlowTypeKind, nominal: SymbolRef,
-    arguments: List<FlowTypeRef>, fields: List<FlowNominalFieldFact>,
-    semantic_seed: FlowTypeSemanticSeed,
-    drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
-) -> FlowTypeNode {
-    if !flow_type_kind_same(kind, flow_type_kind_struct()) &&
-       !flow_type_kind_same(kind, flow_type_kind_enum()) {
-        panic("FlowIR: invalid nominal type kind")
-    }
-    if !namespace_kind_same(
-            symbol_ref_namespace_kind(nominal), namespace_nominal()) {
-        panic("FlowIR: nominal type has non-nominal symbol")
-    }
-    FlowTypeNode {
-        reference: reference, kind: kind, nominal: some(nominal),
-        children: fields.map(fn(field) { field.ty }),
-        generic_arguments: copy_type_refs(arguments),
-        nominal_fields: copy_nominal_fields(fields), parameter_count: 0,
-        generic_param: none,
-        semantic_seed: flow_type_semantic_seed_from_tag(semantic_seed.tag),
-        drop_contract: drop_contract, foreign_contract: none,
-        resource_parameters: resource_parameters.map(fn(parameter) {
-            copy_generic_param_fact(parameter)
-        }),
-        resource_edges: copy_resource_edges(resource_edges)
-    }
-}
-
-pub fn make_flow_struct_type_node(
-    reference: FlowTypeRef, nominal: SymbolRef,
-    arguments: List<FlowTypeRef>, fields: List<FlowNominalFieldFact>,
-    semantic_seed: FlowTypeSemanticSeed,
-    drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
-) -> FlowTypeNode {
-    make_nominal_flow_type_node(
-        reference, flow_type_kind_struct(), nominal, arguments, fields,
-        semantic_seed, drop_contract, resource_parameters, resource_edges)
-}
-
-pub fn make_flow_enum_type_node(
-    reference: FlowTypeRef, nominal: SymbolRef,
-    arguments: List<FlowTypeRef>, fields: List<FlowNominalFieldFact>,
-    semantic_seed: FlowTypeSemanticSeed,
-    drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
-) -> FlowTypeNode {
-    make_nominal_flow_type_node(
-        reference, flow_type_kind_enum(), nominal, arguments, fields,
-        semantic_seed, drop_contract, resource_parameters, resource_edges)
-}
-
-pub fn make_flow_extern_type_node(
-    reference: FlowTypeRef, nominal: SymbolRef,
-    arguments: List<FlowTypeRef>, contract: FlowForeignContract,
-    resource_edges: List<FlowResourceDependencyEdge>
-) -> FlowTypeNode {
-    if !namespace_kind_same(
-            symbol_ref_namespace_kind(nominal), namespace_nominal()) {
-        panic("FlowIR: extern type has non-nominal symbol")
-    }
-    FlowTypeNode {
-        reference: reference, kind: flow_type_kind_extern(),
-        nominal: some(nominal), children: [],
-        generic_arguments: copy_type_refs(arguments), nominal_fields: [],
-        parameter_count: 0, generic_param: none,
-        semantic_seed: flow_type_seed_extern(), drop_contract: none,
-        foreign_contract: some(contract),
-        resource_parameters: [],
-        resource_edges: copy_resource_edges(resource_edges)
-    }
-}
-
-fn make_structural_flow_type_node(
-    reference: FlowTypeRef, kind: FlowTypeKind,
-    children: List<FlowTypeRef>, semantic_seed: FlowTypeSemanticSeed,
-    drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
-) -> FlowTypeNode {
-    if !flow_type_kind_same(kind, flow_type_kind_tuple()) &&
-       !flow_type_kind_same(kind, flow_type_kind_record()) {
-        panic("FlowIR: invalid structural type kind")
-    }
-    FlowTypeNode {
-        reference: reference, kind: kind, nominal: none,
-        children: copy_type_refs(children),
-        generic_arguments: [], nominal_fields: [], parameter_count: 0,
-        generic_param: none,
-        semantic_seed: flow_type_semantic_seed_from_tag(semantic_seed.tag),
-        drop_contract: drop_contract, foreign_contract: none,
-        resource_parameters: resource_parameters.map(fn(parameter) {
-            copy_generic_param_fact(parameter)
-        }),
-        resource_edges: copy_resource_edges(resource_edges)
-    }
-}
-
-pub fn make_flow_tuple_type_node(
-    reference: FlowTypeRef, elements: List<FlowTypeRef>,
-    semantic_seed: FlowTypeSemanticSeed, drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
-) -> FlowTypeNode {
-    make_structural_flow_type_node(
-        reference, flow_type_kind_tuple(), elements,
-        semantic_seed, drop_contract, resource_parameters, resource_edges)
-}
-
-pub fn make_flow_record_type_node(
-    reference: FlowTypeRef, fields: List<FlowNominalFieldFact>,
-    semantic_seed: FlowTypeSemanticSeed, drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
-) -> FlowTypeNode {
-    let mut node = make_structural_flow_type_node(
-        reference, flow_type_kind_record(),
-        fields.map(fn(field) { flow_nominal_field_type(field) }),
-        semantic_seed, drop_contract, resource_parameters, resource_edges)
-    node.nominal_fields = copy_nominal_fields(fields)
-    node
-}
-
-pub fn make_flow_callable_type_node(
-    reference: FlowTypeRef, parameters: List<FlowTypeRef>,
-    result: FlowTypeRef
-) -> FlowTypeNode {
-    let mut children = copy_type_refs(parameters)
-    children.push(result)
-    FlowTypeNode {
-        reference: reference, kind: flow_type_kind_callable(), nominal: none,
-        children: children, parameter_count: parameters.len(),
-        generic_arguments: [], nominal_fields: [], generic_param: none,
-        semantic_seed: flow_type_seed_shareable(), drop_contract: none,
-        foreign_contract: none, resource_parameters: [], resource_edges: []
-    }
-}
-
-pub fn make_flow_ptr_type_node(
-    reference: FlowTypeRef, pointee: FlowTypeRef
-) -> FlowTypeNode {
-    FlowTypeNode {
-        reference: reference, kind: flow_type_kind_ptr(), nominal: none,
-        children: [pointee], generic_arguments: [], nominal_fields: [],
-        parameter_count: 0, generic_param: none,
-        semantic_seed: flow_type_seed_ptr(), drop_contract: none,
-        foreign_contract: none, resource_parameters: [], resource_edges: []
-    }
-}
-
-pub fn make_flow_parameter_type_node(
-    reference: FlowTypeRef, generic_param: FlowGenericParamFact
-) -> FlowTypeNode {
-    FlowTypeNode {
-        reference: reference, kind: flow_type_kind_parameter(), nominal: none,
-        children: [], generic_arguments: [], nominal_fields: [],
-        parameter_count: 0,
-        generic_param: some(copy_generic_param_fact(generic_param)),
-        semantic_seed: flow_type_seed_parametric(), drop_contract: none,
-        foreign_contract: none,
-        resource_parameters: [copy_generic_param_fact(generic_param)],
-        resource_edges: []
-    }
-}
-
-pub fn flow_type_node_reference(value: FlowTypeNode) -> FlowTypeRef { value.reference }
-pub fn flow_type_node_kind(value: FlowTypeNode) -> FlowTypeKind { value.kind }
-pub fn flow_type_node_children(value: FlowTypeNode) -> List<FlowTypeRef> {
-    copy_type_refs(value.children)
-}
-pub fn flow_type_node_generic_arguments(value: FlowTypeNode) -> List<FlowTypeRef> {
-    copy_type_refs(value.generic_arguments)
-}
-pub fn flow_type_node_nominal_fields(
-    value: FlowTypeNode
-) -> List<FlowNominalFieldFact> { copy_nominal_fields(value.nominal_fields) }
-pub fn flow_type_node_nominal(value: FlowTypeNode) -> SymbolRef {
-    match value.nominal {
-        some(symbol) => symbol,
-        none => panic("FlowIR: non-nominal type has no nominal symbol")
-    }
-}
-pub fn flow_type_node_parameter_count(value: FlowTypeNode) -> Int {
-    if !flow_type_kind_same(value.kind, flow_type_kind_callable()) {
-        panic("FlowIR: non-callable type has no parameter count")
-    }
-    value.parameter_count
-}
-pub fn flow_type_node_parameter_index(value: FlowTypeNode) -> Int {
-    if !flow_type_kind_same(value.kind, flow_type_kind_parameter()) {
-        panic("FlowIR: non-parameter type has no parameter index")
-    }
-    match value.generic_param {
-        some(fact) => fact.index,
-        none => panic("FlowIR: parameter type has no generic fact")
-    }
-}
-pub fn flow_type_node_generic_param(value: FlowTypeNode) -> FlowGenericParamFact {
-    match value.generic_param {
-        some(fact) => copy_generic_param_fact(fact),
-        none => panic("FlowIR: non-parameter type has no generic fact")
-    }
-}
-pub fn flow_type_node_semantic_seed(value: FlowTypeNode) -> FlowTypeSemanticSeed {
-    value.semantic_seed
-}
-pub fn flow_type_node_drop_contract(value: FlowTypeNode) -> FlowDropContract? {
-    value.drop_contract
-}
-pub fn flow_type_node_foreign_contract(value: FlowTypeNode) -> FlowForeignContract? {
-    value.foreign_contract
-}
-pub fn flow_type_node_resource_edges(
-    value: FlowTypeNode
-) -> List<FlowResourceDependencyEdge> {
-    copy_resource_edges(value.resource_edges)
-}
-pub fn flow_type_node_resource_parameters(
-    value: FlowTypeNode
-) -> List<FlowGenericParamFact> {
-    value.resource_parameters.map(fn(parameter) {
-        copy_generic_param_fact(parameter)
-    })
-}
-
-fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {
-    let mut result: List<FlowTypeNode> = []
-    for value in values {
-        result.push(FlowTypeNode {
-            reference: value.reference, kind: value.kind,
-            nominal: value.nominal, children: copy_type_refs(value.children),
-            generic_arguments: copy_type_refs(value.generic_arguments),
-            nominal_fields: copy_nominal_fields(value.nominal_fields),
-            parameter_count: value.parameter_count,
-            generic_param: match value.generic_param {
-                some(fact) => some(copy_generic_param_fact(fact)),
-                none => none
-            },
-            semantic_seed: value.semantic_seed,
-            drop_contract: value.drop_contract,
-            foreign_contract: value.foreign_contract,
-            resource_parameters: value.resource_parameters.map(fn(parameter) {
-                copy_generic_param_fact(parameter)
-            }),
-            resource_edges: copy_resource_edges(value.resource_edges)
-        })
-    }
-    result
-}
-
-// A module recorder owns only module-local type ordinals.  Project assembly
-// uses these helpers to intern the structural graph once, then rewrites every
-// local edge to the resulting project-global ordinal.  Keeping this logic in
-// FlowIR avoids exposing the private node payload or making checker modules
-// coordinate offsets/side maps.
-fn mapped_type_index(mapping: List<Int?>, reference: FlowTypeRef) -> Int? {
-    match mapping.get(reference.index) {
-        some(value) => value,
-        none => panic("FlowIR: module-local type reference is out of range")
-    }
-}
-
-fn mapped_type_ref(mapping: List<Int>, reference: FlowTypeRef) -> FlowTypeRef {
-    match mapping.get(reference.index) {
-        some(index) => make_flow_type_ref(index),
-        none => panic("FlowIR: module-local type reference is out of range")
-    }
-}
-
-fn all_type_refs_mapped(
-    references: List<FlowTypeRef>, mapping: List<Int?>
-) -> Bool {
-    for reference in references {
-        if mapped_type_index(mapping, reference).is_none() { return false }
-    }
-    true
-}
-
-// Nominal field recursion is deliberately excluded from readiness: exact
-// nominal identity plus mapped generic arguments reserves the canonical node,
-// after which the full remapped payload is checked for equality.  Structural
-// nodes require every child first, so the worklist is finite and deterministic.
-pub fn flow_type_node_intern_ready(
-    value: FlowTypeNode, mapping: List<Int?>
-) -> Bool {
-    let tag = flow_type_kind_tag(value.kind)
-    if tag == FLOW_TYPE_STRUCT || tag == FLOW_TYPE_ENUM ||
-       tag == FLOW_TYPE_EXTERN {
-        return all_type_refs_mapped(value.generic_arguments, mapping)
-    }
-    if tag == FLOW_TYPE_TUPLE || tag == FLOW_TYPE_RECORD ||
-       tag == FLOW_TYPE_CALLABLE || tag == FLOW_TYPE_PTR {
-        return all_type_refs_mapped(value.children, mapping)
-    }
-    true
-}
-
-fn mapped_reference_lists_same(
-    left: List<FlowTypeRef>, left_mapping: List<Int?>,
-    right: List<FlowTypeRef>, right_mapping: List<Int?>
-) -> Bool {
-    if left.len() != right.len() { return false }
-    let mut index = 0
-    while index < left.len() {
-        if mapped_type_index(
-                left_mapping, left.get(index).unwrap()) !=
-           mapped_type_index(
-                right_mapping, right.get(index).unwrap()) {
-            return false
-        }
-        index = index + 1
-    }
-    true
-}
-
-fn optional_symbols_same(left: SymbolRef?, right: SymbolRef?) -> Bool {
-    match (left, right) {
-        (some(a), some(b)) => symbol_ref_same(a, b),
-        (none, none) => true,
-        _ => false
-    }
-}
-
-// Equality of the allocation key, not of the complete contract.  Complete
-// equality is checked after all edges have been remapped.  A repeated exact
-// nominal identity with a different field/resource contract is therefore a
-// hard producer disagreement, never a second type.
-pub fn flow_type_node_intern_key_same(
-    left: FlowTypeNode, left_mapping: List<Int?>,
-    right: FlowTypeNode, right_mapping: List<Int?>
-) -> Bool {
-    let tag = flow_type_kind_tag(left.kind)
-    if tag != flow_type_kind_tag(right.kind) { return false }
-    if tag >= FLOW_TYPE_INT && tag <= FLOW_TYPE_NEVER { return true }
-    if tag == FLOW_TYPE_PARAMETER {
-        return match (left.generic_param, right.generic_param) {
-            (some(a), some(b)) => flow_generic_param_fact_same(a, b),
-            _ => false
-        }
-    }
-    if tag == FLOW_TYPE_STRUCT || tag == FLOW_TYPE_ENUM ||
-       tag == FLOW_TYPE_EXTERN {
-        return optional_symbols_same(left.nominal, right.nominal) &&
-            mapped_reference_lists_same(
-                left.generic_arguments, left_mapping,
-                right.generic_arguments, right_mapping)
-    }
-    if tag == FLOW_TYPE_TUPLE || tag == FLOW_TYPE_CALLABLE ||
-       tag == FLOW_TYPE_PTR {
-        return left.parameter_count == right.parameter_count &&
-            mapped_reference_lists_same(
-                left.children, left_mapping, right.children, right_mapping)
-    }
-    if tag == FLOW_TYPE_RECORD {
-        if left.nominal_fields.len() != right.nominal_fields.len() ||
-           !mapped_reference_lists_same(
-                left.children, left_mapping, right.children, right_mapping) {
-            return false
-        }
-        let mut index = 0
-        while index < left.nominal_fields.len() {
-            if !flow_field_identity_same(
-                    left.nominal_fields.get(index).unwrap().identity,
-                    right.nominal_fields.get(index).unwrap().identity) {
-                return false
-            }
-            index = index + 1
-        }
-        return true
-    }
-    false
-}
-
-fn remap_resource_target(
-    value: FlowResourceDependencyTarget, mapping: List<Int>
-) -> FlowResourceDependencyTarget {
-    match value.value {
-        FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-            parameter) => make_flow_parent_parameter_dependency(parameter),
-        FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) =>
-            make_flow_concrete_type_dependency(mapped_type_ref(mapping, ty))
-    }
-}
-
-fn remap_resource_edge(
-    value: FlowResourceDependencyEdge, mapping: List<Int>
-) -> FlowResourceDependencyEdge {
-    let child = mapped_type_ref(mapping, value.child)
-    let target = remap_resource_target(value.target, mapping)
-    if value.is_application {
-        make_flow_application_resource_dependency_edge(
-            value.child_ordinal, child, value.child_dependency_ordinal,
-            match value.application_parameter {
-                some(parameter) => parameter,
-                none => panic("FlowIR: application resource edge lacks parameter")
-            },
-            target)
-    } else {
-        make_flow_resource_dependency_edge(
-            value.child_ordinal, child, value.child_dependency_ordinal, target)
-    }
-}
-
-pub fn remap_flow_type_node(
-    value: FlowTypeNode, project_index: Int, mapping: List<Int>
-) -> FlowTypeNode {
-    let mut fields: List<FlowNominalFieldFact> = []
-    for field in value.nominal_fields {
-        fields.push(make_flow_nominal_field_fact(
-            field.identity, mapped_type_ref(mapping, field.ty)))
-    }
-    let mut edges: List<FlowResourceDependencyEdge> = []
-    for edge in value.resource_edges {
-        edges.push(remap_resource_edge(edge, mapping))
-    }
-    FlowTypeNode {
-        reference: make_flow_type_ref(project_index), kind: value.kind,
-        nominal: value.nominal,
-        children: value.children.map(fn(reference) {
-            mapped_type_ref(mapping, reference)
-        }),
-        generic_arguments: value.generic_arguments.map(fn(reference) {
-            mapped_type_ref(mapping, reference)
-        }),
-        nominal_fields: fields, parameter_count: value.parameter_count,
-        generic_param: match value.generic_param {
-            some(parameter) => some(copy_generic_param_fact(parameter)),
-            none => none
-        },
-        semantic_seed: value.semantic_seed,
-        drop_contract: value.drop_contract,
-        foreign_contract: value.foreign_contract,
-        resource_parameters: value.resource_parameters.map(fn(parameter) {
-            copy_generic_param_fact(parameter)
-        }),
-        resource_edges: edges
-    }
-}
-
-fn optional_drop_contracts_same(
-    left: FlowDropContract?, right: FlowDropContract?
-) -> Bool {
-    match (left, right) {
-        (some(a), some(b)) => executable_ref_same(a.provider, b.provider),
-        (none, none) => true,
-        _ => false
-    }
-}
-
-fn optional_foreign_contracts_same(
-    left: FlowForeignContract?, right: FlowForeignContract?
-) -> Bool {
-    match (left, right) {
-        (some(a), some(b)) => match (a.value, b.value) {
-            (FlowForeignContractValue::BorrowedForeignValue,
-             FlowForeignContractValue::BorrowedForeignValue) => true,
-            (FlowForeignContractValue::ManagedForeignValue {
-                retain: ar, release: al },
-             FlowForeignContractValue::ManagedForeignValue {
-                retain: br, release: bl }) =>
-                executable_ref_same(ar, br) && executable_ref_same(al, bl),
-            _ => false
-        },
-        (none, none) => true,
-        _ => false
-    }
-}
-
-fn resource_targets_same(
-    left: FlowResourceDependencyTarget,
-    right: FlowResourceDependencyTarget
-) -> Bool {
-    match (left.value, right.value) {
-        (FlowResourceDependencyTargetValue::ParentParameterDependencyValue(a),
-         FlowResourceDependencyTargetValue::ParentParameterDependencyValue(b)) =>
-            flow_generic_param_fact_same(a, b),
-        (FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(a),
-         FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(b)) =>
-            flow_type_ref_same(a, b),
-        _ => false
-    }
-}
-
-fn resource_edges_same(
-    left: List<FlowResourceDependencyEdge>,
-    right: List<FlowResourceDependencyEdge>
-) -> Bool {
-    if left.len() != right.len() { return false }
-    let mut index = 0
-    while index < left.len() {
-        let a = left.get(index).unwrap()
-        let b = right.get(index).unwrap()
-        if a.is_application != b.is_application ||
-           a.child_ordinal != b.child_ordinal ||
-           !flow_type_ref_same(a.child, b.child) ||
-           a.child_dependency_ordinal != b.child_dependency_ordinal ||
-           !resource_targets_same(a.target, b.target) ||
-           match (a.application_parameter, b.application_parameter) {
-               (some(ap), some(bp)) => !flow_generic_param_fact_same(ap, bp),
-               (none, none) => false,
-               _ => true
-           } {
-            return false
-        }
-        index = index + 1
-    }
-    true
-}
-
-pub fn flow_type_node_contract_same(
-    left: FlowTypeNode, right: FlowTypeNode
-) -> Bool {
-    if !flow_type_kind_same(left.kind, right.kind) ||
-       !optional_symbols_same(left.nominal, right.nominal) ||
-       left.parameter_count != right.parameter_count ||
-       flow_type_semantic_seed_tag(left.semantic_seed) !=
-            flow_type_semantic_seed_tag(right.semantic_seed) ||
-       !optional_drop_contracts_same(left.drop_contract, right.drop_contract) ||
-       !optional_foreign_contracts_same(
-            left.foreign_contract, right.foreign_contract) ||
-       left.children.len() != right.children.len() ||
-       left.generic_arguments.len() != right.generic_arguments.len() ||
-       left.nominal_fields.len() != right.nominal_fields.len() ||
-       left.resource_parameters.len() != right.resource_parameters.len() ||
-       !resource_edges_same(left.resource_edges, right.resource_edges) {
-        return false
-    }
-    let mut index = 0
-    while index < left.children.len() {
-        if !flow_type_ref_same(
-                left.children.get(index).unwrap(),
-                right.children.get(index).unwrap()) { return false }
-        index = index + 1
-    }
-    index = 0
-    while index < left.generic_arguments.len() {
-        if !flow_type_ref_same(
-                left.generic_arguments.get(index).unwrap(),
-                right.generic_arguments.get(index).unwrap()) { return false }
-        index = index + 1
-    }
-    index = 0
-    while index < left.nominal_fields.len() {
-        let a = left.nominal_fields.get(index).unwrap()
-        let b = right.nominal_fields.get(index).unwrap()
-        if !flow_field_identity_same(a.identity, b.identity) ||
-           !flow_type_ref_same(a.ty, b.ty) { return false }
-        index = index + 1
-    }
-    match (left.generic_param, right.generic_param) {
-        (some(a), some(b)) => if !flow_generic_param_fact_same(a, b) {
-            return false
-        },
-        (none, none) => {},
-        _ => return false
-    }
-    index = 0
-    while index < left.resource_parameters.len() {
-        if !flow_generic_param_fact_same(
-                left.resource_parameters.get(index).unwrap(),
-                right.resource_parameters.get(index).unwrap()) { return false }
-        index = index + 1
-    }
-    true
-}
-
-pub fn remap_flow_call_contract(
-    value: FlowCallContract, mapping: List<Int>, module_key: Str
-) -> FlowCallContract {
-    if value.module_key != some(module_key) {
-        panic("FlowIR: call contract belongs to another type domain")
-    }
-    make_flow_call_contract(
-        value.parameter_types.map(fn(reference) {
-            mapped_type_ref(mapping, reference)
-        }),
-        value.parameter_roles,
-        mapped_type_ref(mapping, value.result_type),
-        value.result_role, value.result_origin)
-}
-
-fn validate_type_nodes(values: List<FlowTypeNode>) {
-    let mut ordinal = 0
-    for value in values {
-        if value.reference.index != ordinal {
-            panic("FlowIR: type nodes are not in stable ordinal order")
-        }
-        let tag = flow_type_kind_tag(value.kind)
-        for child in value.children {
-            if child.index < 0 || child.index >= values.len() {
-                panic("FlowIR: type node has an unresolved child")
-            }
-        }
-        for argument in value.generic_arguments {
-            if argument.index < 0 || argument.index >= values.len() {
-                panic("FlowIR: type node has an unresolved generic argument")
-            }
-        }
-        let seed = flow_type_semantic_seed_tag(value.semantic_seed)
-        if tag >= FLOW_TYPE_INT && tag <= FLOW_TYPE_NEVER {
-            if value.nominal.is_some() || value.children.len() != 0 ||
-               value.generic_arguments.len() != 0 ||
-               value.nominal_fields.len() != 0 || value.parameter_count != 0 ||
-               value.generic_param.is_some() || value.drop_contract.is_some() ||
-               value.foreign_contract.is_some() ||
-               value.resource_parameters.len() != 0 ||
-               value.resource_edges.len() != 0 ||
-               (tag == FLOW_TYPE_STR && seed != FLOW_SEED_SHAREABLE) ||
-               (tag != FLOW_TYPE_STR && seed != FLOW_SEED_SCALAR) {
-                panic("FlowIR: atomic type payload is invalid")
-            }
-        } else if tag == FLOW_TYPE_STRUCT || tag == FLOW_TYPE_ENUM {
-            if value.nominal.is_none() || value.parameter_count != 0 ||
-               value.generic_param.is_some() || value.foreign_contract.is_some() ||
-               (seed != FLOW_SEED_UNIQUE &&
-                seed != FLOW_SEED_SHAREABLE &&
-                seed != FLOW_SEED_PARAMETRIC) ||
-               (value.resource_parameters.len() == 0 &&
-                seed == FLOW_SEED_PARAMETRIC) ||
-               (value.resource_parameters.len() != 0 &&
-                seed != FLOW_SEED_PARAMETRIC) ||
-               value.children.len() != value.nominal_fields.len() {
-                panic("FlowIR: nominal type payload is invalid")
-            }
-            let nominal = value.nominal.unwrap()
-            let mut field_index = 0
-            while field_index < value.nominal_fields.len() {
-                let field = value.nominal_fields.get(field_index).unwrap()
-                if !flow_type_ref_same(
-                        field.ty, value.children.get(field_index).unwrap()) {
-                    panic("FlowIR: nominal field/type child order differs")
-                }
-                match field.identity.value {
-                    FlowFieldIdentityValue::NominalFieldIdentityValue(reference) => {
-                        if !symbol_ref_same(
-                                nominal_field_ref_owner(reference), nominal) {
-                            panic("FlowIR: nominal field crosses type owner")
-                        }
-                    },
-                    FlowFieldIdentityValue::VariantFieldIdentityValue(reference) => {
-                        if !symbol_ref_same(
-                                registered_nominal_ref_symbol(
-                                    variant_ref_owner(
-                                        variant_field_ref_variant(reference))),
-                                nominal) {
-                            panic("FlowIR: variant field crosses nominal owner")
-                        }
-                    },
-                    FlowFieldIdentityValue::PathFieldIdentityValue(path) => {
-                        if path_ref_module_key(path) !=
-                           symbol_ref_origin_module_key(nominal) {
-                            panic("FlowIR: path field crosses nominal module")
-                        }
-                    }
-                }
-                let mut right_index = field_index + 1
-                while right_index < value.nominal_fields.len() {
-                    if flow_field_identity_same(
-                            field.identity,
-                            value.nominal_fields.get(right_index).unwrap().identity) {
-                        panic("FlowIR: nominal type repeats a field identity")
-                    }
-                    right_index = right_index + 1
-                }
-                field_index = field_index + 1
-            }
-        } else if tag == FLOW_TYPE_TUPLE || tag == FLOW_TYPE_RECORD {
-            if value.nominal.is_some() || value.parameter_count != 0 ||
-               value.generic_param.is_some() ||
-               value.generic_arguments.len() != 0 ||
-               (tag == FLOW_TYPE_TUPLE && value.nominal_fields.len() != 0) ||
-               (tag == FLOW_TYPE_RECORD &&
-                value.nominal_fields.len() != value.children.len()) ||
-               value.foreign_contract.is_some() ||
-               (seed != FLOW_SEED_UNIQUE &&
-                seed != FLOW_SEED_SHAREABLE &&
-                seed != FLOW_SEED_PARAMETRIC) ||
-               (value.resource_parameters.len() == 0 &&
-                seed == FLOW_SEED_PARAMETRIC) ||
-               (value.resource_parameters.len() != 0 &&
-                seed != FLOW_SEED_PARAMETRIC) {
-                panic("FlowIR: structural type payload is invalid")
-            }
-            if tag == FLOW_TYPE_RECORD {
-                let mut field_index = 0
-                while field_index < value.nominal_fields.len() {
-                    let field = value.nominal_fields.get(field_index).unwrap()
-                    if flow_field_identity_is_nominal(field.identity) ||
-                       flow_field_identity_is_variant(field.identity) ||
-                       !flow_type_ref_same(
-                            field.ty, value.children.get(field_index).unwrap()) {
-                        panic("FlowIR: record field identity/type differs")
-                    }
-                    let mut right_index = field_index + 1
-                    while right_index < value.nominal_fields.len() {
-                        if flow_field_identity_same(
-                                field.identity,
-                                value.nominal_fields.get(right_index).unwrap()
-                                    .identity) {
-                            panic("FlowIR: record repeats a field identity")
-                        }
-                        right_index = right_index + 1
-                    }
-                    field_index = field_index + 1
-                }
-            }
-        } else if tag == FLOW_TYPE_CALLABLE {
-            if value.nominal.is_some() || value.parameter_count < 0 ||
-               value.children.len() != value.parameter_count + 1 ||
-               value.generic_param.is_some() ||
-               value.generic_arguments.len() != 0 ||
-               value.nominal_fields.len() != 0 ||
-               seed != FLOW_SEED_SHAREABLE ||
-               value.drop_contract.is_some() ||
-               value.foreign_contract.is_some() ||
-               value.resource_parameters.len() != 0 ||
-               value.resource_edges.len() != 0 {
-                panic("FlowIR: callable type payload is invalid")
-            }
-        } else if tag == FLOW_TYPE_PTR {
-            if value.nominal.is_some() || value.children.len() != 1 ||
-               value.parameter_count != 0 || value.generic_param.is_some() ||
-               value.generic_arguments.len() != 0 ||
-               value.nominal_fields.len() != 0 || seed != FLOW_SEED_PTR ||
-               value.drop_contract.is_some() ||
-               value.foreign_contract.is_some() ||
-               value.resource_parameters.len() != 0 ||
-               value.resource_edges.len() != 0 {
-                panic("FlowIR: Ptr type payload is invalid")
-            }
-        } else if tag == FLOW_TYPE_PARAMETER {
-            if value.nominal.is_some() || value.children.len() != 0 ||
-               value.parameter_count != 0 || value.generic_param.is_none() ||
-               value.generic_arguments.len() != 0 ||
-               value.nominal_fields.len() != 0 ||
-               seed != FLOW_SEED_PARAMETRIC ||
-               value.drop_contract.is_some() ||
-               value.foreign_contract.is_some() ||
-               value.resource_parameters.len() != 1 ||
-               value.resource_edges.len() != 0 {
-                panic("FlowIR: type parameter payload is invalid")
-            }
-            if !flow_generic_param_fact_same(
-                    value.resource_parameters.get(0).unwrap(),
-                    value.generic_param.unwrap()) {
-                panic("FlowIR: type parameter resource fact differs")
-            }
-        } else if tag == FLOW_TYPE_EXTERN {
-            if value.nominal.is_none() || value.children.len() != 0 ||
-               value.parameter_count != 0 || value.generic_param.is_some() ||
-               value.nominal_fields.len() != 0 || seed != FLOW_SEED_EXTERN ||
-               value.drop_contract.is_some() ||
-               value.foreign_contract.is_none() ||
-               value.resource_parameters.len() != 0 {
-                panic("FlowIR: extern type payload is invalid")
-            }
-        } else {
-            panic("FlowIR: unknown type kind crossed freeze")
-        }
-        ordinal = ordinal + 1
-    }
-    validate_resource_dependency_edges(values)
-}
-
-pub fn validate_flow_type_graph_nodes(values: List<FlowTypeNode>) {
-    validate_type_nodes(values)
-}
-
-pub fn copy_flow_type_graph_nodes(
-    values: List<FlowTypeNode>
-) -> List<FlowTypeNode> {
-    validate_type_nodes(values)
-    copy_type_nodes(values)
-}
-
-fn resource_dependency_arity(value: FlowTypeNode) -> Int {
-    if value.resource_parameters.len() == 0 {
-        // A closed type is carried as one explicit concrete dependency cell.
-        1
-    } else {
-        value.resource_parameters.len()
-    }
-}
-
-fn type_node_has_parent_dependency(value: FlowTypeNode) -> Bool {
-    value.resource_parameters.len() != 0
-}
-
-fn generic_parameter_is_registered(
-    values: List<FlowTypeNode>, parameter: FlowGenericParamFact
-) -> Bool {
-    for value in values {
-        match value.generic_param {
-            some(candidate) => if flow_generic_param_fact_same(
-                    candidate, parameter) {
-                return true
-            },
-            none => {}
-        }
-    }
-    false
-}
-
-fn validate_resource_dependency_edges(values: List<FlowTypeNode>) {
-    for owner in values {
-        let mut parameter_index = 0
-        while parameter_index < owner.resource_parameters.len() {
-            let parameter = owner.resource_parameters.get(
-                parameter_index).unwrap()
-            if !generic_parameter_is_registered(values, parameter) {
-                panic("FlowIR: type resource parameter is unregistered")
-            }
-            let mut right_index = parameter_index + 1
-            while right_index < owner.resource_parameters.len() {
-                if flow_generic_param_fact_same(
-                        parameter,
-                        owner.resource_parameters.get(right_index).unwrap()) {
-                    panic("FlowIR: type repeats a resource parameter")
-                }
-                right_index = right_index + 1
-            }
-            parameter_index = parameter_index + 1
-        }
-        for edge in owner.resource_edges {
-            let child = values.get(edge.child.index).unwrap()
-            if edge.is_application {
-                if edge.child_ordinal < 0 ||
-                   edge.child_ordinal >= owner.generic_arguments.len() ||
-                   !flow_type_ref_same(
-                        owner.generic_arguments.get(
-                            edge.child_ordinal).unwrap(), edge.child) {
-                    panic("FlowIR: application resource edge argument differs")
-                }
-                let parameter = match edge.application_parameter {
-                    some(value) => value,
-                    none => panic("FlowIR: application edge has no owner parameter")
-                }
-                if edge.child_dependency_ordinal < 0 ||
-                   edge.child_dependency_ordinal >=
-                        resource_dependency_arity(child) ||
-                   parameter.index != edge.child_ordinal ||
-                   parameter.arity != owner.generic_arguments.len() ||
-                   !generic_parameter_is_registered(values, parameter) {
-                    panic("FlowIR: application owner parameter fact differs")
-                }
-                match owner.nominal {
-                    some(symbol) => if !symbol_ref_same(
-                            symbol, parameter.owner) {
-                        panic("FlowIR: application parameter crosses nominal owner")
-                    },
-                    none => panic("FlowIR: non-nominal type has application edge")
-                }
-            } else {
-                if edge.application_parameter.is_some() ||
-                   edge.child_ordinal < 0 ||
-                   edge.child_ordinal >= owner.children.len() ||
-                   !flow_type_ref_same(
-                        owner.children.get(edge.child_ordinal).unwrap(),
-                        edge.child) {
-                    panic("FlowIR: resource edge child/order differs")
-                }
-                if edge.child_dependency_ordinal < 0 ||
-                   edge.child_dependency_ordinal >=
-                        resource_dependency_arity(child) {
-                    panic("FlowIR: child resource dependency ordinal is invalid")
-                }
-            }
-            if child.resource_parameters.len() == 0 {
-                if edge.child_dependency_ordinal != 0 {
-                    panic("FlowIR: closed child dependency ordinal is not zero")
-                }
-                match edge.target.value {
-                    FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(
-                        target_type) => if !flow_type_ref_same(
-                            target_type, edge.child) {
-                        panic("FlowIR: closed child concrete mapping differs")
-                    },
-                    _ => panic("FlowIR: closed child mapped to parent parameter")
-                }
-            } else {
-                let expected = child.resource_parameters.get(
-                    edge.child_dependency_ordinal).unwrap()
-                match edge.target.value {
-                    FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-                        target_parameter) => if !flow_generic_param_fact_same(
-                            target_parameter, expected) {
-                        panic("FlowIR: open child dependency mapping differs")
-                    },
-                    _ => panic("FlowIR: open child mapped as concrete")
-                }
-            }
-            match edge.target.value {
-                FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-                    parameter) => {
-                    if !generic_parameter_is_registered(values, parameter) {
-                        panic("FlowIR: parent resource parameter is unregistered")
-                    }
-                },
-                FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) => {
-                    if ty.index < 0 || ty.index >= values.len() ||
-                       flow_type_kind_tag(values.get(ty.index).unwrap().kind) ==
-                            FLOW_TYPE_PARAMETER ||
-                       type_node_has_parent_dependency(values.get(ty.index).unwrap()) {
-                        panic("FlowIR: concrete resource dependency is not closed")
-                    }
-                }
-            }
-            let mut duplicates = 0
-            for candidate in owner.resource_edges {
-                if candidate.is_application == edge.is_application &&
-                   candidate.child_ordinal == edge.child_ordinal &&
-                   candidate.child_dependency_ordinal ==
-                        edge.child_dependency_ordinal {
-                    duplicates = duplicates + 1
-                }
-            }
-            if duplicates != 1 {
-                panic("FlowIR: resource dependency mapping is not unique")
-            }
-        }
-        let owner_tag = flow_type_kind_tag(owner.kind)
-        let tracks_resource_children =
-            owner_tag == FLOW_TYPE_STRUCT || owner_tag == FLOW_TYPE_ENUM ||
-            owner_tag == FLOW_TYPE_TUPLE || owner_tag == FLOW_TYPE_RECORD
-        let mut child_ordinal = 0
-        while tracks_resource_children && child_ordinal < owner.children.len() {
-            let child_ref = owner.children.get(child_ordinal).unwrap()
-            let child = values.get(child_ref.index).unwrap()
-            let mut dependency_ordinal = 0
-            while dependency_ordinal < resource_dependency_arity(child) {
-                let mut matches = 0
-                for edge in owner.resource_edges {
-                    if !edge.is_application &&
-                       edge.child_ordinal == child_ordinal &&
-                       edge.child_dependency_ordinal == dependency_ordinal {
-                        matches = matches + 1
-                    }
-                }
-                if matches != 1 {
-                    panic("FlowIR: resource dependency mapping is not total")
-                }
-                dependency_ordinal = dependency_ordinal + 1
-            }
-            child_ordinal = child_ordinal + 1
-        }
-        if owner_tag != FLOW_TYPE_PARAMETER {
-            for edge in owner.resource_edges {
-                if !edge.is_application &&
-                   flow_resource_dependency_target_is_parent(edge.target) {
-                    let target_parameter =
-                        flow_resource_dependency_target_parent(edge.target)
-                    let mut declared = false
-                    for parameter in owner.resource_parameters {
-                        if flow_generic_param_fact_same(
-                                parameter, target_parameter) {
-                            declared = true
-                        }
-                    }
-                    if !declared {
-                        panic("FlowIR: child edge exports undeclared resource parameter")
-                    }
-                }
-            }
-            for parameter in owner.resource_parameters {
-                let mut used = false
-                for edge in owner.resource_edges {
-                    if !edge.is_application &&
-                       flow_resource_dependency_target_is_parent(edge.target) &&
-                       flow_generic_param_fact_same(
-                            flow_resource_dependency_target_parent(edge.target),
-                            parameter) {
-                        used = true
-                    }
-                }
-                if tracks_resource_children && !used {
-                    panic("FlowIR: declared resource parameter has no child edge")
-                }
-            }
-        }
-        let mut argument_ordinal = 0
-        while argument_ordinal < owner.generic_arguments.len() {
-            let argument = values.get(owner.generic_arguments.get(
-                argument_ordinal).unwrap().index).unwrap()
-            let mut dependency_ordinal = 0
-            while dependency_ordinal < resource_dependency_arity(argument) {
-                let mut matches = 0
-                for edge in owner.resource_edges {
-                    if edge.is_application &&
-                       edge.child_ordinal == argument_ordinal &&
-                       edge.child_dependency_ordinal == dependency_ordinal {
-                        matches = matches + 1
-                    }
-                }
-                if matches != 1 {
-                    panic("FlowIR: application substitution mapping is not total")
-                }
-                dependency_ordinal = dependency_ordinal + 1
-            }
-            argument_ordinal = argument_ordinal + 1
-        }
-    }
-}
-
-// ============================================================
-// Callable contract (semantic lower bounds only)
-// ============================================================
-
-const FLOW_ROLE_READ: Int = 0
-const FLOW_ROLE_MUTATE: Int = 1
-const FLOW_ROLE_CONSUME: Int = 2
-const FLOW_ROLE_FORCE: Int = 3
-
-pub struct FlowSemanticRole { tag: Int }
-
-fn flow_semantic_role_from_tag(tag: Int) -> FlowSemanticRole {
-    if tag < FLOW_ROLE_READ || tag > FLOW_ROLE_FORCE {
-        panic("FlowIR: invalid semantic role")
-    }
-    FlowSemanticRole { tag: tag }
-}
-
-pub fn flow_semantic_role_read() -> FlowSemanticRole {
-    flow_semantic_role_from_tag(FLOW_ROLE_READ)
-}
-pub fn flow_semantic_role_mutate() -> FlowSemanticRole {
-    flow_semantic_role_from_tag(FLOW_ROLE_MUTATE)
-}
-pub fn flow_semantic_role_consume() -> FlowSemanticRole {
-    flow_semantic_role_from_tag(FLOW_ROLE_CONSUME)
-}
-pub fn flow_semantic_role_force() -> FlowSemanticRole {
-    flow_semantic_role_from_tag(FLOW_ROLE_FORCE)
-}
-pub fn flow_semantic_role_tag(value: FlowSemanticRole) -> Int {
-    flow_semantic_role_from_tag(value.tag).tag
-}
-
-fn copy_semantic_roles(values: List<FlowSemanticRole>) -> List<FlowSemanticRole> {
-    let mut result: List<FlowSemanticRole> = []
-    for value in values { result.push(value) }
-    result
-}
-
-enum FlowValueOriginContractValue {
-    FreshValueOrigin,
-    AliasesValueOrigin(List<Int>)
-}
-
-pub struct FlowValueOriginContract {
-    value: FlowValueOriginContractValue
-}
-
-pub fn make_fresh_flow_value_origin() -> FlowValueOriginContract {
-    FlowValueOriginContract {
-        value: FlowValueOriginContractValue::FreshValueOrigin
-    }
-}
-pub fn make_aliasing_flow_value_origin(
-    ordinals: List<Int>
-) -> FlowValueOriginContract {
-    if ordinals.len() == 0 {
-        panic("FlowIR: alias origin has no source ordinal")
-    }
-    let mut copied: List<Int> = []
-    let mut left_index = 0
-    while left_index < ordinals.len() {
-        let left = ordinals.get(left_index).unwrap()
-        if left < 0 { panic("FlowIR: negative alias source ordinal") }
-        let mut right_index = left_index + 1
-        while right_index < ordinals.len() {
-            if left == ordinals.get(right_index).unwrap() {
-                panic("FlowIR: alias origin repeats a source ordinal")
-            }
-            right_index = right_index + 1
-        }
-        copied.push(left)
-        left_index = left_index + 1
-    }
-    FlowValueOriginContract {
-        value: FlowValueOriginContractValue::AliasesValueOrigin(copied)
-    }
-}
-pub fn flow_value_origin_is_fresh(value: FlowValueOriginContract) -> Bool {
-    match value.value {
-        FlowValueOriginContractValue::FreshValueOrigin => true,
-        FlowValueOriginContractValue::AliasesValueOrigin(_) => false
-    }
-}
-pub fn flow_value_origin_alias_ordinals(
-    value: FlowValueOriginContract
-) -> List<Int> {
-    match value.value {
-        FlowValueOriginContractValue::AliasesValueOrigin(ordinals) => {
-            let mut result: List<Int> = []
-            for ordinal in ordinals { result.push(ordinal) }
-            result
-        },
-        FlowValueOriginContractValue::FreshValueOrigin =>
-            panic("FlowIR: fresh value has no alias ordinals")
-    }
-}
-fn copy_value_origin(value: FlowValueOriginContract) -> FlowValueOriginContract {
-    match value.value {
-        FlowValueOriginContractValue::FreshValueOrigin =>
-            make_fresh_flow_value_origin(),
-        FlowValueOriginContractValue::AliasesValueOrigin(ordinals) =>
-            make_aliasing_flow_value_origin(ordinals)
-    }
-}
-fn value_origin_same(
-    left: FlowValueOriginContract, right: FlowValueOriginContract
-) -> Bool {
-    match (left.value, right.value) {
-        (FlowValueOriginContractValue::FreshValueOrigin,
-         FlowValueOriginContractValue::FreshValueOrigin) => true,
-        (FlowValueOriginContractValue::AliasesValueOrigin(a),
-         FlowValueOriginContractValue::AliasesValueOrigin(b)) => {
-            if a.len() != b.len() { return false }
-            let mut index = 0
-            while index < a.len() {
-                if a.get(index).unwrap() != b.get(index).unwrap() {
-                    return false
-                }
-                index = index + 1
-            }
-            true
-        },
-        _ => false
-    }
-}
-fn validate_value_origin_arity(
-    value: FlowValueOriginContract, source_count: Int
-) {
-    if !flow_value_origin_is_fresh(value) {
-        for ordinal in flow_value_origin_alias_ordinals(value) {
-            if ordinal < 0 || ordinal >= source_count {
-                panic("FlowIR: alias source ordinal exceeds exact inputs")
-            }
-        }
-    }
-}
-
-pub struct FlowCallContract {
-    module_key: Str?,
-    parameter_types: List<FlowTypeRef>,
-    parameter_roles: List<FlowSemanticRole>,
-    result_type: FlowTypeRef,
-    result_role: FlowSemanticRole,
-    result_origin: FlowValueOriginContract
-}
-
-pub fn make_flow_call_contract(
-    parameter_types: List<FlowTypeRef>,
-    parameter_roles: List<FlowSemanticRole>,
-    result_type: FlowTypeRef, result_role: FlowSemanticRole,
-    result_origin: FlowValueOriginContract
-) -> FlowCallContract {
-    if parameter_types.len() != parameter_roles.len() {
-        panic("FlowIR: call type/role arity differs")
-    }
-    for role in parameter_roles { let _ = flow_semantic_role_tag(role) }
-    let _ = flow_semantic_role_tag(result_role)
-    validate_value_origin_arity(result_origin, parameter_types.len())
-    FlowCallContract {
-        module_key: none,
-        parameter_types: copy_type_refs(parameter_types),
-        parameter_roles: copy_semantic_roles(parameter_roles),
-        result_type: result_type, result_role: result_role,
-        result_origin: copy_value_origin(result_origin)
-    }
-}
-pub fn make_module_flow_call_contract(
-    module_key: Str, parameter_types: List<FlowTypeRef>,
-    parameter_roles: List<FlowSemanticRole>,
-    result_type: FlowTypeRef, result_role: FlowSemanticRole,
-    result_origin: FlowValueOriginContract
-) -> FlowCallContract {
-    if module_key == "" { panic("FlowIR: empty call-contract type domain") }
-    let mut result = make_flow_call_contract(
-        parameter_types, parameter_roles, result_type, result_role,
-        result_origin)
-    result.module_key = some(module_key)
-    result
-}
-pub fn flow_call_contract_module_key(value: FlowCallContract) -> Str? {
-    value.module_key
-}
-pub fn flow_call_contract_parameter_types(
-    value: FlowCallContract
-) -> List<FlowTypeRef> { copy_type_refs(value.parameter_types) }
-pub fn flow_call_contract_parameter_roles(
-    value: FlowCallContract
-) -> List<FlowSemanticRole> { copy_semantic_roles(value.parameter_roles) }
-pub fn flow_call_contract_result_role(
-    value: FlowCallContract
-) -> FlowSemanticRole { value.result_role }
-pub fn flow_call_contract_result_type(value: FlowCallContract) -> FlowTypeRef {
-    value.result_type
-}
-pub fn flow_call_contract_result_origin(
-    value: FlowCallContract
-) -> FlowValueOriginContract { copy_value_origin(value.result_origin) }
-pub fn flow_call_contract_same(
-    left: FlowCallContract, right: FlowCallContract
-) -> Bool {
-    if left.module_key != right.module_key ||
-       left.parameter_roles.len() != right.parameter_roles.len() ||
-       left.parameter_types.len() != right.parameter_types.len() ||
-       !flow_type_ref_same(left.result_type, right.result_type) ||
-       flow_semantic_role_tag(left.result_role) !=
-       flow_semantic_role_tag(right.result_role) ||
-       !value_origin_same(left.result_origin, right.result_origin) {
-        return false
-    }
-    let mut index = 0
-    while index < left.parameter_roles.len() {
-        if !flow_type_ref_same(
-                left.parameter_types.get(index).unwrap(),
-                right.parameter_types.get(index).unwrap()) {
-            return false
-        }
-        if flow_semantic_role_tag(left.parameter_roles.get(index).unwrap()) !=
-           flow_semantic_role_tag(right.parameter_roles.get(index).unwrap()) {
-            return false
-        }
-        index = index + 1
-    }
-    true
-}
-fn copy_call_contract(value: FlowCallContract) -> FlowCallContract {
-    match value.module_key {
-        some(module_key) => make_module_flow_call_contract(
-            module_key, value.parameter_types, value.parameter_roles,
-            value.result_type, value.result_role, value.result_origin),
-        none => make_flow_call_contract(
-            value.parameter_types, value.parameter_roles,
-            value.result_type, value.result_role, value.result_origin)
-    }
-}
-
-const FLOW_CALLABLE_CONCRETE_BODY: Int = 0
-const FLOW_CALLABLE_CONTRACT_ONLY: Int = 1
-
-pub struct FlowCallableMode { tag: Int }
-
-fn flow_callable_mode_from_tag(tag: Int) -> FlowCallableMode {
-    if tag < FLOW_CALLABLE_CONCRETE_BODY ||
-       tag > FLOW_CALLABLE_CONTRACT_ONLY {
-        panic("FlowIR: invalid callable mode")
-    }
-    FlowCallableMode { tag: tag }
-}
-
-pub fn flow_callable_mode_concrete_body() -> FlowCallableMode {
-    flow_callable_mode_from_tag(FLOW_CALLABLE_CONCRETE_BODY)
-}
-pub fn flow_callable_mode_contract_only() -> FlowCallableMode {
-    flow_callable_mode_from_tag(FLOW_CALLABLE_CONTRACT_ONLY)
-}
-pub fn flow_callable_mode_same(
-    left: FlowCallableMode, right: FlowCallableMode
-) -> Bool { left.tag == right.tag }
-
 pub struct FlowHandledEvidenceBinding {
     reference: HandledEvidenceRef,
-    aggregate_type: FlowTypeRef
+    aggregate_type: CoreTypeRef
 }
 
 pub fn make_flow_handled_evidence_binding(
-    reference: HandledEvidenceRef, aggregate_type: FlowTypeRef
+    reference: HandledEvidenceRef, aggregate_type: CoreTypeRef
 ) -> FlowHandledEvidenceBinding {
-    if flow_type_ref_index(aggregate_type) < 0 {
+    if core_type_ref_index(aggregate_type) < 0 {
         panic("FlowIR: handled evidence has invalid aggregate type")
     }
     FlowHandledEvidenceBinding {
@@ -1881,7 +172,7 @@ pub fn flow_handled_evidence_ordinal(
 ) -> Int { handled_evidence_ordinal(value.reference) }
 pub fn flow_handled_evidence_type(
     value: FlowHandledEvidenceBinding
-) -> FlowTypeRef { value.aggregate_type }
+) -> CoreTypeRef { value.aggregate_type }
 fn copy_flow_handled_evidence_bindings(
     values: List<FlowHandledEvidenceBinding>
 ) -> List<FlowHandledEvidenceBinding> {
@@ -1893,12 +184,12 @@ fn copy_flow_handled_evidence_bindings(
 
 pub struct FlowHandledEvidenceUse {
     reference: HandledEvidenceRef,
-    aggregate_type: FlowTypeRef
+    aggregate_type: CoreTypeRef
 }
 pub fn make_flow_handled_evidence_use(
-    reference: HandledEvidenceRef, aggregate_type: FlowTypeRef
+    reference: HandledEvidenceRef, aggregate_type: CoreTypeRef
 ) -> FlowHandledEvidenceUse {
-    if flow_type_ref_index(aggregate_type) < 0 {
+    if core_type_ref_index(aggregate_type) < 0 {
         panic("FlowIR: handled evidence use has invalid aggregate type")
     }
     FlowHandledEvidenceUse {
@@ -1920,7 +211,7 @@ pub fn flow_handled_use_owner(value: FlowHandledEvidenceUse) -> ExecutableRef {
 pub fn flow_handled_use_ordinal(value: FlowHandledEvidenceUse) -> Int {
     handled_evidence_ordinal(value.reference)
 }
-pub fn flow_handled_use_type(value: FlowHandledEvidenceUse) -> FlowTypeRef {
+pub fn flow_handled_use_type(value: FlowHandledEvidenceUse) -> CoreTypeRef {
     value.aggregate_type
 }
 fn copy_flow_handled_evidence_uses(
@@ -1934,42 +225,33 @@ fn copy_flow_handled_evidence_uses(
 pub struct FlowCallable {
     reference: ExecutableRef,
     origin: OriginRef,
-    parameter_types: List<FlowTypeRef>,
     parameter_slots: List<SlotRef>,
-    result_type: FlowTypeRef,
-    mode: FlowCallableMode,
+    mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
-    handled_evidence: List<FlowHandledEvidenceBinding>,
-    call_edges: List<FlowCallEdge>
+    effects: CoreEffectContract,
+    handled_evidence: List<FlowHandledEvidenceBinding>
 }
 
 pub fn make_flow_callable(
     reference: ExecutableRef, origin: OriginRef,
-    parameter_types: List<FlowTypeRef>, parameter_slots: List<SlotRef>,
-    result_type: FlowTypeRef,
-    mode: FlowCallableMode,
+    parameter_slots: List<SlotRef>, mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
+    effects: CoreEffectContract,
     handled_evidence: List<FlowHandledEvidenceBinding>
 ) -> FlowCallable {
-    if parameter_types.len() != semantic_contract.parameter_roles.len() ||
-       parameter_types.len() != semantic_contract.parameter_types.len() ||
-       !flow_type_ref_same(result_type, semantic_contract.result_type) {
-        panic("FlowIR: callable parameter/role arity differs")
-    }
-    let mut type_index = 0
-    while type_index < parameter_types.len() {
-        if !flow_type_ref_same(
-                parameter_types.get(type_index).unwrap(),
-                semantic_contract.parameter_types.get(type_index).unwrap()) {
-            panic("FlowIR: callable parameter type contract differs")
-        }
-        type_index = type_index + 1
-    }
-    let concrete = flow_callable_mode_same(
-        mode, flow_callable_mode_concrete_body())
-    if (concrete && parameter_slots.len() != parameter_types.len()) ||
+    let concrete = executable_contract_mode_same(
+        mode, executable_contract_mode_concrete_body())
+    if (concrete && parameter_slots.len() !=
+            flow_call_contract_parameter_types(semantic_contract).len()) ||
        (!concrete && parameter_slots.len() != 0) {
         panic("FlowIR: callable parameter slot relation is not total")
+    }
+    match core_effect_contract_parameter(effects) {
+        some(parameter) => if !executable_ref_same(
+                effect_param_owner(parameter), reference) {
+            panic("FlowIR: callable effect parameter has another owner")
+        },
+        none => {}
     }
     let mut left_index = 0
     while left_index < parameter_slots.len() {
@@ -1984,63 +266,42 @@ pub fn make_flow_callable(
         }
         left_index = left_index + 1
     }
-    left_index = 0
-    while left_index < handled_evidence.len() {
-        let left = handled_evidence.get(left_index).unwrap()
-        if flow_handled_evidence_ordinal(left) != left_index ||
-           !executable_ref_same(
-                flow_handled_evidence_owner(left), reference) {
-            panic("FlowIR: callable handled evidence owner/order differs")
-        }
-        let mut right_index = left_index + 1
-        while right_index < handled_evidence.len() {
-            let right = handled_evidence.get(right_index).unwrap()
-            if handled_effect_ref_same(
-                    flow_handled_evidence_requirement(left),
-                    flow_handled_evidence_requirement(right)) ||
-               slot_ref_same(
-                    flow_handled_evidence_slot(left),
-                    flow_handled_evidence_slot(right)) ||
-               handled_evidence_ref_same(left.reference, right.reference) {
-                panic("FlowIR: callable repeats handled evidence")
-            }
-            right_index = right_index + 1
-        }
-        left_index = left_index + 1
-    }
     FlowCallable {
         reference: reference, origin: origin,
-        parameter_types: copy_type_refs(parameter_types),
         parameter_slots: copy_slot_refs(parameter_slots),
-        result_type: result_type,
-        mode: flow_callable_mode_from_tag(mode.tag),
+        mode: mode,
         semantic_contract: copy_call_contract(semantic_contract),
+        effects: copy_core_effect_contract(effects),
         handled_evidence:
-            copy_flow_handled_evidence_bindings(handled_evidence),
-        call_edges: []
+            copy_flow_handled_evidence_bindings(handled_evidence)
     }
 }
 
 pub fn flow_callable_reference(value: FlowCallable) -> ExecutableRef { value.reference }
 pub fn flow_callable_origin(value: FlowCallable) -> OriginRef { value.origin }
-pub fn flow_callable_parameter_types(value: FlowCallable) -> List<FlowTypeRef> {
-    copy_type_refs(value.parameter_types)
+pub fn flow_callable_parameter_types(value: FlowCallable) -> List<CoreTypeRef> {
+    flow_call_contract_parameter_types(value.semantic_contract)
 }
 pub fn flow_callable_parameter_slots(value: FlowCallable) -> List<SlotRef> {
     copy_slot_refs(value.parameter_slots)
 }
-pub fn flow_callable_result_type(value: FlowCallable) -> FlowTypeRef {
-    value.result_type
+pub fn flow_callable_result_type(value: FlowCallable) -> CoreTypeRef {
+    flow_call_contract_result_type(value.semantic_contract)
 }
-pub fn flow_callable_mode(value: FlowCallable) -> FlowCallableMode { value.mode }
+pub fn flow_callable_mode(
+    value: FlowCallable
+) -> ExecutableContractMode { value.mode }
 pub fn flow_callable_parameter_role_lower_bounds(
     value: FlowCallable
 ) -> List<FlowSemanticRole> {
-    copy_semantic_roles(value.semantic_contract.parameter_roles)
+    flow_call_contract_parameter_roles(value.semantic_contract)
 }
 pub fn flow_callable_semantic_contract(value: FlowCallable) -> FlowCallContract {
     copy_call_contract(value.semantic_contract)
 }
+pub fn flow_callable_effect_contract(
+    value: FlowCallable
+) -> CoreEffectContract { copy_core_effect_contract(value.effects) }
 pub fn flow_callable_handled_evidence(
     value: FlowCallable
 ) -> List<FlowHandledEvidenceBinding> {
@@ -2169,30 +430,9 @@ pub fn flow_storage_class_same(
     left: FlowStorageClass, right: FlowStorageClass
 ) -> Bool { left.tag == right.tag }
 
-const FLOW_OWN_STORAGE: Int = 0
-const FLOW_BORROW_STORAGE: Int = 1
-
-pub struct FlowStorageContract { tag: Int }
-
-fn flow_storage_contract_from_tag(tag: Int) -> FlowStorageContract {
-    if tag < FLOW_OWN_STORAGE || tag > FLOW_BORROW_STORAGE {
-        panic("FlowIR: invalid source-semantic storage contract")
-    }
-    FlowStorageContract { tag: tag }
-}
-pub fn flow_own_storage() -> FlowStorageContract {
-    flow_storage_contract_from_tag(FLOW_OWN_STORAGE)
-}
-pub fn flow_borrow_storage() -> FlowStorageContract {
-    flow_storage_contract_from_tag(FLOW_BORROW_STORAGE)
-}
-pub fn flow_storage_contract_tag(value: FlowStorageContract) -> Int {
-    flow_storage_contract_from_tag(value.tag).tag
-}
-
 pub struct FlowSlot {
     reference: SlotRef,
-    ty: FlowTypeRef,
+    ty: CoreTypeRef,
     scope: FlowScopeRef,
     reverse_ordinal: Int,
     initial_state: FlowInitialSlotState,
@@ -2202,7 +442,7 @@ pub struct FlowSlot {
 }
 
 pub fn make_flow_slot(
-    reference: SlotRef, ty: FlowTypeRef, scope: FlowScopeRef,
+    reference: SlotRef, ty: CoreTypeRef, scope: FlowScopeRef,
     reverse_ordinal: Int, initial_state: FlowInitialSlotState,
     storage: FlowStorageClass, storage_contract: FlowStorageContract,
     parameter_ordinal: Int?
@@ -2225,13 +465,13 @@ pub fn make_flow_slot(
         reverse_ordinal: reverse_ordinal,
         initial_state: flow_initial_slot_state_from_tag(initial_state.tag),
         storage: flow_storage_class_from_tag(storage.tag),
-        storage_contract: flow_storage_contract_from_tag(storage_contract.tag),
+        storage_contract: storage_contract,
         parameter_ordinal: parameter_ordinal
     }
 }
 
 pub fn flow_slot_reference(value: FlowSlot) -> SlotRef { value.reference }
-pub fn flow_slot_type(value: FlowSlot) -> FlowTypeRef { value.ty }
+pub fn flow_slot_type(value: FlowSlot) -> CoreTypeRef { value.ty }
 pub fn flow_slot_scope(value: FlowSlot) -> FlowScopeRef { value.scope }
 pub fn flow_slot_reverse_ordinal(value: FlowSlot) -> Int { value.reverse_ordinal }
 pub fn flow_slot_initial_state(value: FlowSlot) -> FlowInitialSlotState {
@@ -2327,33 +567,37 @@ enum FlowCallTargetValue {
 
 pub struct FlowCallTarget {
     value: FlowCallTargetValue,
-    contract: FlowCallContract
+    contract: FlowCallContract,
+    effects: CoreEffectInstantiation
 }
 
 pub fn make_direct_flow_call_target(
-    target: ExecutableRef, contract: FlowCallContract
+    target: ExecutableRef, contract: FlowCallContract,
+    effects: CoreEffectInstantiation
 ) -> FlowCallTarget {
     FlowCallTarget {
         value: FlowCallTargetValue::DirectTargetValue(target),
-        contract: copy_call_contract(contract)
+        contract: copy_call_contract(contract), effects: effects
     }
 }
 
 pub fn make_local_flow_call_target(
-    target: SlotRef, contract: FlowCallContract
+    target: SlotRef, contract: FlowCallContract,
+    effects: CoreEffectInstantiation
 ) -> FlowCallTarget {
     FlowCallTarget {
         value: FlowCallTargetValue::LocalTargetValue(target),
-        contract: copy_call_contract(contract)
+        contract: copy_call_contract(contract), effects: effects
     }
 }
 
 pub fn make_dynamic_flow_call_target(
-    target: PathRef, contract: FlowCallContract
+    target: PathRef, contract: FlowCallContract,
+    effects: CoreEffectInstantiation
 ) -> FlowCallTarget {
     FlowCallTarget {
         value: FlowCallTargetValue::DynamicTargetValue(target),
-        contract: copy_call_contract(contract)
+        contract: copy_call_contract(contract), effects: effects
     }
 }
 
@@ -2390,11 +634,42 @@ pub fn flow_call_target_dynamic(value: FlowCallTarget) -> PathRef {
 pub fn flow_call_target_contract(value: FlowCallTarget) -> FlowCallContract {
     copy_call_contract(value.contract)
 }
+pub fn flow_call_target_effect_instantiation(
+    value: FlowCallTarget
+) -> CoreEffectInstantiation {
+    make_core_effect_instantiation(
+        core_effect_instantiation_source(value.effects),
+        core_effect_instantiation_substitutions(value.effects),
+        core_effect_instantiation_result(value.effects))
+}
 fn flow_call_target_same(
     left: FlowCallTarget, right: FlowCallTarget
 ) -> Bool {
-    if !flow_call_contract_same(left.contract, right.contract) {
+    let left_source = core_effect_instantiation_source(left.effects)
+    let right_source = core_effect_instantiation_source(right.effects)
+    let left_result = core_effect_instantiation_result(left.effects)
+    let right_result = core_effect_instantiation_result(right.effects)
+    let left_substitutions = core_effect_instantiation_substitutions(left.effects)
+    let right_substitutions = core_effect_instantiation_substitutions(right.effects)
+    if !flow_call_contract_same(left.contract, right.contract) ||
+       !core_effect_contract_same(left_source, right_source) ||
+       !core_effect_contract_same(left_result, right_result) ||
+       left_substitutions.len() != right_substitutions.len() {
         return false
+    }
+    let mut substitution_index = 0
+    while substitution_index < left_substitutions.len() {
+        let a = left_substitutions.get(substitution_index).unwrap()
+        let b = right_substitutions.get(substitution_index).unwrap()
+        if !effect_param_ref_same(
+                core_effect_substitution_parameter(a),
+                core_effect_substitution_parameter(b)) ||
+           !core_effect_contract_same(
+                core_effect_substitution_replacement(a),
+                core_effect_substitution_replacement(b)) {
+            return false
+        }
+        substitution_index = substitution_index + 1
     }
     match (left.value, right.value) {
         (FlowCallTargetValue::DirectTargetValue(a),
@@ -2409,52 +684,22 @@ fn flow_call_target_same(
 
 fn copy_call_target(value: FlowCallTarget) -> FlowCallTarget {
     FlowCallTarget {
-        value: value.value, contract: copy_call_contract(value.contract)
+        value: value.value, contract: copy_call_contract(value.contract),
+        effects: make_core_effect_instantiation(
+            core_effect_instantiation_source(value.effects),
+            core_effect_instantiation_substitutions(value.effects),
+            core_effect_instantiation_result(value.effects))
     }
 }
 
 enum FlowEvidenceRefValue {
-    FlowLocalEvidenceValue(SlotRef),
-    FlowCallableEvidenceValue(ExecutableRef),
-    FlowDictEvidenceValue(DictRef)
+    FlowDictEvidenceValue(ExactDictRef)
 }
 pub struct FlowEvidenceRef { value: FlowEvidenceRefValue }
-pub fn make_flow_local_evidence(slot: SlotRef) -> FlowEvidenceRef {
-    FlowEvidenceRef { value: FlowEvidenceRefValue::FlowLocalEvidenceValue(slot) }
-}
-pub fn make_flow_callable_evidence(executable: ExecutableRef) -> FlowEvidenceRef {
-    FlowEvidenceRef {
-        value: FlowEvidenceRefValue::FlowCallableEvidenceValue(executable)
-    }
-}
-pub fn make_flow_dict_evidence(value: DictRef) -> FlowEvidenceRef {
+pub fn make_flow_dict_evidence(value: ExactDictRef) -> FlowEvidenceRef {
     FlowEvidenceRef { value: FlowEvidenceRefValue::FlowDictEvidenceValue(value) }
 }
-pub fn flow_evidence_is_local(value: FlowEvidenceRef) -> Bool {
-    match value.value {
-        FlowEvidenceRefValue::FlowLocalEvidenceValue(_) => true,
-        _ => false
-    }
-}
-pub fn flow_evidence_is_callable(value: FlowEvidenceRef) -> Bool {
-    match value.value {
-        FlowEvidenceRefValue::FlowCallableEvidenceValue(_) => true,
-        _ => false
-    }
-}
-pub fn flow_evidence_local(value: FlowEvidenceRef) -> SlotRef {
-    match value.value {
-        FlowEvidenceRefValue::FlowLocalEvidenceValue(slot) => slot,
-        _ => panic("FlowIR: callable evidence has no local slot")
-    }
-}
-pub fn flow_evidence_callable(value: FlowEvidenceRef) -> ExecutableRef {
-    match value.value {
-        FlowEvidenceRefValue::FlowCallableEvidenceValue(executable) => executable,
-        _ => panic("FlowIR: local evidence has no executable")
-    }
-}
-pub fn flow_evidence_dict(value: FlowEvidenceRef) -> DictRef {
+pub fn flow_evidence_dict(value: FlowEvidenceRef) -> ExactDictRef {
     match value.value {
         FlowEvidenceRefValue::FlowDictEvidenceValue(dict) => dict,
         _ => panic("FlowIR: non-dict evidence has no DictRef")
@@ -2509,145 +754,237 @@ enum FlowOperationValue {
     UnitLiteralOperationValue,
     PrimitiveOperationValue(FlowPrimitiveOp),
     ConstructorOperationValue(ExecutableRef),
-    DictionaryOperationValue(ExecutableRef),
-    IntrinsicOperationValue(IntrinsicRef),
     TupleAggregateOperationValue(Int),
     RecordAggregateOperationValue(Int),
     ClosureOperationValue {
         executable: ExecutableRef, capture_targets: List<SlotRef>
     },
-    CallableValueOperationValue(ExecutableRef)
+    CallableValueOperationValue {
+        executable: ExecutableRef,
+        evidence: List<FlowEvidenceRef>
+    }
+}
+
+enum FlowAggregateInputValue {
+    NominalAggregateInputValue(NominalFieldRef),
+    VariantAggregateInputValue(VariantFieldRef),
+    TupleAggregateInputValue(Int),
+    StructuralAggregateInputValue(PathRef)
+}
+
+pub struct FlowAggregateInputRef { value: FlowAggregateInputValue }
+pub fn make_nominal_flow_aggregate_input(
+    field: NominalFieldRef
+) -> FlowAggregateInputRef {
+    FlowAggregateInputRef {
+        value: FlowAggregateInputValue::NominalAggregateInputValue(field)
+    }
+}
+pub fn make_variant_flow_aggregate_input(
+    field: VariantFieldRef
+) -> FlowAggregateInputRef {
+    FlowAggregateInputRef {
+        value: FlowAggregateInputValue::VariantAggregateInputValue(field)
+    }
+}
+pub fn make_tuple_flow_aggregate_input(index: Int) -> FlowAggregateInputRef {
+    if index < 0 { panic("FlowIR: negative aggregate tuple index") }
+    FlowAggregateInputRef {
+        value: FlowAggregateInputValue::TupleAggregateInputValue(index)
+    }
+}
+pub fn make_structural_flow_aggregate_input(
+    path: PathRef
+) -> FlowAggregateInputRef {
+    FlowAggregateInputRef {
+        value: FlowAggregateInputValue::StructuralAggregateInputValue(path)
+    }
+}
+pub fn flow_aggregate_input_kind_tag(value: FlowAggregateInputRef) -> Int {
+    match value.value {
+        FlowAggregateInputValue::NominalAggregateInputValue(_) => 0,
+        FlowAggregateInputValue::VariantAggregateInputValue(_) => 1,
+        FlowAggregateInputValue::TupleAggregateInputValue(_) => 2,
+        FlowAggregateInputValue::StructuralAggregateInputValue(_) => 3
+    }
+}
+pub fn flow_aggregate_input_nominal(
+    value: FlowAggregateInputRef
+) -> NominalFieldRef {
+    match value.value {
+        FlowAggregateInputValue::NominalAggregateInputValue(field) => field,
+        _ => panic("FlowIR: aggregate input is not nominal")
+    }
+}
+pub fn flow_aggregate_input_variant(
+    value: FlowAggregateInputRef
+) -> VariantFieldRef {
+    match value.value {
+        FlowAggregateInputValue::VariantAggregateInputValue(field) => field,
+        _ => panic("FlowIR: aggregate input is not variant")
+    }
+}
+pub fn flow_aggregate_input_tuple_index(value: FlowAggregateInputRef) -> Int {
+    match value.value {
+        FlowAggregateInputValue::TupleAggregateInputValue(index) => index,
+        _ => panic("FlowIR: aggregate input is not tuple")
+    }
+}
+pub fn flow_aggregate_input_structural_path(
+    value: FlowAggregateInputRef
+) -> PathRef {
+    match value.value {
+        FlowAggregateInputValue::StructuralAggregateInputValue(path) => path,
+        _ => panic("FlowIR: aggregate input is not structural")
+    }
+}
+fn copy_flow_aggregate_input(value: FlowAggregateInputRef) -> FlowAggregateInputRef {
+    match value.value {
+        FlowAggregateInputValue::NominalAggregateInputValue(field) =>
+            make_nominal_flow_aggregate_input(field),
+        FlowAggregateInputValue::VariantAggregateInputValue(field) =>
+            make_variant_flow_aggregate_input(field),
+        FlowAggregateInputValue::TupleAggregateInputValue(index) =>
+            make_tuple_flow_aggregate_input(index),
+        FlowAggregateInputValue::StructuralAggregateInputValue(path) =>
+            make_structural_flow_aggregate_input(path)
+    }
+}
+
+fn empty_aggregate_inputs(arity: Int) -> List<FlowAggregateInputRef?> {
+    let mut result: List<FlowAggregateInputRef?> = []
+    for _ in 0..arity { result.push(none) }
+    result
 }
 
 pub struct FlowOperationContract {
     value: FlowOperationValue,
-    input_types: List<FlowTypeRef>,
+    input_types: List<CoreTypeRef>,
     input_roles: List<FlowSemanticRole>,
-    target_type: FlowTypeRef,
+    input_locations: List<FlowAggregateInputRef?>,
+    target_type: CoreTypeRef,
     target_role: FlowSemanticRole,
     target_origin: FlowValueOriginContract
 }
 
 fn make_flow_operation_contract(
-    value: FlowOperationValue, input_types: List<FlowTypeRef>,
-    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef,
+    value: FlowOperationValue, input_types: List<CoreTypeRef>,
+    input_roles: List<FlowSemanticRole>,
+    input_locations: List<FlowAggregateInputRef?>,
+    target_type: CoreTypeRef,
     target_role: FlowSemanticRole,
     target_origin: FlowValueOriginContract
 ) -> FlowOperationContract {
-    if input_types.len() != input_roles.len() {
+    if input_types.len() != input_roles.len() ||
+       input_types.len() != input_locations.len() {
         panic("FlowIR: operation input type/role arity differs")
     }
     for role in input_roles { let _ = flow_semantic_role_tag(role) }
     let _ = flow_semantic_role_tag(target_role)
     validate_value_origin_arity(target_origin, input_types.len())
     FlowOperationContract {
-        value: value, input_types: copy_type_refs(input_types),
+        value: value, input_types: input_types.map(fn(item) { item }),
         input_roles: copy_semantic_roles(input_roles),
+        input_locations: input_locations.map(fn(location) {
+            location.map(fn(value) { copy_flow_aggregate_input(value) })
+        }),
         target_type: target_type, target_role: target_role,
         target_origin: copy_value_origin(target_origin)
     }
 }
 
 pub fn make_flow_int_literal_contract(
-    value: Int, target_type: FlowTypeRef
+    value: Int, target_type: CoreTypeRef
 ) -> FlowOperationContract {
     make_flow_operation_contract(
-        FlowOperationValue::IntLiteralOperationValue(value), [], [],
+        FlowOperationValue::IntLiteralOperationValue(value), [], [], [],
         target_type, flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
 pub fn make_flow_float_literal_contract(
-    value: Float, target_type: FlowTypeRef
+    value: Float, target_type: CoreTypeRef
 ) -> FlowOperationContract {
     make_flow_operation_contract(
-        FlowOperationValue::FloatLiteralOperationValue(value), [], [],
+        FlowOperationValue::FloatLiteralOperationValue(value), [], [], [],
         target_type, flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
 pub fn make_flow_str_literal_contract(
-    value: Str, target_type: FlowTypeRef
+    value: Str, target_type: CoreTypeRef
 ) -> FlowOperationContract {
     make_flow_operation_contract(
-        FlowOperationValue::StrLiteralOperationValue(value), [], [],
+        FlowOperationValue::StrLiteralOperationValue(value), [], [], [],
         target_type, flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
 pub fn make_flow_bool_literal_contract(
-    value: Bool, target_type: FlowTypeRef
+    value: Bool, target_type: CoreTypeRef
 ) -> FlowOperationContract {
     make_flow_operation_contract(
-        FlowOperationValue::BoolLiteralOperationValue(value), [], [],
+        FlowOperationValue::BoolLiteralOperationValue(value), [], [], [],
         target_type, flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
 pub fn make_flow_unit_literal_contract(
-    target_type: FlowTypeRef
+    target_type: CoreTypeRef
 ) -> FlowOperationContract {
     make_flow_operation_contract(
-        FlowOperationValue::UnitLiteralOperationValue, [], [],
+        FlowOperationValue::UnitLiteralOperationValue, [], [], [],
         target_type, flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
 pub fn make_flow_primitive_contract(
-    operation: FlowPrimitiveOp, input_types: List<FlowTypeRef>,
-    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef,
+    operation: FlowPrimitiveOp, input_types: List<CoreTypeRef>,
+    input_roles: List<FlowSemanticRole>, target_type: CoreTypeRef,
     target_role: FlowSemanticRole, target_origin: FlowValueOriginContract
 ) -> FlowOperationContract {
     make_flow_operation_contract(
         FlowOperationValue::PrimitiveOperationValue(
             flow_primitive_op_from_tag(operation.tag)),
-        input_types, input_roles, target_type, target_role, target_origin)
+        input_types, input_roles, empty_aggregate_inputs(input_types.len()),
+        target_type, target_role, target_origin)
 }
 pub fn make_flow_constructor_contract(
-    constructor: ExecutableRef, input_types: List<FlowTypeRef>,
-    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef,
+    constructor: ExecutableRef, input_types: List<CoreTypeRef>,
+    input_roles: List<FlowSemanticRole>,
+    input_locations: List<FlowAggregateInputRef?>,
+    target_type: CoreTypeRef,
     target_role: FlowSemanticRole, target_origin: FlowValueOriginContract
 ) -> FlowOperationContract {
     make_flow_operation_contract(
         FlowOperationValue::ConstructorOperationValue(constructor),
-        input_types, input_roles, target_type, target_role, target_origin)
-}
-pub fn make_flow_dictionary_contract(
-    constructor: ExecutableRef, input_types: List<FlowTypeRef>,
-    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef,
-    target_role: FlowSemanticRole, target_origin: FlowValueOriginContract
-) -> FlowOperationContract {
-    make_flow_operation_contract(
-        FlowOperationValue::DictionaryOperationValue(constructor),
-        input_types, input_roles, target_type, target_role, target_origin)
-}
-pub fn make_flow_intrinsic_contract(
-    intrinsic: IntrinsicRef, input_types: List<FlowTypeRef>,
-    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef,
-    target_role: FlowSemanticRole, target_origin: FlowValueOriginContract
-) -> FlowOperationContract {
-    make_flow_operation_contract(
-        FlowOperationValue::IntrinsicOperationValue(intrinsic),
-        input_types, input_roles, target_type, target_role, target_origin)
+        input_types, input_roles, input_locations,
+        target_type, target_role, target_origin)
 }
 pub fn make_flow_tuple_aggregate_contract(
-    arity: Int, input_types: List<FlowTypeRef>,
-    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef
+    arity: Int, input_types: List<CoreTypeRef>,
+    input_roles: List<FlowSemanticRole>, target_type: CoreTypeRef
 ) -> FlowOperationContract {
     if arity < 0 || arity != input_types.len() {
         panic("FlowIR: tuple aggregate arity differs")
     }
+    let mut locations: List<FlowAggregateInputRef?> = []
+    for index in 0..arity {
+        locations.push(some(make_tuple_flow_aggregate_input(index)))
+    }
     make_flow_operation_contract(
         FlowOperationValue::TupleAggregateOperationValue(arity),
-        input_types, input_roles, target_type,
+        input_types, input_roles, locations, target_type,
         flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
 pub fn make_flow_record_aggregate_contract(
-    arity: Int, input_types: List<FlowTypeRef>,
-    input_roles: List<FlowSemanticRole>, target_type: FlowTypeRef
+    arity: Int, input_types: List<CoreTypeRef>,
+    input_roles: List<FlowSemanticRole>,
+    input_locations: List<FlowAggregateInputRef?>,
+    target_type: CoreTypeRef
 ) -> FlowOperationContract {
     if arity < 0 || arity != input_types.len() {
         panic("FlowIR: record aggregate arity differs")
     }
     make_flow_operation_contract(
         FlowOperationValue::RecordAggregateOperationValue(arity),
-        input_types, input_roles, target_type,
+        input_types, input_roles, input_locations, target_type,
         flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
 pub fn make_flow_closure_contract(
-    executable: ExecutableRef, input_types: List<FlowTypeRef>,
+    executable: ExecutableRef, input_types: List<CoreTypeRef>,
     input_roles: List<FlowSemanticRole>,
-    capture_targets: List<SlotRef>, target_type: FlowTypeRef
+    capture_targets: List<SlotRef>, target_type: CoreTypeRef
 ) -> FlowOperationContract {
     if capture_targets.len() != input_types.len() {
         panic("FlowIR: closure capture source/target arity differs")
@@ -2670,15 +1007,19 @@ pub fn make_flow_closure_contract(
             executable: executable,
             capture_targets: copy_slot_refs(capture_targets)
         },
-        input_types, input_roles, target_type,
+        input_types, input_roles, empty_aggregate_inputs(input_types.len()),
+        target_type,
         flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
 pub fn make_flow_callable_value_contract(
-    executable: ExecutableRef, target_type: FlowTypeRef
+    executable: ExecutableRef, target_type: CoreTypeRef,
+    evidence: List<FlowEvidenceRef>
 ) -> FlowOperationContract {
     make_flow_operation_contract(
-        FlowOperationValue::CallableValueOperationValue(executable),
-        [], [], target_type, flow_semantic_role_read(),
+        FlowOperationValue::CallableValueOperationValue {
+            executable: executable, evidence: copy_flow_evidence(evidence)
+        },
+        [], [], [], target_type, flow_semantic_role_read(),
         make_fresh_flow_value_origin())
 }
 
@@ -2691,12 +1032,10 @@ pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
         FlowOperationValue::UnitLiteralOperationValue => 4,
         FlowOperationValue::PrimitiveOperationValue(_) => 5,
         FlowOperationValue::ConstructorOperationValue(_) => 6,
-        FlowOperationValue::DictionaryOperationValue(_) => 7,
-        FlowOperationValue::IntrinsicOperationValue(_) => 8,
         FlowOperationValue::TupleAggregateOperationValue(_) => 9,
         FlowOperationValue::RecordAggregateOperationValue(_) => 10,
         FlowOperationValue::ClosureOperationValue { .. } => 11,
-        FlowOperationValue::CallableValueOperationValue(_) => 12
+        FlowOperationValue::CallableValueOperationValue { .. } => 12
     }
 }
 pub fn flow_operation_contract_input_roles(
@@ -2704,10 +1043,17 @@ pub fn flow_operation_contract_input_roles(
 ) -> List<FlowSemanticRole> { copy_semantic_roles(value.input_roles) }
 pub fn flow_operation_contract_input_types(
     value: FlowOperationContract
-) -> List<FlowTypeRef> { copy_type_refs(value.input_types) }
+) -> List<CoreTypeRef> { value.input_types.map(fn(item) { item }) }
+pub fn flow_operation_contract_input_locations(
+    value: FlowOperationContract
+) -> List<FlowAggregateInputRef?> {
+    value.input_locations.map(fn(location) {
+        location.map(fn(item) { copy_flow_aggregate_input(item) })
+    })
+}
 pub fn flow_operation_contract_target_type(
     value: FlowOperationContract
-) -> FlowTypeRef { value.target_type }
+) -> CoreTypeRef { value.target_type }
 pub fn flow_operation_contract_target_role(
     value: FlowOperationContract
 ) -> FlowSemanticRole { value.target_role }
@@ -2726,17 +1072,8 @@ pub fn flow_operation_contract_executable(
     value: FlowOperationContract
 ) -> ExecutableRef {
     match value.value {
-        FlowOperationValue::ConstructorOperationValue(executable) |
-        FlowOperationValue::DictionaryOperationValue(executable) => executable,
+        FlowOperationValue::ConstructorOperationValue(executable) => executable,
         _ => panic("FlowIR: operation has no executable contract")
-    }
-}
-pub fn flow_operation_contract_intrinsic(
-    value: FlowOperationContract
-) -> IntrinsicRef {
-    match value.value {
-        FlowOperationValue::IntrinsicOperationValue(intrinsic) => intrinsic,
-        _ => panic("FlowIR: operation is not intrinsic")
     }
 }
 pub fn flow_operation_contract_closure_executable(
@@ -2746,6 +1083,24 @@ pub fn flow_operation_contract_closure_executable(
         FlowOperationValue::ClosureOperationValue { executable, .. } =>
             executable,
         _ => panic("FlowIR: operation is not a closure")
+    }
+}
+pub fn flow_operation_contract_callable_executable(
+    value: FlowOperationContract
+) -> ExecutableRef {
+    match value.value {
+        FlowOperationValue::CallableValueOperationValue { executable, .. } =>
+            executable,
+        _ => panic("FlowIR: operation is not a callable value")
+    }
+}
+pub fn flow_operation_contract_callable_evidence(
+    value: FlowOperationContract
+) -> List<FlowEvidenceRef> {
+    match value.value {
+        FlowOperationValue::CallableValueOperationValue { evidence, .. } =>
+            copy_flow_evidence(evidence),
+        _ => panic("FlowIR: operation is not a callable value")
     }
 }
 pub fn flow_operation_contract_capture_targets(
@@ -2789,6 +1144,7 @@ pub fn flow_operation_contract_bool_literal(
 fn copy_operation_contract(value: FlowOperationContract) -> FlowOperationContract {
     make_flow_operation_contract(
         value.value, value.input_types, value.input_roles,
+        value.input_locations,
         value.target_type, value.target_role, value.target_origin)
 }
 
@@ -2796,21 +1152,20 @@ enum FlowProjectionContractValue {
     NominalProjectionValue(NominalFieldRef),
     VariantProjectionValue(VariantFieldRef),
     TupleProjectionValue(Int),
-    StructuralProjectionValue(PathRef),
-    WholeSlotProjectionValue
+    StructuralProjectionValue(PathRef)
 }
 
 pub struct FlowProjectionContract {
     value: FlowProjectionContractValue,
-    base_type: FlowTypeRef,
-    result_type: FlowTypeRef,
+    base_type: CoreTypeRef,
+    result_type: CoreTypeRef,
     base_role: FlowSemanticRole,
     partial: Bool
 }
 
 pub fn make_nominal_flow_projection_contract(
-    field: NominalFieldRef, base_type: FlowTypeRef,
-    result_type: FlowTypeRef, base_role: FlowSemanticRole, partial: Bool
+    field: NominalFieldRef, base_type: CoreTypeRef,
+    result_type: CoreTypeRef, base_role: FlowSemanticRole, partial: Bool
 ) -> FlowProjectionContract {
     let _ = flow_semantic_role_tag(base_role)
     FlowProjectionContract {
@@ -2820,8 +1175,8 @@ pub fn make_nominal_flow_projection_contract(
     }
 }
 pub fn make_structural_flow_projection_contract(
-    projection: PathRef, base_type: FlowTypeRef,
-    result_type: FlowTypeRef, base_role: FlowSemanticRole, partial: Bool
+    projection: PathRef, base_type: CoreTypeRef,
+    result_type: CoreTypeRef, base_role: FlowSemanticRole, partial: Bool
 ) -> FlowProjectionContract {
     let _ = flow_semantic_role_tag(base_role)
     FlowProjectionContract {
@@ -2831,8 +1186,8 @@ pub fn make_structural_flow_projection_contract(
     }
 }
 pub fn make_variant_flow_projection_contract(
-    field: VariantFieldRef, base_type: FlowTypeRef,
-    result_type: FlowTypeRef, base_role: FlowSemanticRole, partial: Bool
+    field: VariantFieldRef, base_type: CoreTypeRef,
+    result_type: CoreTypeRef, base_role: FlowSemanticRole, partial: Bool
 ) -> FlowProjectionContract {
     let _ = flow_semantic_role_tag(base_role)
     FlowProjectionContract {
@@ -2842,8 +1197,8 @@ pub fn make_variant_flow_projection_contract(
     }
 }
 pub fn make_tuple_flow_projection_contract(
-    index: Int, base_type: FlowTypeRef,
-    result_type: FlowTypeRef, base_role: FlowSemanticRole, partial: Bool
+    index: Int, base_type: CoreTypeRef,
+    result_type: CoreTypeRef, base_role: FlowSemanticRole, partial: Bool
 ) -> FlowProjectionContract {
     if index < 0 { panic("FlowIR: negative tuple projection index") }
     let _ = flow_semantic_role_tag(base_role)
@@ -2853,31 +1208,20 @@ pub fn make_tuple_flow_projection_contract(
         base_role: base_role, partial: partial
     }
 }
-pub fn make_whole_slot_flow_projection_contract(
-    ty: FlowTypeRef, base_role: FlowSemanticRole
-) -> FlowProjectionContract {
-    let _ = flow_semantic_role_tag(base_role)
-    FlowProjectionContract {
-        value: FlowProjectionContractValue::WholeSlotProjectionValue,
-        base_type: ty, result_type: ty,
-        base_role: base_role, partial: false
-    }
-}
 pub fn flow_projection_contract_kind_tag(value: FlowProjectionContract) -> Int {
     match value.value {
         FlowProjectionContractValue::NominalProjectionValue(_) => 0,
         FlowProjectionContractValue::StructuralProjectionValue(_) => 1,
-        FlowProjectionContractValue::WholeSlotProjectionValue => 2,
         FlowProjectionContractValue::VariantProjectionValue(_) => 3,
         FlowProjectionContractValue::TupleProjectionValue(_) => 4
     }
 }
 pub fn flow_projection_contract_base_type(
     value: FlowProjectionContract
-) -> FlowTypeRef { value.base_type }
+) -> CoreTypeRef { value.base_type }
 pub fn flow_projection_contract_result_type(
     value: FlowProjectionContract
-) -> FlowTypeRef { value.result_type }
+) -> CoreTypeRef { value.result_type }
 pub fn flow_projection_contract_base_role(
     value: FlowProjectionContract
 ) -> FlowSemanticRole { value.base_role }
@@ -2924,14 +1268,49 @@ fn copy_projection_contract(
     }
 }
 
+pub fn copy_flow_projection_contract(
+    value: FlowProjectionContract
+) -> FlowProjectionContract { copy_projection_contract(value) }
+
+pub fn flow_projection_contract_same(
+    left: FlowProjectionContract, right: FlowProjectionContract
+) -> Bool {
+    if flow_projection_contract_kind_tag(left) !=
+           flow_projection_contract_kind_tag(right) ||
+       !core_type_ref_same(left.base_type, right.base_type) ||
+       !core_type_ref_same(left.result_type, right.result_type) ||
+       flow_semantic_role_tag(left.base_role) !=
+           flow_semantic_role_tag(right.base_role) ||
+       left.partial != right.partial {
+        return false
+    }
+    let kind = flow_projection_contract_kind_tag(left)
+    if kind == 0 {
+        return nominal_field_ref_same(
+            flow_projection_contract_nominal_field(left),
+            flow_projection_contract_nominal_field(right))
+    }
+    if kind == 1 {
+        return path_ref_same(
+            flow_projection_contract_structural_path(left),
+            flow_projection_contract_structural_path(right))
+    }
+    if kind == 2 { return true }
+    if kind == 3 {
+        return variant_field_ref_same(
+            flow_projection_contract_variant_field(left),
+            flow_projection_contract_variant_field(right))
+    }
+    flow_projection_contract_tuple_index(left) ==
+        flow_projection_contract_tuple_index(right)
+}
+
 enum FlowPlaceRefValue {
     FlowSlotPlaceValue(SlotRef),
     FlowProjectPlaceValue {
         base: SlotRef,
-        projection: FlowProjectionContract?,
-        evaluated_index: SlotRef?,
-        intrinsic: IntrinsicRef?,
-        value_type: FlowTypeRef
+        projection: FlowProjectionContract,
+        value_type: CoreTypeRef
     }
 }
 pub struct FlowPlaceRef { value: FlowPlaceRefValue }
@@ -2940,21 +1319,11 @@ pub fn make_flow_slot_place(slot: SlotRef) -> FlowPlaceRef {
 }
 pub fn make_flow_project_place(
     base: SlotRef, projection: FlowProjectionContract,
-    value_type: FlowTypeRef
+    value_type: CoreTypeRef
 ) -> FlowPlaceRef {
     FlowPlaceRef { value: FlowPlaceRefValue::FlowProjectPlaceValue {
-        base: base, projection: some(projection),
-        evaluated_index: none, intrinsic: none, value_type: value_type
-    } }
-}
-pub fn make_flow_index_place(
-    base: SlotRef, evaluated_index: SlotRef,
-    intrinsic: IntrinsicRef, value_type: FlowTypeRef
-) -> FlowPlaceRef {
-    FlowPlaceRef { value: FlowPlaceRefValue::FlowProjectPlaceValue {
-        base: base, projection: none,
-        evaluated_index: some(evaluated_index),
-        intrinsic: some(intrinsic), value_type: value_type
+        base: base, projection: copy_projection_contract(projection),
+        value_type: value_type
     } }
 }
 pub fn flow_place_is_slot(value: FlowPlaceRef) -> Bool {
@@ -2975,26 +1344,13 @@ pub fn flow_place_base(value: FlowPlaceRef) -> SlotRef {
         _ => panic("FlowIR: slot place has no base")
     }
 }
-pub fn flow_place_projection(value: FlowPlaceRef) -> FlowProjectionContract? {
+pub fn flow_place_projection(value: FlowPlaceRef) -> FlowProjectionContract {
     match value.value {
         FlowPlaceRefValue::FlowProjectPlaceValue { projection, .. } => projection,
         _ => panic("FlowIR: slot place has no projection")
     }
 }
-pub fn flow_place_evaluated_index(value: FlowPlaceRef) -> SlotRef? {
-    match value.value {
-        FlowPlaceRefValue::FlowProjectPlaceValue { evaluated_index, .. } =>
-            evaluated_index,
-        _ => panic("FlowIR: slot place has no evaluated index")
-    }
-}
-pub fn flow_place_intrinsic(value: FlowPlaceRef) -> IntrinsicRef? {
-    match value.value {
-        FlowPlaceRefValue::FlowProjectPlaceValue { intrinsic, .. } => intrinsic,
-        _ => panic("FlowIR: slot place has no index intrinsic")
-    }
-}
-pub fn flow_place_value_type(value: FlowPlaceRef) -> FlowTypeRef {
+pub fn flow_place_value_type(value: FlowPlaceRef) -> CoreTypeRef {
     match value.value {
         FlowPlaceRefValue::FlowProjectPlaceValue { value_type, .. } => value_type,
         _ => panic("FlowIR: slot place type comes from slot table")
@@ -3004,13 +1360,8 @@ fn copy_flow_place(value: FlowPlaceRef) -> FlowPlaceRef {
     match value.value {
         FlowPlaceRefValue::FlowSlotPlaceValue(slot) => make_flow_slot_place(slot),
         FlowPlaceRefValue::FlowProjectPlaceValue {
-            base, projection, evaluated_index, intrinsic, value_type
-        } => match projection {
-            some(contract) => make_flow_project_place(
-                base, copy_projection_contract(contract), value_type),
-            none => make_flow_index_place(
-                base, evaluated_index.unwrap(), intrinsic.unwrap(), value_type)
-        }
+            base, projection, value_type
+        } => make_flow_project_place(base, projection, value_type)
     }
 }
 
@@ -3432,7 +1783,7 @@ pub fn flow_capture_target_role(value: FlowInstruction) -> FlowSemanticRole {
 }
 pub fn flow_scope_instruction_scope(value: FlowInstruction) -> FlowScopeRef {
     match value.value {
-        FlowInstructionValue::ScopeEnterValue { scope } |
+        FlowInstructionValue::ScopeEnterValue { scope } => scope,
         FlowInstructionValue::ScopeExitValue { scope } => scope,
         _ => panic("FlowIR: instruction is not a scope operation")
     }
@@ -3569,7 +1920,9 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
             result.push(make_instruction_operand(value, 0, target, target_role))
             result.push(make_instruction_operand(value, 1, input, value_role))
         },
-        FlowInstructionValue::ConsumeValue { source } |
+        FlowInstructionValue::ConsumeValue { source } =>
+            result.push(make_instruction_operand(
+                value, 0, source, flow_semantic_role_consume())),
         FlowInstructionValue::DiscardValue { source } =>
             result.push(make_instruction_operand(
                 value, 0, source, flow_semantic_role_consume())),
@@ -3587,21 +1940,17 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
                 result.push(make_instruction_operand(
                     value, 1, flow_place_base(target),
                     flow_semantic_role_mutate()))
-                match flow_place_evaluated_index(target) {
-                    some(index) => result.push(make_instruction_operand(
-                        value, 2, index, flow_semantic_role_read())),
-                    none => {}
-                }
             }
         },
         FlowInstructionValue::CallValue {
             target, arguments, handled_evidence, ..
         } => {
+            let roles = flow_call_contract_parameter_roles(target.contract)
             let mut index = 0
             while index < arguments.len() {
                 result.push(make_instruction_operand(
                     value, index, arguments.get(index).unwrap(),
-                    target.contract.parameter_roles.get(index).unwrap()))
+                    roles.get(index).unwrap()))
                 index = index + 1
             }
             for evidence in handled_evidence {
@@ -3629,7 +1978,9 @@ pub fn flow_instruction_results(value: FlowInstruction) -> List<FlowResultRef> {
         FlowInstructionValue::InitializeValue { operation, target, .. } =>
             [make_instruction_result(
                 value, 0, target, operation.target_origin)],
-        FlowInstructionValue::ReadValue { target, .. } |
+        FlowInstructionValue::ReadValue { target, .. } =>
+            [make_instruction_result(
+                value, 0, target, make_aliasing_flow_value_origin([0]))],
         FlowInstructionValue::MutateValue { target, .. } =>
             [make_instruction_result(
                 value, 0, target, make_aliasing_flow_value_origin([0]))],
@@ -3641,10 +1992,13 @@ pub fn flow_instruction_results(value: FlowInstruction) -> List<FlowResultRef> {
             } else { [] },
         FlowInstructionValue::CallValue { target, result, .. } => match result {
             some(slot) => [make_instruction_result(
-                value, 0, slot, target.contract.result_origin)],
+                value, 0, slot,
+                flow_call_contract_result_origin(target.contract))],
             none => []
         },
-        FlowInstructionValue::ProjectValue { result, .. } |
+        FlowInstructionValue::ProjectValue { result, .. } =>
+            [make_instruction_result(
+                value, 0, result, make_aliasing_flow_value_origin([0]))],
         FlowInstructionValue::CaptureValue { target: result, .. } =>
             [make_instruction_result(
                 value, 0, result, make_aliasing_flow_value_origin([0]))],
@@ -3652,9 +2006,91 @@ pub fn flow_instruction_results(value: FlowInstruction) -> List<FlowResultRef> {
     }
 }
 
+enum FlowCallableLocationValue {
+    FlowCallableSlotLocationValue(SlotRef),
+    FlowCallableProjectionLocationValue {
+        base: SlotRef,
+        projection: FlowProjectionContract
+    }
+}
+pub struct FlowCallableLocation { value: FlowCallableLocationValue }
+pub fn make_flow_callable_slot_location(
+    slot: SlotRef
+) -> FlowCallableLocation {
+    FlowCallableLocation {
+        value: FlowCallableLocationValue::FlowCallableSlotLocationValue(slot)
+    }
+}
+pub fn make_flow_callable_projection_location(
+    base: SlotRef, projection: FlowProjectionContract
+) -> FlowCallableLocation {
+    FlowCallableLocation {
+        value: FlowCallableLocationValue::FlowCallableProjectionLocationValue {
+            base: base, projection: copy_projection_contract(projection)
+        }
+    }
+}
+pub fn flow_callable_location_is_slot(value: FlowCallableLocation) -> Bool {
+    match value.value {
+        FlowCallableLocationValue::FlowCallableSlotLocationValue(_) => true,
+        FlowCallableLocationValue::FlowCallableProjectionLocationValue { .. } =>
+            false
+    }
+}
+pub fn flow_callable_location_slot(value: FlowCallableLocation) -> SlotRef {
+    match value.value {
+        FlowCallableLocationValue::FlowCallableSlotLocationValue(slot) => slot,
+        _ => panic("FlowIR: callable projection location has no direct slot")
+    }
+}
+pub fn flow_callable_location_base(value: FlowCallableLocation) -> SlotRef {
+    match value.value {
+        FlowCallableLocationValue::FlowCallableProjectionLocationValue {
+            base, ..
+        } => base,
+        _ => panic("FlowIR: callable slot location has no projection base")
+    }
+}
+pub fn flow_callable_location_projection(
+    value: FlowCallableLocation
+) -> FlowProjectionContract {
+    match value.value {
+        FlowCallableLocationValue::FlowCallableProjectionLocationValue {
+            projection, ..
+        } => copy_projection_contract(projection),
+        _ => panic("FlowIR: callable slot location has no projection")
+    }
+}
+pub fn flow_callable_location_same(
+    left: FlowCallableLocation, right: FlowCallableLocation
+) -> Bool {
+    match (left.value, right.value) {
+        (FlowCallableLocationValue::FlowCallableSlotLocationValue(a),
+         FlowCallableLocationValue::FlowCallableSlotLocationValue(b)) =>
+            slot_ref_same(a, b),
+        (FlowCallableLocationValue::FlowCallableProjectionLocationValue {
+            base: a_base, projection: a_projection
+         },
+         FlowCallableLocationValue::FlowCallableProjectionLocationValue {
+            base: b_base, projection: b_projection
+         }) => slot_ref_same(a_base, b_base) &&
+            flow_projection_contract_same(a_projection, b_projection),
+        _ => false
+    }
+}
+fn copy_flow_callable_location(value: FlowCallableLocation) -> FlowCallableLocation {
+    if flow_callable_location_is_slot(value) {
+        make_flow_callable_slot_location(flow_callable_location_slot(value))
+    } else {
+        make_flow_callable_projection_location(
+            flow_callable_location_base(value),
+            flow_callable_location_projection(value))
+    }
+}
+
 enum FlowCallableValueOriginValue {
     FlowDirectExecutableOrigin(ExecutableRef),
-    FlowFromSlotsOrigin(List<SlotRef>),
+    FlowFromLocationsOrigin(List<FlowCallableLocation>),
     FlowFromCallOrigin {
         target: FlowCallTarget,
         arguments: List<SlotRef>
@@ -3671,12 +2107,19 @@ pub fn make_flow_direct_callable_origin(
 pub fn make_flow_slots_callable_origin(
     sources: List<SlotRef>
 ) -> FlowCallableValueOrigin {
+    make_flow_locations_callable_origin(sources.map(fn(source) {
+        make_flow_callable_slot_location(source)
+    }))
+}
+pub fn make_flow_locations_callable_origin(
+    sources: List<FlowCallableLocation>
+) -> FlowCallableValueOrigin {
     if sources.len() == 0 {
         panic("FlowIR: callable slot provenance is empty")
     }
     FlowCallableValueOrigin {
-        value: FlowCallableValueOriginValue::FlowFromSlotsOrigin(
-            copy_slot_refs(sources))
+        value: FlowCallableValueOriginValue::FlowFromLocationsOrigin(
+            sources.map(fn(source) { copy_flow_callable_location(source) }))
     }
 }
 pub fn make_flow_call_callable_origin(
@@ -3714,9 +2157,23 @@ pub fn flow_callable_origin_slots(
     value: FlowCallableValueOrigin
 ) -> List<SlotRef> {
     match value.value {
-        FlowCallableValueOriginValue::FlowFromSlotsOrigin(sources) =>
-            copy_slot_refs(sources),
+        FlowCallableValueOriginValue::FlowFromLocationsOrigin(sources) =>
+            sources.map(fn(source) {
+                if !flow_callable_location_is_slot(source) {
+                    panic("FlowIR: projected callable origin is not a slot")
+                }
+                flow_callable_location_slot(source)
+            }),
         _ => panic("FlowIR: callable provenance is not from slots")
+    }
+}
+pub fn flow_callable_origin_locations(
+    value: FlowCallableValueOrigin
+) -> List<FlowCallableLocation> {
+    match value.value {
+        FlowCallableValueOriginValue::FlowFromLocationsOrigin(sources) =>
+            sources.map(fn(source) { copy_flow_callable_location(source) }),
+        _ => panic("FlowIR: callable provenance is not from locations")
     }
 }
 pub fn flow_callable_origin_call_target(
@@ -3740,15 +2197,23 @@ pub fn flow_callable_origin_call_arguments(
 
 pub struct FlowCallableProvenanceFact {
     step: FlowSemanticStepRef,
-    target: SlotRef,
+    target: FlowCallableLocation,
     origin: FlowCallableValueOrigin
+}
+pub fn make_flow_callable_provenance_fact(
+    step: FlowSemanticStepRef, target: FlowCallableLocation,
+    origin: FlowCallableValueOrigin
+) -> FlowCallableProvenanceFact {
+    FlowCallableProvenanceFact {
+        step: step, target: copy_flow_callable_location(target), origin: origin
+    }
 }
 pub fn flow_callable_provenance_step(
     value: FlowCallableProvenanceFact
 ) -> FlowSemanticStepRef { value.step }
 pub fn flow_callable_provenance_target(
     value: FlowCallableProvenanceFact
-) -> SlotRef { value.target }
+) -> FlowCallableLocation { copy_flow_callable_location(value.target) }
 pub fn flow_callable_provenance_origin(
     value: FlowCallableProvenanceFact
 ) -> FlowCallableValueOrigin { value.origin }
@@ -3797,7 +2262,7 @@ enum FlowPatternContractValue {
                          fields: List<FlowPatternField> }
 }
 pub struct FlowPatternContract {
-    ty: FlowTypeRef,
+    ty: CoreTypeRef,
     value: FlowPatternContractValue
 }
 pub struct FlowPatternField {
@@ -3814,23 +2279,23 @@ fn copy_flow_pattern_fields(values: List<FlowPatternField>) -> List<FlowPatternF
     for value in values { result.push(value) }
     result
 }
-pub fn make_flow_wildcard_pattern(ty: FlowTypeRef) -> FlowPatternContract {
+pub fn make_flow_wildcard_pattern(ty: CoreTypeRef) -> FlowPatternContract {
     FlowPatternContract { ty: ty, value: FlowPatternContractValue::FlowWildcardPattern }
 }
 pub fn make_flow_binding_pattern(
-    ty: FlowTypeRef, slot: SlotRef
+    ty: CoreTypeRef, slot: SlotRef
 ) -> FlowPatternContract {
     FlowPatternContract { ty: ty,
         value: FlowPatternContractValue::FlowBindingPattern(slot) }
 }
 pub fn make_flow_literal_pattern(
-    ty: FlowTypeRef, literal: FlowPatternLiteral
+    ty: CoreTypeRef, literal: FlowPatternLiteral
 ) -> FlowPatternContract {
     FlowPatternContract { ty: ty,
         value: FlowPatternContractValue::FlowLiteralPattern(literal) }
 }
 pub fn make_flow_tuple_pattern(
-    ty: FlowTypeRef, elements: List<FlowPatternContract>
+    ty: CoreTypeRef, elements: List<FlowPatternContract>
 ) -> FlowPatternContract {
     FlowPatternContract { ty: ty,
         value: FlowPatternContractValue::FlowTuplePattern(
@@ -3840,21 +2305,22 @@ pub fn make_flow_pattern_field(
     field: FlowFieldIdentity, pattern: FlowPatternContract
 ) -> FlowPatternField { FlowPatternField { field: field, pattern: pattern } }
 pub fn make_flow_struct_pattern(
-    ty: FlowTypeRef, owner: SymbolRef, fields: List<FlowPatternField>
+    ty: CoreTypeRef, owner: SymbolRef,
+    field_values: List<FlowPatternField>
 ) -> FlowPatternContract {
     FlowPatternContract { ty: ty,
         value: FlowPatternContractValue::FlowStructPattern {
-            owner: owner, fields: copy_flow_pattern_fields(fields) } }
+            owner: owner, fields: copy_flow_pattern_fields(field_values) } }
 }
 pub fn make_flow_variant_pattern(
-    ty: FlowTypeRef, variant: VariantRef,
-    fields: List<FlowPatternField>
+    ty: CoreTypeRef, variant: VariantRef,
+    field_values: List<FlowPatternField>
 ) -> FlowPatternContract {
     FlowPatternContract { ty: ty,
         value: FlowPatternContractValue::FlowVariantPattern {
-            variant: variant, fields: copy_flow_pattern_fields(fields) } }
+            variant: variant, fields: copy_flow_pattern_fields(field_values) } }
 }
-pub fn flow_pattern_type(value: FlowPatternContract) -> FlowTypeRef { value.ty }
+pub fn flow_pattern_type(value: FlowPatternContract) -> CoreTypeRef { value.ty }
 pub fn flow_pattern_kind_tag(value: FlowPatternContract) -> Int {
     match value.value {
         FlowPatternContractValue::FlowWildcardPattern => 0,
@@ -4237,7 +2703,7 @@ pub fn flow_terminator_successors(
 
 pub fn flow_terminator_read_slots(value: FlowTerminator) -> List<SlotRef> {
     match value.value {
-        FlowTerminatorValue::BranchValue { condition, .. } |
+        FlowTerminatorValue::BranchValue { condition, .. } => [condition],
         FlowTerminatorValue::LoopValue { condition, .. } => [condition],
         FlowTerminatorValue::ReturnValue { value: returned, .. } =>
             match returned { some(slot) => [slot], none => [] },
@@ -4430,7 +2896,10 @@ pub fn flow_block_successors(value: FlowBlock) -> List<FlowSuccessor> {
 pub fn flow_block_terminator_operands(value: FlowBlock) -> List<FlowOperandRef> {
     let step = make_flow_terminator_step_ref(value.reference)
     match value.terminator.value {
-        FlowTerminatorValue::BranchValue { condition, .. } |
+        FlowTerminatorValue::BranchValue { condition, .. } => [FlowOperandRef {
+            step: step, ordinal: 0, slot: condition,
+            role: flow_semantic_role_read()
+        }],
         FlowTerminatorValue::LoopValue { condition, .. } => [FlowOperandRef {
             step: step, ordinal: 0, slot: condition,
             role: flow_semantic_role_read()
@@ -4483,9 +2952,19 @@ fn flow_pattern_binding_slots(value: FlowPatternContract) -> List<SlotRef> {
                 }
             }
         },
-        FlowPatternContractValue::FlowStructPattern { fields, .. } |
-        FlowPatternContractValue::FlowVariantPattern { fields, .. } => {
-            for field in fields {
+        FlowPatternContractValue::FlowStructPattern {
+            fields: field_values, ..
+        } => {
+            for field in field_values {
+                for slot in flow_pattern_binding_slots(field.pattern) {
+                    result.push(slot)
+                }
+            }
+        },
+        FlowPatternContractValue::FlowVariantPattern {
+            fields: field_values, ..
+        } => {
+            for field in field_values {
                 for slot in flow_pattern_binding_slots(field.pattern) {
                     result.push(slot)
                 }
@@ -4597,300 +3076,6 @@ fn copy_bodies(values: List<FlowBody>) -> List<FlowBody> {
 }
 
 // ============================================================
-// Derived graph edges (never a second stored authority)
-// ============================================================
-
-pub struct FlowCallEdge {
-    caller: ExecutableRef,
-    site: FlowInstructionRef,
-    target: FlowCallTarget,
-    arguments: List<SlotRef>,
-    evidence: List<FlowEvidenceRef>,
-    handled_evidence: List<FlowHandledEvidenceUse>,
-    result: SlotRef?
-}
-
-pub fn flow_call_edge_caller(value: FlowCallEdge) -> ExecutableRef {
-    value.caller
-}
-pub fn flow_call_edge_site(value: FlowCallEdge) -> FlowInstructionRef {
-    value.site
-}
-pub fn flow_call_edge_target(value: FlowCallEdge) -> FlowCallTarget {
-    copy_call_target(value.target)
-}
-pub fn flow_call_edge_arguments(value: FlowCallEdge) -> List<SlotRef> {
-    copy_slot_refs(value.arguments)
-}
-pub fn flow_call_edge_result(value: FlowCallEdge) -> SlotRef? { value.result }
-pub fn flow_call_edge_evidence(value: FlowCallEdge) -> List<FlowEvidenceRef> {
-    copy_flow_evidence(value.evidence)
-}
-pub fn flow_call_edge_handled_evidence(
-    value: FlowCallEdge
-) -> List<FlowHandledEvidenceUse> {
-    copy_flow_handled_evidence_uses(value.handled_evidence)
-}
-
-fn copy_call_edges(values: List<FlowCallEdge>) -> List<FlowCallEdge> {
-    let mut result: List<FlowCallEdge> = []
-    for value in values {
-        result.push(FlowCallEdge {
-            caller: value.caller, site: value.site,
-            target: copy_call_target(value.target),
-            // target owns role/candidate lists and must not alias the caller.
-            arguments: copy_slot_refs(value.arguments),
-            evidence: copy_flow_evidence(value.evidence),
-            handled_evidence:
-                copy_flow_handled_evidence_uses(value.handled_evidence),
-            result: value.result
-        })
-    }
-    result
-}
-
-pub fn flow_callable_call_edges(value: FlowCallable) -> List<FlowCallEdge> {
-    copy_call_edges(value.call_edges)
-}
-
-pub struct FlowProjectionEdge {
-    owner: ExecutableRef,
-    site: FlowInstructionRef,
-    contract: FlowProjectionContract,
-    base: SlotRef,
-    result: SlotRef
-}
-
-pub fn flow_projection_edge_owner(value: FlowProjectionEdge) -> ExecutableRef {
-    value.owner
-}
-pub fn flow_projection_edge_site(value: FlowProjectionEdge) -> FlowInstructionRef {
-    value.site
-}
-pub fn flow_projection_edge_contract(
-    value: FlowProjectionEdge
-) -> FlowProjectionContract {
-    copy_projection_contract(value.contract)
-}
-pub fn flow_projection_edge_base(value: FlowProjectionEdge) -> SlotRef {
-    value.base
-}
-pub fn flow_projection_edge_result(value: FlowProjectionEdge) -> SlotRef {
-    value.result
-}
-pub fn flow_projection_edge_is_partial(value: FlowProjectionEdge) -> Bool {
-    value.contract.partial
-}
-
-pub struct FlowCaptureEdge {
-    owner: ExecutableRef,
-    site: FlowInstructionRef,
-    capture: PathRef,
-    source: SlotRef,
-    target: SlotRef,
-    source_role: FlowSemanticRole,
-    target_role: FlowSemanticRole
-}
-
-pub fn flow_capture_edge_owner(value: FlowCaptureEdge) -> ExecutableRef {
-    value.owner
-}
-pub fn flow_capture_edge_site(value: FlowCaptureEdge) -> FlowInstructionRef {
-    value.site
-}
-pub fn flow_capture_edge_capture(value: FlowCaptureEdge) -> PathRef {
-    value.capture
-}
-pub fn flow_capture_edge_source(value: FlowCaptureEdge) -> SlotRef {
-    value.source
-}
-pub fn flow_capture_edge_target(value: FlowCaptureEdge) -> SlotRef {
-    value.target
-}
-pub fn flow_capture_edge_source_role(value: FlowCaptureEdge) -> FlowSemanticRole {
-    value.source_role
-}
-pub fn flow_capture_edge_target_role(value: FlowCaptureEdge) -> FlowSemanticRole {
-    value.target_role
-}
-
-pub struct FlowControlEdge {
-    owner: ExecutableRef,
-    from: FlowBlockRef,
-    to: FlowBlockRef,
-    exited_scopes: List<FlowScopeRef>,
-    entered_scopes: List<FlowScopeRef>,
-    terminator_kind: Int
-}
-
-pub fn flow_control_edge_owner(value: FlowControlEdge) -> ExecutableRef {
-    value.owner
-}
-pub fn flow_control_edge_from(value: FlowControlEdge) -> FlowBlockRef {
-    value.from
-}
-pub fn flow_control_edge_to(value: FlowControlEdge) -> FlowBlockRef { value.to }
-pub fn flow_control_edge_exited_scopes(
-    value: FlowControlEdge
-) -> List<FlowScopeRef> { copy_scope_refs(value.exited_scopes) }
-pub fn flow_control_edge_entered_scopes(
-    value: FlowControlEdge
-) -> List<FlowScopeRef> { copy_scope_refs(value.entered_scopes) }
-pub fn flow_control_edge_terminator_kind(value: FlowControlEdge) -> Int {
-    value.terminator_kind
-}
-
-const FLOW_EXIT_RETURN: Int = 0
-const FLOW_EXIT_UNREACHABLE: Int = 1
-const FLOW_EXIT_DIVERGE: Int = 2
-
-pub struct FlowExitKind { tag: Int }
-
-fn flow_exit_kind_from_tag(tag: Int) -> FlowExitKind {
-    if tag < FLOW_EXIT_RETURN || tag > FLOW_EXIT_DIVERGE {
-        panic("FlowIR: invalid exit kind")
-    }
-    FlowExitKind { tag: tag }
-}
-
-pub fn flow_exit_kind_return() -> FlowExitKind {
-    flow_exit_kind_from_tag(FLOW_EXIT_RETURN)
-}
-pub fn flow_exit_kind_unreachable() -> FlowExitKind {
-    flow_exit_kind_from_tag(FLOW_EXIT_UNREACHABLE)
-}
-pub fn flow_exit_kind_diverge() -> FlowExitKind {
-    flow_exit_kind_from_tag(FLOW_EXIT_DIVERGE)
-}
-pub fn flow_exit_kind_tag(value: FlowExitKind) -> Int {
-    flow_exit_kind_from_tag(value.tag).tag
-}
-
-pub struct FlowExitEdge {
-    owner: ExecutableRef,
-    from: FlowBlockRef,
-    kind: FlowExitKind,
-    value: SlotRef?,
-    exited_scopes: List<FlowScopeRef>
-}
-
-pub fn flow_exit_edge_owner(value: FlowExitEdge) -> ExecutableRef { value.owner }
-pub fn flow_exit_edge_from(value: FlowExitEdge) -> FlowBlockRef { value.from }
-pub fn flow_exit_edge_kind(value: FlowExitEdge) -> FlowExitKind { value.kind }
-pub fn flow_exit_edge_value(value: FlowExitEdge) -> SlotRef? { value.value }
-pub fn flow_exit_edge_exited_scopes(
-    value: FlowExitEdge
-) -> List<FlowScopeRef> { copy_scope_refs(value.exited_scopes) }
-
-pub fn flow_body_call_edges(value: FlowBody) -> List<FlowCallEdge> {
-    let mut result: List<FlowCallEdge> = []
-    for block in value.blocks {
-        for instruction in block.instructions {
-            match instruction.value {
-                FlowInstructionValue::CallValue {
-                    target, arguments, evidence, handled_evidence,
-                    result: call_result
-                } => result.push(FlowCallEdge {
-                    caller: value.reference, site: instruction.reference,
-                    target: copy_call_target(target),
-                    arguments: copy_slot_refs(arguments),
-                    evidence: copy_flow_evidence(evidence),
-                    handled_evidence:
-                        copy_flow_handled_evidence_uses(handled_evidence),
-                    result: call_result
-                }),
-                _ => {}
-            }
-        }
-    }
-    result
-}
-
-pub fn flow_body_projection_edges(value: FlowBody) -> List<FlowProjectionEdge> {
-    let mut result: List<FlowProjectionEdge> = []
-    for block in value.blocks {
-        for instruction in block.instructions {
-            match instruction.value {
-                FlowInstructionValue::ProjectValue {
-                    contract, base, result: projected
-                } => result.push(FlowProjectionEdge {
-                    owner: value.reference, site: instruction.reference,
-                    contract: copy_projection_contract(contract),
-                    base: base, result: projected
-                }),
-                _ => {}
-            }
-        }
-    }
-    result
-}
-
-pub fn flow_body_capture_edges(value: FlowBody) -> List<FlowCaptureEdge> {
-    let mut result: List<FlowCaptureEdge> = []
-    for block in value.blocks {
-        for instruction in block.instructions {
-            match instruction.value {
-                FlowInstructionValue::CaptureValue {
-                    capture, source, target, source_role, target_role
-                } => result.push(FlowCaptureEdge {
-                    owner: value.reference, site: instruction.reference,
-                    capture: capture, source: source, target: target,
-                    source_role: source_role, target_role: target_role
-                }),
-                _ => {}
-            }
-        }
-    }
-    result
-}
-
-pub fn flow_body_control_edges(value: FlowBody) -> List<FlowControlEdge> {
-    let mut result: List<FlowControlEdge> = []
-    for block in value.blocks {
-        let kind = flow_terminator_kind_tag(block.terminator)
-        for successor in terminator_successors(block.terminator) {
-            result.push(FlowControlEdge {
-                owner: value.reference, from: block.reference,
-                to: successor.target,
-                exited_scopes: copy_scope_refs(successor.exited_scopes),
-                entered_scopes: copy_scope_refs(successor.entered_scopes),
-                terminator_kind: kind
-            })
-        }
-    }
-    result
-}
-
-pub fn flow_body_exit_edges(value: FlowBody) -> List<FlowExitEdge> {
-    let mut result: List<FlowExitEdge> = []
-    for block in value.blocks {
-        match block.terminator.value {
-            FlowTerminatorValue::ReturnValue {
-                value: returned, exited_scopes
-            } => result.push(FlowExitEdge {
-                owner: value.reference, from: block.reference,
-                kind: flow_exit_kind_return(), value: returned,
-                exited_scopes: copy_scope_refs(exited_scopes)
-            }),
-            FlowTerminatorValue::UnreachableValue { exited_scopes } =>
-                result.push(FlowExitEdge {
-                    owner: value.reference, from: block.reference,
-                    kind: flow_exit_kind_unreachable(), value: none,
-                    exited_scopes: copy_scope_refs(exited_scopes)
-                }),
-            FlowTerminatorValue::DivergeValue { exited_scopes } =>
-                result.push(FlowExitEdge {
-                    owner: value.reference, from: block.reference,
-                    kind: flow_exit_kind_diverge(), value: none,
-                    exited_scopes: copy_scope_refs(exited_scopes)
-                }),
-            _ => {}
-        }
-    }
-    result
-}
-
-// ============================================================
 // Freeze validation
 // ============================================================
 
@@ -4922,8 +3107,9 @@ fn validate_origin_for_executable(
     }
 }
 
-fn type_ref_exists(values: List<FlowTypeNode>, target: FlowTypeRef) -> Bool {
-    target.index >= 0 && target.index < values.len()
+fn type_ref_exists(values: List<FlowTypeNode>, target: CoreTypeRef) -> Bool {
+    core_type_ref_index(target) >= 0 &&
+        core_type_ref_index(target) < values.len()
 }
 
 fn callable_index(
@@ -4953,21 +3139,44 @@ fn validate_callables(
     while left_index < values.len() {
         let left = values.get(left_index).unwrap()
         validate_origin_for_executable(left.origin, left.reference)
-        if !type_ref_exists(type_nodes, left.result_type) {
+        let parameter_types = flow_call_contract_parameter_types(
+            left.semantic_contract)
+        let parameter_roles = flow_call_contract_parameter_roles(
+            left.semantic_contract)
+        let result_type = flow_call_contract_result_type(left.semantic_contract)
+        if !type_ref_exists(type_nodes, result_type) {
             panic("FlowIR: callable result type is absent")
         }
-        if left.parameter_types.len() !=
-           left.semantic_contract.parameter_roles.len() ||
-           left.parameter_types.len() !=
-                left.semantic_contract.parameter_types.len() ||
-           !flow_type_ref_same(
-                left.result_type, left.semantic_contract.result_type) {
+        match core_effect_contract_parameter(left.effects) {
+            some(parameter) => if !executable_ref_same(
+                    effect_param_owner(parameter), left.reference) {
+                panic("FlowIR: callable effect parameter owner drifted")
+            },
+            none => {}
+        }
+        for atom in core_effect_set_atoms(
+                core_effect_contract_exact(left.effects)) {
+            let effect_kind = core_effect_atom_kind_tag(atom)
+            if effect_kind == 0 || effect_kind == 1 {
+                if !type_ref_exists(type_nodes, core_effect_atom_type(atom)) {
+                    panic("FlowIR: callable fail effect type is absent")
+                }
+            } else if effect_kind == 3 {
+                for ty in core_effect_atom_type_arguments(atom) {
+                    if !type_ref_exists(type_nodes, ty) {
+                        panic("FlowIR: callable handled argument is absent")
+                    }
+                }
+            }
+        }
+        if parameter_types.len() != parameter_roles.len() {
             panic("FlowIR: callable role vector is not total")
         }
-        let concrete = flow_callable_mode_same(
-            left.mode, flow_callable_mode_concrete_body())
+        let concrete = executable_contract_mode_same(
+            left.mode, executable_contract_mode_concrete_body())
         if (concrete &&
-            left.parameter_slots.len() != left.parameter_types.len()) ||
+            left.parameter_slots.len() !=
+                parameter_types.len()) ||
            (!concrete && left.parameter_slots.len() != 0) {
             panic("FlowIR: callable parameter slot relation drifted")
         }
@@ -4984,35 +3193,22 @@ fn validate_callables(
             }
             parameter_left = parameter_left + 1
         }
-        let mut callable_type_index = 0
-        for ty in left.parameter_types {
+        for ty in parameter_types {
             if !type_ref_exists(type_nodes, ty) {
                 panic("FlowIR: callable parameter type is absent")
             }
-            if !flow_type_ref_same(
-                    ty, left.semantic_contract.parameter_types.get(
-                        callable_type_index).unwrap()) {
-                panic("FlowIR: callable semantic parameter type differs")
-            }
-            callable_type_index = callable_type_index + 1
         }
-        for role in left.semantic_contract.parameter_roles {
+        for role in parameter_roles {
             let _ = flow_semantic_role_tag(role)
         }
-        let _ = flow_semantic_role_tag(left.semantic_contract.result_role)
-        let mut evidence_index = 0
-        while evidence_index < left.handled_evidence.len() {
-            let binding = left.handled_evidence.get(evidence_index).unwrap()
-            if flow_handled_evidence_ordinal(binding) != evidence_index ||
-               !executable_ref_same(
-                    flow_handled_evidence_owner(binding), left.reference) ||
-               !type_ref_exists(
+        let _ = flow_semantic_role_tag(
+            flow_call_contract_result_role(left.semantic_contract))
+        for binding in left.handled_evidence {
+            if !type_ref_exists(
                     type_nodes, flow_handled_evidence_type(binding)) {
-                panic("FlowIR: callable handled evidence contract differs")
+                panic("FlowIR: callable handled evidence type is absent")
             }
-            evidence_index = evidence_index + 1
         }
-        let _ = flow_callable_mode_from_tag(left.mode.tag)
         let mut right_index = left_index + 1
         while right_index < values.len() {
             if executable_ref_same(
@@ -5083,6 +3279,35 @@ fn slot_for_ref(values: List<FlowSlot>, target: SlotRef) -> FlowSlot {
     }
 }
 
+fn validate_dictionary_evidence(value: ExactDictRef, body: FlowBody) {
+    if dict_ref_is_local(value) {
+        let _ = slot_for_ref(body.slots, dict_ref_local(value))
+    } else if !dict_ref_is_static(value) {
+        for inner in dict_ref_wrapped_inner(value) {
+            validate_dictionary_evidence(inner, body)
+        }
+    }
+}
+
+fn dynamic_call_slot_for_path(
+    values: List<FlowSlot>, target: PathRef
+) -> FlowSlot {
+    let mut found: FlowSlot? = none
+    for slot in values {
+        if !slot_ref_is_source(slot.reference) &&
+           path_ref_same(slot_ref_synthetic_path(slot.reference), target) {
+            if found.is_some() {
+                panic("FlowIR: dynamic callable path maps to multiple slots")
+            }
+            found = some(slot)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("FlowIR: dynamic callable path has no exact slot")
+    }
+}
+
 fn validate_slots(
     body: FlowBody, type_nodes: List<FlowTypeNode>
 ) {
@@ -5106,7 +3331,7 @@ fn validate_slots(
         }
         let _ = flow_initial_slot_state_from_tag(slot.initial_state.tag)
         let _ = flow_storage_class_from_tag(slot.storage.tag)
-        let _ = flow_storage_contract_from_tag(slot.storage_contract.tag)
+        let _ = flow_storage_contract_tag(slot.storage_contract)
         if flow_storage_class_same(slot.storage, flow_storage_parameter()) {
             match slot.parameter_ordinal {
                 some(parameter_ordinal) => {
@@ -5161,19 +3386,21 @@ fn validate_slots(
 }
 
 fn validate_body_callable_parameters(body: FlowBody, callable: FlowCallable) {
-    if callable.parameter_slots.len() != callable.parameter_types.len() {
+    let parameter_types = flow_call_contract_parameter_types(
+        callable.semantic_contract)
+    if callable.parameter_slots.len() != parameter_types.len() {
         panic("FlowIR: concrete callable parameter relation is partial")
     }
     let mut ordinal = 0
     while ordinal < callable.parameter_slots.len() {
         let expected_slot = callable.parameter_slots.get(ordinal).unwrap()
-        let expected_type = callable.parameter_types.get(ordinal).unwrap()
+        let expected_type = parameter_types.get(ordinal).unwrap()
         let mut matches = 0
         for slot in body.slots {
             if flow_storage_class_same(slot.storage, flow_storage_parameter()) &&
                slot.parameter_ordinal == some(ordinal) {
                 if !slot_ref_same(slot.reference, expected_slot) ||
-                   !flow_type_ref_same(slot.ty, expected_type) {
+                   !core_type_ref_same(slot.ty, expected_type) {
                     panic("FlowIR: parameter ordinal slot/type relation drifted")
                 }
                 matches = matches + 1
@@ -5193,11 +3420,11 @@ fn validate_body_callable_parameters(body: FlowBody, callable: FlowCallable) {
                slot_ref_same(
                     slot.reference,
                     flow_handled_evidence_slot(evidence)) {
-                if !flow_type_ref_same(
+                if !core_type_ref_same(
                         slot.ty, flow_handled_evidence_type(evidence)) ||
                    slot.initial_state.tag != FLOW_SLOT_LIVE ||
                    flow_storage_contract_tag(slot.storage_contract) !=
-                        FLOW_BORROW_STORAGE {
+                        flow_storage_contract_tag(flow_borrow_storage()) {
                     panic("FlowIR: handled evidence parameter contract differs")
                 }
                 matches = matches + 1
@@ -5233,7 +3460,7 @@ fn validate_body_callable_parameters(body: FlowBody, callable: FlowCallable) {
 }
 
 fn validate_typed_flow_pattern(
-    pattern: FlowPatternContract, expected: FlowTypeRef,
+    pattern: FlowPatternContract, expected: CoreTypeRef,
     body: FlowBody, type_nodes: List<FlowTypeNode>
 ) {
     require_same_flow_type(
@@ -5267,14 +3494,16 @@ fn validate_typed_flow_pattern(
                 index = index + 1
             }
         },
-        FlowPatternContractValue::FlowStructPattern { owner, fields } => {
+        FlowPatternContractValue::FlowStructPattern {
+            owner, fields: field_values
+        } => {
             if flow_type_kind_tag(node.kind) != FLOW_TYPE_STRUCT ||
                !symbol_ref_same(node.nominal.unwrap(), owner) ||
-               fields.len() != node.nominal_fields.len() {
+               field_values.len() != node.nominal_fields.len() {
                 panic("FlowIR: struct pattern owner/field census differs")
             }
             let mut index = 0
-            for field in fields {
+            for field in field_values {
                 let fact = node.nominal_fields.get(index).unwrap()
                 if !flow_field_identity_same(field.field, fact.identity) {
                     panic("FlowIR: struct pattern field order differs")
@@ -5284,7 +3513,9 @@ fn validate_typed_flow_pattern(
                 index = index + 1
             }
         },
-        FlowPatternContractValue::FlowVariantPattern { variant, fields } => {
+        FlowPatternContractValue::FlowVariantPattern {
+            variant, fields: field_values
+        } => {
             if flow_type_kind_tag(node.kind) != FLOW_TYPE_ENUM ||
                !symbol_ref_same(
                     node.nominal.unwrap(),
@@ -5301,11 +3532,11 @@ fn validate_typed_flow_pattern(
                     expected_fields.push(fact)
                 }
             }
-            if fields.len() != expected_fields.len() {
+            if field_values.len() != expected_fields.len() {
                 panic("FlowIR: variant pattern field census differs")
             }
             let mut index = 0
-            for field in fields {
+            for field in field_values {
                 let fact = expected_fields.get(index).unwrap()
                 if !flow_field_identity_same(field.field, fact.identity) {
                     panic("FlowIR: variant pattern field order differs")
@@ -5324,7 +3555,14 @@ fn validate_typed_terminators(
 ) {
     for block in body.blocks {
         match block.terminator.value {
-            FlowTerminatorValue::BranchValue { condition, .. } |
+            FlowTerminatorValue::BranchValue { condition, .. } => {
+                let condition_type = slot_type_for(body, condition)
+                if flow_type_kind_tag(
+                        type_node_for(type_nodes, condition_type).kind) !=
+                        FLOW_TYPE_BOOL {
+                    panic("FlowIR: control condition is not Bool")
+                }
+            },
             FlowTerminatorValue::LoopValue { condition, .. } => {
                 let condition_type = slot_type_for(body, condition)
                 if flow_type_kind_tag(
@@ -5335,11 +3573,16 @@ fn validate_typed_terminators(
             },
             FlowTerminatorValue::ReturnValue { value, .. } => match value {
                 some(slot) => require_same_flow_type(
-                    slot_type_for(body, slot), callable.result_type,
+                    slot_type_for(body, slot),
+                    flow_call_contract_result_type(
+                        callable.semantic_contract),
                     "FlowIR: Return slot type differs from callable"),
                 none => {
                     let kind = flow_type_kind_tag(
-                        type_node_for(type_nodes, callable.result_type).kind)
+                        type_node_for(
+                            type_nodes,
+                            flow_call_contract_result_type(
+                                callable.semantic_contract)).kind)
                     if kind != FLOW_TYPE_UNIT && kind != FLOW_TYPE_NEVER {
                         panic("FlowIR: value-returning callable has empty Return")
                     }
@@ -5367,9 +3610,9 @@ fn validate_typed_terminators(
                                 binding.operation))
                         let handler = callable_for_ref(
                             callables, binding.handler)
-                        if !flow_callable_mode_same(
+                        if !executable_contract_mode_same(
                                 handler.mode,
-                                flow_callable_mode_concrete_body()) {
+                                executable_contract_mode_concrete_body()) {
                             panic("FlowIR: installed handler is bodyless")
                         }
                         let _ = slot_for_ref(body.slots, binding.closure)
@@ -5486,7 +3729,9 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
             let _ = flow_semantic_role_tag(target_role)
             let _ = flow_semantic_role_tag(value_role)
         },
-        FlowInstructionValue::ConsumeValue { source } |
+        FlowInstructionValue::ConsumeValue { source } => {
+            let _ = slot_for_ref(body.slots, source)
+        },
         FlowInstructionValue::DiscardValue { source } => {
             let _ = slot_for_ref(body.slots, source)
         },
@@ -5504,10 +3749,6 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
                 let _ = slot_for_ref(body.slots, flow_place_slot(target))
             } else {
                 let _ = slot_for_ref(body.slots, flow_place_base(target))
-                match flow_place_evaluated_index(target) {
-                    some(index) => { let _ = slot_for_ref(body.slots, index) },
-                    none => {}
-                }
             }
             if !flow_storage_class_same(rhs.storage, flow_storage_temp()) {
                 panic("FlowIR: Assign RHS is not an explicit temp slot")
@@ -5524,9 +3765,7 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
                 none => {}
             }
             for item in evidence {
-                if flow_evidence_is_local(item) {
-                    let _ = slot_for_ref(body.slots, flow_evidence_local(item))
-                }
+                let _ = flow_evidence_dict(item)
             }
             for item in handled_evidence {
                 let _ = slot_for_ref(
@@ -5557,7 +3796,12 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
             let _ = flow_semantic_role_tag(source_role)
             let _ = flow_semantic_role_tag(target_role)
         },
-        FlowInstructionValue::ScopeEnterValue { scope } |
+        FlowInstructionValue::ScopeEnterValue { scope } => {
+            if !executable_ref_same(scope.owner, body.reference) ||
+               scope_index(body.scopes, scope).is_none() {
+                panic("FlowIR: scope operation references an absent scope")
+            }
+        },
         FlowInstructionValue::ScopeExitValue { scope } => {
             if !executable_ref_same(scope.owner, body.reference) ||
                scope_index(body.scopes, scope).is_none() {
@@ -5604,9 +3848,17 @@ fn validate_flow_pattern_slots(body: FlowBody, pattern: FlowPatternContract) {
         FlowPatternContractValue::FlowTuplePattern(elements) => {
             for element in elements { validate_flow_pattern_slots(body, element) }
         },
-        FlowPatternContractValue::FlowStructPattern { fields, .. } |
-        FlowPatternContractValue::FlowVariantPattern { fields, .. } => {
-            for field in fields {
+        FlowPatternContractValue::FlowStructPattern {
+            fields: field_values, ..
+        } => {
+            for field in field_values {
+                validate_flow_pattern_slots(body, field.pattern)
+            }
+        },
+        FlowPatternContractValue::FlowVariantPattern {
+            fields: field_values, ..
+        } => {
+            for field in field_values {
                 validate_flow_pattern_slots(body, field.pattern)
             }
         },
@@ -5617,7 +3869,9 @@ fn validate_flow_pattern_slots(body: FlowBody, pattern: FlowPatternContract) {
 fn validate_terminator_slots(body: FlowBody, terminator: FlowTerminator) {
     validate_origin_for_executable(terminator.origin, body.reference)
     match terminator.value {
-        FlowTerminatorValue::BranchValue { condition, .. } |
+        FlowTerminatorValue::BranchValue { condition, .. } => {
+            let _ = slot_for_ref(body.slots, condition)
+        },
         FlowTerminatorValue::LoopValue { condition, .. } => {
             let _ = slot_for_ref(body.slots, condition)
         },
@@ -5716,8 +3970,8 @@ fn validate_bodies(
 ) {
     let mut expected_body_index = 0
     for callable in callables {
-        if flow_callable_mode_same(
-                callable.mode, flow_callable_mode_concrete_body()) {
+        if executable_contract_mode_same(
+                callable.mode, executable_contract_mode_concrete_body()) {
             let body = match bodies.get(expected_body_index) {
                 some(value) => value,
                 none => panic("FlowIR: concrete callable body is missing")
@@ -5740,48 +3994,102 @@ fn validate_bodies(
     }
 }
 
+fn flow_call_contract_actual_satisfies_formal(
+    actual: FlowCallContract, formal: FlowCallContract,
+    type_nodes: List<FlowTypeNode>
+) -> Bool {
+    let module_same = match (
+            flow_call_contract_module_key(actual),
+            flow_call_contract_module_key(formal)) {
+        (some(a), some(b)) => a == b,
+        (none, none) => true,
+        _ => false
+    }
+    let actual_types = flow_call_contract_parameter_types(actual)
+    let formal_types = flow_call_contract_parameter_types(formal)
+    let actual_roles = flow_call_contract_parameter_roles(actual)
+    let formal_roles = flow_call_contract_parameter_roles(formal)
+    if !module_same || actual_types.len() != formal_types.len() ||
+       actual_roles.len() != formal_roles.len() ||
+       !core_type_ref_same(
+            flow_call_contract_result_type(actual),
+            flow_call_contract_result_type(formal)) ||
+       flow_semantic_role_tag(flow_call_contract_result_role(actual)) !=
+            flow_semantic_role_tag(flow_call_contract_result_role(formal)) ||
+       !value_origin_same(
+            flow_call_contract_result_origin(actual),
+            flow_call_contract_result_origin(formal)) {
+        return false
+    }
+    let mut index = 0
+    while index < actual_types.len() {
+        if flow_semantic_role_tag(actual_roles.get(index).unwrap()) !=
+                flow_semantic_role_tag(formal_roles.get(index).unwrap()) ||
+           !flow_type_actual_satisfies_formal(
+                type_node_for(type_nodes, actual_types.get(index).unwrap()),
+                type_node_for(type_nodes, formal_types.get(index).unwrap())) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
 fn validate_direct_calls(
-    bodies: List<FlowBody>, callables: List<FlowCallable>
+    bodies: List<FlowBody>, callables: List<FlowCallable>,
+    type_nodes: List<FlowTypeNode>
 ) {
     for body in bodies {
-        for edge in flow_body_call_edges(body) {
-            let contract = edge.target.contract
-            if edge.arguments.len() != contract.parameter_roles.len() {
-                panic("FlowIR: call arguments/semantic contract arity differs")
-            }
-            if flow_call_target_is_direct(edge.target) {
-                let candidate = callable_for_ref(
-                    callables, flow_call_target_direct(edge.target))
-                if candidate.parameter_types.len() != edge.arguments.len() ||
-                   !flow_call_contract_same(
-                        candidate.semantic_contract, contract) {
-                    panic("FlowIR: direct callable contract differs")
-                }
-                if candidate.handled_evidence.len() !=
-                        edge.handled_evidence.len() {
-                    panic("FlowIR: direct handled-evidence census differs")
-                }
-                let mut handled_index = 0
-                while handled_index < edge.handled_evidence.len() {
-                    let actual = edge.handled_evidence.get(
-                        handled_index).unwrap()
-                    let expected = candidate.handled_evidence.get(
-                        handled_index).unwrap()
-                    if !handled_effect_ref_same(
-                            flow_handled_use_requirement(actual),
-                            flow_handled_evidence_requirement(expected)) ||
-                       !flow_type_ref_same(
-                            flow_handled_use_type(actual),
-                            flow_handled_evidence_type(expected)) {
-                        panic("FlowIR: direct handled-evidence contract differs")
+        for block in body.blocks {
+            for instruction in block.instructions {
+                match instruction.value {
+                    FlowInstructionValue::CallValue {
+                        target, arguments, handled_evidence, ..
+                    } => {
+                        let contract = target.contract
+                        if arguments.len() !=
+                                flow_call_contract_parameter_roles(
+                                    contract).len() {
+                            panic("FlowIR: call arguments/semantic contract arity differs")
+                        }
+                        if flow_call_target_is_direct(target) {
+                            let candidate = callable_for_ref(
+                                callables, flow_call_target_direct(target))
+                            if flow_call_contract_parameter_types(
+                                    candidate.semantic_contract).len() !=
+                                        arguments.len() ||
+                               !flow_call_contract_actual_satisfies_formal(
+                                    contract, candidate.semantic_contract,
+                                    type_nodes) {
+                                panic("FlowIR: direct callable contract differs")
+                            }
+                            if !core_effect_contract_same(
+                                    candidate.effects,
+                                    core_effect_instantiation_source(
+                                        target.effects)) {
+                                panic("FlowIR: direct callable effect source differs")
+                            }
+                            let requirements =
+                                core_effect_contract_handled_requirements(
+                                    core_effect_instantiation_result(
+                                        target.effects))
+                            if requirements.len() != handled_evidence.len() {
+                                panic("FlowIR: direct handled-evidence census differs")
+                            }
+                            let mut handled_index = 0
+                            while handled_index < handled_evidence.len() {
+                                let actual = handled_evidence.get(
+                                    handled_index).unwrap()
+                                if !handled_effect_ref_same(
+                                        flow_handled_use_requirement(actual),
+                                        requirements.get(handled_index).unwrap()) {
+                                    panic("FlowIR: direct handled-evidence contract differs")
+                                }
+                                handled_index = handled_index + 1
+                            }
+                        }
                     }
-                    handled_index = handled_index + 1
-                }
-            }
-            for evidence in edge.evidence {
-                if flow_evidence_is_callable(evidence) {
-                    let _ = callable_for_ref(
-                        callables, flow_evidence_callable(evidence))
+                    _ => {}
                 }
             }
         }
@@ -5808,42 +4116,20 @@ fn validate_type_provider_contracts(
         match node.drop_contract {
             some(contract) => {
                 let provider = callable_for_ref(callables, contract.provider)
-                if provider.parameter_types.len() != 1 ||
-                   !flow_type_ref_same(
-                        provider.parameter_types.get(0).unwrap(),
+                let provider_parameters = flow_call_contract_parameter_types(
+                    provider.semantic_contract)
+                let provider_result = flow_call_contract_result_type(
+                    provider.semantic_contract)
+                if provider_parameters.len() != 1 ||
+                   !core_type_ref_same(
+                        provider_parameters.get(0).unwrap(),
                         node.reference) ||
                    flow_type_kind_tag(type_nodes.get(
-                        provider.result_type.index).unwrap().kind) !=
+                        core_type_ref_index(provider_result)
+                    ).unwrap().kind) !=
                         FLOW_TYPE_UNIT {
                     panic("FlowIR: Drop provider contract differs from type")
                 }
-            },
-            none => {}
-        }
-        match node.foreign_contract {
-            some(contract) => match contract.value {
-                FlowForeignContractValue::ManagedForeignValue {
-                    retain, release
-                } => {
-                    let retain_callable = callable_for_ref(callables, retain)
-                    let release_callable = callable_for_ref(callables, release)
-                    if retain_callable.parameter_types.len() != 1 ||
-                       release_callable.parameter_types.len() != 1 ||
-                       !flow_type_ref_same(
-                            retain_callable.parameter_types.get(0).unwrap(),
-                            node.reference) ||
-                       !flow_type_ref_same(
-                            release_callable.parameter_types.get(0).unwrap(),
-                            node.reference) ||
-                       !flow_type_ref_same(
-                            retain_callable.result_type, node.reference) ||
-                       flow_type_kind_tag(type_nodes.get(
-                            release_callable.result_type.index).unwrap().kind) !=
-                            FLOW_TYPE_UNIT {
-                        panic("FlowIR: foreign handling callable contract differs")
-                    }
-                },
-                FlowForeignContractValue::BorrowedForeignValue => {}
             },
             none => {}
         }
@@ -5851,161 +4137,68 @@ fn validate_type_provider_contracts(
 }
 
 fn require_same_flow_type(
-    left: FlowTypeRef, right: FlowTypeRef, message: Str
+    left: CoreTypeRef, right: CoreTypeRef, message: Str
 ) {
-    if !flow_type_ref_same(left, right) { panic(message) }
+    if !core_type_ref_same(left, right) { panic(message) }
 }
 
 fn type_node_for(
-    type_nodes: List<FlowTypeNode>, reference: FlowTypeRef
+    type_nodes: List<FlowTypeNode>, reference: CoreTypeRef
 ) -> FlowTypeNode {
-    match type_nodes.get(reference.index) {
+    match type_nodes.get(core_type_ref_index(reference)) {
         some(value) => value,
         none => panic("FlowIR: typed operation references an absent type")
     }
 }
 
-fn slot_type_for(body: FlowBody, slot: SlotRef) -> FlowTypeRef {
+fn slot_type_for(body: FlowBody, slot: SlotRef) -> CoreTypeRef {
     slot_for_ref(body.slots, slot).ty
 }
 
-fn standalone_slot_type_for(
-    slots: List<FlowSlot>, target: SlotRef
-) -> FlowTypeRef {
-    for slot in slots {
-        if slot_ref_same(slot.reference, target) { return slot.ty }
+fn aggregate_input_projection(
+    location: FlowAggregateInputRef,
+    base_type: CoreTypeRef, result_type: CoreTypeRef
+) -> FlowProjectionContract {
+    let kind = flow_aggregate_input_kind_tag(location)
+    if kind == 0 {
+        return make_nominal_flow_projection_contract(
+            flow_aggregate_input_nominal(location), base_type, result_type,
+            flow_semantic_role_read(), false)
     }
-    panic("FlowIR: callable provenance target slot is absent")
-}
-
-fn slot_has_callable_type(
-    slots: List<FlowSlot>, type_nodes: List<FlowTypeNode>, target: SlotRef
-) -> Bool {
-    let ty = standalone_slot_type_for(slots, target)
-    flow_type_kind_tag(type_nodes.get(ty.index).unwrap().kind) ==
-        FLOW_TYPE_CALLABLE
-}
-
-pub fn flow_instruction_callable_provenance(
-    instruction: FlowInstruction,
-    slots: List<FlowSlot>, type_nodes: List<FlowTypeNode>
-) -> List<FlowCallableProvenanceFact> {
-    let step = make_flow_instruction_step_ref(instruction.reference)
-    let mut result: List<FlowCallableProvenanceFact> = []
-    match instruction.value {
-        FlowInstructionValue::InitializeValue { operation, target, .. } => {
-            if slot_has_callable_type(slots, type_nodes, target) {
-                match operation.value {
-                    FlowOperationValue::ClosureOperationValue {
-                        executable, ..
-                    } =>
-                        result.push(FlowCallableProvenanceFact {
-                            step: step, target: target,
-                            origin: make_flow_direct_callable_origin(executable)
-                        }),
-                    _ => panic(
-                        "FlowIR: callable Initialize lacks exact executable provenance")
-                }
-            }
-        },
-        FlowInstructionValue::ReadValue { source, target } => {
-            if slot_has_callable_type(slots, type_nodes, target) {
-                result.push(FlowCallableProvenanceFact {
-                    step: step, target: target,
-                    origin: make_flow_slots_callable_origin([source])
-                })
-            }
-        },
-        FlowInstructionValue::AssignValue { rhs_temp, target } => {
-            if flow_place_is_slot(target) && slot_has_callable_type(
-                    slots, type_nodes, flow_place_slot(target)) {
-                result.push(FlowCallableProvenanceFact {
-                    step: step, target: flow_place_slot(target),
-                    origin: make_flow_slots_callable_origin([rhs_temp])
-                })
-            }
-        },
-        FlowInstructionValue::CallValue {
-            target: callee, arguments, result: call_result, ..
-        } => match call_result {
-            some(target) => if slot_has_callable_type(
-                    slots, type_nodes, target) {
-                result.push(FlowCallableProvenanceFact {
-                    step: step, target: target,
-                    origin: make_flow_call_callable_origin(callee, arguments)
-                })
-            },
-            none => {}
-        },
-        FlowInstructionValue::ProjectValue { base, result: target, .. } => {
-            if slot_has_callable_type(slots, type_nodes, target) {
-                result.push(FlowCallableProvenanceFact {
-                    step: step, target: target,
-                    origin: make_flow_slots_callable_origin([base])
-                })
-            }
-        },
-        FlowInstructionValue::CaptureValue { source, target, .. } => {
-            if slot_has_callable_type(slots, type_nodes, target) {
-                result.push(FlowCallableProvenanceFact {
-                    step: step, target: target,
-                    origin: make_flow_slots_callable_origin([source])
-                })
-            }
-        },
-        _ => {}
+    if kind == 1 {
+        return make_variant_flow_projection_contract(
+            flow_aggregate_input_variant(location), base_type, result_type,
+            flow_semantic_role_read(), false)
     }
-    result
+    if kind == 2 {
+        return make_tuple_flow_projection_contract(
+            flow_aggregate_input_tuple_index(location), base_type, result_type,
+            flow_semantic_role_read(), false)
+    }
+    make_structural_flow_projection_contract(
+        flow_aggregate_input_structural_path(location),
+        base_type, result_type, flow_semantic_role_read(), false)
 }
 
 fn flow_place_type(
     body: FlowBody, type_nodes: List<FlowTypeNode>,
     callables: List<FlowCallable>, place: FlowPlaceRef
-) -> FlowTypeRef {
+) -> CoreTypeRef {
     if flow_place_is_slot(place) {
         return slot_type_for(body, flow_place_slot(place))
     }
     let value_type = flow_place_value_type(place)
-    match flow_place_projection(place) {
-        some(contract) => {
-            require_same_flow_type(
-                slot_type_for(body, flow_place_base(place)), contract.base_type,
-                "FlowIR: place base type differs")
-            require_same_flow_type(
-                contract.result_type, value_type,
-                "FlowIR: place projection value type differs")
-            if contract.partial {
-                panic("FlowIR: assign place projection cannot be partial")
-            }
-            validate_projection_contract(contract, type_nodes)
-        },
-        none => {
-            let index = match flow_place_evaluated_index(place) {
-                some(value) => value,
-                none => panic("FlowIR: indexed place has no index")
-            }
-            if flow_type_kind_tag(type_node_for(
-                    type_nodes, slot_type_for(body, index)).kind) != FLOW_TYPE_INT {
-                panic("FlowIR: indexed place index is not Int")
-            }
-            let intrinsic = match flow_place_intrinsic(place) {
-                some(value) => value,
-                none => panic("FlowIR: indexed place has no exact intrinsic")
-            }
-            let callable = callable_for_symbol(
-                callables, intrinsic_ref_symbol(intrinsic))
-            if callable.parameter_types.len() < 2 ||
-               !flow_type_ref_same(
-                    callable.parameter_types.get(0).unwrap(),
-                    slot_type_for(body, flow_place_base(place))) ||
-               !flow_type_ref_same(
-                    callable.parameter_types.get(1).unwrap(),
-                    slot_type_for(body, index)) ||
-               !flow_type_ref_same(callable.result_type, value_type) {
-                panic("FlowIR: indexed place intrinsic contract differs")
-            }
-        }
+    let contract = flow_place_projection(place)
+    require_same_flow_type(
+        slot_type_for(body, flow_place_base(place)), contract.base_type,
+        "FlowIR: place base type differs")
+    require_same_flow_type(
+        contract.result_type, value_type,
+        "FlowIR: place projection value type differs")
+    if contract.partial {
+        panic("FlowIR: assign place projection cannot be partial")
     }
+    validate_projection_contract(contract, type_nodes)
     value_type
 }
 
@@ -6032,32 +4225,51 @@ fn callable_for_symbol(
 fn validate_operation_callable_contract(
     operation: FlowOperationContract, callable: FlowCallable
 ) {
-    if operation.input_types.len() != callable.parameter_types.len() ||
-       operation.input_roles.len() !=
-            callable.semantic_contract.parameter_roles.len() ||
-       !flow_type_ref_same(operation.target_type, callable.result_type) ||
+    let parameter_types = flow_call_contract_parameter_types(
+        callable.semantic_contract)
+    let parameter_roles = flow_call_contract_parameter_roles(
+        callable.semantic_contract)
+    if operation.input_types.len() != parameter_types.len() ||
+       operation.input_roles.len() != parameter_roles.len() ||
+       !core_type_ref_same(
+            operation.target_type,
+            flow_call_contract_result_type(callable.semantic_contract)) ||
        flow_semantic_role_tag(operation.target_role) !=
             flow_semantic_role_tag(
-                callable.semantic_contract.result_role) ||
+                flow_call_contract_result_role(callable.semantic_contract)) ||
        !value_origin_same(
             operation.target_origin,
-            callable.semantic_contract.result_origin) {
+            flow_call_contract_result_origin(callable.semantic_contract)) {
         panic("FlowIR: operation producer contract differs from callable")
     }
     let mut index = 0
     while index < operation.input_types.len() {
-        if !flow_type_ref_same(
+        if !core_type_ref_same(
                 operation.input_types.get(index).unwrap(),
-                callable.parameter_types.get(index).unwrap()) ||
+                parameter_types.get(index).unwrap()) ||
            flow_semantic_role_tag(
                 operation.input_roles.get(index).unwrap()) !=
-                flow_semantic_role_tag(
-                    callable.semantic_contract.parameter_roles.get(
-                        index).unwrap()) {
+                flow_semantic_role_tag(parameter_roles.get(index).unwrap()) {
             panic("FlowIR: operation producer parameter contract differs")
         }
         index = index + 1
     }
+}
+
+fn validate_callable_value_effect_contract(
+    target_type: CoreTypeRef, callable: FlowCallable,
+    type_nodes: List<FlowTypeNode>
+) {
+    let node = type_node_for(type_nodes, target_type)
+    if !flow_type_kind_same(node.kind, flow_type_kind_callable()) {
+        panic("FlowIR: callable value target is not callable typed")
+    }
+    let target_effects = match node.callable_effects {
+        some(value) => value,
+        none => panic("FlowIR: callable value type lacks effect contract")
+    }
+    let _ = make_explicit_core_effect_instantiation(
+        callable.effects, target_effects, target_effects)
 }
 
 fn validate_literal_or_primitive_contract(
@@ -6137,12 +4349,6 @@ fn validate_projection_contract(
     let _ = type_node_for(type_nodes, contract.result_type)
     let _ = flow_semantic_role_tag(contract.base_role)
     match contract.value {
-        FlowProjectionContractValue::WholeSlotProjectionValue => {
-            if contract.partial ||
-               !flow_type_ref_same(contract.base_type, contract.result_type) {
-                panic("FlowIR: whole-slot projection is not full-type")
-            }
-        },
         FlowProjectionContractValue::StructuralProjectionValue(_) => {
             let kind = flow_type_kind_tag(base.kind)
             if kind != FLOW_TYPE_TUPLE && kind != FLOW_TYPE_RECORD {
@@ -6152,7 +4358,7 @@ fn validate_projection_contract(
         FlowProjectionContractValue::TupleProjectionValue(index) => {
             if flow_type_kind_tag(base.kind) != FLOW_TYPE_TUPLE ||
                index < 0 || index >= base.children.len() ||
-               !flow_type_ref_same(
+               !core_type_ref_same(
                     base.children.get(index).unwrap(), contract.result_type) {
                 panic("FlowIR: tuple projection index/result type differs")
             }
@@ -6220,7 +4426,8 @@ fn validate_typed_instructions(
                         operation, inputs, target
                     } => {
                         if operation.input_roles.len() != inputs.len() ||
-                           operation.input_types.len() != inputs.len() {
+                           operation.input_types.len() != inputs.len() ||
+                           operation.input_locations.len() != inputs.len() {
                             panic("FlowIR: Initialize typed contract is partial")
                         }
                         let mut index = 0
@@ -6229,6 +4436,14 @@ fn validate_typed_instructions(
                                 slot_type_for(body, inputs.get(index).unwrap()),
                                 operation.input_types.get(index).unwrap(),
                                 "FlowIR: Initialize input slot type differs")
+                            match operation.input_locations.get(index).unwrap() {
+                                some(location) => validate_projection_contract(
+                                    aggregate_input_projection(
+                                        location, operation.target_type,
+                                        operation.input_types.get(index).unwrap()),
+                                    type_nodes),
+                                none => {}
+                            }
                             index = index + 1
                         }
                         require_same_flow_type(
@@ -6238,27 +4453,21 @@ fn validate_typed_instructions(
                             operation, type_nodes)
                         match operation.value {
                             FlowOperationValue::ConstructorOperationValue(
-                                executable) |
-                            FlowOperationValue::DictionaryOperationValue(
                                 executable) => {
                                 let callable = callable_for_ref(
                                     callables, executable)
                                 validate_operation_callable_contract(
                                     operation, callable)
                             },
-                            FlowOperationValue::IntrinsicOperationValue(intrinsic) => {
-                                validate_operation_callable_contract(
-                                    operation, callable_for_symbol(
-                                        callables,
-                                        intrinsic_ref_symbol(intrinsic)))
-                            },
                             FlowOperationValue::ClosureOperationValue {
                                 executable, capture_targets
                             } => {
                                 let callable = callable_for_ref(callables, executable)
-                                if !flow_callable_mode_same(
+                                validate_callable_value_effect_contract(
+                                    operation.target_type, callable, type_nodes)
+                                if !executable_contract_mode_same(
                                         callable.mode,
-                                        flow_callable_mode_concrete_body()) {
+                                        executable_contract_mode_concrete_body()) {
                                     panic("FlowIR: closure executable is bodyless")
                                 }
                                 let mut child: FlowBody? = none
@@ -6293,12 +4502,20 @@ fn validate_typed_instructions(
                                     capture_index = capture_index + 1
                                 }
                             },
-                            FlowOperationValue::CallableValueOperationValue(executable) => {
+                            FlowOperationValue::CallableValueOperationValue {
+                                executable, evidence
+                            } => {
                                 let callable = callable_for_ref(callables, executable)
-                                if !flow_callable_mode_same(
+                                validate_callable_value_effect_contract(
+                                    operation.target_type, callable, type_nodes)
+                                if !executable_contract_mode_same(
                                         callable.mode,
-                                        flow_callable_mode_concrete_body()) {
+                                        executable_contract_mode_concrete_body()) {
                                     panic("FlowIR: callable value executable is bodyless")
+                                }
+                                for item in evidence {
+                                    validate_dictionary_evidence(
+                                        flow_evidence_dict(item), body)
                                 }
                             },
                             _ => {}
@@ -6334,63 +4551,94 @@ fn validate_typed_instructions(
                         target, arguments, handled_evidence, result, ..
                     } => {
                         let contract = target.contract
-                        if arguments.len() != contract.parameter_types.len() {
+                        let parameter_types = flow_call_contract_parameter_types(
+                            contract)
+                        let result_type = flow_call_contract_result_type(contract)
+                        if arguments.len() != parameter_types.len() {
                             panic("FlowIR: Call argument/type arity differs")
                         }
                         let mut index = 0
                         while index < arguments.len() {
-                            require_same_flow_type(
-                                slot_type_for(
-                                    body, arguments.get(index).unwrap()),
-                                contract.parameter_types.get(index).unwrap(),
-                                "FlowIR: Call argument slot type differs")
+                            if !flow_type_actual_satisfies_formal(
+                                    type_node_for(type_nodes, slot_type_for(
+                                        body, arguments.get(index).unwrap())),
+                                    type_node_for(type_nodes,
+                                        parameter_types.get(index).unwrap())) {
+                                panic("FlowIR: Call argument slot type differs")
+                            }
                             index = index + 1
                         }
                         match result {
                             some(slot) => require_same_flow_type(
-                                slot_type_for(body, slot), contract.result_type,
+                                slot_type_for(body, slot), result_type,
                                 "FlowIR: Call result slot type differs"),
                             none => {
                                 let kind = flow_type_kind_tag(type_node_for(
-                                    type_nodes, contract.result_type).kind)
+                                    type_nodes, result_type).kind)
                                 if kind != FLOW_TYPE_UNIT &&
                                    kind != FLOW_TYPE_NEVER {
                                     panic("FlowIR: value-returning Call has no result slot")
                                 }
                             }
                         }
-                        if flow_call_target_is_local(target) {
+                        if !flow_call_target_is_direct(target) {
+                            let target_slot = if flow_call_target_is_local(target) {
+                                slot_for_ref(
+                                    body.slots, flow_call_target_local(target))
+                            } else {
+                                dynamic_call_slot_for_path(
+                                    body.slots, flow_call_target_dynamic(target))
+                            }
                             let callable_type = type_node_for(
-                                type_nodes,
-                                slot_type_for(
-                                    body, flow_call_target_local(target)))
+                                type_nodes, target_slot.ty)
                             if !flow_type_kind_same(
                                     callable_type.kind,
                                     flow_type_kind_callable()) ||
                                callable_type.parameter_count !=
-                                    contract.parameter_types.len() {
+                                    parameter_types.len() {
                                 panic("FlowIR: local callee slot is not exact callable type")
                             }
                             let mut callable_index = 0
-                            while callable_index < contract.parameter_types.len() {
-                                require_same_flow_type(
-                                    callable_type.children.get(
-                                        callable_index).unwrap(),
-                                    contract.parameter_types.get(
-                                        callable_index).unwrap(),
-                                    "FlowIR: local callee parameter type differs")
+                            while callable_index < parameter_types.len() {
+                                if !flow_type_actual_satisfies_formal(
+                                        type_node_for(type_nodes,
+                                            parameter_types.get(
+                                                callable_index).unwrap()),
+                                        type_node_for(type_nodes,
+                                            callable_type.children.get(
+                                                callable_index).unwrap())) {
+                                    panic("FlowIR: local callee parameter type differs")
+                                }
                                 callable_index = callable_index + 1
                             }
                             require_same_flow_type(
                                 callable_type.children.get(
                                     callable_type.parameter_count).unwrap(),
-                                contract.result_type,
+                                result_type,
                                 "FlowIR: local callee result type differs")
+                            if !core_effect_contract_same(
+                                    callable_type.callable_effects.unwrap(),
+                                    core_effect_instantiation_source(
+                                        target.effects)) {
+                                panic("FlowIR: indirect callee effect source differs")
+                            }
+                        }
+                        let expected_handled =
+                            core_effect_contract_handled_requirements(
+                                core_effect_instantiation_result(target.effects))
+                        if expected_handled.len() != handled_evidence.len() {
+                            panic("FlowIR: call handled evidence/effect census differs")
                         }
                         let mut handled_index = 0
                         while handled_index < handled_evidence.len() {
                             let use_ref = handled_evidence.get(
                                 handled_index).unwrap()
+                            if !handled_effect_ref_same(
+                                    flow_handled_use_requirement(use_ref),
+                                    expected_handled.get(
+                                        handled_index).unwrap()) {
+                                panic("FlowIR: call handled evidence/effect order differs")
+                            }
                             if !executable_ref_same(
                                     flow_handled_use_owner(use_ref),
                                     body.reference) {
@@ -6499,19 +4747,23 @@ fn encode_origin(value: OriginRef) -> Str {
     }
 }
 
-fn encode_type_ref(value: FlowTypeRef) -> Str { "T${value.index.to_str()}" }
+fn encode_type_ref(value: CoreTypeRef) -> Str {
+    "T${core_type_ref_index(value).to_str()}"
+}
 fn encode_field_identity(value: FlowFieldIdentity) -> Str {
-    match value.value {
-        FlowFieldIdentityValue::NominalFieldIdentityValue(field) =>
-            [
-                "FN", encode_symbol(nominal_field_ref_owner(field)),
-                encode_symbol(nominal_field_ref_member(field)),
-                nominal_field_ref_index(field).to_str()
-            ].join("/"),
-        FlowFieldIdentityValue::VariantFieldIdentityValue(field) =>
-            "FV/${variant_field_ref_index(field).to_str()}/${encode_symbol(variant_field_ref_member(field))}",
-        FlowFieldIdentityValue::PathFieldIdentityValue(path) =>
-            "FP/${encode_path(path)}"
+    if flow_field_identity_is_nominal(value) {
+        let field = flow_field_identity_nominal(value)
+        [
+            "FN", encode_symbol(nominal_field_ref_owner(field)),
+            encode_symbol(nominal_field_ref_member(field)),
+            nominal_field_ref_index(field).to_str()
+        ].join("/")
+    } else if flow_field_identity_is_variant(value) {
+        let field = flow_field_identity_variant(value)
+        "FV/${variant_field_ref_index(field).to_str()}/${
+            encode_symbol(variant_field_ref_member(field))}"
+    } else {
+        "FP/${encode_path(flow_field_identity_path(value))}"
     }
 }
 fn encode_scope_ref(value: FlowScopeRef) -> Str {
@@ -6533,6 +4785,56 @@ fn encode_value_origin(value: FlowValueOriginContract) -> Str {
     parts.join(":")
 }
 
+fn encode_effect_contract(value: CoreEffectContract) -> Str {
+    let mut parts: List<Str> = []
+    for atom in core_effect_set_atoms(core_effect_contract_exact(value)) {
+        let kind = core_effect_atom_kind_tag(atom)
+        let encoded = if kind == 0 {
+            "F${encode_type_ref(core_effect_atom_type(atom))}"
+        } else if kind == 1 {
+            "M${encode_type_ref(core_effect_atom_type(atom))}"
+        } else if kind == 2 {
+            "U"
+        } else if kind == 3 {
+                let mut item = "H${encode_symbol(
+                    handled_effect_ref_symbol(
+                        core_effect_atom_handled_ref(atom)))}"
+                for ty in core_effect_atom_type_arguments(atom) {
+                    item = "${item}/${encode_type_ref(ty)}"
+                }
+                item
+        } else if kind == 4 {
+            "S${system_effect_ref_tag(
+                core_effect_atom_system_ref(atom)).to_str()}"
+        } else {
+            panic("FlowIR: unknown effect atom in fingerprint")
+        }
+        parts.push(encoded)
+    }
+    match core_effect_contract_parameter(value) {
+        some(parameter) => parts.push(
+            "P${encode_executable(effect_param_owner(parameter))}/${
+                effect_param_ordinal(parameter).to_str()}"),
+        none => {}
+    }
+    parts.join(",")
+}
+
+fn encode_effect_instantiation(value: CoreEffectInstantiation) -> Str {
+    let mut substitutions: List<Str> = []
+    for substitution in core_effect_instantiation_substitutions(value) {
+        let parameter = core_effect_substitution_parameter(substitution)
+        substitutions.push("${encode_executable(
+            effect_param_owner(parameter))}/${
+            effect_param_ordinal(parameter).to_str()}=${
+            encode_effect_contract(
+                core_effect_substitution_replacement(substitution))}")
+    }
+    "${encode_effect_contract(core_effect_instantiation_source(value))}=>${
+        substitutions.join(",")}=>${encode_effect_contract(
+            core_effect_instantiation_result(value))}"
+}
+
 fn encode_call_target(value: FlowCallTarget) -> Str {
     let base = match value.value {
         FlowCallTargetValue::DirectTargetValue(target) =>
@@ -6543,15 +4845,19 @@ fn encode_call_target(value: FlowCallTarget) -> Str {
             "CY/${encode_path(target)}"
     }
     let mut parts: List<Str> = [base]
-    for ty in value.contract.parameter_types {
+    for ty in flow_call_contract_parameter_types(value.contract) {
         parts.push("T${encode_type_ref(ty)}")
     }
-    for role in value.contract.parameter_roles {
+    for role in flow_call_contract_parameter_roles(value.contract) {
         parts.push("P${flow_semantic_role_tag(role).to_str()}")
     }
-    parts.push("R${flow_semantic_role_tag(value.contract.result_role).to_str()}")
-    parts.push("Y${encode_type_ref(value.contract.result_type)}")
-    parts.push("O${encode_value_origin(value.contract.result_origin)}")
+    parts.push("R${flow_semantic_role_tag(
+        flow_call_contract_result_role(value.contract)).to_str()}")
+    parts.push("Y${encode_type_ref(
+        flow_call_contract_result_type(value.contract))}")
+    parts.push("O${encode_value_origin(
+        flow_call_contract_result_origin(value.contract))}")
+    parts.push("E${encode_effect_instantiation(value.effects)}")
     parts.join("/")
 }
 
@@ -6571,14 +4877,8 @@ fn encode_operation(value: FlowOperationContract) -> Str {
         FlowOperationValue::UnitLiteralOperationValue => parts.push("unit"),
         FlowOperationValue::PrimitiveOperationValue(operation) =>
             parts.push(flow_primitive_op_tag(operation).to_str()),
-        FlowOperationValue::ConstructorOperationValue(executable) |
-        FlowOperationValue::DictionaryOperationValue(executable) =>
+        FlowOperationValue::ConstructorOperationValue(executable) =>
             parts.push(encode_executable(executable)),
-        FlowOperationValue::IntrinsicOperationValue(intrinsic) => {
-            parts.push(builtin_method_site_tag(
-                intrinsic_ref_site(intrinsic)).to_str())
-            parts.push(encode_symbol(intrinsic_ref_symbol(intrinsic)))
-        },
         FlowOperationValue::TupleAggregateOperationValue(arity) =>
             parts.push("tuple:${arity.to_str()}"),
         FlowOperationValue::RecordAggregateOperationValue(arity) =>
@@ -6591,14 +4891,41 @@ fn encode_operation(value: FlowOperationContract) -> Str {
                 parts.push("capture:${encode_slot(target)}")
             }
         },
-        FlowOperationValue::CallableValueOperationValue(executable) =>
+        FlowOperationValue::CallableValueOperationValue {
+            executable, evidence
+        } => {
             parts.push("callable:${encode_executable(executable)}")
+            for item in evidence {
+                parts.push("evidence:${encode_dict_evidence(
+                    flow_evidence_dict(item))}")
+            }
+        }
     }
     for ty in value.input_types {
         parts.push("T${encode_type_ref(ty)}")
     }
     for role in value.input_roles {
         parts.push("P${flow_semantic_role_tag(role).to_str()}")
+    }
+    for location in value.input_locations {
+        parts.push(match location {
+            some(exact) => {
+                let kind = flow_aggregate_input_kind_tag(exact)
+                if kind == 0 {
+                    "LN${encode_field_identity(make_nominal_flow_field_identity(
+                        flow_aggregate_input_nominal(exact)))}"
+                } else if kind == 1 {
+                    "LV${encode_field_identity(make_variant_flow_field_identity(
+                        flow_aggregate_input_variant(exact)))}"
+                } else if kind == 2 {
+                    "LT${flow_aggregate_input_tuple_index(exact).to_str()}"
+                } else {
+                    "LS${encode_path(
+                        flow_aggregate_input_structural_path(exact))}"
+                }
+            },
+            none => "L-"
+        })
     }
     parts.push("R${flow_semantic_role_tag(value.target_role).to_str()}")
     parts.push("Y${encode_type_ref(value.target_type)}")
@@ -6614,35 +4941,34 @@ fn encode_flow_place(value: FlowPlaceRef) -> Str {
         "PP", encode_slot(flow_place_base(value)),
         encode_type_ref(flow_place_value_type(value))
     ]
-    match flow_place_projection(value) {
-        some(contract) => parts.push(encode_projection_contract(contract)),
-        none => match flow_place_evaluated_index(value) {
-            some(index) => {
-                let intrinsic = match flow_place_intrinsic(value) {
-                    some(reference) => reference,
-                    none => panic("FlowIR: indexed place fingerprint lacks intrinsic")
-                }
-                parts.push("index:${encode_slot(index)}")
-                parts.push("intrinsic:${encode_symbol(
-                    intrinsic_ref_symbol(intrinsic))}")
-            },
-            none => panic("FlowIR: place fingerprint lacks projection/index")
-        }
-    }
+    parts.push(encode_projection_contract(flow_place_projection(value)))
     parts.join("/")
 }
 
-fn encode_dict_evidence(value: DictRef) -> Str {
-    match value {
-        DictRef::Simple(name) => "simple:${encode_atom(name)}",
-        DictRef::Static(name) => "static:${encode_atom(name)}",
-        DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
-            let mut parts: List<Str> = [
-                "wrapped", encode_atom(dict), encode_symbol(trait_ref)
-            ]
-            for inner in inner_dicts { parts.push(encode_dict_evidence(inner)) }
-            parts.join("/")
+fn encode_impl_owner(value: ImplOwnerRef) -> Str {
+    let provider = impl_owner_ref_provider(value)
+    let trait_identity = match impl_owner_ref_trait(value) {
+        some(reference) => encode_symbol(reference),
+        none => "inherent"
+    }
+    "${encode_symbol(impl_owner_ref_target(value))}/${encode_path(
+        impl_provider_ref_site(provider))}/${impl_provider_kind_tag(
+        impl_provider_ref_kind(provider)).to_str()}/${trait_identity}"
+}
+
+fn encode_dict_evidence(value: ExactDictRef) -> Str {
+    if dict_ref_is_local(value) {
+        "local:${encode_slot(dict_ref_local(value))}"
+    } else if dict_ref_is_static(value) {
+        "static:${encode_impl_owner(dict_ref_static(value))}"
+    } else {
+        let mut parts: List<Str> = [
+            "wrapped", encode_impl_owner(dict_ref_wrapped_base(value))
+        ]
+        for inner in dict_ref_wrapped_inner(value) {
+            parts.push(encode_dict_evidence(inner))
         }
+        parts.join("/")
     }
 }
 
@@ -6655,8 +4981,7 @@ fn encode_projection_contract(value: FlowProjectionContract) -> Str {
         FlowProjectionContractValue::TupleProjectionValue(index) =>
             "T${index.to_str()}",
         FlowProjectionContractValue::StructuralProjectionValue(path) =>
-            "S${encode_path(path)}",
-        FlowProjectionContractValue::WholeSlotProjectionValue => "W"
+            "S${encode_path(path)}"
     }
     "${identity}/${encode_type_ref(value.base_type)}/${encode_type_ref(value.result_type)}/${flow_semantic_role_tag(value.base_role).to_str()}/${if value.partial { "partial" } else { "total" }}"
 }
@@ -6693,7 +5018,8 @@ fn encode_instruction(value: FlowInstruction) -> Str {
             parts.push("T${flow_semantic_role_tag(target_role).to_str()}")
             parts.push("V${flow_semantic_role_tag(value_role).to_str()}")
         },
-        FlowInstructionValue::ConsumeValue { source } |
+        FlowInstructionValue::ConsumeValue { source } =>
+            parts.push(encode_slot(source)),
         FlowInstructionValue::DiscardValue { source } =>
             parts.push(encode_slot(source)),
         FlowInstructionValue::FailRaiseValue { payload, sink } => {
@@ -6708,13 +5034,7 @@ fn encode_instruction(value: FlowInstruction) -> Str {
             parts.push(encode_call_target(target))
             for argument in arguments { parts.push(encode_slot(argument)) }
             for item in evidence {
-                parts.push(if flow_evidence_is_local(item) {
-                    "EL${encode_slot(flow_evidence_local(item))}"
-                } else if flow_evidence_is_callable(item) {
-                    "EC${encode_executable(flow_evidence_callable(item))}"
-                } else {
-                    "ED${encode_dict_evidence(flow_evidence_dict(item))}"
-                })
+                parts.push("ED${encode_dict_evidence(flow_evidence_dict(item))}")
             }
             for item in handled_evidence {
                 parts.push("EH${encode_executable(
@@ -6745,7 +5065,9 @@ fn encode_instruction(value: FlowInstruction) -> Str {
             parts.push("S${flow_semantic_role_tag(source_role).to_str()}")
             parts.push("T${flow_semantic_role_tag(target_role).to_str()}")
         },
-        FlowInstructionValue::ScopeEnterValue { scope } |
+        FlowInstructionValue::ScopeEnterValue { scope } => {
+            parts.push(encode_scope_ref(scope))
+        },
         FlowInstructionValue::ScopeExitValue { scope } => {
             parts.push(encode_scope_ref(scope))
         }
@@ -6776,15 +5098,19 @@ fn encode_flow_pattern(value: FlowPatternContract) -> Str {
         FlowPatternContractValue::FlowTuplePattern(elements) => {
             for element in elements { parts.push(encode_flow_pattern(element)) }
         },
-        FlowPatternContractValue::FlowStructPattern { owner, fields } => {
+        FlowPatternContractValue::FlowStructPattern {
+            owner, fields: field_values
+        } => {
             parts.push(encode_symbol(owner))
-            for field in fields {
+            for field in field_values {
                 parts.push("${encode_field_identity(field.field)}=${encode_flow_pattern(field.pattern)}")
             }
         },
-        FlowPatternContractValue::FlowVariantPattern { variant, fields } => {
+        FlowPatternContractValue::FlowVariantPattern {
+            variant, fields: field_values
+        } => {
             parts.push(encode_symbol(variant_ref_member(variant)))
-            for field in fields {
+            for field in field_values {
                 parts.push("${encode_field_identity(field.field)}=${encode_flow_pattern(field.pattern)}")
             }
         }
@@ -6797,8 +5123,10 @@ fn encode_terminator(value: FlowTerminator) -> Str {
         encode_origin(value.origin), flow_terminator_kind_tag(value).to_str()
     ]
     match value.value {
-        FlowTerminatorValue::GotoValue(edge) |
-        FlowTerminatorValue::BreakValue(edge) |
+        FlowTerminatorValue::GotoValue(edge) =>
+            parts.push(encode_successor(edge)),
+        FlowTerminatorValue::BreakValue(edge) =>
+            parts.push(encode_successor(edge)),
         FlowTerminatorValue::ContinueValue(edge) =>
             parts.push(encode_successor(edge)),
         FlowTerminatorValue::BranchValue {
@@ -6864,7 +5192,8 @@ fn encode_terminator(value: FlowTerminator) -> Str {
                 }
             }
         },
-        FlowTerminatorValue::UnreachableValue { exited_scopes } |
+        FlowTerminatorValue::UnreachableValue { exited_scopes } =>
+            parts.push(encode_scope_refs(exited_scopes)),
         FlowTerminatorValue::DivergeValue { exited_scopes } =>
             parts.push(encode_scope_refs(exited_scopes))
     }
@@ -6878,7 +5207,7 @@ fn compute_topology_encoding(
     let mut parts: List<Str> = ["FlowIR/0.1"]
     for node in type_nodes {
         let mut item: List<Str> = [
-            "TY", node.reference.index.to_str(),
+            "TY", core_type_ref_index(node.reference).to_str(),
             flow_type_kind_tag(node.kind).to_str(),
             node.parameter_count.to_str(),
             match node.generic_param {
@@ -6898,29 +5227,41 @@ fn compute_topology_encoding(
         for field in node.nominal_fields {
             item.push("F${encode_field_identity(field.identity)}/${encode_type_ref(field.ty)}")
         }
+        match node.callable_effects {
+            some(effects) => item.push(
+                "CE${encode_effect_contract(effects)}"),
+            none => {}
+        }
         for parameter in node.resource_parameters {
             item.push(
-                "Q${encode_symbol(parameter.owner)}/${parameter.index.to_str()}/${parameter.arity.to_str()}")
+                "Q${encode_symbol(flow_generic_param_owner(parameter))}/${
+                    flow_generic_param_index(parameter).to_str()}/${
+                    flow_generic_param_arity(parameter).to_str()}")
         }
         for edge in node.resource_edges {
-            let target = match edge.target.value {
-                FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-                    parameter) =>
-                    "P${encode_symbol(parameter.owner)}/${parameter.index.to_str()}/${parameter.arity.to_str()}",
-                FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) =>
-                    "C${encode_type_ref(ty)}"
+            let edge_target = flow_resource_edge_target(edge)
+            let target = if flow_resource_dependency_target_is_parent(
+                    edge_target) {
+                let parameter = flow_resource_dependency_target_parent(edge_target)
+                "P${encode_symbol(flow_generic_param_owner(parameter))}/${
+                    flow_generic_param_index(parameter).to_str()}/${
+                    flow_generic_param_arity(parameter).to_str()}"
+            } else {
+                "C${encode_type_ref(
+                    flow_resource_dependency_target_concrete_type(edge_target))}"
             }
-            let source = if edge.is_application {
-                let parameter = match edge.application_parameter {
-                    some(value) => value,
-                    none => panic("FlowIR: application edge lost owner parameter")
-                }
-                "A/${encode_symbol(parameter.owner)}/${parameter.index.to_str()}/${parameter.arity.to_str()}"
+            let source = if flow_resource_edge_is_application(edge) {
+                let parameter = flow_resource_edge_application_parameter(edge)
+                "A/${encode_symbol(flow_generic_param_owner(parameter))}/${
+                    flow_generic_param_index(parameter).to_str()}/${
+                    flow_generic_param_arity(parameter).to_str()}"
             } else {
                 "C"
             }
             item.push(
-                "E${source}/${edge.child_ordinal.to_str()}/${encode_type_ref(edge.child)}/${edge.child_dependency_ordinal.to_str()}/${target}")
+                "E${source}/${flow_resource_edge_child_ordinal(edge).to_str()}/${
+                    encode_type_ref(flow_resource_edge_child(edge))}/${
+                    flow_resource_edge_child_dependency_ordinal(edge).to_str()}/${target}")
         }
         match node.generic_param {
             some(fact) => {
@@ -6936,25 +5277,24 @@ fn compute_topology_encoding(
                 "X${encode_executable(contract.provider)}"),
             none => {}
         }
-        match node.foreign_contract {
-            some(contract) => match contract.value {
-                FlowForeignContractValue::BorrowedForeignValue =>
-                    item.push("FB"),
-                FlowForeignContractValue::ManagedForeignValue {
-                    retain, release
-                } => item.push(
-                    "FM/${encode_executable(retain)}/${encode_executable(release)}")
-            },
-            none => {}
-        }
         parts.push(item.join(";"))
     }
     for callable in callables {
+        let mode_tag = if executable_contract_mode_same(
+                callable.mode, executable_contract_mode_concrete_body()) {
+            "0"
+        } else if executable_contract_mode_same(
+                callable.mode, executable_contract_mode_contract_only()) {
+            "1"
+        } else {
+            panic("FlowIR: invalid executable contract mode")
+        }
         let mut item: List<Str> = [
             "CA", encode_executable(callable.reference),
-            encode_origin(callable.origin), callable.mode.tag.to_str()
+            encode_origin(callable.origin), mode_tag
         ]
-        for parameter in callable.parameter_types {
+        for parameter in flow_call_contract_parameter_types(
+                callable.semantic_contract) {
             item.push(encode_type_ref(parameter))
         }
         let mut parameter_ordinal = 0
@@ -6962,12 +5302,18 @@ fn compute_topology_encoding(
             item.push("Q${parameter_ordinal.to_str()}/${encode_slot(parameter_slot)}")
             parameter_ordinal = parameter_ordinal + 1
         }
-        item.push("R${encode_type_ref(callable.result_type)}")
-        for role in callable.semantic_contract.parameter_roles {
+        item.push("R${encode_type_ref(flow_call_contract_result_type(
+            callable.semantic_contract))}")
+        for role in flow_call_contract_parameter_roles(
+                callable.semantic_contract) {
             item.push("L${flow_semantic_role_tag(role).to_str()}")
         }
-        item.push("O${flow_semantic_role_tag(callable.semantic_contract.result_role).to_str()}")
-        item.push("G${encode_value_origin(callable.semantic_contract.result_origin)}")
+        item.push("O${flow_semantic_role_tag(
+            flow_call_contract_result_role(
+                callable.semantic_contract)).to_str()}")
+        item.push("G${encode_value_origin(flow_call_contract_result_origin(
+            callable.semantic_contract))}")
+        item.push("CE${encode_effect_contract(callable.effects)}")
         for binding in callable.handled_evidence {
             item.push("E${encode_executable(
                 flow_handled_evidence_owner(binding))}/${
@@ -6993,7 +5339,7 @@ fn compute_topology_encoding(
                 "SL", encode_slot(slot.reference), encode_type_ref(slot.ty),
                 encode_scope_ref(slot.scope), slot.reverse_ordinal.to_str(),
                 slot.initial_state.tag.to_str(), slot.storage.tag.to_str(),
-                slot.storage_contract.tag.to_str(),
+                flow_storage_contract_tag(slot.storage_contract).to_str(),
                 match slot.parameter_ordinal {
                     some(ordinal) => ordinal.to_str(),
                     none => (0 - 1).to_str()
@@ -7031,36 +5377,18 @@ pub struct FlowProgram {
     topology_fingerprint: FlowTopologyFingerprint
 }
 
-fn freeze_callables_with_edges(
-    callables: List<FlowCallable>, bodies: List<FlowBody>
-) -> List<FlowCallable> {
+fn copy_flow_callables(callables: List<FlowCallable>) -> List<FlowCallable> {
     let mut result: List<FlowCallable> = []
     for callable in callables {
-        let edges = if flow_callable_mode_same(
-                callable.mode, flow_callable_mode_concrete_body()) {
-            let mut found: FlowBody? = none
-            for body in bodies {
-                if executable_ref_same(body.reference, callable.reference) {
-                    found = some(body)
-                }
-            }
-            match found {
-                some(body) => flow_body_call_edges(body),
-                none => panic("FlowIR: cannot derive concrete callable edges")
-            }
-        } else {
-            []
-        }
         result.push(FlowCallable {
             reference: callable.reference, origin: callable.origin,
-            parameter_types: copy_type_refs(callable.parameter_types),
             parameter_slots: copy_slot_refs(callable.parameter_slots),
-            result_type: callable.result_type, mode: callable.mode,
+            mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
+            effects: copy_core_effect_contract(callable.effects),
             handled_evidence:
                 copy_flow_handled_evidence_bindings(
-                    callable.handled_evidence),
-            call_edges: copy_call_edges(edges)
+                    callable.handled_evidence)
         })
     }
     result
@@ -7070,15 +5398,15 @@ pub fn make_flow_program(
     type_nodes: List<FlowTypeNode>, callables: List<FlowCallable>,
     bodies: List<FlowBody>
 ) -> FlowProgram {
-    validate_type_nodes(type_nodes)
+    validate_flow_type_graph_nodes(type_nodes)
     validate_callables(callables, type_nodes)
     validate_type_provider_contracts(type_nodes, callables)
     validate_bodies(bodies, callables, type_nodes)
-    validate_direct_calls(bodies, callables)
+    validate_direct_calls(bodies, callables, type_nodes)
     validate_typed_instructions(bodies, callables, type_nodes)
-    let frozen_types = copy_type_nodes(type_nodes)
+    let frozen_types = copy_flow_type_graph_nodes(type_nodes)
     let frozen_bodies = copy_bodies(bodies)
-    let frozen_callables = freeze_callables_with_edges(callables, frozen_bodies)
+    let frozen_callables = copy_flow_callables(callables)
     let fingerprint = FlowTopologyFingerprint {
         canonical: compute_topology_encoding(
             frozen_types, frozen_callables, frozen_bodies)
@@ -7090,21 +5418,20 @@ pub fn make_flow_program(
 }
 
 pub fn flow_program_type_nodes(value: FlowProgram) -> List<FlowTypeNode> {
-    copy_type_nodes(value.type_nodes)
+    copy_flow_type_graph_nodes(value.type_nodes)
 }
 pub fn flow_program_callables(value: FlowProgram) -> List<FlowCallable> {
     let mut result: List<FlowCallable> = []
     for callable in value.callables {
         result.push(FlowCallable {
             reference: callable.reference, origin: callable.origin,
-            parameter_types: copy_type_refs(callable.parameter_types),
             parameter_slots: copy_slot_refs(callable.parameter_slots),
-            result_type: callable.result_type, mode: callable.mode,
+            mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
+            effects: copy_core_effect_contract(callable.effects),
             handled_evidence:
                 copy_flow_handled_evidence_bindings(
-                    callable.handled_evidence),
-            call_edges: copy_call_edges(callable.call_edges)
+                    callable.handled_evidence)
         })
     }
     result
@@ -7123,9 +5450,8 @@ pub fn validate_flow_program(value: FlowProgram) {
         value.type_nodes, value.callables.map(fn(callable) {
             make_flow_callable(
                 callable.reference, callable.origin,
-                callable.parameter_types, callable.parameter_slots,
-                callable.result_type,
-                callable.mode, callable.semantic_contract,
+                callable.parameter_slots, callable.mode,
+                callable.semantic_contract, callable.effects,
                 callable.handled_evidence)
         }), value.bodies)
     if !flow_topology_fingerprint_same(

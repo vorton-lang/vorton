@@ -132,10 +132,11 @@ fn al_decl(d: HDecl) -> HDecl {
             }
             HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
-        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, handled_evidence_bindings, trait_bounds, is_pub, span } =>
+        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, resource_contract, handled_evidence_bindings, trait_bounds, is_pub, span } =>
             HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id,
                 executable_ref: executable_ref, type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
+                resource_contract: resource_contract,
                 handled_evidence_bindings: handled_evidence_bindings,
                 trait_bounds: trait_bounds,
                 is_pub: is_pub, span: span },
@@ -431,8 +432,11 @@ fn al_stmt(s: HStmt) -> HStmt {
                 then_block: al_expr(then_block), else_block: new_else, span: span }
         },
         // RC ops are inserted by perceus (after this pass) — never present.
-        HStmt::Drop { name, def_id, slot, site, reason, ty, span } =>
+        HStmt::Drop {
+            name, def_id, slot, place_target, site, reason, ty, span
+        } =>
             HStmt::Drop { name: name, def_id: def_id, slot: slot,
+                place_target: place_target.map(fn(value) { al_expr(value) }),
                 site: site, reason: reason, ty: ty, span: span }
     }
 }

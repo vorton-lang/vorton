@@ -1,15 +1,24 @@
 use ast::{Program}
 use hir::{HProgram}
-use diagnostics::{CollectingSink, Diagnostic, new_collecting_sink}
+use diagnostics::{Diagnostic, new_collecting_sink}
 use formatter::{format_human, format_llm}
 use checker::{CheckResult, check as check_single}
 use codegen_c::{generate_c}
 use compiler_mod::{compile_project, compile_project_c, verify_project_rc}
 use parser::{parse}
 use verify_rc::{verify_rc_program, rc_fatal_count, format_rc_findings}
-use core_from_hir::{assemble_single_core, core_assembly_result_program}
+use core_from_hir::{CoreAssemblyResult, CoreDiagnosticProjection,
+    assemble_single_core,
+    core_assembly_result_program,
+    core_assembly_result_diagnostic_projection,
+    mutate_core_unowned_effect_tail}
 use legacy_projection::{assemble_legacy_projection}
-use ownership_pipeline::{run_ownership_pipeline,
+use ownership_pipeline::{
+    OwnershipPipelineOutcome, VerifiedOwnershipProgram,
+    run_ownership_pipeline,
+    ownership_pipeline_outcome_is_verified,
+    ownership_pipeline_outcome_verified,
+    ownership_pipeline_failure_diagnostics,
     verified_ownership_program_flow}
 use rc_hir_bridge::{materialize_verified_hir}
 use phase_timing::{
@@ -244,6 +253,12 @@ pub fn cli_main() {
         }
     }
 
+    if parsed.rc_mutate == "core-unowned-effect-tail" {
+        mutate_core_unowned_effect_tail(match check_result.core_facts {
+            some(value) => value,
+            none => panic("Core mutation: successful check lacks frozen Core facts")
+        })
+    }
     if parsed.rc_mutate != "" {
         eprintln("Error: --rc-mutate has no typed ownership-pipeline mutation entry")
         timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
@@ -252,7 +267,26 @@ pub fn cli_main() {
         return
     }
     let resource_start = timing.start_phase()
-    let rc_program = materialize_single_ownership(check_result)
+    let core_facts = match check_result.core_facts {
+        some(value) => value,
+        none => panic("ownership pipeline: successful check lacks Core facts")
+    }
+    let assembly = assemble_single_core(core_facts)
+    let ownership = run_ownership_pipeline(
+        core_assembly_result_program(assembly))
+    if !ownership_pipeline_outcome_is_verified(ownership) {
+        report_single_ownership_failure(
+            check_result.prelude_physical_owner_module_key,
+            file_path, source, parsed.error_format,
+            ownership, core_assembly_result_diagnostic_projection(assembly))
+        timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+        timing.finish_command(false)
+        exit_process(1)
+        return
+    }
+    let rc_program = materialize_single_verified_ownership(
+        check_result, assembly,
+        ownership_pipeline_outcome_verified(ownership))
     timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
 
     // B-104 D2: single-file --verify-rc (see the multi-file branch above).
@@ -306,22 +340,45 @@ pub fn cli_main() {
     }
 }
 
-fn materialize_single_ownership(result: CheckResult) -> HProgram {
-    let core_facts = match result.core_facts {
-        some(value) => value,
-        none => panic("ownership pipeline: successful check lacks Core facts")
+fn report_single_ownership_failure(
+    module_key: Str, file_path: Str, source: Str, error_format: Str,
+    outcome: OwnershipPipelineOutcome,
+    projection: CoreDiagnosticProjection
+) {
+    let mut sink = new_collecting_sink()
+    for projected in ownership_pipeline_failure_diagnostics(
+            outcome, projection) {
+        let (finding_module_key, diagnostic) = projected
+        if finding_module_key != module_key ||
+           diagnostic.span.file != file_path {
+            panic("ownership diagnostic: single-file projection crosses module")
+        }
+        sink.report(diagnostic)
     }
+    if !sink.has_errors() {
+        panic("ownership diagnostic: failed single-file plan emitted no error")
+    }
+    if error_format == "llm" {
+        print(format_llm(sink.diagnostics(), file_path))
+    } else {
+        eprintln(format_human(sink.diagnostics(), source))
+    }
+}
+
+fn materialize_single_verified_ownership(
+    result: CheckResult, assembly: CoreAssemblyResult,
+    verified: VerifiedOwnershipProgram
+) -> HProgram {
     let legacy_facts = match result.legacy_facts {
         some(value) => value,
         none => panic("ownership pipeline: successful check lacks legacy facts")
     }
-    let assembly = assemble_single_core(core_facts)
-    let verified = run_ownership_pipeline(
-        core_assembly_result_program(assembly))
     let projection = assemble_legacy_projection(
         [legacy_facts], assembly,
         verified_ownership_program_flow(verified))
-    materialize_verified_hir(result.program, verified, projection)
+    materialize_verified_hir(
+        result.prelude_physical_owner_module_key,
+        result.program, verified, projection)
 }
 
 // ============================================================

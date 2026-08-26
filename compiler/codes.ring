@@ -48,8 +48,6 @@ pub const E0505: Str = "E0505"
 pub const E0506: Str = "E0506"
 pub const E0507: Str = "E0507"
 pub const E0508: Str = "E0508"
-pub const E0409: Str = "E0409"
-pub const E0410: Str = "E0410"
 pub const E0411: Str = "E0411"
 pub const E0509: Str = "E0509"
 pub const E0510: Str = "E0510"
@@ -104,8 +102,6 @@ pub fn error_description(code: Str) -> Str {
     if code == "E0407" { return "Unknown effect" }
     // Reserved: not currently emitted (open row ≠ capability violation, see infer_decl.ring)
     if code == "E0408" { return "Open effect row in capability-restricted module" }
-    if code == "E0409" { return "Default handler body uses effect without default handler" }
-    if code == "E0410" { return "Cyclic default effect handler dependency" }
     if code == "E0411" { return "Unsafe block without module requires" }
     if code == "E0501" { return "Unknown trait" }
     if code == "E0502" { return "Missing trait method implementation" }

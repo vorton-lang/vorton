@@ -169,6 +169,7 @@ fn mutate_append_param_drops(
                     slot_domain_lexical(), param_def_id)
                 new_stmts.push(HStmt::Drop { name: p.name,
                     def_id: param_def_id, slot: slot,
+                    place_target: none,
                     site: make_h_instruction_resource_site(
                         executable_ref, 0, new_stmts.len()),
                     reason: h_resource_reason_drop(), ty: Type::UnitType,

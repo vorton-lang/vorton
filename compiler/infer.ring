@@ -22,14 +22,17 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     TraitDispatch, DictRef, TraitBound,
     MethodCallRef, make_intrinsic_method_call_ref,
     make_concrete_method_call_ref, make_bound_method_call_ref,
+    method_call_ref_is_bound, method_call_ref_bound_evidence,
+    h_operator_is_tuple, h_operator_elements, h_operator_method_ref,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod,
     HForInDestructure, HLetDestructureBinding, ValueBindingKind,
     trait_bound_param_name,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET, BUILTIN_OPTION,
     hexpr_type, hexpr_effects, hexpr_span, map_index_helper_identity,
     remap_hir_handled_evidence}
+use hir_exact::{dict_ref_exact}
 use diagnostics::{DiagnosticContext, DiagnosticNote, CollectingSink, Severity, make_diag}
-use codes::{E0201, E0203, E0206, E0301, E0303, E0304, E0305, E0306,
+use codes::{E0201, E0203, E0205, E0206, E0301, E0303, E0304, E0305, E0306,
     E0307, E0308, E0309, E0402, E0411, E0503, E0601, E0705, W0001}
 use union_find::{UnionFind}
 use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
@@ -40,6 +43,7 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
     find_impl, lookup_variant}
 use unify::{unify, empty_subst}
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
+    fn_bound_dict_ref,
     PendingDictPurpose,
     type_error, type_error_with_notes, merge_effects, unify_at, unify_at_noted, update_fn_effects,
     resolve_type_expr, resolve_self_type, resolve_named_type,
@@ -54,6 +58,8 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
     has_variant_ctor_origin_def_id, fresh_child_executable,
     enter_executable_owner, exit_executable_owner,
+    current_executable_owner, current_dictionary_evidence_owner,
+    inherit_dictionary_evidence_owner,
     resolve_handled_evidence, install_handled_evidence,
     uninstall_handled_evidence,
     current_handled_evidence_bindings,
@@ -88,6 +94,8 @@ use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
     path_owner_for_symbol, make_path_ref, path_role_synthetic,
     variant_ref_member}
 use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
+    ExactDictRef, dict_ref_is_local, dict_ref_is_wrapped,
+    dict_ref_local, dict_ref_wrapped_inner,
     HandledEvidenceRef,
     handled_evidence_requirement,
     make_named_executable_ref, make_system_host_callable_ref}
@@ -519,7 +527,9 @@ fn require_for_protocol_impl(
     // Resolve the actual impl evidence now. This catches missing nested bounds
     // before lowering and never lets a later backend guess a dictionary.
     match resolve_dict_ref_for_type(
-        ctx.env, ctx.current_fn_bounds, concrete, subst, trait_name
+        current_dictionary_evidence_owner(ctx),
+        ctx.env, ctx.current_fn_bounds,
+        concrete, subst, trait_name
     ) {
         some(_) => impl_entry,
         none => {
@@ -718,6 +728,20 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             }
         },
         Stmt::Assign { target, value, span } => {
+            match target {
+                Expr::IndexExpr { span: target_span, .. } => {
+                    let _ = type_error(
+                        ctx.sink, E0205,
+                        "Index assignment is not part of Ring 0.1; use List.set(...) or Map.insert(...)",
+                        target_span,
+                        DiagnosticContext::OtherContext {
+                            detail: some(
+                                "indexed values are readable but not assignment places")
+                        })
+                    fail.raise(CompileError {})
+                },
+                _ => {}
+            }
             check_assign_target_mutable(ctx, target)
             let target_r = infer_expr(ctx, target, subst)
             let value_r = infer_expr(ctx, value, target_r.subst)
@@ -2145,10 +2169,8 @@ fn infer_method_call_from_receiver(
                                             some(value) => value,
                                             none => false
                                         }
-                                        bound_evidence = some(DictRef::Simple(
-                                            trait_bound_param_name(
-                                                fb.type_param_name,
-                                                fb.trait_name)))
+                                        bound_evidence = some(fn_bound_dict_ref(
+                                            current_dictionary_evidence_owner(ctx), fb))
                                     },
                                     none => {}
                                 }
@@ -3902,13 +3924,68 @@ fn append_lambda_capture(
     })
 }
 
+fn append_dictionary_capture(
+    value: ExactDictRef, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    if dict_ref_is_local(value) {
+        let source = dict_ref_local(value)
+        for capture in captures {
+            if slot_ref_same(capture.source, source) { return }
+        }
+        captures.push(HLambdaCapture {
+            source: source,
+            target: executable_capture_slot(executable, captures.len()),
+            value: none, resource_site: none
+        })
+    } else if dict_ref_is_wrapped(value) {
+        for inner in dict_ref_wrapped_inner(value) {
+            append_dictionary_capture(inner, executable, captures)
+        }
+    }
+}
+
+fn collect_dict_capture(
+    value: DictRef, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    append_dictionary_capture(dict_ref_exact(value), executable, captures)
+}
+
+fn collect_method_dict_capture(
+    value: MethodCallRef, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    if method_call_ref_is_bound(value) {
+        collect_dict_capture(
+            method_call_ref_bound_evidence(value), executable, captures)
+    }
+}
+
+fn collect_operator_dict_captures(
+    value: HOperatorPlan, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    if h_operator_is_tuple(value) {
+        for child in h_operator_elements(value) {
+            collect_operator_dict_captures(child, executable, captures)
+        }
+    } else {
+        collect_method_dict_capture(
+            h_operator_method_ref(value), executable, captures)
+    }
+}
+
 fn collect_lambda_capture_stmt(
     ctx: InferCtx, stmt: HStmt, lambda_depth: Int,
     executable: ExecutableRef,
     mut captures: List<HLambdaCapture>
 ) {
     match stmt {
-        HStmt::Let { init, .. } | HStmt::Var { init, .. } =>
+        HStmt::Let { init, .. } =>
+            collect_lambda_capture_expr(
+                ctx, init, lambda_depth, executable, captures),
+        HStmt::Var { init, .. } =>
             collect_lambda_capture_expr(
                 ctx, init, lambda_depth, executable, captures),
         HStmt::Assign { target, value, .. } => {
@@ -3960,22 +4037,51 @@ fn collect_lambda_capture_expr(
     mut captures: List<HLambdaCapture>
 ) {
     match expr {
-        HExpr::Ident { def_id: some(id), .. } =>
-            append_lambda_capture(
-                ctx, id, lambda_depth, executable, captures),
-        HExpr::BinOp { left, right, .. } => {
+        HExpr::Ident { def_id, dict_closure_dicts, .. } => {
+            match def_id {
+                some(id) => append_lambda_capture(
+                    ctx, id, lambda_depth, executable, captures),
+                none => {}
+            }
+            match dict_closure_dicts {
+                some(values) => {
+                    for value in values {
+                        collect_dict_capture(value, executable, captures)
+                    }
+                },
+                none => {}
+            }
+        },
+        HExpr::BinOp { left, right, eq_plan, ord_plan, .. } => {
             collect_lambda_capture_expr(
                 ctx, left, lambda_depth, executable, captures)
             collect_lambda_capture_expr(
                 ctx, right, lambda_depth, executable, captures)
+            match eq_plan {
+                some(value) => collect_operator_dict_captures(
+                    value, executable, captures), none => {}
+            }
+            match ord_plan {
+                some(value) => collect_operator_dict_captures(
+                    value, executable, captures), none => {}
+            }
         },
         HExpr::UnaryOp { operand, .. } => collect_lambda_capture_expr(
             ctx, operand, lambda_depth, executable, captures),
-        HExpr::Call { callee, args, .. } => {
+        HExpr::Call {
+            callee, args, resolved_dicts, method_ref, ..
+        } => {
             collect_lambda_capture_expr(
                 ctx, callee, lambda_depth, executable, captures)
             for arg in args { collect_lambda_capture_expr(
                 ctx, arg, lambda_depth, executable, captures) }
+            for value in resolved_dicts {
+                collect_dict_capture(value, executable, captures)
+            }
+            match method_ref {
+                some(value) => collect_method_dict_capture(
+                    value, executable, captures), none => {}
+            }
         },
         HExpr::FieldAccess { receiver, .. } => collect_lambda_capture_expr(
             ctx, receiver, lambda_depth, executable, captures),
@@ -3991,7 +4097,16 @@ fn collect_lambda_capture_expr(
             match spread { some(value) => collect_lambda_capture_expr(
                 ctx, value, lambda_depth, executable, captures), none => {} }
         },
-        HExpr::MatchExpr { scrutinee, arms, .. } |
+        HExpr::MatchExpr { scrutinee, arms, .. } => {
+            collect_lambda_capture_expr(
+                ctx, scrutinee, lambda_depth, executable, captures)
+            for arm in arms {
+                match arm.guard { some(guard) => collect_lambda_capture_expr(
+                    ctx, guard, lambda_depth, executable, captures), none => {} }
+                collect_lambda_capture_expr(
+                    ctx, arm.body, lambda_depth, executable, captures)
+            }
+        },
         HExpr::TryCatch { body: scrutinee, arms, .. } => {
             collect_lambda_capture_expr(
                 ctx, scrutinee, lambda_depth, executable, captures)
@@ -4041,14 +4156,24 @@ fn collect_lambda_capture_expr(
                     ctx, arg, lambda_depth, executable, captures)
             }
         },
-        HExpr::RangeExpr { start, end, .. } |
+        HExpr::RangeExpr { start, end, .. } => {
+            collect_lambda_capture_expr(
+                ctx, start, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, end, lambda_depth, executable, captures)
+        },
         HExpr::IndexExpr { receiver: start, index: end, .. } => {
             collect_lambda_capture_expr(
                 ctx, start, lambda_depth, executable, captures)
             collect_lambda_capture_expr(
                 ctx, end, lambda_depth, executable, captures)
         },
-        HExpr::ListLit { elements, .. } |
+        HExpr::ListLit { elements, .. } => {
+            for value in elements {
+                collect_lambda_capture_expr(
+                    ctx, value, lambda_depth, executable, captures)
+            }
+        },
         HExpr::TupleLit { elements, .. } => {
             for value in elements {
                 collect_lambda_capture_expr(
@@ -4069,8 +4194,10 @@ fn collect_lambda_capture_expr(
 }
 
 fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, subst: UnionFind, expected_param_types: List<Type>?) -> InferResult {
+    let dictionary_owner = current_dictionary_evidence_owner(ctx)
     let lambda_executable = fresh_child_executable(ctx, "lambda")
     enter_executable_owner(ctx, lambda_executable)
+    inherit_dictionary_evidence_owner(ctx, dictionary_owner)
     ctx.env.push_scope()
     ctx.lambda_depth = ctx.lambda_depth + 1
     let exact_lambda_depth = ctx.lambda_depth

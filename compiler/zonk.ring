@@ -267,9 +267,13 @@ fn zonk_stmt(ctx: ZonkCtx, stmt: HStmt) -> HStmt {
                 then_block: zonk_block(ctx, then_block),
                 else_block: z_else, span: span }
         },
-        HStmt::Drop { name, def_id, slot, site, reason, ty, span } =>
+        HStmt::Drop {
+            name, def_id, slot, place_target, site, reason, ty, span
+        } =>
             HStmt::Drop { name: name, def_id: def_id, slot: slot,
-                site: site, reason: reason,
+                place_target: place_target.map(fn(value) {
+                    zonk_expr(ctx, value)
+                }), site: site, reason: reason,
                 ty: zonk_type(ctx, ty), span: span }
     }
 }

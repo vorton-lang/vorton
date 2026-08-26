@@ -37,8 +37,9 @@ use diagnostics::{DiagnosticContext}
 use codes::{E0207, E0406, E0501, E0502, E0503, E0504, E0505, E0506, E0507, E0508, E0509, E0510, E0511, E0513, E0514}
 use hir::{compare_by_first, module_item_identity, variant_ctor_name, ValueBindingKind}
 use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_expr, resolve_self_type, resolve_effect_expr,
+    validate_fn_bound_order,
     record_value_origin, record_variant_ctor_origin, record_value_binding_kind,
-    resolve_dict_ref_for_type, impl_predicate_constraints_satisfied,
+    prove_dict_evidence_for_type, impl_predicate_constraints_satisfied,
     resolve_mod_uses, bind_exact_import_alias,
     enter_project_root_frame, enter_project_child_frame,
     refresh_project_namespace_frame, exit_project_namespace_frame,
@@ -82,9 +83,31 @@ use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
 // ============================================================
 
 pub fn register_decl_public(
-    mut ctx: InferCtx, decl: Decl, decl_index: Int
+    mut ctx: InferCtx, decl: Decl, decl_index: Int,
+    direct_value_payload: Str?
 ) {
     register_decl(ctx, decl, decl_index)
+    match direct_value_payload {
+        some(payload) => match decl {
+            Decl::Fn { name, .. } => {
+                record_value_origin(ctx, name, payload)
+                record_value_binding_kind(
+                    ctx, name, ValueBindingKind::DirectCallable)
+            },
+            Decl::ExternFn { name, .. } => {
+                record_value_origin(ctx, name, payload)
+                record_value_binding_kind(
+                    ctx, name, ValueBindingKind::ExternCallable)
+            },
+            Decl::Const { name, .. } => {
+                record_value_origin(ctx, name, payload)
+                record_value_binding_kind(
+                    ctx, name, ValueBindingKind::ConstGetter)
+            },
+            _ => panic("prelude value identity: payload attached to non-value")
+        },
+        none => {}
+    }
 }
 
 pub fn insert_mod_aliases(mut ctx: InferCtx, mod_name: Str, decls: List<Decl>, guard: Bool) {
@@ -2710,6 +2733,7 @@ fn register_impl_canonical(
             method_schemes: map_clone(exact_method_schemes),
             method_refs: exact_method_refs,
             method_intrinsics: map_new(),
+            method_resource_contracts: map_new(),
             provider_ref: some(provider_ref),
             trait_ref: resolved_trait_ref,
             owner_ref: some(owner_ref),
@@ -2861,9 +2885,11 @@ pub fn impl_owner_fn_bounds(owner: ImplEntry) -> List<FnBoundsEntry> {
             type_param_var_id: impl_predicate_subject_type_var(predicate),
             trait_name: impl_predicate_trait_name(predicate),
             type_param_name: type_param_name,
+            dict_ordinal: result.len(),
             assoc_constraints: constraints
         })
     }
+    validate_fn_bound_order(result)
     result
 }
 
@@ -3000,10 +3026,10 @@ fn merge_delegate_owner_predicates(
                     predicates, span)
             },
             _ => {
-                if resolve_dict_ref_for_type(
+                if !prove_dict_evidence_for_type(
                     ctx.env, wrapper_fn_bounds, mapped_subject,
                     ctx.subst, impl_predicate_trait_name(source)
-                ).is_none() || !impl_predicate_constraints_satisfied(
+                ) || !impl_predicate_constraints_satisfied(
                     ctx.env, wrapper_fn_bounds, mapped_subject,
                     impl_predicate_trait_name(source), constraints,
                     ctx.subst) {
@@ -3305,6 +3331,7 @@ fn register_delegate_traits(
                                     method_schemes: map_clone(exact_method_schemes),
                                     method_refs: exact_method_refs,
                                     method_intrinsics: map_new(),
+                                    method_resource_contracts: map_new(),
                                     provider_ref: some(provider_ref),
                                     trait_ref: some(delegate_trait_ref),
                                     owner_ref: some(delegate_owner_ref),

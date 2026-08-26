@@ -25,6 +25,12 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
 use ast::{span_zero}
 use hir::{variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
+use ir_inventory::{CallableResourceContractFact,
+    CallableResourceRoleFact,
+    make_callable_resource_contract_fact,
+    callable_resource_contract_parameter_roles,
+    callable_resource_role_read, callable_resource_role_mutate,
+    callable_resource_role_consume}
 use ir_identity::{SymbolRef, TraitMethodRef,
     ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     IntrinsicRef, BuiltinMethodSite, BuiltinValueSite,
@@ -38,7 +44,7 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     impl_provider_kind_builtin, registered_trait_ref_symbol,
     builtin_method_site_from_tag, builtin_method_site_tag,
     make_builtin_method_intrinsic_ref, intrinsic_ref_same,
-    intrinsic_ref_symbol,
+    intrinsic_ref_symbol, intrinsic_ref_site,
     BUILTIN_METHOD_SITE_COUNT,
     BUILTIN_METHOD_STR_LEN, BUILTIN_METHOD_STR_CONTAINS,
     BUILTIN_METHOD_STR_STARTS_WITH, BUILTIN_METHOD_STR_ENDS_WITH,
@@ -57,6 +63,18 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE, BUILTIN_METHOD_OPTION_TO_FAIL,
     BUILTIN_METHOD_CELL_GET, BUILTIN_METHOD_CELL_SET,
     BUILTIN_METHOD_CELL_UPDATE,
+    BUILTIN_METHOD_INT_EQ, BUILTIN_METHOD_INT_NE,
+    BUILTIN_METHOD_FLOAT_EQ, BUILTIN_METHOD_FLOAT_NE,
+    BUILTIN_METHOD_STR_EQ, BUILTIN_METHOD_STR_NE,
+    BUILTIN_METHOD_BOOL_EQ, BUILTIN_METHOD_BOOL_NE,
+    BUILTIN_METHOD_INT_CLONE, BUILTIN_METHOD_FLOAT_CLONE,
+    BUILTIN_METHOD_STR_CLONE, BUILTIN_METHOD_BOOL_CLONE,
+    BUILTIN_METHOD_INT_CMP, BUILTIN_METHOD_FLOAT_CMP,
+    BUILTIN_METHOD_STR_CMP, BUILTIN_METHOD_BOOL_CMP,
+    BUILTIN_METHOD_INT_DEBUG, BUILTIN_METHOD_FLOAT_DEBUG,
+    BUILTIN_METHOD_STR_DEBUG, BUILTIN_METHOD_BOOL_DEBUG,
+    BUILTIN_METHOD_INT_HASH, BUILTIN_METHOD_STR_HASH,
+    BUILTIN_METHOD_BOOL_HASH,
     builtin_value_site_from_tag, builtin_value_symbol,
     BUILTIN_VALUE_CELL_CONSTRUCTOR, BUILTIN_VALUE_ALLOC,
     BUILTIN_VALUE_DEALLOC, BUILTIN_VALUE_PTR_COPY,
@@ -79,6 +97,37 @@ struct OpenRow {
 struct BuiltinPredicateSpec {
     subject_param_index: Int,
     trait_name: Str
+}
+
+struct BuiltinImplMethodSpec {
+    name: Str,
+    intrinsic_tag: Int?,
+    resource_contract: CallableResourceContractFact?
+}
+
+fn builtin_impl_method(name: Str) -> BuiltinImplMethodSpec {
+    BuiltinImplMethodSpec {
+        name: name, intrinsic_tag: none, resource_contract: none
+    }
+}
+
+fn builtin_intrinsic_method(
+    name: Str, intrinsic_tag: Int,
+    resource_contract: CallableResourceContractFact
+) -> BuiltinImplMethodSpec {
+    BuiltinImplMethodSpec {
+        name: name, intrinsic_tag: some(intrinsic_tag),
+        resource_contract: some(resource_contract)
+    }
+}
+
+fn builtin_resource_contract(
+    parameter_roles: List<CallableResourceRoleFact>,
+    result_role: CallableResourceRoleFact,
+    result_alias_ordinals: List<Int>
+) -> CallableResourceContractFact {
+    make_callable_resource_contract_fact(
+        parameter_roles, result_role, result_alias_ordinals)
 }
 
 fn builtin_trait_symbol(name: Str) -> SymbolRef {
@@ -219,6 +268,18 @@ fn install_intrinsic(
         builtin_method_site_from_tag(tag)))
 }
 
+fn install_intrinsic_contract(
+    mut intrinsics: Map<Str, IntrinsicRef>,
+    mut resources: Map<Str, CallableResourceContractFact>,
+    name: Str, tag: Int, resource: CallableResourceContractFact
+) {
+    install_intrinsic(intrinsics, name, tag)
+    if resources.contains_key(name) {
+        panic("builtin method intrinsic: duplicate resource relation")
+    }
+    resources.insert(name, resource)
+}
+
 pub struct CheckerBuiltinValue {
     name: Str,
     symbol: SymbolRef
@@ -338,6 +399,7 @@ fn install_builtin_method_owner(
     predicate_specs: List<BuiltinPredicateSpec>,
     methods: Map<Str, TypeScheme>,
     method_intrinsics: Map<Str, IntrinsicRef>,
+    method_resources: Map<Str, CallableResourceContractFact>,
     provider_site: BuiltinImplProviderSite
 ) {
     let span = span_zero()
@@ -381,6 +443,7 @@ fn install_builtin_method_owner(
         method_schemes: map_clone(cores),
         method_refs: method_refs,
         method_intrinsics: map_clone(method_intrinsics),
+        method_resource_contracts: method_resources,
         provider_ref: some(provider_ref),
         trait_ref: trait_ref,
         owner_ref: some(owner_ref),
@@ -421,7 +484,7 @@ fn add_builtin_impl(
     trait_name: Str, target_type_name: Str,
     type_params: List<Str>, type_var_ids: List<Int>,
     predicate_specs: List<BuiltinPredicateSpec>,
-    method_names: List<Str>
+    method_specs: List<BuiltinImplMethodSpec>
 ) {
     let span = span_zero()
     let mut type_args: List<Type> = []
@@ -434,6 +497,10 @@ fn add_builtin_impl(
     let provider_ref = builtin_impl_provider(builtin_trait_factory_site())
     let trait_ref = builtin_impl_trait_ref(
         env, some(trait_name)).unwrap()
+    let mut method_names: List<Str> = []
+    for method_spec in method_specs {
+        method_names.push(method_spec.name)
+    }
     let mut exact: Map<Str, ImplMethodSchemeCore> = map_new()
     match env.trait_reg.traits.get(trait_name) {
         some(trait_def) => {
@@ -456,6 +523,22 @@ fn add_builtin_impl(
         env, target_type_name, provider_ref, some(trait_ref), exact)
     let owner_ref = identity.0
     let method_refs = identity.1
+    let mut method_intrinsics: Map<Str, IntrinsicRef> = map_new()
+    let mut method_resources: Map<Str, CallableResourceContractFact> = map_new()
+    for method_spec in method_specs {
+        match method_spec.intrinsic_tag {
+            some(tag) => {
+                let resource = match method_spec.resource_contract {
+                    some(value) => value,
+                    none => panic(
+                        "builtin impl owner: intrinsic resource contract is absent")
+                }
+                install_intrinsic(method_intrinsics, method_spec.name, tag)
+                method_resources.insert(method_spec.name, resource)
+            },
+            none => {}
+        }
+    }
     add_impl(env.trait_reg, ImplEntry {
         trait_name: some(trait_name),
         target_type_name: target_type_name,
@@ -466,7 +549,8 @@ fn add_builtin_impl(
         assoc_types: map_new(),
         method_schemes: map_clone(exact),
         method_refs: method_refs,
-        method_intrinsics: map_new(),
+        method_intrinsics: method_intrinsics,
+        method_resource_contracts: method_resources,
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
         owner_ref: some(owner_ref),
@@ -654,57 +738,116 @@ fn register_scalar_method_intrinsics(
         effects: EMPTY_ROW }))
 
     let mut str_intrinsics: Map<Str, IntrinsicRef> = map_new()
-    install_intrinsic(str_intrinsics, "len", BUILTIN_METHOD_STR_LEN)
-    install_intrinsic(str_intrinsics, "contains", BUILTIN_METHOD_STR_CONTAINS)
-    install_intrinsic(
-        str_intrinsics, "starts_with", BUILTIN_METHOD_STR_STARTS_WITH)
-    install_intrinsic(str_intrinsics, "ends_with", BUILTIN_METHOD_STR_ENDS_WITH)
-    install_intrinsic(str_intrinsics, "slice", BUILTIN_METHOD_STR_SLICE)
-    install_intrinsic(str_intrinsics, "trim", BUILTIN_METHOD_STR_TRIM)
-    install_intrinsic(str_intrinsics, "to_upper", BUILTIN_METHOD_STR_TO_UPPER)
-    install_intrinsic(str_intrinsics, "to_lower", BUILTIN_METHOD_STR_TO_LOWER)
-    install_intrinsic(str_intrinsics, "replace", BUILTIN_METHOD_STR_REPLACE)
-    install_intrinsic(str_intrinsics, "split", BUILTIN_METHOD_STR_SPLIT)
-    install_intrinsic(str_intrinsics, "char_at", BUILTIN_METHOD_STR_CHAR_AT)
-    install_intrinsic(str_intrinsics, "index_of", BUILTIN_METHOD_STR_INDEX_OF)
-    install_intrinsic(str_intrinsics, "pad_start", BUILTIN_METHOD_STR_PAD_START)
-    install_intrinsic(str_intrinsics, "pad_end", BUILTIN_METHOD_STR_PAD_END)
-    install_intrinsic(str_intrinsics, "repeat", BUILTIN_METHOD_STR_REPEAT)
-    install_intrinsic(
-        str_intrinsics, "char_code_at", BUILTIN_METHOD_STR_CHAR_CODE_AT)
-    install_intrinsic(
-        str_intrinsics, "trim_start", BUILTIN_METHOD_STR_TRIM_START)
-    install_intrinsic(str_intrinsics, "trim_end", BUILTIN_METHOD_STR_TRIM_END)
-    install_intrinsic(str_intrinsics, "is_empty", BUILTIN_METHOD_STR_IS_EMPTY)
-    install_intrinsic(
-        str_intrinsics, "last_index_of", BUILTIN_METHOD_STR_LAST_INDEX_OF)
+    let mut str_resources: Map<Str, CallableResourceContractFact> = map_new()
+    install_intrinsic_contract(str_intrinsics, str_resources, "len",
+        BUILTIN_METHOD_STR_LEN, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_read(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "contains",
+        BUILTIN_METHOD_STR_CONTAINS, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_read(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "starts_with",
+        BUILTIN_METHOD_STR_STARTS_WITH, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_read(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "ends_with",
+        BUILTIN_METHOD_STR_ENDS_WITH, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_read(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "slice",
+        BUILTIN_METHOD_STR_SLICE, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read(),
+             callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "trim",
+        BUILTIN_METHOD_STR_TRIM, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "to_upper",
+        BUILTIN_METHOD_STR_TO_UPPER, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "to_lower",
+        BUILTIN_METHOD_STR_TO_LOWER, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "replace",
+        BUILTIN_METHOD_STR_REPLACE, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read(),
+             callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "split",
+        BUILTIN_METHOD_STR_SPLIT, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "char_at",
+        BUILTIN_METHOD_STR_CHAR_AT, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "index_of",
+        BUILTIN_METHOD_STR_INDEX_OF, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "pad_start",
+        BUILTIN_METHOD_STR_PAD_START, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read(),
+             callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "pad_end",
+        BUILTIN_METHOD_STR_PAD_END, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read(),
+             callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "repeat",
+        BUILTIN_METHOD_STR_REPEAT, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "char_code_at",
+        BUILTIN_METHOD_STR_CHAR_CODE_AT, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "trim_start",
+        BUILTIN_METHOD_STR_TRIM_START, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "trim_end",
+        BUILTIN_METHOD_STR_TRIM_END, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_consume(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "is_empty",
+        BUILTIN_METHOD_STR_IS_EMPTY, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_read(), []))
+    install_intrinsic_contract(str_intrinsics, str_resources, "last_index_of",
+        BUILTIN_METHOD_STR_LAST_INDEX_OF, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), []))
     install_builtin_method_owner(
         env, sink, "Str",
         none, [], [], [],
-        str_methods, str_intrinsics,
+        str_methods, str_intrinsics, str_resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_STR_CORE))
 
     let mut int_methods: Map<Str, TypeScheme> = map_new()
     int_methods.insert("to_str", mono(Type::FnType {
         params: [INT], return_type: STR, effects: EMPTY_ROW }))
     let mut int_intrinsics: Map<Str, IntrinsicRef> = map_new()
-    install_intrinsic(int_intrinsics, "to_str", BUILTIN_METHOD_INT_TO_STR)
+    let mut int_resources: Map<Str, CallableResourceContractFact> = map_new()
+    install_intrinsic_contract(int_intrinsics, int_resources, "to_str",
+        BUILTIN_METHOD_INT_TO_STR, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_consume(), []))
     install_builtin_method_owner(
         env, sink, "Int",
         none, [], [], [],
-        int_methods, int_intrinsics,
+        int_methods, int_intrinsics, int_resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_INT_CORE))
 
     let mut float_methods: Map<Str, TypeScheme> = map_new()
     float_methods.insert("to_str", mono(Type::FnType {
         params: [FLOAT], return_type: STR, effects: EMPTY_ROW }))
     let mut float_intrinsics: Map<Str, IntrinsicRef> = map_new()
-    install_intrinsic(
-        float_intrinsics, "to_str", BUILTIN_METHOD_FLOAT_TO_STR)
+    let mut float_resources: Map<Str, CallableResourceContractFact> = map_new()
+    install_intrinsic_contract(float_intrinsics, float_resources, "to_str",
+        BUILTIN_METHOD_FLOAT_TO_STR, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_consume(), []))
     install_builtin_method_owner(
         env, sink, "Float",
         none, [], [], [],
-        float_methods, float_intrinsics,
+        float_methods, float_intrinsics, float_resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_FLOAT_CORE))
 }
 
@@ -759,19 +902,58 @@ fn registered_intrinsic_scheme(
     }
 }
 
+fn registered_intrinsic_resource_contract(
+    env: TypeEnv, intrinsic: IntrinsicRef
+) -> CallableResourceContractFact {
+    let mut found: CallableResourceContractFact? = none
+    for map_entry in env.trait_reg.trait_impls.entries() {
+        let (_, owners) = map_entry
+        for owner in owners {
+            for method_entry in owner.method_intrinsics.entries() {
+                let (method_name, candidate) = method_entry
+                if intrinsic_ref_same(candidate, intrinsic) {
+                    let contract = match
+                            owner.method_resource_contracts.get(method_name) {
+                        some(value) => value,
+                        none => panic(
+                            "builtin method contract: exact resource fact is missing")
+                    }
+                    if found.is_some() {
+                        panic(
+                            "builtin method contract: resource fact is not unique")
+                    }
+                    found = some(contract)
+                }
+            }
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic(
+            "builtin method contract: resource fact was not registered")
+    }
+}
+
 pub struct BuiltinMethodContractFact {
     intrinsic: IntrinsicRef,
-    scheme: TypeScheme
+    scheme: TypeScheme,
+    resource: CallableResourceContractFact
 }
 
 fn make_builtin_method_contract_fact(
-    intrinsic: IntrinsicRef, scheme: TypeScheme
+    intrinsic: IntrinsicRef, scheme: TypeScheme,
+    resource: CallableResourceContractFact
 ) -> BuiltinMethodContractFact {
-    match scheme.ty {
-        Type::FnType { .. } => {},
+    let arity = match scheme.ty {
+        Type::FnType { params, .. } => params.len(),
         _ => panic("builtin method contract: scheme is not callable")
     }
-    BuiltinMethodContractFact { intrinsic: intrinsic, scheme: scheme }
+    if callable_resource_contract_parameter_roles(resource).len() != arity {
+        panic("builtin method contract: exact resource arity differs")
+    }
+    BuiltinMethodContractFact {
+        intrinsic: intrinsic, scheme: scheme, resource: resource
+    }
 }
 
 pub fn builtin_method_contract_intrinsic(
@@ -781,6 +963,9 @@ pub fn builtin_method_contract_intrinsic(
 pub fn builtin_method_contract_scheme(
     value: BuiltinMethodContractFact
 ) -> TypeScheme { value.scheme }
+pub fn builtin_method_contract_resource(
+    value: BuiltinMethodContractFact
+) -> CallableResourceContractFact { value.resource }
 
 // Sole typed builtin-method payload consumed by the real module-order-0 Core
 // assembler.  It carries no shadow Core/Flow graph and owns no second type
@@ -796,7 +981,8 @@ pub fn builtin_method_contract_facts(
             panic("builtin method contract: registry relation is not unique")
         }
         result.push(make_builtin_method_contract_fact(
-            intrinsic, registered_intrinsic_scheme(env, intrinsic)))
+            intrinsic, registered_intrinsic_scheme(env, intrinsic),
+            registered_intrinsic_resource_contract(env, intrinsic)))
     }
     if result.len() != BUILTIN_METHOD_SITE_COUNT {
         panic("builtin method contract: exact site census drifted")
@@ -914,12 +1100,23 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     let mut intrinsics: Map<Str, IntrinsicRef> = map_new()
-    install_intrinsic(intrinsics, "get", BUILTIN_METHOD_CELL_GET)
-    install_intrinsic(intrinsics, "set", BUILTIN_METHOD_CELL_SET)
-    install_intrinsic(intrinsics, "update", BUILTIN_METHOD_CELL_UPDATE)
+    let mut resources: Map<Str, CallableResourceContractFact> = map_new()
+    install_intrinsic_contract(intrinsics, resources, "get",
+        BUILTIN_METHOD_CELL_GET, builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_consume(), [0]))
+    install_intrinsic_contract(intrinsics, resources, "set",
+        BUILTIN_METHOD_CELL_SET, builtin_resource_contract(
+            [callable_resource_role_mutate(),
+             callable_resource_role_consume()],
+            callable_resource_role_read(), []))
+    install_intrinsic_contract(intrinsics, resources, "update",
+        BUILTIN_METHOD_CELL_UPDATE, builtin_resource_contract(
+            [callable_resource_role_mutate(), callable_resource_role_read()],
+            callable_resource_role_read(), []))
     install_builtin_method_owner(
         env, sink, BUILTIN_CELL,
-        none, [], [], [], methods, intrinsics,
+        none, [], [], [], methods, intrinsics, resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_CELL_CORE))
 }
 
@@ -1062,14 +1259,28 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         def_id: none
     })
     let mut intrinsics: Map<Str, IntrinsicRef> = map_new()
-    install_intrinsic(intrinsics, "unwrap_or", BUILTIN_METHOD_OPTION_UNWRAP_OR)
-    install_intrinsic(intrinsics, "unwrap", BUILTIN_METHOD_OPTION_UNWRAP)
-    install_intrinsic(intrinsics, "is_some", BUILTIN_METHOD_OPTION_IS_SOME)
-    install_intrinsic(intrinsics, "is_none", BUILTIN_METHOD_OPTION_IS_NONE)
-    install_intrinsic(intrinsics, "to_fail", BUILTIN_METHOD_OPTION_TO_FAIL)
+    let mut resources: Map<Str, CallableResourceContractFact> = map_new()
+    install_intrinsic_contract(intrinsics, resources, "unwrap_or",
+        BUILTIN_METHOD_OPTION_UNWRAP_OR, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), [0, 1]))
+    install_intrinsic_contract(intrinsics, resources, "unwrap",
+        BUILTIN_METHOD_OPTION_UNWRAP, builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_consume(), [0]))
+    install_intrinsic_contract(intrinsics, resources, "is_some",
+        BUILTIN_METHOD_OPTION_IS_SOME, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_read(), []))
+    install_intrinsic_contract(intrinsics, resources, "is_none",
+        BUILTIN_METHOD_OPTION_IS_NONE, builtin_resource_contract(
+            [callable_resource_role_read()], callable_resource_role_read(), []))
+    install_intrinsic_contract(intrinsics, resources, "to_fail",
+        BUILTIN_METHOD_OPTION_TO_FAIL, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), [0]))
     install_builtin_method_owner(
         env, sink, BUILTIN_OPTION,
-        none, [], [], [], methods, intrinsics,
+        none, [], [], [], methods, intrinsics, resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_OPTION_CORE))
 }
 
@@ -1091,10 +1302,43 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
             TraitMethodDef { name: "ne", method_ref: builtin_trait_method(owner_ref, 1, 1, "ne"), ty: ne_fn, has_default: true, param_mutabilities: [false, false], method_type_params: [] }
         ], [], [])
 
-    // Register Eq impls for primitive types
-    for prim in ["Int", "Float", "Str", "Bool"] {
-        add_builtin_impl(env, sink, "Eq", prim, [], [], [], ["eq", "ne"])
-    }
+    // Register Eq impls with the exact intrinsic contract at the producer.
+    add_builtin_impl(env, sink, "Eq", "Int", [], [], [], [
+        builtin_intrinsic_method("eq", BUILTIN_METHOD_INT_EQ,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), [])),
+        builtin_intrinsic_method("ne", BUILTIN_METHOD_INT_NE,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), []))])
+    add_builtin_impl(env, sink, "Eq", "Float", [], [], [], [
+        builtin_intrinsic_method("eq", BUILTIN_METHOD_FLOAT_EQ,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), [])),
+        builtin_intrinsic_method("ne", BUILTIN_METHOD_FLOAT_NE,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), []))])
+    add_builtin_impl(env, sink, "Eq", "Str", [], [], [], [
+        builtin_intrinsic_method("eq", BUILTIN_METHOD_STR_EQ,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), [])),
+        builtin_intrinsic_method("ne", BUILTIN_METHOD_STR_NE,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), []))])
+    add_builtin_impl(env, sink, "Eq", "Bool", [], [], [], [
+        builtin_intrinsic_method("eq", BUILTIN_METHOD_BOOL_EQ,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), [])),
+        builtin_intrinsic_method("ne", BUILTIN_METHOD_BOOL_NE,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), []))])
 }
 
 // ============================================================
@@ -1105,7 +1349,7 @@ fn register_option_eq(mut env: TypeEnv, sink: CollectingSink) {
     let t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Eq", BUILTIN_OPTION, ["T"], [t_id],
         [BuiltinPredicateSpec { subject_param_index: 0, trait_name: "Eq" }],
-        ["eq", "ne"])
+        [builtin_impl_method("eq"), builtin_impl_method("ne")])
 }
 
 // ============================================================
@@ -1124,22 +1368,26 @@ fn register_clone_trait(mut env: TypeEnv, sink: CollectingSink) {
             TraitMethodDef { name: "clone", method_ref: builtin_trait_method(owner_ref, 0, 0, "clone"), ty: clone_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
-    // Primitive impls
-    for prim in ["Int", "Float", "Str", "Bool"] {
-        add_builtin_impl(env, sink, "Clone", prim, [], [], [], ["clone"])
-    }
+    // Primitive impls carry their exact physical intrinsic contract here.
+    add_builtin_impl(env, sink, "Clone", "Int", [], [], [], [
+        builtin_intrinsic_method("clone", BUILTIN_METHOD_INT_CLONE,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_consume(), [0]))])
+    add_builtin_impl(env, sink, "Clone", "Float", [], [], [], [
+        builtin_intrinsic_method("clone", BUILTIN_METHOD_FLOAT_CLONE,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_consume(), [0]))])
+    add_builtin_impl(env, sink, "Clone", "Str", [], [], [], [
+        builtin_intrinsic_method("clone", BUILTIN_METHOD_STR_CLONE,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_consume(), [0]))])
+    add_builtin_impl(env, sink, "Clone", "Bool", [], [], [], [
+        builtin_intrinsic_method("clone", BUILTIN_METHOD_BOOL_CLONE,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_consume(), [0]))])
 
-    // Collection impls
-    let list_t_id = env.fresh_var_id()
-    add_builtin_impl(env, sink, "Clone", BUILTIN_LIST,
-        ["T"], [list_t_id], [], ["clone"])
-    let map_k_id = env.fresh_var_id()
-    let map_v_id = env.fresh_var_id()
-    add_builtin_impl(env, sink, "Clone", BUILTIN_MAP,
-        ["K", "V"], [map_k_id, map_v_id], [], ["clone"])
-    let set_t_id = env.fresh_var_id()
-    add_builtin_impl(env, sink, "Clone", BUILTIN_SET,
-        ["T"], [set_t_id], [], ["clone"])
+    // List/Map/Set Clone impls are ordinary std bodies. Their element/key/value
+    // Clone evidence must remain visible to Core and ResourcePlanner.
 }
 
 // ============================================================
@@ -1168,7 +1416,7 @@ fn register_option_clone(mut env: TypeEnv, sink: CollectingSink) {
     let t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Clone", BUILTIN_OPTION, ["T"], [t_id],
         [BuiltinPredicateSpec { subject_param_index: 0, trait_name: "Clone" }],
-        ["clone"])
+        [builtin_impl_method("clone")])
 }
 
 // ============================================================
@@ -1187,9 +1435,26 @@ fn register_ord_trait(mut env: TypeEnv, sink: CollectingSink) {
             TraitMethodDef { name: "cmp", method_ref: builtin_trait_method(owner_ref, 0, 0, "cmp"), ty: cmp_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] }
         ], [], [])
 
-    for prim in ["Int", "Float", "Str", "Bool"] {
-        add_builtin_impl(env, sink, "Ord", prim, [], [], [], ["cmp"])
-    }
+    add_builtin_impl(env, sink, "Ord", "Int", [], [], [], [
+        builtin_intrinsic_method("cmp", BUILTIN_METHOD_INT_CMP,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), []))])
+    add_builtin_impl(env, sink, "Ord", "Float", [], [], [], [
+        builtin_intrinsic_method("cmp", BUILTIN_METHOD_FLOAT_CMP,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), []))])
+    add_builtin_impl(env, sink, "Ord", "Str", [], [], [], [
+        builtin_intrinsic_method("cmp", BUILTIN_METHOD_STR_CMP,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), []))])
+    add_builtin_impl(env, sink, "Ord", "Bool", [], [], [], [
+        builtin_intrinsic_method("cmp", BUILTIN_METHOD_BOOL_CMP,
+            builtin_resource_contract(
+                [callable_resource_role_read(), callable_resource_role_read()],
+                callable_resource_role_read(), []))])
 }
 
 // ============================================================
@@ -1209,27 +1474,41 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
         ], [], [])
 
     // Primitive impls
-    for prim in ["Int", "Float", "Str", "Bool"] {
-        add_builtin_impl(env, sink, "Debug", prim, [], [], [], ["debug"])
-    }
+    add_builtin_impl(env, sink, "Debug", "Int", [], [], [], [
+        builtin_intrinsic_method("debug", BUILTIN_METHOD_INT_DEBUG,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_consume(), []))])
+    add_builtin_impl(env, sink, "Debug", "Float", [], [], [], [
+        builtin_intrinsic_method("debug", BUILTIN_METHOD_FLOAT_DEBUG,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_consume(), []))])
+    add_builtin_impl(env, sink, "Debug", "Str", [], [], [], [
+        builtin_intrinsic_method("debug", BUILTIN_METHOD_STR_DEBUG,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_consume(), []))])
+    add_builtin_impl(env, sink, "Debug", "Bool", [], [], [], [
+        builtin_intrinsic_method("debug", BUILTIN_METHOD_BOOL_DEBUG,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_consume(), []))])
 
     // List<T: Debug> Debug impl
     let list_t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Debug", BUILTIN_LIST,
         ["T"], [list_t_id],
         [BuiltinPredicateSpec { subject_param_index: 0, trait_name: "Debug" }],
-        ["debug"])
+        [builtin_impl_method("debug")])
 
     // Map<K, V> Debug impl (no bounds required in TS source)
     let map_k_id = env.fresh_var_id()
     let map_v_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Debug", BUILTIN_MAP,
-        ["K", "V"], [map_k_id, map_v_id], [], ["debug"])
+        ["K", "V"], [map_k_id, map_v_id], [],
+        [builtin_impl_method("debug")])
 
     // Set<T> Debug impl (no bounds required in TS source)
     let set_t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Debug", BUILTIN_SET,
-        ["T"], [set_t_id], [], ["debug"])
+        ["T"], [set_t_id], [], [builtin_impl_method("debug")])
 }
 
 // ============================================================
@@ -1240,7 +1519,7 @@ fn register_option_debug(mut env: TypeEnv, sink: CollectingSink) {
     let t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Debug", BUILTIN_OPTION, ["T"], [t_id],
         [BuiltinPredicateSpec { subject_param_index: 0, trait_name: "Debug" }],
-        ["debug"])
+        [builtin_impl_method("debug")])
 }
 
 // ============================================================
@@ -1259,9 +1538,18 @@ fn register_hash_trait(mut env: TypeEnv, sink: CollectingSink) {
             TraitMethodDef { name: "hash", method_ref: builtin_trait_method(owner_ref, 0, 0, "hash"), ty: hash_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
-    for prim in ["Int", "Str", "Bool"] {
-        add_builtin_impl(env, sink, "Hash", prim, [], [], [], ["hash"])
-    }
+    add_builtin_impl(env, sink, "Hash", "Int", [], [], [], [
+        builtin_intrinsic_method("hash", BUILTIN_METHOD_INT_HASH,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_read(), []))])
+    add_builtin_impl(env, sink, "Hash", "Str", [], [], [], [
+        builtin_intrinsic_method("hash", BUILTIN_METHOD_STR_HASH,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_read(), []))])
+    add_builtin_impl(env, sink, "Hash", "Bool", [], [], [], [
+        builtin_intrinsic_method("hash", BUILTIN_METHOD_BOOL_HASH,
+            builtin_resource_contract([callable_resource_role_read()],
+                callable_resource_role_read(), []))])
 }
 
 // ============================================================
@@ -1370,7 +1658,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_LIST,
         none, ["T"], [t_id], [],
-        methods, map_new(),
+        methods, map_new(), map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_LIST_HOF_FALLBACK))
 }
@@ -1463,7 +1751,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_MAP,
         none, ["K", "V"], [unbounded_k_id, unbounded_v_id], [],
-        unbounded_methods, map_new(),
+        unbounded_methods, map_new(), map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_MAP_HOF_UNBOUNDED))
     install_builtin_method_owner(
@@ -1475,7 +1763,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
             BuiltinPredicateSpec {
                 subject_param_index: 0, trait_name: "Eq"
             }
-        ], bounded_methods, map_new(),
+        ], bounded_methods, map_new(), map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_MAP_HOF_BOUNDED))
 }
@@ -1567,7 +1855,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
     install_builtin_method_owner(
         env, sink, BUILTIN_SET,
         none, ["T"], [unbounded_t_id], [],
-        unbounded_methods, map_new(),
+        unbounded_methods, map_new(), map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_SET_HOF_UNBOUNDED))
     install_builtin_method_owner(
@@ -1579,7 +1867,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
             BuiltinPredicateSpec {
                 subject_param_index: 0, trait_name: "Eq"
             }
-        ], bounded_methods, map_new(),
+        ], bounded_methods, map_new(), map_new(),
         builtin_impl_provider_site_from_tag(
             BUILTIN_PROVIDER_SET_HOF_BOUNDED))
 }
@@ -1631,13 +1919,22 @@ fn register_option_hof(mut env: TypeEnv, sink: CollectingSink) {
         def_id: none
     })
     let mut intrinsics: Map<Str, IntrinsicRef> = map_new()
-    install_intrinsic(intrinsics, "map", BUILTIN_METHOD_OPTION_MAP)
-    install_intrinsic(intrinsics, "and_then", BUILTIN_METHOD_OPTION_AND_THEN)
-    install_intrinsic(
-        intrinsics, "unwrap_or_else", BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE)
+    let mut resources: Map<Str, CallableResourceContractFact> = map_new()
+    install_intrinsic_contract(intrinsics, resources, "map",
+        BUILTIN_METHOD_OPTION_MAP, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(intrinsics, resources, "and_then",
+        BUILTIN_METHOD_OPTION_AND_THEN, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(intrinsics, resources, "unwrap_or_else",
+        BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), [0]))
     install_builtin_method_owner(
         env, sink, BUILTIN_OPTION,
-        none, [], [], [], methods, intrinsics,
+        none, [], [], [], methods, intrinsics, resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_OPTION_HOF))
 }
 
@@ -1768,6 +2065,6 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
     })
     install_builtin_method_owner(
         env, sink, "Ptr",
-        none, [], [], [], methods, map_new(),
+        none, [], [], [], methods, map_new(), map_new(),
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_PTR_CORE))
 }

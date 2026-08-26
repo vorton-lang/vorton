@@ -9,14 +9,15 @@
 // declaration order (audit #237) — the emitted .c is byte-identical across
 // runs.
 
-use types::{Type, Effect, EffectRow, effect_kind_name}
+use types::{Type}
 use ast::{Span, UseDecl, UseImport}
 use hir::{HExpr, HStmt, HDecl, HParam, HProgram, HStructField, HEnumVariant,
-    HEffectOp, TraitBound, evidence_param_name, trait_bound_param_name,
+    TraitBound, trait_bound_param_name,
     variant_ctor_name, compare_by_first, hexpr_type, trait_dict_name,
     scan_trait_method_order, type_contains_extern_handle}
 use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTypedRef,
     CEmitState, new_c_ctx, c_emit, c_raw, c_param, c_param_def,
+    c_param_semantic_slot, c_exact_slot_c_name,
     c_local, c_mangle_fn,
     c_mangle_fn_with_prefix, c_mangle_method, c_sanitize, c_symbol_for_fn_key, c_symbol_fragment,
     c_line_directive,
@@ -24,12 +25,15 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTy
     get_or_assign_c_typeid, is_runtime_symbol, fresh_tmp,
     fresh_label, c_push_fn, c_pop_fn, c_global_cstr, c_ref_c_name,
     c_enable_identity_ledger, c_identity_ledger_text}
-use codegen_c_expr::{gen_c_expr, emit_c_stmt, ensure_c_dict_getter}
-use effect_analysis::{extract_effect_names, collect_fn_callees}
+use codegen_c_expr::{gen_c_expr, emit_c_stmt, ensure_c_dict_getter,
+    c_exact_mut_symbol_key}
 use ir_identity::{
-    symbol_ref_canonical_payload,
+    slot_ref_stable_key,
     impl_method_ref_callable_slot_index
 }
+use ir_inventory::{ExecutableRef, HandledEvidenceRef,
+    executable_ref_is_named, executable_ref_named_symbol,
+    handled_evidence_binding, binder_entry_slot}
 use resolver::{module_prefix}
 
 // ============================================================
@@ -68,14 +72,8 @@ pub fn generate_c(
     // Built-in enums (Option/Result ctors — Option layout {i64 tag, ptr payload}).
     c_register_builtin_enums(ctx)
 
-    // Effect scan + transitive closure (B-089 G-b) — determines evidence
-    // param counts, which are part of every C prototype.
-    scan_fn_effects_c(program.decls, ctx.local_fn_effects)
-    scan_fn_mut_params_c(program.decls, ctx.fn_mut_params)
-    compute_transitive_effect_closure_c(program.decls, ctx.local_fn_effects)
-
-    // Step 6: effect op declarations (slot-order contract).
-    register_effect_ops_c(program.decls, ctx.effect_ops)
+    scan_fn_mut_params_c(
+        program.decls, program.boxed_vars, ctx.fn_mut_params)
 
     // First pass: prototypes + registries (enum variant ctors are declared
     // AND defined here — their bodies depend on nothing but the registries).
@@ -119,6 +117,8 @@ pub fn generate_c_project(
     extern_forward_bridges: Map<Str, Str>
 ) -> Bool {
     let mut ctx = new_c_ctx(emit_lines)
+    let mut exact_body_mut_keys: Map<Str, Str> = map_new()
+    let mut exact_extern_mut_keys: Map<Str, Str> = map_new()
     for entry in extern_forward_bridges.entries() {
         let (source, target) = entry
         ctx.extern_forward_bridges.insert(c_mangle_fn(source), c_mangle_fn(target))
@@ -144,18 +144,17 @@ pub fn generate_c_project(
         for sd in program.static_dicts { ctx.static_dict_defs.insert(sd.name, sd) }
         // Trait method slot order + supertraits (hir.ring single source).
         scan_trait_method_order(program.decls, ctx.trait_method_order, ctx.trait_supertraits)
-        scan_fn_effects_with_prefix_c(program.decls, some(prefix), ctx.local_fn_effects)
-        scan_fn_mut_params_with_prefix_c(program.decls, some(prefix), ctx.fn_mut_params)
-        // B-090: effect-op declaration order (slot contract, all modules).
-        register_effect_ops_c(program.decls, ctx.effect_ops)
+        scan_fn_mut_params_with_prefix_c(
+            program.decls, some(prefix), program.boxed_vars,
+            ctx.fn_mut_params, exact_body_mut_keys,
+            exact_extern_mut_keys)
     }
 
-    c_register_builtin_enums(ctx)
+    alias_project_extern_forward_mut_params_c(
+        extern_forward_bridges, exact_body_mut_keys,
+        exact_extern_mut_keys, ctx.fn_mut_params)
 
-    // Prefix/import-aware transitive effect closure.  Bare function names are
-    // not unique across modules, so both caller and callee use the exact same
-    // qualified registry key as forward declarations and body emission.
-    compute_project_effect_closure_c(modules, ctx.local_fn_effects)
+    c_register_builtin_enums(ctx)
 
     // First pass: forward declare all modules' functions with their module
     // prefix (registry keys ring_<prefix>$$_<name>, LLVM key parity; impl
@@ -279,7 +278,7 @@ fn collect_c_module_names_rec(decls: List<HDecl>, mut names: Set<Str>) {
                 for m in methods {
                     match m {
                         HDecl::Fn { name: mn, .. } => {
-                            // #177: qualified key matching scan_fn_effects_c
+                            // Impl methods use the shared qualified callable key.
                             names.insert("${target_type}_${mn}")
                         },
                         _ => {},
@@ -456,26 +455,25 @@ fn c_forward_declare(mut ctx: CCtx, decls: List<HDecl>) {
 fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?) {
     for decl in decls {
         match decl {
-            HDecl::Fn { name, params, effects, trait_bounds, .. } => {
+            HDecl::Fn { name, params, trait_bounds,
+                        handled_evidence_bindings, .. } => {
                 let mangled = match prefix {
                     some(p) => c_mangle_fn_with_prefix(p, name),
                     none => c_mangle_fn(name),
                 }
                 ctx.ring_callable_names.insert(mangled)
-                let effect_key = match prefix {
-                    some(_) => mangled,
-                    none => name,
-                }
-                c_declare_fn(ctx, mangled, effect_key, params, effects, trait_bounds)
+                c_declare_fn(ctx, mangled, params, trait_bounds,
+                    handled_evidence_bindings)
             },
             HDecl::Impl { target_type, trait_name, methods, .. } => {
                 for m in methods {
                     match m {
-                        HDecl::Fn { name: mn, params: mp, effects: me, trait_bounds: mtb, .. } => {
-                            // #177: qualified effect key matching scan_fn_effects_c.
+                        HDecl::Fn { name: mn, params: mp,
+                                    trait_bounds: mtb,
+                                    handled_evidence_bindings: mhe, .. } => {
                             let method_key = c_mangle_method(target_type, mn)
                             ctx.ring_callable_names.insert(method_key)
-                            c_declare_fn(ctx, method_key, "${target_type}_${mn}", mp, me, mtb)
+                            c_declare_fn(ctx, method_key, mp, mtb, mhe)
                         },
                         _ => {},
                     }
@@ -546,7 +544,7 @@ fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?
                 // checker; `::` sanitizes to `__` in c_mangle_fn.
                 c_forward_declare_with_prefix(ctx, md, prefix)
             },
-            HDecl::Effect { .. } => {},       // ops registry: register_effect_ops_c
+            HDecl::Effect { .. } => {},
             HDecl::ExternFn { name, abi_name, .. } => {
                 // C externs remain lazily declared at direct call sites, but
                 // first-class values need an exact declaration identity and a
@@ -694,15 +692,16 @@ fn c_emit_struct_ctor(mut ctx: CCtx, name: Str, fields: List<HStructField>) {
     ctx.fn_defs.push(def.join("\n"))
 }
 
-fn c_declare_fn(mut ctx: CCtx, mangled: Str, effect_key: Str, params: List<HParam>, effects: EffectRow, trait_bounds: List<TraitBound>) {
-    // Effective effects: transitive closure result wins over the decl row.
-    let effective = match ctx.local_fn_effects.get(effect_key) {
-        some(e) => e,
-        none => effects,
-    }
-    let ev_names = extract_effect_names(effective)
+fn c_declare_fn(
+    mut ctx: CCtx, mangled: Str, params: List<HParam>,
+    trait_bounds: List<TraitBound>,
+    handled_evidence: List<HandledEvidenceRef>
+) {
     let mut ev_params: List<Str> = []
-    for en in ev_names { ev_params.push(evidence_param_name(en)) }
+    for evidence in handled_evidence {
+        ev_params.push(slot_ref_stable_key(
+            binder_entry_slot(handled_evidence_binding(evidence))))
+    }
     ctx.fn_evidence_params.insert(mangled, ev_params)
 
     // Dedupe (multi-decl re-declaration parity with forward_declare_fn_with_name).
@@ -742,14 +741,20 @@ fn c_declare_fn(mut ctx: CCtx, mangled: Str, effect_key: Str, params: List<HPara
 
 fn emit_c_decl(mut ctx: CCtx, decl: HDecl) {
     match decl {
-        HDecl::Fn { name, params, effects, body, trait_bounds, span, .. } => {
-            emit_c_fn_body(ctx, name, params, effects, body, trait_bounds, none, span)
+        HDecl::Fn { name, params, body, trait_bounds,
+                    handled_evidence_bindings, span, .. } => {
+            emit_c_fn_body(ctx, name, params, body, trait_bounds,
+                handled_evidence_bindings, none, span)
         },
         HDecl::Impl { target_type, trait_name, methods, .. } => {
             for m in methods {
                 match m {
-                    HDecl::Fn { name: mn, params: mp, effects: me, body: mb, trait_bounds: mtb, span: msp, .. } => {
-                        emit_c_fn_body(ctx, mn, mp, me, mb, mtb, some(target_type), msp)
+                    HDecl::Fn { name: mn, params: mp, body: mb,
+                                trait_bounds: mtb,
+                                handled_evidence_bindings: mhe,
+                                span: msp, .. } => {
+                        emit_c_fn_body(ctx, mn, mp, mb, mtb, mhe,
+                            some(target_type), msp)
                     },
                     _ => {},
                 }
@@ -816,7 +821,12 @@ fn end_c_fn(mut ctx: CCtx, mangled: Str, params_str: Str, saved: Map<Str, Str>) 
     ctx.current_fn_name = ""
 }
 
-fn emit_c_fn_body(mut ctx: CCtx, name: Str, params: List<HParam>, effects: EffectRow, body: HExpr, trait_bounds: List<TraitBound>, impl_type: Str?, span: Span) {
+fn emit_c_fn_body(
+    mut ctx: CCtx, name: Str, params: List<HParam>, body: HExpr,
+    trait_bounds: List<TraitBound>,
+    handled_evidence: List<HandledEvidenceRef>,
+    impl_type: Str?, span: Span
+) {
     let mangled = match impl_type {
         some(t) => c_mangle_method(t, name),
         none => {
@@ -853,22 +863,10 @@ fn emit_c_fn_body(mut ctx: CCtx, name: Str, params: List<HParam>, effects: Effec
         let cn = c_param(ctx, dn)
         sig_parts.push("void* ${cn}")
     }
-    let effect_key = match impl_type {
-        some(t) => "${t}_${name}",
-        none => mangled,
-    }
-    // Single-file scans retain their historical bare keys.
-    let lookup_effect_key = match ctx.module_prefix {
-        some(_) => effect_key,
-        none => name,
-    }
-    let effective = match ctx.local_fn_effects.get(lookup_effect_key) {
-        some(e) => e,
-        none => effects,
-    }
-    for en in extract_effect_names(effective) {
-        let ep = evidence_param_name(en)
-        let cn = c_param(ctx, ep)
+    for evidence in handled_evidence {
+        let slot = binder_entry_slot(handled_evidence_binding(evidence))
+        let cn = c_exact_slot_c_name(c_param_semantic_slot(
+            ctx, slot, "__handled_evidence"))
         sig_parts.push("void* ${cn}")
     }
     let params_str = if sig_parts.len() == 0 { "void" } else { sig_parts.join(", ") }
@@ -1140,72 +1138,8 @@ fn emit_c_main_wrapper_common(mut ctx: CCtx, ring_main_key: Str, warn_no_main: B
     ctx.fn_defs.push(lines.join("\n"))
 }
 
-// ============================================================
-// Step 6: effect registries.
-// ============================================================
-
-// Port of register_effect_ops_llvm — effect name -> declared ops (slot order).
-fn register_effect_ops_c(decls: List<HDecl>, mut effect_ops: Map<Str, List<HEffectOp>>) {
-    for decl in decls {
-        match decl {
-            HDecl::Effect { name, ops, .. } => {
-                effect_ops.insert(name, ops)
-            },
-            HDecl::ModBlock { decls: md, .. } => {
-                register_effect_ops_c(md, effect_ops)
-            },
-            _ => {},
-        }
-    }
-}
-
-// ============================================================
-// Effect scanning — C-native source of truth for local/transitive effect
-// discovery and local-name collection.
-// ============================================================
-
-fn scan_fn_effects_c(decls: List<HDecl>, mut local_fn_effects: Map<Str, EffectRow>) {
-    scan_fn_effects_with_prefix_c(decls, none, local_fn_effects)
-}
-
-// In project mode top-level functions are keyed exactly like the function
-// registry.  Impl methods retain the shared Type_method ABI used by both
-// backends.
-fn scan_fn_effects_with_prefix_c(decls: List<HDecl>, prefix: Str?, mut local_fn_effects: Map<Str, EffectRow>) {
-    for decl in decls {
-        match decl {
-            HDecl::Fn { name, effects, .. } => {
-                if effects.effects.len() > 0 {
-                    let key = match prefix {
-                        some(p) => c_mangle_fn_with_prefix(p, name),
-                        none => name,
-                    }
-                    local_fn_effects.insert(key, effects)
-                }
-            },
-            HDecl::Impl { target_type, methods, .. } => {
-                for m in methods {
-                    match m {
-                        HDecl::Fn { name: mn, effects: me, .. } => {
-                            if me.effects.len() > 0 {
-                                let key = "${target_type}_${mn}"
-                                local_fn_effects.insert(key, me)
-                            }
-                        },
-                        _ => {},
-                    }
-                }
-            },
-            HDecl::ModBlock { decls: md, .. } => {
-                scan_fn_effects_with_prefix_c(md, prefix, local_fn_effects)
-            },
-            _ => {},
-        }
-    }
-}
-
-// A value type (Int/Float/Bool/Str) is the only kind a `mut` param boxes
-// into a CELL (#B-087 gap 5).
+// A bodyless exact extern has no DefId/boxed-var body authority. Its declared
+// mut value type determines whether an internal forward uses the CELL ABI.
 fn c_is_value_type(t: Type) -> Bool {
     match t {
         Type::IntType => true,
@@ -1216,7 +1150,26 @@ fn c_is_value_type(t: Type) -> Bool {
     }
 }
 
-fn mut_param_flags_c(params: List<HParam>) -> List<Bool> {
+// A defined function's call ABI must match the body ABI emitted by
+// `gen_c_ident`: a parameter is a CELL exactly when its DefId is present in
+// the module's boxed-var set.  Re-deriving that decision from the parameter
+// type misses representation changes such as closure-capture boxing.
+fn body_mut_param_flags_c(
+    params: List<HParam>, boxed_vars: Set<Int>
+) -> List<Bool> {
+    let mut flags: List<Bool> = []
+    for p in params {
+        match p.def_id {
+            some(def_id) => flags.push(boxed_vars.contains(def_id)),
+            none => flags.push(false)
+        }
+    }
+    flags
+}
+
+// Bodyless extern declarations have no parameter DefIds/body slots.  Their
+// declared mut-value ABI remains the authority for an exact internal forward.
+fn declared_mut_param_flags_c(params: List<HParam>) -> List<Bool> {
     let mut flags: List<Bool> = []
     for p in params {
         if p.name == "self" || !p.is_mutable {
@@ -1228,176 +1181,194 @@ fn mut_param_flags_c(params: List<HParam>) -> List<Bool> {
     flags
 }
 
-fn scan_fn_mut_params_c(decls: List<HDecl>, mut fn_mut_params: Map<Str, List<Bool>>) {
-    scan_fn_mut_params_with_prefix_c(decls, none, fn_mut_params)
+fn scan_fn_mut_params_c(
+    decls: List<HDecl>, boxed_vars: Set<Int>,
+    mut fn_mut_params: Map<Str, List<Bool>>
+) {
+    let mut exact_body_mut_keys: Map<Str, Str> = map_new()
+    let mut exact_extern_mut_keys: Map<Str, Str> = map_new()
+    scan_fn_mut_params_with_prefix_c(
+        decls, none, boxed_vars, fn_mut_params,
+        exact_body_mut_keys, exact_extern_mut_keys)
 }
 
-fn scan_fn_mut_params_with_prefix_c(decls: List<HDecl>, prefix: Str?, mut fn_mut_params: Map<Str, List<Bool>>) {
+fn mut_param_flags_same_c(
+    left: List<Bool>, right: List<Bool>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        match (left.get(index), right.get(index)) {
+            (some(a), some(b)) => if a != b { return false },
+            _ => return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn register_exact_mut_flags_c(
+    mut fn_mut_params: Map<Str, List<Bool>>,
+    exact_key: Str, flags: List<Bool>
+) {
+    match fn_mut_params.get(exact_key) {
+        some(existing) => {
+            if !mut_param_flags_same_c(existing, flags) {
+                panic("C mut ABI: duplicate exact executable has different arity/flags")
+            }
+            // Same exact declaration may be carried idempotently (for
+            // example the shared prelude). Validate, but never overwrite.
+        },
+        none => fn_mut_params.insert(exact_key, flags)
+    }
+}
+
+fn register_exact_mut_physical_key_c(
+    mut physical_keys: Map<Str, Str>, physical_key: Str, exact_key: Str
+) {
+    match physical_keys.get(physical_key) {
+        some(existing) => if existing != exact_key {
+            panic("C mut ABI: one physical callable names multiple exact executables")
+        },
+        none => physical_keys.insert(physical_key, exact_key)
+    }
+}
+
+fn insert_exact_body_mut_params_c(
+    mut fn_mut_params: Map<Str, List<Bool>>,
+    executable: ExecutableRef, params: List<HParam>,
+    boxed_vars: Set<Int>, physical_key: Str,
+    mut exact_body_mut_keys: Map<Str, Str>
+) {
+    if !executable_ref_is_named(executable) {
+        panic("C mut ABI: defined HDecl executable is not named")
+    }
+    let exact_key = c_exact_mut_symbol_key(
+        executable_ref_named_symbol(executable))
+    register_exact_mut_flags_c(fn_mut_params, exact_key,
+        body_mut_param_flags_c(params, boxed_vars))
+    register_exact_mut_physical_key_c(
+        exact_body_mut_keys, physical_key, exact_key)
+}
+
+fn insert_exact_declared_mut_params_c(
+    mut fn_mut_params: Map<Str, List<Bool>>,
+    executable: ExecutableRef, params: List<HParam>, physical_key: Str,
+    mut exact_extern_mut_keys: Map<Str, Str>
+) {
+    if !executable_ref_is_named(executable) {
+        panic("C mut ABI: extern HDecl executable is not named")
+    }
+    let exact_key = c_exact_mut_symbol_key(
+        executable_ref_named_symbol(executable))
+    register_exact_mut_flags_c(
+        fn_mut_params, exact_key, declared_mut_param_flags_c(params))
+    register_exact_mut_physical_key_c(
+        exact_extern_mut_keys, physical_key, exact_key)
+}
+
+fn require_exact_mut_physical_key_c(
+    keys: Map<Str, Str>, physical_key: Str, role: Str
+) -> Str {
+    match keys.get(physical_key) {
+        some(exact_key) => exact_key,
+        none => panic(
+            "C mut ABI: extern-forward ${role} has no exact HDecl")
+    }
+}
+
+fn require_exact_mut_flags_c(
+    flags: Map<Str, List<Bool>>, exact_key: Str, role: Str
+) -> List<Bool> {
+    match flags.get(exact_key) {
+        some(values) => values,
+        none => panic(
+            "C mut ABI: extern-forward ${role} has no exact flags")
+    }
+}
+
+fn alias_project_extern_forward_mut_params_c(
+    extern_forward_bridges: Map<Str, Str>,
+    exact_body_mut_keys: Map<Str, Str>,
+    exact_extern_mut_keys: Map<Str, Str>,
+    mut fn_mut_params: Map<Str, List<Bool>>
+) {
+    for entry in extern_forward_bridges.entries() {
+        let (source, target) = entry
+        let source_exact = require_exact_mut_physical_key_c(
+            exact_extern_mut_keys, c_mangle_fn(source), "source")
+        let target_exact = require_exact_mut_physical_key_c(
+            exact_body_mut_keys, c_mangle_fn(target), "target")
+        if source_exact == target_exact {
+            panic("C mut ABI: extern-forward aliases one exact declaration to itself")
+        }
+        let source_flags = require_exact_mut_flags_c(
+            fn_mut_params, source_exact, "source")
+        let target_flags = require_exact_mut_flags_c(
+            fn_mut_params, target_exact, "target")
+        if source_flags.len() != target_flags.len() {
+            panic("C mut ABI: extern-forward source/target arity differs")
+        }
+        // This deliberate replacement is the project bridge cutover: exact
+        // calls to the declaration now share the provider body's CELL ABI.
+        // Genuine externs are absent from the bridge map and keep their
+        // declaration-derived flags registered above.
+        fn_mut_params.insert(source_exact, target_flags)
+    }
+}
+
+fn scan_fn_mut_params_with_prefix_c(
+    decls: List<HDecl>, prefix: Str?, boxed_vars: Set<Int>,
+    mut fn_mut_params: Map<Str, List<Bool>>,
+    mut exact_body_mut_keys: Map<Str, Str>,
+    mut exact_extern_mut_keys: Map<Str, Str>
+) {
     for decl in decls {
         match decl {
-            HDecl::Fn { name, params, .. } => {
+            HDecl::Fn { name, executable_ref, params, .. } => {
                 let key = match prefix {
                     some(p) => c_mangle_fn_with_prefix(p, name),
                     none => name,
                 }
-                fn_mut_params.insert(key, mut_param_flags_c(params))
+                fn_mut_params.insert(
+                    key, body_mut_param_flags_c(params, boxed_vars))
+                insert_exact_body_mut_params_c(
+                    fn_mut_params, executable_ref, params, boxed_vars,
+                    key, exact_body_mut_keys)
+            },
+            HDecl::ExternFn { name, executable_ref, params, .. } => {
+                let key = match prefix {
+                    some(p) => c_mangle_fn_with_prefix(p, name),
+                    none => c_mangle_fn(name)
+                }
+                insert_exact_declared_mut_params_c(
+                    fn_mut_params, executable_ref, params, key,
+                    exact_extern_mut_keys)
             },
             HDecl::Impl { target_type, methods, .. } => {
                 for m in methods {
                     match m {
-                        HDecl::Fn { name: mn, params: mp, .. } => {
+                        HDecl::Fn {
+                            name: mn, executable_ref, params: mp, ..
+                        } => {
                             let ufcs_name = "${target_type}_${mn}"
-                            fn_mut_params.insert(ufcs_name, mut_param_flags_c(mp))
+                            fn_mut_params.insert(ufcs_name,
+                                body_mut_param_flags_c(mp, boxed_vars))
+                            insert_exact_body_mut_params_c(
+                                fn_mut_params, executable_ref, mp,
+                                boxed_vars, ufcs_name,
+                                exact_body_mut_keys)
                         },
                         _ => {},
                     }
                 }
             },
             HDecl::ModBlock { decls: md, .. } => {
-                scan_fn_mut_params_with_prefix_c(md, prefix, fn_mut_params)
+                scan_fn_mut_params_with_prefix_c(
+                    md, prefix, boxed_vars, fn_mut_params,
+                    exact_body_mut_keys, exact_extern_mut_keys)
             },
             _ => {},
-        }
-    }
-}
-
-fn collect_local_names_rec_c(decls: List<HDecl>, mut names: Set<Str>) {
-    for decl in decls {
-        match decl {
-            HDecl::Fn { name, .. } => { names.insert(name) },
-            HDecl::Impl { target_type, methods, .. } => {
-                for m in methods {
-                    match m {
-                        HDecl::Fn { name: mn, .. } => { names.insert("${target_type}_${mn}") },
-                        _ => {},
-                    }
-                }
-            },
-            HDecl::ModBlock { decls: md, .. } => { collect_local_names_rec_c(md, names) },
-            _ => {},
-        }
-    }
-}
-
-fn compute_transitive_effect_closure_c(decls: List<HDecl>, mut local_fn_effects: Map<Str, EffectRow>) {
-    if local_fn_effects.len() == 0 { return }
-    let mut local_names: Set<Str> = set_new()
-    collect_local_names_rec_c(decls, local_names)
-    let mut fn_callees: Map<Str, Set<Str>> = map_new()
-    collect_fn_callees(decls, local_names, fn_callees)
-    propagate_transitive_effects_c(fn_callees, local_fn_effects)
-}
-
-// Record whether a callee-analysis key denotes a top-level/module function or
-// a globally-keyed impl method.  `collect_fn_callees` intentionally emits bare
-// HIR names; this metadata lets project mode translate them to registry keys.
-fn collect_project_callable_kinds_c(decls: List<HDecl>, mut top_level: Set<Str>, mut impl_methods: Set<Str>) {
-    for decl in decls {
-        match decl {
-            HDecl::Fn { name, .. } => { top_level.insert(name) },
-            HDecl::Impl { target_type, methods, .. } => {
-                for m in methods {
-                    match m {
-                        HDecl::Fn { name, .. } => { impl_methods.insert("${target_type}_${name}") },
-                        _ => {},
-                    }
-                }
-            },
-            HDecl::ModBlock { decls: md, .. } => collect_project_callable_kinds_c(md, top_level, impl_methods),
-            _ => {},
-        }
-    }
-}
-
-fn project_effect_key_c(prefix: Str, name: Str, top_level: Set<Str>, impl_methods: Set<Str>, imports: Map<Str, Str>) -> Str {
-    match imports.get(name) {
-        some(key) => key,
-        none => {
-            if impl_methods.contains(name) {
-                name
-            } else if top_level.contains(name) {
-                c_mangle_fn_with_prefix(prefix, name)
-            } else {
-                name
-            }
-        },
-    }
-}
-
-fn compute_project_effect_closure_c(modules: List<(Str, HProgram, List<UseDecl>)>, mut local_fn_effects: Map<Str, EffectRow>) {
-    let mut qualified_callees: Map<Str, Set<Str>> = map_new()
-    for m in modules {
-        let (prefix, program, uses) = m
-        let imports = build_c_imports_map(uses)
-        let mut top_level: Set<Str> = set_new()
-        let mut impl_methods: Set<Str> = set_new()
-        collect_project_callable_kinds_c(program.decls, top_level, impl_methods)
-
-        // The shared traversal only records names present in local_names.
-        // Imported aliases are callable too, so include them for this module.
-        let mut analysis_names: Set<Str> = set_new()
-        collect_local_names_rec_c(program.decls, analysis_names)
-        let mut sorted_imports = imports.entries()
-        sorted_imports.sort_by(compare_by_first)
-        for entry in sorted_imports { analysis_names.insert(entry.0) }
-
-        let mut bare_callees: Map<Str, Set<Str>> = map_new()
-        collect_fn_callees(program.decls, analysis_names, bare_callees)
-        let mut sorted_callers = bare_callees.entries()
-        sorted_callers.sort_by(compare_by_first)
-        for entry in sorted_callers {
-            let (caller, callees) = entry
-            let caller_key = project_effect_key_c(prefix, caller, top_level, impl_methods, imports)
-            let mut mapped: Set<Str> = set_new()
-            let mut sorted_callees = callees.to_list()
-            sorted_callees.sort()
-            for callee in sorted_callees {
-                mapped.insert(project_effect_key_c(prefix, callee, top_level, impl_methods, imports))
-            }
-            qualified_callees.insert(caller_key, mapped)
-        }
-    }
-    propagate_transitive_effects_c(qualified_callees, local_fn_effects)
-}
-
-fn propagate_transitive_effects_c(fn_callees: Map<Str, Set<Str>>, mut local_fn_effects: Map<Str, EffectRow>) {
-    let mut changed = true
-    while changed {
-        changed = false
-        let mut sorted_callees = fn_callees.entries()
-        sorted_callees.sort_by(compare_by_first)
-        for entry in sorted_callees {
-            let (name, callees) = entry
-            let mut sorted_callee_names = callees.to_list()
-            sorted_callee_names.sort()
-            for callee in sorted_callee_names {
-                match local_fn_effects.get(callee) {
-                    some(callee_effects) => {
-                        match local_fn_effects.get(name) {
-                            none => {
-                                let mut effs: List<Effect> = []
-                                for e in callee_effects.effects { effs.push(e) }
-                                local_fn_effects.insert(name, EffectRow { effects: effs, tail: none })
-                                changed = true
-                            },
-                            some(current) => {
-                                for e in callee_effects.effects {
-                                    let ename = effect_kind_name(e)
-                                    let mut found = false
-                                    for ce in current.effects {
-                                        if effect_kind_name(ce) == ename { found = true }
-                                    }
-                                    if found == false {
-                                        current.effects.push(e)
-                                        changed = true
-                                    }
-                                }
-                            },
-                        }
-                    },
-                    none => {},
-                }
-            }
         }
     }
 }

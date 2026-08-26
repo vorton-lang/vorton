@@ -1276,13 +1276,22 @@ extern "C" void* ring_Option_none() {
 
 extern "C" void* ring_Option_unwrap_or(void* opt, void* default_val) {
     int64_t tag = *(int64_t*)opt;
-    if (tag == 0) return *((void**)((int64_t*)opt + 1));
+    if (tag == 0) {
+        void* value = *((void**)((int64_t*)opt + 1));
+        ring_dup(value);
+        return value;
+    }
+    ring_dup(default_val);
     return default_val;
 }
 
 extern "C" void* ring_Option_unwrap(void* opt) {
     int64_t tag = *(int64_t*)opt;
-    if (tag == 0) return *((void**)((int64_t*)opt + 1));
+    if (tag == 0) {
+        void* value = *((void**)((int64_t*)opt + 1));
+        ring_dup(value);
+        return value;
+    }
     fprintf(stderr, "ring panic: unwrap() called on None\n");
     exit(1);
     return nullptr;
@@ -1326,14 +1335,23 @@ extern "C" void* ring_Option_and_then(void* opt, void* closure) {
 // for type-correctness; ring_raise never returns.
 extern "C" void* ring_Option_to_fail(void* opt, void* err) {
     int64_t tag = *(int64_t*)opt;
-    if (tag == 0) return *((void**)((int64_t*)opt + 1));
+    if (tag == 0) {
+        void* value = *((void**)((int64_t*)opt + 1));
+        ring_dup(value);
+        return value;
+    }
+    ring_dup(err);
     ring_raise(err);
     return nullptr;
 }
 
 extern "C" void* ring_Option_unwrap_or_else(void* opt, void* closure) {
     int64_t tag = *(int64_t*)opt;
-    if (tag == 0) return *((void**)((int64_t*)opt + 1));
+    if (tag == 0) {
+        void* value = *((void**)((int64_t*)opt + 1));
+        ring_dup(value);
+        return value;
+    }
     RingClosure* cl = (RingClosure*)closure;
     typedef void* (*ring_fn_0)(void* env);
     ring_fn_0 fn = (ring_fn_0)cl->fn_ptr;
@@ -2435,6 +2453,18 @@ static void* ring_Str_debug(void* /*env*/, void* val) {
     result += "\"";
     return make_ring_str(result.c_str(), (int64_t)result.size());
 }
+extern "C" void* ring_cl_debug_int(void* env, void* val) {
+    return ring_Int_debug(env, val);
+}
+extern "C" void* ring_cl_debug_float(void* env, void* val) {
+    return ring_Float_debug(env, val);
+}
+extern "C" void* ring_cl_debug_str(void* env, void* val) {
+    return ring_Str_debug(env, val);
+}
+extern "C" void* ring_cl_debug_bool(void* env, void* val) {
+    return ring_Bool_debug(env, val);
+}
 static void* ring_make_debug_dict(void* debugfn) {
     // Debug dict: single `debug` closure at slot 0.
     // Same count-prefixed DICT_STATIC layout as Eq/Ord dicts.
@@ -2482,6 +2512,15 @@ static void* ring_cl_hash_str(void* /*env*/, void* val) {
 
 static void* ring_cl_hash_bool(void* /*env*/, void* val) {
     return ring_box_int(ring_unbox_int(val) ? 1LL : 0LL);
+}
+extern "C" void* ring_cl_hash_int_export(void* env, void* val) {
+    return ring_cl_hash_int(env, val);
+}
+extern "C" void* ring_cl_hash_str_export(void* env, void* val) {
+    return ring_cl_hash_str(env, val);
+}
+extern "C" void* ring_cl_hash_bool_export(void* env, void* val) {
+    return ring_cl_hash_bool(env, val);
 }
 
 static void* ring_make_hash_dict(void* hashfn) {

@@ -8,6 +8,7 @@ use hir::{HDecl, HParam, HTypeParam, HExpr, HStmt, HProgram, DerivedImpl, TraitB
     HDefaultSpecializationPlan, make_h_default_specialization_plan,
     make_h_delegate_method_plan, make_h_delegate_assoc_plan,
     make_h_delegate_typed_plan, method_call_ref_callee_identity,
+    h_type_param_source,
     DictRef, trait_dict_name,
     make_intrinsic_method_call_ref, make_concrete_method_call_ref,
     make_bound_method_call_ref,
@@ -15,6 +16,7 @@ use hir::{HDecl, HParam, HTypeParam, HExpr, HStmt, HProgram, DerivedImpl, TraitB
     hexpr_type, hexpr_effects, hexpr_span,
     remap_hir_handled_evidence,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
+use hir_exact::{make_static_dict_ref}
 use ir_identity::{SymbolRef, NominalFieldRef,
     nominal_field_ref_index, symbol_ref_same,
     ImplOwnerRef, ImplMethodRef,
@@ -30,6 +32,12 @@ use ir_identity::{SymbolRef, NominalFieldRef,
     path_role_declaration, make_source_slot_ref, slot_domain_lexical,
     make_named_callee_ref, make_local_callee_ref, make_symbol_origin_ref}
 use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
+    make_exact_static_dict_ref,
+    CallableResourceContractFact, CallableResourceRoleFact,
+    make_callable_resource_contract_fact,
+    callable_resource_contract_parameter_roles,
+    callable_resource_role_read, callable_resource_role_mutate,
+    callable_resource_role_consume,
     make_named_executable_ref,
     make_anonymous_executable_ref, executable_ref_named_symbol,
     effect_operation_ref_callable}
@@ -45,15 +53,19 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     delegate_child_provider_had_semantic_error,
     registered_trait_contract_handled_effects,
     has_impl, impl_target_symbol,
+    compiler_owned_extern_manifest_entry,
     install_method_core, replace_impl_method_core,
     impl_method_core_as_scheme, impl_method_core_from_scheme,
     impl_method_core_type,
     build_type_var_map}
+use extern_manifest::{compiler_extern_manifest_entry_executable,
+    compiler_extern_manifest_entry_resource}
 use union_find::{UnionFind}
 use unify::{empty_subst}
 use diagnostics::{DiagnosticContext, DiagnosticNote}
-use codes::{E0201, E0204, E0301, E0402, E0403, E0404, E0405, E0407, E0409, E0410, E0501, E0503, E0507, E0802, E0803}
+use codes::{E0201, E0204, E0301, E0402, E0403, E0404, E0405, E0407, E0501, E0503, E0507, E0802, E0803}
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileError,
+    validate_fn_bound_order,
     type_error, type_error_with_notes,
     unify_at, unify_at_noted, update_fn_effects,
     resolve_type_expr, resolve_self_type, resolve_dicts_from_scheme,
@@ -70,7 +82,6 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     current_handled_evidence_captures, resolve_handled_evidence,
     prepare_callable_handled_evidence,
     canonicalize_callable_handled_evidence,
-    record_core_parameter_fact, record_handled_evidence_type_source,
     current_identity_file_key, semantic_parameter_binder}
 use infer_helpers::{is_value_type}
 use resolver::{single_namespace_file_key}
@@ -547,9 +558,6 @@ fn record_nominal_core_parameters(
             })
             bounds.push(registered_trait_ref_symbol(trait_def.owner_ref))
         }
-        record_core_parameter_fact(
-            ctx, type_var_ids.get(index).unwrap(), owner,
-            index, type_params.len(), bounds)
         index = index + 1
     }
 }
@@ -655,7 +663,6 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
             panic("Core type producer: builtin effect has type parameters")
         }
     }
-    record_handled_evidence_type_source(ctx, def)
     HDecl::Effect {
         name: name, owner_ref: def.owner_ref, handled_ref: def.handled_ref,
         type_params: exact_h_type_params(
@@ -1027,6 +1034,7 @@ fn check_impl_decl_canonical(
                     let handled_uses = current_handled_evidence_bindings(ctx)
                     exit_executable_owner(ctx)
                     let dict_evidence = resolve_dicts_from_impl_owner(
+                        generated_executable,
                         ctx.sink, ctx.env, impl_bounds,
                         impl_owner, core, signature, ctx.subst, span)
                     default_specializations.push(
@@ -1183,7 +1191,8 @@ fn expand_delegate_impls(
                     let self_type = if type_params.len() > 0 {
                         let mut impl_tp_types: List<Type> = []
                         for tp in type_params {
-                            match ctx.type_param_scope.get(tp.name) {
+                            match ctx.type_param_scope.get(
+                                    h_type_param_source(tp).name) {
                                 some(tv) => impl_tp_types.push(tv),
                                 none => impl_tp_types.push(ctx.env.fresh_var())
                             }
@@ -1351,7 +1360,8 @@ fn expand_delegate_impls(
                                                     bound.type_param_var_id,
                                                 trait_name: bound.trait_name,
                                                 trait_ref: registered_trait_ref_symbol(
-                                                    trait_def.owner_ref)
+                                                    trait_def.owner_ref),
+                                                dict_ordinal: bound.dict_ordinal
                                             })
                                         }
                                     },
@@ -1400,6 +1410,26 @@ fn expand_delegate_impls(
                                                 none => none
                                             },
                                         none => none
+                                    }
+                                    let mut generated_method_type_var_ids: List<Int> = []
+                                    match resolved_method_scheme {
+                                        some(scheme) => {
+                                            if scheme.type_vars.len() <
+                                               tm.method_type_params.len() {
+                                                panic(
+                                                    "delegate HIR: method type parameter arity differs")
+                                            }
+                                            let start = scheme.type_vars.len() -
+                                                tm.method_type_params.len()
+                                            for index in start..scheme.type_vars.len() {
+                                                generated_method_type_var_ids.push(
+                                                    scheme.type_vars.get(index).unwrap())
+                                            }
+                                        },
+                                        none => if tm.method_type_params.len() != 0 {
+                                            panic(
+                                                "delegate HIR: generic method scheme is absent")
+                                        }
                                     }
                                     match tm.ty {
                                         Type::FnType { params: trait_params, return_type: trait_ret_ty, effects: trait_eff } => {
@@ -1585,6 +1615,47 @@ fn expand_delegate_impls(
                                                 }
                                             }
 
+                                            let field_callee_type = match field_method_scheme {
+                                                some((_field_core, field_scheme)) =>
+                                                    apply_subst_map(
+                                                        field_var_map,
+                                                        field_scheme.ty),
+                                                none => apply_subst_map(
+                                                    field_var_map, tm.ty)
+                                            }
+                                            match field_callee_type {
+                                                Type::FnType {
+                                                    params: exact_params,
+                                                    return_type: exact_result, ..
+                                                } => {
+                                                    if exact_params.len() == 0 ||
+                                                       !types_equal(
+                                                            exact_params.get(0).unwrap(),
+                                                            resolved_ft) ||
+                                                       !types_equal(exact_result, ret_ty) {
+                                                        panic(
+                                                            "delegate HIR: field callee specialization differs")
+                                                    }
+                                                },
+                                                _ => panic(
+                                                    "delegate HIR: field callee is not callable")
+                                            }
+
+                                            let generated_method_ref = match delegate_impl {
+                                                some(wrapper) => match
+                                                        wrapper.method_refs.get(tm.name) {
+                                                    some(reference) => reference,
+                                                    none => panic(
+                                                        "delegate HIR: wrapper lost exact method")
+                                                },
+                                                none => panic(
+                                                    "delegate HIR: wrapper owner is missing")
+                                            }
+                                            let generated_executable =
+                                                make_named_executable_ref(
+                                                    impl_method_ref_member(
+                                                        generated_method_ref))
+
                                             let call_expr = if use_bound_evidence {
                                                 // Generate exact bound dispatch through __FieldType_Trait evidence.
                                                 let ftn = match resolved_ft {
@@ -1593,10 +1664,23 @@ fn expand_delegate_impls(
                                                     _ => ""
                                                 }
                                                 let dict_name = trait_dict_name(ftn, tname)
+                                                let bound_owner = match field_impl {
+                                                    some(value) => match value.owner_ref {
+                                                        some(owner) => owner,
+                                                        none => panic(
+                                                            "delegate HIR: field impl owner is absent")
+                                                    },
+                                                    none => panic(
+                                                        "delegate HIR: bound method impl is absent")
+                                                }
                                                 let exact_bound_ref =
                                                     make_bound_method_call_ref(
                                                         tm.method_ref,
-                                                        DictRef::Static(dict_name), tm.ty,
+                                                        make_static_dict_ref(
+                                                            dict_name,
+                                                            make_exact_static_dict_ref(
+                                                                bound_owner)),
+                                                        field_callee_type,
                                                         tm.param_mutabilities.first().unwrap_or(false))
                                                 HExpr::Call {
                                                     callee: HExpr::FieldAccess {
@@ -1604,7 +1688,7 @@ fn expand_delegate_impls(
                                                         field: tm.name,
                                                         access_kind: HFieldAccessKind::Method,
                                                         projection: none,
-                                                        ty: tm.ty,
+                                                        ty: field_callee_type,
                                                         effects: EMPTY_ROW,
                                                         span: span
                                                     },
@@ -1622,9 +1706,8 @@ fn expand_delegate_impls(
                                             } else {
                                                 let resolved_forward_dicts = match (field_impl, field_method_scheme) {
                                                     (some(field_owner), some((field_core, field_scheme))) => {
-                                                        let field_callee_type = apply_subst_map(
-                                                            field_var_map, field_scheme.ty)
                                                         resolve_dicts_from_impl_owner(
+                                                            generated_executable,
                                                             ctx.sink, ctx.env,
                                                             generated_fn_bounds,
                                                             field_owner, field_core,
@@ -1639,7 +1722,7 @@ fn expand_delegate_impls(
                                                     field: tm.name,
                                                     access_kind: HFieldAccessKind::Method,
                                                     projection: none,
-                                                    ty: tm.ty,
+                                                    ty: field_callee_type,
                                                     effects: EMPTY_ROW,
                                                     span: span
                                                 }
@@ -1650,12 +1733,14 @@ fn expand_delegate_impls(
                                                             field_owner.method_intrinsics.get(tm.name) {
                                                         some(intrinsic) =>
                                                             make_intrinsic_method_call_ref(
-                                                                intrinsic, tm.ty),
+                                                                intrinsic,
+                                                                field_callee_type),
                                                         none => match
                                                                 field_owner.method_refs.get(tm.name) {
                                                             some(method_ref) =>
                                                                 make_concrete_method_call_ref(
-                                                                    method_ref, tm.ty,
+                                                                    method_ref,
+                                                                    field_callee_type,
                                                                     tm.param_mutabilities.first().unwrap_or(false)),
                                                             none => panic(
                                                                 "delegate HIR: field owner lost exact method")
@@ -1679,20 +1764,6 @@ fn expand_delegate_impls(
                                                 }
                                             }
 
-                                            let generated_method_ref = match delegate_impl {
-                                                some(wrapper) => match
-                                                        wrapper.method_refs.get(tm.name) {
-                                                    some(reference) => reference,
-                                                    none => panic(
-                                                        "delegate HIR: wrapper lost exact method")
-                                                },
-                                                none => panic(
-                                                    "delegate HIR: wrapper owner is missing")
-                                            }
-                                            let generated_executable =
-                                                make_named_executable_ref(
-                                                    impl_method_ref_member(
-                                                        generated_method_ref))
                                             enter_executable_owner(
                                                 ctx, generated_executable)
                                             ensure_callable_handled_evidence(
@@ -1755,7 +1826,9 @@ fn expand_delegate_impls(
                                                 impl_method_ref:
                                                     some(generated_method_ref),
                                                 // #77: Copy method type_params from trait method declaration
-                                                type_params: tm.method_type_params,
+                                                type_params: exact_h_type_params(
+                                                    ctx, tm.method_type_params,
+                                                    generated_method_type_var_ids),
                                                 params: hparams,
                                                 return_type: ret_ty,
                                                 effects: eff,
@@ -2054,19 +2127,24 @@ fn check_trait_default_body(
         Type::TypeVar { id, .. } => {
             ctx.current_fn_bounds.push(FnBoundsEntry {
                 type_param_var_id: id, trait_name: trait_name,
-                type_param_name: "self", assoc_constraints: []
+                type_param_name: "self",
+                dict_ordinal: ctx.current_fn_bounds.len(),
+                assoc_constraints: []
             })
             // Expand supertrait bounds for trait default body
             let supers = collect_all_supertraits(ctx, trait_name)
             for st_name in supers {
                 ctx.current_fn_bounds.push(FnBoundsEntry {
                     type_param_var_id: id, trait_name: st_name,
-                    type_param_name: "self", assoc_constraints: []
+                    type_param_name: "self",
+                    dict_ordinal: ctx.current_fn_bounds.len(),
+                    assoc_constraints: []
                 })
             }
         },
         _ => {}
     }
+    validate_fn_bound_order(ctx.current_fn_bounds)
 
     // Inject Self into type_param_scope so Self::Item resolves
     ctx.type_param_scope.insert("Self", self_var)
@@ -2175,7 +2253,7 @@ fn check_trait_default_body(
     assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
     let evidence_remap = canonicalize_callable_handled_evidence(
         ctx, method_effects)
-    let remapped_body = final_body.map(fn(value) {
+    let remapped_body = final_body_unremapped.map(fn(value) {
         remap_hir_handled_evidence(
             value, evidence_remap.0, evidence_remap.1)
     })
@@ -2186,6 +2264,25 @@ fn check_trait_default_body(
         body: remapped_body,
         handled_evidence_bindings: handled_evidence_bindings
     }
+}
+
+fn conservative_extern_resource_contract(
+    params: List<HParam>, result: Type
+) -> CallableResourceContractFact {
+    let mut roles: List<CallableResourceRoleFact> = []
+    for param in params {
+        roles.push(if param.is_mutable {
+            callable_resource_role_mutate()
+        } else { callable_resource_role_read() })
+    }
+    let result_owned = match result {
+        Type::UnitType | Type::NeverType => false,
+        _ => true
+    }
+    make_callable_resource_contract_fact(
+        roles,
+        if result_owned { callable_resource_role_consume() }
+        else { callable_resource_role_read() }, [])
 }
 
 fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, params: List<Param>, declared_effects: List<EffectExpr>?, is_pub: Bool, span: Span) -> HDecl {
@@ -2215,6 +2312,24 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
         hparams.push(HParam { name: p.name, ty: ptype, def_id: none, is_mutable: p.is_mutable })
         i = i + 1
     }
+    let abi_name = extern_abi_leaf(name)
+    let source_symbol = match scheme.def_id {
+        some(id) => value_symbol_ref(ctx, id),
+        none => panic("extern HIR: executable DefId is missing")
+    }
+    let compiler_owned = compiler_owned_extern_manifest_entry(
+        ctx.env, source_symbol)
+    let resource_contract = match compiler_owned {
+        some(entry) => {
+            let resource = compiler_extern_manifest_entry_resource(entry)
+            if callable_resource_contract_parameter_roles(resource).len() !=
+               hparams.len() {
+                panic("extern resource contract: manifest arity differs")
+            }
+            resource
+        },
+        none => conservative_extern_resource_contract(hparams, fn_ret)
+    }
     let extern_effects = match declared_effects {
         some(de) => resolve_declared_effects(ctx, de),
         none => EMPTY_ROW
@@ -2241,8 +2356,10 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
                 "system effects are exact AbiIR host imports, not handled evidence") })
         fail.raise(CompileError {})
     }
-    let executable_ref = named_executable_for_def_id(
-        ctx, scheme.def_id, "extern '${name}'")
+    let executable_ref = match compiler_owned {
+        some(entry) => compiler_extern_manifest_entry_executable(entry),
+        none => make_named_executable_ref(source_symbol)
+    }
     enter_executable_owner(ctx, executable_ref)
     ensure_callable_handled_evidence(ctx, extern_effects)
     let handled_evidence_bindings =
@@ -2266,17 +2383,19 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
                     type_param_index).unwrap(),
                 trait_name: trait_name,
                 trait_ref: registered_trait_ref_symbol(
-                    trait_def.owner_ref) })
+                    trait_def.owner_ref),
+                dict_ordinal: trait_bounds.len() })
         }
         type_param_index = type_param_index + 1
     }
     HDecl::ExternFn {
-        name: name, abi_name: extern_abi_leaf(name),
+        name: name, abi_name: abi_name,
         def_id: scheme.def_id,
         executable_ref: executable_ref,
         type_params: exact_h_type_params(
             ctx, type_params, extern_type_var_ids),
         params: hparams, return_type: fn_ret, effects: extern_effects,
+        resource_contract: resource_contract,
         handled_evidence_bindings: handled_evidence_bindings,
         trait_bounds: trait_bounds,
         is_pub: is_pub, span: span
@@ -2707,29 +2826,6 @@ fn check_fn_decl_transaction(
         ctx.type_param_scope.insert(tp.name, tv)
         ctx.env.bind_mono(tp.name, tv)
     }
-    let mut core_param_index = 0
-    for tp in type_params {
-        let type_var_id = match ctx.type_param_scope.get(tp.name) {
-            some(Type::TypeVar { id, .. }) => id,
-            _ => panic("Core type producer: function parameter var is missing")
-        }
-        let mut exact_bounds: List<SymbolRef> = []
-        for bound in tp.bounds {
-            let trait_name = resolve_trait_identity(ctx, bound.trait_name)
-            let trait_def = ctx.env.trait_reg.traits.get(
-                trait_name).unwrap_or_else(fn() {
-                panic("Core type producer: function bound trait is missing")
-            })
-            exact_bounds.push(registered_trait_ref_symbol(
-                trait_def.owner_ref))
-        }
-        record_core_parameter_fact(
-            ctx, type_var_id,
-            executable_ref_named_symbol(executable_ref),
-            core_param_index, type_params.len(), exact_bounds)
-        core_param_index = core_param_index + 1
-    }
-
     ctx.fn_bounds_stack.push(ctx.current_fn_bounds)
     let mut inherited_bounds: List<FnBoundsEntry> = []
     for ib in ctx.current_fn_bounds { inherited_bounds.push(ib) }
@@ -2750,6 +2846,7 @@ fn check_fn_decl_transaction(
                         ctx.current_fn_bounds.push(FnBoundsEntry {
                             type_param_var_id: id, trait_name: bound_trait,
                             type_param_name: tp.name,
+                            dict_ordinal: ctx.current_fn_bounds.len(),
                             assoc_constraints: assoc_constraints
                         })
                         // Expand supertrait bounds: if T: Ord and Ord: Eq, add T: Eq too
@@ -2758,6 +2855,7 @@ fn check_fn_decl_transaction(
                             ctx.current_fn_bounds.push(FnBoundsEntry {
                                 type_param_var_id: id, trait_name: st_name,
                                 type_param_name: tp.name,
+                                dict_ordinal: ctx.current_fn_bounds.len(),
                                 assoc_constraints: []
                             })
                         }
@@ -2768,6 +2866,7 @@ fn check_fn_decl_transaction(
             none => {}
         }
     }
+    validate_fn_bound_order(ctx.current_fn_bounds)
 
     // Inject associated types from type param bounds into type_param_scope
     // so that zonk names map includes associated type variable names (e.g., Item instead of ?NNN)
@@ -2898,7 +2997,8 @@ fn check_fn_decl_transaction(
         trait_bounds.push(TraitBound {
             type_param: fb.type_param_name, trait_name: fb.trait_name,
             type_var_id: fb.type_param_var_id,
-            trait_ref: registered_trait_ref_symbol(trait_def.owner_ref) })
+            trait_ref: registered_trait_ref_symbol(trait_def.owner_ref),
+            dict_ordinal: fb.dict_ordinal })
     }
 
     let fn_def_id = match registration_scheme {
@@ -2958,7 +3058,7 @@ fn check_test_decl(
     ctx.env.push_scope()
     let body_result = some(infer_block(ctx, body, none)) catch { _ => none }
 
-    let final_body = match body_result {
+    let final_body_unremapped = match body_result {
         some(br) => {
             ctx.subst = br.subst
             register_bounded_callable_value_shadows(

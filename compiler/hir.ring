@@ -31,6 +31,7 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     impl_provider_kind_tag}
 use ir_inventory::{ExecutableRef, EffectOperationRef, SystemHostCallableRef,
     BinderEntry, HandledEvidenceRef, HandledEvidenceCapture,
+    CallableResourceContractFact,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_same,
     handled_evidence_requirement,
@@ -218,20 +219,31 @@ pub fn slot_write_source_name() -> Str {
     "ring_slot_write"
 }
 
-fn slot_bridge_identity(source_name: Str) -> Str {
-    compiler_intrinsic_identity("prelude$slot", source_name)
+pub fn slot_drop_source_name() -> Str { "ring_slot_drop" }
+pub fn list_sort_bridge_source_name() -> Str { "ring_list_sort_bridge" }
+
+fn slot_bridge_identity(role: Str) -> Str {
+    compiler_intrinsic_identity("prelude$slot", role)
 }
 
 pub fn slot_read_identity() -> Str {
-    slot_bridge_identity(slot_read_source_name())
+    slot_bridge_identity("read")
 }
 
 pub fn slot_take_identity() -> Str {
-    slot_bridge_identity(slot_take_source_name())
+    slot_bridge_identity("take")
 }
 
 pub fn slot_write_identity() -> Str {
-    slot_bridge_identity(slot_write_source_name())
+    slot_bridge_identity("write")
+}
+
+pub fn slot_drop_identity() -> Str {
+    slot_bridge_identity("drop")
+}
+
+pub fn list_sort_bridge_identity() -> Str {
+    compiler_intrinsic_identity("prelude$list", "sort")
 }
 
 // Every parsed top-level prelude extern receives an unspellable semantic
@@ -243,6 +255,10 @@ pub fn prelude_extern_identity(source_name: Str) -> Str {
     if source_name == slot_read_source_name() { return slot_read_identity() }
     if source_name == slot_take_source_name() { return slot_take_identity() }
     if source_name == slot_write_source_name() { return slot_write_identity() }
+    if source_name == slot_drop_source_name() { return slot_drop_identity() }
+    if source_name == list_sort_bridge_source_name() {
+        return list_sort_bridge_identity()
+    }
     compiler_intrinsic_identity("prelude$extern", source_name)
 }
 
@@ -568,7 +584,8 @@ pub enum HStmt {
             then_block: HExpr, else_block: HExpr?, span: Span },
 
     // Perceus RC: explicit reference counting op inserted by the RC pass.
-    Drop { name: Str, def_id: Int, slot: SlotRef, site: HResourceSite,
+    Drop { name: Str, def_id: Int, slot: SlotRef,
+           place_target: HExpr?, site: HResourceSite,
            reason: HResourceReason, ty: Type, span: Span }
 }
 
@@ -612,7 +629,8 @@ pub struct TraitBound {
     pub type_param: Str,
     pub type_var_id: Int,
     pub trait_name: Str,
-    pub trait_ref: SymbolRef
+    pub trait_ref: SymbolRef,
+    pub dict_ordinal: Int
 }
 
 pub struct HAssocType {
@@ -629,6 +647,7 @@ pub struct HTypeParam {
 }
 
 pub fn h_type_param_source(value: HTypeParam) -> TypeParam { value.source }
+pub fn h_type_param_name(value: HTypeParam) -> Str { value.source.name }
 pub fn h_type_param_sources(values: List<HTypeParam>) -> List<TypeParam> {
     values.map(fn(value) { value.source })
 }
@@ -655,6 +674,7 @@ pub enum HDecl {
     ExternFn { name: Str, abi_name: Str, def_id: Int?,
                executable_ref: ExecutableRef, type_params: List<HTypeParam>,
                params: List<HParam>, return_type: Type, effects: EffectRow,
+               resource_contract: CallableResourceContractFact,
                handled_evidence_bindings: List<HandledEvidenceRef>,
                trait_bounds: List<TraitBound>,
                is_pub: Bool, span: Span },
@@ -714,7 +734,10 @@ pub struct DerivedVariant {
 
 pub enum DerivedTextPiece {
     DerivedLiteralText(Str),
-    DerivedFieldText(DerivedFieldRef)
+    DerivedFieldText(DerivedFieldRef),
+    // A payload field whose Debug/Json representation is a fixed literal
+    // still carries its exact identity so enum pattern coverage remains total.
+    DerivedFieldLiteralText { field: DerivedFieldRef, value: Str }
 }
 
 pub struct DerivedTextSequence {
@@ -946,9 +969,13 @@ fn remap_h_stmt_handled_evidence(
                 remap_hir_handled_evidence(value, sources, targets)
             }), span: span
         },
-        HStmt::Drop { name, def_id, slot, site, reason, ty, span } =>
+        HStmt::Drop {
+            name, def_id, slot, place_target, site, reason, ty, span
+        } =>
             HStmt::Drop { name: name, def_id: def_id, slot: slot,
-                site: site, reason: reason, ty: ty, span: span }
+                place_target: place_target.map(fn(value) {
+                    remap_hir_handled_evidence(value, sources, targets)
+                }), site: site, reason: reason, ty: ty, span: span }
     }
 }
 
@@ -1018,11 +1045,11 @@ pub fn remap_hir_handled_evidence(
             ty: ty, effects: effects, span: span
         },
         HExpr::StructLit {
-            name, owner_ref, type_args, fields, spread, constructor,
+            name, owner_ref, type_args, fields: field_values, spread, constructor,
             ty, effects, span
         } => {
             let mut remapped_fields: List<HNominalStructFieldInit> = []
-            for field in fields {
+            for field in field_values {
                 remapped_fields.push(HNominalStructFieldInit {
                     name: field.name, field_ref: field.field_ref,
                     field_index: field.field_index,
@@ -1041,11 +1068,11 @@ pub fn remap_hir_handled_evidence(
             }
         },
         HExpr::NamedVariantConstruct {
-            enum_name, variant_name, variant_ref, fields, spread,
+            enum_name, variant_name, variant_ref, fields: field_values, spread,
             constructor, ty, effects, span
         } => {
             let mut remapped_fields: List<HStructFieldInit> = []
-            for field in fields {
+            for field in field_values {
                 remapped_fields.push(HStructFieldInit {
                     name: field.name, field_ref: field.field_ref,
                     value: remap_hir_handled_evidence(
@@ -1366,11 +1393,11 @@ fn collect_hir_pattern_names(pattern: Pattern, mut names: Set<Str>) {
         Pattern::Binding { name, .. } => {
             if name != "_" { names.insert(name) }
         },
-        Pattern::Constructor { fields, .. } => {
-            for field in fields { collect_hir_pattern_names(field, names) }
+        Pattern::Constructor { fields: field_values, .. } => {
+            for field in field_values { collect_hir_pattern_names(field, names) }
         },
-        Pattern::NamedConstructor { fields, .. } => {
-            for field in fields {
+        Pattern::NamedConstructor { fields: field_values, .. } => {
+            for field in field_values {
                 collect_hir_pattern_names(field.pattern, names)
             }
         },
@@ -1543,22 +1570,26 @@ fn validate_hir_stmt(
                 none => {}
             }
         },
-        HStmt::Drop { name, def_id, slot, .. } => {
+        HStmt::Drop { name, def_id, slot, place_target, .. } => {
             if slot_ref_is_source(slot) &&
                slot_ref_source_def_id(slot) != def_id {
                 panic("HIR Drop: source SlotRef/DefId relation drifted")
             }
             validate_hir_drop_reference(scope, name, def_id)
+            match place_target {
+                some(target) => validate_hir_expr(target, seen, scope),
+                none => {}
+            }
         },
         HStmt::Break { .. } | HStmt::Continue { .. } => {}
     }
 }
 
 fn validate_hir_field_values(
-    fields: List<HStructFieldInit>, spread: HExpr?,
+    field_values: List<HStructFieldInit>, spread: HExpr?,
     mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
-    for field in fields {
+    for field in field_values {
         validate_hir_expr(field.value, seen, scope)
     }
     match spread {
@@ -1568,11 +1599,11 @@ fn validate_hir_field_values(
 }
 
 fn validate_hir_variant_field_values(
-    variant_ref: VariantRef, fields: List<HStructFieldInit>, spread: HExpr?,
+    variant_ref: VariantRef, field_values: List<HStructFieldInit>, spread: HExpr?,
     mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
     let mut field_indices: Set<Int> = set_new()
-    for field in fields {
+    for field in field_values {
         if !variant_ref_same(
                 variant_field_ref_variant(field.field_ref), variant_ref) ||
            field_indices.contains(variant_field_ref_index(field.field_ref)) {
@@ -1589,13 +1620,13 @@ fn validate_hir_variant_field_values(
 
 fn validate_hir_nominal_field_values(
     name: Str, owner_ref: RegisteredNominalRef,
-    fields: List<HNominalStructFieldInit>, spread: HExpr?,
+    field_values: List<HNominalStructFieldInit>, spread: HExpr?,
     mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
     if registered_nominal_ref_display_name(owner_ref) != name {
         panic("HIR identity: struct literal nominal name drifted")
     }
-    for field in fields {
+    for field in field_values {
         if !symbol_ref_same(
                 registered_nominal_ref_symbol(owner_ref),
                 nominal_field_ref_owner(field.field_ref)) ||
@@ -1874,27 +1905,29 @@ fn validate_hir_expr(
                 access_kind, projection, receiver, field)
             validate_hir_expr(receiver, seen, scope)
         },
-        HExpr::StructLit { name, owner_ref, fields, spread, constructor, .. } => {
+        HExpr::StructLit {
+            name, owner_ref, fields: field_values, spread, constructor, ..
+        } => {
             let plan = match constructor {
                 some(value) => value,
                 none => panic("HIR struct literal: constructor plan is absent")
             }
             if h_constructor_kind(plan) != 2 ||
-               h_constructor_fields(plan).len() != fields.len() {
+               h_constructor_fields(plan).len() != field_values.len() {
                 panic("HIR struct literal: constructor field census differs")
             }
             validate_hir_nominal_field_values(
-                name, owner_ref, fields, spread, seen, scope)
+                name, owner_ref, field_values, spread, seen, scope)
         },
         HExpr::NamedVariantConstruct {
-            variant_ref, fields, spread, constructor, ..
+            variant_ref, fields: field_values, spread, constructor, ..
         } => {
             let plan = match constructor {
                 some(value) => value,
                 none => panic("HIR variant literal: constructor plan is absent")
             }
             if h_constructor_kind(plan) != 0 ||
-               h_constructor_fields(plan).len() != fields.len() ||
+               h_constructor_fields(plan).len() != field_values.len() ||
                !symbol_ref_same(
                     executable_ref_named_symbol(
                         h_constructor_executable(plan)),
@@ -1902,7 +1935,7 @@ fn validate_hir_expr(
                 panic("HIR variant literal: constructor identity differs")
             }
             validate_hir_variant_field_values(
-                variant_ref, fields, spread, seen, scope)
+                variant_ref, field_values, spread, seen, scope)
         },
         HExpr::MatchExpr { scrutinee, arms, .. } => {
             validate_hir_expr(scrutinee, seen, scope)
@@ -2339,12 +2372,14 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
             },
             HDecl::ModBlock { decls: inner, .. } =>
                 validate_hir_decls(inner, seen),
-            HDecl::Struct { name, owner_ref, fields, .. } => {
+            HDecl::Struct {
+                name, owner_ref, fields: field_values, ..
+            } => {
                 if registered_nominal_ref_display_name(owner_ref) != name {
                     panic("HIR identity: struct declaration name drifted")
                 }
-                for field_index in 0..fields.len() {
-                    match fields.get(field_index) {
+                for field_index in 0..field_values.len() {
+                    match field_values.get(field_index) {
                         some(field) => {
                             if !symbol_ref_same(
                                     registered_nominal_ref_symbol(owner_ref),
@@ -2448,34 +2483,6 @@ pub fn trait_dict_name(type_name: Str, trait_name: Str) -> Str {
     let safe_type = if type_name.contains("::") { type_name.replace("::", "$") } else { type_name }
     let safe_trait = if trait_name.contains("::") { trait_name.replace("::", "$") } else { trait_name }
     "__${safe_type}_${safe_trait}"
-}
-
-pub fn evidence_param_name(effect_name: Str) -> Str {
-    let safe = if effect_name.contains("::") { effect_name.replace("::", "$") } else { effect_name }
-    "__ring_ev_${safe}"
-}
-
-// B-090: declaration-order index of an op within its effect. This is the
-// cross-phase contract between gen_handle_expr (which lays out the N-slot
-// evidence struct, slot k = op k's {fn_ptr, env} closure) and gen_effect_op
-// (which GEPs to this slot to dispatch). Slot order = op order in the effect
-// declaration. Property is identical to variant_ctor_name: a naming/layout
-// convention shared across codegen phases that must never be hardcoded per-site.
-// Returns -1 if the op is not found (well-typed code never hits this — the
-// checker rejects ops not declared on the effect).
-pub fn effect_op_slot(effect_ops: Map<Str, List<HEffectOp>>, effect_name: Str, op_name: Str) -> Int {
-    match effect_ops.get(effect_name) {
-        some(ops) => {
-            let mut idx = 0
-            let mut found = -1
-            for o in ops {
-                if o.name == op_name && found == -1 { found = idx }
-                idx = idx + 1
-            }
-            found
-        },
-        none => -1,
-    }
 }
 
 pub fn trait_bound_param_name(type_param: Str, trait_name: Str) -> Str {
@@ -2818,9 +2825,9 @@ fn type_contains_extern_rec(ty: Type, externs: Set<Str>, mut visited: Set<Str>) 
             }
             found
         },
-        Type::RecordType { fields, .. } => {
+        Type::RecordType { fields: field_values, .. } => {
             let mut found = false
-            for f in fields {
+            for f in field_values {
                 if type_contains_extern_rec(f.ty, externs, visited) { found = true }
             }
             found

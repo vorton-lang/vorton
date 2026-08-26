@@ -53,16 +53,29 @@ use hir::{HProgram, HDecl, HStmt, HExpr, HMatchArm, HStructFieldInit,
     synthetic_def_id, SYNTHETIC_DICT_DEF_ID_BASE,
     make_h_dict_construct_plan,
     validate_hir_binder_def_ids}
+use hir_exact::{
+    make_simple_dict_ref, make_static_dict_ref, make_wrapped_dict_ref,
+    dict_ref_exact, dict_ref_is_simple_physical,
+    dict_ref_is_static_physical, dict_ref_simple_name,
+    dict_ref_static_name, dict_ref_wrapped_name,
+    dict_ref_wrapped_trait, dict_ref_wrapped_physical_inner
+}
 use ir_identity::{builtin_dict_constructor_symbol,
     symbol_ref_canonical_payload}
-use ir_inventory::{make_named_executable_ref}
+use ir_inventory::{
+    make_named_executable_ref, make_dictionary_local_dict_ref,
+    dict_ref_local, dict_ref_wrapped_base
+}
 
-pub fn lower_dicts(program: HProgram) -> HProgram {
+struct DictLowerState { ordinals: List<Int>, module_key: Str }
+
+pub fn lower_dicts(program: HProgram, module_key: Str) -> HProgram {
+    if module_key == "" { panic("dictionary lowering: empty module key") }
     let mut defs: List<HDictDef> = []
     let mut seen: Set<Str> = set_new()
     // Per-program gensym for dict locals (names are function-scoped at codegen,
     // but a global counter is simplest and collision-free).
-    let mut counter: List<Int> = [0]
+    let counter = DictLowerState { ordinals: [0], module_key: module_key }
     let mut new_decls: List<HDecl> = []
     for d in program.decls {
         new_decls.push(dl_decl(d, defs, seen, counter))
@@ -173,7 +186,7 @@ fn dl_derived_impl(di: DerivedImpl, mut defs: List<HDictDef>,
     }
 }
 
-fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: List<Int>) -> HDecl {
+fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: DictLowerState) -> HDecl {
     match d {
         HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } =>
             HDecl::Fn { name: name, def_id: def_id,
@@ -250,10 +263,11 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
             }
             HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
-        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, handled_evidence_bindings, trait_bounds, is_pub, span } =>
+        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, resource_contract, handled_evidence_bindings, trait_bounds, is_pub, span } =>
             HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id,
                 executable_ref: executable_ref, type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
+                resource_contract: resource_contract,
                 handled_evidence_bindings: handled_evidence_bindings,
                 trait_bounds: trait_bounds,
                 is_pub: is_pub, span: span },
@@ -279,14 +293,18 @@ fn dl_register(mut defs: List<HDictDef>, mut seen: Set<Str>, def: HDictDef) {
 // resolved_dicts).  Dynamic wrapped dicts become `let __ring_dictlocal_N =
 // DictConstruct{..}` statements appended to `lets` + a Simple(local) borrow.
 fn dl_ref_dyn(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>,
-              mut counter: List<Int>, mut lets: List<HStmt>, span: Span) -> DictRef {
-    match dr {
-        DictRef::Simple(name) => DictRef::Simple(name),
-        DictRef::Static(name) => {
-            dl_register(defs, seen, HDictDef { name: name, base_dict: name, trait_name: "", inner: [] })
-            DictRef::Static(name)
-        },
-        DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
+              mut counter: DictLowerState, mut lets: List<HStmt>, span: Span) -> DictRef {
+    if dict_ref_is_simple_physical(dr) { return dr }
+    if dict_ref_is_static_physical(dr) {
+        let name = dict_ref_static_name(dr)
+        dl_register(defs, seen, HDictDef {
+            name: name, base_dict: name, trait_name: "", inner: []
+        })
+        return dr
+    }
+    let dict = dict_ref_wrapped_name(dr)
+    let trait_ref = dict_ref_wrapped_trait(dr)
+    let inner_dicts = dict_ref_wrapped_physical_inner(dr)
             let trait_name = symbol_ref_canonical_payload(trait_ref)
             let mut inner_refs: List<DictRef> = []
             for i in inner_dicts {
@@ -295,49 +313,56 @@ fn dl_ref_dyn(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>,
             let mut all_static = true
             let mut inner_names: List<Str> = []
             for r in inner_refs {
-                match r {
-                    DictRef::Static(n) => inner_names.push(n),
-                    _ => { all_static = false },
-                }
+                if dict_ref_is_static_physical(r) {
+                    inner_names.push(dict_ref_static_name(r))
+                } else { all_static = false }
             }
             if all_static {
                 let inst = dict_instance_name(dict, inner_names)
                 dl_register(defs, seen, HDictDef { name: inst, base_dict: dict, trait_name: trait_name, inner: inner_names })
-                DictRef::Static(inst)
+                make_static_dict_ref(inst, dict_ref_exact(dr))
             } else {
-                counter.set(0, counter[0] + 1)
-                let ordinal = counter[0]
+                counter.ordinals.set(0, counter.ordinals[0] + 1)
+                let ordinal = counter.ordinals[0]
                 let lname = "__ring_dictlocal_${ordinal}"
                 let local_def_id = synthetic_def_id(
                     SYNTHETIC_DICT_DEF_ID_BASE, ordinal)
+                let result_ref = make_dictionary_local_dict_ref(
+                    counter.module_key, local_def_id)
                 let construct = HExpr::DictConstruct {
                     base_dict: dict,
                     plan: some(make_h_dict_construct_plan(
                         make_named_executable_ref(
-                            builtin_dict_constructor_symbol()), trait_ref)),
+                            builtin_dict_constructor_symbol()),
+                        dict_ref_wrapped_base(dict_ref_exact(dr)),
+                        inner_refs.map(fn(value) { dict_ref_exact(value) }),
+                        dict_ref_local(result_ref))),
                     inner: inner_refs,
                     ty: Type::TupleType { elements: [] }, effects: EMPTY_ROW, span: span
                 }
                 lets.push(HStmt::Let { name: lname, name_span: span,
                     def_id: some(local_def_id),
                     ty: Type::TupleType { elements: [] }, init: construct, span: span })
-                DictRef::Simple(lname)
+                make_simple_dict_ref(
+                    lname, result_ref)
             }
-        },
-    }
 }
 
 // Rewrite a DictRef in a position that CANNOT host local constructions (BinOp
 // dispatch extra_dicts): all-static wrapped → Static(instance); a dynamic
 // wrapped keeps its Wrapped shell (inners still individually rewritten).
 fn dl_ref_static_only(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>) -> DictRef {
-    match dr {
-        DictRef::Simple(name) => DictRef::Simple(name),
-        DictRef::Static(name) => {
-            dl_register(defs, seen, HDictDef { name: name, base_dict: name, trait_name: "", inner: [] })
-            DictRef::Static(name)
-        },
-        DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
+    if dict_ref_is_simple_physical(dr) { return dr }
+    if dict_ref_is_static_physical(dr) {
+        let name = dict_ref_static_name(dr)
+        dl_register(defs, seen, HDictDef {
+            name: name, base_dict: name, trait_name: "", inner: []
+        })
+        return dr
+    }
+    let dict = dict_ref_wrapped_name(dr)
+    let trait_ref = dict_ref_wrapped_trait(dr)
+    let inner_dicts = dict_ref_wrapped_physical_inner(dr)
             let trait_name = symbol_ref_canonical_payload(trait_ref)
             let mut inner_refs: List<DictRef> = []
             for i in inner_dicts {
@@ -346,21 +371,18 @@ fn dl_ref_static_only(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>)
             let mut all_static = true
             let mut inner_names: List<Str> = []
             for r in inner_refs {
-                match r {
-                    DictRef::Static(n) => inner_names.push(n),
-                    _ => { all_static = false },
-                }
+                if dict_ref_is_static_physical(r) {
+                    inner_names.push(dict_ref_static_name(r))
+                } else { all_static = false }
             }
             if all_static {
                 let inst = dict_instance_name(dict, inner_names)
                 dl_register(defs, seen, HDictDef { name: inst, base_dict: dict, trait_name: trait_name, inner: inner_names })
-                DictRef::Static(inst)
+                make_static_dict_ref(inst, dict_ref_exact(dr))
             } else {
-                DictRef::Wrapped { dict: dict, trait_ref: trait_ref,
-                    inner_dicts: inner_refs }
+                make_wrapped_dict_ref(
+                    dict, trait_ref, inner_refs, dict_ref_exact(dr))
             }
-        },
-    }
 }
 
 fn dl_dispatch(d: TraitDispatch?, mut defs: List<HDictDef>, mut seen: Set<Str>) -> TraitDispatch? {
@@ -436,7 +458,7 @@ fn dl_operator_plan(
 // Structural walkers
 // ============================================================
 
-fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: List<Int>) -> HExpr {
+fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: DictLowerState) -> HExpr {
     match e {
         HExpr::IntLit { value, ty, effects, span } =>
             HExpr::IntLit { value: value, ty: ty, effects: effects, span: span },
@@ -677,7 +699,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
     }
 }
 
-fn dl_arms(arms: List<HMatchArm>, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: List<Int>) -> List<HMatchArm> {
+fn dl_arms(arms: List<HMatchArm>, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: DictLowerState) -> List<HMatchArm> {
     let mut out: List<HMatchArm> = []
     for arm in arms {
         let new_guard = match arm.guard {
@@ -692,7 +714,7 @@ fn dl_arms(arms: List<HMatchArm>, mut defs: List<HDictDef>, mut seen: Set<Str>, 
     out
 }
 
-fn dl_stmt(s: HStmt, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: List<Int>) -> HStmt {
+fn dl_stmt(s: HStmt, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: DictLowerState) -> HStmt {
     match s {
         HStmt::Let { name, name_span, def_id, ty, init, span } =>
             HStmt::Let { name: name, name_span: name_span, def_id: def_id, ty: ty,
@@ -740,8 +762,12 @@ fn dl_stmt(s: HStmt, mut defs: List<HDictDef>, mut seen: Set<Str>, mut counter: 
                 then_block: dl_expr(then_block, defs, seen, counter), else_block: new_else, span: span }
         },
         // RC ops are inserted by perceus (after this pass) — never present.
-        HStmt::Drop { name, def_id, slot, site, reason, ty, span } =>
+        HStmt::Drop {
+            name, def_id, slot, place_target, site, reason, ty, span
+        } =>
             HStmt::Drop { name: name, def_id: def_id, slot: slot,
-                site: site, reason: reason, ty: ty, span: span }
+                place_target: place_target.map(fn(value) {
+                    dl_expr(value, defs, seen, counter)
+                }), site: site, reason: reason, ty: ty, span: span }
     }
 }

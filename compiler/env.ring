@@ -24,7 +24,15 @@ use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     impl_provider_ref_same, intrinsic_ref_same,
     impl_provider_ref_kind, impl_provider_kind_same,
     impl_provider_kind_source, impl_provider_kind_delegate}
-use ir_inventory::{EffectOperationRef}
+use ir_inventory::{EffectOperationRef, CallableResourceContractFact,
+    callable_resource_contract_parameter_roles,
+    callable_resource_contract_same}
+use extern_manifest::{CompilerExternManifest, CompilerExternManifestEntry,
+    new_compiler_extern_manifest, register_compiler_extern_source,
+    close_compiler_extern_manifest, compiler_extern_manifest_entry,
+    registered_compiler_extern_manifest_entry,
+    compiler_extern_manifest_entry_compiler_symbol,
+    compiler_extern_should_publish_hdecl}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -762,6 +770,9 @@ pub struct ImplEntry {
     // the sole signature payload; this map may only relate that core to one
     // fixed IntrinsicRef.
     pub method_intrinsics: Map<Str, IntrinsicRef>,
+    // Ownership-neutral resource ABI fixed by the exact method producer.
+    // Bodyless builtin methods must carry one entry; downstream stages copy it.
+    pub method_resource_contracts: Map<Str, CallableResourceContractFact>,
     pub provider_ref: ImplProviderRef?,
     pub trait_ref: SymbolRef?,
     pub owner_ref: ImplOwnerRef?,
@@ -851,7 +862,8 @@ pub struct TypeEnv {
     pub types: TypeRegistry,
     pub trait_reg: TraitRegistry,
     pub scope: ScopeManager,
-    pub ids: IdGen
+    pub ids: IdGen,
+    compiler_externs: CompilerExternManifest
 }
 
 // ============================================================
@@ -893,8 +905,59 @@ pub fn new_type_env() -> TypeEnv {
         ids: IdGen {
             next_type_var_id: 0,
             next_def_id: 0
-        }
+        },
+        compiler_externs: new_compiler_extern_manifest()
     }
+}
+
+// Prelude registration is the only producer allowed to relate a
+// resolver-issued source SymbolRef to a fixed compiler-owned extern. The
+// manifest itself owns the physical source census and exact resource facts;
+// TypeEnv only transports that opaque relation into declaration inference.
+pub fn register_compiler_owned_extern_source(
+    mut env: TypeEnv, source: SymbolRef, scheme: TypeScheme
+) -> Bool {
+    if scheme.bounds.len() != 0 {
+        panic("compiler extern manifest: source bridge has trait bounds")
+    }
+    let mut normalization: Map<Int, Type> = map_new()
+    let mut index = 0
+    for type_var in scheme.type_vars {
+        normalization.insert(type_var, Type::TypeVar {
+            id: -1 - index, name: none
+        })
+        index = index + 1
+    }
+    register_compiler_extern_source(
+        env.compiler_externs, source,
+        apply_subst_map(normalization, scheme.ty),
+        scheme.type_vars.len())
+}
+
+pub fn close_compiler_owned_extern_sources(mut env: TypeEnv) {
+    close_compiler_extern_manifest(env.compiler_externs)
+}
+
+pub fn compiler_owned_extern_manifest_entry(
+    env: TypeEnv, source: SymbolRef
+) -> CompilerExternManifestEntry? {
+    compiler_extern_manifest_entry(env.compiler_externs, source)
+}
+
+pub fn compiler_owned_extern_symbol(
+    env: TypeEnv, source: SymbolRef
+) -> SymbolRef? {
+    registered_compiler_extern_manifest_entry(
+        env.compiler_externs, source).map(fn(entry) {
+            compiler_extern_manifest_entry_compiler_symbol(entry)
+        })
+}
+
+pub fn compiler_owned_extern_should_publish_hdecl(
+    env: TypeEnv, source: SymbolRef
+) -> Bool? {
+    compiler_extern_should_publish_hdecl(
+        env.compiler_externs, source)
 }
 
 fn builtin_impl_target_symbol(type_name: Str) -> SymbolRef? {
@@ -1196,6 +1259,22 @@ fn method_intrinsic_map_same(
     true
 }
 
+fn method_resource_contract_map_same(
+    left: Map<Str, CallableResourceContractFact>,
+    right: Map<Str, CallableResourceContractFact>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    for entry in left.entries() {
+        let (name, contract) = entry
+        match right.get(name) {
+            some(other) => if !callable_resource_contract_same(
+                    contract, other) { return false },
+            none => return false
+        }
+    }
+    true
+}
+
 fn delegate_child_provider_plan_same(
     left: DelegateChildProviderPlan, right: DelegateChildProviderPlan
 ) -> Bool {
@@ -1253,6 +1332,9 @@ pub fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
         method_ref_map_same(left.method_refs, right.method_refs) &&
         method_intrinsic_map_same(
             left.method_intrinsics, right.method_intrinsics) &&
+        method_resource_contract_map_same(
+            left.method_resource_contracts,
+            right.method_resource_contracts) &&
         delegate_plan_state_same(left.delegate_plan, right.delegate_plan)
 }
 
@@ -1270,8 +1352,23 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
     }
     for intrinsic_entry in entry.method_intrinsics.entries() {
         let (method_name, _) = intrinsic_entry
-        if !entry.method_schemes.contains_key(method_name) {
-            panic("impl owner: intrinsic has no method core")
+        if !entry.method_schemes.contains_key(method_name) ||
+           !entry.method_resource_contracts.contains_key(method_name) {
+            panic("impl owner: intrinsic has no method/resource contract")
+        }
+    }
+    for resource_entry in entry.method_resource_contracts.entries() {
+        let (method_name, contract) = resource_entry
+        let core = match entry.method_schemes.get(method_name) {
+            some(value) => value,
+            none => panic("impl owner: resource contract has no method core")
+        }
+        let arity = match impl_method_core_type(core) {
+            Type::FnType { params, .. } => params.len(),
+            _ => panic("impl owner: resource contract method is not callable")
+        }
+        if callable_resource_contract_parameter_roles(contract).len() != arity {
+            panic("impl owner: resource contract arity differs")
         }
     }
     for method_entry in entry.method_refs.entries() {
@@ -1403,8 +1500,6 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
                     impl_owner_ref_provider(owner), provider) ||
                !optional_symbol_ref_same(
                     impl_owner_ref_trait(owner), entry.trait_ref) ||
-               symbol_ref_canonical_payload(
-                    impl_owner_ref_target(owner)) != entry.target_type_name ||
                entry.method_refs.len() != entry.method_schemes.len() {
                 panic("impl owner: typed owner/method closure drifted")
             }

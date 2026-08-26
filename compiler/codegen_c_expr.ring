@@ -13,26 +13,43 @@
 // Step 6 adds explicit custom-effect handlers (tail-resumptive + abort) and
 // try/catch; Ring 0.1 has no default evidence path.
 //
-use types::{Type, EffectRow, EMPTY_ROW, type_to_builtin_name, types_equal,
+use types::{Type, EMPTY_ROW, type_to_builtin_name, types_equal,
     BUILTIN_RANGE}
 use ast::{BinOp, UnaryOp, Pattern, LiteralValue, NamedPatternField, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
     HNominalStructFieldInit, HFieldAccessKind,
-    HEffectHandler, HEffectOp, DictRef,
+    HEffectHandler, DictRef,
     h_dict_construct_trait,
     TraitDispatch, MethodCallRef,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_is_bound,
     method_call_ref_intrinsic, method_call_ref_impl,
     method_call_ref_bound, method_call_ref_bound_evidence,
-    method_call_ref_signature, effect_op_slot,
+    method_call_ref_signature,
     hexpr_type, hexpr_effects, is_fresh_owned_bool_value, variant_ctor_name, compare_by_first,
-    trait_dict_name, trait_bound_param_name, evidence_param_name,
+    trait_dict_name, trait_bound_param_name,
     is_extern_handle_type,
     slot_bridge_runtime_name, is_synthetic_dict_def_id}
-use ir_identity::{CalleeRef, builtin_method_site_tag, intrinsic_ref_site,
-    slot_ref_is_source, slot_ref_source_def_id,
+use hir_exact::{
+    dict_ref_is_simple_physical, dict_ref_is_static_physical,
+    dict_ref_simple_name, dict_ref_static_name,
+    dict_ref_wrapped_name, dict_ref_wrapped_trait,
+    dict_ref_wrapped_physical_inner
+}
+use ir_inventory::{HandledEvidenceRef, HandledEvidenceCapture,
+    EffectOperationRef,
+    handled_evidence_binding, handled_evidence_requirement,
+    handled_evidence_capture_source, handled_evidence_capture_target,
+    binder_entry_slot, effect_operation_ref_effect,
+    effect_operation_ref_source_index}
+use ir_identity::{CalleeRef, SlotRef, SymbolRef,
+    callee_ref_is_named, callee_ref_named_symbol,
+    path_owner_for_symbol, make_path_ref, path_role_synthetic,
+    make_synthetic_slot_ref, slot_ref_stable_key,
+    builtin_method_site_tag, intrinsic_ref_site,
+    slot_ref_is_source, slot_ref_source_def_id, slot_ref_same,
+    handled_effect_ref_same,
     impl_method_ref_owner, impl_method_ref_name,
     trait_method_ref_callable_slot_index,
     impl_owner_ref_target, symbol_ref_canonical_payload,
@@ -52,12 +69,26 @@ use ir_identity::{CalleeRef, builtin_method_site_tag, intrinsic_ref_site,
     BUILTIN_METHOD_OPTION_MAP, BUILTIN_METHOD_OPTION_AND_THEN,
     BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE, BUILTIN_METHOD_OPTION_TO_FAIL,
     BUILTIN_METHOD_CELL_GET, BUILTIN_METHOD_CELL_SET,
-    BUILTIN_METHOD_CELL_UPDATE}
+    BUILTIN_METHOD_CELL_UPDATE,
+    BUILTIN_METHOD_INT_EQ, BUILTIN_METHOD_INT_NE,
+    BUILTIN_METHOD_FLOAT_EQ, BUILTIN_METHOD_FLOAT_NE,
+    BUILTIN_METHOD_STR_EQ, BUILTIN_METHOD_STR_NE,
+    BUILTIN_METHOD_BOOL_EQ, BUILTIN_METHOD_BOOL_NE,
+    BUILTIN_METHOD_INT_CLONE, BUILTIN_METHOD_FLOAT_CLONE,
+    BUILTIN_METHOD_STR_CLONE, BUILTIN_METHOD_BOOL_CLONE,
+    BUILTIN_METHOD_INT_CMP, BUILTIN_METHOD_FLOAT_CMP,
+    BUILTIN_METHOD_STR_CMP, BUILTIN_METHOD_BOOL_CMP,
+    BUILTIN_METHOD_INT_DEBUG, BUILTIN_METHOD_FLOAT_DEBUG,
+    BUILTIN_METHOD_STR_DEBUG, BUILTIN_METHOD_BOOL_DEBUG,
+    BUILTIN_METHOD_INT_HASH, BUILTIN_METHOD_STR_HASH,
+    BUILTIN_METHOD_BOOL_HASH, BUILTIN_METHOD_SITE_COUNT}
 use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEmitState, CHandleCleanup,
     CNameOnlySlotRef, CTypedRef, CClosureEdge,
     c_emit, c_raw, fresh_tmp, fresh_i64, fresh_dbl, fresh_label,
     c_local, c_local_ref, c_local_def, c_local_def_ref,
     c_param, c_param_def, c_value_slot, c_exact_value_slot,
+    c_local_semantic_slot, c_semantic_value_slot,
+    c_semantic_value_slot_key,
     c_exact_slot_c_name, c_name_only_slot_c_name, c_name_only_slot_key,
     c_register_name_only_value, c_restore_name_only_value, c_remove_name_only_value,
     c_name_only_value, c_ref_exact, c_ref_name_only, c_ref_static,
@@ -70,7 +101,6 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEmitState, CHandleCl
     c_mangle_method, c_sanitize, c_symbol_fragment, c_global_cstr, c_interned_cstr, c_stub_stmt, c_stub_expr,
     c_line_directive, rt_use, rt_known_arity, get_or_assign_c_typeid,
     c_push_fn, c_pop_fn}
-use effect_analysis::{extract_effect_names}
 
 // ============================================================
 // Type predicate helpers
@@ -139,10 +169,11 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
         HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch, ty, .. } =>
             gen_c_binop(ctx, op, left, right, eq_dispatch, ord_dispatch, ty),
         HExpr::UnaryOp { op, operand, ty, .. } => gen_c_unaryop(ctx, op, operand, ty),
-        HExpr::Call { callee, args, resolved_dicts, callee_ref, method_ref, ty, .. } =>
+        HExpr::Call { callee, args, resolved_dicts, handled_evidence,
+                      callee_ref, method_ref, ty, .. } =>
             gen_c_call(
                 ctx, callee, args, resolved_dicts,
-                callee_ref, method_ref, ty),
+                handled_evidence, callee_ref, method_ref, ty),
         HExpr::FieldAccess { receiver, field, access_kind, ty, .. } =>
             gen_c_field_access(ctx, receiver, field, access_kind, ty),
         HExpr::StructLit { name, fields, spread, .. } =>
@@ -156,11 +187,16 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
             gen_c_if_expr(ctx, condition, then_branch, else_branch),
         HExpr::StringInterp { parts, .. } => gen_c_string_interp(ctx, parts),
         HExpr::TryCatch { body, arms, .. } => gen_c_try_catch(ctx, body, arms),
-        HExpr::HandleExpr { body, handlers, .. } => gen_c_handle_expr(ctx, body, handlers),
-        HExpr::Lambda { params, return_type, body, ty, .. } =>
-            gen_c_lambda(ctx, params, return_type, body, ty),
-        HExpr::EffectOp { effect_name, op_name, args, .. } =>
-            gen_c_effect_op(ctx, effect_name, op_name, args),
+        HExpr::HandleExpr { body, handlers, installed_evidence, .. } =>
+            gen_c_handle_expr(ctx, body, handlers, installed_evidence),
+        HExpr::Lambda { params, return_type, body, ty,
+                        evidence_captures, .. } =>
+            gen_c_lambda(
+                ctx, params, return_type, body, ty, evidence_captures),
+        HExpr::EffectOp { effect_name, op_name, operation_ref,
+                          handled_evidence, args, .. } =>
+            gen_c_effect_op(ctx, effect_name, op_name, operation_ref,
+                handled_evidence, args),
         HExpr::RangeExpr { start, end, inclusive, .. } =>
             gen_c_range_expr(ctx, start, end, inclusive),
         HExpr::ListLit { elements, .. } => gen_c_list_lit(ctx, elements),
@@ -488,24 +524,12 @@ fn gen_c_dict_closure_wrapper(mut ctx: CCtx, lookup_name: Str, name: Str, dict_r
     let mut dict_vals: List<Str> = []
     let mut owned_dict_vals: List<Str> = []
     for dr in dict_refs {
-        match dr {
-            DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
-                let reference = c_resolve_dict_ref(ctx, DictRef::Wrapped {
-                    dict: dict, trait_ref: trait_ref,
-                    inner_dicts: inner_dicts
-                })
-                let value = c_ref_c_name(reference)
-                dict_vals.push(value)
-                owned_dict_vals.push(value)
-            },
-            DictRef::Simple(n) => {
-                let reference = c_resolve_dict_ref(ctx, DictRef::Simple(n))
-                dict_vals.push(c_ref_c_name(reference))
-            },
-            DictRef::Static(n) => {
-                let reference = c_resolve_dict_ref(ctx, DictRef::Static(n))
-                dict_vals.push(c_ref_c_name(reference))
-            },
+        let reference = c_resolve_dict_ref(ctx, dr)
+        let value = c_ref_c_name(reference)
+        dict_vals.push(value)
+        if !dict_ref_is_simple_physical(dr) &&
+           !dict_ref_is_static_physical(dr) {
+            owned_dict_vals.push(value)
         }
     }
 
@@ -768,6 +792,15 @@ struct CNameOnlyMatch {
     slot: CNameOnlySlotRef
 }
 
+// Reuse the identity layer's stable path/slot encoder so this registry key
+// contains the complete opaque SymbolRef: origin module, namespace, payload
+// and declaration site. The fixed child component only domains the adapter.
+pub fn c_exact_mut_symbol_key(symbol: SymbolRef) -> Str {
+    slot_ref_stable_key(make_synthetic_slot_ref(make_path_ref(
+        path_owner_for_symbol(symbol), ["c-exact-mut-abi"],
+        path_role_synthetic())))
+}
+
 // Resolve the actual registered key once.  A resolved/qualified key wins;
 // the bare spelling is consulted only when it names a distinct explicit
 // name-only registration.  Module/global registries are deliberately absent.
@@ -790,8 +823,21 @@ fn c_match_name_only_slot(
     }
 }
 
-// #B-087 gap 5 port: mut value-type args are passed as a shared CELL.
-fn c_lookup_call_mut_flags(ctx: CCtx, callee: HExpr) -> List<Bool>? {
+// Calls consume the exact executable's recorded CELL-parameter ABI.  An
+// exact CalleeRef never falls back to a leaf/name-derived entry.
+fn c_lookup_call_mut_flags(
+    ctx: CCtx, callee: HExpr, callee_ref: CalleeRef?
+) -> List<Bool>? {
+    match callee_ref {
+        some(exact) => {
+            if callee_ref_is_named(exact) {
+                return ctx.fn_mut_params.get(c_exact_mut_symbol_key(
+                    callee_ref_named_symbol(exact)))
+            }
+            return none
+        },
+        none => {}
+    }
     match callee {
         HExpr::Ident {
             name, resolved_name, def_id, dict_closure_dicts, ..
@@ -925,23 +971,31 @@ pub fn gen_c_cell_alloc(mut ctx: CCtx, init_val: Str) -> Str {
 // ============================================================
 
 pub fn c_resolve_dict_ref(mut ctx: CCtx, dr: DictRef) -> CTypedRef {
-    match dr {
-        DictRef::Simple(n) => {
-            match c_name_only_value(ctx, n) {
-                some(slot) => c_ref_name_only(slot),
-                none => panic(
-                    "C codegen: bound dictionary '${n}' has no name-only slot"),
-            }
-        },
-        DictRef::Static(n) => c_ref_static(resolve_c_static_dict(ctx, n), n),
-        DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
-            let trait_name = symbol_ref_canonical_payload(trait_ref)
-            // Post-dict_lower this survives in BinOp dispatch and dynamic
-            // derived FieldAction evidence.
-            let value = build_c_wrapped_dict(ctx, dict, trait_name, inner_dicts)
-            c_ref_computed(value, "wrapped-dict:${dict}:${trait_name}")
-        },
+    if dict_ref_is_simple_physical(dr) {
+        return c_resolve_simple_dict_name(ctx, dict_ref_simple_name(dr))
     }
+    if dict_ref_is_static_physical(dr) {
+        return c_resolve_static_dict_name(ctx, dict_ref_static_name(dr))
+    }
+    let dict = dict_ref_wrapped_name(dr)
+    let trait_name = symbol_ref_canonical_payload(dict_ref_wrapped_trait(dr))
+    // Post-dict_lower this survives in BinOp dispatch and dynamic derived
+    // FieldAction evidence.
+    let value = build_c_wrapped_dict(
+        ctx, dict, trait_name, dict_ref_wrapped_physical_inner(dr))
+    c_ref_computed(value, "wrapped-dict:${dict}:${trait_name}")
+}
+
+fn c_resolve_simple_dict_name(mut ctx: CCtx, name: Str) -> CTypedRef {
+    match c_name_only_value(ctx, name) {
+        some(slot) => c_ref_name_only(slot),
+        none => panic(
+            "C codegen: bound dictionary '${name}' has no name-only slot")
+    }
+}
+
+fn c_resolve_static_dict_name(mut ctx: CCtx, name: Str) -> CTypedRef {
+    c_ref_static(resolve_c_static_dict(ctx, name), name)
 }
 
 // Borrow the memoised module singleton for a static dict: emit (once) the
@@ -984,9 +1038,8 @@ pub fn ensure_c_dict_getter(mut ctx: CCtx, name: Str) -> Str {
         }
         match inst_def {
             some(def) => {
-                let mut inner_refs: List<DictRef> = []
-                for inn in def.inner { inner_refs.push(DictRef::Static(inn)) }
-                let v = build_c_wrapped_dict_typed(ctx, def.base_dict, def.trait_name, inner_refs, 16)
+                let v = build_c_wrapped_static_dict_typed(
+                    ctx, def.base_dict, def.trait_name, def.inner, 16)
                 c_emit(ctx, "${gvar} = ${v};")
             },
             none => {
@@ -1045,26 +1098,35 @@ pub fn build_c_wrapped_dict_typed(mut ctx: CCtx, dict_name: Str, trait_name: Str
     // once every method slot has captured them.
     let mut owned_inner_vals: List<Str> = []
     for d in inner_dicts {
-        match d {
-            DictRef::Wrapped { dict, trait_ref, inner_dicts } => {
-                let reference = c_resolve_dict_ref(ctx, DictRef::Wrapped {
-                    dict: dict, trait_ref: trait_ref,
-                    inner_dicts: inner_dicts
-                })
-                let value = c_ref_c_name(reference)
-                inner_vals.push(value)
-                owned_inner_vals.push(value)
-            },
-            DictRef::Simple(name) => {
-                let reference = c_resolve_dict_ref(ctx, DictRef::Simple(name))
-                inner_vals.push(c_ref_c_name(reference))
-            },
-            DictRef::Static(name) => {
-                let reference = c_resolve_dict_ref(ctx, DictRef::Static(name))
-                inner_vals.push(c_ref_c_name(reference))
-            },
+        let reference = c_resolve_dict_ref(ctx, d)
+        let value = c_ref_c_name(reference)
+        inner_vals.push(value)
+        if !dict_ref_is_simple_physical(d) &&
+           !dict_ref_is_static_physical(d) {
+            owned_inner_vals.push(value)
         }
     }
+
+    build_c_wrapped_dict_values(
+        ctx, dict_name, trait_name, inner_vals, owned_inner_vals, dict_tid)
+}
+
+fn build_c_wrapped_static_dict_typed(
+    mut ctx: CCtx, dict_name: Str, trait_name: Str,
+    inner_names: List<Str>, dict_tid: Int
+) -> Str {
+    let mut inner_vals: List<Str> = []
+    for name in inner_names {
+        inner_vals.push(resolve_c_static_dict(ctx, name))
+    }
+    build_c_wrapped_dict_values(
+        ctx, dict_name, trait_name, inner_vals, [], dict_tid)
+}
+
+fn build_c_wrapped_dict_values(
+    mut ctx: CCtx, dict_name: Str, trait_name: Str,
+    inner_vals: List<Str>, owned_inner_vals: List<Str>, dict_tid: Int
+) -> Str {
 
     let target_type = c_wrapped_dict_target_type(dict_name, trait_name)
     let method_order = match ctx.trait_method_order.get(trait_name) {
@@ -1179,7 +1241,8 @@ fn ensure_c_wrapped_method_thunk(mut ctx: CCtx, method_c_name: Str, dispatch_ari
 
 enum CCaptureProvenance {
     Exact { reference: CTypedRef },
-    NameOnly { reference: CTypedRef }
+    NameOnly { reference: CTypedRef },
+    Semantic { source: CTypedRef, target: SlotRef }
 }
 
 struct CCapture {
@@ -1187,11 +1250,37 @@ struct CCapture {
     extern_typed: Bool
 }
 
-fn gen_c_lambda(mut ctx: CCtx, params: List<HParam>, return_type: Type, body: HExpr, ty: Type) -> Str {
+fn gen_c_lambda(
+    mut ctx: CCtx, params: List<HParam>, return_type: Type,
+    body: HExpr, ty: Type,
+    evidence_captures: List<HandledEvidenceCapture>
+) -> Str {
     // Capture collection runs against the ENCLOSING scope (named_values of
     // the function being emitted) — before the nested push.
     let mut captures: List<CCapture> = []
     collect_c_captures(ctx, body, params, captures)
+    for capture in evidence_captures {
+        let source = c_handled_evidence_ref(
+            ctx, handled_evidence_capture_source(capture))
+        let target = binder_entry_slot(handled_evidence_binding(
+            handled_evidence_capture_target(capture)))
+        for existing in captures {
+            match existing.provenance {
+                CCaptureProvenance::Semantic {
+                    target: existing_target, ..
+                } => if slot_ref_same(existing_target, target) {
+                    panic("C codegen: handled evidence capture repeats target")
+                },
+                _ => {}
+            }
+        }
+        captures.push(CCapture {
+            provenance: CCaptureProvenance::Semantic {
+                source: source, target: target
+            },
+            extern_typed: false
+        })
+    }
 
     let ln = ctx.lambda_counter
     ctx.lambda_counter = ln + 1
@@ -1214,6 +1303,11 @@ fn gen_c_lambda(mut ctx: CCtx, params: List<HParam>, return_type: Type, body: HE
                     CCaptureProvenance::NameOnly { reference } => {
                         let dest_slot = c_local_ref(ctx, c_ref_key(reference))
                         (reference, c_ref_name_only(dest_slot))
+                    },
+                    CCaptureProvenance::Semantic { source, target } => {
+                        let dest_slot = c_local_semantic_slot(
+                            ctx, target, "__handled_evidence_capture")
+                        (source, c_ref_exact(dest_slot))
                     }
                 }
                 emit_c_capture_extract(ctx, edge, identity, dest, i + 1)
@@ -1243,7 +1337,8 @@ fn gen_c_lambda(mut ctx: CCtx, params: List<HParam>, return_type: Type, body: HE
             some(cap) => {
                 let identity = match cap.provenance {
                     CCaptureProvenance::Exact { reference } => reference,
-                    CCaptureProvenance::NameOnly { reference } => reference
+                    CCaptureProvenance::NameOnly { reference } => reference,
+                    CCaptureProvenance::Semantic { source, .. } => source
                 }
                 let cv = c_ref_c_name(identity)
                 if !cap.extern_typed {
@@ -1283,7 +1378,8 @@ fn push_c_exact_capture(
                     CCaptureProvenance::Exact { reference } => {
                         if c_ref_def_id(reference) == def_id { return }
                     },
-                    CCaptureProvenance::NameOnly { reference: _reference } => {}
+                    CCaptureProvenance::NameOnly { reference: _reference } => {},
+                    CCaptureProvenance::Semantic { source: _source, .. } => {}
                 }
             }
             captures.push(CCapture {
@@ -1328,6 +1424,7 @@ fn push_c_name_only_capture(
     for existing in captures {
         match existing.provenance {
             CCaptureProvenance::Exact { reference: _reference } => {},
+            CCaptureProvenance::Semantic { source: _source, .. } => {},
             CCaptureProvenance::NameOnly { reference } => {
                 if c_ref_key(reference) == matched.canonical_key { return }
             }
@@ -1353,18 +1450,6 @@ fn consider_c_required_name_only_capture(
         none => return
     }
     push_c_name_only_capture(matched, extern_typed, captures)
-}
-
-// Effect-row metadata can describe process-default/unhandled io/fail paths
-// that have no lexical evidence slot.  Capture it only when an explicit
-// name-only binding proves that this frame must forward it.
-fn consider_c_optional_evidence_capture(
-    ctx: CCtx, key: Str, mut captures: List<CCapture>
-) {
-    match c_match_name_only_slot(ctx, key, key) {
-        some(matched) => push_c_name_only_capture(matched, false, captures),
-        none => {}
-    }
 }
 
 // A nested handler arm is a closure nested inside the closure currently being
@@ -1424,18 +1509,15 @@ fn collect_c_dictref_names(
     ctx: CCtx, dr: DictRef, params: List<HParam>,
     mut captures: List<CCapture>
 ) {
-    match dr {
-        DictRef::Simple(name) => consider_c_required_name_only_capture(
-            ctx, name, name, false, captures),
-        // B-104 D4: module-level singleton — resolved globally, never captured.
-        DictRef::Static(_) => {},
-        DictRef::Wrapped { inner_dicts, .. } => {
-            // Wrapped's base is Static; dynamics live only in tagged inners.
-            for inner in inner_dicts {
-                collect_c_dictref_names(
-                    ctx, inner, params, captures)
-            }
-        },
+    if dict_ref_is_simple_physical(dr) {
+        let name = dict_ref_simple_name(dr)
+        consider_c_required_name_only_capture(
+            ctx, name, name, false, captures)
+    } else if !dict_ref_is_static_physical(dr) {
+        // Wrapped's base is Static; dynamics live only in tagged inners.
+        for inner in dict_ref_wrapped_physical_inner(dr) {
+            collect_c_dictref_names(ctx, inner, params, captures)
+        }
     }
 }
 
@@ -1483,13 +1565,6 @@ fn collect_c_captures(
                         params, captures)
                 },
                 none => {}
-            }
-            // B-145: evidence params forwarded by calls inside the body must
-            // be captured (only ones actually in named_values are).
-            let call_ev_names = extract_effect_names(effects)
-            for en in call_ev_names {
-                let key = evidence_param_name(en)
-                consider_c_optional_evidence_capture(ctx, key, captures)
             }
         },
         HExpr::DictConstruct { inner, .. } => {
@@ -1589,15 +1664,9 @@ fn collect_c_captures(
                 collect_c_captures(ctx, h.body, arm_params, captures)
             }
         },
-        HExpr::EffectOp { effect_name: eo_eff, args: eo_args, .. } => {
+        HExpr::EffectOp { args: eo_args, .. } => {
             for a in eo_args {
                 collect_c_captures(ctx, a, params, captures)
-            }
-            // B-090: a non-fail effect op dispatches through its evidence —
-            // capture the evidence param.  fail routes through ring_raise.
-            if eo_eff != "fail" {
-                let key = evidence_param_name(eo_eff)
-                consider_c_optional_evidence_capture(ctx, key, captures)
             }
         },
         HExpr::RangeExpr { start: rs, end: re, .. } => {
@@ -1655,7 +1724,7 @@ fn collect_c_captures_stmt(
         },
         // B-084 #131: Perceus branch-balancing may place an HStmt::Drop for an
         // outer-scope variable inside the lambda body — treat as a use.
-        HStmt::Drop { name, def_id, slot, ty, .. } => {
+        HStmt::Drop { name, def_id, slot, place_target, ty, .. } => {
             if slot_ref_is_source(slot) &&
                slot_ref_source_def_id(slot) != def_id {
                 panic("C codegen: Drop SlotRef/DefId relation drifted")
@@ -1663,6 +1732,11 @@ fn collect_c_captures_stmt(
             consider_c_drop_reference(ctx, name, def_id,
                 is_extern_handle_type(ty, ctx.extern_types),
                 params, captures)
+            match place_target {
+                some(target) => collect_c_captures(
+                    ctx, target, params, captures),
+                none => {}
+            }
         },
         _ => {},
     }
@@ -1958,7 +2032,8 @@ pub fn gen_c_closure_call(
 // Trait method call through exact dictionary evidence:
 // load exact evidence, read the resolver-issued callable slot, and call it.
 fn gen_c_bound_method_call(
-    mut ctx: CCtx, callee: HExpr, args: List<HExpr>, exact: MethodCallRef
+    mut ctx: CCtx, callee: HExpr, args: List<HExpr>, exact: MethodCallRef,
+    handled_evidence: List<HandledEvidenceRef>
 ) -> Str {
     // Receiver from callee (FieldAccess) or first arg.
     let mut call_args: List<Str> = []
@@ -1983,6 +2058,9 @@ fn gen_c_bound_method_call(
             none => {},
         }
     }
+    for value in c_handled_evidence_values(ctx, handled_evidence) {
+        call_args.push(value)
+    }
 
     let dict_ref = c_resolve_dict_ref(
         ctx, method_call_ref_bound_evidence(exact))
@@ -2002,11 +2080,11 @@ fn resolve_c_dispatch_dict(
 ) -> CTypedRef {
     match dispatch {
         TraitDispatch::Dict { param } => {
-            c_resolve_dict_ref(ctx, DictRef::Simple(param))
+            c_resolve_simple_dict_name(ctx, param)
         },
         TraitDispatch::Direct { dict, extra_dicts } => {
             if extra_dicts.len() == 0 {
-                c_resolve_dict_ref(ctx, DictRef::Static(dict))
+                c_resolve_static_dict_name(ctx, dict)
             } else {
                 // B-121 gap 1: bind inner type-param dicts via a wrapped dict.
                 match trait_name_hint {
@@ -2162,10 +2240,34 @@ fn gen_c_ord_dispatch(mut ctx: CCtx, op: BinOp, left: HExpr, right: HExpr, dispa
 fn c_lookup_evidence(mut ctx: CCtx, ep_name: Str) -> CTypedRef {
     // Only handled custom effects request evidence. System effects, failure,
     // mutation and unsafe are excluded by the shared typed effect scan.
+    match c_semantic_value_slot_key(ctx, ep_name) {
+        some(slot) => return c_ref_exact(slot),
+        none => {}
+    }
     match c_name_only_value(ctx, ep_name) {
         some(slot) => c_ref_name_only(slot),
         none => panic("C codegen: handled effect evidence is absent"),
     }
+}
+
+fn c_handled_evidence_ref(
+    ctx: CCtx, evidence: HandledEvidenceRef
+) -> CTypedRef {
+    let slot = binder_entry_slot(handled_evidence_binding(evidence))
+    match c_semantic_value_slot(ctx, slot) {
+        some(value) => c_ref_exact(value),
+        none => panic("C codegen: exact handled evidence slot is absent")
+    }
+}
+
+fn c_handled_evidence_values(
+    ctx: CCtx, values: List<HandledEvidenceRef>
+) -> List<Str> {
+    let mut result: List<Str> = []
+    for value in values {
+        result.push(c_ref_c_name(c_handled_evidence_ref(ctx, value)))
+    }
+    result
 }
 
 // ============================================================
@@ -2181,7 +2283,7 @@ fn c_lookup_evidence(mut ctx: CCtx, ep_name: Str) -> CTypedRef {
 //   * tail-resumptive handler ops = evidence structs.  An evidence struct is
 //     { int64_t count, void* slot0, ... } (typeid 21, RING_TYPEID_EVIDENCE);
 //     slot k holds op k's {fn_ptr, env} closure (slot order = declaration
-//     order via hir::effect_op_slot).  Handler arms become closures via
+//     order via exact EffectOperationRef source ordinals). Handler arms become closures via
 //     gen_c_lambda; an effect op dispatches by loading its slot and calling
 //     the closure — the arm's return value IS the resume value.
 //   * setjmp non-volatile-local caveat: all Ring locals are hoisted to the
@@ -2280,71 +2382,67 @@ fn gen_c_try_catch(mut ctx: CCtx, body: HExpr, arms: List<HMatchArm>) -> Str {
 // Handle expression — port of gen_handle_expr. Builds one evidence struct per
 // handled effect; a fail.raise handler is the abort form (setjmp, then execute
 // the arm with the raised payload after restoring outer evidence).
-fn gen_c_handle_expr(mut ctx: CCtx, body: HExpr, handlers: List<HEffectHandler>) -> Str {
-    // Group handlers by effect name.
-    let mut by_effect: Map<Str, List<HEffectHandler>> = map_new()
+fn gen_c_handle_expr(
+    mut ctx: CCtx, body: HExpr, handlers: List<HEffectHandler>,
+    installed_evidence: List<HandledEvidenceRef>
+) -> Str {
     let mut abort_handler: HEffectHandler? = none
     for h in handlers {
-        if h.effect_name == "fail" && h.op_name == "raise" {
+        if h.fail_ref.is_some() {
             match abort_handler {
-                some(_) => {},
+                some(_) => panic("C codegen: duplicate fail handler"),
                 none => { abort_handler = some(h) },
             }
         }
-        match by_effect.get(h.effect_name) {
-            some(existing) => existing.push(h),
-            none => {
-                by_effect.insert(h.effect_name, [h])
-            },
-        }
     }
 
-    let mut has_fail_abort = false
-    // B-096: hoisted C vars holding evidence to drop at scope end.  Stored by
-    // VALUE VARIABLE (unique per handle), not by evidence name — nested
-    // handles for the same effect must not double-free (LLVM alloca parity).
-    let mut ev_drop_vars: List<Str> = []
-    // B-100 Fix 7: save outer evidence bindings so post-handle code sees the
-    // outer evidence again (not this handle's dropped struct).
-    let mut saved_ev_entries: List<(Str, CNameOnlySlotRef)> = []
-    // #251: absence is part of the lexical snapshot. If no outer binding
-    // existed, the abort arm must not see this handle's stale/dropped evidence.
-    let mut absent_ev_names: List<Str> = []
-
-    let mut sorted_by_effect = by_effect.entries()
-    sorted_by_effect.sort_by(compare_by_first)
-    for entry in sorted_by_effect {
-        let (effect_name, hs) = entry
-        let ev_name = evidence_param_name(effect_name)
-
-        let mut is_fail_abort = false
-        for h in hs {
-            if effect_name == "fail" && h.op_name == "raise" {
-                has_fail_abort = true
-                is_fail_abort = true
+    let mut installed_index = 0
+    while installed_index < installed_evidence.len() {
+        let installed = installed_evidence.get(installed_index).unwrap()
+        let requirement = handled_evidence_requirement(installed)
+        let mut hs: List<HEffectHandler> = []
+        for handler in handlers {
+            match handler.handled_ref {
+                some(reference) => if handled_effect_ref_same(
+                        reference, requirement) {
+                    hs.push(handler)
+                },
+                none => {}
             }
         }
-
-        match c_name_only_value(ctx, ev_name) {
-            some(outer_cv) => saved_ev_entries.push((ev_name, outer_cv)),
-            none => absent_ev_names.push(ev_name),
+        if hs.len() == 0 {
+            panic("C codegen: installed evidence has no exact handlers")
         }
-
-        if is_fail_abort {
-            // fail.raise routes through setjmp/ring_raise, not evidence —
-            // keep a null placeholder for ABI uniformity (callees still
-            // receive an evidence ptr param for the effect).
-            let cv = c_local(ctx, ev_name)
-            c_emit(ctx, "${cv} = RING_UNIT;")
-        } else {
-            // B-090 (D1): build the real N-slot evidence struct BEFORE
-            // rebinding ev_name — arm closures capture the OUTER evidence.
-            let ev_val = build_c_handler_evidence(ctx, effect_name, hs)
-            let cv = c_local(ctx, ev_name)
-            c_emit(ctx, "${cv} = ${ev_val};")
-            ev_drop_vars.push(cv)
+        let ev_val = build_c_handler_evidence(ctx, installed, hs)
+        let slot = binder_entry_slot(handled_evidence_binding(installed))
+        let cv = c_exact_slot_c_name(c_local_semantic_slot(
+            ctx, slot, "__handled_evidence"))
+        c_emit(ctx, "${cv} = ${ev_val};")
+        installed_index = installed_index + 1
+    }
+    for handler in handlers {
+        match handler.handled_ref {
+            some(reference) => {
+                let mut matches = 0
+                for installed in installed_evidence {
+                    if handled_effect_ref_same(
+                            handled_evidence_requirement(installed),
+                            reference) {
+                        matches = matches + 1
+                    }
+                }
+                if matches != 1 {
+                    panic("C codegen: handler/evidence installation differs")
+                }
+            },
+            none => if handler.fail_ref.is_none() {
+                panic("C codegen: handler lacks exact effect identity")
+            }
         }
     }
+
+    let has_fail_abort = abort_handler.is_some()
+    let ev_drop_vars: List<Str> = []
 
     if has_fail_abort {
         // Abort (fail.raise) handler: inline setjmp like gen_c_try_catch. On
@@ -2367,7 +2465,6 @@ fn gen_c_handle_expr(mut ctx: CCtx, body: HExpr, handlers: List<HEffectHandler>)
         let _popped = ctx.handle_cleanup_stack.pop()
         c_emit(ctx, "${res} = ${body_val};")
         c_emit(ctx, "ring_catch_pop();")
-        emit_c_evidence_drops(ctx, ev_drop_vars)
         c_emit(ctx, "goto ${merge_lbl};")
 
         // --- catch path: deactivate current handle, then execute abort arm ---
@@ -2375,18 +2472,6 @@ fn gen_c_handle_expr(mut ctx: CCtx, body: HExpr, handlers: List<HEffectHandler>)
         let error_val = fresh_tmp(ctx)
         c_emit(ctx, "${error_val} = ring_catch_get_error(${frame});")
         c_emit(ctx, "ring_catch_pop();")
-        emit_c_evidence_drops(ctx, ev_drop_vars)
-
-        // #251: abort arms run outside the current handler. Restore the full
-        // outer evidence snapshot before generating the arm so ordinary effects
-        // dispatch outward; explicitly remove names that were previously absent.
-        for saved in saved_ev_entries {
-            let (sname, scv) = saved
-            c_restore_name_only_value(ctx, sname, scv)
-        }
-        for absent_name in absent_ev_names {
-            c_remove_name_only_value(ctx, absent_name)
-        }
 
         // The operation parameter is a lexical binder. Isolate it from the
         // enclosing map so a same-named outer local is restored at the merge.
@@ -2424,14 +2509,6 @@ fn gen_c_handle_expr(mut ctx: CCtx, body: HExpr, handlers: List<HEffectHandler>)
         // BEFORE the evidence drops (a slot closure may own the value).
         let res = fresh_tmp(ctx)
         c_emit(ctx, "${res} = ${result};")
-        emit_c_evidence_drops(ctx, ev_drop_vars)
-        for saved in saved_ev_entries {
-            let (sname, scv) = saved
-            c_restore_name_only_value(ctx, sname, scv)
-        }
-        for absent_name in absent_ev_names {
-            c_remove_name_only_value(ctx, absent_name)
-        }
         res
     }
 }
@@ -2441,12 +2518,30 @@ fn gen_c_handle_expr(mut ctx: CCtx, body: HExpr, handlers: List<HEffectHandler>)
 // Layout: { int64_t count, void* slot0, ... }, typeid 21 (RING_TYPEID_EVIDENCE)
 // — drop_evidence (runtime) reads the leading count and ring_drop's each
 // non-null closure slot.  Slot k = op k's closure (declaration order).
-fn build_c_handler_evidence(mut ctx: CCtx, effect_name: Str, hs: List<HEffectHandler>) -> Str {
-    // Slot count = #ops declared on the effect; fall back to the handler
-    // count only for unregistered effects (unreachable for checked code).
-    let n_slots = match ctx.effect_ops.get(effect_name) {
-        some(ops) => ops.len(),
-        none => hs.len(),
+fn build_c_handler_evidence(
+    mut ctx: CCtx, installed: HandledEvidenceRef,
+    hs: List<HEffectHandler>
+) -> Str {
+    let requirement = handled_evidence_requirement(installed)
+    let n_slots = hs.len()
+    let mut seen: Set<Int> = set_new()
+    for handler in hs {
+        let operation = match handler.operation_ref {
+            some(value) => value,
+            none => panic("C codegen: custom handler lacks operation ref")
+        }
+        if !handled_effect_ref_same(
+                effect_operation_ref_effect(operation), requirement) {
+            panic("C codegen: handler operation crosses installed effect")
+        }
+        let index = effect_operation_ref_source_index(operation)
+        if index < 0 || index >= n_slots || seen.contains(index) {
+            panic("C codegen: handler operation order/census differs")
+        }
+        seen.insert(index)
+    }
+    if seen.len() != n_slots {
+        panic("C codegen: handler operation set is incomplete")
     }
 
     rt_use(ctx, "ring_alloc", 2)
@@ -2462,10 +2557,15 @@ fn build_c_handler_evidence(mut ctx: CCtx, effect_name: Str, hs: List<HEffectHan
     // return value is the resume value (tail-resumptive), so the closure
     // simply returns its body.
     for h in hs {
-        let slot_idx = effect_op_slot(ctx.effect_ops, effect_name, h.op_name)
-        let idx = if slot_idx >= 0 { slot_idx } else { 0 }
+        let operation = match h.operation_ref {
+            some(value) => value,
+            none => panic("C codegen: custom handler lost exact operation")
+        }
+        let idx = effect_operation_ref_source_index(operation)
         let arm_ret_ty = hexpr_type(h.body)
-        let arm_closure = gen_c_lambda(ctx, h.params, arm_ret_ty, h.body, arm_ret_ty)
+        let arm_closure = gen_c_lambda(
+            ctx, h.params, arm_ret_ty, h.body, arm_ret_ty,
+            h.evidence_captures)
         c_emit(ctx, "((void**)${ev})[${idx + 1}] = ${arm_closure};")
     }
 
@@ -2473,8 +2573,16 @@ fn build_c_handler_evidence(mut ctx: CCtx, effect_name: Str, hs: List<HEffectHan
 }
 
 // Effect operation — port of gen_effect_op.
-fn gen_c_effect_op(mut ctx: CCtx, effect_name: Str, op_name: Str, args: List<HExpr>) -> Str {
-    if effect_name == "fail" && op_name == "raise" {
+fn gen_c_effect_op(
+    mut ctx: CCtx, effect_name: Str, op_name: Str,
+    operation_ref: EffectOperationRef?,
+    handled_evidence: List<HandledEvidenceRef>, args: List<HExpr>
+) -> Str {
+    if operation_ref.is_none() {
+        if effect_name != "fail" || op_name != "raise" ||
+           handled_evidence.len() != 0 {
+            panic("C codegen: non-custom effect operation contract differs")
+        }
         // Abort: ring_raise longjmps into the innermost catch frame.
         let mut arg_vals: List<Str> = []
         for a in args { arg_vals.push(gen_c_expr(ctx, a)) }
@@ -2487,15 +2595,23 @@ fn gen_c_effect_op(mut ctx: CCtx, effect_name: Str, op_name: Str, args: List<HEx
         // ring_raise never returns; any following C statements are dead.
         "RING_UNIT"
     } else {
-        // B-090 (D1): dispatch through the evidence struct — load the op's
-        // closure from slot effect_op_slot(effect, op) and call it.
-        let ev_name = evidence_param_name(effect_name)
+        let operation = operation_ref.unwrap()
+        if handled_evidence.len() != 1 ||
+           !handled_effect_ref_same(
+                handled_evidence_requirement(
+                    handled_evidence.get(0).unwrap()),
+                effect_operation_ref_effect(operation)) {
+            panic("C codegen: effect operation evidence differs")
+        }
         let mut arg_vals: List<Str> = []
         for a in args { arg_vals.push(gen_c_expr(ctx, a)) }
 
-        let ev_ref = c_lookup_evidence(ctx, ev_name)
-        let slot_idx = effect_op_slot(ctx.effect_ops, effect_name, op_name)
-        let idx = if slot_idx >= 0 { slot_idx } else { 0 }
+        let ev_ref = c_handled_evidence_ref(
+            ctx, handled_evidence.get(0).unwrap())
+        let idx = effect_operation_ref_source_index(operation)
+        if idx < 0 {
+            panic("C codegen: negative effect operation index")
+        }
         let closure_ref = emit_c_receiver_load(
             ctx, ev_ref, idx + 1, "effect")
         gen_c_closure_call(ctx, closure_ref, arg_vals)
@@ -2514,14 +2630,37 @@ const INTRINSIC_RUNTIME_NAMES: List<Str> = [
     "ring_Option_is_some", "ring_Option_is_none", "ring_Option_map",
     "ring_Option_and_then", "ring_Option_unwrap_or_else",
     "ring_Option_to_fail", "ring_Cell_get", "ring_Cell_set",
-    "ring_Cell_update"
+    "ring_Cell_update",
+    "ring_cl_eq_int", "ring_cl_ne_int",
+    "ring_cl_eq_float", "ring_cl_ne_float",
+    "ring_cl_eq_str", "ring_cl_ne_str",
+    "ring_cl_eq_bool", "ring_cl_ne_bool",
+    "ring_dup", "ring_dup", "ring_dup", "ring_dup",
+    "ring_cl_cmp_int", "ring_cl_cmp_float",
+    "ring_cl_cmp_str", "ring_cl_cmp_bool",
+    "ring_cl_debug_int", "ring_cl_debug_float",
+    "ring_cl_debug_str", "ring_cl_debug_bool",
+    "ring_cl_hash_int_export", "ring_cl_hash_str_export",
+    "ring_cl_hash_bool_export"
 ]
 
 fn intrinsic_runtime_name(tag: Int) -> Str {
-    if INTRINSIC_RUNTIME_NAMES.len() != 33 || tag < 0 || tag >= 33 {
+    if INTRINSIC_RUNTIME_NAMES.len() != BUILTIN_METHOD_SITE_COUNT ||
+       tag < 0 || tag >= BUILTIN_METHOD_SITE_COUNT {
         panic("C codegen: builtin method intrinsic census drifted")
     }
     INTRINSIC_RUNTIME_NAMES.get(tag).unwrap_or("")
+}
+
+fn intrinsic_is_scalar_clone(tag: Int) -> Bool {
+    tag == BUILTIN_METHOD_INT_CLONE ||
+    tag == BUILTIN_METHOD_FLOAT_CLONE ||
+    tag == BUILTIN_METHOD_STR_CLONE ||
+    tag == BUILTIN_METHOD_BOOL_CLONE
+}
+
+fn intrinsic_uses_closure_abi(tag: Int) -> Bool {
+    tag >= BUILTIN_METHOD_INT_EQ && !intrinsic_is_scalar_clone(tag)
 }
 
 fn intrinsic_returns_raw_i64(tag: Int) -> Bool {
@@ -2566,9 +2705,17 @@ fn gen_c_intrinsic_method_call(
     }
     let tag = builtin_method_site_tag(intrinsic_ref_site(
         method_call_ref_intrinsic(method_ref)))
+    if intrinsic_is_scalar_clone(tag) {
+        rt_use(ctx, "ring_dup", 1)
+        c_emit(ctx, "ring_dup(${receiver});")
+        return receiver
+    }
     let runtime_name = intrinsic_runtime_name(tag)
     let mut call_args: List<Str> = []
-    if tag == BUILTIN_METHOD_INT_TO_STR {
+    if intrinsic_uses_closure_abi(tag) {
+        call_args.push("RING_UNIT")
+        call_args.push(receiver)
+    } else if tag == BUILTIN_METHOD_INT_TO_STR {
         call_args.push("RING_UNTAG(${receiver})")
     } else if tag == BUILTIN_METHOD_FLOAT_TO_STR {
         rt_use(ctx, "ring_unbox_float", 1)
@@ -2608,17 +2755,18 @@ fn gen_c_intrinsic_method_call(
 
 fn gen_c_call(
     mut ctx: CCtx, callee: HExpr, args: List<HExpr>,
-    resolved_dicts: List<DictRef>, callee_ref: CalleeRef?,
+    resolved_dicts: List<DictRef>,
+    handled_evidence: List<HandledEvidenceRef>, callee_ref: CalleeRef?,
     method_ref: MethodCallRef?,
     result_ty: Type
 ) -> Str {
-    let _ = callee_ref
     // Bound dispatch consumes the exact TraitMethodRef slot and DictRef
     // evidence carried by MethodCallRef. Unit-returning dispatch yields
     // RING_UNIT rather than exposing the closure ABI return value.
     match method_ref {
         some(exact) => if method_call_ref_is_bound(exact) {
-            let raw = gen_c_bound_method_call(ctx, callee, args, exact)
+            let raw = gen_c_bound_method_call(
+                ctx, callee, args, exact, handled_evidence)
             if is_unit_type(result_ty) {
                 return "RING_UNIT"
             }
@@ -2627,7 +2775,7 @@ fn gen_c_call(
         none => {}
     }
 
-    let mut_flags = c_lookup_call_mut_flags(ctx, callee)
+    let mut_flags = c_lookup_call_mut_flags(ctx, callee, callee_ref)
 
     // Evaluate all args first (mut value-type positions box into cells).
     let mut arg_vals: List<Str> = []
@@ -2650,10 +2798,14 @@ fn gen_c_call(
         let reference = c_resolve_dict_ref(ctx, dr)
         dict_vals.push(c_ref_c_name(reference))
     }
+    let handled_vals = c_handled_evidence_values(ctx, handled_evidence)
 
     match method_ref {
         some(exact_method) => {
             let raw = if method_call_ref_is_intrinsic(exact_method) {
+                if handled_vals.len() != 0 {
+                    panic("C codegen: intrinsic call carries handled evidence")
+                }
                 gen_c_intrinsic_method_call(
                     ctx, callee, exact_method, arg_vals)
             } else if method_call_ref_is_concrete(exact_method) {
@@ -2671,7 +2823,7 @@ fn gen_c_call(
                 gen_c_method_call(
                     ctx, receiver, receiver_type, target_name,
                     impl_method_ref_name(method_identity),
-                    arg_vals, dict_vals)
+                    arg_vals, dict_vals, handled_vals)
             } else {
                 panic("C codegen: unknown method identity domain")
             }
@@ -2689,6 +2841,7 @@ fn gen_c_call(
     }
     match exact_local_callee {
         some(slot) => {
+            for value in handled_vals { arg_vals.push(value) }
             let closure_result = gen_c_closure_call(
                 ctx, c_ref_exact(slot), arg_vals)
             return if is_unit_type(result_ty) {
@@ -2725,6 +2878,7 @@ fn gen_c_call(
     }
     match name_only_local_callee {
         some(matched) => {
+            for value in handled_vals { arg_vals.push(value) }
             let closure_result = gen_c_closure_call(
                 ctx, c_ref_name_only(matched.slot), arg_vals)
             return if is_unit_type(result_ty) {
@@ -2777,7 +2931,8 @@ fn gen_c_call(
                     none => {},
                 }
             }
-            gen_c_direct_call(ctx, call_name, arg_vals, dict_vals)
+            gen_c_direct_call(
+                ctx, call_name, arg_vals, dict_vals, handled_vals)
         },
         HExpr::FieldAccess { receiver, field, .. } => {
             let _ = receiver
@@ -2789,6 +2944,7 @@ fn gen_c_call(
             let closure_val = gen_c_expr(ctx, callee)
             let closure_ref = c_ref_computed(
                 closure_val, "expression-closure")
+            for value in handled_vals { arg_vals.push(value) }
             gen_c_closure_call(ctx, closure_ref, arg_vals)
         },
     }
@@ -2897,7 +3053,10 @@ fn gen_c_extern_abi_call(mut ctx: CCtx, abi_name: Str, arg_vals: List<Str>) -> S
     }
 }
 
-fn gen_c_direct_call(mut ctx: CCtx, name: Str, arg_vals: List<Str>, dict_vals: List<Str>) -> Str {
+fn gen_c_direct_call(
+    mut ctx: CCtx, name: Str, arg_vals: List<Str>,
+    dict_vals: List<Str>, handled_vals: List<Str>
+) -> Str {
     // B-125: ptr_from_addr — pure codegen identity (untag Int → raw address).
     if name == "ptr_from_addr" {
         let a = match arg_vals.get(0) { some(v) => v, none => panic("ptr_from_addr: missing arg") }
@@ -2914,6 +3073,9 @@ fn gen_c_direct_call(mut ctx: CCtx, name: Str, arg_vals: List<Str>, dict_vals: L
     if ctx.ring_callable_names.contains(resolved_key) == false {
         match ctx.extern_abi_names.get(resolved_key) {
             some(abi_name) => {
+                if handled_vals.len() != 0 {
+                    panic("C codegen: extern ABI call carries handled evidence")
+                }
                 return gen_c_extern_abi_call(ctx, abi_name, arg_vals)
             },
             none => {},
@@ -2933,15 +3095,7 @@ fn gen_c_direct_call(mut ctx: CCtx, name: Str, arg_vals: List<Str>, dict_vals: L
             let mut call_args: List<Str> = []
             for a in arg_vals { call_args.push(a) }
             for dv in dict_vals { call_args.push(dv) }
-            match ctx.fn_evidence_params.get(lookup.key) {
-                some(ev_params) => {
-                    for ep in ev_params {
-                        let reference = c_lookup_evidence(ctx, ep)
-                        call_args.push(c_ref_c_name(reference))
-                    }
-                },
-                none => {},
-            }
+            for value in handled_vals { call_args.push(value) }
             let t = fresh_tmp(ctx)
             c_emit(ctx, "${t} = ${lookup.fi.c_name}(${call_args.join(", ")});")
             t
@@ -3021,7 +3175,7 @@ fn gen_c_ptr_method(mut ctx: CCtx, recv: Str, recv_type: Type, method: Str, args
 fn gen_c_method_call(
     mut ctx: CCtx, recv: Str, recv_type: Type,
     type_name: Str, method: Str,
-    args: List<Str>, dict_vals: List<Str>
+    args: List<Str>, dict_vals: List<Str>, handled_vals: List<Str>
 ) -> Str {
     if type_name == "Ptr" {
         return gen_c_ptr_method(ctx, recv, recv_type, method, args)
@@ -3034,15 +3188,7 @@ fn gen_c_method_call(
             let mut call_args: List<Str> = [recv]
             for a in args { call_args.push(a) }
             for dv in dict_vals { call_args.push(dv) }
-            match ctx.fn_evidence_params.get(mangled) {
-                some(ev_params) => {
-                    for ep in ev_params {
-                        let reference = c_lookup_evidence(ctx, ep)
-                        call_args.push(c_ref_c_name(reference))
-                    }
-                },
-                none => {}
-            }
+            for value in handled_vals { call_args.push(value) }
             let t = fresh_tmp(ctx)
             c_emit(ctx, "${t} = ${fi.c_name}(${call_args.join(", ")});")
             t
@@ -4277,16 +4423,24 @@ pub fn emit_c_stmt(mut ctx: CCtx, stmt: HStmt) {
                 expr, then_block, else_block)
         },
         // Perceus RC ops (post-RC HIR input — mandatory from step 2 on).
-        HStmt::Drop { name, def_id, .. } => {
-            match c_exact_value_slot(ctx, name, def_id) {
-                some(slot) => {
-                    let cv = c_exact_slot_c_name(slot)
-                    rt_use(ctx, "ring_drop", 1)
-                    c_emit(ctx, "ring_drop(${cv});")
-                },
-                none => panic(
-                    "C codegen: Drop '${name}' has no exact DefId slot"),
+        HStmt::Drop { name, def_id, slot, place_target, .. } => {
+            let value = match place_target {
+                some(target) => gen_c_expr(ctx, target),
+                none => {
+                    let exact = if slot_ref_is_source(slot) {
+                        c_exact_value_slot(ctx, name, def_id)
+                    } else {
+                        c_semantic_value_slot(ctx, slot)
+                    }
+                    match exact {
+                        some(exact_slot) => c_exact_slot_c_name(exact_slot),
+                        none => panic(
+                            "C codegen: Drop '${name}' has no exact DefId slot")
+                    }
+                }
             }
+            rt_use(ctx, "ring_drop", 1)
+            c_emit(ctx, "ring_drop(${value});")
         }
     }
 }

@@ -13,6 +13,7 @@ Usage:
     python tests/run_tests.py --suite self-compile   # tracked dist-c fixed point
     python tests/run_tests.py --suite structural     # generated-C structural gates
     python tests/run_tests.py --suite parity         # static evidence matrix
+    python tests/run_tests.py --suite ownership-vertical  # #268/#269 real fixtures
     python tests/run_tests.py --filter substr        # only cases matching substr
     python tests/run_tests.py --update-golden        # regenerate .expected
 """
@@ -36,6 +37,12 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from ownership_vertical_runner import (
+    ExactPanicObservation,
+    RunnerContext,
+    run_ownership_vertical,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -3289,6 +3296,45 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
     )
 
 
+def run_ownership_vertical_suite(
+    ring_exe: str,
+    clang_path: str,
+    collector: ResultCollector,
+    *,
+    name_filter: Optional[str] = None,
+) -> None:
+    """Adapt aggregate toolchain helpers to the manifest-owned vertical."""
+    suite = "ownership-vertical"
+
+    def add_result(status: str, name: str, detail: str) -> None:
+        collector.add(TestResult(status, suite, name, detail))
+
+    def run_internal_canary(canary, label: str) -> ExactPanicObservation:
+        entry = CASES_DIR / "ownership_vertical" / canary.input_path
+        result = ring_check(
+            ring_exe, str(entry), extra_args=[f"--rc-mutate={canary.mutation}"],
+            phase_suite=suite, phase_case=label,
+        )
+        return ExactPanicObservation(
+            returncode=result.returncode,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
+        )
+
+    context = RunnerContext(
+        manifest_path=CASES_DIR / "ownership_vertical" / "manifest.json",
+        check=lambda entry, label: ring_check(
+            ring_exe, str(entry), phase_suite=suite, phase_case=label),
+        native=lambda entry, output_dir, label: compile_link_run(
+            ring_exe, clang_path, str(entry), str(output_dir),
+            phase_suite=suite, phase_case=label),
+        add_result=add_result,
+        matches_filter=matches_filter,
+        internal_canary=run_internal_canary,
+    )
+    run_ownership_vertical(context, name_filter=name_filter)
+
+
 # ---------------------------------------------------------------------------
 # Golden-snapshot suite
 # ---------------------------------------------------------------------------
@@ -5886,12 +5932,15 @@ def identity_checkpoint_contract_errors(
             ("cctx", "default_evidence"),
             ("cgen", "default_evidence"),
             ("cexpr", "default_evidence"),
-            ("types", "IoEffect")):
+            ("types", "IoEffect"),
+            ("cctx", "local_fn_effects"),
+            ("cctx", "effect_ops"),
+            ("cgen", "scan_fn_effects"),
+            ("cgen", "compute_transitive_effect_closure"),
+            ("cgen", "compute_project_effect_closure"),
+            ("cgen", "register_effect_ops_c")):
         if token in mask_ring_strings_and_comments(sources[label]):
             errors.append(f"{label}: retired effect authority {token!r} remains")
-    if "Effect::SystemEffect { .. } => {}" not in sources["effect_analysis"] or (
-            "Effect::CustomEffect { .. } => {" not in sources["effect_analysis"]):
-        errors.append("effect_analysis: system/handled evidence split drifted")
     for token in (
             '"Effect operation bodies are not supported in Ring 0.1"',
             "let _ = self.parse_block_expr()",
@@ -5962,25 +6011,6 @@ def identity_checkpoint_contract_errors(
     if "let fn_scheme = ctx.env.lookup(name)" in sources["infer_decl"]:
         errors.append(
             "infer_decl: function HDecl DefId must not re-query a same-spelled env binding")
-    checker_error_guard = (
-        "    let has_errors = ctx.sink.has_errors()\n"
-        "    // B-002p1: check for use-after-move on Drop types (before lowering)\n"
-        "    if !has_errors && assembled.drop_types.len() > 0 {\n"
-        "        check_drop_moves(assembled, ctx.sink)\n"
-        "    }\n"
-        "    let checked_program = if has_errors {\n"
-        "        assembled\n"
-        "    } else {\n"
-        "        lower_dicts(lower_andor(assembled))\n"
-        "    }\n"
-        "    CheckResult {\n"
-        "        program: checked_program,"
-    )
-    if sources["checker"].count(checker_error_guard) != 2:
-        errors.append(
-            "checker: check/check_module must return assembled HIR on existing "
-            "errors and guard move/lowering")
-
     infer_source = sources["infer"]
     if len(re.findall(r"\binfer_scoped_block\b", infer_source)) != 5:
         errors.append("infer: scoped-block helper must have one definition and four call sites")
@@ -7034,7 +7064,7 @@ def default_body_identity_generated_c_errors(
 
 IR_IDENTITY_F0_PATH = REPO / "compiler" / "ir_identity.ring"
 RESOURCE_MODEL_F0_PATH = REPO / "compiler" / "resource_model.ring"
-F0_SEMANTIC_MUTATION_COUNT = 49
+F0_SEMANTIC_MUTATION_COUNT = 42
 F0_SCOPE_GUARD_COUNT = 9
 
 
@@ -7398,7 +7428,6 @@ def resource_lattice_f0_contract_errors(source: str) -> List[str]:
         "PhysicalRcShape": [
             "physical_rc", "boxing", "drop_glue", "foreign_containment",
             "param_deps"],
-        "SlotFlowTransition": ["flow", "requires_finding"],
     }.items():
         fields, field_error = _f0_struct_fields(source, name)
         if field_error:
@@ -7416,18 +7445,14 @@ def resource_lattice_f0_contract_errors(source: str) -> List[str]:
         errors.append(param_table_error)
     if param_rank_error:
         errors.append(param_rank_error)
-    expected_param_table = [max(left, right) for left in range(5) for right in range(5)]
+    expected_param_table = [max(left, right) for left in range(4) for right in range(4)]
     if param_table is not None and param_ranks is not None:
         errors.extend(_f0_lattice_errors(
-            "ParamMode", param_table, param_ranks, 5))
+            "ParamMode", param_table, param_ranks, 4))
         if param_table != expected_param_table:
             errors.append("ParamMode is not the strict Bottom<Borrow<MutBorrow<Own chain")
-        if param_ranks != [0, 1, 2, 3, 4]:
+        if param_ranks != [0, 1, 2, 3]:
             errors.append("ParamMode ranks drifted")
-        for left in range(4):
-            for right in range(4):
-                if param_table[left * 5 + right] == 4:
-                    errors.append("normal ParamMode join creates Conflict")
 
     _f0_require_function_tokens(source, "make_transfer_demand", (
         "param_mode_from_tag(param_mode_tag(mode))",
@@ -7436,9 +7461,8 @@ def resource_lattice_f0_contract_errors(source: str) -> List[str]:
     ), errors)
     _f0_require_function_tokens(source, "transfer_demand_join", (
         "let joined_mode = param_mode_join(left.mode, right.mode)",
-        "if param_mode_is_conflict(joined_mode)",
         "left.force || right.force", "make_transfer_demand(",
-        "joined_mode, joined_force",
+        "joined_mode, left.force || right.force",
     ), errors)
     _f0_require_function_tokens(source, "transfer_demand_same", (
         "param_mode_same(left.mode, right.mode)",
@@ -7448,24 +7472,22 @@ def resource_lattice_f0_contract_errors(source: str) -> List[str]:
         "transfer_demand_same(transfer_demand_join(left, right), right)",
     ), errors)
     _f0_require_function_tokens(source, "transfer_demand_rank", (
-        "if param_mode_is_conflict(value.mode) { return 5 }",
         "if value.force { 1 } else { 0 }",
         "param_mode_rank(value.mode) + force_rank",
     ), errors)
 
     transfer_states = [
         (0, False), (1, False), (2, False),
-        (3, False), (3, True), (4, False)]
+        (3, False), (3, True)]
 
     def transfer_join(
         left: Tuple[int, bool], right: Tuple[int, bool],
     ) -> Tuple[int, bool]:
         mode = max(left[0], right[0])
-        force = False if mode == 4 else left[1] or right[1]
-        return mode, force
+        return mode, left[1] or right[1]
 
     transfer_ranks = {
-        state: (5 if state[0] == 4 else state[0] + (1 if state[1] else 0))
+        state: state[0] + (1 if state[1] else 0)
         for state in transfer_states
     }
     for left in transfer_states:
@@ -7522,14 +7544,7 @@ def resource_lattice_f0_contract_errors(source: str) -> List[str]:
 
     slot_table, slot_table_error = _f0_int_list(source, "SLOT_FLOW_JOIN_TAGS")
     slot_ranks, slot_rank_error = _f0_int_list(source, "SLOT_FLOW_RANKS")
-    assignment, assignment_error = _f0_int_list(
-        source, "SLOT_FLOW_ASSIGNMENT_TAGS")
-    take_tags, take_tag_error = _f0_int_list(source, "SLOT_FLOW_TAKE_TAGS")
-    take_findings, take_finding_error = _f0_bool_list(
-        source, "SLOT_FLOW_TAKE_FINDINGS")
-    for error in (
-            slot_table_error, slot_rank_error, assignment_error,
-            take_tag_error, take_finding_error):
+    for error in (slot_table_error, slot_rank_error):
         if error:
             errors.append(error)
     expected_slot_table = [
@@ -7546,12 +7561,6 @@ def resource_lattice_f0_contract_errors(source: str) -> List[str]:
             errors.append("SlotFlow Unreachable/reachable join table drifted")
         if slot_ranks != [0, 1, 1, 1, 2]:
             errors.append("SlotFlow ranks drifted")
-    if assignment is not None and assignment != [0, 2, 2, 2, 2]:
-        errors.append("SlotFlow assignment transition drifted")
-    if take_tags is not None and take_tags != [0, 1, 3, 3, 4]:
-        errors.append("SlotFlow Take state transition drifted")
-    if take_findings is not None and take_findings != [False, True, False, True, True]:
-        errors.append("SlotFlow Take finding flags drifted")
     return errors
 
 
@@ -7647,8 +7656,6 @@ def _f0_semantic_mutation_errors(
          "if false"),
         ("FORCE join", "transfer_demand_join",
          "left.force || right.force", "left.force"),
-        ("Conflict absorbs FORCE", "transfer_demand_join",
-         "if param_mode_is_conflict(joined_mode)", "if false"),
         ("FORCE equality", "transfer_demand_same",
          "left.force == right.force", "true"),
         ("FORCE order", "transfer_demand_leq",
@@ -7704,15 +7711,11 @@ def _f0_semantic_mutation_errors(
             errors.append(f"F0 semantic mutation escaped: {label}")
 
     int_mutations = (
-        ("Param Borrow/MutBorrow chain", "PARAM_MODE_JOIN_TAGS", 7, 4),
-        ("Param Borrow/Own chain", "PARAM_MODE_JOIN_TAGS", 8, 4),
+        ("Param Borrow/MutBorrow chain", "PARAM_MODE_JOIN_TAGS", 6, 1),
+        ("Param Borrow/Own chain", "PARAM_MODE_JOIN_TAGS", 7, 2),
         ("Param rank chain", "PARAM_MODE_RANKS", 2, 1),
         ("Unreachable join", "SLOT_FLOW_JOIN_TAGS", 2, 4),
         ("reachable distinct join", "SLOT_FLOW_JOIN_TAGS", 7, 2),
-        ("Unreachable assignment", "SLOT_FLOW_ASSIGNMENT_TAGS", 0, 2),
-        ("Moved assignment", "SLOT_FLOW_ASSIGNMENT_TAGS", 3, 3),
-        ("Unreachable Take state", "SLOT_FLOW_TAKE_TAGS", 0, 1),
-        ("Live Take state", "SLOT_FLOW_TAKE_TAGS", 2, 2),
     )
     for label, name, index, replacement in int_mutations:
         count += 1
@@ -7724,26 +7727,6 @@ def _f0_semantic_mutation_errors(
         values[index] = replacement
         mutated, mutation_error = _f0_replace_const_list(
             resource_source, name, values)
-        if mutation_error:
-            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
-        elif not resource_lattice_f0_contract_errors(mutated or ""):
-            errors.append(f"F0 semantic mutation escaped: {label}")
-
-    bool_mutations = (
-        ("Unreachable Take finding", 0, True),
-        ("Empty Take finding", 1, False),
-    )
-    for label, index, replacement in bool_mutations:
-        count += 1
-        values, value_error = _f0_bool_list(
-            resource_source, "SLOT_FLOW_TAKE_FINDINGS")
-        if value_error:
-            errors.append(f"F0 semantic mutation {label}: {value_error}")
-            continue
-        assert values is not None
-        values[index] = replacement
-        mutated, mutation_error = _f0_replace_const_list(
-            resource_source, "SLOT_FLOW_TAKE_FINDINGS", values)
         if mutation_error:
             errors.append(f"F0 semantic mutation {label}: {mutation_error}")
         elif not resource_lattice_f0_contract_errors(mutated or ""):
@@ -8989,8 +8972,31 @@ B201_BUILTIN_METHODS = (
     ("BUILTIN_METHOD_CELL_GET", "Cell", "get", "ring_Cell_get", "register_cell", "intrinsics"),
     ("BUILTIN_METHOD_CELL_SET", "Cell", "set", "ring_Cell_set", "register_cell", "intrinsics"),
     ("BUILTIN_METHOD_CELL_UPDATE", "Cell", "update", "ring_Cell_update", "register_cell", "intrinsics"),
+    ("BUILTIN_METHOD_INT_EQ", "Int", "eq", "ring_cl_eq_int", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_INT_NE", "Int", "ne", "ring_cl_ne_int", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_EQ", "Float", "eq", "ring_cl_eq_float", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_NE", "Float", "ne", "ring_cl_ne_float", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_STR_EQ", "Str", "eq", "ring_cl_eq_str", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_STR_NE", "Str", "ne", "ring_cl_ne_str", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_BOOL_EQ", "Bool", "eq", "ring_cl_eq_bool", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_BOOL_NE", "Bool", "ne", "ring_cl_ne_bool", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_INT_CLONE", "Int", "clone", "ring_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_CLONE", "Float", "clone", "ring_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_STR_CLONE", "Str", "clone", "ring_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_BOOL_CLONE", "Bool", "clone", "ring_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_INT_CMP", "Int", "cmp", "ring_cl_cmp_int", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_CMP", "Float", "cmp", "ring_cl_cmp_float", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_STR_CMP", "Str", "cmp", "ring_cl_cmp_str", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_BOOL_CMP", "Bool", "cmp", "ring_cl_cmp_bool", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_INT_DEBUG", "Int", "debug", "ring_cl_debug_int", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_DEBUG", "Float", "debug", "ring_cl_debug_float", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_STR_DEBUG", "Str", "debug", "ring_cl_debug_str", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_BOOL_DEBUG", "Bool", "debug", "ring_cl_debug_bool", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_INT_HASH", "Int", "hash", "ring_cl_hash_int_export", "register_hash_trait", ""),
+    ("BUILTIN_METHOD_STR_HASH", "Str", "hash", "ring_cl_hash_str_export", "register_hash_trait", ""),
+    ("BUILTIN_METHOD_BOOL_HASH", "Bool", "hash", "ring_cl_hash_bool_export", "register_hash_trait", ""),
 )
-B201_BUILTIN_METHOD_MUTATION_COUNT = 27
+B201_BUILTIN_METHOD_MUTATION_COUNT = 28
 
 
 def _b201_function_body(
@@ -9043,8 +9049,8 @@ def builtin_method_intrinsic_contract_errors(
     infer_decl = compiler_sources["infer_decl.ring"]
     checker = compiler_sources["checker.ring"]
 
-    if len(B201_BUILTIN_METHODS) != 33:
-        errors.append("B-201 test census is not exact33")
+    if len(B201_BUILTIN_METHODS) != 56:
+        errors.append("B-201 test census is not exact56")
     for tag, method in enumerate(B201_BUILTIN_METHODS):
         constant_name, _, method_name, _, producer, map_name = method
         declaration = f"pub const {constant_name}: Int = {tag}"
@@ -9052,14 +9058,21 @@ def builtin_method_intrinsic_contract_errors(
             errors.append(f"B-201 identity misses {declaration!r}")
         producer_body = _b201_function_body(builtins, producer, errors)
         normalized = re.sub(r"\s+", "", producer_body)
-        relation = re.sub(
-            r"\s+", "",
-            f'install_intrinsic({map_name}, "{method_name}", {constant_name})')
+        relation = re.sub(r"\s+", "", (
+            f'install_intrinsic({map_name}, "{method_name}", {constant_name})'
+            if tag < 33 else
+            f'builtin_intrinsic_method("{method_name}", {constant_name})'
+        ))
         if relation not in normalized:
             errors.append(
                 f"B-201 producer {producer} misses {constant_name}/{method_name}")
-    if "pub const BUILTIN_METHOD_SITE_COUNT: Int = 33" not in identity:
+    if "pub const BUILTIN_METHOD_SITE_COUNT: Int = 56" not in identity:
         errors.append("B-201 identity site census drifted")
+    if "scalar_trait_intrinsic_tag" in mask_ring_strings_and_comments(builtins):
+        errors.append("B-201 scalar intrinsic identity is reconstructed by names")
+    if "struct BuiltinImplMethodSpec" not in builtins or (
+            "intrinsic_tag: Int?" not in builtins):
+        errors.append("B-201 builtin declaration lacks explicit intrinsic tag")
 
     for struct_name, expected_fields in (
         ("BuiltinMethodSite", ["tag"]),
@@ -9244,8 +9257,8 @@ def builtin_method_intrinsic_mutation_errors(
     errors: List[str] = []
     mutations = (
         ("site count", "ir_identity.ring", None,
-         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 33",
-         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 32"),
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 56",
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 55"),
         ("tag duplicate", "ir_identity.ring", None,
          "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 1",
          "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 0"),
@@ -9254,6 +9267,9 @@ def builtin_method_intrinsic_mutation_errors(
         ("producer swap", "builtins.ring", "register_scalar_method_intrinsics",
          'install_intrinsic(str_intrinsics, "len", BUILTIN_METHOD_STR_LEN)',
          'install_intrinsic(str_intrinsics, "len", BUILTIN_METHOD_STR_CONTAINS)'),
+        ("scalar producer swap", "builtins.ring", "register_eq_trait",
+         'builtin_intrinsic_method("eq", BUILTIN_METHOD_INT_EQ)',
+         'builtin_intrinsic_method("eq", BUILTIN_METHOD_INT_NE)'),
         ("option producer", "builtins.ring", "register_option",
          'install_intrinsic(intrinsics, "unwrap", BUILTIN_METHOD_OPTION_UNWRAP)',
          'install_intrinsic(intrinsics, "unwrap", BUILTIN_METHOD_OPTION_UNWRAP_OR)'),
@@ -11418,7 +11434,6 @@ F2_IMPL_PROVIDER_CARRIER_PATHS = {
     "dict": REPO / "compiler" / "dict_lower.ring",
     "perceus": REPO / "compiler" / "perceus.ring",
     "codegen": REPO / "compiler" / "codegen_c.ring",
-    "effect": REPO / "compiler" / "effect_analysis.ring",
     "verify": REPO / "compiler" / "verify_rc.ring",
 }
 F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT = 23
@@ -13229,7 +13244,6 @@ def identity_checkpoint_source_errors() -> List[str]:
         "env": REPO / "compiler" / "env.ring",
         "types": REPO / "compiler" / "types.ring",
         "inventory": REPO / "compiler" / "ir_inventory.ring",
-        "effect_analysis": REPO / "compiler" / "effect_analysis.ring",
         "identity": REPO / "compiler" / "ir_identity.ring",
         "builtins": REPO / "compiler" / "builtins.ring",
         "hir": REPO / "compiler" / "hir.ring",
@@ -13640,6 +13654,7 @@ OWNERSHIP_CUTOVER_PATHS = {
     "checker": REPO / "compiler" / "checker.ring",
     "cli": REPO / "compiler" / "cli.ring",
     "project": REPO / "compiler" / "compiler_mod.ring",
+    "pipeline": REPO / "compiler" / "ownership_pipeline.ring",
     "hir_exact": REPO / "compiler" / "hir_exact.ring",
     "infer_decl": REPO / "compiler" / "infer_decl.ring",
     "core": REPO / "compiler" / "core_from_hir.ring",
@@ -13681,9 +13696,8 @@ def ownership_cutover_source_errors() -> List[str]:
         required = (
             "let frozen = if has_errors { none } else { some(",
             "freeze_core_and_legacy_facts(",
-            "ctx.core_recorder, checked_program, ctx.env,",
-            "ctx.core_type_sources,",
-            "ctx.core_handled_evidence_type_sources",
+            "ctx.core_module_key, ctx.core_module_order,",
+            "checked_program, ctx.env,",
             "core_facts: frozen.map(",
             "frozen_core_and_legacy_core(value)",
             "legacy_facts: frozen.map(",
@@ -13693,6 +13707,12 @@ def ownership_cutover_source_errors() -> List[str]:
             if token not in body:
                 errors.append(
                     f"checker.{function_name}: cutover relation misses {token!r}")
+        for retired in (
+                "ctx.core_recorder", "ctx.core_type_sources",
+                "ctx.core_handled_evidence_type_sources"):
+            if retired in body:
+                errors.append(
+                    f"checker.{function_name}: retired freeze input {retired!r} survived")
 
     def require_order(
         label: str, body: str, tokens: Tuple[str, ...],
@@ -13703,33 +13723,95 @@ def ownership_cutover_source_errors() -> List[str]:
         elif positions != sorted(positions) or len(set(positions)) != len(positions):
             errors.append(f"{label}: ownership stage order drifted")
 
-    single, single_error = extract_ring_function_body(
-        sources["cli"], "materialize_single_ownership")
-    if single_error:
-        errors.append(single_error)
+    pipeline, pipeline_error = extract_ring_function_body(
+        sources["pipeline"], "run_ownership_pipeline")
+    if pipeline_error:
+        errors.append(pipeline_error)
     else:
-        require_order("cli.materialize_single_ownership", single, (
-            "assemble_single_core(core_facts)",
-            "run_ownership_pipeline(",
+        require_order("ownership_pipeline.run_ownership_pipeline", pipeline, (
+            "lower_core_to_flow(validated_core)",
+            "verify_and_plan_resource_program(flow)",
+            "if !planning_outcome_is_verified(planning)",
+            "planning_outcome_verified(planning)",
+        ))
+        for token in (
+                "OwnershipPipelineFailedValue(",
+                "findings: findings, step_map: step_map",
+                "OwnershipPipelineVerifiedValue("):
+            if token not in pipeline:
+                errors.append(
+                    f"ownership pipeline: outcome closure misses {token!r}")
+
+    diagnostic_adapter, diagnostic_adapter_error = extract_ring_function_body(
+        sources["pipeline"], "ownership_pipeline_failure_diagnostics")
+    if diagnostic_adapter_error:
+        errors.append(diagnostic_adapter_error)
+    else:
+        for token in (
+                "failed_ownership_program_core_node_for_finding(",
+                "core_diagnostic_projection_origin_location(",
+                "core_diagnostic_projection_slot_display_label(",
+                "E0801", "use of moved value:"):
+            if token not in diagnostic_adapter:
+                errors.append(
+                    f"ownership diagnostics: exact adapter misses {token!r}")
+
+    single_report, single_report_error = extract_ring_function_body(
+        sources["cli"], "report_single_ownership_failure")
+    if single_report_error:
+        errors.append(single_report_error)
+    elif not all(token in single_report for token in (
+            "ownership_pipeline_failure_diagnostics(",
+            "diagnostic.span.file != file_path", "sink.report(diagnostic)",
+            "failed single-file plan emitted no error")):
+        errors.append("cli: single ownership diagnostic route drifted")
+
+    single_materialize, single_materialize_error = extract_ring_function_body(
+        sources["cli"], "materialize_single_verified_ownership")
+    if single_materialize_error:
+        errors.append(single_materialize_error)
+    else:
+        require_order("cli.materialize_single_verified_ownership",
+                      single_materialize, (
             "assemble_legacy_projection(",
+            "verified_ownership_program_flow(verified)",
             "materialize_verified_hir(",
         ))
-        if "verified_ownership_program_flow(verified)" not in single:
-            errors.append("cli: legacy projection is not bound to verified Flow")
+
+    project_run, project_run_error = extract_ring_function_body(
+        sources["project"], "run_project_ownership")
+    if project_run_error:
+        errors.append(project_run_error)
+    else:
+        require_order("compiler_mod.run_project_ownership", project_run, (
+            "assemble_project_core(core_facts)",
+            "run_ownership_pipeline(",
+        ))
+
+    project_report, project_report_error = extract_ring_function_body(
+        sources["project"], "report_project_ownership_failure")
+    if project_report_error:
+        errors.append(project_report_error)
+    elif not all(token in project_report for token in (
+            "ownership_pipeline_failure_diagnostics(",
+            "diagnostic.span.file != module.file_path",
+            "for key in phases.graph.topo_order", "sink.report(diagnostic)",
+            "failed plan emitted no error")):
+        errors.append("compiler_mod: project ownership diagnostic route drifted")
 
     project, project_error = extract_ring_function_body(
-        sources["project"], "materialize_project_ownership")
+        sources["project"], "materialize_verified_project_ownership")
     if project_error:
         errors.append(project_error)
     else:
-        require_order("compiler_mod.materialize_project_ownership", project, (
-            "assemble_project_core(core_facts)",
-            "run_ownership_pipeline(",
+        require_order("compiler_mod.materialize_verified_project_ownership",
+                      project, (
+            "for key in phases.graph.topo_order",
             "assemble_legacy_projection(",
+            "verified_ownership_program_flow(verified)",
             "materialize_verified_project_hir(",
         ))
         for token in (
-                "for key in phases.graph.topo_order",
                 "make_verified_project_hir_shell(",
                 "key, phases.module_hirs.get(key)",
                 "materialized_project_hir_module_key(value)",
@@ -13738,9 +13820,6 @@ def ownership_cutover_source_errors() -> List[str]:
             if token not in project:
                 errors.append(
                     f"compiler_mod: project shell partition misses {token!r}")
-        if "verified_ownership_program_flow(verified)" not in project:
-            errors.append(
-                "compiler_mod: legacy projection is not bound to verified Flow")
 
     for function_name in (
             "compile_project", "compile_project_c", "verify_project_rc"):
@@ -13748,9 +13827,13 @@ def ownership_cutover_source_errors() -> List[str]:
             sources["project"], function_name)
         if body_error:
             errors.append(body_error)
-        elif "materialize_project_ownership(phases)" not in body:
+        elif not all(token in body for token in (
+                "run_project_ownership(phases)",
+                "ownership_pipeline_outcome_is_verified(ownership)",
+                "report_project_ownership_failure(",
+                "materialize_verified_project_ownership(")):
             errors.append(
-                f"compiler_mod.{function_name}: project ownership path bypassed")
+                f"compiler_mod.{function_name}: project ownership outcome path drifted")
     if "--rc-mutate has no typed ownership-pipeline mutation entry" not in (
             sources["cli"] + sources["project"]):
         errors.append("ownership cutover: unsupported mutation did not fail loud")
@@ -13778,6 +13861,7 @@ IDENTITY_CANDIDATE_RC_FIXTURES = (
     "tests/cases/local_closure_exact_call.ring",
     "tests/cases/drop_nullary_variant_ctor_repeat.ring",
     "tests/cases/golden/generic_extern_fn_value_bound.ring",
+    "tests/cases/phantom_resource_shareable.ring",
 )
 
 
@@ -15439,7 +15523,7 @@ def print_summary(collector: ResultCollector) -> None:
 
     for suite_name in [
         "e2e", "golden", "rc", "self-compile", "structural", "parity",
-        "runner",
+        "ownership-vertical", "runner",
     ]:
         if suite_name not in summary:
             continue
@@ -15469,7 +15553,10 @@ def _run_selected(args: argparse.Namespace) -> int:
     # --- Tool discovery ---
     needs_ring = any(
         suite in suites
-        for suite in ["e2e", "golden", "rc", "self-compile", "structural"]
+        for suite in [
+            "e2e", "golden", "rc", "self-compile", "structural",
+            "ownership-vertical",
+        ]
     )
     needs_clang = needs_ring
     clang_path = find_clang() if needs_clang else None
@@ -15496,7 +15583,8 @@ def _run_selected(args: argparse.Namespace) -> int:
         return 1
 
     # Ensure runtime .o is built
-    needs_runtime = any(suite in suites for suite in ["e2e", "golden"])
+    needs_runtime = any(
+        suite in suites for suite in ["e2e", "golden", "ownership-vertical"])
     if needs_runtime and clang_path:
         if not ensure_runtime(clang_path):
             print("ERROR: failed to build ring_runtime.o from ring_runtime.cpp.", file=sys.stderr)
@@ -15546,6 +15634,12 @@ def _run_selected(args: argparse.Namespace) -> int:
             collector, name_filter=args.name_filter,
         ))
 
+    if "ownership-vertical" in suites:
+        _run_timed_suite("ownership-vertical", lambda: run_ownership_vertical_suite(
+            ring_exe, clang_path or "", collector,
+            name_filter=args.name_filter,
+        ))
+
     if args.name_filter and not collector.results:
         collector.add(TestResult(
             TestResult.FAIL, "runner", "filter",
@@ -15562,6 +15656,7 @@ def main() -> int:
         "--suite",
         choices=[
             "e2e", "golden", "rc", "self-compile", "structural", "parity",
+            "ownership-vertical",
         ],
         action="append", dest="suites",
         help="Test suite(s) to run. Omit for all C-native suites.")

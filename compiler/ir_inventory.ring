@@ -7,8 +7,10 @@
 
 use ir_identity::{
     SymbolRef, ModuleBodyRef, PathRef, PathOwnerRef, SlotRef,
+    IntrinsicRef, ImplOwnerRef, ImplMethodRef, TraitMethodRef,
     HandledEffectRef, SystemEffectRef,
     PathRole, symbol_ref_same, symbol_ref_origin_module_key,
+    origin_module_key_is_prelude,
     symbol_ref_namespace_kind, namespace_kind_from_tag, namespace_kind_same,
     namespace_member,
     handled_effect_ref_symbol, handled_effect_ref_same,
@@ -17,7 +19,11 @@ use ir_identity::{
     path_ref_same, path_ref_owner, path_ref_normalized_child_path,
     path_ref_role, path_owner_ref_same, path_owner_ref_is_symbol,
     path_owner_ref_symbol, path_owner_ref_module_body,
+    make_path_ref, path_owner_for_symbol, path_role_parameter,
+    make_source_slot_ref, make_synthetic_slot_ref, slot_domain_dictionary,
     slot_ref_same, slot_ref_is_source, slot_ref_synthetic_path,
+    intrinsic_ref_same, impl_owner_ref_same,
+    impl_method_ref_same, trait_method_ref_same,
     slot_ref_source_origin_module_key, slot_ref_source_domain,
     slot_ref_source_def_id, slot_domain_same, slot_domain_lexical,
     path_role_same, path_role_child,
@@ -134,6 +140,239 @@ pub fn executable_ref_same(left: ExecutableRef, right: ExecutableRef) -> Bool {
     }
 }
 
+// ============================================================
+// Exact dictionary-evidence identity
+// ============================================================
+
+// TypedHIR may retain source spellings for diagnostics.  This is the sole
+// spelling-free identity that may cross the Core freeze barrier: locals name
+// their exact binder slot, static dictionaries name their exact value symbol,
+// and a residual wrapper recursively names its exact base/trait/inputs.
+enum ExactDictRefValue {
+    LocalDictValue(SlotRef),
+    StaticDictValue(ImplOwnerRef),
+    WrappedDictValue {
+        base: ImplOwnerRef,
+        inner: List<ExactDictRef>
+    }
+}
+
+pub struct ExactDictRef { value: ExactDictRefValue }
+
+pub fn make_exact_local_dict_ref(slot: SlotRef) -> ExactDictRef {
+    ExactDictRef { value: ExactDictRefValue::LocalDictValue(slot) }
+}
+
+pub fn make_parameter_dict_ref(
+    owner: ExecutableRef, ordinal: Int
+) -> ExactDictRef {
+    if ordinal < 0 {
+        panic("IR inventory: negative dictionary parameter ordinal")
+    }
+    let (path_owner, prefix) = match owner.value {
+        ExecutableRefValue::NamedExecutableValue(symbol) =>
+            (path_owner_for_symbol(symbol), []),
+        ExecutableRefValue::AnonymousExecutableValue(path) =>
+            (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child = prefix.map(fn(item) { item })
+    child.push("dictionary-evidence:${ordinal.to_str()}")
+    make_exact_local_dict_ref(make_synthetic_slot_ref(make_path_ref(
+        path_owner, child, path_role_parameter())))
+}
+
+pub fn make_dictionary_local_dict_ref(
+    module_key: Str, def_id: Int
+) -> ExactDictRef {
+    if def_id >= 0 {
+        panic("IR inventory: dictionary local lacks synthetic DefId")
+    }
+    make_exact_local_dict_ref(make_source_slot_ref(
+        module_key, slot_domain_dictionary(), def_id))
+}
+
+pub fn make_exact_static_dict_ref(reference: ImplOwnerRef) -> ExactDictRef {
+    ExactDictRef { value: ExactDictRefValue::StaticDictValue(reference) }
+}
+
+pub fn make_exact_wrapped_dict_ref(
+    base: ImplOwnerRef, inner: List<ExactDictRef>
+) -> ExactDictRef {
+    ExactDictRef { value: ExactDictRefValue::WrappedDictValue {
+        base: base,
+        inner: inner.map(fn(value) { copy_exact_dict_ref(value) })
+    } }
+}
+
+fn copy_exact_dict_ref(value: ExactDictRef) -> ExactDictRef {
+    match value.value {
+        ExactDictRefValue::LocalDictValue(slot) => make_exact_local_dict_ref(slot),
+        ExactDictRefValue::StaticDictValue(reference) =>
+            make_exact_static_dict_ref(reference),
+        ExactDictRefValue::WrappedDictValue { base, inner } =>
+            make_exact_wrapped_dict_ref(base, inner)
+    }
+}
+
+pub fn dict_ref_is_local(value: ExactDictRef) -> Bool {
+    match value.value {
+        ExactDictRefValue::LocalDictValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn dict_ref_is_static(value: ExactDictRef) -> Bool {
+    match value.value {
+        ExactDictRefValue::StaticDictValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn dict_ref_is_wrapped(value: ExactDictRef) -> Bool {
+    match value.value {
+        ExactDictRefValue::WrappedDictValue { .. } => true,
+        _ => false
+    }
+}
+
+pub fn dict_ref_local(value: ExactDictRef) -> SlotRef {
+    match value.value {
+        ExactDictRefValue::LocalDictValue(slot) => slot,
+        _ => panic("IR inventory: dictionary evidence is not local")
+    }
+}
+
+pub fn dict_ref_static(value: ExactDictRef) -> ImplOwnerRef {
+    match value.value {
+        ExactDictRefValue::StaticDictValue(reference) => reference,
+        _ => panic("IR inventory: dictionary evidence is not static")
+    }
+}
+
+pub fn dict_ref_wrapped_base(value: ExactDictRef) -> ImplOwnerRef {
+    match value.value {
+        ExactDictRefValue::WrappedDictValue { base, .. } => base,
+        _ => panic("IR inventory: dictionary evidence is not wrapped")
+    }
+}
+
+pub fn dict_ref_wrapped_inner(value: ExactDictRef) -> List<ExactDictRef> {
+    match value.value {
+        ExactDictRefValue::WrappedDictValue { inner, .. } =>
+            inner.map(fn(item) { copy_exact_dict_ref(item) }),
+        _ => panic("IR inventory: dictionary evidence is not wrapped")
+    }
+}
+
+pub fn dict_ref_same(left: ExactDictRef, right: ExactDictRef) -> Bool {
+    match (left.value, right.value) {
+        (ExactDictRefValue::LocalDictValue(a),
+         ExactDictRefValue::LocalDictValue(b)) => slot_ref_same(a, b),
+        (ExactDictRefValue::StaticDictValue(a),
+         ExactDictRefValue::StaticDictValue(b)) => impl_owner_ref_same(a, b),
+        (ExactDictRefValue::WrappedDictValue {
+            base: left_base, inner: left_inner
+         }, ExactDictRefValue::WrappedDictValue {
+            base: right_base, inner: right_inner
+         }) => {
+            if !impl_owner_ref_same(left_base, right_base) ||
+               left_inner.len() != right_inner.len() {
+                return false
+            }
+            let mut index = 0
+            while index < left_inner.len() {
+                if !dict_ref_same(
+                        left_inner.get(index).unwrap(),
+                        right_inner.get(index).unwrap()) {
+                    return false
+                }
+                index = index + 1
+            }
+            true
+        },
+        _ => false
+    }
+}
+
+// Exact method selection deliberately carries no callable signature.  The
+// single canonical call contract owns parameter/result/effect information.
+enum ExactMethodRefValue {
+    IntrinsicMethodValue(IntrinsicRef),
+    ImplMethodValue(ImplMethodRef),
+    TraitMethodValue(TraitMethodRef)
+}
+
+pub struct ExactMethodRef { value: ExactMethodRefValue }
+
+pub fn make_exact_intrinsic_method_ref(value: IntrinsicRef) -> ExactMethodRef {
+    ExactMethodRef { value: ExactMethodRefValue::IntrinsicMethodValue(value) }
+}
+
+pub fn make_exact_impl_method_ref(value: ImplMethodRef) -> ExactMethodRef {
+    ExactMethodRef { value: ExactMethodRefValue::ImplMethodValue(value) }
+}
+
+pub fn make_exact_trait_method_ref(value: TraitMethodRef) -> ExactMethodRef {
+    ExactMethodRef { value: ExactMethodRefValue::TraitMethodValue(value) }
+}
+
+pub fn exact_method_ref_is_intrinsic(value: ExactMethodRef) -> Bool {
+    match value.value {
+        ExactMethodRefValue::IntrinsicMethodValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn exact_method_ref_is_impl(value: ExactMethodRef) -> Bool {
+    match value.value {
+        ExactMethodRefValue::ImplMethodValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn exact_method_ref_is_trait(value: ExactMethodRef) -> Bool {
+    match value.value {
+        ExactMethodRefValue::TraitMethodValue(_) => true,
+        _ => false
+    }
+}
+
+pub fn exact_method_ref_intrinsic(value: ExactMethodRef) -> IntrinsicRef {
+    match value.value {
+        ExactMethodRefValue::IntrinsicMethodValue(reference) => reference,
+        _ => panic("IR inventory: method selection is not intrinsic")
+    }
+}
+
+pub fn exact_method_ref_impl(value: ExactMethodRef) -> ImplMethodRef {
+    match value.value {
+        ExactMethodRefValue::ImplMethodValue(reference) => reference,
+        _ => panic("IR inventory: method selection is not an impl method")
+    }
+}
+
+pub fn exact_method_ref_trait(value: ExactMethodRef) -> TraitMethodRef {
+    match value.value {
+        ExactMethodRefValue::TraitMethodValue(reference) => reference,
+        _ => panic("IR inventory: method selection is not a trait method")
+    }
+}
+
+pub fn exact_method_ref_same(left: ExactMethodRef, right: ExactMethodRef) -> Bool {
+    match (left.value, right.value) {
+        (ExactMethodRefValue::IntrinsicMethodValue(a),
+         ExactMethodRefValue::IntrinsicMethodValue(b)) =>
+            intrinsic_ref_same(a, b),
+        (ExactMethodRefValue::ImplMethodValue(a),
+         ExactMethodRefValue::ImplMethodValue(b)) =>
+            impl_method_ref_same(a, b),
+        (ExactMethodRefValue::TraitMethodValue(a),
+         ExactMethodRefValue::TraitMethodValue(b)) =>
+            trait_method_ref_same(a, b),
+        _ => false
+    }
+}
+
 fn path_owner_origin_module_key(owner: PathOwnerRef) -> Str {
     if path_owner_ref_is_symbol(owner) {
         symbol_ref_origin_module_key(path_owner_ref_symbol(owner))
@@ -149,6 +388,115 @@ pub fn executable_ref_origin_module_key(value: ExecutableRef) -> Str {
         ExecutableRefValue::AnonymousExecutableValue(path) =>
             path_owner_origin_module_key(path_ref_owner(path))
     }
+}
+
+pub fn executable_ref_is_prelude(value: ExecutableRef) -> Bool {
+    origin_module_key_is_prelude(executable_ref_origin_module_key(value))
+}
+
+// Ownership-neutral callable ABI facts. The producer fixes these at the same
+// point as an intrinsic/extern identity; Flow maps them to its semantic roles
+// without consulting a runtime name or replaying backend policy.
+const RESOURCE_ROLE_READ: Int = 0
+const RESOURCE_ROLE_MUTATE: Int = 1
+const RESOURCE_ROLE_CONSUME: Int = 2
+const RESOURCE_ROLE_FORCE: Int = 3
+
+pub struct CallableResourceRoleFact { tag: Int }
+pub fn callable_resource_role_from_tag(tag: Int) -> CallableResourceRoleFact {
+    if tag < RESOURCE_ROLE_READ || tag > RESOURCE_ROLE_FORCE {
+        panic("IR inventory: invalid callable resource role")
+    }
+    CallableResourceRoleFact { tag: tag }
+}
+pub fn callable_resource_role_read() -> CallableResourceRoleFact {
+    callable_resource_role_from_tag(RESOURCE_ROLE_READ)
+}
+pub fn callable_resource_role_mutate() -> CallableResourceRoleFact {
+    callable_resource_role_from_tag(RESOURCE_ROLE_MUTATE)
+}
+pub fn callable_resource_role_consume() -> CallableResourceRoleFact {
+    callable_resource_role_from_tag(RESOURCE_ROLE_CONSUME)
+}
+pub fn callable_resource_role_force() -> CallableResourceRoleFact {
+    callable_resource_role_from_tag(RESOURCE_ROLE_FORCE)
+}
+pub fn callable_resource_role_tag(value: CallableResourceRoleFact) -> Int {
+    callable_resource_role_from_tag(value.tag).tag
+}
+
+pub struct CallableResourceContractFact {
+    parameter_roles: List<CallableResourceRoleFact>,
+    result_role: CallableResourceRoleFact,
+    result_alias_ordinals: List<Int>
+}
+pub fn make_callable_resource_contract_fact(
+    parameter_roles: List<CallableResourceRoleFact>,
+    result_role: CallableResourceRoleFact,
+    result_alias_ordinals: List<Int>
+) -> CallableResourceContractFact {
+    let mut roles: List<CallableResourceRoleFact> = []
+    for role in parameter_roles {
+        roles.push(callable_resource_role_from_tag(
+            callable_resource_role_tag(role)))
+    }
+    let mut aliases: List<Int> = []
+    for ordinal in result_alias_ordinals {
+        if ordinal < 0 || ordinal >= roles.len() || aliases.contains(ordinal) {
+            panic("IR inventory: callable result alias set is invalid")
+        }
+        aliases.push(ordinal)
+    }
+    CallableResourceContractFact {
+        parameter_roles: roles,
+        result_role: callable_resource_role_from_tag(
+            callable_resource_role_tag(result_role)),
+        result_alias_ordinals: aliases
+    }
+}
+pub fn callable_resource_contract_parameter_roles(
+    value: CallableResourceContractFact
+) -> List<CallableResourceRoleFact> {
+    value.parameter_roles.map(fn(role) {
+        callable_resource_role_from_tag(callable_resource_role_tag(role))
+    })
+}
+pub fn callable_resource_contract_result_role(
+    value: CallableResourceContractFact
+) -> CallableResourceRoleFact { value.result_role }
+pub fn callable_resource_contract_result_alias_ordinals(
+    value: CallableResourceContractFact
+) -> List<Int> { value.result_alias_ordinals.map(fn(value) { value }) }
+
+pub fn callable_resource_contract_same(
+    left: CallableResourceContractFact,
+    right: CallableResourceContractFact
+) -> Bool {
+    let left_roles = callable_resource_contract_parameter_roles(left)
+    let right_roles = callable_resource_contract_parameter_roles(right)
+    let left_aliases = left.result_alias_ordinals
+    let right_aliases = right.result_alias_ordinals
+    if left_roles.len() != right_roles.len() ||
+       callable_resource_role_tag(left.result_role) !=
+           callable_resource_role_tag(right.result_role) ||
+       left_aliases.len() != right_aliases.len() {
+        return false
+    }
+    let mut index = 0
+    while index < left_roles.len() {
+        if callable_resource_role_tag(left_roles.get(index).unwrap()) !=
+           callable_resource_role_tag(right_roles.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    index = 0
+    while index < left_aliases.len() {
+        if left_aliases.get(index).unwrap() !=
+           right_aliases.get(index).unwrap() { return false }
+        index = index + 1
+    }
+    true
 }
 
 pub struct EffectOperationRef {
@@ -653,12 +1001,13 @@ const BINDER_ASSIGN_TEMP: Int = 20
 const BINDER_HANDLED_EVIDENCE_PARAM: Int = 21
 const BINDER_HANDLED_EVIDENCE_LOCAL: Int = 22
 const BINDER_HANDLED_EVIDENCE_CAPTURE: Int = 23
-const BINDER_KIND_COUNT: Int = 24
+const BINDER_DICTIONARY_EVIDENCE_PARAM: Int = 24
+const BINDER_KIND_COUNT: Int = 25
 
 const BINDER_KIND_PATH_ROLE_TAGS: List<Int> = [
     2, 0, 0, 0, 0, 0, 0, 0, 2, 5, 5,
     4, 0, 2, 1, 3, 6, 1, 3, 3, 6,
-    2, 5, 4
+    2, 5, 4, 2
 ]
 
 pub struct BinderKind { tag: Int }
@@ -704,6 +1053,9 @@ pub fn binder_kind_handled_evidence_local() -> BinderKind {
 pub fn binder_kind_handled_evidence_capture() -> BinderKind {
     binder_kind_from_tag(BINDER_HANDLED_EVIDENCE_CAPTURE)
 }
+pub fn binder_kind_dictionary_evidence_param() -> BinderKind {
+    binder_kind_from_tag(BINDER_DICTIONARY_EVIDENCE_PARAM)
+}
 
 fn binder_kind_is_handled_evidence(kind: BinderKind) -> Bool {
     let tag = binder_kind_tag(kind)
@@ -739,20 +1091,28 @@ pub struct BinderEntry {
 }
 
 // Source binders are emitted by the typed semantic producer before FlowIR
-// allocates administrative slots.  Their lexical DefId/domain and structural
-// site must agree with the exact executable owner; neither names nor spans can
-// recover this relation later.
+// allocates administrative slots.  Ordinary declarations use a non-negative
+// lexical DefId; dictionary-lowering locals use a negative DefId in the
+// dedicated dictionary domain.  Both forms must agree with the exact
+// executable owner and structural site; neither names nor spans can recover
+// this relation later.
 pub fn make_source_binder_entry(
     slot: SlotRef, owner: ExecutableRef, kind: BinderKind, site: PathRef
 ) -> BinderEntry {
     if !binder_kind_is_source(kind) {
         panic("IR inventory: source binder uses synthetic/admin kind")
     }
-    if !slot_ref_is_source(slot) ||
-       slot_ref_source_def_id(slot) < 0 ||
-       !slot_domain_same(
-            slot_ref_source_domain(slot), slot_domain_lexical()) {
-        panic("IR inventory: source binder has invalid lexical SlotRef")
+    if !slot_ref_is_source(slot) {
+        panic("IR inventory: source binder lacks source SlotRef")
+    }
+    let lexical = slot_ref_source_def_id(slot) >= 0 &&
+        slot_domain_same(slot_ref_source_domain(slot), slot_domain_lexical())
+    let dictionary = slot_ref_source_def_id(slot) < 0 &&
+        slot_domain_same(slot_ref_source_domain(slot), slot_domain_dictionary()) &&
+        binder_kind_tag(kind) ==
+            binder_kind_tag(binder_kind_dictionary_evidence_local())
+    if !lexical && !dictionary {
+        panic("IR inventory: source binder has invalid lexical/dictionary SlotRef")
     }
     if slot_ref_source_origin_module_key(slot) !=
            executable_ref_origin_module_key(owner) ||

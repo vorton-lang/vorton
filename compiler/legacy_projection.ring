@@ -7,11 +7,15 @@
 
 use types::{Type, EffectRow, types_equal, effects_equal}
 use ir_identity::{
+    CoreTypeRef, CoreTypeFactRef,
+    make_core_type_ref, core_type_ref_index, core_type_ref_same,
+    core_type_fact_module_key, core_type_fact_ordinal, core_type_fact_same,
     SymbolRef, ModuleBodyRef, OriginRef, SlotRef,
     IntrinsicRef, intrinsic_ref_symbol, intrinsic_ref_same,
     ImplOwnerRef, ImplMethodRef,
     handled_effect_ref_same, system_effect_ref_same,
     symbol_ref_same, symbol_ref_origin_module_key,
+    origin_module_key_is_prelude,
     module_body_ref_same, module_body_ref_origin_module_key,
     origin_ref_is_symbol, origin_ref_symbol, origin_ref_path, origin_ref_same,
     path_ref_owner, path_ref_normalized_child_path,
@@ -24,23 +28,24 @@ use ir_identity::{
     impl_method_ref_owner, impl_method_ref_member, impl_method_ref_same,
     make_module_body_ref, make_symbol_origin_ref}
 use ir_inventory::{
-    ExecutableRef, ExecutableKind,
+    ExecutableRef, ExecutableKind, ExactDictRef, dict_ref_same,
     make_named_executable_ref,
     executable_inventory_entries, executable_entry_reference,
     executable_entry_kind,
     executable_ref_same, executable_ref_origin_module_key,
+    executable_ref_is_prelude,
     executable_kind_same, executable_kind_builtin_intrinsic}
-use core_expr::{
-    CoreTypeRef, CoreTypeFactRef, CoreEffectAtom, CoreEffectSet,
-    make_core_type_ref,
-    core_type_ref_index, core_type_ref_same, core_type_graph_count,
-    core_type_fact_module_key, core_type_fact_ordinal, core_type_fact_same,
+use hir::{DictRef}
+use hir_exact::{dict_ref_exact, dict_ref_physical_same}
+use effect_contract::{
+    CoreEffectAtom, CoreEffectSet,
     make_core_effect_set, core_effect_set_atoms,
     core_effect_atom_kind_tag, core_effect_atom_type,
-    core_effect_atom_handled_ref, core_effect_atom_system_ref}
+    core_effect_atom_handled_ref, core_effect_atom_system_ref
+}
 use core_hir::{core_program_type_graph, core_program_inventory}
 use core_type_source::{
-    CoreTypeSourceFact,
+    CoreTypeSourceFact, core_type_graph_count,
     core_type_source_type, core_type_source_fact
 }
 use core_from_hir::{
@@ -53,7 +58,7 @@ use core_from_hir::{
     core_assembly_remap_type, core_assembly_remap_effect}
 use flow_ir::{
     FlowProgram, flow_program_bodies, flow_body_slots,
-    flow_slot_reference, flow_slot_type, flow_type_ref_index
+    flow_slot_reference, flow_slot_type
 }
 
 // ============================================================
@@ -492,9 +497,9 @@ fn make_legacy_callable_projection_with_domain(
 ) -> LegacyCallableProjection {
     let module_key = module_body_ref_origin_module_key(module_body)
     let identity_valid = if prelude_physical {
-        executable_ref_origin_module_key(reference) == "$prelude" &&
-            origin_module_key(origin) == "$prelude" &&
-            module_key != "$prelude" &&
+        executable_ref_is_prelude(reference) &&
+            origin_module_key_is_prelude(origin_module_key(origin)) &&
+            !origin_module_key_is_prelude(module_key) &&
             legacy_container_module_key(container) == module_key
     } else {
         executable_ref_origin_module_key(reference) == module_key &&
@@ -699,7 +704,11 @@ pub fn make_legacy_impl_projection(
         _ => panic("legacy projection: impl trait presence differs from owner")
     }
     let module_key = module_body_ref_origin_module_key(module_body)
-    if symbol_ref_origin_module_key(target_nominal) != module_key ||
+    let provider_owner = path_ref_owner(impl_provider_ref_site(
+        impl_owner_ref_provider(owner)))
+    if path_owner_ref_is_symbol(provider_owner) ||
+       module_body_ref_origin_module_key(
+            path_owner_ref_module_body(provider_owner)) != module_key ||
        legacy_container_module_key(container) != module_key {
         panic("legacy projection: impl module/container identity differs")
     }
@@ -818,9 +827,9 @@ fn make_legacy_executable_shell_with_domain(
 ) -> LegacyExecutableShell {
     let module_key = module_body_ref_origin_module_key(module_body)
     let identity_valid = if prelude_physical {
-        executable_ref_origin_module_key(reference) == "$prelude" &&
-            origin_module_key(origin) == "$prelude" &&
-            module_key != "$prelude" &&
+        executable_ref_is_prelude(reference) &&
+            origin_module_key_is_prelude(origin_module_key(origin)) &&
+            !origin_module_key_is_prelude(module_key) &&
             legacy_container_module_key(container) == module_key
     } else {
         executable_ref_origin_module_key(reference) == module_key &&
@@ -1051,9 +1060,9 @@ pub fn make_legacy_prelude_callable_fact_projection(
     effects: EffectRow, is_public: Bool
 ) -> LegacyPreludeCallableFactProjection {
     let physical_key = module_body_ref_origin_module_key(module_body)
-    if executable_ref_origin_module_key(reference) != "$prelude" ||
-       origin_module_key(origin) != "$prelude" ||
-       physical_key == "$prelude" ||
+    if !executable_ref_is_prelude(reference) ||
+       !origin_module_key_is_prelude(origin_module_key(origin)) ||
+       origin_module_key_is_prelude(physical_key) ||
        core_type_fact_module_key(result_type_fact) != physical_key {
         panic("legacy projection: prelude physical owner contract differs")
     }
@@ -1226,8 +1235,48 @@ pub struct LegacyProjectionFacts {
     prelude_callables: List<LegacyPreludeCallableFactProjection>,
     builtin_callables: List<LegacyBuiltinCallableFactProjection>,
     impls: List<LegacyImplFactProjection>,
+    dictionaries: List<LegacyDictionaryProjection>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
+}
+
+pub struct LegacyDictionaryProjection { physical: DictRef }
+pub fn make_legacy_dictionary_projection(
+    physical: DictRef
+) -> LegacyDictionaryProjection {
+    let _ = dict_ref_exact(physical)
+    LegacyDictionaryProjection { physical: physical }
+}
+pub fn legacy_dictionary_projection_exact(
+    value: LegacyDictionaryProjection
+) -> ExactDictRef { dict_ref_exact(value.physical) }
+pub fn legacy_dictionary_projection_physical(
+    value: LegacyDictionaryProjection
+) -> DictRef { value.physical }
+fn copy_dictionary_projections(
+    values: List<LegacyDictionaryProjection>
+) -> List<LegacyDictionaryProjection> {
+    values.map(fn(value) {
+        make_legacy_dictionary_projection(value.physical)
+    })
+}
+fn append_dictionary_projection(
+    mut values: List<LegacyDictionaryProjection>,
+    value: LegacyDictionaryProjection
+) {
+    for existing in values {
+        if dict_ref_same(
+                legacy_dictionary_projection_exact(existing),
+                legacy_dictionary_projection_exact(value)) {
+            if !dict_ref_physical_same(
+                    legacy_dictionary_projection_physical(existing),
+                    legacy_dictionary_projection_physical(value)) {
+                panic("legacy projection: dictionary physical projection drifted")
+            }
+            return
+        }
+    }
+    values.push(value)
 }
 
 pub struct LegacyExecutablePhysicalIdentity {
@@ -1255,6 +1304,7 @@ pub fn make_legacy_projection_facts(
     prelude_callables: List<LegacyPreludeCallableFactProjection>,
     builtin_callables: List<LegacyBuiltinCallableFactProjection>,
     impls: List<LegacyImplFactProjection>,
+    dictionaries: List<LegacyDictionaryProjection>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
 ) -> LegacyProjectionFacts {
@@ -1290,7 +1340,8 @@ pub fn make_legacy_projection_facts(
         let left = binders.get(index).unwrap()
         let slot_module = slot_projection_module_key(left.slot)
         if (slot_module != module_key &&
-            !(module_order == 0 && slot_module == "$prelude")) ||
+            !(module_order == 0 &&
+              origin_module_key_is_prelude(slot_module))) ||
            core_type_fact_module_key(left.type_fact) != module_key {
             panic("legacy projection: module binder fact crosses module")
         }
@@ -1335,6 +1386,21 @@ pub fn make_legacy_projection_facts(
             panic("legacy projection: impl fact crosses module")
         }
     }
+    let mut dictionary_index = 0
+    while dictionary_index < dictionaries.len() {
+        let left = dictionaries.get(dictionary_index).unwrap()
+        let mut right = dictionary_index + 1
+        while right < dictionaries.len() {
+            let candidate = dictionaries.get(right).unwrap()
+            if dict_ref_same(
+                    legacy_dictionary_projection_exact(left),
+                    legacy_dictionary_projection_exact(candidate)) {
+                panic("legacy projection: dictionary exact identity repeats")
+            }
+            right = right + 1
+        }
+        dictionary_index = dictionary_index + 1
+    }
     let mut physical_index = 0
     while physical_index < physical_identities.len() {
         let left = physical_identities.get(physical_index).unwrap()
@@ -1357,7 +1423,8 @@ pub fn make_legacy_projection_facts(
         effects: effects, binders: binders,
         callables: callables, prelude_callables: prelude_callables,
         builtin_callables: builtin_callables,
-        impls: impls, physical_identities: physical_identities,
+        impls: impls, dictionaries: copy_dictionary_projections(dictionaries),
+        physical_identities: physical_identities,
         shells: make_legacy_executable_shell_map(
             legacy_executable_shell_entries(shells))
     }
@@ -1368,6 +1435,11 @@ pub fn legacy_projection_facts_module_key(value: LegacyProjectionFacts) -> Str {
 }
 pub fn legacy_projection_facts_module_order(value: LegacyProjectionFacts) -> Int {
     value.module_order
+}
+pub fn legacy_projection_facts_dictionaries(
+    value: LegacyProjectionFacts
+) -> List<LegacyDictionaryProjection> {
+    copy_dictionary_projections(value.dictionaries)
 }
 
 // ============================================================
@@ -1419,6 +1491,7 @@ pub struct LegacyProjectionTable {
     binders: List<LegacyBinderProjection>,
     callables: List<LegacyCallableProjection>,
     impls: List<LegacyImplProjection>,
+    dictionaries: List<LegacyDictionaryProjection>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
 }
@@ -1429,11 +1502,27 @@ pub fn make_legacy_projection_table(
     binders: List<LegacyBinderProjection>,
     callables: List<LegacyCallableProjection>,
     impls: List<LegacyImplProjection>,
+    dictionaries: List<LegacyDictionaryProjection>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
 ) -> LegacyProjectionTable {
     if core_type_count <= 0 || types.len() != core_type_count {
         panic("legacy projection: Core type projection is not total")
+    }
+    let mut dictionary_index = 0
+    while dictionary_index < dictionaries.len() {
+        let left = dictionaries.get(dictionary_index).unwrap()
+        let mut right = dictionary_index + 1
+        while right < dictionaries.len() {
+            if dict_ref_same(
+                    legacy_dictionary_projection_exact(left),
+                    legacy_dictionary_projection_exact(
+                        dictionaries.get(right).unwrap())) {
+                panic("legacy projection: dictionary identity repeats")
+            }
+            right = right + 1
+        }
+        dictionary_index = dictionary_index + 1
     }
     let shell_entries = legacy_executable_shell_entries(shells)
     let mut shell_callable_count = 0
@@ -1567,6 +1656,7 @@ pub fn make_legacy_projection_table(
         binders: copy_legacy_binders(binders),
         callables: copy_callables(callables),
         impls: copy_impls(impls),
+        dictionaries: copy_dictionary_projections(dictionaries),
         physical_identities: physical_identities.map(fn(value) {
             make_legacy_executable_physical_identity(
                 value.reference, value.identity)
@@ -1579,6 +1669,24 @@ pub fn make_legacy_projection_table(
 pub fn legacy_projection_core_type_count(
     value: LegacyProjectionTable
 ) -> Int { value.core_type_count }
+pub fn legacy_projection_dictionary(
+    value: LegacyProjectionTable, exact: ExactDictRef
+) -> DictRef {
+    let mut found: DictRef? = none
+    for projection in value.dictionaries {
+        if dict_ref_same(
+                legacy_dictionary_projection_exact(projection), exact) {
+            if found.is_some() {
+                panic("legacy projection: dictionary projection is duplicated")
+            }
+            found = some(legacy_dictionary_projection_physical(projection))
+        }
+    }
+    match found {
+        some(physical) => physical,
+        none => panic("legacy projection: dictionary projection is absent")
+    }
+}
 pub fn legacy_projection_types(
     value: LegacyProjectionTable
 ) -> List<LegacyTypeProjection> { copy_legacy_types(value.types) }
@@ -1901,7 +2009,7 @@ fn append_flow_synthetic_binders(
                 let name = "__flow_${path.join("$")}"
                 let def_id = LEGACY_FLOW_SYNTHETIC_DEF_ID_BASE -
                     synthetic_ordinal
-                let core_type = make_core_type_ref(flow_type_ref_index(
+                let core_type = make_core_type_ref(core_type_ref_index(
                     flow_slot_type(slot)))
                 binders.push(make_legacy_binder_projection(
                     reference, name, def_id, core_type,
@@ -1930,6 +2038,7 @@ pub fn assemble_legacy_projection(
     let mut projected_binders: List<LegacyBinderProjection> = []
     let mut projected_callables: List<LegacyCallableProjection> = []
     let mut projected_impls: List<LegacyImplProjection> = []
+    let mut projected_dictionaries: List<LegacyDictionaryProjection> = []
     let mut projected_physical: List<LegacyExecutablePhysicalIdentity> = []
     let mut projected_shells: List<LegacyExecutableShell> = []
     for facts in facts_in_topological_order {
@@ -1974,6 +2083,9 @@ pub fn assemble_legacy_projection(
         for value in facts.impls {
             projected_impls.push(assemble_fact_impl(type_remap, value))
         }
+        for value in facts.dictionaries {
+            append_dictionary_projection(projected_dictionaries, value)
+        }
         for value in facts.physical_identities {
             projected_physical.push(make_legacy_executable_physical_identity(
                 value.reference, value.identity))
@@ -1991,5 +2103,6 @@ pub fn assemble_legacy_projection(
     make_legacy_projection_table(
         project_type_count, ordered_types, projected_effects,
         projected_binders, projected_callables,
-        projected_impls, projected_physical, shell_map)
+        projected_impls, projected_dictionaries,
+        projected_physical, shell_map)
 }

@@ -6,20 +6,22 @@
 // elaborator only assembles those closed facts into ordinary CoreExpr trees.
 
 use ir_identity::{
+    CoreTypeRef, core_type_ref_same,
     SlotRef, OriginRef, RegisteredNominalRef, VariantRef,
     VariantFieldRef,
     slot_ref_same, variant_ref_same, variant_field_ref_variant,
     registered_nominal_ref_same
 }
-use ir_inventory::{ExecutableRef}
-use hir::{MethodCallRef}
+use ir_inventory::{ExecutableRef, ExactMethodRef}
+use effect_contract::{
+    CoreEffectSet, make_core_effect_set, core_effect_set_atoms
+}
 use core_expr::{
-    CoreTypeRef, CoreEffectSet, CoreCalleeRef, CoreEvidenceRef,
+    CoreCalleeRef, CoreEvidenceRef,
     CoreHandledEvidenceUse,
     CoreFieldRef, CoreFieldValue, CoreConstructorRef,
     CoreBinder, CoreBody, CoreBlock, CoreStmt, CoreExpr,
     CorePattern, CorePatternField, CoreMatchArm,
-    make_core_effect_set, core_effect_set_atoms,
     make_core_read_expr, make_core_project_expr,
     make_core_call_expr, make_core_method_call_expr,
     make_core_construct_expr, make_core_if_expr, make_core_match_expr,
@@ -36,8 +38,7 @@ use core_expr::{
     core_field_ref_kind_tag, core_field_ref_same,
     core_field_ref_tuple_index, core_field_ref_variant,
     core_constructor_kind_tag, core_constructor_struct_owner,
-    core_constructor_variant, core_constructor_arity,
-    core_type_ref_same
+    core_constructor_variant, core_constructor_arity
 }
 
 fn copy_binders(values: List<CoreBinder>) -> List<CoreBinder> {
@@ -179,7 +180,7 @@ fn derived_value_expr(value: CoreDerivedValueRef) -> CoreExpr {
 
 pub struct CoreDerivedCallPlan {
     callee: CoreCalleeRef,
-    method: MethodCallRef?,
+    method: ExactMethodRef?,
     result_type: CoreTypeRef,
     effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
@@ -188,7 +189,7 @@ pub struct CoreDerivedCallPlan {
 }
 
 pub fn make_core_derived_call_plan(
-    callee: CoreCalleeRef, method: MethodCallRef?,
+    callee: CoreCalleeRef, method: ExactMethodRef?,
     result_type: CoreTypeRef, effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
     handled_evidence: List<CoreHandledEvidenceUse>, origin: OriginRef
@@ -263,7 +264,7 @@ pub fn make_core_derived_field_plan(
         panic("Core derive: field operand type differs")
     }
     if operation.method.is_none() {
-        panic("Core derive: field operation lacks exact MethodCallRef")
+        panic("Core derive: field operation lacks exact method identity")
     }
     if left.projections.len() > 0 && !core_field_ref_same(
             left.projections.get(left.projections.len() - 1).unwrap(), field) {
@@ -1133,7 +1134,7 @@ pub fn make_core_derived_text_render_leaf(
        (value.projections.len() > 0 && !core_field_ref_same(
             value.projections.get(value.projections.len() - 1).unwrap(),
             field)) {
-        panic("Core derive text: render leaf lacks exact MethodCallRef")
+        panic("Core derive text: render leaf lacks exact method identity")
     }
     CoreDerivedTextRenderPlan {
         field: field, ty: ty, value: some(value),

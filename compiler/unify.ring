@@ -243,29 +243,27 @@ pub fn unify_effect_rows(a: EffectRow, b: EffectRow, subst: UnionFind, mut env: 
             }
         },
         (none, some(tb)) => {
-            // a is closed, b is open — push a's unmatched effects into b's tail
-            if a_unmatched.len() > 0 {
-                let row_for_b_tail = Type::EffectRowType { effects: a_unmatched, tail: none }
-                if occurs_in(tb, row_for_b_tail, s) {
-                    unify_error_msg("infinite type in effect row variable")
-                }
-                uf_insert(s, tb, row_for_b_tail)
+            // Equality with a closed row solves the ordinary metavariable even
+            // when the residual is empty.  Generalized tails are instantiated
+            // fresh before unification; leaving this UF id open would leak an
+            // inference identity into TypedHIR/Core instead of preserving
+            // polymorphism.
+            let row_for_b_tail = Type::EffectRowType {
+                effects: a_unmatched, tail: none
             }
-            // When a_unmatched is empty, all effects matched — the tail variable
-            // is left unbound to avoid over-constraining shared type variables
-            // (e.g., effect-polymorphic HOF instantiation tails used by merge_effects).
+            if occurs_in(tb, row_for_b_tail, s) {
+                unify_error_msg("infinite type in effect row variable")
+            }
+            uf_insert(s, tb, row_for_b_tail)
         },
         (some(ta), none) => {
-            // a is open, b is closed — push b's unmatched effects into a's tail
-            if b_unmatched.len() > 0 {
-                let row_for_a_tail = Type::EffectRowType { effects: b_unmatched, tail: none }
-                if occurs_in(ta, row_for_a_tail, s) {
-                    unify_error_msg("infinite type in effect row variable")
-                }
-                uf_insert(s, ta, row_for_a_tail)
+            let row_for_a_tail = Type::EffectRowType {
+                effects: b_unmatched, tail: none
             }
-            // When b_unmatched is empty, all effects matched — the tail variable
-            // is left unbound to avoid over-constraining shared type variables.
+            if occurs_in(ta, row_for_a_tail, s) {
+                unify_error_msg("infinite type in effect row variable")
+            }
+            uf_insert(s, ta, row_for_a_tail)
         },
         (none, none) => {}
     }

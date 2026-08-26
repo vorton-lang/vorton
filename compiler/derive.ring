@@ -35,6 +35,13 @@ use hir::{DerivedImpl, DerivedMethod, DerivedSemanticKind, DerivedDirectCall,
     h_tuple_projection, derived_semantic_kind_tag,
     TraitBound, HTypeParam, TypeKind, trait_dict_name,
     trait_bound_param_name, compare_by_first}
+use hir_exact::{
+    make_simple_dict_ref, make_static_dict_ref, make_wrapped_dict_ref,
+    dict_ref_exact, dict_ref_is_simple_physical,
+    dict_ref_is_static_physical, dict_ref_simple_name,
+    dict_ref_static_name, dict_ref_wrapped_name,
+    dict_ref_wrapped_physical_inner
+}
 use ir_identity::{SymbolRef, ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     RegisteredNominalRef,
     make_impl_owner_ref, make_impl_method_ref, make_named_callee_ref,
@@ -50,12 +57,14 @@ use ir_identity::{SymbolRef, ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     impl_provider_ref_kind, impl_provider_kind_same,
     impl_provider_kind_builtin, impl_provider_kind_derived,
     registered_trait_ref_symbol, registered_nominal_ref_symbol,
-    impl_owner_ref_target, impl_method_ref_member,
+    impl_owner_ref_target, impl_method_ref_owner, impl_method_ref_member,
     impl_method_ref_name,
     symbol_ref_origin_module_key}
 use ir_identity::{builtin_value_site_from_tag, builtin_value_symbol,
     BUILTIN_VALUE_HASH_COMBINE}
 use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
+    make_parameter_dict_ref, make_exact_static_dict_ref,
+    make_exact_wrapped_dict_ref, dict_ref_wrapped_base,
     make_named_executable_ref, executable_ref_is_named,
     executable_ref_named_symbol,
     make_source_binder_entry, binder_kind_let,
@@ -109,6 +118,71 @@ struct DerivedCallAuthority {
     self_method: ImplMethodRef?
 }
 
+fn derived_runtime_owner(value: DerivedCallAuthority) -> ExecutableRef {
+    match value.self_method {
+        some(method) => make_named_executable_ref(impl_method_ref_member(method)),
+        none => panic("derived dictionary evidence lacks method owner")
+    }
+}
+
+fn derived_bound_dict_ref(
+    authority: DerivedCallAuthority, bounds: List<TraitBound>,
+    type_var_id: Int, trait_name: Str
+) -> DictRef {
+    let bound = bounds.find(fn(value) {
+        value.type_var_id == type_var_id && value.trait_name == trait_name
+    }).unwrap_or_else(fn() {
+        panic("derived dictionary evidence bound is absent")
+    })
+    make_simple_dict_ref(
+        trait_bound_param_name(bound.type_param, bound.trait_name),
+        make_parameter_dict_ref(
+            derived_runtime_owner(authority), bound.dict_ordinal))
+}
+
+fn derived_impl_owner(
+    env: TypeEnv, type_name: Str, trait_name: Str,
+    authority: DerivedCallAuthority
+) -> ImplOwnerRef {
+    match find_impl(env.trait_reg, type_name, trait_name) {
+        some(entry) => match entry.owner_ref {
+            some(owner) => owner,
+            none => panic("derived dictionary impl owner is absent")
+        },
+        none => if type_name == authority.self_type_name {
+            match authority.self_method {
+                some(method) => impl_method_ref_owner(method),
+                none => panic("derived self dictionary owner is absent")
+            }
+        } else {
+            panic("derived dictionary impl is absent")
+        }
+    }
+}
+
+fn derived_static_dict_ref(
+    env: TypeEnv, type_name: Str, trait_name: Str,
+    authority: DerivedCallAuthority
+) -> DictRef {
+    make_static_dict_ref(
+        trait_dict_name(type_name, trait_name),
+        make_exact_static_dict_ref(derived_impl_owner(
+            env, type_name, trait_name, authority)))
+}
+
+fn derived_wrapped_dict_ref(
+    env: TypeEnv, type_name: Str, trait_name: Str,
+    inner: List<DictRef>, authority: DerivedCallAuthority
+) -> DictRef {
+    let owner = derived_impl_owner(env, type_name, trait_name, authority)
+    make_wrapped_dict_ref(
+        trait_dict_name(type_name, trait_name),
+        registered_derive_trait_ref(env, trait_name), inner,
+        make_exact_wrapped_dict_ref(owner, inner.map(fn(value) {
+            dict_ref_exact(value)
+        })))
+}
+
 const BUILTIN_TYPES: Set<Str> = set_from(["Option", "Cell", "List", "Map", "Set", "Range"])
 
 // ================================================================
@@ -143,7 +217,7 @@ pub fn run_derive_pass(
 }
 
 fn option_derived_some_variant(
-    env: TypeEnv, bound: TraitBound
+    env: TypeEnv, bound: TraitBound, authority: DerivedCallAuthority
 ) -> DerivedVariant {
     let option_def = env.types.enums.get(BUILTIN_OPTION).unwrap_or_else(fn() {
         panic("builtin Option derived descriptor lost enum owner")
@@ -156,13 +230,11 @@ fn option_derived_some_variant(
     let field_refs = option_def.variant_field_refs.get(variant_index).unwrap()
     let field_type = variant.fields.get(0).unwrap()
     let field_ref = field_refs.get(0).unwrap()
-    let evidence = DictRef::Simple(trait_bound_param_name(
-        bound.type_param, bound.trait_name))
+    let evidence = derived_bound_dict_ref(
+        authority, [bound], bound.type_var_id, bound.trait_name)
     let action = derived_call_action(
         env, field_type, bound.trait_name, evidence, [],
-        DerivedCallAuthority {
-            self_type_name: BUILTIN_OPTION, self_method: none
-        }).unwrap_or_else(fn() {
+        authority).unwrap_or_else(fn() {
         panic("builtin Option derived descriptor lost field method")
     })
     DerivedVariant {
@@ -222,17 +294,25 @@ fn builtin_option_derived_impl(env: TypeEnv, owner: ImplEntry) -> DerivedImpl {
     if bound.type_param != "T" || bound.trait_name != trait_name {
         panic("builtin Option derived descriptor predicate drifted")
     }
+    let primary_name = derived_primary_method_name(trait_name)
+    let authority = DerivedCallAuthority {
+        self_type_name: BUILTIN_OPTION,
+        self_method: owner.method_refs.get(primary_name)
+    }
+    if authority.self_method.is_none() {
+        panic("builtin Option derived descriptor lost primary method")
+    }
     let variants = match trait_name {
         "Eq" => some([
-            option_derived_some_variant(env, bound),
+            option_derived_some_variant(env, bound, authority),
             option_derived_none_variant(env)
         ]),
         "Debug" => some([
-            option_derived_some_variant(env, bound),
+            option_derived_some_variant(env, bound, authority),
             option_derived_none_variant(env)
         ]),
         "Clone" => some([
-            option_derived_some_variant(env, bound),
+            option_derived_some_variant(env, bound, authority),
             option_derived_none_variant(env)
         ]),
         _ => panic("builtin Option derived descriptor census drifted")
@@ -1033,7 +1113,8 @@ fn json_derived_signature(
                     }),
                 trait_name: impl_bound.trait_name,
                 trait_ref: registered_derive_trait_ref(
-                    env, impl_bound.trait_name)
+                    env, impl_bound.trait_name),
+                dict_ordinal: bounds.len()
             }),
             none => return none
         }
@@ -1481,7 +1562,8 @@ fn derived_runtime_bounds_from_owner(
             type_var_id: impl_predicate_subject_type_var(predicate),
             trait_name: impl_predicate_trait_name(predicate),
             trait_ref: registered_derive_trait_ref(
-                env, impl_predicate_trait_name(predicate))
+                env, impl_predicate_trait_name(predicate)),
+            dict_ordinal: bounds.len()
         })
     }
     bounds
@@ -1497,7 +1579,10 @@ fn push_derived_rendered_field(
     mut pieces: List<DerivedTextPiece>, field: DerivedField
 ) {
     match field.action {
-        FieldAction::FnLiteral => push_derived_literal(pieces, "<fn>"),
+        FieldAction::FnLiteral => pieces.push(
+            DerivedTextPiece::DerivedFieldLiteralText {
+                field: field.field_ref, value: "<fn>"
+            }),
         _ => pieces.push(
             DerivedTextPiece::DerivedFieldText(field.field_ref))
     }
@@ -1901,7 +1986,7 @@ fn derived_method_semantic_kind(
 
 fn derived_actual_type_args(value: Type) -> List<Type> {
     match value {
-        Type::StructType { type_params, .. } |
+        Type::StructType { type_params, .. } => type_params,
         Type::EnumType { type_params, .. } => type_params,
         _ => []
     }
@@ -1937,7 +2022,7 @@ fn exact_derived_field_method(
             let target_name = match type_to_builtin_name(field_type) {
                 some(value) => value,
                 none => match field_type {
-                    Type::StructType { name, .. } |
+                    Type::StructType { name, .. } => name,
                     Type::EnumType { name, .. } => name,
                     _ => return none
                 }
@@ -2046,23 +2131,23 @@ fn resolve_field_action(
     match field_type {
         Type::IntType => derived_call_action(
             env, field_type, trait_name,
-            DictRef::Static(trait_dict_name("Int", trait_name)), [],
+            derived_static_dict_ref(env, "Int", trait_name, authority), [],
             authority),
         Type::FloatType => derived_call_action(
             env, field_type, trait_name,
-            DictRef::Static(trait_dict_name("Float", trait_name)), [],
+            derived_static_dict_ref(env, "Float", trait_name, authority), [],
             authority),
         Type::StrType => derived_call_action(
             env, field_type, trait_name,
-            DictRef::Static(trait_dict_name("Str", trait_name)), [],
+            derived_static_dict_ref(env, "Str", trait_name, authority), [],
             authority),
         Type::BoolType => derived_call_action(
             env, field_type, trait_name,
-            DictRef::Static(trait_dict_name("Bool", trait_name)), [],
+            derived_static_dict_ref(env, "Bool", trait_name, authority), [],
             authority),
         Type::UnitType => derived_call_action(
             env, field_type, trait_name,
-            DictRef::Static(trait_dict_name("Unit", trait_name)), [],
+            derived_static_dict_ref(env, "Unit", trait_name, authority), [],
             authority),
         Type::TypeVar { id, .. } => {
             let param_idx = index_of_int(type_param_vars, id)
@@ -2074,31 +2159,37 @@ fn resolve_field_action(
                     type_param: param_name, type_var_id: id,
                     trait_name: trait_name,
                     trait_ref: registered_derive_trait_ref(
-                        env, trait_name) })
+                        env, trait_name),
+                    dict_ordinal: bounds.len() })
             }
-            let evidence = DictRef::Simple(
-                trait_bound_param_name(param_name, trait_name))
+            let evidence = derived_bound_dict_ref(
+                authority, bounds, id, trait_name)
             derived_call_action(
                 env, field_type, trait_name, evidence, [], authority)
         },
         Type::StructType { name, type_params, .. } => {
             if name == self_type_name {
-                let extra = resolve_extra_dicts(env, type_params, type_param_vars, type_param_names, trait_name, known, self_type_name, bounds)
+                let extra = resolve_extra_dicts(env, type_params, type_param_vars,
+                    type_param_names, trait_name, known, self_type_name,
+                    authority, bounds)
                 match extra {
                     some(e) => derived_call_action(
                         env, field_type, trait_name,
-                        DictRef::Static(trait_dict_name(name, trait_name)), e,
+                        derived_static_dict_ref(
+                            env, name, trait_name, authority), e,
                         authority),
                     none => none,
                 }
             } else {
                 if known.contains(name) {
-                    let extra = resolve_extra_dicts(env, type_params, type_param_vars, type_param_names, trait_name, known, self_type_name, bounds)
+                    let extra = resolve_extra_dicts(env, type_params,
+                        type_param_vars, type_param_names, trait_name,
+                        known, self_type_name, authority, bounds)
                     match extra {
                         some(e) => derived_call_action(
                             env, field_type, trait_name,
-                            DictRef::Static(
-                                trait_dict_name(name, trait_name)), e,
+                            derived_static_dict_ref(
+                                env, name, trait_name, authority), e,
                             authority),
                         none => none,
                     }
@@ -2109,22 +2200,27 @@ fn resolve_field_action(
         },
         Type::EnumType { name, type_params, .. } => {
             if name == self_type_name {
-                let extra = resolve_extra_dicts(env, type_params, type_param_vars, type_param_names, trait_name, known, self_type_name, bounds)
+                let extra = resolve_extra_dicts(env, type_params, type_param_vars,
+                    type_param_names, trait_name, known, self_type_name,
+                    authority, bounds)
                 match extra {
                     some(e) => derived_call_action(
                         env, field_type, trait_name,
-                        DictRef::Static(trait_dict_name(name, trait_name)), e,
+                        derived_static_dict_ref(
+                            env, name, trait_name, authority), e,
                         authority),
                     none => none,
                 }
             } else {
                 if known.contains(name) {
-                    let extra = resolve_extra_dicts(env, type_params, type_param_vars, type_param_names, trait_name, known, self_type_name, bounds)
+                    let extra = resolve_extra_dicts(env, type_params,
+                        type_param_vars, type_param_names, trait_name,
+                        known, self_type_name, authority, bounds)
                     match extra {
                         some(e) => derived_call_action(
                             env, field_type, trait_name,
-                            DictRef::Static(
-                                trait_dict_name(name, trait_name)), e,
+                            derived_static_dict_ref(
+                                env, name, trait_name, authority), e,
                             authority),
                         none => none,
                     }
@@ -2187,18 +2283,21 @@ fn resolve_json_field_action(
     mut bounds: List<TraitBound>
 ) -> FieldAction? {
     match resolve_json_dict_ref(
-        env, field_type, type_param_vars, type_param_names, "Json", bounds
+        env, field_type, type_param_vars, type_param_names,
+        "Json", authority, bounds
     ) {
-        some(DictRef::Simple(dict_name)) => derived_call_action(
-            env, field_type, "Json", DictRef::Simple(dict_name), [],
-            authority),
-        some(DictRef::Static(dict_name)) => derived_call_action(
-            env, field_type, "Json", DictRef::Static(dict_name), [],
-            authority),
-        some(DictRef::Wrapped { dict, inner_dicts, .. }) =>
+        some(value) => if dict_ref_is_simple_physical(value) ||
+                dict_ref_is_static_physical(value) {
+            derived_call_action(env, field_type, "Json", value, [], authority)
+        } else {
             derived_call_action(
-                env, field_type, "Json", DictRef::Static(dict),
-                inner_dicts, authority),
+                env, field_type, "Json",
+                make_static_dict_ref(
+                    dict_ref_wrapped_name(value),
+                    make_exact_static_dict_ref(
+                        dict_ref_wrapped_base(dict_ref_exact(value)))),
+                dict_ref_wrapped_physical_inner(value), authority)
+        },
         none => none
     }
 }
@@ -2210,7 +2309,8 @@ fn resolve_json_field_action(
 fn resolve_json_dict_ref(
     env: TypeEnv, t: Type,
     owner_type_param_vars: List<Int>, owner_type_param_names: List<Str>,
-    trait_name: Str, mut bounds: List<TraitBound>
+    trait_name: Str, authority: DerivedCallAuthority,
+    mut bounds: List<TraitBound>
 ) -> DictRef? {
     match t {
         Type::TypeVar { id, .. } => {
@@ -2224,35 +2324,44 @@ fn resolve_json_dict_ref(
                     type_var_id: id,
                     trait_name: trait_name,
                     trait_ref: registered_derive_trait_ref(
-                        env, trait_name)
+                        env, trait_name),
+                    dict_ordinal: bounds.len()
                 })
             }
-            some(DictRef::Simple(trait_bound_param_name(param_name, trait_name)))
+            some(derived_bound_dict_ref(
+                authority, bounds, id, trait_name))
         },
         Type::StructType { name, type_params, .. } => {
             resolve_json_nominal_dict_ref(
                 env, name, type_params, owner_type_param_vars,
-                owner_type_param_names, trait_name, bounds)
+                owner_type_param_names, trait_name, authority, bounds)
         },
         Type::EnumType { name, type_params, .. } => {
             resolve_json_nominal_dict_ref(
                 env, name, type_params, owner_type_param_vars,
-                owner_type_param_names, trait_name, bounds)
+                owner_type_param_names, trait_name, authority, bounds)
         },
-        Type::IntType => resolve_json_builtin_dict_ref(env, "Int", trait_name),
-        Type::FloatType => resolve_json_builtin_dict_ref(env, "Float", trait_name),
-        Type::StrType => resolve_json_builtin_dict_ref(env, "Str", trait_name),
-        Type::BoolType => resolve_json_builtin_dict_ref(env, "Bool", trait_name),
-        Type::UnitType => resolve_json_builtin_dict_ref(env, "Unit", trait_name),
+        Type::IntType => resolve_json_builtin_dict_ref(
+            env, "Int", trait_name, authority),
+        Type::FloatType => resolve_json_builtin_dict_ref(
+            env, "Float", trait_name, authority),
+        Type::StrType => resolve_json_builtin_dict_ref(
+            env, "Str", trait_name, authority),
+        Type::BoolType => resolve_json_builtin_dict_ref(
+            env, "Bool", trait_name, authority),
+        Type::UnitType => resolve_json_builtin_dict_ref(
+            env, "Unit", trait_name, authority),
         _ => none
     }
 }
 
 fn resolve_json_builtin_dict_ref(
-    env: TypeEnv, type_name: Str, trait_name: Str
+    env: TypeEnv, type_name: Str, trait_name: Str,
+    authority: DerivedCallAuthority
 ) -> DictRef? {
     if has_impl(env.trait_reg, type_name, trait_name) {
-        some(DictRef::Static(trait_dict_name(type_name, trait_name)))
+        some(derived_static_dict_ref(
+            env, type_name, trait_name, authority))
     } else {
         none
     }
@@ -2261,7 +2370,8 @@ fn resolve_json_builtin_dict_ref(
 fn resolve_json_nominal_dict_ref(
     env: TypeEnv, name: Str, type_args: List<Type>,
     owner_type_param_vars: List<Int>, owner_type_param_names: List<Str>,
-    trait_name: Str, mut bounds: List<TraitBound>
+    trait_name: Str, authority: DerivedCallAuthority,
+    mut bounds: List<TraitBound>
 ) -> DictRef? {
     let impl_entry = match find_impl(env.trait_reg, name, trait_name) {
         some(found) => found,
@@ -2273,9 +2383,9 @@ fn resolve_json_nominal_dict_ref(
         some(found) => found,
         none => return none
     }
-    let dict_name = trait_dict_name(name, trait_name)
     if requirements.len() == 0 {
-        return some(DictRef::Static(dict_name))
+        return some(derived_static_dict_ref(
+            env, name, trait_name, authority))
     }
     let mut inner_dicts: List<DictRef> = []
     for requirement in requirements {
@@ -2288,17 +2398,14 @@ fn resolve_json_nominal_dict_ref(
         match resolve_json_dict_ref(
             env, requirement.subject_type, owner_type_param_vars,
             owner_type_param_names,
-            requirement.canonical_trait_name, bounds
+            requirement.canonical_trait_name, authority, bounds
         ) {
             some(dict_ref) => inner_dicts.push(dict_ref),
             none => return none
         }
     }
-    some(DictRef::Wrapped {
-        dict: dict_name,
-        trait_ref: registered_derive_trait_ref(env, trait_name),
-        inner_dicts: inner_dicts
-    })
+    some(derived_wrapped_dict_ref(
+        env, name, trait_name, inner_dicts, authority))
 }
 
 fn resolve_hash_field_action(
@@ -2314,13 +2421,16 @@ fn resolve_hash_field_action(
     match field_type {
         Type::IntType => derived_call_action(
             env, field_type, "Hash",
-            DictRef::Static(trait_dict_name("Int", "Hash")), [], authority),
+            derived_static_dict_ref(env, "Int", "Hash", authority),
+            [], authority),
         Type::StrType => derived_call_action(
             env, field_type, "Hash",
-            DictRef::Static(trait_dict_name("Str", "Hash")), [], authority),
+            derived_static_dict_ref(env, "Str", "Hash", authority),
+            [], authority),
         Type::BoolType => derived_call_action(
             env, field_type, "Hash",
-            DictRef::Static(trait_dict_name("Bool", "Hash")), [], authority),
+            derived_static_dict_ref(env, "Bool", "Hash", authority),
+            [], authority),
         Type::TypeVar { id, .. } => {
             let param_idx = index_of_int(type_param_vars, id)
             if param_idx < 0 { return none }
@@ -2330,10 +2440,11 @@ fn resolve_hash_field_action(
                 bounds.push(TraitBound {
                     type_param: param_name, type_var_id: id,
                     trait_name: "Hash",
-                    trait_ref: registered_derive_trait_ref(env, "Hash") })
+                    trait_ref: registered_derive_trait_ref(env, "Hash"),
+                    dict_ordinal: bounds.len() })
             }
-            let evidence = DictRef::Simple(
-                trait_bound_param_name(param_name, "Hash"))
+            let evidence = derived_bound_dict_ref(
+                authority, bounds, id, "Hash")
             derived_call_action(
                 env, field_type, "Hash", evidence, [], authority)
         },
@@ -2343,11 +2454,11 @@ fn resolve_hash_field_action(
             }
             let extra = resolve_extra_dicts(env,
                 type_params, type_param_vars, type_param_names,
-                "Hash", known, self_type_name, bounds)
+                "Hash", known, self_type_name, authority, bounds)
             match extra {
                 some(e) => derived_call_action(
                     env, field_type, "Hash",
-                    DictRef::Static(trait_dict_name(name, "Hash")), e,
+                    derived_static_dict_ref(env, name, "Hash", authority), e,
                     authority),
                 none => none,
             }
@@ -2358,11 +2469,11 @@ fn resolve_hash_field_action(
             }
             let extra = resolve_extra_dicts(env,
                 type_params, type_param_vars, type_param_names,
-                "Hash", known, self_type_name, bounds)
+                "Hash", known, self_type_name, authority, bounds)
             match extra {
                 some(e) => derived_call_action(
                     env, field_type, "Hash",
-                    DictRef::Static(trait_dict_name(name, "Hash")), e,
+                    derived_static_dict_ref(env, name, "Hash", authority), e,
                     authority),
                 none => none,
             }
@@ -2409,11 +2520,14 @@ fn resolve_extra_dicts(
     type_param_names: List<Str>,
     trait_name: Str,
     known: Set<Str>,
-    self_type_name: Str, mut bounds: List<TraitBound>
+    self_type_name: Str, authority: DerivedCallAuthority,
+    mut bounds: List<TraitBound>
 ) -> List<DictRef>? {
     let mut dicts: List<DictRef> = []
     for arg in type_args {
-        let dict = resolve_type_arg_dict(env, arg, type_param_vars, type_param_names, trait_name, known, self_type_name, bounds)
+        let dict = resolve_type_arg_dict(
+            env, arg, type_param_vars, type_param_names,
+            trait_name, known, self_type_name, authority, bounds)
         match dict {
             some(d) => dicts.push(d),
             none => { return none },
@@ -2429,24 +2543,30 @@ fn resolve_type_arg_dict(
     type_param_names: List<Str>,
     trait_name: Str,
     known: Set<Str>,
-    self_type_name: Str, mut bounds: List<TraitBound>
+    self_type_name: Str, authority: DerivedCallAuthority,
+    mut bounds: List<TraitBound>
 ) -> DictRef? {
     match arg {
-        Type::IntType => some(DictRef::Static(trait_dict_name("Int", trait_name))),
+        Type::IntType => some(derived_static_dict_ref(
+            env, "Int", trait_name, authority)),
         Type::FloatType => {
             if trait_name == "Hash" {
                 none
             } else {
-                some(DictRef::Static(trait_dict_name("Float", trait_name)))
+                some(derived_static_dict_ref(
+                    env, "Float", trait_name, authority))
             }
         },
-        Type::StrType => some(DictRef::Static(trait_dict_name("Str", trait_name))),
-        Type::BoolType => some(DictRef::Static(trait_dict_name("Bool", trait_name))),
+        Type::StrType => some(derived_static_dict_ref(
+            env, "Str", trait_name, authority)),
+        Type::BoolType => some(derived_static_dict_ref(
+            env, "Bool", trait_name, authority)),
         Type::UnitType => {
             if trait_name == "Hash" || trait_name == "Json" {
                 none
             } else {
-                some(DictRef::Static(trait_dict_name("Unit", trait_name)))
+                some(derived_static_dict_ref(
+                    env, "Unit", trait_name, authority))
             }
         },
         Type::TypeVar { id, .. } => {
@@ -2459,27 +2579,26 @@ fn resolve_type_arg_dict(
                     type_param: param_name, type_var_id: id,
                     trait_name: trait_name,
                     trait_ref: registered_derive_trait_ref(
-                        env, trait_name) })
+                        env, trait_name),
+                    dict_ordinal: bounds.len() })
             }
-            some(DictRef::Simple(trait_bound_param_name(param_name, trait_name)))
+            some(derived_bound_dict_ref(
+                authority, bounds, id, trait_name))
         },
         Type::StructType { name, type_params, .. } => {
             if name != self_type_name && known.contains(name) == false {
                 return none
             }
-            let dict_name = trait_dict_name(name, trait_name)
             if type_params.len() == 0 {
-                return some(DictRef::Static(dict_name))
+                return some(derived_static_dict_ref(
+                    env, name, trait_name, authority))
             }
             let inner = resolve_extra_dicts(env,
                 type_params, type_param_vars, type_param_names,
-                trait_name, known, self_type_name, bounds)
+                trait_name, known, self_type_name, authority, bounds)
             match inner {
-                some(inner_dicts) => some(DictRef::Wrapped {
-                    dict: dict_name,
-                    trait_ref: registered_derive_trait_ref(env, trait_name),
-                    inner_dicts: inner_dicts
-                }),
+                some(inner_dicts) => some(derived_wrapped_dict_ref(
+                    env, name, trait_name, inner_dicts, authority)),
                 none => none,
             }
         },
@@ -2487,19 +2606,16 @@ fn resolve_type_arg_dict(
             if name != self_type_name && known.contains(name) == false {
                 return none
             }
-            let dict_name = trait_dict_name(name, trait_name)
             if type_params.len() == 0 {
-                return some(DictRef::Static(dict_name))
+                return some(derived_static_dict_ref(
+                    env, name, trait_name, authority))
             }
             let inner = resolve_extra_dicts(env,
                 type_params, type_param_vars, type_param_names,
-                trait_name, known, self_type_name, bounds)
+                trait_name, known, self_type_name, authority, bounds)
             match inner {
-                some(inner_dicts) => some(DictRef::Wrapped {
-                    dict: dict_name,
-                    trait_ref: registered_derive_trait_ref(env, trait_name),
-                    inner_dicts: inner_dicts
-                }),
+                some(inner_dicts) => some(derived_wrapped_dict_ref(
+                    env, name, trait_name, inner_dicts, authority)),
                 none => none,
             }
         },
@@ -2627,6 +2743,7 @@ fn register_derived_impl(
         method_schemes: exact,
         method_refs: method_refs,
         method_intrinsics: map_new(),
+        method_resource_contracts: map_new(),
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
         owner_ref: some(owner_ref),

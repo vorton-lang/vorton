@@ -31,7 +31,8 @@ use ir_inventory::{
     executable_ref_anonymous_path, executable_ref_origin_module_key,
     system_host_callable_effect, system_host_callable_executable,
     binder_entry_slot, handled_evidence_requirement,
-    effect_operation_ref_effect
+    effect_operation_ref_effect, make_exact_wrapped_dict_ref,
+    dict_ref_same
 }
 use env::{TypeEnv}
 use hir::{
@@ -72,6 +73,11 @@ use hir::{
     method_call_ref_bound, method_call_ref_signature,
     hexpr_type, hexpr_effects, hexpr_span,
     validate_hir_binder_def_ids
+}
+use hir_exact::{
+    make_wrapped_dict_ref, dict_ref_exact,
+    h_dict_construct_base, h_dict_construct_inner,
+    h_dict_construct_result
 }
 
 struct ClosedPattern {
@@ -788,6 +794,9 @@ fn exact_trait_bounds(values: List<TraitBound>) -> List<TraitBound> {
     let mut index = 0
     while index < values.len() {
         let value = values.get(index).unwrap()
+        if value.dict_ordinal != index {
+            panic("PreCore closure: dictionary bound order is not dense")
+        }
         let mut right = index + 1
         while right < values.len() {
             if symbol_ref_same(
@@ -830,10 +839,21 @@ fn exact_h_type_params(values: List<HTypeParam>) -> List<HTypeParam> {
 
 fn close_stmt(value: HStmt) -> List<HStmt> {
     match value {
-        HStmt::Let { name, name_span, def_id, ty, init, span } => [
-            HStmt::Let { name: name, name_span: name_span, def_id: def_id,
-                ty: ty, init: close_expr(init), span: span }
-        ],
+        HStmt::Let { name, name_span, def_id, ty, init, span } => {
+            match init {
+                HExpr::DictConstruct { plan: some(exact), .. } => {
+                    let result = h_dict_construct_result(exact)
+                    if !slot_ref_is_source(result) ||
+                       def_id != some(slot_ref_source_def_id(result)) {
+                        panic(
+                            "PreCore closure: dictionary result binder differs")
+                    }
+                },
+                _ => {}
+            }
+            [HStmt::Let { name: name, name_span: name_span, def_id: def_id,
+                ty: ty, init: close_expr(init), span: span }]
+        },
         HStmt::Var { name, name_span, def_id, ty, init, span } => [
             HStmt::Var { name: name, name_span: name_span, def_id: def_id,
                 ty: ty, init: close_expr(init), span: span }
@@ -1340,15 +1360,33 @@ fn close_expr(value: HExpr) -> HExpr {
             receiver, index, call_plan, projection, ty, effects, span
         } => close_index(
             receiver, index, call_plan, projection, ty, effects, span),
-        HExpr::DictConstruct { plan, inner, ty, effects, span, .. } => {
+        HExpr::DictConstruct {
+            base_dict, plan, inner, ty, effects, span
+        } => {
             let exact = match plan {
                 some(value) => value,
                 none => panic(
                     "PreCore closure: dictionary constructor is absent")
             }
-            let _ = h_dict_construct_trait(exact)
+            let exact_inner = h_dict_construct_inner(exact)
+            if exact_inner.len() != inner.len() {
+                panic("PreCore closure: dictionary evidence arity differs")
+            }
+            let mut index = 0
+            while index < inner.len() {
+                if !dict_ref_same(
+                        exact_inner.get(index).unwrap(),
+                        dict_ref_exact(inner.get(index).unwrap())) {
+                    panic("PreCore closure: dictionary evidence order differs")
+                }
+                index = index + 1
+            }
+            let wrapped = make_wrapped_dict_ref(
+                base_dict, h_dict_construct_trait(exact), inner,
+                make_exact_wrapped_dict_ref(
+                    h_dict_construct_base(exact), exact_inner))
             executable_call(
-                h_dict_construct_executable(exact), [], inner,
+                h_dict_construct_executable(exact), [], [wrapped],
                 ty, effects, span)
         },
         HExpr::Clone { .. } =>
@@ -1455,13 +1493,15 @@ fn close_decl(value: HDecl) -> HDecl {
         },
         HDecl::ExternFn {
             name, abi_name, def_id, executable_ref, type_params,
-            params, return_type, effects, handled_evidence_bindings,
+            params, return_type, effects, resource_contract,
+            handled_evidence_bindings,
             trait_bounds, is_pub, span
         } => HDecl::ExternFn {
             name: name, abi_name: abi_name, def_id: def_id,
             executable_ref: executable_ref,
             type_params: exact_h_type_params(type_params),
             params: params, return_type: return_type, effects: effects,
+            resource_contract: resource_contract,
             handled_evidence_bindings: handled_evidence_bindings,
             trait_bounds: exact_trait_bounds(trait_bounds),
             is_pub: is_pub, span: span

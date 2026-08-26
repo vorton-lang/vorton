@@ -4,13 +4,12 @@
 // representation used by source/default/derived methods.  No delegate kind,
 // root, identity, provider lookup, or fallback survives this boundary.
 
-use ir_identity::{SlotRef, NominalFieldRef, slot_ref_same}
+use ir_identity::{CoreTypeRef, SlotRef, NominalFieldRef, slot_ref_same}
+use effect_contract::{make_core_effect_set}
 
 use core_expr::{
-    CoreTypeRef, CoreBody, CoreImplMetadata,
-    make_core_assoc_binding, make_core_obligation_binding,
-    make_core_impl_metadata,
-    make_core_effect_set,
+    CoreBody, CoreImplMetadata,
+    make_core_assoc_binding, make_core_impl_metadata,
     make_core_nominal_field,
     make_core_read_expr,
     make_core_project_expr,
@@ -26,9 +25,7 @@ use delegate_plan::{
     delegate_typed_plan_field, delegate_typed_plan_methods,
     delegate_typed_plan_outer_owner,
     delegate_typed_plan_assoc_bindings,
-    delegate_typed_plan_dict_evidence,
     delegate_assoc_binding_member, delegate_assoc_binding_type,
-    delegate_evidence_requirement, delegate_evidence_value,
     delegate_method_executable, delegate_method_origin,
     delegate_method_generated,
     delegate_method_child_call, delegate_method_child_callee,
@@ -114,13 +111,7 @@ pub fn elaborate_delegate_to_core(
             delegate_assoc_binding_member(binding),
             delegate_assoc_binding_type(binding))
     })
-    let mut obligations = []
-    for binding in delegate_typed_plan_dict_evidence(plan) {
-        obligations.push(make_core_obligation_binding(
-            delegate_evidence_requirement(binding),
-            delegate_evidence_value(binding)))
-    }
     (make_core_impl_metadata(
         delegate_typed_plan_outer_owner(plan),
-        methods, assoc, obligations), result)
+        methods, assoc), result)
 }

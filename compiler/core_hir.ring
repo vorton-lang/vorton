@@ -6,6 +6,7 @@
 // with no body entry; executable bodies never escape through legacy HIR here.
 
 use ir_identity::{
+    core_type_ref_index,
     OriginRef, PathRef, origin_ref_same, path_ref_same,
     impl_method_ref_member, symbol_ref_same
 }
@@ -20,21 +21,19 @@ use ir_inventory::{
     executable_contract_body_path,
     executable_inventory_entries,
     make_executable_inventory}
+use core_type_source::{
+    CoreTypeGraph, core_type_graph_count, core_type_graph_nodes,
+    make_core_type_graph
+}
 use core_expr::{
-    CoreBody, CoreTypeGraph, CoreCallableContract, CoreImplMetadata,
+    CoreBody, CoreCallableContract, CoreImplMetadata,
     validate_core_body, validate_core_callable_contracts,
     validate_core_body_with_program,
     core_body_reference, core_body_origin,
-    core_type_graph_count, core_type_graph_nodes,
-    make_core_type_graph,
     core_callable_reference, core_callable_mode,
     copy_core_callables, copy_core_impl_metadata,
     core_impl_methods, core_impl_assoc_bindings,
-    core_assoc_binding_type, core_type_ref_index
-}
-use flow_ir::{
-    flow_callable_mode_same, flow_callable_mode_concrete_body,
-    flow_callable_mode_contract_only
+    core_assoc_binding_type
 }
 
 pub struct CoreBodyEntry {
@@ -152,12 +151,12 @@ fn validate_core_callable_inventory(
         let core_mode = core_callable_mode(callable)
         if (executable_contract_mode_same(
                 inventory_mode, executable_contract_mode_concrete_body()) &&
-            !flow_callable_mode_same(
-                core_mode, flow_callable_mode_concrete_body())) ||
+            !executable_contract_mode_same(
+                core_mode, executable_contract_mode_concrete_body())) ||
            (executable_contract_mode_same(
                 inventory_mode, executable_contract_mode_contract_only()) &&
-            !flow_callable_mode_same(
-                core_mode, flow_callable_mode_contract_only())) {
+            !executable_contract_mode_same(
+                core_mode, executable_contract_mode_contract_only())) {
             panic("CoreHIR: callable/inventory body mode differs")
         }
         index = index + 1
@@ -212,26 +211,28 @@ pub fn make_core_program(
     let closed_inventory = make_executable_inventory(
         executable_inventory_entries(inventory))
     let closed_callables = copy_core_callables(callables)
+    let closed_impls = copy_core_impl_metadata(impls)
     validate_core_callable_contracts(type_graph, closed_callables)
     validate_core_callable_inventory(closed_callables, closed_inventory)
     validate_core_body_subsequence(bodies, closed_inventory)
+    validate_core_impls(closed_impls, type_graph, closed_callables)
     let mut body_index = 0
     for callable in closed_callables {
-        if flow_callable_mode_same(
+        if executable_contract_mode_same(
                 core_callable_mode(callable),
-                flow_callable_mode_concrete_body()) {
+                executable_contract_mode_concrete_body()) {
             let entry = bodies.get(body_index).unwrap()
             validate_core_body_with_program(
-                entry.body, type_graph, closed_callables, callable)
+                entry.body, type_graph, closed_callables,
+                closed_impls, callable)
             body_index = body_index + 1
         }
     }
-    validate_core_impls(impls, type_graph, closed_callables)
     CoreProgram {
         inventory: closed_inventory,
         type_graph: make_core_type_graph(core_type_graph_nodes(type_graph)),
         callables: copy_core_callables(closed_callables),
-        impls: copy_core_impl_metadata(impls),
+        impls: copy_core_impl_metadata(closed_impls),
         bodies: copy_core_body_entries(bodies)
     }
 }

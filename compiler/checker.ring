@@ -1,15 +1,16 @@
-use types::{Type, UNIT, nominal_display_name}
+use types::{UNIT, nominal_display_name}
 use ast::{Program, Decl, UseDecl, UseImport, Span, TypeParam, span_zero}
-use hir::{HDecl, HStmt, HExpr, HProgram, HMatchArm, HStructFieldInit, ModuleImplFact,
-    HStringInterpPart, HEffectHandler, ValueBindingKind,
-    compare_by_first, is_user_drop_type, hexpr_type,
+use hir::{HDecl, HProgram, ModuleImplFact, ValueBindingKind,
+    compare_by_first,
     map_index_helper_source_name, map_index_helper_identity,
-    prelude_extern_identity,
-    is_nullary_variant_ctor_ident}
+    prelude_extern_identity}
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, new_collecting_sink, make_diag}
 use env::{TypeEnv, TypeScheme, add_impl, find_impl,
     find_impl_by_provider, impl_entry_exact_key_same,
-    optional_symbol_ref_same, install_method_core}
+    optional_symbol_ref_same, install_method_core,
+    register_compiler_owned_extern_source,
+    close_compiler_owned_extern_sources,
+    compiler_owned_extern_should_publish_hdecl}
 use builtins::{register_builtins, register_hof_intrinsics,
     finalize_std_hof_fallbacks,
     checker_only_builtin_values, checker_builtin_value_name,
@@ -31,10 +32,11 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
     duplicate_direct_declaration_diagnostic,
     single_namespace_file_key, resolve_single_namespace_plan,
     prelude_namespace_file_key, resolve_prelude_namespace_plan}
-use codes::{E0504, E0702, E0703, E0704, E0705, E0707, E0801}
+use codes::{E0504, E0702, E0703, E0704, E0705, E0707}
 use parser::{parse}
 use ir_identity::{SymbolRef, impl_owner_ref_same, impl_method_ref_owner,
-    impl_owner_ref_trait, impl_owner_ref_provider, impl_method_ref_same}
+    impl_owner_ref_trait, impl_owner_ref_provider, impl_method_ref_same,
+    symbol_ref_canonical_payload}
 use union_find::{UnionFind}
 use core_from_hir::{FrozenCoreAssemblyFacts}
 use legacy_projection::{LegacyProjectionFacts}
@@ -132,7 +134,8 @@ fn find_std_dir() -> Str? {
 struct PreludeDeclSite {
     decl: Decl,
     file_key: Str,
-    decl_index: Int
+    decl_index: Int,
+    source_symbol: SymbolRef?
 }
 
 fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
@@ -156,25 +159,91 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                         decls: canonical_decls,
                         span: ast.span
                     }
+                    let prelude_file_key = prelude_namespace_file_key(file_path)
                     let prelude_plan = resolve_prelude_namespace_plan(
                         file_path, canonical_program)
+                    let root_frame = match prelude_plan.frames.find(fn(frame) {
+                        frame.file_key == prelude_file_key &&
+                            frame.parent_frame_index < 0
+                    }) {
+                        some(frame) => frame.frame_index,
+                        none => panic("prelude value identity: root frame is absent")
+                    }
                     install_struct_identity_ledger(
-                        ctx, prelude_namespace_file_key(file_path), prelude_plan)
+                        ctx, prelude_file_key, prelude_plan)
                     enter_struct_identity_root_frame(ctx)
                     for decl_index in 0..canonical_decls.len() {
                         let canonical_decl = canonical_decls.get(
                             decl_index).unwrap()
-                        register_decl_public(ctx, canonical_decl, decl_index)
+                        let mut source_symbol: SymbolRef? = none
+                        let local_name = match canonical_decl {
+                            Decl::Fn { name, .. } => some(name),
+                            Decl::ExternFn { name, .. } => some(name),
+                            Decl::Const { name, .. } => some(name),
+                            _ => none
+                        }
+                        match local_name {
+                            some(name) => {
+                                let mut matches = 0
+                                for binding in prelude_plan.bindings {
+                                    if binding.file_key == prelude_file_key &&
+                                       binding.frame_index == root_frame &&
+                                       binding.exposed_name == name {
+                                        match binding.namespace {
+                                            NamespaceKind::Value => {
+                                                matches = matches + 1
+                                            },
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                if matches != 1 {
+                                    panic("prelude value identity: direct binding is not unique")
+                                }
+                                for binding in prelude_plan.bindings {
+                                    if binding.file_key == prelude_file_key &&
+                                       binding.frame_index == root_frame &&
+                                       binding.exposed_name == name {
+                                        match binding.namespace {
+                                            NamespaceKind::Value => {
+                                                register_decl_public(
+                                                    ctx, canonical_decl, decl_index,
+                                                    some(symbol_ref_canonical_payload(
+                                                        binding.symbol)))
+                                                source_symbol = some(binding.symbol)
+                                                match canonical_decl {
+                                                    Decl::ExternFn { name, .. } => {
+                                                        let source_scheme = ctx.env.lookup(
+                                                            name).unwrap_or_else(fn() {
+                                                            panic("compiler extern manifest: registered source scheme is absent")
+                                                        })
+                                                        let _ = register_compiler_owned_extern_source(
+                                                            ctx.env, binding.symbol,
+                                                            source_scheme)
+                                                    },
+                                                    _ => {}
+                                                }
+                                            },
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            },
+                            none => register_decl_public(
+                                ctx, canonical_decl, decl_index, none)
+                        }
                         all_prelude_decls.push(PreludeDeclSite {
                             decl: canonical_decl,
-                            file_key: prelude_namespace_file_key(file_path),
-                            decl_index: decl_index
+                            file_key: prelude_file_key,
+                            decl_index: decl_index,
+                            source_symbol: source_symbol
                         })
                     }
                     exit_struct_identity_frame(ctx)
                     close_struct_identity_ledger(ctx)
                 }
             }
+            close_compiler_owned_extern_sources(ctx.env)
             // Install the source-level API spelling as an alias of the exact
             // canonical scheme/DefId. record_value_origin makes ordinary
             // explicit calls use the same backend-safe canonical identity too.
@@ -265,42 +334,48 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                         }
                     },
                     Decl::ExternFn { .. } => {
-                        let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
-                        match result {
-                            some(HDecl::ExternFn {
-                                name, abi_name, def_id, executable_ref,
-                                type_params, params,
-                                return_type, effects,
-                                handled_evidence_bindings, trait_bounds,
-                                is_pub, span
-                            }) => {
-                                // A small number of compiler-owned extern
-                                // bridges carry an unspellable exact origin on
-                                // their DefId. Preserve it in HDecl while
-                                // keeping the parsed ABI leaf separately.
-                                let exact_name = match def_id {
-                                    some(id) => match ctx.use_aliases.get(id) {
-                                        some(origin) => origin,
-                                        none => name
-                                    },
-                                    none => name
-                                }
-                                prelude_hdecls.push(HDecl::ExternFn {
-                                    name: exact_name, abi_name: abi_name,
-                                    def_id: def_id,
-                                    executable_ref: executable_ref,
-                                    type_params: type_params,
-                                    params: params, return_type: return_type,
-                                    effects: effects,
-                                    handled_evidence_bindings:
-                                        handled_evidence_bindings,
-                                    trait_bounds: trait_bounds,
-                                    is_pub: is_pub, span: span
-                                })
-                            },
-                            some(_) => {},
-                            none => {}
+                        let source = match site.source_symbol {
+                            some(symbol) => symbol,
+                            none => panic(
+                                "compiler extern manifest: Phase 2 source symbol is absent")
+                        }
+                        let publish = match
+                                compiler_owned_extern_should_publish_hdecl(
+                                    ctx.env, source) {
+                            some(value) => value,
+                            none => true
+                        }
+                        if publish {
+                            let result = some(check_prelude_decl(
+                                ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
+                            match result {
+                                some(HDecl::ExternFn {
+                                    name, abi_name, def_id, executable_ref,
+                                    type_params, params,
+                                    return_type, effects, resource_contract,
+                                    handled_evidence_bindings, trait_bounds,
+                                    is_pub, span
+                                }) => {
+                                    // The source spelling is diagnostic/ABI
+                                    // metadata only. ExecutableRef is the sole
+                                    // callable identity transported downstream.
+                                    prelude_hdecls.push(HDecl::ExternFn {
+                                        name: name, abi_name: abi_name,
+                                        def_id: def_id,
+                                        executable_ref: executable_ref,
+                                        type_params: type_params,
+                                        params: params, return_type: return_type,
+                                        effects: effects,
+                                        resource_contract: resource_contract,
+                                        handled_evidence_bindings:
+                                            handled_evidence_bindings,
+                                        trait_bounds: trait_bounds,
+                                        is_pub: is_pub, span: span
+                                    })
+                                },
+                                some(_) => {},
+                                none => {}
+                            }
                         }
                     },
                     _ => {}
@@ -344,7 +419,6 @@ fn impl_trait_name_same(left: Str?, right: Str?) -> Bool {
         _ => false
     }
 }
-
 fn validate_impl_carriers(
     env: TypeEnv, decls: List<HDecl>
 ) {
@@ -484,21 +558,17 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     let derived_impls = hprogram.derived_impls
     validate_derived_impls(ctx.env, derived_impls)
     let assembled = HProgram { decls: all_decls, derived_impls: derived_impls, boxed_vars: hprogram.boxed_vars, static_dicts: [], extern_type_names: hprogram.extern_type_names, drop_types: hprogram.drop_types }
-    // B-002p1: check for use-after-move on Drop types (before lowering)
-    if !ctx.sink.has_errors() && assembled.drop_types.len() > 0 {
-        check_drop_moves(assembled, ctx.sink)
-    }
     let has_errors = ctx.sink.has_errors()
     let checked_program = if has_errors {
         assembled
     } else {
-        lower_dicts(lower_andor(assembled))
+        lower_dicts(lower_andor(assembled), ctx.core_module_key)
     }
     let frozen = if has_errors { none } else { some(
         freeze_core_and_legacy_facts(
-            ctx.core_recorder, checked_program, ctx.env,
-            ctx.core_type_sources,
-            ctx.core_handled_evidence_type_sources)) }
+            ctx.core_module_key, ctx.core_module_order,
+            checked_program, ctx.env,
+            file_key, "")) }
     CheckResult {
         program: checked_program,
         env: ctx.env,
@@ -751,21 +821,17 @@ pub fn check_module(
     for d in hprogram.decls { all_decls.push(d) }
     // B-104 D7 + D4: see check() above.
     let assembled = HProgram { decls: all_decls, derived_impls: hprogram.derived_impls, boxed_vars: hprogram.boxed_vars, static_dicts: [], extern_type_names: hprogram.extern_type_names, drop_types: hprogram.drop_types }
-    // B-002p1: check for use-after-move on Drop types (before lowering)
-    if !ctx.sink.has_errors() && assembled.drop_types.len() > 0 {
-        check_drop_moves(assembled, ctx.sink)
-    }
     let has_errors = ctx.sink.has_errors()
     let checked_program = if has_errors {
         assembled
     } else {
-        lower_dicts(lower_andor(assembled))
+        lower_dicts(lower_andor(assembled), ctx.core_module_key)
     }
     let frozen = if has_errors { none } else { some(
         freeze_core_and_legacy_facts(
-            ctx.core_recorder, checked_program, ctx.env,
-            ctx.core_type_sources,
-            ctx.core_handled_evidence_type_sources)) }
+            ctx.core_module_key, ctx.core_module_order,
+            checked_program, ctx.env,
+            prelude_physical_owner_module_key, module_prefix)) }
     CheckResult {
         program: checked_program,
         env: ctx.env,
@@ -967,248 +1033,5 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
             let (fn_name, flags) = entry
             ctx.fn_mut_params.insert(fn_name, flags)
         }
-    }
-}
-
-// ============================================================
-// B-002p1: Move checker for Drop types
-// Walks HIR in program order to detect use-after-move.
-// Phase 1 simplification: no branch/loop analysis — any move
-// in any branch marks the variable as consumed for all
-// subsequent uses in the same function scope.
-// ============================================================
-
-fn check_drop_moves(program: HProgram, mut sink: CollectingSink) {
-    for decl in program.decls {
-        match decl {
-            HDecl::Fn { body, .. } => {
-                let mut consumed: Map<Str, Span> = map_new()
-                check_moves_expr(body, consumed, program.drop_types, sink)
-            },
-            HDecl::Impl { methods, .. } => {
-                for m in methods {
-                    match m {
-                        HDecl::Fn { body, .. } => {
-                            let mut consumed: Map<Str, Span> = map_new()
-                            check_moves_expr(body, consumed, program.drop_types, sink)
-                        },
-                        _ => {}
-                    }
-                }
-            },
-            _ => {}
-        }
-    }
-}
-
-fn check_consumed(name: Str, ty: Type, span: Span, consumed: Map<Str, Span>, drop_types: Set<Str>, mut sink: CollectingSink) {
-    if is_user_drop_type(ty, drop_types) {
-        match consumed.get(name) {
-            some(_) => {
-                let _ = type_error(sink, E0801,
-                    "use of moved value: '${name}'",
-                    span, DiagnosticContext::OtherContext { detail: some("value was previously moved") })
-            },
-            none => {}
-        }
-    }
-}
-
-fn try_consume_ident(expr: HExpr, mut consumed: Map<Str, Span>, drop_types: Set<Str>) {
-    // A fieldless variant is Ident-shaped but evaluates a fresh constructor on
-    // every occurrence. It is not a binding that can become moved.
-    if is_nullary_variant_ctor_ident(expr) { return }
-    match expr {
-        HExpr::Ident { name, ty, span, .. } => {
-            if is_user_drop_type(ty, drop_types) {
-                consumed.insert(name, span)
-            }
-        },
-        _ => {}
-    }
-}
-
-fn check_moves_expr(expr: HExpr, mut consumed: Map<Str, Span>, drop_types: Set<Str>, mut sink: CollectingSink) {
-    match expr {
-        HExpr::Ident { name, ty, span, .. } => {
-            // Mirror try_consume_ident: repeated evaluation of a nullary ctor is
-            // repeated fresh construction, never use-after-move.
-            if is_nullary_variant_ctor_ident(expr) == false {
-                check_consumed(name, ty, span, consumed, drop_types, sink)
-            }
-        },
-        HExpr::Block { stmts, tail, .. } => {
-            for s in stmts {
-                check_moves_stmt(s, consumed, drop_types, sink)
-            }
-            match tail {
-                some(t) => check_moves_expr(t, consumed, drop_types, sink),
-                none => {}
-            }
-        },
-        HExpr::Call { callee, args, .. } => {
-            check_moves_expr(callee, consumed, drop_types, sink)
-            for arg in args {
-                check_moves_expr(arg, consumed, drop_types, sink)
-                // After using a Drop-type arg, consume it (move into callee)
-                try_consume_ident(arg, consumed, drop_types)
-            }
-        },
-        HExpr::FieldAccess { receiver, .. } => {
-            check_moves_expr(receiver, consumed, drop_types, sink)
-        },
-        HExpr::BinOp { left, right, .. } => {
-            check_moves_expr(left, consumed, drop_types, sink)
-            check_moves_expr(right, consumed, drop_types, sink)
-        },
-        HExpr::UnaryOp { operand, .. } => {
-            check_moves_expr(operand, consumed, drop_types, sink)
-        },
-        HExpr::IfExpr { condition, then_branch, else_branch, .. } => {
-            check_moves_expr(condition, consumed, drop_types, sink)
-            check_moves_expr(then_branch, consumed, drop_types, sink)
-            match else_branch {
-                some(eb) => check_moves_expr(eb, consumed, drop_types, sink),
-                none => {}
-            }
-        },
-        HExpr::MatchExpr { scrutinee, arms, .. } => {
-            check_moves_expr(scrutinee, consumed, drop_types, sink)
-            for arm in arms {
-                match arm.guard {
-                    some(g) => check_moves_expr(g, consumed, drop_types, sink),
-                    none => {}
-                }
-                check_moves_expr(arm.body, consumed, drop_types, sink)
-            }
-        },
-        HExpr::StructLit { fields, spread, .. } => {
-            for f in fields {
-                check_moves_expr(f.value, consumed, drop_types, sink)
-            }
-            match spread {
-                some(s) => check_moves_expr(s, consumed, drop_types, sink),
-                none => {}
-            }
-        },
-        HExpr::NamedVariantConstruct { fields, spread, .. } => {
-            for f in fields {
-                check_moves_expr(f.value, consumed, drop_types, sink)
-            }
-            match spread {
-                some(s) => check_moves_expr(s, consumed, drop_types, sink),
-                none => {}
-            }
-        },
-        HExpr::StringInterp { parts, .. } => {
-            for p in parts {
-                match p {
-                    HStringInterpPart::Expression(e) => check_moves_expr(e, consumed, drop_types, sink),
-                    HStringInterpPart::Literal(_) => {}
-                }
-            }
-        },
-        HExpr::TryCatch { body, arms, .. } => {
-            check_moves_expr(body, consumed, drop_types, sink)
-            for arm in arms {
-                check_moves_expr(arm.body, consumed, drop_types, sink)
-            }
-        },
-        HExpr::HandleExpr { body, handlers, .. } => {
-            check_moves_expr(body, consumed, drop_types, sink)
-            for h in handlers {
-                check_moves_expr(h.body, consumed, drop_types, sink)
-            }
-        },
-        HExpr::Lambda { body, .. } => {
-            check_moves_expr(body, consumed, drop_types, sink)
-        },
-        HExpr::EffectOp { args, .. } => {
-            for a in args { check_moves_expr(a, consumed, drop_types, sink) }
-        },
-        HExpr::RangeExpr { start, end, .. } => {
-            check_moves_expr(start, consumed, drop_types, sink)
-            check_moves_expr(end, consumed, drop_types, sink)
-        },
-        HExpr::ListLit { elements, .. } => {
-            for e in elements { check_moves_expr(e, consumed, drop_types, sink) }
-        },
-        HExpr::TupleLit { elements, .. } => {
-            for e in elements { check_moves_expr(e, consumed, drop_types, sink) }
-        },
-        HExpr::IndexExpr { receiver, index, .. } => {
-            check_moves_expr(receiver, consumed, drop_types, sink)
-            check_moves_expr(index, consumed, drop_types, sink)
-        },
-        HExpr::ReturnExpr { value, .. } => {
-            match value {
-                some(v) => check_moves_expr(v, consumed, drop_types, sink),
-                none => {}
-            }
-        },
-        HExpr::Clone { inner, .. } => {
-            check_moves_expr(inner, consumed, drop_types, sink)
-        },
-        HExpr::Take { source, .. } => {
-            check_moves_expr(source, consumed, drop_types, sink)
-        },
-        HExpr::UnsafeBlock { body, .. } => {
-            check_moves_expr(body, consumed, drop_types, sink)
-        },
-        HExpr::DictConstruct { .. } => {},
-        // Literals — no sub-expressions
-        HExpr::IntLit { .. } => {},
-        HExpr::FloatLit { .. } => {},
-        HExpr::StrLit { .. } => {},
-        HExpr::BoolLit { .. } => {},
-    }
-}
-
-fn check_moves_stmt(stmt: HStmt, mut consumed: Map<Str, Span>, drop_types: Set<Str>, mut sink: CollectingSink) {
-    match stmt {
-        HStmt::Let { init, .. } => {
-            check_moves_expr(init, consumed, drop_types, sink)
-            // If init is a bare Ident of Drop type, consume the source
-            try_consume_ident(init, consumed, drop_types)
-        },
-        HStmt::Var { init, .. } => {
-            check_moves_expr(init, consumed, drop_types, sink)
-            try_consume_ident(init, consumed, drop_types)
-        },
-        HStmt::Assign { target, value, .. } => {
-            check_moves_expr(target, consumed, drop_types, sink)
-            check_moves_expr(value, consumed, drop_types, sink)
-        },
-        HStmt::ExprStmt { expr, .. } => {
-            check_moves_expr(expr, consumed, drop_types, sink)
-        },
-        HStmt::Return { value, .. } => {
-            match value {
-                some(v) => check_moves_expr(v, consumed, drop_types, sink),
-                none => {}
-            }
-        },
-        HStmt::While { condition, body, .. } => {
-            check_moves_expr(condition, consumed, drop_types, sink)
-            check_moves_expr(body, consumed, drop_types, sink)
-        },
-        HStmt::ForIn { iterable, body, .. } => {
-            check_moves_expr(iterable, consumed, drop_types, sink)
-            check_moves_expr(body, consumed, drop_types, sink)
-        },
-        HStmt::Break { .. } => {},
-        HStmt::Continue { .. } => {},
-        HStmt::LetDestructure { init, .. } => {
-            check_moves_expr(init, consumed, drop_types, sink)
-        },
-        HStmt::IfLet { expr, then_block, else_block, .. } => {
-            check_moves_expr(expr, consumed, drop_types, sink)
-            check_moves_expr(then_block, consumed, drop_types, sink)
-            match else_block {
-                some(eb) => check_moves_expr(eb, consumed, drop_types, sink),
-                none => {}
-            }
-        },
-        HStmt::Drop { .. } => {}
     }
 }

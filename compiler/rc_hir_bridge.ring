@@ -4,6 +4,7 @@
 // stages and relates every Rc site to the sole lowerer's Core node map.
 
 use ir_identity::{
+    CoreTypeRef,
     OriginRef, SlotRef, CalleeRef, ImplOwnerRef, ImplMethodRef,
     RegisteredNominalRef, VariantRef,
     SymbolRef, PathRef,
@@ -25,7 +26,7 @@ use ir_identity::{
     module_body_ref_origin_module_key
 }
 use ir_inventory::{
-    ExecutableRef, ExecutableKind,
+    ExecutableRef, ExecutableKind, ExactMethodRef,
     executable_ref_same, executable_ref_is_named,
     make_named_executable_ref,
     executable_ref_named_symbol, executable_ref_anonymous_path,
@@ -39,8 +40,18 @@ use ir_inventory::{
     HandledEvidenceRef, HandledEvidenceCapture,
     make_handled_evidence_capture,
     effect_operation_ref_effect, effect_operation_ref_member,
-    system_host_callable_executable
+    system_host_callable_executable,
+    exact_method_ref_is_intrinsic, exact_method_ref_is_impl,
+    exact_method_ref_is_trait, exact_method_ref_intrinsic,
+    exact_method_ref_impl, exact_method_ref_trait
 }
+use resource_model::{
+    flow_call_contract_parameter_types,
+    flow_call_contract_parameter_roles,
+    flow_call_contract_result_type,
+    flow_semantic_role_tag, flow_semantic_role_mutate
+}
+use core_type_source::{core_type_graph_count}
 use ast::{
     Span, Pattern, LiteralValue, BinOp, UnaryOp,
     TypeParam, TypeBound, NamedPatternField, span_zero
@@ -52,7 +63,7 @@ use hir::{
     HEffectOp, HTraitMethod, TraitBound, HPatternPlan, HProjectionRef,
     h_fail_raise_ref,
     h_nominal_projection, h_variant_projection,
-    h_structural_projection, h_tuple_projection, h_intrinsic_projection,
+    h_structural_projection, h_tuple_projection,
     make_h_pattern_field_plan,
     h_pattern_wildcard, h_pattern_binding, h_pattern_literal,
     h_pattern_tuple, h_pattern_struct, h_pattern_variant,
@@ -61,9 +72,8 @@ use hir::{
     HFieldAccessKind, HNominalStructFieldInit, HStructFieldInit,
     HResourceSite,
     DictRef, MethodCallRef,
-    method_call_ref_is_intrinsic, method_call_ref_is_concrete,
-    method_call_ref_intrinsic, method_call_ref_impl,
-    method_call_ref_bound,
+    make_intrinsic_method_call_ref, make_concrete_method_call_ref,
+    make_bound_method_call_ref,
     synthetic_def_id, SYNTHETIC_ANF_DEF_ID_BASE,
     validate_hir_binder_def_ids,
     make_h_instruction_resource_site, make_h_terminator_resource_site,
@@ -84,7 +94,7 @@ use flow_ir::{
     flow_block_instructions,
     flow_instruction_reference, flow_instruction_kind_tag,
     flow_fail_raise_sink,
-    flow_slot_reference, flow_slot_type, flow_type_ref_index
+    flow_slot_reference, flow_slot_type
 }
 use core_hir::{
     CoreProgram, CoreBodyEntry,
@@ -94,13 +104,10 @@ use core_hir::{
 }
 use core_expr::{
     CoreBody, CoreBinder, CoreBlock, CoreStmt, CoreExpr, CoreMatchArm,
-    CoreTypeRef, CoreEffectSet,
     CorePattern, CorePatternField, CoreFieldRef, CoreFieldValue,
     CoreCalleeRef, CoreEvidenceRef, CoreConstructorRef, CorePlaceRef,
     CoreImplMetadata, CoreCallableContract, CoreHandledEvidenceCapture,
     CoreHandlerOperation, CoreHandlerInstallation,
-    core_type_graph_count,
-    make_core_type_ref,
     core_callable_reference, core_callable_handled_evidence,
     core_handled_evidence_reference,
     core_body_reference, core_body_origin, core_body_block,
@@ -124,9 +131,7 @@ use core_expr::{
     core_handled_use_reference,
     core_expr_method_ref,
     core_expr_method_receiver, core_expr_effect_operation,
-    core_expr_system_host, core_expr_dict_constructor,
-    core_expr_fail_payload,
-    core_expr_dict_project_dictionary, core_expr_dict_project_method,
+    core_expr_system_host, core_expr_fail_payload,
     core_expr_project_base, core_expr_project_field,
     core_expr_constructor, core_expr_constructor_fields,
     core_expr_lambda_executable, core_expr_lambda_captures,
@@ -145,17 +150,17 @@ use core_expr::{
     core_pattern_field_ref, core_pattern_field_pattern,
     core_field_ref_kind_tag, core_field_ref_nominal,
     core_field_ref_variant, core_field_ref_tuple_index,
-    core_field_ref_record_path,
+    core_field_ref_record_path, core_field_ref_record_name,
     core_field_value_field, core_field_value_expr,
     core_place_is_slot, core_place_slot, core_place_base,
-    core_place_field, core_place_evaluated_index, core_place_intrinsic,
+    core_place_field,
     core_place_value_type,
     core_constructor_kind_tag, core_constructor_struct_owner,
     core_constructor_variant, core_constructor_executable,
     core_callee_ref, core_callee_kind_tag, core_callee_direct,
-    core_callee_local, core_callee_dynamic,
-    core_evidence_is_local, core_evidence_is_dict,
-    core_evidence_local, core_evidence_callable, core_evidence_dict,
+    core_callee_local, core_callee_dynamic, core_callee_contract,
+    core_callee_effect_instantiation,
+    core_evidence_dict,
     core_handler_installation_evidence,
     core_handler_installation_operations,
     core_handler_operation_ref, core_handler_operation_executable,
@@ -165,6 +170,10 @@ use core_expr::{
     core_handler_operation_handled_captures,
     core_impl_owner, core_impl_methods, core_impl_assoc_bindings,
     core_assoc_binding_member
+}
+use effect_contract::{
+    CoreEffectSet,
+    core_effect_instantiation_result, core_effect_contract_exact
 }
 use flow_lower::{
     CoreFlowNodeRef, CoreFlowStepMap, CoreFlowStepRelation, CoreFlowStepRole,
@@ -190,8 +199,9 @@ use rc_ir::{
     rc_edge_successor_ordinal, rc_edge_cleanup,
     rc_operation_site,
     rc_operation_kind, rc_operation_source, rc_operation_target,
+    rc_operation_place_projection,
     rc_op_kind_same, rc_op_kind_clone, rc_op_kind_take,
-    rc_op_kind_drop, rc_op_kind_cleanup,
+    rc_op_kind_drop, rc_op_kind_cleanup, rc_op_kind_drop_old_place,
     rc_semantic_site_is_instruction, rc_semantic_site_instruction,
     rc_semantic_site_block, rc_semantic_site_successor_ordinal,
     rc_semantic_site_operand_ordinal, rc_semantic_site_placement,
@@ -206,7 +216,7 @@ use legacy_projection::{
     legacy_projection_core_type_count,
     legacy_projection_type_for, legacy_projection_effect_for,
     legacy_projection_binder_for, legacy_projection_callable_for,
-    legacy_projection_impl_for,
+    legacy_projection_impl_for, legacy_projection_dictionary,
     legacy_projection_executable_physical_identity,
     legacy_type_projection_type, legacy_effect_projection_row,
     legacy_binder_projection_name, legacy_binder_projection_def_id,
@@ -216,7 +226,8 @@ use legacy_projection::{
     legacy_callable_parameters, legacy_callable_result_type,
     legacy_callable_effects, legacy_callable_is_public,
     legacy_callable_module,
-    legacy_type_parameter_name, legacy_type_parameter_bounds,
+    legacy_type_parameter_name, legacy_type_parameter_var_id,
+    legacy_type_parameter_bounds,
     legacy_trait_bound_parameter_index, legacy_trait_bound_trait,
     legacy_impl_owner, legacy_impl_target_type, legacy_impl_trait,
     legacy_impl_target_nominal,
@@ -308,7 +319,13 @@ fn nominal_owner_in_decls_opt(
     let mut found: RegisteredNominalRef? = none
     for decl in decls {
         match decl {
-            HDecl::Struct { owner_ref, .. } |
+            HDecl::Struct { owner_ref, .. } => if symbol_ref_same(
+                registered_nominal_ref_symbol(owner_ref), symbol) {
+                if found.is_some() {
+                    panic("RcHIR bridge: nominal shell owner repeats")
+                }
+                found = some(owner_ref)
+            },
             HDecl::Enum { owner_ref, .. } => if symbol_ref_same(
                 registered_nominal_ref_symbol(owner_ref), symbol) {
                 if found.is_some() {
@@ -398,8 +415,7 @@ fn bridge_binder_for(
             for body in flow_program_bodies(ctx.stages.flow) {
                 for candidate in flow_body_slots(body) {
                     if slot_ref_same(flow_slot_reference(candidate), slot) {
-                        flow_type = some(make_core_type_ref(
-                            flow_type_ref_index(flow_slot_type(candidate))))
+                        flow_type = some(flow_slot_type(candidate))
                     }
                 }
             }
@@ -471,15 +487,7 @@ fn executable_ident(
 fn evidence_dict(
     projection: LegacyProjectionTable, value: CoreEvidenceRef
 ) -> DictRef {
-    if core_evidence_is_local(value) {
-        DictRef::Simple(legacy_binder_projection_name(
-            projected_binder_for(projection, core_evidence_local(value))))
-    } else if core_evidence_is_dict(value) {
-        core_evidence_dict(value)
-    } else {
-        DictRef::Static(executable_identity(
-            projection, core_evidence_callable(value)))
-    }
+    legacy_projection_dictionary(projection, core_evidence_dict(value))
 }
 
 fn legacy_type_params(
@@ -508,18 +516,24 @@ fn legacy_trait_bounds(
     callable: LegacyCallableProjection
 ) -> List<TraitBound> {
     let parameters = legacy_callable_type_parameters(callable)
-    legacy_callable_bounds(callable).map(fn(bound) {
+    let mut result: List<TraitBound> = []
+    let mut ordinal = 0
+    for bound in legacy_callable_bounds(callable) {
         let index = legacy_trait_bound_parameter_index(bound)
         let parameter = parameters.get(index).unwrap_or_else(fn() {
             panic("RcHIR bridge: callable trait-bound parameter is absent")
         })
-        TraitBound {
+        result.push(TraitBound {
             type_param: legacy_type_parameter_name(parameter),
+            type_var_id: legacy_type_parameter_var_id(parameter),
             trait_name: symbol_ref_canonical_payload(
                 legacy_trait_bound_trait(bound)),
-            trait_ref: legacy_trait_bound_trait(bound)
-        }
-    })
+            trait_ref: legacy_trait_bound_trait(bound),
+            dict_ordinal: ordinal
+        })
+        ordinal = ordinal + 1
+    }
+    result
 }
 
 fn legacy_params(callable: LegacyCallableProjection) -> List<HParam> {
@@ -653,34 +667,43 @@ fn wrap_resource_operand(
 
 fn drop_statement(
     ctx: HirBridgeCtx, event: BridgeRcEvent,
-    projected_old: Bool
+    place_target: HExpr?
 ) -> HStmt {
     let operation = event.operation
     let slot = rc_operation_source(operation)
     let binder = bridge_binder_for(ctx, slot)
     let kind = rc_operation_kind(operation)
     let reason = if rc_op_kind_same(kind, rc_op_kind_cleanup()) {
+        if place_target.is_some() {
+            panic("RcHIR bridge: Cleanup cannot target a place")
+        }
         h_resource_reason_cleanup()
     } else if rc_op_kind_same(kind, rc_op_kind_drop()) {
-        if projected_old {
-            h_resource_reason_drop_projected_old()
-        } else {
-            h_resource_reason_drop()
+        if place_target.is_some() {
+            panic("RcHIR bridge: slot Drop cannot target a place")
         }
+        h_resource_reason_drop()
+    } else if rc_op_kind_same(kind, rc_op_kind_drop_old_place()) {
+        if place_target.is_none() ||
+           rc_operation_place_projection(operation).is_none() {
+            panic("RcHIR bridge: DropOldPlace lacks exact projection")
+        }
+        h_resource_reason_drop_projected_old()
     } else {
         panic("RcHIR bridge: non-drop operation used as Drop statement")
     }
     HStmt::Drop {
         name: legacy_binder_projection_name(binder),
         def_id: legacy_binder_projection_def_id(binder),
-        slot: slot, site: h_resource_site_for_step(event.step),
+        slot: slot, place_target: place_target,
+        site: h_resource_site_for_step(event.step),
         reason: reason, ty: legacy_binder_projection_type(binder),
         span: span_zero()
     }
 }
 
 fn before_drop_statements(
-    ctx: HirBridgeCtx, node_ordinal: Int, projected_old: Bool,
+    ctx: HirBridgeCtx, node_ordinal: Int, place_target: HExpr?,
     selector: Int, role_ordinal: Int
 ) -> List<HStmt> {
     let mut result: List<HStmt> = []
@@ -689,9 +712,10 @@ fn before_drop_statements(
             selector, role_ordinal) {
         let kind = rc_operation_kind(event.operation)
         if rc_op_kind_same(kind, rc_op_kind_drop()) ||
-           rc_op_kind_same(kind, rc_op_kind_cleanup()) {
+           rc_op_kind_same(kind, rc_op_kind_cleanup()) ||
+           rc_op_kind_same(kind, rc_op_kind_drop_old_place()) {
             consume_event(ctx, event)
-            result.push(drop_statement(ctx, event, projected_old))
+            result.push(drop_statement(ctx, event, place_target))
         }
     }
     result
@@ -781,7 +805,7 @@ fn before_terminator_drops(
         if rc_op_kind_same(kind, rc_op_kind_drop()) ||
            rc_op_kind_same(kind, rc_op_kind_cleanup()) {
             consume_event(ctx, event)
-            result.push(drop_statement(ctx, event, false))
+            result.push(drop_statement(ctx, event, none))
         }
     }
     result
@@ -802,7 +826,7 @@ fn edge_cleanup_statements(
                 panic("RcHIR bridge: edge carries non-cleanup operation")
             }
             consume_event(ctx, event)
-            result.push(drop_statement(ctx, event, false))
+            result.push(drop_statement(ctx, event, none))
         }
     }
     result
@@ -967,14 +991,57 @@ fn callee_expr(
     }
 }
 
-fn method_name(value: MethodCallRef) -> Str {
-    if method_call_ref_is_intrinsic(value) {
+fn method_name(value: ExactMethodRef) -> Str {
+    if exact_method_ref_is_intrinsic(value) {
         symbol_ref_canonical_payload(intrinsic_ref_symbol(
-            method_call_ref_intrinsic(value)))
-    } else if method_call_ref_is_concrete(value) {
-        impl_method_ref_name(method_call_ref_impl(value))
+            exact_method_ref_intrinsic(value)))
+    } else if exact_method_ref_is_impl(value) {
+        impl_method_ref_name(exact_method_ref_impl(value))
+    } else if exact_method_ref_is_trait(value) {
+        trait_method_ref_name(exact_method_ref_trait(value))
     } else {
-        trait_method_ref_name(method_call_ref_bound(value))
+        panic("RcHIR bridge: unknown exact method identity")
+    }
+}
+
+fn legacy_method_ref(
+    ctx: HirBridgeCtx, method: ExactMethodRef, callee: CoreCalleeRef,
+    evidence: List<DictRef>
+) -> MethodCallRef {
+    let contract = core_callee_contract(callee)
+    let parameter_types = flow_call_contract_parameter_types(contract).map(
+        fn(value) {
+            legacy_type_for(ctx.projection, value)
+        })
+    let result_type = legacy_type_for(
+        ctx.projection, flow_call_contract_result_type(contract))
+    let effects = legacy_effects_for(
+        ctx.projection, core_effect_contract_exact(
+            core_effect_instantiation_result(
+                core_callee_effect_instantiation(callee))))
+    let signature = Type::FnType {
+        params: parameter_types, return_type: result_type, effects: effects
+    }
+    let roles = flow_call_contract_parameter_roles(contract)
+    let receiver_mutable = roles.len() > 0 &&
+        flow_semantic_role_tag(roles.get(0).unwrap()) ==
+            flow_semantic_role_tag(flow_semantic_role_mutate())
+    if exact_method_ref_is_intrinsic(method) {
+        make_intrinsic_method_call_ref(
+            exact_method_ref_intrinsic(method), signature)
+    } else if exact_method_ref_is_impl(method) {
+        make_concrete_method_call_ref(
+            exact_method_ref_impl(method), signature, receiver_mutable)
+    } else if exact_method_ref_is_trait(method) {
+        let bound = match evidence.get(0) {
+            some(value) => value,
+            none => panic("RcHIR bridge: bound method lacks exact evidence")
+        }
+        make_bound_method_call_ref(
+            exact_method_ref_trait(method), bound, signature,
+            receiver_mutable)
+    } else {
+        panic("RcHIR bridge: unknown exact method identity")
     }
 }
 
@@ -985,12 +1052,7 @@ fn field_name(value: CoreFieldRef) -> Str {
     } else if kind == 1 {
         core_field_ref_tuple_index(value).to_str()
     } else if kind == 2 {
-        let path = path_ref_normalized_child_path(
-            core_field_ref_record_path(value))
-        if path.len() == 0 {
-            panic("RcHIR bridge: structural field path is empty")
-        }
-        path.last().unwrap()
+        core_field_ref_record_name(value)
     } else if kind == 3 {
         symbol_ref_canonical_payload(variant_field_ref_member(
             core_field_ref_variant(value)))
@@ -1171,6 +1233,13 @@ fn simple_core_expr(
             operand_index = operand_index + 1
             serialized.value
         })
+        let source_method = if kind == 4 {
+            some(legacy_method_ref(
+                ctx, core_expr_method_ref(expr), callee, evidence))
+        } else {
+            let absent: MethodCallRef? = none
+            absent
+        }
         return SerializedOperand { prefix: prefix, value: HExpr::Call {
             callee: call_callee, args: args, type_args: [],
             resolved_dicts: evidence,
@@ -1181,9 +1250,7 @@ fn simple_core_expr(
             callee_ref: if kind == 3 {
                 some(core_callee_ref(callee))
             } else { none },
-            method_ref: if kind == 4 {
-                some(core_expr_method_ref(expr))
-            } else { none },
+            method_ref: source_method,
             system_host: none,
             ty: ty, effects: effects, span: span_zero()
         } }
@@ -1239,38 +1306,6 @@ fn simple_core_expr(
             callee_ref: some(make_named_callee_ref(
                 executable_ref_named_symbol(executable))), method_ref: none,
             system_host: some(core_expr_system_host(expr)),
-            ty: ty, effects: effects, span: span_zero()
-        } }
-    }
-    if kind == 7 || kind == 8 {
-        let executable = if kind == 7 {
-            core_expr_dict_constructor(expr)
-        } else {
-            core_expr_dict_project_method(expr)
-        }
-        let callable = legacy_projection_callable_for(ctx.projection, executable)
-        let nested = if kind == 7 { none } else { some(
-            serialize_nested_operand(
-                ctx, owner, core_expr_dict_project_dictionary(expr),
-                node_ordinal, 0, BRIDGE_ROLE_EXPR_PRIMARY, 0)) }
-        let arguments = match nested {
-            some(value) => [value.value], none => []
-        }
-        return SerializedOperand {
-            prefix: match nested { some(value) => value.prefix, none => [] },
-            value: HExpr::Call {
-            callee: executable_ident(
-                ctx.projection, executable, callable_fn_type(callable)),
-            args: arguments, type_args: [],
-            resolved_dicts: if kind == 7 {
-                core_expr_call_evidence(expr).map(fn(value) {
-                    evidence_dict(ctx.projection, value)
-                })
-            } else { [] },
-            handled_evidence: [],
-            callee_ref: some(make_named_callee_ref(
-                executable_ref_named_symbol(executable))), method_ref: none,
-            system_host: none,
             ty: ty, effects: effects, span: span_zero()
         } }
     }
@@ -1456,7 +1491,7 @@ fn serialize_core_expr(
             init: payload.value, span: span_zero()
         })
         append_all(prefix, before_drop_statements(
-            ctx, node_ordinal, false, BRIDGE_ROLE_EXPR_PRIMARY, 0))
+            ctx, node_ordinal, none, BRIDGE_ROLE_EXPR_PRIMARY, 0))
         append_all(prefix, before_terminator_drops(
             ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0))
         return SerializedExpr {
@@ -1478,7 +1513,7 @@ fn serialize_core_expr(
         let simple = simple_core_expr(ctx, owner, expr, node_ordinal)
         let mut prefix = simple.prefix
         append_all(prefix, before_drop_statements(
-            ctx, node_ordinal, false, BRIDGE_ROLE_EXPR_PRIMARY, 0))
+            ctx, node_ordinal, none, BRIDGE_ROLE_EXPR_PRIMARY, 0))
         SerializedExpr {
             node_ordinal: node_ordinal,
             prefix: prefix, value: simple.value,
@@ -1549,24 +1584,8 @@ fn assignment_target(
     let base = serialize_child_reference(ctx, owner, core_place_base(value))
     let mut prefix = base.prefix
     let ty = legacy_type_for(ctx.projection, core_place_value_type(value))
-    let projected = match core_place_field(value) {
-        some(field) => projected_field_access(
-            ctx, base.value, field, ty, EMPTY_ROW),
-        none => {
-            let index_expr = core_place_evaluated_index(value).unwrap_or_else(fn() {
-                panic("RcHIR bridge: indexed place lacks index expression")
-            })
-            let index = serialize_child_reference(ctx, owner, index_expr)
-            append_all(prefix, index.prefix)
-            HExpr::IndexExpr {
-                receiver: base.value, index: index.value,
-                call_plan: none,
-                projection: some(h_intrinsic_projection(
-                    core_place_intrinsic(value).unwrap())),
-                ty: ty, effects: EMPTY_ROW, span: span_zero()
-            }
-        }
-    }
+    let projected = projected_field_access(
+        ctx, base.value, core_place_field(value), ty, EMPTY_ROW)
     SerializedOperand { prefix: prefix, value: projected }
 }
 
@@ -1625,7 +1644,7 @@ fn serialize_core_statement(
         })
         append_all(result, serialized.after)
         append_all(result, before_drop_statements(
-            ctx, node_ordinal, false, BRIDGE_ROLE_STMT_ASSIGN, 0))
+            ctx, node_ordinal, none, BRIDGE_ROLE_STMT_ASSIGN, 0))
         let init = wrap_resource_operand(
             ctx, node_ordinal, 0, rhs_slot,
             BRIDGE_ROLE_STMT_ASSIGN, 0)
@@ -1670,9 +1689,13 @@ fn serialize_core_statement(
             init: serialized.value, span: span_zero()
         })
         append_all(result, serialized.after)
-        let projected_old = !core_place_is_slot(core_stmt_target(statement))
+        let drop_place = if core_place_is_slot(core_stmt_target(statement)) {
+            none
+        } else {
+            some(target.value)
+        }
         append_all(result, before_drop_statements(
-            ctx, node_ordinal, projected_old,
+            ctx, node_ordinal, drop_place,
             BRIDGE_ROLE_STMT_ASSIGN, 0))
         result.push(HStmt::Assign {
             target: target.value,
@@ -2123,7 +2146,8 @@ fn legacy_impl_assoc_types(
 
 fn legacy_impl_target_name(value: Type) -> Str {
     match value {
-        Type::StructType { name, .. } | Type::EnumType { name, .. } =>
+        Type::StructType { name, .. } => nominal_display_name(name),
+        Type::EnumType { name, .. } =>
             nominal_display_name(name),
         Type::GenericType { base, .. } => legacy_impl_target_name(base),
         _ => panic("RcHIR bridge: impl target is not nominal")
@@ -2286,12 +2310,13 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
         HDecl::ExternFn {
             name, abi_name, def_id, executable_ref,
             type_params, params, return_type, effects,
-            trait_bounds, is_pub, span
+            resource_contract, trait_bounds, is_pub, span, ..
         } => HDecl::ExternFn {
             name: name, abi_name: abi_name, def_id: def_id,
             executable_ref: executable_ref, type_params: type_params,
             params: params, return_type: return_type,
             effects: validate_legacy_effect_row(effects),
+            resource_contract: resource_contract,
             handled_evidence_bindings: core_callable_handled_refs(
                 ctx.stages.core, executable_ref),
             trait_bounds: trait_bounds,
@@ -3040,9 +3065,6 @@ fn validate_core_expr_nodes(
         for argument in core_expr_call_arguments(expr) {
             validate_core_expr_nodes(cursor, owner, argument)
         }
-    } else if kind == 8 {
-        validate_core_expr_nodes(
-            cursor, owner, core_expr_dict_project_dictionary(expr))
     } else if kind == 9 {
         validate_core_expr_nodes(cursor, owner, core_expr_project_base(expr))
     } else if kind == 10 {
@@ -3092,10 +3114,6 @@ fn validate_core_stmt_nodes(
         let place = core_stmt_target(statement)
         if !core_place_is_slot(place) {
             validate_core_expr_nodes(cursor, owner, core_place_base(place))
-            match core_place_evaluated_index(place) {
-                some(index) => validate_core_expr_nodes(cursor, owner, index),
-                none => {}
-            }
         }
         validate_core_expr_nodes(cursor, owner, core_stmt_value(statement))
     } else if kind == 0 || kind == 2 {

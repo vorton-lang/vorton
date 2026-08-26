@@ -5,6 +5,52 @@
 // Public references have private representation and can only be created by
 // fail-closed constructors below.
 
+// The one canonical type-reference identity freezes at the Core boundary and
+// is transported unchanged through Flow and resource planning.
+pub struct CoreTypeRef { index: Int, module_key: Str? }
+
+pub fn make_core_type_ref(index: Int) -> CoreTypeRef {
+    if index < 0 { panic("IR identity: negative Core type reference") }
+    CoreTypeRef { index: index, module_key: none }
+}
+pub fn make_module_core_type_ref(
+    module_key: Str, index: Int
+) -> CoreTypeRef {
+    if module_key == "" || index < 0 {
+        panic("IR identity: invalid module-local Core type reference")
+    }
+    CoreTypeRef { index: index, module_key: some(module_key) }
+}
+pub fn core_type_ref_index(value: CoreTypeRef) -> Int { value.index }
+pub fn core_type_ref_module_key(value: CoreTypeRef) -> Str? { value.module_key }
+pub fn core_type_ref_same(left: CoreTypeRef, right: CoreTypeRef) -> Bool {
+    left.index == right.index && left.module_key == right.module_key
+}
+
+// Producer facts have a stable module/ordinal identity.  Allocation remains
+// in core_type_source; this module only owns the exact reference.
+pub struct CoreTypeFactRef { module_key: Str, ordinal: Int }
+pub fn make_core_type_fact_ref(
+    module_key: Str, ordinal: Int
+) -> CoreTypeFactRef {
+    if module_key == "" || ordinal < 0 {
+        panic("IR identity: invalid Core type fact reference")
+    }
+    CoreTypeFactRef { module_key: module_key, ordinal: ordinal }
+}
+pub fn core_type_fact_module_key(value: CoreTypeFactRef) -> Str {
+    value.module_key
+}
+pub fn core_type_fact_ordinal(value: CoreTypeFactRef) -> Int { value.ordinal }
+pub fn core_type_fact_same(
+    left: CoreTypeFactRef, right: CoreTypeFactRef
+) -> Bool {
+    left.module_key == right.module_key && left.ordinal == right.ordinal
+}
+pub fn core_type_fact_local_ref(value: CoreTypeFactRef) -> CoreTypeRef {
+    make_module_core_type_ref(value.module_key, value.ordinal)
+}
+
 // ============================================================
 // Validated tag types
 // ============================================================
@@ -231,6 +277,23 @@ pub fn symbol_ref_origin_module_key(value: SymbolRef) -> Str {
     value.origin_module_key
 }
 
+// Resolver-owned prelude module keys are `$prelude$::<stable-basename>`.
+// Keep this predicate beside SymbolRef so every later stage consumes one
+// exact domain rule instead of guessing with a bare `$prelude` string or a
+// permissive near-prefix check.
+pub fn origin_module_key_is_prelude(value: Str) -> Bool {
+    let prefix = "$prelude$::"
+    if !value.starts_with(prefix) || value.len() <= prefix.len() {
+        return false
+    }
+    let suffix = value.slice(prefix.len(), value.len())
+    suffix != "" && !suffix.contains("::")
+}
+
+pub fn symbol_ref_is_prelude(value: SymbolRef) -> Bool {
+    origin_module_key_is_prelude(symbol_ref_origin_module_key(value))
+}
+
 pub fn symbol_ref_namespace_kind(value: SymbolRef) -> NamespaceKind {
     value.namespace_kind
 }
@@ -336,8 +399,10 @@ pub fn registered_nominal_ref_display_name(
 pub fn registered_nominal_ref_same(
     left: RegisteredNominalRef, right: RegisteredNominalRef
 ) -> Bool {
-    symbol_ref_same(left.symbol, right.symbol) &&
-        left.display_name == right.display_name
+    // Display spelling is diagnostic provenance. Re-exports and staged
+    // registration may retain different local spellings for the same exact
+    // resolver symbol, so it cannot participate in nominal identity.
+    symbol_ref_same(left.symbol, right.symbol)
 }
 
 // Registration gives a source trait its local typed display name without
@@ -882,7 +947,30 @@ pub const BUILTIN_METHOD_OPTION_TO_FAIL: Int = 29
 pub const BUILTIN_METHOD_CELL_GET: Int = 30
 pub const BUILTIN_METHOD_CELL_SET: Int = 31
 pub const BUILTIN_METHOD_CELL_UPDATE: Int = 32
-pub const BUILTIN_METHOD_SITE_COUNT: Int = 33
+pub const BUILTIN_METHOD_INT_EQ: Int = 33
+pub const BUILTIN_METHOD_INT_NE: Int = 34
+pub const BUILTIN_METHOD_FLOAT_EQ: Int = 35
+pub const BUILTIN_METHOD_FLOAT_NE: Int = 36
+pub const BUILTIN_METHOD_STR_EQ: Int = 37
+pub const BUILTIN_METHOD_STR_NE: Int = 38
+pub const BUILTIN_METHOD_BOOL_EQ: Int = 39
+pub const BUILTIN_METHOD_BOOL_NE: Int = 40
+pub const BUILTIN_METHOD_INT_CLONE: Int = 41
+pub const BUILTIN_METHOD_FLOAT_CLONE: Int = 42
+pub const BUILTIN_METHOD_STR_CLONE: Int = 43
+pub const BUILTIN_METHOD_BOOL_CLONE: Int = 44
+pub const BUILTIN_METHOD_INT_CMP: Int = 45
+pub const BUILTIN_METHOD_FLOAT_CMP: Int = 46
+pub const BUILTIN_METHOD_STR_CMP: Int = 47
+pub const BUILTIN_METHOD_BOOL_CMP: Int = 48
+pub const BUILTIN_METHOD_INT_DEBUG: Int = 49
+pub const BUILTIN_METHOD_FLOAT_DEBUG: Int = 50
+pub const BUILTIN_METHOD_STR_DEBUG: Int = 51
+pub const BUILTIN_METHOD_BOOL_DEBUG: Int = 52
+pub const BUILTIN_METHOD_INT_HASH: Int = 53
+pub const BUILTIN_METHOD_STR_HASH: Int = 54
+pub const BUILTIN_METHOD_BOOL_HASH: Int = 55
+pub const BUILTIN_METHOD_SITE_COUNT: Int = 56
 
 pub struct BuiltinMethodSite {
     tag: Int
@@ -936,6 +1024,89 @@ pub fn intrinsic_ref_symbol(value: IntrinsicRef) -> SymbolRef {
 
 pub fn intrinsic_ref_same(left: IntrinsicRef, right: IntrinsicRef) -> Bool {
     builtin_method_site_same(left.site, right.site) &&
+        symbol_ref_same(left.symbol, right.symbol)
+}
+
+// Fixed compiler-owned extern bridge sites. These are semantic identities,
+// not runtime-name ordinals: the resolver-issued source SymbolRef is related
+// to one of these sites by the sole extern manifest during prelude
+// registration. Renaming an internal declaration therefore does not mint a
+// new executable identity, while an unrelated same-spelled declaration can
+// never construct this relation.
+pub const COMPILER_EXTERN_SLOT_ALLOC: Int = 0
+pub const COMPILER_EXTERN_SLOT_DEALLOC: Int = 1
+pub const COMPILER_EXTERN_SLOT_READ: Int = 2
+pub const COMPILER_EXTERN_SLOT_TAKE: Int = 3
+pub const COMPILER_EXTERN_SLOT_WRITE: Int = 4
+pub const COMPILER_EXTERN_SLOT_REPLACE: Int = 5
+pub const COMPILER_EXTERN_SLOT_SWAP: Int = 6
+pub const COMPILER_EXTERN_SLOT_MOVE: Int = 7
+pub const COMPILER_EXTERN_SLOT_DROP: Int = 8
+pub const COMPILER_EXTERN_LIST_SORT: Int = 9
+pub const COMPILER_EXTERN_SITE_COUNT: Int = 10
+
+pub struct CompilerExternSite { tag: Int }
+
+pub fn compiler_extern_site_from_tag(tag: Int) -> CompilerExternSite {
+    if tag < 0 || tag >= COMPILER_EXTERN_SITE_COUNT {
+        panic("IR identity: invalid compiler extern site")
+    }
+    CompilerExternSite { tag: tag }
+}
+
+pub fn compiler_extern_site_tag(value: CompilerExternSite) -> Int {
+    compiler_extern_site_from_tag(value.tag).tag
+}
+
+pub fn compiler_extern_site_same(
+    left: CompilerExternSite, right: CompilerExternSite
+) -> Bool {
+    compiler_extern_site_tag(left) == compiler_extern_site_tag(right)
+}
+
+pub struct CompilerExternRef {
+    site: CompilerExternSite,
+    symbol: SymbolRef
+}
+
+pub fn make_compiler_extern_ref(
+    site: CompilerExternSite, symbol: SymbolRef
+) -> CompilerExternRef {
+    let tag = compiler_extern_site_tag(site)
+    if symbol_ref_origin_module_key(symbol) != "$builtin" ||
+       !namespace_kind_same(
+            symbol_ref_namespace_kind(symbol), namespace_value()) ||
+       symbol_ref_canonical_payload(symbol) !=
+            "compiler-extern:${tag.to_str()}" ||
+       symbol_ref_declaration_site_path(symbol) !=
+            "builtin:compiler-extern-site:${tag.to_str()}" {
+        panic("IR identity: compiler extern relation drifted")
+    }
+    CompilerExternRef { site: site, symbol: symbol }
+}
+
+pub fn compiler_extern_ref_for_site(
+    site: CompilerExternSite
+) -> CompilerExternRef {
+    let tag = compiler_extern_site_tag(site)
+    make_compiler_extern_ref(site, make_symbol_ref(
+        "$builtin", namespace_value(),
+        "compiler-extern:${tag.to_str()}",
+        "builtin:compiler-extern-site:${tag.to_str()}"))
+}
+
+pub fn compiler_extern_ref_site(
+    value: CompilerExternRef
+) -> CompilerExternSite { value.site }
+
+pub fn compiler_extern_ref_symbol(value: CompilerExternRef) -> SymbolRef {
+    value.symbol
+}
+
+pub fn compiler_extern_ref_same(
+    left: CompilerExternRef, right: CompilerExternRef
+) -> Bool {
+    compiler_extern_site_same(left.site, right.site) &&
         symbol_ref_same(left.symbol, right.symbol)
 }
 
@@ -1258,6 +1429,51 @@ pub fn slot_ref_same(left: SlotRef, right: SlotRef) -> Bool {
         (SlotRefValue::SyntheticSlotValue(a),
          SlotRefValue::SyntheticSlotValue(b)) => path_ref_same(a, b),
         _ => false
+    }
+}
+
+fn identity_key_atom(value: Str) -> Str {
+    "${value.len().to_str()}:${value}"
+}
+
+fn symbol_ref_stable_key(value: SymbolRef) -> Str {
+    ["symbol", identity_key_atom(symbol_ref_origin_module_key(value)),
+     namespace_kind_tag(symbol_ref_namespace_kind(value)).to_str(),
+     identity_key_atom(symbol_ref_canonical_payload(value)),
+     identity_key_atom(symbol_ref_declaration_site_path(value))].join("/")
+}
+
+fn module_body_ref_stable_key(value: ModuleBodyRef) -> Str {
+    ["module", identity_key_atom(
+        module_body_ref_origin_module_key(value)), identity_key_atom(
+        module_body_ref_declaration_site_path(value))].join("/")
+}
+
+fn path_ref_stable_key(value: PathRef) -> Str {
+    let owner = path_ref_owner(value)
+    let owner_key = if path_owner_ref_is_symbol(owner) {
+        symbol_ref_stable_key(path_owner_ref_symbol(owner))
+    } else {
+        module_body_ref_stable_key(path_owner_ref_module_body(owner))
+    }
+    let mut parts = ["path", owner_key,
+        path_role_tag(path_ref_role(value)).to_str()]
+    for component in path_ref_normalized_child_path(value) {
+        parts.push(identity_key_atom(component))
+    }
+    parts.join("/")
+}
+
+// Exact physical adapters may key maps by this value without weakening the
+// opaque SlotRef equality contract or reconstructing an identity from names.
+pub fn slot_ref_stable_key(value: SlotRef) -> Str {
+    if slot_ref_is_source(value) {
+        ["source", identity_key_atom(
+            slot_ref_source_origin_module_key(value)),
+         slot_domain_tag(slot_ref_source_domain(value)).to_str(),
+         slot_ref_source_def_id(value).to_str()].join("/")
+    } else {
+        "synthetic/${path_ref_stable_key(slot_ref_synthetic_path(value))}"
     }
 }
 

@@ -1,0 +1,273 @@
+{
+  "schema_version": 1,
+  "matrix": "Ring 0.1 ownership/Core/effect/extern vertical",
+  "scope": {
+    "real_consumers_only": true,
+    "post_0_1_cases": 0,
+    "single_and_project_share_one_semantic_entry": true,
+    "source_string_oracle": false
+  },
+  "fixtures": [
+    {
+      "id": "A1",
+      "path": "single/a_deep_clone_collections.ring",
+      "covers": [
+        "List<List<Int>> deep clone",
+        "Option<List<Int>> deep clone",
+        "Map<Int,List<Int>> deep clone",
+        "Set<Int> deep clone",
+        "mutating clone leaves original independent"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "A_DEEP_CLONE_OK\n"
+      }
+    },
+    {
+      "id": "A2",
+      "path": "single/a_deep_clone_generic_bound.ring",
+      "covers": [
+        "generic T: Clone bound",
+        "derived generic deep clone",
+        "nested clone independence"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "A_GENERIC_CLONE_OK\n"
+      }
+    },
+    {
+      "id": "A3",
+      "path": "single/a_missing_clone_bound.ring",
+      "covers": ["missing generic Clone bound fails loud"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0503",
+        "diagnostic_contains": "does not satisfy trait bound 'Clone'"
+      }
+    },
+    {
+      "id": "A4",
+      "path": "single/a_resource_clone_conflict.ring",
+      "covers": ["Drop and Clone are mutually exclusive for Resource"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0802",
+        "diagnostic_contains": "cannot implement both Drop and Clone"
+      }
+    },
+    {
+      "id": "B1",
+      "path": "single/b_type_resource_matrix.ring",
+      "covers": [
+        "direct Resource reuse after generic consume is rejected",
+        "Wrapper<Resource> reuse after generic consume is rejected",
+        "Wrapper<Int> remains a shareable control",
+        "Option<Resource> reuse is rejected",
+        "List<Resource> reuse is rejected",
+        "Map<Int,Resource> reuse is rejected",
+        "Set<Resource> reuse is rejected",
+        "tuple Resource payload reuse is rejected",
+        "recursive generic Resource payload reuse is rejected",
+        "each TypeResource shape has a distinct diagnostic observable"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0801",
+        "diagnostic_contains_all": [
+          "use of moved value: 'direct'",
+          "use of moved value: 'wrapped'",
+          "use of moved value: 'optional'",
+          "use of moved value: 'listed'",
+          "use of moved value: 'mapped'",
+          "use of moved value: 'setted'",
+          "use of moved value: 'tupled'",
+          "use of moved value: 'recursive'"
+        ],
+        "diagnostic_forbidden": ["use of moved value: 'plain'"]
+      }
+    },
+    {
+      "id": "B2",
+      "path": "single/b_ptr_resource_negative_control.ring",
+      "covers": ["Ptr<Resource> does not inherit pointee TypeResource ownership"],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_PTR_NEGATIVE_CONTROL_OK\n"
+      }
+    },
+    {
+      "id": "B3",
+      "path": "single/b_reuse_after_transitive_consume.ring",
+      "covers": ["Wrapper<Resource> becomes unavailable after an owning sink"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0801",
+        "diagnostic_contains": "use of moved value",
+        "diagnostic_line": 24,
+        "diagnostic_column": 11
+      }
+    },
+    {
+      "id": "C1",
+      "path": "single/c_exact_callable_carriers.ring",
+      "covers": [
+        "named function value",
+        "lambda",
+        "closure factory",
+        "two same-signature struct function fields",
+        "tuple function payloads",
+        "enum function payload",
+        "no global same-signature ownership widening"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "C_EXACT_CALLABLE_OK:105\n"
+      }
+    },
+    {
+      "id": "D1",
+      "path": "single/d_handled_effect_hof.ring",
+      "covers": [
+        "polymorphic HOF effect formal",
+        "effect substitution",
+        "two distinct HandledEffectRef values with one operation signature",
+        "single-boundary evidence-order swaps change the native result"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_HANDLED_HOF_OK:1235\n"
+      }
+    },
+    {
+      "id": "D2",
+      "path": "single/d_system_effect_hof.ring",
+      "covers": [
+        "closed pure HOF",
+        "closed console HOF",
+        "pure and console same-signature callable identity",
+        "system extern function value"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "console:4\n9\nD_SYSTEM_HOF_OK:4/6\n"
+      }
+    },
+    {
+      "id": "D3",
+      "path": "single/d_generalized_effect_tail.ring",
+      "covers": [
+        "one open HOF formal instantiates a pure callback",
+        "the same formal independently instantiates a custom-effect callback",
+        "pure and effectful owner outputs are distinguishable"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_GENERALIZED_TAIL_OK:6/12\n"
+      }
+    },
+    {
+      "id": "D4",
+      "path": "single/d_custom_effect_extern.ring",
+      "covers": ["raw extern ABI cannot carry custom handled evidence"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0407",
+        "diagnostic_contains": "extern"
+      }
+    },
+    {
+      "id": "D5",
+      "path": "single/d_effect_default_operation.ring",
+      "covers": ["Ring 0.1 effect operations are signature-only"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0103",
+        "diagnostic_contains": "Effect operation bodies are not supported in Ring 0.1"
+      }
+    },
+    {
+      "id": "E1",
+      "path": "single/e_user_extern_same_spelling.ring",
+      "covers": [
+        "user externs may reuse all ten compiler bridge leaf spellings",
+        "typed source identity prevents manifest capture"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "E_USER_EXTERN_SPELLING_OK\n"
+      }
+    },
+    {
+      "id": "E2",
+      "path": "single/e_extern_manifest_inventory_runtime.ring",
+      "covers": [
+        "slot alloc",
+        "slot dealloc",
+        "slot read",
+        "slot take",
+        "slot write",
+        "slot replace",
+        "slot swap",
+        "slot move",
+        "slot drop",
+        "list sort",
+        "10/10 unique compiler extern inventory"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "E_EXTERN_MANIFEST_10_OF_10_OK\n"
+      }
+    },
+    {
+      "id": "F1",
+      "path": "single/f_single_project_parity.ring",
+      "parity_group": "F-single-project",
+      "covers": ["single-file ownership entry"],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "F_PARITY:82\n"
+      }
+    },
+    {
+      "id": "F2",
+      "path": "modules/f_single_project_parity/main.ring",
+      "support_paths": ["modules/f_single_project_parity/model.ring"],
+      "parity_group": "F-single-project",
+      "covers": ["project ownership entry", "literal output parity with F1"],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "F_PARITY:82\n",
+        "same_stdout_as": "F1"
+      }
+    }
+  ],
+  "internal_negative_canaries": [
+    {
+      "id": "D6",
+      "requirement": "raw/unowned effect tail fails closed at the Core boundary",
+      "source_fixture": null,
+      "reason": "A legal Ring source tail is generalized under an ExecutableRef; ordinary source cannot construct the invalid raw Core state without becoming a source-string oracle.",
+      "input_fixture_id": "D3",
+      "mutation": "core-unowned-effect-tail",
+      "expected_panic_exact": "ring panic: Core assembly: unowned raw effect tail crossed Core\n"
+    }
+  ]
+}

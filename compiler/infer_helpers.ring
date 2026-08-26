@@ -10,15 +10,22 @@ use hir::{HExpr, HStmt, TraitDispatch, DictRef, ValueBindingKind,
     make_bound_method_call_ref,
     trait_dict_name, trait_bound_param_name,
     hexpr_type, compare_by_first}
+use hir_exact::{
+    dict_ref_is_simple_physical, dict_ref_is_static_physical,
+    dict_ref_simple_name, dict_ref_static_name,
+    dict_ref_wrapped_name, dict_ref_wrapped_physical_inner
+}
 use diagnostics::{DiagnosticContext, DiagnosticNote}
 use codes::{E0201, E0205, E0208, E0303, E0307, E0308, E0504, E0705}
 use union_find::{UnionFind, uf_find, uf_lookup}
 use env::{TypeEnv, TypeScheme, ImplEntry, ImplMethodSchemeCore,
     apply_subst, has_impl, lookup_variant, find_impl_by_provider}
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
+    fn_bound_dict_ref,
     type_error, unify_at, resolve_relative_qualifier,
     resolve_dict_ref_for_type, resolve_dicts_from_scheme, variant_ctor_origin,
-    value_binding_kind, value_symbol_ref, current_identity_file_key}
+    value_binding_kind, value_symbol_ref, current_identity_file_key,
+    current_executable_owner, current_dictionary_evidence_owner}
 use ir_identity::{IntrinsicRef, ImplMethodRef,
     impl_method_ref_owner, impl_owner_ref_trait, impl_owner_ref_provider,
     make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
@@ -253,33 +260,6 @@ pub fn check_assign_target_mutable(ctx: InferCtx, target: Expr) {
                 }
             }
         },
-        Expr::IndexExpr { receiver, span, .. } => {
-            // Index assignment (e.g. list[i] = val) — check receiver mutability
-            let root = find_root_expr(receiver)
-            match root {
-                Expr::Ident { name, span: rspan, .. } => {
-                    let scheme = ctx.env.lookup(name)
-                    match scheme {
-                        some(s) => match s.def_id {
-                            some(did) => {
-                                if !ctx.env.scope.mutable_vars.contains(did) {
-                                    let _ = type_error(ctx.sink, E0205,
-                                        "Cannot assign to index of immutable variable '${name}'. Use 'let mut' for mutable bindings.",
-                                        span, DiagnosticContext::OtherContext { detail: some("'${name}' is not mutable") })
-                                }
-                            },
-                            none => {}
-                        },
-                        none => {}
-                    }
-                },
-                _ => {
-                    let _ = type_error(ctx.sink, E0205,
-                        "Cannot assign to index of a temporary value. Store the value in a 'let mut' variable first.",
-                        span, DiagnosticContext::OtherContext { detail: some("assignment to temporary value") })
-                }
-            }
-        },
         _ => {}
     }
 }
@@ -287,7 +267,6 @@ pub fn check_assign_target_mutable(ctx: InferCtx, target: Expr) {
 pub fn find_root_expr(e: Expr) -> Expr {
     match e {
         Expr::FieldAccess { receiver, .. } => find_root_expr(receiver),
-        Expr::IndexExpr { receiver, .. } => find_root_expr(receiver),
         _ => e
     }
 }
@@ -310,7 +289,6 @@ pub fn get_assign_target_root_def_id(ctx: InferCtx, target: Expr) -> Int? {
 pub fn get_hexpr_root_type(target: HExpr) -> Type {
     match target {
         HExpr::FieldAccess { receiver, .. } => get_hexpr_root_type(receiver),
-        HExpr::IndexExpr { receiver, .. } => get_hexpr_root_type(receiver),
         _ => hexpr_type(target)
     }
 }
@@ -571,13 +549,17 @@ pub fn resolve_eq_dispatch(ctx: InferCtx, resolved: Type, subst: UnionFind,
 }
 
 fn dispatch_from_dict_ref(dict_ref: DictRef) -> TraitDispatch {
-    match dict_ref {
-        DictRef::Static(dict) =>
-            TraitDispatch::Direct { dict: dict, extra_dicts: [] },
-        DictRef::Wrapped { dict, inner_dicts, .. } =>
-            TraitDispatch::Direct { dict: dict, extra_dicts: inner_dicts },
-        DictRef::Simple(param) =>
-            TraitDispatch::Dict { param: param }
+    if dict_ref_is_static_physical(dict_ref) {
+        TraitDispatch::Direct {
+            dict: dict_ref_static_name(dict_ref), extra_dicts: []
+        }
+    } else if dict_ref_is_simple_physical(dict_ref) {
+        TraitDispatch::Dict { param: dict_ref_simple_name(dict_ref) }
+    } else {
+        TraitDispatch::Direct {
+            dict: dict_ref_wrapped_name(dict_ref),
+            extra_dicts: dict_ref_wrapped_physical_inner(dict_ref)
+        }
     }
 }
 
@@ -618,6 +600,7 @@ pub fn resolve_trait_dispatch(ctx: InferCtx, resolved: Type, trait_name: Str, er
         },
         Type::StructType { .. } => {
             match resolve_dict_ref_for_type(
+                current_dictionary_evidence_owner(ctx),
                 ctx.env, ctx.current_fn_bounds, resolved, subst, trait_name
             ) {
                 some(dict_ref) => {
@@ -632,6 +615,7 @@ pub fn resolve_trait_dispatch(ctx: InferCtx, resolved: Type, trait_name: Str, er
         },
         Type::EnumType { .. } => {
             match resolve_dict_ref_for_type(
+                current_dictionary_evidence_owner(ctx),
                 ctx.env, ctx.current_fn_bounds, resolved, subst, trait_name
             ) {
                 some(dict_ref) => {
@@ -817,6 +801,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                                 }
                             } else {
                                 let dicts = resolve_dicts_from_scheme(
+                                    current_dictionary_evidence_owner(ctx),
                                     ctx.sink, ctx.env, ctx.current_fn_bounds,
                                     as_, ty, s, span
                                 )
@@ -840,6 +825,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                             let as_ = m.live_scheme
                             let valid = if as_.bounds.len() > 0 {
                                 let validated = resolve_dicts_from_scheme(
+                                    current_dictionary_evidence_owner(ctx),
                                     ctx.sink, ctx.env, ctx.current_fn_bounds,
                                     as_, ty, s, span
                                 )
@@ -1054,15 +1040,15 @@ pub fn exact_operator_plan(
             }
             some(h_operator_method(make_bound_method_call_ref(
                 method.method_ref,
-                DictRef::Simple(trait_bound_param_name(
-                    bound.type_param_name, trait_name)),
+                fn_bound_dict_ref(
+                    current_dictionary_evidence_owner(ctx), bound),
                 method.ty, false)))
         },
         _ => {
             let type_name = match type_to_builtin_name(exact_type) {
                 some(value) => value,
                 none => match exact_type {
-                    Type::StructType { name, .. } |
+                    Type::StructType { name, .. } => name,
                     Type::EnumType { name, .. } => name,
                     _ => return none
                 }

@@ -7,7 +7,11 @@ use types::{Type, EffectRow, types_equal, effects_equal}
 use env::{TypeEnv}
 use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
-    HTypeParam, TraitBound, HDefaultSpecializationPlan,
+    HTypeParam, TraitBound, HDefaultSpecializationPlan, HDelegateTypedPlan,
+    DictRef, MethodCallRef, HOperatorPlan, FieldAction,
+    method_call_ref_is_bound, method_call_ref_bound_evidence,
+    h_operator_is_tuple, h_operator_elements, h_operator_method_ref,
+    h_type_param_name,
     DerivedImpl, DerivedMethod, DerivedField, TypeKind,
     h_default_specialization_generated_method,
     h_default_specialization_generated_executable,
@@ -16,10 +20,19 @@ use hir::{
     h_default_specialization_binders,
     h_default_specialization_result_type,
     h_default_specialization_effects,
+    h_default_specialization_forward_call, h_exact_call_evidence,
+    h_exact_call_method,
+    h_delegate_methods, h_delegate_method_evidence,
+    h_delegate_dict_evidence,
     derived_semantic_kind_tag,
     module_item_identity, hexpr_type, hexpr_effects
 }
+use hir_exact::{
+    dict_ref_exact, dict_ref_physical_same,
+    dict_ref_is_wrapped_physical, dict_ref_wrapped_physical_inner
+}
 use ir_identity::{
+    CoreTypeFactRef, core_type_fact_same, core_type_fact_module_key,
     SymbolRef, ModuleBodyRef, SlotRef, OriginRef, ImplMethodRef,
     make_module_body_ref, make_source_slot_ref, slot_domain_lexical,
     make_synthetic_slot_ref, make_path_ref, path_role_parameter,
@@ -33,11 +46,11 @@ use ir_identity::{
     slot_ref_source_def_id
 }
 use ir_inventory::{
-    ExecutableRef, ExecutableKind, EffectOperationRef,
+    ExecutableRef, ExecutableKind, EffectOperationRef, dict_ref_same,
     make_named_executable_ref,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_anonymous_path, executable_ref_same,
-    executable_ref_origin_module_key,
+    executable_ref_origin_module_key, executable_ref_is_prelude,
     executable_kind_fn, executable_kind_impl_method,
     executable_kind_test, executable_kind_const_getter,
     executable_kind_extern_fn, executable_kind_trait_default,
@@ -60,15 +73,13 @@ use core_type_source::{
     core_type_source_type, core_type_source_fact,
     core_handled_evidence_source_aggregate_fact
 }
-use core_expr::{
-    CoreTypeFactRef, core_type_fact_same, core_type_fact_module_key,
-    make_core_effect_set
-}
+use effect_contract::{make_core_effect_set}
 use core_from_hir::{
-    CoreAssemblyRecorder, FrozenCoreAssemblyFacts,
-    core_assembly_recorder_module_key,
-    core_assembly_recorder_module_order,
-    freeze_closed_core_assembly_facts,
+    FrozenCoreAssemblyFacts,
+    produce_closed_core_assembly_facts,
+    frozen_core_assembly_program,
+    frozen_core_assembly_type_sources,
+    frozen_core_assembly_handled_sources,
     make_core_effect_set_fact_from_row
 }
 use legacy_projection::{
@@ -80,6 +91,7 @@ use legacy_projection::{
     LegacyExecutableShell, LegacyContainerRef,
     LegacyExecutablePhysicalIdentity,
     LegacyTypeParameterProjection, LegacyTraitBoundProjection,
+    LegacyDictionaryProjection,
     make_legacy_effect_fact_projection,
     make_legacy_binder_fact_projection,
     make_legacy_callable_fact_projection,
@@ -93,7 +105,11 @@ use legacy_projection::{
     make_legacy_executable_physical_identity,
     make_legacy_module_container, make_legacy_executable_container,
     make_legacy_type_parameter_projection,
+    make_legacy_dictionary_projection,
+    legacy_dictionary_projection_exact,
+    legacy_dictionary_projection_physical,
     make_legacy_trait_bound_projection,
+    make_legacy_impl_fact_projection,
     make_legacy_internal_type_fact_projection,
     legacy_internal_handled_evidence_opaque,
     legacy_effect_fact_projection_row,
@@ -142,6 +158,7 @@ fn exact_type_fact(
 
 struct LegacyFactBuilder {
     module_key: Str,
+    physical_module_prefix: Str,
     owns_prelude: Bool,
     module_body: ModuleBodyRef,
     type_sources: List<CoreTypeSourceFact>,
@@ -151,6 +168,7 @@ struct LegacyFactBuilder {
     prelude_callables: List<LegacyPreludeCallableFactProjection>,
     builtin_callables: List<LegacyBuiltinCallableFactProjection>,
     impls: List<LegacyImplFactProjection>,
+    dictionaries: List<LegacyDictionaryProjection>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: List<LegacyExecutableShell>
 }
@@ -168,14 +186,15 @@ fn add_physical_identity(
     source_name: Str?
 ) {
     let identity = if executable_ref_is_named(reference) {
-        if executable_ref_origin_module_key(reference) == "$prelude" {
-            module_item_identity(
-                builder.module_key,
-                match source_name {
-                    some(value) => value,
-                    none => panic(
-                        "Core/legacy freeze: prelude physical name is absent")
-                })
+        if executable_ref_is_prelude(reference) {
+            let name = match source_name {
+                some(value) => value,
+                none => panic(
+                    "Core/legacy freeze: prelude physical name is absent")
+            }
+            if builder.physical_module_prefix == "" { name }
+            else { module_item_identity(
+                builder.physical_module_prefix, name) }
         } else {
             symbol_ref_canonical_payload(
                 executable_ref_named_symbol(reference))
@@ -192,9 +211,16 @@ fn add_physical_identity(
 
 fn add_effect_row(mut builder: LegacyFactBuilder, row: EffectRow) {
     for existing in builder.effects {
-        if effects_equal(
-                legacy_effect_fact_projection_row(existing),
-                row) {
+        let existing_row = legacy_effect_fact_projection_row(existing)
+        let tails_same = match (existing_row.tail, row.tail) {
+            (some(a), some(b)) => a == b,
+            (none, none) => true,
+            _ => false
+        }
+        if tails_same && existing_row.effects.len() == row.effects.len() &&
+           existing_row.effects.all(fn(left) {
+               row.effects.any(fn(right) { effects_equal(left, right) })
+           }) {
             return
         }
     }
@@ -245,7 +271,8 @@ fn callable_type_parameters(
     let mut result: List<LegacyTypeParameterProjection> = []
     for value in values {
         result.push(make_legacy_type_parameter_projection(
-            value.source.name, value.type_var_id, value.bound_refs))
+            h_type_param_name(value),
+            value.type_var_id, value.bound_refs))
     }
     let _ = bounds
     result
@@ -291,7 +318,7 @@ fn add_callable_fact(
         source_parameter_fact(builder, param)
     })
     let origin = executable_origin(reference)
-    if executable_ref_origin_module_key(reference) == "$prelude" {
+    if executable_ref_is_prelude(reference) {
         if !builder.owns_prelude {
             panic("Core/legacy freeze: prelude callable escaped owner module")
         }
@@ -356,20 +383,106 @@ fn add_match_binders(mut builder: LegacyFactBuilder, arm: HMatchArm) {
     }
 }
 
+fn add_dictionary_fact(mut builder: LegacyFactBuilder, value: DictRef) {
+    for existing in builder.dictionaries {
+        if dict_ref_same(
+                legacy_dictionary_projection_exact(existing),
+                dict_ref_exact(value)) {
+            if !dict_ref_physical_same(
+                    legacy_dictionary_projection_physical(existing), value) {
+                panic("Core/legacy freeze: dictionary physical projection drifted")
+            }
+            return
+        }
+    }
+    if dict_ref_is_wrapped_physical(value) {
+        for inner in dict_ref_wrapped_physical_inner(value) {
+            add_dictionary_fact(builder, inner)
+        }
+    }
+    builder.dictionaries.push(make_legacy_dictionary_projection(value))
+}
+
+fn add_method_dictionary(
+    mut builder: LegacyFactBuilder, value: MethodCallRef
+) {
+    if method_call_ref_is_bound(value) {
+        add_dictionary_fact(builder, method_call_ref_bound_evidence(value))
+    }
+}
+
+fn add_operator_dictionaries(
+    mut builder: LegacyFactBuilder, value: HOperatorPlan
+) {
+    if h_operator_is_tuple(value) {
+        for child in h_operator_elements(value) {
+            add_operator_dictionaries(builder, child)
+        }
+    } else {
+        add_method_dictionary(builder, h_operator_method_ref(value))
+    }
+}
+
+fn add_field_action_dictionaries(
+    mut builder: LegacyFactBuilder, value: FieldAction
+) {
+    match value {
+        FieldAction::Call { method_ref, base_dict, extra_dicts } => {
+            add_method_dictionary(builder, method_ref)
+            add_dictionary_fact(builder, base_dict)
+            for item in extra_dicts { add_dictionary_fact(builder, item) }
+        },
+        FieldAction::Tuple { element_actions, .. } => {
+            for child in element_actions {
+                add_field_action_dictionaries(builder, child)
+            }
+        },
+        FieldAction::Identity | FieldAction::FloatIdentity |
+        FieldAction::BoolIdentity | FieldAction::FnLiteral => {}
+    }
+}
+
+fn add_delegate_dictionaries(
+    mut builder: LegacyFactBuilder, value: HDelegateTypedPlan
+) {
+    for item in h_delegate_dict_evidence(value) {
+        add_dictionary_fact(builder, item)
+    }
+    for method in h_delegate_methods(value) {
+        for item in h_delegate_method_evidence(method) {
+            add_dictionary_fact(builder, item)
+        }
+    }
+}
+
 fn scan_expr(
     mut builder: LegacyFactBuilder, owner: ExecutableRef, value: HExpr
 ) {
     add_effect_row(builder, hexpr_effects(value))
     match value {
-        HExpr::Call { callee, args, .. } => {
+        HExpr::Call {
+            callee, args, resolved_dicts, method_ref, ..
+        } => {
             scan_expr(builder, owner, callee)
             for arg in args { scan_expr(builder, owner, arg) }
+            for item in resolved_dicts { add_dictionary_fact(builder, item) }
+            match method_ref {
+                some(method) => add_method_dictionary(builder, method), none => {}
+            }
         },
-        HExpr::BinOp { left, right, .. } => {
+        HExpr::BinOp { left, right, eq_plan, ord_plan, .. } => {
             scan_expr(builder, owner, left); scan_expr(builder, owner, right)
+            match eq_plan {
+                some(plan) => add_operator_dictionaries(builder, plan), none => {}
+            }
+            match ord_plan {
+                some(plan) => add_operator_dictionaries(builder, plan), none => {}
+            }
         },
-        HExpr::UnaryOp { operand, .. } |
-        HExpr::FieldAccess { receiver: operand, .. } |
+        HExpr::UnaryOp { operand, .. } =>
+            scan_expr(builder, owner, operand),
+        HExpr::FieldAccess { receiver: operand, .. } =>
+            scan_expr(builder, owner, operand),
         HExpr::UnsafeBlock { body: operand, .. } =>
             scan_expr(builder, owner, operand),
         HExpr::StructLit { fields, .. } => {
@@ -392,7 +505,16 @@ fn scan_expr(
                 some(expr) => scan_expr(builder, owner, expr), none => {}
             }
         },
-        HExpr::MatchExpr { scrutinee, arms, .. } |
+        HExpr::MatchExpr { scrutinee, arms, .. } => {
+            scan_expr(builder, owner, scrutinee)
+            for arm in arms {
+                add_match_binders(builder, arm)
+                match arm.guard {
+                    some(expr) => scan_expr(builder, owner, expr), none => {}
+                }
+                scan_expr(builder, owner, arm.body)
+            }
+        },
         HExpr::TryCatch { body: scrutinee, arms, .. } => {
             scan_expr(builder, owner, scrutinee)
             for arm in arms {
@@ -437,9 +559,14 @@ fn scan_expr(
         HExpr::ReturnExpr { value, .. } => match value {
             some(expr) => scan_expr(builder, owner, expr), none => {}
         },
+        HExpr::Ident { dict_closure_dicts, .. } => match dict_closure_dicts {
+            some(values) => {
+                for item in values { add_dictionary_fact(builder, item) }
+            },
+            none => {}
+        },
         HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
-        HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
-        HExpr::Ident { .. } => {},
+        HExpr::StrLit { .. } | HExpr::BoolLit { .. } => {},
         _ => panic("Core/legacy freeze: surface/resource expr crossed PreCore")
     }
 }
@@ -512,6 +639,13 @@ fn add_default_specialization_facts(
             h_default_specialization_result_type(value),
             h_default_specialization_effects(value))
         methods.push(h_default_specialization_generated_method(value))
+        let exact = h_default_specialization_forward_call(value)
+        for item in h_exact_call_evidence(exact) {
+            add_dictionary_fact(builder, item)
+        }
+        match h_exact_call_method(exact) {
+            some(method) => add_method_dictionary(builder, method), none => {}
+        }
     }
 }
 
@@ -519,13 +653,14 @@ fn add_derived_field_binders(
     mut builder: LegacyFactBuilder, fields: List<DerivedField>
 ) {
     for field in fields {
+        add_field_action_dictionaries(builder, field.action)
         match field.ord_result_binder {
             some(entry) => {
                 let slot = binder_entry_slot(entry)
                 if !slot_ref_is_source(slot) {
                     panic("Core/legacy freeze: Ord result binder is not source")
                 }
-                add_binder_fact(
+                let _ = add_binder_fact(
                     builder, slot, "__derived_ord",
                     slot_ref_source_def_id(slot), Type::IntType, false)
             },
@@ -666,10 +801,15 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
             },
             HDecl::Impl {
                 target_ty, owner_ref, trait_ref, type_params,
-                methods, default_specializations, assoc_types, ..
+                delegate_plan, methods, default_specializations,
+                assoc_types, ..
             } => {
+                match delegate_plan {
+                    some(plan) => add_delegate_dictionaries(builder, plan),
+                    none => {}
+                }
                 scan_decls(builder, methods)
-                let method_refs = impl_method_refs(methods)
+                let mut method_refs = impl_method_refs(methods)
                 add_default_specialization_facts(
                     builder, default_specializations, method_refs)
                 method_refs.sort_by(fn(left, right) {
@@ -747,7 +887,8 @@ fn freeze_legacy_semantic_facts(
     module_key: Str, module_order: Int, closed: HProgram,
     env: TypeEnv, type_sources: List<CoreTypeSourceFact>,
     handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
-    prelude_physical_owner_module_key: Str
+    prelude_physical_owner_module_key: Str,
+    physical_module_prefix: Str
 ) -> LegacyProjectionFacts {
     if (module_order == 0) !=
            (module_key == prelude_physical_owner_module_key) {
@@ -756,11 +897,12 @@ fn freeze_legacy_semantic_facts(
     let module_body = make_module_body_ref(module_key, "module-body")
     let builder = LegacyFactBuilder {
         module_key: module_key,
+        physical_module_prefix: physical_module_prefix,
         owns_prelude: module_key == prelude_physical_owner_module_key,
         module_body: module_body,
         type_sources: type_sources, effects: [], binders: [],
         callables: [], prelude_callables: [], builtin_callables: [],
-        impls: [], physical_identities: [], shells: []
+        impls: [], dictionaries: [], physical_identities: [], shells: []
     }
     scan_decls(builder, closed.decls)
     add_derived_impl_facts(builder, closed.derived_impls)
@@ -775,23 +917,27 @@ fn freeze_legacy_semantic_facts(
         type_sources.len() + internal_types.len(), type_sources,
         internal_types, builder.effects, builder.binders, builder.callables,
         builder.prelude_callables, builder.builtin_callables, builder.impls,
+        builder.dictionaries,
         builder.physical_identities,
         make_legacy_executable_shell_map(builder.shells))
 }
 
 pub fn freeze_core_and_legacy_facts(
-    recorder: CoreAssemblyRecorder, program: HProgram, env: TypeEnv,
-    type_sources: List<CoreTypeSourceFact>,
-    handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
-    prelude_physical_owner_module_key: Str
+    module_key: Str, module_order: Int,
+    program: HProgram, env: TypeEnv,
+    prelude_physical_owner_module_key: Str,
+    physical_module_prefix: Str
 ) -> FrozenCoreAndLegacyFacts {
-    let module_key = core_assembly_recorder_module_key(recorder)
-    let module_order = core_assembly_recorder_module_order(recorder)
     let closed = close_hir_surface(program, env)
+    let core = produce_closed_core_assembly_facts(
+        module_key, module_order, closed, env)
+    let sealed_program = frozen_core_assembly_program(core)
+    let type_sources = frozen_core_assembly_type_sources(core)
+    let handled_evidence_types =
+        frozen_core_assembly_handled_sources(core)
     let legacy = freeze_legacy_semantic_facts(
-        module_key, module_order, closed, env, type_sources,
-        handled_evidence_types, prelude_physical_owner_module_key)
-    let core = freeze_closed_core_assembly_facts(
-        recorder, closed, env, type_sources, handled_evidence_types)
+        module_key, module_order, sealed_program, env, type_sources,
+        handled_evidence_types, prelude_physical_owner_module_key,
+        physical_module_prefix)
     FrozenCoreAndLegacyFacts { core: core, legacy: legacy }
 }

@@ -3,6 +3,293 @@
 // Identity belongs to ir_identity.ring.  Staged IR nodes, resource planning,
 // certificates, and executable-tree storage are deliberately absent here.
 
+use ir_identity::{CoreTypeRef, core_type_ref_same}
+
+// ============================================================
+// Core-frozen resource contracts shared by Core and Flow
+// ============================================================
+
+const FLOW_SEED_SCALAR: Int = 0
+const FLOW_SEED_PTR: Int = 1
+const FLOW_SEED_UNIQUE: Int = 2
+const FLOW_SEED_SHAREABLE: Int = 3
+const FLOW_SEED_EXTERN: Int = 4
+const FLOW_SEED_PARAMETRIC: Int = 5
+
+pub struct FlowTypeSemanticSeed { tag: Int }
+fn flow_type_semantic_seed_from_tag(tag: Int) -> FlowTypeSemanticSeed {
+    if tag < FLOW_SEED_SCALAR || tag > FLOW_SEED_PARAMETRIC {
+        panic("resource model: invalid type semantic seed")
+    }
+    FlowTypeSemanticSeed { tag: tag }
+}
+pub fn flow_type_seed_scalar() -> FlowTypeSemanticSeed {
+    flow_type_semantic_seed_from_tag(FLOW_SEED_SCALAR)
+}
+pub fn flow_type_seed_ptr() -> FlowTypeSemanticSeed {
+    flow_type_semantic_seed_from_tag(FLOW_SEED_PTR)
+}
+pub fn flow_type_seed_unique() -> FlowTypeSemanticSeed {
+    flow_type_semantic_seed_from_tag(FLOW_SEED_UNIQUE)
+}
+pub fn flow_type_seed_shareable() -> FlowTypeSemanticSeed {
+    flow_type_semantic_seed_from_tag(FLOW_SEED_SHAREABLE)
+}
+pub fn flow_type_seed_extern() -> FlowTypeSemanticSeed {
+    flow_type_semantic_seed_from_tag(FLOW_SEED_EXTERN)
+}
+pub fn flow_type_seed_parametric() -> FlowTypeSemanticSeed {
+    flow_type_semantic_seed_from_tag(FLOW_SEED_PARAMETRIC)
+}
+pub fn flow_type_semantic_seed_tag(value: FlowTypeSemanticSeed) -> Int {
+    flow_type_semantic_seed_from_tag(value.tag).tag
+}
+
+const FLOW_ROLE_READ: Int = 0
+const FLOW_ROLE_MUTATE: Int = 1
+const FLOW_ROLE_CONSUME: Int = 2
+const FLOW_ROLE_FORCE: Int = 3
+
+pub struct FlowSemanticRole { tag: Int }
+fn flow_semantic_role_from_tag(tag: Int) -> FlowSemanticRole {
+    if tag < FLOW_ROLE_READ || tag > FLOW_ROLE_FORCE {
+        panic("resource model: invalid semantic role")
+    }
+    FlowSemanticRole { tag: tag }
+}
+pub fn flow_semantic_role_read() -> FlowSemanticRole {
+    flow_semantic_role_from_tag(FLOW_ROLE_READ)
+}
+pub fn flow_semantic_role_mutate() -> FlowSemanticRole {
+    flow_semantic_role_from_tag(FLOW_ROLE_MUTATE)
+}
+pub fn flow_semantic_role_consume() -> FlowSemanticRole {
+    flow_semantic_role_from_tag(FLOW_ROLE_CONSUME)
+}
+pub fn flow_semantic_role_force() -> FlowSemanticRole {
+    flow_semantic_role_from_tag(FLOW_ROLE_FORCE)
+}
+pub fn flow_semantic_role_tag(value: FlowSemanticRole) -> Int {
+    flow_semantic_role_from_tag(value.tag).tag
+}
+pub fn copy_semantic_roles(
+    values: List<FlowSemanticRole>
+) -> List<FlowSemanticRole> {
+    values.map(fn(value) { value })
+}
+
+enum FlowValueOriginContractValue {
+    FreshValueOrigin,
+    AliasesValueOrigin(List<Int>)
+}
+pub struct FlowValueOriginContract { value: FlowValueOriginContractValue }
+pub fn make_fresh_flow_value_origin() -> FlowValueOriginContract {
+    FlowValueOriginContract {
+        value: FlowValueOriginContractValue::FreshValueOrigin
+    }
+}
+pub fn make_aliasing_flow_value_origin(
+    ordinals: List<Int>
+) -> FlowValueOriginContract {
+    if ordinals.len() == 0 {
+        panic("resource model: alias origin has no source ordinal")
+    }
+    let mut copied: List<Int> = []
+    let mut left_index = 0
+    while left_index < ordinals.len() {
+        let left = ordinals.get(left_index).unwrap()
+        if left < 0 { panic("resource model: negative alias source ordinal") }
+        let mut right_index = left_index + 1
+        while right_index < ordinals.len() {
+            if left == ordinals.get(right_index).unwrap() {
+                panic("resource model: alias origin repeats a source ordinal")
+            }
+            right_index = right_index + 1
+        }
+        copied.push(left)
+        left_index = left_index + 1
+    }
+    FlowValueOriginContract {
+        value: FlowValueOriginContractValue::AliasesValueOrigin(copied)
+    }
+}
+pub fn flow_value_origin_is_fresh(value: FlowValueOriginContract) -> Bool {
+    match value.value {
+        FlowValueOriginContractValue::FreshValueOrigin => true,
+        FlowValueOriginContractValue::AliasesValueOrigin(_) => false
+    }
+}
+pub fn flow_value_origin_alias_ordinals(
+    value: FlowValueOriginContract
+) -> List<Int> {
+    match value.value {
+        FlowValueOriginContractValue::AliasesValueOrigin(ordinals) =>
+            ordinals.map(fn(ordinal) { ordinal }),
+        FlowValueOriginContractValue::FreshValueOrigin =>
+            panic("resource model: fresh value has no alias ordinals")
+    }
+}
+pub fn copy_value_origin(
+    value: FlowValueOriginContract
+) -> FlowValueOriginContract {
+    match value.value {
+        FlowValueOriginContractValue::FreshValueOrigin =>
+            make_fresh_flow_value_origin(),
+        FlowValueOriginContractValue::AliasesValueOrigin(ordinals) =>
+            make_aliasing_flow_value_origin(ordinals)
+    }
+}
+pub fn value_origin_same(
+    left: FlowValueOriginContract, right: FlowValueOriginContract
+) -> Bool {
+    match (left.value, right.value) {
+        (FlowValueOriginContractValue::FreshValueOrigin,
+         FlowValueOriginContractValue::FreshValueOrigin) => true,
+        (FlowValueOriginContractValue::AliasesValueOrigin(a),
+         FlowValueOriginContractValue::AliasesValueOrigin(b)) => {
+            if a.len() != b.len() { return false }
+            let mut index = 0
+            while index < a.len() {
+                if a.get(index).unwrap() != b.get(index).unwrap() {
+                    return false
+                }
+                index = index + 1
+            }
+            true
+        },
+        _ => false
+    }
+}
+pub fn validate_value_origin_arity(
+    value: FlowValueOriginContract, source_count: Int
+) {
+    if !flow_value_origin_is_fresh(value) {
+        for ordinal in flow_value_origin_alias_ordinals(value) {
+            if ordinal < 0 || ordinal >= source_count {
+                panic("resource model: alias source ordinal exceeds inputs")
+            }
+        }
+    }
+}
+
+fn copy_contract_type_refs(values: List<CoreTypeRef>) -> List<CoreTypeRef> {
+    values.map(fn(value) { value })
+}
+pub struct FlowCallContract {
+    module_key: Str?,
+    parameter_types: List<CoreTypeRef>,
+    parameter_roles: List<FlowSemanticRole>,
+    result_type: CoreTypeRef,
+    result_role: FlowSemanticRole,
+    result_origin: FlowValueOriginContract
+}
+pub fn make_flow_call_contract(
+    parameter_types: List<CoreTypeRef>,
+    parameter_roles: List<FlowSemanticRole>,
+    result_type: CoreTypeRef, result_role: FlowSemanticRole,
+    result_origin: FlowValueOriginContract
+) -> FlowCallContract {
+    if parameter_types.len() != parameter_roles.len() {
+        panic("resource model: call type/role arity differs")
+    }
+    for role in parameter_roles { let _ = flow_semantic_role_tag(role) }
+    let _ = flow_semantic_role_tag(result_role)
+    validate_value_origin_arity(result_origin, parameter_types.len())
+    FlowCallContract {
+        module_key: none,
+        parameter_types: copy_contract_type_refs(parameter_types),
+        parameter_roles: copy_semantic_roles(parameter_roles),
+        result_type: result_type, result_role: result_role,
+        result_origin: copy_value_origin(result_origin)
+    }
+}
+pub fn make_module_flow_call_contract(
+    module_key: Str, parameter_types: List<CoreTypeRef>,
+    parameter_roles: List<FlowSemanticRole>,
+    result_type: CoreTypeRef, result_role: FlowSemanticRole,
+    result_origin: FlowValueOriginContract
+) -> FlowCallContract {
+    if module_key == "" { panic("resource model: empty call type domain") }
+    let mut result = make_flow_call_contract(
+        parameter_types, parameter_roles, result_type, result_role,
+        result_origin)
+    result.module_key = some(module_key)
+    result
+}
+pub fn flow_call_contract_module_key(value: FlowCallContract) -> Str? {
+    value.module_key
+}
+pub fn flow_call_contract_parameter_types(
+    value: FlowCallContract
+) -> List<CoreTypeRef> { copy_contract_type_refs(value.parameter_types) }
+pub fn flow_call_contract_parameter_roles(
+    value: FlowCallContract
+) -> List<FlowSemanticRole> { copy_semantic_roles(value.parameter_roles) }
+pub fn flow_call_contract_result_role(
+    value: FlowCallContract
+) -> FlowSemanticRole { value.result_role }
+pub fn flow_call_contract_result_type(value: FlowCallContract) -> CoreTypeRef {
+    value.result_type
+}
+pub fn flow_call_contract_result_origin(
+    value: FlowCallContract
+) -> FlowValueOriginContract { copy_value_origin(value.result_origin) }
+pub fn flow_call_contract_same(
+    left: FlowCallContract, right: FlowCallContract
+) -> Bool {
+    if left.module_key != right.module_key ||
+       left.parameter_roles.len() != right.parameter_roles.len() ||
+       left.parameter_types.len() != right.parameter_types.len() ||
+       !core_type_ref_same(left.result_type, right.result_type) ||
+       flow_semantic_role_tag(left.result_role) !=
+            flow_semantic_role_tag(right.result_role) ||
+       !value_origin_same(left.result_origin, right.result_origin) {
+        return false
+    }
+    let mut index = 0
+    while index < left.parameter_roles.len() {
+        if !core_type_ref_same(
+                left.parameter_types.get(index).unwrap(),
+                right.parameter_types.get(index).unwrap()) ||
+           flow_semantic_role_tag(left.parameter_roles.get(index).unwrap()) !=
+                flow_semantic_role_tag(
+                    right.parameter_roles.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+pub fn copy_call_contract(value: FlowCallContract) -> FlowCallContract {
+    match value.module_key {
+        some(module_key) => make_module_flow_call_contract(
+            module_key, value.parameter_types, value.parameter_roles,
+            value.result_type, value.result_role, value.result_origin),
+        none => make_flow_call_contract(
+            value.parameter_types, value.parameter_roles,
+            value.result_type, value.result_role, value.result_origin)
+    }
+}
+
+const FLOW_OWN_STORAGE: Int = 0
+const FLOW_BORROW_STORAGE: Int = 1
+pub struct FlowStorageContract { tag: Int }
+fn flow_storage_contract_from_tag(tag: Int) -> FlowStorageContract {
+    if tag < FLOW_OWN_STORAGE || tag > FLOW_BORROW_STORAGE {
+        panic("resource model: invalid source storage contract")
+    }
+    FlowStorageContract { tag: tag }
+}
+pub fn flow_own_storage() -> FlowStorageContract {
+    flow_storage_contract_from_tag(FLOW_OWN_STORAGE)
+}
+pub fn flow_borrow_storage() -> FlowStorageContract {
+    flow_storage_contract_from_tag(FLOW_BORROW_STORAGE)
+}
+pub fn flow_storage_contract_tag(value: FlowStorageContract) -> Int {
+    flow_storage_contract_from_tag(value.tag).tag
+}
+
 // ============================================================
 // ParamMode chain and independent FORCE product
 // ============================================================
@@ -11,24 +298,19 @@ const PARAM_MODE_BOTTOM: Int = 0
 const PARAM_MODE_BORROW: Int = 1
 const PARAM_MODE_MUT_BORROW: Int = 2
 const PARAM_MODE_OWN: Int = 3
-const PARAM_MODE_CONFLICT: Int = 4
-const PARAM_MODE_COUNT: Int = 5
+const PARAM_MODE_COUNT: Int = 4
 
-// Bottom < Borrow < MutBorrow < Own < Conflict.  Conflict is an explicit
-// diagnostic top: joining ordinary modes (tags 0..3) never creates it.
+// Bottom < Borrow < MutBorrow < Own.
 const PARAM_MODE_JOIN_TAGS: List<Int> = [
-    0, 1, 2, 3, 4,
-    1, 1, 2, 3, 4,
-    2, 2, 2, 3, 4,
-    3, 3, 3, 3, 4,
-    4, 4, 4, 4, 4
+    0, 1, 2, 3,
+    1, 1, 2, 3,
+    2, 2, 2, 3,
+    3, 3, 3, 3
 ]
-const PARAM_MODE_RANKS: List<Int> = [0, 1, 2, 3, 4]
 
 pub struct ParamMode {
     tag: Int
 }
-
 pub fn param_mode_from_tag(tag: Int) -> ParamMode {
     if tag < PARAM_MODE_BOTTOM || tag >= PARAM_MODE_COUNT {
         panic("resource model: invalid ParamMode tag")
@@ -52,23 +334,15 @@ pub fn param_mode_own() -> ParamMode {
     param_mode_from_tag(PARAM_MODE_OWN)
 }
 
-pub fn param_mode_conflict() -> ParamMode {
-    param_mode_from_tag(PARAM_MODE_CONFLICT)
-}
-
 pub fn param_mode_tag(mode: ParamMode) -> Int {
     param_mode_from_tag(mode.tag).tag
-}
-
-pub fn param_mode_is_conflict(mode: ParamMode) -> Bool {
-    param_mode_tag(mode) == PARAM_MODE_CONFLICT
 }
 
 pub fn param_mode_same(left: ParamMode, right: ParamMode) -> Bool {
     param_mode_tag(left) == param_mode_tag(right)
 }
 
-pub fn param_mode_join(left: ParamMode, right: ParamMode) -> ParamMode {
+fn param_mode_join(left: ParamMode, right: ParamMode) -> ParamMode {
     let left_tag = param_mode_tag(left)
     let right_tag = param_mode_tag(right)
     let index = left_tag * PARAM_MODE_COUNT + right_tag
@@ -78,16 +352,7 @@ pub fn param_mode_join(left: ParamMode, right: ParamMode) -> ParamMode {
     }
 }
 
-pub fn param_mode_leq(left: ParamMode, right: ParamMode) -> Bool {
-    param_mode_same(param_mode_join(left, right), right)
-}
 
-pub fn param_mode_rank(mode: ParamMode) -> Int {
-    match PARAM_MODE_RANKS.get(param_mode_tag(mode)) {
-        some(rank) => rank,
-        none => panic("resource model: ParamMode rank table is incomplete")
-    }
-}
 
 pub struct TransferDemand {
     mode: ParamMode,
@@ -114,15 +379,7 @@ pub fn transfer_demand_join(
     left: TransferDemand, right: TransferDemand
 ) -> TransferDemand {
     let joined_mode = param_mode_join(left.mode, right.mode)
-    // Explicit Conflict is the diagnostic top for the complete product.  It
-    // absorbs FORCE; every non-conflict FORCE value still has exactly Own.
-    let joined_force = if param_mode_is_conflict(joined_mode) {
-        false
-    } else {
-        left.force || right.force
-    }
-    make_transfer_demand(
-        joined_mode, joined_force)
+    make_transfer_demand(joined_mode, left.force || right.force)
 }
 
 pub fn transfer_demand_same(
@@ -137,11 +394,6 @@ pub fn transfer_demand_leq(
     transfer_demand_same(transfer_demand_join(left, right), right)
 }
 
-pub fn transfer_demand_rank(value: TransferDemand) -> Int {
-    if param_mode_is_conflict(value.mode) { return 5 }
-    let force_rank = if value.force { 1 } else { 0 }
-    param_mode_rank(value.mode) + force_rank
-}
 
 // ============================================================
 // Independent logical and physical shape lattices
@@ -161,40 +413,8 @@ pub struct PhysicalRcShape {
     param_deps: List<Bool>
 }
 
-fn bool_list_join(left: List<Bool>, right: List<Bool>) -> List<Bool> {
-    if left.len() != right.len() {
-        panic("resource model: shape dependency arity mismatch")
-    }
-    let mut result: List<Bool> = []
-    let mut index = 0
-    while index < left.len() {
-        match (left.get(index), right.get(index)) {
-            (some(a), some(b)) => result.push(a || b),
-            _ => panic("resource model: shape dependency list is incomplete")
-        }
-        index = index + 1
-    }
-    result
-}
 
-fn bool_list_same(left: List<Bool>, right: List<Bool>) -> Bool {
-    if left.len() != right.len() { return false }
-    let mut index = 0
-    while index < left.len() {
-        match (left.get(index), right.get(index)) {
-            (some(a), some(b)) => if a != b { return false },
-            _ => return false
-        }
-        index = index + 1
-    }
-    true
-}
 
-fn bool_list_rank(values: List<Bool>) -> Int {
-    let mut rank = 0
-    for value in values { if value { rank = rank + 1 } }
-    rank
-}
 
 fn copy_bool_list(values: List<Bool>) -> List<Bool> {
     let mut result: List<Bool> = []
@@ -233,35 +453,9 @@ pub fn logical_ownership_shape_param_deps(
     copy_bool_list(value.param_deps)
 }
 
-pub fn logical_ownership_shape_join(
-    left: LogicalOwnershipShape, right: LogicalOwnershipShape
-) -> LogicalOwnershipShape {
-    make_logical_ownership_shape(
-        left.direct_drop || right.direct_drop,
-        left.may_unique || right.may_unique,
-        bool_list_join(left.param_deps, right.param_deps))
-}
 
-pub fn logical_ownership_shape_same(
-    left: LogicalOwnershipShape, right: LogicalOwnershipShape
-) -> Bool {
-    left.direct_drop == right.direct_drop &&
-        left.may_unique == right.may_unique &&
-        bool_list_same(left.param_deps, right.param_deps)
-}
 
-pub fn logical_ownership_shape_leq(
-    left: LogicalOwnershipShape, right: LogicalOwnershipShape
-) -> Bool {
-    logical_ownership_shape_same(
-        logical_ownership_shape_join(left, right), right)
-}
 
-pub fn logical_ownership_shape_rank(shape: LogicalOwnershipShape) -> Int {
-    let direct = if shape.direct_drop { 1 } else { 0 }
-    let unique = if shape.may_unique { 1 } else { 0 }
-    direct + unique + bool_list_rank(shape.param_deps)
-}
 
 pub fn make_physical_rc_shape(
     physical_rc: Bool, boxing: Bool, drop_glue: Bool,
@@ -298,40 +492,9 @@ pub fn physical_rc_shape_param_deps(value: PhysicalRcShape) -> List<Bool> {
     copy_bool_list(value.param_deps)
 }
 
-pub fn physical_rc_shape_join(
-    left: PhysicalRcShape, right: PhysicalRcShape
-) -> PhysicalRcShape {
-    make_physical_rc_shape(
-        left.physical_rc || right.physical_rc,
-        left.boxing || right.boxing,
-        left.drop_glue || right.drop_glue,
-        left.foreign_containment || right.foreign_containment,
-        bool_list_join(left.param_deps, right.param_deps))
-}
 
-pub fn physical_rc_shape_same(
-    left: PhysicalRcShape, right: PhysicalRcShape
-) -> Bool {
-    left.physical_rc == right.physical_rc &&
-        left.boxing == right.boxing &&
-        left.drop_glue == right.drop_glue &&
-        left.foreign_containment == right.foreign_containment &&
-        bool_list_same(left.param_deps, right.param_deps)
-}
 
-pub fn physical_rc_shape_leq(
-    left: PhysicalRcShape, right: PhysicalRcShape
-) -> Bool {
-    physical_rc_shape_same(physical_rc_shape_join(left, right), right)
-}
 
-pub fn physical_rc_shape_rank(shape: PhysicalRcShape) -> Int {
-    let rc = if shape.physical_rc { 1 } else { 0 }
-    let boxed = if shape.boxing { 1 } else { 0 }
-    let glue = if shape.drop_glue { 1 } else { 0 }
-    let foreign = if shape.foreign_containment { 1 } else { 0 }
-    rc + boxed + glue + foreign + bool_list_rank(shape.param_deps)
-}
 
 // ============================================================
 // SlotFlow lattice and explicit transitions
@@ -353,25 +516,24 @@ const SLOT_FLOW_JOIN_TAGS: List<Int> = [
     3, 4, 4, 3, 4,
     4, 4, 4, 4, 4
 ]
-const SLOT_FLOW_RANKS: List<Int> = [0, 1, 1, 1, 2]
-const SLOT_FLOW_ASSIGNMENT_TAGS: List<Int> = [0, 2, 2, 2, 2]
-const SLOT_FLOW_TAKE_TAGS: List<Int> = [0, 1, 3, 3, 4]
-const SLOT_FLOW_TAKE_FINDINGS: List<Bool> = [false, true, false, true, true]
-
 pub struct SlotFlow {
-    tag: Int
+    tag: Int,
+    cleanup_owner: Bool
 }
 
-pub struct SlotFlowTransition {
-    flow: SlotFlow,
-    requires_finding: Bool
-}
-
-pub fn slot_flow_from_tag(tag: Int) -> SlotFlow {
+fn make_slot_flow(tag: Int, cleanup_owner: Bool) -> SlotFlow {
     if tag < SLOT_FLOW_UNREACHABLE || tag >= SLOT_FLOW_COUNT {
         panic("resource model: invalid SlotFlow tag")
     }
-    SlotFlow { tag: tag }
+    if cleanup_owner && tag != SLOT_FLOW_LIVE &&
+       tag != SLOT_FLOW_MAYBE_MOVED {
+        panic("resource model: unavailable SlotFlow owns cleanup")
+    }
+    SlotFlow { tag: tag, cleanup_owner: cleanup_owner }
+}
+
+fn slot_flow_from_tag(tag: Int) -> SlotFlow {
+    make_slot_flow(tag, false)
 }
 
 pub fn slot_flow_unreachable() -> SlotFlow {
@@ -382,24 +544,48 @@ pub fn slot_flow_empty() -> SlotFlow {
     slot_flow_from_tag(SLOT_FLOW_EMPTY)
 }
 
-pub fn slot_flow_live() -> SlotFlow {
-    slot_flow_from_tag(SLOT_FLOW_LIVE)
+
+pub fn slot_flow_live_owner(cleanup_owner: Bool) -> SlotFlow {
+    make_slot_flow(SLOT_FLOW_LIVE, cleanup_owner)
 }
 
 pub fn slot_flow_moved() -> SlotFlow {
     slot_flow_from_tag(SLOT_FLOW_MOVED)
 }
 
-pub fn slot_flow_maybe_moved() -> SlotFlow {
-    slot_flow_from_tag(SLOT_FLOW_MAYBE_MOVED)
-}
+
 
 pub fn slot_flow_tag(flow: SlotFlow) -> Int {
-    slot_flow_from_tag(flow.tag).tag
+    make_slot_flow(flow.tag, flow.cleanup_owner).tag
+}
+
+pub fn slot_flow_cleanup_owner(flow: SlotFlow) -> Bool {
+    make_slot_flow(flow.tag, flow.cleanup_owner).cleanup_owner
+}
+
+pub fn slot_flow_is_unreachable(flow: SlotFlow) -> Bool {
+    slot_flow_tag(flow) == SLOT_FLOW_UNREACHABLE
+}
+pub fn slot_flow_is_empty(flow: SlotFlow) -> Bool {
+    slot_flow_tag(flow) == SLOT_FLOW_EMPTY
+}
+pub fn slot_flow_is_live(flow: SlotFlow) -> Bool {
+    slot_flow_tag(flow) == SLOT_FLOW_LIVE
+}
+pub fn slot_flow_is_moved(flow: SlotFlow) -> Bool {
+    slot_flow_tag(flow) == SLOT_FLOW_MOVED
+}
+pub fn slot_flow_is_maybe_moved(flow: SlotFlow) -> Bool {
+    slot_flow_tag(flow) == SLOT_FLOW_MAYBE_MOVED
+}
+
+pub fn copy_slot_flow(flow: SlotFlow) -> SlotFlow {
+    make_slot_flow(slot_flow_tag(flow), slot_flow_cleanup_owner(flow))
 }
 
 pub fn slot_flow_same(left: SlotFlow, right: SlotFlow) -> Bool {
-    slot_flow_tag(left) == slot_flow_tag(right)
+    slot_flow_tag(left) == slot_flow_tag(right) &&
+        slot_flow_cleanup_owner(left) == slot_flow_cleanup_owner(right)
 }
 
 pub fn slot_flow_join(left: SlotFlow, right: SlotFlow) -> SlotFlow {
@@ -407,47 +593,23 @@ pub fn slot_flow_join(left: SlotFlow, right: SlotFlow) -> SlotFlow {
     let right_tag = slot_flow_tag(right)
     let index = left_tag * SLOT_FLOW_COUNT + right_tag
     match SLOT_FLOW_JOIN_TAGS.get(index) {
-        some(tag) => slot_flow_from_tag(tag),
+        some(tag) => {
+            let left_may_live = left_tag == SLOT_FLOW_LIVE ||
+                left_tag == SLOT_FLOW_MAYBE_MOVED
+            let right_may_live = right_tag == SLOT_FLOW_LIVE ||
+                right_tag == SLOT_FLOW_MAYBE_MOVED
+            if left_may_live && right_may_live &&
+               slot_flow_cleanup_owner(left) !=
+                    slot_flow_cleanup_owner(right) {
+                panic("resource model: SlotFlow cleanup owner join differs")
+            }
+            make_slot_flow(tag,
+                if left_may_live {
+                    slot_flow_cleanup_owner(left)
+                } else if right_may_live {
+                    slot_flow_cleanup_owner(right)
+                } else { false })
+        },
         none => panic("resource model: SlotFlow join table is incomplete")
     }
-}
-
-pub fn slot_flow_leq(left: SlotFlow, right: SlotFlow) -> Bool {
-    slot_flow_same(slot_flow_join(left, right), right)
-}
-
-pub fn slot_flow_rank(flow: SlotFlow) -> Int {
-    match SLOT_FLOW_RANKS.get(slot_flow_tag(flow)) {
-        some(rank) => rank,
-        none => panic("resource model: SlotFlow rank table is incomplete")
-    }
-}
-
-pub fn slot_flow_after_assignment(flow: SlotFlow) -> SlotFlow {
-    match SLOT_FLOW_ASSIGNMENT_TAGS.get(slot_flow_tag(flow)) {
-        some(tag) => slot_flow_from_tag(tag),
-        none => panic("resource model: assignment transition table is incomplete")
-    }
-}
-
-pub fn slot_flow_take(flow: SlotFlow) -> SlotFlowTransition {
-    let tag = slot_flow_tag(flow)
-    match (SLOT_FLOW_TAKE_TAGS.get(tag),
-           SLOT_FLOW_TAKE_FINDINGS.get(tag)) {
-        (some(next), some(finding)) => SlotFlowTransition {
-            flow: slot_flow_from_tag(next),
-            requires_finding: finding
-        },
-        _ => panic("resource model: Take transition table is incomplete")
-    }
-}
-
-pub fn slot_flow_transition_flow(value: SlotFlowTransition) -> SlotFlow {
-    value.flow
-}
-
-pub fn slot_flow_transition_requires_finding(
-    value: SlotFlowTransition
-) -> Bool {
-    value.requires_finding
 }

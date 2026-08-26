@@ -12,16 +12,17 @@ use flow_ir::{
     flow_instruction_ref_same, flow_block_ref_same}
 use resource_model::{
     SlotFlow,
-    slot_flow_from_tag, slot_flow_tag, slot_flow_same,
-    slot_flow_unreachable, slot_flow_empty, slot_flow_live,
-    slot_flow_moved, slot_flow_maybe_moved,
+    slot_flow_same, copy_slot_flow,
+    slot_flow_cleanup_owner,
+    slot_flow_is_unreachable, slot_flow_is_empty, slot_flow_is_live,
+    slot_flow_is_moved,
+    slot_flow_unreachable,
     slot_flow_join}
 use rc_ir::{
-    RcProgram, RcBody, RcBlock, RcStep, RcEdge, RcSlot, RcOperation,
-    RcOpKind,
+    RcProgram, RcBody, RcEdge, RcSlot, RcOperation,
     rc_program_flow_fingerprint, rc_program_type_count,
     rc_program_callable_count, rc_program_bodies,
-    rc_body_reference, rc_body_slots, rc_body_entry_block, rc_body_blocks,
+    rc_body_slots, rc_body_entry_block, rc_body_blocks,
     rc_block_source_ref, rc_block_terminator_kind,
     rc_block_steps, rc_block_before_terminator, rc_block_edges,
     rc_step_instruction, rc_step_before, rc_step_after,
@@ -36,7 +37,7 @@ use rc_ir::{
     rc_site_after_instruction, rc_site_before_terminator,
     rc_site_edge_cleanup,
     rc_op_kind_clone, rc_op_kind_take, rc_op_kind_drop,
-    rc_op_kind_cleanup, rc_op_kind_same,
+    rc_op_kind_cleanup, rc_op_kind_drop_old_place, rc_op_kind_same,
     rc_slot_reference}
 
 // ============================================================
@@ -52,11 +53,13 @@ const RESOURCE_CELL_CALLABLE_RESULT_ORIGIN: Int = 5
 const RESOURCE_CELL_BODY_SLOT_ORIGIN: Int = 6
 const RESOURCE_CELL_BODY_SLOT_OWNED: Int = 7
 const RESOURCE_CELL_BODY_BLOCK_REACHABLE: Int = 8
-const RESOURCE_CELL_KIND_COUNT: Int = 9
+const RESOURCE_CELL_BODY_SLOT_MODE: Int = 9
+const RESOURCE_CELL_BODY_SLOT_FORCE: Int = 10
+const RESOURCE_CELL_KIND_COUNT: Int = 11
 
 pub struct ResourceCellKind { tag: Int }
 
-pub fn resource_cell_kind_from_tag(tag: Int) -> ResourceCellKind {
+fn resource_cell_kind_from_tag(tag: Int) -> ResourceCellKind {
     if tag < RESOURCE_CELL_LOGICAL_SHAPE || tag >= RESOURCE_CELL_KIND_COUNT {
         panic("resource certificate: invalid cell kind")
     }
@@ -94,6 +97,12 @@ pub fn resource_cell_kind_body_slot_owned() -> ResourceCellKind {
 pub fn resource_cell_kind_body_block_reachable() -> ResourceCellKind {
     resource_cell_kind_from_tag(RESOURCE_CELL_BODY_BLOCK_REACHABLE)
 }
+pub fn resource_cell_kind_body_slot_mode() -> ResourceCellKind {
+    resource_cell_kind_from_tag(RESOURCE_CELL_BODY_SLOT_MODE)
+}
+pub fn resource_cell_kind_body_slot_force() -> ResourceCellKind {
+    resource_cell_kind_from_tag(RESOURCE_CELL_BODY_SLOT_FORCE)
+}
 
 enum ResourceCellSourceValue {
     StructuralCellSourceValue(Int, Int, Int),
@@ -101,7 +110,9 @@ enum ResourceCellSourceValue {
     CallableResultOriginSourceValue(ExecutableRef, Int),
     BodyReachSourceValue(FlowBlockRef),
     BodySlotOriginSourceValue(FlowBlockRef, Int, SlotRef, Int),
-    BodySlotOwnedSourceValue(FlowBlockRef, Int, SlotRef)
+    BodySlotOwnedSourceValue(FlowBlockRef, Int, SlotRef),
+    BodySlotModeSourceValue(FlowBlockRef, Int, SlotRef),
+    BodySlotForceSourceValue(FlowBlockRef, Int, SlotRef)
 }
 pub struct ResourceCellSource { value: ResourceCellSourceValue }
 pub fn make_structural_resource_cell_source(
@@ -140,6 +151,20 @@ pub fn make_body_slot_owned_source(
     ResourceCellSource { value: ResourceCellSourceValue::BodySlotOwnedSourceValue(
         block, boundary, slot) }
 }
+pub fn make_body_slot_mode_source(
+    block: FlowBlockRef, boundary: Int, slot: SlotRef
+) -> ResourceCellSource {
+    if boundary < 0 { panic("resource certificate: negative body-mode boundary") }
+    ResourceCellSource { value: ResourceCellSourceValue::BodySlotModeSourceValue(
+        block, boundary, slot) }
+}
+pub fn make_body_slot_force_source(
+    block: FlowBlockRef, boundary: Int, slot: SlotRef
+) -> ResourceCellSource {
+    if boundary < 0 { panic("resource certificate: negative body-force boundary") }
+    ResourceCellSource { value: ResourceCellSourceValue::BodySlotForceSourceValue(
+        block, boundary, slot) }
+}
 fn copy_resource_cell_source(value: ResourceCellSource) -> ResourceCellSource {
     match value.value {
         ResourceCellSourceValue::StructuralCellSourceValue(k, o, c) =>
@@ -154,7 +179,11 @@ fn copy_resource_cell_source(value: ResourceCellSource) -> ResourceCellSource {
         ResourceCellSourceValue::BodySlotOriginSourceValue(b, n, s, p) =>
             make_body_slot_origin_source(b, n, s, p),
         ResourceCellSourceValue::BodySlotOwnedSourceValue(b, n, s) =>
-            make_body_slot_owned_source(b, n, s)
+            make_body_slot_owned_source(b, n, s),
+        ResourceCellSourceValue::BodySlotModeSourceValue(b, n, s) =>
+            make_body_slot_mode_source(b, n, s),
+        ResourceCellSourceValue::BodySlotForceSourceValue(b, n, s) =>
+            make_body_slot_force_source(b, n, s)
     }
 }
 pub fn resource_cell_source_same(
@@ -179,6 +208,12 @@ pub fn resource_cell_source_same(
                 slot_ref_same(as_, bs) && ap == bp,
         (ResourceCellSourceValue::BodySlotOwnedSourceValue(ab, an, as_),
          ResourceCellSourceValue::BodySlotOwnedSourceValue(bb, bn, bs)) =>
+            flow_block_ref_same(ab, bb) && an == bn && slot_ref_same(as_, bs),
+        (ResourceCellSourceValue::BodySlotModeSourceValue(ab, an, as_),
+         ResourceCellSourceValue::BodySlotModeSourceValue(bb, bn, bs)) =>
+            flow_block_ref_same(ab, bb) && an == bn && slot_ref_same(as_, bs),
+        (ResourceCellSourceValue::BodySlotForceSourceValue(ab, an, as_),
+         ResourceCellSourceValue::BodySlotForceSourceValue(bb, bn, bs)) =>
             flow_block_ref_same(ab, bb) && an == bn && slot_ref_same(as_, bs),
         _ => false
     }
@@ -320,12 +355,6 @@ pub fn resource_rule_source_same(
         _ => false
     }
 }
-pub fn resource_rule_source_is_structural(value: ResourceRuleSource) -> Bool {
-    match value.value {
-        ResourceRuleSourceValue::StructuralRuleSourceValue(_) => true,
-        _ => false
-    }
-}
 
 // A constraint is target >= max(floor_rank, ranks[premises...]).  Splitting
 // each finite product into monotone cells makes this small rule complete for
@@ -336,6 +365,7 @@ pub struct ResourceConstraint {
     floor_rank: Int,
     premise_cells: List<Int>,
     requires_all: Bool,
+    guard_cell: Int?,
     source: ResourceRuleSource
 }
 
@@ -357,9 +387,23 @@ pub fn make_resource_constraint(
         rule_tag: rule_tag,
         target_cell: target_cell,
         floor_rank: floor_rank,
-        premise_cells: copied, requires_all: false,
+        premise_cells: copied, requires_all: false, guard_cell: none,
         source: make_structural_resource_rule_source(rule_tag)
     }
+}
+
+pub fn make_resource_guarded_constraint_at(
+    source: ResourceRuleSource,
+    rule_tag: Int, target_cell: Int, floor_rank: Int,
+    premise_cell: Int, guard_cell: Int
+) -> ResourceConstraint {
+    if guard_cell < 0 {
+        panic("resource certificate: negative guarded-copy cell")
+    }
+    let mut result = make_resource_constraint_at(
+        source, rule_tag, target_cell, floor_rank, [premise_cell])
+    result.guard_cell = some(guard_cell)
+    result
 }
 
 pub fn make_resource_constraint_at(
@@ -373,18 +417,6 @@ pub fn make_resource_constraint_at(
     result
 }
 
-pub fn make_resource_all_constraint(
-    rule_tag: Int, target_cell: Int,
-    floor_rank: Int, premise_cells: List<Int>
-) -> ResourceConstraint {
-    if premise_cells.len() < 2 {
-        panic("resource certificate: conjunctive constraint is incomplete")
-    }
-    let mut result = make_resource_constraint(
-        rule_tag, target_cell, floor_rank, premise_cells)
-    result.requires_all = true
-    result
-}
 pub fn make_resource_all_constraint_at(
     source: ResourceRuleSource,
     rule_tag: Int, target_cell: Int,
@@ -418,6 +450,9 @@ pub fn resource_constraint_premise_cells(
 pub fn resource_constraint_requires_all(value: ResourceConstraint) -> Bool {
     value.requires_all
 }
+pub fn resource_constraint_guard_cell(value: ResourceConstraint) -> Int? {
+    value.guard_cell
+}
 pub fn resource_constraint_source(value: ResourceConstraint) -> ResourceRuleSource {
     copy_resource_rule_source(value.source)
 }
@@ -427,14 +462,19 @@ fn copy_resource_constraints(
 ) -> List<ResourceConstraint> {
     let mut result: List<ResourceConstraint> = []
     for value in values {
-        result.push(if value.requires_all {
+        result.push(match value.guard_cell {
+            some(guard) => make_resource_guarded_constraint_at(
+                value.source, value.rule_tag, value.target_cell,
+                value.floor_rank, value.premise_cells.get(0).unwrap(), guard),
+            none => if value.requires_all {
             make_resource_all_constraint_at(value.source,
                 value.rule_tag, value.target_cell,
                 value.floor_rank, value.premise_cells)
-        } else {
+            } else {
             make_resource_constraint_at(value.source,
                 value.rule_tag, value.target_cell,
                 value.floor_rank, value.premise_cells)
+            }
         })
     }
     result
@@ -472,25 +512,6 @@ pub fn make_resource_promotion(
     }
 }
 
-pub fn resource_promotion_constraint_index(
-    value: ResourcePromotion
-) -> Int { value.constraint_index }
-pub fn resource_promotion_target_cell(value: ResourcePromotion) -> Int {
-    value.target_cell
-}
-pub fn resource_promotion_from_rank(value: ResourcePromotion) -> Int {
-    value.from_rank
-}
-pub fn resource_promotion_to_rank(value: ResourcePromotion) -> Int {
-    value.to_rank
-}
-pub fn resource_promotion_premise_ranks(
-    value: ResourcePromotion
-) -> List<Int> {
-    let mut result: List<Int> = []
-    for rank in value.premise_ranks { result.push(rank) }
-    result
-}
 
 fn copy_resource_promotions(
     values: List<ResourcePromotion>
@@ -533,9 +554,6 @@ pub fn resource_fixed_point_constraints(
 ) -> List<ResourceConstraint> {
     copy_resource_constraints(value.constraints)
 }
-pub fn resource_fixed_point_promotions(
-    value: ResourceFixedPointProof
-) -> List<ResourcePromotion> { copy_resource_promotions(value.promotions) }
 pub fn resource_fixed_point_final_ranks(
     value: ResourceFixedPointProof
 ) -> List<Int> {
@@ -547,6 +565,12 @@ pub fn resource_fixed_point_final_ranks(
 fn constraint_required_rank(
     constraint: ResourceConstraint, ranks: List<Int>
 ) -> Int {
+    match constraint.guard_cell {
+        some(guard) => if ranks.get(guard).unwrap() == 0 {
+            return constraint.floor_rank
+        },
+        none => {}
+    }
     if constraint.requires_all {
         let mut all = true
         for premise in constraint.premise_cells {
@@ -608,6 +632,14 @@ fn verify_fixed_point_proof(value: ResourceFixedPointProof) {
             if premise < 0 || premise >= value.cells.len() {
                 panic("resource certificate: constraint premise is outside graph")
             }
+        }
+        match constraint.guard_cell {
+            some(guard) => if guard < 0 || guard >= value.cells.len() ||
+                    constraint.requires_all ||
+                    constraint.premise_cells.len() != 1 {
+                panic("resource certificate: guarded-copy domain differs")
+            },
+            none => {}
         }
     }
 
@@ -716,6 +748,18 @@ fn verify_fixed_point_domains(
                cell.max_rank != 1 {
                 panic("resource certificate: body dataflow cell domain drifted")
             }
+        } else if kind == RESOURCE_CELL_BODY_SLOT_MODE {
+            if cell.owner_index < 0 ||
+               cell.owner_index >= rc_program_bodies(rc_program).len() ||
+               cell.max_rank != 3 {
+                panic("resource certificate: body mode cell domain drifted")
+            }
+        } else if kind == RESOURCE_CELL_BODY_SLOT_FORCE {
+            if cell.owner_index < 0 ||
+               cell.owner_index >= rc_program_bodies(rc_program).len() ||
+               cell.max_rank != 1 {
+                panic("resource certificate: body force cell domain drifted")
+            }
         } else {
             panic("resource certificate: unknown proof cell domain")
         }
@@ -745,7 +789,7 @@ const SLOT_REASON_COUNT: Int = 15
 
 pub struct SlotTransitionReason { tag: Int }
 
-pub fn slot_transition_reason_from_tag(tag: Int) -> SlotTransitionReason {
+fn slot_transition_reason_from_tag(tag: Int) -> SlotTransitionReason {
     if tag < SLOT_REASON_INIT_EMPTY || tag >= SLOT_REASON_COUNT {
         panic("resource certificate: invalid slot transition reason")
     }
@@ -756,7 +800,6 @@ pub fn slot_transition_reason_tag(value: SlotTransitionReason) -> Int {
     slot_transition_reason_from_tag(value.tag).tag
 }
 
-pub fn slot_reason_init_empty() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_INIT_EMPTY) }
 pub fn slot_reason_init_live() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_INIT_LIVE) }
 pub fn slot_reason_borrow() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_BORROW) }
 pub fn slot_reason_mutate() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_MUTATE) }
@@ -768,7 +811,6 @@ pub fn slot_reason_drop() -> SlotTransitionReason { slot_transition_reason_from_
 pub fn slot_reason_cleanup() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_CLEANUP) }
 pub fn slot_reason_assign_scalar() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_ASSIGN_SCALAR) }
 pub fn slot_reason_call_result() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_CALL_RESULT) }
-pub fn slot_reason_join() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_JOIN) }
 pub fn slot_reason_scope_end() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_SCOPE_END) }
 pub fn slot_reason_drop_projected_old() -> SlotTransitionReason {
     slot_transition_reason_from_tag(SLOT_REASON_DROP_PROJECTED_OLD)
@@ -790,8 +832,8 @@ pub fn make_slot_transition_witness(
     }
     SlotTransitionWitness {
         slot_index: slot_index,
-        before: slot_flow_from_tag(slot_flow_tag(before)),
-        after: slot_flow_from_tag(slot_flow_tag(after)),
+        before: copy_slot_flow(before),
+        after: copy_slot_flow(after),
         reason: reason
     }
 }
@@ -829,65 +871,74 @@ fn verify_slot_transition(value: SlotTransitionWitness) {
     let after = value.after
     let reason = value.reason
     if transition_reason_is(reason, SLOT_REASON_INIT_EMPTY) {
-        if slot_flow_same(before, slot_flow_live()) ||
-           !slot_flow_same(after, slot_flow_empty()) {
+        if slot_flow_is_live(before) ||
+           !slot_flow_is_empty(after) {
             panic("resource certificate: invalid empty initialization")
         }
     } else if transition_reason_is(reason, SLOT_REASON_INIT_LIVE) {
-        if slot_flow_same(before, slot_flow_unreachable()) ||
-           slot_flow_same(before, slot_flow_live()) ||
-           !slot_flow_same(after, slot_flow_live()) {
+        if slot_flow_is_unreachable(before) ||
+           slot_flow_is_live(before) ||
+           !slot_flow_is_live(after) {
             panic("resource certificate: invalid live initialization")
         }
     } else if transition_reason_is(reason, SLOT_REASON_BORROW) ||
               transition_reason_is(reason, SLOT_REASON_MUTATE) ||
               transition_reason_is(reason, SLOT_REASON_CLONE_SOURCE) {
-        if !slot_flow_same(before, slot_flow_live()) ||
-           !slot_flow_same(after, slot_flow_live()) {
+        if !slot_flow_is_live(before) ||
+           !slot_flow_same(before, after) {
             panic("resource certificate: read requires one live owner")
         }
     } else if transition_reason_is(reason, SLOT_REASON_TAKE_SOURCE) {
-        if !slot_flow_same(before, slot_flow_live()) ||
-           !slot_flow_same(after, slot_flow_moved()) {
+        if !slot_flow_is_live(before) ||
+           !slot_flow_cleanup_owner(before) ||
+           !slot_flow_is_moved(after) {
             panic("resource certificate: Take does not clear one live source")
         }
     } else if transition_reason_is(reason, SLOT_REASON_CLONE_TARGET) ||
-              transition_reason_is(reason, SLOT_REASON_TAKE_TARGET) ||
-              transition_reason_is(reason, SLOT_REASON_CALL_RESULT) {
-        if slot_flow_same(before, slot_flow_live()) ||
-           slot_flow_same(before, slot_flow_unreachable()) ||
-           !slot_flow_same(after, slot_flow_live()) {
+              transition_reason_is(reason, SLOT_REASON_TAKE_TARGET) {
+        if slot_flow_is_live(before) ||
+           slot_flow_is_unreachable(before) ||
+           !slot_flow_is_live(after) ||
+           !slot_flow_cleanup_owner(after) {
             panic("resource certificate: resource target was not empty")
         }
+    } else if transition_reason_is(reason, SLOT_REASON_CALL_RESULT) {
+        if slot_flow_is_live(before) || slot_flow_is_unreachable(before) ||
+           !slot_flow_is_live(after) {
+            panic("resource certificate: call result target was not empty")
+        }
     } else if transition_reason_is(reason, SLOT_REASON_DROP) {
-        if slot_flow_same(before, slot_flow_unreachable()) ||
-           !slot_flow_same(after, slot_flow_empty()) {
+        if slot_flow_is_unreachable(before) ||
+           !slot_flow_cleanup_owner(before) ||
+           !slot_flow_is_empty(after) {
             panic("resource certificate: Drop does not normalize old storage")
         }
     } else if transition_reason_is(reason, SLOT_REASON_CLEANUP) {
-        if slot_flow_same(before, slot_flow_unreachable()) ||
-           !slot_flow_same(after, slot_flow_empty()) {
+        if slot_flow_is_unreachable(before) ||
+           !slot_flow_cleanup_owner(before) ||
+           !slot_flow_is_empty(after) {
             panic("resource certificate: Cleanup does not normalize storage to empty")
         }
     } else if transition_reason_is(reason, SLOT_REASON_ASSIGN_SCALAR) {
-        if slot_flow_same(before, slot_flow_unreachable()) ||
-           !slot_flow_same(after, slot_flow_live()) {
+        if slot_flow_is_unreachable(before) ||
+           !slot_flow_is_live(after) || slot_flow_cleanup_owner(after) {
             panic("resource certificate: scalar assignment has invalid state")
         }
     } else if transition_reason_is(reason, SLOT_REASON_JOIN) {
         // The enclosing edge proof checks the actual join operands.
-        if slot_flow_same(after, slot_flow_unreachable()) &&
-           !slot_flow_same(before, slot_flow_unreachable()) {
+        if slot_flow_is_unreachable(after) &&
+           !slot_flow_is_unreachable(before) {
             panic("resource certificate: reachable state joined to unreachable")
         }
     } else if transition_reason_is(reason, SLOT_REASON_SCOPE_END) {
-        if slot_flow_same(before, slot_flow_unreachable()) ||
-           !slot_flow_same(after, slot_flow_empty()) {
+        if slot_flow_is_unreachable(before) ||
+           slot_flow_cleanup_owner(before) ||
+           !slot_flow_is_empty(after) {
             panic("resource certificate: lexical scope exit does not clear slot state")
         }
     } else if transition_reason_is(reason, SLOT_REASON_DROP_PROJECTED_OLD) {
-        if !slot_flow_same(before, slot_flow_live()) ||
-           !slot_flow_same(after, slot_flow_live()) {
+        if !slot_flow_is_live(before) ||
+           !slot_flow_same(before, after) {
             panic("resource certificate: projected overwrite changed base ownership")
         }
     }
@@ -909,7 +960,7 @@ pub fn make_cfg_edge_certificate(
     }
     let mut states: List<SlotFlow> = []
     for state in exit_states {
-        states.push(slot_flow_from_tag(slot_flow_tag(state)))
+        states.push(copy_slot_flow(state))
     }
     CfgEdgeCertificate {
         successor_ordinal: successor_ordinal,
@@ -925,13 +976,6 @@ pub fn cfg_edge_certificate_target(value: CfgEdgeCertificate) -> Int? {
 pub fn cfg_edge_certificate_successor_ordinal(
     value: CfgEdgeCertificate
 ) -> Int { value.successor_ordinal }
-pub fn cfg_edge_certificate_exit_states(
-    value: CfgEdgeCertificate
-) -> List<SlotFlow> {
-    let mut result: List<SlotFlow> = []
-    for state in value.exit_states { result.push(state) }
-    result
-}
 pub fn cfg_edge_certificate_transitions(
     value: CfgEdgeCertificate
 ) -> List<SlotTransitionWitness> {
@@ -1017,7 +1061,7 @@ pub fn make_cfg_block_certificate(
     }
     let mut states: List<SlotFlow> = []
     for state in entry_states {
-        states.push(slot_flow_from_tag(slot_flow_tag(state)))
+        states.push(copy_slot_flow(state))
     }
     CfgBlockCertificate {
         block_index: block_index,
@@ -1088,7 +1132,7 @@ pub fn make_cfg_body_certificate(
     }
     let mut seed: List<SlotFlow> = []
     for state in entry_seed {
-        seed.push(slot_flow_from_tag(slot_flow_tag(state)))
+        seed.push(copy_slot_flow(state))
     }
     CfgBodyCertificate {
         entry_block: entry_block,
@@ -1100,13 +1144,6 @@ pub fn make_cfg_body_certificate(
 pub fn cfg_body_certificate_entry_block(
     value: CfgBodyCertificate
 ) -> Int { value.entry_block }
-pub fn cfg_body_certificate_entry_seed(
-    value: CfgBodyCertificate
-) -> List<SlotFlow> {
-    let mut result: List<SlotFlow> = []
-    for state in value.entry_seed { result.push(state) }
-    result
-}
 
 pub fn cfg_body_certificate_blocks(
     value: CfgBodyCertificate
@@ -1128,7 +1165,7 @@ fn copy_cfg_body_certificates(
 fn copy_state_vector(values: List<SlotFlow>) -> List<SlotFlow> {
     let mut result: List<SlotFlow> = []
     for value in values {
-        result.push(slot_flow_from_tag(slot_flow_tag(value)))
+        result.push(copy_slot_flow(value))
     }
     result
 }
@@ -1165,7 +1202,7 @@ const CANDIDATE_CELL_KIND_COUNT: Int = 3
 
 pub struct CandidateCellKind { tag: Int }
 
-pub fn candidate_cell_kind_from_tag(tag: Int) -> CandidateCellKind {
+fn candidate_cell_kind_from_tag(tag: Int) -> CandidateCellKind {
     if tag < CANDIDATE_CELL_PARAMETER || tag >= CANDIDATE_CELL_KIND_COUNT {
         panic("resource certificate: invalid callable-candidate cell kind")
     }
@@ -1305,7 +1342,7 @@ pub fn candidate_rule_site_instruction(
 }
 pub fn candidate_rule_site_block(value: CandidateRuleSite) -> FlowBlockRef {
     match value.value {
-        CandidateRuleSiteValue::TerminatorCandidateSiteValue(block) |
+        CandidateRuleSiteValue::TerminatorCandidateSiteValue(block) => block,
         CandidateRuleSiteValue::EdgeCandidateSiteValue { block, .. } => block,
         _ => panic("resource certificate: candidate rule site has no block")
     }
@@ -1335,27 +1372,6 @@ fn copy_candidate_rule_site(value: CandidateRuleSite) -> CandidateRuleSite {
     }
 }
 
-fn candidate_rule_site_same(
-    left: CandidateRuleSite, right: CandidateRuleSite
-) -> Bool {
-    if candidate_rule_site_kind_tag(left) != candidate_rule_site_kind_tag(right) {
-        return false
-    }
-    let tag = candidate_rule_site_kind_tag(left)
-    if tag == 0 { return true }
-    if tag == 1 {
-        return flow_instruction_ref_same(
-            candidate_rule_site_instruction(left),
-            candidate_rule_site_instruction(right))
-    }
-    if !flow_block_ref_same(
-            candidate_rule_site_block(left),
-            candidate_rule_site_block(right)) {
-        return false
-    }
-    tag == 2 || candidate_rule_site_successor_ordinal(left) ==
-        candidate_rule_site_successor_ordinal(right)
-}
 
 const CANDIDATE_RULE_SEED: Int = 0
 const CANDIDATE_RULE_COPY: Int = 1
@@ -1363,7 +1379,7 @@ const CANDIDATE_RULE_ALL: Int = 2
 const CANDIDATE_RULE_KIND_COUNT: Int = 3
 
 pub struct CandidateRuleKind { tag: Int }
-pub fn candidate_rule_kind_from_tag(tag: Int) -> CandidateRuleKind {
+fn candidate_rule_kind_from_tag(tag: Int) -> CandidateRuleKind {
     if tag < CANDIDATE_RULE_SEED || tag >= CANDIDATE_RULE_KIND_COUNT {
         panic("resource certificate: invalid callable-candidate rule kind")
     }
@@ -1454,19 +1470,6 @@ pub fn make_candidate_promotion(
         rule_index: rule_index,
         target_cell: target_cell, premise_values: copied
     }
-}
-pub fn candidate_promotion_rule_index(value: CandidatePromotion) -> Int {
-    value.rule_index
-}
-pub fn candidate_promotion_target_cell(value: CandidatePromotion) -> Int {
-    value.target_cell
-}
-pub fn candidate_promotion_premise_values(
-    value: CandidatePromotion
-) -> List<Bool> {
-    let mut result: List<Bool> = []
-    for item in value.premise_values { result.push(item) }
-    result
 }
 
 fn copy_candidate_promotions(
@@ -1699,9 +1702,6 @@ pub fn make_resource_certificate(
     }
 }
 
-pub fn resource_certificate_flow_fingerprint(
-    value: ResourceCertificate
-) -> Str { value.flow_fingerprint }
 pub fn resource_certificate_fixed_point(
     value: ResourceCertificate
 ) -> ResourceFixedPointProof { value.fixed_point }
@@ -1774,11 +1774,15 @@ fn operation_matches_source_reason(
         return transition_reason_is(reason, SLOT_REASON_TAKE_SOURCE)
     }
     if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_drop()) {
-        return transition_reason_is(reason, SLOT_REASON_DROP) ||
-            transition_reason_is(reason, SLOT_REASON_DROP_PROJECTED_OLD)
+        return transition_reason_is(reason, SLOT_REASON_DROP)
     }
     if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_cleanup()) {
         return transition_reason_is(reason, SLOT_REASON_CLEANUP)
+    }
+    if rc_op_kind_same(
+            rc_operation_kind(operation), rc_op_kind_drop_old_place()) {
+        return transition_reason_is(
+            reason, SLOT_REASON_DROP_PROJECTED_OLD)
     }
     false
 }
