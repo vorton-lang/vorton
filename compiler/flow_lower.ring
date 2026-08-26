@@ -78,6 +78,8 @@ use core_expr::{
     core_expr_project_base, core_expr_project_field,
     core_expr_project_is_partial,
     core_expr_constructor, core_expr_constructor_fields,
+    core_expr_move_update_base, core_expr_move_update_constructor,
+    core_expr_move_update_schema, core_expr_move_update_overrides,
     core_constructor_kind_tag, core_constructor_executable,
     core_expr_lambda_executable, core_expr_block,
     core_expr_lambda_captures, core_capture_source, core_capture_target,
@@ -103,7 +105,7 @@ use core_expr::{
     core_pattern_field_pattern,
     core_field_ref_kind_tag, core_field_ref_nominal,
     core_field_ref_variant, core_field_ref_tuple_index,
-    core_field_ref_record_path,
+    core_field_ref_record_path, core_field_ref_same,
     core_field_value_field, core_field_value_expr,
     core_callee_kind_tag, core_callee_direct, core_callee_local,
     core_callee_dynamic, core_callee_contract,
@@ -119,6 +121,8 @@ use core_type_source::{
     core_type_graph_nodes,
     FlowTypeNode, FlowFieldIdentity,
     flow_type_node_children, copy_flow_type_graph_nodes,
+    flow_type_node_nominal_fields, flow_nominal_field_identity,
+    flow_nominal_field_type, flow_field_identity_same,
     make_nominal_flow_field_identity, make_variant_flow_field_identity,
     make_path_flow_field_identity
 }
@@ -142,7 +146,7 @@ use flow_ir::{
     FlowHandlerInstallation,
     FlowPatternContract, FlowPatternField, FlowPrimitiveOp,
     FlowEvidenceRef, FlowHandledEvidenceUse,
-    FlowCallTarget, FlowPlaceRef,
+    FlowCallTarget, FlowPlaceRef, FlowProjectionContract,
     make_flow_callable, make_flow_program,
     make_flow_handled_evidence_binding,
     make_flow_slot, make_flow_block_ref, make_flow_instruction_ref,
@@ -160,6 +164,7 @@ use flow_ir::{
     make_flow_handler_binding, make_flow_handler_installation,
     make_flow_handle_install,
     make_flow_initialize, make_flow_read, make_flow_assign,
+    make_flow_move_place,
     make_flow_fail_raise,
     make_flow_slot_place, make_flow_project_place,
     make_flow_call, make_flow_project, make_flow_capture,
@@ -890,6 +895,96 @@ fn flow_aggregate_input(field: CoreFieldRef) -> FlowAggregateInputRef {
     make_variant_flow_aggregate_input(core_field_ref_variant(field))
 }
 
+fn move_update_field_type(
+    ctx: FlowLowerCtx, base_type: CoreTypeRef, field: CoreFieldRef
+) -> CoreTypeRef {
+    let node = ctx.type_nodes.get(core_type_ref_index(base_type)).unwrap_or_else(fn() {
+        panic("Flow lowering: move update base type is absent")
+    })
+    if core_field_ref_kind_tag(field) == 1 {
+        return flow_type_node_children(node).get(
+            core_field_ref_tuple_index(field)).unwrap_or_else(fn() {
+                panic("Flow lowering: move update tuple field is absent")
+            })
+    }
+    let identity = flow_field(field)
+    let mut found: CoreTypeRef? = none
+    for fact in flow_type_node_nominal_fields(node) {
+        if flow_field_identity_same(flow_nominal_field_identity(fact), identity) {
+            if found.is_some() {
+                panic("Flow lowering: move update field fact repeats")
+            }
+            found = some(flow_nominal_field_type(fact))
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("Flow lowering: move update field is absent")
+    }
+}
+
+fn move_update_projection_contract(
+    field: CoreFieldRef, base_type: CoreTypeRef,
+    value_type: CoreTypeRef, role: FlowSemanticRole
+) -> FlowProjectionContract {
+    let kind = core_field_ref_kind_tag(field)
+    if kind == 0 {
+        return make_nominal_flow_projection_contract(
+            core_field_ref_nominal(field), base_type, value_type, role, true)
+    }
+    if kind == 1 {
+        return make_tuple_flow_projection_contract(
+            core_field_ref_tuple_index(field), base_type, value_type, role, true)
+    }
+    if kind == 2 {
+        return make_structural_flow_projection_contract(
+            core_field_ref_record_path(field), base_type, value_type, role, true)
+    }
+    make_variant_flow_projection_contract(
+        core_field_ref_variant(field), base_type, value_type, role, true)
+}
+
+fn lower_move_update_source_place(
+    mut ctx: FlowLowerCtx, base: CoreExpr,
+    continue_target: FlowBlockRef?, break_target: FlowBlockRef?
+) -> FlowPlaceRef? {
+    if core_expr_kind_tag(base) == 1 {
+        let source = core_expr_read_source(base)
+        if !flow_slot_exists(ctx, source) {
+            panic("Flow lowering: move update source slot is inactive")
+        }
+        let previous = enter_core_node(
+            ctx, CORE_FLOW_NODE_EXPR, 1, core_expr_origin(base), some(source))
+        restore_core_node(ctx, previous)
+        return some(make_flow_slot_place(source))
+    }
+    if core_expr_kind_tag(base) == 9 {
+        let receiver = core_expr_project_base(base)
+        if core_expr_kind_tag(receiver) == 1 {
+            let source = core_expr_read_source(receiver)
+            let previous = enter_core_node(
+                ctx, CORE_FLOW_NODE_EXPR, 9, core_expr_origin(base), some(source))
+            let source_place = lower_move_update_source_place(
+                ctx, receiver, continue_target, break_target)
+            if source_place.is_none() {
+                restore_core_node(ctx, previous)
+                return none
+            }
+            let base_type = frozen_slot_type_at(ctx, source)
+            let value_type = core_expr_type(base)
+            let result = make_flow_project_place(
+                source, move_update_projection_contract(
+                    core_expr_project_field(base), base_type, value_type,
+                    flow_semantic_role_consume()), value_type)
+            restore_core_node(ctx, previous)
+            return some(result)
+        }
+    }
+    let source = lower_expr(ctx, base, continue_target, break_target)
+    if is_terminated(ctx) { return none }
+    some(make_flow_slot_place(source))
+}
+
 fn lower_flow_place(
     mut ctx: FlowLowerCtx, value: CorePlaceRef,
     continue_target: FlowBlockRef?, break_target: FlowBlockRef?
@@ -1121,6 +1216,114 @@ fn emit_simple_expr(
                 callable_identity_effects(callable)),
             arguments, [], [], some(result)),
             core_flow_role_expr_primary())
+        return true
+    }
+    if kind == 19 {
+        // Evaluate the source first without consuming an addressable place,
+        // then evaluate every override left-to-right.  The first MovePlace is
+        // the commit point: no user expression remains after it.
+        let base_place = match lower_move_update_source_place(
+                ctx, core_expr_move_update_base(expr),
+                continue_target, break_target) {
+            some(value) => value,
+            none => return true
+        }
+        let overrides = core_expr_move_update_overrides(expr)
+        let mut override_fields: List<CoreFieldRef> = []
+        let mut override_slots: List<SlotRef> = []
+        for field in overrides {
+            override_fields.push(core_field_value_field(field))
+            override_slots.push(lower_expr(
+                ctx, core_field_value_expr(field),
+                continue_target, break_target))
+            if is_terminated(ctx) { return true }
+        }
+
+        let scope = current_draft(ctx).scope
+        let committed_base = new_admin_slot(
+            ctx, result_type, scope, binder_kind_pre_anf(),
+            "move-update-base", 0, flow_storage_temp(),
+            flow_initial_slot_empty())
+        let mut role_ordinal = 0
+        emit_instruction(ctx, make_flow_move_place(
+            next_instruction_ref(ctx), origin, base_place, committed_base),
+            core_flow_role_control_dispatch(role_ordinal))
+        role_ordinal = role_ordinal + 1
+
+        let schema = core_expr_move_update_schema(expr)
+        let mut inputs: List<SlotRef> = []
+        let mut input_locations: List<FlowAggregateInputRef?> = []
+        for field in schema {
+            let field_type = move_update_field_type(ctx, result_type, field)
+            let mut override_slot: SlotRef? = none
+            let mut index = 0
+            while index < override_fields.len() {
+                if core_field_ref_same(
+                        override_fields.get(index).unwrap(), field) {
+                    if override_slot.is_some() {
+                        panic("Flow lowering: move update override repeats")
+                    }
+                    override_slot = some(override_slots.get(index).unwrap())
+                }
+                index = index + 1
+            }
+            match override_slot {
+                some(slot) => {
+                    let target_contract = move_update_projection_contract(
+                        field, result_type, field_type,
+                        flow_semantic_role_mutate())
+                    emit_instruction(ctx, make_flow_assign(
+                        next_instruction_ref(ctx), origin, slot,
+                        make_flow_project_place(
+                            committed_base, target_contract, field_type)),
+                        core_flow_role_control_dispatch(role_ordinal))
+                    role_ordinal = role_ordinal + 1
+                },
+                none => {}
+            }
+            let field_slot = new_admin_slot(
+                ctx, field_type, scope, binder_kind_pre_anf(),
+                "move-update-field", inputs.len(), flow_storage_temp(),
+                flow_initial_slot_empty())
+            let projection = move_update_projection_contract(
+                field, result_type, field_type,
+                flow_semantic_role_consume())
+            emit_instruction(ctx, make_flow_project(
+                next_instruction_ref(ctx), origin, projection,
+                committed_base, field_slot),
+                core_flow_role_control_dispatch(role_ordinal))
+            role_ordinal = role_ordinal + 1
+            inputs.push(field_slot)
+            input_locations.push(some(flow_aggregate_input(field)))
+        }
+
+        let constructor = core_expr_move_update_constructor(expr)
+        let input_types = inputs.map(fn(slot) { frozen_slot_type_at(ctx, slot) })
+        let roles = repeated_role(inputs.len(), flow_semantic_role_consume())
+        let constructor_kind = core_constructor_kind_tag(constructor)
+        let contract = match core_constructor_executable(constructor) {
+            some(executable) => {
+                let callable = callable_for(ctx, executable)
+                let callable_contract = core_callable_semantic_contract(callable)
+                make_flow_constructor_contract(
+                    executable,
+                    flow_call_contract_parameter_types(callable_contract),
+                    flow_call_contract_parameter_roles(callable_contract),
+                    input_locations, result_type,
+                    flow_call_contract_result_role(callable_contract),
+                    flow_call_contract_result_origin(callable_contract))
+            },
+            none => if constructor_kind == 0 || constructor_kind == 3 {
+                make_flow_record_aggregate_contract(
+                    inputs.len(), input_types, roles,
+                    input_locations, result_type)
+            } else {
+                panic("Flow lowering: move update variant lacks executable")
+            }
+        }
+        emit_instruction(ctx, make_flow_initialize(
+            next_instruction_ref(ctx), origin, contract, inputs, result),
+            core_flow_role_control_dispatch(role_ordinal))
         return true
     }
     if kind == 9 {

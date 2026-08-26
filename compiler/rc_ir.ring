@@ -230,8 +230,9 @@ fn validate_rc_operation(
         }
         return
     }
-    if place_projection.is_some() {
-        panic("RcIR: only DropOldPlace may carry a projection")
+    if place_projection.is_some() &&
+       !rc_op_kind_same(kind, rc_op_kind_take()) {
+        panic("RcIR: only Take/DropOldPlace may carry a projection")
     }
     if rc_op_kind_same(kind, rc_op_kind_drop()) ||
        rc_op_kind_same(kind, rc_op_kind_cleanup()) {
@@ -271,6 +272,19 @@ pub fn make_rc_take_at(
         source_slot: source,
         target_slot: target,
         place_projection: none
+    }
+}
+
+pub fn make_rc_take_place_at(
+    site: RcSemanticSite, base: SlotRef, target: SlotRef,
+    projection: FlowProjectionContract
+) -> RcOperation {
+    let copied = copy_flow_projection_contract(projection)
+    validate_rc_operation(rc_op_kind_take(), base, some(target), some(copied))
+    RcOperation {
+        site: site, kind: rc_op_kind_take(),
+        source_slot: base, target_slot: some(target),
+        place_projection: some(copied)
     }
 }
 

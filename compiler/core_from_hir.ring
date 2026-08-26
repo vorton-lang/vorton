@@ -266,6 +266,7 @@ use core_expr::{
     make_core_method_call_expr, make_core_effect_call_expr,
     make_core_system_call_expr, make_core_fail_raise_expr,
     make_core_project_expr, make_core_construct_expr,
+    make_core_move_update_expr,
     make_core_capture, make_core_lambda_expr, make_core_block_expr, make_core_if_expr,
     make_core_match_expr, make_core_try_catch_expr, make_core_handle_expr,
     make_core_slot_place, make_core_project_place,
@@ -3209,14 +3210,7 @@ fn core_field(value: HProjectionRef) -> CoreFieldRef {
 
 struct LowerUpdateInput {
     field: CoreFieldRef,
-    ty: CoreTypeRef,
     value: HExpr
-}
-
-struct LowerUpdateTemp {
-    field: CoreFieldRef,
-    ty: CoreTypeRef,
-    slot: SlotRef
 }
 
 fn lower_type_node(ctx: LowerCtx, ty: CoreTypeRef) -> FlowTypeNode {
@@ -3284,22 +3278,6 @@ fn lower_update_core_field(fact: FlowNominalFieldFact) -> CoreFieldRef {
     }
 }
 
-fn lower_update_temp_slot(
-    mut ctx: LowerCtx, ty: CoreTypeRef, label: Str
-) -> SlotRef {
-    let mut path = executable_prefix(ctx.owner)
-    path.push("core-update")
-    path.push(label)
-    path.push(ctx.binders.len().to_str())
-    let site = make_path_ref(
-        executable_owner(ctx.owner), path, path_role_synthetic())
-    let slot = make_synthetic_slot_ref(site)
-    ctx.binders.push(make_core_binder(
-        slot, ty, binder_kind_pre_anf(), site,
-        flow_own_storage(), false))
-    slot
-}
-
 fn lower_update_has_input(
     values: List<LowerUpdateInput>, field: CoreFieldRef
 ) -> Bool {
@@ -3310,7 +3288,7 @@ fn lower_named_update(
     mut ctx: LowerCtx, ty: CoreTypeRef, effects: CoreEffectSet,
     origin: OriginRef, spread: HExpr,
     inputs: List<LowerUpdateInput>, schema: List<FlowNominalFieldFact>,
-    constructor: CoreConstructorRef, source_span: Span
+    constructor: CoreConstructorRef
 ) -> CoreExpr {
     for input in inputs {
         if !schema.any(fn(fact) {
@@ -3321,77 +3299,15 @@ fn lower_named_update(
         }
     }
 
-    let empty_effects = make_core_effect_set([])
-    let mut statements: List<CoreStmt> = []
-    let mut temporaries: List<LowerUpdateTemp> = []
-
-    let spread_slot = lower_update_temp_slot(ctx, ty, "spread")
-    let spread_value = lower_expr(ctx, spread)
-    statements.push(make_core_bind_stmt(
-        spread_slot, spread_value, false,
-        fresh_origin(ctx, "update-spread-bind", source_span)))
-
-    for fact in schema {
-        let field = lower_update_core_field(fact)
-        if !lower_update_has_input(inputs, field) {
-            let field_ty = flow_nominal_field_type(fact)
-            let slot = lower_update_temp_slot(ctx, field_ty, "spread-field")
-            let base = make_core_read_expr(
-                ty, empty_effects,
-                fresh_origin(ctx, "update-spread-read", source_span),
-                spread_slot)
-            let projected = make_core_project_expr(
-                field_ty, empty_effects,
-                fresh_origin(ctx, "update-spread-project", source_span),
-                base, field, false)
-            statements.push(make_core_bind_stmt(
-                slot, projected, false,
-                fresh_origin(ctx, "update-spread-field-bind", source_span)))
-            temporaries.push(LowerUpdateTemp {
-                field: field, ty: field_ty, slot: slot
-            })
-        }
-    }
-
+    let base = lower_expr(ctx, spread)
+    let mut overrides: List<CoreFieldValue> = []
     for input in inputs {
-        let slot = lower_update_temp_slot(ctx, input.ty, "override")
-        let value = lower_expr(ctx, input.value)
-        statements.push(make_core_bind_stmt(
-            slot, value, false,
-            fresh_origin(ctx, "update-override-bind", source_span)))
-        temporaries.push(LowerUpdateTemp {
-            field: input.field, ty: input.ty, slot: slot
-        })
+        overrides.push(make_core_field_value(
+            input.field, lower_expr(ctx, input.value)))
     }
-
-    let mut fields: List<CoreFieldValue> = []
-    for fact in schema {
-        let field = lower_update_core_field(fact)
-        let temporary = match temporaries.find(fn(value) {
-                core_field_ref_same(value.field, field)
-            }) {
-            some(value) => value,
-            none => panic("Core assembly: update field has no exact value")
-        }
-        fields.push(make_core_field_value(
-            field, make_core_read_expr(
-                temporary.ty, empty_effects,
-                fresh_origin(ctx, "update-field-read", source_span),
-                temporary.slot)))
-    }
-    if fields.len() != schema.len() || temporaries.len() != schema.len() {
-        panic("Core assembly: update field census differs")
-    }
-
-    let constructed = make_core_construct_expr(
-        ty, empty_effects,
-        fresh_origin(ctx, "update-construct", source_span),
-        constructor, fields)
-    make_core_block_expr(
-        ty, effects, origin,
-        make_core_block(
-            statements, some(constructed),
-            fresh_origin(ctx, "update-block", source_span)))
+    make_core_move_update_expr(
+        ty, effects, origin, base, constructor,
+        schema.map(fn(fact) { lower_update_core_field(fact) }), overrides)
 }
 
 fn primitive_tag(op: BinOp) -> Int {
@@ -3605,15 +3521,12 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     for field in fields {
                         inputs.push(LowerUpdateInput {
                             field: make_core_nominal_field(field.field_ref),
-                            ty: type_fact_for(
-                                ctx.types, hexpr_type(field.value),
-                                ctx.module_key),
                             value: field.value
                         })
                     }
                     lower_named_update(
                         ctx, ty, effects, origin, base, inputs,
-                        schema, constructor, source_span)
+                        schema, constructor)
                 },
                 none => make_core_construct_expr(ty, effects, origin,
                     make_core_struct_constructor(
@@ -3639,15 +3552,12 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     for field in fields {
                         inputs.push(LowerUpdateInput {
                             field: make_core_variant_field(field.field_ref),
-                            ty: type_fact_for(
-                                ctx.types, hexpr_type(field.value),
-                                ctx.module_key),
                             value: field.value
                         })
                     }
                     lower_named_update(
                         ctx, ty, effects, origin, base, inputs,
-                        schema, constructor, source_span)
+                        schema, constructor)
                 },
                 none => make_core_construct_expr(ty, effects, origin,
                     constructor,

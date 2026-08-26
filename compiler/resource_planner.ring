@@ -74,9 +74,12 @@ use flow_ir::{
     flow_mutate_target_role, flow_mutate_value_role,
     flow_consume_source, flow_discard_source, flow_fail_raise_payload,
     flow_fail_raise_sink, flow_assign_rhs_temp, flow_assign_target,
+    flow_move_place_source, flow_move_place_target,
     flow_place_is_slot, flow_place_slot, flow_place_base,
-    flow_place_projection, flow_place_value_type, flow_call_target,
-    flow_call_arguments, flow_call_result, flow_project_base,
+    flow_place_projection, flow_place_value_type,
+    flow_projection_contract_result_type, flow_call_target,
+    flow_call_arguments, flow_call_result, flow_project_contract,
+    flow_project_base,
     flow_project_result, flow_project_is_partial, flow_capture_source,
     flow_capture_target, flow_capture_source_role,
     flow_capture_target_role, flow_scope_instruction_scope,
@@ -129,7 +132,8 @@ use resource_type_lfp::{
     PlannerEvent, make_planner_noop,
     make_planner_scope_exit, make_planner_initialize,
     make_planner_read, make_planner_mutate, make_planner_consume,
-    make_planner_discard, make_planner_assign, make_planner_call,
+    make_planner_discard, make_planner_assign, make_planner_move_place,
+    make_planner_call,
     make_planner_project, make_planner_capture, PlannerEdge,
     make_planner_edge, PlannerTerminatorUse, make_planner_terminator_use,
     PlannerBlock, make_planner_block, PlannerBody, make_planner_body}
@@ -571,11 +575,14 @@ fn planner_event_value_from_flow(
             result)
     }
     if tag == 7 {
+        let contract = flow_project_contract(instruction)
         return make_planner_project(
             step, operands,
             flow_slot_index(slots, flow_project_base(instruction)),
             flow_slot_index(slots, flow_project_result(instruction)),
-            !flow_project_is_partial(instruction))
+            contract,
+            core_type_ref_index(flow_projection_contract_result_type(contract)),
+            flow_project_is_partial(instruction))
     }
     if tag == 8 {
         let source_role = flow_capture_source_role(instruction)
@@ -604,6 +611,12 @@ fn planner_event_value_from_flow(
             flow_slot_index(slots, flow_fail_raise_payload(instruction)),
             true, some(flow_slot_index(
                 slots, flow_fail_raise_sink(instruction))))
+    }
+    if tag == 12 {
+        return make_planner_move_place(
+            step, operands,
+            planner_place_from_flow(flow_move_place_source(instruction), slots),
+            flow_slot_index(slots, flow_move_place_target(instruction)))
     }
     panic("ResourcePlanner: unknown FlowIR instruction kind")
 }

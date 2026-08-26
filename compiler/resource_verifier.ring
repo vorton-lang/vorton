@@ -106,6 +106,7 @@ use resource_certificate::{
     slot_reason_take_target, slot_reason_drop, slot_reason_cleanup,
     slot_reason_assign_scalar, slot_reason_call_result,
     slot_reason_scope_end, slot_reason_drop_projected_old,
+    slot_reason_take_projected_source,
     slot_transition_reason_tag, slot_transition_witness_slot_index,
     slot_transition_witness_before, slot_transition_witness_after,
     slot_transition_witness_reason}
@@ -420,6 +421,9 @@ fn verifier_event_overwrites_slot(
         PlannerEventValue::AssignValue { rhs_temp, target } =>
             slot == rhs_temp || (planner_place_is_slot(target) &&
                 slot == planner_place_slot(target)),
+        PlannerEventValue::MovePlaceValue { source, target } =>
+            slot == target || (planner_place_is_slot(source) &&
+                slot == planner_place_slot(source)),
         PlannerEventValue::CallValue { result_slot, .. } => match result_slot {
             some(value) => slot == value,
             none => false
@@ -595,6 +599,27 @@ fn add_expected_event_constraints(
                 result.push(make_source_constraint_spec(
                     site, RULE_RESULT_OWNED_BODY, 0, false,
                     source_body_owned(body, block_index, next, target_slot),
+                [source_body_reach(body, block_index)]))
+            }
+        },
+        PlannerEventValue::MovePlaceValue { source, target } => {
+            let source_slot = if planner_place_is_slot(source) {
+                planner_place_slot(source)
+            } else { planner_place_base(source) }
+            let mut parameter = 0
+            while parameter < parameter_count {
+                result.push(make_source_constraint_spec(
+                    site, RULE_RESULT_ORIGIN_COPY, 0, false,
+                    source_body_origin(body, block_index, next,
+                        target, parameter),
+                    [source_body_origin(body, block_index, boundary,
+                        source_slot, parameter)]))
+                parameter = parameter + 1
+            }
+            if body.slots.get(target).unwrap().owns_storage {
+                result.push(make_source_constraint_spec(
+                    site, RULE_RESULT_OWNED_BODY, 0, false,
+                    source_body_owned(body, block_index, next, target),
                     [source_body_reach(body, block_index)]))
             }
         },
@@ -704,6 +729,9 @@ fn verifier_event_demand_slot_defined(
         PlannerEventValue::AssignValue { rhs_temp, target } =>
             slot == rhs_temp || (planner_place_is_slot(target) &&
                 slot == planner_place_slot(target)),
+        PlannerEventValue::MovePlaceValue { source, target } =>
+            slot == target || (planner_place_is_slot(source) &&
+                slot == planner_place_slot(source)),
         PlannerEventValue::CallValue { result_slot, .. } => match result_slot {
             some(value) => slot == value,
             none => false
@@ -785,6 +813,18 @@ fn append_expected_event_demand_constraints(
                     planner_place_slot(target)
                 } else { planner_place_base(target) },
                 make_transfer_demand(param_mode_mut_borrow(), false))
+        },
+        PlannerEventValue::MovePlaceValue { source, target } => {
+            let source_slot = if planner_place_is_slot(source) {
+                planner_place_slot(source)
+            } else { planner_place_base(source) }
+            append_expected_local_floor(
+                result, site, body, block_index, boundary, source_slot,
+                make_transfer_demand(param_mode_own(), true))
+            append_expected_local_copy(
+                result, site, RULE_LOCAL_READ, body,
+                block_index, boundary, source_slot,
+                block_index, next, target)
         },
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
@@ -1279,6 +1319,10 @@ fn verifier_solved_event_decision(
                 planner_event_operand(event, 1),
                 make_transfer_demand(param_mode_mut_borrow(), false)))
         },
+        PlannerEventValue::MovePlaceValue { .. } =>
+            transfers.push(make_transfer_decision(
+                planner_event_operand(event, 0),
+                make_transfer_demand(param_mode_own(), true))),
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
             result_owned: lower_owned, result_slot, ..
@@ -2606,6 +2650,33 @@ fn verify_event_transition_contract(
             }
             require_transition_count(after, 0, "Assign after")
         },
+        PlannerEventValue::MovePlaceValue { source, target } => {
+            let source_slot = if planner_place_is_slot(source) {
+                planner_place_slot(source)
+            } else { planner_place_base(source) }
+            require_transition_count(before, 1, "MovePlace source")
+            require_transition(
+                before.get(0).unwrap(), source_slot,
+                if planner_place_is_slot(source) {
+                    demand_source_transition_reason(
+                        body, solved, source_slot,
+                        verifier_decided_transfer(body, event, 0).demand)
+                } else { slot_reason_take_projected_source() },
+                "MovePlace source")
+            let type_index = if planner_place_is_slot(source) {
+                body.slots.get(source_slot).unwrap().type_index
+            } else { planner_place_value_type(source) }
+            let needs_cleanup = verifier_logical_shape_may_take(
+                    solved.logical_shapes.get(type_index).unwrap()) ||
+                verifier_physical_shape_may_drop(
+                    solved.physical_shapes.get(type_index).unwrap())
+            require_transition_count(semantic, 1, "MovePlace target")
+            require_transition(
+                semantic.get(0).unwrap(), target,
+                if needs_cleanup { slot_reason_take_target() }
+                else { slot_reason_assign_scalar() }, "MovePlace target")
+            require_transition_count(after, 0, "MovePlace after")
+        },
         PlannerEventValue::CallValue {
             callable_indices, argument_demands, result_owned,
             argument_slots, result_slot, ..
@@ -2653,19 +2724,31 @@ fn verify_event_transition_contract(
             }
         },
         PlannerEventValue::ProjectValue {
-            source, target, whole_slot
+            source, target, value_type_index, partial, ..
         } => {
             let demand = verifier_decided_transfer(body, event, 0).demand
-            require_transition_count(before, 1, "Project source")
-            require_transition(
-                before.get(0).unwrap(), source,
-                demand_source_transition_reason(body, solved, source, demand),
+            let needs_cleanup = verifier_logical_shape_may_take(
+                    solved.logical_shapes.get(value_type_index).unwrap()) ||
+                verifier_physical_shape_may_drop(
+                    solved.physical_shapes.get(value_type_index).unwrap())
+            require_transition_count(
+                before, if partial && !needs_cleanup { 0 } else { 1 },
                 "Project source")
+            if before.len() == 1 {
+                require_transition(
+                    before.get(0).unwrap(), source,
+                    if partial { slot_reason_take_projected_source() }
+                    else { demand_source_transition_reason(
+                        body, solved, source, demand) },
+                    "Project source")
+            }
             require_transition_count(semantic, 1, "Project target")
             require_transition(
                 semantic.get(0).unwrap(), target,
-                transfer_target_transition_reason(
-                    body, solved, source, target, demand),
+                if partial && needs_cleanup { slot_reason_take_target() }
+                else if partial { slot_reason_assign_scalar() }
+                else { transfer_target_transition_reason(
+                    body, solved, source, target, demand) },
                 "Project target")
             require_transition_count(after, 0, "Project after")
         },
@@ -2883,6 +2966,38 @@ fn verify_event_operation_contract(
                 }
             }
         },
+        PlannerEventValue::MovePlaceValue { source, target } => {
+            if after.len() != 0 || before.len() != 1 {
+                panic("ResourcePlanner verifier: MovePlace Take is absent")
+            }
+            let operation = before.get(0).unwrap()
+            if rc_semantic_site_operand_ordinal(
+                    rc_operation_site(operation)) != 0 ||
+               !rc_op_kind_same(
+                    rc_operation_kind(operation), rc_op_kind_take()) {
+                panic("ResourcePlanner verifier: MovePlace operation differs")
+            }
+            let source_slot = if planner_place_is_slot(source) {
+                planner_place_slot(source)
+            } else { planner_place_base(source) }
+            verify_operation_slots_exact(
+                operation, body.slots.get(source_slot).unwrap().reference,
+                some(body.slots.get(target).unwrap().reference))
+            let actual_projection = rc_operation_place_projection(operation)
+            if planner_place_is_slot(source) {
+                if actual_projection.is_some() {
+                    panic("ResourcePlanner verifier: slot MovePlace has projection")
+                }
+            } else {
+                match actual_projection {
+                    some(value) => if !flow_projection_contract_same(
+                            value, planner_place_projection(source)) {
+                        panic("ResourcePlanner verifier: MovePlace projection drifted")
+                    },
+                    none => panic("ResourcePlanner verifier: MovePlace projection absent")
+                }
+            }
+        },
         PlannerEventValue::CallValue {
             argument_slots, result_slot, ..
         } => {
@@ -2909,7 +3024,9 @@ fn verify_event_operation_contract(
                 verify_operation_slots_exact(operation, result, none)
             }
         },
-        PlannerEventValue::ProjectValue { source, target, .. } => {
+        PlannerEventValue::ProjectValue {
+            source, target, projection, partial, ..
+        } => {
             if after.len() != 0 {
                 panic("ResourcePlanner verifier: projection/capture has after-resource op")
             }
@@ -2921,6 +3038,17 @@ fn verify_event_operation_contract(
                 verify_operation_slots_exact(
                     operation, body.slots.get(source).unwrap().reference,
                     some(body.slots.get(target).unwrap().reference))
+                if partial {
+                    match rc_operation_place_projection(operation) {
+                        some(value) => if !flow_projection_contract_same(
+                                value, projection) {
+                            panic("ResourcePlanner verifier: projected Take identity drifted")
+                        },
+                        none => panic("ResourcePlanner verifier: projected Take is untyped")
+                    }
+                } else if rc_operation_place_projection(operation).is_some() {
+                    panic("ResourcePlanner verifier: ordinary Project has place Take")
+                }
             }
         },
         PlannerEventValue::CaptureValue { source, target, .. } => {

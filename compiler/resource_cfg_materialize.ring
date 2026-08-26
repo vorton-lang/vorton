@@ -25,7 +25,8 @@ use resource_model::{
 use rc_ir::{
     RcBody, RcBlock, RcStep, RcEdge, RcSlot, RcOperation, RcSemanticSite,
     make_rc_body, make_rc_block, make_rc_step, make_rc_edge, make_rc_slot,
-    make_rc_clone_at, make_rc_take_at, make_rc_drop_at, make_rc_cleanup_at,
+    make_rc_clone_at, make_rc_take_at, make_rc_take_place_at,
+    make_rc_drop_at, make_rc_cleanup_at,
     make_rc_drop_old_place_at, make_rc_instruction_site,
     make_rc_terminator_site, make_rc_edge_site,
     rc_site_before_instruction, rc_site_after_instruction}
@@ -41,7 +42,8 @@ use resource_certificate::{
     slot_reason_take_source, slot_reason_take_target,
     slot_reason_drop, slot_reason_cleanup,
     slot_reason_assign_scalar, slot_reason_call_result,
-    slot_reason_scope_end, slot_reason_drop_projected_old}
+    slot_reason_scope_end, slot_reason_drop_projected_old,
+    slot_reason_take_projected_source}
 use resource_type_lfp::{
     PlannerBody,
     PlannerEdge, PlannerEvent, PlannerEventValue, PlannerSlot, PlannerPlace,
@@ -400,6 +402,44 @@ fn apply_event_abstract(
             }
             states.set(rhs_temp, slot_flow_moved())
         },
+        PlannerEventValue::MovePlaceValue { source, target } => {
+            let target_before = states.get(target).unwrap()
+            if slot_flow_is_live(target_before) ||
+               slot_flow_is_unreachable(target_before) {
+                panic("ResourcePlanner: MovePlace target is not empty")
+            }
+            let source_slot = if planner_place_is_slot(source) {
+                planner_place_slot(source)
+            } else { planner_place_base(source) }
+            if planner_place_is_slot(source) {
+                apply_demand_abstract(
+                    body, event, 0, source_slot,
+                    decided_transfer(body, event, 0).demand,
+                    logical_shapes, physical_shapes, states,
+                    collect, findings)
+            } else {
+                let _ = preflight_live_place(
+                    body, event, 0, source,
+                    states.get(source_slot).unwrap(), collect, findings)
+                if collect {
+                    append_resource_finding(
+                        findings, make_place_resource_diagnostic(
+                            event.step, 0, source,
+                            states.get(source_slot).unwrap()))
+                }
+            }
+            let type_index = if planner_place_is_slot(source) {
+                body.slots.get(source_slot).unwrap().type_index
+            } else { planner_place_value_type(source) }
+            require_concrete_resource_shape(
+                logical_shapes.get(type_index).unwrap(),
+                physical_shapes.get(type_index).unwrap(), "MovePlace")
+            states.set(target, slot_flow_live_owner(
+                body.slots.get(target).unwrap().owns_storage &&
+                type_requires_cleanup(
+                    logical_shapes.get(type_index).unwrap(),
+                    physical_shapes.get(type_index).unwrap())))
+        },
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
             result_owned, result_type_index,
@@ -454,27 +494,36 @@ fn apply_event_abstract(
             }
         },
         PlannerEventValue::ProjectValue {
-            source, target, whole_slot
+            source, target, value_type_index, partial, ..
         } => {
             let before_target = states.get(target).unwrap()
             if slot_flow_is_live(before_target) ||
                slot_flow_is_unreachable(before_target) {
                 panic("ResourcePlanner: projection overwrites live storage")
             }
-            let type_index = body.slots.get(source).unwrap().type_index
-            let logical = logical_shapes.get(type_index).unwrap()
-            if !whole_slot && logical_shape_may_take(logical) {
-                panic("ResourcePlanner: partial move of may-own projection")
+            let demand = decided_transfer(body, event, 0).demand
+            if partial {
+                if !param_mode_same(
+                        transfer_demand_mode(demand), param_mode_own()) {
+                    panic("ResourcePlanner: partial projection is not an Own transfer")
+                }
+                let _ = preflight_live_slot(
+                    body, event, 0, source, states.get(source).unwrap(),
+                    collect, findings)
+            } else {
+                apply_demand_abstract(
+                    body, event, 0, source, demand,
+                    logical_shapes, physical_shapes, states, collect, findings)
             }
-            apply_demand_abstract(
-                body, event, 0, source,
-                decided_transfer(body, event, 0).demand,
-                logical_shapes, physical_shapes, states, collect, findings)
+            require_concrete_resource_shape(
+                logical_shapes.get(value_type_index).unwrap(),
+                physical_shapes.get(value_type_index).unwrap(), "projection value")
             states.set(target, slot_flow_live_owner(
-                transfer_target_cleanup_owner(
-                    body, source, target,
-                    decided_transfer(body, event, 0).demand,
-                    logical_shapes, physical_shapes)))
+                body.slots.get(target).unwrap().owns_storage &&
+                param_mode_same(transfer_demand_mode(demand), param_mode_own()) &&
+                type_requires_cleanup(
+                    logical_shapes.get(value_type_index).unwrap(),
+                    physical_shapes.get(value_type_index).unwrap())))
         },
         PlannerEventValue::CaptureValue { source, target, demand } => {
             let before_target = states.get(target).unwrap()
@@ -1057,6 +1106,42 @@ fn materialize_event(
                     })
             }
         },
+        PlannerEventValue::MovePlaceValue { source, target } => {
+            let target_before = states.get(target).unwrap()
+            if slot_flow_is_live(target_before) ||
+               slot_flow_is_unreachable(target_before) {
+                panic("ResourcePlanner: MovePlace target is not empty")
+            }
+            let source_slot = if planner_place_is_slot(source) {
+                planner_place_slot(source)
+            } else { planner_place_base(source) }
+            let type_index = if planner_place_is_slot(source) {
+                body.slots.get(source_slot).unwrap().type_index
+            } else { planner_place_value_type(source) }
+            let logical = solved.logical_shapes.get(type_index).unwrap()
+            let physical = solved.physical_shapes.get(type_index).unwrap()
+            require_concrete_resource_shape(logical, physical, "MovePlace")
+            if planner_place_is_slot(source) {
+                apply_demand_materialized(
+                    body, source_slot,
+                    decided_transfer(body, event, 0).demand,
+                    make_rc_instruction_site(
+                        instruction, rc_site_before_instruction(), 0),
+                    solved, some(target), states,
+                    before_ops, before_transitions)
+            } else {
+                panic("ResourcePlanner: projected move spread crossed diagnostics")
+            }
+            let target_state = slot_flow_live_owner(
+                body.slots.get(target).unwrap().owns_storage &&
+                type_requires_cleanup(logical, physical))
+            states.set(target, target_state)
+            push_transition(
+                semantic_transitions, target, target_before, target_state,
+                if type_requires_cleanup(logical, physical) {
+                    slot_reason_take_target()
+                } else { slot_reason_assign_scalar() })
+        },
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
             result_owned, result_type_index,
@@ -1136,7 +1221,7 @@ fn materialize_event(
             }
         },
         PlannerEventValue::ProjectValue {
-            source, target, whole_slot
+            source, target, projection, value_type_index, partial
         } => {
             let source_before = states.get(source).unwrap()
             let target_before = states.get(target).unwrap()
@@ -1145,30 +1230,42 @@ fn materialize_event(
                slot_flow_is_unreachable(target_before) {
                 panic("ResourcePlanner: projection overwrites live storage")
             }
-            let type_index = body.slots.get(source).unwrap().type_index
-            let logical = solved.logical_shapes.get(type_index).unwrap()
-            if !whole_slot && logical_shape_may_take(logical) {
-                panic("ResourcePlanner: partial move of may-own projection")
-            }
             let demand = decided_transfer(body, event, 0).demand
-            apply_demand_materialized(
-                body, source, demand,
-                make_rc_instruction_site(
-                    instruction, rc_site_before_instruction(), 0),
-                solved, some(target),
-                states, before_ops, before_transitions)
+            let logical = solved.logical_shapes.get(value_type_index).unwrap()
+            let physical = solved.physical_shapes.get(value_type_index).unwrap()
+            require_concrete_resource_shape(logical, physical, "projection value")
+            if partial {
+                if !param_mode_same(
+                        transfer_demand_mode(demand), param_mode_own()) {
+                    panic("ResourcePlanner: partial projection is not an Own transfer")
+                }
+                if type_requires_cleanup(logical, physical) {
+                    before_ops.push(make_rc_take_place_at(
+                        make_rc_instruction_site(
+                            instruction, rc_site_before_instruction(), 0),
+                        rc_slot_for(body, source), rc_slot_for(body, target),
+                        projection))
+                    push_transition(
+                        before_transitions, source, source_before,
+                        source_before, slot_reason_take_projected_source())
+                }
+            } else {
+                apply_demand_materialized(
+                    body, source, demand,
+                    make_rc_instruction_site(
+                        instruction, rc_site_before_instruction(), 0),
+                    solved, some(target),
+                    states, before_ops, before_transitions)
+            }
             let before_target_write = states.get(target).unwrap()
             let target_state = slot_flow_live_owner(
-                transfer_target_cleanup_owner(
-                    body, source, target, demand,
-                    solved.logical_shapes, solved.physical_shapes))
+                body.slots.get(target).unwrap().owns_storage &&
+                param_mode_same(transfer_demand_mode(demand), param_mode_own()) &&
+                type_requires_cleanup(logical, physical))
             states.set(target, target_state)
-            let target_reason = if logical_shape_may_take(logical) && whole_slot {
+            let target_reason = if partial &&
+                    type_requires_cleanup(logical, physical) {
                 slot_reason_take_target()
-            } else if physical_shape_may_drop(
-                    solved.physical_shapes.get(type_index).unwrap()) &&
-                      body.slots.get(target).unwrap().owns_storage {
-                slot_reason_clone_target()
             } else {
                 slot_reason_assign_scalar()
             }

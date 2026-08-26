@@ -29,6 +29,7 @@ use rc_ir::{
     rc_edge_target_block, rc_edge_cleanup,
     rc_operation_site, rc_operation_kind,
     rc_operation_source, rc_operation_target,
+    rc_operation_place_projection,
     rc_semantic_site_is_instruction, rc_semantic_site_instruction,
     rc_semantic_site_block, rc_semantic_site_terminator_kind,
     rc_semantic_site_successor_ordinal, rc_semantic_site_placement,
@@ -785,7 +786,8 @@ const SLOT_REASON_CALL_RESULT: Int = 11
 const SLOT_REASON_JOIN: Int = 12
 const SLOT_REASON_SCOPE_END: Int = 13
 const SLOT_REASON_DROP_PROJECTED_OLD: Int = 14
-const SLOT_REASON_COUNT: Int = 15
+const SLOT_REASON_TAKE_PROJECTED_SOURCE: Int = 15
+const SLOT_REASON_COUNT: Int = 16
 
 pub struct SlotTransitionReason { tag: Int }
 
@@ -814,6 +816,9 @@ pub fn slot_reason_call_result() -> SlotTransitionReason { slot_transition_reaso
 pub fn slot_reason_scope_end() -> SlotTransitionReason { slot_transition_reason_from_tag(SLOT_REASON_SCOPE_END) }
 pub fn slot_reason_drop_projected_old() -> SlotTransitionReason {
     slot_transition_reason_from_tag(SLOT_REASON_DROP_PROJECTED_OLD)
+}
+pub fn slot_reason_take_projected_source() -> SlotTransitionReason {
+    slot_transition_reason_from_tag(SLOT_REASON_TAKE_PROJECTED_SOURCE)
 }
 
 pub struct SlotTransitionWitness {
@@ -940,6 +945,11 @@ fn verify_slot_transition(value: SlotTransitionWitness) {
         if !slot_flow_is_live(before) ||
            !slot_flow_same(before, after) {
             panic("resource certificate: projected overwrite changed base ownership")
+        }
+    } else if transition_reason_is(reason, SLOT_REASON_TAKE_PROJECTED_SOURCE) {
+        if !slot_flow_is_live(before) ||
+           !slot_flow_same(before, after) {
+            panic("resource certificate: projected Take changed base ownership")
         }
     }
 }
@@ -1749,7 +1759,8 @@ fn reason_is_resource_source(reason: SlotTransitionReason) -> Bool {
     let tag = slot_transition_reason_tag(reason)
     tag == SLOT_REASON_CLONE_SOURCE || tag == SLOT_REASON_TAKE_SOURCE ||
         tag == SLOT_REASON_DROP || tag == SLOT_REASON_CLEANUP ||
-        tag == SLOT_REASON_DROP_PROJECTED_OLD
+        tag == SLOT_REASON_DROP_PROJECTED_OLD ||
+        tag == SLOT_REASON_TAKE_PROJECTED_SOURCE
 }
 
 fn resource_source_transitions(
@@ -1771,7 +1782,9 @@ fn operation_matches_source_reason(
         return transition_reason_is(reason, SLOT_REASON_CLONE_SOURCE)
     }
     if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_take()) {
-        return transition_reason_is(reason, SLOT_REASON_TAKE_SOURCE)
+        return if rc_operation_place_projection(operation).is_some() {
+            transition_reason_is(reason, SLOT_REASON_TAKE_PROJECTED_SOURCE)
+        } else { transition_reason_is(reason, SLOT_REASON_TAKE_SOURCE) }
     }
     if rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_drop()) {
         return transition_reason_is(reason, SLOT_REASON_DROP)

@@ -824,6 +824,12 @@ fn copy_field_values(values: List<CoreFieldValue>) -> List<CoreFieldValue> {
     result
 }
 
+fn copy_core_field_refs(values: List<CoreFieldRef>) -> List<CoreFieldRef> {
+    let mut result: List<CoreFieldRef> = []
+    for value in values { result.push(value) }
+    result
+}
+
 // ============================================================
 // 0.1 literals, primitive operations, and patterns
 // ============================================================
@@ -1106,6 +1112,12 @@ enum CoreExprValue {
         constructor: CoreConstructorRef,
         fields: List<CoreFieldValue>
     },
+    MoveUpdateExprValue {
+        base: CoreExpr,
+        constructor: CoreConstructorRef,
+        schema: List<CoreFieldRef>,
+        overrides: List<CoreFieldValue>
+    },
     LambdaExprValue {
         executable: ExecutableRef,
         captures: List<CoreCapture>,
@@ -1359,6 +1371,18 @@ pub fn make_core_construct_expr(
     make_core_expr(ty, effects, origin,
         CoreExprValue::ConstructExprValue {
             constructor: constructor, fields: copy_field_values(fields)
+        })
+}
+pub fn make_core_move_update_expr(
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    base: CoreExpr, constructor: CoreConstructorRef,
+    schema: List<CoreFieldRef>, overrides: List<CoreFieldValue>
+) -> CoreExpr {
+    make_core_expr(ty, effects, origin,
+        CoreExprValue::MoveUpdateExprValue {
+            base: base, constructor: constructor,
+            schema: copy_core_field_refs(schema),
+            overrides: copy_field_values(overrides)
         })
 }
 pub fn make_core_lambda_expr(
@@ -1642,7 +1666,8 @@ pub fn core_expr_kind_tag(value: CoreExpr) -> Int {
         CoreExprValue::TryCatchExprValue { .. } => 15,
         CoreExprValue::HandleExprValue { .. } => 16,
         CoreExprValue::CallableValueExprValue { .. } => 17,
-        CoreExprValue::FailRaiseExprValue { .. } => 18
+        CoreExprValue::FailRaiseExprValue { .. } => 18,
+        CoreExprValue::MoveUpdateExprValue { .. } => 19
     }
 }
 pub fn core_expr_literal(value: CoreExpr) -> CoreLiteral {
@@ -1786,6 +1811,32 @@ pub fn core_expr_constructor_fields(value: CoreExpr) -> List<CoreFieldValue> {
         CoreExprValue::ConstructExprValue { fields, .. } =>
             copy_field_values(fields),
         _ => panic("CoreHIR: expression is not Construct")
+    }
+}
+pub fn core_expr_move_update_base(value: CoreExpr) -> CoreExpr {
+    match value.value {
+        CoreExprValue::MoveUpdateExprValue { base, .. } => base,
+        _ => panic("CoreHIR: expression is not MoveUpdate")
+    }
+}
+pub fn core_expr_move_update_constructor(value: CoreExpr) -> CoreConstructorRef {
+    match value.value {
+        CoreExprValue::MoveUpdateExprValue { constructor, .. } => constructor,
+        _ => panic("CoreHIR: expression is not MoveUpdate")
+    }
+}
+pub fn core_expr_move_update_schema(value: CoreExpr) -> List<CoreFieldRef> {
+    match value.value {
+        CoreExprValue::MoveUpdateExprValue { schema, .. } =>
+            copy_core_field_refs(schema),
+        _ => panic("CoreHIR: expression is not MoveUpdate")
+    }
+}
+pub fn core_expr_move_update_overrides(value: CoreExpr) -> List<CoreFieldValue> {
+    match value.value {
+        CoreExprValue::MoveUpdateExprValue { overrides, .. } =>
+            copy_field_values(overrides),
+        _ => panic("CoreHIR: expression is not MoveUpdate")
     }
 }
 pub fn core_expr_lambda_executable(value: CoreExpr) -> ExecutableRef {
@@ -2429,6 +2480,51 @@ fn validate_expr_with_loop_depth(
             validate_expr_with_loop_depth(base, body, loop_depth),
         CoreExprValue::ConstructExprValue { constructor, fields } =>
             validate_constructor_fields(constructor, fields, body, loop_depth),
+        CoreExprValue::MoveUpdateExprValue {
+            base, constructor, schema, overrides
+        } => {
+            validate_expr_with_loop_depth(base, body, loop_depth)
+            for override_value in overrides {
+                validate_expr_with_loop_depth(
+                    override_value.value, body, loop_depth)
+                if !schema.any(fn(field) {
+                        core_field_ref_same(field, override_value.field)
+                    }) {
+                    panic("CoreHIR: move update override is outside schema")
+                }
+            }
+            let mut index = 0
+            while index < schema.len() {
+                let mut right = index + 1
+                while right < schema.len() {
+                    if core_field_ref_same(
+                            schema.get(index).unwrap(),
+                            schema.get(right).unwrap()) {
+                        panic("CoreHIR: move update schema repeats a field")
+                    }
+                    right = right + 1
+                }
+                index = index + 1
+            }
+            let mut override_index = 0
+            while override_index < overrides.len() {
+                let mut right = override_index + 1
+                while right < overrides.len() {
+                    if core_field_ref_same(
+                            overrides.get(override_index).unwrap().field,
+                            overrides.get(right).unwrap().field) {
+                        panic("CoreHIR: move update repeats an override")
+                    }
+                    right = right + 1
+                }
+                override_index = override_index + 1
+            }
+            match constructor.value {
+                CoreConstructorRefValue::StructConstructorValue { .. } |
+                CoreConstructorRefValue::VariantConstructorValue(_) => {},
+                _ => panic("CoreHIR: move update constructor is not nominal")
+            }
+        },
         CoreExprValue::LambdaExprValue {
             executable, captures, handled_captures
         } => {
@@ -2679,6 +2775,12 @@ fn collect_expr_effect_sets(
         CoreExprValue::ConstructExprValue { fields, .. } => {
             for field in fields { collect_expr_effect_sets(field.value, result) }
         },
+        CoreExprValue::MoveUpdateExprValue { base, overrides, .. } => {
+            collect_expr_effect_sets(base, result)
+            for field in overrides {
+                collect_expr_effect_sets(field.value, result)
+            }
+        },
         CoreExprValue::BlockExprValue(block) =>
             collect_block_effect_sets(block, result),
         CoreExprValue::IfExprValue { condition, then_block, else_block } => {
@@ -2779,6 +2881,12 @@ fn collect_core_expr_origins(value: CoreExpr, mut result: List<OriginRef>) {
             collect_core_expr_origins(base, result),
         CoreExprValue::ConstructExprValue { fields, .. } => {
             for field in fields { collect_core_expr_origins(field.value, result) }
+        },
+        CoreExprValue::MoveUpdateExprValue { base, overrides, .. } => {
+            collect_core_expr_origins(base, result)
+            for field in overrides {
+                collect_core_expr_origins(field.value, result)
+            }
         },
         CoreExprValue::BlockExprValue(block) =>
             collect_core_block_origins(block, result),
@@ -3132,6 +3240,18 @@ fn remap_core_expr_types(
                             field.value, mapping, module_key))
                 })
             },
+        CoreExprValue::MoveUpdateExprValue {
+            base, constructor, schema, overrides
+        } => CoreExprValue::MoveUpdateExprValue {
+            base: remap_core_expr_types(base, mapping, module_key),
+            constructor: constructor,
+            schema: copy_core_field_refs(schema),
+            overrides: overrides.map(fn(field) {
+                make_core_field_value(
+                    field.field, remap_core_expr_types(
+                        field.value, mapping, module_key))
+            })
+        },
         CoreExprValue::LambdaExprValue {
             executable, captures, handled_captures
         } =>
@@ -3732,6 +3852,68 @@ fn validate_construct_with_graph(
     }
 }
 
+fn validate_move_update_with_graph(
+    constructor: CoreConstructorRef, schema: List<CoreFieldRef>,
+    overrides: List<CoreFieldValue>, base_type: CoreTypeRef,
+    result_type: CoreTypeRef, graph: CoreTypeGraph
+) {
+    require_core_type_same(
+        base_type, result_type,
+        "CoreHIR: move update base/result type differs")
+    let node = core_type_graph_node(graph, result_type)
+    let mut expected: List<FlowNominalFieldFact> = []
+    match constructor.value {
+        CoreConstructorRefValue::StructConstructorValue {
+            owner, fields: contract_fields
+        } => {
+            if type_kind(graph, result_type) !=
+                    flow_type_kind_tag(flow_type_kind_struct()) ||
+               !symbol_ref_same(
+                    registered_nominal_ref_symbol(owner),
+                    flow_type_node_nominal(node)) {
+                panic("CoreHIR: move update struct owner/type differs")
+            }
+            for fact in flow_type_node_nominal_fields(node) {
+                if flow_field_identity_is_nominal(
+                        flow_nominal_field_identity(fact)) {
+                    expected.push(fact)
+                }
+            }
+            if contract_fields.len() != expected.len() {
+                panic("CoreHIR: move update struct contract arity differs")
+            }
+        },
+        CoreConstructorRefValue::VariantConstructorValue(variant) => {
+            if type_kind(graph, result_type) !=
+                    flow_type_kind_tag(flow_type_kind_enum()) ||
+               !symbol_ref_same(
+                    registered_nominal_ref_symbol(variant_ref_owner(variant)),
+                    flow_type_node_nominal(node)) {
+                panic("CoreHIR: move update variant owner/type differs")
+            }
+            expected = variant_flow_fields(node, variant)
+        },
+        _ => panic("CoreHIR: move update constructor is not nominal")
+    }
+    if schema.len() != expected.len() {
+        panic("CoreHIR: move update schema census differs")
+    }
+    let mut index = 0
+    while index < schema.len() {
+        if !core_field_matches_fact(
+                schema.get(index).unwrap(), expected.get(index).unwrap()) {
+            panic("CoreHIR: move update schema identity/order differs")
+        }
+        index = index + 1
+    }
+    for override_value in overrides {
+        require_core_type_same(
+            projection_result_type(override_value.field, result_type, graph),
+            core_expr_type(override_value.value),
+            "CoreHIR: move update override type differs")
+    }
+}
+
 fn validate_pattern_with_graph(
     pattern: CorePattern, expected_type: CoreTypeRef,
     body: CoreBody, graph: CoreTypeGraph
@@ -4210,6 +4392,32 @@ fn validate_expr_with_program(
                 },
                 none => if core_constructor_kind_tag(constructor) == 1 {
                     panic("CoreHIR: variant constructor has no exact executable")
+                }
+            }
+        },
+        CoreExprValue::MoveUpdateExprValue {
+            base, constructor, schema, overrides
+        } => {
+            validate_expr_with_program(
+                base, body, graph, callables,
+                impls, current_callable, loop_depth)
+            for field in overrides {
+                validate_expr_with_program(
+                    field.value, body, graph, callables,
+                    impls, current_callable, loop_depth)
+            }
+            validate_move_update_with_graph(
+                constructor, schema, overrides, core_expr_type(base),
+                value.ty, graph)
+            match constructor.executable {
+                some(executable) => {
+                    if core_constructor_kind_tag(constructor) != 1 {
+                        panic("CoreHIR: move update structural constructor has executable")
+                    }
+                    let _ = core_callable_for(callables, executable)
+                },
+                none => if core_constructor_kind_tag(constructor) == 1 {
+                    panic("CoreHIR: move update variant constructor has no executable")
                 }
             }
         },

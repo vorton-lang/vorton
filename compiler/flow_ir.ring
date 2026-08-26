@@ -1379,6 +1379,7 @@ enum FlowInstructionValue {
     DiscardValue { source: SlotRef },
     FailRaiseValue { payload: SlotRef, sink: SlotRef },
     AssignValue { rhs_temp: SlotRef, target: FlowPlaceRef },
+    MovePlaceValue { source: FlowPlaceRef, target: SlotRef },
     CallValue {
         target: FlowCallTarget, arguments: List<SlotRef>,
         evidence: List<FlowEvidenceRef>,
@@ -1504,6 +1505,22 @@ pub fn make_flow_assign(
     }
 }
 
+pub fn make_flow_move_place(
+    reference: FlowInstructionRef, origin: OriginRef,
+    source: FlowPlaceRef, target: SlotRef
+) -> FlowInstruction {
+    if flow_place_is_slot(source) &&
+       slot_ref_same(flow_place_slot(source), target) {
+        panic("FlowIR: MovePlace source and target alias")
+    }
+    FlowInstruction {
+        reference: reference, origin: origin,
+        value: FlowInstructionValue::MovePlaceValue {
+            source: copy_flow_place(source), target: target
+        }
+    }
+}
+
 pub fn make_flow_call(
     reference: FlowInstructionRef, origin: OriginRef,
     target: FlowCallTarget, arguments: List<SlotRef>,
@@ -1594,7 +1611,8 @@ pub fn flow_instruction_kind_tag(value: FlowInstruction) -> Int {
         FlowInstructionValue::CaptureValue { .. } => 8,
         FlowInstructionValue::ScopeEnterValue { .. } => 9,
         FlowInstructionValue::ScopeExitValue { .. } => 10,
-        FlowInstructionValue::FailRaiseValue { .. } => 11
+        FlowInstructionValue::FailRaiseValue { .. } => 11,
+        FlowInstructionValue::MovePlaceValue { .. } => 12
     }
 }
 
@@ -1689,6 +1707,19 @@ pub fn flow_assign_target(value: FlowInstruction) -> FlowPlaceRef {
         FlowInstructionValue::AssignValue { target, .. } =>
             copy_flow_place(target),
         _ => panic("FlowIR: instruction is not Assign")
+    }
+}
+pub fn flow_move_place_source(value: FlowInstruction) -> FlowPlaceRef {
+    match value.value {
+        FlowInstructionValue::MovePlaceValue { source, .. } =>
+            copy_flow_place(source),
+        _ => panic("FlowIR: instruction is not MovePlace")
+    }
+}
+pub fn flow_move_place_target(value: FlowInstruction) -> SlotRef {
+    match value.value {
+        FlowInstructionValue::MovePlaceValue { target, .. } => target,
+        _ => panic("FlowIR: instruction is not MovePlace")
     }
 }
 pub fn flow_call_target(value: FlowInstruction) -> FlowCallTarget {
@@ -1942,6 +1973,12 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
                     flow_semantic_role_mutate()))
             }
         },
+        FlowInstructionValue::MovePlaceValue { source, .. } =>
+            result.push(make_instruction_operand(
+                value, 0,
+                if flow_place_is_slot(source) { flow_place_slot(source) }
+                else { flow_place_base(source) },
+                flow_semantic_role_consume())),
         FlowInstructionValue::CallValue {
             target, arguments, handled_evidence, ..
         } => {
@@ -1990,6 +2027,9 @@ pub fn flow_instruction_results(value: FlowInstruction) -> List<FlowResultRef> {
                     value, 0, flow_place_slot(target),
                     make_aliasing_flow_value_origin([0]))]
             } else { [] },
+        FlowInstructionValue::MovePlaceValue { target, .. } =>
+            [make_instruction_result(
+                value, 0, target, make_aliasing_flow_value_origin([0]))],
         FlowInstructionValue::CallValue { target, result, .. } => match result {
             some(slot) => [make_instruction_result(
                 value, 0, slot,
@@ -2831,6 +2871,9 @@ fn copy_instructions(values: List<FlowInstruction>) -> List<FlowInstruction> {
             FlowInstructionValue::AssignValue { rhs_temp, target } =>
                 make_flow_assign(
                     value.reference, value.origin, rhs_temp, target),
+            FlowInstructionValue::MovePlaceValue { source, target } =>
+                make_flow_move_place(
+                    value.reference, value.origin, source, target),
             FlowInstructionValue::CallValue {
                 target, arguments, evidence, handled_evidence, result
             } =>
@@ -3754,6 +3797,19 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
                 panic("FlowIR: Assign RHS is not an explicit temp slot")
             }
         },
+        FlowInstructionValue::MovePlaceValue { source, target } => {
+            if flow_place_is_slot(source) {
+                let _ = slot_for_ref(body.slots, flow_place_slot(source))
+            } else {
+                let _ = slot_for_ref(body.slots, flow_place_base(source))
+            }
+            let target_slot = slot_for_ref(body.slots, target)
+            if !flow_storage_class_same(
+                    target_slot.storage, flow_storage_temp()) ||
+               target_slot.initial_state.tag != FLOW_SLOT_EMPTY {
+                panic("FlowIR: MovePlace target is not an empty temp")
+            }
+        },
         FlowInstructionValue::CallValue {
             target, arguments, evidence, handled_evidence, result
         } => {
@@ -4542,6 +4598,11 @@ fn validate_typed_instructions(
                             slot_type_for(body, rhs_temp),
                             flow_place_type(body, type_nodes, callables, target),
                             "FlowIR: Assign RHS/target type differs"),
+                    FlowInstructionValue::MovePlaceValue { source, target } =>
+                        require_same_flow_type(
+                            flow_place_type(body, type_nodes, callables, source),
+                            slot_type_for(body, target),
+                            "FlowIR: MovePlace source/target type differs"),
                     FlowInstructionValue::CaptureValue {
                         source, target, ..
                     } => require_same_flow_type(
@@ -5030,6 +5091,9 @@ fn encode_instruction(value: FlowInstruction) -> Str {
         },
         FlowInstructionValue::AssignValue { rhs_temp, target } => {
             parts.push(encode_slot(rhs_temp)); parts.push(encode_flow_place(target))
+        },
+        FlowInstructionValue::MovePlaceValue { source, target } => {
+            parts.push(encode_flow_place(source)); parts.push(encode_slot(target))
         },
         FlowInstructionValue::CallValue {
             target, arguments, evidence, handled_evidence, result

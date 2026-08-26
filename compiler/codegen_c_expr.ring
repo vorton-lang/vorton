@@ -235,7 +235,31 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
                     none => panic(
                         "C codegen: Take source has no exact physical slot")
                 },
-                _ => panic("C codegen: Take source is not a projected slot")
+                HExpr::FieldAccess { receiver, field, access_kind, .. } => {
+                    reject_c_error_field_access(access_kind)
+                    let recv_type = hexpr_type(receiver)
+                    let recv_val = gen_c_expr(ctx, receiver)
+                    let type_name = match recv_type {
+                        Type::StructType { name, .. } => name,
+                        Type::EnumType { name, .. } => name,
+                        _ => panic("C codegen: projected Take base is not nominal")
+                    }
+                    let info = ctx.struct_types.get(type_name).unwrap_or_else(fn() {
+                        panic("C codegen: projected Take nominal is unregistered")
+                    })
+                    let mut field_index = -1
+                    for index in 0..info.field_names.len() {
+                        if info.field_names[index] == field { field_index = index }
+                    }
+                    if field_index < 0 {
+                        panic("C codegen: projected Take field is absent")
+                    }
+                    let saved = fresh_tmp(ctx)
+                    c_emit(ctx, "${saved} = ((void**)${recv_val})[${field_index}];")
+                    c_emit(ctx, "((void**)${recv_val})[${field_index}] = RING_NULL;")
+                    saved
+                },
+                _ => panic("C codegen: Take source is not an exact slot/place")
             }
         },
         HExpr::UnsafeBlock { body, .. } => gen_c_expr(ctx, body),

@@ -82,10 +82,12 @@ use hir::{
 }
 use flow_ir::{
     FlowProgram, FlowBody, FlowInstruction, FlowSemanticStepRef,
+    FlowProjectionContract,
     make_flow_instruction_step_ref, make_flow_terminator_step_ref,
     flow_semantic_step_same, flow_semantic_step_is_instruction,
     flow_semantic_step_instruction, flow_semantic_step_terminator,
-    flow_instruction_ref_owner, flow_instruction_ref_block_ordinal,
+    flow_instruction_ref_owner, flow_instruction_ref_same,
+    flow_instruction_ref_block_ordinal,
     flow_instruction_ref_ordinal,
     flow_block_ref_owner, flow_block_ref_ordinal,
     flow_program_bodies, flow_program_topology_fingerprint,
@@ -93,6 +95,14 @@ use flow_ir::{
     flow_body_reference, flow_body_slots, flow_body_blocks,
     flow_block_instructions,
     flow_instruction_reference, flow_instruction_kind_tag,
+    flow_assign_rhs_temp, flow_assign_target,
+    flow_move_place_source, flow_move_place_target,
+    flow_place_is_slot, flow_place_slot, flow_place_base,
+    flow_place_projection,
+    flow_projection_contract_same,
+    flow_projection_contract_result_type,
+    flow_project_contract, flow_project_base, flow_project_result,
+    flow_initialize_inputs, flow_initialize_target,
     flow_fail_raise_sink,
     flow_slot_reference, flow_slot_type
 }
@@ -134,6 +144,8 @@ use core_expr::{
     core_expr_system_host, core_expr_fail_payload,
     core_expr_project_base, core_expr_project_field,
     core_expr_constructor, core_expr_constructor_fields,
+    core_expr_move_update_base, core_expr_move_update_constructor,
+    core_expr_move_update_schema, core_expr_move_update_overrides,
     core_expr_lambda_executable, core_expr_lambda_captures,
     core_expr_lambda_handled_captures,
     core_capture_source, core_capture_target,
@@ -151,6 +163,7 @@ use core_expr::{
     core_field_ref_kind_tag, core_field_ref_nominal,
     core_field_ref_variant, core_field_ref_tuple_index,
     core_field_ref_record_path, core_field_ref_record_name,
+    core_field_ref_same,
     core_field_value_field, core_field_value_expr,
     core_place_is_slot, core_place_slot, core_place_base,
     core_place_field,
@@ -665,6 +678,57 @@ fn wrap_resource_operand(
     result
 }
 
+fn wrap_exact_place_take(
+    mut ctx: HirBridgeCtx, node_ordinal: Int,
+    source_slot: SlotRef, target_slot: SlotRef, source: HExpr,
+    expected_projection: FlowProjectionContract?, required: Bool,
+    selector: Int, role_ordinal: Int
+) -> HExpr {
+    let mut found: BridgeRcEvent? = none
+    for event in events_for_node_role(
+            ctx.stages, node_ordinal, BRIDGE_RC_BEFORE_INSTRUCTION,
+            selector, role_ordinal) {
+        let operation = event.operation
+        if event.operand_ordinal == 0 &&
+           rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_take()) {
+            let target_same = match rc_operation_target(operation) {
+                some(value) => slot_ref_same(value, target_slot),
+                none => false
+            }
+            if found.is_some() ||
+               !slot_ref_same(rc_operation_source(operation), source_slot) ||
+               !target_same {
+                panic("RcHIR bridge: exact place Take relation drifted")
+            }
+            match (rc_operation_place_projection(operation), expected_projection) {
+                (some(actual), some(expected)) => if
+                        !flow_projection_contract_same(actual, expected) {
+                    panic("RcHIR bridge: exact place Take projection drifted")
+                },
+                (none, none) => {},
+                _ => panic("RcHIR bridge: exact place Take projection shape differs")
+            }
+            found = some(event)
+        }
+    }
+    match found {
+        some(event) => {
+            consume_event(ctx, event)
+            let binder = bridge_binder_for(ctx, target_slot)
+            HExpr::Take {
+                source: source, source_slot: source_slot,
+                saved_slot: some(target_slot),
+                site: h_resource_site_for_step(event.step),
+                ty: legacy_binder_projection_type(binder),
+                effects: EMPTY_ROW, span: span_zero()
+            }
+        },
+        none => if required {
+            panic("RcHIR bridge: exact place Take is absent")
+        } else { source }
+    }
+}
+
 fn drop_statement(
     ctx: HirBridgeCtx, event: BridgeRcEvent,
     place_target: HExpr?
@@ -846,8 +910,25 @@ struct SerializedOperand {
 struct SerializedReference {
     prefix: List<HStmt>, value: HExpr, slot: SlotRef
 }
+struct SerializedUpdateOverride {
+    field: CoreFieldRef,
+    reference: SerializedReference
+}
 fn simple_operand(value: HExpr) -> SerializedOperand {
     SerializedOperand { prefix: [], value: value }
+}
+
+fn bridge_let_for_slot(
+    ctx: HirBridgeCtx, slot: SlotRef, init: HExpr
+) -> HStmt {
+    let binder = bridge_binder_for(ctx, slot)
+    HStmt::Let {
+        name: legacy_binder_projection_name(binder),
+        name_span: span_zero(),
+        def_id: some(legacy_binder_projection_def_id(binder)),
+        ty: legacy_binder_projection_type(binder),
+        init: init, span: span_zero()
+    }
 }
 
 fn serialize_nested_operand(
@@ -951,6 +1032,52 @@ fn fail_instruction_for_node(
         some(value) => value,
         none => panic("RcHIR bridge: CoreFailRaise has no Flow instruction")
     }
+}
+
+fn instruction_for_node_role(
+    ctx: HirBridgeCtx, ordinal: Int,
+    selector: Int, role_ordinal: Int, expected_kind: Int
+) -> FlowInstruction {
+    let mut target_step: FlowSemanticStepRef? = none
+    for relation in core_flow_step_map_relations(ctx.stages.step_map) {
+        if core_flow_node_ordinal(core_flow_step_node(relation)) == ordinal &&
+           role_matches(core_flow_step_role(relation), selector, role_ordinal) {
+            if target_step.is_some() {
+                panic("RcHIR bridge: Core node role has multiple Flow steps")
+            }
+            target_step = some(core_flow_step(relation))
+        }
+    }
+    let step = match target_step {
+        some(value) => value,
+        none => panic("RcHIR bridge: Core node role lacks Flow step")
+    }
+    if !flow_semantic_step_is_instruction(step) {
+        panic("RcHIR bridge: Core expression role is not an instruction")
+    }
+    let reference = flow_semantic_step_instruction(step)
+    let mut found: FlowInstruction? = none
+    for body in flow_program_bodies(ctx.stages.flow) {
+        for block in flow_body_blocks(body) {
+            for instruction in flow_block_instructions(block) {
+                if flow_instruction_ref_same(
+                        flow_instruction_reference(instruction), reference) {
+                    if found.is_some() {
+                        panic("RcHIR bridge: Flow instruction repeats")
+                    }
+                    found = some(instruction)
+                }
+            }
+        }
+    }
+    let instruction = match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: Core node Flow instruction is absent")
+    }
+    if flow_instruction_kind_tag(instruction) != expected_kind {
+        panic("RcHIR bridge: Core node Flow instruction kind differs")
+    }
+    instruction
 }
 
 fn primitive_bin_op(tag: Int) -> BinOp {
@@ -1572,6 +1699,35 @@ fn serialize_child_reference(
     SerializedReference {
         prefix: prefix, value: bridge_binder_ident(ctx, slot), slot: slot
     }
+}
+
+fn serialize_move_update_source(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef, expr: CoreExpr
+) -> SerializedReference {
+    let kind = core_expr_kind_tag(expr)
+    if kind == 1 {
+        let _ = enter_materialize_node(
+            ctx, owner, kind, core_expr_origin(expr))
+        let slot = core_expr_read_source(expr)
+        return SerializedReference {
+            prefix: [], value: bridge_binder_ident(ctx, slot), slot: slot
+        }
+    }
+    if kind == 9 && core_expr_kind_tag(core_expr_project_base(expr)) == 1 {
+        let _ = enter_materialize_node(
+            ctx, owner, kind, core_expr_origin(expr))
+        let receiver = serialize_move_update_source(
+            ctx, owner, core_expr_project_base(expr))
+        return SerializedReference {
+            prefix: receiver.prefix,
+            value: projected_field_access(
+                ctx, receiver.value, core_expr_project_field(expr),
+                legacy_type_for(ctx.projection, core_expr_type(expr)),
+                legacy_effects_for(ctx.projection, core_expr_effects(expr))),
+            slot: receiver.slot
+        }
+    }
+    serialize_child_reference(ctx, owner, expr)
 }
 
 fn assignment_target(
@@ -2845,6 +3001,208 @@ fn serialize_match_arm(
     }
 }
 
+fn serialize_move_update_expr(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef,
+    expr: CoreExpr, node_ordinal: Int,
+    ty: Type, effects: EffectRow
+) -> SerializedExpr {
+    let base = serialize_move_update_source(
+        ctx, owner, core_expr_move_update_base(expr))
+    let mut prefix = base.prefix
+    let mut overrides: List<SerializedUpdateOverride> = []
+    for field in core_expr_move_update_overrides(expr) {
+        let reference = serialize_child_reference(
+            ctx, owner, core_field_value_expr(field))
+        append_all(prefix, reference.prefix)
+        overrides.push(SerializedUpdateOverride {
+            field: core_field_value_field(field), reference: reference
+        })
+    }
+
+    let move_instruction = instruction_for_node_role(
+        ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 12)
+    let move_source = flow_move_place_source(move_instruction)
+    let committed_slot = flow_move_place_target(move_instruction)
+    if !flow_place_is_slot(move_source) {
+        panic("RcHIR bridge: projected move spread crossed diagnostics")
+    }
+    let source_slot = if flow_place_is_slot(move_source) {
+        flow_place_slot(move_source)
+    } else { flow_place_base(move_source) }
+    if !slot_ref_same(source_slot, base.slot) {
+        panic("RcHIR bridge: MoveUpdate base/MovePlace slot differs")
+    }
+    let committed_value = wrap_exact_place_take(
+        ctx, node_ordinal, source_slot, committed_slot, base.value,
+        none, true,
+        BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+    prefix.push(bridge_let_for_slot(ctx, committed_slot, committed_value))
+
+    let committed_ident = bridge_binder_ident(ctx, committed_slot)
+    let schema = core_expr_move_update_schema(expr)
+    let mut field_slots: List<SlotRef> = []
+    let mut role_ordinal = 1
+    for field in schema {
+        let mut override_value: SerializedReference? = none
+        for candidate in overrides {
+            if core_field_ref_same(candidate.field, field) {
+                if override_value.is_some() {
+                    panic("RcHIR bridge: MoveUpdate override repeats")
+                }
+                override_value = some(candidate.reference)
+            }
+        }
+        let field_type = match override_value {
+            some(value) => legacy_binder_projection_type(
+                bridge_binder_for(ctx, value.slot)),
+            none => legacy_type_for(
+                ctx.projection,
+                flow_projection_contract_result_type(
+                    flow_project_contract(instruction_for_node_role(
+                        ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH,
+                        role_ordinal, 7))))
+        }
+        let place = projected_field_access(
+            ctx, committed_ident, field, field_type, EMPTY_ROW)
+        match override_value {
+            some(value) => {
+                let assign = instruction_for_node_role(
+                    ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH,
+                    role_ordinal, 5)
+                if !slot_ref_same(flow_assign_rhs_temp(assign), value.slot) ||
+                   flow_place_is_slot(flow_assign_target(assign)) ||
+                   !slot_ref_same(
+                        flow_place_base(flow_assign_target(assign)), committed_slot) {
+                    panic("RcHIR bridge: MoveUpdate Assign relation differs")
+                }
+                append_all(prefix, before_drop_statements(
+                    ctx, node_ordinal, some(place),
+                    BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal))
+                prefix.push(HStmt::Assign {
+                    target: place,
+                    value: wrap_resource_operand(
+                        ctx, node_ordinal, 0, value.slot,
+                        BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal),
+                    span: span_zero()
+                })
+                append_all(prefix, after_resource_statements(
+                    ctx, node_ordinal,
+                    BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal))
+                role_ordinal = role_ordinal + 1
+            },
+            none => {}
+        }
+
+        let project = instruction_for_node_role(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH,
+            role_ordinal, 7)
+        if !slot_ref_same(flow_project_base(project), committed_slot) {
+            panic("RcHIR bridge: MoveUpdate Project base differs")
+        }
+        let field_slot = flow_project_result(project)
+        let projected = projected_field_access(
+            ctx, committed_ident, field,
+            legacy_binder_projection_type(bridge_binder_for(ctx, field_slot)),
+            EMPTY_ROW)
+        let moved = wrap_exact_place_take(
+            ctx, node_ordinal, committed_slot, field_slot, projected,
+            some(flow_project_contract(project)), false,
+            BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal)
+        prefix.push(bridge_let_for_slot(ctx, field_slot, moved))
+        append_all(prefix, after_resource_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal))
+        field_slots.push(field_slot)
+        role_ordinal = role_ordinal + 1
+    }
+
+    let initialize = instruction_for_node_role(
+        ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH,
+        role_ordinal, 0)
+    let inputs = flow_initialize_inputs(initialize)
+    if inputs.len() != field_slots.len() ||
+       !slot_ref_same(flow_initialize_target(initialize), node_anchor(ctx, node_ordinal)) {
+        panic("RcHIR bridge: MoveUpdate Initialize census differs")
+    }
+    let mut values: List<HExpr> = []
+    let mut index = 0
+    while index < field_slots.len() {
+        if !slot_ref_same(
+                inputs.get(index).unwrap(), field_slots.get(index).unwrap()) {
+            panic("RcHIR bridge: MoveUpdate Initialize order differs")
+        }
+        values.push(wrap_resource_operand(
+            ctx, node_ordinal, index, field_slots.get(index).unwrap(),
+            BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal))
+        index = index + 1
+    }
+
+    let constructor = core_expr_move_update_constructor(expr)
+    let constructor_kind = core_constructor_kind_tag(constructor)
+    let value = if constructor_kind == 0 {
+        let owner_ref = core_constructor_struct_owner(constructor)
+        let mut field_index = 0
+        let fields = schema.map(fn(field) {
+            let reference = core_field_ref_nominal(field)
+            let result = HNominalStructFieldInit {
+                name: nominal_field_ref_name(reference),
+                field_ref: reference,
+                field_index: nominal_field_ref_index(reference),
+                value: values.get(field_index).unwrap()
+            }
+            field_index = field_index + 1
+            result
+        })
+        HExpr::StructLit {
+            name: registered_nominal_ref_display_name(owner_ref),
+            owner_ref: owner_ref, type_args: [], fields: fields,
+            spread: none,
+            constructor: some(make_h_record_constructor_plan(
+                schema.map(fn(field) { hir_projection(field) }))),
+            ty: ty, effects: effects, span: span_zero()
+        }
+    } else if constructor_kind == 1 {
+        let variant = core_constructor_variant(constructor)
+        let variant_shell = match enum_variant_in_decls_opt(
+                ctx.shell.decls, variant) {
+            some(value) => value,
+            none => panic("RcHIR bridge: MoveUpdate variant shell is absent")
+        }
+        let mut field_index = 0
+        let fields = schema.map(fn(field) {
+            let result = HStructFieldInit {
+                name: match variant_shell.field_names {
+                    some(names) => names.get(field_index).unwrap(),
+                    none => field_index.to_str()
+                },
+                field_ref: core_field_ref_variant(field),
+                value: values.get(field_index).unwrap()
+            }
+            field_index = field_index + 1
+            result
+        })
+        HExpr::NamedVariantConstruct {
+            enum_name: registered_nominal_ref_display_name(
+                variant_ref_owner(variant)),
+            variant_name: variant_shell.name, variant_ref: variant,
+            fields: fields, spread: none,
+            constructor: some(make_h_executable_constructor_plan(
+                core_constructor_executable(constructor).unwrap(),
+                schema.map(fn(field) { hir_projection(field) }))),
+            ty: ty, effects: effects, span: span_zero()
+        }
+    } else {
+        panic("RcHIR bridge: MoveUpdate constructor is not nominal")
+    }
+    append_all(prefix, before_drop_statements(
+        ctx, node_ordinal, none,
+        BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal))
+    SerializedExpr {
+        node_ordinal: node_ordinal, prefix: prefix, value: value,
+        after: after_resource_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal)
+    }
+}
+
 fn serialize_structured_core_expr(
     mut ctx: HirBridgeCtx, owner: ExecutableRef,
     expr: CoreExpr, node_ordinal: Int
@@ -2852,6 +3210,10 @@ fn serialize_structured_core_expr(
     let kind = core_expr_kind_tag(expr)
     let ty = legacy_type_for(ctx.projection, core_expr_type(expr))
     let effects = legacy_effects_for(ctx.projection, core_expr_effects(expr))
+    if kind == 19 {
+        return serialize_move_update_expr(
+            ctx, owner, expr, node_ordinal, ty, effects)
+    }
     if kind == 12 {
         let mut prefix = before_terminator_drops(
             ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0)
@@ -3069,6 +3431,11 @@ fn validate_core_expr_nodes(
         validate_core_expr_nodes(cursor, owner, core_expr_project_base(expr))
     } else if kind == 10 {
         for field in core_expr_constructor_fields(expr) {
+            validate_core_expr_nodes(cursor, owner, core_field_value_expr(field))
+        }
+    } else if kind == 19 {
+        validate_core_expr_nodes(cursor, owner, core_expr_move_update_base(expr))
+        for field in core_expr_move_update_overrides(expr) {
             validate_core_expr_nodes(cursor, owner, core_field_value_expr(field))
         }
     } else if kind == 18 {

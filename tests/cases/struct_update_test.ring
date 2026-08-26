@@ -36,7 +36,9 @@ fn shift_new() -> Point {
 struct Rect { origin: Point, size: Point }
 
 fn move_rect(r: Rect, dx: Int) -> Rect {
-  let new_origin = Point { ..r.origin, x: r.origin.x + dx }
+  // MOVE SPREAD rejects consuming a child place out of an owning aggregate.
+  // Rebuild the child from reads, then consume the whole Rect once.
+  let new_origin = Point { x: r.origin.x + dx, y: r.origin.y }
   Rect { ..r, origin: new_origin }
 }
 

@@ -777,6 +777,7 @@ pub enum PlannerEventValue {
     ConsumeValue(Int, Bool, Int?),
     DiscardValue(Int),
     AssignValue { rhs_temp: Int, target: PlannerPlace },
+    MovePlaceValue { source: PlannerPlace, target: Int },
     CallValue {
         call_target: PlannerCallTarget,
         callable_indices: List<Int>,
@@ -790,7 +791,9 @@ pub enum PlannerEventValue {
     ProjectValue {
         source: Int,
         target: Int,
-        whole_slot: Bool
+        projection: FlowProjectionContract,
+        value_type_index: Int,
+        partial: Bool
     },
     CaptureValue {
         source: Int,
@@ -1159,6 +1162,14 @@ pub fn make_planner_assign(
         rhs_temp: rhs_temp, target: copy_planner_place(target)
     })
 }
+pub fn make_planner_move_place(
+    step: FlowSemanticStepRef, operands: List<PlannerOperand>,
+    source: PlannerPlace, target: Int
+) -> PlannerEvent {
+    make_planner_event(step, operands, PlannerEventValue::MovePlaceValue {
+        source: copy_planner_place(source), target: target
+    })
+}
 pub fn make_planner_call(
     step: FlowSemanticStepRef, operands: List<PlannerOperand>,
     call_target: PlannerCallTarget,
@@ -1206,10 +1217,13 @@ pub fn make_planner_call(
 }
 pub fn make_planner_project(
     step: FlowSemanticStepRef, operands: List<PlannerOperand>,
-    source: Int, target: Int, whole_slot: Bool
+    source: Int, target: Int, projection: FlowProjectionContract,
+    value_type_index: Int, partial: Bool
 ) -> PlannerEvent {
     make_planner_event(step, operands, PlannerEventValue::ProjectValue {
-            source: source, target: target, whole_slot: whole_slot
+            source: source, target: target,
+            projection: copy_flow_projection_contract(projection),
+            value_type_index: value_type_index, partial: partial
         })
 }
 pub fn make_planner_capture(
@@ -1250,6 +1264,9 @@ pub fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
         PlannerEventValue::AssignValue { rhs_temp, target } =>
             make_planner_assign(
                 value.step, value.operands, rhs_temp, target),
+        PlannerEventValue::MovePlaceValue { source, target } =>
+            make_planner_move_place(
+                value.step, value.operands, source, target),
         PlannerEventValue::CallValue {
             call_target, callable_indices, argument_demands,
             result_owned, result_type_index,
@@ -1261,9 +1278,10 @@ pub fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
             result_owned, result_type_index,
             result_origin_argument_ordinals, result_slot),
         PlannerEventValue::ProjectValue {
-            source, target, whole_slot
+            source, target, projection, value_type_index, partial
         } => make_planner_project(
-            value.step, value.operands, source, target, whole_slot),
+            value.step, value.operands, source, target,
+            projection, value_type_index, partial),
         PlannerEventValue::CaptureValue { source, target, demand } =>
             make_planner_capture(
                 value.step, value.operands, source, target, demand)
@@ -1568,6 +1586,20 @@ fn validate_event(
                 }
             }
         },
+        PlannerEventValue::MovePlaceValue { source, target } => {
+            let source_slot = if planner_place_is_slot(source) {
+                planner_place_slot(source)
+            } else { planner_place_base(source) }
+            validate_slot_index(source_slot, slots)
+            validate_slot_index(target, slots)
+            if source_slot == target ||
+               slots.get(target).unwrap().type_index !=
+                    if planner_place_is_slot(source) {
+                        slots.get(source_slot).unwrap().type_index
+                    } else { planner_place_value_type(source) } {
+                panic("ResourcePlanner: MovePlace source/target differs")
+            }
+        },
         PlannerEventValue::CallValue {
             call_target, callable_indices, argument_demands,
             result_owned, result_type_index,
@@ -1623,11 +1655,18 @@ fn validate_event(
             }
         },
         PlannerEventValue::ProjectValue {
-            source, target, whole_slot: _
+            source, target, projection, value_type_index, ..
         } => {
             validate_slot_index(source, slots)
             validate_slot_index(target, slots)
-            if source == target {
+            if source == target ||
+               slots.get(target).unwrap().type_index != value_type_index ||
+               core_type_ref_index(
+                    flow_projection_contract_result_type(projection)) !=
+                    value_type_index ||
+               core_type_ref_index(
+                    flow_projection_contract_base_type(projection)) !=
+                    slots.get(source).unwrap().type_index {
                 panic("ResourcePlanner: projection aliases its source slot")
             }
         },
@@ -2069,6 +2108,9 @@ fn event_origin_slot_overwritten(
         PlannerEventValue::AssignValue { rhs_temp, target } =>
             slot == rhs_temp || (planner_place_is_slot(target) &&
                 slot == planner_place_slot(target)),
+        PlannerEventValue::MovePlaceValue { source, target } =>
+            slot == target || (planner_place_is_slot(source) &&
+                slot == planner_place_slot(source)),
         PlannerEventValue::CallValue { result_slot, .. } => match result_slot {
             some(value) => slot == value,
             none => false
@@ -2249,6 +2291,27 @@ fn add_body_event_result_constraints(
                     [body_reach_cell(layout, block_index)])
             }
         },
+        PlannerEventValue::MovePlaceValue { source, target } => {
+            let source_slot = if planner_place_is_slot(source) {
+                planner_place_slot(source)
+            } else { planner_place_base(source) }
+            let mut parameter = 0
+            while parameter < layout.parameter_count {
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_ORIGIN_COPY,
+                    body_origin_cell(
+                        layout, block_index, next, target, parameter), 0,
+                    [body_origin_cell(
+                        layout, block_index, boundary, source_slot, parameter)])
+                parameter = parameter + 1
+            }
+            if body.slots.get(target).unwrap().owns_storage {
+                add_constraint_at(constraints, source_site,
+                    RULE_RESULT_OWNED_BODY,
+                    body_owned_cell(layout, block_index, next, target), 0,
+                    [body_reach_cell(layout, block_index)])
+            }
+        },
         PlannerEventValue::CaptureValue { source, target, .. } => {
             let mut parameter = 0
             while parameter < layout.parameter_count {
@@ -2398,6 +2461,9 @@ fn event_demand_slot_defined(
         PlannerEventValue::AssignValue { rhs_temp, target } =>
             slot == rhs_temp || (planner_place_is_slot(target) &&
                 slot == planner_place_slot(target)),
+        PlannerEventValue::MovePlaceValue { source, target } =>
+            slot == target || (planner_place_is_slot(source) &&
+                slot == planner_place_slot(source)),
         PlannerEventValue::CallValue { result_slot, .. } => match result_slot {
             some(value) => slot == value,
             none => false
@@ -2514,6 +2580,18 @@ fn add_body_event_demand_constraints(
                     planner_place_base(target)
                 },
                 make_transfer_demand(param_mode_mut_borrow(), false))
+        },
+        PlannerEventValue::MovePlaceValue { source, target } => {
+            let source_slot = if planner_place_is_slot(source) {
+                planner_place_slot(source)
+            } else { planner_place_base(source) }
+            add_local_demand_floor(
+                constraints, site, layout, block_index, boundary,
+                source_slot, make_transfer_demand(param_mode_own(), true))
+            add_local_demand_copy(
+                constraints, site, RULE_LOCAL_READ, layout,
+                block_index, boundary, source_slot,
+                block_index, next, target)
         },
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
@@ -3130,6 +3208,10 @@ fn solved_event_decision(
                 planner_event_operand(event, 1),
                 make_transfer_demand(param_mode_mut_borrow(), false)))
         },
+        PlannerEventValue::MovePlaceValue { .. } =>
+            transfers.push(make_transfer_decision(
+                planner_event_operand(event, 0),
+                make_transfer_demand(param_mode_own(), true))),
         PlannerEventValue::CallValue {
             callable_indices, argument_demands,
             result_owned: lower_owned, result_slot, ..
