@@ -39,6 +39,7 @@ use hir::{compare_by_first, module_item_identity, variant_ctor_name, ValueBindin
 use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_expr, resolve_self_type, resolve_effect_expr,
     validate_fn_bound_order,
     record_value_origin, record_variant_ctor_origin, record_value_binding_kind,
+    record_value_symbol_ref,
     prove_dict_evidence_for_type, impl_predicate_constraints_satisfied,
     resolve_mod_uses, bind_exact_import_alias,
     enter_project_root_frame, enter_project_child_frame,
@@ -66,7 +67,7 @@ use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
     trait_method_ref_trait,
     trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index, trait_method_ref_name,
-    variant_ref_owner, variant_ref_source_index,
+    variant_ref_owner, variant_ref_source_index, variant_ref_member,
     variant_field_ref_variant, variant_field_ref_index,
     registered_nominal_ref_same, variant_ref_same,
     ImplProviderRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
@@ -1803,7 +1804,13 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
 
             let enum_type = Type::EnumType { name: name, type_params: tv_types }
             let tv_ids = def.type_param_vars
+            let mut ctor_index = 0
             for variant in def.variants {
+                let variant_ref = match def.variant_refs.get(ctor_index) {
+                    some(value) => value,
+                    none => panic("enum identity ledger: constructor VariantRef is missing")
+                }
+                ctor_index = ctor_index + 1
                 let ctor_payload = variant_ctor_name(name, variant.name)
                 let binding_name = if project_active {
                     ctor_payload
@@ -1849,9 +1856,13 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                     if !project_active {
                         record_variant_ctor_origin(ctx, variant.name,
                             ctor_payload)
+                        record_value_symbol_ref(
+                            ctx, variant.name, variant_ref_member(variant_ref))
                     }
                     record_variant_ctor_origin(ctx, ctor_payload,
                         ctor_payload)
+                    record_value_symbol_ref(
+                        ctx, ctor_payload, variant_ref_member(variant_ref))
                 }
             }
 

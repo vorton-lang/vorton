@@ -1,4 +1,4 @@
-use types::{UNIT, nominal_display_name}
+use types::{UNIT, BUILTIN_OPTION, nominal_display_name}
 use ast::{Program, Decl, UseDecl, UseImport, Span, TypeParam, span_zero}
 use hir::{HDecl, HProgram, ModuleImplFact, ValueBindingKind,
     compare_by_first,
@@ -37,7 +37,8 @@ use codes::{E0504, E0702, E0703, E0704, E0705, E0707}
 use parser::{parse}
 use ir_identity::{SymbolRef, impl_owner_ref_same, impl_method_ref_owner,
     impl_owner_ref_trait, impl_owner_ref_provider, impl_method_ref_same,
-    symbol_ref_canonical_payload, make_symbol_ref, namespace_value}
+    symbol_ref_canonical_payload, make_symbol_ref, namespace_value,
+    variant_ref_member}
 use union_find::{UnionFind}
 use core_from_hir::{FrozenCoreAssemblyFacts}
 use legacy_projection::{LegacyProjectionFacts}
@@ -415,9 +416,27 @@ fn new_infer_ctx(
         sink, module_key, module_order)
     register_builtins(ctx.env, sink)
     register_hof_intrinsics(ctx.env, sink)
+    // Option is registered before resolver-backed source declarations exist.
+    // Bind its two lexical constructor DefIds to the exact typed variant
+    // members here; downstream inference never reconstructs identity from
+    // `Option_some` / `Option_none` codegen spellings.
+    let option_def = match ctx.env.types.enums.get(BUILTIN_OPTION) {
+        some(value) => value,
+        none => panic("builtin Option identity: enum definition is missing")
+    }
+    let some_ref = match option_def.variant_refs.get(0) {
+        some(value) => value,
+        none => panic("builtin Option identity: some VariantRef is missing")
+    }
+    let none_ref = match option_def.variant_refs.get(1) {
+        some(value) => value,
+        none => panic("builtin Option identity: none VariantRef is missing")
+    }
+    record_value_symbol_ref(ctx, "some", variant_ref_member(some_ref))
+    record_value_symbol_ref(ctx, "none", variant_ref_member(none_ref))
     // These bindings are created only by register_builtins above. Record their
     // freshly allocated DefIds now; later same-spelled locals cannot inherit
-    // this provenance. `some` remains on the independent variant-ctor path.
+    // this provenance. Option constructors use the exact variant path above.
     for builtin in checker_only_builtin_values() {
         let name = checker_builtin_value_name(builtin)
         record_value_binding_kind(ctx, name, ValueBindingKind::ExternCallable)

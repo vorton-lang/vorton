@@ -46,7 +46,7 @@ use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     impl_provider_ref_same, impl_owner_ref_same,
     impl_method_ref_member,
     nominal_field_ref_same, trait_method_ref_same,
-    registered_nominal_ref_same, variant_ref_same, variant_ref_member,
+    registered_nominal_ref_same, variant_ref_same,
     variant_field_ref_same,
     handled_effect_ref_same, system_effect_console, system_effect_fs,
     system_effect_process,
@@ -431,6 +431,10 @@ fn apply_project_value_binding(
             ctx.use_aliases.insert(new_def_id, ultimate)
             ctx.value_binding_kinds.insert(
                 new_def_id, value_binding_kind(ctx, source_scheme.def_id))
+            // The resolver binding already owns the exact value identity.
+            // Relate the fresh lexical DefId directly; constructors must not
+            // recover this fact from their legacy codegen spelling.
+            ctx.value_symbols.insert(new_def_id, binding.symbol)
             match variant_ctor_origin(ctx, source_scheme) {
                 some(origin) => {
                     ctx.env.types.variant_ctor_origins.insert(new_def_id, origin)
@@ -1372,28 +1376,6 @@ pub fn record_value_binding_kind(mut ctx: InferCtx, local_name: Str, kind: Value
         },
         none => {}
     }
-}
-
-pub fn variant_ctor_symbol_ref(
-    ctx: InferCtx, scheme: TypeScheme
-) -> SymbolRef? {
-    let origin = match variant_ctor_origin(ctx, scheme) {
-        some(value) => value,
-        none => return none
-    }
-    let mut found: SymbolRef? = none
-    for entry in ctx.env.types.enums.entries() {
-        for reference in entry.1.variant_refs {
-            let symbol = variant_ref_member(reference)
-            if symbol_ref_canonical_payload(symbol) == origin {
-                if found.is_some() {
-                    panic("value identity: variant constructor symbol repeats")
-                }
-                found = some(symbol)
-            }
-        }
-    }
-    found
 }
 
 pub fn value_symbol_ref(ctx: InferCtx, def_id: Int) -> SymbolRef {

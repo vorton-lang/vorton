@@ -24,7 +24,6 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     fn_bound_dict_ref,
     type_error, unify_at, resolve_relative_qualifier,
     resolve_dict_ref_for_type, resolve_dicts_from_scheme, variant_ctor_origin,
-    variant_ctor_symbol_ref,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
     current_executable_owner, current_dictionary_evidence_owner}
 use ir_identity::{IntrinsicRef, ImplMethodRef,
@@ -56,15 +55,7 @@ fn make_inferred_ident(
                     ValueBindingKind::ConstGetter => true,
                     ValueBindingKind::LocalBorrow => false
                 } {
-            some(make_named_callee_ref(if is_constructor {
-                match scheme {
-                    some(value) => match variant_ctor_symbol_ref(ctx, value) {
-                        some(symbol) => symbol,
-                        none => panic("Ident identity: constructor lacks exact SymbolRef")
-                    },
-                    none => panic("Ident identity: constructor lacks scheme")
-                }
-            } else { value_symbol_ref(ctx, id) }))
+            some(make_named_callee_ref(value_symbol_ref(ctx, id)))
         } else if is_callable {
             match source_slot {
                 some(slot) => some(make_local_callee_ref(slot)),
