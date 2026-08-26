@@ -336,7 +336,9 @@ StructLit    ::= UpperIdent '{' ('..' Expr ',')? FieldInit (',' FieldInit)* ','?
 FieldInit    ::= Ident (':' Expr)?
 ```
 
-大写字母开头的标识符后跟 `{` 触发 struct/变体字面量解析。字段 punning：`{ x }` 是 `{ x: x }` 的语法糖。`..expr` 前缀是 struct update 语法：从基础值复制未指定的字段。
+大写字母开头的标识符后跟 `{` 触发 struct/变体字面量解析。字段 punning：`{ x }` 是 `{ x: x }` 的语法糖。
+
+`..expr` 前缀是 struct / named enum update 的 **move spread**：基础表达式只求值一次；显式字段 RHS 按源码顺序先全部求值，期间基础值仍可读取或借用；成功后未指定字段从基础值转移到 fresh result，被覆盖的旧字段执行 Drop，最后基础值整体失活。该语法不隐式调用语言级 `.clone()`，也不提供 shareable-only 分支；需要保留基础值时显式使用 `..base.clone()`。在 RHS 中 ownership-move 基础值的子字段会形成 partial move，稳定报错；任一 RHS 失败时不得留下部分 move 的基础值。结果语义上始终是 fresh value，证明基础值物理唯一后允许不可观察的原地复用优化。
 
 ### List 字面量
 
