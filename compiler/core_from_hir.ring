@@ -8,8 +8,14 @@ use ast::{Span, Pattern, LiteralValue, BinOp, UnaryOp, span_zero}
 use types::{Type, Effect, EffectRow, types_equal, EMPTY_ROW,
     BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET}
 use env::{
-    TypeEnv, registered_trait_contract_methods,
+    TypeEnv, TraitDef, AssocTypeDef,
+    RegisteredTraitAssocContract,
+    registered_trait_contract_owner,
+    registered_trait_contract_methods,
+    registered_trait_contract_assoc_items,
     registered_trait_contract_dict_obligations,
+    registered_trait_assoc_member, registered_trait_assoc_type,
+    registered_trait_assoc_default, registered_trait_assoc_bounds,
     registered_trait_method_mutabilities, apply_subst_map, find_impl
 }
 use builtins::{
@@ -791,6 +797,120 @@ fn producer_symbol_lists_same(
     true
 }
 
+fn producer_int_lists_same(left: List<Int>, right: List<Int>) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if left.get(index).unwrap() != right.get(index).unwrap() {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn producer_optional_types_same(left: Type?, right: Type?) -> Bool {
+    match (left, right) {
+        (some(a), some(b)) => types_equal(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn producer_assoc_formals_same(
+    left: List<AssocTypeDef>, right: List<AssocTypeDef>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        let a = left.get(index).unwrap()
+        let b = right.get(index).unwrap()
+        if a.var_id != b.var_id ||
+           !symbol_ref_same(a.member_ref, b.member_ref) ||
+           !producer_optional_types_same(a.default_type, b.default_type) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn producer_assoc_contracts_same(
+    left: List<RegisteredTraitAssocContract>,
+    right: List<RegisteredTraitAssocContract>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        let a = left.get(index).unwrap()
+        let b = right.get(index).unwrap()
+        if !symbol_ref_same(
+                registered_trait_assoc_member(a),
+                registered_trait_assoc_member(b)) ||
+           !types_equal(
+                registered_trait_assoc_type(a),
+                registered_trait_assoc_type(b)) ||
+           !producer_optional_types_same(
+                registered_trait_assoc_default(a),
+                registered_trait_assoc_default(b)) ||
+           !producer_symbol_lists_same(
+                registered_trait_assoc_bounds(a),
+                registered_trait_assoc_bounds(b)) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn producer_trait_formals_same(left: TraitDef, right: TraitDef) -> Bool {
+    symbol_ref_same(
+        registered_trait_ref_symbol(
+            registered_trait_contract_owner(left.contract)),
+        registered_trait_ref_symbol(
+            registered_trait_contract_owner(right.contract))) &&
+    left.self_type_var_id == right.self_type_var_id &&
+    producer_int_lists_same(left.type_param_vars, right.type_param_vars) &&
+    producer_assoc_formals_same(left.assoc_types, right.assoc_types) &&
+    producer_assoc_contracts_same(
+        registered_trait_contract_assoc_items(left.contract),
+        registered_trait_contract_assoc_items(right.contract)) &&
+    producer_symbol_lists_same(
+        registered_trait_contract_dict_obligations(left.contract),
+        registered_trait_contract_dict_obligations(right.contract))
+}
+
+fn producer_trait_for_owner(
+    producer: ClosedCoreProducer, owner: SymbolRef
+) -> TraitDef {
+    let mut found: TraitDef? = none
+    for entry in producer.env.trait_reg.traits.entries() {
+        let candidate = entry.1
+        if symbol_ref_same(
+                registered_trait_ref_symbol(candidate.owner_ref), owner) {
+            match found {
+                some(existing) => if !producer_trait_formals_same(
+                        existing, candidate) {
+                    panic("Core producer: trait owner has conflicting payloads")
+                },
+                none => { found = some(candidate) }
+            }
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("Core producer: exact trait owner is absent")
+    }
+}
+
+fn producer_append_unique_symbol(
+    mut values: List<SymbolRef>, value: SymbolRef
+) {
+    if !values.any(fn(existing) { symbol_ref_same(existing, value) }) {
+        values.push(value)
+    }
+}
+
 fn producer_register_parameter(
     mut producer: ClosedCoreProducer, type_var_id: Int,
     owner: SymbolRef, index: Int, arity: Int, bounds: List<SymbolRef>
@@ -1376,6 +1496,79 @@ fn producer_register_h_type_params(
     }
 }
 
+fn producer_register_trait_parameters(
+    mut producer: ClosedCoreProducer, owner: SymbolRef,
+    source: List<HTypeParam>, assoc_values: List<HAssocType>
+) {
+    let def = producer_trait_for_owner(producer, owner)
+    if !symbol_ref_same(
+            registered_trait_ref_symbol(def.owner_ref), owner) ||
+       !symbol_ref_same(
+            registered_trait_ref_symbol(
+                registered_trait_contract_owner(def.contract)), owner) ||
+       def.type_params.len() != source.len() ||
+       def.type_param_vars.len() != source.len() ||
+       def.assoc_types.len() != assoc_values.len() {
+        panic("Core producer: trait formal census differs")
+    }
+    let contract_assoc = registered_trait_contract_assoc_items(def.contract)
+    if contract_assoc.len() != assoc_values.len() {
+        panic("Core producer: trait assoc contract census differs")
+    }
+    let total_arity = source.len() + 1 + assoc_values.len()
+    let mut index = 0
+    while index < source.len() {
+        let value = source.get(index).unwrap()
+        if value.type_var_id != def.type_param_vars.get(index).unwrap() {
+            panic("Core producer: trait source parameter order differs")
+        }
+        producer_register_parameter(
+            producer, value.type_var_id, owner,
+            index, total_arity, value.bound_refs)
+        index = index + 1
+    }
+
+    if def.self_type_var_id < 0 {
+        panic("Core producer: trait Self parameter is invalid")
+    }
+    let mut self_bounds: List<SymbolRef> = []
+    producer_append_unique_symbol(self_bounds, owner)
+    for obligation in registered_trait_contract_dict_obligations(def.contract) {
+        producer_append_unique_symbol(self_bounds, obligation)
+    }
+    producer_register_parameter(
+        producer, def.self_type_var_id, owner,
+        source.len(), total_arity, self_bounds)
+
+    let mut assoc_index = 0
+    while assoc_index < assoc_values.len() {
+        let hir_assoc = assoc_values.get(assoc_index).unwrap()
+        let def_assoc = def.assoc_types.get(assoc_index).unwrap()
+        let exact_assoc = contract_assoc.get(assoc_index).unwrap()
+        let contract_type_var_id = match registered_trait_assoc_type(exact_assoc) {
+            Type::TypeVar { id, .. } => id,
+            _ => panic("Core producer: trait assoc contract is not abstract")
+        }
+        if def_assoc.var_id < 0 || def_assoc.var_id != contract_type_var_id ||
+           !symbol_ref_same(hir_assoc.member_ref, def_assoc.member_ref) ||
+           !symbol_ref_same(
+                def_assoc.member_ref,
+                registered_trait_assoc_member(exact_assoc)) ||
+           !producer_optional_types_same(
+                hir_assoc.concrete, def_assoc.default_type) ||
+           !producer_optional_types_same(
+                def_assoc.default_type,
+                registered_trait_assoc_default(exact_assoc)) {
+            panic("Core producer: trait assoc formal differs")
+        }
+        producer_register_parameter(
+            producer, def_assoc.var_id, owner,
+            source.len() + 1 + assoc_index, total_arity,
+            registered_trait_assoc_bounds(exact_assoc))
+        assoc_index = assoc_index + 1
+    }
+}
+
 fn producer_register_decl_parameters(
     mut producer: ClosedCoreProducer, decls: List<HDecl>
 ) {
@@ -1402,10 +1595,12 @@ fn producer_register_decl_parameters(
                     panic("Core producer: builtin effect has type parameters")
                 }
             },
-            HDecl::Trait { owner_ref, type_params, methods, .. } => {
-                producer_register_h_type_params(
+            HDecl::Trait {
+                owner_ref, type_params, methods, assoc_types, ..
+            } => {
+                producer_register_trait_parameters(
                     producer, registered_trait_ref_symbol(owner_ref),
-                    type_params)
+                    type_params, assoc_types)
                 for method in methods {
                     if !executable_ref_is_named(method.executable_ref) {
                         panic("Core producer: trait method owner is anonymous")

@@ -164,6 +164,7 @@ pub struct TraitDef {
     pub owner_ref: RegisteredTraitRef,
     pub type_params: List<Str>,
     pub type_param_vars: List<Int>,
+    pub self_type_var_id: Int,
     pub methods: List<TraitMethodDef>,
     pub supertraits: List<Str>,
     pub assoc_types: List<AssocTypeDef>,

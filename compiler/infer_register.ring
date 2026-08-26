@@ -2177,6 +2177,10 @@ fn register_trait(
     }
 
     let self_var = ctx.env.fresh_var()
+    let self_type_var_id = match self_var {
+        Type::TypeVar { id, .. } => id,
+        _ => panic("trait registration: Self is not a type variable")
+    }
 
     // Collect associated types first, inject into type_param_scope
     let mut assoc_type_defs: List<AssocTypeDef> = []
@@ -2336,6 +2340,7 @@ fn register_trait(
         name: name,
         owner_ref: registered_owner,
         type_params: tp_names, type_param_vars: tp_vars,
+        self_type_var_id: self_type_var_id,
         methods: trait_methods, supertraits: supertrait_names,
         assoc_types: assoc_type_defs,
         contract: contract

@@ -138,6 +138,7 @@ fn builtin_trait_symbol(name: Str) -> SymbolRef {
 fn install_builtin_trait_contract(
     mut env: TypeEnv, name: Str, owner_symbol: SymbolRef,
     type_params: List<Str>, type_param_vars: List<Int>,
+    self_type_var_id: Int,
     methods: List<TraitMethodDef>, supertraits: List<Str>,
     assoc_types: List<AssocTypeDef>
 ) {
@@ -177,6 +178,7 @@ fn install_builtin_trait_contract(
     env.trait_reg.traits.insert(name, TraitDef {
         name: name, owner_ref: owner_ref,
         type_params: type_params, type_param_vars: type_param_vars,
+        self_type_var_id: self_type_var_id,
         methods: methods, supertraits: supertraits,
         assoc_types: assoc_types, contract: contract
     })
@@ -1297,7 +1299,7 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
 
     let owner_ref = builtin_trait_symbol("Eq")
     install_builtin_trait_contract(
-        env, "Eq", owner_ref, [], [self_var_id], [
+        env, "Eq", owner_ref, [], [self_var_id], self_var_id, [
             TraitMethodDef { name: "eq", method_ref: builtin_trait_method(owner_ref, 0, 0, "eq"), ty: eq_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] },
             TraitMethodDef { name: "ne", method_ref: builtin_trait_method(owner_ref, 1, 1, "ne"), ty: ne_fn, has_default: true, param_mutabilities: [false, false], method_type_params: [] }
         ], [], [])
@@ -1364,7 +1366,7 @@ fn register_clone_trait(mut env: TypeEnv, sink: CollectingSink) {
 
     let owner_ref = builtin_trait_symbol("Clone")
     install_builtin_trait_contract(
-        env, "Clone", owner_ref, [], [self_var_id], [
+        env, "Clone", owner_ref, [], [self_var_id], self_var_id, [
             TraitMethodDef { name: "clone", method_ref: builtin_trait_method(owner_ref, 0, 0, "clone"), ty: clone_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
@@ -1403,7 +1405,7 @@ fn register_drop_trait(mut env: TypeEnv) {
 
     let owner_ref = builtin_trait_symbol("Drop")
     install_builtin_trait_contract(
-        env, "Drop", owner_ref, [], [self_var_id], [
+        env, "Drop", owner_ref, [], [self_var_id], self_var_id, [
             TraitMethodDef { name: "drop", method_ref: builtin_trait_method(owner_ref, 0, 0, "drop"), ty: drop_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 }
@@ -1431,7 +1433,7 @@ fn register_ord_trait(mut env: TypeEnv, sink: CollectingSink) {
 
     let owner_ref = builtin_trait_symbol("Ord")
     install_builtin_trait_contract(
-        env, "Ord", owner_ref, [], [self_var_id], [
+        env, "Ord", owner_ref, [], [self_var_id], self_var_id, [
             TraitMethodDef { name: "cmp", method_ref: builtin_trait_method(owner_ref, 0, 0, "cmp"), ty: cmp_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] }
         ], [], [])
 
@@ -1469,7 +1471,7 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
 
     let owner_ref = builtin_trait_symbol("Debug")
     install_builtin_trait_contract(
-        env, "Debug", owner_ref, [], [self_var_id], [
+        env, "Debug", owner_ref, [], [self_var_id], self_var_id, [
             TraitMethodDef { name: "debug", method_ref: builtin_trait_method(owner_ref, 0, 0, "debug"), ty: debug_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
@@ -1534,7 +1536,7 @@ fn register_hash_trait(mut env: TypeEnv, sink: CollectingSink) {
 
     let owner_ref = builtin_trait_symbol("Hash")
     install_builtin_trait_contract(
-        env, "Hash", owner_ref, [], [self_var_id], [
+        env, "Hash", owner_ref, [], [self_var_id], self_var_id, [
             TraitMethodDef { name: "hash", method_ref: builtin_trait_method(owner_ref, 0, 0, "hash"), ty: hash_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
