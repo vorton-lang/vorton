@@ -212,14 +212,17 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                                         binding.symbol)))
                                                 source_symbol = some(binding.symbol)
                                                 match canonical_decl {
-                                                    Decl::ExternFn { name, .. } => {
+                                                    Decl::ExternFn {
+                                                        name, type_params, ..
+                                                    } => {
                                                         let source_scheme = ctx.env.lookup(
                                                             name).unwrap_or_else(fn() {
                                                             panic("compiler extern manifest: registered source scheme is absent")
                                                         })
                                                         let _ = register_compiler_owned_extern_source(
                                                             ctx.env, binding.symbol,
-                                                            source_scheme)
+                                                            source_scheme,
+                                                            type_params.len())
                                                     },
                                                     _ => {}
                                                 }

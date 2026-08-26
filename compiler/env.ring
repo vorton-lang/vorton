@@ -915,7 +915,8 @@ pub fn new_type_env() -> TypeEnv {
 // manifest itself owns the physical source census and exact resource facts;
 // TypeEnv only transports that opaque relation into declaration inference.
 pub fn register_compiler_owned_extern_source(
-    mut env: TypeEnv, source: SymbolRef, scheme: TypeScheme
+    mut env: TypeEnv, source: SymbolRef, scheme: TypeScheme,
+    source_generic_arity: Int
 ) -> Bool {
     if scheme.bounds.len() != 0 {
         panic("compiler extern manifest: source bridge has trait bounds")
@@ -931,7 +932,7 @@ pub fn register_compiler_owned_extern_source(
     register_compiler_extern_source(
         env.compiler_externs, source,
         apply_subst_map(normalization, scheme.ty),
-        scheme.type_vars.len())
+        source_generic_arity)
 }
 
 pub fn close_compiler_owned_extern_sources(mut env: TypeEnv) {
