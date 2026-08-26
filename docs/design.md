@@ -22,6 +22,14 @@
 
 ---
 
+## 确定性求值顺序
+
+Ring 在同一 evaluation region 内按源码 **从左到右** 求值同级子表达式，不采用 C 式 unspecified operand / argument order。callable/receiver 先于 arguments；二元运算数、参数、List/tuple/constructor 字段、字符串插值片段按源码顺序；index 先 receiver 后 index，range 先 start 后 end。`&&` / `||` 保持左侧优先与短路；条件表达式先求 condition 且只求选中分支；match 先求 scrutinee，再从上到下检查 arm，模式成功后才求 guard。任一子表达式产生 `fail`、panic 或 diverge 后，后续子表达式不执行。
+
+优化器只有在证明观测等价时才可重排；观测包括 effect、mutation、fail/panic、资源 transfer 与 Drop 时点，而不只包括最终数值。C 后端必须把需要定序的子表达式先按 Ring 顺序物化为 temporary，再发出 C operator/call，不能把 Ring 语义委托给 C 自身未规定的求值顺序。现有 CoreHIR → FlowIR 的 evaluation-region lowering 是该公开语义的唯一 operational authority，不新增平行 pass。
+
+---
+
 ## 1. 类型系统
 
 ### 1.1 基础层：ADT + Trait
