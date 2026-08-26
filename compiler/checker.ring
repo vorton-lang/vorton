@@ -338,12 +338,18 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                             none => {}
                         }
                     },
-                    Decl::ExternFn { .. } => {
+                    Decl::ExternFn { name, .. } => {
                         let source = match site.source_symbol {
                             some(symbol) => symbol,
                             none => panic(
                                 "compiler extern manifest: Phase 2 source symbol is absent")
                         }
+                        // Phase 2 consumes the final same-spelled environment
+                        // binding after all prelude registration/replay. Relate
+                        // that final DefId to the resolver-issued source once;
+                        // the Phase-1 DefId may have been replaced by a later
+                        // exact declaration replay.
+                        record_value_symbol_ref(ctx, name, source)
                         let publish = match
                                 compiler_owned_extern_should_publish_hdecl(
                                     ctx.env, source) {
