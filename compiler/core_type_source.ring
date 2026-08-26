@@ -935,11 +935,36 @@ fn flow_satisfaction_field_name(
     none
 }
 
-// The sole directional callable-boundary compatibility relation.  Record rows
-// are already frozen to required-field logical contracts; satisfying one never
-// creates a value/view or changes the actual slot's physical type.
-pub fn flow_type_actual_satisfies_formal(
-    actual: FlowTypeNode, formal: FlowTypeNode
+fn flow_satisfaction_type_node(
+    nodes: List<FlowTypeNode>, reference: CoreTypeRef
+) -> FlowTypeNode {
+    for node in nodes {
+        if core_type_ref_same(node.reference, reference) { return node }
+    }
+    panic("CoreHIR: callable compatibility references an absent type")
+}
+
+fn flow_satisfaction_pair_active(
+    actual: CoreTypeRef, formal: CoreTypeRef,
+    actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
+) -> Bool {
+    if actual_path.len() != formal_path.len() {
+        panic("CoreHIR: callable compatibility path is malformed")
+    }
+    let mut index = 0
+    while index < actual_path.len() {
+        if core_type_ref_same(actual_path.get(index).unwrap(), actual) &&
+           core_type_ref_same(formal_path.get(index).unwrap(), formal) {
+            return true
+        }
+        index = index + 1
+    }
+    false
+}
+
+fn flow_type_actual_satisfies_formal_inner(
+    nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode,
+    mut actual_path: List<CoreTypeRef>, mut formal_path: List<CoreTypeRef>
 ) -> Bool {
     if core_type_ref_same(actual.reference, formal.reference) { return true }
     let formal_kind = flow_type_kind_tag(formal.kind)
@@ -948,21 +973,44 @@ pub fn flow_type_actual_satisfies_formal(
        (actual_kind != FLOW_TYPE_STRUCT && actual_kind != FLOW_TYPE_RECORD) {
         return false
     }
+    if flow_satisfaction_pair_active(
+            actual.reference, formal.reference, actual_path, formal_path) {
+        return true
+    }
+
+    actual_path.push(actual.reference)
+    formal_path.push(formal.reference)
+    let mut satisfied = true
     for required in formal.nominal_fields {
         let required_name = flow_nominal_field_record_name(required)
+        let required_type = flow_satisfaction_type_node(nodes, required.ty)
         let mut found = false
         for candidate in actual.nominal_fields {
             match flow_satisfaction_field_name(candidate, actual_kind) {
                 some(name) => if name == required_name &&
-                        core_type_ref_same(candidate.ty, required.ty) {
+                        flow_type_actual_satisfies_formal_inner(
+                            nodes,
+                            flow_satisfaction_type_node(nodes, candidate.ty),
+                            required_type, actual_path, formal_path) {
                     found = true
                 },
                 none => {}
             }
         }
-        if !found { return false }
+        if !found { satisfied = false }
     }
-    true
+    let _ = actual_path.pop()
+    let _ = formal_path.pop()
+    satisfied
+}
+
+// The sole directional callable-boundary compatibility relation.  Record rows
+// are already frozen to required-field logical contracts; satisfying one never
+// creates a value/view or changes the actual slot's physical type.
+pub fn flow_type_actual_satisfies_formal(
+    nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode
+) -> Bool {
+    flow_type_actual_satisfies_formal_inner(nodes, actual, formal, [], [])
 }
 
 fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {

@@ -4026,6 +4026,7 @@ fn flow_call_contract_actual_satisfies_formal(
         if flow_semantic_role_tag(actual_roles.get(index).unwrap()) !=
                 flow_semantic_role_tag(formal_roles.get(index).unwrap()) ||
            !flow_type_actual_satisfies_formal(
+                type_nodes,
                 type_node_for(type_nodes, actual_types.get(index).unwrap()),
                 type_node_for(type_nodes, formal_types.get(index).unwrap())) {
             return false
@@ -4560,6 +4561,7 @@ fn validate_typed_instructions(
                         let mut index = 0
                         while index < arguments.len() {
                             if !flow_type_actual_satisfies_formal(
+                                    type_nodes,
                                     type_node_for(type_nodes, slot_type_for(
                                         body, arguments.get(index).unwrap())),
                                     type_node_for(type_nodes,
@@ -4601,6 +4603,7 @@ fn validate_typed_instructions(
                             let mut callable_index = 0
                             while callable_index < parameter_types.len() {
                                 if !flow_type_actual_satisfies_formal(
+                                        type_nodes,
                                         type_node_for(type_nodes,
                                             parameter_types.get(
                                                 callable_index).unwrap()),

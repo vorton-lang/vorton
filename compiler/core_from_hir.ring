@@ -614,17 +614,164 @@ struct ClosedCoreProducer {
     module_key: Str,
     recorded_types: List<ProducerRecordedType>,
     parameter_facts: Map<Int, FlowGenericParamFact>,
+    resource_containment: Map<Str, List<Bool>>,
     type_sources: List<CoreTypeSourceFact>,
     handled_sources: List<CoreHandledEvidenceTypeSource>
+}
+
+fn producer_false_flags(count: Int) -> List<Bool> {
+    let mut result: List<Bool> = []
+    let mut index = 0
+    while index < count { result.push(false); index = index + 1 }
+    result
+}
+
+fn producer_bool_flags_same(left: List<Bool>, right: List<Bool>) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if left.get(index).unwrap() != right.get(index).unwrap() { return false }
+        index = index + 1
+    }
+    true
+}
+
+fn producer_copy_bool_flags(values: List<Bool>) -> List<Bool> {
+    let mut result: List<Bool> = []
+    for value in values { result.push(value) }
+    result
+}
+
+fn producer_mark_contained_parameters(
+    ty: Type, owner_parameters: List<Int>,
+    containment: Map<Str, List<Bool>>, mut result: List<Bool>
+) {
+    match ty {
+        Type::TypeVar { id, .. } => {
+            let mut index = 0
+            while index < owner_parameters.len() {
+                if owner_parameters.get(index).unwrap() == id {
+                    result.set(index, true)
+                }
+                index = index + 1
+            }
+        },
+        Type::PtrType { .. } => {},
+        Type::StructType { name, type_params } |
+        Type::EnumType { name, type_params } => {
+            if name == BUILTIN_LIST || name == BUILTIN_MAP ||
+               name == BUILTIN_SET {
+                for argument in type_params {
+                    producer_mark_contained_parameters(
+                        argument, owner_parameters, containment, result)
+                }
+                return
+            }
+            let child = containment.get(name).unwrap_or_else(fn() {
+                panic("Core producer: nominal containment owner is absent")
+            })
+            if child.len() != type_params.len() {
+                panic("Core producer: nominal containment arity differs")
+            }
+            let mut index = 0
+            while index < child.len() {
+                if child.get(index).unwrap() {
+                    producer_mark_contained_parameters(
+                        type_params.get(index).unwrap(), owner_parameters,
+                        containment, result)
+                }
+                index = index + 1
+            }
+        },
+        Type::TupleType { elements } => {
+            for element in elements {
+                producer_mark_contained_parameters(
+                    element, owner_parameters, containment, result)
+            }
+        },
+        Type::RecordType { fields, .. } => {
+            for field in fields {
+                producer_mark_contained_parameters(
+                    field.ty, owner_parameters, containment, result)
+            }
+        },
+        Type::GenericType { base, args } => {
+            producer_mark_contained_parameters(
+                base, owner_parameters, containment, result)
+            for argument in args {
+                producer_mark_contained_parameters(
+                    argument, owner_parameters, containment, result)
+            }
+        },
+        _ => {}
+    }
+}
+
+fn producer_resource_containment(env: TypeEnv) -> Map<Str, List<Bool>> {
+    let mut result: Map<Str, List<Bool>> = map_new()
+    let mut bit_count = 0
+    for entry in env.types.structs.entries() {
+        if result.contains_key(entry.0) {
+            panic("Core producer: duplicate nominal containment owner")
+        }
+        result.insert(entry.0, producer_false_flags(entry.1.type_param_vars.len()))
+        bit_count = bit_count + entry.1.type_param_vars.len()
+    }
+    for entry in env.types.enums.entries() {
+        if result.contains_key(entry.0) {
+            panic("Core producer: duplicate nominal containment owner")
+        }
+        result.insert(entry.0, producer_false_flags(entry.1.type_param_vars.len()))
+        bit_count = bit_count + entry.1.type_param_vars.len()
+    }
+
+    let mut changed = true
+    let mut iteration = 0
+    while changed {
+        changed = false
+        for entry in env.types.structs.entries() {
+            let def = entry.1
+            let previous = result.get(entry.0).unwrap()
+            let mut next = producer_copy_bool_flags(previous)
+            for field in def.fields {
+                producer_mark_contained_parameters(
+                    field.ty, def.type_param_vars, result, next)
+            }
+            if !producer_bool_flags_same(previous, next) {
+                result.insert(entry.0, next); changed = true
+            }
+        }
+        for entry in env.types.enums.entries() {
+            let def = entry.1
+            let previous = result.get(entry.0).unwrap()
+            let mut next = producer_copy_bool_flags(previous)
+            for variant in def.variants {
+                for field in variant.fields {
+                    producer_mark_contained_parameters(
+                        field, def.type_param_vars, result, next)
+                }
+            }
+            if !producer_bool_flags_same(previous, next) {
+                result.insert(entry.0, next); changed = true
+            }
+        }
+        iteration = iteration + 1
+        if iteration > bit_count + 1 {
+            panic("Core producer: nominal containment LFP did not converge")
+        }
+    }
+    result
 }
 
 fn new_closed_core_producer(
     module_key: Str, module_order: Int, env: TypeEnv
 ) -> ClosedCoreProducer {
+    let containment = producer_resource_containment(env)
     ClosedCoreProducer {
         recorder: new_core_assembly_recorder(module_key, module_order),
         env: env, module_key: module_key, recorded_types: [],
-        parameter_facts: map_new(), type_sources: [], handled_sources: []
+        parameter_facts: map_new(), resource_containment: containment,
+        type_sources: [], handled_sources: []
     }
 }
 
@@ -694,7 +841,7 @@ fn producer_append_resource_param(
 }
 
 fn producer_collect_resource_params_inner(
-    producer: ClosedCoreProducer, ty: Type, mut visiting: Set<Str>,
+    producer: ClosedCoreProducer, ty: Type,
     mut result: List<FlowGenericParamFact>
 ) {
     match ty {
@@ -703,81 +850,49 @@ fn producer_collect_resource_params_inner(
             none => panic("Core producer: unresolved resource parameter")
         },
         Type::PtrType { .. } => {},
-        Type::StructType { name, type_params } => {
-            if name == BUILTIN_LIST || name == BUILTIN_MAP ||
-               name == BUILTIN_SET || visiting.contains(name) {
-                for argument in type_params {
-                    producer_collect_resource_params_inner(
-                        producer, argument, visiting, result)
-                }
-                return
-            }
-            visiting.insert(name)
-            let def = producer.env.types.structs.get(name).unwrap_or_else(fn() {
-                panic("Core producer: resource struct is absent")
-            })
-            let mut mapping: Map<Int, Type> = map_new()
-            let mut index = 0
-            for argument in type_params {
-                match def.type_param_vars.get(index) {
-                    some(id) => mapping.insert(id, argument), none => {}
-                }
-                index = index + 1
-            }
-            for field in def.fields {
-                producer_collect_resource_params_inner(
-                    producer, apply_subst_map(mapping, field.ty),
-                    visiting, result)
-            }
-            visiting.remove(name)
-        },
+        Type::StructType { name, type_params } |
         Type::EnumType { name, type_params } => {
-            if visiting.contains(name) {
+            if name == BUILTIN_LIST || name == BUILTIN_MAP ||
+               name == BUILTIN_SET {
                 for argument in type_params {
                     producer_collect_resource_params_inner(
-                        producer, argument, visiting, result)
+                        producer, argument, result)
                 }
                 return
             }
-            visiting.insert(name)
-            let def = producer.env.types.enums.get(name).unwrap_or_else(fn() {
-                panic("Core producer: resource enum is absent")
+            let contained = producer.resource_containment.get(name).unwrap_or_else(fn() {
+                panic("Core producer: resource nominal is absent")
             })
-            let mut mapping: Map<Int, Type> = map_new()
+            if contained.len() != type_params.len() {
+                panic("Core producer: resource nominal arity differs")
+            }
             let mut index = 0
-            for argument in type_params {
-                match def.type_param_vars.get(index) {
-                    some(id) => mapping.insert(id, argument), none => {}
+            while index < contained.len() {
+                if contained.get(index).unwrap() {
+                    producer_collect_resource_params_inner(
+                        producer, type_params.get(index).unwrap(), result)
                 }
                 index = index + 1
             }
-            for variant in def.variants {
-                for field in variant.fields {
-                    producer_collect_resource_params_inner(
-                        producer, apply_subst_map(mapping, field),
-                        visiting, result)
-                }
-            }
-            visiting.remove(name)
         },
         Type::TupleType { elements } => {
             for element in elements {
                 producer_collect_resource_params_inner(
-                    producer, element, visiting, result)
+                    producer, element, result)
             }
         },
         Type::RecordType { fields, .. } => {
             for field in fields {
                 producer_collect_resource_params_inner(
-                    producer, field.ty, visiting, result)
+                    producer, field.ty, result)
             }
         },
         Type::GenericType { base, args } => {
             producer_collect_resource_params_inner(
-                producer, base, visiting, result)
+                producer, base, result)
             for argument in args {
                 producer_collect_resource_params_inner(
-                    producer, argument, visiting, result)
+                    producer, argument, result)
             }
         },
         _ => {}
@@ -788,8 +903,7 @@ fn producer_type_resource_params(
     producer: ClosedCoreProducer, ty: Type
 ) -> List<FlowGenericParamFact> {
     let mut result: List<FlowGenericParamFact> = []
-    let visiting: Set<Str> = set_new()
-    producer_collect_resource_params_inner(producer, ty, visiting, result)
+    producer_collect_resource_params_inner(producer, ty, result)
     result
 }
 
@@ -797,10 +911,9 @@ fn producer_types_resource_params(
     producer: ClosedCoreProducer, values: List<Type>
 ) -> List<FlowGenericParamFact> {
     let mut result: List<FlowGenericParamFact> = []
-    let visiting: Set<Str> = set_new()
     for value in values {
         producer_collect_resource_params_inner(
-            producer, value, visiting, result)
+            producer, value, result)
     }
     result
 }
@@ -1152,7 +1265,6 @@ fn producer_record_type(
                 resource.0, resource.1)
         },
         Type::RecordType { fields, tail, .. } => {
-            let _ = tail
             let owner = path_owner_for_module_body(make_module_body_ref(
                 producer.module_key, "module-body"))
             let mut field_specs: List<CoreNominalFieldSpec> = []
@@ -1176,7 +1288,12 @@ fn producer_record_type(
                 producer, child_types, child_facts)
             define_core_record_type_fact(
                 producer.recorder, fact, field_specs,
-                producer_composite_seed(resource.0, none), none,
+                // An open record is a required-fields logical contract, not
+                // its caller's complete physical shape.  Conservatively make
+                // owning use single-transfer so a hidden unique field can
+                // never be RC-cloned inside the callee.
+                if tail.is_some() { flow_type_seed_unique() }
+                else { producer_composite_seed(resource.0, none) }, none,
                 resource.0, resource.1)
         },
         Type::PtrType { pointee } => define_core_ptr_type_fact(

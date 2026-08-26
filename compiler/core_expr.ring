@@ -106,7 +106,8 @@ use resource_model::{
     FlowStorageContract, flow_storage_contract_tag
 }
 use core_type_source::{
-    CoreTypeGraph, core_type_graph_count, core_type_graph_node,
+    CoreTypeGraph, core_type_graph_count, core_type_graph_nodes,
+    core_type_graph_node,
     FlowTypeNode, FlowFieldIdentity, FlowNominalFieldFact,
     flow_type_node_kind, flow_type_node_children,
     flow_type_node_nominal, flow_type_node_nominal_fields,
@@ -3451,6 +3452,7 @@ fn core_call_contract_actual_satisfies_formal(
         if flow_semantic_role_tag(actual_roles.get(index).unwrap()) !=
                 flow_semantic_role_tag(formal_roles.get(index).unwrap()) ||
            !flow_type_actual_satisfies_formal(
+                core_type_graph_nodes(graph),
                 core_type_graph_node(
                     graph, actual_types.get(index).unwrap()),
                 core_type_graph_node(
@@ -3477,6 +3479,7 @@ fn validate_call_signature(
     let mut index = 0
     while index < arguments.len() {
         if !flow_type_actual_satisfies_formal(
+                core_type_graph_nodes(graph),
                 core_type_graph_node(
                     graph, core_expr_type(arguments.get(index).unwrap())),
                 core_type_graph_node(
