@@ -289,6 +289,12 @@ ExprStmt     ::= Expr ';'?
 
 ## 表达式
 
+### 求值顺序
+
+同一 evaluation region 内的同级子表达式按源码从左到右求值：callable/receiver 先于 arguments；二元运算数、参数、List/tuple/constructor 字段和字符串插值片段依次求值；index 先 receiver 后 index，range 先 start 后 end。`&&` 与 `||` 先求左侧并短路；条件表达式先求 condition，只求值选中的分支；match 先求 scrutinee，arm 自上而下检查，模式成功后再求 guard。
+
+若任一子表达式产生 `fail`、panic 或 diverge，后续子表达式不再执行。编译器可以重排仅当它证明 effect、mutation、fail/panic、资源 transfer、Drop 时点及结果均不可观察地相同；目标后端自身未规定的 operand / argument order 不改变 Ring 语义。
+
 ### 块
 
 ```ebnf
