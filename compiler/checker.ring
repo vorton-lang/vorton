@@ -10,6 +10,7 @@ use env::{TypeEnv, TypeScheme, add_impl, find_impl,
     optional_symbol_ref_same, install_method_core,
     register_compiler_owned_extern_source,
     close_compiler_owned_extern_sources,
+    compiler_owned_extern_symbol,
     compiler_owned_extern_should_publish_hdecl}
 use builtins::{register_builtins, register_hof_intrinsics,
     finalize_std_hof_fallbacks,
@@ -22,6 +23,7 @@ use andor_lower::{lower_andor}
 use infer_ctx::{InferCtx, new_infer_ctx as new_base_infer_ctx,
     type_error, record_value_origin, record_variant_ctor_origin,
     record_value_binding_kind, record_value_symbol_ref,
+    commit_final_prelude_value_symbol_ref,
     install_project_namespace_plan,
     install_struct_identity_ledger, enter_struct_identity_root_frame,
     exit_struct_identity_frame, close_struct_identity_ledger}
@@ -36,7 +38,7 @@ use codes::{E0504, E0702, E0703, E0704, E0705, E0707}
 use parser::{parse}
 use ir_identity::{SymbolRef, impl_owner_ref_same, impl_method_ref_owner,
     impl_owner_ref_trait, impl_owner_ref_provider, impl_method_ref_same,
-    symbol_ref_canonical_payload}
+    symbol_ref_canonical_payload, make_symbol_ref, namespace_value}
 use union_find::{UnionFind}
 use core_from_hir::{FrozenCoreAssemblyFacts}
 use legacy_projection::{LegacyProjectionFacts}
@@ -129,6 +131,17 @@ fn find_std_dir() -> Str? {
         if file_exists(dir) { return some(dir) }
     }
     none
+}
+
+fn canonical_prelude_extern_symbol(
+    env: TypeEnv, source: SymbolRef, name: Str
+) -> SymbolRef {
+    match compiler_owned_extern_symbol(env, source) {
+        some(symbol) => symbol,
+        none => make_symbol_ref(
+            "$prelude$::extern", namespace_value(),
+            prelude_extern_identity(name), "prelude-extern:${name}")
+    }
 }
 
 struct PreludeDeclSite {
@@ -344,12 +357,6 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                             none => panic(
                                 "compiler extern manifest: Phase 2 source symbol is absent")
                         }
-                        // Phase 2 consumes the final same-spelled environment
-                        // binding after all prelude registration/replay. Relate
-                        // that final DefId to the resolver-issued source once;
-                        // the Phase-1 DefId may have been replaced by a later
-                        // exact declaration replay.
-                        record_value_symbol_ref(ctx, name, source)
                         let publish = match
                                 compiler_owned_extern_should_publish_hdecl(
                                     ctx.env, source) {
@@ -357,6 +364,12 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                             none => true
                         }
                         if publish {
+                            // Only the manifest's unique publication owner
+                            // enters Phase-2 HIR. Shared list/map declaration
+                            // replay must not rebind the final owner's DefId.
+                            commit_final_prelude_value_symbol_ref(
+                                ctx, name, canonical_prelude_extern_symbol(
+                                    ctx.env, source, name))
                             let result = some(check_prelude_decl(
                                 ctx, decl, site.file_key, site.decl_index)) catch { _ => none }
                             match result {

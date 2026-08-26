@@ -41,7 +41,7 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     DelegateProviderFact, NominalDerivedProviderPlanFact, NamespaceKind}
 use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     symbol_ref_canonical_payload,
-    symbol_ref_origin_module_key, symbol_ref_same,
+    symbol_ref_origin_module_key, symbol_ref_same, symbol_ref_is_prelude,
     ImplProviderRef, ImplOwnerRef,
     impl_provider_ref_same, impl_owner_ref_same,
     impl_method_ref_member,
@@ -1399,6 +1399,27 @@ pub fn record_value_symbol_ref(
             none => panic("value identity: explicit callable has no DefId")
         },
         none => panic("value identity: explicit callable is not registered")
+    }
+}
+
+pub fn commit_final_prelude_value_symbol_ref(
+    mut ctx: InferCtx, local_name: Str, symbol: SymbolRef
+) {
+    match ctx.env.lookup(local_name) {
+        some(scheme) => match scheme.def_id {
+            some(def_id) => {
+                match ctx.value_symbols.get(def_id) {
+                    some(existing) => if !symbol_ref_same(existing, symbol) &&
+                            !symbol_ref_is_prelude(existing) {
+                        panic("value identity: final prelude DefId has non-prelude source")
+                    },
+                    none => {}
+                }
+                ctx.value_symbols.insert(def_id, symbol)
+            },
+            none => panic("value identity: final prelude callable has no DefId")
+        },
+        none => panic("value identity: final prelude callable is not registered")
     }
 }
 
