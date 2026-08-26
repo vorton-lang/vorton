@@ -41,7 +41,9 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     DelegateProviderFact, NominalDerivedProviderPlanFact, NamespaceKind}
 use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     symbol_ref_canonical_payload,
-    symbol_ref_origin_module_key, symbol_ref_same, symbol_ref_is_prelude,
+    symbol_ref_origin_module_key, symbol_ref_declaration_site_path,
+    symbol_ref_namespace_kind, namespace_kind_same, namespace_value,
+    symbol_ref_same, symbol_ref_is_prelude,
     ImplProviderRef, ImplOwnerRef,
     impl_provider_ref_same, impl_owner_ref_same,
     impl_method_ref_member,
@@ -1399,6 +1401,41 @@ pub fn record_value_symbol_ref(
             none => panic("value identity: explicit callable has no DefId")
         },
         none => panic("value identity: explicit callable is not registered")
+    }
+}
+
+pub fn source_value_symbol_for_decl(
+    ctx: InferCtx, decl_index: Int
+) -> SymbolRef {
+    if decl_index < 0 {
+        panic("value identity: declaration index is negative")
+    }
+    let file_key = match ctx.struct_identity_file_key {
+        some(value) => value,
+        none => panic("value identity: resolver ledger is absent")
+    }
+    let frame_index = match ctx.struct_identity_frame_stack.get(
+            ctx.struct_identity_frame_stack.len() - 1) {
+        some(value) => value,
+        none => panic("value identity: registration frame is absent")
+    }
+    let site_path = "frame:${frame_index}|item:${decl_index}"
+    let mut found: SymbolRef? = none
+    for entry in ctx.value_symbols_by_payload.entries() {
+        let symbol = entry.1
+        if symbol_ref_origin_module_key(symbol) == file_key &&
+           namespace_kind_same(
+                symbol_ref_namespace_kind(symbol), namespace_value()) &&
+           symbol_ref_declaration_site_path(symbol) == site_path {
+            if found.is_some() {
+                panic("value identity: declaration site has two value symbols")
+            }
+            found = some(symbol)
+        }
+    }
+    match found {
+        some(symbol) => symbol,
+        none => panic("value identity: declaration site has no resolver symbol")
     }
 }
 

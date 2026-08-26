@@ -39,7 +39,7 @@ use hir::{compare_by_first, module_item_identity, variant_ctor_name, ValueBindin
 use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_expr, resolve_self_type, resolve_effect_expr,
     validate_fn_bound_order,
     record_value_origin, record_variant_ctor_origin, record_value_binding_kind,
-    record_value_symbol_ref,
+    record_value_symbol_ref, source_value_symbol_for_decl,
     prove_dict_evidence_for_type, impl_predicate_constraints_satisfied,
     resolve_mod_uses, bind_exact_import_alias,
     enter_project_root_frame, enter_project_child_frame,
@@ -751,7 +751,20 @@ fn register_phase1(
             register_mod_block_items(ctx, mod_name, mod_uses, mod_decls, some(deferred_struct_names), some(deferred_enum_names))
             exit_struct_identity_frame(ctx)
         },
-        _ => register_decl(ctx, decl, decl_index)
+        _ => {
+            register_decl(ctx, decl, decl_index)
+            match decl {
+                Decl::Fn { name, .. } |
+                Decl::ExternFn { name, .. } |
+                Decl::Const { name, .. } => {
+                    let symbol = source_value_symbol_for_decl(ctx, decl_index)
+                    record_value_origin(
+                        ctx, name, symbol_ref_canonical_payload(symbol))
+                    record_value_symbol_ref(ctx, name, symbol)
+                },
+                _ => {}
+            }
+        }
     }
 }
 
