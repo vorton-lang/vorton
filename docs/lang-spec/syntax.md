@@ -280,11 +280,12 @@ ReturnStmt   ::= 'return' Expr? ';'?
 ### 赋值和表达式语句
 
 ```ebnf
-AssignStmt   ::= Expr ('=' | '+=' | '-=' | '*=' | '/=' | '%=') Expr ';'?
+AssignStmt   ::= AssignTarget ('=' | '+=' | '-=' | '*=' | '/=' | '%=') Expr ';'?
+AssignTarget ::= Ident | Ident ('.' Ident)+
 ExprStmt     ::= Expr ';'?
 ```
 
-赋值目标必须是可变的（`let mut` 绑定、可变参数或其字段等）。
+赋值目标必须是可变的（`let mut` 绑定、可变参数或其字段等）。0.1 的 index expression 仅可读取；`xs[i] = value`及compound index assignment稳定报错，不按receiver类型隐式改写setter。List mutation使用`xs.set(i, value)`，Map mutation使用`map.insert(key, value)`；完整`IndexMut`不属于0.1语法。
 
 ## 表达式
 

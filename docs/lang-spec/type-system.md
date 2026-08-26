@@ -446,6 +446,8 @@ apply(subst, τ):
   Range<Int> 保留特殊快速路径（直接编译为计数循环）。
 ```
 
+字段赋值要求其root binding可变，并保持同一字段类型。0.1中`IndexExpr`只产生读取值，不是lvalue；index assignment在进入类型/ownership lowering前稳定拒绝。容器更新通过声明为`mut self`的具名方法参与普通调用与mutation推断。
+
 ## 方法解析
 
 方法调用 `receiver.method(args)` 按以下顺序解析：
