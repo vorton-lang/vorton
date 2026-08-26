@@ -796,7 +796,8 @@ fn exact_trait_bounds(values: List<TraitBound>) -> List<TraitBound> {
         }
         let mut right = index + 1
         while right < values.len() {
-            if symbol_ref_same(
+            if value.type_var_id == values.get(right).unwrap().type_var_id &&
+               symbol_ref_same(
                     value.trait_ref,
                     values.get(right).unwrap().trait_ref) {
                 panic("PreCore closure: trait bound identity is duplicated")
