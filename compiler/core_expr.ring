@@ -101,7 +101,7 @@ use resource_model::{
     flow_call_contract_parameter_types, flow_call_contract_parameter_roles,
     flow_call_contract_result_type, flow_call_contract_result_role,
     flow_call_contract_result_origin, flow_semantic_role_tag,
-    flow_call_contract_same, value_origin_same,
+    value_origin_same,
     FlowStorageContract, flow_storage_contract_tag
 }
 use core_type_source::{
@@ -129,6 +129,7 @@ use core_type_source::{
     flow_generic_param_owner, flow_generic_param_index,
     flow_generic_param_arity,
     flow_type_actual_satisfies_substituted_formal,
+    flow_type_refs_alpha_same, flow_callable_contract_alpha_same,
     remap_flow_call_contract
 }
 
@@ -381,9 +382,14 @@ pub fn core_callable_redirect_contract_same(
     source: CoreCallableContract, target: CoreCallableContract,
     graph: CoreTypeGraph
 ) -> Bool {
-    if !flow_call_contract_same(
-            source.semantic_contract, target.semantic_contract) ||
-       !core_effect_contract_same(source.effects, target.effects) ||
+    if !executable_ref_is_named(source.reference) ||
+       !executable_ref_is_named(target.reference) ||
+       !flow_callable_contract_alpha_same(
+            core_type_graph_nodes(graph),
+            source.semantic_contract, source.effects,
+            executable_ref_named_symbol(source.reference), source.origin,
+            target.semantic_contract, target.effects,
+            executable_ref_named_symbol(target.reference), target.origin) ||
        source.handled_evidence.len() != target.handled_evidence.len() {
         return false
     }
@@ -398,9 +404,13 @@ pub fn core_callable_redirect_contract_same(
         if !handled_effect_ref_same(
                 core_handled_evidence_requirement(left),
                 core_handled_evidence_requirement(right)) ||
-           !core_type_ref_same(
+           !flow_type_refs_alpha_same(
+                core_type_graph_nodes(graph),
                 core_handled_evidence_type(left),
-                core_handled_evidence_type(right)) {
+                core_handled_evidence_type(right),
+                executable_ref_named_symbol(source.reference),
+                executable_ref_named_symbol(target.reference),
+                source.origin, target.origin) {
             return false
         }
         index = index + 1
