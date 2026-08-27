@@ -139,6 +139,7 @@ use resource_type_lfp::{
     make_locations_planner_callable_provenance,
     make_call_planner_callable_provenance,
     with_planner_callable_provenance, make_frozen_planner_input,
+    flow_callable_index_for_planner,
     build_constraint_graph, solve_constraint_graph,
     materialize_solved_graph}
 use resource_candidate_provenance::{
