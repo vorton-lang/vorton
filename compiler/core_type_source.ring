@@ -39,6 +39,7 @@ use effect_contract::{
     make_core_effect_set, core_effect_set_atoms,
     make_core_effect_contract, core_effect_contract_exact,
     core_effect_contract_parameter, core_effect_contract_same,
+    core_effect_contract_actual_satisfies_formal,
     copy_core_effect_contract
 }
 use resource_model::{
@@ -777,7 +778,7 @@ fn flow_satisfaction_type_node(
     for node in nodes {
         if core_type_ref_same(node.reference, reference) { return node }
     }
-    panic("CoreHIR: callable compatibility references an absent type")
+    panic("CoreHIR: type compatibility references an absent type")
 }
 
 fn flow_satisfaction_pair_active(
@@ -785,7 +786,7 @@ fn flow_satisfaction_pair_active(
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
 ) -> Bool {
     if actual_path.len() != formal_path.len() {
-        panic("CoreHIR: callable compatibility path is malformed")
+        panic("CoreHIR: type compatibility path is malformed")
     }
     let mut index = 0
     while index < actual_path.len() {
@@ -805,6 +806,43 @@ fn flow_type_actual_satisfies_formal_inner(
     if core_type_ref_same(actual.reference, formal.reference) { return true }
     let formal_kind = flow_type_kind_tag(formal.kind)
     let actual_kind = flow_type_kind_tag(actual.kind)
+
+    if formal_kind == FLOW_TYPE_CALLABLE &&
+       actual_kind == FLOW_TYPE_CALLABLE {
+        if actual.parameter_count != formal.parameter_count ||
+           actual.children.len() != formal.children.len() ||
+           !core_effect_contract_actual_satisfies_formal(
+                actual.callable_effects.unwrap(),
+                formal.callable_effects.unwrap()) {
+            return false
+        }
+        if flow_satisfaction_pair_active(
+                actual.reference, formal.reference,
+                actual_path, formal_path) {
+            return true
+        }
+        actual_path.push(actual.reference)
+        formal_path.push(formal.reference)
+        let mut index = 0
+        while index < actual.children.len() {
+            if !flow_type_actual_satisfies_formal_inner(
+                    nodes,
+                    flow_satisfaction_type_node(
+                        nodes, actual.children.get(index).unwrap()),
+                    flow_satisfaction_type_node(
+                        nodes, formal.children.get(index).unwrap()),
+                    actual_path, formal_path) {
+                let _ = actual_path.pop()
+                let _ = formal_path.pop()
+                return false
+            }
+            index = index + 1
+        }
+        let _ = actual_path.pop()
+        let _ = formal_path.pop()
+        return true
+    }
+
     if formal_kind != FLOW_TYPE_RECORD ||
        (actual_kind != FLOW_TYPE_STRUCT && actual_kind != FLOW_TYPE_RECORD) {
         return false
@@ -840,8 +878,10 @@ fn flow_type_actual_satisfies_formal_inner(
     satisfied
 }
 
-// The sole directional callable-boundary compatibility relation.  Record rows
-// are already frozen to required-field logical contracts; satisfying one never
+// The sole directional compatibility relation.  Record rows are already
+// frozen to required-field logical contracts.  Callable shapes recurse
+// pointwise through this same relation and admit only the explicit effect
+// instantiation above, not general function subtyping.  Satisfaction never
 // creates a value/view or changes the actual slot's physical type.
 pub fn flow_type_actual_satisfies_formal(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode

@@ -107,11 +107,12 @@ use resource_model::{
 }
 use core_type_source::{
     CoreTypeGraph, core_type_graph_count, core_type_graph_nodes,
-    core_type_graph_node,
+    core_type_graph_node, core_type_graph_ref_from_flow,
     FlowTypeNode, FlowFieldIdentity, FlowNominalFieldFact,
     flow_type_node_kind, flow_type_node_children,
     flow_type_node_nominal, flow_type_node_nominal_fields,
     flow_type_node_parameter_count,
+    flow_type_node_callable_effects,
     flow_type_kind_tag, flow_type_kind_int, flow_type_kind_float,
     flow_type_kind_str, flow_type_kind_bool, flow_type_kind_unit,
     flow_type_kind_never, flow_type_kind_struct, flow_type_kind_enum,
@@ -292,8 +293,8 @@ pub fn make_core_callable_contract(
         panic("CoreHIR: callable parameter-slot relation differs")
     }
     match core_effect_contract_parameter(effects) {
-        some(parameter) => if !executable_ref_same(
-                effect_param_owner(parameter), reference) {
+        some(parameter) => if !origin_ref_same(
+                effect_param_owner(parameter), origin) {
             panic("CoreHIR: callable effect parameter has another owner")
         },
         none => {}
@@ -3471,6 +3472,13 @@ pub fn validate_core_callable_contracts(
         validate_effect_set(
             core_effect_contract_exact(left.effects),
             core_type_graph_count(graph))
+        match core_effect_contract_parameter(left.effects) {
+            some(parameter) => if !origin_ref_same(
+                    effect_param_owner(parameter), left.origin) {
+                panic("CoreHIR: callable effect parameter owner drifted")
+            },
+            none => {}
+        }
         for parameter in core_callable_parameter_types(left) {
             let _ = core_type_graph_node(graph, parameter)
         }
@@ -3496,6 +3504,18 @@ fn require_core_type_same(
     left: CoreTypeRef, right: CoreTypeRef, message: Str
 ) {
     if !core_type_ref_same(left, right) { panic(message) }
+}
+fn require_core_type_actual_satisfies_formal(
+    actual: CoreTypeRef, formal: CoreTypeRef,
+    graph: CoreTypeGraph, message: Str
+) {
+    let formal_ref = core_type_graph_ref_from_flow(graph, formal)
+    if !flow_type_actual_satisfies_formal(
+            core_type_graph_nodes(graph),
+            core_type_graph_node(graph, actual),
+            core_type_graph_node(graph, formal_ref)) {
+        panic(message)
+    }
 }
 
 fn validate_instantiated_handled_uses(
@@ -3532,8 +3552,8 @@ fn validate_call_effects(
         }
     }
     match core_effect_contract_parameter(result_contract) {
-        some(parameter) => if !executable_ref_same(
-                effect_param_owner(parameter), body.reference) {
+        some(parameter) => if !origin_ref_same(
+                effect_param_owner(parameter), body.origin) {
             panic("CoreHIR: call effect substitution escapes another owner")
         },
         none => {}
@@ -3756,7 +3776,7 @@ fn variant_flow_fields(
 
 fn validate_field_sequence(
     fields: List<CoreFieldValue>, expected: List<FlowNominalFieldFact>,
-    body: CoreBody
+    graph: CoreTypeGraph
 ) {
     if fields.len() != expected.len() {
         panic("CoreHIR: constructor field census differs from type graph")
@@ -3765,18 +3785,19 @@ fn validate_field_sequence(
     while index < fields.len() {
         let actual = fields.get(index).unwrap()
         let fact = expected.get(index).unwrap()
-        if !core_field_matches_fact(actual.field, fact) ||
-           core_type_ref_index(core_expr_type(actual.value)) !=
-                core_type_ref_index(flow_nominal_field_type(fact)) {
+        if !core_field_matches_fact(actual.field, fact) {
             panic("CoreHIR: constructor field identity/type order differs")
         }
+        require_core_type_actual_satisfies_formal(
+            core_expr_type(actual.value), flow_nominal_field_type(fact), graph,
+            "CoreHIR: constructor field identity/type order differs")
         index = index + 1
     }
 }
 
 fn validate_construct_with_graph(
     constructor: CoreConstructorRef, fields: List<CoreFieldValue>,
-    result_type: CoreTypeRef, body: CoreBody, graph: CoreTypeGraph
+    result_type: CoreTypeRef, graph: CoreTypeGraph
 ) {
     let node = core_type_graph_node(graph, result_type)
     match constructor.value {
@@ -3812,7 +3833,7 @@ fn validate_construct_with_graph(
                 }
                 contract_index = contract_index + 1
             }
-            validate_field_sequence(fields, expected, body)
+            validate_field_sequence(fields, expected, graph)
         },
         CoreConstructorRefValue::VariantConstructorValue(variant) => {
             if type_kind(graph, result_type) !=
@@ -3823,7 +3844,7 @@ fn validate_construct_with_graph(
                 panic("CoreHIR: variant constructor/result owner differs")
             }
             validate_field_sequence(
-                fields, variant_flow_fields(node, variant), body)
+                fields, variant_flow_fields(node, variant), graph)
         },
         CoreConstructorRefValue::TupleConstructorValue(arity) => {
             let children = flow_type_node_children(node)
@@ -3842,10 +3863,10 @@ fn validate_construct_with_graph(
                     },
                     _ => panic("CoreHIR: tuple constructor field identity differs")
                 }
-                if core_type_ref_index(core_expr_type(field.value)) !=
-                   core_type_ref_index(children.get(index).unwrap()) {
-                    panic("CoreHIR: tuple constructor field type differs")
-                }
+                require_core_type_actual_satisfies_formal(
+                    core_expr_type(field.value),
+                    children.get(index).unwrap(), graph,
+                    "CoreHIR: tuple constructor field type differs")
                 index = index + 1
             }
         }
@@ -3907,9 +3928,10 @@ fn validate_move_update_with_graph(
         index = index + 1
     }
     for override_value in overrides {
-        require_core_type_same(
-            projection_result_type(override_value.field, result_type, graph),
+        require_core_type_actual_satisfies_formal(
             core_expr_type(override_value.value),
+            projection_result_type(override_value.field, result_type, graph),
+            graph,
             "CoreHIR: move update override type differs")
     }
 }
@@ -4041,10 +4063,11 @@ fn core_place_type(
     let base_type = core_expr_type(core_place_base(place))
     let expected = projection_result_type(
         core_place_field(place), base_type, graph)
-    require_core_type_same(
-        expected, core_place_value_type(place),
+    let actual = core_place_value_type(place)
+    require_core_type_actual_satisfies_formal(
+        actual, expected, graph,
         "CoreHIR: project place value type differs")
-    expected
+    actual
 }
 
 fn block_tail_type(value: CoreBlock) -> CoreTypeRef? {
@@ -4204,6 +4227,27 @@ fn validate_handled_capture_targets(
     }
 }
 
+fn validate_core_callable_value_effect_contract(
+    target_type: CoreTypeRef, callable: CoreCallableContract,
+    graph: CoreTypeGraph
+) {
+    let node = core_type_graph_node(graph, target_type)
+    if flow_type_kind_tag(flow_type_node_kind(node)) !=
+            flow_type_kind_tag(flow_type_kind_callable()) {
+        panic("CoreHIR: callable value target is not callable typed")
+    }
+    let target_effects = flow_type_node_callable_effects(node)
+    match core_effect_contract_parameter(target_effects) {
+        some(parameter) => if !origin_ref_same(
+                effect_param_owner(parameter), callable.origin) {
+            panic("CoreHIR: callable value residual effect owner differs")
+        },
+        none => {}
+    }
+    let _ = make_explicit_core_effect_instantiation(
+        callable.effects, target_effects, target_effects)
+}
+
 fn validate_expr_with_program(
     value: CoreExpr, body: CoreBody, graph: CoreTypeGraph,
     callables: List<CoreCallableContract>,
@@ -4216,7 +4260,9 @@ fn validate_expr_with_program(
         CoreExprValue::LiteralExprValue(literal) =>
             validate_core_literal_type(literal, value.ty, graph),
         CoreExprValue::CallableValueExprValue { executable, evidence } => {
-            let _ = core_callable_for(callables, executable)
+            let callable = core_callable_for(callables, executable)
+            validate_core_callable_value_effect_contract(
+                value.ty, callable, graph)
             validate_evidence_with_program(evidence, body, impls)
         },
         CoreExprValue::ReadExprValue(source) => require_core_type_same(
@@ -4370,10 +4416,11 @@ fn validate_expr_with_program(
             validate_expr_with_program(
                 base, body, graph, callables,
                 impls, current_callable, loop_depth)
-            require_core_type_same(
+            require_core_type_actual_satisfies_formal(
+                value.ty,
                 projection_result_type(
                     field, core_expr_type(base), graph),
-                value.ty, "CoreHIR: projection result type differs")
+                graph, "CoreHIR: projection result type differs")
         },
         CoreExprValue::ConstructExprValue { constructor, fields } => {
             for field in fields {
@@ -4382,7 +4429,7 @@ fn validate_expr_with_program(
                     impls, current_callable, loop_depth)
             }
             validate_construct_with_graph(
-                constructor, fields, value.ty, body, graph)
+                constructor, fields, value.ty, graph)
             match constructor.executable {
                 some(executable) => {
                     if core_constructor_kind_tag(constructor) != 1 {
@@ -4425,6 +4472,8 @@ fn validate_expr_with_program(
             executable, handled_captures, ..
         } => {
             let contract = core_callable_for(callables, executable)
+            validate_core_callable_value_effect_contract(
+                value.ty, contract, graph)
             if !executable_contract_mode_same(
                     contract.mode, executable_contract_mode_concrete_body()) {
                 panic("CoreHIR: lambda references a bodyless callable")

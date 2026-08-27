@@ -2,32 +2,31 @@
 //
 // Raw inference/UnionFind ids are intentionally absent from this module.  A
 // producer may construct a reference only after TypedHIR has resolved ordinary
-// effect metavariables and chosen a callable owner plus deterministic ordinal.
+// effect metavariables and chosen a callable origin plus deterministic ordinal.
 // CoreHIR and FlowIR transport this identity without reopening inference.
 
 use ir_identity::{
     CoreTypeRef, core_type_ref_same,
+    OriginRef, origin_ref_same,
     HandledEffectRef, SystemEffectRef,
     handled_effect_ref_same, system_effect_ref_same
 }
-use ir_inventory::{ExecutableRef, executable_ref_same,
-    executable_ref_origin_module_key}
 
 pub struct EffectParamRef {
-    owner: ExecutableRef,
+    owner: OriginRef,
     ordinal: Int
 }
 
 pub fn make_effect_param_ref(
-    owner: ExecutableRef, ordinal: Int
+    owner: OriginRef, ordinal: Int
 ) -> EffectParamRef {
-    if ordinal < 0 || executable_ref_origin_module_key(owner) == "" {
+    if ordinal < 0 {
         panic("effect contract: invalid formal parameter identity")
     }
     EffectParamRef { owner: owner, ordinal: ordinal }
 }
 
-pub fn effect_param_owner(value: EffectParamRef) -> ExecutableRef {
+pub fn effect_param_owner(value: EffectParamRef) -> OriginRef {
     value.owner
 }
 
@@ -38,7 +37,7 @@ pub fn effect_param_ordinal(value: EffectParamRef) -> Int {
 pub fn effect_param_ref_same(
     left: EffectParamRef, right: EffectParamRef
 ) -> Bool {
-    executable_ref_same(left.owner, right.owner) &&
+    origin_ref_same(left.owner, right.owner) &&
         left.ordinal == right.ordinal
 }
 
@@ -313,6 +312,30 @@ pub fn make_explicit_core_effect_instantiation(
         some(parameter) => make_core_effect_instantiation(
             source, [make_core_effect_substitution(parameter, replacement)], result)
     }
+}
+// The one directional effect-contract relation used by callable type
+// compatibility.  A closed formal is exact.  An open formal admits precisely
+// the one substitution already modelled by CoreEffectInstantiation; passing
+// the actual contract as both replacement and result is legal exactly when
+// every fixed formal atom is retained.
+pub fn core_effect_contract_actual_satisfies_formal(
+    actual: CoreEffectContract, formal: CoreEffectContract
+) -> Bool {
+    match formal.parameter {
+        none => if !core_effect_contract_same(actual, formal) {
+            return false
+        },
+        some(_) => {
+            for atom in formal.exact.atoms {
+                if !core_effect_set_contains_atom(actual.exact, atom) {
+                    return false
+                }
+            }
+        }
+    }
+    let _ = make_explicit_core_effect_instantiation(
+        formal, actual, actual)
+    true
 }
 pub fn core_effect_instantiation_source(
     value: CoreEffectInstantiation

@@ -238,8 +238,8 @@ pub fn make_flow_callable(
         panic("FlowIR: callable parameter slot relation is not total")
     }
     match core_effect_contract_parameter(effects) {
-        some(parameter) => if !executable_ref_same(
-                effect_param_owner(parameter), reference) {
+        some(parameter) => if !origin_ref_same(
+                effect_param_owner(parameter), origin) {
             panic("FlowIR: callable effect parameter has another owner")
         },
         none => {}
@@ -3182,8 +3182,8 @@ fn validate_callables(
             panic("FlowIR: callable result type is absent")
         }
         match core_effect_contract_parameter(left.effects) {
-            some(parameter) => if !executable_ref_same(
-                    effect_param_owner(parameter), left.reference) {
+            some(parameter) => if !origin_ref_same(
+                    effect_param_owner(parameter), left.origin) {
                 panic("FlowIR: callable effect parameter owner drifted")
             },
             none => {}
@@ -4198,6 +4198,17 @@ fn type_node_for(
         none => panic("FlowIR: typed operation references an absent type")
     }
 }
+fn require_flow_type_actual_satisfies_formal(
+    actual: CoreTypeRef, formal: CoreTypeRef,
+    type_nodes: List<FlowTypeNode>, message: Str
+) {
+    if !flow_type_actual_satisfies_formal(
+            type_nodes,
+            type_node_for(type_nodes, actual),
+            type_node_for(type_nodes, formal)) {
+        panic(message)
+    }
+}
 
 fn slot_type_for(body: FlowBody, slot: SlotRef) -> CoreTypeRef {
     slot_for_ref(body.slots, slot).ty
@@ -4316,6 +4327,13 @@ fn validate_callable_value_effect_contract(
         some(value) => value,
         none => panic("FlowIR: callable value type lacks effect contract")
     }
+    match core_effect_contract_parameter(target_effects) {
+        some(parameter) => if !origin_ref_same(
+                effect_param_owner(parameter), callable.origin) {
+            panic("FlowIR: callable value residual effect owner differs")
+        },
+        none => {}
+    }
     let _ = make_explicit_core_effect_instantiation(
         callable.effects, target_effects, target_effects)
 }
@@ -4405,11 +4423,13 @@ fn validate_projection_contract(
         },
         FlowProjectionContractValue::TupleProjectionValue(index) => {
             if flow_type_kind_tag(base.kind) != FLOW_TYPE_TUPLE ||
-               index < 0 || index >= base.children.len() ||
-               !core_type_ref_same(
-                    base.children.get(index).unwrap(), contract.result_type) {
+               index < 0 || index >= base.children.len() {
                 panic("FlowIR: tuple projection index/result type differs")
             }
+            require_flow_type_actual_satisfies_formal(
+                contract.result_type, base.children.get(index).unwrap(),
+                type_nodes,
+                "FlowIR: tuple projection index/result type differs")
         },
         FlowProjectionContractValue::NominalProjectionValue(field) => {
             let nominal = match base.nominal {
@@ -4424,8 +4444,8 @@ fn validate_projection_contract(
                 if flow_field_identity_is_nominal(fact.identity) &&
                    nominal_field_ref_same(
                         flow_field_identity_nominal(fact.identity), field) {
-                    require_same_flow_type(
-                        fact.ty, contract.result_type,
+                    require_flow_type_actual_satisfies_formal(
+                        contract.result_type, fact.ty, type_nodes,
                         "FlowIR: nominal projection result type differs")
                     matches = matches + 1
                 }
@@ -4449,8 +4469,8 @@ fn validate_projection_contract(
                 if flow_field_identity_is_variant(fact.identity) &&
                    variant_field_ref_same(
                         flow_field_identity_variant(fact.identity), field) {
-                    require_same_flow_type(
-                        fact.ty, contract.result_type,
+                    require_flow_type_actual_satisfies_formal(
+                        contract.result_type, fact.ty, type_nodes,
                         "FlowIR: variant projection result type differs")
                     matches = matches + 1
                 }
@@ -4480,17 +4500,28 @@ fn validate_typed_instructions(
                         }
                         let mut index = 0
                         while index < inputs.len() {
-                            require_same_flow_type(
-                                slot_type_for(body, inputs.get(index).unwrap()),
-                                operation.input_types.get(index).unwrap(),
-                                "FlowIR: Initialize input slot type differs")
                             match operation.input_locations.get(index).unwrap() {
-                                some(location) => validate_projection_contract(
-                                    aggregate_input_projection(
-                                        location, operation.target_type,
-                                        operation.input_types.get(index).unwrap()),
-                                    type_nodes),
-                                none => {}
+                                some(location) => {
+                                    require_flow_type_actual_satisfies_formal(
+                                        slot_type_for(
+                                            body,
+                                            inputs.get(index).unwrap()),
+                                        operation.input_types.get(
+                                            index).unwrap(),
+                                        type_nodes,
+                                        "FlowIR: Initialize input slot type differs")
+                                    validate_projection_contract(
+                                        aggregate_input_projection(
+                                            location, operation.target_type,
+                                            operation.input_types.get(
+                                                index).unwrap()),
+                                        type_nodes)
+                                },
+                                none => require_same_flow_type(
+                                    slot_type_for(
+                                        body, inputs.get(index).unwrap()),
+                                    operation.input_types.get(index).unwrap(),
+                                    "FlowIR: Initialize input slot type differs")
                             }
                             index = index + 1
                         }
@@ -4678,9 +4709,18 @@ fn validate_typed_instructions(
                                 panic("FlowIR: indirect callee effect source differs")
                             }
                         }
+                        let result_effects =
+                            core_effect_instantiation_result(target.effects)
+                        match core_effect_contract_parameter(result_effects) {
+                            some(parameter) => if !origin_ref_same(
+                                    effect_param_owner(parameter), body.origin) {
+                                panic("FlowIR: call effect substitution escapes another owner")
+                            },
+                            none => {}
+                        }
                         let expected_handled =
                             core_effect_contract_handled_requirements(
-                                core_effect_instantiation_result(target.effects))
+                                result_effects)
                         if expected_handled.len() != handled_evidence.len() {
                             panic("FlowIR: call handled evidence/effect census differs")
                         }
@@ -4868,7 +4908,7 @@ fn encode_effect_contract(value: CoreEffectContract) -> Str {
     }
     match core_effect_contract_parameter(value) {
         some(parameter) => parts.push(
-            "P${encode_executable(effect_param_owner(parameter))}/${
+            "P${encode_origin(effect_param_owner(parameter))}/${
                 effect_param_ordinal(parameter).to_str()}"),
         none => {}
     }
@@ -4879,7 +4919,7 @@ fn encode_effect_instantiation(value: CoreEffectInstantiation) -> Str {
     let mut substitutions: List<Str> = []
     for substitution in core_effect_instantiation_substitutions(value) {
         let parameter = core_effect_substitution_parameter(substitution)
-        substitutions.push("${encode_executable(
+        substitutions.push("${encode_origin(
             effect_param_owner(parameter))}/${
             effect_param_ordinal(parameter).to_str()}=${
             encode_effect_contract(
