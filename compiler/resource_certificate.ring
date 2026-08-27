@@ -1992,6 +1992,7 @@ fn verify_cfg_body_certificate(
        certificate.entry_seed.len() != slots.len() {
         panic("resource certificate: CFG block census differs")
     }
+    let reachable = cfg_certificate_reachable_blocks(certificate)
     let mut block_index = 0
     while block_index < blocks.len() {
         let rc_block = blocks.get(block_index).unwrap()
@@ -2002,6 +2003,32 @@ fn verify_cfg_body_certificate(
                 proof.source_block, rc_block_source_ref(rc_block)) ||
            proof.terminator_kind != rc_block_terminator_kind(rc_block) {
             panic("resource certificate: CFG block identity/state census differs")
+        }
+        if !reachable.get(block_index).unwrap() {
+            for state in proof.entry_states {
+                if !slot_flow_is_unreachable(state) {
+                    panic("resource certificate: unreachable block is not bottom")
+                }
+            }
+            for step in proof.steps {
+                if step.before.len() != 0 || step.semantic.len() != 0 ||
+                   step.after.len() != 0 {
+                    panic("resource certificate: unreachable step has transitions")
+                }
+            }
+            if proof.terminator_transitions.len() != 0 {
+                panic("resource certificate: unreachable terminator has transitions")
+            }
+            for edge in proof.edges {
+                if edge.transitions.len() != 0 {
+                    panic("resource certificate: unreachable edge has transitions")
+                }
+                for state in edge.exit_states {
+                    if !slot_flow_is_unreachable(state) {
+                        panic("resource certificate: unreachable edge is not bottom")
+                    }
+                }
+            }
         }
         let rc_steps = rc_block_steps(rc_block)
         if proof.steps.len() != rc_steps.len() {
@@ -2078,7 +2105,6 @@ fn verify_cfg_body_certificate(
         block_index = block_index + 1
     }
 
-    let reachable = cfg_certificate_reachable_blocks(certificate)
     // Every entry-rooted predecessor contributes exactly to the target entry
     // state.  Equality with the join prevents both under- and over-claiming.
     let mut target_index = 0
