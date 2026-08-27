@@ -611,6 +611,8 @@ fn activate_core_binder(
         binder_kind_handled_evidence_local())
     let handled_capture = kind_tag == binder_kind_tag(
         binder_kind_handled_evidence_capture())
+    let lambda_capture = kind_tag == binder_kind_tag(
+        binder_kind_lambda_capture())
     let dictionary_param = kind_tag == binder_kind_tag(
         binder_kind_dictionary_evidence_param())
     let entry = if handled_param || handled_local || handled_capture {
@@ -622,8 +624,8 @@ fn activate_core_binder(
     }
     let ordinal = parameter_ordinal(ctx.core_body, reference)
     let entry_live = ordinal.is_some() || handled_param || handled_capture ||
-        dictionary_param
-    let storage = if handled_capture {
+        lambda_capture || dictionary_param
+    let storage = if handled_capture || lambda_capture {
         flow_storage_capture()
     } else if ordinal.is_some() || handled_param || dictionary_param {
         flow_storage_parameter()

@@ -666,7 +666,7 @@ fn flow_call_target_same(
        left.type_substitutions.len() != right.type_substitutions.len() {
         return false
     }
-    substitution_index = 0
+    let mut substitution_index = 0
     while substitution_index < left.type_substitutions.len() {
         let a = left.type_substitutions.get(substitution_index).unwrap()
         let b = right.type_substitutions.get(substitution_index).unwrap()
@@ -683,7 +683,7 @@ fn flow_call_target_same(
         }
         substitution_index = substitution_index + 1
     }
-    let mut substitution_index = 0
+    substitution_index = 0
     while substitution_index < left_substitutions.len() {
         let a = left_substitutions.get(substitution_index).unwrap()
         let b = right_substitutions.get(substitution_index).unwrap()
