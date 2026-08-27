@@ -32,6 +32,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
     impl_target_symbol,
     specialize_trait_method_scheme, build_type_var_map,
+    ordered_effect_tail_vars,
     delegate_plan_not_applicable, delegate_plan_pending,
     delegate_plan_final,
     finalize_delegate_provider_plan, assert_no_pending_delegate_plans}
@@ -2873,7 +2874,9 @@ fn register_impl_method(
         none => infer_hof_effect_row(param_types)
     }
     let fn_type = Type::FnType { params: param_types, return_type: ret, effects: impl_m_effects }
-    collect_effect_tail_vars(fn_type, all_tvs)
+    for tail in ordered_effect_tail_vars(fn_type) {
+        if !all_tvs.contains(tail) { all_tvs.push(tail) }
+    }
     let scheme = make_impl_method_scheme_core(fn_type, all_tvs, none)
 
     // Track mut self methods
@@ -2939,8 +2942,7 @@ fn freshen_generated_effect_formals(
     mut ctx: InferCtx, core: ImplMethodSchemeCore
 ) -> ImplMethodSchemeCore {
     let source_type = impl_method_core_type(core)
-    let mut tails: List<Int> = []
-    collect_effect_tail_vars(source_type, tails)
+    let tails = ordered_effect_tail_vars(source_type)
     if tails.len() == 0 { return core }
 
     let mut mapping: Map<Int, Type> = map_new()
@@ -3505,60 +3507,6 @@ fn expand_effect_exprs(mut ctx: InferCtx, decl_effects: List<EffectExpr>, mut ex
     effects
 }
 
-fn collect_effect_atom_tail_vars(value: Effect, mut vars: List<Int>) {
-    match value {
-        Effect::FailEffect { error_type } =>
-            collect_effect_tail_vars(error_type, vars),
-        Effect::MutEffect { state_type } =>
-            collect_effect_tail_vars(state_type, vars),
-        Effect::CustomEffect { type_args, .. } => {
-            for argument in type_args {
-                collect_effect_tail_vars(argument, vars)
-            }
-        },
-        Effect::SystemEffect { .. } | Effect::UnsafeEffect => {}
-    }
-}
-
-fn collect_effect_row_tail_vars(row: EffectRow, mut vars: List<Int>) {
-    for item in row.effects { collect_effect_atom_tail_vars(item, vars) }
-    match row.tail {
-        some(tail) => if !vars.contains(tail) { vars.push(tail) },
-        none => {}
-    }
-}
-
-fn collect_effect_tail_vars(ty: Type, mut vars: List<Int>) {
-    match ty {
-        Type::FnType { params, return_type, effects } => {
-            collect_effect_row_tail_vars(effects, vars)
-            for p in params { collect_effect_tail_vars(p, vars) }
-            collect_effect_tail_vars(return_type, vars)
-        },
-        Type::StructType { type_params, .. } => {
-            for tp in type_params { collect_effect_tail_vars(tp, vars) }
-        },
-        Type::EnumType { type_params, .. } => {
-            for tp in type_params { collect_effect_tail_vars(tp, vars) }
-        },
-        Type::TupleType { elements } => {
-            for e in elements { collect_effect_tail_vars(e, vars) }
-        },
-        Type::GenericType { base, args } => {
-            collect_effect_tail_vars(base, vars)
-            for a in args { collect_effect_tail_vars(a, vars) }
-        },
-        Type::RecordType { fields, .. } => {
-            for field in fields { collect_effect_tail_vars(field.ty, vars) }
-        },
-        Type::EffectRowType { effects, tail } =>
-            collect_effect_row_tail_vars(
-                EffectRow { effects: effects, tail: tail }, vars),
-        Type::PtrType { pointee } => collect_effect_tail_vars(pointee, vars),
-        _ => {}
-    }
-}
-
 fn infer_hof_effect_row(param_types: List<Type>) -> EffectRow {
     for pt in param_types {
         match pt {
@@ -3716,7 +3664,9 @@ fn register_fn_common(
         none => infer_hof_effect_row(param_types)
     }
     let fn_type = Type::FnType { params: param_types, return_type: ret, effects: effects }
-    collect_effect_tail_vars(fn_type, type_vars)
+    for tail in ordered_effect_tail_vars(fn_type) {
+        if !type_vars.contains(tail) { type_vars.push(tail) }
+    }
 
     let mut fn_bounds_list: List<FnBound> = []
     let mut scheme_bounds: List<SchemeBound> = []

@@ -2495,6 +2495,12 @@ fn collect_effect_tail_ids_in_atom(
     }
 }
 
+pub fn ordered_effect_tail_vars(value: Type) -> List<Int> {
+    let result: List<Int> = []
+    collect_effect_tail_ids_in_type(value, result)
+    result
+}
+
 fn fresh_mapping_for_ids(
     mut env: TypeEnv, ids: List<Int>, mut mapping: Map<Int, Type>
 ) {
@@ -2509,7 +2515,11 @@ pub fn instantiate_effect_schema_types(
     mut env: TypeEnv, values: List<Type>
 ) -> List<Type> {
     let mut tails: List<Int> = []
-    for value in values { collect_effect_tail_ids_in_type(value, tails) }
+    for value in values {
+        for tail in ordered_effect_tail_vars(value) {
+            append_ordered_type_var(tails, tail)
+        }
+    }
     let mapping: Map<Int, Type> = map_new()
     fresh_mapping_for_ids(env, tails, mapping)
     values.map(fn(value) { apply_subst_map(mapping, value) })

@@ -807,15 +807,12 @@ fn producer_direct_composite_seed(
 }
 
 fn producer_effect_parameter_from_facts(
-    producer: ClosedCoreProducer, owner: OriginRef, raw_tail: Int
+    producer: ClosedCoreProducer, raw_tail: Int
 ) -> EffectParamRef {
     let mut found: EffectParamRef? = none
     for fact in producer.effect_parameters {
         if typed_effect_formal_raw_tail(fact) == raw_tail {
             let parameter = typed_effect_formal_parameter(fact)
-            if !origin_ref_same(effect_param_owner(parameter), owner) {
-                panic("Core producer: typed effect formal owner differs")
-            }
             if found.is_some() {
                 panic("Core producer: typed effect formal repeats")
             }
@@ -856,10 +853,7 @@ fn producer_record_effect_contract(
     }
     let parameter = row.tail.map(fn(raw_tail) {
         producer_effect_parameter_from_facts(
-            producer, match owner {
-                some(value) => value,
-                none => panic("Core producer: unowned effect tail")
-            }, raw_tail)
+            producer, raw_tail)
     })
     make_core_effect_contract(make_core_effect_set(atoms), parameter)
 }
@@ -2750,18 +2744,11 @@ fn effect_parameter_from_sources(
 
 fn core_effect_contract_from_row(
     values: List<CoreTypeSourceFact>, row: EffectRow, module_key: Str,
-    effect_parameters: List<TypedEffectFormalFact>, owner: OriginRef?
+    effect_parameters: List<TypedEffectFormalFact>
 ) -> CoreEffectContract {
     let parameter = row.tail.map(fn(raw_tail) {
         effect_parameter_from_sources(effect_parameters, raw_tail)
     })
-    match (parameter, owner) {
-        (some(formal), some(expected_owner)) => if !origin_ref_same(
-                effect_param_owner(formal), expected_owner) {
-            panic("Core assembly: callable effect formal owner differs")
-        },
-        _ => {}
-    }
     make_core_effect_contract(
         core_effects(values, row, module_key),
         parameter)
@@ -3099,8 +3086,7 @@ fn core_callee(
         _ => panic("Core assembly: callee signature is not callable")
     }
     let actual_effects = core_effect_contract_from_row(
-        ctx.types, actual_row, ctx.module_key, ctx.effect_parameters,
-        none)
+        ctx.types, actual_row, ctx.module_key, ctx.effect_parameters)
     if callee_ref_is_named(value) {
         let executable = redirected_executable(
             ctx, make_named_executable_ref(callee_ref_named_symbol(value)))
@@ -3326,7 +3312,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
     let ty = type_fact_for(ctx.types, hexpr_type(value), ctx.module_key)
     let effects = core_effect_contract_exact(core_effect_contract_from_row(
         ctx.types, hexpr_effects(value), ctx.module_key,
-        ctx.effect_parameters, some(executable_origin(ctx.owner))))
+        ctx.effect_parameters))
     let origin = fresh_origin(ctx, "expr", source_span)
     match value {
         HExpr::IntLit { value, .. } =>
@@ -3895,7 +3881,7 @@ fn callable_contract(
             flow_semantic_role_read(), make_fresh_flow_value_origin()),
         core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
-            facts.effect_parameters, some(executable_origin(reference))),
+            facts.effect_parameters),
         handled_evidence.map(fn(value) {
             core_handled_binding(facts.handled_evidence_types, value)
         }))
@@ -3953,7 +3939,7 @@ fn add_builtin_method_contracts(
                 builtin_method_contract_resource(fact)),
             core_effect_contract_from_row(
                 facts.type_sources, effects, facts.module_key,
-                facts.effect_parameters, some(executable_origin(reference))),
+                facts.effect_parameters),
             []))
         index = index + 1
     }
@@ -3989,7 +3975,7 @@ fn typed_callable_contract(
             flow_semantic_role_read(), make_fresh_flow_value_origin()),
         core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
-            facts.effect_parameters, some(executable_origin(reference))),
+            facts.effect_parameters),
         handled.map(fn(value) {
             core_handled_binding(facts.handled_evidence_types, value)
         }))
@@ -4236,7 +4222,7 @@ fn derived_call_plan_from_method(
         type_fact_for(facts.type_sources, result, facts.module_key),
         core_effect_contract_exact(core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
-            ctx.effect_parameters, none)),
+            ctx.effect_parameters)),
         evidence_values.map(fn(value) {
             make_core_dict_evidence(dict_ref_exact(value))
         }),
@@ -4272,7 +4258,7 @@ fn derived_call_plan_from_exact(
         type_fact_for(facts.type_sources, result, facts.module_key),
         core_effect_contract_exact(core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
-            ctx.effect_parameters, none)),
+            ctx.effect_parameters)),
         h_exact_call_evidence(exact).map(fn(value) {
             make_core_dict_evidence(dict_ref_exact(value))
         }),
@@ -5279,8 +5265,7 @@ fn add_contract_only(
                     facts.module_key, parameter_types, result, resource),
                 core_effect_contract_from_row(
                     facts.type_sources, effects, facts.module_key,
-                    facts.effect_parameters,
-                    some(executable_origin(reference))),
+                    facts.effect_parameters),
                 handled_evidence.map(fn(value) {
                     core_handled_binding(
                         facts.handled_evidence_types, value)
@@ -5710,8 +5695,7 @@ fn close_project_callable_effect_sources(
             let local = core_effect_contract_from_row(
                 facts.type_sources, typed_callable_effect_row(source),
                 facts.module_key,
-                facts.effect_parameters,
-                some(executable_origin(reference)))
+                facts.effect_parameters)
             let global = remap_core_effect_contract_types(
                 local, mapping, facts.module_key)
             let mut matched = false

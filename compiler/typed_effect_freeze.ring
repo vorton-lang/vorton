@@ -54,7 +54,16 @@ struct TypedEffectFreezeState {
     env: TypeEnv,
     facts: List<TypedEffectFormalFact>,
     callables: List<TypedCallableEffectFact>,
-    visited_nominals: List<SymbolRef>
+    visited_nominals: List<SymbolRef>,
+    header_tails: List<Int>,
+    schema_use_tails: List<Int>,
+    scope_owners: List<OriginRef>
+}
+
+enum EffectFormalScanMode {
+    HeaderFormal,
+    SchemaUseFormal,
+    ValidateFormal
 }
 
 pub struct TypedCallableEffectFact {
@@ -97,22 +106,49 @@ fn executable_origin(value: ExecutableRef) -> OriginRef {
     }
 }
 
-fn register_formal(
-    mut state: TypedEffectFreezeState, raw_tail: Int, owner: OriginRef,
-    allow_foreign_owner: Bool
+fn enter_formal_scope(
+    mut state: TypedEffectFreezeState, owner: OriginRef
+) { state.scope_owners.push(owner) }
+
+fn exit_formal_scope(mut state: TypedEffectFreezeState, owner: OriginRef) {
+    match state.scope_owners.pop() {
+        some(actual) => if !origin_ref_same(actual, owner) {
+            panic("typed effect freeze: lexical owner stack drifted")
+        },
+        none => panic("typed effect freeze: lexical owner stack underflow")
+    }
+}
+
+fn formal_fact_for_raw(
+    state: TypedEffectFreezeState, raw_tail: Int
+) -> TypedEffectFormalFact? {
+    let mut found: TypedEffectFormalFact? = none
+    for fact in state.facts {
+        if typed_effect_formal_raw_tail(fact) == raw_tail {
+            if found.is_some() {
+                panic("typed effect freeze: raw tail has two binders")
+            }
+            found = some(fact)
+        }
+    }
+    found
+}
+
+fn owner_is_visible(
+    state: TypedEffectFreezeState, owner: OriginRef,
+    current_owner: OriginRef
+) -> Bool {
+    if origin_ref_same(owner, current_owner) { return true }
+    state.scope_owners.any(fn(ancestor) {
+        origin_ref_same(ancestor, owner)
+    })
+}
+
+fn mint_formal(
+    mut state: TypedEffectFreezeState, raw_tail: Int, owner: OriginRef
 ) {
     if raw_tail < 0 {
         panic("typed effect freeze: invalid generalized row tail")
-    }
-    for fact in state.facts {
-        if typed_effect_formal_raw_tail(fact) == raw_tail {
-            let parameter = typed_effect_formal_parameter(fact)
-            if !origin_ref_same(effect_param_owner(parameter), owner) {
-                if allow_foreign_owner { return }
-                panic("typed effect freeze: one row tail crossed exact owners")
-            }
-            return
-        }
     }
     let mut ordinal = 0
     for fact in state.facts {
@@ -130,6 +166,62 @@ fn register_formal(
         }
     }
     state.facts.push(make_typed_effect_formal_fact(raw_tail, parameter))
+}
+
+fn scan_formal(
+    mut state: TypedEffectFreezeState, raw_tail: Int, owner: OriginRef,
+    mode: EffectFormalScanMode
+) {
+    match mode {
+        EffectFormalScanMode::HeaderFormal => match formal_fact_for_raw(
+                state, raw_tail) {
+            some(fact) => {
+                let existing_owner = effect_param_owner(
+                    typed_effect_formal_parameter(fact))
+                if !owner_is_visible(state, existing_owner, owner) {
+                    panic("typed effect freeze: unrelated headers share a row tail")
+                }
+            },
+            none => mint_formal(state, raw_tail, owner)
+        },
+        EffectFormalScanMode::SchemaUseFormal => match formal_fact_for_raw(
+                state, raw_tail) {
+            some(fact) => {
+                let existing_owner = effect_param_owner(
+                    typed_effect_formal_parameter(fact))
+                if state.header_tails.contains(raw_tail) &&
+                   owner_is_visible(state, existing_owner, owner) {
+                    return
+                }
+                panic("typed effect freeze: two schema uses share a row tail")
+            },
+            none => {
+                if state.schema_use_tails.contains(raw_tail) {
+                    panic("typed effect freeze: schema-use row tail repeats")
+                }
+                state.schema_use_tails.push(raw_tail)
+                mint_formal(state, raw_tail, owner)
+            }
+        },
+        EffectFormalScanMode::ValidateFormal => match formal_fact_for_raw(
+                state, raw_tail) {
+            some(fact) => {
+                let existing_owner = effect_param_owner(
+                    typed_effect_formal_parameter(fact))
+                if !owner_is_visible(state, existing_owner, owner) {
+                    panic("typed effect freeze: row-tail use escaped its binder")
+                }
+            },
+            none => panic("typed effect freeze: row-tail use has no binder")
+        }
+    }
+    match mode {
+        EffectFormalScanMode::HeaderFormal => if
+                !state.header_tails.contains(raw_tail) {
+            state.header_tails.push(raw_tail)
+        },
+        _ => {}
+    }
 }
 
 fn register_callable_effect(
@@ -157,17 +249,17 @@ fn register_callable_effect(
 
 fn scan_effect_mode(
     mut state: TypedEffectFreezeState, value: Effect, owner: OriginRef,
-    allow_foreign_owner: Bool
+    mode: EffectFormalScanMode
 ) {
     match value {
         Effect::FailEffect { error_type } => scan_type_mode(
-            state, error_type, owner, allow_foreign_owner),
+            state, error_type, owner, mode),
         Effect::MutEffect { state_type } => scan_type_mode(
-            state, state_type, owner, allow_foreign_owner),
+            state, state_type, owner, mode),
         Effect::CustomEffect { type_args, .. } => {
             for argument in type_args {
                 scan_type_mode(
-                    state, argument, owner, allow_foreign_owner)
+                    state, argument, owner, mode)
             }
         },
         Effect::SystemEffect { .. } | Effect::UnsafeEffect => {}
@@ -176,21 +268,28 @@ fn scan_effect_mode(
 
 fn scan_row_mode(
     mut state: TypedEffectFreezeState, row: EffectRow, owner: OriginRef,
-    allow_foreign_owner: Bool
+    mode: EffectFormalScanMode
 ) {
     for item in row.effects {
-        scan_effect_mode(state, item, owner, allow_foreign_owner)
+        scan_effect_mode(state, item, owner, mode)
     }
     match row.tail {
-        some(raw_tail) => register_formal(
-            state, raw_tail, owner, allow_foreign_owner),
+        some(raw_tail) => scan_formal(state, raw_tail, owner, mode),
         none => {}
     }
 }
 
-fn scan_row(
+fn scan_header_row(
     mut state: TypedEffectFreezeState, row: EffectRow, owner: OriginRef
-) { scan_row_mode(state, row, owner, false) }
+) { scan_row_mode(state, row, owner, EffectFormalScanMode::HeaderFormal) }
+
+fn scan_schema_use_row(
+    mut state: TypedEffectFreezeState, row: EffectRow, owner: OriginRef
+) { scan_row_mode(state, row, owner, EffectFormalScanMode::SchemaUseFormal) }
+
+fn validate_row(
+    mut state: TypedEffectFreezeState, row: EffectRow, owner: OriginRef
+) { scan_row_mode(state, row, owner, EffectFormalScanMode::ValidateFormal) }
 
 fn nominal_was_visited(
     state: TypedEffectFreezeState, owner: SymbolRef
@@ -214,7 +313,7 @@ fn scan_struct_schema(mut state: TypedEffectFreezeState, name: Str) {
             let nominal = registered_nominal_ref_symbol(def.owner_ref)
             if !mark_nominal_visited(state, nominal) { return }
             for field in def.fields {
-                scan_type(state, field.ty,
+                scan_header_type(state, field.ty,
                     make_symbol_origin_ref(
                         nominal_field_ref_member(field.field_ref)))
             }
@@ -241,7 +340,7 @@ fn scan_enum_schema(mut state: TypedEffectFreezeState, name: Str) {
                 }
                 let mut field_index = 0
                 while field_index < variant.fields.len() {
-                    scan_type(state,
+                    scan_header_type(state,
                         variant.fields.get(field_index).unwrap(),
                         make_symbol_origin_ref(variant_field_ref_member(
                             field_refs.get(field_index).unwrap())))
@@ -256,76 +355,80 @@ fn scan_enum_schema(mut state: TypedEffectFreezeState, name: Str) {
 
 fn scan_type_mode(
     mut state: TypedEffectFreezeState, value: Type, owner: OriginRef,
-    allow_foreign_owner: Bool
+    mode: EffectFormalScanMode
 ) {
     match value {
         Type::FnType { params, return_type, effects } => {
             for parameter in params {
                 scan_type_mode(
-                    state, parameter, owner, allow_foreign_owner)
+                    state, parameter, owner, mode)
             }
             scan_type_mode(
-                state, return_type, owner, allow_foreign_owner)
-            scan_row_mode(state, effects, owner, allow_foreign_owner)
+                state, return_type, owner, mode)
+            scan_row_mode(state, effects, owner, mode)
         },
         Type::StructType { name, type_params } => {
             for argument in type_params {
                 scan_type_mode(
-                    state, argument, owner, allow_foreign_owner)
+                    state, argument, owner, mode)
             }
             scan_struct_schema(state, name)
         },
         Type::EnumType { name, type_params } => {
             for argument in type_params {
                 scan_type_mode(
-                    state, argument, owner, allow_foreign_owner)
+                    state, argument, owner, mode)
             }
             scan_enum_schema(state, name)
         },
         Type::GenericType { base, args } => {
-            scan_type_mode(state, base, owner, allow_foreign_owner)
+            scan_type_mode(state, base, owner, mode)
             for argument in args {
                 scan_type_mode(
-                    state, argument, owner, allow_foreign_owner)
+                    state, argument, owner, mode)
             }
         },
         Type::RecordType { fields, .. } => {
             for field in fields {
-                scan_type_mode(state, field.ty, owner, allow_foreign_owner)
+                scan_type_mode(state, field.ty, owner, mode)
             }
         },
         Type::EffectRowType { effects, tail } => scan_row_mode(
             state, EffectRow { effects: effects, tail: tail }, owner,
-            allow_foreign_owner),
+            mode),
         Type::TupleType { elements } => {
             for element in elements {
                 scan_type_mode(
-                    state, element, owner, allow_foreign_owner)
+                    state, element, owner, mode)
             }
         },
         Type::PtrType { pointee } => scan_type_mode(
-            state, pointee, owner, allow_foreign_owner),
+            state, pointee, owner, mode),
         _ => {}
     }
 }
 
-fn scan_type(
+fn scan_header_type(
     mut state: TypedEffectFreezeState, value: Type, owner: OriginRef
-) { scan_type_mode(state, value, owner, false) }
+) { scan_type_mode(state, value, owner, EffectFormalScanMode::HeaderFormal) }
 
-fn scan_type_use(
+fn scan_schema_use_type(
     mut state: TypedEffectFreezeState, value: Type, owner: OriginRef
-) { scan_type_mode(state, value, owner, true) }
+) { scan_type_mode(state, value, owner, EffectFormalScanMode::SchemaUseFormal) }
+
+fn validate_type(
+    mut state: TypedEffectFreezeState, value: Type, owner: OriginRef
+) { scan_type_mode(state, value, owner, EffectFormalScanMode::ValidateFormal) }
 
 fn scan_param(
     mut state: TypedEffectFreezeState, value: HParam, owner: OriginRef
-) { scan_type(state, value.ty, owner) }
+) { scan_header_type(state, value.ty, owner) }
 
 fn scan_match_arm(
     mut state: TypedEffectFreezeState, value: HMatchArm, owner: OriginRef
 ) {
     for binding in value.bindings {
-        scan_type_use(state, binding.ty, owner)
+        scan_schema_use_type(state, binding.ty, owner)
     }
     match value.guard {
         some(guard) => scan_expr(state, guard, owner), none => {}
@@ -340,8 +443,13 @@ fn scan_handler(
     register_callable_effect(
         state, value.executable_ref, hexpr_effects(value.body))
     for parameter in value.params { scan_param(state, parameter, owner) }
+    scan_header_type(state, hexpr_type(value.body), owner)
+    scan_header_row(state, hexpr_effects(value.body), owner)
+    enter_formal_scope(state, owner)
     match value.resume_binding {
-        some(binding) => scan_type_use(state, binding.ty, owner), none => {}
+        some(binding) => scan_schema_use_type(
+            state, binding.ty, owner),
+        none => {}
     }
     for capture in value.captures {
         match capture.value {
@@ -349,6 +457,7 @@ fn scan_handler(
         }
     }
     scan_expr(state, value.body, owner)
+    exit_formal_scope(state, owner)
 }
 
 fn scan_stmt(
@@ -356,7 +465,7 @@ fn scan_stmt(
 ) {
     match value {
         HStmt::Let { ty, init, .. } | HStmt::Var { ty, init, .. } => {
-            scan_type_use(state, ty, owner); scan_expr(state, init, owner)
+            scan_expr(state, init, owner); validate_type(state, ty, owner)
         },
         HStmt::Assign { target, value, .. } => {
             scan_expr(state, target, owner); scan_expr(state, value, owner)
@@ -372,25 +481,26 @@ fn scan_stmt(
             scan_expr(state, iterable, owner); scan_expr(state, body, owner)
         },
         HStmt::LetDestructure { bindings, init, .. } => {
-            for binding in bindings {
-                scan_type_use(state, binding.ty, owner)
-            }
             scan_expr(state, init, owner)
+            for binding in bindings {
+                scan_schema_use_type(state, binding.ty, owner)
+            }
         },
         HStmt::IfLet { bindings, expr, then_block, else_block, .. } => {
+            scan_expr(state, expr, owner)
             for binding in bindings {
-                scan_type_use(state, binding.ty, owner)
+                scan_schema_use_type(state, binding.ty, owner)
             }
-            scan_expr(state, expr, owner); scan_expr(state, then_block, owner)
+            scan_expr(state, then_block, owner)
             match else_block {
                 some(branch) => scan_expr(state, branch, owner), none => {}
             }
         },
         HStmt::Drop { ty, place_target, .. } => {
-            scan_type_use(state, ty, owner)
             match place_target {
                 some(expr) => scan_expr(state, expr, owner), none => {}
             }
+            validate_type(state, ty, owner)
         },
         HStmt::Break { .. } | HStmt::Continue { .. } => {}
     }
@@ -399,22 +509,21 @@ fn scan_stmt(
 fn scan_expr(
     mut state: TypedEffectFreezeState, value: HExpr, owner: OriginRef
 ) {
-    let type_owner = match value {
-        HExpr::Lambda { executable_ref, .. } => executable_origin(executable_ref),
-        HExpr::FieldAccess { projection: some(projection), .. } => {
-            let kind = h_projection_kind(projection)
-            if kind == 0 {
-                make_symbol_origin_ref(nominal_field_ref_member(
-                    h_projection_nominal(projection)))
-            } else if kind == 1 {
-                make_symbol_origin_ref(variant_field_ref_member(
-                    h_projection_variant(projection)))
-            } else { owner }
+    let mut type_bound = false
+    match value {
+        HExpr::Lambda { executable_ref, .. } => {
+            scan_header_type(
+                state, hexpr_type(value), executable_origin(executable_ref))
+            type_bound = true
         },
-        _ => owner
+        HExpr::Ident {
+            source_slot: none, callee_identity: some(_), ..
+        } | HExpr::FieldAccess { .. } | HExpr::EffectOp { .. } => {
+            scan_schema_use_type(state, hexpr_type(value), owner)
+            type_bound = true
+        },
+        _ => {}
     }
-    scan_type_use(state, hexpr_type(value), type_owner)
-    scan_row(state, hexpr_effects(value), owner)
     match value {
         HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
         HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
@@ -428,10 +537,10 @@ fn scan_expr(
             scan_expr(state, callee, owner)
             for argument in args { scan_expr(state, argument, owner) }
             for argument in type_args {
-                scan_type_use(state, argument, owner)
+                validate_type(state, argument, owner)
             }
             match method_ref {
-                some(method) => scan_type_use(
+                some(method) => validate_type(
                     state, method_call_ref_signature(method), owner),
                 none => {}
             }
@@ -439,7 +548,7 @@ fn scan_expr(
         HExpr::FieldAccess { receiver, .. } => scan_expr(state, receiver, owner),
         HExpr::StructLit { type_args, fields, spread, .. } => {
             for argument in type_args {
-                scan_type_use(state, argument, owner)
+                validate_type(state, argument, owner)
             }
             for field in fields { scan_expr(state, field.value, owner) }
             match spread {
@@ -491,13 +600,16 @@ fn scan_expr(
             register_callable_effect(
                 state, executable_ref, hexpr_effects(body))
             for parameter in params { scan_param(state, parameter, lambda_owner) }
-            scan_type(state, return_type, lambda_owner)
+            scan_header_type(state, return_type, lambda_owner)
+            scan_header_row(state, hexpr_effects(body), lambda_owner)
+            enter_formal_scope(state, lambda_owner)
             for capture in captures {
                 match capture.value {
                     some(expr) => scan_expr(state, expr, lambda_owner), none => {}
                 }
             }
             scan_expr(state, body, lambda_owner)
+            exit_formal_scope(state, lambda_owner)
         },
         HExpr::EffectOp { args, .. } => {
             for argument in args { scan_expr(state, argument, owner) }
@@ -515,6 +627,8 @@ fn scan_expr(
         },
         HExpr::UnsafeBlock { body, .. } => scan_expr(state, body, owner)
     }
+    if !type_bound { validate_type(state, hexpr_type(value), owner) }
+    validate_row(state, hexpr_effects(value), owner)
 }
 
 fn scan_callable(
@@ -524,8 +638,11 @@ fn scan_callable(
     let owner = executable_origin(executable)
     register_callable_effect(state, executable, effects)
     for parameter in params { scan_param(state, parameter, owner) }
-    scan_type(state, result, owner); scan_row(state, effects, owner)
+    scan_header_type(state, result, owner)
+    scan_header_row(state, effects, owner)
+    enter_formal_scope(state, owner)
     match body { some(expr) => scan_expr(state, expr, owner), none => {} }
+    exit_formal_scope(state, owner)
 }
 
 fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
@@ -538,7 +655,7 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
                 let nominal = registered_nominal_ref_symbol(owner_ref)
                 let _ = mark_nominal_visited(state, nominal)
                 for field in fields {
-                    scan_type(state, field.ty, make_symbol_origin_ref(
+                    scan_header_type(state, field.ty, make_symbol_origin_ref(
                         nominal_field_ref_member(field.field_ref)))
                 }
             },
@@ -551,7 +668,8 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
                     }
                     let mut index = 0
                     while index < variant.fields.len() {
-                        scan_type(state, variant.fields.get(index).unwrap(),
+                        scan_header_type(
+                            state, variant.fields.get(index).unwrap(),
                             make_symbol_origin_ref(variant_field_ref_member(
                                 variant.field_refs.get(index).unwrap())))
                         index = index + 1
@@ -564,10 +682,10 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
             } => {
                 let owner = make_path_origin_ref(impl_provider_ref_site(
                     impl_owner_ref_provider(owner_ref)))
-                scan_type(state, target_ty, owner)
+                scan_header_type(state, target_ty, owner)
                 for assoc in assoc_types {
                     match assoc.concrete {
-                        some(ty) => scan_type(state, ty,
+                        some(ty) => scan_header_type(state, ty,
                             make_symbol_origin_ref(assoc.member_ref)),
                         none => {}
                     }
@@ -577,15 +695,15 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
                     let generated = h_default_specialization_generated_executable(plan)
                     let generated_owner = executable_origin(generated)
                     for ty in h_default_specialization_parameter_types(plan) {
-                        scan_type(state, ty, generated_owner)
+                        scan_header_type(state, ty, generated_owner)
                     }
-                    scan_type(state,
+                    scan_header_type(state,
                         h_default_specialization_result_type(plan), generated_owner)
-                    scan_row(state,
+                    scan_header_row(state,
                         h_default_specialization_effects(plan), generated_owner)
                     register_callable_effect(state, generated,
                         h_default_specialization_effects(plan))
-                    scan_type_use(state, h_exact_call_signature(
+                    scan_schema_use_type(state, h_exact_call_signature(
                         h_default_specialization_forward_call(plan)),
                         generated_owner)
                 }
@@ -595,23 +713,25 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
                             let generated_owner = executable_origin(
                                 h_delegate_method_executable(method))
                             for ty in h_delegate_method_parameter_types(method) {
-                                scan_type(state, ty, generated_owner)
+                                scan_header_type(state, ty, generated_owner)
                             }
-                            scan_type(state,
+                            scan_header_type(state,
                                 h_delegate_method_result_type(method),
                                 generated_owner)
-                            scan_row(state,
+                            scan_header_row(state,
                                 h_delegate_method_effects(method),
                                 generated_owner)
                             register_callable_effect(
                                 state, h_delegate_method_executable(method),
                                 h_delegate_method_effects(method))
-                            scan_type_use(state, method_call_ref_signature(
+                            scan_schema_use_type(
+                                state, method_call_ref_signature(
                                 h_delegate_method_child_call(method)),
                                 generated_owner)
                         }
                         for assoc in h_delegate_assoc_bindings(plan) {
-                            scan_type(state, h_delegate_assoc_type(assoc),
+                            scan_header_type(
+                                state, h_delegate_assoc_type(assoc),
                                 make_symbol_origin_ref(
                                     h_delegate_assoc_member(assoc)))
                         }
@@ -651,7 +771,7 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
                 }
                 for assoc in assoc_types {
                     match assoc.concrete {
-                        some(ty) => scan_type(state, ty,
+                        some(ty) => scan_header_type(state, ty,
                             make_symbol_origin_ref(assoc.member_ref)),
                         none => {}
                     }
@@ -677,7 +797,7 @@ fn scan_derived(
     for derived in values {
         let owner = make_path_origin_ref(impl_provider_ref_site(
             impl_owner_ref_provider(derived.owner_ref)))
-        scan_type(state, derived.target_type, owner)
+        scan_header_type(state, derived.target_type, owner)
         match derived.struct_fields {
             some(fields) => {
                 for field in fields {
@@ -689,7 +809,7 @@ fn scan_derived(
                             make_symbol_origin_ref(
                                 variant_field_ref_member(reference))
                     }
-                    scan_type(state, field.ty, field_owner)
+                    scan_header_type(state, field.ty, field_owner)
                 }
             },
             none => {}
@@ -706,7 +826,7 @@ fn scan_derived(
                                 make_symbol_origin_ref(
                                     variant_field_ref_member(reference))
                         }
-                        scan_type(state, field.ty, field_owner)
+                        scan_header_type(state, field.ty, field_owner)
                     }
                 }
             },
@@ -718,7 +838,7 @@ fn scan_derived(
                 _ => panic(
                     "typed effect freeze: derived signature is not callable")
             }
-            scan_type(state, method.signature,
+            scan_header_type(state, method.signature,
                 executable_origin(method.executable_ref))
             register_callable_effect(state, method.executable_ref, effects)
         }
@@ -732,7 +852,8 @@ pub fn freeze_typed_effect_formals(
         panic("typed effect freeze: invalid module order")
     }
     let state = TypedEffectFreezeState {
-        env: env, facts: [], callables: [], visited_nominals: []
+        env: env, facts: [], callables: [], visited_nominals: [],
+        header_tails: [], schema_use_tails: [], scope_owners: []
     }
     scan_decls(state, program.decls)
     scan_derived(state, program.derived_impls)
@@ -742,7 +863,7 @@ pub fn freeze_typed_effect_formals(
                 builtin_method_contract_intrinsic(fact)))
             let reference = executable_origin(executable)
             let scheme = builtin_method_contract_scheme(fact).ty
-            scan_type(state, scheme, reference)
+            scan_header_type(state, scheme, reference)
             match scheme {
                 Type::FnType { effects, .. } => register_callable_effect(
                     state, executable, effects),
