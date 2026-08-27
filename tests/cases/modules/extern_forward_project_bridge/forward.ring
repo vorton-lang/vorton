@@ -2,6 +2,7 @@ pub fn marker() -> Int { 0 }
 
 pub struct BridgeCtx { value: Int }
 pub struct BridgeResource { id: Int, payload: Str }
+pub struct Token { value: Int }
 
 // Intentional project-internal forward declaration: provider imports this
 // module, so a normal reverse use would create a dependency cycle.
@@ -9,6 +10,7 @@ extern fn bridge(value: Int) -> Int
 extern fn bridge_ctx(mut ctx: BridgeCtx) -> Int
 extern fn bridge_effect_contract() -> Int with {}
 extern fn borrow_resource(value: BridgeResource) -> Int
+extern fn token_bridge(value: Token) -> Int
 
 // This remains genuine FFI even though another project module defines a
 // same-signature Ring function named parse_int: that module does not depend
@@ -23,5 +25,8 @@ pub fn call_borrow_resource() -> Int {
     let callback = borrow_resource
     let observed = callback(value)
     observed + value.id
+}
+pub fn call_token_bridge() -> Int {
+    token_bridge(Token { value: 6 })
 }
 pub fn call_ffi() -> Int { parse_int("7").unwrap_or(0) }

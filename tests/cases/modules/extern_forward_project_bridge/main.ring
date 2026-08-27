@@ -1,5 +1,5 @@
 use forward::{call_bridge, call_mut_bridge, call_effect_bridge,
-    call_borrow_resource, call_ffi}
+    call_borrow_resource, call_token_bridge, call_ffi}
 use provider::{keep_provider}
 use decoy::{keep_decoy}
 
@@ -8,5 +8,6 @@ fn main() {
     print(call_mut_bridge())
     print(call_effect_bridge())
     print(call_borrow_resource())
+    print(call_token_bridge())
     print(call_ffi())
 }

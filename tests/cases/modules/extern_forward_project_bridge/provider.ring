@@ -1,4 +1,4 @@
-use forward::{BridgeCtx, BridgeResource, marker}
+use forward::{BridgeCtx, BridgeResource, Token, marker}
 
 pub fn bridge(value: Int) -> Int { value + 1 }
 pub fn bridge_ctx(mut ctx: BridgeCtx) -> Int { ctx.value }
@@ -12,5 +12,6 @@ pub fn bridge_effect_contract() -> Int with {} {
 }
 
 pub fn borrow_resource(value: BridgeResource) -> Int { value.id }
+pub fn token_bridge(value: Token) -> Int { value.value + 1 }
 
 pub fn keep_provider() -> Int { marker() }
