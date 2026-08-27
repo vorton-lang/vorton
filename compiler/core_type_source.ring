@@ -816,30 +816,15 @@ fn flow_type_actual_satisfies_formal_inner(
                 formal.callable_effects.unwrap()) {
             return false
         }
-        if flow_satisfaction_pair_active(
-                actual.reference, formal.reference,
-                actual_path, formal_path) {
-            return true
-        }
-        actual_path.push(actual.reference)
-        formal_path.push(formal.reference)
         let mut index = 0
         while index < actual.children.len() {
-            if !flow_type_actual_satisfies_formal_inner(
-                    nodes,
-                    flow_satisfaction_type_node(
-                        nodes, actual.children.get(index).unwrap()),
-                    flow_satisfaction_type_node(
-                        nodes, formal.children.get(index).unwrap()),
-                    actual_path, formal_path) {
-                let _ = actual_path.pop()
-                let _ = formal_path.pop()
+            if !core_type_ref_same(
+                    actual.children.get(index).unwrap(),
+                    formal.children.get(index).unwrap()) {
                 return false
             }
             index = index + 1
         }
-        let _ = actual_path.pop()
-        let _ = formal_path.pop()
         return true
     }
 
@@ -879,10 +864,11 @@ fn flow_type_actual_satisfies_formal_inner(
 }
 
 // The sole directional compatibility relation.  Record rows are already
-// frozen to required-field logical contracts.  Callable shapes recurse
-// pointwise through this same relation and admit only the explicit effect
-// instantiation above, not general function subtyping.  Satisfaction never
-// creates a value/view or changes the actual slot's physical type.
+// frozen to required-field logical contracts.  Callable parameter/result
+// references stay exact; only their formal effect contract may admit the one
+// explicit instantiation above.  This is not function variance or general
+// function subtyping.  Satisfaction never creates a value/view or changes the
+// actual slot's physical type.
 pub fn flow_type_actual_satisfies_formal(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode
 ) -> Bool {
