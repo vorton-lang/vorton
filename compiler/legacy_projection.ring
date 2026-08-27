@@ -1817,11 +1817,8 @@ fn append_assembled_type_projection(
                 (some(a), some(b)) => if a.tag != b.tag {
                     panic("legacy projection: interned internal Type kind differs")
                 },
-                // An exporter-owned ordinary projection is the sole physical
-                // Type authority.  A consumer's internal nominal marker only
-                // keeps an otherwise source-less Core parameter total.
-                (none, some(_)) => {},
-                (some(_), none) => values.set(index, projection)
+                _ => panic(
+                    "legacy projection: interned Type mixes ordinary/internal domains")
             }
             return
         }
