@@ -22,6 +22,7 @@ use infer_helpers::{resolve_value_ident}
 pub struct ZonkCtx {
     pub subst: UnionFind,
     pub names: Map<Int, Str>,
+    pub canonical_type_var_ids: Map<Int, Int>,
     // Present for checker-owned zonks.  Keeping it optional preserves zonk's
     // pure type-substitution use sites while allowing fully-unified function
     // VALUE identifiers to resolve their complete DictRef evidence once.
@@ -30,7 +31,7 @@ pub struct ZonkCtx {
 
 pub fn zonk_type(ctx: ZonkCtx, t: Type) -> Type {
     let resolved = apply_subst(ctx.subst, t)
-    label_vars(ctx.names, resolved)
+    label_vars(ctx.names, ctx.canonical_type_var_ids, resolved)
 }
 
 fn zonk_method_call_ref(
@@ -78,55 +79,79 @@ fn zonk_operator_plan(ctx: ZonkCtx, value: HOperatorPlan?) -> HOperatorPlan? {
     }
 }
 
-fn label_effect(names: Map<Int, Str>, e: Effect) -> Effect {
+fn label_effect(
+    names: Map<Int, Str>, canonical_ids: Map<Int, Int>, e: Effect
+) -> Effect {
     match e {
         Effect::FailEffect { error_type } =>
-            Effect::FailEffect { error_type: label_vars(names, error_type) },
+            Effect::FailEffect {
+                error_type: label_vars(names, canonical_ids, error_type) },
         Effect::MutEffect { state_type } =>
-            Effect::MutEffect { state_type: label_vars(names, state_type) },
+            Effect::MutEffect {
+                state_type: label_vars(names, canonical_ids, state_type) },
         Effect::CustomEffect { reference, name, type_args } =>
             Effect::CustomEffect { reference: reference, name: name,
-                type_args: type_args.map(fn(a) { label_vars(names, a) }) },
+                type_args: type_args.map(fn(a) {
+                    label_vars(names, canonical_ids, a) }) },
         Effect::SystemEffect { .. } => e,
         Effect::UnsafeEffect => e,
     }
 }
 
-fn label_effect_row(names: Map<Int, Str>, row: EffectRow) -> EffectRow {
+fn canonical_type_var_id(
+    canonical_ids: Map<Int, Int>, resolved_id: Int
+) -> Int {
+    canonical_ids.get(resolved_id).unwrap_or(resolved_id)
+}
+
+fn label_effect_row(
+    names: Map<Int, Str>, canonical_ids: Map<Int, Int>, row: EffectRow
+) -> EffectRow {
     EffectRow {
-        effects: row.effects.map(fn(e) { label_effect(names, e) }),
-        tail: row.tail
+        effects: row.effects.map(fn(e) {
+            label_effect(names, canonical_ids, e) }),
+        tail: row.tail.map(fn(id) {
+            canonical_type_var_id(canonical_ids, id) })
     }
 }
 
-fn label_vars(names: Map<Int, Str>, t: Type) -> Type {
+fn label_vars(
+    names: Map<Int, Str>, canonical_ids: Map<Int, Int>, t: Type
+) -> Type {
     match t {
         Type::TypeVar { id, name } => {
-            match names.get(id) {
-                some(n) => Type::TypeVar { id: id, name: some(n) },
-                none => t,
+            let labeled_name = match names.get(id) {
+                some(n) => some(n), none => name
+            }
+            Type::TypeVar {
+                id: canonical_type_var_id(canonical_ids, id),
+                name: labeled_name
             }
         },
         Type::FnType { params, return_type, effects } =>
             Type::FnType {
-                params: params.map(fn(p) { label_vars(names, p) }),
-                return_type: label_vars(names, return_type),
-                effects: label_effect_row(names, effects)
+                params: params.map(fn(p) {
+                    label_vars(names, canonical_ids, p) }),
+                return_type: label_vars(names, canonical_ids, return_type),
+                effects: label_effect_row(names, canonical_ids, effects)
             },
         Type::StructType { name, type_params } =>
             Type::StructType {
                 name: name,
-                type_params: type_params.map(fn(p) { label_vars(names, p) })
+                type_params: type_params.map(fn(p) {
+                    label_vars(names, canonical_ids, p) })
             },
         Type::EnumType { name, type_params } =>
             Type::EnumType {
                 name: name,
-                type_params: type_params.map(fn(p) { label_vars(names, p) })
+                type_params: type_params.map(fn(p) {
+                    label_vars(names, canonical_ids, p) })
             },
         Type::GenericType { base, args } =>
             Type::GenericType {
-                base: label_vars(names, base),
-                args: args.map(fn(a) { label_vars(names, a) })
+                base: label_vars(names, canonical_ids, base),
+                args: args.map(fn(a) {
+                    label_vars(names, canonical_ids, a) })
             },
         Type::RecordType { fields, tail, tail_name } => {
             let new_tail_name = match tail {
@@ -137,20 +162,27 @@ fn label_vars(names: Map<Int, Str>, t: Type) -> Type {
                 none => tail_name,
             }
             Type::RecordType {
-                fields: fields.map(fn(f) { RecordField { name: f.name, ty: label_vars(names, f.ty) } }),
-                tail: tail,
+                fields: fields.map(fn(f) { RecordField {
+                    name: f.name,
+                    ty: label_vars(names, canonical_ids, f.ty) } }),
+                tail: tail.map(fn(id) {
+                    canonical_type_var_id(canonical_ids, id) }),
                 tail_name: new_tail_name
             }
         },
         Type::EffectRowType { effects, tail } =>
             Type::EffectRowType {
-                effects: effects.map(fn(e) { label_effect(names, e) }),
-                tail: tail
+                effects: effects.map(fn(e) {
+                    label_effect(names, canonical_ids, e) }),
+                tail: tail.map(fn(id) {
+                    canonical_type_var_id(canonical_ids, id) })
             },
         Type::TupleType { elements } =>
-            Type::TupleType { elements: elements.map(fn(e) { label_vars(names, e) }) },
+            Type::TupleType { elements: elements.map(fn(e) {
+                label_vars(names, canonical_ids, e) }) },
         Type::PtrType { pointee } =>
-            Type::PtrType { pointee: label_vars(names, pointee) },
+            Type::PtrType {
+                pointee: label_vars(names, canonical_ids, pointee) },
         Type::IntType => t,
         Type::FloatType => t,
         Type::StrType => t,
@@ -163,7 +195,9 @@ fn label_vars(names: Map<Int, Str>, t: Type) -> Type {
 }
 
 pub fn zonk_row(ctx: ZonkCtx, r: EffectRow) -> EffectRow {
-    apply_subst_row(ctx.subst, r)
+    label_effect_row(
+        ctx.names, ctx.canonical_type_var_ids,
+        apply_subst_row(ctx.subst, r))
 }
 
 pub fn zonk_param(ctx: ZonkCtx, p: HParam) -> HParam {

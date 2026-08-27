@@ -509,6 +509,7 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
     // otherwise a bounded module function reaches codegen without its DictRef.
     let zctx = ZonkCtx {
         subst: s, names: map_new(),
+        canonical_type_var_ids: map_new(),
         dict_resolver: some(ctx)
     }
     let resolved = zonk_type(zctx, init_ty)
@@ -2235,6 +2236,7 @@ fn check_trait_default_body(
             drain_pending_dicts(ctx, obligation_checkpoint, ctx.subst)
             let zctx = ZonkCtx {
                 subst: ctx.subst, names: map_new(),
+                canonical_type_var_ids: map_new(),
                 dict_resolver: some(ctx)
             }
             let result = some(zonk_block(zctx, br.hexpr))
@@ -2492,6 +2494,7 @@ fn check_fn_body(
     fn_name: Str,
     registration_scheme: TypeScheme?,
     type_params: List<TypeParam>,
+    source_type_var_ids: List<Int>,
     hparams: List<HParam>,
     expected_ret: Type,
     declared_effects: EffectRow?,
@@ -2590,8 +2593,27 @@ fn check_fn_body(
         }
     }
 
+    let mut canonical_type_var_ids: Map<Int, Int> = map_new()
+    for source_id in source_type_var_ids {
+        match apply_subst(
+                ctx.subst,
+                Type::TypeVar { id: source_id, name: none }) {
+            Type::TypeVar { id: representative, .. } => {
+                match canonical_type_var_ids.get(representative) {
+                    some(existing) => if existing != source_id {
+                        panic(
+                            "function zonk: two source type parameters share one representative")
+                    },
+                    none => canonical_type_var_ids.insert(
+                        representative, source_id)
+                }
+            },
+            _ => {}
+        }
+    }
     let zctx = ZonkCtx {
         subst: ctx.subst, names: local_names,
+        canonical_type_var_ids: canonical_type_var_ids,
         dict_resolver: some(ctx)
     }
     let mut final_params: List<HParam> = []
@@ -2949,7 +2971,8 @@ fn check_fn_decl_transaction(
 
     let try_result = some(
         check_fn_body(
-            ctx, provenance_key, registration_scheme, type_params, hparams,
+            ctx, provenance_key, registration_scheme, type_params,
+            source_type_var_ids, hparams,
             expected_ret, owner_declared_effects,
             body, saved_tp_scope, span,
             obligation_checkpoint
@@ -3080,6 +3103,7 @@ fn check_test_decl(
             drain_pending_dicts(ctx, obligation_checkpoint, ctx.subst)
             let zctx = ZonkCtx {
                 subst: ctx.subst, names: map_new(),
+                canonical_type_var_ids: map_new(),
                 dict_resolver: some(ctx)
             }
             let result = zonk_block(zctx, br.hexpr)
