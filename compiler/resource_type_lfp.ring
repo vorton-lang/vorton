@@ -23,7 +23,8 @@ use flow_ir::{
 use resource_model::{
     TransferDemand, LogicalOwnershipShape, PhysicalRcShape, SlotFlow,
     param_mode_from_tag, param_mode_tag, param_mode_same,
-    param_mode_bottom, param_mode_mut_borrow, param_mode_own,
+    param_mode_bottom, param_mode_borrow, param_mode_mut_borrow,
+    param_mode_own,
     make_transfer_demand, transfer_demand_mode, transfer_demand_force,
     transfer_demand_join, transfer_demand_leq,
     make_logical_ownership_shape,
