@@ -93,6 +93,9 @@ pub struct StructDef {
     pub fields: List<StructField>,
     pub derive_attrs: List<DeriveAttribute>,
     pub derived_provider_plan: NominalDerivedProviderPlan?,
+    // Ordinals of generic arguments held in hidden owned storage. Visible
+    // fields remain the ordinary structural resource authority.
+    pub resource_storage_parameter_ordinals: List<Int>,
     // True for opaque extern (FFI) types registered as zero-field structs.
     // Carries cross-module via TypeDef::StructDef_ so both the declaring and
     // consuming modules can exclude it from trait derivation (B-074).
@@ -908,6 +911,48 @@ pub fn new_type_env() -> TypeEnv {
             next_def_id: 0
         },
         compiler_externs: new_compiler_extern_manifest()
+    }
+}
+
+pub fn commit_struct_resource_storage_parameter_ordinals(
+    mut env: TypeEnv, owner: RegisteredNominalRef, ordinals: List<Int>
+) {
+    let owner_symbol = registered_nominal_ref_symbol(owner)
+    let mut keys: List<Str> = []
+    for entry in env.types.structs.entries() {
+        if symbol_ref_same(
+                registered_nominal_ref_symbol(entry.1.owner_ref),
+                owner_symbol) {
+            keys.push(entry.0)
+        }
+    }
+    if keys.len() == 0 {
+        panic("struct storage contract: exact owner is absent")
+    }
+    for key in keys {
+        let def = env.types.structs.get(key).unwrap()
+        let mut index = 0
+        while index < ordinals.len() {
+            let ordinal = ordinals.get(index).unwrap()
+            if ordinal < 0 || ordinal >= def.type_param_vars.len() ||
+               (index > 0 && ordinals.get(index - 1).unwrap() >= ordinal) {
+                panic("struct storage contract: ordinals are not canonical")
+            }
+            index = index + 1
+        }
+        if def.resource_storage_parameter_ordinals.len() != 0 &&
+           !int_list_same(def.resource_storage_parameter_ordinals, ordinals) {
+            panic("struct storage contract: exact owner changed")
+        }
+        env.types.structs.insert(key, StructDef {
+            name: def.name, owner_ref: def.owner_ref,
+            type_params: def.type_params,
+            type_param_vars: def.type_param_vars,
+            fields: def.fields, derive_attrs: def.derive_attrs,
+            derived_provider_plan: def.derived_provider_plan,
+            resource_storage_parameter_ordinals: ordinals,
+            is_extern: def.is_extern
+        })
     }
 }
 

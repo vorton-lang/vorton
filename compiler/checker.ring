@@ -11,7 +11,8 @@ use env::{TypeEnv, TypeScheme, add_impl, find_impl,
     register_compiler_owned_extern_source,
     close_compiler_owned_extern_sources,
     compiler_owned_extern_symbol,
-    compiler_owned_extern_should_publish_hdecl}
+    compiler_owned_extern_should_publish_hdecl,
+    commit_struct_resource_storage_parameter_ordinals}
 use builtins::{register_builtins, register_hof_intrinsics,
     finalize_std_hof_fallbacks, builtin_range_hdecl,
     checker_only_builtin_values, checker_builtin_value_name,
@@ -37,9 +38,14 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
     prelude_namespace_file_key, resolve_prelude_namespace_plan}
 use codes::{E0207, E0504, E0702, E0703, E0704, E0705, E0707}
 use parser::{parse}
-use ir_identity::{SymbolRef, impl_owner_ref_same, impl_method_ref_owner,
+use ir_identity::{SymbolRef, RegisteredNominalRef,
+    impl_owner_ref_same, impl_method_ref_owner,
     impl_owner_ref_trait, impl_owner_ref_provider, impl_method_ref_same,
-    symbol_ref_canonical_payload, make_symbol_ref, namespace_value,
+    registered_nominal_ref_symbol,
+    symbol_ref_origin_module_key, symbol_ref_namespace_kind,
+    symbol_ref_canonical_payload, symbol_ref_declaration_site_path,
+    namespace_kind_same, make_symbol_ref, namespace_value,
+    namespace_nominal,
     variant_ref_member}
 use union_find::{UnionFind}
 use core_from_hir::{FrozenCoreAssemblyFacts}
@@ -151,6 +157,45 @@ struct PreludeDeclSite {
     file_key: Str,
     decl_index: Int,
     source_symbol: SymbolRef?
+}
+
+fn prelude_struct_storage_parameter_ordinals(
+    site: PreludeDeclSite, decl: HDecl
+) -> (RegisteredNominalRef, List<Int>)? {
+    let relation = match decl {
+        HDecl::Struct { owner_ref, type_params, .. } =>
+            some((owner_ref, type_params.len())),
+        _ => none
+    }
+    let relation = match relation {
+        some(value) => value,
+        none => return none
+    }
+    if site.decl_index != 0 { return none }
+    let expected = if site.file_key == "$prelude$::list" {
+        some(("$prelude$$list$$_List", 1, [0]))
+    } else if site.file_key == "$prelude$::map" {
+        some(("$prelude$$map$$_Map", 2, [0, 1]))
+    } else if site.file_key == "$prelude$::set" {
+        some(("$prelude$$set$$_Set", 1, [0]))
+    } else {
+        none
+    }
+    match expected {
+        some((payload, arity, ordinals)) => {
+            let symbol = registered_nominal_ref_symbol(relation.0)
+            if relation.1 != arity ||
+               symbol_ref_origin_module_key(symbol) != site.file_key ||
+               !namespace_kind_same(
+                    symbol_ref_namespace_kind(symbol), namespace_nominal()) ||
+               symbol_ref_canonical_payload(symbol) != payload ||
+               symbol_ref_declaration_site_path(symbol) != "frame:0|item:0" {
+                panic("prelude storage contract: exact source identity differs")
+            }
+            some((relation.0, ordinals))
+        },
+        none => none
+    }
 }
 
 fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
@@ -300,7 +345,16 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                         let result = some(check_prelude_decl(
                             ctx, decl, site.file_key, site.decl_index, none)) catch { _ => none }
                         match result {
-                            some(hd) => { prelude_hdecls.push(hd) },
+                            some(hd) => {
+                                match prelude_struct_storage_parameter_ordinals(
+                                        site, hd) {
+                                    some((owner, ordinals)) =>
+                                        commit_struct_resource_storage_parameter_ordinals(
+                                            ctx.env, owner, ordinals),
+                                    none => {}
+                                }
+                                prelude_hdecls.push(hd)
+                            },
                             none => {}
                         }
                     },

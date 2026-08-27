@@ -893,6 +893,7 @@ fn register_range(mut env: TypeEnv) {
                 field_index: 2, span: span_zero() }
         ],
         derive_attrs: [], derived_provider_plan: none,
+        resource_storage_parameter_ordinals: [],
         is_extern: false
     })
 }
@@ -1266,6 +1267,7 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
         }],
         derive_attrs: [],
         derived_provider_plan: none,
+        resource_storage_parameter_ordinals: [],
         is_extern: false
     })
 

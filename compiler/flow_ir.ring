@@ -100,16 +100,7 @@ use core_type_source::{
     flow_field_identity_path, flow_field_identity_same,
     make_nominal_flow_field_identity, make_variant_flow_field_identity,
     flow_type_actual_satisfies_formal,
-    validate_flow_type_graph_nodes, copy_flow_type_graph_nodes,
-    flow_generic_param_owner, flow_generic_param_index,
-    flow_generic_param_arity,
-    flow_resource_edge_is_application, flow_resource_edge_child,
-    flow_resource_edge_child_ordinal,
-    flow_resource_edge_child_dependency_ordinal,
-    flow_resource_edge_target, flow_resource_edge_application_parameter,
-    flow_resource_dependency_target_is_parent,
-    flow_resource_dependency_target_parent,
-    flow_resource_dependency_target_concrete_type
+    validate_flow_type_graph_nodes, copy_flow_type_graph_nodes
 }
 use resource_model::{
     FlowTypeSemanticSeed,
@@ -5299,36 +5290,8 @@ fn compute_topology_encoding(
                 "CE${encode_effect_contract(effects)}"),
             none => {}
         }
-        for parameter in node.resource_parameters {
-            item.push(
-                "Q${encode_symbol(flow_generic_param_owner(parameter))}/${
-                    flow_generic_param_index(parameter).to_str()}/${
-                    flow_generic_param_arity(parameter).to_str()}")
-        }
-        for edge in node.resource_edges {
-            let edge_target = flow_resource_edge_target(edge)
-            let target = if flow_resource_dependency_target_is_parent(
-                    edge_target) {
-                let parameter = flow_resource_dependency_target_parent(edge_target)
-                "P${encode_symbol(flow_generic_param_owner(parameter))}/${
-                    flow_generic_param_index(parameter).to_str()}/${
-                    flow_generic_param_arity(parameter).to_str()}"
-            } else {
-                "C${encode_type_ref(
-                    flow_resource_dependency_target_concrete_type(edge_target))}"
-            }
-            let source = if flow_resource_edge_is_application(edge) {
-                let parameter = flow_resource_edge_application_parameter(edge)
-                "A/${encode_symbol(flow_generic_param_owner(parameter))}/${
-                    flow_generic_param_index(parameter).to_str()}/${
-                    flow_generic_param_arity(parameter).to_str()}"
-            } else {
-                "C"
-            }
-            item.push(
-                "E${source}/${flow_resource_edge_child_ordinal(edge).to_str()}/${
-                    encode_type_ref(flow_resource_edge_child(edge))}/${
-                    flow_resource_edge_child_dependency_ordinal(edge).to_str()}/${target}")
+        for ordinal in node.resource_storage_parameter_ordinals {
+            item.push("Q${ordinal.to_str()}")
         }
         match node.generic_param {
             some(fact) => {

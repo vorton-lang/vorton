@@ -1630,6 +1630,7 @@ fn preregister_struct(
         type_params: tp_names, type_param_vars: tp_vars, fields: [],
         derive_attrs: derive_attrs,
         derived_provider_plan: some(derived_provider_plan),
+        resource_storage_parameter_ordinals: [],
         is_extern: false }
     commit_struct_identity_fact(ctx, identity, true)
     ctx.env.types.structs.insert(name, def)
@@ -3766,7 +3767,8 @@ fn register_extern_type_common(
     let def = StructDef { name: name,
         owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
         type_params: tp_names, type_param_vars: tp_vars, fields: [],
-        derive_attrs: [], derived_provider_plan: none, is_extern: true }
+        derive_attrs: [], derived_provider_plan: none,
+        resource_storage_parameter_ordinals: [], is_extern: true }
     commit_struct_identity_fact(ctx, identity, false)
     if install_visible_name {
         ctx.env.types.structs.insert(name, def)

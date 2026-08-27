@@ -66,17 +66,12 @@ use flow_ir::{
 // ============================================================
 
 const LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE: Int = 0
-const LEGACY_INTERNAL_NOMINAL_FORMAL: Int = 1
 pub struct LegacyInternalTypeKind { tag: Int }
 pub fn legacy_internal_handled_evidence_opaque() -> LegacyInternalTypeKind {
     LegacyInternalTypeKind { tag: LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE }
 }
-pub fn legacy_internal_nominal_formal() -> LegacyInternalTypeKind {
-    LegacyInternalTypeKind { tag: LEGACY_INTERNAL_NOMINAL_FORMAL }
-}
 fn legacy_internal_type_kind_valid(kind: LegacyInternalTypeKind) -> Bool {
-    kind.tag == LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE ||
-        kind.tag == LEGACY_INTERNAL_NOMINAL_FORMAL
+    kind.tag == LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE
 }
 
 pub struct LegacyTypeProjection {
@@ -116,12 +111,6 @@ pub fn legacy_type_projection_core(
 ) -> CoreTypeRef { value.core_type }
 
 pub fn legacy_type_projection_type(value: LegacyTypeProjection) -> Type {
-    match value.internal_kind {
-        some(kind) => if kind.tag == LEGACY_INTERNAL_NOMINAL_FORMAL {
-            panic("legacy projection: nominal formal has no legacy Type")
-        },
-        none => {}
-    }
     value.legacy_type
 }
 

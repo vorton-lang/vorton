@@ -55,7 +55,6 @@ use resource_model::{
     flow_call_contract_result_role,
     flow_call_contract_result_origin
 }
-
 pub struct CoreTypeFactAllocator { module_key: Str, next_ordinal: Int }
 pub fn new_core_type_fact_allocator(
     module_key: Str
@@ -345,150 +344,6 @@ fn flow_generic_param_fact_same(
     true
 }
 
-enum FlowResourceDependencyTargetValue {
-    ParentParameterDependencyValue(FlowGenericParamFact),
-    ConcreteTypeDependencyValue(CoreTypeRef)
-}
-
-pub struct FlowResourceDependencyTarget {
-    value: FlowResourceDependencyTargetValue
-}
-
-pub fn make_flow_parent_parameter_dependency(
-    parameter: FlowGenericParamFact
-) -> FlowResourceDependencyTarget {
-    FlowResourceDependencyTarget {
-        value: FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-            copy_generic_param_fact(parameter))
-    }
-}
-pub fn make_flow_concrete_type_dependency(
-    ty: CoreTypeRef
-) -> FlowResourceDependencyTarget {
-    FlowResourceDependencyTarget {
-        value: FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty)
-    }
-}
-pub fn flow_resource_dependency_target_is_parent(
-    value: FlowResourceDependencyTarget
-) -> Bool {
-    match value.value {
-        FlowResourceDependencyTargetValue::ParentParameterDependencyValue(_) => true,
-        FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(_) => false
-    }
-}
-pub fn flow_resource_dependency_target_parent(
-    value: FlowResourceDependencyTarget
-) -> FlowGenericParamFact {
-    match value.value {
-        FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-            parameter) => copy_generic_param_fact(parameter),
-        _ => panic("FlowIR: resource dependency target is not a parent parameter")
-    }
-}
-pub fn flow_resource_dependency_target_parent_ordinal(
-    value: FlowResourceDependencyTarget
-) -> Int {
-    flow_resource_dependency_target_parent(value).index
-}
-pub fn flow_resource_dependency_target_concrete_type(
-    value: FlowResourceDependencyTarget
-) -> CoreTypeRef {
-    match value.value {
-        FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) => ty,
-        _ => panic("FlowIR: resource dependency target is not a concrete type")
-    }
-}
-
-pub struct FlowResourceDependencyEdge {
-    is_application: Bool,
-    child_ordinal: Int,
-    child: CoreTypeRef,
-    child_dependency_ordinal: Int,
-    application_parameter: FlowGenericParamFact?,
-    target: FlowResourceDependencyTarget
-}
-
-pub fn make_flow_resource_dependency_edge(
-    child_ordinal: Int, child: CoreTypeRef, child_dependency_ordinal: Int,
-    target: FlowResourceDependencyTarget
-) -> FlowResourceDependencyEdge {
-    if child_ordinal < 0 || child_dependency_ordinal < 0 {
-        panic("FlowIR: negative child resource dependency ordinal")
-    }
-    FlowResourceDependencyEdge {
-        is_application: false,
-        child_ordinal: child_ordinal, child: child,
-        child_dependency_ordinal: child_dependency_ordinal,
-        application_parameter: none,
-        target: target
-    }
-}
-pub fn make_flow_application_resource_dependency_edge(
-    argument_ordinal: Int, argument: CoreTypeRef,
-    argument_dependency_ordinal: Int,
-    owner_parameter: FlowGenericParamFact,
-    target: FlowResourceDependencyTarget
-) -> FlowResourceDependencyEdge {
-    if argument_ordinal < 0 || argument_dependency_ordinal < 0 ||
-       owner_parameter.index < 0 {
-        panic("FlowIR: invalid application resource dependency ordinal")
-    }
-    FlowResourceDependencyEdge {
-        is_application: true, child_ordinal: argument_ordinal,
-        child: argument,
-        child_dependency_ordinal: argument_dependency_ordinal,
-        application_parameter: some(copy_generic_param_fact(owner_parameter)),
-        target: target
-    }
-}
-pub fn flow_resource_edge_is_application(
-    value: FlowResourceDependencyEdge
-) -> Bool { value.is_application }
-pub fn flow_resource_edge_child(value: FlowResourceDependencyEdge) -> CoreTypeRef {
-    value.child
-}
-pub fn flow_resource_edge_child_ordinal(
-    value: FlowResourceDependencyEdge
-) -> Int { value.child_ordinal }
-pub fn flow_resource_edge_child_dependency_ordinal(
-    value: FlowResourceDependencyEdge
-) -> Int { value.child_dependency_ordinal }
-pub fn flow_resource_edge_target(
-    value: FlowResourceDependencyEdge
-) -> FlowResourceDependencyTarget { value.target }
-pub fn flow_resource_edge_application_parameter(
-    value: FlowResourceDependencyEdge
-) -> FlowGenericParamFact {
-    match value.application_parameter {
-        some(parameter) => copy_generic_param_fact(parameter),
-        none => panic("FlowIR: child resource edge has no application parameter")
-    }
-}
-fn copy_resource_edges(
-    values: List<FlowResourceDependencyEdge>
-) -> List<FlowResourceDependencyEdge> {
-    let mut result: List<FlowResourceDependencyEdge> = []
-    for value in values {
-        result.push(FlowResourceDependencyEdge {
-            is_application: value.is_application,
-            child_ordinal: value.child_ordinal, child: value.child,
-            child_dependency_ordinal: value.child_dependency_ordinal,
-            application_parameter: match value.application_parameter {
-                some(parameter) => some(copy_generic_param_fact(parameter)),
-                none => none
-            },
-            target: match value.target.value {
-                FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-                    parameter) => make_flow_parent_parameter_dependency(parameter),
-                FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) =>
-                    make_flow_concrete_type_dependency(ty)
-            }
-        })
-    }
-    result
-}
-
 enum FlowFieldIdentityValue {
     NominalFieldIdentityValue(NominalFieldRef),
     VariantFieldIdentityValue(VariantFieldRef),
@@ -626,12 +481,17 @@ pub struct FlowTypeNode {
     generic_param: FlowGenericParamFact?,
     semantic_seed: FlowTypeSemanticSeed,
     drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
+    resource_storage_parameter_ordinals: List<Int>
 }
 
 fn copy_type_refs(values: List<CoreTypeRef>) -> List<CoreTypeRef> {
     let mut result: List<CoreTypeRef> = []
+    for value in values { result.push(value) }
+    result
+}
+
+fn copy_ints(values: List<Int>) -> List<Int> {
+    let mut result: List<Int> = []
     for value in values { result.push(value) }
     result
 }
@@ -654,7 +514,7 @@ fn make_atomic_flow_type_node(
         callable_effects: none,
         generic_param: none, semantic_seed: seed,
         drop_contract: none,
-        resource_parameters: [], resource_edges: []
+        resource_storage_parameter_ordinals: []
     }
 }
 
@@ -682,8 +542,7 @@ fn make_nominal_flow_type_node(
     arguments: List<CoreTypeRef>, field_values: List<FlowNominalFieldFact>,
     semantic_seed: FlowTypeSemanticSeed,
     drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
+    resource_storage_parameter_ordinals: List<Int>
 ) -> FlowTypeNode {
     if !flow_type_kind_same(kind, flow_type_kind_struct()) &&
        !flow_type_kind_same(kind, flow_type_kind_enum()) {
@@ -702,10 +561,8 @@ fn make_nominal_flow_type_node(
         generic_param: none,
         semantic_seed: semantic_seed,
         drop_contract: drop_contract,
-        resource_parameters: resource_parameters.map(fn(parameter) {
-            copy_generic_param_fact(parameter)
-        }),
-        resource_edges: copy_resource_edges(resource_edges)
+        resource_storage_parameter_ordinals:
+            copy_ints(resource_storage_parameter_ordinals)
     }
 }
 
@@ -714,12 +571,11 @@ pub fn make_flow_struct_type_node(
     arguments: List<CoreTypeRef>, field_values: List<FlowNominalFieldFact>,
     semantic_seed: FlowTypeSemanticSeed,
     drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
+    resource_storage_parameter_ordinals: List<Int>
 ) -> FlowTypeNode {
     make_nominal_flow_type_node(
         reference, flow_type_kind_struct(), nominal, arguments, field_values,
-        semantic_seed, drop_contract, resource_parameters, resource_edges)
+        semantic_seed, drop_contract, resource_storage_parameter_ordinals)
 }
 
 pub fn make_flow_enum_type_node(
@@ -727,18 +583,16 @@ pub fn make_flow_enum_type_node(
     arguments: List<CoreTypeRef>, field_values: List<FlowNominalFieldFact>,
     semantic_seed: FlowTypeSemanticSeed,
     drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
+    resource_storage_parameter_ordinals: List<Int>
 ) -> FlowTypeNode {
     make_nominal_flow_type_node(
         reference, flow_type_kind_enum(), nominal, arguments, field_values,
-        semantic_seed, drop_contract, resource_parameters, resource_edges)
+        semantic_seed, drop_contract, resource_storage_parameter_ordinals)
 }
 
 pub fn make_flow_extern_type_node(
     reference: CoreTypeRef, nominal: SymbolRef,
-    arguments: List<CoreTypeRef>,
-    resource_edges: List<FlowResourceDependencyEdge>
+    arguments: List<CoreTypeRef>
 ) -> FlowTypeNode {
     if !namespace_kind_same(
             symbol_ref_namespace_kind(nominal), namespace_nominal()) {
@@ -751,17 +605,14 @@ pub fn make_flow_extern_type_node(
         parameter_count: 0, generic_param: none,
         callable_effects: none,
         semantic_seed: flow_type_seed_extern(), drop_contract: none,
-        resource_parameters: [],
-        resource_edges: copy_resource_edges(resource_edges)
+        resource_storage_parameter_ordinals: []
     }
 }
 
 fn make_structural_flow_type_node(
     reference: CoreTypeRef, kind: FlowTypeKind,
     children: List<CoreTypeRef>, semantic_seed: FlowTypeSemanticSeed,
-    drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
+    drop_contract: FlowDropContract?
 ) -> FlowTypeNode {
     if !flow_type_kind_same(kind, flow_type_kind_tuple()) &&
        !flow_type_kind_same(kind, flow_type_kind_record()) {
@@ -775,34 +626,27 @@ fn make_structural_flow_type_node(
         generic_param: none,
         semantic_seed: semantic_seed,
         drop_contract: drop_contract,
-        resource_parameters: resource_parameters.map(fn(parameter) {
-            copy_generic_param_fact(parameter)
-        }),
-        resource_edges: copy_resource_edges(resource_edges)
+        resource_storage_parameter_ordinals: []
     }
 }
 
 pub fn make_flow_tuple_type_node(
     reference: CoreTypeRef, elements: List<CoreTypeRef>,
-    semantic_seed: FlowTypeSemanticSeed, drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
+    semantic_seed: FlowTypeSemanticSeed, drop_contract: FlowDropContract?
 ) -> FlowTypeNode {
     make_structural_flow_type_node(
         reference, flow_type_kind_tuple(), elements,
-        semantic_seed, drop_contract, resource_parameters, resource_edges)
+        semantic_seed, drop_contract)
 }
 
 pub fn make_flow_record_type_node(
     reference: CoreTypeRef, field_values: List<FlowNominalFieldFact>,
-    semantic_seed: FlowTypeSemanticSeed, drop_contract: FlowDropContract?,
-    resource_parameters: List<FlowGenericParamFact>,
-    resource_edges: List<FlowResourceDependencyEdge>
+    semantic_seed: FlowTypeSemanticSeed, drop_contract: FlowDropContract?
 ) -> FlowTypeNode {
     let mut node = make_structural_flow_type_node(
         reference, flow_type_kind_record(),
         nominal_field_types(field_values),
-        semantic_seed, drop_contract, resource_parameters, resource_edges)
+        semantic_seed, drop_contract)
     node.nominal_fields = copy_nominal_fields(field_values)
     node
 }
@@ -819,7 +663,7 @@ pub fn make_flow_callable_type_node(
         generic_arguments: [], nominal_fields: [], generic_param: none,
         callable_effects: some(copy_core_effect_contract(effects)),
         semantic_seed: flow_type_seed_shareable(), drop_contract: none,
-        resource_parameters: [], resource_edges: []
+        resource_storage_parameter_ordinals: []
     }
 }
 
@@ -832,7 +676,7 @@ pub fn make_flow_ptr_type_node(
         parameter_count: 0, generic_param: none,
         callable_effects: none,
         semantic_seed: flow_type_seed_ptr(), drop_contract: none,
-        resource_parameters: [], resource_edges: []
+        resource_storage_parameter_ordinals: []
     }
 }
 
@@ -846,8 +690,7 @@ pub fn make_flow_parameter_type_node(
         callable_effects: none,
         generic_param: some(copy_generic_param_fact(generic_param)),
         semantic_seed: flow_type_seed_parametric(), drop_contract: none,
-        resource_parameters: [copy_generic_param_fact(generic_param)],
-        resource_edges: []
+        resource_storage_parameter_ordinals: []
     }
 }
 
@@ -906,17 +749,10 @@ pub fn flow_type_node_semantic_seed(value: FlowTypeNode) -> FlowTypeSemanticSeed
 pub fn flow_type_node_drop_contract(value: FlowTypeNode) -> FlowDropContract? {
     value.drop_contract
 }
-pub fn flow_type_node_resource_edges(
+pub fn flow_type_node_resource_storage_parameter_ordinals(
     value: FlowTypeNode
-) -> List<FlowResourceDependencyEdge> {
-    copy_resource_edges(value.resource_edges)
-}
-pub fn flow_type_node_resource_parameters(
-    value: FlowTypeNode
-) -> List<FlowGenericParamFact> {
-    value.resource_parameters.map(fn(parameter) {
-        copy_generic_param_fact(parameter)
-    })
+) -> List<Int> {
+    copy_ints(value.resource_storage_parameter_ordinals)
 }
 
 fn flow_satisfaction_field_name(
@@ -1031,10 +867,8 @@ fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {
             },
             semantic_seed: value.semantic_seed,
             drop_contract: value.drop_contract,
-            resource_parameters: value.resource_parameters.map(fn(parameter) {
-                copy_generic_param_fact(parameter)
-            }),
-            resource_edges: copy_resource_edges(value.resource_edges)
+            resource_storage_parameter_ordinals:
+                copy_ints(value.resource_storage_parameter_ordinals)
         })
     }
     result
@@ -1247,36 +1081,6 @@ pub fn flow_type_node_intern_key_same(
     false
 }
 
-fn remap_resource_target(
-    value: FlowResourceDependencyTarget, mapping: List<Int>
-) -> FlowResourceDependencyTarget {
-    match value.value {
-        FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-            parameter) => make_flow_parent_parameter_dependency(parameter),
-        FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) =>
-            make_flow_concrete_type_dependency(mapped_type_ref(mapping, ty))
-    }
-}
-
-fn remap_resource_edge(
-    value: FlowResourceDependencyEdge, mapping: List<Int>
-) -> FlowResourceDependencyEdge {
-    let child = mapped_type_ref(mapping, value.child)
-    let target = remap_resource_target(value.target, mapping)
-    if value.is_application {
-        make_flow_application_resource_dependency_edge(
-            value.child_ordinal, child, value.child_dependency_ordinal,
-            match value.application_parameter {
-                some(parameter) => parameter,
-                none => panic("FlowIR: application resource edge lacks parameter")
-            },
-            target)
-    } else {
-        make_flow_resource_dependency_edge(
-            value.child_ordinal, child, value.child_dependency_ordinal, target)
-    }
-}
-
 fn remap_flow_effect_contract(
     value: CoreEffectContract, mapping: List<Int>
 ) -> CoreEffectContract {
@@ -1319,10 +1123,6 @@ pub fn remap_flow_type_node(
                 field.identity, mapped_type_ref(mapping, field.ty))
         })
     }
-    let mut edges: List<FlowResourceDependencyEdge> = []
-    for edge in value.resource_edges {
-        edges.push(remap_resource_edge(edge, mapping))
-    }
     FlowTypeNode {
         reference: make_core_type_ref(project_index), kind: value.kind,
         nominal: value.nominal,
@@ -1342,10 +1142,8 @@ pub fn remap_flow_type_node(
         },
         semantic_seed: value.semantic_seed,
         drop_contract: value.drop_contract,
-        resource_parameters: value.resource_parameters.map(fn(parameter) {
-            copy_generic_param_fact(parameter)
-        }),
-        resource_edges: edges
+        resource_storage_parameter_ordinals:
+            copy_ints(value.resource_storage_parameter_ordinals)
     }
 }
 
@@ -1357,47 +1155,6 @@ fn optional_drop_contracts_same(
         (none, none) => true,
         _ => false
     }
-}
-
-fn resource_targets_same(
-    left: FlowResourceDependencyTarget,
-    right: FlowResourceDependencyTarget
-) -> Bool {
-    match (left.value, right.value) {
-        (FlowResourceDependencyTargetValue::ParentParameterDependencyValue(a),
-         FlowResourceDependencyTargetValue::ParentParameterDependencyValue(b)) =>
-            flow_generic_param_fact_same(a, b),
-        (FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(a),
-         FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(b)) =>
-            core_type_ref_same(a, b),
-        _ => false
-    }
-}
-
-fn resource_edges_same(
-    left: List<FlowResourceDependencyEdge>,
-    right: List<FlowResourceDependencyEdge>
-) -> Bool {
-    if left.len() != right.len() { return false }
-    let mut index = 0
-    while index < left.len() {
-        let a = left.get(index).unwrap()
-        let b = right.get(index).unwrap()
-        if a.is_application != b.is_application ||
-           a.child_ordinal != b.child_ordinal ||
-           !core_type_ref_same(a.child, b.child) ||
-           a.child_dependency_ordinal != b.child_dependency_ordinal ||
-           !resource_targets_same(a.target, b.target) ||
-           match (a.application_parameter, b.application_parameter) {
-               (some(ap), some(bp)) => !flow_generic_param_fact_same(ap, bp),
-               (none, none) => false,
-               _ => true
-           } {
-            return false
-        }
-        index = index + 1
-    }
-    true
 }
 
 fn optional_flow_effect_contracts_same(
@@ -1424,8 +1181,8 @@ pub fn flow_type_node_contract_same(
        left.children.len() != right.children.len() ||
        left.generic_arguments.len() != right.generic_arguments.len() ||
        left.nominal_fields.len() != right.nominal_fields.len() ||
-       left.resource_parameters.len() != right.resource_parameters.len() ||
-       !resource_edges_same(left.resource_edges, right.resource_edges) {
+       left.resource_storage_parameter_ordinals.len() !=
+            right.resource_storage_parameter_ordinals.len() {
         return false
     }
     let mut index = 0
@@ -1461,10 +1218,11 @@ pub fn flow_type_node_contract_same(
         _ => return false
     }
     index = 0
-    while index < left.resource_parameters.len() {
-        if !flow_generic_param_fact_same(
-                left.resource_parameters.get(index).unwrap(),
-                right.resource_parameters.get(index).unwrap()) { return false }
+    while index < left.resource_storage_parameter_ordinals.len() {
+        if left.resource_storage_parameter_ordinals.get(index).unwrap() !=
+           right.resource_storage_parameter_ordinals.get(index).unwrap() {
+            return false
+        }
         index = index + 1
     }
     true
@@ -1509,13 +1267,31 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
         if tag != FLOW_TYPE_CALLABLE && value.callable_effects.is_some() {
             panic("FlowIR: non-callable type carries an effect contract")
         }
+        if tag != FLOW_TYPE_STRUCT &&
+           value.resource_storage_parameter_ordinals.len() != 0 {
+            panic("FlowIR: non-struct type carries storage parameter ordinals")
+        }
+        let mut storage_index = 0
+        while storage_index <
+              value.resource_storage_parameter_ordinals.len() {
+            let storage_ordinal =
+                value.resource_storage_parameter_ordinals.get(
+                    storage_index).unwrap()
+            if storage_ordinal < 0 ||
+               storage_ordinal >= value.generic_arguments.len() ||
+               (storage_index > 0 &&
+                value.resource_storage_parameter_ordinals.get(
+                    storage_index - 1).unwrap() >= storage_ordinal) {
+                panic("FlowIR: storage parameter ordinals are not canonical")
+            }
+            storage_index = storage_index + 1
+        }
         if tag >= FLOW_TYPE_INT && tag <= FLOW_TYPE_NEVER {
             if value.nominal.is_some() || value.children.len() != 0 ||
                value.generic_arguments.len() != 0 ||
                value.nominal_fields.len() != 0 || value.parameter_count != 0 ||
                value.generic_param.is_some() || value.drop_contract.is_some() ||
-               value.resource_parameters.len() != 0 ||
-               value.resource_edges.len() != 0 ||
+               value.resource_storage_parameter_ordinals.len() != 0 ||
                (tag == FLOW_TYPE_STR && seed != flow_type_semantic_seed_tag(flow_type_seed_shareable())) ||
                (tag != FLOW_TYPE_STR && seed != flow_type_semantic_seed_tag(flow_type_seed_scalar())) {
                 panic("FlowIR: atomic type payload is invalid")
@@ -1524,12 +1300,7 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
             if value.nominal.is_none() || value.parameter_count != 0 ||
                value.generic_param.is_some() ||
                (seed != flow_type_semantic_seed_tag(flow_type_seed_unique()) &&
-                seed != flow_type_semantic_seed_tag(flow_type_seed_shareable()) &&
-                seed != flow_type_semantic_seed_tag(flow_type_seed_parametric())) ||
-               (value.resource_parameters.len() == 0 &&
-                seed == flow_type_semantic_seed_tag(flow_type_seed_parametric())) ||
-               (value.resource_parameters.len() != 0 &&
-                seed != flow_type_semantic_seed_tag(flow_type_seed_parametric())) ||
+                seed != flow_type_semantic_seed_tag(flow_type_seed_shareable())) ||
                value.children.len() != value.nominal_fields.len() {
                 panic("FlowIR: nominal type payload is invalid")
             }
@@ -1583,12 +1354,8 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
                (tag == FLOW_TYPE_RECORD &&
                 value.nominal_fields.len() != value.children.len()) ||
                (seed != flow_type_semantic_seed_tag(flow_type_seed_unique()) &&
-                seed != flow_type_semantic_seed_tag(flow_type_seed_shareable()) &&
-                seed != flow_type_semantic_seed_tag(flow_type_seed_parametric())) ||
-               (value.resource_parameters.len() == 0 &&
-                seed == flow_type_semantic_seed_tag(flow_type_seed_parametric())) ||
-               (value.resource_parameters.len() != 0 &&
-                seed != flow_type_semantic_seed_tag(flow_type_seed_parametric())) {
+                seed != flow_type_semantic_seed_tag(flow_type_seed_shareable())) ||
+               value.resource_storage_parameter_ordinals.len() != 0 {
                 panic("FlowIR: structural type payload is invalid")
             }
             if tag == FLOW_TYPE_RECORD {
@@ -1628,8 +1395,7 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
                seed != flow_type_semantic_seed_tag(flow_type_seed_shareable()) ||
                value.drop_contract.is_some() ||
                value.callable_effects.is_none() ||
-               value.resource_parameters.len() != 0 ||
-               value.resource_edges.len() != 0 {
+               value.resource_storage_parameter_ordinals.len() != 0 {
                 panic("FlowIR: callable type payload is invalid")
             }
             let effects = value.callable_effects.unwrap()
@@ -1657,8 +1423,7 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
                value.generic_arguments.len() != 0 ||
                value.nominal_fields.len() != 0 || seed != flow_type_semantic_seed_tag(flow_type_seed_ptr()) ||
                value.drop_contract.is_some() ||
-               value.resource_parameters.len() != 0 ||
-               value.resource_edges.len() != 0 {
+               value.resource_storage_parameter_ordinals.len() != 0 {
                 panic("FlowIR: Ptr type payload is invalid")
             }
         } else if tag == FLOW_TYPE_PARAMETER {
@@ -1668,21 +1433,15 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
                value.nominal_fields.len() != 0 ||
                seed != flow_type_semantic_seed_tag(flow_type_seed_parametric()) ||
                value.drop_contract.is_some() ||
-               value.resource_parameters.len() != 1 ||
-               value.resource_edges.len() != 0 {
+               value.resource_storage_parameter_ordinals.len() != 0 {
                 panic("FlowIR: type parameter payload is invalid")
-            }
-            if !flow_generic_param_fact_same(
-                    value.resource_parameters.get(0).unwrap(),
-                    value.generic_param.unwrap()) {
-                panic("FlowIR: type parameter resource fact differs")
             }
         } else if tag == FLOW_TYPE_EXTERN {
             if value.nominal.is_none() || value.children.len() != 0 ||
                value.parameter_count != 0 || value.generic_param.is_some() ||
                value.nominal_fields.len() != 0 || seed != flow_type_semantic_seed_tag(flow_type_seed_extern()) ||
                value.drop_contract.is_some() ||
-               value.resource_parameters.len() != 0 {
+               value.resource_storage_parameter_ordinals.len() != 0 {
                 panic("FlowIR: extern type payload is invalid")
             }
         } else {
@@ -1690,7 +1449,6 @@ fn validate_type_nodes(values: List<FlowTypeNode>) {
         }
         ordinal = ordinal + 1
     }
-    validate_resource_dependency_edges(values)
 }
 
 pub fn validate_flow_type_graph_nodes(values: List<FlowTypeNode>) {
@@ -1750,237 +1508,5 @@ pub fn core_type_graph_ref_from_flow(
         some(module_key) => make_module_core_type_ref(
             module_key, core_type_ref_index(reference)),
         none => make_core_type_ref(core_type_ref_index(reference))
-    }
-}
-
-
-fn resource_dependency_arity(value: FlowTypeNode) -> Int {
-    if value.resource_parameters.len() == 0 {
-        // A closed type is carried as one explicit concrete dependency cell.
-        1
-    } else {
-        value.resource_parameters.len()
-    }
-}
-
-fn type_node_has_parent_dependency(value: FlowTypeNode) -> Bool {
-    value.resource_parameters.len() != 0
-}
-
-fn generic_parameter_is_registered(
-    values: List<FlowTypeNode>, parameter: FlowGenericParamFact
-) -> Bool {
-    for value in values {
-        match value.generic_param {
-            some(candidate) => if flow_generic_param_fact_same(
-                    candidate, parameter) {
-                return true
-            },
-            none => {}
-        }
-    }
-    false
-}
-
-fn validate_resource_dependency_edges(values: List<FlowTypeNode>) {
-    for owner in values {
-        let mut parameter_index = 0
-        while parameter_index < owner.resource_parameters.len() {
-            let parameter = owner.resource_parameters.get(
-                parameter_index).unwrap()
-            if !generic_parameter_is_registered(values, parameter) {
-                panic("FlowIR: type resource parameter is unregistered")
-            }
-            let mut right_index = parameter_index + 1
-            while right_index < owner.resource_parameters.len() {
-                if flow_generic_param_fact_same(
-                        parameter,
-                        owner.resource_parameters.get(right_index).unwrap()) {
-                    panic("FlowIR: type repeats a resource parameter")
-                }
-                right_index = right_index + 1
-            }
-            parameter_index = parameter_index + 1
-        }
-        for edge in owner.resource_edges {
-            let child = values.get(core_type_ref_index(edge.child)).unwrap()
-            if edge.is_application {
-                if edge.child_ordinal < 0 ||
-                   edge.child_ordinal >= owner.generic_arguments.len() ||
-                   !core_type_ref_same(
-                        owner.generic_arguments.get(
-                            edge.child_ordinal).unwrap(), edge.child) {
-                    panic("FlowIR: application resource edge argument differs")
-                }
-                let parameter = match edge.application_parameter {
-                    some(value) => value,
-                    none => panic("FlowIR: application edge has no owner parameter")
-                }
-                if edge.child_dependency_ordinal < 0 ||
-                   edge.child_dependency_ordinal >=
-                        resource_dependency_arity(child) ||
-                   parameter.index != edge.child_ordinal ||
-                   parameter.arity != owner.generic_arguments.len() ||
-                   !generic_parameter_is_registered(values, parameter) {
-                    panic("FlowIR: application owner parameter fact differs")
-                }
-                match owner.nominal {
-                    some(symbol) => if !symbol_ref_same(
-                            symbol, parameter.owner) {
-                        panic("FlowIR: application parameter crosses nominal owner")
-                    },
-                    none => panic("FlowIR: non-nominal type has application edge")
-                }
-            } else {
-                if edge.application_parameter.is_some() ||
-                   edge.child_ordinal < 0 ||
-                   edge.child_ordinal >= owner.children.len() ||
-                   !core_type_ref_same(
-                        owner.children.get(edge.child_ordinal).unwrap(),
-                        edge.child) {
-                    panic("FlowIR: resource edge child/order differs")
-                }
-                if edge.child_dependency_ordinal < 0 ||
-                   edge.child_dependency_ordinal >=
-                        resource_dependency_arity(child) {
-                    panic("FlowIR: child resource dependency ordinal is invalid")
-                }
-            }
-            if child.resource_parameters.len() == 0 {
-                if edge.child_dependency_ordinal != 0 {
-                    panic("FlowIR: closed child dependency ordinal is not zero")
-                }
-                match edge.target.value {
-                    FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(
-                        target_type) => if !core_type_ref_same(
-                            target_type, edge.child) {
-                        panic("FlowIR: closed child concrete mapping differs")
-                    },
-                    _ => panic("FlowIR: closed child mapped to parent parameter")
-                }
-            } else {
-                let expected = child.resource_parameters.get(
-                    edge.child_dependency_ordinal).unwrap()
-                match edge.target.value {
-                    FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-                        target_parameter) => if !flow_generic_param_fact_same(
-                            target_parameter, expected) {
-                        panic("FlowIR: open child dependency mapping differs")
-                    },
-                    _ => panic("FlowIR: open child mapped as concrete")
-                }
-            }
-            match edge.target.value {
-                FlowResourceDependencyTargetValue::ParentParameterDependencyValue(
-                    parameter) => {
-                    if !generic_parameter_is_registered(values, parameter) {
-                        panic("FlowIR: parent resource parameter is unregistered")
-                    }
-                },
-                FlowResourceDependencyTargetValue::ConcreteTypeDependencyValue(ty) => {
-                    if core_type_ref_index(ty) < 0 ||
-                       core_type_ref_index(ty) >= values.len() ||
-                       flow_type_kind_tag(values.get(
-                            core_type_ref_index(ty)).unwrap().kind) ==
-                            FLOW_TYPE_PARAMETER ||
-                       type_node_has_parent_dependency(values.get(
-                            core_type_ref_index(ty)).unwrap()) {
-                        panic("FlowIR: concrete resource dependency is not closed")
-                    }
-                }
-            }
-            let mut duplicates = 0
-            for candidate in owner.resource_edges {
-                if candidate.is_application == edge.is_application &&
-                   candidate.child_ordinal == edge.child_ordinal &&
-                   candidate.child_dependency_ordinal ==
-                        edge.child_dependency_ordinal {
-                    duplicates = duplicates + 1
-                }
-            }
-            if duplicates != 1 {
-                panic("FlowIR: resource dependency mapping is not unique")
-            }
-        }
-        let owner_tag = flow_type_kind_tag(owner.kind)
-        let tracks_resource_children =
-            owner_tag == FLOW_TYPE_STRUCT || owner_tag == FLOW_TYPE_ENUM ||
-            owner_tag == FLOW_TYPE_TUPLE || owner_tag == FLOW_TYPE_RECORD
-        let mut child_ordinal = 0
-        while tracks_resource_children && child_ordinal < owner.children.len() {
-            let child_ref = owner.children.get(child_ordinal).unwrap()
-            let child = values.get(core_type_ref_index(child_ref)).unwrap()
-            let mut dependency_ordinal = 0
-            while dependency_ordinal < resource_dependency_arity(child) {
-                let mut matches = 0
-                for edge in owner.resource_edges {
-                    if !edge.is_application &&
-                       edge.child_ordinal == child_ordinal &&
-                       edge.child_dependency_ordinal == dependency_ordinal {
-                        matches = matches + 1
-                    }
-                }
-                if matches != 1 {
-                    panic("FlowIR: resource dependency mapping is not total")
-                }
-                dependency_ordinal = dependency_ordinal + 1
-            }
-            child_ordinal = child_ordinal + 1
-        }
-        if owner_tag != FLOW_TYPE_PARAMETER {
-            for edge in owner.resource_edges {
-                if !edge.is_application &&
-                   flow_resource_dependency_target_is_parent(edge.target) {
-                    let target_parameter =
-                        flow_resource_dependency_target_parent(edge.target)
-                    let mut declared = false
-                    for parameter in owner.resource_parameters {
-                        if flow_generic_param_fact_same(
-                                parameter, target_parameter) {
-                            declared = true
-                        }
-                    }
-                    if !declared {
-                        panic("FlowIR: child edge exports undeclared resource parameter")
-                    }
-                }
-            }
-            for parameter in owner.resource_parameters {
-                let mut used = false
-                for edge in owner.resource_edges {
-                    if flow_resource_dependency_target_is_parent(edge.target) &&
-                       flow_generic_param_fact_same(
-                            flow_resource_dependency_target_parent(edge.target),
-                            parameter) {
-                        used = true
-                    }
-                }
-                if tracks_resource_children && !used {
-                    panic("FlowIR: declared resource parameter has no child edge")
-                }
-            }
-        }
-        let mut argument_ordinal = 0
-        while owner_tag != FLOW_TYPE_EXTERN &&
-              argument_ordinal < owner.generic_arguments.len() {
-            let argument = values.get(core_type_ref_index(
-                owner.generic_arguments.get(argument_ordinal).unwrap())).unwrap()
-            let mut dependency_ordinal = 0
-            while dependency_ordinal < resource_dependency_arity(argument) {
-                let mut matches = 0
-                for edge in owner.resource_edges {
-                    if edge.is_application &&
-                       edge.child_ordinal == argument_ordinal &&
-                       edge.child_dependency_ordinal == dependency_ordinal {
-                        matches = matches + 1
-                    }
-                }
-                if matches != 1 {
-                    panic("FlowIR: application substitution mapping is not total")
-                }
-                dependency_ordinal = dependency_ordinal + 1
-            }
-            argument_ordinal = argument_ordinal + 1
-        }
     }
 }
