@@ -456,6 +456,7 @@ fn projected_binder_ident(
         source_slot: if slot_ref_is_source(slot) { some(slot) } else { none },
         callee_identity: none,
         dict_closure_dicts: none,
+        callable_instantiation: none,
         ty: legacy_binder_projection_type(binder),
         effects: EMPTY_ROW,
         span: span_zero()
@@ -469,6 +470,7 @@ fn bridge_binder_ident(ctx: HirBridgeCtx, slot: SlotRef) -> HExpr {
         def_id: some(legacy_binder_projection_def_id(binder)),
         source_slot: if slot_ref_is_source(slot) { some(slot) } else { none },
         callee_identity: none, dict_closure_dicts: none,
+        callable_instantiation: none,
         ty: legacy_binder_projection_type(binder),
         effects: EMPTY_ROW, span: span_zero()
     }
@@ -492,7 +494,8 @@ fn executable_ident(
         callee_identity: if executable_ref_is_named(executable) {
             some(make_named_callee_ref(executable_ref_named_symbol(executable)))
         } else { none },
-        dict_closure_dicts: none, ty: ty, effects: EMPTY_ROW,
+        dict_closure_dicts: none, callable_instantiation: none,
+        ty: ty, effects: EMPTY_ROW,
         span: span_zero()
     }
 }
@@ -1110,7 +1113,8 @@ fn callee_expr(
         HExpr::Ident {
             name: identity, resolved_name: some(identity), def_id: none,
             source_slot: none, callee_identity: none,
-            dict_closure_dicts: none, ty: ty, effects: EMPTY_ROW,
+            dict_closure_dicts: none, callable_instantiation: none,
+            ty: ty, effects: EMPTY_ROW,
             span: span_zero()
         }
     } else {

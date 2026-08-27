@@ -477,7 +477,7 @@ fn gen_c_extern_closure_wrapper(
         synthetic_args.push(HExpr::Ident {
             name: param_name, resolved_name: none, def_id: none,
             source_slot: none, callee_identity: none,
-            dict_closure_dicts: none, ty: param_ty,
+            dict_closure_dicts: none, callable_instantiation: none, ty: param_ty,
             effects: EMPTY_ROW, span: span
         })
         i = i + 1
@@ -485,7 +485,8 @@ fn gen_c_extern_closure_wrapper(
     let synthetic_callee = HExpr::Ident {
         name: name, resolved_name: some(lookup_name), def_id: none,
         source_slot: none, callee_identity: none,
-        dict_closure_dicts: none, ty: ty, effects: EMPTY_ROW, span: span
+        dict_closure_dicts: none, callable_instantiation: none,
+        ty: ty, effects: EMPTY_ROW, span: span
     }
     let result = gen_c_expr(ctx, HExpr::Call {
         callee: synthetic_callee, args: synthetic_args, type_args: [],

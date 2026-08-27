@@ -471,7 +471,8 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: Dict
         HExpr::BoolLit { value, ty, effects, span } =>
             HExpr::BoolLit { value: value, ty: ty, effects: effects, span: span },
         HExpr::Ident { name, resolved_name, def_id, source_slot,
-                       callee_identity, dict_closure_dicts, ty, effects, span } => {
+                       callee_identity, dict_closure_dicts,
+                       callable_instantiation, ty, effects, span } => {
             let mut lets: List<HStmt> = []
             let lowered_dicts = match dict_closure_dicts {
                 some(dicts) => {
@@ -487,6 +488,7 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: Dict
                 name: name, resolved_name: resolved_name, def_id: def_id,
                 source_slot: source_slot, callee_identity: callee_identity,
                 dict_closure_dicts: lowered_dicts,
+                callable_instantiation: callable_instantiation,
                 ty: ty, effects: effects, span: span
             }
             if lets.len() == 0 {

@@ -187,7 +187,7 @@ fn diagnostic_callee(
     HExpr::Ident {
         name: label, resolved_name: some(label), def_id: none,
         source_slot: none, callee_identity: some(callee),
-        dict_closure_dicts: none, ty: signature,
+        dict_closure_dicts: none, callable_instantiation: none, ty: signature,
         effects: EMPTY_ROW, span: span
     }
 }
@@ -278,7 +278,7 @@ fn binder_ident(
     HExpr::Ident {
         name: name, resolved_name: none, def_id: some(binder_def_id(binder)),
         source_slot: some(slot), callee_identity: none,
-        dict_closure_dicts: none, ty: ty,
+        dict_closure_dicts: none, callable_instantiation: none, ty: ty,
         effects: EMPTY_ROW, span: span
     }
 }
@@ -1207,7 +1207,7 @@ fn close_expr(value: HExpr) -> HExpr {
             HExpr::BoolLit { value: value, ty: ty, effects: effects, span: span },
         HExpr::Ident {
             name, resolved_name, def_id, source_slot, callee_identity,
-            dict_closure_dicts, ty, effects, span
+            dict_closure_dicts, callable_instantiation, ty, effects, span
         } => {
             if source_slot.is_none() && callee_identity.is_none() {
                 panic("PreCore closure: identifier exact identity is absent")
@@ -1216,6 +1216,7 @@ fn close_expr(value: HExpr) -> HExpr {
                 name: name, resolved_name: resolved_name, def_id: def_id,
                 source_slot: source_slot, callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
+                callable_instantiation: callable_instantiation,
                 ty: ty, effects: effects, span: span
             }
         },

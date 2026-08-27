@@ -1814,6 +1814,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                     none => panic("map index helper: exact DefId is absent")
                 },
                 dict_closure_dicts: none,
+                callable_instantiation: none,
                 ty: callee_ty, effects: EMPTY_ROW, span: span
             }
             let effect_tail = ctx.env.fresh_var_id()

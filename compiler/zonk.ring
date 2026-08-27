@@ -442,11 +442,13 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
         HExpr::BoolLit { value, .. } =>
             HExpr::BoolLit { value: value, ty: z_ty, effects: z_eff, span: z_span },
         HExpr::Ident { name, resolved_name, def_id, source_slot,
-                       callee_identity, dict_closure_dicts, .. } => {
+                       callee_identity, dict_closure_dicts,
+                       callable_instantiation, .. } => {
             let ident = HExpr::Ident {
                 name: name, resolved_name: resolved_name, def_id: def_id,
                 source_slot: source_slot, callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
+                callable_instantiation: callable_instantiation,
                 ty: z_ty, effects: z_eff, span: z_span
             }
             match ctx.dict_resolver {
@@ -711,7 +713,8 @@ fn clear_zonk_local_callee_marker(ident: HExpr) -> HExpr {
 fn zonk_direct_callee(ctx: ZonkCtx, callee: HExpr) -> HExpr {
     match callee {
         HExpr::Ident { name, resolved_name, def_id, source_slot,
-                       callee_identity, dict_closure_dicts, .. } => {
+                       callee_identity, dict_closure_dicts,
+                       callable_instantiation, .. } => {
             let z_ty = zonk_type(ctx, hexpr_type(callee))
             let z_eff = zonk_row(ctx, hexpr_effects(callee))
             let z_span = hexpr_span(callee)
@@ -719,6 +722,7 @@ fn zonk_direct_callee(ctx: ZonkCtx, callee: HExpr) -> HExpr {
                 name: name, resolved_name: resolved_name, def_id: def_id,
                 source_slot: source_slot, callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
+                callable_instantiation: callable_instantiation,
                 ty: z_ty, effects: z_eff, span: z_span
             }
             match ctx.dict_resolver {

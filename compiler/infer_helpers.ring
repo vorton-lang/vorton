@@ -67,6 +67,7 @@ fn make_inferred_ident(
     HExpr::Ident { name: name, resolved_name: resolved_name,
         def_id: def_id, source_slot: source_slot,
         callee_identity: callee_identity, dict_closure_dicts: none,
+        callable_instantiation: none,
         ty: ty, effects: EMPTY_ROW, span: span }
 }
 
@@ -739,7 +740,8 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
     let metadata = resolve_callee_metadata(ctx, harg)
     match harg {
         HExpr::Ident { name, resolved_name, def_id, source_slot,
-                       callee_identity, dict_closure_dicts, ty, effects, span } => {
+                       callee_identity, dict_closure_dicts,
+                       callable_instantiation, ty, effects, span } => {
             let kind = match metadata {
                 some(m) => m.kind,
                 none => ValueBindingKind::LocalBorrow
@@ -759,7 +761,9 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                         callee_identity: callee_identity,
                         // This synthetic direct getter Call is returned from
                         // zonk and will not pass through zonk_direct_callee.
-                        dict_closure_dicts: some([]), ty: getter_ty,
+                        dict_closure_dicts: some([]),
+                        callable_instantiation: callable_instantiation,
+                        ty: getter_ty,
                         effects: EMPTY_ROW, span: span
                     }
                     return HExpr::Call {
@@ -802,6 +806,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                                     def_id: def_id, source_slot: source_slot,
                                     callee_identity: callee_identity,
                                     dict_closure_dicts: some([]),
+                                    callable_instantiation: callable_instantiation,
                                     ty: ty, effects: effects, span: span
                                 }
                             } else {
@@ -816,7 +821,9 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                                     HExpr::Ident { name: name, resolved_name: resolved_name,
                                         def_id: def_id, source_slot: source_slot,
                                         callee_identity: callee_identity,
-                                        dict_closure_dicts: some(dicts), ty: ty,
+                                        dict_closure_dicts: some(dicts),
+                                        callable_instantiation: callable_instantiation,
+                                        ty: ty,
                                         effects: effects, span: span }
                                 } else { harg }
                             }
@@ -844,6 +851,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                                     def_id: def_id, source_slot: source_slot,
                                     callee_identity: callee_identity,
                                     dict_closure_dicts: some([]),
+                                    callable_instantiation: callable_instantiation,
                                     ty: ty, effects: effects, span: span
                                 }
                             } else {
@@ -864,6 +872,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                             def_id: def_id, source_slot: source_slot,
                             callee_identity: callee_identity,
                             dict_closure_dicts: some([]),
+                            callable_instantiation: callable_instantiation,
                             ty: ty, effects: effects, span: span
                         },
                         none => harg

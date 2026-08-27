@@ -164,11 +164,13 @@ fn al_expr(e: HExpr) -> HExpr {
         HExpr::BoolLit { value, ty, effects, span } =>
             HExpr::BoolLit { value: value, ty: ty, effects: effects, span: span },
         HExpr::Ident { name, resolved_name, def_id, source_slot,
-                       callee_identity, dict_closure_dicts, ty, effects, span } =>
+                       callee_identity, dict_closure_dicts,
+                       callable_instantiation, ty, effects, span } =>
             HExpr::Ident { name: name, resolved_name: resolved_name,
                 def_id: def_id, source_slot: source_slot,
                 callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
+                callable_instantiation: callable_instantiation,
                 ty: ty, effects: effects, span: span },
         HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch,
                        eq_plan, ord_plan, ty, effects, span } => {

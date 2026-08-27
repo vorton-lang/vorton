@@ -1551,6 +1551,7 @@ fn expand_delegate_impls(
                                                             _ => none
                                                         },
                                                         dict_closure_dicts: none,
+                                                        callable_instantiation: none,
                                                         ty: exact_self_type, effects: EMPTY_ROW, span: span
                                                     }
                                                     forward_args.push(HExpr::FieldAccess {
@@ -1582,6 +1583,7 @@ fn expand_delegate_impls(
                                                             _ => none
                                                         },
                                                         dict_closure_dicts: none,
+                                                        callable_instantiation: none,
                                                         ty: resolved_pty, effects: EMPTY_ROW, span: span
                                                     })
                                                 }
@@ -1597,6 +1599,7 @@ fn expand_delegate_impls(
                                                         slot_domain_lexical(), def_id_self)),
                                                     callee_identity: none,
                                                     dict_closure_dicts: none,
+                                                    callable_instantiation: none,
                                                     ty: exact_self_type, effects: EMPTY_ROW, span: span
                                                 },
                                                 projection: some(h_nominal_projection(

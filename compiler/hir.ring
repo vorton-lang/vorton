@@ -42,6 +42,7 @@ use ir_inventory::{ExecutableRef, EffectOperationRef, SystemHostCallableRef,
     effect_operation_ref_effect,
     effect_operation_ref_source_index,
     system_host_callable_effect, system_host_callable_executable}
+use effect_contract::{EffectParamRef}
 
 pub use hir_exact::{
     DictRef, MethodCallRef, make_intrinsic_method_call_ref, method_call_ref_intrinsic,
@@ -477,6 +478,21 @@ pub enum ValueBindingKind {
     LocalBorrow
 }
 
+// Exact use-site provenance for a materialized declaration callable.  Effect
+// substitutions are optional until the final effect-header producer publishes
+// them; present([]) is reserved for a header with no effect formal.
+pub struct HCallableEffectActual {
+    pub source: EffectParamRef,
+    pub actual: EffectRow
+}
+pub struct HCallableEffectInstantiation {
+    pub substitutions: List<HCallableEffectActual>
+}
+pub struct HCallableValueInstantiation {
+    pub type_args: List<Type>,
+    pub effects: HCallableEffectInstantiation?
+}
+
 pub enum HExpr {
     IntLit { value: Int, ty: Type, effects: EffectRow, span: Span },
     FloatLit { value: Float, ty: Type, effects: EffectRow, span: Span },
@@ -485,6 +501,7 @@ pub enum HExpr {
     Ident { name: Str, resolved_name: Str?, def_id: Int?,
             source_slot: SlotRef?, callee_identity: CalleeRef?,
             dict_closure_dicts: List<DictRef>?, ty: Type,
+            callable_instantiation: HCallableValueInstantiation?,
             effects: EffectRow, span: Span },
     BinOp { op: BinOp, left: HExpr, right: HExpr,
             eq_dispatch: TraitDispatch?, ord_dispatch: TraitDispatch?,
@@ -999,10 +1016,11 @@ pub fn remap_hir_handled_evidence(
             value: value, ty: ty, effects: effects, span: span },
         HExpr::Ident { name, resolved_name, def_id, source_slot,
                        callee_identity, dict_closure_dicts,
-                       ty, effects, span } => HExpr::Ident {
+                       callable_instantiation, ty, effects, span } => HExpr::Ident {
             name: name, resolved_name: resolved_name, def_id: def_id,
             source_slot: source_slot, callee_identity: callee_identity,
             dict_closure_dicts: dict_closure_dicts,
+            callable_instantiation: callable_instantiation,
             ty: ty, effects: effects, span: span
         },
         HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch,

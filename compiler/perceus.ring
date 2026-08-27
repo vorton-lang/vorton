@@ -629,7 +629,8 @@ fn anf_materialize(expr: HExpr, mut hoists: List<HStmt>, mut counter: List<Int>)
     HExpr::Ident { name: tmp, resolved_name: none,
         def_id: some(tmp_def_id),
         source_slot: none, callee_identity: none,
-        dict_closure_dicts: none, ty: t, effects: e, span: s }
+        dict_closure_dicts: none, callable_instantiation: none,
+        ty: t, effects: e, span: s }
 }
 
 // Normalise a sub-expression that sits in a CONSUMING operand position — one where
@@ -898,11 +899,13 @@ fn anf_lvalue(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut count
         },
         // Ident lvalue (plain variable) — nothing to normalise.
         HExpr::Ident { name, resolved_name, def_id, source_slot,
-                       callee_identity, dict_closure_dicts, ty, effects, span } =>
+                       callee_identity, dict_closure_dicts,
+                       callable_instantiation, ty, effects, span } =>
             HExpr::Ident { name: name, resolved_name: resolved_name,
                 def_id: def_id, source_slot: source_slot,
                 callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
+                callable_instantiation: callable_instantiation,
                 ty: ty, effects: effects, span: span },
         // Other HExpr variants are unreachable as lvalues.
         _ => expr,
@@ -927,11 +930,13 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
         HExpr::BoolLit { value, ty, effects, span } =>
             HExpr::BoolLit { value: value, ty: ty, effects: effects, span: span },
         HExpr::Ident { name, resolved_name, def_id, source_slot,
-                       callee_identity, dict_closure_dicts, ty, effects, span } =>
+                       callee_identity, dict_closure_dicts,
+                       callable_instantiation, ty, effects, span } =>
             HExpr::Ident { name: name, resolved_name: resolved_name,
                 def_id: def_id, source_slot: source_slot,
                 callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
+                callable_instantiation: callable_instantiation,
                 ty: ty, effects: effects, span: span },
         // B-104 D4: a dict construction is a leaf (its inners are DictRefs, not
         // sub-expressions) and is ALWAYS the init of a dict_lower-synthesised
@@ -2089,7 +2094,8 @@ fn rc_block_inner(stmts: List<HStmt>, tail: HExpr?, escape: Bool, owned: List<Ow
                 let tmp_tail = HExpr::Ident { name: tmp, resolved_name: none,
                     def_id: some(tmp_def_id),
                     source_slot: none, callee_identity: none,
-                    dict_closure_dicts: none, ty: tt, effects: te, span: ts }
+                    dict_closure_dicts: none, callable_instantiation: none,
+                    ty: tt, effects: te, span: ts }
                 ((new_stmts, some(tmp_tail)))
             },
             none => {
@@ -2523,7 +2529,8 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
                         name: tmp, resolved_name: none,
                         def_id: some(tmp_def_id),
                         source_slot: none, callee_identity: none,
-                        dict_closure_dicts: none, ty: vt,
+                        dict_closure_dicts: none, callable_instantiation: none,
+                        ty: vt,
                         effects: hexpr_effects(value), span: hexpr_span(value)
                     }
                     [
@@ -2565,7 +2572,8 @@ fn rc_stmt(stmt: HStmt, owned: List<OwnedSlot>, boxed: Set<Int>, externs: Set<St
                     let tmp_id = HExpr::Ident { name: tmp, resolved_name: none,
                         def_id: some(tmp_def_id),
                         source_slot: none, callee_identity: none,
-                        dict_closure_dicts: none, ty: tt, effects: te, span: ts }
+                        dict_closure_dicts: none, callable_instantiation: none,
+                        ty: tt, effects: te, span: ts }
                     out.push(HStmt::Return { value: some(tmp_id), span: span })
                     out
                 },
@@ -2686,11 +2694,13 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
         // Leaves: nothing to transform.  Owner-bearing leaves (Ident) are cloned
         // by rc_escape at the escape site, never here (here = value position).
         HExpr::Ident { name, resolved_name, def_id, source_slot,
-                       callee_identity, dict_closure_dicts, ty, effects, span } =>
+                       callee_identity, dict_closure_dicts,
+                       callable_instantiation, ty, effects, span } =>
             HExpr::Ident { name: name, resolved_name: resolved_name,
                 def_id: def_id, source_slot: source_slot,
                 callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
+                callable_instantiation: callable_instantiation,
                 ty: ty, effects: effects, span: span },
         HExpr::IntLit { value, ty, effects, span } =>
             HExpr::IntLit { value: value, ty: ty, effects: effects, span: span },
@@ -3030,7 +3040,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 let tmp_id = HExpr::Ident { name: tmp, resolved_name: none,
                     def_id: some(tmp_def_id),
                     source_slot: none, callee_identity: none,
-                    dict_closure_dicts: none, ty: tt, effects: te, span: ts }
+                    dict_closure_dicts: none, callable_instantiation: none,
+                    ty: tt, effects: te, span: ts }
                 let ret_expr = HExpr::ReturnExpr { value: some(tmp_id), ty: ty, effects: effects, span: span }
                 HExpr::Block { stmts: out, tail: some(ret_expr),
                     ty: ty, effects: effects, span: span }
