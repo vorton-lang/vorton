@@ -9,11 +9,11 @@ use ir_identity::{
     core_type_ref_index, core_type_ref_module_key, core_type_ref_same,
     make_core_type_fact_ref,
     core_type_fact_module_key, core_type_fact_same,
-    SymbolRef, PathRef, PathOwnerRef, OriginRef,
+    SymbolRef, PathRef, PathOwnerRef,
     NominalFieldRef, VariantRef, VariantFieldRef,
     HandledEffectRef, SystemEffectRef,
     handled_effect_ref_same, system_effect_ref_same,
-    symbol_ref_same, symbol_ref_origin_module_key, origin_ref_same,
+    symbol_ref_same, symbol_ref_origin_module_key,
     symbol_ref_namespace_kind,
     namespace_kind_same, namespace_nominal, namespace_trait,
     path_ref_same, path_ref_owner,
@@ -29,8 +29,7 @@ use ir_inventory::{
     effect_operation_ref_source_index, effect_operation_ref_same
 }
 use effect_contract::{
-    EffectParamRef, effect_param_ref_same,
-    effect_param_owner, effect_param_ordinal,
+    effect_param_ref_same,
     CoreEffectAtom, CoreEffectContract,
     make_core_fail_effect, make_core_mut_effect, make_core_unsafe_effect,
     make_core_handled_effect, make_core_system_effect,
@@ -55,8 +54,7 @@ use resource_model::{
     flow_call_contract_parameter_roles,
     flow_call_contract_result_type,
     flow_call_contract_result_role,
-    flow_call_contract_result_origin,
-    flow_semantic_role_tag, value_origin_same
+    flow_call_contract_result_origin
 }
 pub struct CoreTypeFactAllocator { module_key: Str, next_ordinal: Int }
 pub fn new_core_type_fact_allocator(
@@ -835,286 +833,6 @@ fn flow_satisfaction_pair_active(
         index = index + 1
     }
     false
-}
-
-// Exact alpha-equivalence for the 0.1 extern-forward bridge.  This does not
-// infer substitutions: only the two callable headers' own formals may be
-// renamed by ordinal.  Every other nominal/member/effect identity stays exact.
-struct FlowTypeAlphaContext {
-    left_type_owner: SymbolRef,
-    right_type_owner: SymbolRef,
-    left_effect_owner: OriginRef,
-    right_effect_owner: OriginRef
-}
-
-fn alpha_owner_parameter_arity(
-    nodes: List<FlowTypeNode>, owner: SymbolRef
-) -> Int {
-    let mut arity: Int? = none
-    let mut seen: List<Bool> = []
-    for node in nodes {
-        match node.generic_param {
-            some(parameter) => if symbol_ref_same(parameter.owner, owner) {
-                if parameter.bounds.len() != 0 { return -1 }
-                match arity {
-                    some(existing) => if existing != parameter.arity {
-                        return -1
-                    },
-                    none => {
-                        arity = some(parameter.arity)
-                        for _ in 0..parameter.arity { seen.push(false) }
-                    }
-                }
-                if parameter.index < 0 || parameter.index >= seen.len() ||
-                   seen.get(parameter.index).unwrap() {
-                    return -1
-                }
-                seen.set(parameter.index, true)
-            },
-            none => {}
-        }
-    }
-    match arity {
-        some(value) => {
-            for present in seen { if !present { return -1 } }
-            value
-        },
-        none => 0
-    }
-}
-
-fn alpha_generic_parameter_same(
-    left: FlowGenericParamFact, right: FlowGenericParamFact,
-    ctx: FlowTypeAlphaContext
-) -> Bool {
-    if flow_generic_param_fact_same(left, right) { return true }
-    symbol_ref_same(left.owner, ctx.left_type_owner) &&
-        symbol_ref_same(right.owner, ctx.right_type_owner) &&
-        left.index == right.index && left.arity == right.arity &&
-        left.bounds.len() == 0 && right.bounds.len() == 0
-}
-
-fn alpha_effect_parameter_same(
-    left: EffectParamRef?, right: EffectParamRef?, ctx: FlowTypeAlphaContext
-) -> Bool {
-    match (left, right) {
-        (some(a), some(b)) => {
-            if effect_param_ref_same(a, b) { return true }
-            origin_ref_same(effect_param_owner(a), ctx.left_effect_owner) &&
-                origin_ref_same(effect_param_owner(b), ctx.right_effect_owner) &&
-                effect_param_ordinal(a) == effect_param_ordinal(b)
-        },
-        (none, none) => true,
-        _ => false
-    }
-}
-
-fn alpha_type_refs_same_inner(
-    nodes: List<FlowTypeNode>, left_ref: CoreTypeRef, right_ref: CoreTypeRef,
-    ctx: FlowTypeAlphaContext
-) -> Bool {
-    if core_type_ref_same(left_ref, right_ref) { return true }
-    let left = flow_satisfaction_type_node(nodes, left_ref)
-    let right = flow_satisfaction_type_node(nodes, right_ref)
-    let kind = flow_type_kind_tag(left.kind)
-    if kind != flow_type_kind_tag(right.kind) { return false }
-    if kind >= FLOW_TYPE_INT && kind <= FLOW_TYPE_NEVER { return true }
-    if kind == FLOW_TYPE_PARAMETER {
-        return match (left.generic_param, right.generic_param) {
-            (some(a), some(b)) => alpha_generic_parameter_same(a, b, ctx),
-            _ => false
-        }
-    }
-    if kind == FLOW_TYPE_STRUCT || kind == FLOW_TYPE_ENUM ||
-       kind == FLOW_TYPE_EXTERN {
-        if !optional_symbols_same(left.nominal, right.nominal) ||
-           left.generic_arguments.len() != right.generic_arguments.len() {
-            return false
-        }
-        let mut index = 0
-        while index < left.generic_arguments.len() {
-            if !alpha_type_refs_same_inner(
-                    nodes, left.generic_arguments.get(index).unwrap(),
-                    right.generic_arguments.get(index).unwrap(), ctx) {
-                return false
-            }
-            index = index + 1
-        }
-        return true
-    }
-    if kind == FLOW_TYPE_TUPLE || kind == FLOW_TYPE_PTR {
-        if left.children.len() != right.children.len() { return false }
-        let mut index = 0
-        while index < left.children.len() {
-            if !alpha_type_refs_same_inner(
-                    nodes, left.children.get(index).unwrap(),
-                    right.children.get(index).unwrap(), ctx) {
-                return false
-            }
-            index = index + 1
-        }
-        return true
-    }
-    if kind == FLOW_TYPE_CALLABLE {
-        if left.parameter_count != right.parameter_count ||
-           left.children.len() != right.children.len() ||
-           !alpha_effect_contract_same(
-                nodes, left.callable_effects.unwrap(),
-                right.callable_effects.unwrap(), ctx) {
-            return false
-        }
-        let mut index = 0
-        while index < left.children.len() {
-            if !alpha_type_refs_same_inner(
-                    nodes, left.children.get(index).unwrap(),
-                    right.children.get(index).unwrap(), ctx) {
-                return false
-            }
-            index = index + 1
-        }
-        return true
-    }
-    if kind == FLOW_TYPE_RECORD {
-        if left.nominal_fields.len() != right.nominal_fields.len() {
-            return false
-        }
-        let mut index = 0
-        while index < left.nominal_fields.len() {
-            let a = left.nominal_fields.get(index).unwrap()
-            let b = right.nominal_fields.get(index).unwrap()
-            if !optional_record_names_same(a.record_name, b.record_name) ||
-               !alpha_type_refs_same_inner(nodes, a.ty, b.ty, ctx) {
-                return false
-            }
-            index = index + 1
-        }
-        return true
-    }
-    false
-}
-
-fn alpha_effect_atom_same(
-    nodes: List<FlowTypeNode>, left: CoreEffectAtom, right: CoreEffectAtom,
-    ctx: FlowTypeAlphaContext
-) -> Bool {
-    let kind = core_effect_atom_kind_tag(left)
-    if kind != core_effect_atom_kind_tag(right) { return false }
-    if kind == 0 || kind == 1 {
-        return alpha_type_refs_same_inner(
-            nodes, core_effect_atom_type(left), core_effect_atom_type(right), ctx)
-    }
-    if kind == 2 { return true }
-    if kind == 3 {
-        if !handled_effect_ref_same(
-                core_effect_atom_handled_ref(left),
-                core_effect_atom_handled_ref(right)) ||
-           core_effect_atom_type_arguments(left).len() !=
-                core_effect_atom_type_arguments(right).len() {
-            return false
-        }
-        let left_args = core_effect_atom_type_arguments(left)
-        let right_args = core_effect_atom_type_arguments(right)
-        let mut index = 0
-        while index < left_args.len() {
-            if !alpha_type_refs_same_inner(
-                    nodes, left_args.get(index).unwrap(),
-                    right_args.get(index).unwrap(), ctx) {
-                return false
-            }
-            index = index + 1
-        }
-        return true
-    }
-    system_effect_ref_same(
-        core_effect_atom_system_ref(left), core_effect_atom_system_ref(right))
-}
-
-fn alpha_effect_contract_same(
-    nodes: List<FlowTypeNode>, left: CoreEffectContract,
-    right: CoreEffectContract, ctx: FlowTypeAlphaContext
-) -> Bool {
-    let left_atoms = core_effect_set_atoms(core_effect_contract_exact(left))
-    let right_atoms = core_effect_set_atoms(core_effect_contract_exact(right))
-    if left_atoms.len() != right_atoms.len() ||
-       !alpha_effect_parameter_same(
-            core_effect_contract_parameter(left),
-            core_effect_contract_parameter(right), ctx) {
-        return false
-    }
-    for atom in left_atoms {
-        let mut matches = 0
-        for candidate in right_atoms {
-            if alpha_effect_atom_same(nodes, atom, candidate, ctx) {
-                matches = matches + 1
-            }
-        }
-        if matches != 1 { return false }
-    }
-    true
-}
-
-pub fn flow_type_refs_alpha_same(
-    nodes: List<FlowTypeNode>, left: CoreTypeRef, right: CoreTypeRef,
-    left_type_owner: SymbolRef, right_type_owner: SymbolRef,
-    left_effect_owner: OriginRef, right_effect_owner: OriginRef
-) -> Bool {
-    let left_arity = alpha_owner_parameter_arity(nodes, left_type_owner)
-    let right_arity = alpha_owner_parameter_arity(nodes, right_type_owner)
-    if left_arity < 0 || left_arity != right_arity { return false }
-    alpha_type_refs_same_inner(nodes, left, right, FlowTypeAlphaContext {
-        left_type_owner: left_type_owner, right_type_owner: right_type_owner,
-        left_effect_owner: left_effect_owner,
-        right_effect_owner: right_effect_owner
-    })
-}
-
-pub fn flow_callable_contract_alpha_same(
-    nodes: List<FlowTypeNode>, left: FlowCallContract,
-    left_effects: CoreEffectContract, left_type_owner: SymbolRef,
-    left_effect_owner: OriginRef, right: FlowCallContract,
-    right_effects: CoreEffectContract, right_type_owner: SymbolRef,
-    right_effect_owner: OriginRef
-) -> Bool {
-    let left_types = flow_call_contract_parameter_types(left)
-    let right_types = flow_call_contract_parameter_types(right)
-    let left_roles = flow_call_contract_parameter_roles(left)
-    let right_roles = flow_call_contract_parameter_roles(right)
-    if flow_call_contract_module_key(left) != flow_call_contract_module_key(right) ||
-       left_types.len() != right_types.len() ||
-       left_roles.len() != right_roles.len() ||
-       flow_semantic_role_tag(flow_call_contract_result_role(left)) !=
-            flow_semantic_role_tag(flow_call_contract_result_role(right)) ||
-       !value_origin_same(
-            flow_call_contract_result_origin(left),
-            flow_call_contract_result_origin(right)) {
-        return false
-    }
-    let ctx = FlowTypeAlphaContext {
-        left_type_owner: left_type_owner, right_type_owner: right_type_owner,
-        left_effect_owner: left_effect_owner,
-        right_effect_owner: right_effect_owner
-    }
-    let left_arity = alpha_owner_parameter_arity(nodes, left_type_owner)
-    let right_arity = alpha_owner_parameter_arity(nodes, right_type_owner)
-    if left_arity < 0 || left_arity != right_arity ||
-       !alpha_effect_contract_same(nodes, left_effects, right_effects, ctx) ||
-       !alpha_type_refs_same_inner(
-            nodes, flow_call_contract_result_type(left),
-            flow_call_contract_result_type(right), ctx) {
-        return false
-    }
-    let mut index = 0
-    while index < left_types.len() {
-        if flow_semantic_role_tag(left_roles.get(index).unwrap()) !=
-                flow_semantic_role_tag(right_roles.get(index).unwrap()) ||
-           !alpha_type_refs_same_inner(
-                nodes, left_types.get(index).unwrap(),
-                right_types.get(index).unwrap(), ctx) {
-            return false
-        }
-        index = index + 1
-    }
-    true
 }
 
 fn substituted_parameter_replacement(
