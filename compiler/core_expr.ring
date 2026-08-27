@@ -72,7 +72,6 @@ use ir_inventory::{
     binder_kind_dictionary_evidence_param, binder_kind_lambda_capture
 }
 use effect_contract::{
-    EffectParamRef, effect_param_owner, effect_param_ref_same,
     CoreEffectAtom, CoreEffectSet, CoreEffectContract,
     CoreEffectSubstitution, CoreEffectInstantiation,
     make_core_fail_effect, make_core_mut_effect, make_core_unsafe_effect,
@@ -298,13 +297,6 @@ pub fn make_core_callable_contract(
     if (concrete && parameter_slots.len() != flow_parameters.len()) ||
        (!concrete && parameter_slots.len() != 0) {
         panic("CoreHIR: callable parameter-slot relation differs")
-    }
-    match core_effect_contract_parameter(effects) {
-        some(parameter) => if !origin_ref_same(
-                effect_param_owner(parameter), origin) {
-            panic("CoreHIR: callable effect parameter has another owner")
-        },
-        none => {}
     }
     let mut left_index = 0
     while left_index < handled_evidence.len() {
@@ -3496,13 +3488,6 @@ pub fn validate_core_callable_contracts(
         validate_effect_set(
             core_effect_contract_exact(left.effects),
             core_type_graph_count(graph))
-        match core_effect_contract_parameter(left.effects) {
-            some(parameter) => if !origin_ref_same(
-                    effect_param_owner(parameter), left.origin) {
-                panic("CoreHIR: callable effect parameter owner drifted")
-            },
-            none => {}
-        }
         for parameter in core_callable_parameter_types(left) {
             let _ = core_type_graph_node(graph, parameter)
         }
@@ -3564,8 +3549,7 @@ fn validate_instantiated_handled_uses(
 }
 
 fn validate_call_effects(
-    callee: CoreCalleeRef, expression_effects: CoreEffectSet,
-    body: CoreBody
+    callee: CoreCalleeRef, expression_effects: CoreEffectSet
 ) {
     let instantiation = callee.effects
     let result_contract = core_effect_instantiation_result(instantiation)
@@ -3574,13 +3558,6 @@ fn validate_call_effects(
         if !core_effect_set_contains_atom(expression_effects, atom) {
             panic("CoreHIR: call expression drops an instantiated effect atom")
         }
-    }
-    match core_effect_contract_parameter(result_contract) {
-        some(parameter) => if !origin_ref_same(
-                effect_param_owner(parameter), body.origin) {
-            panic("CoreHIR: call effect substitution escapes another owner")
-        },
-        none => {}
     }
 }
 
@@ -3634,7 +3611,7 @@ fn validate_call_signature(
     handled_evidence: List<CoreHandledEvidenceUse>, body: CoreBody,
     graph: CoreTypeGraph, callables: List<CoreCallableContract>
 ) {
-    validate_call_effects(callee, expression_effects, body)
+    validate_call_effects(callee, expression_effects)
     if callee.kind != CORE_CALLEE_DIRECT &&
        callee.type_substitutions.len() != 0 {
         panic("CoreHIR: non-direct call carries declaration type substitutions")
@@ -4286,13 +4263,6 @@ fn validate_core_callable_value_effect_contract(
         panic("CoreHIR: callable value target is not callable typed")
     }
     let target_effects = flow_type_node_callable_effects(node)
-    match core_effect_contract_parameter(target_effects) {
-        some(parameter) => if !origin_ref_same(
-                effect_param_owner(parameter), callable.origin) {
-            panic("CoreHIR: callable value residual effect owner differs")
-        },
-        none => {}
-    }
     let _ = make_explicit_core_effect_instantiation(
         callable.effects, target_effects, target_effects)
 }

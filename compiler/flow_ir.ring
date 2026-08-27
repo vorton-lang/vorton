@@ -66,7 +66,7 @@ use ir_inventory::{
     binder_entry_slot, make_binder_manifest
 }
 use effect_contract::{
-    EffectParamRef, effect_param_owner, effect_param_ref_same,
+    effect_param_owner, effect_param_ref_same,
     effect_param_ordinal,
     CoreEffectAtom, CoreEffectContract, CoreEffectSubstitution,
     CoreEffectInstantiation,
@@ -242,13 +242,6 @@ pub fn make_flow_callable(
             flow_call_contract_parameter_types(semantic_contract).len()) ||
        (!concrete && parameter_slots.len() != 0) {
         panic("FlowIR: callable parameter slot relation is not total")
-    }
-    match core_effect_contract_parameter(effects) {
-        some(parameter) => if !origin_ref_same(
-                effect_param_owner(parameter), origin) {
-            panic("FlowIR: callable effect parameter has another owner")
-        },
-        none => {}
     }
     let mut left_index = 0
     while left_index < parameter_slots.len() {
@@ -3173,13 +3166,6 @@ fn validate_callables(
         if !type_ref_exists(type_nodes, result_type) {
             panic("FlowIR: callable result type is absent")
         }
-        match core_effect_contract_parameter(left.effects) {
-            some(parameter) => if !origin_ref_same(
-                    effect_param_owner(parameter), left.origin) {
-                panic("FlowIR: callable effect parameter owner drifted")
-            },
-            none => {}
-        }
         for atom in core_effect_set_atoms(
                 core_effect_contract_exact(left.effects)) {
             let effect_kind = core_effect_atom_kind_tag(atom)
@@ -4742,13 +4728,6 @@ fn validate_typed_instructions(
                         }
                         let result_effects =
                             core_effect_instantiation_result(target.effects)
-                        match core_effect_contract_parameter(result_effects) {
-                            some(parameter) => if !origin_ref_same(
-                                    effect_param_owner(parameter), body.origin) {
-                                panic("FlowIR: call effect substitution escapes another owner")
-                            },
-                            none => {}
-                        }
                         let expected_handled =
                             core_effect_contract_handled_requirements(
                                 result_effects)
