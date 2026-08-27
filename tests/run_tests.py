@@ -9,7 +9,6 @@ Usage:
     python tests/run_tests.py                        # all suites
     python tests/run_tests.py --suite e2e            # single-file e2e
     python tests/run_tests.py --suite golden         # golden snapshots
-    python tests/run_tests.py --suite rc             # RC verify sweep
     python tests/run_tests.py --suite self-compile   # tracked dist-c fixed point
     python tests/run_tests.py --suite structural     # generated-C structural gates
     python tests/run_tests.py --suite parity         # static evidence matrix
@@ -53,7 +52,6 @@ CASES_DIR = REPO / "tests" / "cases"
 GOLDEN_CASES_DIR = CASES_DIR / "golden"
 NATIVE_ONLY_DIR = CASES_DIR / "native_only"
 MODULES_DIR = CASES_DIR / "modules"
-RC_NEG_DIR = CASES_DIR / "verify_rc"
 RUNTIME_CPP = REPO / "ring_runtime.cpp"
 RUNTIME_O = REPO / "ring_runtime.o"
 DIST_C_DIR = REPO / "compiler" / "dist-c"
@@ -99,49 +97,6 @@ RECOVERY_CASES = (
 )
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-RC_FINDING_RE = re.compile(
-    r"^(.+):(\d+):(\d+)\s+rc-verify\[([^\]]+)\]\s+(.+)$",
-    re.MULTILINE,
-)
-RC_SUMMARY_RE = re.compile(
-    r"^RC verify:\s*(\d+) errors?,\s*(\d+) exempt \(documented\) findings$",
-    re.MULTILINE,
-)
-RC_EXEMPT_RE = re.compile(r"^rc-verify exempt classes:\s*(.*)$", re.MULTILINE)
-RC_BOUNDARY_MARKER = "HIR-level proof. Codegen-level drops are outside this check"
-
-
-@dataclass(frozen=True)
-class RcFindingLine:
-    file: str
-    line: int
-    column: int
-    category: str
-    message: str
-
-
-@dataclass(frozen=True)
-class RcReport:
-    fatal: int
-    exempt: int
-    exempt_counts: Dict[str, int]
-    findings: Tuple[RcFindingLine, ...]
-
-
-@dataclass(frozen=True)
-class RcInvocationContract:
-    name: str
-    fixture: str
-    args: Tuple[str, ...]
-    exit_zero: bool
-    strict: bool = False
-    fatal_exact: Optional[int] = None
-    fatal_min: int = 0
-    exempt_min: int = 0
-    exempt_counts: Tuple[Tuple[str, int], ...] = ()
-    finding_counts: Tuple[Tuple[str, int], ...] = ()
-    finding_lines: Tuple[Tuple[str, Tuple[int, ...]], ...] = ()
-    finding_function_bindings: Tuple[Tuple[str, str, str], ...] = ()
 
 # Generated-C evidence owned by the structural suite.  This map is also the
 # parity contract: every fixture below must exist, every structural .ring file
@@ -178,8 +133,8 @@ TIMEOUT_COMPILE = 60   # seconds, for ring.exe build / check
 TIMEOUT_LINK = 60      # seconds, for clang link
 TIMEOUT_COMPILER_LINK = 300  # cold ThinLTO link on slower CI hosts
 TIMEOUT_RUN = 30       # seconds, per test program execution
-TIMEOUT_SELFCOMPILE = 1200  # seconds, for self-compile / rc self-verify (900 was
-                            # exceeded after B-170; clean builds take ~18 min)
+TIMEOUT_SELFCOMPILE = 1200  # seconds; 900 was exceeded after B-170, and clean
+                            # self-compiles take about 18 minutes
 
 PHASE_TIMING_SCHEMA = "ring.test-runner-phase.v1"
 PHASE_TIMING_VERSION = 1
@@ -193,9 +148,8 @@ PHASE_TIMING_FIELDS = frozenset({
 SHARED_POSITIVE_GAPS = {}
 
 # Positive cases whose `ring check` itself fails today.  Unlike shared
-# execution gaps, these are frontend blockers, so every lane
-# that would compile or RC-verify the case (golden/e2e/native/module, rc) must
-# skip it with the same actionable reason.
+# execution gaps, these are frontend blockers, so every lane that would compile
+# the case (golden/e2e/native/module) must skip it with the same actionable reason.
 CHECK_BLOCKED_POSITIVE_GAPS = {}
 
 CHECK_ONLY_GAPS = {}
@@ -2974,12 +2928,14 @@ def run_native_real_program_contract(
     *,
     name_filter: Optional[str] = None,
 ) -> None:
-    """Preserve the repeated native-frontend/RC regression and execute it."""
+    """Exercise the production resource plan/certificate once, then run it."""
     suite = "e2e"
     key = "tests/native/real_program.ring"
+    label = "native-real-program:resource-planner+certificate"
     if not (
         matches_filter("native-real-program", name_filter)
         or matches_filter(key, name_filter)
+        or matches_filter(label, name_filter)
     ):
         return
     if not NATIVE_REAL_PROGRAM.is_file() or not NATIVE_REAL_PROGRAM_EXPECTED.is_file():
@@ -2989,32 +2945,27 @@ def run_native_real_program_contract(
         ))
         return
 
-    rc_contract = RcInvocationContract(
-        name="native-real-program RC",
-        fixture=key,
-        args=("--verify-rc",),
-        exit_zero=True,
-        fatal_exact=0,
-    )
-    for run_number in range(1, 4):
-        label = f"native-real-program:frontend+rc {run_number}/3"
-        try:
-            result = ring_check(
-                ring_exe,
-                str(NATIVE_REAL_PROGRAM),
-                extra_args=list(rc_contract.args),
-                phase_suite=suite,
-                phase_case=label,
+    try:
+        result = ring_check(
+            ring_exe, str(NATIVE_REAL_PROGRAM),
+            phase_suite=suite, phase_case=label,
+        )
+    except subprocess.TimeoutExpired:
+        collector.add(TestResult(TestResult.FAIL, suite, label, "check timed out"))
+    else:
+        failure = None
+        if result.returncode != 0:
+            failure = (
+                f"expected exit 0, got {result.returncode}: "
+                f"{process_output(result)[:300]}"
             )
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(TestResult.FAIL, suite, label, "check timed out"))
-            continue
-        failure = rc_contract_failure(rc_contract, result.returncode, process_output(result))
+        elif result.stdout != "OK\n":
+            failure = f"expected exact stdout 'OK\\n', got {result.stdout!r}"
+        elif result.stderr != "":
+            failure = f"expected empty stderr, got {result.stderr!r}"
         collector.add(TestResult(
             TestResult.PASS if failure is None else TestResult.FAIL,
-            suite,
-            label,
-            failure or "",
+            suite, label, failure or "",
         ))
 
     expected = norm(NATIVE_REAL_PROGRAM_EXPECTED.read_text(encoding="utf-8"))
@@ -5562,7 +5513,6 @@ def identity_ledger_contract_errors(
         "canonicalize_identity_stdout_root(",
         'IDENTITY_EVIDENCE_ROOT_ENV = "RING_IDENTITY_EVIDENCE_ROOT"',
         "evidence_root, evidence_error = identity_checkpoint_evidence_root()",
-        "identity_candidate_verify_rc_errors(\n        candidate, evidence_root, evidence_log)",
         "default_body_identity_generated_c_errors(\n            candidate, evidence_root, evidence_log)",
         "audit_one_shot_attempt(evidence_dir)",
         "archive_sha256",
@@ -5580,9 +5530,9 @@ def identity_ledger_contract_errors(
         errors.append("Python ledger relation bypasses event-shape authority")
     evidence_anchor = (
         "evidence_root, evidence_error = identity_checkpoint_evidence_root()")
-    verify_anchor = "verify_errors = identity_candidate_verify_rc_errors("
-    if evidence_anchor in runner and verify_anchor in runner and (
-            runner.index(evidence_anchor) > runner.index(verify_anchor)):
+    candidate_anchor = "errors.extend(default_body_identity_generated_c_errors("
+    if evidence_anchor in runner and candidate_anchor in runner and (
+            runner.index(evidence_anchor) > runner.index(candidate_anchor)):
         errors.append("candidate command can precede evidence-root authority")
     if re.search(
         r"(?m)^    evidence_root, evidence_error = "
@@ -5799,18 +5749,6 @@ def identity_checkpoint_contract_errors(
             "base_dict: DictRef::Static(",
             "base_dict: DictRef::Static(dict)",
         ),
-        "perceus": (
-            "struct OwnedSlot",
-            "fn owned_find_def_id(",
-            "SYNTHETIC_ANF_DEF_ID_BASE",
-            "SYNTHETIC_RC_DEF_ID_BASE",
-            "def_id: slot.def_id",
-            "validate_hir_binder_def_ids(transformed)",
-            "mutate_drop_identity_capture(anf_program)",
-            "is_exact_direct_call_ident(normalized)",
-            "dictionaries remain Call.resolved_dicts",
-            "callee_ref: callee_ref",
-        ),
         "cctx": (
             "pub struct CExactSlotRef",
             "pub struct CNameOnlySlotRef",
@@ -5879,19 +5817,6 @@ def identity_checkpoint_contract_errors(
             "parsed.identity_ledger)",
             "--internal-c-identity-ledger is single-file only",
         ),
-        "verify": (
-            "def_ids: List<Int>",
-            "if ctx.def_ids[i] == def_id",
-            "fn v_lookup_name(",
-            "local reference '${name}' has no exact DefId",
-            "fn v_drop(name: Str, def_id: Int",
-            "ctx.kinds[idx] == K_BORROW || ctx.kinds[idx] == K_CAPTURE",
-            "for binding in arm.bindings",
-            "def_id, \"assignment '${name}'\"",
-            "if is_exact_direct_call_ident(callee)",
-            "v_lookup(ctx, direct_def_id) >= 0",
-            "direct-call marker DefId",
-        ),
         "provenance_fixture": (
             "fn __ring_T_Ord(mut value: Int)",
             "fn direct_global_with_ord_evidence<T: Ord>",
@@ -5948,7 +5873,7 @@ def identity_checkpoint_contract_errors(
         if token not in sources["parser"]:
             errors.append(f"parser: effect signature-only boundary misses {token!r}")
     for label, expected in (
-            ("andor", 1), ("dict", 1), ("perceus", 2), ("zonk", 1)):
+            ("andor", 1), ("dict", 1), ("zonk", 1)):
         count = sources[label].count("callee_ref: callee_ref")
         if count != expected:
             errors.append(
@@ -6536,35 +6461,6 @@ def identity_checkpoint_contract_errors(
                 errors.append(
                     f"c_push/c_pop does not independently restore {domain}")
 
-    lookup_body, lookup_error = extract_ring_function_body(
-        sources["verify"], "v_lookup")
-    if lookup_error:
-        errors.append(lookup_error)
-    elif "ctx.names[i]" in lookup_body or "ctx.def_ids[i] == def_id" not in lookup_body:
-        errors.append("RC verifier lookup is not exact-DefId-only")
-
-    drops_body, drops_error = extract_ring_function_body(
-        sources["perceus"], "drops_for")
-    if drops_error:
-        errors.append(drops_error)
-    elif not all(token in drops_body for token in (
-            "let mut index = names.len()", "index = index - 1",
-            "def_id: slot.def_id")):
-        errors.append("Perceus cleanup is not reverse-order exact-slot")
-
-    anf_callee_body, anf_callee_error = extract_ring_function_body(
-        sources["perceus"], "anf_callee")
-    if anf_callee_error:
-        errors.append(anf_callee_error)
-    elif not all(token in anf_callee_body for token in (
-            "is_exact_direct_call_ident(normalized)",
-            "return normalized",
-            "is_materializable_fn_value(normalized, externs)")):
-        errors.append("ANF no longer preserves marked syntactic direct callees")
-    elif anf_callee_body.index("return normalized") > anf_callee_body.index(
-            "is_materializable_fn_value(normalized, externs)"):
-        errors.append("ANF direct marker is checked after materialization")
-
     direct_predicate_body, direct_predicate_error = extract_ring_function_body(
         sources["hir"], "is_exact_direct_call_ident")
     if direct_predicate_error:
@@ -6575,31 +6471,6 @@ def identity_checkpoint_contract_errors(
             "=> true",
             "_ => false")):
         errors.append("direct-call predicate is broader than exact marked Ident")
-
-    verify_expr_body, verify_expr_error = extract_ring_function_body(
-        sources["verify"], "v_expr")
-    if verify_expr_error:
-        errors.append(verify_expr_error)
-    else:
-        call_start = verify_expr_body.find("HExpr::Call { callee, args, ty, .. }")
-        call_end = verify_expr_body.find("HExpr::FieldAccess", call_start)
-        if call_start < 0 or call_end < 0:
-            errors.append("verify_rc Call accounting arm is missing")
-        else:
-            call_arm = verify_expr_body[call_start:call_end]
-            required_call_tokens = (
-                "if is_exact_direct_call_ident(callee)",
-                "HExpr::Ident { def_id: some(id), .. } => id",
-                "v_lookup(ctx, direct_def_id) >= 0",
-                "direct-call marker DefId ${direct_def_id} is local/captured",
-                "} else {",
-                "v_borrow(callee, \"\", ctx)",
-            )
-            if not all(token in call_arm for token in required_call_tokens):
-                errors.append("verify_rc direct Call context guard drifted")
-            elif call_arm.index("is_exact_direct_call_ident(callee)") > call_arm.index(
-                    "v_borrow(callee, \"\", ctx)"):
-                errors.append("verify_rc checks direct marker after callee borrow")
 
     for function_name, required in (
         ("check_effect_decl", (
@@ -6673,7 +6544,6 @@ def identity_checkpoint_contract_errors(
     # I-prime is identity only: the S-prime producer split and A-prime Take /
     # ownership metadata must remain absent from this checkpoint.
     forbidden = {
-        "perceus": ("DROP_PRODUCER_NOOP_NONE", "is_option_none_ctor_ident"),
         "hir": (
             "OwnershipMetadata", "Take {", "pub dict_param: Str",
             "Call { dict_name: Str",
@@ -7834,13 +7704,13 @@ IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
 F1_EXECUTABLE_KIND_COUNT = 20
 F1_BINDER_KIND_COUNT = 24
 F1_SEMANTIC_MUTATION_COUNT = 73
-F1_SCOPE_GUARD_COUNT = 14
+F1_SCOPE_GUARD_COUNT = 13
 
 F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
 F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
 F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
-F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 40
+F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 37
 F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT = 35
 F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT = 36
 
@@ -7917,7 +7787,7 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     if imports != ["ir_identity"]:
         errors.append(f"F1 import authority drifted: {imports!r}")
     for forbidden in (
-        "resolver", "checker", "codegen", "perceus", "verify_rc",
+        "resolver", "checker", "codegen", "perceus",
         "OwnershipMetadata", "FnMeta", "HExpr", "HDecl", "Type::FnType",
         "IdentityCounter", "next_identity", "fresh_identity", "name_fallback",
         "display_name", "c_symbol", "FlowIrFreezeFacts", "node_count",
@@ -8354,7 +8224,6 @@ def ir_inventory_f1_scope_guard_errors(source: str) -> Tuple[List[str], int]:
         ("checker import", "\nuse checker::{check}\n"),
         ("codegen import", "\nuse codegen_c::{generate_c}\n"),
         ("Perceus import", "\nuse perceus::{perceus_transform}\n"),
-        ("verifier import", "\nuse verify_rc::{verify_rc_program}\n"),
         ("shared counter", "\nstruct IdentityCounter { next_identity: Int }\n"),
         ("name fallback", "\nfn name_fallback(value: Str) -> Str { value }\n"),
         ("legacy HIR scan", "\nstruct Legacy { value: HExpr }\n"),
@@ -8996,7 +8865,7 @@ B201_BUILTIN_METHODS = (
     ("BUILTIN_METHOD_STR_HASH", "Str", "hash", "ring_cl_hash_str_export", "register_hash_trait", ""),
     ("BUILTIN_METHOD_BOOL_HASH", "Bool", "hash", "ring_cl_hash_bool_export", "register_hash_trait", ""),
 )
-B201_BUILTIN_METHOD_MUTATION_COUNT = 28
+B201_BUILTIN_METHOD_MUTATION_COUNT = 26
 
 
 def _b201_function_body(
@@ -9186,8 +9055,6 @@ def builtin_method_intrinsic_contract_errors(
         ("andor_lower.ring", "al_expr", "method_ref: method_ref"),
         ("dict_lower.ring", "dl_expr",
          "method_ref: dl_method_call_ref(method_ref, defs, seen)"),
-        ("perceus.ring", "anf_expr", "method_ref: method_ref"),
-        ("perceus.ring", "rc_expr", "method_ref: method_ref"),
         ("zonk.ring", "zonk_expr", "method_ref: zonk_method_call_ref(ctx, method_ref)"),
     ):
         body = _b201_function_body(
@@ -9309,10 +9176,6 @@ def builtin_method_intrinsic_mutation_errors(
         ("dict transport", "dict_lower.ring", "dl_expr",
          "method_ref: dl_method_call_ref(method_ref, defs, seen)",
          "method_ref: none"),
-        ("ANF transport", "perceus.ring", "anf_expr",
-         "method_ref: method_ref", "method_ref: none"),
-        ("RC transport", "perceus.ring", "rc_expr",
-         "method_ref: method_ref", "method_ref: none"),
         ("ABI order", "codegen_c_expr.ring", None,
          '"ring_str_len", "ring_str_contains"',
          '"ring_str_contains", "ring_str_len"'),
@@ -9955,7 +9818,6 @@ F2_U1B_PATHS = {
     "zonk": REPO / "compiler" / "zonk.ring",
     "andor": REPO / "compiler" / "andor_lower.ring",
     "dict": REPO / "compiler" / "dict_lower.ring",
-    "perceus": REPO / "compiler" / "perceus.ring",
     "unify": REPO / "compiler" / "unify.ring",
     "exhaustive": REPO / "compiler" / "exhaustive.ring",
     "codegen": REPO / "compiler" / "codegen_c_expr.ring",
@@ -10076,9 +9938,6 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
         ("andor", "al_decl", "owner_ref: owner_ref"),
         ("dict", "dl_expr", "field_ref: f.field_ref"),
         ("dict", "dl_decl", "owner_ref: owner_ref"),
-        ("perceus", "anf_lvalue", "access_kind: access_kind"),
-        ("perceus", "anf_expr", "field_ref: f.field_ref"),
-        ("perceus", "rc_expr", "field_ref: f.field_ref"),
         ("unify", "unify_struct_with_record", "field_ref: f.field_ref"),
         ("codegen", "gen_c_field_access",
          "reject_c_error_field_access(access_kind)"),
@@ -10230,12 +10089,6 @@ F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
      "field_ref: fields.get(0).unwrap().field_ref"),
     ("dict", "dl_decl", "owner_ref: owner_ref",
      "owner_ref: missing_owner_ref"),
-    ("perceus", "anf_lvalue", "access_kind: access_kind",
-     "access_kind: HFieldAccessKind::ErrorRecovery"),
-    ("perceus", "anf_expr", "field_ref: f.field_ref",
-     "field_ref: fields.get(0).unwrap().field_ref"),
-    ("perceus", "rc_expr", "field_ref: f.field_ref",
-     "field_ref: fields.get(0).unwrap().field_ref"),
     ("unify", "unify_struct_with_record", "field_ref: f.field_ref",
      "field_ref: struct_def.fields.get(0).unwrap().field_ref"),
     ("codegen", "gen_c_field_access",
@@ -11432,12 +11285,10 @@ F2_IMPL_PROVIDER_CARRIER_PATHS = {
     "decl": REPO / "compiler" / "infer_decl.ring",
     "andor": REPO / "compiler" / "andor_lower.ring",
     "dict": REPO / "compiler" / "dict_lower.ring",
-    "perceus": REPO / "compiler" / "perceus.ring",
     "codegen": REPO / "compiler" / "codegen_c.ring",
-    "verify": REPO / "compiler" / "verify_rc.ring",
 }
-F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT = 23
-F2_IMPL_PROVIDER_CARRIER_SCOPE_COUNT = 3
+F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT = 19
+F2_IMPL_PROVIDER_CARRIER_SCOPE_COUNT = 1
 
 
 def impl_provider_u1c2_contract_errors(
@@ -11496,7 +11347,6 @@ def impl_provider_u1c2_contract_errors(
 
     visitor_functions = (
         ("andor", "al_decl"), ("dict", "dl_decl"),
-        ("perceus", "anf_decl"), ("perceus", "transform_decl"),
     )
     for source_name, function_name in visitor_functions:
         body = _trait_method_function_body(
@@ -11577,7 +11427,7 @@ def impl_provider_u1c2_contract_errors(
         if token not in inject_body:
             errors.append(f"hydration typed owner closure misses {token!r}")
 
-    for source_name in ("codegen", "effect", "verify"):
+    for source_name in ("codegen",):
         masked = mask_ring_strings_and_comments(sources[source_name])
         if "ImplProviderRef" in masked or "provider_ref" in masked or (
                 "trait_ref" in masked):
@@ -11611,14 +11461,6 @@ def impl_provider_u1c2_mutation_errors(
         ("dict provider", "dict", "dl_decl",
          "provider_ref: provider_ref", "provider_ref: wrong_provider_ref"),
         ("dict trait", "dict", "dl_decl",
-         "trait_ref: trait_ref", "trait_ref: none"),
-        ("ANF provider", "perceus", "anf_decl",
-         "provider_ref: provider_ref", "provider_ref: wrong_provider_ref"),
-        ("ANF trait", "perceus", "anf_decl",
-         "trait_ref: trait_ref", "trait_ref: none"),
-        ("RC provider", "perceus", "transform_decl",
-         "provider_ref: provider_ref", "provider_ref: wrong_provider_ref"),
-        ("RC trait", "perceus", "transform_decl",
          "trait_ref: trait_ref", "trait_ref: none"),
         ("checker provider lookup", "checker", "validate_impl_carriers",
          "find_impl_by_provider(", "find_impl_by_origin("),
@@ -11687,7 +11529,7 @@ def impl_provider_u1c2_scope_errors(
     sources: Mapping[str, str],
 ) -> List[str]:
     errors: List[str] = []
-    for source_name in ("codegen", "effect", "verify"):
+    for source_name in ("codegen",):
         mutated = dict(sources)
         mutated[source_name] = sources[source_name] + (
             "\nfn forbidden_impl_provider_read(provider_ref: ImplProviderRef) "
@@ -13256,13 +13098,11 @@ def identity_checkpoint_source_errors() -> List[str]:
         "zonk": REPO / "compiler" / "zonk.ring",
         "derive": REPO / "compiler" / "derive.ring",
         "dict": REPO / "compiler" / "dict_lower.ring",
-        "perceus": REPO / "compiler" / "perceus.ring",
         "cctx": REPO / "compiler" / "codegen_c_ctx.ring",
         "cgen": REPO / "compiler" / "codegen_c.ring",
         "cexpr": REPO / "compiler" / "codegen_c_expr.ring",
         "cli": REPO / "compiler" / "cli.ring",
         "runner": REPO / "tests" / "run_tests.py",
-        "verify": REPO / "compiler" / "verify_rc.ring",
         "provenance_fixture": (
             REPO / "tests" / "cases" / "provenance_b_capture_identity.ring"
         ),
@@ -13381,16 +13221,6 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("ConstGetter direct marker", "infer_helpers",
          "dict_closure_dicts: some([]), ty: getter_ty",
          "dict_closure_dicts: none, ty: getter_ty"),
-        ("ANF marked direct preservation", "perceus",
-         "if is_exact_direct_call_ident(normalized) {\n"
-         "        return normalized\n"
-         "    }",
-         "if is_exact_direct_call_ident(normalized) {\n"
-         "        return anf_materialize(normalized, hoists, counter)\n"
-         "    }"),
-        ("ANF CalleeRef transport", "perceus",
-         "resolved_dicts: resolved_dicts, callee_ref: callee_ref,",
-         "resolved_dicts: resolved_dicts, callee_ref: none,"),
         ("dict CalleeRef transport", "dict",
          "callee_ref: callee_ref,\n                method_ref: dl_method_call_ref",
          "callee_ref: none,\n                method_ref: dl_method_call_ref"),
@@ -13403,14 +13233,6 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("direct predicate exact marker shape", "hir",
          "def_id: some(_), dict_closure_dicts: some(_), ..",
          ".."),
-        ("verifier direct Call context guard", "verify",
-         "if is_exact_direct_call_ident(callee) {",
-         "if false {"),
-        ("verifier direct marker local-slot guard", "verify",
-         "if v_lookup(ctx, direct_def_id) >= 0 {\n"
-         "                    panic(\"RC verifier direct-call marker DefId ${direct_def_id} is local/captured\")\n"
-         "                }",
-         "if false {}"),
         ("exact callee miss panic", "cexpr",
          "none => panic(\n"
          "                    \"C codegen: exact local callee '${name}' DefId ${id} has no slot\")",
@@ -13591,8 +13413,6 @@ def identity_checkpoint_source_errors() -> List[str]:
          "    if false:\n"
          "        return errors, \"source/mutation authority failed; "
          "candidate not evaluated\""),
-        ("verifier exact lookup", "verify", "ctx.def_ids[i] == def_id",
-         "ctx.names[i] == name"),
         ("or-pattern shared slot", "cexpr", "bind_c_root_pattern_after_success(",
          "bind_c_nested_pattern("),
         ("trait default HParam identity", "infer_decl", "def_id: some(trait_param_def_id)",
@@ -13856,97 +13676,6 @@ def ownership_cutover_source_errors() -> List[str]:
     return errors
 
 
-IDENTITY_CANDIDATE_RC_FIXTURES = (
-    "tests/cases/provenance_b_capture_identity.ring",
-    "tests/cases/local_closure_exact_call.ring",
-    "tests/cases/drop_nullary_variant_ctor_repeat.ring",
-    "tests/cases/golden/generic_extern_fn_value_bound.ring",
-    "tests/cases/phantom_resource_shareable.ring",
-)
-
-
-def identity_candidate_verify_rc_errors(
-    ring_exe: str, evidence_root: Path, evidence_log: List[str],
-) -> List[str]:
-    errors: List[str] = []
-    environment = dict(_controlled_environment(ring_exe))
-    try:
-        parent = identity_candidate_case_root(evidence_root, "verify-rc")
-    except RuntimeError as exc:
-        return [str(exc)]
-    for index, fixture in enumerate(IDENTITY_CANDIDATE_RC_FIXTURES):
-        evidence_dir = parent / f"case-{index}"
-        try:
-            evidence_dir.mkdir(parents=False, exist_ok=False)
-        except OSError as exc:
-            errors.append(
-                f"cannot create verify-rc evidence root {evidence_dir}: {exc}")
-            return errors
-        argv = (
-            str(Path(ring_exe).resolve()), "check",
-            str((REPO / fixture).resolve()), "--verify-rc",
-        )
-        spec = OneShotSpec(
-            evidence_dir=evidence_dir.resolve(),
-            gate_id=f"identity-verify-rc-{index}",
-            argv=argv,
-            reviewed_argv=argv,
-            cwd=REPO.resolve(),
-            env=environment,
-            reviewed_env=tuple(sorted(environment.items())),
-            limits=OneShotLimits(
-                wall_seconds=60,
-                stdout_cap_bytes=1024 * 1024,
-                stderr_cap_bytes=1024 * 1024,
-                job_memory_bytes=(
-                    12 * 1024 * 1024 * 1024 if os.name == "nt" else None),
-                active_process_limit=(5 if os.name == "nt" else None),
-            ),
-        )
-        verdict: Optional[dict[str, Any]] = None
-        wrapper_error: Optional[str] = None
-        try:
-            verdict = run_one_shot(spec)
-        except Exception as exc:
-            wrapper_error = str(exc)
-        audit = audit_one_shot_attempt(evidence_dir)
-        archive_path = evidence_root / f"verify-rc-{index}.tar"
-        archive_error: Optional[str] = None
-        try:
-            create_one_shot_archive(evidence_dir, archive_path)
-            archive_hash = _sha256_file(archive_path)
-        except Exception as exc:
-            archive_error = str(exc)
-            archive_hash = "unavailable"
-        archive_detail = (
-            f"sha256={archive_hash}" if archive_error is None
-            else f"error={archive_error}")
-        evidence_log.append(
-            f"verify-rc-{index}:raw={evidence_dir};audit={audit['state']}/"
-            f"{audit['status']};archive={archive_path};{archive_detail}")
-        if wrapper_error is not None:
-            errors.append(
-                f"candidate verify-rc wrapper failed for {fixture}: "
-                f"{wrapper_error}; raw={evidence_dir}; archive={archive_path}; "
-                f"{archive_detail}")
-            continue
-        assert verdict is not None
-        if verdict["status"] != "success":
-            errors.append(
-                f"candidate verify-rc failed for {fixture}: "
-                f"{verdict['classification']}; raw={evidence_dir}; "
-                f"archive={archive_path}; archive_sha256={archive_hash}")
-        if audit["state"] != "complete" or audit["status"] != "success":
-            errors.append(
-                f"candidate verify-rc audit failed for {fixture}: {audit}; "
-                f"archive={archive_path}; archive_sha256={archive_hash}")
-        if archive_error is not None:
-            errors.append(
-                f"candidate verify-rc archive failed for {fixture}: "
-                f"{archive_error}; raw={evidence_dir}")
-    return errors
-
-
 def identity_checkpoint_candidate_identity(
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Resolve and hash the explicitly selected I-prime candidate compiler."""
@@ -14031,12 +13760,8 @@ def identity_checkpoint_errors() -> Tuple[List[str], str]:
             f"{IDENTITY_EVIDENCE_ROOT_ENV}=invalid")
     assert evidence_root is not None
     evidence_log: List[str] = []
-    verify_errors = identity_candidate_verify_rc_errors(
-        candidate, evidence_root, evidence_log)
-    errors.extend(verify_errors)
-    if not verify_errors:
-        errors.extend(default_body_identity_generated_c_errors(
-            candidate, evidence_root, evidence_log))
+    errors.extend(default_body_identity_generated_c_errors(
+        candidate, evidence_root, evidence_log))
     post_candidate, post_digest, post_error = (
         identity_checkpoint_candidate_identity())
     if post_error is not None:
@@ -14227,7 +13952,7 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         detail = (
             "producer=registered_impl_payload; "
             "consumer=core_shadow+method_call_ref+c_abi; "
-            "census=33; source_mutations=27; "
+            "census=33; source_mutations=25; "
             "single_canary=builtin_intrinsic_identity; "
             "project_canary=builtin_intrinsic_identity_project; "
             "old_method_name_table=retired; impl_member_extern=hard_reject")
@@ -14592,126 +14317,6 @@ def diagnostic_by_code(
 ) -> Optional[Dict[str, Any]]:
     """Return the first diagnostic with an exact stable code."""
     return next((item for item in diagnostics if item.get("code") == code), None)
-
-
-def parse_rc_report(output: str) -> Tuple[Optional[RcReport], Optional[str]]:
-    """Parse the stable text contract emitted by ``format_rc_findings``."""
-    clean = strip_ansi(output)
-    summaries = RC_SUMMARY_RE.findall(clean)
-    if len(summaries) != 1:
-        return None, f"expected exactly one RC summary, found {len(summaries)}"
-    fatal, exempt = (int(value) for value in summaries[0])
-
-    exempt_lines = RC_EXEMPT_RE.findall(clean)
-    if len(exempt_lines) > 1:
-        return None, "expected at most one RC exempt-class summary"
-    exempt_counts: Dict[str, int] = {}
-    if exempt_lines:
-        for token in exempt_lines[0].split():
-            match = re.fullmatch(r"([^=\s]+)=(\d+)", token)
-            if match is None:
-                return None, f"malformed RC exempt-class token: {token!r}"
-            category, count_text = match.groups()
-            if category in exempt_counts:
-                return None, f"duplicate RC exempt class: {category}"
-            exempt_counts[category] = int(count_text)
-    if exempt > 0 and not exempt_lines:
-        return None, "RC report omitted exempt-class counts"
-    if exempt == 0 and exempt_lines:
-        return None, "RC report emitted exempt-class counts for zero exemptions"
-    if sum(exempt_counts.values()) != exempt:
-        return None, (
-            "RC exempt-class counts disagree with summary: "
-            f"classes={sum(exempt_counts.values())}, summary={exempt}"
-        )
-    if RC_BOUNDARY_MARKER not in clean:
-        return None, "RC report omitted the documented HIR/codegen boundary"
-
-    findings = tuple(
-        RcFindingLine(
-            file=match.group(1),
-            line=int(match.group(2)),
-            column=int(match.group(3)),
-            category=match.group(4),
-            message=match.group(5),
-        )
-        for match in RC_FINDING_RE.finditer(clean)
-    )
-    return RcReport(fatal, exempt, exempt_counts, findings), None
-
-
-def rc_contract_failure(
-    contract: RcInvocationContract,
-    returncode: int,
-    output: str,
-) -> Optional[str]:
-    """Return why an RC CLI invocation violates its exact migrated contract."""
-    if contract.exit_zero and returncode != 0:
-        return f"expected exit 0, got {returncode}: {strip_ansi(output)[:300]}"
-    if not contract.exit_zero and returncode == 0:
-        return "expected non-zero exit, got 0"
-
-    report, parse_failure = parse_rc_report(output)
-    if parse_failure is not None or report is None:
-        return parse_failure
-    if contract.fatal_exact is not None and report.fatal != contract.fatal_exact:
-        return f"expected {contract.fatal_exact} fatal findings, got {report.fatal}"
-    if report.fatal < contract.fatal_min:
-        return f"expected at least {contract.fatal_min} fatal findings, got {report.fatal}"
-    if report.exempt < contract.exempt_min:
-        return f"expected at least {contract.exempt_min} exempt findings, got {report.exempt}"
-
-    printed_expected = report.fatal + (report.exempt if contract.strict else 0)
-    if len(report.findings) != printed_expected:
-        mode = "strict" if contract.strict else "non-strict"
-        return (
-            f"{mode} RC report printed {len(report.findings)} findings; "
-            f"expected {printed_expected}"
-        )
-
-    for category, minimum in contract.exempt_counts:
-        actual = report.exempt_counts.get(category, 0)
-        if actual < minimum:
-            return f"expected {category}>={minimum} exempt findings, got {actual}"
-
-    fixture_suffix = contract.fixture.replace("\\", "/").lower()
-    by_category: Dict[str, List[RcFindingLine]] = {}
-    for finding in report.findings:
-        by_category.setdefault(finding.category, []).append(finding)
-    for category, minimum in contract.finding_counts:
-        matching = by_category.get(category, [])
-        local = [
-            finding for finding in matching
-            if finding.file.replace("\\", "/").lower().endswith(fixture_suffix)
-        ]
-        if len(local) < minimum:
-            return (
-                f"expected {category}>={minimum} findings in {contract.fixture}, "
-                f"got {len(local)} local / {len(matching)} total"
-            )
-    for category, required_lines in contract.finding_lines:
-        actual_lines = {
-            finding.line for finding in by_category.get(category, [])
-            if finding.file.replace("\\", "/").lower().endswith(fixture_suffix)
-        }
-        missing = sorted(set(required_lines) - actual_lines)
-        if missing:
-            return f"{category} findings missing fixture lines {missing}"
-    for category, function_name, binding_name in contract.finding_function_bindings:
-        expected_message = (
-            f"in {function_name}: Drop of borrowed binding '{binding_name}' "
-            "(param/pattern/for-in projection) — frees a reference owned elsewhere"
-        )
-        matching = [
-            finding for finding in by_category.get(category, [])
-            if finding.message == expected_message
-        ]
-        if len(matching) != 1:
-            return (
-                f"expected exactly one {category} finding for "
-                f"{function_name}/{binding_name}, got {len(matching)}"
-            )
-    return None
 
 
 def expected_gap_lanes(scope: str, evidence: str,
@@ -15149,296 +14754,6 @@ def run_parity(collector: ResultCollector, *,
 
 
 # ---------------------------------------------------------------------------
-# RC verify suite
-# ---------------------------------------------------------------------------
-
-def run_rc(ring_exe: str, collector: ResultCollector, *,
-           name_filter: Optional[str] = None) -> None:
-    """Run the RC verify suite."""
-    suite = "rc"
-
-    # 1. Self-verify: compiler/main.ring --verify-rc
-    compiler_main = REPO / "compiler" / "main.ring"
-    if not matches_filter("self-verify (compiler/main.ring)", name_filter):
-        pass
-    elif compiler_main.is_file():
-        try:
-            r = ring_check(ring_exe, str(compiler_main),
-                           extra_args=["--verify-rc"],
-                           timeout=TIMEOUT_SELFCOMPILE,
-                           phase_suite=suite,
-                           phase_case="self-verify (compiler/main.ring)")
-            contract = RcInvocationContract(
-                name="self-verify (compiler/main.ring)",
-                fixture="compiler/main.ring",
-                args=("--verify-rc",),
-                exit_zero=True,
-                fatal_exact=0,
-            )
-            failure = rc_contract_failure(
-                contract, r.returncode, process_output(r),
-            )
-            if failure is None:
-                collector.add(TestResult(TestResult.PASS, suite, "self-verify (compiler/main.ring)"))
-            else:
-                collector.add(TestResult(
-                    TestResult.FAIL, suite, "self-verify (compiler/main.ring)",
-                    failure))
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(TestResult.FAIL, suite, "self-verify", f"timed out ({TIMEOUT_SELFCOMPILE}s)"))
-    else:
-        collector.add(TestResult(TestResult.SKIP, suite, "self-verify", "compiler/main.ring not found"))
-
-    # 2. Positive case sweep: tests/cases/*.ring and tests/cases/golden/*.ring
-    for directory, label in [(CASES_DIR, "cases"), (GOLDEN_CASES_DIR, "golden")]:
-        positive = discover_positive_cases(directory)
-        for ring_file in positive:
-            name = f"{label}/{ring_file.name}"
-            if not matches_filter(name, name_filter):
-                continue
-            blocked = check_blocked_gap_reason(ring_file)
-            if blocked:
-                collector.add(TestResult(TestResult.SKIP, suite, name, blocked))
-                continue
-            try:
-                r = ring_check(
-                    ring_exe, str(ring_file), extra_args=["--verify-rc"],
-                    phase_suite=suite, phase_case=name,
-                )
-            except subprocess.TimeoutExpired:
-                collector.add(TestResult(TestResult.FAIL, suite, name, "timed out"))
-                continue
-
-            if r.returncode == 0:
-                collector.add(TestResult(TestResult.PASS, suite, name))
-            else:
-                combined = (r.stdout or "") + (r.stderr or "")
-                if "rc-verify[leak-temp]" in combined:
-                    collector.add(TestResult(TestResult.SKIP, suite, name,
-                                            "known rc-verify limitation (leak-temp)"))
-                else:
-                    collector.add(TestResult(
-                        TestResult.FAIL, suite, name,
-                        f"exit {r.returncode}: {combined[:300]}"))
-
-    # 3. Exact negative/degradation contracts migrated from the legacy RC harness.
-    #    In particular, a generic "RC verify: 0 errors" line is not evidence
-    #    for a negative case: every expected category/count/location is checked.
-    rc_contracts = (
-        RcInvocationContract(
-            "field-overwrite lax", "tests/cases/verify_rc/field_overwrite_leak.ring",
-            ("--verify-rc",), True, fatal_exact=0, exempt_min=2,
-            exempt_counts=(("x-overwrite-field", 2),),
-        ),
-        RcInvocationContract(
-            "field-overwrite strict", "tests/cases/verify_rc/field_overwrite_leak.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=2,
-            exempt_counts=(("x-overwrite-field", 2),),
-            finding_counts=(("x-overwrite-field", 2),),
-            finding_lines=(("x-overwrite-field", (14, 15)),),
-        ),
-        RcInvocationContract(
-            "option-temporary live", "tests/cases/verify_rc/option_temp_leak.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "option-temporary skip-anf mutation", "tests/cases/verify_rc/option_temp_leak.ring",
-            ("--verify-rc", "--rc-mutate=skip-anf"), False, fatal_min=2,
-            finding_counts=(("leak-temp", 2),),
-            finding_lines=(("leak-temp", (11, 27)),),
-        ),
-        RcInvocationContract(
-            "drop-borrow live", "tests/cases/verify_rc/drop_borrow_uaf.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "drop-borrow drop-params mutation", "tests/cases/verify_rc/drop_borrow_uaf.ring",
-            ("--verify-rc", "--rc-mutate=drop-params"), False, fatal_min=2,
-            finding_function_bindings=(
-                ("uaf-drop-borrow", "describe", "name"),
-                ("uaf-drop-borrow", "describe", "age"),
-            ),
-        ),
-        RcInvocationContract(
-            "exact reference identity live",
-            "tests/cases/verify_rc/exact_reference_def_id.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "exact-DefId shadowing live", "tests/cases/verify_rc/shadow_overwrite.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "control-flow value", "tests/cases/verify_rc/cf_value_leak.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=2,
-            exempt_counts=(("x-cf-value", 2),),
-            finding_counts=(("x-cf-value", 2),),
-        ),
-        RcInvocationContract(
-            "effect value", "tests/cases/verify_rc/effect_value.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-effect-value", 1),),
-            finding_counts=(("x-effect-value", 1),),
-        ),
-        RcInvocationContract(
-            "parameter overwrite", "tests/cases/verify_rc/overwrite_param.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-overwrite-param", 1),),
-            finding_counts=(("x-overwrite-param", 1),),
-        ),
-        RcInvocationContract(
-            "variable overwrite", "tests/cases/verify_rc/overwrite_var.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-overwrite-var", 1),),
-            finding_counts=(("x-overwrite-var", 1),),
-        ),
-        RcInvocationContract(
-            "spread source", "tests/cases/verify_rc/spread_leak.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-spread", 1),), finding_counts=(("x-spread", 1),),
-        ),
-        RcInvocationContract(
-            "discard owned", "tests/cases/verify_rc/discard_owned.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-discard", 1),), finding_counts=(("x-discard", 1),),
-        ),
-        RcInvocationContract(
-            "boxed overwrite", "tests/cases/verify_rc/overwrite_boxed.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-overwrite-boxed", 1),),
-            finding_counts=(("x-overwrite-boxed", 1),),
-        ),
-        RcInvocationContract(
-            "callee call materialized", "tests/cases/verify_rc/callee_call.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "shadow mismatch lax", "tests/cases/verify_rc/shadow_mismatch.ring",
-            ("--verify-rc",), True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-effect-value", 1),),
-        ),
-        RcInvocationContract(
-            "shadow mismatch strict", "tests/cases/verify_rc/shadow_mismatch.ring",
-            ("--verify-rc-strict",), False, strict=True,
-            fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-effect-value", 1),),
-            finding_counts=(("x-effect-value", 1),),
-            finding_lines=(("x-effect-value", (12,)),),
-        ),
-    )
-
-    fixture_files = {
-        normalized_repo_path(path) for path in RC_NEG_DIR.glob("*.ring")
-    } if RC_NEG_DIR.is_dir() else set()
-    contracted_files = {contract.fixture for contract in rc_contracts}
-    if fixture_files != contracted_files:
-        missing = sorted(fixture_files - contracted_files)
-        stale = sorted(contracted_files - fixture_files)
-        detail = f"uncontracted={missing}; missing fixtures={stale}"
-        collector.add(TestResult(TestResult.FAIL, suite, "negative contract wiring", detail))
-
-    for contract in rc_contracts:
-        name = f"neg/{contract.name}"
-        if not (
-            matches_filter(name, name_filter)
-            or matches_filter(contract.fixture, name_filter)
-        ):
-            continue
-        ring_file = REPO / contract.fixture
-        try:
-            result = ring_check(
-                ring_exe,
-                str(ring_file),
-                extra_args=list(contract.args),
-                phase_suite=suite,
-                phase_case=name,
-            )
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(TestResult.FAIL, suite, name, "timed out"))
-            continue
-        failure = rc_contract_failure(
-            contract, result.returncode, process_output(result),
-        )
-        if (
-            failure is None
-            and contract.name == "exact-DefId shadowing live"
-            and "x-shadow-overwrite" in process_output(result)
-        ):
-            failure = "exact-DefId shadowing still reports shared-name overwrite"
-        collector.add(TestResult(
-            TestResult.PASS if failure is None else TestResult.FAIL,
-            suite,
-            name,
-            failure or "",
-        ))
-
-    identity_fixture = "tests/cases/verify_rc/exact_reference_def_id.ring"
-    identity_mutations = (
-        ("local", "strip-local-ident-def-id"),
-        ("capture", "strip-capture-ident-def-id"),
-    )
-    for mutation_name, mutation in identity_mutations:
-        label = f"neg/exact reference {mutation_name} DefId mutation"
-        if not (
-            matches_filter(label, name_filter)
-            or matches_filter(identity_fixture, name_filter)
-        ):
-            continue
-        try:
-            result = ring_check(
-                ring_exe, str(REPO / identity_fixture),
-                extra_args=["--verify-rc", f"--rc-mutate={mutation}"],
-                phase_suite=suite, phase_case=label,
-            )
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(TestResult.FAIL, suite, label, "timed out"))
-            continue
-        output = strip_ansi(process_output(result))
-        failure = None
-        if result.returncode == 0:
-            failure = "stripped exact local reference DefId did not fail"
-        elif "HIR Ident local reference" not in output:
-            failure = (
-                "missing fail-loud exact-reference diagnostic: "
-                + output[:300]
-            )
-        collector.add(TestResult(
-            TestResult.PASS if failure is None else TestResult.FAIL,
-            suite, label, failure or "",
-        ))
-
-    capture_drop_label = "neg/exact capture Drop mutation"
-    if (
-        matches_filter(capture_drop_label, name_filter)
-        or matches_filter(identity_fixture, name_filter)
-    ):
-        try:
-            result = ring_check(
-                ring_exe, str(REPO / identity_fixture),
-                extra_args=["--verify-rc", "--rc-mutate=drop-capture"],
-                phase_suite=suite, phase_case=capture_drop_label,
-            )
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(
-                TestResult.FAIL, suite, capture_drop_label, "timed out"))
-        else:
-            output = strip_ansi(process_output(result))
-            failure = None
-            if result.returncode == 0:
-                failure = "Drop of borrowed exact capture did not fail"
-            elif (
-                "rc-verify[uaf-drop-borrow]" not in output
-                or "capture_slot" not in output
-            ):
-                failure = (
-                    "missing exact capture Drop finding: " + output[:300])
-            collector.add(TestResult(
-                TestResult.PASS if failure is None else TestResult.FAIL,
-                suite, capture_drop_label, failure or "",
-            ))
-
-
-# ---------------------------------------------------------------------------
 # Self-compile suite
 # ---------------------------------------------------------------------------
 
@@ -15522,7 +14837,7 @@ def print_summary(collector: ResultCollector) -> None:
     summary = collector.summary()
 
     for suite_name in [
-        "e2e", "golden", "rc", "self-compile", "structural", "parity",
+        "e2e", "golden", "self-compile", "structural", "parity",
         "ownership-vertical", "runner",
     ]:
         if suite_name not in summary:
@@ -15547,14 +14862,15 @@ def print_summary(collector: ResultCollector) -> None:
 
 def _run_selected(args: argparse.Namespace) -> int:
     suites = args.suites or [
-        "e2e", "golden", "rc", "self-compile", "structural", "parity",
+        "e2e", "golden", "self-compile", "structural", "parity",
+        "ownership-vertical",
     ]
 
     # --- Tool discovery ---
     needs_ring = any(
         suite in suites
         for suite in [
-            "e2e", "golden", "rc", "self-compile", "structural",
+            "e2e", "golden", "self-compile", "structural",
             "ownership-vertical",
         ]
     )
@@ -15614,11 +14930,6 @@ def _run_selected(args: argparse.Namespace) -> int:
             name_filter=args.name_filter,
         ))
 
-    if "rc" in suites:
-        _run_timed_suite("rc", lambda: run_rc(
-            ring_exe, collector, name_filter=args.name_filter,
-        ))
-
     if "self-compile" in suites:
         _run_timed_suite("self-compile", lambda: run_self_compile(
             ring_exe, collector, name_filter=args.name_filter,
@@ -15655,7 +14966,7 @@ def main() -> int:
     parser.add_argument(
         "--suite",
         choices=[
-            "e2e", "golden", "rc", "self-compile", "structural", "parity",
+            "e2e", "golden", "self-compile", "structural", "parity",
             "ownership-vertical",
         ],
         action="append", dest="suites",

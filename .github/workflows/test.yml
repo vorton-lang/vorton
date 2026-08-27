@@ -23,8 +23,8 @@ jobs:
           clang --version
           clang++ --version
           lld-link --version
-      - name: Run C-native RC suite
-        run: python tests/run_tests.py --suite rc
+      - name: Run ownership vertical suite
+        run: python tests/run_tests.py --suite ownership-vertical
 
   test:
     # C-native executable, golden, generated-C structural, and parity gates.
