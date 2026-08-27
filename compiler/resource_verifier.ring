@@ -97,6 +97,7 @@ use resource_certificate::{
     cfg_edge_certificate_target, cfg_edge_certificate_transitions,
     callable_candidate_proof_callable_count,
     callable_candidate_proof_cells, callable_candidate_proof_rules,
+    callable_candidate_proof_final_values,
     callable_candidate_proof_selections, candidate_cell_spec_kind,
     candidate_cell_spec_owner, candidate_cell_spec_block,
     candidate_cell_spec_boundary, candidate_cell_spec_component,
@@ -2347,6 +2348,84 @@ fn actual_call_selections_from_bodies(
     result
 }
 
+fn proof_call_selections_from_cells(
+    proof: CallableCandidateProof, type_nodes: List<PlannerTypeNode>,
+    bodies: List<PlannerBody>
+) -> List<CandidateSelection> {
+    let cells = callable_candidate_proof_cells(proof)
+    let values = callable_candidate_proof_final_values(proof)
+    let callable_count = callable_candidate_proof_callable_count(proof)
+    let mut result: List<CandidateSelection> = []
+    let mut body_index = 0
+    while body_index < bodies.len() {
+        let body = bodies.get(body_index).unwrap()
+        let reachable = planner_body_reachable_blocks(body)
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            if !reachable.get(block_index).unwrap() {
+                block_index = block_index + 1
+                continue
+            }
+            let block = body.blocks.get(block_index).unwrap()
+            let mut instruction = 0
+            while instruction < block.events.len() {
+                match block.events.get(instruction).unwrap().value {
+                    PlannerEventValue::CallValue { call_target, .. } =>
+                        if !planner_call_target_is_direct(call_target) {
+                            let location = verifier_callable_location_index(
+                                body, type_nodes,
+                                make_planner_callable_slot_location(
+                                    planner_call_target_slot(call_target)))
+                            let mut candidates: List<Int> = []
+                            let mut candidate = 0
+                            while candidate < callable_count {
+                                let cell = verifier_candidate_cell_index(
+                                    cells, candidate_cell_state(), body_index,
+                                    block_index, instruction, location, candidate)
+                                if values.get(cell).unwrap() {
+                                    candidates.push(candidate)
+                                }
+                                candidate = candidate + 1
+                            }
+                            result.push(make_candidate_selection(
+                                make_flow_instruction_ref(
+                                    body.reference, block_index, instruction),
+                                candidates))
+                        },
+                    _ => {}
+                }
+                instruction = instruction + 1
+            }
+            block_index = block_index + 1
+        }
+        body_index = body_index + 1
+    }
+    result
+}
+
+fn verify_candidate_selections_same(
+    actual: List<CandidateSelection>,
+    expected: List<CandidateSelection>, context: Str
+) {
+    if actual.len() != expected.len() {
+        panic("ResourcePlanner verifier: ${context} selection census drifted")
+    }
+    let mut index = 0
+    while index < expected.len() {
+        let candidate = actual.get(index).unwrap()
+        let wanted = expected.get(index).unwrap()
+        if !flow_instruction_ref_same(
+                candidate_selection_instruction(candidate),
+                candidate_selection_instruction(wanted)) ||
+           !int_lists_same(
+                candidate_selection_candidates(candidate),
+                candidate_selection_candidates(wanted)) {
+            panic("ResourcePlanner verifier: ${context} selection drifted")
+        }
+        index = index + 1
+    }
+}
+
 pub fn verify_candidate_graph_contract(
     input: FrozenPlannerInput, certificate: ResourceCertificate
 ) {
@@ -2385,27 +2464,18 @@ pub fn verify_candidate_graph_contract(
         }
         index = index + 1
     }
-    // Candidate selections are bound to the actual frozen call instructions,
-    // not re-derived from the certificate's own candidate cells.
-    let expected_selections = actual_call_selections_from_bodies(input.bodies)
-    let actual_selections = callable_candidate_proof_selections(proof)
-    if expected_selections.len() != actual_selections.len() {
-        panic("ResourcePlanner verifier: call-site selection census drifted")
-    }
-    index = 0
-    while index < expected_selections.len() {
-        let actual = actual_selections.get(index).unwrap()
-        let wanted = expected_selections.get(index).unwrap()
-        if !flow_instruction_ref_same(
-                candidate_selection_instruction(actual),
-                candidate_selection_instruction(wanted)) ||
-           !int_lists_same(
-                candidate_selection_candidates(actual),
-                candidate_selection_candidates(wanted)) {
-            panic("ResourcePlanner verifier: certified call-site selection drifted")
-        }
-        index = index + 1
-    }
+    // Independently project the exact candidate set from certified state cells.
+    // The PlannerBody cutover and the explicit certificate selection must both
+    // equal that projection; comparing the two producer outputs to each other
+    // would accept the same dropped/swapped candidate in both places.
+    let derived_selections = proof_call_selections_from_cells(
+        proof, input.type_nodes, input.bodies)
+    verify_candidate_selections_same(
+        actual_call_selections_from_bodies(input.bodies),
+        derived_selections, "frozen body")
+    verify_candidate_selections_same(
+        callable_candidate_proof_selections(proof),
+        derived_selections, "certificate")
 }
 
 fn slot_option_same(left: SlotRef?, right: SlotRef?) -> Bool {
