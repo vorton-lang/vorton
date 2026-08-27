@@ -63,6 +63,12 @@ fn main() {
     consume(mapped)
     observe(mapped)
 
+    let mapped_key: Map<Resource, Int> = map_from([(
+        Resource { id: 8, payload: "map-key" }, 8
+    )])
+    consume(mapped_key)
+    observe(mapped_key)
+
     let setted = set_from([Resource { id: 7, payload: "set" }])
     consume(setted)
     observe(setted)

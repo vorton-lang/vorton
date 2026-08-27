@@ -70,6 +70,7 @@
         "Option<Resource> reuse is rejected",
         "List<Resource> reuse is rejected",
         "Map<Int,Resource> reuse is rejected",
+        "Map<Resource,Int> key hidden-storage reuse is rejected",
         "Set<Resource> reuse is rejected",
         "tuple Resource payload reuse is rejected",
         "recursive generic Resource payload reuse is rejected",
@@ -85,6 +86,7 @@
           "use of moved value: 'optional'",
           "use of moved value: 'listed'",
           "use of moved value: 'mapped'",
+          "use of moved value: 'mapped_key'",
           "use of moved value: 'setted'",
           "use of moved value: 'tupled'",
           "use of moved value: 'recursive'"
