@@ -308,16 +308,16 @@
       "id": "D7",
       "path": "single/d_effect_header_composites.ring",
       "covers": [
-        "Box<fn> branch merge preserves the actual callable effect tail",
-        "positional and named enum fields preserve nested callable tails",
-        "effect operation callable parameters and results preserve their tails",
-        "generic fail<T> preserves a nested callable actual tail",
-        "generic custom-effect payload preserves a nested callable actual tail"
+        "Box<fn> actual and fallback branches preserve distinct exact effects and results",
+        "positional and named enum fields preserve distinct exact callable effects and results",
+        "effect operation callable parameter and result preserve distinct exact effects and results",
+        "generic fail<T> preserves its nested callable exact effect and result",
+        "generic custom-effect payload preserves its nested callable exact effect and result"
       ],
       "expected": {
         "phase": "native",
         "status": "pass",
-        "stdout": "D_EFFECT_HEADER_COMPOSITES_OK:93\n"
+        "stdout": "D_EFFECT_HEADER_COMPOSITES_OK:box=101/202;enum=303/404;op=505/606;fail=707;custom=808\n"
       }
     },
     {
