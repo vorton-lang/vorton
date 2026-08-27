@@ -454,9 +454,7 @@ fn record_core_effect_parameter_source(
     parameter: EffectParamRef
 ) {
     require_open(recorder)
-    if raw_tail < 0 ||
-       executable_ref_origin_module_key(effect_param_owner(parameter)) !=
-            recorder.module_key {
+    if raw_tail < 0 {
         panic("Core assembly: invalid effect parameter source")
     }
     for existing in recorder.effect_parameters {
