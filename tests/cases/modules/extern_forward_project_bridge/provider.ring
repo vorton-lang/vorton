@@ -13,5 +13,9 @@ pub fn bridge_effect_contract() -> Int with {} {
 
 pub fn borrow_resource(value: BridgeResource) -> Int { value.id }
 pub fn token_bridge(value: Token) -> Int { value.value + 1 }
+pub fn generic_bridge<T>(value: T) -> T { value }
+pub fn generic_hof<T>(callback: fn(T) -> T, value: T) -> T {
+    callback(value)
+}
 
 pub fn keep_provider() -> Int { marker() }
