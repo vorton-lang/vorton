@@ -27,6 +27,7 @@ use core_type_source::{
 }
 use core_expr::{
     CoreBody, CoreCallableContract, CoreImplMetadata,
+    CoreExecutableRedirect, redirect_core_body_executables,
     validate_core_body, validate_core_callable_contracts,
     validate_core_body_with_program,
     core_body_reference, core_body_origin,
@@ -266,4 +267,17 @@ pub fn core_program_impls(value: CoreProgram) -> List<CoreImplMetadata> {
 
 pub fn core_program_inventory(value: CoreProgram) -> ExecutableInventory {
     make_executable_inventory(executable_inventory_entries(value.inventory))
+}
+
+pub fn redirect_core_program_executables(
+    value: CoreProgram, redirects: List<CoreExecutableRedirect>
+) -> CoreProgram {
+    let bodies = value.bodies.map(fn(entry) {
+        make_core_body_entry(
+            entry.reference, entry.origin, entry.body_anchor,
+            redirect_core_body_executables(entry.body, redirects))
+    })
+    make_core_program(
+        value.type_graph, value.callables, value.impls, bodies,
+        value.inventory)
 }

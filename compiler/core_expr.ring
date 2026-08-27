@@ -101,7 +101,7 @@ use resource_model::{
     flow_call_contract_parameter_types, flow_call_contract_parameter_roles,
     flow_call_contract_result_type, flow_call_contract_result_role,
     flow_call_contract_result_origin, flow_semantic_role_tag,
-    value_origin_same,
+    flow_call_contract_same, value_origin_same,
     FlowStorageContract, flow_storage_contract_tag
 }
 use core_type_source::{
@@ -377,6 +377,37 @@ pub fn core_callable_handled_evidence(
     copy_handled_evidence_bindings(value.handled_evidence)
 }
 
+pub fn core_callable_redirect_contract_same(
+    source: CoreCallableContract, target: CoreCallableContract,
+    graph: CoreTypeGraph
+) -> Bool {
+    if !flow_call_contract_same(
+            source.semantic_contract, target.semantic_contract) ||
+       !core_effect_contract_same(source.effects, target.effects) ||
+       source.handled_evidence.len() != target.handled_evidence.len() {
+        return false
+    }
+    for ty in core_callable_parameter_types(source) {
+        let _ = core_type_graph_node(graph, ty)
+    }
+    let _ = core_type_graph_node(graph, core_callable_result_type(source))
+    let mut index = 0
+    while index < source.handled_evidence.len() {
+        let left = source.handled_evidence.get(index).unwrap()
+        let right = target.handled_evidence.get(index).unwrap()
+        if !handled_effect_ref_same(
+                core_handled_evidence_requirement(left),
+                core_handled_evidence_requirement(right)) ||
+           !core_type_ref_same(
+                core_handled_evidence_type(left),
+                core_handled_evidence_type(right)) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
 fn copy_core_callable_contracts(
     values: List<CoreCallableContract>
 ) -> List<CoreCallableContract> {
@@ -396,6 +427,48 @@ pub fn copy_core_callables(
 // ============================================================
 // Exact callable/evidence/member identities
 // ============================================================
+
+pub struct CoreExecutableRedirect {
+    source: ExecutableRef,
+    target: ExecutableRef
+}
+pub fn make_core_executable_redirect(
+    source: ExecutableRef, target: ExecutableRef
+) -> CoreExecutableRedirect {
+    if !executable_ref_is_named(source) ||
+       !executable_ref_is_named(target) ||
+       executable_ref_same(source, target) {
+        panic("CoreHIR: executable redirect is invalid")
+    }
+    CoreExecutableRedirect { source: source, target: target }
+}
+pub fn core_executable_redirect_source(
+    value: CoreExecutableRedirect
+) -> ExecutableRef { value.source }
+pub fn core_executable_redirect_target(
+    value: CoreExecutableRedirect
+) -> ExecutableRef { value.target }
+pub fn copy_core_executable_redirects(
+    values: List<CoreExecutableRedirect>
+) -> List<CoreExecutableRedirect> {
+    values.map(fn(value) {
+        make_core_executable_redirect(value.source, value.target)
+    })
+}
+fn redirected_core_executable(
+    value: ExecutableRef, redirects: List<CoreExecutableRedirect>
+) -> ExecutableRef {
+    let mut found: ExecutableRef? = none
+    for redirect in redirects {
+        if executable_ref_same(redirect.source, value) {
+            if found.is_some() {
+                panic("CoreHIR: executable redirect source repeats")
+            }
+            found = some(redirect.target)
+        }
+    }
+    match found { some(target) => target, none => value }
+}
 
 const CORE_CALLEE_DIRECT: Int = 0
 const CORE_CALLEE_LOCAL: Int = 1
@@ -2981,35 +3054,61 @@ pub fn core_body_origins(value: CoreBody) -> List<OriginRef> {
 // ordinals, then the project interner assigns the only global CoreTypeRef
 // domain.  These rebuilders are the single typed rewrite boundary; downstream
 // Flow lowering never sees module-local ordinals.
-fn remap_core_type_reference(
-    value: CoreTypeRef, mapping: List<Int>, module_key: Str
-) -> CoreTypeRef {
-    if value.module_key != some(module_key) {
-        panic("CoreHIR: type reference belongs to another module recorder")
+struct CoreRewriteContext {
+    mapping: List<Int>?,
+    module_key: Str?,
+    redirects: List<CoreExecutableRedirect>
+}
+fn core_type_rewrite_context(
+    mapping: List<Int>, module_key: Str
+) -> CoreRewriteContext {
+    CoreRewriteContext {
+        mapping: some(mapping), module_key: some(module_key), redirects: []
     }
-    match mapping.get(core_type_ref_index(value)) {
-        some(index) => make_core_type_ref(index),
-        none => panic("CoreHIR: module-local type reference is out of range")
+}
+fn core_executable_rewrite_context(
+    redirects: List<CoreExecutableRedirect>
+) -> CoreRewriteContext {
+    CoreRewriteContext {
+        mapping: none, module_key: none,
+        redirects: copy_core_executable_redirects(redirects)
+    }
+}
+fn remap_core_type_reference(
+    value: CoreTypeRef, ctx: CoreRewriteContext
+) -> CoreTypeRef {
+    match (ctx.mapping, ctx.module_key) {
+        (some(mapping), some(module_key)) => {
+            if value.module_key != some(module_key) {
+                panic("CoreHIR: type reference belongs to another module recorder")
+            }
+            match mapping.get(core_type_ref_index(value)) {
+                some(index) => make_core_type_ref(index),
+                none => panic("CoreHIR: module-local type reference is out of range")
+            }
+        },
+        (none, none) => value,
+        _ => panic("CoreHIR: type rewrite context is partial")
     }
 }
 
 fn remap_core_effect_atom(
-    value: CoreEffectAtom, mapping: List<Int>, module_key: Str
+    value: CoreEffectAtom, ctx: CoreRewriteContext
 ) -> CoreEffectAtom {
     let kind = core_effect_atom_kind_tag(value)
     if kind == 0 {
         make_core_fail_effect(remap_core_type_reference(
-            core_effect_atom_type(value), mapping, module_key))
+            core_effect_atom_type(value), ctx))
     } else if kind == 1 {
         make_core_mut_effect(remap_core_type_reference(
-            core_effect_atom_type(value), mapping, module_key))
+            core_effect_atom_type(value), ctx))
     } else if kind == 2 {
         make_core_unsafe_effect()
     } else if kind == 3 {
         make_core_handled_effect(
             core_effect_atom_handled_ref(value),
             core_effect_atom_type_arguments(value).map(fn(ty) {
-                remap_core_type_reference(ty, mapping, module_key)
+                remap_core_type_reference(ty, ctx)
             }))
     } else if kind == 4 {
         make_core_system_effect(core_effect_atom_system_ref(value))
@@ -3019,87 +3118,86 @@ fn remap_core_effect_atom(
 }
 
 fn remap_core_effect_set(
-    value: CoreEffectSet, mapping: List<Int>, module_key: Str
+    value: CoreEffectSet, ctx: CoreRewriteContext
 ) -> CoreEffectSet {
     make_core_effect_set(core_effect_set_atoms(value).map(fn(atom) {
-        remap_core_effect_atom(atom, mapping, module_key)
+        remap_core_effect_atom(atom, ctx)
     }))
 }
 
 fn remap_core_effect_contract(
-    value: CoreEffectContract, mapping: List<Int>, module_key: Str
+    value: CoreEffectContract, ctx: CoreRewriteContext
 ) -> CoreEffectContract {
     make_core_effect_contract(
-        remap_core_effect_set(
-            core_effect_contract_exact(value), mapping, module_key),
+        remap_core_effect_set(core_effect_contract_exact(value), ctx),
         core_effect_contract_parameter(value))
 }
 pub fn remap_core_effect_contract_types(
     value: CoreEffectContract, mapping: List<Int>, module_key: Str
 ) -> CoreEffectContract {
-    remap_core_effect_contract(value, mapping, module_key)
+    remap_core_effect_contract(
+        value, core_type_rewrite_context(mapping, module_key))
 }
 
 fn remap_core_effect_instantiation(
-    value: CoreEffectInstantiation, mapping: List<Int>, module_key: Str
+    value: CoreEffectInstantiation, ctx: CoreRewriteContext
 ) -> CoreEffectInstantiation {
     make_core_effect_instantiation(
         remap_core_effect_contract(
-            core_effect_instantiation_source(value), mapping, module_key),
+            core_effect_instantiation_source(value), ctx),
         core_effect_instantiation_substitutions(value).map(fn(item) {
             make_core_effect_substitution(
                 core_effect_substitution_parameter(item),
                 remap_core_effect_contract(
-                    core_effect_substitution_replacement(item),
-                    mapping, module_key))
+                    core_effect_substitution_replacement(item), ctx))
         }),
         remap_core_effect_contract(
-            core_effect_instantiation_result(value), mapping, module_key))
+            core_effect_instantiation_result(value), ctx))
 }
 
 fn remap_handled_binding(
-    value: CoreHandledEvidenceBinding,
-    mapping: List<Int>, module_key: Str
+    value: CoreHandledEvidenceBinding, ctx: CoreRewriteContext
 ) -> CoreHandledEvidenceBinding {
     make_core_handled_evidence_binding(
-        value.reference, remap_core_type_reference(
-            value.aggregate_type, mapping, module_key))
+        value.reference, remap_core_type_reference(value.aggregate_type, ctx))
 }
 fn remap_handled_use(
-    value: CoreHandledEvidenceUse,
-    mapping: List<Int>, module_key: Str
+    value: CoreHandledEvidenceUse, ctx: CoreRewriteContext
 ) -> CoreHandledEvidenceUse {
     make_core_handled_evidence_use(
-        value.reference, remap_core_type_reference(
-            value.aggregate_type, mapping, module_key))
+        value.reference, remap_core_type_reference(value.aggregate_type, ctx))
 }
 fn remap_handled_uses(
-    values: List<CoreHandledEvidenceUse>,
-    mapping: List<Int>, module_key: Str
+    values: List<CoreHandledEvidenceUse>, ctx: CoreRewriteContext
 ) -> List<CoreHandledEvidenceUse> {
     let mut result: List<CoreHandledEvidenceUse> = []
     for value in values {
-        result.push(remap_handled_use(value, mapping, module_key))
+        result.push(remap_handled_use(value, ctx))
     }
     result
 }
 
 fn remap_core_callee(
-    value: CoreCalleeRef, mapping: List<Int>, module_key: Str
+    value: CoreCalleeRef, ctx: CoreRewriteContext
 ) -> CoreCalleeRef {
-    let contract = remap_flow_call_contract(value.contract, mapping, module_key)
-    let effects = remap_core_effect_instantiation(
-        value.effects, mapping, module_key)
+    let contract = match (ctx.mapping, ctx.module_key) {
+        (some(mapping), some(module_key)) =>
+            remap_flow_call_contract(value.contract, mapping, module_key),
+        (none, none) => value.contract,
+        _ => panic("CoreHIR: callee rewrite context is partial")
+    }
+    let effects = remap_core_effect_instantiation(value.effects, ctx)
     let substitutions = value.type_substitutions.map(fn(item) {
         make_flow_type_substitution(
             flow_type_substitution_parameter(item),
             remap_core_type_reference(
-                flow_type_substitution_replacement(item),
-                mapping, module_key))
+                flow_type_substitution_replacement(item), ctx))
     })
     if value.kind == CORE_CALLEE_DIRECT {
         make_core_direct_callee(
-            value.direct.unwrap(), contract, substitutions, effects)
+            redirected_core_executable(
+                value.direct.unwrap(), ctx.redirects),
+            contract, substitutions, effects)
     } else if value.kind == CORE_CALLEE_LOCAL {
         make_core_local_callee(value.local.unwrap(), contract, effects)
     } else if value.kind == CORE_CALLEE_DYNAMIC {
@@ -3110,22 +3208,22 @@ fn remap_core_callee(
 }
 
 fn remap_core_place(
-    value: CorePlaceRef, mapping: List<Int>, module_key: Str
+    value: CorePlaceRef, ctx: CoreRewriteContext
 ) -> CorePlaceRef {
     match value.value {
         CorePlaceRefValue::CoreSlotPlaceValue(slot) => make_core_slot_place(slot),
         CorePlaceRefValue::CoreProjectPlaceValue {
             base, field, value_type
         } => make_core_project_place(
-            remap_core_expr_types(base, mapping, module_key), field,
-            remap_core_type_reference(value_type, mapping, module_key))
+            remap_core_expr_types(base, ctx), field,
+            remap_core_type_reference(value_type, ctx))
     }
 }
 
 fn remap_core_pattern(
-    value: CorePattern, mapping: List<Int>, module_key: Str
+    value: CorePattern, ctx: CoreRewriteContext
 ) -> CorePattern {
-    let ty = remap_core_type_reference(value.ty, mapping, module_key)
+    let ty = remap_core_type_reference(value.ty, ctx)
     match value.value {
         CorePatternValue::WildcardPatternValue => make_core_wildcard_pattern(ty),
         CorePatternValue::BindingPatternValue(slot) =>
@@ -3134,119 +3232,116 @@ fn remap_core_pattern(
             make_core_literal_pattern(ty, literal),
         CorePatternValue::TuplePatternValue(elements) =>
             make_core_tuple_pattern(ty, elements.map(fn(element) {
-                remap_core_pattern(element, mapping, module_key)
+                remap_core_pattern(element, ctx)
             })),
         CorePatternValue::StructPatternValue { owner, fields } =>
             make_core_struct_pattern(ty, owner, fields.map(fn(field) {
                 make_core_pattern_field(
                     field.field, remap_core_pattern(
-                        field.pattern, mapping, module_key))
+                        field.pattern, ctx))
             })),
         CorePatternValue::VariantPatternValue { variant, fields } =>
             make_core_variant_pattern(ty, variant, fields.map(fn(field) {
                 make_core_pattern_field(
                     field.field, remap_core_pattern(
-                        field.pattern, mapping, module_key))
+                        field.pattern, ctx))
             }))
     }
 }
 
 fn remap_core_block_types(
-    value: CoreBlock, mapping: List<Int>, module_key: Str
+    value: CoreBlock, ctx: CoreRewriteContext
 ) -> CoreBlock {
     make_core_block(
         value.statements.map(fn(statement) {
-            remap_core_statement_types(statement, mapping, module_key)
+            remap_core_statement_types(statement, ctx)
         }),
         match value.tail {
-            some(tail) => some(remap_core_expr_types(
-                tail, mapping, module_key)),
+            some(tail) => some(remap_core_expr_types(tail, ctx)),
             none => none
         },
         value.origin)
 }
 
 fn remap_core_match_arm_types(
-    value: CoreMatchArm, mapping: List<Int>, module_key: Str
+    value: CoreMatchArm, ctx: CoreRewriteContext
 ) -> CoreMatchArm {
     make_core_match_arm(
-        remap_core_pattern(value.pattern, mapping, module_key),
+        remap_core_pattern(value.pattern, ctx),
         match value.guard {
-            some(guard) => some(remap_core_expr_types(
-                guard, mapping, module_key)),
+            some(guard) => some(remap_core_expr_types(guard, ctx)),
             none => none
         },
-        remap_core_block_types(value.body, mapping, module_key), value.origin)
+        remap_core_block_types(value.body, ctx), value.origin)
 }
 
 fn remap_core_expr_types(
-    value: CoreExpr, mapping: List<Int>, module_key: Str
+    value: CoreExpr, ctx: CoreRewriteContext
 ) -> CoreExpr {
-    let ty = remap_core_type_reference(value.ty, mapping, module_key)
-    let effects = remap_core_effect_set(value.effects, mapping, module_key)
+    let ty = remap_core_type_reference(value.ty, ctx)
+    let effects = remap_core_effect_set(value.effects, ctx)
     let payload = match value.value {
         CoreExprValue::LiteralExprValue(literal) =>
             CoreExprValue::LiteralExprValue(literal),
         CoreExprValue::CallableValueExprValue { executable, evidence } =>
             CoreExprValue::CallableValueExprValue {
-                executable: executable, evidence: copy_evidence(evidence)
+                executable: redirected_core_executable(
+                    executable, ctx.redirects),
+                evidence: copy_evidence(evidence)
             },
         CoreExprValue::ReadExprValue(source) =>
             CoreExprValue::ReadExprValue(source),
         CoreExprValue::PrimitiveExprValue { operation, operands } =>
             CoreExprValue::PrimitiveExprValue {
                 operation: operation, operands: operands.map(fn(operand) {
-                    remap_core_expr_types(operand, mapping, module_key)
+                    remap_core_expr_types(operand, ctx)
                 })
             },
         CoreExprValue::CallExprValue {
             callee, arguments, evidence, handled_evidence
         } =>
             CoreExprValue::CallExprValue {
-                callee: remap_core_callee(callee, mapping, module_key),
+                callee: remap_core_callee(callee, ctx),
                 arguments: arguments.map(fn(argument) {
-                    remap_core_expr_types(argument, mapping, module_key)
+                    remap_core_expr_types(argument, ctx)
                 }),
                 evidence: copy_evidence(evidence),
-                handled_evidence: remap_handled_uses(
-                    handled_evidence, mapping, module_key)
+                handled_evidence: remap_handled_uses(handled_evidence, ctx)
             },
         CoreExprValue::MethodCallExprValue {
             callee, method, receiver, arguments, evidence, handled_evidence
         } => CoreExprValue::MethodCallExprValue {
-            callee: remap_core_callee(callee, mapping, module_key),
+            callee: remap_core_callee(callee, ctx),
             method: method,
-            receiver: remap_core_expr_types(receiver, mapping, module_key),
+            receiver: remap_core_expr_types(receiver, ctx),
             arguments: arguments.map(fn(argument) {
-                remap_core_expr_types(argument, mapping, module_key)
+                remap_core_expr_types(argument, ctx)
             }),
             evidence: copy_evidence(evidence),
-            handled_evidence: remap_handled_uses(
-                handled_evidence, mapping, module_key)
+            handled_evidence: remap_handled_uses(handled_evidence, ctx)
         },
         CoreExprValue::EffectCallExprValue {
             operation, arguments, evidence, handled_evidence
         } => CoreExprValue::EffectCallExprValue {
             operation: operation, arguments: arguments.map(fn(argument) {
-                remap_core_expr_types(argument, mapping, module_key)
+                remap_core_expr_types(argument, ctx)
             }),
             evidence: copy_evidence(evidence),
-            handled_evidence: remap_handled_uses(
-                handled_evidence, mapping, module_key)
+            handled_evidence: remap_handled_uses(handled_evidence, ctx)
         },
         CoreExprValue::SystemCallExprValue { host, arguments } =>
             CoreExprValue::SystemCallExprValue {
                 host: host, arguments: arguments.map(fn(argument) {
-                    remap_core_expr_types(argument, mapping, module_key)
+                    remap_core_expr_types(argument, ctx)
                 })
             },
         CoreExprValue::FailRaiseExprValue { payload } =>
             CoreExprValue::FailRaiseExprValue {
-                payload: remap_core_expr_types(payload, mapping, module_key)
+                payload: remap_core_expr_types(payload, ctx)
             },
         CoreExprValue::ProjectExprValue { base, field, partial } =>
             CoreExprValue::ProjectExprValue {
-                base: remap_core_expr_types(base, mapping, module_key),
+                base: remap_core_expr_types(base, ctx),
                 field: field, partial: partial
             },
         CoreExprValue::ConstructExprValue { constructor, fields } =>
@@ -3254,19 +3349,19 @@ fn remap_core_expr_types(
                 constructor: constructor, fields: fields.map(fn(field) {
                     make_core_field_value(
                         field.field, remap_core_expr_types(
-                            field.value, mapping, module_key))
+                            field.value, ctx))
                 })
             },
         CoreExprValue::MoveUpdateExprValue {
             base, constructor, schema, overrides
         } => CoreExprValue::MoveUpdateExprValue {
-            base: remap_core_expr_types(base, mapping, module_key),
+            base: remap_core_expr_types(base, ctx),
             constructor: constructor,
             schema: copy_core_field_refs(schema),
             overrides: overrides.map(fn(field) {
                 make_core_field_value(
                     field.field, remap_core_expr_types(
-                        field.value, mapping, module_key))
+                        field.value, ctx))
             })
         },
         CoreExprValue::LambdaExprValue {
@@ -3278,46 +3373,41 @@ fn remap_core_expr_types(
             handled_captures: handled_captures.map(fn(capture) {
                 make_core_handled_evidence_capture(
                     capture.reference,
-                    remap_core_type_reference(
-                        capture.aggregate_type, mapping, module_key))
+                    remap_core_type_reference(capture.aggregate_type, ctx))
             })
         },
         CoreExprValue::BlockExprValue(block) =>
             CoreExprValue::BlockExprValue(
-                remap_core_block_types(block, mapping, module_key)),
+                remap_core_block_types(block, ctx)),
         CoreExprValue::IfExprValue {
             condition, then_block, else_block
         } => CoreExprValue::IfExprValue {
-            condition: remap_core_expr_types(
-                condition, mapping, module_key),
-            then_block: remap_core_block_types(
-                then_block, mapping, module_key),
-            else_block: remap_core_block_types(
-                else_block, mapping, module_key)
+            condition: remap_core_expr_types(condition, ctx),
+            then_block: remap_core_block_types(then_block, ctx),
+            else_block: remap_core_block_types(else_block, ctx)
         },
         CoreExprValue::MatchExprValue { scrutinee, arms } =>
             CoreExprValue::MatchExprValue {
-                scrutinee: remap_core_expr_types(
-                    scrutinee, mapping, module_key),
+                scrutinee: remap_core_expr_types(scrutinee, ctx),
                 arms: arms.map(fn(arm) {
-                    remap_core_match_arm_types(arm, mapping, module_key)
+                    remap_core_match_arm_types(arm, ctx)
                 })
             },
         CoreExprValue::TryCatchExprValue { body, error_slot, arms } =>
             CoreExprValue::TryCatchExprValue {
-                body: remap_core_block_types(body, mapping, module_key),
+                body: remap_core_block_types(body, ctx),
                 error_slot: error_slot,
                 arms: arms.map(fn(arm) {
-                    remap_core_match_arm_types(arm, mapping, module_key)
+                    remap_core_match_arm_types(arm, ctx)
                 })
             },
         CoreExprValue::HandleExprValue { body, installations } =>
             CoreExprValue::HandleExprValue {
-                body: remap_core_block_types(body, mapping, module_key),
+                body: remap_core_block_types(body, ctx),
                 installations: installations.map(fn(installation) {
                     CoreHandlerInstallation {
                         evidence: remap_handled_binding(
-                            installation.evidence, mapping, module_key),
+                            installation.evidence, ctx),
                         operations: installation.operations.map(fn(operation) {
                             CoreHandlerOperation {
                                 operation: operation.operation,
@@ -3331,8 +3421,7 @@ fn remap_core_expr_types(
                                         make_core_handled_evidence_capture(
                                             capture.reference,
                                             remap_core_type_reference(
-                                                capture.aggregate_type,
-                                                mapping, module_key))
+                                                capture.aggregate_type, ctx))
                                     }),
                                 origin: operation.origin
                             }
@@ -3346,31 +3435,30 @@ fn remap_core_expr_types(
 }
 
 fn remap_core_statement_types(
-    value: CoreStmt, mapping: List<Int>, module_key: Str
+    value: CoreStmt, ctx: CoreRewriteContext
 ) -> CoreStmt {
     match value.value {
         CoreStmtValue::Bind {
             target, value: expr, is_mutable, origin
         } => make_core_bind_stmt(
-            target, remap_core_expr_types(expr, mapping, module_key),
+            target, remap_core_expr_types(expr, ctx),
             is_mutable, origin),
         CoreStmtValue::Assign { target, value: expr, origin } =>
             make_core_assign_stmt(
-                remap_core_place(target, mapping, module_key),
-                remap_core_expr_types(expr, mapping, module_key), origin),
+                remap_core_place(target, ctx),
+                remap_core_expr_types(expr, ctx), origin),
         CoreStmtValue::ExprStmt { value: expr, origin } =>
             make_core_expr_stmt(
-                remap_core_expr_types(expr, mapping, module_key), origin),
+                remap_core_expr_types(expr, ctx), origin),
         CoreStmtValue::While { condition, body, origin } =>
             make_core_while_stmt(
-                remap_core_expr_types(condition, mapping, module_key),
-                remap_core_block_types(body, mapping, module_key), origin),
+                remap_core_expr_types(condition, ctx),
+                remap_core_block_types(body, ctx), origin),
         CoreStmtValue::Break { origin } => make_core_break_stmt(origin),
         CoreStmtValue::Continue { origin } => make_core_continue_stmt(origin),
         CoreStmtValue::Return { value: returned, origin } =>
             make_core_return_stmt(match returned {
-                some(expr) => some(remap_core_expr_types(
-                    expr, mapping, module_key)),
+                some(expr) => some(remap_core_expr_types(expr, ctx)),
                 none => none
             }, origin)
     }
@@ -3379,44 +3467,56 @@ fn remap_core_statement_types(
 pub fn remap_core_callable_types(
     value: CoreCallableContract, mapping: List<Int>, module_key: Str
 ) -> CoreCallableContract {
+    let ctx = core_type_rewrite_context(mapping, module_key)
     make_core_callable_contract(
         value.reference, value.origin,
         value.parameter_slots,
         value.mode,
         remap_flow_call_contract(value.semantic_contract, mapping, module_key),
-        remap_core_effect_contract(value.effects, mapping, module_key),
+        remap_core_effect_contract(value.effects, ctx),
         value.handled_evidence.map(fn(binding) {
-            remap_handled_binding(binding, mapping, module_key)
+            remap_handled_binding(binding, ctx)
         }))
 }
 
 pub fn remap_core_impl_types(
     value: CoreImplMetadata, mapping: List<Int>, module_key: Str
 ) -> CoreImplMetadata {
+    let ctx = core_type_rewrite_context(mapping, module_key)
     make_core_impl_metadata(
         value.owner, value.methods,
         value.assoc_bindings.map(fn(binding) {
             make_core_assoc_binding(
                 binding.member,
-                remap_core_type_reference(binding.ty, mapping, module_key))
+                remap_core_type_reference(binding.ty, ctx))
         }))
 }
 
 pub fn remap_core_body_types(
     value: CoreBody, mapping: List<Int>, module_key: Str
 ) -> CoreBody {
+    let ctx = core_type_rewrite_context(mapping, module_key)
     make_core_body(
         value.reference, value.origin,
         value.binders.map(fn(binder) {
             make_core_binder(
                 binder.reference,
-                remap_core_type_reference(binder.ty, mapping, module_key),
+                remap_core_type_reference(binder.ty, ctx),
                 binder.kind, binder.site, binder.storage_contract,
                 binder.is_mutable)
         }),
         value.parameter_slots,
-        remap_core_type_reference(value.result_type, mapping, module_key),
-        remap_core_block_types(value.body, mapping, module_key))
+        remap_core_type_reference(value.result_type, ctx),
+        remap_core_block_types(value.body, ctx))
+}
+
+pub fn redirect_core_body_executables(
+    value: CoreBody, redirects: List<CoreExecutableRedirect>
+) -> CoreBody {
+    let ctx = core_executable_rewrite_context(redirects)
+    make_core_body(
+        value.reference, value.origin, value.binders, value.parameter_slots,
+        value.result_type, remap_core_block_types(value.body, ctx))
 }
 
 fn identity_type_mapping(count: Int) -> List<Int> {
@@ -4253,7 +4353,7 @@ fn validate_handled_capture_targets(
     }
 }
 
-fn validate_core_callable_value_effect_contract(
+fn validate_core_callable_value_contract(
     target_type: CoreTypeRef, callable: CoreCallableContract,
     graph: CoreTypeGraph
 ) {
@@ -4263,8 +4363,30 @@ fn validate_core_callable_value_effect_contract(
         panic("CoreHIR: callable value target is not callable typed")
     }
     let target_effects = flow_type_node_callable_effects(node)
-    let _ = make_explicit_core_effect_instantiation(
-        callable.effects, target_effects, target_effects)
+    let contract = callable.semantic_contract
+    let parameter_types = flow_call_contract_parameter_types(contract)
+    let children = flow_type_node_children(node)
+    if flow_type_node_parameter_count(node) != parameter_types.len() ||
+       children.len() != parameter_types.len() + 1 {
+        panic("CoreHIR: callable value type arity differs from exact contract")
+    }
+    let mut index = 0
+    while index < parameter_types.len() {
+        if !core_type_ref_same(
+                children.get(index).unwrap(),
+                parameter_types.get(index).unwrap()) {
+            panic("CoreHIR: callable value parameter type differs")
+        }
+        index = index + 1
+    }
+    if !core_type_ref_same(
+            children.get(parameter_types.len()).unwrap(),
+            flow_call_contract_result_type(contract)) {
+        panic("CoreHIR: callable value result type differs")
+    }
+    if !core_effect_contract_same(target_effects, callable.effects) {
+        panic("CoreHIR: callable value effect contract differs")
+    }
 }
 
 fn validate_expr_with_program(
@@ -4280,7 +4402,7 @@ fn validate_expr_with_program(
             validate_core_literal_type(literal, value.ty, graph),
         CoreExprValue::CallableValueExprValue { executable, evidence } => {
             let callable = core_callable_for(callables, executable)
-            validate_core_callable_value_effect_contract(
+            validate_core_callable_value_contract(
                 value.ty, callable, graph)
             validate_evidence_with_program(evidence, body, impls)
         },
