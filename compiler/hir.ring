@@ -42,7 +42,7 @@ use ir_inventory::{ExecutableRef, EffectOperationRef, SystemHostCallableRef,
     effect_operation_ref_effect,
     effect_operation_ref_source_index,
     system_host_callable_effect, system_host_callable_executable}
-use effect_contract::{EffectParamRef}
+use effect_contract::{EffectParamRef, effect_param_ref_same}
 
 pub use hir_exact::{
     DictRef, MethodCallRef, make_intrinsic_method_call_ref, method_call_ref_intrinsic,
@@ -1783,7 +1783,10 @@ fn validate_hir_expr(
     expr: HExpr, mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
     match expr {
-        HExpr::Ident { name, def_id, source_slot, callee_identity, .. } => {
+        HExpr::Ident {
+            name, def_id, source_slot, callee_identity,
+            dict_closure_dicts, callable_instantiation, ty, ..
+        } => {
             validate_hir_local_reference(scope, name, def_id, "Ident")
             match source_slot {
                 some(slot) => {
@@ -1813,6 +1816,42 @@ fn validate_hir_expr(
                         }
                     } else if !callee_ref_is_named(callee) {
                         panic("HIR Ident: dynamic CalleeRef crossed TypedHIR")
+                    }
+                },
+                none => {}
+            }
+            match callable_instantiation {
+                some(instantiation) => {
+                    if dict_closure_dicts.is_none() ||
+                       match callee_identity {
+                           some(callee) => !callee_ref_is_named(callee),
+                           none => true
+                       } || match ty {
+                           Type::FnType { .. } => false,
+                           _ => true
+                       } {
+                        panic("HIR Ident: callable instantiation lacks a named materialized callable")
+                    }
+                    match instantiation.effects {
+                        some(effect_instantiation) => {
+                            let mut left = 0
+                            while left < effect_instantiation.substitutions.len() {
+                                let source = effect_instantiation.substitutions.get(
+                                    left).unwrap().source
+                                let mut right = left + 1
+                                while right < effect_instantiation.substitutions.len() {
+                                    if effect_param_ref_same(
+                                            source,
+                                            effect_instantiation.substitutions.get(
+                                                right).unwrap().source) {
+                                        panic("HIR Ident: callable effect source repeats")
+                                    }
+                                    right = right + 1
+                                }
+                                left = left + 1
+                            }
+                        },
+                        none => {}
                     }
                 },
                 none => {}

@@ -1507,13 +1507,37 @@ fn producer_record_expr(
     match expr {
         HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
         HExpr::StrLit { .. } | HExpr::BoolLit { .. } => {},
-        HExpr::Ident { dict_closure_dicts, .. } => match dict_closure_dicts {
-            some(values) => {
-                for value in values {
-                    producer_record_physical_dictionary(producer, owner, value)
-                }
-            },
-            none => {}
+        HExpr::Ident {
+            dict_closure_dicts, callable_instantiation, ..
+        } => {
+            match dict_closure_dicts {
+                some(values) => {
+                    for value in values {
+                        producer_record_physical_dictionary(
+                            producer, owner, value)
+                    }
+                },
+                none => {}
+            }
+            match callable_instantiation {
+                some(instantiation) => {
+                    for actual in instantiation.type_args {
+                        let _ = producer_record_type(
+                            producer, actual, some(executable_origin(owner)))
+                    }
+                    match instantiation.effects {
+                        some(effect_instantiation) => {
+                            for substitution in effect_instantiation.substitutions {
+                                let _ = producer_record_effect_contract(
+                                    producer, substitution.actual,
+                                    some(executable_origin(owner)))
+                            }
+                        },
+                        none => {}
+                    }
+                },
+                none => {}
+            }
         },
         HExpr::BinOp { left, right, eq_plan, ord_plan, .. } => {
             producer_record_expr(producer, owner, left)
@@ -3332,18 +3356,46 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
         },
         HExpr::Ident {
             callee_identity: some(callee), dict_closure_dicts,
-            ty: source_ty, ..
+            callable_instantiation, ty: source_ty, ..
         } => {
             if !callee_ref_is_named(callee) {
                 panic("Core assembly: non-local callable identity is not named")
             }
             match source_ty {
-                Type::FnType { .. } => make_core_callable_value_expr(
-                    ty, origin, make_named_executable_ref(
-                        callee_ref_named_symbol(callee)),
-                    match dict_closure_dicts {
-                        some(values) => evidence(ctx, values), none => []
-                    }),
+                Type::FnType { effects: actual_row, .. } => {
+                    let executable = make_named_executable_ref(
+                        callee_ref_named_symbol(callee))
+                    let type_args = match callable_instantiation {
+                        some(instantiation) => {
+                            match instantiation.effects {
+                                some(effect_instantiation) =>
+                                    if effect_instantiation.substitutions.len() != 0 {
+                                        panic("Core assembly: callable value effect provenance is not connected")
+                                    },
+                                none => {}
+                            }
+                            instantiation.type_args
+                        },
+                        none => []
+                    }
+                    let actual_effects = core_effect_contract_from_row(
+                        ctx.types, actual_row, ctx.module_key,
+                        ctx.effect_parameters)
+                    let source_effects = match callable_effect_source(
+                            ctx, executable) {
+                        some(contract) => contract,
+                        none => panic(
+                            "Core assembly: callable value effect source is absent")
+                    }
+                    make_core_callable_value_expr(
+                        ty, origin, executable,
+                        match dict_closure_dicts {
+                            some(values) => evidence(ctx, values), none => []
+                        },
+                        direct_type_substitutions(ctx, executable, type_args),
+                        make_explicit_core_effect_instantiation(
+                            source_effects, actual_effects, actual_effects))
+                },
                 _ => panic("Core assembly: non-callable exact Ident was not elaborated")
             }
         },

@@ -4,6 +4,7 @@ use types::{Type, Effect, EffectRow,
     type_to_builtin_name}
 use ast::{Expr, Pattern, Span, NamedPatternField}
 use hir::{HExpr, HStmt, TraitDispatch, DictRef, ValueBindingKind,
+    HCallableEffectInstantiation, HCallableValueInstantiation,
     MethodCallRef,
     HOperatorPlan, h_operator_method, h_operator_tuple,
     make_intrinsic_method_call_ref, make_concrete_method_call_ref,
@@ -19,7 +20,9 @@ use diagnostics::{DiagnosticContext, DiagnosticNote}
 use codes::{E0201, E0205, E0208, E0303, E0307, E0308, E0504, E0705}
 use union_find::{UnionFind, uf_find, uf_lookup}
 use env::{TypeEnv, TypeScheme, ImplEntry, ImplMethodSchemeCore,
-    apply_subst, has_impl, lookup_variant, find_impl_by_provider}
+    apply_subst, build_scheme_var_map, scheme_value_type_vars,
+    ordered_effect_tail_vars,
+    has_impl, lookup_variant, find_impl_by_provider}
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     fn_bound_dict_ref,
     type_error, unify_at, resolve_relative_qualifier,
@@ -736,6 +739,28 @@ pub fn is_bounded_direct_callable_ident(ctx: InferCtx, expr: HExpr) -> Bool {
     }
 }
 
+fn exact_callable_value_instantiation(
+    scheme: TypeScheme, instantiated_type: Type, subst: UnionFind
+) -> HCallableValueInstantiation? {
+    if scheme.type_vars.len() == 0 { return none }
+    let exact_type = apply_subst(subst, instantiated_type)
+    let mapping = build_scheme_var_map(scheme, exact_type)
+    let mut type_args: List<Type> = []
+    for formal in scheme_value_type_vars(scheme) {
+        type_args.push(match mapping.get(formal) {
+            some(actual) => apply_subst(subst, actual),
+            none => panic(
+                "callable value: declared generic has no exact instantiation")
+        })
+    }
+    some(HCallableValueInstantiation {
+        type_args: type_args,
+        effects: if ordered_effect_tail_vars(scheme.ty).len() == 0 {
+            some(HCallableEffectInstantiation { substitutions: [] })
+        } else { none }
+    })
+}
+
 pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
     let metadata = resolve_callee_metadata(ctx, harg)
     match harg {
@@ -800,13 +825,15 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                     match metadata {
                         some(m) => {
                             let as_ = m.live_scheme
+                            let exact_instantiation =
+                                exact_callable_value_instantiation(as_, ty, s)
                             if as_.bounds.len() == 0 {
                                 HExpr::Ident {
                                     name: name, resolved_name: resolved_name,
                                     def_id: def_id, source_slot: source_slot,
                                     callee_identity: callee_identity,
                                     dict_closure_dicts: some([]),
-                                    callable_instantiation: callable_instantiation,
+                                    callable_instantiation: exact_instantiation,
                                     ty: ty, effects: effects, span: span
                                 }
                             } else {
@@ -822,7 +849,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                                         def_id: def_id, source_slot: source_slot,
                                         callee_identity: callee_identity,
                                         dict_closure_dicts: some(dicts),
-                                        callable_instantiation: callable_instantiation,
+                                        callable_instantiation: exact_instantiation,
                                         ty: ty,
                                         effects: effects, span: span }
                                 } else { harg }
@@ -835,6 +862,8 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                     match metadata {
                         some(m) => {
                             let as_ = m.live_scheme
+                            let exact_instantiation =
+                                exact_callable_value_instantiation(as_, ty, s)
                             let valid = if as_.bounds.len() > 0 {
                                 let validated = resolve_dicts_from_scheme(
                                     current_dictionary_evidence_owner(ctx),
@@ -851,7 +880,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                                     def_id: def_id, source_slot: source_slot,
                                     callee_identity: callee_identity,
                                     dict_closure_dicts: some([]),
-                                    callable_instantiation: callable_instantiation,
+                                    callable_instantiation: exact_instantiation,
                                     ty: ty, effects: effects, span: span
                                 }
                             } else {
