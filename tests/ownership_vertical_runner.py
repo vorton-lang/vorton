@@ -372,6 +372,21 @@ def _process_output(result: subprocess.CompletedProcess) -> str:
     return _normalized((result.stdout or "") + (result.stderr or ""))
 
 
+def normal_diagnostic_contract_failure(
+    result: subprocess.CompletedProcess,
+    diagnostic_failure: Optional[str],
+) -> Optional[str]:
+    """Require the compiler's normal diagnostic process contract.
+
+    A matching diagnostic is accepted only when ``ring check`` terminates via
+    its ordinary diagnostic exit. Signals and platform exception statuses are
+    failures even if they happened to flush matching text first.
+    """
+    if result.returncode != 1:
+        return f"expected normal diagnostic exit 1, got {result.returncode}"
+    return diagnostic_failure
+
+
 def _has_internal_failure(output: str) -> bool:
     lowered = output.lower()
     return any(marker in lowered for marker in _ORDINARY_CRASH_MARKERS)
@@ -416,9 +431,6 @@ def _run_fixture(
         return None
 
     if fixture.phase == "check":
-        if checked.returncode == 0:
-            context.add_result("FAIL", label, "expected diagnostic, got exit 0")
-            return None
         assert fixture.diagnostic_code is not None
         lowered = check_output.lower()
         missing = [
@@ -438,15 +450,19 @@ def _run_fixture(
                 f":{fixture.diagnostic_line}:{fixture.diagnostic_column}"
                 not in check_output
             )
+        diagnostic_failure = None
         if missing or forbidden or location_missing:
-            context.add_result(
-                "FAIL", label,
+            diagnostic_failure = (
                 f"missing diagnostic {missing!r}; forbidden diagnostic "
                 f"{forbidden!r}; location_missing={location_missing}; "
-                f"output={check_output[:300]!r}",
+                f"output={check_output[:300]!r}"
             )
-        else:
+        failure = normal_diagnostic_contract_failure(
+            checked, diagnostic_failure)
+        if failure is None:
             context.add_result("PASS", label, "expected diagnostic observed")
+        else:
+            context.add_result("FAIL", label, failure)
         return None
 
     if checked.returncode != 0:

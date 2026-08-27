@@ -40,6 +40,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from ownership_vertical_runner import (
     ExactPanicObservation,
     RunnerContext,
+    normal_diagnostic_contract_failure,
     run_ownership_vertical,
 )
 
@@ -3127,15 +3128,10 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
             collector.add(TestResult(TestResult.FAIL, suite, f"neg:{rel}", "check timed out"))
             continue
 
-        if r.returncode == 0:
-            collector.add(TestResult(
-                TestResult.FAIL, suite, f"neg:{rel}",
-                "expected non-zero exit, got 0"))
-            continue
-
         # Check all output (stdout + stderr) against the companion contract.
         combined = (r.stdout or "") + (r.stderr or "")
-        contract_failure = error_contract_failure(contract, combined)
+        contract_failure = normal_diagnostic_contract_failure(
+            r, error_contract_failure(contract, combined))
         if contract_failure is None:
             collector.add(TestResult(TestResult.PASS, suite, f"neg:{rel}"))
         else:
@@ -3224,14 +3220,9 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
             collector.add(TestResult(TestResult.FAIL, suite, f"mod-neg:{mod_name}", "timed out"))
             continue
 
-        if r.returncode == 0:
-            collector.add(TestResult(
-                TestResult.FAIL, suite, f"mod-neg:{mod_name}",
-                "expected non-zero exit, got 0"))
-            continue
-
         combined = (r.stdout or "") + (r.stderr or "")
-        contract_failure = error_contract_failure(contract, combined)
+        contract_failure = normal_diagnostic_contract_failure(
+            r, error_contract_failure(contract, combined))
         if contract_failure is None:
             collector.add(TestResult(TestResult.PASS, suite, f"mod-neg:{mod_name}"))
         else:
@@ -3247,6 +3238,43 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
     )
 
 
+def run_normal_diagnostic_exit_contract(
+    collector: ResultCollector,
+    *,
+    name_filter: Optional[str] = None,
+) -> None:
+    """Exercise the shared normal-diagnostic verdict with process results."""
+    suite = "ownership-vertical"
+    label = "runner:normal-diagnostic-exit"
+    if not matches_filter(label, name_filter):
+        return
+
+    diagnostic = "error[E0801]: use of moved value: sample\n"
+    contract = "E0801\nuse of moved value:\n!internal compiler error"
+    failures: List[str] = []
+    for returncode, should_pass in (
+        (1, True),
+        (0, False),
+        (-9, False),
+        (0xC0000374, False),
+    ):
+        result = subprocess.CompletedProcess(
+            args=["ring", "check"], returncode=returncode,
+            stdout=diagnostic, stderr="",
+        )
+        failure = normal_diagnostic_contract_failure(
+            result, error_contract_failure(contract, process_output(result)))
+        if (failure is None) != should_pass:
+            failures.append(
+                f"exit {returncode}: expected "
+                f"{'PASS' if should_pass else 'FAIL'}, got {failure or 'PASS'}"
+            )
+    collector.add(TestResult(
+        TestResult.PASS if not failures else TestResult.FAIL,
+        suite, label, "; ".join(failures),
+    ))
+
+
 def run_ownership_vertical_suite(
     ring_exe: str,
     clang_path: str,
@@ -3256,6 +3284,9 @@ def run_ownership_vertical_suite(
 ) -> None:
     """Adapt aggregate toolchain helpers to the manifest-owned vertical."""
     suite = "ownership-vertical"
+
+    run_normal_diagnostic_exit_contract(
+        collector, name_filter=name_filter)
 
     def add_result(status: str, name: str, detail: str) -> None:
         collector.add(TestResult(status, suite, name, detail))
