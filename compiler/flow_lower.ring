@@ -103,6 +103,7 @@ use core_expr::{
     core_pattern_fields, core_pattern_struct_owner,
     core_pattern_variant, core_pattern_field_ref,
     core_pattern_field_pattern,
+    make_core_tuple_field,
     core_field_ref_kind_tag, core_field_ref_nominal,
     core_field_ref_variant, core_field_ref_tuple_index,
     core_field_ref_record_path, core_field_ref_same,
