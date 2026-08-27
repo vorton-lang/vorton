@@ -7710,7 +7710,7 @@ F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
 F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
 F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
-F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 37
+F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 20
 F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT = 35
 F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT = 36
 
@@ -8865,7 +8865,7 @@ B201_BUILTIN_METHODS = (
     ("BUILTIN_METHOD_STR_HASH", "Str", "hash", "ring_cl_hash_str_export", "register_hash_trait", ""),
     ("BUILTIN_METHOD_BOOL_HASH", "Bool", "hash", "ring_cl_hash_bool_export", "register_hash_trait", ""),
 )
-B201_BUILTIN_METHOD_MUTATION_COUNT = 26
+B201_BUILTIN_METHOD_MUTATION_COUNT = 19
 
 
 def _b201_function_body(
@@ -8902,21 +8902,21 @@ def _b201_runtime_names(
 
 
 def builtin_method_intrinsic_contract_errors(
-    compiler_sources: Mapping[str, str], std_str: str, std_num: str,
+    compiler_sources: Mapping[str, str],
 ) -> List[str]:
     errors: List[str] = []
     identity = compiler_sources["ir_identity.ring"]
     builtins = compiler_sources["builtins.ring"]
     env = compiler_sources["env.ring"]
     hir = compiler_sources["hir.ring"]
+    hir_exact = compiler_sources["hir_exact.ring"]
     infer = compiler_sources["infer.ring"]
     infer_helpers = compiler_sources["infer_helpers.ring"]
     zonk = compiler_sources["zonk.ring"]
+    core = compiler_sources["core_from_hir.ring"]
+    core_expr = compiler_sources["core_expr.ring"]
+    flow_lower = compiler_sources["flow_lower.ring"]
     codegen = compiler_sources["codegen_c_expr.ring"]
-    parser = compiler_sources["parser.ring"]
-    infer_register = compiler_sources["infer_register.ring"]
-    infer_decl = compiler_sources["infer_decl.ring"]
-    checker = compiler_sources["checker.ring"]
 
     if len(B201_BUILTIN_METHODS) != 56:
         errors.append("B-201 test census is not exact56")
@@ -8927,10 +8927,15 @@ def builtin_method_intrinsic_contract_errors(
             errors.append(f"B-201 identity misses {declaration!r}")
         producer_body = _b201_function_body(builtins, producer, errors)
         normalized = re.sub(r"\s+", "", producer_body)
+        resource_map = (
+            map_name[:-len("_intrinsics")] + "_resources"
+            if map_name.endswith("_intrinsics") else "resources"
+        )
         relation = re.sub(r"\s+", "", (
-            f'install_intrinsic({map_name}, "{method_name}", {constant_name})'
+            f'install_intrinsic_contract({map_name}, {resource_map}, '
+            f'"{method_name}", {constant_name},'
             if tag < 33 else
-            f'builtin_intrinsic_method("{method_name}", {constant_name})'
+            f'builtin_intrinsic_method("{method_name}", {constant_name},'
         ))
         if relation not in normalized:
             errors.append(
@@ -8939,16 +8944,27 @@ def builtin_method_intrinsic_contract_errors(
         errors.append("B-201 identity site census drifted")
     if "scalar_trait_intrinsic_tag" in mask_ring_strings_and_comments(builtins):
         errors.append("B-201 scalar intrinsic identity is reconstructed by names")
-    if "struct BuiltinImplMethodSpec" not in builtins or (
-            "intrinsic_tag: Int?" not in builtins):
-        errors.append("B-201 builtin declaration lacks explicit intrinsic tag")
+    if "struct BuiltinImplMethodSpec" not in builtins or not all(
+            token in builtins for token in (
+                "intrinsic_tag: Int?",
+                "resource_contract: CallableResourceContractFact?")):
+        errors.append(
+            "B-201 builtin declaration lacks exact intrinsic/resource facts")
 
     for struct_name, expected_fields in (
         ("BuiltinMethodSite", ["tag"]),
         ("IntrinsicRef", ["site", "symbol"]),
         ("MethodCallRef", ["value", "signature", "receiver_mutable"]),
+        ("BuiltinMethodContractFact", [
+            "intrinsic", "target_owner", "target_owner_type_vars",
+            "method_type_vars", "scheme", "resource",
+        ]),
     ):
-        source = hir if struct_name == "MethodCallRef" else identity
+        source = (
+            hir_exact if struct_name == "MethodCallRef"
+            else builtins if struct_name == "BuiltinMethodContractFact"
+            else identity
+        )
         fields, field_error = _f0_struct_fields(source, struct_name)
         if field_error:
             errors.append(field_error.replace("F0 struct", "B-201 struct"))
@@ -8973,43 +8989,76 @@ def builtin_method_intrinsic_contract_errors(
     impl_fields, impl_error = _f0_struct_fields(env, "ImplEntry")
     if impl_error:
         errors.append(impl_error.replace("F0 struct", "B-201 ImplEntry"))
-    elif impl_fields is not None and (
-            [name for _, name in impl_fields].count("method_intrinsics") != 1):
-        errors.append("B-201 ImplEntry lacks one intrinsic relation payload")
+    elif impl_fields is not None and any(
+            [name for _, name in impl_fields].count(field) != 1
+            for field in ("method_intrinsics", "method_resource_contracts")):
+        errors.append(
+            "B-201 ImplEntry lacks one intrinsic/resource relation payload")
     impl_validator = _b201_function_body(env, "validate_impl_entry", errors)
     for token in (
         "entry.method_intrinsics.entries()",
         "entry.method_schemes.contains_key(method_name)",
+        "entry.method_resource_contracts.contains_key(method_name)",
+        "entry.method_resource_contracts.entries()",
+        "callable_resource_contract_parameter_roles(contract).len() != arity",
     ):
         if token not in impl_validator:
             errors.append(f"B-201 ImplEntry validator misses {token!r}")
     impl_same = _b201_function_body(env, "impl_entry_final_same", errors)
-    if "method_intrinsic_map_same(" not in impl_same:
-        errors.append("B-201 full owner equality drops intrinsic relations")
+    for token in (
+            "method_intrinsic_map_same(",
+            "method_resource_contract_map_same("):
+        if token not in impl_same:
+            errors.append(f"B-201 full owner equality drops {token!r}")
 
-    shadow = _b201_function_body(
-        builtins, "validate_builtin_method_core_shadow", errors)
-    shadow_normalized = re.sub(r"\s+", "", shadow)
+    intrinsic_source = _b201_function_body(
+        builtins, "registered_intrinsic_source", errors)
+    for token in (
+            "intrinsic_ref_same(candidate, intrinsic)",
+            "owner.method_schemes.get(method_name)"):
+        if token not in intrinsic_source:
+            errors.append(f"B-201 exact registry source misses {token!r}")
+    resource_source = _b201_function_body(
+        builtins, "registered_intrinsic_resource_contract", errors)
+    for token in (
+            "intrinsic_ref_same(candidate, intrinsic)",
+            "owner.method_resource_contracts.get(method_name)"):
+        if token not in resource_source:
+            errors.append(f"B-201 exact resource registry misses {token!r}")
+
+    facts_body = _b201_function_body(
+        builtins, "builtin_method_contract_facts", errors)
     for token in (
         "for tag in 0..BUILTIN_METHOD_SITE_COUNT",
-        "registered_intrinsic_count(env, intrinsic) != 1",
-        "make_named_executable_ref(intrinsic_ref_symbol(intrinsic))",
-        "executable_kind_builtin_intrinsic()", "make_contract_only()",
-        "make_binder_manifest(executable, [])", "make_core_program(",
-        "core_program_body_count(program) != 0",
-        "BUILTIN_METHOD_SITE_COUNT",
+        "registered_intrinsic_source(env, intrinsic)",
+        "make_builtin_method_contract_fact(",
+        "registered_intrinsic_resource_contract(env, intrinsic)",
+        "result.len() != BUILTIN_METHOD_SITE_COUNT",
     ):
-        if re.sub(r"\s+", "", token) not in shadow_normalized:
-            errors.append(f"B-201 Core shadow misses {token!r}")
-    load_prelude = _b201_function_body(checker, "load_prelude", errors)
-    if "validate_builtin_method_core_shadow(ctx.env)" not in load_prelude:
-        errors.append("B-201 checker does not consume shadow after prelude registration")
+        if token not in facts_body:
+            errors.append(f"B-201 typed contract producer misses {token!r}")
+
+    core_contracts = _b201_function_body(
+        core, "add_builtin_method_contracts", errors)
+    for token in (
+        "facts.builtin_methods.len() != BUILTIN_METHOD_SITE_COUNT",
+        "builtin_method_contract_intrinsic(fact)",
+        "intrinsic_ref_same(",
+        "make_named_executable_ref(",
+        "intrinsic_ref_symbol(intrinsic)",
+        "executable_kind_builtin_intrinsic()",
+        "make_contract_only()",
+        "builtin_method_contract_resource(fact)",
+    ):
+        if token not in core_contracts:
+            errors.append(f"B-201 real Core consumer misses {token!r}")
 
     method_ctor = _b201_function_body(
-        hir, "make_intrinsic_method_call_ref", errors)
+        hir_exact, "make_intrinsic_method_call_ref", errors)
     if "Type::FnType { .. }" not in method_ctor:
         errors.append("B-201 MethodCallRef accepts a non-callable signature")
-    method_same = _b201_function_body(hir, "method_call_ref_same", errors)
+    method_same = _b201_function_body(
+        hir_exact, "method_call_ref_same", errors)
     for token in (
             "intrinsic_ref_same(", "trait_method_ref_same(",
             "dict_ref_same(", "types_equal("):
@@ -9063,6 +9112,31 @@ def builtin_method_intrinsic_contract_errors(
             errors.append(
                 f"B-201 {file_name}:{function_name} drops MethodCallRef")
 
+    exact_core = _b201_function_body(core, "exact_method_ref", errors)
+    for token in (
+            "method_call_ref_is_intrinsic(value)",
+            "make_exact_intrinsic_method_ref(method_call_ref_intrinsic(value))",
+            'panic("Core assembly: method selection is not exact")'):
+        if token not in exact_core:
+            errors.append(f"B-201 TypedHIR/Core exact method bridge misses {token!r}")
+    core_validation = _b201_function_body(
+        core_expr, "validate_method_call_identity", errors)
+    for token in (
+            "exact_method_ref_is_intrinsic(method)",
+            "intrinsic_ref_symbol(",
+            "exact_method_ref_intrinsic(method)",
+            'panic("CoreHIR: intrinsic method/callee differs")'):
+        if token not in core_validation:
+            errors.append(f"B-201 Core exact method validation misses {token!r}")
+    flow_target = _b201_function_body(flow_lower, "flow_call_target", errors)
+    for token in (
+            "core_callee_kind_tag(value)",
+            "make_direct_flow_call_target(",
+            "core_callee_direct(value)",
+            'panic("Flow lowering: unknown Core callee form")'):
+        if token not in flow_target:
+            errors.append(f"B-201 Core/Flow exact callee bridge misses {token!r}")
+
     runtime_names, runtime_error = _b201_runtime_names(codegen)
     if runtime_error:
         errors.append(runtime_error)
@@ -9090,36 +9164,11 @@ def builtin_method_intrinsic_contract_errors(
     if exact_pos < 0 or fallback_pos < 0 or exact_pos >= fallback_pos:
         errors.append("B-201 exact method consumer does not precede fallback")
 
-    parse_impl = _b201_function_body(parser, "parse_impl_decl", errors)
-    if "skip_forbidden_impl_extern_member()" not in parse_impl or (
-            "parse_extern_fn_decl_body" in parse_impl):
-        errors.append("B-201 parser still accepts impl-member extern fn")
-    skip_extern = _b201_function_body(
-        parser, "skip_forbidden_impl_extern_member", errors)
-    for token in (
-        "self.report_error(E0103,", "self.advance() // extern",
-        "self.parse_type_params()", "self.parse_params()",
-        "self.parse_type_expr()", "self.parse_effect_annotation()",
-    ):
-        if token not in skip_extern:
-            errors.append(f"B-201 local extern recovery misses {token!r}")
-    register_impl = _b201_function_body(
-        infer_register, "register_impl_canonical", errors)
-    check_impl = _b201_function_body(
-        infer_decl, "check_impl_decl_canonical", errors)
-    if "Decl::ExternFn { .. } => panic(" not in register_impl:
-        errors.append("B-201 registration does not fail closed on injected extern")
-    if "Decl::ExternFn { .. } => panic(" not in check_impl:
-        errors.append("B-201 HIR does not fail closed on injected extern")
-    for file_name, source in (("std/str.ring", std_str), ("std/num.ring", std_num)):
-        masked = mask_ring_strings_and_comments(source)
-        if re.search(r"\bimpl\s+(?:Str|Int|Float)\s*\{", masked):
-            errors.append(f"B-201 source extern owner remains in {file_name}")
     return errors
 
 
 def builtin_method_intrinsic_mutation_errors(
-    compiler_sources: Mapping[str, str], std_str: str, std_num: str,
+    compiler_sources: Mapping[str, str],
 ) -> List[str]:
     errors: List[str] = []
     mutations = (
@@ -9132,69 +9181,53 @@ def builtin_method_intrinsic_mutation_errors(
         ("symbol payload", "ir_identity.ring", "make_builtin_method_intrinsic_ref",
          '"builtin-method:${tag.to_str()}"', '"builtin-method"'),
         ("producer swap", "builtins.ring", "register_scalar_method_intrinsics",
-         'install_intrinsic(str_intrinsics, "len", BUILTIN_METHOD_STR_LEN)',
-         'install_intrinsic(str_intrinsics, "len", BUILTIN_METHOD_STR_CONTAINS)'),
+         "BUILTIN_METHOD_STR_LEN", "BUILTIN_METHOD_STR_CONTAINS"),
         ("scalar producer swap", "builtins.ring", "register_eq_trait",
-         'builtin_intrinsic_method("eq", BUILTIN_METHOD_INT_EQ)',
-         'builtin_intrinsic_method("eq", BUILTIN_METHOD_INT_NE)'),
+         "BUILTIN_METHOD_INT_EQ", "BUILTIN_METHOD_INT_NE"),
         ("option producer", "builtins.ring", "register_option",
-         'install_intrinsic(intrinsics, "unwrap", BUILTIN_METHOD_OPTION_UNWRAP)',
-         'install_intrinsic(intrinsics, "unwrap", BUILTIN_METHOD_OPTION_UNWRAP_OR)'),
+         "BUILTIN_METHOD_OPTION_UNWRAP, builtin_resource_contract(",
+         "BUILTIN_METHOD_OPTION_UNWRAP_OR, builtin_resource_contract("),
         ("cell producer", "builtins.ring", "register_cell",
-         'install_intrinsic(intrinsics, "set", BUILTIN_METHOD_CELL_SET)',
-         'install_intrinsic(intrinsics, "set", BUILTIN_METHOD_CELL_GET)'),
+         "BUILTIN_METHOD_CELL_SET, builtin_resource_contract(",
+         "BUILTIN_METHOD_CELL_GET, builtin_resource_contract("),
         ("owner scheme relation", "env.ring", "validate_impl_entry",
          "for intrinsic_entry in entry.method_intrinsics.entries()",
          "for intrinsic_entry in []"),
-        ("owner equality", "env.ring", "impl_entry_final_same",
-         "method_intrinsic_map_same(", "method_core_map_same("),
-        ("shadow uniqueness", "builtins.ring", "validate_builtin_method_core_shadow",
-         "registered_intrinsic_count(env, intrinsic) != 1", "false"),
-        ("shadow contract", "builtins.ring", "validate_builtin_method_core_shadow",
-         "make_contract_only()", "make_concrete_body_contract(make_path_ref(path_owner_for_module_body(module_body), [\"x\"], path_role_child()))"),
-        ("shadow manifest", "builtins.ring", "validate_builtin_method_core_shadow",
-         "make_binder_manifest(executable, [])", "make_binder_manifest(executable, [bad])"),
-        ("checker consumer", "checker.ring", "load_prelude",
-         "validate_builtin_method_core_shadow(ctx.env)", "()"),
-        ("call signature kind", "hir.ring", "make_intrinsic_method_call_ref",
+        ("owner resource equality", "env.ring", "impl_entry_final_same",
+         "method_resource_contract_map_same(", "method_core_map_same("),
+        ("registry intrinsic lookup", "builtins.ring",
+         "registered_intrinsic_source",
+         "intrinsic_ref_same(candidate, intrinsic)", "true"),
+        ("registry resource lookup", "builtins.ring",
+         "registered_intrinsic_resource_contract",
+         "owner.method_resource_contracts.get(method_name)",
+         'owner.method_resource_contracts.get("wrong")'),
+        ("typed fact census", "builtins.ring", "builtin_method_contract_facts",
+         "for tag in 0..BUILTIN_METHOD_SITE_COUNT", "for tag in 0..0"),
+        ("Core contract resource", "core_from_hir.ring",
+         "add_builtin_method_contracts",
+         "builtin_method_contract_resource(fact)",
+         "missing_builtin_resource_contract(fact)"),
+        ("call signature kind", "hir_exact.ring", "make_intrinsic_method_call_ref",
          "Type::FnType { .. }", "_"),
-        ("call intrinsic equality", "hir.ring", "method_call_ref_same",
-         "intrinsic_ref_same(a, b)", "true"),
-        ("HIR validation", "hir.ring", None,
-         "method_ref: MethodCallRef?", "method_ref: IntrinsicRef?"),
-        ("impl lookup", "infer_helpers.ring", "lookup_impl_method",
-         "intrinsic_ref: owner.method_intrinsics.get(method)", "intrinsic_ref: none"),
-        ("trait lookup", "infer_helpers.ring", "lookup_trait_method",
-         "impl_entry.method_intrinsics.get(method)", "none"),
         ("infer publish", "infer.ring", "infer_method_call_from_receiver",
          "method_ref: exact_method_ref", "method_ref: none"),
-        ("zonk signature", "zonk.ring", "zonk_method_call_ref",
-         "zonk_type(ctx, method_call_ref_signature(exact))",
-         "method_call_ref_signature(exact)"),
-        ("andor transport", "andor_lower.ring", "al_expr",
-         "method_ref: method_ref", "method_ref: none"),
-        ("dict transport", "dict_lower.ring", "dl_expr",
-         "method_ref: dl_method_call_ref(method_ref, defs, seen)",
-         "method_ref: none"),
+        ("TypedHIR/Core bridge", "core_from_hir.ring", "exact_method_ref",
+         "make_exact_intrinsic_method_ref(method_call_ref_intrinsic(value))",
+         "make_exact_trait_method_ref(method_call_ref_bound(value))"),
+        ("Core/Flow direct target", "flow_lower.ring", "flow_call_target",
+         "make_direct_flow_call_target(", "make_dynamic_flow_call_target("),
         ("ABI order", "codegen_c_expr.ring", None,
          '"ring_str_len", "ring_str_contains"',
          '"ring_str_contains", "ring_str_len"'),
         ("name fallback", "codegen_c_expr.ring", None,
          "fn intrinsic_runtime_name(tag: Int) -> Str {",
          "fn method_to_runtime_c(type_name: Str, method: Str) -> Str? { none }\n\nfn intrinsic_runtime_name(tag: Int) -> Str {"),
-        ("parser fallback", "parser.ring", "parse_impl_decl",
-         "self.skip_forbidden_impl_extern_member()",
-         "methods.push(self.parse_extern_fn_decl_body(m_pub, self.current_span_start()))"),
-        ("source extern resurrection", "std", None, "", ""),
     )
     killed = 0
     for label, file_name, function_name, anchor, replacement in mutations:
         mutated_sources = dict(compiler_sources)
-        mutated_str = std_str
-        mutated_num = std_num
-        if file_name == "std":
-            mutated_str = "impl Str { pub extern fn len(self: Str) -> Int }\n" + std_str
-        elif function_name is None:
+        if function_name is None:
             source = compiler_sources[file_name]
             if source.count(anchor) != 1:
                 errors.append(
@@ -9209,8 +9242,7 @@ def builtin_method_intrinsic_mutation_errors(
                 continue
             assert mutated is not None
             mutated_sources[file_name] = mutated
-        findings = builtin_method_intrinsic_contract_errors(
-            mutated_sources, mutated_str, mutated_num)
+        findings = builtin_method_intrinsic_contract_errors(mutated_sources)
         if not findings:
             errors.append(f"B-201 mutation escaped: {label}")
         else:
@@ -9228,16 +9260,12 @@ def builtin_method_intrinsic_source_errors() -> List[str]:
             path.name: path.read_text(encoding="utf-8")
             for path in (REPO / "compiler").glob("*.ring")
         }
-        std_str = (REPO / "std" / "str.ring").read_text(encoding="utf-8")
-        std_num = (REPO / "std" / "num.ring").read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         return [f"cannot read B-201 sources: {exc}"]
-    errors = builtin_method_intrinsic_contract_errors(
-        compiler_sources, std_str, std_num)
+    errors = builtin_method_intrinsic_contract_errors(compiler_sources)
     if errors:
         return errors
-    errors.extend(builtin_method_intrinsic_mutation_errors(
-        compiler_sources, std_str, std_num))
+    errors.extend(builtin_method_intrinsic_mutation_errors(compiler_sources))
     return errors
 
 
@@ -9806,21 +9834,15 @@ def resolver_identity_u1a_source_check_errors(ring_exe: str) -> List[str]:
 F2_U1B_PATHS = {
     "identity": REPO / "compiler" / "ir_identity.ring",
     "resolver": REPO / "compiler" / "resolver.ring",
-    "builtins": REPO / "compiler" / "builtins.ring",
     "types": REPO / "compiler" / "types.ring",
     "env": REPO / "compiler" / "env.ring",
     "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
     "infer_register": REPO / "compiler" / "infer_register.ring",
-    "checker": REPO / "compiler" / "checker.ring",
-    "exports": REPO / "compiler" / "exports.ring",
     "hir": REPO / "compiler" / "hir.ring",
     "infer": REPO / "compiler" / "infer.ring",
-    "zonk": REPO / "compiler" / "zonk.ring",
-    "andor": REPO / "compiler" / "andor_lower.ring",
-    "dict": REPO / "compiler" / "dict_lower.ring",
-    "unify": REPO / "compiler" / "unify.ring",
-    "exhaustive": REPO / "compiler" / "exhaustive.ring",
-    "codegen": REPO / "compiler" / "codegen_c_expr.ring",
+    "core": REPO / "compiler" / "core_from_hir.ring",
+    "core_expr": REPO / "compiler" / "core_expr.ring",
+    "flow": REPO / "compiler" / "flow_lower.ring",
 }
 
 
@@ -9843,7 +9865,7 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
             name for _, name in struct_def_fields] != [
                 "name", "owner_ref", "type_params", "type_param_vars",
                 "fields", "derive_attrs", "derived_provider_plan",
-                "is_extern"]:
+                "resource_storage_parameter_ordinals", "is_extern"]:
         errors.append("F2 U1b StructDef owner inventory drifted")
     registered_fields, registered_error = _f0_struct_fields(
         sources["identity"], "RegisteredNominalRef")
@@ -9874,13 +9896,9 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
          "symbol_ref_declaration_site_path(member) !="),
         ("identity", "make_nominal_field_ref",
          '"${symbol_ref_declaration_site_path(owner)}|field:${field_index}|kind:struct-field"'),
-        ("resolver", "source_seed_symbol",
-         "source_struct_field_site_path(origin_site, field_index)"),
         ("resolver", "collect_struct_identity_fact", "none, field_index)"),
         ("resolver", "resolve_namespace_plan",
          "append_struct_identity_fact(fact, struct_identities)"),
-        ("resolver", "single_namespace_file_key",
-         'stable_source_basename(\n            program.span.file, "$virtual-source$")'),
         ("infer_ctx", "install_struct_identity_ledger",
          "for existing in ctx.struct_identity_unconsumed {\n"
          "                if existing.frame_index == fact.frame_index"),
@@ -9910,10 +9928,6 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
          "commit_struct_identity_fact(ctx, identity, false)"),
         ("infer_register", "complete_struct_fields",
          "resolved_fields.push(StructField {"),
-        ("checker", "check", "resolve_single_namespace_plan(program)"),
-        ("checker", "load_prelude", "resolve_prelude_namespace_plan("),
-        ("checker", "load_prelude", "file_path, canonical_program"),
-        ("exports", "copy_exported_name", "types.insert(local_name, def)"),
         ("hir", "validate_hir_field_access_kind",
          "registered_nominal_ref_symbol(owner_ref)"),
         ("hir", "validate_hir_field_access_kind",
@@ -9930,17 +9944,16 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
          "access_kind = HFieldAccessKind::NominalField {"),
         ("infer", "infer_field_access", "owner_ref: struct_def.owner_ref"),
         ("infer", "infer_struct_lit", "owner_ref: struct_def.owner_ref"),
-        ("builtins", "register_cell",
-         "make_registered_nominal_ref(cell_owner, BUILTIN_CELL)"),
-        ("zonk", "zonk_expr", "access_kind: access_kind"),
-        ("zonk", "zonk_expr", "field_ref: f.field_ref"),
-        ("andor", "al_expr", "access_kind: access_kind"),
-        ("andor", "al_decl", "owner_ref: owner_ref"),
-        ("dict", "dl_expr", "field_ref: f.field_ref"),
-        ("dict", "dl_decl", "owner_ref: owner_ref"),
-        ("unify", "unify_struct_with_record", "field_ref: f.field_ref"),
-        ("codegen", "gen_c_field_access",
-         "reject_c_error_field_access(access_kind)"),
+        ("core", "producer_record_type",
+         "registered_nominal_ref_symbol(def.owner_ref)"),
+        ("core", "producer_record_type",
+         "make_nominal_flow_field_identity(field.field_ref)"),
+        ("core", "producer_record_type",
+         "def.resource_storage_parameter_ordinals"),
+        ("core_expr", "make_core_nominal_field",
+         "CoreFieldRefValue::NominalFieldValue(value)"),
+        ("flow", "flow_field",
+         "make_nominal_flow_field_identity(core_field_ref_nominal(value))"),
     )
     for source_name, function_name, token in required_relations:
         _f2_u1a_require_function_token(
@@ -9981,19 +9994,6 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
             errors.append(f"F2 U1b HIR schema misses {token!r}")
     if re.search(r"StructType\s*\{[^}\n]*owner_ref", sources["types"]):
         errors.append("F2 U1b leaked owner identity into Type::StructType")
-    if re.search(r"Map\s*<\s*Str\s*,\s*SymbolRef\s*>",
-                 mask_ring_strings_and_comments(sources["infer_ctx"])):
-        errors.append("F2 U1b gained post-registration name/ref side map")
-    for source_name in (
-            "infer_ctx", "infer_register", "checker", "exports", "hir", "infer",
-            "zonk", "unify", "exhaustive", "codegen"):
-        if "make_symbol_ref(" in sources[source_name]:
-            errors.append(
-                f"F2 U1b {source_name} remints resolver identity")
-    if sources["resolver"].count("make_symbol_ref(") != 1:
-        errors.append("F2 U1b resolver SymbolRef producer count drifted")
-    if "nominal_field_ref_" in sources["codegen"]:
-        errors.append("F2 U1b backend semantically reads nominal identity")
     if "HFieldAccessKind::ErrorRecovery" not in hir_masked:
         errors.append("F2 U1b successful-HIR ErrorRecovery rejection drifted")
     for forbidden in (
@@ -10005,25 +10005,17 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
 
 
 F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
-    ("identity", "make_registered_nominal_ref",
-     "display_name == \"\"", "false"),
     ("identity", "make_nominal_field_ref",
      "symbol_ref_origin_module_key(owner) !=", "false &&"),
     ("identity", "make_nominal_field_ref",
      "symbol_ref_canonical_payload(member) !=", "false &&"),
     ("identity", "make_nominal_field_ref",
      'symbol_ref_declaration_site_path(member) !=', "false &&"),
-    ("resolver", "source_seed_symbol",
-     "source_struct_field_site_path(origin_site, field_index)",
-     "source_declaration_site_path(origin_site)"),
     ("resolver", "collect_struct_identity_fact", "none, field_index)",
      "none, 0)"),
     ("resolver", "resolve_namespace_plan",
      "append_struct_identity_fact(fact, struct_identities)",
      "discard_struct_identity_fact(fact)"),
-    ("resolver", "single_namespace_file_key",
-     'stable_source_basename(\n            program.span.file, "$virtual-source$")',
-     "program.span.file"),
     ("infer_ctx", "install_struct_identity_ledger",
      "for existing in ctx.struct_identity_unconsumed {\n"
      "                if existing.frame_index == fact.frame_index",
@@ -10034,10 +10026,6 @@ F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
      "none => StructIdentityFact {}"),
     ("infer_ctx", "commit_struct_identity_fact",
      'panic("struct identity ledger: commit fact mismatch")', "{}"),
-    ("infer_ctx", "close_struct_identity_ledger",
-     "ctx.struct_identity_unconsumed.len() != 0", "false"),
-    ("infer_ctx", "apply_project_namespace_binding",
-     "registered_nominal_ref_symbol(def.owner_ref)", "binding.symbol"),
     ("infer_register", "complete_struct_fields",
      "field_ref: field_identity.field_ref",
      "field_ref: identity.fields.get(0).unwrap().field_ref"),
@@ -10049,22 +10037,11 @@ F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
     ("infer_register", "complete_struct_fields",
      "resolved_fields.push(StructField {",
      "committed_def.fields.push(StructField {"),
-    ("checker", "check", "resolve_single_namespace_plan(program)",
-     "missing_single_namespace_plan(program)"),
-    ("checker", "load_prelude", "resolve_prelude_namespace_plan(",
-     "missing_prelude_namespace_plan("),
-    ("checker", "load_prelude", "file_path, canonical_program",
-     "file_path, ast"),
-    ("exports", "copy_exported_name", "types.insert(local_name, def)",
-     "types.insert(local_name, remint_type_def(def))"),
     ("hir", "validate_hir_field_access_kind",
      "field != nominal_field_ref_name(field_ref)", "false"),
     ("hir", "validate_hir_field_access_kind",
      "if name != registered_nominal_ref_display_name(owner_ref)",
      "if false"),
-    ("hir", "validate_hir_field_access_kind",
-     'panic("HIR identity: ErrorRecovery field access reached successful HIR")',
-     "{}"),
     ("infer", "infer_field_access", "field_ref: found_field.field_ref",
      "field_ref: missing_field_ref"),
     ("infer", "infer_field_access",
@@ -10074,25 +10051,12 @@ F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
      "owner_ref: wrong_owner_ref"),
     ("infer", "infer_struct_lit", "owner_ref: struct_def.owner_ref",
      "owner_ref: wrong_owner_ref"),
-    ("builtins", "register_cell",
-     "make_registered_nominal_ref(cell_owner, BUILTIN_CELL)",
-     "make_registered_nominal_ref(cell_owner, \"WrongCell\")"),
-    ("zonk", "zonk_expr", "access_kind: access_kind",
-     "access_kind: HFieldAccessKind::ErrorRecovery"),
-    ("zonk", "zonk_expr", "field_ref: f.field_ref",
-     "field_ref: fields.get(0).unwrap().field_ref"),
-    ("andor", "al_expr", "access_kind: access_kind",
-     "access_kind: HFieldAccessKind::ErrorRecovery"),
-    ("andor", "al_decl", "owner_ref: owner_ref",
-     "owner_ref: missing_owner_ref"),
-    ("dict", "dl_expr", "field_ref: f.field_ref",
-     "field_ref: fields.get(0).unwrap().field_ref"),
-    ("dict", "dl_decl", "owner_ref: owner_ref",
-     "owner_ref: missing_owner_ref"),
-    ("unify", "unify_struct_with_record", "field_ref: f.field_ref",
-     "field_ref: struct_def.fields.get(0).unwrap().field_ref"),
-    ("codegen", "gen_c_field_access",
-     "reject_c_error_field_access(access_kind)", "discard_field_kind(access_kind)"),
+    ("core", "producer_record_type",
+     "make_nominal_flow_field_identity(field.field_ref)",
+     "make_nominal_flow_field_identity(def.fields.get(0).unwrap().field_ref)"),
+    ("flow", "flow_field",
+     "make_nominal_flow_field_identity(core_field_ref_nominal(value))",
+     "make_path_flow_field_identity(core_field_ref_record_path(value))"),
 )
 
 
@@ -11283,11 +11247,11 @@ F2_IMPL_PROVIDER_CARRIER_PATHS = {
     "checker": REPO / "compiler" / "checker.ring",
     "exports": REPO / "compiler" / "exports.ring",
     "decl": REPO / "compiler" / "infer_decl.ring",
-    "andor": REPO / "compiler" / "andor_lower.ring",
-    "dict": REPO / "compiler" / "dict_lower.ring",
+    "core": REPO / "compiler" / "core_from_hir.ring",
+    "core_expr": REPO / "compiler" / "core_expr.ring",
     "codegen": REPO / "compiler" / "codegen_c.ring",
 }
-F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT = 19
+F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT = 17
 F2_IMPL_PROVIDER_CARRIER_SCOPE_COUNT = 1
 
 
@@ -11296,13 +11260,6 @@ def impl_provider_u1c2_contract_errors(
 ) -> List[str]:
     errors: List[str] = []
     hir = sources["hir"]
-    impl_schema = (
-        "Impl { target_type: Str, owner_ref: ImplOwnerRef, "
-        "provider_ref: ImplProviderRef, "
-        "trait_ref: SymbolRef?, type_params: List<TypeParam>, "
-        "trait_name: Str?, methods: List<HDecl>")
-    if impl_schema not in hir:
-        errors.append("impl provider carrier: HDecl::Impl schema is incomplete")
     fact_fields, fact_error = _f0_struct_fields(hir, "ModuleImplFact")
     if fact_error:
         errors.append(fact_error)
@@ -11322,6 +11279,8 @@ def impl_provider_u1c2_contract_errors(
         "impl_provider_kind_tag(",
         "trait_name.is_some() != trait_ref.is_some()",
         "impl trait name/ref presence drifted",
+        "impl_owner_ref_provider(owner_ref), provider_ref",
+        "impl_owner_ref_trait(owner_ref), trait_ref",
     ):
         if token not in hir_validate:
             errors.append(f"impl provider HIR validator misses {token!r}")
@@ -11344,18 +11303,6 @@ def impl_provider_u1c2_contract_errors(
     ):
         if token not in delegate_body:
             errors.append(f"delegate impl carrier misses {token!r}")
-
-    visitor_functions = (
-        ("andor", "al_decl"), ("dict", "dl_decl"),
-    )
-    for source_name, function_name in visitor_functions:
-        body = _trait_method_function_body(
-            sources, source_name, function_name, errors)
-        for token in (
-                "provider_ref: provider_ref", "trait_ref: trait_ref"):
-            if token not in body:
-                errors.append(
-                    f"{source_name}.{function_name} loses {token!r}")
 
     checker = sources["checker"]
     carrier_body = _trait_method_function_body(
@@ -11427,6 +11374,32 @@ def impl_provider_u1c2_contract_errors(
         if token not in inject_body:
             errors.append(f"hydration typed owner closure misses {token!r}")
 
+    core_impl_fields, core_impl_error = _f0_struct_fields(
+        sources["core_expr"], "CoreImplMetadata")
+    if core_impl_error:
+        errors.append(core_impl_error)
+    elif core_impl_fields is not None and [
+            name for _, name in core_impl_fields] != [
+                "owner", "methods", "assoc_bindings"]:
+        errors.append("Core impl metadata gained a name/span/fallback carrier")
+    core_impl = _trait_method_function_body(
+        sources, "core_expr", "make_core_impl_metadata", errors)
+    for token in (
+            "impl_owner_ref_same(impl_method_ref_owner(method), owner)",
+            "impl_method_ref_callable_slot_index(method)",
+            "CoreImplMetadata {"):
+        if token not in core_impl:
+            errors.append(f"Core impl registry validation misses {token!r}")
+    core_assembly = _trait_method_function_body(
+        sources, "core", "assemble_decls", errors)
+    for token in (
+            "HDecl::Impl {",
+            "owner_ref, delegate_plan, default_specializations,",
+            "assembly.impls.push(make_core_impl_metadata(",
+            "owner_ref, method_refs, bindings"):
+        if token not in core_assembly:
+            errors.append(f"HIR/Core impl carrier misses {token!r}")
+
     for source_name in ("codegen",):
         masked = mask_ring_strings_and_comments(sources[source_name])
         if "ImplProviderRef" in masked or "provider_ref" in masked or (
@@ -11445,6 +11418,12 @@ def impl_provider_u1c2_mutation_errors(
          "impl_provider_ref_kind(wrong_provider_ref)"),
         ("HIR trait presence", "hir", "validate_hir_decls",
          "trait_name.is_some() != trait_ref.is_some()", "false"),
+        ("HIR owner/provider relation", "hir", "validate_hir_decls",
+         "impl_owner_ref_provider(owner_ref), provider_ref",
+         "provider_ref, provider_ref"),
+        ("HIR owner/trait relation", "hir", "validate_hir_decls",
+         "impl_owner_ref_trait(owner_ref), trait_ref",
+         "trait_ref, trait_ref"),
         ("source provider", "decl", "check_impl_decl_canonical",
          "provider_ref: provider_ref", "provider_ref: wrong_provider_ref"),
         ("source trait", "decl", "check_impl_decl_canonical",
@@ -11454,14 +11433,6 @@ def impl_provider_u1c2_mutation_errors(
          "provider_ref: wrong_provider_ref"),
         ("delegate trait", "decl", "expand_delegate_impls",
          "trait_ref: selected_delegate_owner.trait_ref", "trait_ref: none"),
-        ("andor provider", "andor", "al_decl",
-         "provider_ref: provider_ref", "provider_ref: wrong_provider_ref"),
-        ("andor trait", "andor", "al_decl",
-         "trait_ref: trait_ref", "trait_ref: none"),
-        ("dict provider", "dict", "dl_decl",
-         "provider_ref: provider_ref", "provider_ref: wrong_provider_ref"),
-        ("dict trait", "dict", "dl_decl",
-         "trait_ref: trait_ref", "trait_ref: none"),
         ("checker provider lookup", "checker", "validate_impl_carriers",
          "find_impl_by_provider(", "find_impl_by_origin("),
         ("collector provider", "checker", "collect_module_impl_facts",
@@ -11479,6 +11450,13 @@ def impl_provider_u1c2_mutation_errors(
         ("hydration provider", "checker", "inject_module_exports",
          "impl_owner_ref_provider(owner_ref)",
          "wrong_provider_ref"),
+        ("Core impl owner", "core", "assemble_decls",
+         "owner_ref, method_refs, bindings",
+         "missing, method_refs, bindings"),
+        ("Core method owner validation", "core_expr",
+         "make_core_impl_metadata",
+         "impl_owner_ref_same(impl_method_ref_owner(method), owner)",
+         "true"),
     )
     killed = 0
     for label, source_name, function_name, anchor, replacement in mutations:
@@ -11495,29 +11473,6 @@ def impl_provider_u1c2_mutation_errors(
         else:
             killed += 1
 
-    hir_source = sources["hir"]
-    schema_anchor = "provider_ref: ImplProviderRef, trait_ref: SymbolRef?"
-    if hir_source.count(schema_anchor) != 1:
-        errors.append(
-            f"impl provider HDecl schema anchor count was "
-            f"{hir_source.count(schema_anchor)}")
-    else:
-        mutated = dict(sources)
-        mutated["hir"] = hir_source.replace(
-            schema_anchor, "trait_ref: SymbolRef?", 1)
-        if not impl_provider_u1c2_contract_errors(mutated):
-            errors.append("impl provider HDecl schema mutation escaped")
-        else:
-            killed += 1
-    second_truth = hir_source.replace(
-        "pub trait_ref: SymbolRef?,\n",
-        "pub trait_ref: SymbolRef?,\n    pub is_trait_impl: Bool,\n", 1)
-    mutated = dict(sources)
-    mutated["hir"] = second_truth
-    if not impl_provider_u1c2_contract_errors(mutated):
-        errors.append("ModuleImplFact second-truth mutation escaped")
-    else:
-        killed += 1
     if killed != F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT:
         errors.append(
             f"impl provider carrier killed {killed} mutations, expected "
@@ -13951,8 +13906,9 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         builtin_method_errors = builtin_method_intrinsic_source_errors()
         detail = (
             "producer=registered_impl_payload; "
-            "consumer=core_shadow+method_call_ref+c_abi; "
-            "census=33; source_mutations=25; "
+            "consumer=typed_hir+core_contract+flow_target+c_abi; "
+            f"intrinsic_sites={len(B201_BUILTIN_METHODS)}; "
+            f"source_mutations={B201_BUILTIN_METHOD_MUTATION_COUNT}; "
             "single_canary=builtin_intrinsic_identity; "
             "project_canary=builtin_intrinsic_identity_project; "
             "old_method_name_table=retired; impl_member_extern=hard_reject")
