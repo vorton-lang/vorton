@@ -25,7 +25,7 @@ use core_type_source::{
 }
 use flow_ir::{
     FlowProgram,
-    FlowCallable, FlowBody, FlowSlot, FlowScope, FlowScopeRef,
+    FlowCallable, FlowBody, FlowBlock, FlowSlot, FlowScope, FlowScopeRef,
     FlowInstruction, FlowPlaceRef, FlowCallableLocation, FlowOperandRef,
     FlowTerminator, FlowCallTarget,
     validate_flow_program, flow_program_type_nodes,
@@ -55,6 +55,7 @@ use flow_ir::{
     flow_storage_class_tag,
     flow_block_reference, flow_block_instructions,
     flow_block_terminator, flow_block_terminator_operands,
+    flow_block_terminator_results, flow_result_slot, flow_result_origin,
     flow_block_ref_ordinal,
     flow_instruction_reference, flow_instruction_operands,
     make_flow_instruction_step_ref,
@@ -670,22 +671,43 @@ fn exited_scope_ids(scopes: List<FlowScopeRef>) -> List<Int> {
     result
 }
 
-fn planner_edges_from_flow(terminator: FlowTerminator) -> List<PlannerEdge> {
+fn planner_edges_from_flow(
+    block: FlowBlock, slots: List<FlowSlot>
+) -> List<PlannerEdge> {
     let mut result: List<PlannerEdge> = []
+    let terminator = flow_block_terminator(block)
+    let tag = flow_terminator_kind_tag(terminator)
+    let terminator_results = flow_block_terminator_results(block)
+    if tag == 11 {
+        if terminator_results.len() != 1 ||
+           !flow_value_origin_is_fresh(
+                flow_result_origin(terminator_results.get(0).unwrap())) {
+            panic("ResourcePlanner: Try lacks one fresh caught result")
+        }
+    } else if terminator_results.len() != 0 {
+        panic("ResourcePlanner: non-Try terminator has edge results")
+    }
     let successors = flow_terminator_successors(terminator)
+    let mut edge_index = 0
     for successor in successors {
+        let fresh_results = if tag == 11 && edge_index == 1 {
+            [flow_slot_index(
+                slots,
+                flow_result_slot(terminator_results.get(0).unwrap()))]
+        } else { [] }
         result.push(make_planner_edge(
             some(flow_block_ref_ordinal(flow_successor_target(successor))),
-            exited_scope_ids(flow_successor_exited_scopes(successor))))
+            exited_scope_ids(flow_successor_exited_scopes(successor)),
+            fresh_results))
+        edge_index = edge_index + 1
     }
     if result.len() == 0 {
-        let tag = flow_terminator_kind_tag(terminator)
         if tag != 3 && tag != 8 && tag != 9 {
             panic("ResourcePlanner: non-terminal FlowIR block has no successor")
         }
         result.push(make_planner_edge(
             none, exited_scope_ids(
-                flow_terminator_terminal_exited_scopes(terminator))))
+                flow_terminator_terminal_exited_scopes(terminator)), []))
     }
     result
 }
@@ -740,7 +762,7 @@ fn planner_body_from_flow(
             planner_terminator_uses_from_flow(
                 flow_block_terminator_operands(block),
                 terminator, flow_slots, return_demand),
-            planner_edges_from_flow(terminator)))
+            planner_edges_from_flow(block, flow_slots)))
         expected_block = expected_block + 1
     }
     make_planner_body(
@@ -852,7 +874,9 @@ fn plan_resources(
     let mut rc_bodies: List<RcBody> = []
     let mut cfg_certificates: List<CfgBodyCertificate> = []
     for body in solved.bodies {
-        let planned = plan_body(body, solved)
+        let callable_index = flow_callable_index_for_planner(
+            input.callables, body.reference)
+        let planned = plan_body(body, callable_index, solved)
         rc_bodies.push(planned.rc_body)
         cfg_certificates.push(planned.certificate)
     }
@@ -924,7 +948,8 @@ pub fn verify_and_plan_resource_program(
     let fixed_point = solve_constraint_graph(build)
     let solved = materialize_solved_graph(
         planning_input, build, fixed_point)
-    let findings = collect_stable_resource_diagnostics(solved)
+    let findings = collect_stable_resource_diagnostics(
+        planning_input, solved)
     if findings.len() != 0 {
         return PlanningOutcome {
             value: PlanningOutcomeValue::PlanningFailedValue(findings)

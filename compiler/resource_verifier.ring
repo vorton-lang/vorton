@@ -40,7 +40,8 @@ use rc_ir::{
     rc_step_before, rc_step_after, rc_edge_successor_ordinal,
     rc_edge_target_block, rc_edge_cleanup, rc_operation_site,
     rc_operation_kind, rc_operation_source, rc_operation_target,
-    rc_operation_place_projection, rc_op_kind_take, rc_op_kind_drop,
+    rc_operation_place_projection, rc_op_kind_clone, rc_op_kind_take,
+    rc_op_kind_drop,
     rc_op_kind_cleanup, rc_op_kind_drop_old_place, rc_op_kind_same,
     rc_semantic_site_operand_ordinal}
 use resource_certificate::{
@@ -1004,11 +1005,10 @@ fn append_expected_event_demand_constraints(
                 argument = argument + 1
             }
         },
-        PlannerEventValue::ProjectValue { source, target, .. } =>
-            append_expected_local_copy(
-                result, site, RULE_LOCAL_READ, body,
-                block_index, boundary, source,
-                block_index, next, target),
+        PlannerEventValue::ProjectValue { source, .. } =>
+            append_expected_local_floor(
+                result, site, body, block_index, boundary, source,
+                make_transfer_demand(param_mode_borrow(), false)),
         PlannerEventValue::CaptureValue { source, demand, .. } =>
             append_expected_local_floor(
                 result, site, body, block_index, boundary, source, demand)
@@ -1047,7 +1047,8 @@ fn append_expected_body_demand_constraints(
                         edge_index)
                     let mut slot = 0
                     while slot < body.slots.len() {
-                        if !int_list_contains(
+                        if !int_list_contains(edge.fresh_result_slots, slot) &&
+                           !int_list_contains(
                                 edge.exited_scope_ids,
                                 body.slots.get(slot).unwrap().scope_id) {
                             append_expected_local_copy(
@@ -1311,21 +1312,38 @@ fn expected_source_constraints(
                         while slot < body.slots.len() {
                             if !int_list_contains(edge.exited_scope_ids,
                                     body.slots.get(slot).unwrap().scope_id) {
-                                let mut parameter = 0
-                                while parameter < parameter_count {
+                                if int_list_contains(
+                                        edge.fresh_result_slots, slot) {
+                                    if body.slots.get(slot).unwrap().owns_storage {
+                                        result.push(make_source_constraint_spec(
+                                            edge_site, RULE_RESULT_CFG_EDGE,
+                                            0, false,
+                                            source_body_owned(
+                                                body, target, 0, slot),
+                                            [source_body_reach(
+                                                body, block_index)]))
+                                    }
+                                } else {
+                                    let mut parameter = 0
+                                    while parameter < parameter_count {
+                                        result.push(make_source_constraint_spec(
+                                            edge_site, RULE_RESULT_CFG_EDGE,
+                                            0, false,
+                                            source_body_origin(
+                                                body, target, 0,
+                                                slot, parameter),
+                                            [source_body_origin(
+                                                body, block_index, end,
+                                                slot, parameter)]))
+                                        parameter = parameter + 1
+                                    }
                                     result.push(make_source_constraint_spec(
                                         edge_site, RULE_RESULT_CFG_EDGE, 0, false,
-                                        source_body_origin(body, target, 0,
-                                            slot, parameter),
-                                        [source_body_origin(body, block_index,
-                                            end, slot, parameter)]))
-                                    parameter = parameter + 1
+                                        source_body_owned(
+                                            body, target, 0, slot),
+                                        [source_body_owned(
+                                            body, block_index, end, slot)]))
                                 }
-                                result.push(make_source_constraint_spec(
-                                    edge_site, RULE_RESULT_CFG_EDGE, 0, false,
-                                    source_body_owned(body, target, 0, slot),
-                                    [source_body_owned(body, block_index,
-                                        end, slot)]))
                             }
                             slot = slot + 1
                         }
@@ -2974,30 +2992,57 @@ fn verify_event_transition_contract(
             source, target, value_type_index, partial, ..
         } => {
             let demand = verifier_decided_transfer(body, event, 0).demand
+            let mode = transfer_demand_mode(demand)
             let needs_cleanup = verifier_logical_shape_may_take(
                     solved.logical_shapes.get(value_type_index).unwrap()) ||
                 verifier_physical_shape_may_drop(
                     solved.physical_shapes.get(value_type_index).unwrap())
-            require_transition_count(
-                before, if partial && !needs_cleanup { 0 } else { 1 },
-                "Project source")
-            if before.len() == 1 {
+            if partial {
+                let takes_place = param_mode_same(mode, param_mode_own()) &&
+                    needs_cleanup
+                require_transition_count(
+                    before, if takes_place { 1 } else { 0 },
+                    "partial Project source")
+                if before.len() == 1 {
+                    require_transition(
+                        before.get(0).unwrap(), source,
+                        slot_reason_take_projected_source(),
+                        "partial Project source")
+                }
+            } else {
+                if param_mode_same(mode, param_mode_own()) &&
+                   verifier_logical_shape_may_take(
+                        solved.logical_shapes.get(value_type_index).unwrap()) {
+                    panic("ResourcePlanner verifier: owning field projection crossed diagnostics")
+                }
+                require_transition_count(before, 1, "Project source")
                 require_transition(
                     before.get(0).unwrap(), source,
-                    if partial { slot_reason_take_projected_source() }
-                    else { demand_source_transition_reason(
-                        body, solved, source, demand) },
-                    "Project source")
+                    slot_reason_borrow(), "Project source")
+            }
+            let needs_clone = !partial &&
+                param_mode_same(mode, param_mode_own()) &&
+                verifier_physical_shape_may_drop(
+                    solved.physical_shapes.get(value_type_index).unwrap())
+            if needs_clone && !body.slots.get(target).unwrap().owns_storage {
+                panic("ResourcePlanner verifier: owning field projection targets borrowed storage")
             }
             require_transition_count(semantic, 1, "Project target")
             require_transition(
                 semantic.get(0).unwrap(), target,
-                if partial && needs_cleanup { slot_reason_take_target() }
+                if partial && param_mode_same(mode, param_mode_own()) &&
+                        needs_cleanup { slot_reason_take_target() }
                 else if partial { slot_reason_assign_scalar() }
-                else { transfer_target_transition_reason(
-                    body, solved, source, target, demand) },
+                else if needs_clone { slot_reason_clone_target() }
+                else { slot_reason_assign_scalar() },
                 "Project target")
-            require_transition_count(after, 0, "Project after")
+            require_transition_count(
+                after, if needs_clone { 1 } else { 0 }, "Project after")
+            if needs_clone {
+                require_transition(
+                    after.get(0).unwrap(), target,
+                    slot_reason_clone_source(), "Project result clone")
+            }
         },
         PlannerEventValue::CaptureValue { source, target, demand } => {
             let exact_demand = verifier_decided_transfer(
@@ -3043,9 +3088,33 @@ fn verify_edge_transition_contract(
     solved: SolvedResourceGraph, states: List<SlotFlow>,
     transitions: List<SlotTransitionWitness>
 ) {
+    if transitions.len() < edge.fresh_result_slots.len() {
+        panic("ResourcePlanner verifier: fresh edge result transition is absent")
+    }
+    let mut result_index = 0
+    while result_index < edge.fresh_result_slots.len() {
+        let result_slot = edge.fresh_result_slots.get(result_index).unwrap()
+        let slot = body.slots.get(result_slot).unwrap()
+        require_transition(
+            transitions.get(result_index).unwrap(), result_slot,
+            slot_reason_init_live(), "fresh edge result")
+        require_transition_after_state(
+            transitions.get(result_index).unwrap(),
+            slot_flow_live_owner(
+                slot.owns_storage && verifier_type_requires_cleanup(
+                    solved.logical_shapes.get(slot.type_index).unwrap(),
+                    solved.physical_shapes.get(slot.type_index).unwrap())),
+            "fresh edge result")
+        result_index = result_index + 1
+    }
+    let mut cleanup_transitions: List<SlotTransitionWitness> = []
+    while result_index < transitions.len() {
+        cleanup_transitions.push(transitions.get(result_index).unwrap())
+        result_index = result_index + 1
+    }
     verify_scope_transitions(
         body, solved, edge.exited_scope_ids,
-        states, transitions, "edge exit")
+        states, cleanup_transitions, "edge exit")
 }
 
 fn verify_operation_slots_exact(
@@ -3059,7 +3128,7 @@ fn verify_operation_slots_exact(
 }
 
 fn verify_event_operation_contract(
-    body: PlannerBody, event: PlannerEvent,
+    body: PlannerBody, event: PlannerEvent, solved: SolvedResourceGraph,
     before: List<RcOperation>, after: List<RcOperation>
 ) {
     match event.value {
@@ -3272,20 +3341,32 @@ fn verify_event_operation_contract(
             }
         },
         PlannerEventValue::ProjectValue {
-            source, target, projection, partial, ..
+            source, target, projection, value_type_index, partial
         } => {
-            if after.len() != 0 {
-                panic("ResourcePlanner verifier: projection/capture has after-resource op")
-            }
-            for operation in before {
-                if rc_semantic_site_operand_ordinal(
-                        rc_operation_site(operation)) != 0 {
-                    panic("ResourcePlanner verifier: projection/capture ordinal drifted")
+            if partial {
+                if after.len() != 0 {
+                    panic("ResourcePlanner verifier: partial Project has after-resource op")
                 }
-                verify_operation_slots_exact(
-                    operation, body.slots.get(source).unwrap().reference,
-                    some(body.slots.get(target).unwrap().reference))
-                if partial {
+                let demand = verifier_decided_transfer(body, event, 0).demand
+                let needs_take = param_mode_same(
+                        transfer_demand_mode(demand), param_mode_own()) &&
+                    (verifier_logical_shape_may_take(
+                        solved.logical_shapes.get(value_type_index).unwrap()) ||
+                     verifier_physical_shape_may_drop(
+                        solved.physical_shapes.get(value_type_index).unwrap()))
+                if before.len() != if needs_take { 1 } else { 0 } {
+                    panic("ResourcePlanner verifier: partial Project Take census drifted")
+                }
+                for operation in before {
+                    if rc_semantic_site_operand_ordinal(
+                            rc_operation_site(operation)) != 0 ||
+                       !rc_op_kind_same(
+                            rc_operation_kind(operation), rc_op_kind_take()) {
+                        panic("ResourcePlanner verifier: partial Project operation drifted")
+                    }
+                    verify_operation_slots_exact(
+                        operation, body.slots.get(source).unwrap().reference,
+                        some(body.slots.get(target).unwrap().reference))
                     match rc_operation_place_projection(operation) {
                         some(value) => if !flow_projection_contract_same(
                                 value, projection) {
@@ -3293,8 +3374,31 @@ fn verify_event_operation_contract(
                         },
                         none => panic("ResourcePlanner verifier: projected Take is untyped")
                     }
-                } else if rc_operation_place_projection(operation).is_some() {
-                    panic("ResourcePlanner verifier: ordinary Project has place Take")
+                }
+            } else {
+                if before.len() != 0 {
+                    panic("ResourcePlanner verifier: ordinary Project touches aggregate base")
+                }
+                let demand = verifier_decided_transfer(body, event, 0).demand
+                let needs_clone = param_mode_same(
+                        transfer_demand_mode(demand), param_mode_own()) &&
+                    verifier_physical_shape_may_drop(
+                        solved.physical_shapes.get(value_type_index).unwrap())
+                if after.len() != if needs_clone { 1 } else { 0 } {
+                    panic("ResourcePlanner verifier: Project result Clone census drifted")
+                }
+                if needs_clone {
+                    let operation = after.get(0).unwrap()
+                    if rc_semantic_site_operand_ordinal(
+                            rc_operation_site(operation)) != 0 ||
+                       !rc_op_kind_same(
+                            rc_operation_kind(operation), rc_op_kind_clone()) ||
+                       rc_operation_place_projection(operation).is_some() {
+                        panic("ResourcePlanner verifier: Project result Clone drifted")
+                    }
+                    verify_operation_slots_exact(
+                        operation, body.slots.get(target).unwrap().reference,
+                        none)
                 }
             }
         },
@@ -3383,6 +3487,8 @@ pub fn verify_rc_topology_contract(
                 cfg_body_certificate_entry_block(cfg_body) {
             panic("ResourcePlanner verifier: body identity/entry drifted")
         }
+        let body_callable_index = flow_callable_index_for_planner(
+            input.callables, expected_body.reference)
         let certified_entry_seed = cfg_body_certificate_entry_seed(cfg_body)
         if certified_entry_seed.len() != expected_body.slots.len() {
             panic("ResourcePlanner verifier: entry seed census drifted")
@@ -3391,10 +3497,26 @@ pub fn verify_rc_topology_contract(
         while entry_slot < expected_body.slots.len() {
             let slot = expected_body.slots.get(entry_slot).unwrap()
             let expected_state = if slot.initially_live {
-                slot_flow_live_owner(
-                    slot.owns_storage && verifier_type_requires_cleanup(
-                        solved.logical_shapes.get(slot.type_index).unwrap(),
-                        solved.physical_shapes.get(slot.type_index).unwrap()))
+                let owner = match slot.parameter_ordinal {
+                    some(parameter) => {
+                        let demands = solved.callable_demands.get(
+                            body_callable_index).unwrap()
+                        if parameter < 0 || parameter >= demands.len() {
+                            panic("ResourcePlanner verifier: entry parameter demand is absent")
+                        }
+                        param_mode_same(
+                            transfer_demand_mode(
+                                demands.get(parameter).unwrap()),
+                            param_mode_own()) &&
+                            verifier_type_requires_cleanup(
+                                solved.logical_shapes.get(
+                                    slot.type_index).unwrap(),
+                                solved.physical_shapes.get(
+                                    slot.type_index).unwrap())
+                    },
+                    none => false
+                }
+                slot_flow_live_owner(owner)
             } else { slot_flow_empty() }
             if !slot_flow_same(
                     certified_entry_seed.get(entry_slot).unwrap(),
@@ -3510,6 +3632,7 @@ pub fn verify_rc_topology_contract(
                     verify_event_operation_contract(
                         expected_body,
                         expected_event,
+                        solved,
                         rc_step_before(rc_step), rc_step_after(rc_step))
                     apply_topology_transitions(
                         topology_states, before_transitions)
@@ -3569,6 +3692,12 @@ pub fn verify_rc_topology_contract(
                    cfg_edge_certificate_target(cfg_edge) !=
                         expected_edge.target_block {
                     panic("ResourcePlanner verifier: successor endpoint drifted")
+                }
+                let expects_fresh = expected_block.terminator_kind == 11 &&
+                    edge_index == 1
+                if expected_edge.fresh_result_slots.len() !=
+                        if expects_fresh { 1 } else { 0 } {
+                    panic("ResourcePlanner verifier: edge result census drifted")
                 }
                 let edge_transitions =
                     cfg_edge_certificate_transitions(cfg_edge)

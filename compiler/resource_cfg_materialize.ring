@@ -5,6 +5,7 @@
 use ir_identity::{SlotRef, slot_ref_same}
 use flow_ir::{
     make_flow_instruction_ref, make_flow_block_ref,
+    make_flow_project_place, flow_projection_contract_result_type,
     flow_semantic_step_is_instruction, flow_semantic_step_instruction,
     flow_instruction_ref_same}
 use resource_model::{
@@ -45,13 +46,15 @@ use resource_certificate::{
     slot_reason_scope_end, slot_reason_drop_projected_old,
     slot_reason_take_projected_source}
 use resource_type_lfp::{
-    PlannerBody,
+    FrozenPlannerInput, PlannerBody,
     PlannerEdge, PlannerEvent, PlannerEventValue, PlannerSlot, PlannerPlace,
     PlannerTerminatorUse, TransferDecision,
     ResourceDiagnostic, make_slot_resource_diagnostic,
     make_place_resource_diagnostic, resource_diagnostic_same,
     SolvedResourceGraph, int_list_contains,
     event_decision_transfer,
+    flow_callable_index_for_planner,
+    make_planner_project_place,
     planner_place_is_slot, planner_place_slot, planner_place_base,
     planner_place_projection, planner_place_value_type}
 
@@ -450,7 +453,7 @@ fn apply_event_abstract(
             }
         },
         PlannerEventValue::ProjectValue {
-            source, target, value_type_index, partial, ..
+            source, target, projection, value_type_index, partial
         } => {
             let before_target = states.get(target).unwrap()
             if slot_flow_is_live(before_target) ||
@@ -458,25 +461,41 @@ fn apply_event_abstract(
                 panic("ResourcePlanner: projection overwrites live storage")
             }
             let demand = decided_transfer(body, event, 0).demand
-            if partial {
-                if !param_mode_same(
-                        transfer_demand_mode(demand), param_mode_own()) {
-                    panic("ResourcePlanner: partial projection is not an Own transfer")
+            let source_live = preflight_live_slot(
+                body, event, 0, source, states.get(source).unwrap(),
+                collect, findings)
+            if !partial {
+                let logical = logical_shapes.get(value_type_index).unwrap()
+                if source_live && collect &&
+                   param_mode_same(
+                        transfer_demand_mode(demand), param_mode_own()) &&
+                   logical_shape_may_take(logical) {
+                    append_resource_finding(
+                        findings, make_place_resource_diagnostic(
+                            event.step, 0,
+                            make_planner_project_place(
+                                source, projection, value_type_index,
+                                make_flow_project_place(
+                                    body.slots.get(source).unwrap().reference,
+                                    projection,
+                                    flow_projection_contract_result_type(
+                                        projection))),
+                            slot_flow_moved()))
                 }
-                let _ = preflight_live_slot(
-                    body, event, 0, source, states.get(source).unwrap(),
-                    collect, findings)
-            } else {
-                apply_demand_abstract(
-                    body, event, 0, source, demand,
-                    logical_shapes, states, collect, findings)
             }
-            states.set(target, slot_flow_live_owner(
-                body.slots.get(target).unwrap().owns_storage &&
+            let target_owner = body.slots.get(target).unwrap().owns_storage &&
                 param_mode_same(transfer_demand_mode(demand), param_mode_own()) &&
-                type_requires_cleanup(
-                    logical_shapes.get(value_type_index).unwrap(),
-                    physical_shapes.get(value_type_index).unwrap())))
+                if partial {
+                    type_requires_cleanup(
+                        logical_shapes.get(value_type_index).unwrap(),
+                        physical_shapes.get(value_type_index).unwrap())
+                } else {
+                    !logical_shape_may_take(
+                        logical_shapes.get(value_type_index).unwrap()) &&
+                    physical_shape_may_drop(
+                        physical_shapes.get(value_type_index).unwrap())
+                }
+            states.set(target, slot_flow_live_owner(target_owner))
         },
         PlannerEventValue::CaptureValue { source, target, demand } => {
             let before_target = states.get(target).unwrap()
@@ -563,9 +582,22 @@ fn cleanup_slot_order(
 }
 
 fn apply_edge_cleanup_abstract(
-    edge: PlannerEdge, slots: List<PlannerSlot>, mut states: List<SlotFlow>
+    edge: PlannerEdge, body: PlannerBody,
+    solved: SolvedResourceGraph, mut states: List<SlotFlow>
 ) {
-    for slot_index in cleanup_slot_order(slots, edge.exited_scope_ids) {
+    for result_slot in edge.fresh_result_slots {
+        let before = states.get(result_slot).unwrap()
+        if !slot_flow_is_empty(before) {
+            panic("ResourcePlanner: fresh edge result is not empty")
+        }
+        let slot = body.slots.get(result_slot).unwrap()
+        states.set(result_slot, slot_flow_live_owner(
+            slot.owns_storage && type_requires_cleanup(
+                solved.logical_shapes.get(slot.type_index).unwrap(),
+                solved.physical_shapes.get(slot.type_index).unwrap())))
+    }
+    for slot_index in cleanup_slot_order(
+            body.slots, edge.exited_scope_ids) {
         let before = states.get(slot_index).unwrap()
         if !slot_flow_is_unreachable(before) {
             // Empty/Moved/MaybeMoved are represented by cleared storage;
@@ -587,8 +619,34 @@ struct BodyEntrySolution {
     findings: List<ResourceDiagnostic>
 }
 
+fn body_entry_slot_state(
+    body: PlannerBody, callable_index: Int, slot_index: Int,
+    solved: SolvedResourceGraph
+) -> SlotFlow {
+    let slot = body.slots.get(slot_index).unwrap()
+    if !slot.initially_live { return slot_flow_empty() }
+    let owner = match slot.parameter_ordinal {
+        some(parameter) => {
+            let demands = solved.callable_demands.get(callable_index).unwrap()
+            if parameter < 0 || parameter >= demands.len() {
+                panic("ResourcePlanner: entry parameter demand is absent")
+            }
+            param_mode_same(
+                transfer_demand_mode(demands.get(parameter).unwrap()),
+                param_mode_own()) &&
+                type_requires_cleanup(
+                    solved.logical_shapes.get(slot.type_index).unwrap(),
+                    solved.physical_shapes.get(slot.type_index).unwrap())
+        },
+        // Captures/evidence are environment-owned. A call observes them but
+        // must never clean them up as if they were per-call parameters.
+        none => false
+    }
+    slot_flow_live_owner(owner)
+}
+
 fn solve_body_entry_states(
-    body: PlannerBody, solved: SolvedResourceGraph
+    body: PlannerBody, callable_index: Int, solved: SolvedResourceGraph
 ) -> BodyEntrySolution {
     let mut reachable: List<Bool> = []
     let mut entry_states: List<List<SlotFlow>> = []
@@ -601,15 +659,11 @@ fn solve_body_entry_states(
         block_index = block_index + 1
     }
     let mut seed: List<SlotFlow> = []
-    for slot in body.slots {
-        seed.push(if slot.initially_live {
-            let logical = solved.logical_shapes.get(slot.type_index).unwrap()
-            let physical = solved.physical_shapes.get(slot.type_index).unwrap()
-            slot_flow_live_owner(
-                slot.owns_storage && type_requires_cleanup(logical, physical))
-        } else {
-            slot_flow_empty()
-        })
+    let mut slot_index = 0
+    while slot_index < body.slots.len() {
+        seed.push(body_entry_slot_state(
+            body, callable_index, slot_index, solved))
+        slot_index = slot_index + 1
     }
     reachable.set(body.entry_block, true)
     entry_states.set(body.entry_block, seed)
@@ -646,7 +700,7 @@ fn solve_body_entry_states(
                         some(target) => {
                             let edge_states = copy_slot_states(states)
                             apply_edge_cleanup_abstract(
-                                edge, body.slots, edge_states)
+                                edge, body, solved, edge_states)
                             if !reachable.get(target).unwrap() {
                                 reachable.set(target, true)
                                 entry_states.set(target, edge_states)
@@ -700,14 +754,17 @@ fn solve_body_entry_states(
 }
 
 pub fn collect_stable_resource_diagnostics(
-    solved: SolvedResourceGraph
+    input: FrozenPlannerInput, solved: SolvedResourceGraph
 ) -> List<ResourceDiagnostic> {
     // Bodies, blocks, events, and operands are all frozen in exact ordinal
     // order. Diagnostics are collected only after the CFG join reaches its
     // fixed point, so first occurrence is the stable exact-key sort order.
     let mut result: List<ResourceDiagnostic> = []
     for body in solved.bodies {
-        let solution = solve_body_entry_states(body, solved)
+        let callable_index = flow_callable_index_for_planner(
+            input.callables, body.reference)
+        let solution = solve_body_entry_states(
+            body, callable_index, solved)
         for finding in solution.findings {
             append_resource_finding(result, finding)
         }
@@ -1148,11 +1205,9 @@ fn materialize_event(
             let logical = solved.logical_shapes.get(value_type_index).unwrap()
             let physical = solved.physical_shapes.get(value_type_index).unwrap()
             if partial {
-                if !param_mode_same(
-                        transfer_demand_mode(demand), param_mode_own()) {
-                    panic("ResourcePlanner: partial projection is not an Own transfer")
-                }
-                if type_requires_cleanup(logical, physical) {
+                if param_mode_same(
+                        transfer_demand_mode(demand), param_mode_own()) &&
+                   type_requires_cleanup(logical, physical) {
                     before_ops.push(make_rc_take_place_at(
                         make_rc_instruction_site(
                             instruction, rc_site_before_instruction(), 0),
@@ -1163,27 +1218,50 @@ fn materialize_event(
                         source_before, slot_reason_take_projected_source())
                 }
             } else {
-                apply_demand_materialized(
-                    body, source, demand,
-                    make_rc_instruction_site(
-                        instruction, rc_site_before_instruction(), 0),
-                    solved, some(target),
-                    states, before_ops, before_transitions)
+                if param_mode_same(
+                        transfer_demand_mode(demand), param_mode_own()) &&
+                   logical_shape_may_take(logical) {
+                    panic("ResourcePlanner: owning field projection crossed diagnostics")
+                }
+                push_transition(
+                    before_transitions, source, source_before, source_before,
+                    slot_reason_borrow())
             }
             let before_target_write = states.get(target).unwrap()
+            let needs_clone = !partial &&
+                param_mode_same(
+                    transfer_demand_mode(demand), param_mode_own()) &&
+                physical_shape_may_drop(physical)
+            if needs_clone && !body.slots.get(target).unwrap().owns_storage {
+                panic("ResourcePlanner: owning field projection targets borrowed storage")
+            }
             let target_state = slot_flow_live_owner(
                 body.slots.get(target).unwrap().owns_storage &&
                 param_mode_same(transfer_demand_mode(demand), param_mode_own()) &&
-                type_requires_cleanup(logical, physical))
+                if partial { type_requires_cleanup(logical, physical) }
+                else { needs_clone })
             states.set(target, target_state)
             let target_reason = if partial &&
+                    param_mode_same(
+                        transfer_demand_mode(demand), param_mode_own()) &&
                     type_requires_cleanup(logical, physical) {
                 slot_reason_take_target()
+            } else if needs_clone {
+                slot_reason_clone_target()
             } else {
                 slot_reason_assign_scalar()
             }
             push_transition(semantic_transitions, target, before_target_write,
                 target_state, target_reason)
+            if needs_clone {
+                after_ops.push(make_rc_clone_at(
+                    make_rc_instruction_site(
+                        instruction, rc_site_after_instruction(), 0),
+                    rc_slot_for(body, target), none))
+                push_transition(
+                    after_transitions, target, target_state, target_state,
+                    slot_reason_clone_source())
+            }
         },
         PlannerEventValue::CaptureValue { source, target, demand } => {
             let target_before = states.get(target).unwrap()
@@ -1242,6 +1320,20 @@ fn materialize_edge(
     let mut states = copy_slot_states(states_after_block)
     let mut cleanup_ops: List<RcOperation> = []
     let transitions: List<SlotTransitionWitness> = []
+    for result_slot in edge.fresh_result_slots {
+        let before = states.get(result_slot).unwrap()
+        if !slot_flow_is_empty(before) {
+            panic("ResourcePlanner: fresh edge result is not empty")
+        }
+        let slot = body.slots.get(result_slot).unwrap()
+        let after = slot_flow_live_owner(
+            slot.owns_storage && type_requires_cleanup(
+                solved.logical_shapes.get(slot.type_index).unwrap(),
+                solved.physical_shapes.get(slot.type_index).unwrap()))
+        states.set(result_slot, after)
+        push_transition(
+            transitions, result_slot, before, after, slot_reason_init_live())
+    }
     for slot_index in cleanup_slot_order(body.slots, edge.exited_scope_ids) {
         let slot = body.slots.get(slot_index).unwrap()
         let before = states.get(slot_index).unwrap()
@@ -1281,21 +1373,20 @@ pub struct PlannedBody {
     pub certificate: CfgBodyCertificate
 }
 
-pub fn plan_body(body: PlannerBody, solved: SolvedResourceGraph) -> PlannedBody {
-    let entry_solution = solve_body_entry_states(body, solved)
+pub fn plan_body(
+    body: PlannerBody, callable_index: Int, solved: SolvedResourceGraph
+) -> PlannedBody {
+    let entry_solution = solve_body_entry_states(
+        body, callable_index, solved)
     if entry_solution.findings.len() != 0 {
         panic("ResourcePlanner: materialization received failed preflight")
     }
     let mut entry_seed: List<SlotFlow> = []
-    for slot in body.slots {
-        entry_seed.push(if slot.initially_live {
-            slot_flow_live_owner(
-                slot.owns_storage && type_requires_cleanup(
-                    solved.logical_shapes.get(slot.type_index).unwrap(),
-                    solved.physical_shapes.get(slot.type_index).unwrap()))
-        } else {
-            slot_flow_empty()
-        })
+    let mut entry_slot = 0
+    while entry_slot < body.slots.len() {
+        entry_seed.push(body_entry_slot_state(
+            body, callable_index, entry_slot, solved))
+        entry_slot = entry_slot + 1
     }
     let mut rc_slots: List<RcSlot> = []
     for slot in body.slots {

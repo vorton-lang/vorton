@@ -132,6 +132,36 @@
       }
     },
     {
+      "id": "B5",
+      "path": "single/b_field_projection_own_reject.ring",
+      "covers": [
+        "ordinary Own projection of a logical Resource field fails loud",
+        "diagnostic is keyed by the exact projected place",
+        "aggregate base and sibling are never converted into a whole Take"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0801",
+        "diagnostic_contains": "use of moved value"
+      }
+    },
+    {
+      "id": "B6",
+      "path": "single/b_field_projection_share_clone.ring",
+      "covers": [
+        "borrowed Str parameter remains caller-owned after return",
+        "ordinary Own projection of a shareable field clones the result slot",
+        "aggregate base and sibling remain live",
+        "no whole-aggregate Take or Clone is emitted"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_FIELD_PROJECT_CLONE_OK\n"
+      }
+    },
+    {
       "id": "B7",
       "path": "single/b_pattern_projection_ownership.ring",
       "covers": [
@@ -143,6 +173,20 @@
         "phase": "native",
         "status": "pass",
         "stdout": "B_PATTERN_PROJECTION_OK:24\n"
+      }
+    },
+    {
+      "id": "B8",
+      "path": "single/b_try_caught_result.ring",
+      "covers": [
+        "Try caught edge creates one fresh error result",
+        "caught binder is Live only on the caught successor",
+        "fresh result cleanup ownership follows its exact slot and type"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_TRY_CAUGHT_RESULT_OK:12\n"
       }
     },
     {

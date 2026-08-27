@@ -12,7 +12,12 @@ fn consume_text(value: Str) -> Int {
     sink.value.len()
 }
 
+fn observe_text(value: Str) -> Int { value.len() }
+
 fn main() {
+    let observed = "observed"
+    assert(observe_text(observed) == 8 && observed == "observed",
+        "borrowed Str parameter never becomes a callee cleanup owner")
     let pair = TextPair { left: "left", right: "right" }
     assert(consume_text(pair.left) == 4,
         "Own shareable field projects then clones the result")

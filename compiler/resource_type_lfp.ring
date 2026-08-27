@@ -1333,11 +1333,13 @@ pub fn copy_planner_event(value: PlannerEvent) -> PlannerEvent {
 
 pub struct PlannerEdge {
     pub target_block: Int?,
-    pub exited_scope_ids: List<Int>
+    pub exited_scope_ids: List<Int>,
+    pub fresh_result_slots: List<Int>
 }
 
 pub fn make_planner_edge(
-    target_block: Int?, exited_scope_ids: List<Int>
+    target_block: Int?, exited_scope_ids: List<Int>,
+    fresh_result_slots: List<Int>
 ) -> PlannerEdge {
     let mut scopes: List<Int> = []
     for scope in exited_scope_ids {
@@ -1349,7 +1351,20 @@ pub fn make_planner_edge(
         }
         scopes.push(scope)
     }
-    PlannerEdge { target_block: target_block, exited_scope_ids: scopes }
+    let mut results: List<Int> = []
+    for slot in fresh_result_slots {
+        if slot < 0 || int_list_contains(results, slot) {
+            panic("ResourcePlanner: invalid fresh edge result")
+        }
+        results.push(slot)
+    }
+    if target_block.is_none() && results.len() != 0 {
+        panic("ResourcePlanner: terminal edge has fresh results")
+    }
+    PlannerEdge {
+        target_block: target_block, exited_scope_ids: scopes,
+        fresh_result_slots: results
+    }
 }
 
 pub struct PlannerTerminatorUse {
@@ -1401,7 +1416,8 @@ pub fn make_planner_block(
     }
     for edge in edges {
         copied_edges.push(make_planner_edge(
-            edge.target_block, edge.exited_scope_ids))
+            edge.target_block, edge.exited_scope_ids,
+            edge.fresh_result_slots))
     }
     PlannerBlock {
         terminator_kind: terminator_kind,
@@ -1856,6 +1872,10 @@ fn validate_body(
             terminator_ordinal = terminator_ordinal + 1
         }
         let mut previous_depth: Int? = none
+        if block.terminator_kind == 11 && block.edges.len() != 2 {
+            panic("ResourcePlanner: Try successor census differs")
+        }
+        let mut edge_ordinal = 0
         for edge in block.edges {
             match edge.target_block {
                 some(target) => if target < 0 || target >= body.blocks.len() {
@@ -1878,6 +1898,23 @@ fn validate_body(
                     none => panic("ResourcePlanner: exited scope has no frozen binder")
                 }
             }
+            for result_slot in edge.fresh_result_slots {
+                validate_slot_index(result_slot, body.slots)
+                if body.slots.get(result_slot).unwrap().initially_live {
+                    panic("ResourcePlanner: fresh edge result is already live")
+                }
+                if int_list_contains(
+                        edge.exited_scope_ids,
+                        body.slots.get(result_slot).unwrap().scope_id) {
+                    panic("ResourcePlanner: fresh edge result exits its scope")
+                }
+            }
+            let expects_fresh = block.terminator_kind == 11 &&
+                edge_ordinal == 1
+            if edge.fresh_result_slots.len() != if expects_fresh { 1 } else { 0 } {
+                panic("ResourcePlanner: terminator edge result census differs")
+            }
+            edge_ordinal = edge_ordinal + 1
         }
         block_index = block_index + 1
     }
@@ -2629,21 +2666,33 @@ fn add_body_result_constraints(
                     while slot < body.slots.len() {
                         if !int_list_contains(edge.exited_scope_ids,
                                 body.slots.get(slot).unwrap().scope_id) {
-                            let mut parameter = 0
-                            while parameter < layout.parameter_count {
+                            if int_list_contains(
+                                    edge.fresh_result_slots, slot) {
+                                if body.slots.get(slot).unwrap().owns_storage {
+                                    add_constraint_at(constraints, edge_source,
+                                        RULE_RESULT_CFG_EDGE,
+                                        body_owned_cell(
+                                            layout, target, 0, slot), 0,
+                                        [body_reach_cell(layout, block_index)])
+                                }
+                            } else {
+                                let mut parameter = 0
+                                while parameter < layout.parameter_count {
+                                    add_constraint_at(constraints, edge_source,
+                                        RULE_RESULT_CFG_EDGE,
+                                        body_origin_cell(layout, target, 0,
+                                            slot, parameter), 0,
+                                        [body_origin_cell(layout, block_index,
+                                            end, slot, parameter)])
+                                    parameter = parameter + 1
+                                }
                                 add_constraint_at(constraints, edge_source,
                                     RULE_RESULT_CFG_EDGE,
-                                    body_origin_cell(layout, target, 0,
-                                        slot, parameter), 0,
-                                    [body_origin_cell(layout, block_index, end,
-                                        slot, parameter)])
-                                parameter = parameter + 1
+                                    body_owned_cell(
+                                        layout, target, 0, slot), 0,
+                                    [body_owned_cell(
+                                        layout, block_index, end, slot)])
                             }
-                            add_constraint_at(constraints, edge_source,
-                                RULE_RESULT_CFG_EDGE,
-                                body_owned_cell(layout, target, 0, slot), 0,
-                                [body_owned_cell(
-                                    layout, block_index, end, slot)])
                         }
                         slot = slot + 1
                     }
@@ -2854,11 +2903,12 @@ fn add_body_event_demand_constraints(
                 argument = argument + 1
             }
         },
-        PlannerEventValue::ProjectValue { source, target, .. } =>
-            add_local_demand_copy(
-                constraints, site, RULE_LOCAL_READ, layout,
-                block_index, boundary, source,
-                block_index, next, target),
+        PlannerEventValue::ProjectValue { source, .. } =>
+            // A value projection observes its aggregate base. Demand for the
+            // projected result must not turn into a whole-aggregate Own edge.
+            add_local_demand_floor(
+                constraints, site, layout, block_index, boundary, source,
+                make_transfer_demand(param_mode_borrow(), false)),
         PlannerEventValue::CaptureValue { source, demand, .. } =>
             add_local_demand_floor(
                 constraints, site, layout, block_index, boundary,
@@ -2902,7 +2952,8 @@ fn add_body_demand_constraints(
                         edge_index)
                     let mut slot = 0
                     while slot < body.slots.len() {
-                        if !int_list_contains(
+                        if !int_list_contains(edge.fresh_result_slots, slot) &&
+                           !int_list_contains(
                                 edge.exited_scope_ids,
                                 body.slots.get(slot).unwrap().scope_id) {
                             add_local_demand_copy(
