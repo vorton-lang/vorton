@@ -3628,10 +3628,11 @@ fn validate_call_signature(
         }
         index = index + 1
     }
-    if core_type_ref_index(result_type) != core_type_ref_index(
-            flow_call_contract_result_type(callee.contract)) {
-        panic("CoreHIR: call result type differs from exact contract")
-    }
+    require_core_type_same(
+        result_type,
+        core_type_graph_ref_from_flow(
+            graph, flow_call_contract_result_type(callee.contract)),
+        "CoreHIR: call result type differs from exact contract")
     if callee.kind == CORE_CALLEE_DIRECT {
         let candidate = core_callable_for(callables, core_callee_direct(callee))
         if !core_call_contract_actual_satisfies_formal(
