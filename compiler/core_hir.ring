@@ -275,7 +275,8 @@ pub fn redirect_core_program_executables(
     let bodies = value.bodies.map(fn(entry) {
         make_core_body_entry(
             entry.reference, entry.origin, entry.body_anchor,
-            redirect_core_body_executables(entry.body, redirects))
+            redirect_core_body_executables(
+                entry.body, redirects, value.type_graph))
     })
     make_core_program(
         value.type_graph, value.callables, value.impls, bodies,

@@ -66,6 +66,7 @@ use ir_inventory::{
     binder_entry_slot, make_binder_manifest
 }
 use effect_contract::{
+    EffectParamRef,
     effect_param_owner, effect_param_ref_same,
     effect_param_ordinal,
     CoreEffectAtom, CoreEffectContract, CoreEffectSubstitution,
@@ -94,7 +95,9 @@ use core_type_source::{
     flow_type_substitution_parameter,
     flow_type_substitution_replacement,
     flow_generic_param_owner, flow_generic_param_index,
-    flow_generic_param_arity,
+    flow_generic_param_arity, flow_generic_param_bounds,
+    flow_generic_param_fact_same,
+    flow_type_node_generic_param,
     flow_type_actual_satisfies_substituted_formal,
     FLOW_TYPE_INT, FLOW_TYPE_FLOAT, FLOW_TYPE_STR, FLOW_TYPE_BOOL,
     FLOW_TYPE_UNIT, FLOW_TYPE_NEVER, FLOW_TYPE_STRUCT, FLOW_TYPE_ENUM,
@@ -222,6 +225,9 @@ fn copy_flow_handled_evidence_uses(
 pub struct FlowCallable {
     reference: ExecutableRef,
     origin: OriginRef,
+    header_type: CoreTypeRef,
+    type_formals: List<CoreTypeRef>,
+    effect_formals: List<EffectParamRef>,
     parameter_slots: List<SlotRef>,
     mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
@@ -231,11 +237,40 @@ pub struct FlowCallable {
 
 pub fn make_flow_callable(
     reference: ExecutableRef, origin: OriginRef,
+    header_type: CoreTypeRef, type_formals: List<CoreTypeRef>,
+    effect_formals: List<EffectParamRef>,
     parameter_slots: List<SlotRef>, mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
     effects: CoreEffectContract,
     handled_evidence: List<FlowHandledEvidenceBinding>
 ) -> FlowCallable {
+    if core_type_ref_index(header_type) < 0 {
+        panic("FlowIR: callable header type is invalid")
+    }
+    let mut formal_index = 0
+    while formal_index < type_formals.len() {
+        let formal = type_formals.get(formal_index).unwrap()
+        if core_type_ref_index(formal) < 0 {
+            panic("FlowIR: callable type formal is invalid")
+        }
+        let mut right = formal_index + 1
+        while right < type_formals.len() {
+            if core_type_ref_same(formal, type_formals.get(right).unwrap()) {
+                panic("FlowIR: callable repeats a type formal")
+            }
+            right = right + 1
+        }
+        formal_index = formal_index + 1
+    }
+    let mut effect_index = 0
+    while effect_index < effect_formals.len() {
+        let formal = effect_formals.get(effect_index).unwrap()
+        if !origin_ref_same(effect_param_owner(formal), origin) ||
+           effect_param_ordinal(formal) != effect_index {
+            panic("FlowIR: callable effect formal owner/order differs")
+        }
+        effect_index = effect_index + 1
+    }
     let concrete = executable_contract_mode_same(
         mode, executable_contract_mode_concrete_body())
     if (concrete && parameter_slots.len() !=
@@ -258,6 +293,9 @@ pub fn make_flow_callable(
     }
     FlowCallable {
         reference: reference, origin: origin,
+        header_type: header_type,
+        type_formals: type_formals.map(fn(value) { value }),
+        effect_formals: effect_formals.map(fn(value) { value }),
         parameter_slots: copy_slot_refs(parameter_slots),
         mode: mode,
         semantic_contract: copy_call_contract(semantic_contract),
@@ -3163,6 +3201,69 @@ fn validate_callables(
         let parameter_roles = flow_call_contract_parameter_roles(
             left.semantic_contract)
         let result_type = flow_call_contract_result_type(left.semantic_contract)
+        if !type_ref_exists(type_nodes, left.header_type) {
+            panic("FlowIR: callable header type is absent")
+        }
+        let header = type_nodes.get(
+            core_type_ref_index(left.header_type)).unwrap()
+        if !flow_type_kind_same(header.kind, flow_type_kind_callable()) ||
+           header.parameter_count != parameter_types.len() ||
+           header.children.len() != parameter_types.len() + 1 {
+            panic("FlowIR: callable header shape differs")
+        }
+        let mut header_index = 0
+        while header_index < parameter_types.len() {
+            if !core_type_ref_same(
+                    header.children.get(header_index).unwrap(),
+                    parameter_types.get(header_index).unwrap()) {
+                panic("FlowIR: callable header parameter differs")
+            }
+            header_index = header_index + 1
+        }
+        if !core_type_ref_same(
+                header.children.get(parameter_types.len()).unwrap(),
+                result_type) ||
+           !core_effect_contract_same(
+                header.callable_effects.unwrap(), left.effects) {
+            panic("FlowIR: callable header result/effects differ")
+        }
+        let owner = if left.type_formals.len() == 0 {
+            none
+        } else if executable_ref_is_named(left.reference) {
+            some(executable_ref_named_symbol(left.reference))
+        } else {
+            panic("FlowIR: anonymous callable declares type formals")
+        }
+        let mut formal_index = 0
+        while formal_index < left.type_formals.len() {
+            let formal_ref = left.type_formals.get(formal_index).unwrap()
+            if !type_ref_exists(type_nodes, formal_ref) {
+                panic("FlowIR: callable type formal is absent")
+            }
+            let formal_node = type_nodes.get(
+                core_type_ref_index(formal_ref)).unwrap()
+            if flow_type_kind_tag(formal_node.kind) != FLOW_TYPE_PARAMETER {
+                panic("FlowIR: callable type formal is not a parameter node")
+            }
+            let fact = flow_type_node_generic_param(formal_node)
+            if !symbol_ref_same(
+                    flow_generic_param_owner(fact), owner.unwrap()) ||
+               flow_generic_param_index(fact) != formal_index ||
+               flow_generic_param_arity(fact) != left.type_formals.len() {
+                panic("FlowIR: callable type formal owner/order/arity differs")
+            }
+            let _ = flow_generic_param_bounds(fact)
+            formal_index = formal_index + 1
+        }
+        let mut effect_formal_index = 0
+        while effect_formal_index < left.effect_formals.len() {
+            let formal = left.effect_formals.get(effect_formal_index).unwrap()
+            if !origin_ref_same(effect_param_owner(formal), left.origin) ||
+               effect_param_ordinal(formal) != effect_formal_index {
+                panic("FlowIR: callable effect formal owner/order differs")
+            }
+            effect_formal_index = effect_formal_index + 1
+        }
         if !type_ref_exists(type_nodes, result_type) {
             panic("FlowIR: callable result type is absent")
         }
@@ -4081,36 +4182,11 @@ fn validate_direct_calls(
                         }
                         if flow_call_target_is_direct(target) {
                             let substitutions = target.type_substitutions
-                            if substitutions.len() != 0 {
-                                let direct = flow_call_target_direct(target)
-                                if !executable_ref_is_named(direct) {
-                                    panic("FlowIR: generic direct target is not named")
-                                }
-                                let owner = executable_ref_named_symbol(direct)
-                                let arity = substitutions.len()
-                                let mut ordinal = 0
-                                for substitution in substitutions {
-                                    let parameter =
-                                        flow_type_substitution_parameter(
-                                            substitution)
-                                    if !symbol_ref_same(
-                                            flow_generic_param_owner(parameter),
-                                            owner) ||
-                                       flow_generic_param_index(parameter) !=
-                                            ordinal ||
-                                       flow_generic_param_arity(parameter) !=
-                                            arity {
-                                        panic("FlowIR: direct type substitution identity/order differs")
-                                    }
-                                    let _ = type_node_for(
-                                        type_nodes,
-                                        flow_type_substitution_replacement(
-                                            substitution))
-                                    ordinal = ordinal + 1
-                                }
-                            }
                             let candidate = callable_for_ref(
                                 callables, flow_call_target_direct(target))
+                            validate_flow_type_substitutions_for_callable(
+                                substitutions, candidate, type_nodes,
+                                "FlowIR: direct type substitution identity/order differs")
                             if flow_call_contract_parameter_types(
                                     candidate.semantic_contract).len() !=
                                         arguments.len() ||
@@ -4320,6 +4396,54 @@ fn validate_operation_callable_contract(
             panic("FlowIR: operation producer parameter contract differs")
         }
         index = index + 1
+    }
+}
+
+fn validate_flow_type_substitutions_for_callable(
+    substitutions: List<FlowTypeSubstitution>, callable: FlowCallable,
+    type_nodes: List<FlowTypeNode>, message: Str
+) {
+    if callable.type_formals.len() == 0 {
+        if substitutions.len() == 0 { return }
+        if !executable_ref_is_named(callable.reference) { panic(message) }
+        let owner = executable_ref_named_symbol(callable.reference)
+        let mut ordinal = 0
+        for substitution in substitutions {
+            let parameter = flow_type_substitution_parameter(substitution)
+            if !symbol_ref_same(flow_generic_param_owner(parameter), owner) ||
+               flow_generic_param_index(parameter) != ordinal ||
+               flow_generic_param_arity(parameter) != substitutions.len() {
+                panic(message)
+            }
+            let _ = type_node_for(
+                type_nodes, flow_type_substitution_replacement(substitution))
+            ordinal = ordinal + 1
+        }
+        return
+    }
+    let mut prior_index = 0 - 1
+    for substitution in substitutions {
+        let parameter = flow_type_substitution_parameter(substitution)
+        let mut found_index: Int? = none
+        let mut index = 0
+        while index < callable.type_formals.len() {
+            let formal_ref = callable.type_formals.get(index).unwrap()
+            let declared = flow_type_node_generic_param(
+                type_node_for(type_nodes, formal_ref))
+            if flow_generic_param_fact_same(parameter, declared) {
+                if found_index.is_some() { panic(message) }
+                found_index = some(index)
+            }
+            index = index + 1
+        }
+        let exact_index = match found_index {
+            some(value) => value,
+            none => panic(message)
+        }
+        if exact_index <= prior_index { panic(message) }
+        let _ = type_node_for(
+            type_nodes, flow_type_substitution_replacement(substitution))
+        prior_index = exact_index
     }
 }
 
@@ -5378,8 +5502,19 @@ fn compute_topology_encoding(
         }
         let mut item: List<Str> = [
             "CA", encode_executable(callable.reference),
-            encode_origin(callable.origin), mode_tag
+            encode_origin(callable.origin), mode_tag,
+            "H${encode_type_ref(callable.header_type)}"
         ]
+        let mut type_formal_ordinal = 0
+        for formal in callable.type_formals {
+            item.push("F${type_formal_ordinal.to_str()}/${
+                encode_type_ref(formal)}")
+            type_formal_ordinal = type_formal_ordinal + 1
+        }
+        for formal in callable.effect_formals {
+            item.push("E${encode_origin(effect_param_owner(formal))}/${
+                effect_param_ordinal(formal).to_str()}")
+        }
         for parameter in flow_call_contract_parameter_types(
                 callable.semantic_contract) {
             item.push(encode_type_ref(parameter))
@@ -5469,6 +5604,9 @@ fn copy_flow_callables(callables: List<FlowCallable>) -> List<FlowCallable> {
     for callable in callables {
         result.push(FlowCallable {
             reference: callable.reference, origin: callable.origin,
+            header_type: callable.header_type,
+            type_formals: callable.type_formals.map(fn(item) { item }),
+            effect_formals: callable.effect_formals.map(fn(item) { item }),
             parameter_slots: copy_slot_refs(callable.parameter_slots),
             mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
@@ -5512,6 +5650,9 @@ pub fn flow_program_callables(value: FlowProgram) -> List<FlowCallable> {
     for callable in value.callables {
         result.push(FlowCallable {
             reference: callable.reference, origin: callable.origin,
+            header_type: callable.header_type,
+            type_formals: callable.type_formals.map(fn(item) { item }),
+            effect_formals: callable.effect_formals.map(fn(item) { item }),
             parameter_slots: copy_slot_refs(callable.parameter_slots),
             mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
@@ -5537,6 +5678,8 @@ pub fn validate_flow_program(value: FlowProgram) {
         value.type_nodes, value.callables.map(fn(callable) {
             make_flow_callable(
                 callable.reference, callable.origin,
+                callable.header_type, callable.type_formals,
+                callable.effect_formals,
                 callable.parameter_slots, callable.mode,
                 callable.semantic_contract, callable.effects,
                 callable.handled_evidence)

@@ -29,7 +29,7 @@ use ir_inventory::{
     effect_operation_ref_source_index, effect_operation_ref_same
 }
 use effect_contract::{
-    effect_param_ref_same,
+    EffectParamRef, effect_param_ref_same,
     CoreEffectAtom, CoreEffectContract,
     make_core_fail_effect, make_core_mut_effect, make_core_unsafe_effect,
     make_core_handled_effect, make_core_system_effect,
@@ -354,6 +354,20 @@ pub fn flow_generic_param_identity_same(
 pub struct FlowTypeSubstitution {
     parameter: FlowGenericParamFact,
     replacement: CoreTypeRef
+}
+
+// The exact callable-header matcher may alpha-map only already-frozen effect
+// formal identities.  It never maps a row body, raw inference tail, name, or
+// graph-reachable approximation.
+pub struct FlowEffectParamSubstitution {
+    formal: EffectParamRef,
+    actual: EffectParamRef
+}
+
+pub fn make_flow_effect_param_substitution(
+    formal: EffectParamRef, actual: EffectParamRef
+) -> FlowEffectParamSubstitution {
+    FlowEffectParamSubstitution { formal: formal, actual: actual }
 }
 
 pub fn make_flow_type_substitution(
@@ -854,6 +868,8 @@ fn substituted_parameter_replacement(
 fn exact_record_shape_satisfies(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode,
     substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<FlowEffectParamSubstitution>,
+    exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
 ) -> Bool {
     if actual.nominal_fields.len() != formal.nominal_fields.len() {
@@ -871,7 +887,8 @@ fn exact_record_shape_satisfies(
                 nodes,
                 flow_satisfaction_type_node(nodes, actual_field.ty),
                 flow_satisfaction_type_node(nodes, formal_field.ty),
-                substitutions, false, actual_path, formal_path) {
+                substitutions, effect_substitutions, exact,
+                false, actual_path, formal_path) {
             return false
         }
         index = index + 1
@@ -882,6 +899,8 @@ fn exact_record_shape_satisfies(
 fn substituted_effect_atom_matches(
     nodes: List<FlowTypeNode>, actual: CoreEffectAtom,
     formal: CoreEffectAtom, substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<FlowEffectParamSubstitution>,
+    exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
 ) -> Bool {
     let kind = core_effect_atom_kind_tag(formal)
@@ -891,7 +910,8 @@ fn substituted_effect_atom_matches(
             nodes,
             flow_satisfaction_type_node(nodes, core_effect_atom_type(actual)),
             flow_satisfaction_type_node(nodes, core_effect_atom_type(formal)),
-            substitutions, false, actual_path, formal_path)
+            substitutions, effect_substitutions, exact,
+            false, actual_path, formal_path)
     }
     if kind == 2 { return true }
     if kind == 3 {
@@ -912,7 +932,8 @@ fn substituted_effect_atom_matches(
                         nodes, actual_args.get(index).unwrap()),
                     flow_satisfaction_type_node(
                         nodes, formal_args.get(index).unwrap()),
-                    substitutions, false, actual_path, formal_path) {
+                    substitutions, effect_substitutions, exact,
+                    false, actual_path, formal_path) {
                 return false
             }
             index = index + 1
@@ -924,19 +945,42 @@ fn substituted_effect_atom_matches(
         core_effect_atom_system_ref(formal))
 }
 
+fn substituted_effect_parameter_matches(
+    actual: EffectParamRef, formal: EffectParamRef,
+    substitutions: List<FlowEffectParamSubstitution>
+) -> Bool {
+    if effect_param_ref_same(actual, formal) { return true }
+    let mut found: EffectParamRef? = none
+    for substitution in substitutions {
+        if effect_param_ref_same(substitution.formal, formal) {
+            if found.is_some() {
+                panic("CoreHIR: exact effect formal mapping repeats")
+            }
+            found = some(substitution.actual)
+        }
+    }
+    match found {
+        some(mapped) => effect_param_ref_same(actual, mapped),
+        none => false
+    }
+}
+
 fn substituted_effect_contract_satisfies(
     nodes: List<FlowTypeNode>, actual: CoreEffectContract,
     formal: CoreEffectContract, substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<FlowEffectParamSubstitution>,
+    exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
 ) -> Bool {
-    if substitutions.len() == 0 {
+    if substitutions.len() == 0 && effect_substitutions.len() == 0 && !exact {
         return core_effect_contract_actual_satisfies_formal(actual, formal)
     }
     let actual_atoms = core_effect_set_atoms(core_effect_contract_exact(actual))
     let formal_atoms = core_effect_set_atoms(core_effect_contract_exact(formal))
-    if core_effect_contract_parameter(formal).is_none() &&
+    if (exact && actual_atoms.len() != formal_atoms.len()) ||
+       (!exact && core_effect_contract_parameter(formal).is_none() &&
        (core_effect_contract_parameter(actual).is_some() ||
-        actual_atoms.len() != formal_atoms.len()) {
+        actual_atoms.len() != formal_atoms.len())) {
         return false
     }
     for required in formal_atoms {
@@ -944,18 +988,29 @@ fn substituted_effect_contract_satisfies(
         for candidate in actual_atoms {
             if substituted_effect_atom_matches(
                     nodes, candidate, required, substitutions,
+                    effect_substitutions, exact,
                     actual_path, formal_path) {
                 matches = matches + 1
             }
         }
         if matches != 1 { return false }
     }
-    true
+    if !exact { return true }
+    match (core_effect_contract_parameter(actual),
+           core_effect_contract_parameter(formal)) {
+        (some(actual_parameter), some(formal_parameter)) =>
+            substituted_effect_parameter_matches(
+                actual_parameter, formal_parameter, effect_substitutions),
+        (none, none) => true,
+        _ => false
+    }
 }
 
 fn flow_type_actual_satisfies_formal_inner(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode,
     substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<FlowEffectParamSubstitution>,
+    exact: Bool,
     allow_record_widening: Bool,
     mut actual_path: List<CoreTypeRef>, mut formal_path: List<CoreTypeRef>
 ) -> Bool {
@@ -977,6 +1032,7 @@ fn flow_type_actual_satisfies_formal_inner(
            !substituted_effect_contract_satisfies(
                 nodes, actual.callable_effects.unwrap(),
                 formal.callable_effects.unwrap(), substitutions,
+                effect_substitutions, exact,
                 actual_path, formal_path) {
             return false
         }
@@ -988,14 +1044,16 @@ fn flow_type_actual_satisfies_formal_inner(
                         nodes, actual.children.get(index).unwrap()),
                     flow_satisfaction_type_node(
                         nodes, formal.children.get(index).unwrap()),
-                    substitutions, false, actual_path, formal_path) {
+                    substitutions, effect_substitutions, exact,
+                    false, actual_path, formal_path) {
                 return false
             }
             index = index + 1
         }
         return true
     }
-    if substitutions.len() != 0 && actual_kind == formal_kind {
+    if (substitutions.len() != 0 || effect_substitutions.len() != 0 || exact) &&
+       actual_kind == formal_kind {
         if formal_kind == FLOW_TYPE_STRUCT ||
            formal_kind == FLOW_TYPE_ENUM ||
            formal_kind == FLOW_TYPE_EXTERN {
@@ -1011,7 +1069,8 @@ fn flow_type_actual_satisfies_formal_inner(
                             nodes, actual.generic_arguments.get(index).unwrap()),
                         flow_satisfaction_type_node(
                             nodes, formal.generic_arguments.get(index).unwrap()),
-                        substitutions, false, actual_path, formal_path) {
+                        substitutions, effect_substitutions, exact,
+                        false, actual_path, formal_path) {
                     return false
                 }
                 index = index + 1
@@ -1028,7 +1087,8 @@ fn flow_type_actual_satisfies_formal_inner(
                             nodes, actual.children.get(index).unwrap()),
                         flow_satisfaction_type_node(
                             nodes, formal.children.get(index).unwrap()),
-                        substitutions, false, actual_path, formal_path) {
+                        substitutions, effect_substitutions, exact,
+                        false, actual_path, formal_path) {
                     return false
                 }
                 index = index + 1
@@ -1038,6 +1098,7 @@ fn flow_type_actual_satisfies_formal_inner(
         if formal_kind == FLOW_TYPE_RECORD && !allow_record_widening {
             return exact_record_shape_satisfies(
                 nodes, actual, formal, substitutions,
+                effect_substitutions, exact,
                 actual_path, formal_path)
         }
     }
@@ -1062,7 +1123,8 @@ fn flow_type_actual_satisfies_formal_inner(
                                 nodes,
                                 flow_satisfaction_type_node(nodes, candidate.ty),
                                 flow_satisfaction_type_node(nodes, required.ty),
-                                substitutions, true,
+                                substitutions, effect_substitutions, exact,
+                                true,
                                 actual_path, formal_path) {
                         found = true
                     },
@@ -1088,7 +1150,7 @@ pub fn flow_type_actual_satisfies_formal(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode
 ) -> Bool {
     flow_type_actual_satisfies_formal_inner(
-        nodes, actual, formal, [], true, [], [])
+        nodes, actual, formal, [], [], false, true, [], [])
 }
 
 // Direct generic calls carry an explicit declared-formal -> actual map.  This
@@ -1102,7 +1164,21 @@ pub fn flow_type_actual_satisfies_substituted_formal(
     flow_type_actual_satisfies_formal_inner(
         nodes, flow_satisfaction_type_node(nodes, actual),
         flow_satisfaction_type_node(nodes, formal),
-        substitutions, true, [], [])
+        substitutions, [], false, true, [], [])
+}
+
+// Exact callable-header alpha comparison.  It shares the sole recursive type
+// relation above, disables record widening, and admits only the explicit
+// declared type/effect formal identity maps supplied by Core.
+pub fn flow_type_actual_matches_formal_exact(
+    nodes: List<FlowTypeNode>, actual: CoreTypeRef, formal: CoreTypeRef,
+    substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<FlowEffectParamSubstitution>
+) -> Bool {
+    flow_type_actual_satisfies_formal_inner(
+        nodes, flow_satisfaction_type_node(nodes, actual),
+        flow_satisfaction_type_node(nodes, formal),
+        substitutions, effect_substitutions, true, false, [], [])
 }
 
 fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {

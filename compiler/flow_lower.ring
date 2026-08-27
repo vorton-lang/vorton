@@ -48,6 +48,8 @@ use core_expr::{
     CoreConstructorRef, CorePlaceRef,
     CoreCallableContract,
     core_callable_reference, core_callable_origin,
+    core_callable_header_type, core_callable_type_formals,
+    core_callable_effect_formals,
     core_callable_parameter_slots, core_callable_mode,
     core_callable_semantic_contract,
     core_callable_effect_contract,
@@ -2160,6 +2162,8 @@ fn lower_core_body(
 fn lower_core_callable(value: CoreCallableContract) -> FlowCallable {
     make_flow_callable(
         core_callable_reference(value), core_callable_origin(value),
+        core_callable_header_type(value), core_callable_type_formals(value),
+        core_callable_effect_formals(value),
         core_callable_parameter_slots(value),
         core_callable_mode(value), core_callable_semantic_contract(value),
         core_callable_effect_contract(value),

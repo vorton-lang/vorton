@@ -12,10 +12,10 @@ use core_from_hir::{
     core_assembly_result_diagnostic_projection,
     core_assembly_result_with_program}
 use core_expr::{
-    CoreExecutableRedirect, make_core_executable_redirect,
+    CoreExecutableRedirect,
     core_executable_redirect_source, core_executable_redirect_target,
     CoreCallableContract, core_callable_reference, core_callable_mode,
-    core_callable_redirect_contract_same}
+    core_callable_redirect}
 use core_hir::{CoreProgram, core_program_callables, core_program_type_graph,
     redirect_core_program_executables}
 use ir_inventory::{ExecutableRef, executable_ref_is_named,
@@ -368,20 +368,24 @@ fn resolve_project_extern_redirects(
             panic("project extern forward: source is not contract-only")
         }
         let mut matching: List<ProjectRingFnCandidate> = []
+        let mut matching_redirects: List<CoreExecutableRedirect> = []
         for candidate in group.candidates {
             let target = project_core_callable(
                 callables, candidate.executable)
             if executable_contract_mode_same(
                     core_callable_mode(target),
-                    executable_contract_mode_concrete_body()) &&
-               core_callable_redirect_contract_same(source, target, graph) {
-                matching.push(candidate)
+                    executable_contract_mode_concrete_body()) {
+                match core_callable_redirect(source, target, graph) {
+                    some(redirect) => {
+                        matching.push(candidate)
+                        matching_redirects.push(redirect)
+                    },
+                    none => {}
+                }
             }
         }
         if matching.len() == 1 {
-            redirects.push(make_core_executable_redirect(
-                group.forward.executable,
-                matching.get(0).unwrap().executable))
+            redirects.push(matching_redirects.get(0).unwrap())
         } else if matching.len() > 1 {
             report_extern_forward_ambiguity(
                 phases.graph, group.forward, matching, error_format)

@@ -72,6 +72,8 @@ use ir_inventory::{
     binder_kind_dictionary_evidence_param, binder_kind_lambda_capture
 }
 use effect_contract::{
+    EffectParamRef, effect_param_owner, effect_param_ordinal,
+    effect_param_ref_same,
     CoreEffectAtom, CoreEffectSet, CoreEffectContract,
     CoreEffectSubstitution, CoreEffectInstantiation,
     make_core_fail_effect, make_core_mut_effect, make_core_unsafe_effect,
@@ -101,7 +103,7 @@ use resource_model::{
     flow_call_contract_parameter_types, flow_call_contract_parameter_roles,
     flow_call_contract_result_type, flow_call_contract_result_role,
     flow_call_contract_result_origin, flow_semantic_role_tag,
-    flow_call_contract_same, value_origin_same,
+    value_origin_same,
     FlowStorageContract, flow_storage_contract_tag
 }
 use core_type_source::{
@@ -112,10 +114,12 @@ use core_type_source::{
     flow_type_node_nominal, flow_type_node_nominal_fields,
     flow_type_node_parameter_count,
     flow_type_node_callable_effects,
+    flow_type_node_generic_param,
     flow_type_kind_tag, flow_type_kind_int, flow_type_kind_float,
     flow_type_kind_str, flow_type_kind_bool, flow_type_kind_unit,
     flow_type_kind_never, flow_type_kind_struct, flow_type_kind_enum,
     flow_type_kind_tuple, flow_type_kind_record, flow_type_kind_callable,
+    flow_type_kind_parameter,
     flow_nominal_field_identity, flow_nominal_field_type,
     flow_nominal_field_record_name,
     flow_field_identity_is_nominal, flow_field_identity_nominal,
@@ -127,8 +131,11 @@ use core_type_source::{
     flow_type_substitution_replacement,
     copy_flow_type_substitutions,
     flow_generic_param_owner, flow_generic_param_index,
-    flow_generic_param_arity,
+    flow_generic_param_arity, flow_generic_param_bounds,
+    flow_generic_param_fact_same, flow_generic_param_identity_same,
     flow_type_actual_satisfies_substituted_formal,
+    FlowEffectParamSubstitution, make_flow_effect_param_substitution,
+    flow_type_actual_matches_formal_exact,
     remap_flow_call_contract
 }
 
@@ -272,6 +279,9 @@ fn copy_handled_evidence_captures(
 pub struct CoreCallableContract {
     reference: ExecutableRef,
     origin: OriginRef,
+    header_type: CoreTypeRef,
+    type_formals: List<CoreTypeRef>,
+    effect_formals: List<EffectParamRef>,
     parameter_slots: List<SlotRef>,
     mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
@@ -284,13 +294,55 @@ fn copy_core_type_refs(values: List<CoreTypeRef>) -> List<CoreTypeRef> {
     for value in values { result.push(value) }
     result
 }
+fn copy_effect_param_refs(
+    values: List<EffectParamRef>
+) -> List<EffectParamRef> {
+    values.map(fn(value) { value })
+}
 pub fn make_core_callable_contract(
     reference: ExecutableRef, origin: OriginRef,
+    header_type: CoreTypeRef, type_formals: List<CoreTypeRef>,
+    effect_formals: List<EffectParamRef>,
     parameter_slots: List<SlotRef>, mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
     effects: CoreEffectContract,
     handled_evidence: List<CoreHandledEvidenceBinding>
 ) -> CoreCallableContract {
+    if core_type_ref_index(header_type) < 0 {
+        panic("CoreHIR: callable header type is invalid")
+    }
+    let mut type_formal_index = 0
+    while type_formal_index < type_formals.len() {
+        let formal = type_formals.get(type_formal_index).unwrap()
+        if core_type_ref_index(formal) < 0 {
+            panic("CoreHIR: callable type formal is invalid")
+        }
+        let mut right = type_formal_index + 1
+        while right < type_formals.len() {
+            if core_type_ref_same(formal, type_formals.get(right).unwrap()) {
+                panic("CoreHIR: callable repeats a type formal")
+            }
+            right = right + 1
+        }
+        type_formal_index = type_formal_index + 1
+    }
+    let mut effect_formal_index = 0
+    while effect_formal_index < effect_formals.len() {
+        let formal = effect_formals.get(effect_formal_index).unwrap()
+        if !origin_ref_same(effect_param_owner(formal), origin) ||
+           effect_param_ordinal(formal) != effect_formal_index {
+            panic("CoreHIR: callable effect formal owner/order differs")
+        }
+        let mut right = effect_formal_index + 1
+        while right < effect_formals.len() {
+            if effect_param_ref_same(
+                    formal, effect_formals.get(right).unwrap()) {
+                panic("CoreHIR: callable repeats an effect formal")
+            }
+            right = right + 1
+        }
+        effect_formal_index = effect_formal_index + 1
+    }
     let flow_parameters = flow_call_contract_parameter_types(semantic_contract)
     let concrete = executable_contract_mode_same(
         mode, executable_contract_mode_concrete_body())
@@ -327,6 +379,9 @@ pub fn make_core_callable_contract(
     }
     CoreCallableContract {
         reference: reference, origin: origin,
+        header_type: header_type,
+        type_formals: copy_core_type_refs(type_formals),
+        effect_formals: copy_effect_param_refs(effect_formals),
         parameter_slots: copy_slot_refs(parameter_slots),
         mode: mode,
         semantic_contract: semantic_contract,
@@ -340,6 +395,15 @@ pub fn core_callable_reference(value: CoreCallableContract) -> ExecutableRef {
 pub fn core_callable_origin(value: CoreCallableContract) -> OriginRef {
     value.origin
 }
+pub fn core_callable_header_type(
+    value: CoreCallableContract
+) -> CoreTypeRef { value.header_type }
+pub fn core_callable_type_formals(
+    value: CoreCallableContract
+) -> List<CoreTypeRef> { copy_core_type_refs(value.type_formals) }
+pub fn core_callable_effect_formals(
+    value: CoreCallableContract
+) -> List<EffectParamRef> { copy_effect_param_refs(value.effect_formals) }
 pub fn core_callable_parameter_types(
     value: CoreCallableContract
 ) -> List<CoreTypeRef> {
@@ -377,35 +441,188 @@ pub fn core_callable_handled_evidence(
     copy_handled_evidence_bindings(value.handled_evidence)
 }
 
-pub fn core_callable_redirect_contract_same(
-    source: CoreCallableContract, target: CoreCallableContract,
-    graph: CoreTypeGraph
+pub struct CoreExecutableRedirect {
+    source: ExecutableRef,
+    target: ExecutableRef,
+    type_formals: List<(CoreTypeRef, CoreTypeRef)>,
+    effect_formals: List<(EffectParamRef, EffectParamRef)>
+}
+fn make_core_executable_redirect(
+    source: ExecutableRef, target: ExecutableRef,
+    type_formals: List<(CoreTypeRef, CoreTypeRef)>,
+    effect_formals: List<(EffectParamRef, EffectParamRef)>
+) -> CoreExecutableRedirect {
+    if !executable_ref_is_named(source) ||
+       !executable_ref_is_named(target) ||
+       executable_ref_same(source, target) {
+        panic("CoreHIR: executable redirect is invalid")
+    }
+    let mut type_index = 0
+    while type_index < type_formals.len() {
+        let left = type_formals.get(type_index).unwrap()
+        if core_type_ref_index(left.0) < 0 ||
+           core_type_ref_index(left.1) < 0 {
+            panic("CoreHIR: executable redirect has an invalid type formal")
+        }
+        let mut right_index = type_index + 1
+        while right_index < type_formals.len() {
+            let right = type_formals.get(right_index).unwrap()
+            if core_type_ref_same(left.0, right.0) ||
+               core_type_ref_same(left.1, right.1) {
+                panic("CoreHIR: executable redirect type mapping is not bijective")
+            }
+            right_index = right_index + 1
+        }
+        type_index = type_index + 1
+    }
+    let mut effect_index = 0
+    while effect_index < effect_formals.len() {
+        let left = effect_formals.get(effect_index).unwrap()
+        let mut right_index = effect_index + 1
+        while right_index < effect_formals.len() {
+            let right = effect_formals.get(right_index).unwrap()
+            if effect_param_ref_same(left.0, right.0) ||
+               effect_param_ref_same(left.1, right.1) {
+                panic("CoreHIR: executable redirect effect mapping is not bijective")
+            }
+            right_index = right_index + 1
+        }
+        effect_index = effect_index + 1
+    }
+    CoreExecutableRedirect {
+        source: source, target: target,
+        type_formals: type_formals.map(fn(pair) { (pair.0, pair.1) }),
+        effect_formals: effect_formals.map(fn(pair) { (pair.0, pair.1) })
+    }
+}
+pub fn core_executable_redirect_source(
+    value: CoreExecutableRedirect
+) -> ExecutableRef { value.source }
+pub fn core_executable_redirect_target(
+    value: CoreExecutableRedirect
+) -> ExecutableRef { value.target }
+pub fn copy_core_executable_redirects(
+    values: List<CoreExecutableRedirect>
+) -> List<CoreExecutableRedirect> {
+    values.map(fn(value) {
+        make_core_executable_redirect(
+            value.source, value.target,
+            value.type_formals, value.effect_formals)
+    })
+}
+
+fn callable_redirect_semantic_shell_same(
+    source: CoreCallableContract, target: CoreCallableContract
 ) -> Bool {
-    if !flow_call_contract_same(
-            source.semantic_contract, target.semantic_contract) ||
-       !core_effect_contract_same(source.effects, target.effects) ||
-       source.handled_evidence.len() != target.handled_evidence.len() {
+    let source_roles = flow_call_contract_parameter_roles(
+        source.semantic_contract)
+    let target_roles = flow_call_contract_parameter_roles(
+        target.semantic_contract)
+    if source_roles.len() != target_roles.len() ||
+       flow_semantic_role_tag(flow_call_contract_result_role(
+            source.semantic_contract)) !=
+       flow_semantic_role_tag(flow_call_contract_result_role(
+            target.semantic_contract)) ||
+       !value_origin_same(
+            flow_call_contract_result_origin(source.semantic_contract),
+            flow_call_contract_result_origin(target.semantic_contract)) {
         return false
     }
-    for ty in core_callable_parameter_types(source) {
-        let _ = core_type_graph_node(graph, ty)
-    }
-    let _ = core_type_graph_node(graph, core_callable_result_type(source))
     let mut index = 0
-    while index < source.handled_evidence.len() {
-        let left = source.handled_evidence.get(index).unwrap()
-        let right = target.handled_evidence.get(index).unwrap()
+    while index < source_roles.len() {
+        if flow_semantic_role_tag(source_roles.get(index).unwrap()) !=
+           flow_semantic_role_tag(target_roles.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+pub fn core_callable_redirect(
+    source: CoreCallableContract, target: CoreCallableContract,
+    graph: CoreTypeGraph
+) -> CoreExecutableRedirect? {
+    if source.type_formals.len() != target.type_formals.len() ||
+       source.effect_formals.len() != target.effect_formals.len() ||
+       source.handled_evidence.len() != target.handled_evidence.len() ||
+       !callable_redirect_semantic_shell_same(source, target) ||
+       !executable_ref_is_named(source.reference) ||
+       !executable_ref_is_named(target.reference) {
+        return none
+    }
+    let source_owner = executable_ref_named_symbol(source.reference)
+    let target_owner = executable_ref_named_symbol(target.reference)
+    let mut type_pairs: List<(CoreTypeRef, CoreTypeRef)> = []
+    let mut type_substitutions: List<FlowTypeSubstitution> = []
+    let mut type_index = 0
+    while type_index < source.type_formals.len() {
+        let source_formal = source.type_formals.get(type_index).unwrap()
+        let target_formal = target.type_formals.get(type_index).unwrap()
+        let source_node = core_type_graph_node(graph, source_formal)
+        let target_node = core_type_graph_node(graph, target_formal)
+        if flow_type_kind_tag(flow_type_node_kind(source_node)) !=
+                flow_type_kind_tag(flow_type_kind_parameter()) ||
+           flow_type_kind_tag(flow_type_node_kind(target_node)) !=
+                flow_type_kind_tag(flow_type_kind_parameter()) {
+            return none
+        }
+        let source_fact = flow_type_node_generic_param(source_node)
+        let target_fact = flow_type_node_generic_param(target_node)
+        if !symbol_ref_same(flow_generic_param_owner(source_fact), source_owner) ||
+           !symbol_ref_same(flow_generic_param_owner(target_fact), target_owner) ||
+           flow_generic_param_index(source_fact) != type_index ||
+           flow_generic_param_index(target_fact) != type_index ||
+           flow_generic_param_arity(source_fact) != source.type_formals.len() ||
+           flow_generic_param_arity(target_fact) != target.type_formals.len() ||
+           flow_generic_param_bounds(source_fact).len() != 0 ||
+           flow_generic_param_bounds(target_fact).len() != 0 {
+            return none
+        }
+        type_pairs.push((source_formal, target_formal))
+        type_substitutions.push(make_flow_type_substitution(
+            target_fact, source_formal))
+        type_index = type_index + 1
+    }
+    let mut effect_pairs: List<(EffectParamRef, EffectParamRef)> = []
+    let mut effect_substitutions: List<FlowEffectParamSubstitution> = []
+    let mut effect_index = 0
+    while effect_index < source.effect_formals.len() {
+        let source_formal = source.effect_formals.get(effect_index).unwrap()
+        let target_formal = target.effect_formals.get(effect_index).unwrap()
+        if !origin_ref_same(effect_param_owner(source_formal), source.origin) ||
+           !origin_ref_same(effect_param_owner(target_formal), target.origin) ||
+           effect_param_ordinal(source_formal) != effect_index ||
+           effect_param_ordinal(target_formal) != effect_index {
+            return none
+        }
+        effect_pairs.push((source_formal, target_formal))
+        effect_substitutions.push(make_flow_effect_param_substitution(
+            target_formal, source_formal))
+        effect_index = effect_index + 1
+    }
+    if !flow_type_actual_matches_formal_exact(
+            core_type_graph_nodes(graph), source.header_type,
+            target.header_type, type_substitutions,
+            effect_substitutions) {
+        return none
+    }
+    let mut handled_index = 0
+    while handled_index < source.handled_evidence.len() {
+        let left = source.handled_evidence.get(handled_index).unwrap()
+        let right = target.handled_evidence.get(handled_index).unwrap()
         if !handled_effect_ref_same(
                 core_handled_evidence_requirement(left),
                 core_handled_evidence_requirement(right)) ||
            !core_type_ref_same(
                 core_handled_evidence_type(left),
                 core_handled_evidence_type(right)) {
-            return false
+            return none
         }
-        index = index + 1
+        handled_index = handled_index + 1
     }
-    true
+    some(make_core_executable_redirect(
+        source.reference, target.reference, type_pairs, effect_pairs))
 }
 
 fn copy_core_callable_contracts(
@@ -415,6 +632,7 @@ fn copy_core_callable_contracts(
     for value in values {
         result.push(make_core_callable_contract(
             value.reference, value.origin,
+            value.header_type, value.type_formals, value.effect_formals,
             value.parameter_slots, value.mode,
             value.semantic_contract, value.effects, value.handled_evidence))
     }
@@ -427,47 +645,27 @@ pub fn copy_core_callables(
 // ============================================================
 // Exact callable/evidence/member identities
 // ============================================================
-
-pub struct CoreExecutableRedirect {
-    source: ExecutableRef,
-    target: ExecutableRef
-}
-pub fn make_core_executable_redirect(
-    source: ExecutableRef, target: ExecutableRef
-) -> CoreExecutableRedirect {
-    if !executable_ref_is_named(source) ||
-       !executable_ref_is_named(target) ||
-       executable_ref_same(source, target) {
-        panic("CoreHIR: executable redirect is invalid")
-    }
-    CoreExecutableRedirect { source: source, target: target }
-}
-pub fn core_executable_redirect_source(
-    value: CoreExecutableRedirect
-) -> ExecutableRef { value.source }
-pub fn core_executable_redirect_target(
-    value: CoreExecutableRedirect
-) -> ExecutableRef { value.target }
-pub fn copy_core_executable_redirects(
-    values: List<CoreExecutableRedirect>
-) -> List<CoreExecutableRedirect> {
-    values.map(fn(value) {
-        make_core_executable_redirect(value.source, value.target)
-    })
-}
-fn redirected_core_executable(
+fn core_executable_redirect_for(
     value: ExecutableRef, redirects: List<CoreExecutableRedirect>
-) -> ExecutableRef {
-    let mut found: ExecutableRef? = none
+) -> CoreExecutableRedirect? {
+    let mut found: CoreExecutableRedirect? = none
     for redirect in redirects {
         if executable_ref_same(redirect.source, value) {
             if found.is_some() {
                 panic("CoreHIR: executable redirect source repeats")
             }
-            found = some(redirect.target)
+            found = some(redirect)
         }
     }
-    match found { some(target) => target, none => value }
+    found
+}
+fn redirected_core_executable(
+    value: ExecutableRef, redirects: List<CoreExecutableRedirect>
+) -> ExecutableRef {
+    match core_executable_redirect_for(value, redirects) {
+        some(redirect) => redirect.target,
+        none => value
+    }
 }
 
 const CORE_CALLEE_DIRECT: Int = 0
@@ -3057,21 +3255,24 @@ pub fn core_body_origins(value: CoreBody) -> List<OriginRef> {
 struct CoreRewriteContext {
     mapping: List<Int>?,
     module_key: Str?,
-    redirects: List<CoreExecutableRedirect>
+    redirects: List<CoreExecutableRedirect>,
+    redirect_graph: CoreTypeGraph?
 }
 fn core_type_rewrite_context(
     mapping: List<Int>, module_key: Str
 ) -> CoreRewriteContext {
     CoreRewriteContext {
-        mapping: some(mapping), module_key: some(module_key), redirects: []
+        mapping: some(mapping), module_key: some(module_key), redirects: [],
+        redirect_graph: none
     }
 }
 fn core_executable_rewrite_context(
-    redirects: List<CoreExecutableRedirect>
+    redirects: List<CoreExecutableRedirect>, graph: CoreTypeGraph
 ) -> CoreRewriteContext {
     CoreRewriteContext {
         mapping: none, module_key: none,
-        redirects: copy_core_executable_redirects(redirects)
+        redirects: copy_core_executable_redirects(redirects),
+        redirect_graph: some(graph)
     }
 }
 fn remap_core_type_reference(
@@ -3139,20 +3340,131 @@ pub fn remap_core_effect_contract_types(
         value, core_type_rewrite_context(mapping, module_key))
 }
 
+fn redirected_core_type_reference(
+    value: CoreTypeRef, redirect: CoreExecutableRedirect
+) -> CoreTypeRef {
+    let mut found: CoreTypeRef? = none
+    for pair in redirect.type_formals {
+        if core_type_ref_same(pair.0, value) {
+            if found.is_some() {
+                panic("CoreHIR: redirect type formal source repeats")
+            }
+            found = some(pair.1)
+        }
+    }
+    match found { some(target) => target, none => value }
+}
+
+fn redirected_effect_parameter(
+    value: EffectParamRef, redirect: CoreExecutableRedirect
+) -> EffectParamRef {
+    let mut found: EffectParamRef? = none
+    for pair in redirect.effect_formals {
+        if effect_param_ref_same(pair.0, value) {
+            if found.is_some() {
+                panic("CoreHIR: redirect effect formal source repeats")
+            }
+            found = some(pair.1)
+        }
+    }
+    match found { some(target) => target, none => value }
+}
+
+fn redirected_core_effect_atom(
+    value: CoreEffectAtom, redirect: CoreExecutableRedirect
+) -> CoreEffectAtom {
+    let kind = core_effect_atom_kind_tag(value)
+    if kind == 0 {
+        make_core_fail_effect(redirected_core_type_reference(
+            core_effect_atom_type(value), redirect))
+    } else if kind == 1 {
+        make_core_mut_effect(redirected_core_type_reference(
+            core_effect_atom_type(value), redirect))
+    } else if kind == 2 {
+        make_core_unsafe_effect()
+    } else if kind == 3 {
+        make_core_handled_effect(
+            core_effect_atom_handled_ref(value),
+            core_effect_atom_type_arguments(value).map(fn(ty) {
+                redirected_core_type_reference(ty, redirect)
+            }))
+    } else if kind == 4 {
+        make_core_system_effect(core_effect_atom_system_ref(value))
+    } else {
+        panic("CoreHIR: unknown redirected effect atom")
+    }
+}
+
+fn redirected_core_effect_contract(
+    value: CoreEffectContract, redirect: CoreExecutableRedirect
+) -> CoreEffectContract {
+    make_core_effect_contract(
+        make_core_effect_set(core_effect_set_atoms(
+            core_effect_contract_exact(value)).map(fn(atom) {
+                redirected_core_effect_atom(atom, redirect)
+            })),
+        core_effect_contract_parameter(value).map(fn(parameter) {
+            redirected_effect_parameter(parameter, redirect)
+        }))
+}
+
+fn redirected_type_substitution_parameter(
+    value: FlowTypeSubstitution, redirect: CoreExecutableRedirect,
+    graph: CoreTypeGraph
+) -> FlowTypeSubstitution {
+    let source_parameter = flow_type_substitution_parameter(value)
+    let mut found: FlowTypeSubstitution? = none
+    for pair in redirect.type_formals {
+        let source_node = core_type_graph_node(graph, pair.0)
+        let target_node = core_type_graph_node(graph, pair.1)
+        let source_fact = flow_type_node_generic_param(source_node)
+        if flow_generic_param_identity_same(source_fact, source_parameter) {
+            if found.is_some() {
+                panic("CoreHIR: redirect type substitution maps twice")
+            }
+            found = some(make_flow_type_substitution(
+                flow_type_node_generic_param(target_node),
+                flow_type_substitution_replacement(value)))
+        }
+    }
+    match found {
+        some(result) => result,
+        none => panic("CoreHIR: redirect type substitution lacks declared formal")
+    }
+}
+
 fn remap_core_effect_instantiation(
-    value: CoreEffectInstantiation, ctx: CoreRewriteContext
+    value: CoreEffectInstantiation, ctx: CoreRewriteContext,
+    redirect: CoreExecutableRedirect?
 ) -> CoreEffectInstantiation {
-    make_core_effect_instantiation(
-        remap_core_effect_contract(
-            core_effect_instantiation_source(value), ctx),
-        core_effect_instantiation_substitutions(value).map(fn(item) {
-            make_core_effect_substitution(
-                core_effect_substitution_parameter(item),
-                remap_core_effect_contract(
-                    core_effect_substitution_replacement(item), ctx))
-        }),
-        remap_core_effect_contract(
-            core_effect_instantiation_result(value), ctx))
+    match (ctx.mapping, ctx.module_key, redirect) {
+        (some(_), some(_), none) => make_core_effect_instantiation(
+            remap_core_effect_contract(
+                core_effect_instantiation_source(value), ctx),
+            core_effect_instantiation_substitutions(value).map(fn(item) {
+                make_core_effect_substitution(
+                    core_effect_substitution_parameter(item),
+                    remap_core_effect_contract(
+                        core_effect_substitution_replacement(item), ctx))
+            }),
+            remap_core_effect_contract(
+                core_effect_instantiation_result(value), ctx)),
+        (none, none, some(exact)) => make_core_effect_instantiation(
+            redirected_core_effect_contract(
+                core_effect_instantiation_source(value), exact),
+            core_effect_instantiation_substitutions(value).map(fn(item) {
+                make_core_effect_substitution(
+                    redirected_effect_parameter(
+                        core_effect_substitution_parameter(item), exact),
+                    core_effect_substitution_replacement(item))
+            }),
+            core_effect_instantiation_result(value)),
+        (none, none, none) => make_core_effect_instantiation(
+            core_effect_instantiation_source(value),
+            core_effect_instantiation_substitutions(value),
+            core_effect_instantiation_result(value)),
+        _ => panic("CoreHIR: effect-instantiation rewrite context is partial")
+    }
 }
 
 fn remap_handled_binding(
@@ -3186,22 +3498,43 @@ fn remap_core_callee(
         (none, none) => value.contract,
         _ => panic("CoreHIR: callee rewrite context is partial")
     }
-    let effects = remap_core_effect_instantiation(value.effects, ctx)
-    let substitutions = value.type_substitutions.map(fn(item) {
-        make_flow_type_substitution(
-            flow_type_substitution_parameter(item),
-            remap_core_type_reference(
-                flow_type_substitution_replacement(item), ctx))
-    })
     if value.kind == CORE_CALLEE_DIRECT {
+        let redirect = core_executable_redirect_for(
+            value.direct.unwrap(), ctx.redirects)
+        let effects = remap_core_effect_instantiation(
+            value.effects, ctx, redirect)
+        let substitutions = match redirect {
+            some(exact) => {
+                let graph = match ctx.redirect_graph {
+                    some(value) => value,
+                    none => panic("CoreHIR: redirect type graph is absent")
+                }
+                value.type_substitutions.map(fn(item) {
+                    redirected_type_substitution_parameter(
+                        item, exact, graph)
+                })
+            },
+            none => value.type_substitutions.map(fn(item) {
+                make_flow_type_substitution(
+                    flow_type_substitution_parameter(item),
+                    remap_core_type_reference(
+                        flow_type_substitution_replacement(item), ctx))
+            })
+        }
         make_core_direct_callee(
-            redirected_core_executable(
-                value.direct.unwrap(), ctx.redirects),
+            match redirect {
+                some(exact) => exact.target,
+                none => value.direct.unwrap()
+            },
             contract, substitutions, effects)
     } else if value.kind == CORE_CALLEE_LOCAL {
-        make_core_local_callee(value.local.unwrap(), contract, effects)
+        make_core_local_callee(
+            value.local.unwrap(), contract,
+            remap_core_effect_instantiation(value.effects, ctx, none))
     } else if value.kind == CORE_CALLEE_DYNAMIC {
-        make_core_dynamic_callee(value.dynamic.unwrap(), contract, effects)
+        make_core_dynamic_callee(
+            value.dynamic.unwrap(), contract,
+            remap_core_effect_instantiation(value.effects, ctx, none))
     } else {
         panic("CoreHIR: unknown callee form during type remap")
     }
@@ -3470,6 +3803,11 @@ pub fn remap_core_callable_types(
     let ctx = core_type_rewrite_context(mapping, module_key)
     make_core_callable_contract(
         value.reference, value.origin,
+        remap_core_type_reference(value.header_type, ctx),
+        value.type_formals.map(fn(formal) {
+            remap_core_type_reference(formal, ctx)
+        }),
+        value.effect_formals,
         value.parameter_slots,
         value.mode,
         remap_flow_call_contract(value.semantic_contract, mapping, module_key),
@@ -3511,9 +3849,10 @@ pub fn remap_core_body_types(
 }
 
 pub fn redirect_core_body_executables(
-    value: CoreBody, redirects: List<CoreExecutableRedirect>
+    value: CoreBody, redirects: List<CoreExecutableRedirect>,
+    graph: CoreTypeGraph
 ) -> CoreBody {
-    let ctx = core_executable_rewrite_context(redirects)
+    let ctx = core_executable_rewrite_context(redirects, graph)
     make_core_body(
         value.reference, value.origin, value.binders, value.parameter_slots,
         value.result_type, remap_core_block_types(value.body, ctx))
@@ -3584,11 +3923,72 @@ pub fn validate_core_callable_contracts(
     while left_index < values.len() {
         let left = values.get(left_index).unwrap()
         validate_origin(left.origin, left.reference)
+        let header = core_type_graph_node(graph, left.header_type)
+        if flow_type_kind_tag(flow_type_node_kind(header)) !=
+                flow_type_kind_tag(flow_type_kind_callable()) {
+            panic("CoreHIR: callable header is not a function type")
+        }
+        let header_children = flow_type_node_children(header)
+        let parameter_types = core_callable_parameter_types(left)
+        if flow_type_node_parameter_count(header) != parameter_types.len() ||
+           header_children.len() != parameter_types.len() + 1 {
+            panic("CoreHIR: callable header arity differs")
+        }
+        let mut header_index = 0
+        while header_index < parameter_types.len() {
+            if !core_type_ref_same(
+                    header_children.get(header_index).unwrap(),
+                    parameter_types.get(header_index).unwrap()) {
+                panic("CoreHIR: callable header parameter differs")
+            }
+            header_index = header_index + 1
+        }
+        if !core_type_ref_same(
+                header_children.get(parameter_types.len()).unwrap(),
+                core_callable_result_type(left)) ||
+           !core_effect_contract_same(
+                flow_type_node_callable_effects(header), left.effects) {
+            panic("CoreHIR: callable header result/effects differ")
+        }
+        let owner = if left.type_formals.len() == 0 {
+            none
+        } else if executable_ref_is_named(left.reference) {
+            some(executable_ref_named_symbol(left.reference))
+        } else {
+            panic("CoreHIR: anonymous callable declares type formals")
+        }
+        let mut formal_index = 0
+        while formal_index < left.type_formals.len() {
+            let node = core_type_graph_node(
+                graph, left.type_formals.get(formal_index).unwrap())
+            if flow_type_kind_tag(flow_type_node_kind(node)) !=
+                    flow_type_kind_tag(flow_type_kind_parameter()) {
+                panic("CoreHIR: callable type formal is not a parameter node")
+            }
+            let fact = flow_type_node_generic_param(node)
+            if !symbol_ref_same(
+                    flow_generic_param_owner(fact), owner.unwrap()) ||
+               flow_generic_param_index(fact) != formal_index ||
+               flow_generic_param_arity(fact) != left.type_formals.len() {
+                panic("CoreHIR: callable type formal owner/order/arity differs")
+            }
+            let _ = flow_generic_param_bounds(fact)
+            formal_index = formal_index + 1
+        }
+        let mut effect_formal_index = 0
+        while effect_formal_index < left.effect_formals.len() {
+            let formal = left.effect_formals.get(effect_formal_index).unwrap()
+            if !origin_ref_same(effect_param_owner(formal), left.origin) ||
+               effect_param_ordinal(formal) != effect_formal_index {
+                panic("CoreHIR: callable effect formal owner/order differs")
+            }
+            effect_formal_index = effect_formal_index + 1
+        }
         let _ = core_type_graph_node(graph, core_callable_result_type(left))
         validate_effect_set(
             core_effect_contract_exact(left.effects),
             core_type_graph_count(graph))
-        for parameter in core_callable_parameter_types(left) {
+        for parameter in parameter_types {
             let _ = core_type_graph_node(graph, parameter)
         }
         for binding in left.handled_evidence {
@@ -3716,26 +4116,6 @@ fn validate_call_signature(
        callee.type_substitutions.len() != 0 {
         panic("CoreHIR: non-direct call carries declaration type substitutions")
     }
-    if callee.type_substitutions.len() != 0 {
-        let target = core_callee_direct(callee)
-        if !executable_ref_is_named(target) {
-            panic("CoreHIR: generic direct target is not named")
-        }
-        let owner = executable_ref_named_symbol(target)
-        let arity = callee.type_substitutions.len()
-        let mut ordinal = 0
-        for substitution in callee.type_substitutions {
-            let parameter = flow_type_substitution_parameter(substitution)
-            if !symbol_ref_same(flow_generic_param_owner(parameter), owner) ||
-               flow_generic_param_index(parameter) != ordinal ||
-               flow_generic_param_arity(parameter) != arity {
-                panic("CoreHIR: direct type substitution identity/order differs")
-            }
-            let _ = core_type_graph_node(
-                graph, flow_type_substitution_replacement(substitution))
-            ordinal = ordinal + 1
-        }
-    }
     let flow_parameters = flow_call_contract_parameter_types(callee.contract)
     if arguments.len() != flow_parameters.len() {
         panic("CoreHIR: call argument arity differs from exact contract")
@@ -3759,6 +4139,9 @@ fn validate_call_signature(
         "CoreHIR: call result type differs from exact contract")
     if callee.kind == CORE_CALLEE_DIRECT {
         let candidate = core_callable_for(callables, core_callee_direct(callee))
+        validate_type_substitutions_for_callable(
+            callee.type_substitutions, candidate, graph,
+            "CoreHIR: direct type substitution identity/order differs")
         if !core_call_contract_actual_satisfies_formal(
                 callee.contract, candidate.semantic_contract,
                 callee.type_substitutions, graph) {
@@ -4350,6 +4733,55 @@ fn validate_handled_capture_targets(
             panic("CoreHIR: handled capture target is absent from callable")
         }
         let _ = core_type_graph_node(graph, capture.aggregate_type)
+    }
+}
+
+fn validate_type_substitutions_for_callable(
+    substitutions: List<FlowTypeSubstitution>,
+    callable: CoreCallableContract, graph: CoreTypeGraph,
+    message: Str
+) {
+    if callable.type_formals.len() == 0 {
+        if substitutions.len() == 0 { return }
+        if !executable_ref_is_named(callable.reference) { panic(message) }
+        let owner = executable_ref_named_symbol(callable.reference)
+        let mut ordinal = 0
+        for substitution in substitutions {
+            let parameter = flow_type_substitution_parameter(substitution)
+            if !symbol_ref_same(flow_generic_param_owner(parameter), owner) ||
+               flow_generic_param_index(parameter) != ordinal ||
+               flow_generic_param_arity(parameter) != substitutions.len() {
+                panic(message)
+            }
+            let _ = core_type_graph_node(
+                graph, flow_type_substitution_replacement(substitution))
+            ordinal = ordinal + 1
+        }
+        return
+    }
+    let mut prior_index = 0 - 1
+    for substitution in substitutions {
+        let parameter = flow_type_substitution_parameter(substitution)
+        let mut found_index: Int? = none
+        let mut index = 0
+        while index < callable.type_formals.len() {
+            let node = core_type_graph_node(
+                graph, callable.type_formals.get(index).unwrap())
+            let declared = flow_type_node_generic_param(node)
+            if flow_generic_param_fact_same(parameter, declared) {
+                if found_index.is_some() { panic(message) }
+                found_index = some(index)
+            }
+            index = index + 1
+        }
+        let exact_index = match found_index {
+            some(value) => value,
+            none => panic(message)
+        }
+        if exact_index <= prior_index { panic(message) }
+        let _ = core_type_graph_node(
+            graph, flow_type_substitution_replacement(substitution))
+        prior_index = exact_index
     }
 }
 

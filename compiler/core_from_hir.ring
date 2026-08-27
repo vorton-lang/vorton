@@ -15,7 +15,8 @@ use env::{
     registered_trait_contract_dict_obligations,
     registered_trait_assoc_member, registered_trait_assoc_type,
     registered_trait_assoc_default, registered_trait_assoc_bounds,
-    registered_trait_method_mutabilities, apply_subst_map, find_impl
+    registered_trait_method_mutabilities, apply_subst_map, find_impl,
+    ordered_effect_tail_vars
 }
 use builtins::{
     BuiltinMethodContractFact, builtin_method_contract_facts,
@@ -245,6 +246,7 @@ use core_type_source::{
     make_path_flow_field_identity,
     flow_type_node_reference, flow_type_node_kind,
     flow_type_node_callable_effects,
+    flow_type_node_generic_param,
     flow_type_kind_parameter,
     flow_type_node_nominal_fields,
     flow_nominal_field_identity, flow_nominal_field_type,
@@ -1348,6 +1350,17 @@ fn producer_record_match_arm(
 fn producer_record_handler(
     mut producer: ClosedCoreProducer, handler: HEffectHandler
 ) {
+    let mut header_parameters = handler.params.map(fn(param) { param.ty })
+    match handler.resume_binding {
+        some(binding) => header_parameters.push(binding.ty),
+        none => {}
+    }
+    let _ = producer_record_type(
+        producer, Type::FnType {
+            params: header_parameters,
+            return_type: hexpr_type(handler.body),
+            effects: hexpr_effects(handler.body)
+        }, some(executable_origin(handler.executable_ref)))
     for param in handler.params {
         producer_record_param(producer, handler.executable_ref, param)
     }
@@ -1653,15 +1666,34 @@ fn producer_record_callable(
     }
 }
 
+fn producer_record_declared_type_formals(
+    mut producer: ClosedCoreProducer, owner: ExecutableRef,
+    values: List<HTypeParam>
+) {
+    for value in values {
+        let _ = producer_record_type(
+            producer,
+            Type::TypeVar {
+                id: value.type_var_id,
+                name: some(value.source.name)
+            },
+            some(executable_origin(owner)))
+    }
+}
+
 fn producer_record_decls(
     mut producer: ClosedCoreProducer, decls: List<HDecl>
 ) {
     for decl in decls {
         match decl {
-            HDecl::Fn { executable_ref, params, return_type, effects,
-                        body, .. } => producer_record_callable(
-                producer, executable_ref, params, return_type, effects,
-                some(body)),
+            HDecl::Fn { executable_ref, type_params, params,
+                        return_type, effects, body, .. } => {
+                producer_record_declared_type_formals(
+                    producer, executable_ref, type_params)
+                producer_record_callable(
+                    producer, executable_ref, params, return_type, effects,
+                    some(body))
+            },
             HDecl::Struct { fields, .. } => {
                 for field in fields {
                     let _ = producer_record_type(
@@ -1762,9 +1794,14 @@ fn producer_record_decls(
                         method.return_type, method.effects, method.body)
                 }
             },
-            HDecl::ExternFn { executable_ref, params, return_type, effects,
-                              .. } => producer_record_callable(
-                producer, executable_ref, params, return_type, effects, none),
+            HDecl::ExternFn { executable_ref, type_params, params,
+                              return_type, effects, .. } => {
+                producer_record_declared_type_formals(
+                    producer, executable_ref, type_params)
+                producer_record_callable(
+                    producer, executable_ref, params, return_type, effects,
+                    none)
+            },
             // Type aliases are fully expanded by type checking. The declaration
             // has no executable, Core type identity, or reachable fact of its
             // own; only expanded use-site Types enter this census.
@@ -3821,12 +3858,54 @@ fn flow_contract_from_resource_fact(
         if aliases.len() == 0 { make_fresh_flow_value_origin() }
         else { make_aliasing_flow_value_origin(aliases) })
 }
+fn final_callable_header(
+    parameter_types: List<Type>, result: Type, effects: EffectRow
+) -> Type {
+    Type::FnType {
+        params: parameter_types, return_type: result, effects: effects
+    }
+}
+fn declared_callable_type_formals(
+    facts: FrozenCoreAssemblyFacts, reference: ExecutableRef,
+    values: List<HTypeParam>
+) -> List<CoreTypeRef> {
+    if values.len() != 0 && !executable_ref_is_named(reference) {
+        panic("Core assembly: anonymous callable declares type formals")
+    }
+    values.map(fn(value) {
+        type_fact_for(facts.type_sources, Type::TypeVar {
+            id: value.type_var_id,
+            name: some(value.source.name)
+        }, facts.module_key)
+    })
+}
+fn callable_owned_effect_formals(
+    facts: FrozenCoreAssemblyFacts, reference: ExecutableRef,
+    header: Type
+) -> List<EffectParamRef> {
+    let owner = executable_origin(reference)
+    let mut result: List<EffectParamRef> = []
+    for raw_tail in ordered_effect_tail_vars(header) {
+        let parameter = effect_parameter_from_sources(
+            facts.effect_parameters, raw_tail)
+        if origin_ref_same(effect_param_owner(parameter), owner) {
+            if effect_param_ordinal(parameter) != result.len() {
+                panic("Core assembly: callable effect formal order differs")
+            }
+            result.push(parameter)
+        }
+    }
+    result
+}
 fn callable_contract(
     facts: FrozenCoreAssemblyFacts, reference: ExecutableRef,
-    params: List<HParam>, result: Type, effects: EffectRow,
+    type_params: List<HTypeParam>, params: List<HParam>,
+    result: Type, effects: EffectRow,
     mode: ExecutableContractMode,
     handled_evidence: List<HandledEvidenceRef>
 ) -> CoreCallableContract {
+    let header = final_callable_header(
+        params.map(fn(param) { param.ty }), result, effects)
     let parameter_types = params.map(fn(p) {
         type_fact_for(facts.type_sources, p.ty, facts.module_key)
     })
@@ -3838,6 +3917,9 @@ fn callable_contract(
                 none => panic("Core assembly: callable parameter lacks DefId") }) })
     } else { [] }
     make_core_callable_contract(reference, executable_origin(reference),
+        type_fact_for(facts.type_sources, header, facts.module_key),
+        declared_callable_type_formals(facts, reference, type_params),
+        callable_owned_effect_formals(facts, reference, header),
         slots, mode,
         make_module_flow_call_contract(facts.module_key,
             parameter_types.map(fn(t) { make_core_type_ref(core_type_ref_index(t)) }),
@@ -3889,6 +3971,7 @@ fn add_builtin_method_contracts(
         })
         let result_type = type_fact_for(
             facts.type_sources, result, facts.module_key)
+        let header = final_callable_header(params, result, effects)
         let reference = make_named_executable_ref(
             intrinsic_ref_symbol(intrinsic))
         assembly.entries.push(make_executable_entry(
@@ -3897,6 +3980,8 @@ fn add_builtin_method_contracts(
         assembly.callables.push(make_core_callable_contract(
             reference,
             make_symbol_origin_ref(intrinsic_ref_symbol(intrinsic)),
+            type_fact_for(facts.type_sources, header, facts.module_key),
+            [], callable_owned_effect_formals(facts, reference, header),
             [], executable_contract_mode_contract_only(),
             flow_contract_from_resource_fact(
                 facts.module_key, parameter_types, result_type,
@@ -3925,8 +4010,12 @@ fn typed_callable_contract(
     let result_type = type_fact_for(
         facts.type_sources, result, facts.module_key)
     let roles = parameter_roles_from_mutabilities(parameter_mutabilities)
+    let header = final_callable_header(
+        parameter_types_in, result, effects)
     make_core_callable_contract(
         reference, executable_origin(reference),
+        type_fact_for(facts.type_sources, header, facts.module_key),
+        [], callable_owned_effect_formals(facts, reference, header),
         if executable_contract_mode_same(
                 mode, executable_contract_mode_concrete_body()) {
             parameter_slots
@@ -5147,7 +5236,8 @@ fn append_delegate_impl(
 fn add_executable_body(
     facts: FrozenCoreAssemblyFacts, parent: ExecutableParentRef,
     reference: ExecutableRef, kind: ExecutableKind,
-    params: List<HParam>, result_type: Type, effects: EffectRow,
+    type_params: List<HTypeParam>, params: List<HParam>,
+    result_type: Type, effects: EffectRow,
     body_expr: HExpr,
     handled_evidence: List<HandledEvidenceRef>,
     handled_captures: List<HandledEvidenceCapture>,
@@ -5158,7 +5248,7 @@ fn add_executable_body(
     assembly.entries.push(make_executable_entry(
         reference, parent, kind, make_concrete_body_contract(anchor)))
     let callable = callable_contract(
-        facts, reference, params, result_type, effects,
+        facts, reference, type_params, params, result_type, effects,
         executable_contract_mode_concrete_body(), handled_evidence)
     let entry_roles = flow_call_contract_parameter_roles(
         core_callable_semantic_contract(callable))
@@ -5202,7 +5292,8 @@ fn add_executable_body(
 fn add_contract_only(
     facts: FrozenCoreAssemblyFacts, parent: ExecutableParentRef,
     reference: ExecutableRef, kind: ExecutableKind,
-    params: List<HParam>, result_type: Type, effects: EffectRow,
+    type_params: List<HTypeParam>, params: List<HParam>,
+    result_type: Type, effects: EffectRow,
     handled_evidence: List<HandledEvidenceRef>,
     resource_contract: CallableResourceContractFact?,
     mut assembly: ModuleAssembly
@@ -5211,6 +5302,8 @@ fn add_contract_only(
         reference, parent, kind, make_contract_only()))
     assembly.callables.push(match resource_contract {
         some(resource) => {
+            let header = final_callable_header(
+                params.map(fn(param) { param.ty }), result_type, effects)
             let parameter_types = params.map(fn(param) {
                 type_fact_for(
                     facts.type_sources, param.ty, facts.module_key)
@@ -5219,6 +5312,11 @@ fn add_contract_only(
                 facts.type_sources, result_type, facts.module_key)
             make_core_callable_contract(
                 reference, executable_origin(reference),
+                type_fact_for(
+                    facts.type_sources, header, facts.module_key),
+                declared_callable_type_formals(
+                    facts, reference, type_params),
+                callable_owned_effect_formals(facts, reference, header),
                 [], executable_contract_mode_contract_only(),
                 flow_contract_from_resource_fact(
                     facts.module_key, parameter_types, result, resource),
@@ -5231,7 +5329,7 @@ fn add_contract_only(
                 }))
         },
         none => callable_contract(
-            facts, reference, params, result_type, effects,
+            facts, reference, type_params, params, result_type, effects,
             executable_contract_mode_contract_only(), handled_evidence)
     })
 }
@@ -5271,7 +5369,7 @@ fn scan_nested_expr(
                         captures, handled_evidence_bindings,
                         evidence_captures, .. } => {
             add_executable_body(facts, make_executable_parent(parent),
-                executable_ref, executable_kind_lambda(), params,
+                executable_ref, executable_kind_lambda(), [], params,
                 return_type, hexpr_effects(body), body,
                 handled_evidence_bindings,
                 evidence_captures, capture_slot_maps(captures), assembly)
@@ -5288,7 +5386,7 @@ fn scan_nested_expr(
                     none => {}
                 }
                 add_executable_body(facts, make_executable_parent(parent),
-                    handler.executable_ref, executable_kind_handler(), params,
+                    handler.executable_ref, executable_kind_handler(), [], params,
                     hexpr_type(handler.body), hexpr_effects(handler.body),
                     handler.body,
                     handler.handled_evidence_bindings,
@@ -5405,33 +5503,36 @@ fn assemble_decls(
 ) {
     for decl in decls {
         match decl {
-            HDecl::Fn { executable_ref, impl_method_ref, params,
+            HDecl::Fn { executable_ref, impl_method_ref, type_params, params,
                 return_type, effects,
                 handled_evidence_bindings, body, .. } =>
                 add_executable_body(
                     facts, source_parent(module_body, executable_ref), executable_ref,
                     if impl_method_ref.is_some() { executable_kind_impl_method() }
                     else { executable_kind_fn() },
-                    params, return_type, effects, body,
+                    type_params, params, return_type, effects, body,
                     handled_evidence_bindings,
                     [], [], assembly),
             HDecl::Test { executable_ref, handled_evidence_bindings,
                           body, .. } => add_executable_body(
                 facts, source_parent(module_body, executable_ref), executable_ref,
-                executable_kind_test(), [], hexpr_type(body),
+                executable_kind_test(), [], [], hexpr_type(body),
                 hexpr_effects(body), body,
                 handled_evidence_bindings, [], [], assembly),
             HDecl::Const { executable_ref, handled_evidence_bindings,
                            ty, init, .. } => add_executable_body(
                 facts, source_parent(module_body, executable_ref), executable_ref,
-                executable_kind_const_getter(), [], ty, hexpr_effects(init), init,
+                executable_kind_const_getter(), [], [], ty,
+                hexpr_effects(init), init,
                 handled_evidence_bindings, [], [], assembly),
-            HDecl::ExternFn { executable_ref, params, return_type, effects,
+            HDecl::ExternFn { executable_ref, type_params, params,
+                              return_type, effects,
                               resource_contract,
                               handled_evidence_bindings, .. } =>
                 add_contract_only(facts, source_parent(module_body, executable_ref),
                     executable_ref, executable_kind_extern_fn(),
-                    params, return_type, effects, handled_evidence_bindings,
+                    type_params, params, return_type, effects,
+                    handled_evidence_bindings,
                     some(resource_contract), assembly),
             HDecl::Trait { methods, .. } => {
                 for method in methods {
@@ -5442,14 +5543,14 @@ fn assemble_decls(
                     match method.body {
                         some(body) => add_executable_body(
                             facts, source_parent(module_body, reference), reference,
-                            executable_kind_trait_default(), method.params,
+                            executable_kind_trait_default(), [], method.params,
                             method.return_type, method.effects, body,
                             method.handled_evidence_bindings,
                             [], [], assembly),
                         none => add_contract_only(
                             facts, source_parent(module_body, reference),
                             reference, executable_kind_bodyless_trait_member(),
-                            method.params, method.return_type, method.effects,
+                            [], method.params, method.return_type, method.effects,
                             method.handled_evidence_bindings, none, assembly)
                     }
                 }
@@ -5515,7 +5616,7 @@ fn assemble_decls(
                                 effect_operation_ref_callable(reference)),
                             effect_operation_ref_callable(reference),
                             executable_kind_bodyless_effect_operation(),
-                            op.params, op.return_type,
+                            [], op.params, op.return_type,
                             EffectRow { effects: [Effect::CustomEffect {
                                 reference: effect_operation_ref_effect(reference),
                                 name: name, type_args: effect_type_args
