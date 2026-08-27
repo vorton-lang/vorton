@@ -43,12 +43,14 @@ use core_type_source::{
 use resource_model::{
     FlowTypeSemanticSeed,
     flow_type_seed_shareable, flow_type_seed_unique,
-    FlowSemanticRole, FlowCallContract,
+    FlowSemanticRole, FlowCallContract, FlowStorageContract,
     make_flow_call_contract, make_module_flow_call_contract,
     flow_semantic_role_read, flow_semantic_role_mutate,
     flow_semantic_role_consume, flow_semantic_role_force,
+    flow_semantic_role_tag,
     make_fresh_flow_value_origin, make_aliasing_flow_value_origin,
-    flow_own_storage, flow_borrow_storage
+    flow_own_storage, flow_borrow_storage,
+    flow_call_contract_parameter_roles
 }
 use ir_identity::{
     CoreTypeRef, CoreTypeFactRef,
@@ -225,6 +227,7 @@ use core_type_source::{
     make_flow_generic_param_fact,
     flow_generic_param_index, flow_generic_param_arity,
     flow_generic_param_owner, flow_generic_param_bounds,
+    FlowTypeSubstitution, make_flow_type_substitution,
     flow_type_kind_int, flow_type_kind_float, flow_type_kind_str,
     flow_type_kind_bool, flow_type_kind_unit, flow_type_kind_never,
     flow_type_kind_struct, flow_type_kind_enum,
@@ -296,6 +299,7 @@ use core_expr::{
     core_body_reference, core_body_origin, core_body_binders,
     core_body_origins,
     core_binder_reference, core_binder_type, core_binder_kind,
+    core_callable_semantic_contract,
     core_field_ref_same,
     core_handler_operation_ref
 }
@@ -2366,6 +2370,8 @@ pub struct FrozenCoreAssemblyFacts {
     callable_effect_rows: List<TypedCallableEffectFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
     project_type_mapping: List<Int>,
+    project_redirect_sources: List<ExecutableRef>,
+    project_redirect_targets: List<ExecutableRef>,
     handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
     builtin_methods: List<BuiltinMethodContractFact>,
     diagnostic_seed: CoreDiagnosticSeed,
@@ -2437,6 +2443,7 @@ pub fn mutate_core_unowned_effect_tail(
         type_sources: value.type_sources, effect_parameters: retained,
         callable_effect_rows: value.callable_effect_rows,
         project_callable_effects: [], project_type_mapping: [],
+        project_redirect_sources: [], project_redirect_targets: [],
         handled_evidence_types: value.handled_evidence_types,
         diagnostic_seed: value.diagnostic_seed,
         builtin_methods: value.builtin_methods, program: value.program
@@ -2521,6 +2528,7 @@ fn freeze_closed_core_assembly_facts(
         effect_parameters: effect_parameters,
         callable_effect_rows: callable_effect_rows,
         project_callable_effects: [], project_type_mapping: [],
+        project_redirect_sources: [], project_redirect_targets: [],
         handled_evidence_types: handled_evidence_types,
         diagnostic_seed: diagnostic_seed,
         builtin_methods: if recorder.module_order == 0 {
@@ -2764,11 +2772,31 @@ struct LowerCtx {
     effect_parameters: List<TypedEffectFormalFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
     project_type_mapping: List<Int>,
+    project_redirect_sources: List<ExecutableRef>,
+    project_redirect_targets: List<ExecutableRef>,
     types: List<CoreTypeSourceFact>,
     type_nodes: List<FlowTypeNode>,
     handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
     binders: List<CoreBinder>, captures: List<CaptureSlotMap>, next_origin: Int,
     diagnostic_origins: List<CoreDiagnosticOriginFact>
+}
+fn redirected_executable(ctx: LowerCtx, value: ExecutableRef) -> ExecutableRef {
+    if ctx.project_redirect_sources.len() != ctx.project_redirect_targets.len() {
+        panic("Core assembly: executable redirect relation is partial")
+    }
+    let mut found: ExecutableRef? = none
+    let mut index = 0
+    while index < ctx.project_redirect_sources.len() {
+        if executable_ref_same(
+                ctx.project_redirect_sources.get(index).unwrap(), value) {
+            if found.is_some() {
+                panic("Core assembly: executable redirect source repeats")
+            }
+            found = some(ctx.project_redirect_targets.get(index).unwrap())
+        }
+        index = index + 1
+    }
+    match found { some(target) => target, none => value }
 }
 fn fresh_origin(mut ctx: LowerCtx, label: Str, span: Span) -> OriginRef {
     require_diagnostic_span(span)
@@ -2826,9 +2854,9 @@ fn captured_slot(ctx: LowerCtx, slot: SlotRef) -> SlotRef? {
 fn resolved_slot(ctx: LowerCtx, slot: SlotRef) -> SlotRef {
     match captured_slot(ctx, slot) { some(value) => value, none => slot }
 }
-fn ensure_binder(
+fn ensure_binder_with_storage(
     mut ctx: LowerCtx, slot: SlotRef, ty: Type,
-    kind: BinderKind, is_mutable: Bool
+    kind: BinderKind, storage: FlowStorageContract, is_mutable: Bool
 ) -> SlotRef {
     let resolved = resolved_slot(ctx, slot)
     for value in ctx.binders {
@@ -2850,8 +2878,16 @@ fn ensure_binder(
     }
     ctx.binders.push(make_core_binder(
         resolved, type_fact_for(ctx.types, ty, ctx.module_key), exact_kind, site,
-        flow_own_storage(), is_mutable))
+        if capture.is_some() { flow_borrow_storage() } else { storage },
+        is_mutable))
     resolved
+}
+fn ensure_binder(
+    ctx: LowerCtx, slot: SlotRef, ty: Type,
+    kind: BinderKind, is_mutable: Bool
+) -> SlotRef {
+    ensure_binder_with_storage(
+        ctx, slot, ty, kind, flow_own_storage(), is_mutable)
 }
 fn activate_handled_evidence_binder(
     mut ctx: LowerCtx, value: HandledEvidenceRef
@@ -2873,11 +2909,26 @@ fn activate_handled_evidence_binder(
             handled_evidence_requirement(value)),
         kind, binder_entry_site(binding), storage, false))
 }
-fn param_slot(ctx: LowerCtx, param: HParam, kind: BinderKind) -> SlotRef {
+fn parameter_storage(role: FlowSemanticRole) -> FlowStorageContract {
+    let tag = flow_semantic_role_tag(role)
+    if tag == flow_semantic_role_tag(flow_semantic_role_read()) ||
+       tag == flow_semantic_role_tag(flow_semantic_role_mutate()) {
+        return flow_borrow_storage()
+    }
+    if tag == flow_semantic_role_tag(flow_semantic_role_consume()) ||
+       tag == flow_semantic_role_tag(flow_semantic_role_force()) {
+        return flow_own_storage()
+    }
+    panic("Core assembly: parameter has unknown semantic role")
+}
+fn param_slot(
+    ctx: LowerCtx, param: HParam, kind: BinderKind, role: FlowSemanticRole
+) -> SlotRef {
     let id = match param.def_id { some(v) => v,
         none => panic("Core assembly: parameter lacks DefId") }
     let slot = source_slot(ctx.module_key, id)
-    ensure_binder(ctx, slot, param.ty, kind, param.is_mutable)
+    ensure_binder_with_storage(
+        ctx, slot, param.ty, kind, parameter_storage(role), param.is_mutable)
 }
 fn remap_dictionary_evidence(
     mut ctx: LowerCtx, value: ExactDictRef
@@ -2997,7 +3048,30 @@ fn local_callable_effect_source(
         none => panic("Core assembly: local callable type node is absent")
     }
 }
-fn core_callee(ctx: LowerCtx, value: CalleeRef, signature: Type) -> CoreCalleeRef {
+fn direct_type_substitutions(
+    ctx: LowerCtx, executable: ExecutableRef, type_args: List<Type>
+) -> List<FlowTypeSubstitution> {
+    if type_args.len() == 0 { return [] }
+    if !executable_ref_is_named(executable) {
+        panic("Core assembly: generic direct callee is not named")
+    }
+    let owner = executable_ref_named_symbol(executable)
+    let arity = type_args.len()
+    let mut result: List<FlowTypeSubstitution> = []
+    let mut ordinal = 0
+    for argument in type_args {
+        result.push(make_flow_type_substitution(
+            make_flow_generic_param_fact(owner, ordinal, arity, []),
+            type_fact_for(ctx.types, argument, ctx.module_key)))
+        ordinal = ordinal + 1
+    }
+    result
+}
+
+fn core_callee(
+    ctx: LowerCtx, value: CalleeRef, signature: Type,
+    type_args: List<Type>
+) -> CoreCalleeRef {
     let contract = call_contract(ctx, signature, false)
     let actual_row = match signature {
         Type::FnType { effects, .. } => effects,
@@ -3007,16 +3081,21 @@ fn core_callee(ctx: LowerCtx, value: CalleeRef, signature: Type) -> CoreCalleeRe
         ctx.types, actual_row, ctx.module_key, ctx.effect_parameters,
         none)
     if callee_ref_is_named(value) {
-        let executable = make_named_executable_ref(callee_ref_named_symbol(value))
+        let executable = redirected_executable(
+            ctx, make_named_executable_ref(callee_ref_named_symbol(value)))
         let source_effects = match callable_effect_source(ctx, executable) {
             some(contract) => contract,
             none => panic("Core assembly: exact callable effect source is absent")
         }
         make_core_direct_callee(
             executable, contract,
+            direct_type_substitutions(ctx, executable, type_args),
             make_explicit_core_effect_instantiation(
                 source_effects, actual_effects, actual_effects))
     } else if callee_ref_is_local(value) {
+        if type_args.len() != 0 {
+            panic("Core assembly: local callable carries declaration type arguments")
+        }
         let source_effects = local_callable_effect_source(
             ctx, callee_ref_local_slot(value))
         make_core_local_callee(
@@ -3024,6 +3103,9 @@ fn core_callee(ctx: LowerCtx, value: CalleeRef, signature: Type) -> CoreCalleeRe
             make_explicit_core_effect_instantiation(
                 source_effects, actual_effects, actual_effects))
     } else {
+        if type_args.len() != 0 {
+            panic("Core assembly: dynamic callable carries declaration type arguments")
+        }
         let executable = make_anonymous_executable_ref(
             callee_ref_dynamic_path(value))
         let source_effects = match callable_effect_source(ctx, executable) {
@@ -3248,8 +3330,9 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
             }
             match source_ty {
                 Type::FnType { .. } => make_core_callable_value_expr(
-                    ty, origin, make_named_executable_ref(
-                        callee_ref_named_symbol(callee)),
+                    ty, origin, redirected_executable(
+                        ctx, make_named_executable_ref(
+                            callee_ref_named_symbol(callee))),
                     match dict_closure_dicts {
                         some(values) => evidence(ctx, values), none => []
                     }),
@@ -3296,7 +3379,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                                 core_callee(
                                     ctx,
                                     method_call_ref_callee_identity(method),
-                                    signature),
+                                    signature, []),
                                 exact_method_ref(method), lowered_left,
                                 [lowered_right], method_evidence, [])
                             let zero = make_core_literal_expr(
@@ -3312,7 +3395,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                             ty, effects, origin,
                             core_callee(
                                 ctx, method_call_ref_callee_identity(method),
-                                signature),
+                                signature, []),
                             exact_method_ref(method), lowered_left,
                             [lowered_right], method_evidence, [])
                     }
@@ -3323,7 +3406,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
             }
         },
         HExpr::Call {
-            callee, args, resolved_dicts, handled_evidence, callee_ref,
+            callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
             method_ref, system_host, ..
         } => match system_host {
             some(host) => {
@@ -3343,7 +3426,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     make_core_method_call_expr(
                         ty, effects, origin,
                         core_callee(ctx, method_call_ref_callee_identity(method),
-                            method_call_ref_signature(method)),
+                            method_call_ref_signature(method), []),
                         exact_method_ref(method), lower_expr(ctx, receiver),
                         args.map(fn(v) { lower_expr(ctx, v) }),
                         if method_call_ref_is_bound(method) {
@@ -3360,7 +3443,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                         none => panic("Core assembly: Call lacks CalleeRef") }
                     make_core_call_expr(
                         ty, effects, origin,
-                        core_callee(ctx, exact, hexpr_type(callee)),
+                        core_callee(ctx, exact, hexpr_type(callee), type_args),
                         args.map(fn(v) { lower_expr(ctx, v) }),
                         evidence(ctx, resolved_dicts),
                         handled_evidence.map(fn(value) {
@@ -3721,6 +3804,14 @@ fn parameter_roles(params: List<HParam>) -> List<FlowSemanticRole> {
     params.map(fn(p) { if p.is_mutable { flow_semantic_role_mutate() }
         else { flow_semantic_role_read() } })
 }
+fn parameter_roles_from_mutabilities(
+    values: List<Bool>
+) -> List<FlowSemanticRole> {
+    values.map(fn(is_mutable) {
+        if is_mutable { flow_semantic_role_mutate() }
+        else { flow_semantic_role_read() }
+    })
+}
 fn read_roles(count: Int) -> List<FlowSemanticRole> {
     let mut result: List<FlowSemanticRole> = []
     for _ in 0..count { result.push(flow_semantic_role_read()) }
@@ -3862,12 +3953,7 @@ fn typed_callable_contract(
     })
     let result_type = type_fact_for(
         facts.type_sources, result, facts.module_key)
-    let mut roles: List<FlowSemanticRole> = []
-    for mutable in parameter_mutabilities {
-        roles.push(if mutable {
-            flow_semantic_role_mutate()
-        } else { flow_semantic_role_read() })
-    }
+    let roles = parameter_roles_from_mutabilities(parameter_mutabilities)
     make_core_callable_contract(
         reference, executable_origin(reference),
         if executable_contract_mode_same(
@@ -3890,9 +3976,11 @@ fn typed_callable_contract(
 
 fn core_parameter_binders(
     facts: FrozenCoreAssemblyFacts, entries: List<BinderEntry>,
-    types: List<Type>, mutabilities: List<Bool>
+    types: List<Type>, roles: List<FlowSemanticRole>,
+    mutabilities: List<Bool>
 ) -> List<CoreBinder> {
-    if entries.len() != types.len() || entries.len() != mutabilities.len() {
+    if entries.len() != types.len() || entries.len() != roles.len() ||
+       entries.len() != mutabilities.len() {
         panic("Core assembly: generated parameter fact census differs")
     }
     let mut result: List<CoreBinder> = []
@@ -3905,7 +3993,8 @@ fn core_parameter_binders(
                 facts.type_sources, types.get(index).unwrap(),
                 facts.module_key),
             binder_entry_kind(entry), binder_entry_site(entry),
-            flow_own_storage(), mutabilities.get(index).unwrap()))
+            parameter_storage(roles.get(index).unwrap()),
+            mutabilities.get(index).unwrap()))
         index = index + 1
     }
     result
@@ -3992,7 +4081,9 @@ fn append_default_specialization(
     let handled = h_exact_call_handled_evidence(forward)
     let mutabilities = h_default_specialization_parameter_mutabilities(plan)
     let mut binders = core_parameter_binders(
-        facts, entries, parameter_types, mutabilities)
+        facts, entries, parameter_types,
+        parameter_roles_from_mutabilities(mutabilities),
+        mutabilities)
     append_handled_core_binders(facts, handled, binders)
     let signature = Type::FnType {
         params: parameter_types,
@@ -4008,13 +4099,15 @@ fn append_default_specialization(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_type_mapping: facts.project_type_mapping,
+        project_redirect_sources: facts.project_redirect_sources,
+        project_redirect_targets: facts.project_redirect_targets,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
         binders: binders, captures: [], next_origin: 0,
         diagnostic_origins: []
     }
     let callee = core_callee(
-        call_ctx, h_exact_call_callee(forward), forward_signature)
+        call_ctx, h_exact_call_callee(forward), forward_signature, [])
     let arguments = parameter_slots.map(fn(slot) {
         let mut found: CoreTypeRef? = none
         for binder in binders {
@@ -4110,13 +4203,16 @@ fn derived_call_plan_from_method(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_type_mapping: facts.project_type_mapping,
+        project_redirect_sources: facts.project_redirect_sources,
+        project_redirect_targets: facts.project_redirect_targets,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
         binders: [], captures: [], next_origin: 0,
         diagnostic_origins: []
     }
     make_core_derived_call_plan(
-        core_callee(ctx, method_call_ref_callee_identity(method), signature),
+        core_callee(
+            ctx, method_call_ref_callee_identity(method), signature, []),
         some(exact_method_ref(method)),
         type_fact_for(facts.type_sources, result, facts.module_key),
         core_effect_contract_exact(core_effect_contract_from_row(
@@ -4145,13 +4241,15 @@ fn derived_call_plan_from_exact(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_type_mapping: facts.project_type_mapping,
+        project_redirect_sources: facts.project_redirect_sources,
+        project_redirect_targets: facts.project_redirect_targets,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
         binders: [], captures: [], next_origin: 0,
         diagnostic_origins: []
     }
     make_core_derived_call_plan(
-        core_callee(ctx, h_exact_call_callee(exact), signature),
+        core_callee(ctx, h_exact_call_callee(exact), signature, []),
         h_exact_call_method(exact).map(fn(value) { exact_method_ref(value) }),
         type_fact_for(facts.type_sources, result, facts.module_key),
         core_effect_contract_exact(core_effect_contract_from_row(
@@ -4333,7 +4431,8 @@ fn derived_method_header_parts(
     }
     let mutabilities = params.map(fn(_) { false })
     let mut binders = core_parameter_binders(
-        facts, method.binders, params, mutabilities)
+        facts, method.binders, params,
+        parameter_roles_from_mutabilities(mutabilities), mutabilities)
     append_handled_core_binders(
         facts, method.handled_evidence_bindings, binders)
     let slots = method.binders.map(fn(entry) { binder_entry_slot(entry) })
@@ -4960,7 +5059,9 @@ fn append_delegate_impl(
         })
         let handled_bindings = h_delegate_method_handled_bindings(method)
         let mut binders = core_parameter_binders(
-            facts, entries, parameter_types, mutabilities)
+            facts, entries, parameter_types,
+            parameter_roles_from_mutabilities(mutabilities),
+            mutabilities)
         append_handled_core_binders(facts, handled_bindings, binders)
         let reference = h_delegate_method_executable(method)
         let origin = h_delegate_method_origin(method)
@@ -4970,6 +5071,8 @@ fn append_delegate_impl(
             effect_parameters: facts.effect_parameters,
             project_callable_effects: facts.project_callable_effects,
             project_type_mapping: facts.project_type_mapping,
+            project_redirect_sources: facts.project_redirect_sources,
+            project_redirect_targets: facts.project_redirect_targets,
             types: facts.type_sources, type_nodes: facts.type_nodes,
             handled_evidence_types: facts.handled_evidence_types,
             binders: binders, captures: [], next_origin: 0,
@@ -5004,7 +5107,7 @@ fn append_delegate_impl(
             exact_method_ref(child_call),
             core_callee(
                 callee_ctx, h_delegate_method_child_callee(method),
-                method_call_ref_signature(child_call)),
+                method_call_ref_signature(child_call), []),
             tail_types(parameter_types).map(fn(ty) {
                 type_fact_for(facts.type_sources, ty, facts.module_key)
             }),
@@ -5091,14 +5194,19 @@ fn add_executable_body(
     let anchor = body_anchor(reference)
     assembly.entries.push(make_executable_entry(
         reference, parent, kind, make_concrete_body_contract(anchor)))
-    assembly.callables.push(callable_contract(
+    let callable = callable_contract(
         facts, reference, params, result_type, effects,
-        executable_contract_mode_concrete_body(), handled_evidence))
+        executable_contract_mode_concrete_body(), handled_evidence)
+    let entry_roles = flow_call_contract_parameter_roles(
+        core_callable_semantic_contract(callable))
+    assembly.callables.push(callable)
     let mut ctx = LowerCtx { module_key: facts.module_key,
         owner: reference,
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_type_mapping: facts.project_type_mapping,
+        project_redirect_sources: facts.project_redirect_sources,
+        project_redirect_targets: facts.project_redirect_targets,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
         binders: [], captures: capture_bindings, next_origin: 0,
@@ -5111,8 +5219,14 @@ fn add_executable_body(
             ctx, handled_evidence_capture_target(capture))
     }
     let mut parameter_slots: List<SlotRef> = []
+    let mut parameter_index = 0
     for param in params {
-        parameter_slots.push(param_slot(ctx, param, binder_kind_source_param()))
+        parameter_slots.push(param_slot(
+            ctx, param, binder_kind_source_param(),
+            entry_roles.get(parameter_index).unwrap_or_else(fn() {
+                panic("Core assembly: parameter role is absent")
+            })))
+        parameter_index = parameter_index + 1
     }
     let block = block_from_expr(ctx, body_expr)
     let body = make_core_body(reference, executable_origin(reference),
@@ -5659,7 +5773,9 @@ fn project_effect_contract_to_module(
 
 fn with_project_effect_sources(
     facts: FrozenCoreAssemblyFacts,
-    sources: List<ProjectCallableEffectSource>, mapping: List<Int>
+    sources: List<ProjectCallableEffectSource>, mapping: List<Int>,
+    redirect_sources: List<ExecutableRef>,
+    redirect_targets: List<ExecutableRef>
 ) -> FrozenCoreAssemblyFacts {
     FrozenCoreAssemblyFacts {
         module_key: facts.module_key, module_order: facts.module_order,
@@ -5669,6 +5785,8 @@ fn with_project_effect_sources(
         callable_effect_rows: facts.callable_effect_rows,
         project_callable_effects: sources.map(fn(item) { item }),
         project_type_mapping: mapping.map(fn(item) { item }),
+        project_redirect_sources: redirect_sources.map(fn(item) { item }),
+        project_redirect_targets: redirect_targets.map(fn(item) { item }),
         handled_evidence_types: facts.handled_evidence_types,
         diagnostic_seed: facts.diagnostic_seed,
         builtin_methods: facts.builtin_methods, program: facts.program
@@ -5839,8 +5957,34 @@ fn build_core_diagnostic_projection(
     result
 }
 
-fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
+fn assemble_all(
+    values: List<FrozenCoreAssemblyFacts>,
+    redirect_sources: List<ExecutableRef>,
+    redirect_targets: List<ExecutableRef>
+) -> CoreAssemblyResult {
     if values.len() == 0 { panic("Core assembly: project has no modules") }
+    if redirect_sources.len() != redirect_targets.len() {
+        panic("Core assembly: project executable redirect relation is partial")
+    }
+    let mut redirect_index = 0
+    while redirect_index < redirect_sources.len() {
+        let source = redirect_sources.get(redirect_index).unwrap()
+        let target = redirect_targets.get(redirect_index).unwrap()
+        if !executable_ref_is_named(source) ||
+           !executable_ref_is_named(target) ||
+           executable_ref_same(source, target) {
+            panic("Core assembly: project executable redirect is invalid")
+        }
+        let mut prior = 0
+        while prior < redirect_index {
+            if executable_ref_same(
+                    redirect_sources.get(prior).unwrap(), source) {
+                panic("Core assembly: project executable redirect source repeats")
+            }
+            prior = prior + 1
+        }
+        redirect_index = redirect_index + 1
+    }
     validate_prelude_source_parent_canary()
     validate_fact_order(values)
     let project = intern_project_types(values)
@@ -5858,7 +6002,8 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
         let frozen_facts = values.get(module_index).unwrap()
         let mapping = project.mappings.get(module_index).unwrap()
         let facts = with_project_effect_sources(
-            frozen_facts, project_effect_sources, mapping)
+            frozen_facts, project_effect_sources, mapping,
+            redirect_sources, redirect_targets)
         let module_body = make_module_body_ref(facts.module_key, "module-body")
         let assembly = empty_module_assembly()
         add_builtin_method_contracts(facts, assembly)
@@ -5916,8 +6061,13 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
 }
 pub fn assemble_single_core(facts: FrozenCoreAssemblyFacts) -> CoreAssemblyResult {
     if facts.module_order != 0 { panic("Core assembly: single module order differs") }
-    assemble_all([facts])
+    assemble_all([facts], [], [])
 }
 pub fn assemble_project_core(
-    facts_in_topological_order: List<FrozenCoreAssemblyFacts>
-) -> CoreAssemblyResult { assemble_all(facts_in_topological_order) }
+    facts_in_topological_order: List<FrozenCoreAssemblyFacts>,
+    redirect_sources: List<ExecutableRef>,
+    redirect_targets: List<ExecutableRef>
+) -> CoreAssemblyResult {
+    assemble_all(
+        facts_in_topological_order, redirect_sources, redirect_targets)
+}

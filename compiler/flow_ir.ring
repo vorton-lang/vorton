@@ -90,6 +90,12 @@ use effect_contract::{
 }
 use core_type_source::{
     FlowTypeNode, FlowFieldIdentity, FlowNominalFieldFact,
+    FlowTypeSubstitution, copy_flow_type_substitutions,
+    flow_type_substitution_parameter,
+    flow_type_substitution_replacement,
+    flow_generic_param_owner, flow_generic_param_index,
+    flow_generic_param_arity,
+    flow_type_actual_satisfies_substituted_formal,
     FLOW_TYPE_INT, FLOW_TYPE_FLOAT, FLOW_TYPE_STR, FLOW_TYPE_BOOL,
     FLOW_TYPE_UNIT, FLOW_TYPE_NEVER, FLOW_TYPE_STRUCT, FLOW_TYPE_ENUM,
     FLOW_TYPE_TUPLE, FLOW_TYPE_RECORD, FLOW_TYPE_CALLABLE,
@@ -559,16 +565,20 @@ enum FlowCallTargetValue {
 pub struct FlowCallTarget {
     value: FlowCallTargetValue,
     contract: FlowCallContract,
+    type_substitutions: List<FlowTypeSubstitution>,
     effects: CoreEffectInstantiation
 }
 
 pub fn make_direct_flow_call_target(
     target: ExecutableRef, contract: FlowCallContract,
+    type_substitutions: List<FlowTypeSubstitution>,
     effects: CoreEffectInstantiation
 ) -> FlowCallTarget {
     FlowCallTarget {
         value: FlowCallTargetValue::DirectTargetValue(target),
-        contract: copy_call_contract(contract), effects: effects
+        contract: copy_call_contract(contract),
+        type_substitutions: copy_flow_type_substitutions(type_substitutions),
+        effects: effects
     }
 }
 
@@ -578,7 +588,8 @@ pub fn make_local_flow_call_target(
 ) -> FlowCallTarget {
     FlowCallTarget {
         value: FlowCallTargetValue::LocalTargetValue(target),
-        contract: copy_call_contract(contract), effects: effects
+        contract: copy_call_contract(contract), type_substitutions: [],
+        effects: effects
     }
 }
 
@@ -588,7 +599,8 @@ pub fn make_dynamic_flow_call_target(
 ) -> FlowCallTarget {
     FlowCallTarget {
         value: FlowCallTargetValue::DynamicTargetValue(target),
-        contract: copy_call_contract(contract), effects: effects
+        contract: copy_call_contract(contract), type_substitutions: [],
+        effects: effects
     }
 }
 
@@ -625,6 +637,11 @@ pub fn flow_call_target_dynamic(value: FlowCallTarget) -> PathRef {
 pub fn flow_call_target_contract(value: FlowCallTarget) -> FlowCallContract {
     copy_call_contract(value.contract)
 }
+pub fn flow_call_target_type_substitutions(
+    value: FlowCallTarget
+) -> List<FlowTypeSubstitution> {
+    copy_flow_type_substitutions(value.type_substitutions)
+}
 pub fn flow_call_target_effect_instantiation(
     value: FlowCallTarget
 ) -> CoreEffectInstantiation {
@@ -645,8 +662,26 @@ fn flow_call_target_same(
     if !flow_call_contract_same(left.contract, right.contract) ||
        !core_effect_contract_same(left_source, right_source) ||
        !core_effect_contract_same(left_result, right_result) ||
-       left_substitutions.len() != right_substitutions.len() {
+       left_substitutions.len() != right_substitutions.len() ||
+       left.type_substitutions.len() != right.type_substitutions.len() {
         return false
+    }
+    substitution_index = 0
+    while substitution_index < left.type_substitutions.len() {
+        let a = left.type_substitutions.get(substitution_index).unwrap()
+        let b = right.type_substitutions.get(substitution_index).unwrap()
+        let ap = flow_type_substitution_parameter(a)
+        let bp = flow_type_substitution_parameter(b)
+        if !symbol_ref_same(
+                flow_generic_param_owner(ap), flow_generic_param_owner(bp)) ||
+           flow_generic_param_index(ap) != flow_generic_param_index(bp) ||
+           flow_generic_param_arity(ap) != flow_generic_param_arity(bp) ||
+           !core_type_ref_same(
+                flow_type_substitution_replacement(a),
+                flow_type_substitution_replacement(b)) {
+            return false
+        }
+        substitution_index = substitution_index + 1
     }
     let mut substitution_index = 0
     while substitution_index < left_substitutions.len() {
@@ -676,6 +711,8 @@ fn flow_call_target_same(
 fn copy_call_target(value: FlowCallTarget) -> FlowCallTarget {
     FlowCallTarget {
         value: value.value, contract: copy_call_contract(value.contract),
+        type_substitutions:
+            copy_flow_type_substitutions(value.type_substitutions),
         effects: make_core_effect_instantiation(
             core_effect_instantiation_source(value.effects),
             core_effect_instantiation_substitutions(value.effects),
@@ -2362,6 +2399,45 @@ pub fn flow_pattern_kind_tag(value: FlowPatternContract) -> Int {
         FlowPatternContractValue::FlowVariantPattern { .. } => 5
     }
 }
+pub fn flow_pattern_binding(value: FlowPatternContract) -> SlotRef {
+    match value.value {
+        FlowPatternContractValue::FlowBindingPattern(slot) => slot,
+        _ => panic("FlowIR: pattern is not a binding")
+    }
+}
+pub fn flow_pattern_tuple_elements(
+    value: FlowPatternContract
+) -> List<FlowPatternContract> {
+    match value.value {
+        FlowPatternContractValue::FlowTuplePattern(elements) =>
+            copy_flow_patterns(elements),
+        _ => panic("FlowIR: pattern is not a tuple")
+    }
+}
+pub fn flow_pattern_struct_fields(
+    value: FlowPatternContract
+) -> List<FlowPatternField> {
+    match value.value {
+        FlowPatternContractValue::FlowStructPattern { fields, .. } =>
+            copy_flow_pattern_fields(fields),
+        _ => panic("FlowIR: pattern is not a struct")
+    }
+}
+pub fn flow_pattern_variant_fields(
+    value: FlowPatternContract
+) -> List<FlowPatternField> {
+    match value.value {
+        FlowPatternContractValue::FlowVariantPattern { fields, .. } =>
+            copy_flow_pattern_fields(fields),
+        _ => panic("FlowIR: pattern is not a variant")
+    }
+}
+pub fn flow_pattern_field_identity(
+    value: FlowPatternField
+) -> FlowFieldIdentity { value.field }
+pub fn flow_pattern_field_pattern(
+    value: FlowPatternField
+) -> FlowPatternContract { value.pattern }
 
 pub struct FlowSuccessor {
     target: FlowBlockRef,
@@ -4043,6 +4119,7 @@ fn validate_bodies(
 
 fn flow_call_contract_actual_satisfies_formal(
     actual: FlowCallContract, formal: FlowCallContract,
+    substitutions: List<FlowTypeSubstitution>,
     type_nodes: List<FlowTypeNode>
 ) -> Bool {
     let module_same = match (
@@ -4058,9 +4135,10 @@ fn flow_call_contract_actual_satisfies_formal(
     let formal_roles = flow_call_contract_parameter_roles(formal)
     if !module_same || actual_types.len() != formal_types.len() ||
        actual_roles.len() != formal_roles.len() ||
-       !core_type_ref_same(
+       !flow_type_actual_satisfies_substituted_formal(
+            type_nodes,
             flow_call_contract_result_type(actual),
-            flow_call_contract_result_type(formal)) ||
+            flow_call_contract_result_type(formal), substitutions) ||
        flow_semantic_role_tag(flow_call_contract_result_role(actual)) !=
             flow_semantic_role_tag(flow_call_contract_result_role(formal)) ||
        !value_origin_same(
@@ -4072,10 +4150,9 @@ fn flow_call_contract_actual_satisfies_formal(
     while index < actual_types.len() {
         if flow_semantic_role_tag(actual_roles.get(index).unwrap()) !=
                 flow_semantic_role_tag(formal_roles.get(index).unwrap()) ||
-           !flow_type_actual_satisfies_formal(
-                type_nodes,
-                type_node_for(type_nodes, actual_types.get(index).unwrap()),
-                type_node_for(type_nodes, formal_types.get(index).unwrap())) {
+           !flow_type_actual_satisfies_substituted_formal(
+                type_nodes, actual_types.get(index).unwrap(),
+                formal_types.get(index).unwrap(), substitutions) {
             return false
         }
         index = index + 1
@@ -4101,6 +4178,35 @@ fn validate_direct_calls(
                             panic("FlowIR: call arguments/semantic contract arity differs")
                         }
                         if flow_call_target_is_direct(target) {
+                            let substitutions = target.type_substitutions
+                            if substitutions.len() != 0 {
+                                let direct = flow_call_target_direct(target)
+                                if !executable_ref_is_named(direct) {
+                                    panic("FlowIR: generic direct target is not named")
+                                }
+                                let owner = executable_ref_named_symbol(direct)
+                                let arity = substitutions.len()
+                                let mut ordinal = 0
+                                for substitution in substitutions {
+                                    let parameter =
+                                        flow_type_substitution_parameter(
+                                            substitution)
+                                    if !symbol_ref_same(
+                                            flow_generic_param_owner(parameter),
+                                            owner) ||
+                                       flow_generic_param_index(parameter) !=
+                                            ordinal ||
+                                       flow_generic_param_arity(parameter) !=
+                                            arity {
+                                        panic("FlowIR: direct type substitution identity/order differs")
+                                    }
+                                    let _ = type_node_for(
+                                        type_nodes,
+                                        flow_type_substitution_replacement(
+                                            substitution))
+                                    ordinal = ordinal + 1
+                                }
+                            }
                             let candidate = callable_for_ref(
                                 callables, flow_call_target_direct(target))
                             if flow_call_contract_parameter_types(
@@ -4108,7 +4214,7 @@ fn validate_direct_calls(
                                         arguments.len() ||
                                !flow_call_contract_actual_satisfies_formal(
                                     contract, candidate.semantic_contract,
-                                    type_nodes) {
+                                    substitutions, type_nodes) {
                                 panic("FlowIR: direct callable contract differs")
                             }
                             if !core_effect_contract_same(
@@ -4953,6 +5059,13 @@ fn encode_call_target(value: FlowCallTarget) -> Str {
     parts.push("O${encode_value_origin(
         flow_call_contract_result_origin(value.contract))}")
     parts.push("E${encode_effect_instantiation(value.effects)}")
+    for substitution in value.type_substitutions {
+        let parameter = flow_type_substitution_parameter(substitution)
+        parts.push("X${encode_symbol(flow_generic_param_owner(parameter))}/${
+            flow_generic_param_index(parameter).to_str()}/${
+            flow_generic_param_arity(parameter).to_str()}=${encode_type_ref(
+                flow_type_substitution_replacement(substitution))}")
+    }
     parts.join("/")
 }
 

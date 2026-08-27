@@ -76,7 +76,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     fresh_semantic_let_binder, fresh_semantic_var_binder,
     semantic_for_binder}
 use exhaustive::{check_exhaustive}
-use infer_helpers::{MethodLookupResult, StmtResult,
+use infer_helpers::{MethodLookupResult, StmtResult, CalleeMetadata,
     is_value_type, cancel_local_mut_effects, resolve_var_id,
     check_assign_target_mutable, find_root_expr, get_assign_target_root_def_id, get_hexpr_root_type,
     infer_ident, infer_numeric_op, is_primitive_ord,
@@ -2068,6 +2068,28 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
     // reflected in the result.
     let result_type = apply_subst(s, ret_var)
 
+    let mut exact_type_args: List<Type> = []
+    match callee_metadata {
+        some(metadata) => match metadata.kind {
+            ValueBindingKind::DirectCallable |
+            ValueBindingKind::ExternCallable => {
+                let instantiated = apply_subst(s, resolved_callee_type)
+                let var_map = build_scheme_var_map(
+                    metadata.live_scheme, instantiated)
+                for type_var in metadata.live_scheme.type_vars {
+                    exact_type_args.push(match var_map.get(type_var) {
+                        some(actual) => apply_subst(s, actual),
+                        none => panic(
+                            "call inference: declared generic has no exact instantiation")
+                    })
+                }
+            },
+            ValueBindingKind::ConstGetter |
+            ValueBindingKind::LocalBorrow => {}
+        },
+        none => {}
+    }
+
     // Call-site pre-boxing consumes only exact DirectCallable metadata.
     match callee_metadata {
         some(metadata) => match metadata.mut_flags {
@@ -2115,7 +2137,7 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
         ctx, callee_r.hexpr, resolved_callee_type, exact_callee)
     InferResult {
         hexpr: HExpr::Call {
-            callee: callee_r.hexpr, args: hargs, type_args: [],
+            callee: callee_r.hexpr, args: hargs, type_args: exact_type_args,
             resolved_dicts: resolved_dicts,
             handled_evidence: exact_handled_evidence_for_callable(
                 ctx, resolved_callee_type),

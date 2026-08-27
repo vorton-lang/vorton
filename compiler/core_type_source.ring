@@ -325,7 +325,7 @@ fn copy_generic_param_fact(value: FlowGenericParamFact) -> FlowGenericParamFact 
         bounds: copy_symbols(value.bounds)
     }
 }
-fn flow_generic_param_fact_same(
+pub fn flow_generic_param_fact_same(
     left: FlowGenericParamFact, right: FlowGenericParamFact
 ) -> Bool {
     if !symbol_ref_same(left.owner, right.owner) ||
@@ -343,6 +343,42 @@ fn flow_generic_param_fact_same(
         index = index + 1
     }
     true
+}
+pub fn flow_generic_param_identity_same(
+    left: FlowGenericParamFact, right: FlowGenericParamFact
+) -> Bool {
+    symbol_ref_same(left.owner, right.owner) &&
+        left.index == right.index && left.arity == right.arity
+}
+
+pub struct FlowTypeSubstitution {
+    parameter: FlowGenericParamFact,
+    replacement: CoreTypeRef
+}
+
+pub fn make_flow_type_substitution(
+    parameter: FlowGenericParamFact, replacement: CoreTypeRef
+) -> FlowTypeSubstitution {
+    if core_type_ref_index(replacement) < 0 {
+        panic("CoreHIR: generic substitution has invalid replacement")
+    }
+    FlowTypeSubstitution {
+        parameter: copy_generic_param_fact(parameter),
+        replacement: replacement
+    }
+}
+pub fn flow_type_substitution_parameter(
+    value: FlowTypeSubstitution
+) -> FlowGenericParamFact { copy_generic_param_fact(value.parameter) }
+pub fn flow_type_substitution_replacement(
+    value: FlowTypeSubstitution
+) -> CoreTypeRef { value.replacement }
+pub fn copy_flow_type_substitutions(
+    values: List<FlowTypeSubstitution>
+) -> List<FlowTypeSubstitution> {
+    values.map(fn(value) {
+        make_flow_type_substitution(value.parameter, value.replacement)
+    })
 }
 
 enum FlowFieldIdentityValue {
@@ -873,6 +909,203 @@ pub fn flow_type_actual_satisfies_formal(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode
 ) -> Bool {
     flow_type_actual_satisfies_formal_inner(nodes, actual, formal, [], [])
+}
+
+fn substituted_parameter_replacement(
+    substitutions: List<FlowTypeSubstitution>, parameter: FlowGenericParamFact
+) -> CoreTypeRef? {
+    let mut found: CoreTypeRef? = none
+    for substitution in substitutions {
+        if flow_generic_param_identity_same(
+                substitution.parameter, parameter) {
+            if found.is_some() {
+                panic("CoreHIR: generic call repeats a type substitution")
+            }
+            found = some(substitution.replacement)
+        }
+    }
+    found
+}
+
+fn substituted_effect_atom_matches(
+    nodes: List<FlowTypeNode>, actual: CoreEffectAtom,
+    formal: CoreEffectAtom, substitutions: List<FlowTypeSubstitution>,
+    actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
+) -> Bool {
+    let kind = core_effect_atom_kind_tag(formal)
+    if core_effect_atom_kind_tag(actual) != kind { return false }
+    if kind == 0 || kind == 1 {
+        return flow_type_actual_satisfies_substituted_formal_inner(
+            nodes,
+            flow_satisfaction_type_node(nodes, core_effect_atom_type(actual)),
+            flow_satisfaction_type_node(nodes, core_effect_atom_type(formal)),
+            substitutions, actual_path, formal_path)
+    }
+    if kind == 2 { return true }
+    if kind == 3 {
+        if !handled_effect_ref_same(
+                core_effect_atom_handled_ref(actual),
+                core_effect_atom_handled_ref(formal)) ||
+           core_effect_atom_type_arguments(actual).len() !=
+                core_effect_atom_type_arguments(formal).len() {
+            return false
+        }
+        let actual_args = core_effect_atom_type_arguments(actual)
+        let formal_args = core_effect_atom_type_arguments(formal)
+        let mut index = 0
+        while index < actual_args.len() {
+            if !flow_type_actual_satisfies_substituted_formal_inner(
+                    nodes,
+                    flow_satisfaction_type_node(
+                        nodes, actual_args.get(index).unwrap()),
+                    flow_satisfaction_type_node(
+                        nodes, formal_args.get(index).unwrap()),
+                    substitutions, actual_path, formal_path) {
+                return false
+            }
+            index = index + 1
+        }
+        return true
+    }
+    system_effect_ref_same(
+        core_effect_atom_system_ref(actual),
+        core_effect_atom_system_ref(formal))
+}
+
+fn substituted_effect_contract_satisfies(
+    nodes: List<FlowTypeNode>, actual: CoreEffectContract,
+    formal: CoreEffectContract, substitutions: List<FlowTypeSubstitution>,
+    actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
+) -> Bool {
+    let actual_atoms = core_effect_set_atoms(core_effect_contract_exact(actual))
+    let formal_atoms = core_effect_set_atoms(core_effect_contract_exact(formal))
+    if core_effect_contract_parameter(formal).is_none() &&
+       (core_effect_contract_parameter(actual).is_some() ||
+        actual_atoms.len() != formal_atoms.len()) {
+        return false
+    }
+    for required in formal_atoms {
+        let mut matches = 0
+        for candidate in actual_atoms {
+            if substituted_effect_atom_matches(
+                    nodes, candidate, required, substitutions,
+                    actual_path, formal_path) {
+                matches = matches + 1
+            }
+        }
+        if matches != 1 { return false }
+    }
+    true
+}
+
+fn flow_type_actual_satisfies_substituted_formal_inner(
+    nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode,
+    substitutions: List<FlowTypeSubstitution>,
+    mut actual_path: List<CoreTypeRef>, mut formal_path: List<CoreTypeRef>
+) -> Bool {
+    if core_type_ref_same(actual.reference, formal.reference) { return true }
+    let actual_kind = flow_type_kind_tag(actual.kind)
+    let formal_kind = flow_type_kind_tag(formal.kind)
+    if formal_kind == FLOW_TYPE_PARAMETER {
+        return match substituted_parameter_replacement(
+                substitutions, formal.generic_param.unwrap()) {
+            some(replacement) => core_type_ref_same(
+                actual.reference, replacement),
+            none => false
+        }
+    }
+    if formal_kind == FLOW_TYPE_RECORD &&
+       (actual_kind == FLOW_TYPE_STRUCT || actual_kind == FLOW_TYPE_RECORD) {
+        if flow_satisfaction_pair_active(
+                actual.reference, formal.reference,
+                actual_path, formal_path) { return true }
+        actual_path.push(actual.reference)
+        formal_path.push(formal.reference)
+        for required in formal.nominal_fields {
+            let required_name = flow_nominal_field_record_name(required)
+            let mut found = false
+            for candidate in actual.nominal_fields {
+                match flow_satisfaction_field_name(candidate, actual_kind) {
+                    some(name) => if name == required_name &&
+                            flow_type_actual_satisfies_substituted_formal_inner(
+                                nodes,
+                                flow_satisfaction_type_node(nodes, candidate.ty),
+                                flow_satisfaction_type_node(nodes, required.ty),
+                                substitutions, actual_path, formal_path) {
+                        found = true
+                    },
+                    none => {}
+                }
+            }
+            if !found { return false }
+        }
+        return true
+    }
+    if actual_kind != formal_kind { return false }
+    if formal_kind == FLOW_TYPE_CALLABLE {
+        if actual.parameter_count != formal.parameter_count ||
+           actual.children.len() != formal.children.len() ||
+           !substituted_effect_contract_satisfies(
+                nodes,
+                actual.callable_effects.unwrap(),
+                formal.callable_effects.unwrap(), substitutions,
+                actual_path, formal_path) {
+            return false
+        }
+    } else if formal_kind == FLOW_TYPE_STRUCT ||
+              formal_kind == FLOW_TYPE_ENUM ||
+              formal_kind == FLOW_TYPE_EXTERN {
+        if !symbol_ref_same(actual.nominal.unwrap(), formal.nominal.unwrap()) ||
+           actual.generic_arguments.len() != formal.generic_arguments.len() {
+            return false
+        }
+        let mut argument = 0
+        while argument < actual.generic_arguments.len() {
+            if !flow_type_actual_satisfies_substituted_formal_inner(
+                    nodes,
+                    flow_satisfaction_type_node(
+                        nodes, actual.generic_arguments.get(argument).unwrap()),
+                    flow_satisfaction_type_node(
+                        nodes, formal.generic_arguments.get(argument).unwrap()),
+                    substitutions, actual_path, formal_path) {
+                return false
+            }
+            argument = argument + 1
+        }
+        return true
+    } else if formal_kind != FLOW_TYPE_TUPLE &&
+              formal_kind != FLOW_TYPE_PTR {
+        return false
+    }
+    if actual.children.len() != formal.children.len() { return false }
+    let mut child = 0
+    while child < actual.children.len() {
+        if !flow_type_actual_satisfies_substituted_formal_inner(
+                nodes,
+                flow_satisfaction_type_node(
+                    nodes, actual.children.get(child).unwrap()),
+                flow_satisfaction_type_node(
+                    nodes, formal.children.get(child).unwrap()),
+                substitutions, actual_path, formal_path) {
+            return false
+        }
+        child = child + 1
+    }
+    true
+}
+
+// Direct generic calls carry an explicit declared-formal -> actual map.  This
+// relation only checks that one already-frozen substitution against the
+// declaration contract; it never infers a type argument or widens the normal
+// actual-satisfies-formal relation.
+pub fn flow_type_actual_satisfies_substituted_formal(
+    nodes: List<FlowTypeNode>, actual: CoreTypeRef, formal: CoreTypeRef,
+    substitutions: List<FlowTypeSubstitution>
+) -> Bool {
+    flow_type_actual_satisfies_substituted_formal_inner(
+        nodes, flow_satisfaction_type_node(nodes, actual),
+        flow_satisfaction_type_node(nodes, formal),
+        substitutions, [], [])
 }
 
 fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {

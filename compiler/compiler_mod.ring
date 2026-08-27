@@ -10,6 +10,9 @@ use core_from_hir::{
     FrozenCoreAssemblyFacts, CoreAssemblyResult,
     assemble_project_core, core_assembly_result_program,
     core_assembly_result_diagnostic_projection}
+use ir_inventory::{ExecutableRef, executable_ref_is_named,
+    executable_ref_named_symbol}
+use ir_identity::{symbol_ref_canonical_payload}
 use legacy_projection::{LegacyProjectionFacts}
 use codegen_c::{generate_c_project}
 use resolver::{ModuleGraph, ModuleId, module_key, module_prefix,
@@ -49,7 +52,7 @@ struct CompilePhaseResult {
     module_core_facts: Map<Str, FrozenCoreAssemblyFacts>,
     module_legacy_facts: Map<Str, LegacyProjectionFacts>,
     module_exports_map: Map<Str, ModuleExports>,
-    extern_forward_bridges: Map<Str, Str>
+    extern_forward_bridges: List<ProjectExternForwardBridge>
 }
 
 fn run_project_ownership(
@@ -61,7 +64,14 @@ fn run_project_ownership(
             panic("project ownership: Core facts are absent")
         }))
     }
-    let assembly = assemble_project_core(core_facts)
+    let mut redirect_sources: List<ExecutableRef> = []
+    let mut redirect_targets: List<ExecutableRef> = []
+    for bridge in phases.extern_forward_bridges {
+        redirect_sources.push(bridge.source)
+        redirect_targets.push(bridge.target)
+    }
+    let assembly = assemble_project_core(
+        core_facts, redirect_sources, redirect_targets)
     (assembly, run_ownership_pipeline(
         core_assembly_result_program(assembly)))
 }
@@ -151,17 +161,29 @@ fn materialize_verified_project_ownership(
 // codegen without per-module synthesis or backend deduplication.
 struct ProjectRingFnCandidate {
     module_key: Str,
-    identity: Str,
+    executable: ExecutableRef,
     leaf: Str,
     signature: Str
 }
 
 struct ProjectExternForward {
     module_key: Str,
-    identity: Str,
+    executable: ExecutableRef,
     abi_name: Str,
     signature: Str,
     span: Span
+}
+
+struct ProjectExternForwardBridge {
+    source: ExecutableRef,
+    target: ExecutableRef
+}
+
+fn project_executable_identity(value: ExecutableRef) -> Str {
+    if !executable_ref_is_named(value) {
+        panic("project extern forward: executable is not named")
+    }
+    symbol_ref_canonical_payload(executable_ref_named_symbol(value))
 }
 
 fn project_identity_leaf(identity: Str) -> Str {
@@ -205,13 +227,14 @@ fn collect_project_ring_candidates(
 ) {
     for decl in decls {
         match decl {
-            HDecl::Fn { name, type_params, params, return_type, effects, is_pub, .. } => {
+            HDecl::Fn { name, executable_ref, type_params, params,
+                        return_type, effects, is_pub, .. } => {
                 // Raw prelude functions are repeated in every HProgram. Only a
                 // canonical project definition may satisfy a project forward.
                 if is_pub && is_module_item_identity(name) {
                     match project_callable_signature(type_params, params, return_type, effects) {
                         some(signature) => out.push(ProjectRingFnCandidate {
-                            module_key: module_key_, identity: name,
+                            module_key: module_key_, executable: executable_ref,
                             leaf: project_identity_leaf(name), signature: signature
                         }),
                         none => {}
@@ -232,14 +255,15 @@ fn collect_project_extern_forwards(
 ) {
     for decl in decls {
         match decl {
-            HDecl::ExternFn { name, abi_name, type_params, params, return_type, effects, span, .. } => {
+            HDecl::ExternFn { name, abi_name, executable_ref, type_params,
+                              params, return_type, effects, span, .. } => {
                 // Prelude externs use compiler-intrinsic identities and inline
                 // externs have an additional `::` component. Only this file
                 // module's exact top-level declaration may cycle-break.
                 if name == module_item_identity(module_prefix_, abi_name) {
                     match project_callable_signature(type_params, params, return_type, effects) {
                         some(signature) => out.push(ProjectExternForward {
-                            module_key: module_key_, identity: name,
+                            module_key: module_key_, executable: executable_ref,
                             abi_name: abi_name, signature: signature, span: span
                         }),
                         none => {}
@@ -269,7 +293,10 @@ fn report_extern_forward_ambiguity(
     candidates: List<ProjectRingFnCandidate>, error_format: Str
 ) {
     let mut names: List<Str> = []
-    for candidate in candidates { names.push(nominal_display_name(candidate.identity)) }
+    for candidate in candidates {
+        names.push(nominal_display_name(
+            project_executable_identity(candidate.executable)))
+    }
     names.sort()
     let mut sink = new_collecting_sink()
     sink.report(make_diag(
@@ -296,7 +323,7 @@ fn report_extern_forward_ambiguity(
 // resolved signature. Zero matches remains real FFI; ambiguity is an error.
 fn build_project_extern_forward_bridges(
     graph: ModuleGraph, module_hirs: Map<Str, HProgram>, error_format: Str
-) -> Map<Str, Str>? {
+) -> List<ProjectExternForwardBridge>? {
     let mut candidates: List<ProjectRingFnCandidate> = []
     let mut forwards: List<ProjectExternForward> = []
     for key in graph.topo_order {
@@ -310,7 +337,7 @@ fn build_project_extern_forward_bridges(
         }
     }
 
-    let mut bridges: Map<Str, Str> = map_new()
+    let mut bridges: List<ProjectExternForwardBridge> = []
     let mut has_ambiguity = false
     for forward in forwards {
         let mut matching: List<ProjectRingFnCandidate> = []
@@ -324,7 +351,10 @@ fn build_project_extern_forward_bridges(
         if matching.len() == 1 {
             match matching.get(0) {
                 some(candidate) => {
-                    bridges.insert(forward.identity, candidate.identity)
+                    bridges.push(ProjectExternForwardBridge {
+                        source: forward.executable,
+                        target: candidate.executable
+                    })
                 },
                 none => {}
             }
@@ -336,6 +366,21 @@ fn build_project_extern_forward_bridges(
         // not a candidate: preserve the raw foreign ABI symbol.
     }
     if has_ambiguity { none } else { some(bridges) }
+}
+
+fn codegen_extern_forward_bridges(
+    values: List<ProjectExternForwardBridge>
+) -> Map<Str, Str> {
+    let mut result: Map<Str, Str> = map_new()
+    for value in values {
+        let source = project_executable_identity(value.source)
+        let target = project_executable_identity(value.target)
+        if source == target || result.contains_key(source) {
+            panic("project extern forward: typed redirect is invalid/duplicated")
+        }
+        result.insert(source, target)
+    }
+    result
 }
 
 fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -> CompilePhaseResult? {
@@ -622,7 +667,8 @@ pub fn compile_project_c(
             timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
             let build_ok = generate_c_project(
                 modules, entry_prefix, c_path, o_path, emit_lines,
-                phases.extern_forward_bridges)
+                codegen_extern_forward_bridges(
+                    phases.extern_forward_bridges))
             CProjectCompileResult { success: build_ok }
         },
     }
