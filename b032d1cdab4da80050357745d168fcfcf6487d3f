@@ -1,0 +1,21 @@
+{
+  "records": [
+    {
+      "canonical_key": "{\"lenses\":[\"backend-parity\",\"design-drift\",\"oracle-blind\",\"rc-memory\",\"runtime-abi\",\"type-soundness\"],\"source_sha\":\"b032d1cdab4da80050357745d168fcfcf6487d3f\",\"trigger_id\":\"ownership-ir-preacceptance\"}",
+      "key_digest": "9fb116c65ba71bbb4ccb7a791e893a65d27ff5f317ce448a12bcb4f792fc174d",
+      "lenses": [
+        "backend-parity",
+        "design-drift",
+        "oracle-blind",
+        "rc-memory",
+        "runtime-abi",
+        "type-soundness"
+      ],
+      "outcome": "findings",
+      "source_sha": "b032d1cdab4da80050357745d168fcfcf6487d3f",
+      "trigger_id": "ownership-ir-preacceptance"
+    }
+  ],
+  "source_sha": "b032d1cdab4da80050357745d168fcfcf6487d3f",
+  "version": 1
+}
