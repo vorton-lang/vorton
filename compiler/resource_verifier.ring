@@ -26,7 +26,7 @@ use resource_model::{
     physical_rc_shape_physical_rc, physical_rc_shape_drop_glue,
     physical_rc_shape_foreign_containment, physical_rc_shape_param_deps,
     slot_flow_same, slot_flow_empty, slot_flow_live_owner,
-    slot_flow_cleanup_owner, slot_flow_is_unreachable}
+    slot_flow_cleanup_owner, slot_flow_is_unreachable, slot_flow_is_live}
 use rc_ir::{
     RcProgram, RcOperation, rc_program_flow_fingerprint,
     rc_program_type_count, rc_program_callable_count, rc_program_bodies,
@@ -47,7 +47,8 @@ use rc_ir::{
 use resource_certificate::{
     ResourceCellKind, ResourceCellSource, ResourceRuleSource,
     ResourceCellSpec, ResourceConstraint, ResourceFixedPointProof,
-    ResourceCertificate, CandidateCellKind, CandidateCellSpec,
+    ResourceCertificate, CallableCandidateProof,
+    CandidateCellKind, CandidateCellSpec,
     CandidateRuleSite, CandidateRuleKind, CandidateRule,
     CandidateSelection, SlotTransitionReason, SlotTransitionWitness,
     make_callable_result_owned_source, make_callable_result_origin_source,
