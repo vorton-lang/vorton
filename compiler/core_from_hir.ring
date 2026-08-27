@@ -21,6 +21,9 @@ use env::{
 use builtins::{
     BuiltinMethodContractFact, builtin_method_contract_facts,
     builtin_method_contract_intrinsic, builtin_method_contract_scheme,
+    builtin_method_contract_target_owner,
+    builtin_method_contract_target_type_vars,
+    builtin_method_contract_method_type_vars,
     builtin_method_contract_resource
 }
 use precore_lower::{close_hir_surface}
@@ -2138,8 +2141,22 @@ fn producer_record_builtin_methods(mut producer: ClosedCoreProducer) {
     if core_assembly_recorder_module_order(producer.recorder) != 0 { return }
     for fact in builtin_method_contract_facts(producer.env) {
         let scheme = builtin_method_contract_scheme(fact)
-        let reference = make_named_executable_ref(
-            intrinsic_ref_symbol(builtin_method_contract_intrinsic(fact)))
+        let intrinsic_symbol = intrinsic_ref_symbol(
+            builtin_method_contract_intrinsic(fact))
+        let target_vars = builtin_method_contract_target_type_vars(fact)
+        for index in 0..target_vars.len() {
+            producer_register_parameter(
+                producer, target_vars.get(index).unwrap(),
+                builtin_method_contract_target_owner(fact),
+                index, target_vars.len(), [])
+        }
+        let method_vars = builtin_method_contract_method_type_vars(fact)
+        for index in 0..method_vars.len() {
+            producer_register_parameter(
+                producer, method_vars.get(index).unwrap(), intrinsic_symbol,
+                index, method_vars.len(), [])
+        }
+        let reference = make_named_executable_ref(intrinsic_symbol)
         let _ = producer_record_type(producer, scheme.ty, some(reference))
     }
 }

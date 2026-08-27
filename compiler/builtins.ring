@@ -40,6 +40,7 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     make_module_body_ref, path_owner_for_module_body, make_path_ref,
     path_role_synthetic, make_impl_provider_ref,
     make_impl_owner_ref, make_impl_method_ref,
+    impl_owner_ref_target,
     impl_provider_ref_site, path_ref_normalized_child_path,
     impl_provider_kind_builtin, registered_trait_ref_symbol,
     builtin_method_site_from_tag, builtin_method_site_tag,
@@ -859,26 +860,101 @@ pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {
     register_option_hof(env, sink)
 }
 
-fn registered_intrinsic_count(env: TypeEnv, intrinsic: IntrinsicRef) -> Int {
-    let mut count = 0
-    for map_entry in env.trait_reg.trait_impls.entries() {
-        let (_, owners) = map_entry
-        for owner in owners {
-            for method_entry in owner.method_intrinsics.entries() {
-                let (_, candidate) = method_entry
-                if intrinsic_ref_same(candidate, intrinsic) {
-                    count = count + 1
-                }
-            }
-        }
-    }
-    count
+fn append_builtin_type_var(mut values: List<Int>, value: Int) {
+    if !values.contains(value) { values.push(value) }
 }
 
-fn registered_intrinsic_scheme(
+fn collect_builtin_effect_formals(
+    eff: Effect, mut value_vars: List<Int>, mut row_tails: List<Int>
+) {
+    match eff {
+        Effect::FailEffect { error_type } =>
+            collect_builtin_type_formals(error_type, value_vars, row_tails),
+        Effect::MutEffect { state_type } =>
+            collect_builtin_type_formals(state_type, value_vars, row_tails),
+        Effect::CustomEffect { type_args, .. } => {
+            for value in type_args {
+                collect_builtin_type_formals(value, value_vars, row_tails)
+            }
+        },
+        Effect::SystemEffect { .. } | Effect::UnsafeEffect => {}
+    }
+}
+
+fn collect_builtin_effect_row_formals(
+    row: EffectRow, mut value_vars: List<Int>, mut row_tails: List<Int>
+) {
+    match row.tail {
+        some(value) => append_builtin_type_var(row_tails, value),
+        none => {}
+    }
+    for eff in row.effects {
+        collect_builtin_effect_formals(eff, value_vars, row_tails)
+    }
+}
+
+fn collect_builtin_type_formals(
+    ty: Type, mut value_vars: List<Int>, mut row_tails: List<Int>
+) {
+    match ty {
+        Type::TypeVar { id, .. } => append_builtin_type_var(value_vars, id),
+        Type::FnType { params, return_type, effects } => {
+            for parameter in params {
+                collect_builtin_type_formals(parameter, value_vars, row_tails)
+            }
+            collect_builtin_type_formals(return_type, value_vars, row_tails)
+            collect_builtin_effect_row_formals(effects, value_vars, row_tails)
+        },
+        Type::StructType { type_params, .. } |
+        Type::EnumType { type_params, .. } => {
+            for parameter in type_params {
+                collect_builtin_type_formals(parameter, value_vars, row_tails)
+            }
+        },
+        Type::GenericType { base, args } => {
+            collect_builtin_type_formals(base, value_vars, row_tails)
+            for argument in args {
+                collect_builtin_type_formals(argument, value_vars, row_tails)
+            }
+        },
+        Type::RecordType { fields, tail, .. } => {
+            for field in fields {
+                collect_builtin_type_formals(field.ty, value_vars, row_tails)
+            }
+            match tail {
+                some(value) => append_builtin_type_var(row_tails, value),
+                none => {}
+            }
+        },
+        Type::EffectRowType { effects, tail } => {
+            for eff in effects {
+                collect_builtin_effect_formals(eff, value_vars, row_tails)
+            }
+            match tail {
+                some(value) => append_builtin_type_var(row_tails, value),
+                none => {}
+            }
+        },
+        Type::TupleType { elements } => {
+            for element in elements {
+                collect_builtin_type_formals(element, value_vars, row_tails)
+            }
+        },
+        Type::PtrType { pointee } =>
+            collect_builtin_type_formals(pointee, value_vars, row_tails),
+        _ => {}
+    }
+}
+
+struct RegisteredIntrinsicSource {
+    owner: ImplEntry,
+    scheme: TypeScheme
+}
+
+fn registered_intrinsic_source(
     env: TypeEnv, intrinsic: IntrinsicRef
-) -> TypeScheme {
-    let mut found: TypeScheme? = none
+) -> RegisteredIntrinsicSource {
+    let mut found: RegisteredIntrinsicSource? = none
     for map_entry in env.trait_reg.trait_impls.entries() {
         let (_, owners) = map_entry
         for owner in owners {
@@ -893,7 +969,10 @@ fn registered_intrinsic_scheme(
                     if found.is_some() {
                         panic("builtin method contract: scheme is not unique")
                     }
-                    found = some(impl_method_core_as_scheme(core))
+                    found = some(RegisteredIntrinsicSource {
+                        owner: owner,
+                        scheme: impl_method_core_as_scheme(core)
+                    })
                 }
             }
         }
@@ -938,12 +1017,65 @@ fn registered_intrinsic_resource_contract(
 
 pub struct BuiltinMethodContractFact {
     intrinsic: IntrinsicRef,
+    target_owner: SymbolRef,
+    target_owner_type_vars: List<Int>,
+    method_type_vars: List<Int>,
     scheme: TypeScheme,
     resource: CallableResourceContractFact
 }
 
+fn builtin_method_value_type_vars(
+    owner: ImplEntry, scheme: TypeScheme
+) -> List<Int> {
+    if scheme.bounds.len() != 0 {
+        panic("builtin method contract: value formal has a scheme bound")
+    }
+    let mut value_vars: List<Int> = []
+    let mut row_tails: List<Int> = []
+    collect_builtin_type_formals(scheme.ty, value_vars, row_tails)
+    let mut ordered_values: List<Int> = []
+    let mut index = 0
+    while index < scheme.type_vars.len() {
+        let value = scheme.type_vars.get(index).unwrap()
+        let mut prior = 0
+        while prior < index {
+            if scheme.type_vars.get(prior).unwrap() == value {
+                panic("builtin method contract: scheme formal repeats")
+            }
+            prior = prior + 1
+        }
+        let is_value = value_vars.contains(value)
+        let is_tail = row_tails.contains(value)
+        if is_value == is_tail {
+            panic("builtin method contract: scheme formal domain differs")
+        }
+        if is_value { ordered_values.push(value) }
+        index = index + 1
+    }
+    for value in value_vars {
+        if !scheme.type_vars.contains(value) {
+            panic("builtin method contract: value formal is omitted")
+        }
+    }
+    for tail in row_tails {
+        if !scheme.type_vars.contains(tail) {
+            panic("builtin method contract: effect tail is omitted")
+        }
+    }
+    if owner.type_param_vars.len() > ordered_values.len() {
+        panic("builtin method contract: owner formal prefix is short")
+    }
+    for owner_index in 0..owner.type_param_vars.len() {
+        if owner.type_param_vars.get(owner_index).unwrap() !=
+           ordered_values.get(owner_index).unwrap() {
+            panic("builtin method contract: owner formal prefix differs")
+        }
+    }
+    ordered_values
+}
+
 fn make_builtin_method_contract_fact(
-    intrinsic: IntrinsicRef, scheme: TypeScheme,
+    intrinsic: IntrinsicRef, owner: ImplEntry, scheme: TypeScheme,
     resource: CallableResourceContractFact
 ) -> BuiltinMethodContractFact {
     let arity = match scheme.ty {
@@ -953,8 +1085,21 @@ fn make_builtin_method_contract_fact(
     if callable_resource_contract_parameter_roles(resource).len() != arity {
         panic("builtin method contract: exact resource arity differs")
     }
+    let owner_ref = match owner.owner_ref {
+        some(value) => value,
+        none => panic("builtin method contract: target owner is absent")
+    }
+    let value_vars = builtin_method_value_type_vars(owner, scheme)
+    let mut method_type_vars: List<Int> = []
+    for index in owner.type_param_vars.len()..value_vars.len() {
+        method_type_vars.push(value_vars.get(index).unwrap())
+    }
     BuiltinMethodContractFact {
-        intrinsic: intrinsic, scheme: scheme, resource: resource
+        intrinsic: intrinsic,
+        target_owner: impl_owner_ref_target(owner_ref),
+        target_owner_type_vars: owner.type_param_vars.map(fn(value) { value }),
+        method_type_vars: method_type_vars,
+        scheme: scheme, resource: resource
     }
 }
 
@@ -965,6 +1110,15 @@ pub fn builtin_method_contract_intrinsic(
 pub fn builtin_method_contract_scheme(
     value: BuiltinMethodContractFact
 ) -> TypeScheme { value.scheme }
+pub fn builtin_method_contract_target_owner(
+    value: BuiltinMethodContractFact
+) -> SymbolRef { value.target_owner }
+pub fn builtin_method_contract_target_type_vars(
+    value: BuiltinMethodContractFact
+) -> List<Int> { value.target_owner_type_vars.map(fn(item) { item }) }
+pub fn builtin_method_contract_method_type_vars(
+    value: BuiltinMethodContractFact
+) -> List<Int> { value.method_type_vars.map(fn(item) { item }) }
 pub fn builtin_method_contract_resource(
     value: BuiltinMethodContractFact
 ) -> CallableResourceContractFact { value.resource }
@@ -979,11 +1133,9 @@ pub fn builtin_method_contract_facts(
     for tag in 0..BUILTIN_METHOD_SITE_COUNT {
         let intrinsic = builtin_method_intrinsic(
             builtin_method_site_from_tag(tag))
-        if registered_intrinsic_count(env, intrinsic) != 1 {
-            panic("builtin method contract: registry relation is not unique")
-        }
+        let source = registered_intrinsic_source(env, intrinsic)
         result.push(make_builtin_method_contract_fact(
-            intrinsic, registered_intrinsic_scheme(env, intrinsic),
+            intrinsic, source.owner, source.scheme,
             registered_intrinsic_resource_contract(env, intrinsic)))
     }
     if result.len() != BUILTIN_METHOD_SITE_COUNT {
@@ -1118,7 +1270,7 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
             callable_resource_role_read(), []))
     install_builtin_method_owner(
         env, sink, BUILTIN_CELL,
-        none, [], [], [], methods, intrinsics, resources,
+        none, ["T"], [m_t_id], [], methods, intrinsics, resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_CELL_CORE))
 }
 
@@ -1282,7 +1434,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
             callable_resource_role_consume(), [0]))
     install_builtin_method_owner(
         env, sink, BUILTIN_OPTION,
-        none, [], [], [], methods, intrinsics, resources,
+        none, ["T"], [t_id], [], methods, intrinsics, resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_OPTION_CORE))
 }
 
