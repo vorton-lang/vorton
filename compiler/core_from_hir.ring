@@ -5,8 +5,7 @@
 // callable, impl and executable facts are derived once from canonical HIR.
 
 use ast::{Span, Pattern, LiteralValue, BinOp, UnaryOp, span_zero}
-use types::{Type, Effect, EffectRow, types_equal, EMPTY_ROW,
-    BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET}
+use types::{Type, Effect, EffectRow, types_equal, EMPTY_ROW}
 use env::{
     TypeEnv, TraitDef, AssocTypeDef,
     RegisteredTraitAssocContract,
@@ -64,7 +63,11 @@ use ir_identity::{
     OriginRef, ImplOwnerRef, ImplMethodRef,
     RegisteredNominalRef, VariantRef, HandledEffectRef,
     handled_effect_ref_same, make_symbol_ref, namespace_value,
-    symbol_ref_origin_module_key, symbol_ref_is_prelude, symbol_ref_same,
+    namespace_nominal,
+    namespace_kind_same, symbol_ref_namespace_kind,
+    symbol_ref_origin_module_key, symbol_ref_canonical_payload,
+    symbol_ref_declaration_site_path,
+    symbol_ref_same,
     origin_ref_same, origin_ref_is_symbol, origin_ref_symbol, origin_ref_path,
     path_owner_for_symbol, path_owner_for_module_body,
     path_ref_owner, path_ref_normalized_child_path, path_ref_role,
@@ -770,39 +773,52 @@ fn producer_mark_contained_parameters(
     }
 }
 
+const PRODUCER_CONTAINER_NONE: Int = 0
+const PRODUCER_CONTAINER_LIST: Int = 1
+const PRODUCER_CONTAINER_MAP: Int = 2
+const PRODUCER_CONTAINER_SET: Int = 3
+
+fn producer_container_contract_kind(owner: SymbolRef) -> Int {
+    if !namespace_kind_same(
+            symbol_ref_namespace_kind(owner), namespace_nominal()) ||
+       symbol_ref_declaration_site_path(owner) != "frame:0|item:0" {
+        return PRODUCER_CONTAINER_NONE
+    }
+    let origin = symbol_ref_origin_module_key(owner)
+    let payload = symbol_ref_canonical_payload(owner)
+    if origin == "$prelude$::list" &&
+       payload == "$prelude$$list$$_List" {
+        return PRODUCER_CONTAINER_LIST
+    }
+    if origin == "$prelude$::map" &&
+       payload == "$prelude$$map$$_Map" {
+        return PRODUCER_CONTAINER_MAP
+    }
+    if origin == "$prelude$::set" &&
+       payload == "$prelude$$set$$_Set" {
+        return PRODUCER_CONTAINER_SET
+    }
+    PRODUCER_CONTAINER_NONE
+}
+
 fn producer_resource_containment(
     env: TypeEnv
 ) -> List<ProducerNominalContainment> {
-    let list_def = env.types.structs.get(BUILTIN_LIST).unwrap_or_else(fn() {
-        panic("Core producer: builtin List contract is absent")
-    })
-    let map_def = env.types.structs.get(BUILTIN_MAP).unwrap_or_else(fn() {
-        panic("Core producer: builtin Map contract is absent")
-    })
-    let set_def = env.types.structs.get(BUILTIN_SET).unwrap_or_else(fn() {
-        panic("Core producer: builtin Set contract is absent")
-    })
-    if list_def.type_param_vars.len() != 1 ||
-       map_def.type_param_vars.len() != 2 ||
-       set_def.type_param_vars.len() != 1 {
-        panic("Core producer: builtin container contract arity differs")
-    }
-    let list_owner = registered_nominal_ref_symbol(list_def.owner_ref)
-    let map_owner = registered_nominal_ref_symbol(map_def.owner_ref)
-    let set_owner = registered_nominal_ref_symbol(set_def.owner_ref)
-    if !symbol_ref_is_prelude(list_owner) ||
-       !symbol_ref_is_prelude(map_owner) ||
-       !symbol_ref_is_prelude(set_owner) {
-        panic("Core producer: builtin container owner is not canonical prelude")
-    }
     let mut result: List<ProducerNominalContainment> = []
     for entry in env.types.structs.entries() {
         let owner = registered_nominal_ref_symbol(entry.1.owner_ref)
         let mut flags = producer_false_flags(entry.1.type_param_vars.len())
-        if symbol_ref_same(owner, list_owner) ||
-           symbol_ref_same(owner, set_owner) {
+        let container = producer_container_contract_kind(owner)
+        if container == PRODUCER_CONTAINER_LIST ||
+           container == PRODUCER_CONTAINER_SET {
+            if flags.len() != 1 {
+                panic("Core producer: exact unary container arity differs")
+            }
             flags.set(0, true)
-        } else if symbol_ref_same(owner, map_owner) {
+        } else if container == PRODUCER_CONTAINER_MAP {
+            if flags.len() != 2 {
+                panic("Core producer: exact Map arity differs")
+            }
             flags.set(0, true); flags.set(1, true)
         }
         producer_put_containment_flags(result, owner, flags)
@@ -1123,8 +1139,15 @@ fn producer_record_application_argument(
                 none => producer_record_nominal_parameter_type(
                     producer, parameter)
             },
-            none => panic(
-                "Core producer: application has unresolved type parameter")
+            none => {
+                let owner = match nominal_parameters.get(0) {
+                    some(parameter) => flow_generic_param_owner(parameter),
+                    none => panic(
+                        "Core producer: unresolved application lacks nominal owner")
+                }
+                panic(
+                    "Core producer: application has unresolved type parameter ${id.to_str()} for ${symbol_ref_origin_module_key(owner)}|${symbol_ref_canonical_payload(owner)}")
+            }
         },
         _ => producer_record_type(producer, ty, effect_owner)
     }
@@ -1720,56 +1743,68 @@ fn producer_register_h_type_params(
     }
 }
 
-fn producer_register_impl_target_parameters(
-    mut producer: ClosedCoreProducer, target_owner: SymbolRef, target: Type
-) {
-    let definition = match target {
-        Type::StructType { name, .. } => some((
-            registered_nominal_ref_symbol(
-                producer.env.types.structs.get(name).unwrap_or_else(fn() {
-                    panic("Core producer: impl struct target is absent")
-                }).owner_ref),
-            producer.env.types.structs.get(name).unwrap().type_param_vars)),
-        Type::EnumType { name, .. } => some((
-            registered_nominal_ref_symbol(
-                producer.env.types.enums.get(name).unwrap_or_else(fn() {
-                    panic("Core producer: impl enum target is absent")
-                }).owner_ref),
-            producer.env.types.enums.get(name).unwrap().type_param_vars)),
-        _ => none
-    }
-    match definition {
-        some((owner, raw_formals)) => {
-            if !symbol_ref_same(owner, target_owner) {
-                panic("Core producer: impl target owner differs")
-            }
-            let arguments = match target {
-                Type::StructType { type_params, .. } |
-                Type::EnumType { type_params, .. } => type_params,
-                _ => panic("Core producer: impl nominal target changed")
-            }
-            if arguments.len() != raw_formals.len() {
-                panic("Core producer: impl target application arity differs")
-            }
-            let mut index = 0
-            while index < raw_formals.len() {
-                let raw_formal = raw_formals.get(index).unwrap()
-                // HDecl source parameters were registered first.  The target
-                // definition's raw formal is only a local alias for methods
-                // that retain the exact nominal formal in their frozen type.
-                match arguments.get(index).unwrap() {
-                    Type::TypeVar { id, .. } => if id == raw_formal &&
-                           !producer.parameter_facts.contains_key(id) {
-                        producer_register_parameter(
-                            producer, id, owner, index,
-                            raw_formals.len(), [])
+fn producer_nominal_definition_raw_parameters(
+    producer: ClosedCoreProducer, owner: SymbolRef, is_struct: Bool
+) -> List<Int> {
+    let mut found: List<Int>? = none
+    if is_struct {
+        for entry in producer.env.types.structs.entries() {
+            if symbol_ref_same(
+                    registered_nominal_ref_symbol(entry.1.owner_ref), owner) {
+                match found {
+                    some(existing) => if !producer_int_lists_same(
+                            existing, entry.1.type_param_vars) {
+                        panic("Core producer: local struct formal aliases differ")
                     },
-                    _ => {}
+                    none => { found = some(entry.1.type_param_vars) }
                 }
-                index = index + 1
             }
-        },
-        none => {}
+        }
+    } else {
+        for entry in producer.env.types.enums.entries() {
+            if symbol_ref_same(
+                    registered_nominal_ref_symbol(entry.1.owner_ref), owner) {
+                match found {
+                    some(existing) => if !producer_int_lists_same(
+                            existing, entry.1.type_param_vars) {
+                        panic("Core producer: local enum formal aliases differ")
+                    },
+                    none => { found = some(entry.1.type_param_vars) }
+                }
+            }
+        }
+    }
+    match found {
+        some(values) => values,
+        none => panic("Core producer: local nominal definition is absent")
+    }
+}
+
+fn producer_register_nominal_decl_parameters(
+    mut producer: ClosedCoreProducer, owner: SymbolRef,
+    source: List<HTypeParam>, is_struct: Bool
+) {
+    producer_register_h_type_params(producer, owner, source)
+    let raw_formals = producer_nominal_definition_raw_parameters(
+        producer, owner, is_struct)
+    if raw_formals.len() != source.len() {
+        panic("Core producer: local nominal formal arity differs")
+    }
+    let exact = producer_nominal_parameters(owner, raw_formals.len())
+    let mut index = 0
+    while index < raw_formals.len() {
+        let raw_formal = raw_formals.get(index).unwrap()
+        let parameter = exact.get(index).unwrap()
+        match producer.parameter_facts.get(raw_formal) {
+            some(existing) => if !producer_resource_param_same(
+                    existing, parameter) {
+                panic("Core producer: local nominal formal identity differs")
+            },
+            none => producer_register_parameter(
+                producer, raw_formal, owner, index,
+                raw_formals.len(), [])
+        }
+        index = index + 1
     }
 }
 
@@ -1860,11 +1895,14 @@ fn producer_register_decl_parameters(
                     producer, executable_ref_named_symbol(executable_ref),
                     type_params)
             },
-            HDecl::Struct { owner_ref, type_params, .. } |
-            HDecl::Enum { owner_ref, type_params, .. } =>
-                producer_register_h_type_params(
+            HDecl::Struct { owner_ref, type_params, .. } =>
+                producer_register_nominal_decl_parameters(
                     producer, registered_nominal_ref_symbol(owner_ref),
-                    type_params),
+                    type_params, true),
+            HDecl::Enum { owner_ref, type_params, .. } =>
+                producer_register_nominal_decl_parameters(
+                    producer, registered_nominal_ref_symbol(owner_ref),
+                    type_params, false),
             HDecl::Effect { owner_ref, type_params, .. } => match owner_ref {
                 some(owner) => producer_register_h_type_params(
                     producer, owner, type_params),
@@ -1884,13 +1922,9 @@ fn producer_register_decl_parameters(
                     }
                 }
             },
-            HDecl::Impl {
-                owner_ref, type_params, target_ty, methods, ..
-            } => {
+            HDecl::Impl { owner_ref, type_params, methods, .. } => {
                 producer_register_h_type_params(
                     producer, impl_owner_ref_target(owner_ref), type_params)
-                producer_register_impl_target_parameters(
-                    producer, impl_owner_ref_target(owner_ref), target_ty)
                 producer_register_decl_parameters(producer, methods)
             },
             HDecl::ModBlock { decls: nested, .. } =>
