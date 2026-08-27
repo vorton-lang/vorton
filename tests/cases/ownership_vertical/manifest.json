@@ -132,6 +132,20 @@
       }
     },
     {
+      "id": "B7",
+      "path": "single/b_pattern_projection_ownership.ring",
+      "covers": [
+        "matched Option payload binding is materialized by exact projection",
+        "nested Option tuple bindings preserve their projection path",
+        "struct-pattern bindings remain live across repeated borrowing uses"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_PATTERN_PROJECTION_OK:24\n"
+      }
+    },
+    {
       "id": "C1",
       "path": "single/c_exact_callable_carriers.ring",
       "covers": [
