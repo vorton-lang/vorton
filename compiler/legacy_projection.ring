@@ -1558,12 +1558,19 @@ pub fn make_legacy_projection_table(
         let mut other = index + 1
         while other < types.len() {
             let right = types.get(other).unwrap()
-            if core_type_ref_same(left.core_type, right.core_type) ||
-               (types_equal(left.legacy_type, right.legacy_type) &&
+            let reverse_conflict =
+                types_equal(left.legacy_type, right.legacy_type) &&
                 match (left.internal_kind, right.internal_kind) {
                     (some(_), some(_)) => false,
+                    (none, none) => match (
+                            left.legacy_type, right.legacy_type) {
+                        (Type::TypeVar { .. }, Type::TypeVar { .. }) => false,
+                        _ => true
+                    },
                     _ => true
-                }) {
+                }
+            if core_type_ref_same(left.core_type, right.core_type) ||
+               reverse_conflict {
                 panic("legacy projection: Core/legacy Type mapping is not bijective")
             }
             other = other + 1
@@ -1809,18 +1816,27 @@ pub fn legacy_projection_impl_for(
 fn append_assembled_type_projection(
     mut values: List<LegacyTypeProjection>, projection: LegacyTypeProjection
 ) {
-    for existing in values {
+    let mut index = 0
+    while index < values.len() {
+        let existing = values.get(index).unwrap()
         if core_type_ref_same(existing.core_type, projection.core_type) {
-            if !types_equal(existing.legacy_type, projection.legacy_type) ||
-               match (existing.internal_kind, projection.internal_kind) {
-                    (none, none) => false,
-                    (some(a), some(b)) => a.tag != b.tag,
-                    _ => true
-               } {
-                panic("legacy projection: interned Type fact has two physical types")
+            match (existing.internal_kind, projection.internal_kind) {
+                (none, none) => if !types_equal(
+                        existing.legacy_type, projection.legacy_type) {
+                    panic("legacy projection: interned Type fact has two physical types")
+                },
+                (some(a), some(b)) => if a.tag != b.tag {
+                    panic("legacy projection: interned internal Type kind differs")
+                },
+                // An exporter-owned ordinary projection is the sole physical
+                // Type authority.  A consumer's internal nominal marker only
+                // keeps an otherwise source-less Core parameter total.
+                (none, some(_)) => {},
+                (some(_), none) => values.set(index, projection)
             }
             return
         }
+        index = index + 1
     }
     values.push(projection)
 }
