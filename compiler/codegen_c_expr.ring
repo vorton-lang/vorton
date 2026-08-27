@@ -3346,6 +3346,11 @@ fn gen_c_struct_lit(
     mut ctx: CCtx, name: Str,
     fields: List<HNominalStructFieldInit>, spread: HExpr?
 ) -> Str {
+    match spread {
+        some(_) => panic(
+            "C codegen: struct spread crossed verified ownership lowering"),
+        none => {}
+    }
     match ctx.struct_types.get(name) {
         some(info) => {
             rt_use(ctx, "ring_alloc", 2)
@@ -3354,29 +3359,7 @@ fn gen_c_struct_lit(
             let t = fresh_tmp(ctx)
             c_emit(ctx, "${t} = ring_alloc((int64_t)(${n} * sizeof(void*)), ${tid});")
 
-            // Spread copies the source struct's field pointers first (B-098):
-            // non-overridden copies alias the source's owned references, so the
-            // new struct takes its OWN reference (ring_dup) to avoid double-free;
-            // overridden copies are dead — skip the dup to avoid leaking.
-            match spread {
-                some(spread_expr) => {
-                    let mut overridden: Set<Str> = set_new()
-                    for f in fields { overridden.insert(f.name) }
-                    let spread_val = gen_c_expr(ctx, spread_expr)
-                    rt_use(ctx, "ring_dup", 1)
-                    for i in 0..info.field_names.len() {
-                        let fv = fresh_tmp(ctx)
-                        c_emit(ctx, "${fv} = ((void**)${spread_val})[${i}];")
-                        if overridden.contains(info.field_names[i]) == false {
-                            c_emit(ctx, "ring_dup(${fv});")
-                        }
-                        c_emit(ctx, "((void**)${t})[${i}] = ${fv};")
-                    }
-                },
-                none => {},
-            }
-
-            // Explicitly specified fields (override spread values).
+            // All fields are explicit after verified ownership lowering.
             for f in fields {
                 let val = gen_c_expr(ctx, f.value)
                 let mut field_idx = -1
@@ -3403,6 +3386,11 @@ fn gen_c_struct_lit(
 // ============================================================
 
 fn gen_c_variant_construct(mut ctx: CCtx, enum_name: Str, variant_name: Str, fields: List<HStructFieldInit>, spread: HExpr?) -> Str {
+    match spread {
+        some(_) => panic(
+            "C codegen: variant spread crossed verified ownership lowering"),
+        none => {}
+    }
     match ctx.enum_types.get(enum_name) {
         some(enum_info) => {
             match enum_info.variants.get(variant_name) {
@@ -3412,25 +3400,6 @@ fn gen_c_variant_construct(mut ctx: CCtx, enum_name: Str, variant_name: Str, fie
                     let t = fresh_tmp(ctx)
                     c_emit(ctx, "${t} = ring_alloc((int64_t)(sizeof(int64_t) + ${enum_info.max_fields} * sizeof(void*)), ${tid});")
                     c_emit(ctx, "*(int64_t*)${t} = ${vi.tag};")
-
-                    // Spread: same RC semantics as struct spread (B-098).
-                    match spread {
-                        some(spread_expr) => {
-                            let mut overridden: Set<Str> = set_new()
-                            for f in fields { overridden.insert(f.name) }
-                            let spread_val = gen_c_expr(ctx, spread_expr)
-                            rt_use(ctx, "ring_dup", 1)
-                            for i in 0..vi.field_names.len() {
-                                let fv = fresh_tmp(ctx)
-                                c_emit(ctx, "${fv} = ((void**)${spread_val})[${i + 1}];")
-                                if overridden.contains(vi.field_names[i]) == false {
-                                    c_emit(ctx, "ring_dup(${fv});")
-                                }
-                                c_emit(ctx, "((void**)${t})[${i + 1}] = ${fv};")
-                            }
-                        },
-                        none => {},
-                    }
 
                     // Explicitly specified fields, resolved by declared name.
                     for i in 0..fields.len() {

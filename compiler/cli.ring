@@ -4,9 +4,8 @@ use diagnostics::{Diagnostic, new_collecting_sink}
 use formatter::{format_human, format_llm}
 use checker::{CheckResult, check as check_single}
 use codegen_c::{generate_c}
-use compiler_mod::{compile_project, compile_project_c, verify_project_rc}
+use compiler_mod::{compile_project, compile_project_c}
 use parser::{parse}
-use verify_rc::{verify_rc_program, rc_fatal_count, format_rc_findings}
 use core_from_hir::{CoreAssemblyResult, CoreDiagnosticProjection,
     assemble_single_core,
     core_assembly_result_program,
@@ -146,26 +145,13 @@ pub fn cli_main() {
             exit_process(1)
             return
         }
-        // B-104 D2: static RC leak/UAF verification over the same materialized
-        // post-ownership HIR consumed by native project compilation.
-        if parsed.command == "check" && (parsed.verify_rc || parsed.verify_strict) {
-            let res = verify_project_rc(
-                file_path, parsed.rc_mutate, parsed.verify_strict,
-                parsed.error_format, timing)
-            if res.success == false {
-                eprintln("Compilation failed")
-                timing.finish_command(false)
-                exit_process(1)
-                return
-            }
-            print(res.report)
-            if res.fatal > 0 || (parsed.verify_strict && res.exempt > 0) {
-                timing.finish_command(false)
-                exit_process(1)
-            } else {
-                print("OK")
-                timing.finish_command(true)
-            }
+        if parsed.rc_mutate != "" {
+            eprintln("Error: --rc-mutate has no typed project ownership-pipeline mutation entry")
+            timing.skip_phase(PHASE_PROJECT_MODULE_LOAD_PARSE)
+            timing.skip_phase(PHASE_TYPE_EFFECT_CHECK_LOWER)
+            timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
+            timing.finish_command(false)
+            exit_process(1)
             return
         }
         if parsed.command == "check" {
@@ -288,22 +274,6 @@ pub fn cli_main() {
         check_result, assembly,
         ownership_pipeline_outcome_verified(ownership))
     timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
-
-    // B-104 D2: single-file --verify-rc (see the multi-file branch above).
-    if parsed.command == "check" && (parsed.verify_rc || parsed.verify_strict) {
-        let findings = verify_rc_program(rc_program)
-        let fatal = rc_fatal_count(findings)
-        let exempt = findings.len() - fatal
-        print(format_rc_findings(findings, parsed.verify_strict))
-        if fatal > 0 || (parsed.verify_strict && exempt > 0) {
-            timing.finish_command(false)
-            exit_process(1)
-        } else {
-            print("OK")
-            timing.finish_command(true)
-        }
-        return
-    }
 
     if parsed.command == "check" {
         print("OK")
@@ -461,8 +431,7 @@ fn parse_cli_args(raw_args: List<Str>) -> CliArgs {
                         identity_ledger = true
                     } else {
                     if arg.starts_with("--rc-mutate=") {
-                        // TEST-ONLY (B-104 D2 negative tests): degrade the RC
-                        // pipeline so the verifier's detection can be asserted.
+                        // TEST-ONLY: select a typed ownership-pipeline mutation.
                         rc_mutate = arg.slice(12, arg.len())
                     } else {
                         if arg.starts_with("--phase-timing=") {
@@ -540,6 +509,6 @@ fn usage() {
     print("  --out-dir=<path>          Output directory (default: dist)")
     print("  --target=c                Code generation target (default: c)")
     print("  --no-c-lines              Omit #line directives from the generated C")
-    print("  --verify-rc               (check) static RC leak/UAF verification of the post-RC HIR")
-    print("  --verify-rc-strict        like --verify-rc, but documented-exempt findings also fail")
+    print("  --verify-rc               compatibility alias; ownership verification is always on")
+    print("  --verify-rc-strict        compatibility alias; ownership verification is always strict")
 }

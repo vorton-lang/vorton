@@ -15,7 +15,6 @@ use codegen_c::{generate_c_project}
 use resolver::{ModuleGraph, ModuleId, module_key, module_prefix,
     build_module_graph}
 use exports::{ModuleExports, extract_exports}
-use verify_rc::{RcFinding, verify_rc_program, rc_fatal_count, format_rc_findings}
 use legacy_projection::{assemble_legacy_projection}
 use ownership_pipeline::{
     VerifiedOwnershipProgram, OwnershipPipelineOutcome,
@@ -625,69 +624,6 @@ pub fn compile_project_c(
                 modules, entry_prefix, c_path, o_path, emit_lines,
                 phases.extern_forward_bridges)
             CProjectCompileResult { success: build_ok }
-        },
-    }
-}
-
-// ============================================================
-// B-104 D2: multi-file static RC verification over the same exact project
-// materialization consumed by native compilation.
-// ============================================================
-
-pub struct RcProjectVerifyResult {
-    pub success: Bool,
-    pub fatal: Int,
-    pub exempt: Int,
-    pub report: Str
-}
-
-pub fn verify_project_rc(
-    entry_file: Str, mutate: Str, strict: Bool, error_format: Str,
-    mut timing: PhaseTiming
-) -> RcProjectVerifyResult {
-    match compile_phases(entry_file, error_format, timing) {
-        none => {
-            timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
-            RcProjectVerifyResult { success: false, fatal: 0, exempt: 0, report: "" }
-        },
-        some(phases) => {
-            if mutate != "" {
-                timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
-                return RcProjectVerifyResult {
-                    success: false, fatal: 1, exempt: 0,
-                    report: "Error: --rc-mutate has no typed ownership-pipeline mutation entry"
-                }
-            }
-            let resource_start = timing.start_phase()
-            let (assembly, ownership) = run_project_ownership(phases)
-            if !ownership_pipeline_outcome_is_verified(ownership) {
-                report_project_ownership_failure(
-                    phases, assembly, ownership, error_format)
-                timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
-                return RcProjectVerifyResult {
-                    success: false, fatal: 0, exempt: 0, report: ""
-                }
-            }
-            let materialized = materialize_verified_project_ownership(
-                phases, assembly,
-                ownership_pipeline_outcome_verified(ownership))
-            let mut all: List<RcFinding> = []
-            for key in phases.graph.topo_order {
-                match materialized.get(key) {
-                    some(hir) => {
-                        for f in verify_rc_program(hir) { all.push(f) }
-                    },
-                    none => {},
-                }
-            }
-            let fatal = rc_fatal_count(all)
-            timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
-            RcProjectVerifyResult {
-                success: true,
-                fatal: fatal,
-                exempt: all.len() - fatal,
-                report: format_rc_findings(all, strict)
-            }
         },
     }
 }
