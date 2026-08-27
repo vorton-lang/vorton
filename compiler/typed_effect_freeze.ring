@@ -23,19 +23,21 @@ use hir::{
     h_default_specialization_effects,
     h_default_specialization_forward_call,
     h_exact_call_signature, method_call_ref_signature,
-    h_projection_kind, h_projection_nominal, h_projection_variant
+    method_call_ref_is_bound, method_call_ref_bound
 }
 use builtins::{
     builtin_method_contract_facts, builtin_method_contract_intrinsic,
     builtin_method_contract_scheme
 }
 use ir_identity::{
-    OriginRef, SymbolRef,
+    OriginRef, SymbolRef, HandledEffectRef,
     make_symbol_origin_ref, make_path_origin_ref, origin_ref_same,
     registered_nominal_ref_symbol,
     nominal_field_ref_member, variant_field_ref_member,
     impl_owner_ref_provider, impl_provider_ref_site,
-    intrinsic_ref_symbol, symbol_ref_same
+    intrinsic_ref_symbol, symbol_ref_same,
+    handled_effect_ref_same, trait_method_ref_trait,
+    trait_method_ref_member, registered_trait_ref_symbol
 }
 use ir_inventory::{
     ExecutableRef, executable_ref_is_named, executable_ref_named_symbol,
@@ -55,6 +57,8 @@ struct TypedEffectFreezeState {
     facts: List<TypedEffectFormalFact>,
     callables: List<TypedCallableEffectFact>,
     visited_nominals: List<SymbolRef>,
+    visited_effects: List<HandledEffectRef>,
+    visited_traits: List<SymbolRef>,
     header_tails: List<Int>,
     schema_use_tails: List<Int>,
     scope_owners: List<OriginRef>
@@ -205,13 +209,11 @@ fn scan_formal(
         },
         EffectFormalScanMode::ValidateFormal => match formal_fact_for_raw(
                 state, raw_tail) {
-            some(fact) => {
-                let existing_owner = effect_param_owner(
-                    typed_effect_formal_parameter(fact))
-                if !owner_is_visible(state, existing_owner, owner) {
-                    panic("typed effect freeze: row-tail use escaped its binder")
-                }
-            },
+            // Ordinary typed values may transport a child callable/header
+            // formal outward (for example a returned lambda).  Binder/header
+            // publication above already rejects unrelated owners; transport
+            // validation only proves that the raw tail has one exact binder.
+            some(_) => {},
             none => panic("typed effect freeze: row-tail use has no binder")
         }
     }
@@ -256,7 +258,8 @@ fn scan_effect_mode(
             state, error_type, owner, mode),
         Effect::MutEffect { state_type } => scan_type_mode(
             state, state_type, owner, mode),
-        Effect::CustomEffect { type_args, .. } => {
+        Effect::CustomEffect { reference, type_args, .. } => {
+            scan_handled_effect_schema(state, reference)
             for argument in type_args {
                 scan_type_mode(
                     state, argument, owner, mode)
@@ -351,6 +354,89 @@ fn scan_enum_schema(mut state: TypedEffectFreezeState, name: Str) {
         },
         none => {}
     }
+}
+
+fn scan_handled_effect_schema(
+    mut state: TypedEffectFreezeState, reference: HandledEffectRef
+) {
+    if state.visited_effects.any(fn(existing) {
+            handled_effect_ref_same(existing, reference)
+        }) { return }
+    state.visited_effects.push(reference)
+    let mut found = false
+    for entry in state.env.types.effects.entries() {
+        let def = entry.1
+        match def.handled_ref {
+            some(candidate) => if handled_effect_ref_same(
+                    candidate, reference) {
+                if found {
+                    panic("typed effect freeze: handled header repeats")
+                }
+                found = true
+                let type_args = def.type_param_vars.map(fn(id) {
+                    Type::TypeVar { id: id, name: none }
+                })
+                for op in def.ops {
+                    let operation = match op.operation_ref {
+                        some(value) => value,
+                        none => panic(
+                            "typed effect freeze: handled op lacks identity")
+                    }
+                    let executable = effect_operation_ref_callable(operation)
+                    let owner = executable_origin(executable)
+                    for param in op.params {
+                        scan_header_type(state, param, owner)
+                    }
+                    scan_header_type(state, op.return_type, owner)
+                    let row = EffectRow { effects: [Effect::CustomEffect {
+                        reference: reference, name: def.name,
+                        type_args: type_args
+                    }], tail: none }
+                    register_callable_effect(state, executable, row)
+                }
+            },
+            none => {}
+        }
+    }
+    if !found {
+        panic("typed effect freeze: handled header is absent")
+    }
+}
+
+fn scan_trait_schema(mut state: TypedEffectFreezeState, owner: SymbolRef) {
+    if state.visited_traits.any(fn(existing) {
+            symbol_ref_same(existing, owner)
+        }) { return }
+    state.visited_traits.push(owner)
+    let mut found = false
+    for entry in state.env.trait_reg.traits.entries() {
+        let def = entry.1
+        if symbol_ref_same(registered_trait_ref_symbol(def.owner_ref), owner) {
+            if found { panic("typed effect freeze: trait header repeats") }
+            found = true
+            for method in def.methods {
+                let executable = make_named_executable_ref(
+                    trait_method_ref_member(method.method_ref))
+                let method_owner = executable_origin(executable)
+                scan_header_type(state, method.ty, method_owner)
+                match method.ty {
+                    Type::FnType { effects, .. } => register_callable_effect(
+                        state, executable, effects),
+                    _ => panic(
+                        "typed effect freeze: trait method is not callable")
+                }
+            }
+            for assoc in def.assoc_types {
+                match assoc.default_type {
+                    some(value) => scan_header_type(
+                        state, value,
+                        make_symbol_origin_ref(assoc.member_ref)),
+                    none => {}
+                }
+            }
+        }
+    }
+    if !found { panic("typed effect freeze: trait header is absent") }
 }
 
 fn scan_type_mode(
@@ -540,8 +626,14 @@ fn scan_expr(
                 validate_type(state, argument, owner)
             }
             match method_ref {
-                some(method) => validate_type(
-                    state, method_call_ref_signature(method), owner),
+                some(method) => {
+                    if method_call_ref_is_bound(method) {
+                        scan_trait_schema(state, trait_method_ref_trait(
+                            method_call_ref_bound(method)))
+                    }
+                    validate_type(
+                        state, method_call_ref_signature(method), owner)
+                },
                 none => {}
             }
         },
@@ -649,8 +741,14 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
     for value in values {
         match value {
             HDecl::Fn { executable_ref, params, return_type, effects,
-                        body, .. } => scan_callable(
-                state, executable_ref, params, return_type, effects, some(body)),
+                        body, trait_bounds, .. } => {
+                for bound in trait_bounds {
+                    scan_trait_schema(state, bound.trait_ref)
+                }
+                scan_callable(
+                    state, executable_ref, params, return_type, effects,
+                    some(body))
+            },
             HDecl::Struct { owner_ref, fields, .. } => {
                 let nominal = registered_nominal_ref_symbol(owner_ref)
                 let _ = mark_nominal_visited(state, nominal)
@@ -677,9 +775,13 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
                 }
             },
             HDecl::Impl {
-                target_ty, owner_ref, methods, assoc_types,
+                target_ty, owner_ref, trait_ref, methods, assoc_types,
                 default_specializations, delegate_plan, ..
             } => {
+                match trait_ref {
+                    some(reference) => scan_trait_schema(state, reference),
+                    none => {}
+                }
                 let owner = make_path_origin_ref(impl_provider_ref_site(
                     impl_owner_ref_provider(owner_ref)))
                 scan_header_type(state, target_ty, owner)
@@ -739,7 +841,16 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
                     none => {}
                 }
             },
-            HDecl::Effect { name, type_params, ops, .. } => {
+            HDecl::Effect { name, handled_ref, type_params, ops, .. } => {
+                match handled_ref {
+                    some(reference) => if !state.visited_effects.any(
+                            fn(existing) {
+                                handled_effect_ref_same(existing, reference)
+                            }) {
+                        scan_handled_effect_schema(state, reference)
+                    },
+                    none => {}
+                }
                 let type_args = type_params.map(fn(parameter) {
                     Type::TypeVar {
                         id: parameter.type_var_id,
@@ -764,7 +875,13 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
             HDecl::Test { executable_ref, body, .. } => scan_callable(
                 state, executable_ref, [], hexpr_type(body),
                 hexpr_effects(body), some(body)),
-            HDecl::Trait { methods, assoc_types, .. } => {
+            HDecl::Trait { owner_ref, methods, assoc_types, .. } => {
+                let trait_owner = registered_trait_ref_symbol(owner_ref)
+                if !state.visited_traits.any(fn(existing) {
+                        symbol_ref_same(existing, trait_owner)
+                    }) {
+                    scan_trait_schema(state, trait_owner)
+                }
                 for method in methods {
                     scan_callable(state, method.executable_ref, method.params,
                         method.return_type, method.effects, method.body)
@@ -778,8 +895,13 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
                 }
             },
             HDecl::ExternFn { executable_ref, params, return_type, effects,
-                              .. } => scan_callable(
-                state, executable_ref, params, return_type, effects, none),
+                              trait_bounds, .. } => {
+                for bound in trait_bounds {
+                    scan_trait_schema(state, bound.trait_ref)
+                }
+                scan_callable(
+                    state, executable_ref, params, return_type, effects, none)
+            },
             HDecl::Const { executable_ref, ty, init, .. } => scan_callable(
                 state, executable_ref, [], ty, hexpr_effects(init), some(init)),
             HDecl::ModBlock { decls, .. } => scan_decls(state, decls),
@@ -853,6 +975,7 @@ pub fn freeze_typed_effect_formals(
     }
     let state = TypedEffectFreezeState {
         env: env, facts: [], callables: [], visited_nominals: [],
+        visited_effects: [], visited_traits: [],
         header_tails: [], schema_use_tails: [], scope_owners: []
     }
     scan_decls(state, program.decls)
