@@ -616,14 +616,13 @@ pub fn compile_project(entry_file: Str, error_format: Str, mut timing: PhaseTimi
         },
         some(phases) => {
             let resource_start = timing.start_phase()
-            let run = match run_project_ownership(phases, error_format) {
-                some(value) => value,
-                none => {
-                    timing.finish_phase(
-                        PHASE_RESOURCE_PLAN_VERIFY, resource_start)
-                    return CompileProjectResult { success: false }
-                }
+            let run_result = run_project_ownership(phases, error_format)
+            if run_result.is_none() {
+                timing.finish_phase(
+                    PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+                return CompileProjectResult { success: false }
             }
+            let run = run_result.unwrap()
             let assembly = run.assembly
             let ownership = run.ownership
             if !ownership_pipeline_outcome_is_verified(ownership) {
@@ -663,14 +662,13 @@ pub fn compile_project_c(
         some(phases) => {
             let resource_start = timing.start_phase()
             let entry_key = module_key(phases.graph.entry.path_segments)
-            let run = match run_project_ownership(phases, error_format) {
-                some(value) => value,
-                none => {
-                    timing.finish_phase(
-                        PHASE_RESOURCE_PLAN_VERIFY, resource_start)
-                    return CProjectCompileResult { success: false }
-                }
+            let run_result = run_project_ownership(phases, error_format)
+            if run_result.is_none() {
+                timing.finish_phase(
+                    PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+                return CProjectCompileResult { success: false }
             }
+            let run = run_result.unwrap()
             let assembly = run.assembly
             let ownership = run.ownership
             if !ownership_pipeline_outcome_is_verified(ownership) {
