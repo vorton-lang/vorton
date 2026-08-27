@@ -222,7 +222,7 @@ fn check_decl_inner(
         Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span, .. } =>
             check_fn_decl(ctx, name, type_params, params, return_type,
                 declared_effects, body, is_pub, span,
-                none, none, none, none, 0),
+                none, none, none, none, []),
         Decl::Test { description, body, span } =>
             check_test_decl(
                 ctx, description, body, span,
@@ -962,7 +962,7 @@ fn check_impl_decl_canonical(
                     ctx, name, mtps, params, return_type, declared_effects,
                     body, is_pub, mspan, some(impl_self_type),
                     registration_scheme, some(rebind_identity),
-                    some(exact_method), impl_owner.type_param_vars.len())
+                    some(exact_method), impl_owner.type_param_vars)
                 // #210: Also register fn_mut_params with qualified key for cross-module export.
                 // check_fn_decl inserts with unqualified `name`; exports.ring looks up
                 // with "${target_type}_${mname}", so we mirror that key here.
@@ -2489,11 +2489,24 @@ fn constrain_declared_fn_effects(
     (declared_row, s)
 }
 
+fn insert_canonical_type_var_id(
+    mut values: Map<Int, Int>, representative: Int, canonical: Int
+) {
+    match values.get(representative) {
+        some(existing) => if existing != canonical {
+            panic(
+                "function zonk: two source type parameters share one representative")
+        },
+        none => values.insert(representative, canonical)
+    }
+}
+
 fn check_fn_body(
     mut ctx: InferCtx,
     fn_name: Str,
     registration_scheme: TypeScheme?,
     type_params: List<TypeParam>,
+    inherited_type_var_ids: List<Int>,
     source_type_var_ids: List<Int>,
     hparams: List<HParam>,
     expected_ret: Type,
@@ -2594,19 +2607,42 @@ fn check_fn_body(
     }
 
     let mut canonical_type_var_ids: Map<Int, Int> = map_new()
+    match registration_scheme {
+        some(scheme) => {
+            if inherited_type_var_ids.len() > scheme.type_vars.len() {
+                panic("function zonk: inherited registration prefix is incomplete")
+            }
+            let mut inherited_index = 0
+            while inherited_index < inherited_type_var_ids.len() {
+                let registration_id = scheme.type_vars.get(
+                    inherited_index).unwrap()
+                let exact_id = inherited_type_var_ids.get(
+                    inherited_index).unwrap()
+                match apply_subst(
+                        ctx.subst,
+                        Type::TypeVar {
+                            id: registration_id, name: none
+                        }) {
+                    Type::TypeVar { id: representative, .. } =>
+                        insert_canonical_type_var_id(
+                            canonical_type_var_ids,
+                            representative, exact_id),
+                    _ => {}
+                }
+                inherited_index = inherited_index + 1
+            }
+        },
+        none => if inherited_type_var_ids.len() != 0 {
+            panic("function zonk: inherited type parameters lack registration")
+        }
+    }
     for source_id in source_type_var_ids {
         match apply_subst(
                 ctx.subst,
                 Type::TypeVar { id: source_id, name: none }) {
             Type::TypeVar { id: representative, .. } => {
-                match canonical_type_var_ids.get(representative) {
-                    some(existing) => if existing != source_id {
-                        panic(
-                            "function zonk: two source type parameters share one representative")
-                    },
-                    none => canonical_type_var_ids.insert(
-                        representative, source_id)
-                }
+                insert_canonical_type_var_id(
+                    canonical_type_var_ids, representative, source_id)
             },
             _ => {}
         }
@@ -2781,7 +2817,7 @@ fn check_fn_decl(
     declared_effects: List<EffectExpr>?, body: Expr,
     is_pub: Bool, span: Span, self_type: Type?,
     registration_override: TypeScheme?, rebind_identity: Str?,
-    impl_method_ref: ImplMethodRef?, source_type_var_offset: Int
+    impl_method_ref: ImplMethodRef?, inherited_type_var_ids: List<Int>
 ) -> HDecl {
     let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let registered_def_id = match registration_override {
@@ -2802,7 +2838,7 @@ fn check_fn_decl(
         ctx, name, type_params, params, return_type,
         declared_effects, body, is_pub, span, self_type,
         registration_override, rebind_identity, impl_method_ref,
-        executable_ref, source_type_var_offset,
+        executable_ref, inherited_type_var_ids,
         obligation_checkpoint)) catch { _ => none }
     exit_executable_owner(ctx)
     match result {
@@ -2824,7 +2860,8 @@ fn check_fn_decl_transaction(
     is_pub: Bool, span: Span, self_type: Type?,
     registration_override: TypeScheme?, rebind_identity: Str?,
     impl_method_ref: ImplMethodRef?,
-    executable_ref: ExecutableRef, source_type_var_offset: Int,
+    executable_ref: ExecutableRef,
+    inherited_type_var_ids: List<Int>,
     obligation_checkpoint: Int
 ) -> HDecl {
     // Save the registration scheme before entering the parameter scope: a
@@ -2851,7 +2888,7 @@ fn check_fn_decl_transaction(
         match registration_scheme {
             some(value) => value,
             none => panic("function HIR: registration scheme is absent")
-        }, source_type_var_offset, type_params.len())
+        }, inherited_type_var_ids.len(), type_params.len())
     let mut source_type_var_index = 0
     for tp in type_params {
         let tv = Type::TypeVar {
@@ -2972,7 +3009,7 @@ fn check_fn_decl_transaction(
     let try_result = some(
         check_fn_body(
             ctx, provenance_key, registration_scheme, type_params,
-            source_type_var_ids, hparams,
+            inherited_type_var_ids, source_type_var_ids, hparams,
             expected_ret, owner_declared_effects,
             body, saved_tp_scope, span,
             obligation_checkpoint
@@ -3075,7 +3112,7 @@ fn check_fn_decl_transaction(
                 match registration_scheme {
                     some(value) => value,
                     none => panic("function HIR: registration scheme is absent")
-                }, source_type_var_offset, type_params.len())),
+                }, inherited_type_var_ids.len(), type_params.len())),
         params: final_params, return_type: final_ret, effects: final_effects,
         handled_evidence_bindings:
             current_handled_evidence_bindings(ctx),
