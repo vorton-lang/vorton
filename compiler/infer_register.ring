@@ -21,6 +21,8 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     find_impls_by_provider,
     install_method_core, replace_impl_method_core,
     make_impl_method_scheme_core, impl_method_core_as_scheme,
+    impl_method_core_type, impl_method_core_type_vars,
+    impl_method_core_def_id,
     make_impl_assoc_predicate, make_typed_impl_predicate,
     direct_impl_predicate_provenance, expanded_impl_predicate_provenance,
     freeze_impl_predicate_set, empty_frozen_impl_predicate_set,
@@ -2682,10 +2684,11 @@ fn register_impl_canonical(
                            !declared_method_names.contains(trait_method.name) {
                             exact_method_schemes.insert(
                                 trait_method.name,
-                                specialize_trait_method_scheme(
-                                    trait_def, trait_method, impl_self_type,
-                                    trait_type_args, impl_tv_ids,
-                                    assoc_type_map))
+                                freshen_generated_effect_formals(
+                                    ctx, specialize_trait_method_scheme(
+                                        trait_def, trait_method,
+                                        impl_self_type, trait_type_args,
+                                        impl_tv_ids, assoc_type_map)))
                         }
                     }
                 },
@@ -2928,8 +2931,46 @@ pub fn impl_owner_fn_bounds(owner: ImplEntry) -> List<FnBoundsEntry> {
     result
 }
 
+// A generated impl method is a new callable authority.  Any generalized
+// effect-row tail retained from the source trait/field scheme must therefore
+// be alpha-renamed before HIR is built; Core may never repair shared raw
+// inference identities after the TypedHIR freeze.
+fn freshen_generated_effect_formals(
+    mut ctx: InferCtx, core: ImplMethodSchemeCore
+) -> ImplMethodSchemeCore {
+    let source_type = impl_method_core_type(core)
+    let mut tails: List<Int> = []
+    collect_effect_tail_vars(source_type, tails)
+    if tails.len() == 0 { return core }
+
+    let mut mapping: Map<Int, Type> = map_new()
+    let source_quantified = impl_method_core_type_vars(core)
+    for tail in tails {
+        if !source_quantified.contains(tail) {
+            panic("generated effect formal: source tail is not quantified")
+        }
+        if !mapping.contains_key(tail) {
+            mapping.insert(tail, ctx.env.fresh_var())
+        }
+    }
+    let mut quantified: List<Int> = []
+    for source_id in source_quantified {
+        match mapping.get(source_id) {
+            some(Type::TypeVar { id, .. }) => {
+                if !quantified.contains(id) { quantified.push(id) }
+            },
+            _ => if !quantified.contains(source_id) {
+                quantified.push(source_id)
+            }
+        }
+    }
+    make_impl_method_scheme_core(
+        apply_subst_map(mapping, source_type), quantified,
+        impl_method_core_def_id(core))
+}
+
 fn specialize_delegate_method_core(
-    field_core: ImplMethodSchemeCore,
+    mut ctx: InferCtx, field_core: ImplMethodSchemeCore,
     field_var_map: Map<Int, Type>, self_type: Type,
     impl_tv_ids: List<Int>
 ) -> ImplMethodSchemeCore {
@@ -2971,7 +3012,8 @@ fn specialize_delegate_method_core(
         }
     }
 
-    make_impl_method_scheme_core(specialized_type, type_vars, none)
+    freshen_generated_effect_formals(ctx,
+        make_impl_method_scheme_core(specialized_type, type_vars, none))
 }
 
 fn delegate_constraint_lists_same(
@@ -3304,7 +3346,7 @@ fn register_delegate_traits(
                                     match resolved_method_scheme {
                                         some(field_core) => {
                                             let core = specialize_delegate_method_core(
-                                                field_core, field_var_map,
+                                                ctx, field_core, field_var_map,
                                                 self_type,
                                                 wrapper_owner.type_param_vars)
                                             exact_method_schemes.insert(tm.name, core)

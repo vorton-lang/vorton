@@ -69,6 +69,10 @@ use builtins::{
     builtin_method_contract_intrinsic, builtin_method_contract_scheme
 }
 use precore_lower::{close_hir_surface}
+use typed_effect_freeze::{
+    freeze_typed_effect_formals, typed_effect_freeze_formals,
+    typed_effect_freeze_callables
+}
 use core_type_source::{
     CoreTypeSourceFact, CoreHandledEvidenceTypeSource,
     core_type_source_type, core_type_source_fact,
@@ -930,8 +934,11 @@ pub fn freeze_core_and_legacy_facts(
     physical_module_prefix: Str
 ) -> FrozenCoreAndLegacyFacts {
     let closed = close_hir_surface(program, env)
+    let effect_freeze = freeze_typed_effect_formals(closed, env)
     let core = produce_closed_core_assembly_facts(
-        module_key, module_order, closed, env)
+        module_key, module_order, closed, env,
+        typed_effect_freeze_formals(effect_freeze),
+        typed_effect_freeze_callables(effect_freeze))
     let sealed_program = frozen_core_assembly_program(core)
     let type_sources = frozen_core_assembly_type_sources(core)
     let handled_evidence_types =

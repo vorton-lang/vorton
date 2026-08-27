@@ -41,6 +41,35 @@ pub fn effect_param_ref_same(
         left.ordinal == right.ordinal
 }
 
+// TypedHIR's immutable bridge from one module-local inference-row tail to the
+// stable formal identity that Core is allowed to consume.  `raw_tail` is only
+// a lookup token inside the already-closed module; it is never transported as
+// Core identity and may not be reminted or re-owned downstream.
+pub struct TypedEffectFormalFact {
+    raw_tail: Int,
+    parameter: EffectParamRef
+}
+
+pub fn make_typed_effect_formal_fact(
+    raw_tail: Int, parameter: EffectParamRef
+) -> TypedEffectFormalFact {
+    if raw_tail < 0 {
+        panic("typed effect freeze: invalid inference-row tail")
+    }
+    TypedEffectFormalFact {
+        raw_tail: raw_tail,
+        parameter: parameter
+    }
+}
+
+pub fn typed_effect_formal_raw_tail(
+    value: TypedEffectFormalFact
+) -> Int { value.raw_tail }
+
+pub fn typed_effect_formal_parameter(
+    value: TypedEffectFormalFact
+) -> EffectParamRef { value.parameter }
+
 // One exact effect contract freezes at the Core boundary and is transported
 // unchanged through Flow.  Flow must not rebuild or translate this relation.
 enum CoreEffectAtomValue {

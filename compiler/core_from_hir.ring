@@ -92,7 +92,8 @@ use ir_identity::{
     impl_owner_ref_target,
     handled_effect_ref_symbol,
     variant_ref_member, variant_ref_same,
-    variant_field_ref_variant,
+    variant_field_ref_variant, variant_field_ref_member,
+    nominal_field_ref_member, impl_provider_ref_site,
     nominal_field_ref_same,
     variant_field_ref_same,
     slot_ref_same, slot_ref_source_def_id
@@ -240,6 +241,7 @@ use core_type_source::{
     make_variant_flow_field_identity,
     make_path_flow_field_identity,
     flow_type_node_reference, flow_type_node_kind,
+    flow_type_node_callable_effects,
     flow_type_kind_parameter,
     flow_type_node_nominal_fields,
     flow_nominal_field_identity, flow_nominal_field_type,
@@ -303,8 +305,9 @@ use core_hir::{
     core_body_entry_origin, core_body_entry_anchor
 }
 use effect_contract::{
-    EffectParamRef, make_effect_param_ref,
-    effect_param_owner, effect_param_ordinal, effect_param_ref_same,
+    EffectParamRef, effect_param_owner, effect_param_ordinal,
+    TypedEffectFormalFact, typed_effect_formal_raw_tail,
+    typed_effect_formal_parameter,
     CoreEffectSet, CoreEffectAtom, CoreEffectContract,
     make_core_effect_set, make_core_effect_contract,
     make_explicit_core_effect_instantiation,
@@ -316,6 +319,10 @@ use effect_contract::{
     make_core_fail_effect, make_core_mut_effect,
     make_core_unsafe_effect, make_core_handled_effect,
     make_core_system_effect
+}
+use typed_effect_freeze::{
+    TypedCallableEffectFact, typed_callable_effect_reference,
+    typed_callable_effect_row
 }
 use extern_manifest::{compiler_extern_ref_for_executable}
 use delegate_plan::{
@@ -412,12 +419,7 @@ struct CoreAssemblyRecorder {
     module_key: Str, module_order: Int,
     allocator: CoreTypeFactAllocator,
     refs: List<CoreTypeFactRef>, specs: List<CoreTypeSpec?>,
-    effect_parameters: List<CoreEffectParamSource>,
     frozen: Bool
-}
-struct CoreEffectParamSource {
-    raw_tail: Int,
-    parameter: EffectParamRef
 }
 fn new_core_assembly_recorder(
     module_key: Str, module_order: Int
@@ -427,7 +429,7 @@ fn new_core_assembly_recorder(
     }
     CoreAssemblyRecorder { module_key: module_key, module_order: module_order,
         allocator: new_core_type_fact_allocator(module_key), refs: [],
-        specs: [], effect_parameters: [], frozen: false }
+        specs: [], frozen: false }
 }
 fn core_assembly_recorder_module_key(
     value: CoreAssemblyRecorder
@@ -437,29 +439,6 @@ fn core_assembly_recorder_module_order(
 ) -> Int { value.module_order }
 fn require_open(value: CoreAssemblyRecorder) {
     if value.frozen { panic("Core assembly: recorder is frozen") }
-}
-fn record_core_effect_parameter_source(
-    mut recorder: CoreAssemblyRecorder, raw_tail: Int,
-    parameter: EffectParamRef
-) {
-    require_open(recorder)
-    if raw_tail < 0 {
-        panic("Core assembly: invalid effect parameter source")
-    }
-    for existing in recorder.effect_parameters {
-        if existing.raw_tail == raw_tail {
-            if !effect_param_ref_same(existing.parameter, parameter) {
-                panic("Core assembly: raw effect tail changed formal identity")
-            }
-            return
-        }
-        if effect_param_ref_same(existing.parameter, parameter) {
-            panic("Core assembly: two raw effect tails share one formal")
-        }
-    }
-    recorder.effect_parameters.push(CoreEffectParamSource {
-        raw_tail: raw_tail, parameter: parameter
-    })
 }
 fn reserve_core_type_fact(
     mut recorder: CoreAssemblyRecorder
@@ -606,17 +585,20 @@ struct ClosedCoreProducer {
     recorded_types: List<ProducerRecordedType>,
     parameter_facts: Map<Int, FlowGenericParamFact>,
     type_sources: List<CoreTypeSourceFact>,
-    handled_sources: List<CoreHandledEvidenceTypeSource>
+    handled_sources: List<CoreHandledEvidenceTypeSource>,
+    effect_parameters: List<TypedEffectFormalFact>
 }
 
 fn new_closed_core_producer(
-    module_key: Str, module_order: Int, env: TypeEnv
+    module_key: Str, module_order: Int, env: TypeEnv,
+    effect_parameters: List<TypedEffectFormalFact>
 ) -> ClosedCoreProducer {
     ClosedCoreProducer {
         recorder: new_core_assembly_recorder(module_key, module_order),
         env: env, module_key: module_key, recorded_types: [],
         parameter_facts: map_new(),
-        type_sources: [], handled_sources: []
+        type_sources: [], handled_sources: [],
+        effect_parameters: effect_parameters.map(fn(fact) { fact })
     }
 }
 
@@ -820,34 +802,31 @@ fn producer_direct_composite_seed(
     flow_type_seed_shareable()
 }
 
-fn producer_effect_parameter_for(
-    mut producer: ClosedCoreProducer, owner: ExecutableRef, raw_tail: Int
+fn producer_effect_parameter_from_facts(
+    producer: ClosedCoreProducer, owner: OriginRef, raw_tail: Int
 ) -> EffectParamRef {
-    for source in producer.recorder.effect_parameters {
-        if source.raw_tail == raw_tail {
-            if !executable_ref_same(
-                    effect_param_owner(source.parameter), owner) {
-                panic("Core producer: raw effect tail crossed owners")
+    let mut found: EffectParamRef? = none
+    for fact in producer.effect_parameters {
+        if typed_effect_formal_raw_tail(fact) == raw_tail {
+            let parameter = typed_effect_formal_parameter(fact)
+            if !origin_ref_same(effect_param_owner(parameter), owner) {
+                panic("Core producer: typed effect formal owner differs")
             }
-            return source.parameter
+            if found.is_some() {
+                panic("Core producer: typed effect formal repeats")
+            }
+            found = some(parameter)
         }
     }
-    let mut ordinal = 0
-    for source in producer.recorder.effect_parameters {
-        if executable_ref_same(
-                effect_param_owner(source.parameter), owner) {
-            ordinal = ordinal + 1
-        }
+    match found {
+        some(parameter) => parameter,
+        none => panic("Core producer: effect tail lacks TypedHIR formal")
     }
-    let parameter = make_effect_param_ref(owner, ordinal)
-    record_core_effect_parameter_source(
-        producer.recorder, raw_tail, parameter)
-    parameter
 }
 
 fn producer_record_effect_contract(
     mut producer: ClosedCoreProducer, row: EffectRow,
-    owner: ExecutableRef?
+    owner: OriginRef?
 ) -> CoreEffectContract {
     let mut atoms: List<CoreEffectAtom> = []
     for item in row.effects {
@@ -872,7 +851,7 @@ fn producer_record_effect_contract(
         }
     }
     let parameter = row.tail.map(fn(raw_tail) {
-        producer_effect_parameter_for(
+        producer_effect_parameter_from_facts(
             producer, match owner {
                 some(value) => value,
                 none => panic("Core producer: unowned effect tail")
@@ -883,7 +862,7 @@ fn producer_record_effect_contract(
 
 fn producer_record_type(
     mut producer: ClosedCoreProducer, ty: Type,
-    effect_owner: ExecutableRef?
+    effect_owner: OriginRef?
 ) -> CoreTypeFactRef {
     match producer_recorded_type(producer, ty) {
         some(fact) => return fact, none => {}
@@ -952,7 +931,8 @@ fn producer_record_type(
                 for field in def.fields {
                     let field_type = apply_subst_map(type_map, field.ty)
                     let field_fact = producer_record_type(
-                        producer, field_type, effect_owner)
+                        producer, field_type, some(make_symbol_origin_ref(
+                            nominal_field_ref_member(field.field_ref))))
                     fields.push(make_core_nominal_field_spec(
                         make_nominal_flow_field_identity(field.field_ref),
                         field_fact))
@@ -993,7 +973,9 @@ fn producer_record_type(
                 for field_ty in variant.fields {
                     let resolved = apply_subst_map(type_map, field_ty)
                     let field_fact = producer_record_type(
-                        producer, resolved, effect_owner)
+                        producer, resolved, some(make_symbol_origin_ref(
+                            variant_field_ref_member(
+                                field_refs.get(field_index).unwrap()))))
                     fields.push(make_core_nominal_field_spec(
                         make_variant_flow_field_identity(
                             field_refs.get(field_index).unwrap()), field_fact))
@@ -1092,7 +1074,7 @@ fn producer_ensure_handled_source(
         }
         let signature = producer_record_type(producer, Type::FnType {
             params: op.params, return_type: op.return_type, effects: EMPTY_ROW
-        }, none)
+        }, some(executable_origin(effect_operation_ref_callable(operation))))
         operations.push(make_core_handled_evidence_operation_type_source(
             operation, signature))
         fields.push(make_core_record_field_spec(
@@ -1341,20 +1323,23 @@ fn producer_record_row(
     mut producer: ClosedCoreProducer, owner: ExecutableRef,
     row: EffectRow
 ) {
-    let _ = producer_record_effect_contract(producer, row, some(owner))
+    let _ = producer_record_effect_contract(
+        producer, row, some(executable_origin(owner)))
 }
 
 fn producer_record_param(
     mut producer: ClosedCoreProducer, owner: ExecutableRef, param: HParam
 ) {
-    let _ = producer_record_type(producer, param.ty, some(owner))
+    let _ = producer_record_type(
+        producer, param.ty, some(executable_origin(owner)))
 }
 
 fn producer_record_match_arm(
     mut producer: ClosedCoreProducer, owner: ExecutableRef, arm: HMatchArm
 ) {
     for binding in arm.bindings {
-        let _ = producer_record_type(producer, binding.ty, some(owner))
+        let _ = producer_record_type(
+            producer, binding.ty, some(executable_origin(owner)))
     }
     match arm.guard {
         some(guard) => producer_record_expr(producer, owner, guard), none => {}
@@ -1371,7 +1356,8 @@ fn producer_record_handler(
     match handler.resume_binding {
         some(binding) => {
             let _ = producer_record_type(
-                producer, binding.ty, some(handler.executable_ref))
+                producer, binding.ty,
+                some(executable_origin(handler.executable_ref)))
         },
         none => {}
     }
@@ -1390,7 +1376,8 @@ fn producer_record_stmt(
 ) {
     match stmt {
         HStmt::Let { ty, init, .. } | HStmt::Var { ty, init, .. } => {
-            let _ = producer_record_type(producer, ty, some(owner))
+            let _ = producer_record_type(
+                producer, ty, some(executable_origin(owner)))
             producer_record_expr(producer, owner, init)
         },
         HStmt::Assign { target, value, .. } => {
@@ -1412,13 +1399,15 @@ fn producer_record_stmt(
         },
         HStmt::LetDestructure { bindings, init, .. } => {
             for binding in bindings {
-                let _ = producer_record_type(producer, binding.ty, some(owner))
+                let _ = producer_record_type(
+                    producer, binding.ty, some(executable_origin(owner)))
             }
             producer_record_expr(producer, owner, init)
         },
         HStmt::IfLet { bindings, expr, then_block, else_block, .. } => {
             for binding in bindings {
-                let _ = producer_record_type(producer, binding.ty, some(owner))
+                let _ = producer_record_type(
+                    producer, binding.ty, some(executable_origin(owner)))
             }
             producer_record_expr(producer, owner, expr)
             producer_record_expr(producer, owner, then_block)
@@ -1428,7 +1417,8 @@ fn producer_record_stmt(
             }
         },
         HStmt::Drop { ty, place_target, .. } => {
-            let _ = producer_record_type(producer, ty, some(owner))
+            let _ = producer_record_type(
+                producer, ty, some(executable_origin(owner)))
             match place_target {
                 some(value) => producer_record_expr(producer, owner, value),
                 none => {}
@@ -1444,7 +1434,8 @@ fn producer_record_dictionary(
 ) {
     if dict_ref_is_local(value) {
         let _ = producer_record_type(
-            producer, Type::TupleType { elements: [] }, some(owner))
+            producer, Type::TupleType { elements: [] },
+            some(executable_origin(owner)))
     } else if !dict_ref_is_static(value) {
         for inner in dict_ref_wrapped_inner(value) {
             producer_record_dictionary(producer, owner, inner)
@@ -1486,8 +1477,18 @@ fn producer_record_expr(
     mut producer: ClosedCoreProducer, owner: ExecutableRef, expr: HExpr
 ) {
     let type_owner = match expr {
-        HExpr::Lambda { executable_ref, .. } => executable_ref,
-        _ => owner
+        HExpr::Lambda { executable_ref, .. } => executable_origin(executable_ref),
+        HExpr::FieldAccess { projection: some(projection), .. } => {
+            let kind = h_projection_kind(projection)
+            if kind == 0 {
+                make_symbol_origin_ref(nominal_field_ref_member(
+                    h_projection_nominal(projection)))
+            } else if kind == 1 {
+                make_symbol_origin_ref(variant_field_ref_member(
+                    h_projection_variant(projection)))
+            } else { executable_origin(owner) }
+        },
+        _ => executable_origin(owner)
     }
     let _ = producer_record_type(
         producer, hexpr_type(expr), some(type_owner))
@@ -1523,7 +1524,8 @@ fn producer_record_expr(
             producer_record_expr(producer, owner, callee)
             for argument in args { producer_record_expr(producer, owner, argument) }
             for ty in type_args {
-                let _ = producer_record_type(producer, ty, some(owner))
+                let _ = producer_record_type(
+                    producer, ty, some(executable_origin(owner)))
             }
             for value in resolved_dicts {
                 producer_record_physical_dictionary(producer, owner, value)
@@ -1537,7 +1539,8 @@ fn producer_record_expr(
             producer_record_expr(producer, owner, receiver),
         HExpr::StructLit { type_args, fields, spread, .. } => {
             for ty in type_args {
-                let _ = producer_record_type(producer, ty, some(owner))
+                let _ = producer_record_type(
+                    producer, ty, some(executable_origin(owner)))
             }
             for field in fields {
                 producer_record_expr(producer, owner, field.value)
@@ -1598,7 +1601,7 @@ fn producer_record_expr(
                 producer_record_param(producer, executable_ref, param)
             }
             let _ = producer_record_type(
-                producer, return_type, some(executable_ref))
+                producer, return_type, some(executable_origin(executable_ref)))
             for capture in captures {
                 match capture.value {
                     some(value) => producer_record_expr(
@@ -1643,7 +1646,8 @@ fn producer_record_callable(
         params: params.map(fn(param) { param.ty }),
         return_type: result, effects: effects
     }
-    let _ = producer_record_type(producer, signature, some(owner))
+    let _ = producer_record_type(
+        producer, signature, some(executable_origin(owner)))
     for param in params { producer_record_param(producer, owner, param) }
     producer_record_row(producer, owner, effects)
     match body {
@@ -1662,23 +1666,40 @@ fn producer_record_decls(
                 some(body)),
             HDecl::Struct { fields, .. } => {
                 for field in fields {
-                    let _ = producer_record_type(producer, field.ty, none)
+                    let _ = producer_record_type(
+                        producer, field.ty, some(make_symbol_origin_ref(
+                            nominal_field_ref_member(field.field_ref))))
                 }
             },
             HDecl::Enum { variants, .. } => {
                 for variant in variants {
-                    for ty in variant.fields {
-                        let _ = producer_record_type(producer, ty, none)
+                    if variant.fields.len() != variant.field_refs.len() {
+                        panic("Core producer: enum field identity census differs")
+                    }
+                    let mut field_index = 0
+                    while field_index < variant.fields.len() {
+                        let _ = producer_record_type(
+                            producer,
+                            variant.fields.get(field_index).unwrap(),
+                            some(make_symbol_origin_ref(
+                                variant_field_ref_member(
+                                    variant.field_refs.get(
+                                        field_index).unwrap()))))
+                        field_index = field_index + 1
                     }
                 }
             },
-            HDecl::Impl { target_ty, methods, assoc_types,
+            HDecl::Impl { target_ty, owner_ref, methods, assoc_types,
                           default_specializations, delegate_plan, .. } => {
-                let _ = producer_record_type(producer, target_ty, none)
+                let provider_origin = make_path_origin_ref(
+                    impl_provider_ref_site(impl_owner_ref_provider(owner_ref)))
+                let _ = producer_record_type(
+                    producer, target_ty, some(provider_origin))
                 for assoc in assoc_types {
                     match assoc.concrete {
                         some(ty) => { let _ = producer_record_type(
-                            producer, ty, none) },
+                            producer, ty, some(make_symbol_origin_ref(
+                                assoc.member_ref))) },
                         none => {}
                     }
                 }
@@ -1690,7 +1711,7 @@ fn producer_record_decls(
                     let effects = h_default_specialization_effects(plan)
                     let _ = producer_record_type(producer, Type::FnType {
                         params: params, return_type: result, effects: effects
-                    }, some(owner))
+                    }, some(executable_origin(owner)))
                 }
                 match delegate_plan {
                     some(plan) => {
@@ -1702,7 +1723,7 @@ fn producer_record_decls(
                             let _ = producer_record_type(producer, Type::FnType {
                                 params: params, return_type: result,
                                 effects: effects
-                            }, some(owner))
+                            }, some(executable_origin(owner)))
                         }
                     },
                     none => {}
@@ -1751,7 +1772,8 @@ fn producer_record_decls(
             // own; only expanded use-site Types enter this census.
             HDecl::TypeAlias { .. } => {},
             HDecl::Const { executable_ref, ty, init, .. } => {
-                let _ = producer_record_type(producer, ty, some(executable_ref))
+                let _ = producer_record_type(
+                    producer, ty, some(executable_origin(executable_ref)))
                 producer_record_callable(
                     producer, executable_ref, [], ty, hexpr_effects(init),
                     some(init))
@@ -1775,11 +1797,23 @@ fn producer_record_derived(
         }
         producer_register_h_type_params(
             producer, parameter_owner, derived.type_params)
-        let _ = producer_record_type(producer, derived.target_type, none)
+        let derived_origin = make_path_origin_ref(impl_provider_ref_site(
+            impl_owner_ref_provider(derived.owner_ref)))
+        let _ = producer_record_type(
+            producer, derived.target_type, some(derived_origin))
         match derived.struct_fields {
             some(fields) => {
                 for field in fields {
-                    let _ = producer_record_type(producer, field.ty, none)
+                    let field_origin = match field.field_ref {
+                        DerivedFieldRef::NominalDerivedField(reference) =>
+                            make_symbol_origin_ref(
+                                nominal_field_ref_member(reference)),
+                        DerivedFieldRef::VariantDerivedField(reference) =>
+                            make_symbol_origin_ref(
+                                variant_field_ref_member(reference))
+                    }
+                    let _ = producer_record_type(
+                        producer, field.ty, some(field_origin))
                 }
             },
             none => {}
@@ -1788,7 +1822,16 @@ fn producer_record_derived(
             some(variants) => {
                 for variant in variants {
                     for field in variant.fields {
-                        let _ = producer_record_type(producer, field.ty, none)
+                        let field_origin = match field.field_ref {
+                            DerivedFieldRef::NominalDerivedField(reference) =>
+                                make_symbol_origin_ref(
+                                    nominal_field_ref_member(reference)),
+                            DerivedFieldRef::VariantDerivedField(reference) =>
+                                make_symbol_origin_ref(
+                                    variant_field_ref_member(reference))
+                        }
+                        let _ = producer_record_type(
+                            producer, field.ty, some(field_origin))
                     }
                 }
             },
@@ -1796,7 +1839,8 @@ fn producer_record_derived(
         }
         for method in derived.methods {
             let _ = producer_record_type(
-                producer, method.signature, some(method.executable_ref))
+                producer, method.signature,
+                some(executable_origin(method.executable_ref)))
         }
     }
 }
@@ -1821,7 +1865,8 @@ fn producer_record_builtin_methods(mut producer: ClosedCoreProducer) {
                 index, method_vars.len(), [])
         }
         let reference = make_named_executable_ref(intrinsic_symbol)
-        let _ = producer_record_type(producer, scheme.ty, some(reference))
+        let _ = producer_record_type(
+            producer, scheme.ty, some(executable_origin(reference)))
     }
 }
 
@@ -2317,8 +2362,8 @@ pub struct FrozenCoreAssemblyFacts {
     module_key: Str, module_order: Int,
     type_refs: List<CoreTypeFactRef>, type_nodes: List<FlowTypeNode>,
     type_sources: List<CoreTypeSourceFact>,
-    effect_parameters: List<CoreEffectParamSource>,
-    callable_effect_rows: List<CoreCallableEffectRowSource>,
+    effect_parameters: List<TypedEffectFormalFact>,
+    callable_effect_rows: List<TypedCallableEffectFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
     project_type_mapping: List<Int>,
     handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
@@ -2333,10 +2378,12 @@ struct ProjectCallableEffectSource {
 
 pub fn produce_closed_core_assembly_facts(
     module_key: Str, module_order: Int,
-    closed_program: HProgram, env: TypeEnv
+    closed_program: HProgram, env: TypeEnv,
+    effect_parameters: List<TypedEffectFormalFact>,
+    callable_effect_rows: List<TypedCallableEffectFact>
 ) -> FrozenCoreAssemblyFacts {
     let producer = new_closed_core_producer(
-        module_key, module_order, env)
+        module_key, module_order, env, effect_parameters)
     producer_register_decl_parameters(producer, closed_program.decls)
     producer_register_environment_effect_parameters(producer)
     producer_record_decls(producer, closed_program.decls)
@@ -2352,6 +2399,7 @@ pub fn produce_closed_core_assembly_facts(
     freeze_closed_core_assembly_facts(
         producer.recorder, closed_program, env,
         producer.type_sources, producer.handled_sources,
+        producer.effect_parameters, callable_effect_rows,
         diagnostic_seed)
 }
 
@@ -2371,7 +2419,7 @@ pub fn frozen_core_assembly_handled_sources(
 pub fn mutate_core_unowned_effect_tail(
     value: FrozenCoreAssemblyFacts
 ) {
-    let mut retained: List<CoreEffectParamSource> = []
+    let mut retained: List<TypedEffectFormalFact> = []
     let mut removed = false
     for source in value.effect_parameters {
         if !removed {
@@ -2396,140 +2444,15 @@ pub fn mutate_core_unowned_effect_tail(
     let _ = assemble_single_core(mutated)
     panic("Core mutation: unowned effect tail survived Core assembly")
 }
-struct CoreCallableEffectRowSource {
-    reference: ExecutableRef,
-    row: EffectRow
-}
-
-fn append_callable_effect_row(
-    mut values: List<CoreCallableEffectRowSource>,
-    reference: ExecutableRef, row: EffectRow
-) {
-    for existing in values {
-        if executable_ref_same(existing.reference, reference) {
-            if !types_equal(
-                    Type::EffectRowType {
-                        effects: existing.row.effects, tail: existing.row.tail
-                    },
-                    Type::EffectRowType {
-                        effects: row.effects, tail: row.tail
-                    }) {
-                panic("Core assembly: callable effect source changed")
-            }
-            return
-        }
-    }
-    values.push(CoreCallableEffectRowSource {
-        reference: reference, row: row
-    })
-}
-
-fn collect_callable_effect_rows(
-    decls: List<HDecl>, mut result: List<CoreCallableEffectRowSource>
-) {
-    for decl in decls {
-        match decl {
-            HDecl::Fn { executable_ref, effects, .. } =>
-                append_callable_effect_row(result, executable_ref, effects),
-            HDecl::ExternFn { executable_ref, effects, .. } =>
-                append_callable_effect_row(result, executable_ref, effects),
-            HDecl::Test { executable_ref, body, .. } =>
-                append_callable_effect_row(
-                    result, executable_ref, hexpr_effects(body)),
-            HDecl::Const { executable_ref, init, .. } =>
-                append_callable_effect_row(
-                    result, executable_ref, hexpr_effects(init)),
-            HDecl::Trait { methods, .. } => {
-                for method in methods {
-                    append_callable_effect_row(
-                        result, method.executable_ref, method.effects)
-                }
-            },
-            HDecl::Impl {
-                methods, delegate_plan, default_specializations, ..
-            } => {
-                collect_callable_effect_rows(methods, result)
-                match delegate_plan {
-                    some(plan) => {
-                        for method in h_delegate_methods(plan) {
-                            append_callable_effect_row(
-                                result, h_delegate_method_executable(method),
-                                h_delegate_method_effects(method))
-                        }
-                    },
-                    none => {}
-                }
-                for plan in default_specializations {
-                    append_callable_effect_row(
-                        result,
-                        h_default_specialization_generated_executable(plan),
-                        h_default_specialization_effects(plan))
-                }
-            },
-            HDecl::Effect { name, type_params, ops, .. } => {
-                let effect_type_args = type_params.map(fn(parameter) {
-                    Type::TypeVar {
-                        id: parameter.type_var_id,
-                        name: some(parameter.source.name)
-                    }
-                })
-                for op in ops {
-                    match op.operation_ref {
-                        some(operation) => append_callable_effect_row(
-                            result, effect_operation_ref_callable(operation),
-                            EffectRow { effects: [Effect::CustomEffect {
-                                reference: effect_operation_ref_effect(operation),
-                                name: name, type_args: effect_type_args
-                            }], tail: none }),
-                        none => panic(
-                            "Core assembly: effect operation source lacks identity")
-                    }
-                }
-            },
-            HDecl::ModBlock { decls: nested, .. } =>
-                collect_callable_effect_rows(nested, result),
-            _ => {}
-        }
-    }
-}
-
-fn freeze_callable_effect_rows(
-    program: HProgram, env: TypeEnv, module_order: Int
-) -> List<CoreCallableEffectRowSource> {
-    let result: List<CoreCallableEffectRowSource> = []
-    collect_callable_effect_rows(program.decls, result)
-    for derived in program.derived_impls {
-        for method in derived.methods {
-            match method.signature {
-                Type::FnType { effects, .. } => append_callable_effect_row(
-                    result, method.executable_ref, effects),
-                _ => panic("Core assembly: derived effect source is not callable")
-            }
-        }
-    }
-    if module_order == 0 {
-        for fact in builtin_method_contract_facts(env) {
-            match builtin_method_contract_scheme(fact).ty {
-                Type::FnType { effects, .. } => append_callable_effect_row(
-                    result,
-                    make_named_executable_ref(intrinsic_ref_symbol(
-                        builtin_method_contract_intrinsic(fact))),
-                    effects),
-                _ => panic("Core assembly: builtin effect source is not callable")
-            }
-        }
-    }
-    result
-}
 fn freeze_closed_core_assembly_facts(
     mut recorder: CoreAssemblyRecorder, closed_program: HProgram, env: TypeEnv,
     type_sources: List<CoreTypeSourceFact>,
     handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
+    effect_parameters: List<TypedEffectFormalFact>,
+    callable_effect_rows: List<TypedCallableEffectFact>,
     diagnostic_seed: CoreDiagnosticSeed
 ) -> FrozenCoreAssemblyFacts {
     validate_hir_binder_def_ids(closed_program)
-    let callable_effect_rows = freeze_callable_effect_rows(
-        closed_program, env, recorder.module_order)
     require_open(recorder); recorder.frozen = true
     if recorder.refs.len() == 0 || recorder.refs.len() != recorder.specs.len() {
         panic("Core assembly: type recorder is empty/partial")
@@ -2548,21 +2471,23 @@ fn freeze_closed_core_assembly_facts(
         }
     }
     let mut effect_parameter_index = 0
-    while effect_parameter_index < recorder.effect_parameters.len() {
-        let source = recorder.effect_parameters.get(
+    while effect_parameter_index < effect_parameters.len() {
+        let source = effect_parameters.get(
             effect_parameter_index).unwrap()
+        let source_parameter = typed_effect_formal_parameter(source)
         let mut expected_ordinal = 0
         let mut prior = 0
         while prior < effect_parameter_index {
-            let earlier = recorder.effect_parameters.get(prior).unwrap()
-            if executable_ref_same(
-                    effect_param_owner(earlier.parameter),
-                    effect_param_owner(source.parameter)) {
+            let earlier = effect_parameters.get(prior).unwrap()
+            if origin_ref_same(
+                    effect_param_owner(
+                        typed_effect_formal_parameter(earlier)),
+                    effect_param_owner(source_parameter)) {
                 expected_ordinal = expected_ordinal + 1
             }
             prior = prior + 1
         }
-        if effect_param_ordinal(source.parameter) != expected_ordinal {
+        if effect_param_ordinal(source_parameter) != expected_ordinal {
             panic("Core assembly: effect formal order is not stable")
         }
         effect_parameter_index = effect_parameter_index + 1
@@ -2593,7 +2518,7 @@ fn freeze_closed_core_assembly_facts(
         module_key: recorder.module_key, module_order: recorder.module_order,
         type_refs: recorder.refs, type_nodes: nodes,
         type_sources: type_sources,
-        effect_parameters: recorder.effect_parameters,
+        effect_parameters: effect_parameters,
         callable_effect_rows: callable_effect_rows,
         project_callable_effects: [], project_type_mapping: [],
         handled_evidence_types: handled_evidence_types,
@@ -2770,15 +2695,16 @@ fn core_effects(
 }
 
 fn effect_parameter_from_sources(
-    sources: List<CoreEffectParamSource>, raw_tail: Int
+    sources: List<TypedEffectFormalFact>, raw_tail: Int
 ) -> EffectParamRef {
     let mut found: EffectParamRef? = none
     for source in sources {
-        if source.raw_tail == raw_tail {
+        if typed_effect_formal_raw_tail(source) == raw_tail {
             if found.is_some() {
                 panic("Core assembly: raw effect tail maps twice")
             }
-            found = some(source.parameter)
+            let parameter = typed_effect_formal_parameter(source)
+            found = some(parameter)
         }
     }
     match found {
@@ -2789,13 +2715,21 @@ fn effect_parameter_from_sources(
 
 fn core_effect_contract_from_row(
     values: List<CoreTypeSourceFact>, row: EffectRow, module_key: Str,
-    effect_parameters: List<CoreEffectParamSource>
+    effect_parameters: List<TypedEffectFormalFact>, owner: OriginRef?
 ) -> CoreEffectContract {
+    let parameter = row.tail.map(fn(raw_tail) {
+        effect_parameter_from_sources(effect_parameters, raw_tail)
+    })
+    match (parameter, owner) {
+        (some(formal), some(expected_owner)) => if !origin_ref_same(
+                effect_param_owner(formal), expected_owner) {
+            panic("Core assembly: callable effect formal owner differs")
+        },
+        _ => {}
+    }
     make_core_effect_contract(
         core_effects(values, row, module_key),
-        row.tail.map(fn(raw_tail) {
-            effect_parameter_from_sources(effect_parameters, raw_tail)
-        }))
+        parameter)
 }
 
 fn executable_owner(value: ExecutableRef) -> PathOwnerRef {
@@ -2827,7 +2761,7 @@ fn capture_slot_maps(values: List<HLambdaCapture>) -> List<CaptureSlotMap> {
 
 struct LowerCtx {
     module_key: Str, owner: ExecutableRef,
-    effect_parameters: List<CoreEffectParamSource>,
+    effect_parameters: List<TypedEffectFormalFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
     project_type_mapping: List<Int>,
     types: List<CoreTypeSourceFact>,
@@ -3041,6 +2975,28 @@ fn callable_effect_source(
     }
     found
 }
+fn local_callable_effect_source(
+    ctx: LowerCtx, slot: SlotRef
+) -> CoreEffectContract {
+    let exact_slot = resolved_slot(ctx, slot)
+    let mut found: CoreTypeRef? = none
+    for binder in ctx.binders {
+        if slot_ref_same(core_binder_reference(binder), exact_slot) {
+            if found.is_some() {
+                panic("Core assembly: local callable binder repeats")
+            }
+            found = some(core_binder_type(binder))
+        }
+    }
+    let callable_type = match found {
+        some(value) => value,
+        none => panic("Core assembly: local callable lacks frozen binder type")
+    }
+    match ctx.type_nodes.get(core_type_ref_index(callable_type)) {
+        some(node) => flow_type_node_callable_effects(node),
+        none => panic("Core assembly: local callable type node is absent")
+    }
+}
 fn core_callee(ctx: LowerCtx, value: CalleeRef, signature: Type) -> CoreCalleeRef {
     let contract = call_contract(ctx, signature, false)
     let actual_row = match signature {
@@ -3048,7 +3004,8 @@ fn core_callee(ctx: LowerCtx, value: CalleeRef, signature: Type) -> CoreCalleeRe
         _ => panic("Core assembly: callee signature is not callable")
     }
     let actual_effects = core_effect_contract_from_row(
-        ctx.types, actual_row, ctx.module_key, ctx.effect_parameters)
+        ctx.types, actual_row, ctx.module_key, ctx.effect_parameters,
+        none)
     if callee_ref_is_named(value) {
         let executable = make_named_executable_ref(callee_ref_named_symbol(value))
         let source_effects = match callable_effect_source(ctx, executable) {
@@ -3060,15 +3017,24 @@ fn core_callee(ctx: LowerCtx, value: CalleeRef, signature: Type) -> CoreCalleeRe
             make_explicit_core_effect_instantiation(
                 source_effects, actual_effects, actual_effects))
     } else if callee_ref_is_local(value) {
+        let source_effects = local_callable_effect_source(
+            ctx, callee_ref_local_slot(value))
         make_core_local_callee(
             resolved_slot(ctx, callee_ref_local_slot(value)), contract,
             make_explicit_core_effect_instantiation(
-                actual_effects, actual_effects, actual_effects))
+                source_effects, actual_effects, actual_effects))
     } else {
+        let executable = make_anonymous_executable_ref(
+            callee_ref_dynamic_path(value))
+        let source_effects = match callable_effect_source(ctx, executable) {
+            some(contract) => contract,
+            none => panic(
+                "Core assembly: dynamic callable effect source is absent")
+        }
         make_core_dynamic_callee(
             callee_ref_dynamic_path(value), contract,
             make_explicit_core_effect_instantiation(
-                actual_effects, actual_effects, actual_effects))
+                source_effects, actual_effects, actual_effects))
     }
 }
 fn core_field(value: HProjectionRef) -> CoreFieldRef {
@@ -3257,7 +3223,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
     let ty = type_fact_for(ctx.types, hexpr_type(value), ctx.module_key)
     let effects = core_effect_contract_exact(core_effect_contract_from_row(
         ctx.types, hexpr_effects(value), ctx.module_key,
-        ctx.effect_parameters))
+        ctx.effect_parameters, some(executable_origin(ctx.owner))))
     let origin = fresh_origin(ctx, "expr", source_span)
     match value {
         HExpr::IntLit { value, .. } =>
@@ -3817,7 +3783,7 @@ fn callable_contract(
             flow_semantic_role_read(), make_fresh_flow_value_origin()),
         core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
-            facts.effect_parameters),
+            facts.effect_parameters, some(executable_origin(reference))),
         handled_evidence.map(fn(value) {
             core_handled_binding(facts.handled_evidence_types, value)
         }))
@@ -3875,7 +3841,7 @@ fn add_builtin_method_contracts(
                 builtin_method_contract_resource(fact)),
             core_effect_contract_from_row(
                 facts.type_sources, effects, facts.module_key,
-                facts.effect_parameters),
+                facts.effect_parameters, some(executable_origin(reference))),
             []))
         index = index + 1
     }
@@ -3916,7 +3882,7 @@ fn typed_callable_contract(
             flow_semantic_role_read(), make_fresh_flow_value_origin()),
         core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
-            facts.effect_parameters),
+            facts.effect_parameters, some(executable_origin(reference))),
         handled.map(fn(value) {
             core_handled_binding(facts.handled_evidence_types, value)
         }))
@@ -4155,7 +4121,7 @@ fn derived_call_plan_from_method(
         type_fact_for(facts.type_sources, result, facts.module_key),
         core_effect_contract_exact(core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
-            ctx.effect_parameters)),
+            ctx.effect_parameters, none)),
         evidence_values.map(fn(value) {
             make_core_dict_evidence(dict_ref_exact(value))
         }),
@@ -4190,7 +4156,7 @@ fn derived_call_plan_from_exact(
         type_fact_for(facts.type_sources, result, facts.module_key),
         core_effect_contract_exact(core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
-            ctx.effect_parameters)),
+            ctx.effect_parameters, none)),
         h_exact_call_evidence(exact).map(fn(value) {
             make_core_dict_evidence(dict_ref_exact(value))
         }),
@@ -5183,7 +5149,8 @@ fn add_contract_only(
                     facts.module_key, parameter_types, result, resource),
                 core_effect_contract_from_row(
                     facts.type_sources, effects, facts.module_key,
-                    facts.effect_parameters),
+                    facts.effect_parameters,
+                    some(executable_origin(reference))),
                 handled_evidence.map(fn(value) {
                     core_handled_binding(
                         facts.handled_evidence_types, value)
@@ -5609,14 +5576,17 @@ fn close_project_callable_effect_sources(
         let facts = values.get(module_index).unwrap()
         let mapping = mappings.get(module_index).unwrap()
         for source in facts.callable_effect_rows {
+            let reference = typed_callable_effect_reference(source)
             let local = core_effect_contract_from_row(
-                facts.type_sources, source.row, facts.module_key,
-                facts.effect_parameters)
+                facts.type_sources, typed_callable_effect_row(source),
+                facts.module_key,
+                facts.effect_parameters,
+                some(executable_origin(reference)))
             let global = remap_core_effect_contract_types(
                 local, mapping, facts.module_key)
             let mut matched = false
             for existing in result {
-                if executable_ref_same(existing.reference, source.reference) {
+                if executable_ref_same(existing.reference, reference) {
                     if !core_effect_contract_same(existing.contract, global) {
                         panic("Core assembly: project callable effect source drifted")
                     }
@@ -5625,7 +5595,7 @@ fn close_project_callable_effect_sources(
             }
             if !matched {
                 result.push(ProjectCallableEffectSource {
-                    reference: source.reference, contract: global
+                    reference: reference, contract: global
                 })
             }
         }
