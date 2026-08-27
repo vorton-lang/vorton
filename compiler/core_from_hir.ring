@@ -245,7 +245,8 @@ use core_type_source::{
     make_nominal_flow_field_identity,
     make_variant_flow_field_identity,
     make_path_flow_field_identity,
-    flow_type_node_reference,
+    flow_type_node_reference, flow_type_node_kind,
+    flow_type_kind_parameter,
     flow_type_node_nominal_fields,
     flow_nominal_field_identity, flow_nominal_field_type,
     flow_nominal_field_record_name,
@@ -616,12 +617,19 @@ struct ProducerRecordedType {
     fact: CoreTypeFactRef
 }
 
+struct ProducerNominalParameterFact {
+    parameter: FlowGenericParamFact,
+    fact: CoreTypeFactRef,
+    private_reachability: Bool
+}
+
 struct ClosedCoreProducer {
     recorder: CoreAssemblyRecorder,
     env: TypeEnv,
     module_key: Str,
     recorded_types: List<ProducerRecordedType>,
     parameter_facts: Map<Int, FlowGenericParamFact>,
+    nominal_parameter_facts: List<ProducerNominalParameterFact>,
     resource_containment: Map<Str, List<Bool>>,
     type_sources: List<CoreTypeSourceFact>,
     handled_sources: List<CoreHandledEvidenceTypeSource>
@@ -778,7 +786,8 @@ fn new_closed_core_producer(
     ClosedCoreProducer {
         recorder: new_core_assembly_recorder(module_key, module_order),
         env: env, module_key: module_key, recorded_types: [],
-        parameter_facts: map_new(), resource_containment: containment,
+        parameter_facts: map_new(), nominal_parameter_facts: [],
+        resource_containment: containment,
         type_sources: [], handled_sources: []
     }
 }
@@ -962,6 +971,67 @@ fn producer_append_resource_param(
     }
 }
 
+fn producer_nominal_parameters(
+    owner: SymbolRef, arity: Int
+) -> List<FlowGenericParamFact> {
+    let mut result: List<FlowGenericParamFact> = []
+    for index in 0..arity {
+        result.push(make_flow_generic_param_fact(
+            owner, index, arity, []))
+    }
+    result
+}
+
+fn producer_contained_nominal_parameters(
+    producer: ClosedCoreProducer, name: Str,
+    parameters: List<FlowGenericParamFact>
+) -> List<FlowGenericParamFact> {
+    let flags = producer.resource_containment.get(name).unwrap_or_else(fn() {
+        panic("Core producer: nominal containment owner is absent")
+    })
+    if flags.len() != parameters.len() {
+        panic("Core producer: nominal containment/formal arity differs")
+    }
+    let mut result: List<FlowGenericParamFact> = []
+    for index in 0..flags.len() {
+        if flags.get(index).unwrap() {
+            result.push(parameters.get(index).unwrap())
+        }
+    }
+    result
+}
+
+fn producer_record_nominal_parameter_type(
+    mut producer: ClosedCoreProducer, parameter: FlowGenericParamFact
+) -> CoreTypeFactRef {
+    for existing in producer.nominal_parameter_facts {
+        if producer_resource_param_same(existing.parameter, parameter) {
+            return existing.fact
+        }
+    }
+    // Local/builtin HDecl formals retain their canonical raw-id relation.
+    // Reuse that existing parameter node when the exact owner+ordinal matches.
+    for entry in producer.parameter_facts.entries() {
+        if producer_resource_param_same(entry.1, parameter) {
+            let fact = producer_record_parameter_type(producer, entry.0)
+            producer.nominal_parameter_facts.push(
+                ProducerNominalParameterFact {
+                    parameter: parameter, fact: fact,
+                    private_reachability: false
+                })
+            return fact
+        }
+    }
+    // A foreign nominal's raw TypeVar id is module-local inference data.  Its
+    // only Core identity is the canonical nominal owner plus ordinal/arity.
+    let fact = reserve_core_type_fact(producer.recorder)
+    define_core_parameter_type_fact(producer.recorder, fact, parameter)
+    producer.nominal_parameter_facts.push(ProducerNominalParameterFact {
+        parameter: parameter, fact: fact, private_reachability: true
+    })
+    fact
+}
+
 fn producer_collect_resource_params_inner(
     producer: ClosedCoreProducer, ty: Type,
     mut result: List<FlowGenericParamFact>
@@ -1029,17 +1099,6 @@ fn producer_type_resource_params(
     result
 }
 
-fn producer_types_resource_params(
-    producer: ClosedCoreProducer, values: List<Type>
-) -> List<FlowGenericParamFact> {
-    let mut result: List<FlowGenericParamFact> = []
-    for value in values {
-        producer_collect_resource_params_inner(
-            producer, value, result)
-    }
-    result
-}
-
 fn producer_resource_edges_for_children(
     producer: ClosedCoreProducer, child_types: List<Type>,
     child_facts: List<CoreTypeFactRef>
@@ -1085,31 +1144,29 @@ fn producer_record_parameter_type(
 
 fn producer_append_application_resource_edges(
     mut producer: ClosedCoreProducer, nominal: SymbolRef,
-    formal_ids: List<Int>, argument_types: List<Type>,
+    formal_parameters: List<FlowGenericParamFact>,
+    argument_types: List<Type>,
     argument_facts: List<CoreTypeFactRef>,
     contained_formals: List<FlowGenericParamFact>,
     mut parameters: List<FlowGenericParamFact>,
     mut edges: List<FlowResourceDependencyEdge>
 ) {
-    if formal_ids.len() != argument_types.len() ||
+    if formal_parameters.len() != argument_types.len() ||
        argument_types.len() != argument_facts.len() {
         panic("Core producer: application arity differs")
     }
     let mut argument = 0
     while argument < argument_types.len() {
-        let formal_id = formal_ids.get(argument).unwrap()
-        let owner_parameter = match producer.parameter_facts.get(formal_id) {
-            some(parameter) => parameter,
-            none => panic(
-                "Core producer: application formal parameter was not registered")
-        }
+        let owner_parameter = formal_parameters.get(argument).unwrap()
         if !symbol_ref_same(
                 flow_generic_param_owner(owner_parameter), nominal) ||
            flow_generic_param_index(owner_parameter) != argument ||
-           flow_generic_param_arity(owner_parameter) != formal_ids.len() {
+           flow_generic_param_arity(owner_parameter) !=
+                formal_parameters.len() {
             panic("Core producer: application formal parameter identity differs")
         }
-        let _ = producer_record_parameter_type(producer, formal_id)
+        let _ = producer_record_nominal_parameter_type(
+            producer, owner_parameter)
         if !contained_formals.any(fn(parameter) {
                 producer_resource_param_same(parameter, owner_parameter)
             }) {
@@ -1271,6 +1328,12 @@ fn producer_record_type(
             let def = producer.env.types.structs.get(name).unwrap_or_else(fn() {
                 panic("Core producer: struct registry owner is absent")
             })
+            let nominal = registered_nominal_ref_symbol(def.owner_ref)
+            if def.type_param_vars.len() != type_params.len() {
+                panic("Core producer: struct application arity differs")
+            }
+            let formal_parameters = producer_nominal_parameters(
+                nominal, def.type_param_vars.len())
             let mut arguments: List<CoreTypeFactRef> = []
             let mut argument_types: List<Type> = []
             let mut type_map: Map<Int, Type> = map_new()
@@ -1287,7 +1350,7 @@ fn producer_record_type(
             if def.is_extern {
                 define_core_extern_type_fact(
                     producer.recorder, fact,
-                    registered_nominal_ref_symbol(def.owner_ref), arguments, [])
+                    nominal, arguments, [])
             } else {
                 let mut fields: List<CoreNominalFieldSpec> = []
                 let mut child_types: List<Type> = []
@@ -1303,16 +1366,16 @@ fn producer_record_type(
                 }
                 let resource = producer_resource_edges_for_children(
                     producer, child_types, child_facts)
-                let containment = producer_types_resource_params(
-                    producer, def.fields.map(fn(field) { field.ty }))
+                let containment = producer_contained_nominal_parameters(
+                    producer, name, formal_parameters)
                 producer_append_application_resource_edges(
-                    producer, registered_nominal_ref_symbol(def.owner_ref),
-                    def.type_param_vars, argument_types, arguments,
+                    producer, nominal, formal_parameters,
+                    argument_types, arguments,
                     containment, resource.0, resource.1)
                 let drop_contract = producer_nominal_drop_contract(producer, name)
                 define_core_nominal_type_fact(
                     producer.recorder, fact, flow_type_kind_struct(),
-                    registered_nominal_ref_symbol(def.owner_ref), arguments,
+                    nominal, arguments,
                     fields, producer_composite_seed(resource.0, drop_contract),
                     drop_contract, resource.0, resource.1)
             }
@@ -1321,6 +1384,12 @@ fn producer_record_type(
             let def = producer.env.types.enums.get(name).unwrap_or_else(fn() {
                 panic("Core producer: enum registry owner is absent")
             })
+            let nominal = registered_nominal_ref_symbol(def.owner_ref)
+            if def.type_param_vars.len() != type_params.len() {
+                panic("Core producer: enum application arity differs")
+            }
+            let formal_parameters = producer_nominal_parameters(
+                nominal, def.type_param_vars.len())
             let mut arguments: List<CoreTypeFactRef> = []
             let mut argument_types: List<Type> = []
             let mut type_map: Map<Int, Type> = map_new()
@@ -1355,22 +1424,16 @@ fn producer_record_type(
             }
             let resource = producer_resource_edges_for_children(
                 producer, child_types, child_facts)
-            let mut containment_types: List<Type> = []
-            for variant in def.variants {
-                for field_ty in variant.fields {
-                    containment_types.push(field_ty)
-                }
-            }
-            let containment = producer_types_resource_params(
-                producer, containment_types)
+            let containment = producer_contained_nominal_parameters(
+                producer, name, formal_parameters)
             producer_append_application_resource_edges(
-                producer, registered_nominal_ref_symbol(def.owner_ref),
-                def.type_param_vars, argument_types, arguments,
+                producer, nominal, formal_parameters,
+                argument_types, arguments,
                 containment, resource.0, resource.1)
             let drop_contract = producer_nominal_drop_contract(producer, name)
             define_core_nominal_type_fact(
                 producer.recorder, fact, flow_type_kind_enum(),
-                registered_nominal_ref_symbol(def.owner_ref), arguments,
+                nominal, arguments,
                 fields, producer_composite_seed(resource.0, drop_contract),
                 drop_contract, resource.0, resource.1)
         },
@@ -1621,33 +1684,9 @@ fn producer_register_decl_parameters(
     }
 }
 
-fn producer_register_environment_nominals(mut producer: ClosedCoreProducer) {
-    for entry in producer.env.types.structs.entries() {
-        let def = entry.1
-        let mut index = 0
-        while index < def.type_param_vars.len() {
-            let id = def.type_param_vars.get(index).unwrap()
-            if !producer.parameter_facts.contains_key(id) {
-                producer_register_parameter(
-                    producer, id, registered_nominal_ref_symbol(def.owner_ref),
-                    index, def.type_param_vars.len(), [])
-            }
-            index = index + 1
-        }
-    }
-    for entry in producer.env.types.enums.entries() {
-        let def = entry.1
-        let mut index = 0
-        while index < def.type_param_vars.len() {
-            let id = def.type_param_vars.get(index).unwrap()
-            if !producer.parameter_facts.contains_key(id) {
-                producer_register_parameter(
-                    producer, id, registered_nominal_ref_symbol(def.owner_ref),
-                    index, def.type_param_vars.len(), [])
-            }
-            index = index + 1
-        }
-    }
+fn producer_register_environment_effect_parameters(
+    mut producer: ClosedCoreProducer
+) {
     for entry in producer.env.types.effects.entries() {
         let def = entry.1
         match def.owner_ref {
@@ -2193,6 +2232,12 @@ fn validate_producer_bijection(producer: ClosedCoreProducer) {
                 reachable = reachable + 1
             }
         }
+        for parameter in producer.nominal_parameter_facts {
+            if parameter.private_reachability &&
+               core_type_fact_same(reference, parameter.fact) {
+                reachable = reachable + 1
+            }
+        }
         for handled in producer.handled_sources {
             if core_type_fact_same(
                     reference,
@@ -2670,7 +2715,7 @@ pub fn produce_closed_core_assembly_facts(
     let producer = new_closed_core_producer(
         module_key, module_order, env)
     producer_register_decl_parameters(producer, closed_program.decls)
-    producer_register_environment_nominals(producer)
+    producer_register_environment_effect_parameters(producer)
     producer_record_decls(producer, closed_program.decls)
     producer_record_derived(producer, closed_program.derived_impls)
     producer_record_builtin_methods(producer)
@@ -2699,6 +2744,36 @@ pub fn frozen_core_assembly_handled_sources(
     value: FrozenCoreAssemblyFacts
 ) -> List<CoreHandledEvidenceTypeSource> {
     value.handled_evidence_types.map(fn(item) { item })
+}
+pub fn frozen_core_assembly_nominal_parameter_facts(
+    value: FrozenCoreAssemblyFacts
+) -> List<CoreTypeFactRef> {
+    let mut result: List<CoreTypeFactRef> = []
+    for index in 0..value.type_refs.len() {
+        let reference = value.type_refs.get(index).unwrap()
+        let mut projected = false
+        for source in value.type_sources {
+            if core_type_fact_same(reference, core_type_source_fact(source)) {
+                projected = true
+            }
+        }
+        for handled in value.handled_evidence_types {
+            if core_type_fact_same(
+                    reference,
+                    core_handled_evidence_source_aggregate_fact(handled)) {
+                projected = true
+            }
+        }
+        if !projected {
+            if flow_type_kind_tag(flow_type_node_kind(
+                    value.type_nodes.get(index).unwrap())) !=
+               flow_type_kind_tag(flow_type_kind_parameter()) {
+                panic("Core assembly: unprojected internal type is not nominal formal")
+            }
+            result.push(reference)
+        }
+    }
+    result
 }
 
 pub fn mutate_core_unowned_effect_tail(

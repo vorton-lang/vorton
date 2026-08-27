@@ -81,6 +81,7 @@ use core_from_hir::{
     frozen_core_assembly_program,
     frozen_core_assembly_type_sources,
     frozen_core_assembly_handled_sources,
+    frozen_core_assembly_nominal_parameter_facts,
     make_core_effect_set_fact_from_row
 }
 use legacy_projection::{
@@ -113,6 +114,7 @@ use legacy_projection::{
     make_legacy_impl_fact_projection,
     make_legacy_internal_type_fact_projection,
     legacy_internal_handled_evidence_opaque,
+    legacy_internal_nominal_formal,
     legacy_effect_fact_projection_row,
     legacy_binder_fact_slot, legacy_binder_fact_name,
     legacy_binder_fact_type, legacy_type_parameter_name,
@@ -888,6 +890,7 @@ fn freeze_legacy_semantic_facts(
     module_key: Str, module_order: Int, closed: HProgram,
     env: TypeEnv, type_sources: List<CoreTypeSourceFact>,
     handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
+    nominal_parameter_facts: List<CoreTypeFactRef>,
     prelude_physical_owner_module_key: Str,
     physical_module_prefix: Str
 ) -> LegacyProjectionFacts {
@@ -908,11 +911,15 @@ fn freeze_legacy_semantic_facts(
     scan_decls(builder, closed.decls)
     add_derived_impl_facts(builder, closed.derived_impls)
     if module_order == 0 { add_builtin_facts(builder, env) }
-    let internal_types = handled_evidence_types.map(fn(value) {
+    let mut internal_types = handled_evidence_types.map(fn(value) {
         make_legacy_internal_type_fact_projection(
             core_handled_evidence_source_aggregate_fact(value),
             legacy_internal_handled_evidence_opaque())
     })
+    for fact in nominal_parameter_facts {
+        internal_types.push(make_legacy_internal_type_fact_projection(
+            fact, legacy_internal_nominal_formal()))
+    }
     make_legacy_projection_facts(
         module_key, module_order,
         type_sources.len() + internal_types.len(), type_sources,
@@ -936,9 +943,12 @@ pub fn freeze_core_and_legacy_facts(
     let type_sources = frozen_core_assembly_type_sources(core)
     let handled_evidence_types =
         frozen_core_assembly_handled_sources(core)
+    let nominal_parameter_facts =
+        frozen_core_assembly_nominal_parameter_facts(core)
     let legacy = freeze_legacy_semantic_facts(
         module_key, module_order, sealed_program, env, type_sources,
-        handled_evidence_types, prelude_physical_owner_module_key,
+        handled_evidence_types, nominal_parameter_facts,
+        prelude_physical_owner_module_key,
         physical_module_prefix)
     FrozenCoreAndLegacyFacts { core: core, legacy: legacy }
 }

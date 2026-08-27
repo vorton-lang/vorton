@@ -66,9 +66,17 @@ use flow_ir::{
 // ============================================================
 
 const LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE: Int = 0
+const LEGACY_INTERNAL_NOMINAL_FORMAL: Int = 1
 pub struct LegacyInternalTypeKind { tag: Int }
 pub fn legacy_internal_handled_evidence_opaque() -> LegacyInternalTypeKind {
     LegacyInternalTypeKind { tag: LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE }
+}
+pub fn legacy_internal_nominal_formal() -> LegacyInternalTypeKind {
+    LegacyInternalTypeKind { tag: LEGACY_INTERNAL_NOMINAL_FORMAL }
+}
+fn legacy_internal_type_kind_valid(kind: LegacyInternalTypeKind) -> Bool {
+    kind.tag == LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE ||
+        kind.tag == LEGACY_INTERNAL_NOMINAL_FORMAL
 }
 
 pub struct LegacyTypeProjection {
@@ -94,7 +102,7 @@ pub fn make_legacy_type_projection(
 fn make_legacy_internal_type_projection(
     core_type: CoreTypeRef, kind: LegacyInternalTypeKind
 ) -> LegacyTypeProjection {
-    if kind.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE {
+    if !legacy_internal_type_kind_valid(kind) {
         panic("legacy projection: unknown assembled internal type")
     }
     LegacyTypeProjection {
@@ -108,6 +116,12 @@ pub fn legacy_type_projection_core(
 ) -> CoreTypeRef { value.core_type }
 
 pub fn legacy_type_projection_type(value: LegacyTypeProjection) -> Type {
+    match value.internal_kind {
+        some(kind) => if kind.tag == LEGACY_INTERNAL_NOMINAL_FORMAL {
+            panic("legacy projection: nominal formal has no legacy Type")
+        },
+        none => {}
+    }
     value.legacy_type
 }
 
@@ -934,7 +948,7 @@ pub struct LegacyInternalTypeFactProjection {
 pub fn make_legacy_internal_type_fact_projection(
     fact: CoreTypeFactRef, kind: LegacyInternalTypeKind
 ) -> LegacyInternalTypeFactProjection {
-    if kind.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE {
+    if !legacy_internal_type_kind_valid(kind) {
         panic("legacy projection: unknown internal type projection")
     }
     LegacyInternalTypeFactProjection { fact: fact, kind: kind }
@@ -1547,9 +1561,7 @@ pub fn make_legacy_projection_table(
             if core_type_ref_same(left.core_type, right.core_type) ||
                (types_equal(left.legacy_type, right.legacy_type) &&
                 match (left.internal_kind, right.internal_kind) {
-                    (some(a), some(b)) =>
-                        a.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE ||
-                        b.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE,
+                    (some(_), some(_)) => false,
                     _ => true
                 }) {
                 panic("legacy projection: Core/legacy Type mapping is not bijective")
@@ -2050,7 +2062,7 @@ pub fn assemble_legacy_projection(
                     core_type_source_type(value)))
         }
         for value in facts.internal_types {
-            if value.kind.tag != LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE {
+            if !legacy_internal_type_kind_valid(value.kind) {
                 panic("legacy projection: unknown internal type kind")
             }
             append_assembled_type_projection(
