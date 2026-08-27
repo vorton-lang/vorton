@@ -33,6 +33,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     impl_target_symbol,
     specialize_trait_method_scheme, build_type_var_map,
     ordered_effect_tail_vars,
+    freshen_effect_header,
     delegate_plan_not_applicable, delegate_plan_pending,
     delegate_plan_final,
     finalize_delegate_provider_plan, assert_no_pending_delegate_plans}
@@ -1846,8 +1847,14 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                     bind_variant_constructor(ctx, binding_name, enum_type, tv_ids)
                 } else {
                     let fn_type = Type::FnType { params: variant.fields, return_type: enum_type, effects: EMPTY_ROW }
-                    if tv_ids.len() > 0 {
-                        ctx.env.bind(binding_name, TypeScheme { ty: fn_type, type_vars: tv_ids, bounds: [], def_id: none })
+                    let mut ctor_vars = list_clone(tv_ids)
+                    for tail in ordered_effect_tail_vars(fn_type) {
+                        if !ctor_vars.contains(tail) { ctor_vars.push(tail) }
+                    }
+                    if ctor_vars.len() > 0 {
+                        ctx.env.bind(binding_name, TypeScheme {
+                            ty: fn_type, type_vars: ctor_vars,
+                            bounds: [], def_id: none })
                     } else {
                         ctx.env.bind_mono(binding_name, fn_type)
                     }
@@ -2593,7 +2600,9 @@ fn register_impl_canonical(
                             match atdef.default_type {
                                 some(dt) => {
                                     // Use the default
-                                    assoc_type_map.insert(atdef.name, dt)
+                                    assoc_type_map.insert(
+                                        atdef.name,
+                                        freshen_effect_header(ctx.env, dt))
                                 },
                                 none => {
                                     let _ = type_error(ctx.sink, E0510,
@@ -3321,7 +3330,9 @@ fn register_delegate_traits(
                                             field_assoc_types.insert(
                                                 assoc_name,
                                                 apply_subst_map(
-                                                    field_var_map, assoc_type))
+                                                    field_var_map,
+                                                    freshen_effect_header(
+                                                        ctx.env, assoc_type)))
                                         }
                                     },
                                     none => {}

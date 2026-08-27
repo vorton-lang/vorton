@@ -37,7 +37,8 @@ use ir_identity::{
     impl_owner_ref_provider, impl_provider_ref_site,
     intrinsic_ref_symbol, symbol_ref_same,
     handled_effect_ref_same, trait_method_ref_trait,
-    trait_method_ref_member, registered_trait_ref_symbol
+    trait_method_ref_member, registered_trait_ref_symbol,
+    slot_ref_is_source, slot_ref_source_def_id
 }
 use ir_inventory::{
     ExecutableRef, executable_ref_is_named, executable_ref_named_symbol,
@@ -59,9 +60,13 @@ struct TypedEffectFreezeState {
     visited_nominals: List<SymbolRef>,
     visited_effects: List<HandledEffectRef>,
     visited_traits: List<SymbolRef>,
-    header_tails: List<Int>,
-    schema_use_tails: List<Int>,
-    scope_owners: List<OriginRef>
+    scope_owners: List<OriginRef>,
+    local_bindings: List<LocalEffectBindingHeader>
+}
+
+struct LocalEffectBindingHeader {
+    def_id: Int,
+    ty: Type
 }
 
 enum EffectFormalScanMode {
@@ -108,6 +113,42 @@ fn executable_origin(value: ExecutableRef) -> OriginRef {
     } else {
         make_path_origin_ref(executable_ref_anonymous_path(value))
     }
+}
+
+fn record_local_binding(
+    mut state: TypedEffectFreezeState, def_id: Int?, ty: Type
+) {
+    match def_id {
+        none => {},
+        some(id) => {
+            for existing in state.local_bindings {
+                if existing.def_id == id {
+                    if !types_equal(existing.ty, ty) {
+                        panic("typed effect freeze: local header type changed")
+                    }
+                    return
+                }
+            }
+            state.local_bindings.push(LocalEffectBindingHeader {
+                def_id: id, ty: ty
+            })
+        }
+    }
+}
+
+fn local_binding_type(
+    state: TypedEffectFreezeState, def_id: Int
+) -> Type? {
+    let mut found: Type? = none
+    for binding in state.local_bindings {
+        if binding.def_id == def_id {
+            if found.is_some() {
+                panic("typed effect freeze: local header repeats")
+            }
+            found = some(binding.ty)
+        }
+    }
+    found
 }
 
 fn enter_formal_scope(
@@ -193,19 +234,12 @@ fn scan_formal(
             some(fact) => {
                 let existing_owner = effect_param_owner(
                     typed_effect_formal_parameter(fact))
-                if state.header_tails.contains(raw_tail) &&
-                   owner_is_visible(state, existing_owner, owner) {
+                if owner_is_visible(state, existing_owner, owner) {
                     return
                 }
-                panic("typed effect freeze: two schema uses share a row tail")
+                panic("typed effect freeze: schema use crossed exact owners")
             },
-            none => {
-                if state.schema_use_tails.contains(raw_tail) {
-                    panic("typed effect freeze: schema-use row tail repeats")
-                }
-                state.schema_use_tails.push(raw_tail)
-                mint_formal(state, raw_tail, owner)
-            }
+            none => mint_formal(state, raw_tail, owner)
         },
         EffectFormalScanMode::ValidateFormal => match formal_fact_for_raw(
                 state, raw_tail) {
@@ -216,13 +250,6 @@ fn scan_formal(
             some(_) => {},
             none => panic("typed effect freeze: row-tail use has no binder")
         }
-    }
-    match mode {
-        EffectFormalScanMode::HeaderFormal => if
-                !state.header_tails.contains(raw_tail) {
-            state.header_tails.push(raw_tail)
-        },
-        _ => {}
     }
 }
 
@@ -500,7 +527,9 @@ fn scan_header_type(
 
 fn scan_schema_use_type(
     mut state: TypedEffectFreezeState, value: Type, owner: OriginRef
-) { scan_type_mode(state, value, owner, EffectFormalScanMode::SchemaUseFormal) }
+) {
+    scan_type_mode(state, value, owner, EffectFormalScanMode::SchemaUseFormal)
+}
 
 fn validate_type(
     mut state: TypedEffectFreezeState, value: Type, owner: OriginRef
@@ -508,12 +537,16 @@ fn validate_type(
 
 fn scan_param(
     mut state: TypedEffectFreezeState, value: HParam, owner: OriginRef
-) { scan_header_type(state, value.ty, owner) }
+) {
+    record_local_binding(state, value.def_id, value.ty)
+    scan_header_type(state, value.ty, owner)
+}
 
 fn scan_match_arm(
     mut state: TypedEffectFreezeState, value: HMatchArm, owner: OriginRef
 ) {
     for binding in value.bindings {
+        record_local_binding(state, some(binding.def_id), binding.ty)
         scan_schema_use_type(state, binding.ty, owner)
     }
     match value.guard {
@@ -533,8 +566,10 @@ fn scan_handler(
     scan_header_row(state, hexpr_effects(value.body), owner)
     enter_formal_scope(state, owner)
     match value.resume_binding {
-        some(binding) => scan_schema_use_type(
-            state, binding.ty, owner),
+        some(binding) => {
+            record_local_binding(state, some(binding.def_id), binding.ty)
+            scan_schema_use_type(state, binding.ty, owner)
+        },
         none => {}
     }
     for capture in value.captures {
@@ -550,7 +585,9 @@ fn scan_stmt(
     mut state: TypedEffectFreezeState, value: HStmt, owner: OriginRef
 ) {
     match value {
-        HStmt::Let { ty, init, .. } | HStmt::Var { ty, init, .. } => {
+        HStmt::Let { def_id, ty, init, .. } |
+        HStmt::Var { def_id, ty, init, .. } => {
+            record_local_binding(state, def_id, ty)
             scan_expr(state, init, owner); validate_type(state, ty, owner)
         },
         HStmt::Assign { target, value, .. } => {
@@ -569,12 +606,14 @@ fn scan_stmt(
         HStmt::LetDestructure { bindings, init, .. } => {
             scan_expr(state, init, owner)
             for binding in bindings {
+                record_local_binding(state, binding.def_id, binding.ty)
                 scan_schema_use_type(state, binding.ty, owner)
             }
         },
         HStmt::IfLet { bindings, expr, then_block, else_block, .. } => {
             scan_expr(state, expr, owner)
             for binding in bindings {
+                record_local_binding(state, some(binding.def_id), binding.ty)
                 scan_schema_use_type(state, binding.ty, owner)
             }
             scan_expr(state, then_block, owner)
@@ -601,6 +640,21 @@ fn scan_expr(
             scan_header_type(
                 state, hexpr_type(value), executable_origin(executable_ref))
             type_bound = true
+        },
+        HExpr::Ident { source_slot: some(slot), .. } => {
+            if !slot_ref_is_source(slot) {
+                panic("typed effect freeze: local Ident slot is synthetic")
+            }
+            match local_binding_type(state, slot_ref_source_def_id(slot)) {
+                some(header) => if !types_equal(header, hexpr_type(value)) {
+                    // A generalized local TypeScheme use has a fresh actual
+                    // shape. Mono locals retain their header type and remain
+                    // ordinary transport.
+                    scan_schema_use_type(state, hexpr_type(value), owner)
+                    type_bound = true
+                },
+                none => {}
+            }
         },
         HExpr::Ident {
             source_slot: none, callee_identity: some(_), ..
@@ -976,7 +1030,8 @@ pub fn freeze_typed_effect_formals(
     let state = TypedEffectFreezeState {
         env: env, facts: [], callables: [], visited_nominals: [],
         visited_effects: [], visited_traits: [],
-        header_tails: [], schema_use_tails: [], scope_owners: []
+        scope_owners: [],
+        local_bindings: []
     }
     scan_decls(state, program.decls)
     scan_derived(state, program.derived_impls)

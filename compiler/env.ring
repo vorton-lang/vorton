@@ -2511,7 +2511,7 @@ fn fresh_mapping_for_ids(
     }
 }
 
-pub fn instantiate_effect_schema_types(
+pub fn freshen_effect_header_types(
     mut env: TypeEnv, values: List<Type>
 ) -> List<Type> {
     let mut tails: List<Int> = []
@@ -2525,8 +2525,8 @@ pub fn instantiate_effect_schema_types(
     values.map(fn(value) { apply_subst_map(mapping, value) })
 }
 
-pub fn instantiate_effect_schema(mut env: TypeEnv, value: Type) -> Type {
-    instantiate_effect_schema_types(env, [value]).get(0).unwrap()
+pub fn freshen_effect_header(mut env: TypeEnv, value: Type) -> Type {
+    freshen_effect_header_types(env, [value]).get(0).unwrap()
 }
 
 fn collect_value_type_vars_in_atom(

@@ -57,7 +57,7 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     install_method_core, replace_impl_method_core,
     impl_method_core_as_scheme, impl_method_core_from_scheme,
     impl_method_core_type,
-    build_type_var_map}
+    build_type_var_map, freshen_effect_header}
 use extern_manifest::{compiler_extern_manifest_entry_executable,
     compiler_extern_manifest_entry_resource}
 use union_find::{UnionFind}
@@ -1398,7 +1398,9 @@ fn expand_delegate_impls(
                                             field_assoc_map.insert(
                                                 assoc_name,
                                                 apply_subst_map(
-                                                    field_var_map, assoc_type))
+                                                    field_var_map,
+                                                    freshen_effect_header(
+                                                        ctx.env, assoc_type)))
                                         }
                                     },
                                     none => {}

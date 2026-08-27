@@ -6,7 +6,7 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef, ImplEntr
     TypeAliasDef, EffectAliasDef,
     exact_scheme_value_origin, find_impl_by_provider,
     impl_entry_exact_key_same, impl_entry_final_same,
-    optional_symbol_ref_same}
+    optional_symbol_ref_same, ordered_effect_tail_vars}
 use ir_identity::{ImplMethodRef, impl_provider_ref_same, impl_owner_ref_same,
     impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
     variant_ref_member, symbol_ref_canonical_payload}
@@ -138,9 +138,13 @@ fn variant_ctor_scheme(def: EnumDef, variant: EnumVariant) -> TypeScheme {
     } else {
         Type::FnType { params: variant.fields, return_type: enum_type, effects: EMPTY_ROW }
     }
+    let mut type_vars = list_clone(def.type_param_vars)
+    for tail in ordered_effect_tail_vars(ctor_type) {
+        if !type_vars.contains(tail) { type_vars.push(tail) }
+    }
     TypeScheme {
         ty: ctor_type,
-        type_vars: def.type_param_vars,
+        type_vars: type_vars,
         bounds: [],
         def_id: none
     }
