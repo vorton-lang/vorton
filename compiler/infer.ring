@@ -44,6 +44,7 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
     BuiltInKind, mono, apply_subst, apply_subst_row, apply_subst_map,
     build_scheme_var_map, impl_method_core_as_scheme,
     freshen_effect_header, freshen_effect_header_types,
+    freshen_effect_scheme_header,
     instantiate_trait_method_signature, scheme_value_type_vars,
     find_impl, lookup_variant, compiler_owned_extern_manifest_entry}
 use extern_manifest::{
@@ -68,6 +69,8 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     has_variant_ctor_origin_def_id, fresh_child_executable,
     enter_executable_owner, exit_executable_owner,
     current_executable_owner, current_dictionary_evidence_owner,
+    local_effect_header_origin,
+    register_exact_effect_header, register_exact_callable_effect_header,
     inherit_dictionary_evidence_owner,
     resolve_handled_evidence, install_handled_evidence,
     uninstall_handled_evidence,
@@ -767,7 +770,8 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             let scheme = if ftv.len() == 0 || init_has_bounds || init_has_pending {
                 mono(resolved)
             } else {
-                generalize(ctx.env, resolved, s)
+                freshen_effect_scheme_header(
+                    ctx.env, generalize(ctx.env, resolved, s))
             }
             ctx.env.bind(name, scheme)
             let bound_scheme = ctx.env.lookup(name)
@@ -778,6 +782,9 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                             ctx.env.record_def_span(did, name_span)
                             ctx.env.scope.let_defs.insert(did)
                             ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                            register_exact_effect_header(
+                                ctx, local_effect_header_origin(ctx, did),
+                                [bs.ty])
                             some(did)
                         },
                         none => none
@@ -3977,6 +3984,17 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
             collect_lambda_capture_expr(
                 ctx, handler_body, ctx.lambda_depth,
                 handler_executable, handler_captures)
+            let mut handler_param_types = hparams.map(fn(param) { param.ty })
+            match resume_binding {
+                some(binding) => handler_param_types.push(binding.ty),
+                none => {}
+            }
+            register_exact_callable_effect_header(
+                ctx, handler_executable, Type::FnType {
+                    params: handler_param_types,
+                    return_type: hexpr_type(handler_body),
+                    effects: handler_effects
+                })
             hhandlers.push(HEffectHandler {
                 effect_name: canonical_effect_name,
                 handled_ref: handler_handled_ref,
@@ -4423,6 +4441,8 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
             let applied_ret = apply_subst(s, hexpr_type(body_r.hexpr))
 
             let fn_type = Type::FnType { params: applied_params, return_type: applied_ret, effects: body_r.effects }
+            register_exact_callable_effect_header(
+                ctx, lambda_executable, fn_type)
 
             let mut final_hparams: List<HParam> = []
             for hp in hparams {

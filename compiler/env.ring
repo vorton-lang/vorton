@@ -7,6 +7,7 @@ use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
 use codes::{E0504}
 use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     ImplOwnerRef, ImplMethodRef,
+    OriginRef, origin_ref_same,
     HandledEffectRef,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     VariantRef, VariantFieldRef,
@@ -24,7 +25,8 @@ use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     impl_provider_ref_same, intrinsic_ref_same,
     impl_provider_ref_kind, impl_provider_kind_same,
     impl_provider_kind_source, impl_provider_kind_delegate}
-use ir_inventory::{EffectOperationRef, CallableResourceContractFact,
+use ir_inventory::{EffectOperationRef, ExecutableRef, executable_ref_same,
+    CallableResourceContractFact,
     callable_resource_contract_parameter_roles,
     callable_resource_contract_same}
 use extern_manifest::{CompilerExternManifest, CompilerExternManifestEntry,
@@ -33,6 +35,14 @@ use extern_manifest::{CompilerExternManifest, CompilerExternManifestEntry,
     registered_compiler_extern_manifest_entry,
     compiler_extern_manifest_entry_compiler_symbol,
     compiler_extern_should_publish_hdecl}
+use effect_contract::{
+    EffectParamRef, TypedEffectFormalFact,
+    TypedCallableEffectFact, make_typed_callable_effect_fact,
+    typed_callable_effect_reference, typed_callable_effect_row,
+    make_effect_param_ref, effect_param_owner, effect_param_ordinal,
+    effect_param_ref_same, make_typed_effect_formal_fact,
+    typed_effect_formal_raw_tail, typed_effect_formal_parameter
+}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -869,7 +879,9 @@ pub struct TypeEnv {
     pub trait_reg: TraitRegistry,
     pub scope: ScopeManager,
     pub ids: IdGen,
-    compiler_externs: CompilerExternManifest
+    compiler_externs: CompilerExternManifest,
+    effect_formal_facts: List<TypedEffectFormalFact>,
+    callable_effect_facts: List<TypedCallableEffectFact>
 }
 
 // ============================================================
@@ -912,7 +924,8 @@ pub fn new_type_env() -> TypeEnv {
             next_type_var_id: 0,
             next_def_id: 0
         },
-        compiler_externs: new_compiler_extern_manifest()
+        compiler_externs: new_compiler_extern_manifest(),
+        effect_formal_facts: [], callable_effect_facts: []
     }
 }
 
@@ -2511,22 +2524,173 @@ fn fresh_mapping_for_ids(
     }
 }
 
-pub fn freshen_effect_header_types(
-    mut env: TypeEnv, values: List<Type>
-) -> List<Type> {
+fn effect_formal_for_raw(
+    env: TypeEnv, raw_tail: Int
+) -> EffectParamRef? {
+    let mut found: EffectParamRef? = none
+    for fact in env.effect_formal_facts {
+        if typed_effect_formal_raw_tail(fact) == raw_tail {
+            if found.is_some() {
+                panic("effect header registry: raw tail maps twice")
+            }
+            found = some(typed_effect_formal_parameter(fact))
+        }
+    }
+    found
+}
+
+fn append_effect_formal_fact(
+    mut env: TypeEnv, raw_tail: Int, parameter: EffectParamRef
+) {
+    match effect_formal_for_raw(env, raw_tail) {
+        some(existing) => {
+            if !effect_param_ref_same(existing, parameter) {
+                panic("effect header registry: raw tail changed parameter")
+            }
+            return
+        },
+        none => env.effect_formal_facts.push(
+            make_typed_effect_formal_fact(raw_tail, parameter))
+    }
+}
+
+fn next_effect_parameter_ordinal(env: TypeEnv, owner: OriginRef) -> Int {
+    let mut parameters: List<EffectParamRef> = []
+    for fact in env.effect_formal_facts {
+        let parameter = typed_effect_formal_parameter(fact)
+        if origin_ref_same(effect_param_owner(parameter), owner) &&
+           !parameters.any(fn(existing) {
+               effect_param_ref_same(existing, parameter)
+           }) {
+            parameters.push(parameter)
+        }
+    }
+    let mut expected = 0
+    for parameter in parameters {
+        if effect_param_ordinal(parameter) != expected {
+            panic("effect header registry: owner ordinal is not contiguous")
+        }
+        expected = expected + 1
+    }
+    expected
+}
+
+pub fn register_effect_header_types(
+    mut env: TypeEnv, owner: OriginRef, headers: List<Type>,
+    allowed_free_owners: List<OriginRef>
+) -> List<EffectParamRef> {
+    let mut result: List<EffectParamRef> = []
     let mut tails: List<Int> = []
-    for value in values {
-        for tail in ordered_effect_tail_vars(value) {
+    for header in headers {
+        for tail in ordered_effect_tail_vars(header) {
             append_ordered_type_var(tails, tail)
         }
     }
-    let mapping: Map<Int, Type> = map_new()
-    fresh_mapping_for_ids(env, tails, mapping)
-    values.map(fn(value) { apply_subst_map(mapping, value) })
+    for raw_tail in tails {
+        let parameter = match effect_formal_for_raw(env, raw_tail) {
+            some(existing) => {
+                let existing_owner = effect_param_owner(existing)
+                if !origin_ref_same(existing_owner, owner) &&
+                   !allowed_free_owners.any(fn(allowed) {
+                       origin_ref_same(allowed, existing_owner)
+                   }) {
+                    panic("effect header registry: unrelated header reused tail")
+                }
+                existing
+            },
+            none => {
+                let created = make_effect_param_ref(
+                    owner, next_effect_parameter_ordinal(env, owner))
+                append_effect_formal_fact(env, raw_tail, created)
+                created
+            }
+        }
+        result.push(parameter)
+    }
+    result
 }
 
-pub fn freshen_effect_header(mut env: TypeEnv, value: Type) -> Type {
-    freshen_effect_header_types(env, [value]).get(0).unwrap()
+pub fn freshen_effect_header_types(
+    mut env: TypeEnv, headers: List<Type>
+) -> List<Type> {
+    let mut tails: List<Int> = []
+    for header in headers {
+        for tail in ordered_effect_tail_vars(header) {
+            append_ordered_type_var(tails, tail)
+        }
+    }
+    let mut mapping: Map<Int, Type> = map_new()
+    for source_tail in tails {
+        let fresh = env.fresh_var()
+        match fresh {
+            Type::TypeVar { .. } => mapping.insert(source_tail, fresh),
+            _ => panic("effect header registry: fresh tail is not TypeVar")
+        }
+    }
+    headers.map(fn(header) { apply_subst_map(mapping, header) })
+}
+
+pub fn freshen_effect_header(
+    mut env: TypeEnv, header: Type
+) -> Type {
+    freshen_effect_header_types(env, [header]).get(0).unwrap()
+}
+
+pub fn freshen_effect_scheme_header(
+    mut env: TypeEnv, scheme: TypeScheme
+) -> TypeScheme {
+    let tails = ordered_effect_tail_vars(scheme.ty)
+    if tails.len() == 0 { return scheme }
+    let mapping: Map<Int, Type> = map_new()
+    fresh_mapping_for_ids(env, tails, mapping)
+    let mut type_vars: List<Int> = []
+    for source in scheme.type_vars {
+        match mapping.get(source) {
+            some(Type::TypeVar { id, .. }) => type_vars.push(id),
+            some(_) => panic(
+                "effect header registry: scheme tail mapped to non-TypeVar"),
+            none => type_vars.push(source)
+        }
+    }
+    TypeScheme {
+        ty: apply_subst_map(mapping, scheme.ty),
+        type_vars: type_vars, bounds: scheme.bounds, def_id: scheme.def_id
+    }
+}
+
+pub fn type_env_effect_formal_facts(
+    env: TypeEnv
+) -> List<TypedEffectFormalFact> {
+    env.effect_formal_facts.map(fn(fact) { fact })
+}
+
+pub fn register_callable_effect_header(
+    mut env: TypeEnv, reference: ExecutableRef, row: EffectRow
+) {
+    for fact in env.callable_effect_facts {
+        if executable_ref_same(
+                typed_callable_effect_reference(fact), reference) {
+            let existing = typed_callable_effect_row(fact)
+            if !types_equal(
+                    Type::EffectRowType {
+                        effects: existing.effects, tail: existing.tail
+                    },
+                    Type::EffectRowType {
+                        effects: row.effects, tail: row.tail
+                    }) {
+                panic("effect header registry: callable row changed")
+            }
+            return
+        }
+    }
+    env.callable_effect_facts.push(
+        make_typed_callable_effect_fact(reference, row))
+}
+
+pub fn type_env_callable_effect_facts(
+    env: TypeEnv
+) -> List<TypedCallableEffectFact> {
+    env.callable_effect_facts.map(fn(fact) { fact })
 }
 
 fn collect_value_type_vars_in_atom(
@@ -2608,6 +2772,42 @@ fn mapped_var_ids(mapping: Map<Int, Type>, ids: List<Int>) -> List<Int> {
             _ => panic("import header localization: formal was not freshened")
         }
     })
+}
+
+// Exported value schemes cross an InferCtx boundary.  Definition-local raw
+// variables must therefore be fresh in the consumer; their semantic owner is
+// transported separately as the exact SymbolRef held by ModuleExports.
+pub fn localize_imported_type_scheme(
+    mut env: TypeEnv, value: TypeScheme
+) -> TypeScheme {
+    for tail in ordered_effect_tail_vars(value.ty) {
+        if !value.type_vars.contains(tail) {
+            panic("import header localization: effect tail is not quantified")
+        }
+    }
+    let mapping: Map<Int, Type> = map_new()
+    fresh_mapping_for_ids(env, value.type_vars, mapping)
+    let mut bounds: List<SchemeBound> = []
+    for bound in value.bounds {
+        let mapped_subject = mapped_var_ids(
+            mapping, [bound.type_var]).get(0).unwrap()
+        bounds.push(SchemeBound {
+            type_var: mapped_subject,
+            trait_name: bound.trait_name,
+            assoc_constraints: bound.assoc_constraints.map(fn(constraint) {
+                AssocConstraintEntry {
+                    name: constraint.name,
+                    ty: apply_subst_map(mapping, constraint.ty)
+                }
+            })
+        })
+    }
+    TypeScheme {
+        ty: apply_subst_map(mapping, value.ty),
+        type_vars: mapped_var_ids(mapping, value.type_vars),
+        bounds: bounds,
+        def_id: none
+    }
 }
 
 pub fn localize_imported_struct_def(

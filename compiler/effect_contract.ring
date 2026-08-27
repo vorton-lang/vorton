@@ -11,6 +11,8 @@ use ir_identity::{
     HandledEffectRef, SystemEffectRef,
     handled_effect_ref_same, system_effect_ref_same
 }
+use ir_inventory::{ExecutableRef}
+use types::{EffectRow}
 
 pub struct EffectParamRef {
     owner: OriginRef,
@@ -69,6 +71,30 @@ pub fn typed_effect_formal_raw_tail(
 pub fn typed_effect_formal_parameter(
     value: TypedEffectFormalFact
 ) -> EffectParamRef { value.parameter }
+
+pub struct TypedCallableEffectFact {
+    reference: ExecutableRef,
+    row: EffectRow
+}
+
+pub fn make_typed_callable_effect_fact(
+    reference: ExecutableRef, row: EffectRow
+) -> TypedCallableEffectFact {
+    TypedCallableEffectFact {
+        reference: reference,
+        row: EffectRow { effects: row.effects, tail: row.tail }
+    }
+}
+
+pub fn typed_callable_effect_reference(
+    value: TypedCallableEffectFact
+) -> ExecutableRef { value.reference }
+
+pub fn typed_callable_effect_row(
+    value: TypedCallableEffectFact
+) -> EffectRow {
+    EffectRow { effects: value.row.effects, tail: value.row.tail }
+}
 
 // One exact effect contract freezes at the Core boundary and is transported
 // unchanged through Flow.  Flow must not rebuild or translate this relation.

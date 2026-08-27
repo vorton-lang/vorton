@@ -27,6 +27,8 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     new_type_env, mono,
     apply_subst, apply_subst_row, apply_subst_map,
     freshen_effect_header,
+    register_effect_header_types,
+    register_callable_effect_header,
     instantiate_type_alias_schema, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
     impl_method_core_as_scheme, frozen_impl_predicates,
@@ -42,6 +44,7 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     SourceImplProviderFact,
     DelegateProviderFact, NominalDerivedProviderPlanFact, NamespaceKind}
 use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
+    OriginRef,
     symbol_ref_canonical_payload,
     symbol_ref_origin_module_key, symbol_ref_declaration_site_path,
     symbol_ref_namespace_kind, namespace_kind_same, namespace_value,
@@ -61,6 +64,7 @@ use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     make_path_ref, make_synthetic_slot_ref, make_module_body_ref,
     path_owner_for_symbol, path_owner_for_module_body, path_ref_owner,
     path_ref_normalized_child_path, path_role_child,
+    make_path_origin_ref, make_symbol_origin_ref,
     path_role_capture, path_role_handler,
     path_role_synthetic, path_role_declaration,
     path_role_parameter,
@@ -1574,6 +1578,59 @@ pub fn current_executable_owner(ctx: InferCtx) -> ExecutableRef {
     match ctx.executable_stack.last() {
         some(value) => value,
         none => panic("executable identity: no current body owner")
+    }
+}
+
+pub fn executable_effect_origin(value: ExecutableRef) -> OriginRef {
+    if executable_ref_is_named(value) {
+        make_symbol_origin_ref(executable_ref_named_symbol(value))
+    } else {
+        make_path_origin_ref(executable_ref_anonymous_path(value))
+    }
+}
+
+pub fn current_effect_free_owners(ctx: InferCtx) -> List<OriginRef> {
+    ctx.executable_stack.map(fn(value) { executable_effect_origin(value) })
+}
+
+pub fn local_effect_header_origin(ctx: InferCtx, def_id: Int) -> OriginRef {
+    if def_id < 0 {
+        panic("effect header registry: local DefId is synthetic")
+    }
+    let executable = current_executable_owner(ctx)
+    let mut path: List<Str> = if executable_ref_is_named(executable) {
+        []
+    } else {
+        path_ref_normalized_child_path(
+            executable_ref_anonymous_path(executable))
+    }
+    path.push("effect-local")
+    path.push(def_id.to_str())
+    let owner = if executable_ref_is_named(executable) {
+        path_owner_for_symbol(executable_ref_named_symbol(executable))
+    } else {
+        path_ref_owner(executable_ref_anonymous_path(executable))
+    }
+    make_path_origin_ref(make_path_ref(
+        owner, path, path_role_declaration()))
+}
+
+pub fn register_exact_effect_header(
+    mut ctx: InferCtx, owner: OriginRef, headers: List<Type>
+) {
+    let _ = register_effect_header_types(
+        ctx.env, owner, headers, current_effect_free_owners(ctx))
+}
+
+pub fn register_exact_callable_effect_header(
+    mut ctx: InferCtx, executable: ExecutableRef, signature: Type
+) {
+    register_exact_effect_header(
+        ctx, executable_effect_origin(executable), [signature])
+    match signature {
+        Type::FnType { effects, .. } => register_callable_effect_header(
+            ctx.env, executable, effects),
+        _ => panic("effect header registry: callable header is not FnType")
     }
 }
 

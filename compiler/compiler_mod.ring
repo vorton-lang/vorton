@@ -510,7 +510,7 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                                     some(mod_) => {
                                         let prefix = module_prefix(mod_.path_segments)
                                         let exp = extract_exports(key, prefix, ast, result.program, result.env,
-                                            result.fn_mut_params, result.value_origins,
+                                            result.fn_mut_params, result.value_symbols,
                                             result.value_binding_kinds,
                                             result.impl_facts, dep_exports)
                                         module_exports_map.insert(key, exp)

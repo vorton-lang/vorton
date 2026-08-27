@@ -83,7 +83,8 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     current_handled_evidence_captures, resolve_handled_evidence,
     prepare_callable_handled_evidence,
     canonicalize_callable_handled_evidence,
-    current_identity_file_key, semantic_parameter_binder}
+    current_identity_file_key, semantic_parameter_binder,
+    register_exact_callable_effect_header}
 use infer_helpers::{is_value_type}
 use resolver::{single_namespace_file_key}
 use infer_register::{register_decls_two_phase, register_module_decls_two_phase,
@@ -548,6 +549,11 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
         final_init_unremapped, evidence_remap.0, evidence_remap.1)
     let handled_evidence_bindings =
         current_handled_evidence_bindings(ctx)
+    register_exact_callable_effect_header(
+        ctx, const_executable, Type::FnType {
+            params: [], return_type: resolved,
+            effects: hexpr_effects(final_init)
+        })
     exit_executable_owner(ctx)
     ctx.subst = saved_subst
     HDecl::Const { name: name, def_id: old_def_id,
@@ -2280,6 +2286,11 @@ fn check_trait_default_body(
     })
     let handled_evidence_bindings =
         current_handled_evidence_bindings(ctx)
+    register_exact_callable_effect_header(
+        ctx, executable_ref, Type::FnType {
+            params: hparams.map(fn(param) { param.ty }),
+            return_type: method_return, effects: method_effects
+        })
     exit_executable_owner(ctx)
     TraitDefaultBodyResult {
         body: remapped_body,
@@ -2385,6 +2396,11 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
     ensure_callable_handled_evidence(ctx, extern_effects)
     let handled_evidence_bindings =
         current_handled_evidence_bindings(ctx)
+    register_exact_callable_effect_header(
+        ctx, executable_ref, Type::FnType {
+            params: hparams.map(fn(param) { param.ty }),
+            return_type: fn_ret, effects: extern_effects
+        })
     exit_executable_owner(ctx)
     let mut trait_bounds: List<TraitBound> = []
     let extern_type_var_ids = exact_source_type_var_ids(
@@ -3126,6 +3142,11 @@ fn check_fn_decl_transaction(
         fi = fi + 1
     }
     ctx.fn_mut_params.insert(name, mut_flags)
+    register_exact_callable_effect_header(
+        ctx, executable_ref, Type::FnType {
+            params: final_params.map(fn(param) { param.ty }),
+            return_type: final_ret, effects: final_effects
+        })
     HDecl::Fn {
         name: name, def_id: fn_def_id,
         executable_ref: executable_ref,
@@ -3188,6 +3209,11 @@ fn check_test_decl(
         final_body_unremapped, evidence_remap.0, evidence_remap.1)
     let handled_evidence_bindings =
         current_handled_evidence_bindings(ctx)
+    register_exact_callable_effect_header(
+        ctx, test_executable, Type::FnType {
+            params: [], return_type: hexpr_type(final_body),
+            effects: hexpr_effects(final_body)
+        })
     exit_executable_owner(ctx)
 
     HDecl::Test { description: description,
@@ -4802,6 +4828,12 @@ fn check_registered(
     // overlay snapshots any payload, so frame aliases always observe the
     // authoritative post-derive definitions.
     let derived_impls = run_derive_pass(ctx)
+    for derived in derived_impls {
+        for method in derived.methods {
+            register_exact_callable_effect_header(
+                ctx, method.executable_ref, method.signature)
+        }
+    }
     let project_active = ctx.project_namespace_file_key.is_some()
     enter_impl_check_root_frame(ctx, file_key)
     let mut entered_project_frame = false

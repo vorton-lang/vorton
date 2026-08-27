@@ -1,4 +1,5 @@
-use types::{UNIT, BUILTIN_OPTION, nominal_display_name}
+use types::{Type, Effect, EffectRow, UNIT, BUILTIN_OPTION,
+    nominal_display_name}
 use ast::{Program, Decl, UseDecl, UseImport, Span, TypeParam, span_zero}
 use hir::{HDecl, HProgram, ModuleImplFact, ValueBindingKind,
     compare_by_first,
@@ -9,8 +10,11 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef,
     add_impl, find_impl,
     find_impl_by_provider, impl_entry_exact_key_same,
     optional_symbol_ref_same, install_method_core,
+    localize_imported_type_scheme,
     localize_imported_struct_def, localize_imported_enum_def,
     localize_imported_effect_def, localize_imported_trait_def,
+    register_effect_header_types,
+    register_callable_effect_header,
     register_compiler_owned_extern_source,
     close_compiler_owned_extern_sources,
     compiler_owned_extern_symbol,
@@ -19,7 +23,9 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef,
 use builtins::{register_builtins, register_hof_intrinsics,
     finalize_std_hof_fallbacks, builtin_range_hdecl,
     checker_only_builtin_values, checker_builtin_value_name,
-    checker_builtin_value_symbol}
+    checker_builtin_value_symbol,
+    builtin_method_contract_facts, builtin_method_contract_intrinsic,
+    builtin_method_contract_scheme}
 use derive::{validate_derived_impls}
 use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
 use dict_lower::{lower_dicts}
@@ -30,6 +36,7 @@ use infer_ctx::{InferCtx, new_infer_ctx as new_base_infer_ctx,
     install_project_namespace_plan,
     install_struct_identity_ledger, enter_struct_identity_root_frame,
     exit_struct_identity_frame, close_struct_identity_ledger}
+use infer_ctx::{executable_effect_origin}
 use infer_register::{register_decl_public}
 use exports::{ModuleExports, TypeDef}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
@@ -47,11 +54,15 @@ use ir_identity::{SymbolRef, RegisteredNominalRef,
     registered_nominal_ref_symbol, registered_nominal_ref_same,
     registered_trait_ref_same, symbol_ref_same,
     handled_effect_ref_same,
+    nominal_field_ref_member, variant_field_ref_member,
+    trait_method_ref_member, make_symbol_origin_ref,
+    intrinsic_ref_symbol,
     symbol_ref_origin_module_key, symbol_ref_namespace_kind,
     symbol_ref_canonical_payload, symbol_ref_declaration_site_path,
     namespace_kind_same, make_symbol_ref, namespace_value,
     namespace_nominal,
     variant_ref_member}
+use ir_inventory::{effect_operation_ref_callable, make_named_executable_ref}
 use union_find::{UnionFind}
 use core_from_hir::{FrozenCoreAssemblyFacts}
 use legacy_projection::{LegacyProjectionFacts}
@@ -478,6 +489,22 @@ fn new_infer_ctx(
         sink, module_key, module_order)
     register_builtins(ctx.env, sink)
     register_hof_intrinsics(ctx.env, sink)
+    for fact in builtin_method_contract_facts(ctx.env) {
+        let executable = make_named_executable_ref(intrinsic_ref_symbol(
+            builtin_method_contract_intrinsic(fact)))
+        let scheme = builtin_method_contract_scheme(fact)
+        let _ = register_effect_header_types(
+            ctx.env, executable_effect_origin(executable), [scheme.ty], [])
+        if module_order == 0 {
+            match scheme.ty {
+                Type::FnType { effects, .. } =>
+                    register_callable_effect_header(
+                        ctx.env, executable, effects),
+                _ => panic(
+                    "effect header registry: builtin method is not callable")
+            }
+        }
+    }
     // Option is registered before resolver-backed source declarations exist.
     // Bind its two lexical constructor DefIds to the exact typed variant
     // members here; downstream inference never reconstructs identity from
@@ -1019,53 +1046,143 @@ fn has_imported_trait_header(env: TypeEnv, value: TraitDef) -> Bool {
     false
 }
 
+fn register_imported_struct_effect_headers(
+    mut ctx: InferCtx, value: StructDef
+) {
+    for field in value.fields {
+        let _ = register_effect_header_types(
+            ctx.env,
+            make_symbol_origin_ref(nominal_field_ref_member(field.field_ref)),
+            [field.ty], [])
+    }
+}
+
+fn register_imported_enum_effect_headers(
+    mut ctx: InferCtx, value: EnumDef
+) {
+    if value.variants.len() != value.variant_field_refs.len() {
+        panic("effect header registry: imported enum census differs")
+    }
+    let mut variant_index = 0
+    while variant_index < value.variants.len() {
+        let variant = value.variants.get(variant_index).unwrap()
+        let refs = value.variant_field_refs.get(variant_index).unwrap()
+        if variant.fields.len() != refs.len() {
+            panic("effect header registry: imported payload census differs")
+        }
+        let mut field_index = 0
+        while field_index < variant.fields.len() {
+            let _ = register_effect_header_types(
+                ctx.env,
+                make_symbol_origin_ref(variant_field_ref_member(
+                    refs.get(field_index).unwrap())),
+                [variant.fields.get(field_index).unwrap()], [])
+            field_index = field_index + 1
+        }
+        variant_index = variant_index + 1
+    }
+}
+
+fn register_imported_effect_headers(
+    mut ctx: InferCtx, value: EffectDef
+) {
+    for op in value.ops {
+        let operation = match op.operation_ref {
+            some(reference) => reference,
+            none => panic("effect header registry: imported op lacks identity")
+        }
+        let mut headers = op.params.map(fn(param) { param })
+        headers.push(op.return_type)
+        let _ = register_effect_header_types(
+            ctx.env,
+            executable_effect_origin(effect_operation_ref_callable(operation)),
+            headers, [])
+        let type_args = value.type_param_vars.map(fn(id) {
+            Type::TypeVar { id: id, name: none }
+        })
+        register_callable_effect_header(
+            ctx.env, effect_operation_ref_callable(operation),
+            EffectRow { effects: [Effect::CustomEffect {
+                reference: value.handled_ref.unwrap(), name: value.name,
+                type_args: type_args
+            }], tail: none })
+    }
+}
+
+fn register_imported_trait_effect_headers(
+    mut ctx: InferCtx, value: TraitDef
+) {
+    for method in value.methods {
+        let _ = register_effect_header_types(
+            ctx.env,
+            make_symbol_origin_ref(trait_method_ref_member(method.method_ref)),
+            [method.ty], [])
+        match method.ty {
+            Type::FnType { effects, .. } => register_callable_effect_header(
+                ctx.env,
+                make_named_executable_ref(
+                    trait_method_ref_member(method.method_ref)),
+                effects),
+            _ => panic("effect header registry: trait method is not callable")
+        }
+    }
+    for assoc in value.assoc_types {
+        match assoc.default_type {
+            some(header) => {
+                let _ = register_effect_header_types(
+                    ctx.env, make_symbol_origin_ref(assoc.member_ref),
+                    [header], [])
+            },
+            none => {}
+        }
+    }
+}
+
 fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
     // Canonical value payloads are the only source keys consumed by the
     // resolver plan. Export display keys are intentionally not hydrated:
     // same-leaf exports from unrelated modules may coexist, while each exact
     // value/constructor origin is installed once with a checker-local DefId.
-    let mut hydrated_value_origins: Set<Str> = set_new()
+    let mut hydrated_value_symbols: List<SymbolRef> = []
     for mod_ in exports {
         let mut sorted_values = mod_.values.entries()
         sorted_values.sort_by(compare_by_first)
         for entry in sorted_values {
             let (lookup_name, scheme) = entry
-            let value_origin = mod_.value_origins.get(lookup_name)
+            let value_symbol = match mod_.value_symbols.get(lookup_name) {
+                some(value) => value,
+                none => panic("module export: value lacks exact SymbolRef")
+            }
             let ctor_origin = mod_.variant_ctor_origins.get(lookup_name)
-            if ctor_origin.is_some() && value_origin.is_none() {
-                panic("module export: constructor lacks exact value identity")
-            }
-            let mut exact_origins: List<Str> = []
-            match value_origin {
-                some(origin) => { exact_origins.push(origin) },
-                none => {}
-            }
-            for origin in exact_origins {
-                if !hydrated_value_origins.contains(origin) {
-                    ctx.env.bind(origin, TypeScheme { ..scheme, def_id: none })
-                    let ultimate = match value_origin {
-                        some(value) => value,
-                        none => origin
-                    }
-                    record_value_origin(ctx, origin, ultimate)
-                    match mod_.value_binding_kinds.get(lookup_name) {
-                        some(kind) => {
-                            record_value_binding_kind(ctx, origin, kind)
-                        },
-                        none => {}
-                    }
-                    match ctor_origin {
-                        some(ctor) => {
-                            record_variant_ctor_origin(ctx, origin, ctor)
-                        },
-                        none => {}
-                    }
-                    match mod_.fn_mut_params.get(lookup_name) {
-                        some(flags) => { ctx.fn_mut_params.insert(origin, flags) },
-                        none => {}
-                    }
-                    hydrated_value_origins.insert(origin)
+            if !hydrated_value_symbols.any(fn(existing) {
+                    symbol_ref_same(existing, value_symbol)
+                }) {
+                let localized = localize_imported_type_scheme(
+                    ctx.env, scheme)
+                let payload = symbol_ref_canonical_payload(value_symbol)
+                ctx.env.bind(payload, localized)
+                record_value_origin(ctx, payload, payload)
+                record_value_symbol_ref(ctx, payload, value_symbol)
+                let _ = register_effect_header_types(
+                    ctx.env, make_symbol_origin_ref(value_symbol),
+                    [localized.ty], [])
+                match mod_.value_binding_kinds.get(lookup_name) {
+                    some(kind) => {
+                        record_value_binding_kind(ctx, payload, kind)
+                    },
+                    none => {}
                 }
+                match ctor_origin {
+                    some(ctor) => {
+                        record_variant_ctor_origin(ctx, payload, ctor)
+                    },
+                    none => {}
+                }
+                match mod_.fn_mut_params.get(lookup_name) {
+                    some(flags) => { ctx.fn_mut_params.insert(payload, flags) },
+                    none => {}
+                }
+                hydrated_value_symbols.push(value_symbol)
             }
         }
         let mut sorted_types = mod_.types.entries()
@@ -1077,6 +1194,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                     if !has_imported_struct_header(ctx.env, sdef) {
                         let localized = localize_imported_struct_def(
                             ctx.env, sdef)
+                        register_imported_struct_effect_headers(ctx, localized)
                         if localized.is_extern {
                             // Dependency hydration exposes only the raw ABI
                             // source. Namespace frames install visible names.
@@ -1092,6 +1210,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                     if !has_imported_enum_header(ctx.env, edef) {
                         let localized = localize_imported_enum_def(
                             ctx.env, edef)
+                        register_imported_enum_effect_headers(ctx, localized)
                         ctx.env.types.enums.insert(
                             localized.name, localized)
                     }
@@ -1110,6 +1229,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
             let (name, effdef) = entry
             if !has_imported_effect_header(ctx.env, effdef) {
                 let localized = localize_imported_effect_def(ctx.env, effdef)
+                register_imported_effect_headers(ctx, localized)
                 ctx.env.types.effects.insert(localized.name, localized)
             }
         }
@@ -1125,6 +1245,7 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
             let (name, tdef) = entry
             if !has_imported_trait_header(ctx.env, tdef) {
                 let localized = localize_imported_trait_def(ctx.env, tdef)
+                register_imported_trait_effect_headers(ctx, localized)
                 ctx.env.trait_reg.traits.insert(localized.name, localized)
             }
         }

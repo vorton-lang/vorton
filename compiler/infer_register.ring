@@ -34,6 +34,8 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     specialize_trait_method_scheme, build_type_var_map,
     ordered_effect_tail_vars,
     freshen_effect_header,
+    register_effect_header_types,
+    register_callable_effect_header,
     delegate_plan_not_applicable, delegate_plan_pending,
     delegate_plan_final,
     finalize_delegate_provider_plan, assert_no_pending_delegate_plans}
@@ -62,18 +64,22 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     peek_delegate_provider_fact, commit_delegate_provider_fact,
     peek_nominal_derived_provider_fact,
     commit_nominal_derived_provider_fact,
-    close_struct_identity_ledger}
+    close_struct_identity_ledger,
+    executable_effect_origin}
+use ir_inventory::{effect_operation_ref_callable, make_named_executable_ref}
 use infer_helpers::{is_value_type}
 use resolver::{StructIdentityFact, DelegateProviderFact,
     ImplMethodIdentityFact}
 use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
     registered_nominal_ref_symbol, nominal_field_ref_name,
-    nominal_field_ref_index, symbol_ref_same,
+    nominal_field_ref_index, nominal_field_ref_member, symbol_ref_same,
     trait_method_ref_trait,
     trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index, trait_method_ref_name,
+    trait_method_ref_member,
     variant_ref_owner, variant_ref_source_index, variant_ref_member,
     variant_field_ref_variant, variant_field_ref_index,
+    variant_field_ref_member,
     registered_nominal_ref_same, variant_ref_same,
     ImplProviderRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     HandledEffectRef, handled_effect_ref_same,
@@ -82,7 +88,8 @@ use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
     path_owner_ref_module_body, module_body_ref_origin_module_key,
     make_symbol_ref, namespace_member,
     impl_provider_ref_same,
-    registered_trait_ref_symbol, symbol_ref_canonical_payload}
+    registered_trait_ref_symbol, symbol_ref_canonical_payload,
+    make_symbol_origin_ref}
 
 // ============================================================
 // Public entry points
@@ -1674,14 +1681,22 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
                         let resolved = some(resolve_type_expr(
                             ctx, f.type_annotation)) catch { _ => none }
                         match resolved {
-                            some(field_type) => resolved_fields.push(StructField {
-                                name: f.name,
-                                ty: field_type,
-                                is_pub: f.is_pub,
-                                field_ref: field_identity.field_ref,
-                                field_index: field_index,
-                                span: f.span
-                            }),
+                            some(field_type) => {
+                                let _ = register_effect_header_types(
+                                    ctx.env,
+                                    make_symbol_origin_ref(
+                                        nominal_field_ref_member(
+                                            field_identity.field_ref)),
+                                    [field_type], [])
+                                resolved_fields.push(StructField {
+                                    name: f.name,
+                                    ty: field_type,
+                                    is_pub: f.is_pub,
+                                    field_ref: field_identity.field_ref,
+                                    field_index: field_index,
+                                    span: f.span
+                                })
+                            },
                             none => { resolution_failed = true }
                         }
                     },
@@ -1822,6 +1837,27 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
             }
 
             let enum_type = Type::EnumType { name: name, type_params: tv_types }
+            let mut header_variant_index = 0
+            while header_variant_index < def.variants.len() {
+                let header_variant = def.variants.get(
+                    header_variant_index).unwrap()
+                let header_refs = def.variant_field_refs.get(
+                    header_variant_index).unwrap()
+                if header_variant.fields.len() != header_refs.len() {
+                    panic("effect header registry: enum field census differs")
+                }
+                let mut header_field_index = 0
+                while header_field_index < header_variant.fields.len() {
+                    let _ = register_effect_header_types(
+                        ctx.env,
+                        make_symbol_origin_ref(variant_field_ref_member(
+                            header_refs.get(header_field_index).unwrap())),
+                        [header_variant.fields.get(
+                            header_field_index).unwrap()], [])
+                    header_field_index = header_field_index + 1
+                }
+                header_variant_index = header_variant_index + 1
+            }
             let tv_ids = def.type_param_vars
             let mut ctor_index = 0
             for variant in def.variants {
@@ -1940,9 +1976,25 @@ fn register_effect(
             }
         }
         let ret = resolve_type_expr(ctx, op.return_type)
+        let operation = identity.operations.get(op_index).unwrap()
+        let mut operation_header = param_types.map(fn(value) { value })
+        operation_header.push(ret)
+        let _ = register_effect_header_types(
+            ctx.env,
+            executable_effect_origin(effect_operation_ref_callable(operation)),
+            operation_header, [])
+        let effect_type_args = tp_vars.map(fn(id) {
+            Type::TypeVar { id: id, name: none }
+        })
+        register_callable_effect_header(
+            ctx.env, effect_operation_ref_callable(operation),
+            EffectRow { effects: [Effect::CustomEffect {
+                reference: identity.handled_ref, name: name,
+                type_args: effect_type_args
+            }], tail: none })
         effect_ops.push(EffectOpDef {
             name: op.name,
-            operation_ref: some(identity.operations.get(op_index).unwrap()),
+            operation_ref: some(operation),
             params: param_types, return_type: ret
         })
         op_index = op_index + 1
@@ -2217,6 +2269,14 @@ fn register_trait(
                 }
                 let member_ref = identity.assoc_members.get(
                     assoc_slot_index).unwrap()
+                match default_ty {
+                    some(value) => {
+                        let _ = register_effect_header_types(
+                            ctx.env, make_symbol_origin_ref(member_ref),
+                            [value], [])
+                    },
+                    none => {}
+                }
                 assoc_type_defs.push(AssocTypeDef {
                     name: aname, member_ref: member_ref,
                     bounds: bound_names, default_type: default_ty,
@@ -2308,6 +2368,15 @@ fn register_trait(
                     }
                 }
                 let fn_type = Type::FnType { params: param_types, return_type: ret, effects: method_effects }
+                let _ = register_effect_header_types(
+                    ctx.env,
+                    make_symbol_origin_ref(trait_method_ref_member(method_ref)),
+                    [fn_type], [])
+                register_callable_effect_header(
+                    ctx.env,
+                    make_named_executable_ref(
+                        trait_method_ref_member(method_ref)),
+                    method_effects)
                 trait_methods.push(TraitMethodDef {
                     name: mname, method_ref: method_ref, ty: fn_type,
                     has_default: !is_abstract,
