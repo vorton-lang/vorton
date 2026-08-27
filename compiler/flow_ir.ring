@@ -4337,7 +4337,7 @@ fn validate_operation_callable_contract(
     }
 }
 
-fn validate_callable_value_effect_contract(
+fn validate_callable_value_contract(
     target_type: CoreTypeRef, callable: FlowCallable,
     type_nodes: List<FlowTypeNode>
 ) {
@@ -4349,15 +4349,29 @@ fn validate_callable_value_effect_contract(
         some(value) => value,
         none => panic("FlowIR: callable value type lacks effect contract")
     }
-    match core_effect_contract_parameter(target_effects) {
-        some(parameter) => if !origin_ref_same(
-                effect_param_owner(parameter), callable.origin) {
-            panic("FlowIR: callable value residual effect owner differs")
-        },
-        none => {}
+    let contract = callable.semantic_contract
+    let parameter_types = flow_call_contract_parameter_types(contract)
+    if node.parameter_count != parameter_types.len() ||
+       node.children.len() != parameter_types.len() + 1 {
+        panic("FlowIR: callable value type arity differs from exact contract")
     }
-    let _ = make_explicit_core_effect_instantiation(
-        callable.effects, target_effects, target_effects)
+    let mut index = 0
+    while index < parameter_types.len() {
+        if !core_type_ref_same(
+                node.children.get(index).unwrap(),
+                parameter_types.get(index).unwrap()) {
+            panic("FlowIR: callable value parameter type differs")
+        }
+        index = index + 1
+    }
+    if !core_type_ref_same(
+            node.children.get(node.parameter_count).unwrap(),
+            flow_call_contract_result_type(contract)) {
+        panic("FlowIR: callable value result type differs")
+    }
+    if !core_effect_contract_same(target_effects, callable.effects) {
+        panic("FlowIR: callable value effect contract differs")
+    }
 }
 
 fn validate_literal_or_primitive_contract(
@@ -4564,7 +4578,7 @@ fn validate_typed_instructions(
                                 executable, capture_targets
                             } => {
                                 let callable = callable_for_ref(callables, executable)
-                                validate_callable_value_effect_contract(
+                                validate_callable_value_contract(
                                     operation.target_type, callable, type_nodes)
                                 if !executable_contract_mode_same(
                                         callable.mode,
@@ -4607,13 +4621,8 @@ fn validate_typed_instructions(
                                 executable, evidence
                             } => {
                                 let callable = callable_for_ref(callables, executable)
-                                validate_callable_value_effect_contract(
+                                validate_callable_value_contract(
                                     operation.target_type, callable, type_nodes)
-                                if !executable_contract_mode_same(
-                                        callable.mode,
-                                        executable_contract_mode_concrete_body()) {
-                                    panic("FlowIR: callable value executable is bodyless")
-                                }
                                 for item in evidence {
                                     validate_dictionary_evidence(
                                         flow_evidence_dict(item), body)
