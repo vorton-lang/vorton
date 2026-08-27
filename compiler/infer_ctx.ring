@@ -26,6 +26,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
     new_type_env, mono,
     apply_subst, apply_subst_row, apply_subst_map,
+    instantiate_effect_schema,
     instantiate_type_alias_schema, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
     impl_method_core_as_scheme, frozen_impl_predicates,
@@ -3535,7 +3536,9 @@ pub fn exact_pattern_plan(
                     }
                     let child = match exact_pattern_plan(
                             ctx, field.pattern,
-                            apply_subst_map(inst_map, child_type), subst) {
+                            instantiate_effect_schema(
+                                ctx.env,
+                                apply_subst_map(inst_map, child_type)), subst) {
                         some(value) => value,
                         none => return none
                     }
@@ -3561,7 +3564,9 @@ pub fn exact_pattern_plan(
                     }
                     let child = match exact_pattern_plan(
                             ctx, field.pattern,
-                            apply_subst_map(inst_map, exact.ty), subst) {
+                            instantiate_effect_schema(
+                                ctx.env,
+                                apply_subst_map(inst_map, exact.ty)), subst) {
                         some(value) => value,
                         none => return none
                     }
@@ -3643,7 +3648,11 @@ fn bind_constructor_pattern(
                         while i < fields.len() {
                             match (fields.get(i), v.fields.get(i)) {
                                 (some(fpat), some(ftype)) => {
-                                    let field_type = if inst_map.len() > 0 { apply_subst_map(inst_map, ftype) } else { ftype }
+                                    let mapped = if inst_map.len() > 0 {
+                                        apply_subst_map(inst_map, ftype)
+                                    } else { ftype }
+                                    let field_type = instantiate_effect_schema(
+                                        ctx.env, mapped)
                                     s = bind_pattern(ctx, fpat, field_type, s)
                                 },
                                 (some(fpat), none) => {
@@ -3748,7 +3757,11 @@ fn bind_named_constructor_pattern(
                                 match field_idx {
                                     some(idx) => match v.fields.get(idx) {
                                         some(ftype) => {
-                                            let field_type = if inst_map.len() > 0 { apply_subst_map(inst_map, ftype) } else { ftype }
+                                            let mapped = if inst_map.len() > 0 {
+                                                apply_subst_map(inst_map, ftype)
+                                            } else { ftype }
+                                            let field_type = instantiate_effect_schema(
+                                                ctx.env, mapped)
                                             s = bind_pattern(ctx, field.pattern, field_type, s)
                                         },
                                         none => {
@@ -3825,7 +3838,11 @@ fn bind_struct_pattern_fields(
                 let found = struct_def.fields.find(fn(sf) { sf.name == field.name })
                 match found {
                     some(sf) => {
-                        let field_type = if inst_map.len() > 0 { apply_subst_map(inst_map, sf.ty) } else { sf.ty }
+                        let mapped = if inst_map.len() > 0 {
+                            apply_subst_map(inst_map, sf.ty)
+                        } else { sf.ty }
+                        let field_type = instantiate_effect_schema(
+                            ctx.env, mapped)
                         s = bind_pattern(ctx, field.pattern, field_type, s)
                     },
                     none => {
@@ -3862,7 +3879,11 @@ fn bind_struct_pattern_fields(
                             let found = sdef.fields.find(fn(sf) { sf.name == field.name })
                             match found {
                                 some(sf) => {
-                                    let field_type = if inst_map.len() > 0 { apply_subst_map(inst_map, sf.ty) } else { sf.ty }
+                                    let mapped = if inst_map.len() > 0 {
+                                        apply_subst_map(inst_map, sf.ty)
+                                    } else { sf.ty }
+                                    let field_type = instantiate_effect_schema(
+                                        ctx.env, mapped)
                                     s = bind_pattern(ctx, field.pattern, field_type, s)
                                 },
                                 none => {

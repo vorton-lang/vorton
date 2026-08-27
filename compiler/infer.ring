@@ -43,6 +43,8 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
     ImplMethodSchemeCore, TypeAliasDef,
     BuiltInKind, mono, apply_subst, apply_subst_row, apply_subst_map,
     build_scheme_var_map, impl_method_core_as_scheme,
+    instantiate_effect_schema, instantiate_effect_schema_types,
+    instantiate_trait_method_signature, scheme_value_type_vars,
     find_impl, lookup_variant, compiler_owned_extern_manifest_entry}
 use extern_manifest::{
     compiler_extern_manifest_entry_executable,
@@ -2076,7 +2078,7 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
                 let instantiated = apply_subst(s, resolved_callee_type)
                 let var_map = build_scheme_var_map(
                     metadata.live_scheme, instantiated)
-                for type_var in metadata.live_scheme.type_vars {
+                for type_var in scheme_value_type_vars(metadata.live_scheme) {
                     exact_type_args.push(match var_map.get(type_var) {
                         some(actual) => apply_subst(s, actual),
                         none => panic(
@@ -2302,7 +2304,9 @@ fn infer_method_call_from_receiver(
                                 let tm = trait_def.methods.find(fn(m) { m.name == method })
                                 match tm {
                                     some(found_method) => {
-                                        method_type = some(ctx.env.instantiate(TypeScheme { ty: found_method.ty, type_vars: trait_def.type_param_vars, bounds: [], def_id: none }))
+                                        method_type = some(
+                                            instantiate_trait_method_signature(
+                                                ctx.env, found_method))
                                         bound_method_ref = some(found_method.method_ref)
                                         bound_receiver_mutable = match
                                                 found_method.param_mutabilities.first() {
@@ -2560,12 +2564,24 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
         tpi = tpi + 1
     }
 
-    // Apply instantiation to op param types and return type
-    let mut inst_params: List<Type> = []
+    // Apply one shared schema instantiation to the complete operation
+    // signature. Repeated row tails inside params/result remain related, while
+    // two operation uses never share inference identities.
+    let mut mapped_signature: List<Type> = []
     for pt in op.params {
-        inst_params.push(apply_subst_map(inst_map, pt))
+        mapped_signature.push(apply_subst_map(inst_map, pt))
     }
-    let inst_ret = apply_subst_map(inst_map, op.return_type)
+    mapped_signature.push(apply_subst_map(inst_map, op.return_type))
+    let instantiated_signature = instantiate_effect_schema_types(
+        ctx.env, mapped_signature)
+    let mut inst_params: List<Type> = []
+    let mut signature_index = 0
+    while signature_index + 1 < instantiated_signature.len() {
+        inst_params.push(instantiated_signature.get(signature_index).unwrap())
+        signature_index = signature_index + 1
+    }
+    let inst_ret = instantiated_signature.get(
+        instantiated_signature.len() - 1).unwrap()
 
     if args.len() != inst_params.len() {
         let effect_display = nominal_display_name(effect_name)
@@ -2665,7 +2681,9 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
                                 }
                                 fi = fi + 1
                             }
-                            field_type = apply_subst_map(inst_map, found_field.ty)
+                            field_type = instantiate_effect_schema(
+                                ctx.env,
+                                apply_subst_map(inst_map, found_field.ty))
                         },
                         none => { let _ = type_error(ctx.sink, E0304,
                             "Struct ${name} has no field ${field}",
@@ -2904,7 +2922,8 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
         let def_field = struct_def.fields.find(fn(f) { f.name == field.name })
         match def_field {
             some(df) => {
-                let ft = apply_subst_map(inst_map, df.ty)
+                let ft = instantiate_effect_schema(
+                    ctx.env, apply_subst_map(inst_map, df.ty))
                 let field_notes: List<DiagnosticNote> = [
                     DiagnosticNote { message: "field '${field.name}' of struct '${name}' expects type '${type_to_string(ft)}'", span: some(field.span) },
                     DiagnosticNote { message: "provided value has type '${type_to_string(apply_subst(s, hexpr_type(fr.hexpr)))}'", span: some(hexpr_span(fr.hexpr)) }
@@ -3007,7 +3026,8 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
             some(idx) => match (variant.fields.get(idx),
                                 exact_field_refs.get(idx)) {
                 (some(ftype), some(field_ref)) => {
-                    let ft = apply_subst_map(inst_map, ftype)
+                    let ft = instantiate_effect_schema(
+                        ctx.env, apply_subst_map(inst_map, ftype))
                     s = unify_at(ctx.sink, ctx.env, hexpr_type(fr.hexpr), ft, s, span)
                     hfields.push(HStructFieldInit {
                         name: field.name, field_ref: field_ref,

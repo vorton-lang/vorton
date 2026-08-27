@@ -5,9 +5,12 @@ use hir::{HDecl, HProgram, ModuleImplFact, ValueBindingKind,
     map_index_helper_source_name, map_index_helper_identity,
     prelude_extern_identity}
 use diagnostics::{Severity, DiagnosticContext, CollectingSink, new_collecting_sink, make_diag}
-use env::{TypeEnv, TypeScheme, add_impl, find_impl,
+use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef,
+    add_impl, find_impl,
     find_impl_by_provider, impl_entry_exact_key_same,
     optional_symbol_ref_same, install_method_core,
+    localize_imported_struct_def, localize_imported_enum_def,
+    localize_imported_effect_def, localize_imported_trait_def,
     register_compiler_owned_extern_source,
     close_compiler_owned_extern_sources,
     compiler_owned_extern_symbol,
@@ -41,7 +44,9 @@ use parser::{parse}
 use ir_identity::{SymbolRef, RegisteredNominalRef,
     impl_owner_ref_same, impl_method_ref_owner,
     impl_owner_ref_trait, impl_owner_ref_provider, impl_method_ref_same,
-    registered_nominal_ref_symbol,
+    registered_nominal_ref_symbol, registered_nominal_ref_same,
+    registered_trait_ref_same, symbol_ref_same,
+    handled_effect_ref_same,
     symbol_ref_origin_module_key, symbol_ref_namespace_kind,
     symbol_ref_canonical_payload, symbol_ref_declaration_site_path,
     namespace_kind_same, make_symbol_ref, namespace_value,
@@ -965,6 +970,55 @@ pub fn check_module(
     }
 }
 
+fn has_imported_struct_header(env: TypeEnv, value: StructDef) -> Bool {
+    for entry in env.types.structs.entries() {
+        if registered_nominal_ref_same(entry.1.owner_ref, value.owner_ref) {
+            return true
+        }
+    }
+    for entry in env.types.extern_structs.entries() {
+        if registered_nominal_ref_same(entry.1.owner_ref, value.owner_ref) {
+            return true
+        }
+    }
+    false
+}
+
+fn has_imported_enum_header(env: TypeEnv, value: EnumDef) -> Bool {
+    for entry in env.types.enums.entries() {
+        if registered_nominal_ref_same(entry.1.owner_ref, value.owner_ref) {
+            return true
+        }
+    }
+    false
+}
+
+fn has_imported_effect_header(env: TypeEnv, value: EffectDef) -> Bool {
+    for entry in env.types.effects.entries() {
+        let existing = entry.1
+        match (existing.owner_ref, value.owner_ref) {
+            (some(left), some(right)) => if symbol_ref_same(left, right) {
+                return true
+            },
+            _ => match (existing.handled_ref, value.handled_ref) {
+                (some(left), some(right)) => if handled_effect_ref_same(
+                        left, right) { return true },
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+fn has_imported_trait_header(env: TypeEnv, value: TraitDef) -> Bool {
+    for entry in env.trait_reg.traits.entries() {
+        if registered_trait_ref_same(entry.1.owner_ref, value.owner_ref) {
+            return true
+        }
+    }
+    false
+}
+
 fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
     // Canonical value payloads are the only source keys consumed by the
     // resolver plan. Export display keys are intentionally not hydrated:
@@ -1020,18 +1074,27 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
             let (name, def) = entry
             match def {
                 TypeDef::StructDef_(sdef) => {
-                    if sdef.is_extern {
-                        // Dependency hydration exposes only the raw ABI source.
-                        // Named/wildcard imports install visible spellings via
-                        // the project namespace frame; infer_decl snapshots
-                        // their raw codegen identities before frame rollback.
-                        ctx.env.types.extern_structs.insert(sdef.name, sdef)
-                    } else {
-                        ctx.env.types.structs.insert(sdef.name, sdef)
+                    if !has_imported_struct_header(ctx.env, sdef) {
+                        let localized = localize_imported_struct_def(
+                            ctx.env, sdef)
+                        if localized.is_extern {
+                            // Dependency hydration exposes only the raw ABI
+                            // source. Namespace frames install visible names.
+                            ctx.env.types.extern_structs.insert(
+                                localized.name, localized)
+                        } else {
+                            ctx.env.types.structs.insert(
+                                localized.name, localized)
+                        }
                     }
                 },
                 TypeDef::EnumDef_(edef) => {
-                    ctx.env.types.enums.insert(edef.name, edef)
+                    if !has_imported_enum_header(ctx.env, edef) {
+                        let localized = localize_imported_enum_def(
+                            ctx.env, edef)
+                        ctx.env.types.enums.insert(
+                            localized.name, localized)
+                    }
                 },
             }
         }
@@ -1045,7 +1108,10 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
         sorted_effects.sort_by(compare_by_first)
         for entry in sorted_effects {
             let (name, effdef) = entry
-            ctx.env.types.effects.insert(effdef.name, effdef)
+            if !has_imported_effect_header(ctx.env, effdef) {
+                let localized = localize_imported_effect_def(ctx.env, effdef)
+                ctx.env.types.effects.insert(localized.name, localized)
+            }
         }
         let mut sorted_aliases = mod_.effect_aliases.entries()
         sorted_aliases.sort_by(compare_by_first)
@@ -1057,7 +1123,10 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
         sorted_traits.sort_by(compare_by_first)
         for entry in sorted_traits {
             let (name, tdef) = entry
-            ctx.env.trait_reg.traits.insert(tdef.name, tdef)
+            if !has_imported_trait_header(ctx.env, tdef) {
+                let localized = localize_imported_trait_def(ctx.env, tdef)
+                ctx.env.trait_reg.traits.insert(localized.name, localized)
+            }
         }
         for impl_ in mod_.trait_impls {
             match impl_.trait_name {

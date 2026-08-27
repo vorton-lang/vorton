@@ -2426,6 +2426,343 @@ fn collect_type_var_ids(ty: Type, mut result: Set<Int>) {
     for id in ordered { result.insert(id) }
 }
 
+fn collect_effect_tail_ids_in_type(
+    ty: Type, mut result: List<Int>
+) {
+    match ty {
+        Type::FnType { params, return_type, effects } => {
+            for param in params {
+                collect_effect_tail_ids_in_type(param, result)
+            }
+            collect_effect_tail_ids_in_type(return_type, result)
+            for atom in effects.effects {
+                collect_effect_tail_ids_in_atom(atom, result)
+            }
+            match effects.tail {
+                some(id) => append_ordered_type_var(result, id),
+                none => {}
+            }
+        },
+        Type::StructType { type_params, .. } |
+        Type::EnumType { type_params, .. } => {
+            for param in type_params {
+                collect_effect_tail_ids_in_type(param, result)
+            }
+        },
+        Type::GenericType { base, args } => {
+            collect_effect_tail_ids_in_type(base, result)
+            for arg in args { collect_effect_tail_ids_in_type(arg, result) }
+        },
+        Type::RecordType { fields, .. } => {
+            for field in fields {
+                collect_effect_tail_ids_in_type(field.ty, result)
+            }
+        },
+        Type::EffectRowType { effects, tail } => {
+            for atom in effects {
+                collect_effect_tail_ids_in_atom(atom, result)
+            }
+            match tail {
+                some(id) => append_ordered_type_var(result, id),
+                none => {}
+            }
+        },
+        Type::TupleType { elements } => {
+            for element in elements {
+                collect_effect_tail_ids_in_type(element, result)
+            }
+        },
+        Type::PtrType { pointee } =>
+            collect_effect_tail_ids_in_type(pointee, result),
+        _ => {}
+    }
+}
+
+fn collect_effect_tail_ids_in_atom(
+    atom: Effect, mut result: List<Int>
+) {
+    match atom {
+        Effect::FailEffect { error_type } =>
+            collect_effect_tail_ids_in_type(error_type, result),
+        Effect::MutEffect { state_type } =>
+            collect_effect_tail_ids_in_type(state_type, result),
+        Effect::CustomEffect { type_args, .. } => {
+            for argument in type_args {
+                collect_effect_tail_ids_in_type(argument, result)
+            }
+        },
+        Effect::SystemEffect { .. } | Effect::UnsafeEffect => {}
+    }
+}
+
+fn fresh_mapping_for_ids(
+    mut env: TypeEnv, ids: List<Int>, mut mapping: Map<Int, Type>
+) {
+    for id in ids {
+        if !mapping.contains_key(id) {
+            mapping.insert(id, env.fresh_var())
+        }
+    }
+}
+
+pub fn instantiate_effect_schema_types(
+    mut env: TypeEnv, values: List<Type>
+) -> List<Type> {
+    let mut tails: List<Int> = []
+    for value in values { collect_effect_tail_ids_in_type(value, tails) }
+    let mapping: Map<Int, Type> = map_new()
+    fresh_mapping_for_ids(env, tails, mapping)
+    values.map(fn(value) { apply_subst_map(mapping, value) })
+}
+
+pub fn instantiate_effect_schema(mut env: TypeEnv, value: Type) -> Type {
+    instantiate_effect_schema_types(env, [value]).get(0).unwrap()
+}
+
+fn collect_value_type_vars_in_atom(
+    atom: Effect, mut result: Set<Int>
+) {
+    match atom {
+        Effect::FailEffect { error_type } =>
+            collect_value_type_vars(error_type, result),
+        Effect::MutEffect { state_type } =>
+            collect_value_type_vars(state_type, result),
+        Effect::CustomEffect { type_args, .. } => {
+            for argument in type_args {
+                collect_value_type_vars(argument, result)
+            }
+        },
+        Effect::SystemEffect { .. } | Effect::UnsafeEffect => {}
+    }
+}
+
+fn collect_value_type_vars(ty: Type, mut result: Set<Int>) {
+    match ty {
+        Type::TypeVar { id, .. } => { result.insert(id) },
+        Type::FnType { params, return_type, effects } => {
+            for param in params { collect_value_type_vars(param, result) }
+            collect_value_type_vars(return_type, result)
+            for atom in effects.effects {
+                collect_value_type_vars_in_atom(atom, result)
+            }
+        },
+        Type::StructType { type_params, .. } |
+        Type::EnumType { type_params, .. } => {
+            for param in type_params { collect_value_type_vars(param, result) }
+        },
+        Type::GenericType { base, args } => {
+            collect_value_type_vars(base, result)
+            for arg in args { collect_value_type_vars(arg, result) }
+        },
+        Type::RecordType { fields, .. } => {
+            for field in fields { collect_value_type_vars(field.ty, result) }
+        },
+        Type::EffectRowType { effects, .. } => {
+            for atom in effects {
+                collect_value_type_vars_in_atom(atom, result)
+            }
+        },
+        Type::TupleType { elements } => {
+            for element in elements { collect_value_type_vars(element, result) }
+        },
+        Type::PtrType { pointee } => collect_value_type_vars(pointee, result),
+        _ => {}
+    }
+}
+
+// HIR Call.type_args transports only ordinary type generics.  Row-tail
+// formals are carried by CoreEffectInstantiation; payload variables inside
+// fail<T>/mut<T>/custom<T> remain ordinary type generics.
+pub fn scheme_value_type_vars(value: TypeScheme) -> List<Int> {
+    let used: Set<Int> = set_new()
+    collect_value_type_vars(value.ty, used)
+    let mut result: List<Int> = []
+    for id in value.type_vars {
+        if used.contains(id) { result.push(id) }
+    }
+    result
+}
+
+fn extend_mapping_for_type(
+    mut env: TypeEnv, value: Type, mut mapping: Map<Int, Type>
+) {
+    let mut ids: List<Int> = []
+    collect_ordered_type_var_ids(value, ids)
+    fresh_mapping_for_ids(env, ids, mapping)
+}
+
+fn mapped_var_ids(mapping: Map<Int, Type>, ids: List<Int>) -> List<Int> {
+    ids.map(fn(id) {
+        match mapping.get(id) {
+            some(Type::TypeVar { id: mapped, .. }) => mapped,
+            _ => panic("import header localization: formal was not freshened")
+        }
+    })
+}
+
+pub fn localize_imported_struct_def(
+    mut env: TypeEnv, value: StructDef
+) -> StructDef {
+    let base: Map<Int, Type> = map_new()
+    fresh_mapping_for_ids(env, value.type_param_vars, base)
+    let mut fields: List<StructField> = []
+    for field in value.fields {
+        let mapping = map_clone(base)
+        extend_mapping_for_type(env, field.ty, mapping)
+        fields.push(StructField {
+            name: field.name, ty: apply_subst_map(mapping, field.ty),
+            is_pub: field.is_pub, field_ref: field.field_ref,
+            field_index: field.field_index, span: field.span
+        })
+    }
+    StructDef {
+        name: value.name, owner_ref: value.owner_ref,
+        type_params: value.type_params,
+        type_param_vars: mapped_var_ids(base, value.type_param_vars),
+        fields: fields, derive_attrs: value.derive_attrs,
+        derived_provider_plan: value.derived_provider_plan,
+        resource_storage_parameter_ordinals:
+            value.resource_storage_parameter_ordinals,
+        is_extern: value.is_extern
+    }
+}
+
+pub fn localize_imported_enum_def(
+    mut env: TypeEnv, value: EnumDef
+) -> EnumDef {
+    let base: Map<Int, Type> = map_new()
+    fresh_mapping_for_ids(env, value.type_param_vars, base)
+    let mut variants: List<EnumVariant> = []
+    for variant in value.variants {
+        let mut fields: List<Type> = []
+        for field in variant.fields {
+            let mapping = map_clone(base)
+            extend_mapping_for_type(env, field, mapping)
+            fields.push(apply_subst_map(mapping, field))
+        }
+        variants.push(EnumVariant {
+            name: variant.name, fields: fields,
+            field_names: variant.field_names
+        })
+    }
+    EnumDef {
+        name: value.name, owner_ref: value.owner_ref,
+        type_params: value.type_params,
+        type_param_vars: mapped_var_ids(base, value.type_param_vars),
+        variants: variants, variant_refs: value.variant_refs,
+        variant_field_refs: value.variant_field_refs,
+        derive_attrs: value.derive_attrs,
+        derived_provider_plan: value.derived_provider_plan,
+        variant_index: value.variant_index
+    }
+}
+
+pub fn localize_imported_effect_def(
+    mut env: TypeEnv, value: EffectDef
+) -> EffectDef {
+    let base: Map<Int, Type> = map_new()
+    fresh_mapping_for_ids(env, value.type_param_vars, base)
+    let mut ops: List<EffectOpDef> = []
+    for op in value.ops {
+        let mapping = map_clone(base)
+        for param in op.params { extend_mapping_for_type(env, param, mapping) }
+        extend_mapping_for_type(env, op.return_type, mapping)
+        ops.push(EffectOpDef {
+            name: op.name, operation_ref: op.operation_ref,
+            params: op.params.map(fn(param) {
+                apply_subst_map(mapping, param)
+            }),
+            return_type: apply_subst_map(mapping, op.return_type)
+        })
+    }
+    EffectDef {
+        name: value.name, owner_ref: value.owner_ref,
+        handled_ref: value.handled_ref, type_params: value.type_params,
+        type_param_vars: mapped_var_ids(base, value.type_param_vars),
+        ops: ops, built_in_kind: value.built_in_kind
+    }
+}
+
+pub fn localize_imported_trait_def(
+    mut env: TypeEnv, value: TraitDef
+) -> TraitDef {
+    let base: Map<Int, Type> = map_new()
+    fresh_mapping_for_ids(env, value.type_param_vars, base)
+    fresh_mapping_for_ids(env, [value.self_type_var_id], base)
+    for assoc in value.assoc_types {
+        fresh_mapping_for_ids(env, [assoc.var_id], base)
+    }
+
+    let mut methods: List<TraitMethodDef> = []
+    let mut method_contracts: List<RegisteredTraitMethodContract> = []
+    for method in value.methods {
+        let mapping = map_clone(base)
+        extend_mapping_for_type(env, method.ty, mapping)
+        let localized = apply_subst_map(mapping, method.ty)
+        methods.push(TraitMethodDef {
+            name: method.name, method_ref: method.method_ref,
+            ty: localized, has_default: method.has_default,
+            param_mutabilities: method.param_mutabilities,
+            method_type_params: method.method_type_params
+        })
+        method_contracts.push(make_registered_trait_method_contract(
+            method.method_ref, localized, method.has_default,
+            method.param_mutabilities))
+    }
+
+    let mut assoc_types: List<AssocTypeDef> = []
+    let mut assoc_contracts: List<RegisteredTraitAssocContract> = []
+    let mut assoc_index = 0
+    while assoc_index < value.assoc_types.len() {
+        let assoc = value.assoc_types.get(assoc_index).unwrap()
+        let contract = value.contract.assoc_items.get(assoc_index).unwrap()
+        let mapping = map_clone(base)
+        match assoc.default_type {
+            some(default_type) => extend_mapping_for_type(
+                env, default_type, mapping),
+            none => {}
+        }
+        let localized_default = assoc.default_type.map(fn(default_type) {
+            apply_subst_map(mapping, default_type)
+        })
+        let localized_id = mapped_var_ids(base, [assoc.var_id]).get(0).unwrap()
+        let localized_value = apply_subst_map(mapping, contract.value_type)
+        assoc_types.push(AssocTypeDef {
+            name: assoc.name, member_ref: assoc.member_ref,
+            bounds: assoc.bounds, default_type: localized_default,
+            var_id: localized_id
+        })
+        assoc_contracts.push(make_registered_trait_assoc_contract(
+            contract.member, localized_value, localized_default,
+            contract.bound_traits))
+        assoc_index = assoc_index + 1
+    }
+
+    let contract = make_registered_trait_contract(
+        value.owner_ref, method_contracts, assoc_contracts,
+        value.contract.handled_effect_obligations,
+        value.contract.dict_obligations)
+    TraitDef {
+        name: value.name, owner_ref: value.owner_ref,
+        type_params: value.type_params,
+        type_param_vars: mapped_var_ids(base, value.type_param_vars),
+        self_type_var_id:
+            mapped_var_ids(base, [value.self_type_var_id]).get(0).unwrap(),
+        methods: methods, supertraits: value.supertraits,
+        assoc_types: assoc_types, contract: contract
+    }
+}
+
+pub fn instantiate_trait_method_signature(
+    mut env: TypeEnv, method: TraitMethodDef
+) -> Type {
+    let mut ids: List<Int> = []
+    collect_ordered_type_var_ids(method.ty, ids)
+    let mapping: Map<Int, Type> = map_new()
+    fresh_mapping_for_ids(env, ids, mapping)
+    apply_subst_map(mapping, method.ty)
+}
+
 pub fn make_type_alias_def(
     name: Str, owner_ref: SymbolRef,
     type_params: List<Str>, raw_type_param_vars: List<Int>, raw_ty: Type
