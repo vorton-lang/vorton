@@ -481,6 +481,8 @@ Ring 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2�
 | **整数除零** | panic | 所有 native lane 一致 |
 | **栈溢出** | 实现定义的 panic 或 abort | 不保证所有平台均可捕获 |
 
+**`Range` 内建类型名（2026-08-27 用户决定）**：`Range<T>` 是语言预声明的 nominal type；`start..end` 与 `start..=end` 固定产生 exact builtin `Range<Int>`，range annotation、构造与 `for-in` 特化必须引用同一 owner。`Range` 只在 type namespace 中保留：用户的 struct、enum、extern type、type alias 或 import/re-export 不得在可见 type namespace 建立同名绑定，冲突稳定报 `E0207`。它不是词法关键字，也不限制 value/function namespace 中的同名绑定；本规则不顺带保留其他 builtin 名称。
+
 #### 1.7.1 字符串编码模型
 
 **公开契约**：`Str` 是 UTF-8 字节串。默认长度、索引、切片和容量以 byte 为单位；Unicode scalar/code point、grapheme 等操作必须使用名称明确的独立 API，不能让同一个 `len` 或 `slice` 随上下文改变单位。
