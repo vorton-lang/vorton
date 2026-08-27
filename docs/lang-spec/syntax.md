@@ -447,7 +447,9 @@ RangeExpr    ::= Expr '..' Expr        (* 不含右端 *)
                | Expr '..=' Expr       (* 包含右端 *)
 ```
 
-产生 `Range<Int>`。Start 和 end 都必须是 `Int`。
+产生 exact builtin `Range<Int>`。Start 和 end 都必须是 `Int`。
+
+`Range` 是 0.1 type namespace 的内建保留名，而不是 lexer keyword。用户的 struct、enum、extern type、type alias 或 import/re-export 不能在可见 type namespace 绑定 `Range`；冲突在声明或导入处报 `E0207`。普通 value/function namespace 不受此规则影响。
 
 ### 一元表达式
 

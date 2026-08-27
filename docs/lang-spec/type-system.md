@@ -338,6 +338,8 @@ apply(subst, τ):
   Γ ⊢ start..end : Range<Int> / (ε₁ ∪ ε₂)
   Γ ⊢ start..=end : Range<Int> / (ε₁ ∪ ε₂)
 
+这里的 `Range` 必须是 exact builtin nominal owner，不能由当前模块或 import 的同名 type binding 遮蔽。用户 struct、enum、extern type、type alias 或 import/re-export 若在可见 type namespace 产生 `Range`，稳定报 `E0207`；value/function namespace 的同名绑定仍合法。
+
 ── 块 ──
   Γ ⊢ stmt₁ ⇒ (Γ₁, ε₁)
   Γ₁ ⊢ stmt₂ ⇒ (Γ₂, ε₂)
