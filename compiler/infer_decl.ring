@@ -41,6 +41,7 @@ use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
     make_named_executable_ref,
     make_anonymous_executable_ref, executable_ref_named_symbol,
     effect_operation_ref_callable}
+use effect_contract::{empty_typed_effect_header_schema}
 use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     ImplEntry,
     ImplMethodSchemeCore,
@@ -543,7 +544,9 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
     }
     let gen_scheme = generalize(ctx.env, resolved, s)
     // Preserve the original def_id so mutability checks work
-    let scheme = TypeScheme { ty: gen_scheme.ty, type_vars: gen_scheme.type_vars, bounds: gen_scheme.bounds, def_id: old_def_id }
+    let scheme = TypeScheme { ty: gen_scheme.ty,
+        type_vars: gen_scheme.type_vars, bounds: gen_scheme.bounds,
+        effect_schema: gen_scheme.effect_schema, def_id: old_def_id }
     ctx.env.rebind(name, scheme)
     let evidence_remap = canonicalize_callable_handled_evidence(
         ctx, hexpr_effects(final_init_unremapped))
@@ -2207,6 +2210,7 @@ fn check_trait_default_body(
         }
         ctx.env.bind(p.name, TypeScheme {
             ty: p.ty, type_vars: [], bounds: [],
+            effect_schema: empty_typed_effect_header_schema(),
             def_id: some(exact_trait_def_id)
         })
         if p.is_mutable {
@@ -3553,6 +3557,7 @@ fn rebind_fn_scheme_with_alias(mut ctx: InferCtx, name: Str, scheme: TypeScheme)
                                 ty: scheme.ty,
                                 type_vars: scheme.type_vars,
                                 bounds: scheme.bounds,
+                                effect_schema: scheme.effect_schema,
                                 def_id: alias_scheme.def_id
                             })
                         }

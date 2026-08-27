@@ -67,6 +67,8 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     close_struct_identity_ledger,
     executable_effect_origin}
 use ir_inventory::{effect_operation_ref_callable, make_named_executable_ref}
+use effect_contract::{TypedEffectHeaderSchema,
+    empty_typed_effect_header_schema}
 use infer_helpers::{is_value_type}
 use resolver::{StructIdentityFact, DelegateProviderFact,
     ImplMethodIdentityFact}
@@ -1640,6 +1642,7 @@ fn preregister_struct(
     let def = StructDef { name: name,
         owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
         type_params: tp_names, type_param_vars: tp_vars, fields: [],
+        field_effect_schemas: [],
         derive_attrs: derive_attrs,
         derived_provider_plan: some(derived_provider_plan),
         resource_storage_parameter_ordinals: [],
@@ -1667,6 +1670,7 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
                 i = i + 1
             }
             let mut resolved_fields: List<StructField> = []
+            let mut resolved_field_schemas = []
             let mut resolution_failed = false
             for field_index in 0..fields.len() {
                 match (fields.get(field_index), identity.fields.get(field_index)) {
@@ -1696,6 +1700,8 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
                                     field_index: field_index,
                                     span: f.span
                                 })
+                                resolved_field_schemas.push(
+                                    empty_typed_effect_header_schema())
                             },
                             none => { resolution_failed = true }
                         }
@@ -1708,6 +1714,7 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
             let mut committed_def = def
             commit_struct_identity_completion(ctx, identity)
             committed_def.fields = resolved_fields
+            committed_def.field_effect_schemas = resolved_field_schemas
         },
         none => {}
     }
@@ -1757,6 +1764,7 @@ fn preregister_enum(
         variant_field_refs: enum_identity.variants.map(fn(variant) {
             variant.fields
         }),
+        variant_field_effect_schemas: [],
         derived_provider_plan: some(derived_provider_plan),
         variant_index: map_new()
     }
@@ -1833,6 +1841,11 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                     }
                 }
                 def.variant_index.insert(v.name, vi)
+                let completed_variant = def.variants.get(vi).unwrap()
+                def.variant_field_effect_schemas.push(
+                    completed_variant.fields.map(fn(_) {
+                        empty_typed_effect_header_schema()
+                    }))
                 vi = vi + 1
             }
 
@@ -1890,7 +1903,9 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                     if ctor_vars.len() > 0 {
                         ctx.env.bind(binding_name, TypeScheme {
                             ty: fn_type, type_vars: ctor_vars,
-                            bounds: [], def_id: none })
+                            bounds: [],
+                            effect_schema: empty_typed_effect_header_schema(),
+                            def_id: none })
                     } else {
                         ctx.env.bind_mono(binding_name, fn_type)
                     }
@@ -1905,6 +1920,7 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                                 ty: scheme.ty,
                                 type_vars: scheme.type_vars,
                                 bounds: scheme.bounds,
+                                effect_schema: scheme.effect_schema,
                                 def_id: none
                             })
                         },
@@ -1939,7 +1955,9 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
 
 fn bind_variant_constructor(mut ctx: InferCtx, variant_name: Str, enum_type: Type, tv_ids: List<Int>) {
     if tv_ids.len() > 0 {
-        ctx.env.bind(variant_name, TypeScheme { ty: enum_type, type_vars: tv_ids, bounds: [], def_id: none })
+        ctx.env.bind(variant_name, TypeScheme { ty: enum_type,
+            type_vars: tv_ids, bounds: [],
+            effect_schema: empty_typed_effect_header_schema(), def_id: none })
     } else {
         ctx.env.bind_mono(variant_name, enum_type)
     }
@@ -1995,7 +2013,8 @@ fn register_effect(
         effect_ops.push(EffectOpDef {
             name: op.name,
             operation_ref: some(operation),
-            params: param_types, return_type: ret
+            params: param_types, return_type: ret,
+            effect_schema: empty_typed_effect_header_schema()
         })
         op_index = op_index + 1
     }
@@ -2280,6 +2299,9 @@ fn register_trait(
                 assoc_type_defs.push(AssocTypeDef {
                     name: aname, member_ref: member_ref,
                     bounds: bound_names, default_type: default_ty,
+                    default_effect_schema: default_ty.map(fn(_) {
+                        empty_typed_effect_header_schema()
+                    }),
                     var_id: at_var_id
                 })
                 assoc_slot_index = assoc_slot_index + 1
@@ -2379,6 +2401,7 @@ fn register_trait(
                     method_effects)
                 trait_methods.push(TraitMethodDef {
                     name: mname, method_ref: method_ref, ty: fn_type,
+                    effect_schema: empty_typed_effect_header_schema(),
                     has_default: !is_abstract,
                     param_mutabilities: param_muts,
                     method_type_params: method_tps
@@ -2431,6 +2454,16 @@ fn register_trait(
 // ============================================================
 // Impl registration
 // ============================================================
+
+fn empty_assoc_effect_schemas(
+    values: Map<Str, Type>
+) -> Map<Str, TypedEffectHeaderSchema> {
+    let mut result: Map<Str, TypedEffectHeaderSchema> = map_new()
+    for entry in values.entries() {
+        result.insert(entry.0, empty_typed_effect_header_schema())
+    }
+    result
+}
 
 fn reject_unsupported_protocol_impl_bounds(
     mut ctx: InferCtx, trait_name: Str?, type_params: List<TypeParam>
@@ -2847,6 +2880,8 @@ fn register_impl_canonical(
             predicates: frozen_predicates,
             method_names: explicit_method_names,
             assoc_types: map_clone(assoc_type_map),
+            assoc_type_effect_schemas:
+                empty_assoc_effect_schemas(assoc_type_map),
             method_schemes: map_clone(exact_method_schemes),
             method_refs: exact_method_refs,
             method_intrinsics: map_new(),
@@ -2955,7 +2990,8 @@ fn register_impl_method(
     for tail in ordered_effect_tail_vars(fn_type) {
         if !all_tvs.contains(tail) { all_tvs.push(tail) }
     }
-    let scheme = make_impl_method_scheme_core(fn_type, all_tvs, none)
+    let scheme = make_impl_method_scheme_core(
+        fn_type, all_tvs, empty_typed_effect_header_schema(), none)
 
     // Track mut self methods
     if params.len() > 0 {
@@ -3046,6 +3082,7 @@ fn freshen_generated_effect_formals(
     }
     make_impl_method_scheme_core(
         apply_subst_map(mapping, source_type), quantified,
+        empty_typed_effect_header_schema(),
         impl_method_core_def_id(core))
 }
 
@@ -3093,7 +3130,9 @@ fn specialize_delegate_method_core(
     }
 
     freshen_generated_effect_formals(ctx,
-        make_impl_method_scheme_core(specialized_type, type_vars, none))
+        make_impl_method_scheme_core(
+            specialized_type, type_vars,
+            empty_typed_effect_header_schema(), none))
 }
 
 fn delegate_constraint_lists_same(
@@ -3487,6 +3526,9 @@ fn register_delegate_traits(
                                     predicates: delegated_predicates,
                                     method_names: method_names,
                                     assoc_types: map_clone(field_assoc_types),
+                                    assoc_type_effect_schemas:
+                                        empty_assoc_effect_schemas(
+                                            field_assoc_types),
                                     method_schemes: map_clone(exact_method_schemes),
                                     method_refs: exact_method_refs,
                                     method_intrinsics: map_new(),
@@ -3818,7 +3860,9 @@ fn register_fn_common(
     ctx.qualified_assoc_scope = saved_qualified
 
     if type_vars.len() > 0 {
-        ctx.env.bind(name, TypeScheme { ty: fn_type, type_vars: type_vars, bounds: scheme_bounds, def_id: none })
+        ctx.env.bind(name, TypeScheme { ty: fn_type,
+            type_vars: type_vars, bounds: scheme_bounds,
+            effect_schema: empty_typed_effect_header_schema(), def_id: none })
     } else {
         ctx.env.bind_mono(name, fn_type)
     }
@@ -3865,6 +3909,7 @@ fn register_extern_type_common(
     let def = StructDef { name: name,
         owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
         type_params: tp_names, type_param_vars: tp_vars, fields: [],
+        field_effect_schemas: [],
         derive_attrs: [], derived_provider_plan: none,
         resource_storage_parameter_ordinals: [], is_extern: true }
     commit_struct_identity_fact(ctx, identity, false)

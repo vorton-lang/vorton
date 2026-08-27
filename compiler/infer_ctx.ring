@@ -93,6 +93,7 @@ use ir_inventory::{ExecutableRef, ExactDictRef,
     binder_kind_handled_evidence_param,
     binder_kind_handled_evidence_local,
     binder_kind_handled_evidence_capture}
+use effect_contract::{empty_typed_effect_header_schema}
 // ============================================================
 // InferResult — return type for expression inference
 // ============================================================
@@ -433,6 +434,7 @@ fn apply_project_value_binding(
                 ty: source_scheme.ty,
                 type_vars: source_scheme.type_vars,
                 bounds: source_scheme.bounds,
+                effect_schema: source_scheme.effect_schema,
                 def_id: some(new_def_id)
             })
 
@@ -1273,7 +1275,8 @@ pub fn generalize(env: TypeEnv, t: Type, subst: UnionFind) -> TypeScheme {
             none => {}
         }
     }
-    TypeScheme { ty: resolved, type_vars: type_vars, bounds: bounds, def_id: none }
+    TypeScheme { ty: resolved, type_vars: type_vars, bounds: bounds,
+        effect_schema: empty_typed_effect_header_schema(), def_id: none }
 }
 
 // ============================================================
@@ -4185,6 +4188,7 @@ pub fn bind_exact_import_alias(
                         ty: live_scheme.ty,
                         type_vars: live_scheme.type_vars,
                         bounds: live_scheme.bounds,
+                        effect_schema: live_scheme.effect_schema,
                         def_id: none
                     })
                     record_value_origin(ctx, alias_name, exact_origin)

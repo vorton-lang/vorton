@@ -24,6 +24,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     find_impl_by_provider, impl_target_symbol,
     specialize_trait_method_scheme, delegate_plan_not_applicable}
 use ast::{TypeParam, span_zero}
+use effect_contract::{empty_typed_effect_header_schema}
 use hir::{HDecl, HStructField, HTypeParam,
     variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
@@ -427,7 +428,8 @@ fn install_builtin_method_owner(
             }
         }
         cores.insert(method_name, make_impl_method_scheme_core(
-            scheme.ty, scheme.type_vars, scheme.def_id))
+            scheme.ty, scheme.type_vars, scheme.effect_schema,
+            scheme.def_id))
     }
     let mut method_names = cores.keys()
     method_names.sort()
@@ -445,6 +447,7 @@ fn install_builtin_method_owner(
         predicates: predicates,
         method_names: method_names,
         assoc_types: map_new(),
+        assoc_type_effect_schemas: map_new(),
         method_schemes: map_clone(cores),
         method_refs: method_refs,
         method_intrinsics: map_clone(method_intrinsics),
@@ -552,6 +555,7 @@ fn add_builtin_impl(
         predicates: predicates,
         method_names: method_names,
         assoc_types: map_new(),
+        assoc_type_effect_schemas: map_new(),
         method_schemes: map_clone(exact),
         method_refs: method_refs,
         method_intrinsics: method_intrinsics,
@@ -891,6 +895,11 @@ fn register_range(mut env: TypeEnv) {
                 field_ref: make_nominal_field_ref(
                     owner, inclusive_member, 2, "inclusive"),
                 field_index: 2, span: span_zero() }
+        ],
+        field_effect_schemas: [
+            empty_typed_effect_header_schema(),
+            empty_typed_effect_header_schema(),
+            empty_typed_effect_header_schema()
         ],
         derive_attrs: [], derived_provider_plan: none,
         resource_storage_parameter_ordinals: [],
@@ -1234,7 +1243,9 @@ fn register_effects(mut env: TypeEnv) {
         type_params: ["E"],
         type_param_vars: [fail_t_id],
         ops: [
-            EffectOpDef { name: "raise", operation_ref: none, params: [fail_t], return_type: NEVER }
+            EffectOpDef { name: "raise", operation_ref: none,
+                params: [fail_t], return_type: NEVER,
+                effect_schema: empty_typed_effect_header_schema() }
         ],
         built_in_kind: some(BuiltInKind::BkFail)
     })
@@ -1265,6 +1276,7 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
             field_index: 0,
             span: span_zero()
         }],
+        field_effect_schemas: [empty_typed_effect_header_schema()],
         derive_attrs: [],
         derived_provider_plan: none,
         resource_storage_parameter_ordinals: [],
@@ -1282,6 +1294,7 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [ctor_t], return_type: ctor_ret, effects: EMPTY_ROW },
         type_vars: [ctor_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1301,6 +1314,7 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [self_type], return_type: m_t, effects: mut_row },
         type_vars: [m_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1309,6 +1323,7 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [self_type, m_t], return_type: UNIT, effects: mut_row },
         type_vars: [m_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1318,6 +1333,7 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [self_type, update_cb], return_type: UNIT, effects: mut_row },
         type_vars: [m_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1380,6 +1396,8 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         variant_refs: [some_ref, none_ref],
         variant_field_refs: [[make_variant_field_ref(
             some_ref, some_field_member, 0)], []],
+        variant_field_effect_schemas:
+            [[empty_typed_effect_header_schema()], []],
         derive_attrs: [],
         derived_provider_plan: none,
         variant_index: option_vi
@@ -1395,6 +1413,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [some_t], return_type: make_option_type(some_t), effects: EMPTY_ROW },
         type_vars: [some_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
     // `some` is a normal payload constructor. Preserve exact constructor
@@ -1418,6 +1437,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         ty: make_option_type(none_t),
         type_vars: [none_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
     // `none` still needs its exact canonical identity so both backends select
@@ -1446,6 +1466,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [self_type], return_type: BOOL, effects: EMPTY_ROW },
         type_vars: [t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1453,6 +1474,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [self_type], return_type: BOOL, effects: EMPTY_ROW },
         type_vars: [t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1460,6 +1482,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [self_type, t], return_type: t, effects: EMPTY_ROW },
         type_vars: [t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1467,6 +1490,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [self_type], return_type: t, effects: EMPTY_ROW },
         type_vars: [t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1478,6 +1502,7 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [self_type2, e], return_type: Type::TypeVar { id: t_id, name: none }, effects: EffectRow { effects: [fail_eff], tail: none } },
         type_vars: [t_id, e_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
     let mut intrinsics: Map<Str, IntrinsicRef> = map_new()
@@ -1520,8 +1545,8 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Eq")
     install_builtin_trait_contract(
         env, "Eq", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "eq", method_ref: builtin_trait_method(owner_ref, 0, 0, "eq"), ty: eq_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] },
-            TraitMethodDef { name: "ne", method_ref: builtin_trait_method(owner_ref, 1, 1, "ne"), ty: ne_fn, has_default: true, param_mutabilities: [false, false], method_type_params: [] }
+            TraitMethodDef { name: "eq", method_ref: builtin_trait_method(owner_ref, 0, 0, "eq"), ty: eq_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false, false], method_type_params: [] },
+            TraitMethodDef { name: "ne", method_ref: builtin_trait_method(owner_ref, 1, 1, "ne"), ty: ne_fn, effect_schema: empty_typed_effect_header_schema(), has_default: true, param_mutabilities: [false, false], method_type_params: [] }
         ], [], [])
 
     // Register Eq impls with the exact intrinsic contract at the producer.
@@ -1587,7 +1612,7 @@ fn register_clone_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Clone")
     install_builtin_trait_contract(
         env, "Clone", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "clone", method_ref: builtin_trait_method(owner_ref, 0, 0, "clone"), ty: clone_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "clone", method_ref: builtin_trait_method(owner_ref, 0, 0, "clone"), ty: clone_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
     // Primitive impls carry their exact physical intrinsic contract here.
@@ -1626,7 +1651,7 @@ fn register_drop_trait(mut env: TypeEnv) {
     let owner_ref = builtin_trait_symbol("Drop")
     install_builtin_trait_contract(
         env, "Drop", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "drop", method_ref: builtin_trait_method(owner_ref, 0, 0, "drop"), ty: drop_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "drop", method_ref: builtin_trait_method(owner_ref, 0, 0, "drop"), ty: drop_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 }
 
@@ -1654,7 +1679,7 @@ fn register_ord_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Ord")
     install_builtin_trait_contract(
         env, "Ord", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "cmp", method_ref: builtin_trait_method(owner_ref, 0, 0, "cmp"), ty: cmp_fn, has_default: false, param_mutabilities: [false, false], method_type_params: [] }
+            TraitMethodDef { name: "cmp", method_ref: builtin_trait_method(owner_ref, 0, 0, "cmp"), ty: cmp_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false, false], method_type_params: [] }
         ], [], [])
 
     add_builtin_impl(env, sink, "Ord", "Int", [], [], [], [
@@ -1692,7 +1717,7 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Debug")
     install_builtin_trait_contract(
         env, "Debug", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "debug", method_ref: builtin_trait_method(owner_ref, 0, 0, "debug"), ty: debug_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "debug", method_ref: builtin_trait_method(owner_ref, 0, 0, "debug"), ty: debug_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
     // Primitive impls
@@ -1757,7 +1782,7 @@ fn register_hash_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Hash")
     install_builtin_trait_contract(
         env, "Hash", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "hash", method_ref: builtin_trait_method(owner_ref, 0, 0, "hash"), ty: hash_fn, has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "hash", method_ref: builtin_trait_method(owner_ref, 0, 0, "hash"), ty: hash_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
     add_builtin_impl(env, sink, "Hash", "Int", [], [], [], [
@@ -1791,6 +1816,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_list_struct(t), cb], return_type: make_list_struct(u), effects: orow.eff },
         type_vars: [t_id, u_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1801,6 +1827,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_list_struct(t), cb], return_type: make_list_struct(t), effects: orow.eff },
         type_vars: [t_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1813,6 +1840,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_list_struct(t), cb], return_type: make_list_struct(u), effects: orow.eff },
         type_vars: [t_id, u_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1825,6 +1853,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_list_struct(t), u, cb], return_type: u, effects: orow.eff },
         type_vars: [t_id, u_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1835,6 +1864,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_list_struct(t), cb], return_type: BOOL, effects: orow.eff },
         type_vars: [t_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1845,6 +1875,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_list_struct(t), cb], return_type: BOOL, effects: orow.eff },
         type_vars: [t_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1855,6 +1886,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_list_struct(t), cb], return_type: make_option_type(t), effects: orow.eff },
         type_vars: [t_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1865,6 +1897,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_list_struct(t), cb], return_type: make_option_type(INT), effects: orow.eff },
         type_vars: [t_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1875,6 +1908,7 @@ fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_list_struct(t), cb], return_type: UNIT, effects: orow.eff },
         type_vars: [t_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
     install_builtin_method_owner(
@@ -1912,6 +1946,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
         },
         type_vars: [bounded_k_id, bounded_v_id, u_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1928,6 +1963,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
         },
         type_vars: [bounded_k_id, bounded_v_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1951,6 +1987,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
         },
         type_vars: [unbounded_k_id, unbounded_v_id, u_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -1967,6 +2004,7 @@ fn register_map_hof(mut env: TypeEnv, sink: CollectingSink) {
         },
         type_vars: [unbounded_k_id, unbounded_v_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2021,6 +2059,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
                 trait_name: "Eq", assoc_constraints: []
             }
         ],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2041,6 +2080,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
         },
         type_vars: [unbounded_t_id, u_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2056,6 +2096,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
         },
         type_vars: [unbounded_t_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2071,6 +2112,7 @@ fn register_set_hof(mut env: TypeEnv, sink: CollectingSink) {
         },
         type_vars: [unbounded_t_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2112,6 +2154,7 @@ fn register_option_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_option_type(t), cb], return_type: make_option_type(u), effects: orow.eff },
         type_vars: [t_id, u_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2126,6 +2169,7 @@ fn register_option_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_option_type(t), cb], return_type: make_option_type(u), effects: orow.eff },
         type_vars: [t_id, u_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2138,6 +2182,7 @@ fn register_option_hof(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [make_option_type(t), cb], return_type: t, effects: orow.eff },
         type_vars: [t_id, orow.tail_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
     let mut intrinsics: Map<Str, IntrinsicRef> = map_new()
@@ -2177,6 +2222,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [INT], return_type: alloc_ptr, effects: unsafe_row },
         type_vars: [alloc_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2188,6 +2234,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [dealloc_ptr, INT], return_type: UNIT, effects: unsafe_row },
         type_vars: [dealloc_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2199,6 +2246,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [copy_ptr, copy_ptr, INT], return_type: UNIT, effects: unsafe_row },
         type_vars: [copy_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2210,6 +2258,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [INT], return_type: from_ptr, effects: EMPTY_ROW },
         type_vars: [from_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2225,6 +2274,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [read_ptr], return_type: read_t, effects: unsafe_row },
         type_vars: [read_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2236,6 +2286,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [take_ptr], return_type: take_t, effects: unsafe_row },
         type_vars: [take_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2247,6 +2298,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [write_ptr, write_t], return_type: UNIT, effects: unsafe_row },
         type_vars: [write_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2258,6 +2310,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [off_ptr, INT], return_type: off_ptr, effects: unsafe_row },
         type_vars: [off_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2272,6 +2325,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [cast_ptr_t], return_type: cast_ptr_u, effects: EMPTY_ROW },
         type_vars: [cast_t_id, cast_u_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
 
@@ -2283,6 +2337,7 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         ty: Type::FnType { params: [addr_ptr], return_type: INT, effects: EMPTY_ROW },
         type_vars: [addr_t_id],
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
     install_builtin_method_owner(

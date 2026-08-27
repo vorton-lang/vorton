@@ -37,6 +37,13 @@ use extern_manifest::{CompilerExternManifest, CompilerExternManifestEntry,
     compiler_extern_should_publish_hdecl}
 use effect_contract::{
     EffectParamRef, TypedEffectFormalFact,
+    TypedEffectHeaderSchema, TypedEffectHeaderBinding,
+    empty_typed_effect_header_schema,
+    make_typed_effect_header_schema, make_typed_effect_header_binding,
+    typed_effect_header_schema_bindings,
+    typed_effect_header_binding_raw_tail,
+    typed_effect_header_binding_parameter,
+    typed_effect_header_schema_same,
     TypedCallableEffectFact, make_typed_callable_effect_fact,
     typed_callable_effect_reference, typed_callable_effect_row,
     make_effect_param_ref, effect_param_owner, effect_param_ordinal,
@@ -63,6 +70,7 @@ pub struct TypeScheme {
     pub ty: Type,
     pub type_vars: List<Int>,
     pub bounds: List<SchemeBound>,
+    pub effect_schema: TypedEffectHeaderSchema,
     pub def_id: Int?
 }
 
@@ -101,6 +109,7 @@ pub struct StructDef {
     pub type_params: List<Str>,
     pub type_param_vars: List<Int>,
     pub fields: List<StructField>,
+    pub field_effect_schemas: List<TypedEffectHeaderSchema>,
     pub derive_attrs: List<DeriveAttribute>,
     pub derived_provider_plan: NominalDerivedProviderPlan?,
     // Ordinals of generic arguments held in hidden owned storage. Visible
@@ -120,6 +129,8 @@ pub struct EnumDef {
     pub variants: List<EnumVariant>,
     pub variant_refs: List<VariantRef>,
     pub variant_field_refs: List<List<VariantFieldRef>>,
+    pub variant_field_effect_schemas:
+        List<List<TypedEffectHeaderSchema>>,
     pub derive_attrs: List<DeriveAttribute>,
     pub derived_provider_plan: NominalDerivedProviderPlan?,
     pub variant_index: Map<Str, Int>
@@ -136,7 +147,8 @@ pub struct EffectOpDef {
     pub name: Str,
     pub operation_ref: EffectOperationRef?,
     pub params: List<Type>,
-    pub return_type: Type
+    pub return_type: Type,
+    pub effect_schema: TypedEffectHeaderSchema
 }
 
 pub enum BuiltInKind { BkFail }
@@ -159,6 +171,7 @@ pub struct TraitMethodDef {
     pub name: Str,
     pub method_ref: TraitMethodRef,
     pub ty: Type,
+    pub effect_schema: TypedEffectHeaderSchema,
     pub has_default: Bool,
     pub param_mutabilities: List<Bool>,
     pub method_type_params: List<TypeParam>
@@ -169,6 +182,7 @@ pub struct AssocTypeDef {
     pub member_ref: SymbolRef,
     pub bounds: List<Str>,        // trait name bounds
     pub default_type: Type?,      // trait-level default value
+    pub default_effect_schema: TypedEffectHeaderSchema?,
     pub var_id: Int               // type variable ID used in trait method signatures
 }
 
@@ -607,14 +621,19 @@ pub fn frozen_impl_predicate_set_same(
 pub struct ImplMethodSchemeCore {
     ty: Type,
     type_vars: List<Int>,
+    effect_schema: TypedEffectHeaderSchema,
     def_id: Int?
 }
 
 pub fn make_impl_method_scheme_core(
-    ty: Type, type_vars: List<Int>, def_id: Int?
+    ty: Type, type_vars: List<Int>, effect_schema: TypedEffectHeaderSchema,
+    def_id: Int?
 ) -> ImplMethodSchemeCore {
     ImplMethodSchemeCore {
-        ty: ty, type_vars: list_clone(type_vars), def_id: def_id
+        ty: ty, type_vars: list_clone(type_vars),
+        effect_schema: make_typed_effect_header_schema(
+            typed_effect_header_schema_bindings(effect_schema)),
+        def_id: def_id
     }
 }
 
@@ -622,7 +641,8 @@ pub fn impl_method_core_from_scheme(scheme: TypeScheme) -> ImplMethodSchemeCore 
     if scheme.bounds.len() != 0 {
         panic("impl method core: method-owned bounds are unsupported")
     }
-    make_impl_method_scheme_core(scheme.ty, scheme.type_vars, scheme.def_id)
+    make_impl_method_scheme_core(
+        scheme.ty, scheme.type_vars, scheme.effect_schema, scheme.def_id)
 }
 
 pub fn impl_method_core_type(value: ImplMethodSchemeCore) -> Type {
@@ -633,6 +653,13 @@ pub fn impl_method_core_type_vars(value: ImplMethodSchemeCore) -> List<Int> {
     list_clone(value.type_vars)
 }
 
+pub fn impl_method_core_effect_schema(
+    value: ImplMethodSchemeCore
+) -> TypedEffectHeaderSchema {
+    make_typed_effect_header_schema(
+        typed_effect_header_schema_bindings(value.effect_schema))
+}
+
 pub fn impl_method_core_def_id(value: ImplMethodSchemeCore) -> Int? {
     value.def_id
 }
@@ -640,7 +667,8 @@ pub fn impl_method_core_def_id(value: ImplMethodSchemeCore) -> Int? {
 pub fn impl_method_core_as_scheme(value: ImplMethodSchemeCore) -> TypeScheme {
     TypeScheme {
         ty: value.ty, type_vars: list_clone(value.type_vars),
-        bounds: [], def_id: value.def_id
+        bounds: [], effect_schema: impl_method_core_effect_schema(value),
+        def_id: value.def_id
     }
 }
 
@@ -648,6 +676,8 @@ fn impl_method_core_same(
     left: ImplMethodSchemeCore, right: ImplMethodSchemeCore
 ) -> Bool {
     if !types_equal(left.ty, right.ty) || left.type_vars.len() != right.type_vars.len() ||
+       !typed_effect_header_schema_same(
+            left.effect_schema, right.effect_schema) ||
        left.def_id != right.def_id { return false }
     for index in 0..left.type_vars.len() {
         if left.type_vars.get(index).unwrap_or(-1) !=
@@ -774,6 +804,7 @@ pub struct ImplEntry {
     pub predicates: FrozenImplPredicateSet,
     pub method_names: List<Str>,
     pub assoc_types: Map<Str, Type>,
+    pub assoc_type_effect_schemas: Map<Str, TypedEffectHeaderSchema>,
     // Trait/inherent method cores live only on their owning entry. The flat
     // ordinary-call view carries only exact ImplMethodRef identity.
     pub method_schemes: Map<Str, ImplMethodSchemeCore>,
@@ -889,7 +920,8 @@ pub struct TypeEnv {
 // ============================================================
 
 pub fn mono(ty: Type) -> TypeScheme {
-    TypeScheme { ty: ty, type_vars: [], bounds: [], def_id: none }
+    TypeScheme { ty: ty, type_vars: [], bounds: [],
+        effect_schema: empty_typed_effect_header_schema(), def_id: none }
 }
 
 pub fn new_type_env() -> TypeEnv {
@@ -963,7 +995,9 @@ pub fn commit_struct_resource_storage_parameter_ordinals(
             name: def.name, owner_ref: def.owner_ref,
             type_params: def.type_params,
             type_param_vars: def.type_param_vars,
-            fields: def.fields, derive_attrs: def.derive_attrs,
+            fields: def.fields,
+            field_effect_schemas: def.field_effect_schemas,
+            derive_attrs: def.derive_attrs,
             derived_provider_plan: def.derived_provider_plan,
             resource_storage_parameter_ordinals: ordinals,
             is_extern: def.is_extern
@@ -1272,6 +1306,22 @@ fn assoc_type_map_same(left: Map<Str, Type>, right: Map<Str, Type>) -> Bool {
     true
 }
 
+fn effect_schema_map_same(
+    left: Map<Str, TypedEffectHeaderSchema>,
+    right: Map<Str, TypedEffectHeaderSchema>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    for entry in left.entries() {
+        let (name, schema) = entry
+        match right.get(name) {
+            some(other) => if !typed_effect_header_schema_same(
+                    schema, other) { return false },
+            none => return false
+        }
+    }
+    true
+}
+
 fn method_core_map_same(
     left: Map<Str, ImplMethodSchemeCore>,
     right: Map<Str, ImplMethodSchemeCore>
@@ -1379,7 +1429,10 @@ fn impl_entry_owner_shape_same(left: ImplEntry, right: ImplEntry) -> Bool {
         string_list_same(left.type_params, right.type_params) &&
         int_list_same(left.type_param_vars, right.type_param_vars) &&
         frozen_impl_predicate_set_same(left.predicates, right.predicates) &&
-        assoc_type_map_same(left.assoc_types, right.assoc_types)
+        assoc_type_map_same(left.assoc_types, right.assoc_types) &&
+        effect_schema_map_same(
+            left.assoc_type_effect_schemas,
+            right.assoc_type_effect_schemas)
 }
 
 // Complete equality for a registration-issued final owner. Export/re-export
@@ -2654,7 +2707,9 @@ pub fn freshen_effect_scheme_header(
     }
     TypeScheme {
         ty: apply_subst_map(mapping, scheme.ty),
-        type_vars: type_vars, bounds: scheme.bounds, def_id: scheme.def_id
+        type_vars: type_vars, bounds: scheme.bounds,
+        effect_schema: remap_effect_header_schema(mapping, scheme.effect_schema),
+        def_id: scheme.def_id
     }
 }
 
@@ -2774,6 +2829,25 @@ fn mapped_var_ids(mapping: Map<Int, Type>, ids: List<Int>) -> List<Int> {
     })
 }
 
+fn remap_effect_header_schema(
+    mapping: Map<Int, Type>, schema: TypedEffectHeaderSchema
+) -> TypedEffectHeaderSchema {
+    let mut bindings: List<TypedEffectHeaderBinding> = []
+    for binding in typed_effect_header_schema_bindings(schema) {
+        let source = typed_effect_header_binding_raw_tail(binding)
+        let mapped = match mapping.get(source) {
+            some(Type::TypeVar { id, .. }) => id,
+            some(_) => panic(
+                "import header localization: effect tail mapped to non-TypeVar"),
+            none => panic(
+                "import header localization: effect tail was not freshened")
+        }
+        bindings.push(make_typed_effect_header_binding(
+            mapped, typed_effect_header_binding_parameter(binding)))
+    }
+    make_typed_effect_header_schema(bindings)
+}
+
 // Exported value schemes cross an InferCtx boundary.  Definition-local raw
 // variables must therefore be fresh in the consumer; their semantic owner is
 // transported separately as the exact SymbolRef held by ModuleExports.
@@ -2806,6 +2880,8 @@ pub fn localize_imported_type_scheme(
         ty: apply_subst_map(mapping, value.ty),
         type_vars: mapped_var_ids(mapping, value.type_vars),
         bounds: bounds,
+        effect_schema: remap_effect_header_schema(
+            mapping, value.effect_schema),
         def_id: none
     }
 }
@@ -2813,10 +2889,16 @@ pub fn localize_imported_type_scheme(
 pub fn localize_imported_struct_def(
     mut env: TypeEnv, value: StructDef
 ) -> StructDef {
+    if value.fields.len() != value.field_effect_schemas.len() {
+        panic("import header localization: struct field schema census differs")
+    }
     let base: Map<Int, Type> = map_new()
     fresh_mapping_for_ids(env, value.type_param_vars, base)
     let mut fields: List<StructField> = []
-    for field in value.fields {
+    let mut field_effect_schemas: List<TypedEffectHeaderSchema> = []
+    let mut field_index = 0
+    while field_index < value.fields.len() {
+        let field = value.fields.get(field_index).unwrap()
         let mapping = map_clone(base)
         extend_mapping_for_type(env, field.ty, mapping)
         fields.push(StructField {
@@ -2824,12 +2906,16 @@ pub fn localize_imported_struct_def(
             is_pub: field.is_pub, field_ref: field.field_ref,
             field_index: field.field_index, span: field.span
         })
+        field_effect_schemas.push(remap_effect_header_schema(
+            mapping, value.field_effect_schemas.get(field_index).unwrap()))
+        field_index = field_index + 1
     }
     StructDef {
         name: value.name, owner_ref: value.owner_ref,
         type_params: value.type_params,
         type_param_vars: mapped_var_ids(base, value.type_param_vars),
-        fields: fields, derive_attrs: value.derive_attrs,
+        fields: fields, field_effect_schemas: field_effect_schemas,
+        derive_attrs: value.derive_attrs,
         derived_provider_plan: value.derived_provider_plan,
         resource_storage_parameter_ordinals:
             value.resource_storage_parameter_ordinals,
@@ -2840,20 +2926,40 @@ pub fn localize_imported_struct_def(
 pub fn localize_imported_enum_def(
     mut env: TypeEnv, value: EnumDef
 ) -> EnumDef {
+    if value.variants.len() != value.variant_field_effect_schemas.len() {
+        panic("import header localization: enum schema census differs")
+    }
     let base: Map<Int, Type> = map_new()
     fresh_mapping_for_ids(env, value.type_param_vars, base)
     let mut variants: List<EnumVariant> = []
-    for variant in value.variants {
+    let mut variant_field_effect_schemas:
+        List<List<TypedEffectHeaderSchema>> = []
+    let mut variant_index = 0
+    while variant_index < value.variants.len() {
+        let variant = value.variants.get(variant_index).unwrap()
+        let source_schemas = value.variant_field_effect_schemas.get(
+            variant_index).unwrap()
+        if variant.fields.len() != source_schemas.len() {
+            panic("import header localization: enum field schema census differs")
+        }
         let mut fields: List<Type> = []
-        for field in variant.fields {
+        let mut schemas: List<TypedEffectHeaderSchema> = []
+        let mut field_index = 0
+        while field_index < variant.fields.len() {
+            let field = variant.fields.get(field_index).unwrap()
             let mapping = map_clone(base)
             extend_mapping_for_type(env, field, mapping)
             fields.push(apply_subst_map(mapping, field))
+            schemas.push(remap_effect_header_schema(
+                mapping, source_schemas.get(field_index).unwrap()))
+            field_index = field_index + 1
         }
         variants.push(EnumVariant {
             name: variant.name, fields: fields,
             field_names: variant.field_names
         })
+        variant_field_effect_schemas.push(schemas)
+        variant_index = variant_index + 1
     }
     EnumDef {
         name: value.name, owner_ref: value.owner_ref,
@@ -2861,6 +2967,7 @@ pub fn localize_imported_enum_def(
         type_param_vars: mapped_var_ids(base, value.type_param_vars),
         variants: variants, variant_refs: value.variant_refs,
         variant_field_refs: value.variant_field_refs,
+        variant_field_effect_schemas: variant_field_effect_schemas,
         derive_attrs: value.derive_attrs,
         derived_provider_plan: value.derived_provider_plan,
         variant_index: value.variant_index
@@ -2882,7 +2989,9 @@ pub fn localize_imported_effect_def(
             params: op.params.map(fn(param) {
                 apply_subst_map(mapping, param)
             }),
-            return_type: apply_subst_map(mapping, op.return_type)
+            return_type: apply_subst_map(mapping, op.return_type),
+            effect_schema: remap_effect_header_schema(
+                mapping, op.effect_schema)
         })
     }
     EffectDef {
@@ -2911,7 +3020,10 @@ pub fn localize_imported_trait_def(
         let localized = apply_subst_map(mapping, method.ty)
         methods.push(TraitMethodDef {
             name: method.name, method_ref: method.method_ref,
-            ty: localized, has_default: method.has_default,
+            ty: localized,
+            effect_schema: remap_effect_header_schema(
+                mapping, method.effect_schema),
+            has_default: method.has_default,
             param_mutabilities: method.param_mutabilities,
             method_type_params: method.method_type_params
         })
@@ -2940,6 +3052,9 @@ pub fn localize_imported_trait_def(
         assoc_types.push(AssocTypeDef {
             name: assoc.name, member_ref: assoc.member_ref,
             bounds: assoc.bounds, default_type: localized_default,
+            default_effect_schema: assoc.default_effect_schema.map(fn(schema) {
+                remap_effect_header_schema(mapping, schema)
+            }),
             var_id: localized_id
         })
         assoc_contracts.push(make_registered_trait_assoc_contract(
@@ -2960,6 +3075,86 @@ pub fn localize_imported_trait_def(
             mapped_var_ids(base, [value.self_type_var_id]).get(0).unwrap(),
         methods: methods, supertraits: value.supertraits,
         assoc_types: assoc_types, contract: contract
+    }
+}
+
+pub fn localize_imported_impl_entry(
+    mut env: TypeEnv, value: ImplEntry
+) -> ImplEntry {
+    if value.assoc_types.len() != value.assoc_type_effect_schemas.len() {
+        panic("import header localization: impl assoc schema census differs")
+    }
+    let base: Map<Int, Type> = map_new()
+    fresh_mapping_for_ids(env, value.type_param_vars, base)
+
+    let mut predicates: List<TypedImplPredicate> = []
+    for predicate in frozen_impl_predicates(value.predicates) {
+        let subject = mapped_var_ids(
+            base, [impl_predicate_subject_type_var(predicate)]
+        ).get(0).unwrap()
+        let mut constraints: List<ImplAssocPredicate> = []
+        for constraint in impl_predicate_assoc_constraints(predicate) {
+            constraints.push(make_impl_assoc_predicate(
+                impl_assoc_predicate_name(constraint),
+                apply_subst_map(base, impl_assoc_predicate_type(constraint))))
+        }
+        predicates.push(make_typed_impl_predicate(
+            impl_predicate_subject_param_index(predicate), subject,
+            impl_predicate_trait_name(predicate), constraints,
+            impl_predicate_provenance(predicate)))
+    }
+    let localized_owner_vars = mapped_var_ids(
+        base, value.type_param_vars)
+
+    let mut assoc_types: Map<Str, Type> = map_new()
+    let mut assoc_schemas: Map<Str, TypedEffectHeaderSchema> = map_new()
+    for entry in value.assoc_types.entries() {
+        let (name, ty) = entry
+        let mapping = map_clone(base)
+        extend_mapping_for_type(env, ty, mapping)
+        let schema = match value.assoc_type_effect_schemas.get(name) {
+            some(found) => found,
+            none => panic(
+                "import header localization: impl assoc schema is absent")
+        }
+        assoc_types.insert(name, apply_subst_map(mapping, ty))
+        assoc_schemas.insert(name,
+            remap_effect_header_schema(mapping, schema))
+    }
+
+    let mut method_schemes: Map<Str, ImplMethodSchemeCore> = map_new()
+    for entry in value.method_schemes.entries() {
+        let (name, core) = entry
+        let mapping = map_clone(base)
+        fresh_mapping_for_ids(
+            env, impl_method_core_type_vars(core), mapping)
+        method_schemes.insert(name, make_impl_method_scheme_core(
+            apply_subst_map(mapping, impl_method_core_type(core)),
+            mapped_var_ids(mapping, impl_method_core_type_vars(core)),
+            remap_effect_header_schema(
+                mapping, impl_method_core_effect_schema(core)),
+            impl_method_core_def_id(core)))
+    }
+
+    ImplEntry {
+        trait_name: value.trait_name,
+        target_type_name: value.target_type_name,
+        type_params: value.type_params,
+        type_param_vars: localized_owner_vars,
+        predicates: freeze_impl_predicate_set(
+            localized_owner_vars, predicates),
+        method_names: value.method_names,
+        assoc_types: assoc_types,
+        assoc_type_effect_schemas: assoc_schemas,
+        method_schemes: method_schemes,
+        method_refs: value.method_refs,
+        method_intrinsics: value.method_intrinsics,
+        method_resource_contracts: value.method_resource_contracts,
+        provider_ref: value.provider_ref,
+        trait_ref: value.trait_ref,
+        owner_ref: value.owner_ref,
+        delegate_plan: value.delegate_plan,
+        span: value.span
     }
 }
 
@@ -3108,7 +3303,9 @@ pub fn specialize_trait_method_scheme(
     for id in remaining_ids {
         if !quantified.contains(id) { quantified.push(id) }
     }
-    make_impl_method_scheme_core(specialized_type, quantified, none)
+    make_impl_method_scheme_core(
+        specialized_type, quantified,
+        empty_typed_effect_header_schema(), none)
 }
 
 // ============================================================

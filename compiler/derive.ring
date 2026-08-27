@@ -17,6 +17,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_target_symbol,
     delegate_plan_not_applicable}
 use builtins::{builtin_option_derived_owners}
+use effect_contract::{empty_typed_effect_header_schema}
 use ast::{Span, DeriveAttribute, TypeParam, TypeBound, span_zero}
 use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
@@ -2722,7 +2723,8 @@ fn register_derived_impl(
             }
         }
         exact.insert(method_name, make_impl_method_scheme_core(
-            scheme.ty, scheme.type_vars, scheme.def_id))
+            scheme.ty, scheme.type_vars, scheme.effect_schema,
+            scheme.def_id))
     }
 
     let trait_ref = registered_derive_trait_ref(env, trait_name)
@@ -2741,6 +2743,7 @@ fn register_derived_impl(
         predicates: frozen_predicates,
         method_names: method_names,
         assoc_types: map_new(),
+        assoc_type_effect_schemas: map_new(),
         method_schemes: exact,
         method_refs: method_refs,
         method_intrinsics: map_new(),
@@ -2793,29 +2796,29 @@ fn register_trait_methods(
     match trait_name {
         "Eq" => {
             let eq_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW }
-            methods.insert("eq", TypeScheme { ty: eq_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            methods.insert("eq", TypeScheme { ty: eq_fn, type_vars: type_var_ids, bounds: bounds, effect_schema: empty_typed_effect_header_schema(), def_id: none })
             let ne_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW }
-            methods.insert("ne", TypeScheme { ty: ne_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            methods.insert("ne", TypeScheme { ty: ne_fn, type_vars: type_var_ids, bounds: bounds, effect_schema: empty_typed_effect_header_schema(), def_id: none })
         },
         "Clone" => {
             let clone_fn = Type::FnType { params: [self_type], return_type: self_type, effects: EMPTY_ROW }
-            methods.insert("clone", TypeScheme { ty: clone_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            methods.insert("clone", TypeScheme { ty: clone_fn, type_vars: type_var_ids, bounds: bounds, effect_schema: empty_typed_effect_header_schema(), def_id: none })
         },
         "Ord" => {
             let cmp_fn = Type::FnType { params: [self_type, self_type], return_type: INT, effects: EMPTY_ROW }
-            methods.insert("cmp", TypeScheme { ty: cmp_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            methods.insert("cmp", TypeScheme { ty: cmp_fn, type_vars: type_var_ids, bounds: bounds, effect_schema: empty_typed_effect_header_schema(), def_id: none })
         },
         "Debug" => {
             let debug_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW }
-            methods.insert("debug", TypeScheme { ty: debug_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            methods.insert("debug", TypeScheme { ty: debug_fn, type_vars: type_var_ids, bounds: bounds, effect_schema: empty_typed_effect_header_schema(), def_id: none })
         },
         "Hash" => {
             let hash_fn = Type::FnType { params: [self_type], return_type: INT, effects: EMPTY_ROW }
-            methods.insert("hash", TypeScheme { ty: hash_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            methods.insert("hash", TypeScheme { ty: hash_fn, type_vars: type_var_ids, bounds: bounds, effect_schema: empty_typed_effect_header_schema(), def_id: none })
         },
         "Json" => {
             let json_fn = Type::FnType { params: [self_type], return_type: STR, effects: EMPTY_ROW }
-            methods.insert("to_json", TypeScheme { ty: json_fn, type_vars: type_var_ids, bounds: bounds, def_id: none })
+            methods.insert("to_json", TypeScheme { ty: json_fn, type_vars: type_var_ids, bounds: bounds, effect_schema: empty_typed_effect_header_schema(), def_id: none })
         },
         _ => {},
     }

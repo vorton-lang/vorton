@@ -13,6 +13,7 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef,
     localize_imported_type_scheme,
     localize_imported_struct_def, localize_imported_enum_def,
     localize_imported_effect_def, localize_imported_trait_def,
+    localize_imported_impl_entry,
     register_effect_header_types,
     register_callable_effect_header,
     register_compiler_owned_extern_source,
@@ -1250,24 +1251,40 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
             }
         }
         for impl_ in mod_.trait_impls {
-            match impl_.trait_name {
-                some(trait_name) => match find_impl(
-                    ctx.env.trait_reg,
-                    impl_.target_type_name, trait_name) {
-                    some(existing) => {
-                        if !impl_entry_exact_key_same(existing, impl_) {
-                            let _ = type_error(ctx.sink, E0504,
-                                "Duplicate impl '${nominal_display_name(trait_name)}' for '${nominal_display_name(impl_.target_type_name)}' from distinct dependency origins",
-                                impl_.span, DiagnosticContext::TraitError {
-                                    detail: "duplicate imported target/trait implementation"
-                                })
-                        }
+            let already_hydrated = match impl_.provider_ref {
+                some(provider) => match find_impl_by_provider(
+                    ctx.env.trait_reg, impl_.target_type_name,
+                    impl_.trait_ref, provider) {
+                    some(existing) => impl_entry_exact_key_same(
+                        existing, impl_),
+                    none => false
+                },
+                none => false
+            }
+            if !already_hydrated {
+                let localized = localize_imported_impl_entry(
+                    ctx.env, impl_)
+                match localized.trait_name {
+                    some(trait_name) => match find_impl(
+                        ctx.env.trait_reg,
+                        localized.target_type_name, trait_name) {
+                        some(existing) => {
+                            if !impl_entry_exact_key_same(
+                                    existing, localized) {
+                                let _ = type_error(ctx.sink, E0504,
+                                    "Duplicate impl '${nominal_display_name(trait_name)}' for '${nominal_display_name(localized.target_type_name)}' from distinct dependency origins",
+                                    localized.span,
+                                    DiagnosticContext::TraitError {
+                                        detail: "duplicate imported target/trait implementation"
+                                    })
+                            }
+                        },
+                        none => {}
                     },
                     none => {}
-                },
-                none => {}
+                }
+                add_impl(ctx.env.trait_reg, localized)
             }
-            add_impl(ctx.env.trait_reg, impl_)
         }
         let mut sorted_method_index = mod_.method_index.entries()
         sorted_method_index.sort_by(compare_by_first)

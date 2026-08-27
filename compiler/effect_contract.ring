@@ -43,6 +43,110 @@ pub fn effect_param_ref_same(
         left.ordinal == right.ordinal
 }
 
+// One canonical TypedHIR definition-header relation.  The raw tail remains a
+// module-local inference token; EffectParamRef is the semantic identity that
+// survives import/re-export.  A schema may carry parameters from more than one
+// existing owner (for example a generated specialization), but each owner's
+// parameters must appear once in their original ordinal order.  Density is a
+// definition-producer invariant: a transported subset may start at ordinal 2.
+pub struct TypedEffectHeaderBinding {
+    raw_tail: Int,
+    parameter: EffectParamRef
+}
+
+pub fn make_typed_effect_header_binding(
+    raw_tail: Int, parameter: EffectParamRef
+) -> TypedEffectHeaderBinding {
+    if raw_tail < 0 {
+        panic("typed effect header: invalid inference-row tail")
+    }
+    TypedEffectHeaderBinding {
+        raw_tail: raw_tail, parameter: parameter
+    }
+}
+
+pub fn typed_effect_header_binding_raw_tail(
+    value: TypedEffectHeaderBinding
+) -> Int { value.raw_tail }
+
+pub fn typed_effect_header_binding_parameter(
+    value: TypedEffectHeaderBinding
+) -> EffectParamRef { value.parameter }
+
+pub struct TypedEffectHeaderSchema {
+    bindings: List<TypedEffectHeaderBinding>
+}
+
+pub fn make_typed_effect_header_schema(
+    bindings: List<TypedEffectHeaderBinding>
+) -> TypedEffectHeaderSchema {
+    let mut copied: List<TypedEffectHeaderBinding> = []
+    let mut index = 0
+    while index < bindings.len() {
+        let binding = bindings.get(index).unwrap()
+        let raw_tail = binding.raw_tail
+        let parameter = binding.parameter
+        let mut prior_owner_ordinal: Int? = none
+        let mut prior = 0
+        while prior < index {
+            let earlier = bindings.get(prior).unwrap()
+            if earlier.raw_tail == raw_tail {
+                panic("typed effect header: raw tail repeats")
+            }
+            if effect_param_ref_same(earlier.parameter, parameter) {
+                panic("typed effect header: parameter repeats")
+            }
+            if origin_ref_same(
+                    effect_param_owner(earlier.parameter),
+                    effect_param_owner(parameter)) {
+                prior_owner_ordinal = some(
+                    effect_param_ordinal(earlier.parameter))
+            }
+            prior = prior + 1
+        }
+        match prior_owner_ordinal {
+            some(ordinal) => if effect_param_ordinal(parameter) <= ordinal {
+                panic("typed effect header: owner ordinal order changed")
+            },
+            none => {}
+        }
+        copied.push(make_typed_effect_header_binding(
+            raw_tail, parameter))
+        index = index + 1
+    }
+    TypedEffectHeaderSchema { bindings: copied }
+}
+
+pub fn empty_typed_effect_header_schema() -> TypedEffectHeaderSchema {
+    make_typed_effect_header_schema([])
+}
+
+pub fn typed_effect_header_schema_bindings(
+    value: TypedEffectHeaderSchema
+) -> List<TypedEffectHeaderBinding> {
+    value.bindings.map(fn(binding) {
+        make_typed_effect_header_binding(
+            binding.raw_tail, binding.parameter)
+    })
+}
+
+pub fn typed_effect_header_schema_same(
+    left: TypedEffectHeaderSchema, right: TypedEffectHeaderSchema
+) -> Bool {
+    if left.bindings.len() != right.bindings.len() { return false }
+    let mut index = 0
+    while index < left.bindings.len() {
+        let a = left.bindings.get(index).unwrap()
+        let b = right.bindings.get(index).unwrap()
+        if a.raw_tail != b.raw_tail ||
+           !effect_param_ref_same(a.parameter, b.parameter) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
 // TypedHIR's immutable bridge from one module-local inference-row tail to the
 // stable formal identity that Core is allowed to consume.  `raw_tail` is only
 // a lookup token inside the already-closed module; it is never transported as

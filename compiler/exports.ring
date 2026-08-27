@@ -12,6 +12,7 @@ use ir_identity::{SymbolRef, ImplMethodRef,
     impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
     variant_ref_member, symbol_ref_canonical_payload}
 use infer_register::{prefix_decl_name, module_prefix_decl_name}
+use effect_contract::{empty_typed_effect_header_schema}
 
 // ============================================================
 // ModuleExports — the public interface of a compiled module
@@ -160,6 +161,7 @@ fn variant_ctor_scheme(def: EnumDef, variant: EnumVariant) -> TypeScheme {
         ty: ctor_type,
         type_vars: type_vars,
         bounds: [],
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     }
 }
