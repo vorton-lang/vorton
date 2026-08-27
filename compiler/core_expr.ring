@@ -4615,7 +4615,7 @@ fn validate_expr_with_program(
             executable, handled_captures, ..
         } => {
             let contract = core_callable_for(callables, executable)
-            validate_core_callable_value_effect_contract(
+            validate_core_callable_value_contract(
                 value.ty, contract, graph)
             if !executable_contract_mode_same(
                     contract.mode, executable_contract_mode_concrete_body()) {
