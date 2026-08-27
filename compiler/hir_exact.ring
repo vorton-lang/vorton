@@ -9,9 +9,11 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     callee_ref_is_named, callee_ref_named_symbol,
     intrinsic_ref_same, impl_method_ref_same, trait_method_ref_same,
     intrinsic_ref_symbol, make_named_callee_ref,
-    RegisteredNominalRef, symbol_ref_same, registered_trait_ref_symbol,
+    RegisteredNominalRef, symbol_ref_same, registered_nominal_ref_symbol,
+    registered_trait_ref_symbol,
     handled_effect_ref_same,
-    nominal_field_ref_owner, nominal_field_ref_same,
+    nominal_field_ref_owner, nominal_field_ref_index,
+    nominal_field_ref_same,
     trait_method_ref_trait, trait_method_ref_member,
     impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_target,
     impl_owner_ref_same, impl_method_ref_member, impl_method_ref_owner,
@@ -586,6 +588,78 @@ pub fn h_constructor_tuple_arity(value: HConstructorPlan) -> Int {
     }
 }
 
+// Exact one-shot elaboration plan for a 0.1 list literal.  The plan exists
+// only through TypedHIR; PreCore consumes it into a normal nominal construct
+// followed by ordinary exact List.push calls.
+pub struct HListLiteralPlan {
+    builder: BinderEntry,
+    owner: RegisteredNominalRef,
+    constructor: HConstructorPlan,
+    allocator: HExactCallPlan,
+    push: HExactCallPlan
+}
+pub fn make_h_list_literal_plan(
+    builder: BinderEntry, owner: RegisteredNominalRef,
+    constructor: HConstructorPlan, allocator: HExactCallPlan,
+    push: HExactCallPlan
+) -> HListLiteralPlan {
+    let fields = h_constructor_fields(constructor)
+    if h_constructor_kind(constructor) != 2 || fields.len() != 3 {
+        panic("HIR list plan: nominal field census differs")
+    }
+    let mut field_index = 0
+    for field in fields {
+        if h_projection_kind(field) != 0 || !symbol_ref_same(
+                nominal_field_ref_owner(h_projection_nominal(field)),
+                registered_nominal_ref_symbol(owner)) ||
+           nominal_field_ref_index(h_projection_nominal(field)) !=
+                field_index {
+            panic("HIR list plan: field owner/order differs")
+        }
+        field_index = field_index + 1
+    }
+    if h_exact_call_method(allocator).is_some() {
+        panic("HIR list plan: allocator is a method")
+    }
+    let push_method = match h_exact_call_method(push) {
+        some(value) => value,
+        none => panic("HIR list plan: push method is absent")
+    }
+    if !method_call_ref_is_concrete(push_method) ||
+       !method_call_ref_receiver_mutable(push_method) {
+        panic("HIR list plan: push is not an exact mutable inherent method")
+    }
+    HListLiteralPlan {
+        builder: builder, owner: owner, constructor: constructor,
+        allocator: allocator, push: push
+    }
+}
+pub fn h_list_literal_builder(value: HListLiteralPlan) -> BinderEntry {
+    value.builder
+}
+pub fn h_list_literal_owner(
+    value: HListLiteralPlan
+) -> RegisteredNominalRef { value.owner }
+pub fn h_list_literal_constructor(
+    value: HListLiteralPlan
+) -> HConstructorPlan { value.constructor }
+pub fn h_list_literal_allocator(
+    value: HListLiteralPlan
+) -> HExactCallPlan { value.allocator }
+pub fn h_list_literal_push(value: HListLiteralPlan) -> HExactCallPlan {
+    value.push
+}
+pub fn remap_h_list_literal_handled_evidence(
+    value: HListLiteralPlan, sources: List<HandledEvidenceRef>,
+    targets: List<HandledEvidenceRef>
+) -> HListLiteralPlan {
+    make_h_list_literal_plan(
+        value.builder, value.owner, value.constructor,
+        remap_h_exact_call_handled_evidence(
+            value.allocator, sources, targets),
+        remap_h_exact_call_handled_evidence(value.push, sources, targets))
+}
+
 pub struct HStringInterpPlan {
     builder_binder: BinderEntry,
     builder: HExactCallPlan,
@@ -1124,51 +1198,70 @@ pub fn h_pattern_plan_variant(value: HPatternPlan) -> VariantRef {
 }
 
 pub struct HForInPlan {
-    iter: HExactCallPlan,
-    has_next: HExactCallPlan,
-    next: HExactCallPlan,
-    iterator_binder: BinderEntry,
-    item_binder: BinderEntry,
-    binding_binder: BinderEntry,
-    destructure_binders: List<BinderEntry>
+    owner: RegisteredNominalRef,
+    start: NominalFieldRef,
+    end: NominalFieldRef,
+    inclusive: NominalFieldRef,
+    order: HOperatorPlan,
+    range_binder: BinderEntry,
+    counter_binder: BinderEntry,
+    binding_binder: BinderEntry
 }
-pub fn make_h_for_in_plan(
-    iter: HExactCallPlan, has_next: HExactCallPlan,
-    next: HExactCallPlan, iterator_binder: BinderEntry,
-    item_binder: BinderEntry, binding_binder: BinderEntry,
-    destructure_binders: List<BinderEntry>
+pub fn make_h_range_for_in_plan(
+    owner: RegisteredNominalRef,
+    start: NominalFieldRef, end: NominalFieldRef,
+    inclusive: NominalFieldRef, order: HOperatorPlan,
+    range_binder: BinderEntry, counter_binder: BinderEntry,
+    binding_binder: BinderEntry
 ) -> HForInPlan {
-    HForInPlan { iter: iter, has_next: has_next, next: next,
-        iterator_binder: iterator_binder, item_binder: item_binder,
-        binding_binder: binding_binder,
-        destructure_binders: destructure_binders.map(fn(value) { value }) }
-}
-pub fn h_for_in_iter(value: HForInPlan) -> HExactCallPlan { value.iter }
-pub fn h_for_in_has_next(value: HForInPlan) -> HExactCallPlan { value.has_next }
-pub fn h_for_in_next(value: HForInPlan) -> HExactCallPlan { value.next }
-pub fn h_for_in_iterator_binder(value: HForInPlan) -> BinderEntry {
-    value.iterator_binder
-}
-pub fn h_for_in_item_binder(value: HForInPlan) -> BinderEntry {
-    value.item_binder
+    let owner_symbol = registered_nominal_ref_symbol(owner)
+    if !symbol_ref_same(nominal_field_ref_owner(start), owner_symbol) ||
+       !symbol_ref_same(nominal_field_ref_owner(end), owner_symbol) ||
+       !symbol_ref_same(nominal_field_ref_owner(inclusive), owner_symbol) ||
+       nominal_field_ref_index(start) != 0 ||
+       nominal_field_ref_index(end) != 1 ||
+       nominal_field_ref_index(inclusive) != 2 ||
+       h_operator_is_tuple(order) {
+        panic("HIR Range for-in: exact field/operator plan differs")
+    }
+    HForInPlan {
+        owner: owner, start: start, end: end, inclusive: inclusive,
+        order: order, range_binder: range_binder,
+        counter_binder: counter_binder, binding_binder: binding_binder }
 }
 pub fn h_for_in_binding_binder(value: HForInPlan) -> BinderEntry {
     value.binding_binder
 }
-pub fn h_for_in_destructure_binders(value: HForInPlan) -> List<BinderEntry> {
-    value.destructure_binders.map(fn(item) { item })
+pub fn h_range_for_in_owner(value: HForInPlan) -> RegisteredNominalRef {
+    value.owner
+}
+pub fn h_range_for_in_start(value: HForInPlan) -> NominalFieldRef {
+    value.start
+}
+pub fn h_range_for_in_end(value: HForInPlan) -> NominalFieldRef {
+    value.end
+}
+pub fn h_range_for_in_inclusive(value: HForInPlan) -> NominalFieldRef {
+    value.inclusive
+}
+pub fn h_range_for_in_order(value: HForInPlan) -> HOperatorPlan {
+    value.order
+}
+pub fn h_range_for_in_range_binder(value: HForInPlan) -> BinderEntry {
+    value.range_binder
+}
+pub fn h_range_for_in_counter_binder(value: HForInPlan) -> BinderEntry {
+    value.counter_binder
 }
 pub fn remap_h_for_in_handled_evidence(
     value: HForInPlan, sources: List<HandledEvidenceRef>,
     targets: List<HandledEvidenceRef>
 ) -> HForInPlan {
-    make_h_for_in_plan(
-        remap_h_exact_call_handled_evidence(value.iter, sources, targets),
-        remap_h_exact_call_handled_evidence(
-            value.has_next, sources, targets),
-        remap_h_exact_call_handled_evidence(value.next, sources, targets),
-        value.iterator_binder, value.item_binder, value.binding_binder,
-        value.destructure_binders)
+    let _ = sources
+    let _ = targets
+    make_h_range_for_in_plan(
+        value.owner, value.start, value.end, value.inclusive, value.order,
+        value.range_binder, value.counter_binder, value.binding_binder)
 }
 pub struct HFailOperationRef { tag: Int }
 pub fn h_fail_raise_ref() -> HFailOperationRef {

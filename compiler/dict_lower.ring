@@ -655,14 +655,10 @@ fn dl_expr(e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: Dict
                 handled_evidence: handled_evidence,
                 args: new_args, ty: ty, effects: effects, span: span }
         },
-        HExpr::RangeExpr { start, end, inclusive, constructor, ty, effects, span } =>
-            HExpr::RangeExpr { start: dl_expr(start, defs, seen, counter),
-                end: dl_expr(end, defs, seen, counter), inclusive: inclusive,
-                constructor: constructor, ty: ty, effects: effects, span: span },
-        HExpr::ListLit { elements, constructor, ty, effects, span } => {
+        HExpr::ListLit { elements, plan, ty, effects, span } => {
             let mut new_elems: List<HExpr> = []
             for el in elements { new_elems.push(dl_expr(el, defs, seen, counter)) }
-            HExpr::ListLit { elements: new_elems, constructor: constructor,
+            HExpr::ListLit { elements: new_elems, plan: plan,
                 ty: ty, effects: effects, span: span }
         },
         HExpr::TupleLit { elements, constructor, ty, effects, span } => {

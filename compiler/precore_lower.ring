@@ -41,19 +41,22 @@ use hir::{
     HNominalStructFieldInit, HStructFieldInit,
     HTraitMethod, HEffectOp, TraitBound, HTypeParam,
     HForInDestructure, HLetDestructureBinding, HPatternBinding,
-    HProjectionRef, HExactCallPlan, HConstructorPlan,
-    HStringInterpPlan, HDictConstructPlan,
+    HProjectionRef, HExactCallPlan,
+    HStringInterpPlan, HListLiteralPlan, HDictConstructPlan,
     HPatternPlan, HPatternFieldPlan, HForInPlan,
     HFieldAccessKind,
     make_h_exact_call_plan,
     h_exact_call_callee, h_exact_call_signature,
     h_exact_call_method, h_exact_call_evidence,
     h_exact_call_handled_evidence,
-    h_constructor_kind, h_constructor_executable,
+    h_constructor_kind,
     h_constructor_fields, h_constructor_tuple_arity,
     h_string_interp_builder_binder, h_string_interp_builder,
     h_string_interp_append_literal, h_string_interp_append_value,
     h_string_interp_finish, h_string_interp_value_to_string,
+    h_list_literal_builder, h_list_literal_owner,
+    h_list_literal_constructor, h_list_literal_allocator,
+    h_list_literal_push,
     h_dict_construct_executable, h_dict_construct_trait,
     h_pattern_kind, h_pattern_plan_binding, h_pattern_plan_children,
     h_pattern_plan_fields, h_pattern_plan_struct_owner,
@@ -61,9 +64,11 @@ use hir::{
     h_pattern_field_pattern, make_h_pattern_field_plan,
     h_pattern_wildcard, h_pattern_binding,
     h_pattern_tuple, h_pattern_struct, h_pattern_variant,
-    h_for_in_iter, h_for_in_has_next, h_for_in_next,
-    h_for_in_iterator_binder, h_for_in_item_binder,
-    h_for_in_binding_binder, h_for_in_destructure_binders,
+    h_nominal_projection,
+    h_for_in_binding_binder,
+    h_range_for_in_start, h_range_for_in_end,
+    h_range_for_in_inclusive, h_range_for_in_order,
+    h_range_for_in_range_binder, h_range_for_in_counter_binder,
     h_fail_operation_tag,
     h_projection_kind, h_projection_nominal, h_projection_variant,
     h_projection_structural, h_projection_structural_name,
@@ -120,12 +125,6 @@ fn expression_list_effects(values: List<HExpr>) -> EffectRow {
     for value in values {
         result = merge_effect_rows(result, hexpr_effects(value))
     }
-    result
-}
-
-fn expression_types(values: List<HExpr>) -> List<Type> {
-    let mut result: List<Type> = []
-    for value in values { result.push(hexpr_type(value)) }
     result
 }
 
@@ -286,6 +285,15 @@ fn binder_let(
     name: Str, binder: BinderEntry, ty: Type, init: HExpr, span: Span
 ) -> HStmt {
     HStmt::Let {
+        name: name, name_span: span, def_id: some(binder_def_id(binder)),
+        ty: ty, init: init, span: span
+    }
+}
+
+fn binder_var(
+    name: Str, binder: BinderEntry, ty: Type, init: HExpr, span: Span
+) -> HStmt {
+    HStmt::Var {
         name: name, name_span: span, def_id: some(binder_def_id(binder)),
         ty: ty, init: init, span: span
     }
@@ -532,23 +540,6 @@ fn close_arms(values: List<HMatchArm>) -> List<HMatchArm> {
     result
 }
 
-fn executable_constructor_expr(
-    plan: HConstructorPlan, values: List<HExpr>,
-    ty: Type, effects: EffectRow, span: Span
-) -> HExpr {
-    if h_constructor_kind(plan) != 0 {
-        panic("PreCore closure: aggregate requires executable constructor")
-    }
-    if h_constructor_fields(plan).len() != values.len() {
-        panic("PreCore closure: constructor field/value census differs")
-    }
-    executable_call(
-        h_constructor_executable(plan), Type::FnType {
-            params: expression_types(values), return_type: ty,
-            effects: EMPTY_ROW
-        }, values, [], ty, effects, span)
-}
-
 fn close_string_interp(
     parts: List<HStringInterpPart>, plan: HStringInterpPlan,
     ty: Type, effects: EffectRow, span: Span
@@ -619,6 +610,95 @@ fn close_string_interp(
     }
 }
 
+fn close_list_literal(
+    elements: List<HExpr>, plan: HListLiteralPlan,
+    ty: Type, effects: EffectRow, span: Span
+) -> HExpr {
+    let element_type = match ty {
+        Type::StructType { type_params, .. } => match type_params.get(0) {
+            some(value) => value,
+            none => panic("PreCore closure: List has no element type")
+        },
+        _ => panic("PreCore closure: List literal type is not nominal")
+    }
+    let builder = h_list_literal_builder(plan)
+    let builder_name = binder_name("$precore_list_builder", builder)
+    let allocator = h_list_literal_allocator(plan)
+    let allocator_signature = exact_plan_signature(allocator)
+    let pointer_type = fn_result_type(allocator_signature)
+    let allocator_expr = exact_call(
+        allocator,
+        [HExpr::IntLit { value: 0, ty: Type::IntType,
+            effects: EMPTY_ROW, span: span }],
+        pointer_type, fn_effects(allocator_signature), span)
+    let constructor = h_list_literal_constructor(plan)
+    let projections = h_constructor_fields(constructor)
+    if projections.len() != 3 {
+        panic("PreCore closure: List field census differs")
+    }
+    let mut fields: List<HNominalStructFieldInit> = []
+    let values: List<HExpr> = [
+        allocator_expr,
+        HExpr::IntLit { value: 0, ty: Type::IntType,
+            effects: EMPTY_ROW, span: span },
+        HExpr::IntLit { value: 0, ty: Type::IntType,
+            effects: EMPTY_ROW, span: span }
+    ]
+    let mut field_index = 0
+    while field_index < projections.len() {
+        let projection = projections.get(field_index).unwrap()
+        if h_projection_kind(projection) != 0 {
+            panic("PreCore closure: List field is not nominal")
+        }
+        let field = h_projection_nominal(projection)
+        fields.push(HNominalStructFieldInit {
+            name: nominal_field_ref_name(field), field_ref: field,
+            field_index: nominal_field_ref_index(field),
+            value: values.get(field_index).unwrap()
+        })
+        field_index = field_index + 1
+    }
+    let initial = HExpr::StructLit {
+        name: match ty {
+            Type::StructType { name, .. } => name,
+            _ => panic("PreCore closure: List literal type changed")
+        },
+        owner_ref: h_list_literal_owner(plan), type_args: [],
+        fields: fields, spread: none, constructor: some(constructor),
+        ty: ty, effects: fn_effects(allocator_signature), span: span
+    }
+    let mut statements: List<HStmt> = [
+        binder_let(builder_name, builder, ty, initial, span)
+    ]
+    let push = h_list_literal_push(plan)
+    let push_signature = exact_plan_signature(push)
+    let push_params = fn_parameter_types(push_signature)
+    if push_params.len() != 2 ||
+       !types_equal(push_params.get(0).unwrap(), ty) ||
+       !types_equal(push_params.get(1).unwrap(), element_type) ||
+       !types_equal(fn_result_type(push_signature), Type::UnitType) {
+        panic("PreCore closure: List.push signature differs")
+    }
+    for element in elements {
+        let closed = close_expr(element)
+        let builder_read = binder_ident(
+            builder_name, builder, ty, span)
+        statements.push(HStmt::ExprStmt {
+            expr: exact_call(
+                push, [builder_read, closed], Type::UnitType,
+                merge_effect_rows(
+                    hexpr_effects(closed), fn_effects(push_signature)),
+                span),
+            span: span
+        })
+    }
+    HExpr::Block {
+        stmts: statements,
+        tail: some(binder_ident(builder_name, builder, ty, span)),
+        ty: ty, effects: effects, span: span
+    }
+}
+
 fn close_index(
     receiver: HExpr, index: HExpr,
     call_plan: HExactCallPlan?, projection: HProjectionRef?,
@@ -663,106 +743,95 @@ fn prepend_statements(
     }
 }
 
-fn exact_binder_type_from_method(
-    plan: HExactCallPlan, parameter_index: Int?, use_result: Bool
-) -> Type {
-    let signature = exact_plan_signature(plan)
-    if use_result { return fn_result_type(signature) }
-    let index = match parameter_index {
-        some(value) => value,
-        none => panic("PreCore closure: method parameter index is absent")
-    }
-    match fn_parameter_types(signature).get(index) {
-        some(value) => value,
-        none => panic("PreCore closure: method parameter index is out of range")
-    }
-}
-
 fn close_for_in(
     binding: Str, binding_span: Span, source_def_id: Int?,
     destructure: List<HForInDestructure>?, plan: HForInPlan,
     iterable: HExpr, body: HExpr, span: Span
 ) -> List<HStmt> {
-    let iter_plan = h_for_in_iter(plan)
-    let has_next_plan = h_for_in_has_next(plan)
-    let next_plan = h_for_in_next(plan)
-    let iterator_binder = h_for_in_iterator_binder(plan)
-    let item_binder = h_for_in_item_binder(plan)
     let binding_binder = h_for_in_binding_binder(plan)
-    let iterator_type = exact_binder_type_from_method(iter_plan, none, true)
-    let item_type = exact_binder_type_from_method(next_plan, none, true)
-    let iterator_name = binder_name("$precore_iterator", iterator_binder)
-    let item_name = binder_name("$precore_item", item_binder)
+    let range_binder = h_range_for_in_range_binder(plan)
+    let counter_binder = h_range_for_in_counter_binder(plan)
+    let range_name = binder_name("$precore_range", range_binder)
+    let counter_name = binder_name("$precore_range_counter", counter_binder)
     if source_def_id != some(binder_def_id(binding_binder)) {
         panic("PreCore closure: for binding DefId/plan differs")
     }
+    if destructure.is_some() {
+        panic("PreCore closure: Range item cannot be destructured")
+    }
     let closed_iterable = close_expr(iterable)
-    let iterator_init = exact_call(
-        iter_plan, [closed_iterable], iterator_type,
-        merge_effect_rows(hexpr_effects(closed_iterable),
-            fn_effects(exact_plan_signature(iter_plan))), span)
-    let iterator_read = binder_ident(
-        iterator_name, iterator_binder, iterator_type, span)
-    let condition = exact_call(
-        has_next_plan, [iterator_read], Type::BoolType,
-        fn_effects(exact_plan_signature(has_next_plan)), span)
-    let item_init = exact_call(
-        next_plan,
-        [binder_ident(iterator_name, iterator_binder, iterator_type, span)],
-        item_type, fn_effects(exact_plan_signature(next_plan)), span)
-    let binding_init = binder_ident(item_name, item_binder, item_type, span)
-    let mut prefix: List<HStmt> = [
-        binder_let(item_name, item_binder, item_type, item_init, span),
-        binder_let(binding, binding_binder, item_type, binding_init, binding_span)
+    let range_type = hexpr_type(closed_iterable)
+    let start = project_expr(
+        binder_ident(range_name, range_binder, range_type, span),
+        h_nominal_projection(h_range_for_in_start(plan)),
+        Type::IntType, EMPTY_ROW, span)
+    let inclusive = project_expr(
+        binder_ident(range_name, range_binder, range_type, span),
+        h_nominal_projection(h_range_for_in_inclusive(plan)),
+        Type::BoolType, EMPTY_ROW, span)
+    let order = h_range_for_in_order(plan)
+    let less = HExpr::BinOp {
+        op: BinOp::Lt,
+        left: binder_ident(
+            counter_name, counter_binder, Type::IntType, span),
+        right: project_expr(
+            binder_ident(range_name, range_binder, range_type, span),
+            h_nominal_projection(h_range_for_in_end(plan)),
+            Type::IntType, EMPTY_ROW, span),
+        eq_dispatch: none, ord_dispatch: none,
+        eq_plan: none, ord_plan: some(order), ty: Type::BoolType,
+        effects: EMPTY_ROW, span: span
+    }
+    let less_equal = HExpr::BinOp {
+        op: BinOp::Lte,
+        left: binder_ident(
+            counter_name, counter_binder, Type::IntType, span),
+        right: project_expr(
+            binder_ident(range_name, range_binder, range_type, span),
+            h_nominal_projection(h_range_for_in_end(plan)),
+            Type::IntType, EMPTY_ROW, span),
+        eq_dispatch: none, ord_dispatch: none,
+        eq_plan: none, ord_plan: some(order), ty: Type::BoolType,
+        effects: EMPTY_ROW, span: span
+    }
+    let condition = HExpr::IfExpr {
+        condition: inclusive,
+        then_branch: HExpr::Block { stmts: [], tail: some(less_equal),
+            ty: Type::BoolType, effects: EMPTY_ROW, span: span },
+        else_branch: some(HExpr::Block { stmts: [], tail: some(less),
+            ty: Type::BoolType, effects: EMPTY_ROW, span: span }),
+        ty: Type::BoolType, effects: EMPTY_ROW, span: span
+    }
+    // Increment before the source body after saving its visible binding, so
+    // source `continue` naturally reaches the next value without a new CFG op.
+    let binding_init = binder_ident(
+        counter_name, counter_binder, Type::IntType, span)
+    let increment = HExpr::BinOp {
+        op: BinOp::Add,
+        left: binder_ident(
+            counter_name, counter_binder, Type::IntType, span),
+        right: HExpr::IntLit { value: 1, ty: Type::IntType,
+            effects: EMPTY_ROW, span: span },
+        eq_dispatch: none, ord_dispatch: none,
+        eq_plan: none, ord_plan: none, ty: Type::IntType,
+        effects: EMPTY_ROW, span: span
+    }
+    let prefix: List<HStmt> = [
+        binder_let(
+            binding, binding_binder, Type::IntType,
+            binding_init, binding_span),
+        HStmt::Assign {
+            target: binder_ident(
+                counter_name, counter_binder, Type::IntType, span),
+            value: increment, span: span }
     ]
-    let source_destructure = match destructure {
-        some(values) => values,
-        none => []
-    }
-    let exact_destructure = h_for_in_destructure_binders(plan)
-    if source_destructure.len() != exact_destructure.len() {
-        panic("PreCore closure: for destructure binder census differs")
-    }
-    let mut index = 0
-    while index < source_destructure.len() {
-        let source = source_destructure.get(index).unwrap()
-        let exact = exact_destructure.get(index).unwrap()
-        let projection = match source.projection {
-            some(value) => value,
-            none => panic("PreCore closure: for destructure projection is absent")
-        }
-        let slot = match source.slot {
-            some(value) => value,
-            none => panic("PreCore closure: for destructure SlotRef is absent")
-        }
-        if !slot_ref_same(slot, binder_entry_slot(exact)) ||
-           source.def_id != some(binder_def_id(exact)) {
-            panic("PreCore closure: for destructure binder identity differs")
-        }
-        if h_projection_kind(projection) != 3 {
-            panic("PreCore closure: for destructure is not tuple projection")
-        }
-        let projected_type = match item_type {
-            Type::TupleType { elements } => match elements.get(
-                    h_projection_tuple_index(projection)) {
-                some(value) => value,
-                none => panic(
-                    "PreCore closure: for tuple projection is out of range")
-            },
-            _ => panic("PreCore closure: for destructure item is not tuple")
-        }
-        prefix.push(binder_let(
-            source.name, exact, projected_type,
-            project_expr(
-                binder_ident(binding, binding_binder, item_type, span),
-                projection, projected_type, EMPTY_ROW, span), span))
-        index = index + 1
-    }
     let loop_body = prepend_statements(prefix, close_expr(body), span)
     [
         binder_let(
-            iterator_name, iterator_binder, iterator_type,
-            iterator_init, span),
+            range_name, range_binder, range_type,
+            closed_iterable, span),
+        binder_var(
+            counter_name, counter_binder, Type::IntType, start, span),
         HStmt::While { condition: condition, body: loop_body, span: span }
     ]
 }
@@ -1320,25 +1389,11 @@ fn close_expr(value: HExpr) -> HExpr {
                 ty: ty, effects: effects, span: span
             }
         },
-        HExpr::RangeExpr {
-            start, end, inclusive, constructor, ty, effects, span
-        } => {
-            let inclusive_value = HExpr::BoolLit {
-                value: inclusive, ty: Type::BoolType,
-                effects: EMPTY_ROW, span: span
-            }
-            executable_constructor_expr(match constructor {
+        HExpr::ListLit { elements, plan, ty, effects, span } =>
+            close_list_literal(elements, match plan {
                 some(value) => value,
-                none => panic("PreCore closure: Range constructor is absent")
-            }, [close_expr(start), close_expr(end), inclusive_value],
-            ty, effects, span)
-        },
-        HExpr::ListLit { elements, constructor, ty, effects, span } =>
-            executable_constructor_expr(match constructor {
-                some(value) => value,
-                none => panic("PreCore closure: List constructor is absent")
-            }, close_expr_list(elements),
-            ty, effects, span),
+                none => panic("PreCore closure: List exact plan is absent")
+            }, ty, effects, span),
         HExpr::TupleLit { elements, constructor, ty, effects, span } => {
             let exact = match constructor {
                 some(value) => value,

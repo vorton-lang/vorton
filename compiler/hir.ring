@@ -64,6 +64,10 @@ pub use hir_exact::{
     h_string_interp_builder_binder, h_string_interp_builder, h_string_interp_append_literal, h_string_interp_append_value,
     h_string_interp_finish, h_string_interp_value_to_string,
     remap_h_string_interp_handled_evidence,
+    HListLiteralPlan, make_h_list_literal_plan,
+    h_list_literal_builder, h_list_literal_owner,
+    h_list_literal_constructor, h_list_literal_allocator,
+    h_list_literal_push, remap_h_list_literal_handled_evidence,
     HDictConstructPlan, make_h_dict_construct_plan,
     h_dict_construct_executable, h_dict_construct_trait, HDelegateMethodPlan, make_h_delegate_method_plan,
     h_delegate_method_required, h_delegate_method_generated, h_delegate_method_executable, h_delegate_method_origin,
@@ -93,9 +97,11 @@ pub use hir_exact::{
     h_pattern_binding, h_pattern_literal, h_pattern_tuple, h_pattern_struct,
     h_pattern_variant, h_pattern_or, h_pattern_kind, h_pattern_plan_binding,
     h_pattern_plan_children, h_pattern_plan_fields, h_pattern_plan_struct_owner, h_pattern_plan_variant,
-    HForInPlan, make_h_for_in_plan, h_for_in_iter, h_for_in_has_next,
-    h_for_in_next, h_for_in_iterator_binder, h_for_in_item_binder, h_for_in_binding_binder,
-    h_for_in_destructure_binders, remap_h_for_in_handled_evidence,
+    HForInPlan, make_h_range_for_in_plan, h_for_in_binding_binder,
+    remap_h_for_in_handled_evidence,
+    h_range_for_in_owner, h_range_for_in_start, h_range_for_in_end,
+    h_range_for_in_inclusive, h_range_for_in_order,
+    h_range_for_in_range_binder, h_range_for_in_counter_binder,
     HFailOperationRef, h_fail_raise_ref, h_fail_operation_tag
 }
 
@@ -514,10 +520,7 @@ pub enum HExpr {
                fail_ref: HFailOperationRef?,
                handled_evidence: List<HandledEvidenceRef>, args: List<HExpr>,
                ty: Type, effects: EffectRow, span: Span },
-    RangeExpr { start: HExpr, end: HExpr, inclusive: Bool,
-                constructor: HConstructorPlan?, ty: Type,
-                effects: EffectRow, span: Span },
-    ListLit { elements: List<HExpr>, constructor: HConstructorPlan?,
+    ListLit { elements: List<HExpr>, plan: HListLiteralPlan?,
               ty: Type, effects: EffectRow, span: Span },
     TupleLit { elements: List<HExpr>, constructor: HConstructorPlan?,
                ty: Type, effects: EffectRow, span: Span },
@@ -1207,21 +1210,17 @@ pub fn remap_hir_handled_evidence(
                 args: remapped_args, ty: ty, effects: effects, span: span
             }
         },
-        HExpr::RangeExpr {
-            start, end, inclusive, constructor, ty, effects, span
-        } => HExpr::RangeExpr {
-            start: remap_hir_handled_evidence(start, sources, targets),
-            end: remap_hir_handled_evidence(end, sources, targets),
-            inclusive: inclusive, constructor: constructor,
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::ListLit { elements, constructor, ty, effects, span } => {
+        HExpr::ListLit { elements, plan, ty, effects, span } => {
             let mut remapped: List<HExpr> = []
             for element in elements {
                 remapped.push(remap_hir_handled_evidence(
                     element, sources, targets))
             }
-            HExpr::ListLit { elements: remapped, constructor: constructor,
+            HExpr::ListLit { elements: remapped,
+                plan: plan.map(fn(value) {
+                    remap_h_list_literal_handled_evidence(
+                        value, sources, targets)
+                }),
                 ty: ty, effects: effects, span: span }
         },
         HExpr::TupleLit { elements, constructor, ty, effects, span } => {
@@ -2116,24 +2115,9 @@ fn validate_hir_expr(
             }
             for arg in args { validate_hir_expr(arg, seen, scope) }
         },
-        HExpr::RangeExpr { start, end, constructor, .. } => {
-            match constructor {
-                some(plan) => if h_constructor_kind(plan) != 0 ||
-                        h_constructor_fields(plan).len() != 3 {
-                    panic("HIR Range: constructor field census differs")
-                },
-                none => panic("HIR Range: exact constructor is absent")
-            }
-            validate_hir_expr(start, seen, scope)
-            validate_hir_expr(end, seen, scope)
-        },
-        HExpr::ListLit { elements, constructor, .. } => {
-            match constructor {
-                some(plan) => if h_constructor_kind(plan) != 0 ||
-                        h_constructor_fields(plan).len() != elements.len() {
-                    panic("HIR List: constructor field census differs")
-                },
-                none => panic("HIR List: exact constructor is absent")
+        HExpr::ListLit { elements, plan, .. } => {
+            if plan.is_none() {
+                panic("HIR List: exact elaboration plan is absent")
             }
             validate_hir_expr_values(elements, seen, scope)
         },
@@ -2591,7 +2575,6 @@ pub fn hexpr_type(e: HExpr) -> Type {
         HExpr::HandleExpr { ty, .. } => ty,
         HExpr::Lambda { ty, .. } => ty,
         HExpr::EffectOp { ty, .. } => ty,
-        HExpr::RangeExpr { ty, .. } => ty,
         HExpr::ListLit { ty, .. } => ty,
         HExpr::TupleLit { ty, .. } => ty,
         HExpr::IndexExpr { ty, .. } => ty,
@@ -2624,7 +2607,6 @@ pub fn hexpr_effects(e: HExpr) -> EffectRow {
         HExpr::HandleExpr { effects, .. } => effects,
         HExpr::Lambda { effects, .. } => effects,
         HExpr::EffectOp { effects, .. } => effects,
-        HExpr::RangeExpr { effects, .. } => effects,
         HExpr::ListLit { effects, .. } => effects,
         HExpr::TupleLit { effects, .. } => effects,
         HExpr::IndexExpr { effects, .. } => effects,
@@ -2657,7 +2639,6 @@ pub fn hexpr_span(e: HExpr) -> Span {
         HExpr::HandleExpr { span, .. } => span,
         HExpr::Lambda { span, .. } => span,
         HExpr::EffectOp { span, .. } => span,
-        HExpr::RangeExpr { span, .. } => span,
         HExpr::ListLit { span, .. } => span,
         HExpr::TupleLit { span, .. } => span,
         HExpr::IndexExpr { span, .. } => span,

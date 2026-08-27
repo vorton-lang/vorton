@@ -1,6 +1,6 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant,
     INT, FLOAT, STR, BOOL, UNIT, NEVER, ANY, EMPTY_ROW,
-    type_to_string, make_option_type, is_option_type, option_inner,
+    type_to_string, types_equal, make_option_type, is_option_type, option_inner,
     type_to_builtin_name, effect_row, nominal_display_name}
 use ast::{Program, Decl, Expr, Stmt, Param, MatchArm, StructFieldInit,
     EffectHandler, StringInterpPart, Pattern, BinOp, UnaryOp, TypeExpr,
@@ -10,12 +10,14 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HPatternBinding, HLambdaCapture,
     HPatternPlan, HOperatorPlan,
     HProjectionRef, h_nominal_projection, h_structural_projection,
-    h_tuple_projection, HConstructorPlan,
+    h_tuple_projection,
     make_h_executable_constructor_plan, make_h_tuple_constructor_plan,
     make_h_record_constructor_plan, h_variant_projection,
-    HExactCallPlan, HStringInterpPlan, make_h_exact_call_plan,
-    make_h_string_interp_plan, method_call_ref_callee_identity,
-    HForInPlan, make_h_for_in_plan,
+    HExactCallPlan, HStringInterpPlan, HListLiteralPlan,
+    make_h_exact_call_plan,
+    make_h_string_interp_plan, make_h_list_literal_plan,
+    method_call_ref_callee_identity,
+    make_h_range_for_in_plan,
     h_fail_raise_ref,
     HStructFieldInit, HNominalStructFieldInit, HFieldAccessKind,
     HStringInterpPart, HProgram, DerivedImpl,
@@ -67,8 +69,8 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     current_handled_evidence_captures,
     canonicalize_callable_handled_evidence,
     executable_capture_slot, fresh_semantic_path,
-    fresh_semantic_let_binder, semantic_for_binder,
-    semantic_destructure_binder}
+    fresh_semantic_let_binder, fresh_semantic_var_binder,
+    semantic_for_binder}
 use exhaustive::{check_exhaustive}
 use infer_helpers::{MethodLookupResult, StmtResult,
     is_value_type, cancel_local_mut_effects, resolve_var_id,
@@ -84,12 +86,10 @@ use infer_helpers::{MethodLookupResult, StmtResult,
 use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
     HandledEffectRef, SystemEffectRef, handled_effect_ref_same,
     make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
-    builtin_list_constructor_symbol,
-    builtin_range_constructor_symbol,
     builtin_str_identity_symbol, builtin_bool_to_str_symbol,
     builtin_list_index_symbol, builtin_str_index_symbol,
-    builtin_range_iter_symbol, builtin_range_has_next_symbol,
-    builtin_range_next_symbol,
+    compiler_extern_site_from_tag, compiler_extern_ref_for_site,
+    compiler_extern_ref_symbol, COMPILER_EXTERN_SLOT_ALLOC,
     callee_ref_is_named, callee_ref_named_symbol,
     slot_domain_lexical, slot_ref_same,
     path_owner_for_symbol, make_path_ref, path_role_synthetic,
@@ -137,12 +137,78 @@ fn exact_call_callee_ref(ctx: InferCtx, callee: HExpr) -> CalleeRef? {
     }
 }
 
-fn sequence_constructor_plan(
-    executable: ExecutableRef, arity: Int
-) -> HConstructorPlan {
-    let mut fields: List<HProjectionRef> = []
-    for index in 0..arity { fields.push(h_tuple_projection(index)) }
-    make_h_executable_constructor_plan(executable, fields)
+fn exact_range_def(ctx: InferCtx) -> StructDef {
+    let def = ctx.env.types.structs.get(BUILTIN_RANGE).unwrap_or_else(fn() {
+        panic("Range inference: exact builtin StructDef is absent")
+    })
+    if def.type_param_vars.len() != 0 || def.fields.len() != 3 ||
+       !types_equal(def.fields.get(0).unwrap().ty, INT) ||
+       !types_equal(def.fields.get(1).unwrap().ty, INT) ||
+       !types_equal(def.fields.get(2).unwrap().ty, BOOL) {
+        panic("Range inference: builtin field contract differs")
+    }
+    def
+}
+
+fn exact_list_literal_plan(
+    mut ctx: InferCtx, element_type: Type, subst: UnionFind, span: Span
+) -> (HListLiteralPlan, UnionFind) {
+    let def = ctx.env.types.structs.get(BUILTIN_LIST).unwrap_or_else(fn() {
+        panic("List literal: exact nominal StructDef is absent")
+    })
+    if def.type_param_vars.len() != 1 || def.fields.len() != 3 {
+        panic("List literal: nominal field census differs")
+    }
+    let list_type = Type::StructType {
+        name: BUILTIN_LIST, type_params: [element_type]
+    }
+    let allocator_ref = compiler_extern_ref_for_site(
+        compiler_extern_site_from_tag(COMPILER_EXTERN_SLOT_ALLOC))
+    let allocator_signature = Type::FnType {
+        params: [INT],
+        return_type: Type::PtrType { pointee: element_type },
+        effects: EMPTY_ROW
+    }
+    let allocator = make_h_exact_call_plan(
+        make_named_callee_ref(compiler_extern_ref_symbol(allocator_ref)),
+        allocator_signature, none, [], [])
+
+    let lookup = lookup_impl_method(ctx, BUILTIN_LIST, "push")
+    let raw_signature = lookup.method_type.unwrap_or_else(fn() {
+        panic("List literal: exact List.push signature is absent")
+    })
+    let exact_method = lookup.impl_method_ref.unwrap_or_else(fn() {
+        panic("List literal: exact List.push member is absent")
+    })
+    if lookup.intrinsic_ref.is_some() {
+        panic("List literal: List.push unexpectedly became intrinsic")
+    }
+    let mut s = subst
+    match raw_signature {
+        Type::FnType { params, .. } => {
+            if params.len() != 2 {
+                panic("List literal: List.push arity differs")
+            }
+            s = unify_at(ctx.sink, ctx.env,
+                params.get(0).unwrap(), list_type, s, span)
+            s = unify_at(ctx.sink, ctx.env,
+                params.get(1).unwrap(), element_type, s, span)
+        },
+        _ => panic("List literal: List.push is not callable")
+    }
+    let push_signature = apply_subst(s, raw_signature)
+    let push_method = make_concrete_method_call_ref(
+        exact_method, push_signature, true)
+    let push = make_h_exact_call_plan(
+        method_call_ref_callee_identity(push_method),
+        push_signature, some(push_method), [], [])
+    let constructor = make_h_record_constructor_plan(
+        def.fields.map(fn(field) {
+            h_nominal_projection(field.field_ref)
+        }))
+    (make_h_list_literal_plan(
+        fresh_semantic_let_binder(ctx, "list-literal-builder"),
+        def.owner_ref, constructor, allocator, push), s)
 }
 
 fn exact_system_host_callable(
@@ -404,10 +470,6 @@ fn collect_bounded_callable_values(
             for arg in args {
                 collect_bounded_callable_values(ctx, arg, found)
             }
-        },
-        HExpr::RangeExpr { start, end, .. } => {
-            collect_bounded_callable_values(ctx, start, found)
-            collect_bounded_callable_values(ctx, end, found)
         },
         HExpr::ListLit { elements, .. } => {
             for element in elements {
@@ -848,10 +910,11 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             let iter_r = infer_expr(ctx, iterable, subst)
             let mut s = iter_r.subst
             let iter_type = apply_subst(s, hexpr_type(iter_r.hexpr))
-            let mut element_type: Type = ctx.env.fresh_var()
-            // Check for Range (builtin, keep special path)
+            let element_type = INT
+            // Range has one exact zero-generic nominal shape.
             let is_range = match iter_type {
-                Type::EnumType { name, .. } => name == BUILTIN_RANGE,
+                Type::StructType { name, type_params } =>
+                    name == BUILTIN_RANGE && type_params.len() == 0,
                 _ => false
             }
             if !is_range {
@@ -860,13 +923,6 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                     iter_r, body, span
                 )
             }
-            match iter_type {
-                Type::EnumType { type_params, .. } => {
-                    element_type = match type_params.first() { some(t) => t, none => INT }
-                },
-                _ => {}
-            }
-
             ctx.env.push_scope()
             let mut hdestructure: List<HForInDestructure>? = none
             match destructure {
@@ -951,39 +1007,20 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 },
                 none => fresh_semantic_let_binder(ctx, "for-payload")
             }
-            let mut destructure_binders: List<BinderEntry> = []
-            match hdestructure {
-                some(bindings) => {
-                    for item in bindings {
-                        match item.def_id {
-                            some(id) => destructure_binders.push(
-                                semantic_destructure_binder(
-                                    ctx, id, "for-destructure")),
-                            none => {}
-                        }
-                    }
-                },
-                none => {}
-            }
-            let range_plan = make_h_for_in_plan(
-                make_h_exact_call_plan(make_named_callee_ref(
-                    builtin_range_iter_symbol()), Type::FnType {
-                        params: [iter_type], return_type: iter_type,
-                        effects: EMPTY_ROW
-                    }, none, [], []),
-                make_h_exact_call_plan(make_named_callee_ref(
-                    builtin_range_has_next_symbol()), Type::FnType {
-                        params: [iter_type], return_type: BOOL,
-                        effects: EMPTY_ROW
-                    }, none, [], []),
-                make_h_exact_call_plan(make_named_callee_ref(
-                    builtin_range_next_symbol()), Type::FnType {
-                        params: [iter_type], return_type: element_type,
-                        effects: EMPTY_ROW
-                    }, none, [], []),
-                fresh_semantic_let_binder(ctx, "range-iterator"),
-                fresh_semantic_let_binder(ctx, "range-item"),
-                binding_binder, destructure_binders)
+            let range_def = exact_range_def(ctx)
+            let order = exact_operator_plan(
+                ctx, INT, "Ord", "cmp", s, span).unwrap_or_else(fn() {
+                    panic("Range for-in: exact Int ordering plan is absent")
+                })
+            let range_plan = make_h_range_for_in_plan(
+                range_def.owner_ref,
+                range_def.fields.get(0).unwrap().field_ref,
+                range_def.fields.get(1).unwrap().field_ref,
+                range_def.fields.get(2).unwrap().field_ref,
+                order,
+                fresh_semantic_let_binder(ctx, "range-value"),
+                fresh_semantic_var_binder(ctx, "range-counter"),
+                binding_binder)
             ctx.loop_depth = ctx.loop_depth + 1
             let body_result = some(infer_block(ctx, body, some(s))) catch { _ => none }
             ctx.loop_depth = ctx.loop_depth - 1
@@ -1520,13 +1557,36 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
             let me = merge_effects(ctx.sink, ctx.env, start_r.effects, end_r.effects, s, span)
             let mut range_effects = me.0
             s = me.1
-            let range_type = Type::EnumType { name: BUILTIN_RANGE, type_params: [INT] }
+            let range_def = exact_range_def(ctx)
+            let range_type = Type::StructType {
+                name: BUILTIN_RANGE, type_params: []
+            }
+            let inclusive_expr = HExpr::BoolLit {
+                value: inclusive, ty: BOOL,
+                effects: EMPTY_ROW, span: span
+            }
+            let range_fields = [
+                HNominalStructFieldInit {
+                    name: range_def.fields.get(0).unwrap().name,
+                    field_ref: range_def.fields.get(0).unwrap().field_ref,
+                    field_index: 0, value: start_r.hexpr },
+                HNominalStructFieldInit {
+                    name: range_def.fields.get(1).unwrap().name,
+                    field_ref: range_def.fields.get(1).unwrap().field_ref,
+                    field_index: 1, value: end_r.hexpr },
+                HNominalStructFieldInit {
+                    name: range_def.fields.get(2).unwrap().name,
+                    field_ref: range_def.fields.get(2).unwrap().field_ref,
+                    field_index: 2, value: inclusive_expr }
+            ]
             InferResult {
-                hexpr: HExpr::RangeExpr {
-                    start: start_r.hexpr, end: end_r.hexpr, inclusive: inclusive,
-                    constructor: some(sequence_constructor_plan(
-                        make_named_executable_ref(
-                            builtin_range_constructor_symbol()), 3)),
+                hexpr: HExpr::StructLit {
+                    name: BUILTIN_RANGE, owner_ref: range_def.owner_ref,
+                    type_args: [], fields: range_fields, spread: none,
+                    constructor: some(make_h_record_constructor_plan(
+                        range_fields.map(fn(field) {
+                            h_nominal_projection(field.field_ref)
+                        }))),
                     ty: range_type, effects: range_effects, span: span
                 },
                 subst: s, effects: range_effects
@@ -4180,12 +4240,6 @@ fn collect_lambda_capture_expr(
                     ctx, arg, lambda_depth, executable, captures)
             }
         },
-        HExpr::RangeExpr { start, end, .. } => {
-            collect_lambda_capture_expr(
-                ctx, start, lambda_depth, executable, captures)
-            collect_lambda_capture_expr(
-                ctx, end, lambda_depth, executable, captures)
-        },
         HExpr::IndexExpr { receiver: start, index: end, .. } => {
             collect_lambda_capture_expr(
                 ctx, start, lambda_depth, executable, captures)
@@ -4334,13 +4388,13 @@ fn infer_list_literal(mut ctx: InferCtx, elements: List<Expr>, span: Span, subst
     if elements.len() == 0 {
         let elem_type = ctx.env.fresh_var()
         let list_type = Type::StructType { name: BUILTIN_LIST, type_params: [elem_type] }
+        let planned = exact_list_literal_plan(
+            ctx, elem_type, subst, span)
         return InferResult {
             hexpr: HExpr::ListLit { elements: [],
-                constructor: some(sequence_constructor_plan(
-                    make_named_executable_ref(
-                        builtin_list_constructor_symbol()), 0)),
+                plan: some(planned.0),
                 ty: list_type, effects: EMPTY_ROW, span: span },
-            subst: subst, effects: EMPTY_ROW
+            subst: planned.1, effects: EMPTY_ROW
         }
     }
     let mut s = subst
@@ -4357,13 +4411,16 @@ fn infer_list_literal(mut ctx: InferCtx, elements: List<Expr>, span: Span, subst
         combined_effects = me.0
         s = me.1
     }
-    let list_type = Type::StructType { name: BUILTIN_LIST, type_params: [apply_subst(s, elem_type)] }
+    let resolved_element = apply_subst(s, elem_type)
+    let list_type = Type::StructType {
+        name: BUILTIN_LIST, type_params: [resolved_element]
+    }
+    let planned = exact_list_literal_plan(
+        ctx, resolved_element, s, span)
     InferResult {
         hexpr: HExpr::ListLit { elements: helements,
-            constructor: some(sequence_constructor_plan(
-                make_named_executable_ref(
-                    builtin_list_constructor_symbol()), helements.len())),
+            plan: some(planned.0),
             ty: list_type, effects: combined_effects, span: span },
-        subst: s, effects: combined_effects
+        subst: planned.1, effects: combined_effects
     }
 }

@@ -5,6 +5,18 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     HStructFieldInit, HNominalStructFieldInit,
     HStringInterpPart, HForInDestructure, HLambdaCapture,
     HLetDestructureBinding, HPatternBinding, ValueBindingKind, TraitDispatch,
+    HExactCallPlan, make_h_exact_call_plan,
+    h_exact_call_callee, h_exact_call_signature, h_exact_call_method,
+    h_exact_call_evidence, h_exact_call_handled_evidence,
+    HListLiteralPlan, make_h_list_literal_plan,
+    h_list_literal_builder, h_list_literal_owner,
+    h_list_literal_constructor, h_list_literal_allocator,
+    h_list_literal_push,
+    HForInPlan, make_h_range_for_in_plan,
+    h_for_in_binding_binder, h_range_for_in_owner,
+    h_range_for_in_start, h_range_for_in_end,
+    h_range_for_in_inclusive, h_range_for_in_order,
+    h_range_for_in_range_binder, h_range_for_in_counter_binder,
     HOperatorPlan, h_operator_is_tuple, h_operator_elements,
     h_operator_method_ref, h_operator_method, h_operator_tuple,
     MethodCallRef, make_intrinsic_method_call_ref,
@@ -77,6 +89,41 @@ fn zonk_operator_plan(ctx: ZonkCtx, value: HOperatorPlan?) -> HOperatorPlan? {
         },
         none => none
     }
+}
+
+fn zonk_exact_call_plan(
+    ctx: ZonkCtx, value: HExactCallPlan
+) -> HExactCallPlan {
+    make_h_exact_call_plan(
+        h_exact_call_callee(value),
+        zonk_type(ctx, h_exact_call_signature(value)),
+        zonk_method_call_ref(ctx, h_exact_call_method(value)),
+        h_exact_call_evidence(value),
+        h_exact_call_handled_evidence(value))
+}
+
+fn zonk_list_literal_plan(
+    ctx: ZonkCtx, value: HListLiteralPlan
+) -> HListLiteralPlan {
+    make_h_list_literal_plan(
+        h_list_literal_builder(value), h_list_literal_owner(value),
+        h_list_literal_constructor(value),
+        zonk_exact_call_plan(ctx, h_list_literal_allocator(value)),
+        zonk_exact_call_plan(ctx, h_list_literal_push(value)))
+}
+
+fn zonk_for_in_plan(ctx: ZonkCtx, value: HForInPlan) -> HForInPlan {
+    let order = match zonk_operator_plan(
+            ctx, some(h_range_for_in_order(value))) {
+        some(plan) => plan,
+        none => panic("zonk: Range ordering plan disappeared")
+    }
+    make_h_range_for_in_plan(
+        h_range_for_in_owner(value), h_range_for_in_start(value),
+        h_range_for_in_end(value), h_range_for_in_inclusive(value), order,
+        h_range_for_in_range_binder(value),
+        h_range_for_in_counter_binder(value),
+        h_for_in_binding_binder(value))
 }
 
 fn label_effect(
@@ -269,7 +316,8 @@ fn zonk_stmt(ctx: ZonkCtx, stmt: HStmt) -> HStmt {
         HStmt::ForIn { binding, binding_span, def_id, destructure, plan,
                        iterable, body, iterable_type_name, iter_type_name, span } =>
             HStmt::ForIn { binding: binding, binding_span: binding_span,
-                def_id: def_id, destructure: destructure, plan: plan,
+                def_id: def_id, destructure: destructure,
+                plan: plan.map(fn(value) { zonk_for_in_plan(ctx, value) }),
                 iterable: zonk_expr(ctx, iterable), body: zonk_block(ctx, body),
                 iterable_type_name: iterable_type_name,
                 iter_type_name: iter_type_name, span: span },
@@ -540,13 +588,11 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 handled_evidence: handled_evidence,
                 args: args.map(fn(a) { zonk_expr(ctx, a) }),
                 ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::RangeExpr { start, end, inclusive, constructor, .. } =>
-            HExpr::RangeExpr { start: zonk_expr(ctx, start),
-                end: zonk_expr(ctx, end), inclusive: inclusive,
-                constructor: constructor, ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::ListLit { elements, constructor, .. } =>
+        HExpr::ListLit { elements, plan, .. } =>
             HExpr::ListLit { elements: elements.map(fn(e) { zonk_expr(ctx, e) }),
-                constructor: constructor, ty: z_ty, effects: z_eff, span: z_span },
+                plan: plan.map(fn(value) {
+                    zonk_list_literal_plan(ctx, value) }),
+                ty: z_ty, effects: z_eff, span: z_span },
         HExpr::TupleLit { elements, constructor, .. } =>
             HExpr::TupleLit { elements: elements.map(fn(e) { zonk_expr(ctx, e) }),
                 constructor: constructor, ty: z_ty, effects: z_eff, span: z_span },

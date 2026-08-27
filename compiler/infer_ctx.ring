@@ -72,6 +72,7 @@ use ir_inventory::{ExecutableRef, ExactDictRef,
     executable_ref_named_symbol, executable_ref_anonymous_path,
     executable_ref_same,
     BinderEntry, BinderKind, make_source_binder_entry, binder_kind_let,
+    binder_kind_var,
     binder_kind_for, binder_kind_destructure, binder_kind_source_param,
     HandledEvidenceRef, HandledEvidenceCapture,
     make_semantic_evidence_binder, make_handled_evidence_ref,
@@ -1922,6 +1923,13 @@ pub fn fresh_semantic_let_binder(
 ) -> BinderEntry {
     let def_id = ctx.env.fresh_def_id()
     semantic_declaration_binder(ctx, def_id, binder_kind_let(), label)
+}
+
+pub fn fresh_semantic_var_binder(
+    mut ctx: InferCtx, label: Str
+) -> BinderEntry {
+    let def_id = ctx.env.fresh_def_id()
+    semantic_declaration_binder(ctx, def_id, binder_kind_var(), label)
 }
 
 pub fn semantic_for_binder(

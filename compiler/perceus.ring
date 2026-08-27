@@ -204,7 +204,7 @@ fn mutate_append_param_drops(
 //
 // HARD RULES (a violation = UAF or changed behaviour):
 //   R1 ONLY materialise FRESH-OWNED compounds: BinOp / UnaryOp / non-borrow Call /
-//      StructLit / NamedVariantConstruct / ListLit / TupleLit / RangeExpr /
+//      StructLit / NamedVariantConstruct / ListLit / TupleLit /
 //      StringInterp / Lambda.  NEVER Ident / FieldAccess / IndexExpr /
 //      borrow-returning Call (is_borrow_returning_call) — those are BORROWS;
 //      materialise+drop would UAF.  Literals are skipped (no heap to reclaim) but
@@ -337,7 +337,7 @@ fn anf_fn_body(body: HExpr, externs: Set<Str>, mut counter: List<Int>) -> HExpr 
 //     drop, considering rc_escape will Clone-wrap borrows?"
 // They share a common preamble (rc-excluded / extern-handle / TypeVar guards)
 // and agree on 12+ "fresh constructor" variants (BinOp, UnaryOp, StructLit,
-// ListLit, TupleLit, RangeExpr, StringInterp, Lambda, IntLit, FloatLit,
+// ListLit, TupleLit, StringInterp, Lambda, IntLit, FloatLit,
 // StrLit, BoolLit → true in both).  INTENTIONAL divergences:
 //   - Ident/FieldAccess/non-Str IndexExpr/Clone: NOT materialized (borrows in
 //     operand position → UAF), but IS droppable (rc_escape Clone-wraps them)
@@ -471,7 +471,6 @@ fn anf_should_materialize(expr: HExpr, externs: Set<Str>) -> Bool {
         HExpr::NamedVariantConstruct { .. } => true,
         HExpr::ListLit { .. } => true,
         HExpr::TupleLit { .. } => true,
-        HExpr::RangeExpr { .. } => true,
         HExpr::StringInterp { .. } => true,
         HExpr::Lambda { .. } => true,
         // B-104 task-1: scalar literals are NOT free — uniform-BOXED (B-080 unboxing
@@ -799,17 +798,8 @@ fn anf_stmt(stmt: HStmt, externs: Set<Str>, mut counter: List<Int>) -> List<HStm
             // `return` inside the body drops the full owned set incl. __anf).
             // Same Clone-wrap balance as the W2 scrutinee.
             //
-            // EXCEPTION — a literal RangeExpr iterable stays INLINE: emit_for_in
-            // pattern-matches the RangeExpr form structurally to lower a direct
-            // counting loop (no range struct) with its own per-iteration counter
-            // + bound drops (B-104b).  Materialising it would reroute through
-            // the heavier range-var path for zero RC gain (the direct lowering
-            // already drops the bound boxes).
             let mut hoists: List<HStmt> = []
-            let new_iter = match iterable {
-                HExpr::RangeExpr { .. } => anf_expr(iterable, hoists, externs, counter),
-                _ => anf_operand(iterable, hoists, externs, counter),
-            }
+            let new_iter = anf_operand(iterable, hoists, externs, counter)
             let new_body = anf_block_expr(body, externs, counter)
             hoists.push(HStmt::ForIn {
                 binding: binding, binding_span: binding_span, def_id: def_id,
@@ -1089,10 +1079,10 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::ListLit { elements, constructor, ty, effects, span } => {
+        HExpr::ListLit { elements, plan, ty, effects, span } => {
             let mut new_elems: List<HExpr> = []
             for e in elements { new_elems.push(anf_tail_value(e, hoists, externs, counter)) }
-            HExpr::ListLit { elements: new_elems, constructor: constructor,
+            HExpr::ListLit { elements: new_elems, plan: plan,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -1100,13 +1090,6 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             let mut new_elems: List<HExpr> = []
             for e in elements { new_elems.push(anf_tail_value(e, hoists, externs, counter)) }
             HExpr::TupleLit { elements: new_elems, constructor: constructor,
-                ty: ty, effects: effects, span: span }
-        },
-
-        HExpr::RangeExpr { start, end, inclusive, constructor, ty, effects, span } => {
-            HExpr::RangeExpr { start: anf_tail_value(start, hoists, externs, counter),
-                end: anf_tail_value(end, hoists, externs, counter),
-                inclusive: inclusive, constructor: constructor,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -2297,7 +2280,6 @@ fn is_droppable_init(init: HExpr, externs: Set<Str>) -> Bool {
         HExpr::NamedVariantConstruct { .. } => true,
         HExpr::ListLit { .. } => true,
         HExpr::TupleLit { .. } => true,
-        HExpr::RangeExpr { .. } => true,
         HExpr::Lambda { .. } => true,
         HExpr::StringInterp { .. } => true,
         HExpr::IntLit { .. } => true,
@@ -2992,19 +2974,11 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::RangeExpr { start, end, inclusive, constructor, ty, effects, span } => {
-            // Range stores start/end into a fresh range struct → they escape.
-            HExpr::RangeExpr { start: rc_escape(start, owned, boxed, externs, drop_types, gensym, loop_base),
-                end: rc_escape(end, owned, boxed, externs, drop_types, gensym, loop_base),
-                inclusive: inclusive, constructor: constructor,
-                ty: ty, effects: effects, span: span }
-        },
-
-        HExpr::ListLit { elements, constructor, ty, effects, span } => {
+        HExpr::ListLit { elements, plan, ty, effects, span } => {
             // Each element escapes into the new list (the list owns it).
             let mut new_elems: List<HExpr> = []
             for e in elements { new_elems.push(rc_escape(e, owned, boxed, externs, drop_types, gensym, loop_base)) }
-            HExpr::ListLit { elements: new_elems, constructor: constructor,
+            HExpr::ListLit { elements: new_elems, plan: plan,
                 ty: ty, effects: effects, span: span }
         },
 

@@ -3,7 +3,8 @@
 
 use types::{Type, Effect, EffectRow, StructField, EnumVariant,
     INT, FLOAT, STR, BOOL, UNIT, NEVER, EMPTY_ROW,
-    BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET, BUILTIN_OPTION, BUILTIN_CELL,
+    BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET, BUILTIN_OPTION,
+    BUILTIN_CELL,
     make_option_type, make_map_type}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     EffectDef, EffectOpDef, BuiltInKind, TraitDef, TraitMethodDef,
@@ -23,7 +24,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     find_impl_by_provider, impl_target_symbol,
     specialize_trait_method_scheme, delegate_plan_not_applicable}
 use ast::{span_zero}
-use hir::{variant_ctor_name, compare_by_first}
+use hir::{HDecl, HStructField, variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
 use ir_inventory::{CallableResourceContractFact,
     CallableResourceRoleFact,
@@ -658,6 +659,7 @@ fn make_set_struct(t: Type) -> Type {
 pub fn register_builtins(mut env: TypeEnv, sink: CollectingSink) {
     register_effects(env)
     register_scalar_method_intrinsics(env, sink)
+    register_range(env)
     register_cell(env, sink)
     register_option(env, sink)
     register_eq_trait(env, sink)
@@ -852,6 +854,59 @@ fn register_scalar_method_intrinsics(
         none, [], [], [],
         float_methods, float_intrinsics, float_resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_FLOAT_CORE))
+}
+
+// Range is a fixed 0.1 value shape, not a generic enum.  The surface `a..b`
+// syntax and Range for-in plan both consume these exact nominal fields before
+// Core; no backend stage reconstructs the shape from the leaf name.
+fn register_range(mut env: TypeEnv) {
+    let owner = make_symbol_ref(
+        "$builtin", namespace_nominal(), BUILTIN_RANGE, "builtin:Range")
+    let start_member = make_symbol_ref(
+        "$builtin", namespace_member(), "Range::start",
+        "builtin:Range|field:0|kind:struct-field")
+    let end_member = make_symbol_ref(
+        "$builtin", namespace_member(), "Range::end",
+        "builtin:Range|field:1|kind:struct-field")
+    let inclusive_member = make_symbol_ref(
+        "$builtin", namespace_member(), "Range::inclusive",
+        "builtin:Range|field:2|kind:struct-field")
+    env.types.structs.insert(BUILTIN_RANGE, StructDef {
+        name: BUILTIN_RANGE,
+        owner_ref: make_registered_nominal_ref(owner, BUILTIN_RANGE),
+        type_params: [], type_param_vars: [],
+        fields: [
+            StructField { name: "start", ty: INT, is_pub: false,
+                field_ref: make_nominal_field_ref(
+                    owner, start_member, 0, "start"),
+                field_index: 0, span: span_zero() },
+            StructField { name: "end", ty: INT, is_pub: false,
+                field_ref: make_nominal_field_ref(
+                    owner, end_member, 1, "end"),
+                field_index: 1, span: span_zero() },
+            StructField { name: "inclusive", ty: BOOL, is_pub: false,
+                field_ref: make_nominal_field_ref(
+                    owner, inclusive_member, 2, "inclusive"),
+                field_index: 2, span: span_zero() }
+        ],
+        derive_attrs: [], derived_provider_plan: none,
+        is_extern: false
+    })
+}
+
+pub fn builtin_range_hdecl(env: TypeEnv) -> HDecl {
+    let def = env.types.structs.get(BUILTIN_RANGE).unwrap_or_else(fn() {
+        panic("builtin Range HIR: StructDef is absent")
+    })
+    HDecl::Struct {
+        name: def.name, owner_ref: def.owner_ref, type_params: [],
+        fields: def.fields.map(fn(field) { HStructField {
+            name: field.name, ty: field.ty, is_pub: field.is_pub,
+            field_ref: field.field_ref, field_index: field.field_index,
+            span: field.span
+        } }),
+        is_pub: false, span: span_zero()
+    }
 }
 
 // Normal compilation publishes no std HOF method core before source

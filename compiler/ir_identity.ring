@@ -318,16 +318,6 @@ pub fn builtin_dict_constructor_symbol() -> SymbolRef {
         "$builtin", namespace_value(), "dict.wrap",
         "builtin:dict-wrap")
 }
-pub fn builtin_list_constructor_symbol() -> SymbolRef {
-    make_symbol_ref(
-        "$builtin", namespace_value(), "list.construct",
-        "builtin:list-construct")
-}
-pub fn builtin_range_constructor_symbol() -> SymbolRef {
-    make_symbol_ref(
-        "$builtin", namespace_value(), "range.construct",
-        "builtin:range-construct")
-}
 pub fn builtin_str_identity_symbol() -> SymbolRef {
     make_symbol_ref(
         "$builtin", namespace_value(), "str.identity",
@@ -347,21 +337,6 @@ pub fn builtin_str_index_symbol() -> SymbolRef {
     make_symbol_ref(
         "$builtin", namespace_value(), "str.index",
         "builtin:str-index")
-}
-pub fn builtin_range_iter_symbol() -> SymbolRef {
-    make_symbol_ref(
-        "$builtin", namespace_value(), "range.iter",
-        "builtin:range-iter")
-}
-pub fn builtin_range_has_next_symbol() -> SymbolRef {
-    make_symbol_ref(
-        "$builtin", namespace_value(), "range.has-next",
-        "builtin:range-has-next")
-}
-pub fn builtin_range_next_symbol() -> SymbolRef {
-    make_symbol_ref(
-        "$builtin", namespace_value(), "range.next",
-        "builtin:range-next")
 }
 
 // Registration gives a resolver-produced nominal a local typed display name

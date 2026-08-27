@@ -13,8 +13,7 @@
 // Step 6 adds explicit custom-effect handlers (tail-resumptive + abort) and
 // try/catch; Ring 0.1 has no default evidence path.
 //
-use types::{Type, EMPTY_ROW, type_to_builtin_name, types_equal,
-    BUILTIN_RANGE}
+use types::{Type, EMPTY_ROW, type_to_builtin_name, types_equal}
 use ast::{BinOp, UnaryOp, Pattern, LiteralValue, NamedPatternField, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
@@ -197,10 +196,9 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
                           handled_evidence, args, .. } =>
             gen_c_effect_op(ctx, effect_name, op_name, operation_ref,
                 handled_evidence, args),
-        HExpr::RangeExpr { start, end, inclusive, .. } =>
-            gen_c_range_expr(ctx, start, end, inclusive),
-        HExpr::ListLit { elements, .. } => gen_c_list_lit(ctx, elements),
-        HExpr::TupleLit { elements, .. } => gen_c_list_lit(ctx, elements),
+        HExpr::ListLit { .. } => panic(
+            "C codegen: List surface literal crossed PreCore"),
+        HExpr::TupleLit { elements, .. } => gen_c_tuple_lit(ctx, elements),
         HExpr::IndexExpr { receiver, index, .. } => gen_c_index_expr(ctx, receiver, index),
         // B-104 D4: local construction of a DYNAMIC wrapped dict (dict_lower's
         // `let __ring_dictlocal_N = …` init) — a fresh owned value, reclaimed
@@ -1693,10 +1691,6 @@ fn collect_c_captures(
                 collect_c_captures(ctx, a, params, captures)
             }
         },
-        HExpr::RangeExpr { start: rs, end: re, .. } => {
-            collect_c_captures(ctx, rs, params, captures)
-            collect_c_captures(ctx, re, params, captures)
-        },
         HExpr::Clone { inner, .. } =>
             collect_c_captures(ctx, inner, params, captures),
         HExpr::Take { source, .. } =>
@@ -1897,10 +1891,6 @@ fn collect_c_extern_typed_names(
             for a in eo_args {
                 collect_c_extern_typed_names(a, captures, params, externs, out)
             }
-        },
-        HExpr::RangeExpr { start: rs, end: re, .. } => {
-            collect_c_extern_typed_names(rs, captures, params, externs, out)
-            collect_c_extern_typed_names(re, captures, params, externs, out)
         },
         HExpr::Clone { inner, .. } =>
             collect_c_extern_typed_names(inner, captures, params, externs, out),
@@ -4278,25 +4268,10 @@ fn convert_c_to_str(mut ctx: CCtx, val: Str, ty: Type) -> Str {
 }
 
 // ============================================================
-// Range / list / tuple literals, indexing
+// Tuple literals and indexing. Range/List surface forms are closed before C.
 // ============================================================
 
-// Range value layout mirrors gen_range_expr: 3 boxed slots
-// { start, end, inclusive } tagged as TUPLE (typeid 10).
-fn gen_c_range_expr(mut ctx: CCtx, start: HExpr, end: HExpr, inclusive: Bool) -> Str {
-    rt_use(ctx, "ring_alloc", 2)
-    let t = fresh_tmp(ctx)
-    c_emit(ctx, "${t} = ring_alloc((int64_t)(3 * sizeof(void*)), 10);")
-    let sv = gen_c_expr(ctx, start)
-    let ev = gen_c_expr(ctx, end)
-    let iv = if inclusive { "RING_TRUE" } else { "RING_FALSE" }
-    c_emit(ctx, "((void**)${t})[0] = ${sv};")
-    c_emit(ctx, "((void**)${t})[1] = ${ev};")
-    c_emit(ctx, "((void**)${t})[2] = ${iv};")
-    t
-}
-
-fn gen_c_list_lit(mut ctx: CCtx, elements: List<HExpr>) -> Str {
+fn gen_c_tuple_lit(mut ctx: CCtx, elements: List<HExpr>) -> Str {
     rt_use(ctx, "ring_list_new", 0)
     rt_use(ctx, "ring_list_push", 2)
     let t = fresh_tmp(ctx)
@@ -4391,10 +4366,8 @@ pub fn emit_c_stmt(mut ctx: CCtx, stmt: HStmt) {
             c_line_directive(ctx, span)
             emit_c_while(ctx, condition, body)
         },
-        HStmt::ForIn { binding, def_id, iterable, body, span, .. } => {
-            c_line_directive(ctx, span)
-            emit_c_for_in(ctx, binding, def_id, iterable, body)
-        },
+        HStmt::ForIn { .. } => panic(
+            "C codegen: for-in surface statement crossed PreCore"),
         HStmt::Break { .. } => {
             if ctx.in_loop {
                 c_emit(ctx, "break;")
@@ -4641,147 +4614,6 @@ fn emit_c_while(mut ctx: CCtx, condition: HExpr, body: HExpr) {
     ctx.loop_continue_stmt = saved_cont
     ctx.in_loop = saved_in_loop
 
-    ctx.indent = ctx.indent - 1
-    c_emit(ctx, "}")
-}
-
-// ============================================================
-// ForIn — three shapes (direct range / range variable / list-backed),
-// ports of emit_for_in_range_direct / _range_var / _list.
-// Ring continue → goto the increment label (binding-box drop + counter++,
-// mirroring LLVM's incr_bb); Ring break → C break (skips the incr — the
-// current binding box leaks, the documented B-104b residual).
-// ============================================================
-
-fn emit_c_for_in(
-    mut ctx: CCtx, binding: Str, def_id: Int?,
-    iterable: HExpr, body: HExpr
-) {
-    match iterable {
-        HExpr::RangeExpr { start, end, inclusive, .. } => {
-            emit_c_for_range_direct(
-                ctx, binding, def_id, start, end, inclusive, body)
-            return
-        },
-        _ => {},
-    }
-    let iter_htype = hexpr_type(iterable)
-    let is_range = match iter_htype {
-        Type::EnumType { name, .. } => name == BUILTIN_RANGE,
-        _ => false,
-    }
-    if is_range {
-        emit_c_for_range_var(ctx, binding, def_id, iterable, body)
-    } else {
-        panic("C codegen invariant: non-Range for-in survived inference lowering")
-    }
-}
-
-fn c_for_binding_local(
-    mut ctx: CCtx, binding: Str, def_id: Int?
-) -> Str {
-    if binding == "_" {
-        // Wildcards need a C assignment target, not a Ring binding.  Keep the
-        // internal temp out of exact and name-only registries.
-        fresh_tmp(ctx)
-    } else {
-        match def_id {
-            some(id) => c_local_def(ctx, binding, some(id)),
-            none => panic("C codegen: for-in binding has no exact DefId")
-        }
-    }
-}
-
-fn emit_c_for_range_direct(
-    mut ctx: CCtx, binding: Str, def_id: Int?,
-    start: HExpr, end: HExpr, inclusive: Bool, body: HExpr
-) {
-    let sv = gen_c_expr(ctx, start)
-    let ev = gen_c_expr(ctx, end)
-    let s_raw = fresh_i64(ctx)
-    let e_raw = fresh_i64(ctx)
-    c_emit(ctx, "${s_raw} = RING_UNTAG(${sv});")
-    c_emit(ctx, "${e_raw} = RING_UNTAG(${ev});")
-    // B-104b: the bound boxes are OWNED and fully consumed by the untag.
-    rt_use(ctx, "ring_drop", 1)
-    c_emit(ctx, "ring_drop(${sv});")
-    c_emit(ctx, "ring_drop(${ev});")
-
-    let ci = fresh_i64(ctx)
-    c_emit(ctx, "${ci} = ${s_raw};")
-    let cmp = if inclusive { "<=" } else { "<" }
-    let incr_label = fresh_label(ctx, "incr")
-
-    c_emit(ctx, "while (1) {")
-    ctx.indent = ctx.indent + 1
-    c_emit(ctx, "if (!(${ci} ${cmp} ${e_raw})) break;")
-    let binds_value = binding != "_"
-    let bv = if binds_value {
-        let slot = c_for_binding_local(ctx, binding, def_id)
-        c_emit(ctx, "${slot} = RING_INT(${ci});")
-        slot
-    } else { "" }
-
-    let saved_cont = ctx.loop_continue_stmt
-    let saved_in_loop = ctx.in_loop
-    ctx.loop_continue_stmt = "goto ${incr_label};"
-    ctx.in_loop = true
-    discard_c(gen_c_expr(ctx, body))
-    ctx.loop_continue_stmt = saved_cont
-    ctx.in_loop = saved_in_loop
-
-    c_raw(ctx, "${incr_label}:;")
-    // B-104b: per-iteration counter box drop (normal path AND continue).
-    if binds_value { c_emit(ctx, "ring_drop(${bv});") }
-    c_emit(ctx, "${ci} = ${ci} + 1;")
-    ctx.indent = ctx.indent - 1
-    c_emit(ctx, "}")
-}
-
-// Range stored in a variable: unbox { start, end, inclusive } slots, fold
-// inclusivity into the bound (end - (1 - incl)), loop with <=.
-fn emit_c_for_range_var(
-    mut ctx: CCtx, binding: Str, def_id: Int?,
-    iterable: HExpr, body: HExpr
-) {
-    let rv = gen_c_expr(ctx, iterable)
-    let sb = fresh_tmp(ctx)
-    let eb = fresh_tmp(ctx)
-    let ib = fresh_tmp(ctx)
-    c_emit(ctx, "${sb} = ((void**)${rv})[0];")
-    c_emit(ctx, "${eb} = ((void**)${rv})[1];")
-    c_emit(ctx, "${ib} = ((void**)${rv})[2];")
-    let s_raw = fresh_i64(ctx)
-    let bound = fresh_i64(ctx)
-    c_emit(ctx, "${s_raw} = RING_UNTAG(${sb});")
-    c_emit(ctx, "${bound} = RING_UNTAG(${eb}) - (1 - RING_UNTAG(${ib}));")
-
-    let ci = fresh_i64(ctx)
-    c_emit(ctx, "${ci} = ${s_raw};")
-    let incr_label = fresh_label(ctx, "incr")
-
-    c_emit(ctx, "while (1) {")
-    ctx.indent = ctx.indent + 1
-    c_emit(ctx, "if (!(${ci} <= ${bound})) break;")
-    let binds_value = binding != "_"
-    let bv = if binds_value {
-        let slot = c_for_binding_local(ctx, binding, def_id)
-        c_emit(ctx, "${slot} = RING_INT(${ci});")
-        slot
-    } else { "" }
-
-    let saved_cont = ctx.loop_continue_stmt
-    let saved_in_loop = ctx.in_loop
-    ctx.loop_continue_stmt = "goto ${incr_label};"
-    ctx.in_loop = true
-    discard_c(gen_c_expr(ctx, body))
-    ctx.loop_continue_stmt = saved_cont
-    ctx.in_loop = saved_in_loop
-
-    c_raw(ctx, "${incr_label}:;")
-    rt_use(ctx, "ring_drop", 1)
-    if binds_value { c_emit(ctx, "ring_drop(${bv});") }
-    c_emit(ctx, "${ci} = ${ci} + 1;")
     ctx.indent = ctx.indent - 1
     c_emit(ctx, "}")
 }

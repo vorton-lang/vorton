@@ -1943,10 +1943,6 @@ fn producer_record_expr(
                 producer_record_expr(producer, owner, argument)
             }
         },
-        HExpr::RangeExpr { start, end, .. } => {
-            producer_record_expr(producer, owner, start)
-            producer_record_expr(producer, owner, end)
-        },
         HExpr::ListLit { elements, .. } | HExpr::TupleLit { elements, .. } => {
             for element in elements {
                 producer_record_expr(producer, owner, element)
@@ -3644,16 +3640,48 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     }
                     let method = h_operator_method_ref(exact)
                     let signature = method_call_ref_signature(method)
-                    make_core_method_call_expr(
-                        ty, effects, origin,
-                        core_callee(ctx, method_call_ref_callee_identity(method), signature),
-                        exact_method_ref(method),
-                        lower_expr(ctx, left), [lower_expr(ctx, right)],
+                    let method_evidence: List<CoreEvidenceRef> =
                         if method_call_ref_is_bound(method) {
-                            [make_core_dict_evidence(remap_dictionary_evidence(
-                                ctx, dict_ref_exact(
-                                    method_call_ref_bound_evidence(method))))]
-                        } else { [] }, [])
+                        [make_core_dict_evidence(remap_dictionary_evidence(
+                            ctx, dict_ref_exact(
+                                method_call_ref_bound_evidence(method))))]
+                    } else { [] }
+                    let lowered_left = lower_expr(ctx, left)
+                    let lowered_right = lower_expr(ctx, right)
+                    match op {
+                        BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte => {
+                            // Ord.cmp returns Int.  Preserve that exact method
+                            // authority, then apply the source relation to zero
+                            // as an existing Core primitive; never pretend the
+                            // callable itself returns Bool.
+                            let int_type = type_fact_for(
+                                ctx.types, Type::IntType, ctx.module_key)
+                            let comparison = make_core_method_call_expr(
+                                int_type, effects,
+                                fresh_origin(ctx, "ordering-cmp", source_span),
+                                core_callee(
+                                    ctx,
+                                    method_call_ref_callee_identity(method),
+                                    signature),
+                                exact_method_ref(method), lowered_left,
+                                [lowered_right], method_evidence, [])
+                            let zero = make_core_literal_expr(
+                                int_type,
+                                fresh_origin(ctx, "ordering-zero", source_span),
+                                make_core_int_literal(0))
+                            make_core_primitive_expr(
+                                ty, effects, origin,
+                                make_core_primitive_op(primitive_tag(op)),
+                                [comparison, zero])
+                        },
+                        _ => make_core_method_call_expr(
+                            ty, effects, origin,
+                            core_callee(
+                                ctx, method_call_ref_callee_identity(method),
+                                signature),
+                            exact_method_ref(method), lowered_left,
+                            [lowered_right], method_evidence, [])
+                    }
                 },
                 none => make_core_primitive_expr(
                     ty, effects, origin, make_core_primitive_op(primitive_tag(op)),
@@ -3858,8 +3886,8 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
             ty, effects, origin, make_core_block(
                 [make_core_return_stmt(value.map(fn(v) { lower_expr(ctx, v) }), origin)],
                 none, origin)),
-        HExpr::StringInterp { .. } | HExpr::RangeExpr { .. } |
-        HExpr::ListLit { .. } | HExpr::IndexExpr { .. } |
+        HExpr::StringInterp { .. } | HExpr::ListLit { .. } |
+        HExpr::IndexExpr { .. } |
         HExpr::DictConstruct { .. } | HExpr::Clone { .. } |
         HExpr::Take { .. } => panic("Core assembly: surface/resource HExpr crossed PreCore")
     }

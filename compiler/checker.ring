@@ -13,7 +13,7 @@ use env::{TypeEnv, TypeScheme, add_impl, find_impl,
     compiler_owned_extern_symbol,
     compiler_owned_extern_should_publish_hdecl}
 use builtins::{register_builtins, register_hof_intrinsics,
-    finalize_std_hof_fallbacks,
+    finalize_std_hof_fallbacks, builtin_range_hdecl,
     checker_only_builtin_values, checker_builtin_value_name,
     checker_builtin_value_symbol}
 use derive::{validate_derived_impls}
@@ -406,6 +406,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
             finalize_std_hof_fallbacks(ctx.env, ctx.sink)
         },
     }
+    prelude_hdecls.push(builtin_range_hdecl(ctx.env))
     prelude_hdecls
 }
 
