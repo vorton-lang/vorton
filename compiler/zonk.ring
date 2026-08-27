@@ -5,6 +5,14 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     HStructFieldInit, HNominalStructFieldInit,
     HStringInterpPart, HForInDestructure, HLambdaCapture,
     HLetDestructureBinding, HPatternBinding, ValueBindingKind, TraitDispatch,
+    HPatternPlan, HPatternFieldPlan,
+    make_h_pattern_field_plan, h_pattern_field_projection,
+    h_pattern_field_pattern, h_pattern_wildcard, h_pattern_binding,
+    h_pattern_literal, h_pattern_tuple, h_pattern_struct,
+    h_pattern_variant, h_pattern_or, h_pattern_kind,
+    h_pattern_plan_binding, h_pattern_plan_children,
+    h_pattern_plan_fields, h_pattern_plan_struct_owner,
+    h_pattern_plan_variant,
     HExactCallPlan, make_h_exact_call_plan,
     h_exact_call_callee, h_exact_call_signature, h_exact_call_method,
     h_exact_call_evidence, h_exact_call_handled_evidence,
@@ -133,6 +141,52 @@ fn zonk_for_in_plan(ctx: ZonkCtx, value: HForInPlan) -> HForInPlan {
         h_range_for_in_counter_binder(value),
         h_range_for_in_finished_binder(value),
         h_for_in_binding_binder(value))
+}
+
+fn zonk_pattern_field_plan(
+    ctx: ZonkCtx, value: HPatternFieldPlan
+) -> HPatternFieldPlan {
+    make_h_pattern_field_plan(
+        h_pattern_field_projection(value),
+        zonk_pattern_plan(ctx, h_pattern_field_pattern(value)))
+}
+
+fn zonk_pattern_plan(ctx: ZonkCtx, value: HPatternPlan) -> HPatternPlan {
+    let kind = h_pattern_kind(value)
+    if kind == 0 { return h_pattern_wildcard() }
+    if kind == 1 {
+        let binding = h_pattern_plan_binding(value)
+        return h_pattern_binding(HPatternBinding {
+            name: binding.name, def_id: binding.def_id,
+            slot: binding.slot, ty: zonk_type(ctx, binding.ty)
+        })
+    }
+    if kind == 2 { return h_pattern_literal() }
+    if kind == 3 {
+        return h_pattern_tuple(h_pattern_plan_children(value).map(fn(child) {
+            zonk_pattern_plan(ctx, child)
+        }))
+    }
+    if kind == 4 {
+        return h_pattern_struct(
+            h_pattern_plan_struct_owner(value),
+            h_pattern_plan_fields(value).map(fn(field) {
+                zonk_pattern_field_plan(ctx, field)
+            }))
+    }
+    if kind == 5 {
+        return h_pattern_variant(
+            h_pattern_plan_variant(value),
+            h_pattern_plan_fields(value).map(fn(field) {
+                zonk_pattern_field_plan(ctx, field)
+            }))
+    }
+    if kind == 6 {
+        return h_pattern_or(h_pattern_plan_children(value).map(fn(child) {
+            zonk_pattern_plan(ctx, child)
+        }))
+    }
+    panic("zonk: unknown exact PatternPlan kind")
 }
 
 fn label_effect(
@@ -339,7 +393,9 @@ fn zonk_stmt(ctx: ZonkCtx, stmt: HStmt) -> HStmt {
                     ty: zonk_type(ctx, b.ty) }
             })
             HStmt::LetDestructure { pattern: pattern,
-                pattern_plan: pattern_plan, bindings: z_bindings,
+                pattern_plan: pattern_plan.map(fn(plan) {
+                    zonk_pattern_plan(ctx, plan)
+                }), bindings: z_bindings,
                 init: zonk_expr(ctx, init), span: span }
         },
         HStmt::IfLet { pattern, pattern_plan, bindings, expr,
@@ -349,7 +405,9 @@ fn zonk_stmt(ctx: ZonkCtx, stmt: HStmt) -> HStmt {
                 none => none,
             }
             HStmt::IfLet { pattern: pattern,
-                pattern_plan: pattern_plan,
+                pattern_plan: pattern_plan.map(fn(plan) {
+                    zonk_pattern_plan(ctx, plan)
+                }),
                 bindings: bindings.map(fn(b) { HPatternBinding {
                     name: b.name, def_id: b.def_id,
                     slot: b.slot,
@@ -476,7 +534,9 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                         none => none,
                     }
                     HMatchArm { pattern: a.pattern,
-                        pattern_plan: a.pattern_plan,
+                        pattern_plan: a.pattern_plan.map(fn(plan) {
+                            zonk_pattern_plan(ctx, plan)
+                        }),
                         bindings: a.bindings.map(fn(b) { HPatternBinding {
                             name: b.name, def_id: b.def_id,
                             slot: b.slot,
@@ -526,7 +586,9 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 arms: arms.map(fn(a) {
                     HMatchArm {
                         pattern: a.pattern,
-                        pattern_plan: a.pattern_plan,
+                        pattern_plan: a.pattern_plan.map(fn(plan) {
+                            zonk_pattern_plan(ctx, plan)
+                        }),
                         bindings: a.bindings.map(fn(b) { HPatternBinding {
                             name: b.name, def_id: b.def_id,
                             slot: b.slot,
