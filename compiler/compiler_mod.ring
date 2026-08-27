@@ -8,6 +8,8 @@ use env::{TypeEnv}
 use checker::{check_module}
 use core_from_hir::{
     FrozenCoreAssemblyFacts, CoreAssemblyResult,
+    CoreExecutableRedirect, make_core_executable_redirect,
+    core_executable_redirect_source, core_executable_redirect_target,
     assemble_project_core, core_assembly_result_program,
     core_assembly_result_diagnostic_projection}
 use ir_inventory::{ExecutableRef, executable_ref_is_named,
@@ -52,7 +54,7 @@ struct CompilePhaseResult {
     module_core_facts: Map<Str, FrozenCoreAssemblyFacts>,
     module_legacy_facts: Map<Str, LegacyProjectionFacts>,
     module_exports_map: Map<Str, ModuleExports>,
-    extern_forward_bridges: List<ProjectExternForwardBridge>
+    extern_forward_bridges: List<CoreExecutableRedirect>
 }
 
 fn run_project_ownership(
@@ -64,14 +66,8 @@ fn run_project_ownership(
             panic("project ownership: Core facts are absent")
         }))
     }
-    let mut redirect_sources: List<ExecutableRef> = []
-    let mut redirect_targets: List<ExecutableRef> = []
-    for bridge in phases.extern_forward_bridges {
-        redirect_sources.push(bridge.source)
-        redirect_targets.push(bridge.target)
-    }
     let assembly = assemble_project_core(
-        core_facts, redirect_sources, redirect_targets)
+        core_facts, phases.extern_forward_bridges)
     (assembly, run_ownership_pipeline(
         core_assembly_result_program(assembly)))
 }
@@ -172,11 +168,6 @@ struct ProjectExternForward {
     abi_name: Str,
     signature: Str,
     span: Span
-}
-
-struct ProjectExternForwardBridge {
-    source: ExecutableRef,
-    target: ExecutableRef
 }
 
 fn project_executable_identity(value: ExecutableRef) -> Str {
@@ -323,7 +314,7 @@ fn report_extern_forward_ambiguity(
 // resolved signature. Zero matches remains real FFI; ambiguity is an error.
 fn build_project_extern_forward_bridges(
     graph: ModuleGraph, module_hirs: Map<Str, HProgram>, error_format: Str
-) -> List<ProjectExternForwardBridge>? {
+) -> List<CoreExecutableRedirect>? {
     let mut candidates: List<ProjectRingFnCandidate> = []
     let mut forwards: List<ProjectExternForward> = []
     for key in graph.topo_order {
@@ -337,7 +328,7 @@ fn build_project_extern_forward_bridges(
         }
     }
 
-    let mut bridges: List<ProjectExternForwardBridge> = []
+    let mut bridges: List<CoreExecutableRedirect> = []
     let mut has_ambiguity = false
     for forward in forwards {
         let mut matching: List<ProjectRingFnCandidate> = []
@@ -351,10 +342,8 @@ fn build_project_extern_forward_bridges(
         if matching.len() == 1 {
             match matching.get(0) {
                 some(candidate) => {
-                    bridges.push(ProjectExternForwardBridge {
-                        source: forward.executable,
-                        target: candidate.executable
-                    })
+                    bridges.push(make_core_executable_redirect(
+                        forward.executable, candidate.executable))
                 },
                 none => {}
             }
@@ -369,12 +358,14 @@ fn build_project_extern_forward_bridges(
 }
 
 fn codegen_extern_forward_bridges(
-    values: List<ProjectExternForwardBridge>
+    values: List<CoreExecutableRedirect>
 ) -> Map<Str, Str> {
     let mut result: Map<Str, Str> = map_new()
     for value in values {
-        let source = project_executable_identity(value.source)
-        let target = project_executable_identity(value.target)
+        let source = project_executable_identity(
+            core_executable_redirect_source(value))
+        let target = project_executable_identity(
+            core_executable_redirect_target(value))
         if source == target || result.contains_key(source) {
             panic("project extern forward: typed redirect is invalid/duplicated")
         }

@@ -2362,6 +2362,34 @@ pub fn core_diagnostic_projection_slot_display_label(
     }
 }
 
+pub struct CoreExecutableRedirect {
+    source: ExecutableRef,
+    target: ExecutableRef
+}
+pub fn make_core_executable_redirect(
+    source: ExecutableRef, target: ExecutableRef
+) -> CoreExecutableRedirect {
+    if !executable_ref_is_named(source) ||
+       !executable_ref_is_named(target) ||
+       executable_ref_same(source, target) {
+        panic("Core assembly: project executable redirect is invalid")
+    }
+    CoreExecutableRedirect { source: source, target: target }
+}
+pub fn core_executable_redirect_source(
+    value: CoreExecutableRedirect
+) -> ExecutableRef { value.source }
+pub fn core_executable_redirect_target(
+    value: CoreExecutableRedirect
+) -> ExecutableRef { value.target }
+fn copy_core_executable_redirects(
+    values: List<CoreExecutableRedirect>
+) -> List<CoreExecutableRedirect> {
+    values.map(fn(value) {
+        make_core_executable_redirect(value.source, value.target)
+    })
+}
+
 pub struct FrozenCoreAssemblyFacts {
     module_key: Str, module_order: Int,
     type_refs: List<CoreTypeFactRef>, type_nodes: List<FlowTypeNode>,
@@ -2370,8 +2398,7 @@ pub struct FrozenCoreAssemblyFacts {
     callable_effect_rows: List<TypedCallableEffectFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
     project_type_mapping: List<Int>,
-    project_redirect_sources: List<ExecutableRef>,
-    project_redirect_targets: List<ExecutableRef>,
+    project_redirects: List<CoreExecutableRedirect>,
     handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
     builtin_methods: List<BuiltinMethodContractFact>,
     diagnostic_seed: CoreDiagnosticSeed,
@@ -2443,7 +2470,7 @@ pub fn mutate_core_unowned_effect_tail(
         type_sources: value.type_sources, effect_parameters: retained,
         callable_effect_rows: value.callable_effect_rows,
         project_callable_effects: [], project_type_mapping: [],
-        project_redirect_sources: [], project_redirect_targets: [],
+        project_redirects: [],
         handled_evidence_types: value.handled_evidence_types,
         diagnostic_seed: value.diagnostic_seed,
         builtin_methods: value.builtin_methods, program: value.program
@@ -2528,7 +2555,7 @@ fn freeze_closed_core_assembly_facts(
         effect_parameters: effect_parameters,
         callable_effect_rows: callable_effect_rows,
         project_callable_effects: [], project_type_mapping: [],
-        project_redirect_sources: [], project_redirect_targets: [],
+        project_redirects: [],
         handled_evidence_types: handled_evidence_types,
         diagnostic_seed: diagnostic_seed,
         builtin_methods: if recorder.module_order == 0 {
@@ -2772,8 +2799,7 @@ struct LowerCtx {
     effect_parameters: List<TypedEffectFormalFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
     project_type_mapping: List<Int>,
-    project_redirect_sources: List<ExecutableRef>,
-    project_redirect_targets: List<ExecutableRef>,
+    project_redirects: List<CoreExecutableRedirect>,
     types: List<CoreTypeSourceFact>,
     type_nodes: List<FlowTypeNode>,
     handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
@@ -2781,20 +2807,15 @@ struct LowerCtx {
     diagnostic_origins: List<CoreDiagnosticOriginFact>
 }
 fn redirected_executable(ctx: LowerCtx, value: ExecutableRef) -> ExecutableRef {
-    if ctx.project_redirect_sources.len() != ctx.project_redirect_targets.len() {
-        panic("Core assembly: executable redirect relation is partial")
-    }
     let mut found: ExecutableRef? = none
-    let mut index = 0
-    while index < ctx.project_redirect_sources.len() {
+    for redirect in ctx.project_redirects {
         if executable_ref_same(
-                ctx.project_redirect_sources.get(index).unwrap(), value) {
+                redirect.source, value) {
             if found.is_some() {
                 panic("Core assembly: executable redirect source repeats")
             }
-            found = some(ctx.project_redirect_targets.get(index).unwrap())
+            found = some(redirect.target)
         }
-        index = index + 1
     }
     match found { some(target) => target, none => value }
 }
@@ -4099,8 +4120,7 @@ fn append_default_specialization(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_type_mapping: facts.project_type_mapping,
-        project_redirect_sources: facts.project_redirect_sources,
-        project_redirect_targets: facts.project_redirect_targets,
+        project_redirects: facts.project_redirects,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
         binders: binders, captures: [], next_origin: 0,
@@ -4203,8 +4223,7 @@ fn derived_call_plan_from_method(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_type_mapping: facts.project_type_mapping,
-        project_redirect_sources: facts.project_redirect_sources,
-        project_redirect_targets: facts.project_redirect_targets,
+        project_redirects: facts.project_redirects,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
         binders: [], captures: [], next_origin: 0,
@@ -4241,8 +4260,7 @@ fn derived_call_plan_from_exact(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_type_mapping: facts.project_type_mapping,
-        project_redirect_sources: facts.project_redirect_sources,
-        project_redirect_targets: facts.project_redirect_targets,
+        project_redirects: facts.project_redirects,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
         binders: [], captures: [], next_origin: 0,
@@ -5071,8 +5089,7 @@ fn append_delegate_impl(
             effect_parameters: facts.effect_parameters,
             project_callable_effects: facts.project_callable_effects,
             project_type_mapping: facts.project_type_mapping,
-            project_redirect_sources: facts.project_redirect_sources,
-            project_redirect_targets: facts.project_redirect_targets,
+            project_redirects: facts.project_redirects,
             types: facts.type_sources, type_nodes: facts.type_nodes,
             handled_evidence_types: facts.handled_evidence_types,
             binders: binders, captures: [], next_origin: 0,
@@ -5205,8 +5222,7 @@ fn add_executable_body(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_type_mapping: facts.project_type_mapping,
-        project_redirect_sources: facts.project_redirect_sources,
-        project_redirect_targets: facts.project_redirect_targets,
+        project_redirects: facts.project_redirects,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
         binders: [], captures: capture_bindings, next_origin: 0,
@@ -5774,8 +5790,7 @@ fn project_effect_contract_to_module(
 fn with_project_effect_sources(
     facts: FrozenCoreAssemblyFacts,
     sources: List<ProjectCallableEffectSource>, mapping: List<Int>,
-    redirect_sources: List<ExecutableRef>,
-    redirect_targets: List<ExecutableRef>
+    redirects: List<CoreExecutableRedirect>
 ) -> FrozenCoreAssemblyFacts {
     FrozenCoreAssemblyFacts {
         module_key: facts.module_key, module_order: facts.module_order,
@@ -5785,8 +5800,7 @@ fn with_project_effect_sources(
         callable_effect_rows: facts.callable_effect_rows,
         project_callable_effects: sources.map(fn(item) { item }),
         project_type_mapping: mapping.map(fn(item) { item }),
-        project_redirect_sources: redirect_sources.map(fn(item) { item }),
-        project_redirect_targets: redirect_targets.map(fn(item) { item }),
+        project_redirects: copy_core_executable_redirects(redirects),
         handled_evidence_types: facts.handled_evidence_types,
         diagnostic_seed: facts.diagnostic_seed,
         builtin_methods: facts.builtin_methods, program: facts.program
@@ -5959,26 +5973,16 @@ fn build_core_diagnostic_projection(
 
 fn assemble_all(
     values: List<FrozenCoreAssemblyFacts>,
-    redirect_sources: List<ExecutableRef>,
-    redirect_targets: List<ExecutableRef>
+    redirects: List<CoreExecutableRedirect>
 ) -> CoreAssemblyResult {
     if values.len() == 0 { panic("Core assembly: project has no modules") }
-    if redirect_sources.len() != redirect_targets.len() {
-        panic("Core assembly: project executable redirect relation is partial")
-    }
     let mut redirect_index = 0
-    while redirect_index < redirect_sources.len() {
-        let source = redirect_sources.get(redirect_index).unwrap()
-        let target = redirect_targets.get(redirect_index).unwrap()
-        if !executable_ref_is_named(source) ||
-           !executable_ref_is_named(target) ||
-           executable_ref_same(source, target) {
-            panic("Core assembly: project executable redirect is invalid")
-        }
+    while redirect_index < redirects.len() {
+        let source = redirects.get(redirect_index).unwrap().source
         let mut prior = 0
         while prior < redirect_index {
             if executable_ref_same(
-                    redirect_sources.get(prior).unwrap(), source) {
+                    redirects.get(prior).unwrap().source, source) {
                 panic("Core assembly: project executable redirect source repeats")
             }
             prior = prior + 1
@@ -6003,7 +6007,7 @@ fn assemble_all(
         let mapping = project.mappings.get(module_index).unwrap()
         let facts = with_project_effect_sources(
             frozen_facts, project_effect_sources, mapping,
-            redirect_sources, redirect_targets)
+            redirects)
         let module_body = make_module_body_ref(facts.module_key, "module-body")
         let assembly = empty_module_assembly()
         add_builtin_method_contracts(facts, assembly)
@@ -6061,13 +6065,11 @@ fn assemble_all(
 }
 pub fn assemble_single_core(facts: FrozenCoreAssemblyFacts) -> CoreAssemblyResult {
     if facts.module_order != 0 { panic("Core assembly: single module order differs") }
-    assemble_all([facts], [], [])
+    assemble_all([facts], [])
 }
 pub fn assemble_project_core(
     facts_in_topological_order: List<FrozenCoreAssemblyFacts>,
-    redirect_sources: List<ExecutableRef>,
-    redirect_targets: List<ExecutableRef>
+    redirects: List<CoreExecutableRedirect>
 ) -> CoreAssemblyResult {
-    assemble_all(
-        facts_in_topological_order, redirect_sources, redirect_targets)
+    assemble_all(facts_in_topological_order, redirects)
 }
