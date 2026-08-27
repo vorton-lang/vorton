@@ -835,82 +835,6 @@ fn flow_satisfaction_pair_active(
     false
 }
 
-fn flow_type_actual_satisfies_formal_inner(
-    nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode,
-    mut actual_path: List<CoreTypeRef>, mut formal_path: List<CoreTypeRef>
-) -> Bool {
-    if core_type_ref_same(actual.reference, formal.reference) { return true }
-    let formal_kind = flow_type_kind_tag(formal.kind)
-    let actual_kind = flow_type_kind_tag(actual.kind)
-
-    if formal_kind == FLOW_TYPE_CALLABLE &&
-       actual_kind == FLOW_TYPE_CALLABLE {
-        if actual.parameter_count != formal.parameter_count ||
-           actual.children.len() != formal.children.len() ||
-           !core_effect_contract_actual_satisfies_formal(
-                actual.callable_effects.unwrap(),
-                formal.callable_effects.unwrap()) {
-            return false
-        }
-        let mut index = 0
-        while index < actual.children.len() {
-            if !core_type_ref_same(
-                    actual.children.get(index).unwrap(),
-                    formal.children.get(index).unwrap()) {
-                return false
-            }
-            index = index + 1
-        }
-        return true
-    }
-
-    if formal_kind != FLOW_TYPE_RECORD ||
-       (actual_kind != FLOW_TYPE_STRUCT && actual_kind != FLOW_TYPE_RECORD) {
-        return false
-    }
-    if flow_satisfaction_pair_active(
-            actual.reference, formal.reference, actual_path, formal_path) {
-        return true
-    }
-
-    actual_path.push(actual.reference)
-    formal_path.push(formal.reference)
-    let mut satisfied = true
-    for required in formal.nominal_fields {
-        let required_name = flow_nominal_field_record_name(required)
-        let required_type = flow_satisfaction_type_node(nodes, required.ty)
-        let mut found = false
-        for candidate in actual.nominal_fields {
-            match flow_satisfaction_field_name(candidate, actual_kind) {
-                some(name) => if name == required_name &&
-                        flow_type_actual_satisfies_formal_inner(
-                            nodes,
-                            flow_satisfaction_type_node(nodes, candidate.ty),
-                            required_type, actual_path, formal_path) {
-                    found = true
-                },
-                none => {}
-            }
-        }
-        if !found { satisfied = false }
-    }
-    let _ = actual_path.pop()
-    let _ = formal_path.pop()
-    satisfied
-}
-
-// The sole directional compatibility relation.  Record rows are already
-// frozen to required-field logical contracts.  Callable parameter/result
-// references stay exact; only their formal effect contract may admit the one
-// explicit instantiation above.  This is not function variance or general
-// function subtyping.  Satisfaction never creates a value/view or changes the
-// actual slot's physical type.
-pub fn flow_type_actual_satisfies_formal(
-    nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode
-) -> Bool {
-    flow_type_actual_satisfies_formal_inner(nodes, actual, formal, [], [])
-}
-
 fn substituted_parameter_replacement(
     substitutions: List<FlowTypeSubstitution>, parameter: FlowGenericParamFact
 ) -> CoreTypeRef? {
@@ -927,6 +851,34 @@ fn substituted_parameter_replacement(
     found
 }
 
+fn exact_record_shape_satisfies(
+    nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode,
+    substitutions: List<FlowTypeSubstitution>,
+    actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
+) -> Bool {
+    if actual.nominal_fields.len() != formal.nominal_fields.len() {
+        return false
+    }
+    let mut index = 0
+    while index < actual.nominal_fields.len() {
+        let actual_field = actual.nominal_fields.get(index).unwrap()
+        let formal_field = formal.nominal_fields.get(index).unwrap()
+        if !flow_field_identity_same(
+                actual_field.identity, formal_field.identity) ||
+           !optional_record_names_same(
+                actual_field.record_name, formal_field.record_name) ||
+           !flow_type_actual_satisfies_formal_inner(
+                nodes,
+                flow_satisfaction_type_node(nodes, actual_field.ty),
+                flow_satisfaction_type_node(nodes, formal_field.ty),
+                substitutions, false, actual_path, formal_path) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
 fn substituted_effect_atom_matches(
     nodes: List<FlowTypeNode>, actual: CoreEffectAtom,
     formal: CoreEffectAtom, substitutions: List<FlowTypeSubstitution>,
@@ -935,11 +887,11 @@ fn substituted_effect_atom_matches(
     let kind = core_effect_atom_kind_tag(formal)
     if core_effect_atom_kind_tag(actual) != kind { return false }
     if kind == 0 || kind == 1 {
-        return flow_type_actual_satisfies_substituted_formal_inner(
+        return flow_type_actual_satisfies_formal_inner(
             nodes,
             flow_satisfaction_type_node(nodes, core_effect_atom_type(actual)),
             flow_satisfaction_type_node(nodes, core_effect_atom_type(formal)),
-            substitutions, actual_path, formal_path)
+            substitutions, false, actual_path, formal_path)
     }
     if kind == 2 { return true }
     if kind == 3 {
@@ -954,13 +906,13 @@ fn substituted_effect_atom_matches(
         let formal_args = core_effect_atom_type_arguments(formal)
         let mut index = 0
         while index < actual_args.len() {
-            if !flow_type_actual_satisfies_substituted_formal_inner(
+            if !flow_type_actual_satisfies_formal_inner(
                     nodes,
                     flow_satisfaction_type_node(
                         nodes, actual_args.get(index).unwrap()),
                     flow_satisfaction_type_node(
                         nodes, formal_args.get(index).unwrap()),
-                    substitutions, actual_path, formal_path) {
+                    substitutions, false, actual_path, formal_path) {
                 return false
             }
             index = index + 1
@@ -977,6 +929,9 @@ fn substituted_effect_contract_satisfies(
     formal: CoreEffectContract, substitutions: List<FlowTypeSubstitution>,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
 ) -> Bool {
+    if substitutions.len() == 0 {
+        return core_effect_contract_actual_satisfies_formal(actual, formal)
+    }
     let actual_atoms = core_effect_set_atoms(core_effect_contract_exact(actual))
     let formal_atoms = core_effect_set_atoms(core_effect_contract_exact(formal))
     if core_effect_contract_parameter(formal).is_none() &&
@@ -998,9 +953,10 @@ fn substituted_effect_contract_satisfies(
     true
 }
 
-fn flow_type_actual_satisfies_substituted_formal_inner(
+fn flow_type_actual_satisfies_formal_inner(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode,
     substitutions: List<FlowTypeSubstitution>,
+    allow_record_widening: Bool,
     mut actual_path: List<CoreTypeRef>, mut formal_path: List<CoreTypeRef>
 ) -> Bool {
     if core_type_ref_same(actual.reference, formal.reference) { return true }
@@ -1014,84 +970,125 @@ fn flow_type_actual_satisfies_substituted_formal_inner(
             none => false
         }
     }
-    if formal_kind == FLOW_TYPE_RECORD &&
-       (actual_kind == FLOW_TYPE_STRUCT || actual_kind == FLOW_TYPE_RECORD) {
+    if formal_kind == FLOW_TYPE_CALLABLE &&
+       actual_kind == FLOW_TYPE_CALLABLE {
+        if actual.parameter_count != formal.parameter_count ||
+           actual.children.len() != formal.children.len() ||
+           !substituted_effect_contract_satisfies(
+                nodes, actual.callable_effects.unwrap(),
+                formal.callable_effects.unwrap(), substitutions,
+                actual_path, formal_path) {
+            return false
+        }
+        let mut index = 0
+        while index < actual.children.len() {
+            if !flow_type_actual_satisfies_formal_inner(
+                    nodes,
+                    flow_satisfaction_type_node(
+                        nodes, actual.children.get(index).unwrap()),
+                    flow_satisfaction_type_node(
+                        nodes, formal.children.get(index).unwrap()),
+                    substitutions, false, actual_path, formal_path) {
+                return false
+            }
+            index = index + 1
+        }
+        return true
+    }
+    if substitutions.len() != 0 && actual_kind == formal_kind {
+        if formal_kind == FLOW_TYPE_STRUCT ||
+           formal_kind == FLOW_TYPE_ENUM ||
+           formal_kind == FLOW_TYPE_EXTERN {
+            if !symbol_ref_same(actual.nominal.unwrap(), formal.nominal.unwrap()) ||
+               actual.generic_arguments.len() != formal.generic_arguments.len() {
+                return false
+            }
+            let mut index = 0
+            while index < actual.generic_arguments.len() {
+                if !flow_type_actual_satisfies_formal_inner(
+                        nodes,
+                        flow_satisfaction_type_node(
+                            nodes, actual.generic_arguments.get(index).unwrap()),
+                        flow_satisfaction_type_node(
+                            nodes, formal.generic_arguments.get(index).unwrap()),
+                        substitutions, false, actual_path, formal_path) {
+                    return false
+                }
+                index = index + 1
+            }
+            return true
+        }
+        if formal_kind == FLOW_TYPE_TUPLE || formal_kind == FLOW_TYPE_PTR {
+            if actual.children.len() != formal.children.len() { return false }
+            let mut index = 0
+            while index < actual.children.len() {
+                if !flow_type_actual_satisfies_formal_inner(
+                        nodes,
+                        flow_satisfaction_type_node(
+                            nodes, actual.children.get(index).unwrap()),
+                        flow_satisfaction_type_node(
+                            nodes, formal.children.get(index).unwrap()),
+                        substitutions, false, actual_path, formal_path) {
+                    return false
+                }
+                index = index + 1
+            }
+            return true
+        }
+        if formal_kind == FLOW_TYPE_RECORD && !allow_record_widening {
+            return exact_record_shape_satisfies(
+                nodes, actual, formal, substitutions,
+                actual_path, formal_path)
+        }
+    }
+    if !allow_record_widening || formal_kind != FLOW_TYPE_RECORD ||
+       (actual_kind != FLOW_TYPE_STRUCT && actual_kind != FLOW_TYPE_RECORD) {
+        return false
+    }
+    if formal_kind == FLOW_TYPE_RECORD {
         if flow_satisfaction_pair_active(
                 actual.reference, formal.reference,
                 actual_path, formal_path) { return true }
         actual_path.push(actual.reference)
         formal_path.push(formal.reference)
+        let mut satisfied = true
         for required in formal.nominal_fields {
             let required_name = flow_nominal_field_record_name(required)
             let mut found = false
             for candidate in actual.nominal_fields {
                 match flow_satisfaction_field_name(candidate, actual_kind) {
                     some(name) => if name == required_name &&
-                            flow_type_actual_satisfies_substituted_formal_inner(
+                            flow_type_actual_satisfies_formal_inner(
                                 nodes,
                                 flow_satisfaction_type_node(nodes, candidate.ty),
                                 flow_satisfaction_type_node(nodes, required.ty),
-                                substitutions, actual_path, formal_path) {
+                                substitutions, true,
+                                actual_path, formal_path) {
                         found = true
                     },
                     none => {}
                 }
             }
-            if !found { return false }
+            if !found { satisfied = false }
         }
-        return true
+        let _ = actual_path.pop()
+        let _ = formal_path.pop()
+        return satisfied
     }
-    if actual_kind != formal_kind { return false }
-    if formal_kind == FLOW_TYPE_CALLABLE {
-        if actual.parameter_count != formal.parameter_count ||
-           actual.children.len() != formal.children.len() ||
-           !substituted_effect_contract_satisfies(
-                nodes,
-                actual.callable_effects.unwrap(),
-                formal.callable_effects.unwrap(), substitutions,
-                actual_path, formal_path) {
-            return false
-        }
-    } else if formal_kind == FLOW_TYPE_STRUCT ||
-              formal_kind == FLOW_TYPE_ENUM ||
-              formal_kind == FLOW_TYPE_EXTERN {
-        if !symbol_ref_same(actual.nominal.unwrap(), formal.nominal.unwrap()) ||
-           actual.generic_arguments.len() != formal.generic_arguments.len() {
-            return false
-        }
-        let mut argument = 0
-        while argument < actual.generic_arguments.len() {
-            if !flow_type_actual_satisfies_substituted_formal_inner(
-                    nodes,
-                    flow_satisfaction_type_node(
-                        nodes, actual.generic_arguments.get(argument).unwrap()),
-                    flow_satisfaction_type_node(
-                        nodes, formal.generic_arguments.get(argument).unwrap()),
-                    substitutions, actual_path, formal_path) {
-                return false
-            }
-            argument = argument + 1
-        }
-        return true
-    } else if formal_kind != FLOW_TYPE_TUPLE &&
-              formal_kind != FLOW_TYPE_PTR {
-        return false
-    }
-    if actual.children.len() != formal.children.len() { return false }
-    let mut child = 0
-    while child < actual.children.len() {
-        if !flow_type_actual_satisfies_substituted_formal_inner(
-                nodes,
-                flow_satisfaction_type_node(
-                    nodes, actual.children.get(child).unwrap()),
-                flow_satisfaction_type_node(
-                    nodes, formal.children.get(child).unwrap()),
-                substitutions, actual_path, formal_path) {
-            return false
-        }
-        child = child + 1
-    }
-    true
+    false
+}
+
+// The sole directional compatibility relation.  Record rows are already
+// frozen to required-field logical contracts.  Callable parameter/result
+// shapes stay exact; generic calls may replace only an exact declared formal
+// parameter node.  Only the effect contract keeps its existing directional
+// compatibility.  Satisfaction never creates a value/view or changes the
+// actual slot's physical type.
+pub fn flow_type_actual_satisfies_formal(
+    nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode
+) -> Bool {
+    flow_type_actual_satisfies_formal_inner(
+        nodes, actual, formal, [], true, [], [])
 }
 
 // Direct generic calls carry an explicit declared-formal -> actual map.  This
@@ -1102,10 +1099,10 @@ pub fn flow_type_actual_satisfies_substituted_formal(
     nodes: List<FlowTypeNode>, actual: CoreTypeRef, formal: CoreTypeRef,
     substitutions: List<FlowTypeSubstitution>
 ) -> Bool {
-    flow_type_actual_satisfies_substituted_formal_inner(
+    flow_type_actual_satisfies_formal_inner(
         nodes, flow_satisfaction_type_node(nodes, actual),
         flow_satisfaction_type_node(nodes, formal),
-        substitutions, [], [])
+        substitutions, true, [], [])
 }
 
 fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {
