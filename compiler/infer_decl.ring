@@ -2825,8 +2825,18 @@ fn check_fn_decl_transaction(
 
     let saved_tp_scope = map_clone(ctx.type_param_scope)
     let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
+    let source_type_var_ids = exact_source_type_var_ids(
+        match registration_scheme {
+            some(value) => value,
+            none => panic("function HIR: registration scheme is absent")
+        }, source_type_var_offset, type_params.len())
+    let mut source_type_var_index = 0
     for tp in type_params {
-        let tv = ctx.env.fresh_var()
+        let tv = Type::TypeVar {
+            id: source_type_var_ids.get(source_type_var_index).unwrap(),
+            name: some(tp.name)
+        }
+        source_type_var_index = source_type_var_index + 1
         ctx.type_param_scope.insert(tp.name, tv)
         ctx.env.bind_mono(tp.name, tv)
     }
