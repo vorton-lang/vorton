@@ -726,23 +726,29 @@ fn scan_derived(
 }
 
 pub fn freeze_typed_effect_formals(
-    program: HProgram, env: TypeEnv
+    program: HProgram, env: TypeEnv, module_order: Int
 ) -> TypedEffectFreezeResult {
+    if module_order < 0 {
+        panic("typed effect freeze: invalid module order")
+    }
     let state = TypedEffectFreezeState {
         env: env, facts: [], callables: [], visited_nominals: []
     }
     scan_decls(state, program.decls)
     scan_derived(state, program.derived_impls)
-    for fact in builtin_method_contract_facts(env) {
-        let executable = make_named_executable_ref(intrinsic_ref_symbol(
-            builtin_method_contract_intrinsic(fact)))
-        let reference = executable_origin(executable)
-        let scheme = builtin_method_contract_scheme(fact).ty
-        scan_type(state, scheme, reference)
-        match scheme {
-            Type::FnType { effects, .. } => register_callable_effect(
-                state, executable, effects),
-            _ => panic("typed effect freeze: builtin contract is not callable")
+    if module_order == 0 {
+        for fact in builtin_method_contract_facts(env) {
+            let executable = make_named_executable_ref(intrinsic_ref_symbol(
+                builtin_method_contract_intrinsic(fact)))
+            let reference = executable_origin(executable)
+            let scheme = builtin_method_contract_scheme(fact).ty
+            scan_type(state, scheme, reference)
+            match scheme {
+                Type::FnType { effects, .. } => register_callable_effect(
+                    state, executable, effects),
+                _ => panic(
+                    "typed effect freeze: builtin contract is not callable")
+            }
         }
     }
     TypedEffectFreezeResult {
