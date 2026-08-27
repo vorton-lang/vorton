@@ -99,6 +99,7 @@ use core_type_source::{
     flow_generic_param_fact_same,
     flow_type_node_generic_param,
     flow_type_actual_satisfies_substituted_formal,
+    flow_effect_actual_satisfies_substituted_formal,
     FLOW_TYPE_INT, FLOW_TYPE_FLOAT, FLOW_TYPE_STR, FLOW_TYPE_BOOL,
     FLOW_TYPE_UNIT, FLOW_TYPE_NEVER, FLOW_TYPE_STRUCT, FLOW_TYPE_ENUM,
     FLOW_TYPE_TUPLE, FLOW_TYPE_RECORD, FLOW_TYPE_CALLABLE,
@@ -822,6 +823,7 @@ enum FlowOperationValue {
         executable: ExecutableRef,
         evidence: List<FlowEvidenceRef>,
         type_substitutions: List<FlowTypeSubstitution>,
+        effect_substitutions: List<CoreEffectSubstitution>,
         effects: CoreEffectInstantiation
     }
 }
@@ -1076,6 +1078,7 @@ pub fn make_flow_callable_value_contract(
     executable: ExecutableRef, target_type: CoreTypeRef,
     evidence: List<FlowEvidenceRef>,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<CoreEffectSubstitution>,
     effects: CoreEffectInstantiation
 ) -> FlowOperationContract {
     make_flow_operation_contract(
@@ -1083,6 +1086,11 @@ pub fn make_flow_callable_value_contract(
             executable: executable, evidence: copy_flow_evidence(evidence),
             type_substitutions:
                 copy_flow_type_substitutions(type_substitutions),
+            effect_substitutions: effect_substitutions.map(fn(item) {
+                make_core_effect_substitution(
+                    core_effect_substitution_parameter(item),
+                    core_effect_substitution_replacement(item))
+            }),
             effects: make_core_effect_instantiation(
                 core_effect_instantiation_source(effects),
                 core_effect_instantiation_substitutions(effects),
@@ -4205,10 +4213,11 @@ fn validate_direct_calls(
                                     substitutions, type_nodes) {
                                 panic("FlowIR: direct callable contract differs")
                             }
-                            if !core_effect_contract_same(
-                                    candidate.effects,
+                            if !flow_effect_actual_satisfies_substituted_formal(
+                                    type_nodes,
                                     core_effect_instantiation_source(
-                                        target.effects)) {
+                                        target.effects), candidate.effects,
+                                    substitutions) {
                                 panic("FlowIR: direct callable effect source differs")
                             }
                             let requirements =
@@ -4413,24 +4422,6 @@ fn validate_flow_type_substitutions_for_callable(
     substitutions: List<FlowTypeSubstitution>, callable: FlowCallable,
     type_nodes: List<FlowTypeNode>, message: Str
 ) {
-    if callable.type_formals.len() == 0 {
-        if substitutions.len() == 0 { return }
-        if !executable_ref_is_named(callable.reference) { panic(message) }
-        let owner = executable_ref_named_symbol(callable.reference)
-        let mut ordinal = 0
-        for substitution in substitutions {
-            let parameter = flow_type_substitution_parameter(substitution)
-            if !symbol_ref_same(flow_generic_param_owner(parameter), owner) ||
-               flow_generic_param_index(parameter) != ordinal ||
-               flow_generic_param_arity(parameter) != substitutions.len() {
-                panic(message)
-            }
-            let _ = type_node_for(
-                type_nodes, flow_type_substitution_replacement(substitution))
-            ordinal = ordinal + 1
-        }
-        return
-    }
     let mut prior_index = 0 - 1
     for substitution in substitutions {
         let parameter = flow_type_substitution_parameter(substitution)
@@ -4457,9 +4448,40 @@ fn validate_flow_type_substitutions_for_callable(
     }
 }
 
+fn validate_flow_effect_substitutions_for_callable(
+    substitutions: List<CoreEffectSubstitution>, callable: FlowCallable,
+    type_nodes: List<FlowTypeNode>, message: Str
+) {
+    if substitutions.len() != callable.effect_formals.len() {
+        panic(message)
+    }
+    let mut index = 0
+    while index < substitutions.len() {
+        let substitution = substitutions.get(index).unwrap()
+        if !effect_param_ref_same(
+                core_effect_substitution_parameter(substitution),
+                callable.effect_formals.get(index).unwrap()) {
+            panic(message)
+        }
+        for atom in core_effect_set_atoms(core_effect_contract_exact(
+                core_effect_substitution_replacement(substitution))) {
+            let kind = core_effect_atom_kind_tag(atom)
+            if kind == 0 || kind == 1 {
+                let _ = type_node_for(type_nodes, core_effect_atom_type(atom))
+            } else if kind == 3 {
+                for ty in core_effect_atom_type_arguments(atom) {
+                    let _ = type_node_for(type_nodes, ty)
+                }
+            }
+        }
+        index = index + 1
+    }
+}
+
 fn validate_callable_value_contract(
     target_type: CoreTypeRef, callable: FlowCallable,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<CoreEffectSubstitution>,
     effects: CoreEffectInstantiation,
     type_nodes: List<FlowTypeNode>
 ) {
@@ -4470,11 +4492,15 @@ fn validate_callable_value_contract(
     validate_flow_type_substitutions_for_callable(
         type_substitutions, callable, type_nodes,
         "FlowIR: callable value type substitution differs")
+    validate_flow_effect_substitutions_for_callable(
+        effect_substitutions, callable, type_nodes,
+        "FlowIR: callable value effect substitution differs")
     if !flow_type_actual_satisfies_substituted_formal(
             type_nodes, target_type, callable.header_type,
             type_substitutions) ||
-       !core_effect_contract_same(
-            callable.effects, core_effect_instantiation_source(effects)) ||
+       !flow_effect_actual_satisfies_substituted_formal(
+            type_nodes, core_effect_instantiation_source(effects),
+            callable.effects, type_substitutions) ||
        !core_effect_contract_same(
             node.callable_effects.unwrap(),
             core_effect_instantiation_result(effects)) {
@@ -4687,7 +4713,7 @@ fn validate_typed_instructions(
                             } => {
                                 let callable = callable_for_ref(callables, executable)
                                 validate_callable_value_contract(
-                                    operation.target_type, callable, [],
+                                    operation.target_type, callable, [], [],
                                     make_explicit_core_effect_instantiation(
                                         callable.effects, callable.effects,
                                         callable.effects), type_nodes)
@@ -4730,12 +4756,13 @@ fn validate_typed_instructions(
                             },
                             FlowOperationValue::CallableValueOperationValue {
                                 executable, evidence, type_substitutions,
-                                effects
+                                effect_substitutions, effects
                             } => {
                                 let callable = callable_for_ref(callables, executable)
                                 validate_callable_value_contract(
                                     operation.target_type, callable,
-                                    type_substitutions, effects, type_nodes)
+                                    type_substitutions, effect_substitutions,
+                                    effects, type_nodes)
                                 for item in evidence {
                                     validate_dictionary_evidence(
                                         flow_evidence_dict(item), body)
@@ -5131,7 +5158,8 @@ fn encode_operation(value: FlowOperationContract) -> Str {
             }
         },
         FlowOperationValue::CallableValueOperationValue {
-            executable, evidence, type_substitutions, effects
+            executable, evidence, type_substitutions,
+            effect_substitutions, effects
         } => {
             parts.push("callable:${encode_executable(executable)}")
             for item in evidence {
@@ -5147,6 +5175,14 @@ fn encode_operation(value: FlowOperationContract) -> Str {
                     flow_generic_param_arity(parameter).to_str()}=${
                     encode_type_ref(flow_type_substitution_replacement(
                         substitution))}")
+            }
+            for substitution in effect_substitutions {
+                let parameter = core_effect_substitution_parameter(substitution)
+                parts.push("effect:${encode_origin(
+                    effect_param_owner(parameter))}/${
+                    effect_param_ordinal(parameter).to_str()}=${
+                    encode_effect_contract(
+                        core_effect_substitution_replacement(substitution))}")
             }
         }
     }

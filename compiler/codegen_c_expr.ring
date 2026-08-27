@@ -490,6 +490,7 @@ fn gen_c_extern_closure_wrapper(
     }
     let result = gen_c_expr(ctx, HExpr::Call {
         callee: synthetic_callee, args: synthetic_args, type_args: [],
+        effect_instantiation: none,
         resolved_dicts: [], handled_evidence: [],
         callee_ref: none, method_ref: none,
         system_host: none,

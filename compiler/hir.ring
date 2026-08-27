@@ -488,8 +488,15 @@ pub struct HCallableEffectActual {
 pub struct HCallableEffectInstantiation {
     pub substitutions: List<HCallableEffectActual>
 }
+pub struct HCallableTypeActual {
+    pub owner: SymbolRef,
+    pub source_type_var_id: Int,
+    pub ordinal: Int,
+    pub arity: Int,
+    pub actual: Type
+}
 pub struct HCallableValueInstantiation {
-    pub type_args: List<Type>,
+    pub type_args: List<HCallableTypeActual>,
     pub effects: HCallableEffectInstantiation?
 }
 
@@ -508,7 +515,14 @@ pub enum HExpr {
             eq_plan: HOperatorPlan?, ord_plan: HOperatorPlan?,
             ty: Type, effects: EffectRow, span: Span },
     UnaryOp { op: UnaryOp, operand: HExpr, ty: Type, effects: EffectRow, span: Span },
-    Call { callee: HExpr, args: List<HExpr>, type_args: List<Type>, resolved_dicts: List<DictRef>, handled_evidence: List<HandledEvidenceRef>, callee_ref: CalleeRef?, method_ref: MethodCallRef?, system_host: SystemHostCallableRef?, ty: Type, effects: EffectRow, span: Span },
+    Call { callee: HExpr, args: List<HExpr>,
+           type_args: List<HCallableTypeActual>,
+           effect_instantiation: HCallableEffectInstantiation?,
+           resolved_dicts: List<DictRef>,
+           handled_evidence: List<HandledEvidenceRef>,
+           callee_ref: CalleeRef?, method_ref: MethodCallRef?,
+           system_host: SystemHostCallableRef?, ty: Type,
+           effects: EffectRow, span: Span },
     FieldAccess { receiver: HExpr, field: Str,
                   access_kind: HFieldAccessKind,
                   projection: HProjectionRef?, ty: Type,
@@ -1039,7 +1053,8 @@ pub fn remap_hir_handled_evidence(
             ty: ty, effects: effects, span: span
         },
         HExpr::Call {
-            callee, args, type_args, resolved_dicts, handled_evidence,
+            callee, args, type_args, effect_instantiation,
+            resolved_dicts, handled_evidence,
             callee_ref, method_ref, system_host, ty, effects, span
         } => {
             let mut remapped_args: List<HExpr> = []
@@ -1050,7 +1065,9 @@ pub fn remap_hir_handled_evidence(
             HExpr::Call {
                 callee: remap_hir_handled_evidence(
                     callee, sources, targets),
-                args: remapped_args, type_args: type_args,
+                args: remapped_args,
+                type_args: type_args,
+                effect_instantiation: effect_instantiation,
                 resolved_dicts: resolved_dicts,
                 handled_evidence: remap_h_handled_evidence_refs(
                     handled_evidence, sources, targets),
@@ -1779,6 +1796,52 @@ fn validate_callable_handled_bindings(
     }
 }
 
+fn validate_callable_type_actuals(
+    values: List<HCallableTypeActual>, callee: CalleeRef?
+) {
+    if values.len() == 0 { return }
+    let owner = match callee {
+        some(exact) => if callee_ref_is_named(exact) {
+            callee_ref_named_symbol(exact)
+        } else { panic("HIR callable type plan: callee is not named") },
+        none => panic("HIR callable type plan: callee is absent")
+    }
+    let mut prior = 0 - 1
+    for value in values {
+        if !symbol_ref_same(value.owner, owner) ||
+           value.source_type_var_id < 0 || value.ordinal <= prior ||
+           value.ordinal < 0 || value.ordinal >= value.arity ||
+           value.arity <= 0 {
+            panic("HIR callable type plan: formal identity/order differs")
+        }
+        prior = value.ordinal
+    }
+}
+
+fn validate_callable_effect_instantiation(
+    value: HCallableEffectInstantiation?
+) {
+    match value {
+        some(instantiation) => {
+            let mut left = 0
+            while left < instantiation.substitutions.len() {
+                let source = instantiation.substitutions.get(left).unwrap().source
+                let mut right = left + 1
+                while right < instantiation.substitutions.len() {
+                    if effect_param_ref_same(
+                            source, instantiation.substitutions.get(
+                                right).unwrap().source) {
+                        panic("HIR callable effect plan: source repeats")
+                    }
+                    right = right + 1
+                }
+                left = left + 1
+            }
+        },
+        none => {}
+    }
+}
+
 fn validate_hir_expr(
     expr: HExpr, mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
@@ -1832,27 +1895,10 @@ fn validate_hir_expr(
                        } {
                         panic("HIR Ident: callable instantiation lacks a named materialized callable")
                     }
-                    match instantiation.effects {
-                        some(effect_instantiation) => {
-                            let mut left = 0
-                            while left < effect_instantiation.substitutions.len() {
-                                let source = effect_instantiation.substitutions.get(
-                                    left).unwrap().source
-                                let mut right = left + 1
-                                while right < effect_instantiation.substitutions.len() {
-                                    if effect_param_ref_same(
-                                            source,
-                                            effect_instantiation.substitutions.get(
-                                                right).unwrap().source) {
-                                        panic("HIR Ident: callable effect source repeats")
-                                    }
-                                    right = right + 1
-                                }
-                                left = left + 1
-                            }
-                        },
-                        none => {}
-                    }
+                    validate_callable_type_actuals(
+                        instantiation.type_args, callee_identity)
+                    validate_callable_effect_instantiation(
+                        instantiation.effects)
                 },
                 none => {}
             }
@@ -1875,12 +1921,15 @@ fn validate_hir_expr(
         },
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
-        HExpr::Call { callee, args, handled_evidence,
+        HExpr::Call { callee, args, type_args, effect_instantiation,
+                      handled_evidence,
                       callee_ref, method_ref, system_host,
                       effects, .. } => {
             if callee_ref.is_some() && method_ref.is_some() {
                 panic("HIR call: ordinary and method identities overlap")
             }
+            validate_callable_type_actuals(type_args, callee_ref)
+            validate_callable_effect_instantiation(effect_instantiation)
             match callee {
                 HExpr::Ident { def_id: some(_), .. } => {
                     if method_ref.is_none() && callee_ref.is_none() {

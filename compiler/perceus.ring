@@ -971,7 +971,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
+        HExpr::Call { callee, args, type_args, effect_instantiation,
+                      resolved_dicts, handled_evidence, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             // Callee is a borrow read (FieldAccess receiver / Ident) — normalise its
             // subexprs but it is not itself a materialisable value.
@@ -994,6 +995,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 new_args.push(anf_operand(a, hoists, externs, counter))
             }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
+                effect_instantiation: effect_instantiation,
                 resolved_dicts: resolved_dicts,
                 handled_evidence: handled_evidence, callee_ref: callee_ref,
                 method_ref: method_ref, system_host: system_host,
@@ -2734,7 +2736,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Call { callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
+        HExpr::Call { callee, args, type_args, effect_instantiation,
+                      resolved_dicts, handled_evidence, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             // Callee is a borrow.  Arguments BORROW by default (the callee does not
             // drop them — point 4) EXCEPT two ownership-taking sinks:
@@ -2766,6 +2769,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 i = i + 1
             }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
+                effect_instantiation: effect_instantiation,
                 resolved_dicts: resolved_dicts,
                 handled_evidence: handled_evidence, callee_ref: callee_ref,
                 method_ref: method_ref, system_host: system_host,

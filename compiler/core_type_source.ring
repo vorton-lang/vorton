@@ -1181,6 +1181,15 @@ pub fn flow_type_actual_matches_formal_exact(
         substitutions, effect_substitutions, true, false, [], [])
 }
 
+pub fn flow_effect_actual_satisfies_substituted_formal(
+    nodes: List<FlowTypeNode>, actual: CoreEffectContract,
+    formal: CoreEffectContract,
+    substitutions: List<FlowTypeSubstitution>
+) -> Bool {
+    substituted_effect_contract_satisfies(
+        nodes, actual, formal, substitutions, [], false, [], [])
+}
+
 fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {
     let mut result: List<FlowTypeNode> = []
     for value in values {

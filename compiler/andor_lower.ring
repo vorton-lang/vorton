@@ -202,12 +202,14 @@ fn al_expr(e: HExpr) -> HExpr {
         },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: al_expr(operand), ty: ty, effects: effects, span: span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
+        HExpr::Call { callee, args, type_args, effect_instantiation,
+                      resolved_dicts, handled_evidence, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             let new_callee = al_expr(callee)
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(al_expr(a)) }
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
+                effect_instantiation: effect_instantiation,
                 resolved_dicts: resolved_dicts,
                 handled_evidence: handled_evidence, callee_ref: callee_ref,
                 method_ref: method_ref, system_host: system_host,

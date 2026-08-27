@@ -1373,6 +1373,7 @@ fn simple_core_expr(
         }
         return SerializedOperand { prefix: prefix, value: HExpr::Call {
             callee: call_callee, args: args, type_args: [],
+            effect_instantiation: none,
             resolved_dicts: evidence,
             handled_evidence:
                 core_expr_call_handled_evidence(expr).map(fn(value) {
@@ -1432,7 +1433,8 @@ fn simple_core_expr(
             callee: executable_ident(
                 ctx.projection, executable, callable_fn_type(callable)),
             args: args,
-            type_args: [], resolved_dicts: [],
+            type_args: [], effect_instantiation: none,
+            resolved_dicts: [],
             handled_evidence: [],
             callee_ref: some(make_named_callee_ref(
                 executable_ref_named_symbol(executable))), method_ref: none,

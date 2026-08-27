@@ -136,6 +136,7 @@ use core_type_source::{
     flow_type_actual_satisfies_substituted_formal,
     FlowEffectParamSubstitution, make_flow_effect_param_substitution,
     flow_type_actual_matches_formal_exact,
+    flow_effect_actual_satisfies_substituted_formal,
     remap_flow_call_contract
 }
 
@@ -659,15 +660,6 @@ fn core_executable_redirect_for(
     }
     found
 }
-fn redirected_core_executable(
-    value: ExecutableRef, redirects: List<CoreExecutableRedirect>
-) -> ExecutableRef {
-    match core_executable_redirect_for(value, redirects) {
-        some(redirect) => redirect.target,
-        none => value
-    }
-}
-
 const CORE_CALLEE_DIRECT: Int = 0
 const CORE_CALLEE_LOCAL: Int = 1
 const CORE_CALLEE_DYNAMIC: Int = 2
@@ -1356,6 +1348,7 @@ enum CoreExprValue {
         executable: ExecutableRef,
         evidence: List<CoreEvidenceRef>,
         type_substitutions: List<FlowTypeSubstitution>,
+        effect_substitutions: List<CoreEffectSubstitution>,
         effects: CoreEffectInstantiation
     },
     ReadExprValue(SlotRef),
@@ -1555,6 +1548,7 @@ pub fn make_core_callable_value_expr(
     ty: CoreTypeRef, origin: OriginRef, executable: ExecutableRef,
     evidence: List<CoreEvidenceRef>,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<CoreEffectSubstitution>,
     effects: CoreEffectInstantiation
 ) -> CoreExpr {
     make_core_expr(ty, make_core_effect_set([]), origin,
@@ -1562,6 +1556,11 @@ pub fn make_core_callable_value_expr(
             executable: executable, evidence: copy_evidence(evidence),
             type_substitutions:
                 copy_flow_type_substitutions(type_substitutions),
+            effect_substitutions: effect_substitutions.map(fn(item) {
+                make_core_effect_substitution(
+                    core_effect_substitution_parameter(item),
+                    core_effect_substitution_replacement(item))
+            }),
             effects: make_core_effect_instantiation(
                 core_effect_instantiation_source(effects),
                 core_effect_instantiation_substitutions(effects),
@@ -1999,6 +1998,20 @@ pub fn core_expr_callable_effect_instantiation(
 ) -> CoreEffectInstantiation {
     match value.value {
         CoreExprValue::CallableValueExprValue { effects, .. } => effects,
+        _ => panic("CoreHIR: expression is not an exact callable value")
+    }
+}
+pub fn core_expr_callable_effect_substitutions(
+    value: CoreExpr
+) -> List<CoreEffectSubstitution> {
+    match value.value {
+        CoreExprValue::CallableValueExprValue {
+            effect_substitutions, ..
+        } => effect_substitutions.map(fn(item) {
+            make_core_effect_substitution(
+                core_effect_substitution_parameter(item),
+                core_effect_substitution_replacement(item))
+        }),
         _ => panic("CoreHIR: expression is not an exact callable value")
     }
 }
@@ -3283,23 +3296,26 @@ struct CoreRewriteContext {
     mapping: List<Int>?,
     module_key: Str?,
     redirects: List<CoreExecutableRedirect>,
-    redirect_graph: CoreTypeGraph?
+    redirect_graph: CoreTypeGraph?,
+    redirect_callables: List<CoreCallableContract>
 }
 fn core_type_rewrite_context(
     mapping: List<Int>, module_key: Str
 ) -> CoreRewriteContext {
     CoreRewriteContext {
         mapping: some(mapping), module_key: some(module_key), redirects: [],
-        redirect_graph: none
+        redirect_graph: none, redirect_callables: []
     }
 }
 fn core_executable_rewrite_context(
-    redirects: List<CoreExecutableRedirect>, graph: CoreTypeGraph
+    redirects: List<CoreExecutableRedirect>, graph: CoreTypeGraph,
+    callables: List<CoreCallableContract>
 ) -> CoreRewriteContext {
     CoreRewriteContext {
         mapping: none, module_key: none,
         redirects: copy_core_executable_redirects(redirects),
-        redirect_graph: some(graph)
+        redirect_graph: some(graph),
+        redirect_callables: copy_core_callables(callables)
     }
 }
 fn remap_core_type_reference(
@@ -3367,21 +3383,6 @@ pub fn remap_core_effect_contract_types(
         value, core_type_rewrite_context(mapping, module_key))
 }
 
-fn redirected_core_type_reference(
-    value: CoreTypeRef, redirect: CoreExecutableRedirect
-) -> CoreTypeRef {
-    let mut found: CoreTypeRef? = none
-    for pair in redirect.type_formals {
-        if core_type_ref_same(pair.0, value) {
-            if found.is_some() {
-                panic("CoreHIR: redirect type formal source repeats")
-            }
-            found = some(pair.1)
-        }
-    }
-    match found { some(target) => target, none => value }
-}
-
 fn redirected_effect_parameter(
     value: EffectParamRef, redirect: CoreExecutableRedirect
 ) -> EffectParamRef {
@@ -3395,44 +3396,6 @@ fn redirected_effect_parameter(
         }
     }
     match found { some(target) => target, none => value }
-}
-
-fn redirected_core_effect_atom(
-    value: CoreEffectAtom, redirect: CoreExecutableRedirect
-) -> CoreEffectAtom {
-    let kind = core_effect_atom_kind_tag(value)
-    if kind == 0 {
-        make_core_fail_effect(redirected_core_type_reference(
-            core_effect_atom_type(value), redirect))
-    } else if kind == 1 {
-        make_core_mut_effect(redirected_core_type_reference(
-            core_effect_atom_type(value), redirect))
-    } else if kind == 2 {
-        make_core_unsafe_effect()
-    } else if kind == 3 {
-        make_core_handled_effect(
-            core_effect_atom_handled_ref(value),
-            core_effect_atom_type_arguments(value).map(fn(ty) {
-                redirected_core_type_reference(ty, redirect)
-            }))
-    } else if kind == 4 {
-        make_core_system_effect(core_effect_atom_system_ref(value))
-    } else {
-        panic("CoreHIR: unknown redirected effect atom")
-    }
-}
-
-fn redirected_core_effect_contract(
-    value: CoreEffectContract, redirect: CoreExecutableRedirect
-) -> CoreEffectContract {
-    make_core_effect_contract(
-        make_core_effect_set(core_effect_set_atoms(
-            core_effect_contract_exact(value)).map(fn(atom) {
-                redirected_core_effect_atom(atom, redirect)
-            })),
-        core_effect_contract_parameter(value).map(fn(parameter) {
-            redirected_effect_parameter(parameter, redirect)
-        }))
 }
 
 fn redirected_type_substitution_parameter(
@@ -3460,6 +3423,24 @@ fn redirected_type_substitution_parameter(
     }
 }
 
+fn redirect_target_effect_contract(
+    ctx: CoreRewriteContext, redirect: CoreExecutableRedirect
+) -> CoreEffectContract {
+    let mut found: CoreEffectContract? = none
+    for callable in ctx.redirect_callables {
+        if executable_ref_same(callable.reference, redirect.target) {
+            if found.is_some() {
+                panic("CoreHIR: redirect target callable repeats")
+            }
+            found = some(callable.effects)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("CoreHIR: redirect target callable is absent")
+    }
+}
+
 fn remap_core_effect_instantiation(
     value: CoreEffectInstantiation, ctx: CoreRewriteContext,
     redirect: CoreExecutableRedirect?
@@ -3477,8 +3458,11 @@ fn remap_core_effect_instantiation(
             remap_core_effect_contract(
                 core_effect_instantiation_result(value), ctx)),
         (none, none, some(exact)) => make_core_effect_instantiation(
-            redirected_core_effect_contract(
-                core_effect_instantiation_source(value), exact),
+            make_core_effect_contract(
+                core_effect_contract_exact(
+                    core_effect_instantiation_source(value)),
+                core_effect_contract_parameter(
+                    redirect_target_effect_contract(ctx, exact))),
             core_effect_instantiation_substitutions(value).map(fn(item) {
                 make_core_effect_substitution(
                     redirected_effect_parameter(
@@ -3519,8 +3503,10 @@ fn remap_handled_uses(
 fn remap_direct_callable_instantiation(
     executable: ExecutableRef,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<CoreEffectSubstitution>,
     effects: CoreEffectInstantiation, ctx: CoreRewriteContext
-) -> (ExecutableRef, List<FlowTypeSubstitution>, CoreEffectInstantiation) {
+) -> (ExecutableRef, List<FlowTypeSubstitution>,
+      List<CoreEffectSubstitution>, CoreEffectInstantiation) {
     let redirect = core_executable_redirect_for(executable, ctx.redirects)
     let substitutions = match redirect {
         some(exact) => {
@@ -3540,7 +3526,29 @@ fn remap_direct_callable_instantiation(
         })
     }
     (match redirect { some(exact) => exact.target, none => executable },
-     substitutions, remap_core_effect_instantiation(effects, ctx, redirect))
+     substitutions, remap_callable_effect_substitutions(
+        effect_substitutions, ctx, redirect),
+     remap_core_effect_instantiation(effects, ctx, redirect))
+}
+
+fn remap_callable_effect_substitutions(
+    values: List<CoreEffectSubstitution>, ctx: CoreRewriteContext,
+    redirect: CoreExecutableRedirect?
+) -> List<CoreEffectSubstitution> {
+    values.map(fn(item) { match (ctx.mapping, ctx.module_key, redirect) {
+        (some(_), some(_), none) => make_core_effect_substitution(
+            core_effect_substitution_parameter(item),
+            remap_core_effect_contract(
+                core_effect_substitution_replacement(item), ctx)),
+        (none, none, some(exact)) => make_core_effect_substitution(
+            redirected_effect_parameter(
+                core_effect_substitution_parameter(item), exact),
+            core_effect_substitution_replacement(item)),
+        (none, none, none) => make_core_effect_substitution(
+            core_effect_substitution_parameter(item),
+            core_effect_substitution_replacement(item)),
+        _ => panic("CoreHIR: callable effect rewrite context is partial")
+    }})
 }
 
 fn remap_core_callee(
@@ -3555,9 +3563,9 @@ fn remap_core_callee(
     if value.kind == CORE_CALLEE_DIRECT {
         let remapped = remap_direct_callable_instantiation(
             value.direct.unwrap(), value.type_substitutions,
-            value.effects, ctx)
+            [], value.effects, ctx)
         make_core_direct_callee(
-            remapped.0, contract, remapped.1, remapped.2)
+            remapped.0, contract, remapped.1, remapped.3)
     } else if value.kind == CORE_CALLEE_LOCAL {
         make_core_local_callee(
             value.local.unwrap(), contract,
@@ -3649,13 +3657,17 @@ fn remap_core_expr_types(
             CoreExprValue::LiteralExprValue(literal),
         CoreExprValue::CallableValueExprValue {
             executable, evidence, type_substitutions,
+            effect_substitutions,
             effects: callable_effects
         } => {
             let remapped = remap_direct_callable_instantiation(
-                executable, type_substitutions, callable_effects, ctx)
+                executable, type_substitutions, effect_substitutions,
+                callable_effects, ctx)
             CoreExprValue::CallableValueExprValue {
                 executable: remapped.0, evidence: copy_evidence(evidence),
-                type_substitutions: remapped.1, effects: remapped.2
+                type_substitutions: remapped.1,
+                effect_substitutions: remapped.2,
+                effects: remapped.3
             }
         },
         CoreExprValue::ReadExprValue(source) =>
@@ -3886,9 +3898,9 @@ pub fn remap_core_body_types(
 
 pub fn redirect_core_body_executables(
     value: CoreBody, redirects: List<CoreExecutableRedirect>,
-    graph: CoreTypeGraph
+    graph: CoreTypeGraph, callables: List<CoreCallableContract>
 ) -> CoreBody {
-    let ctx = core_executable_rewrite_context(redirects, graph)
+    let ctx = core_executable_rewrite_context(redirects, graph, callables)
     make_core_body(
         value.reference, value.origin, value.binders, value.parameter_slots,
         value.result_type, remap_core_block_types(value.body, ctx))
@@ -4183,9 +4195,10 @@ fn validate_call_signature(
                 callee.type_substitutions, graph) {
             panic("CoreHIR: direct call semantic contract differs")
         }
-        if !core_effect_contract_same(
-                candidate.effects,
-                core_effect_instantiation_source(callee.effects)) {
+        if !flow_effect_actual_satisfies_substituted_formal(
+                core_type_graph_nodes(graph),
+                core_effect_instantiation_source(callee.effects),
+                candidate.effects, callee.type_substitutions) {
             panic("CoreHIR: direct call effect source contract differs")
         }
         validate_evidence(evidence, body)
@@ -4777,24 +4790,6 @@ fn validate_type_substitutions_for_callable(
     callable: CoreCallableContract, graph: CoreTypeGraph,
     message: Str
 ) {
-    if callable.type_formals.len() == 0 {
-        if substitutions.len() == 0 { return }
-        if !executable_ref_is_named(callable.reference) { panic(message) }
-        let owner = executable_ref_named_symbol(callable.reference)
-        let mut ordinal = 0
-        for substitution in substitutions {
-            let parameter = flow_type_substitution_parameter(substitution)
-            if !symbol_ref_same(flow_generic_param_owner(parameter), owner) ||
-               flow_generic_param_index(parameter) != ordinal ||
-               flow_generic_param_arity(parameter) != substitutions.len() {
-                panic(message)
-            }
-            let _ = core_type_graph_node(
-                graph, flow_type_substitution_replacement(substitution))
-            ordinal = ordinal + 1
-        }
-        return
-    }
     let mut prior_index = 0 - 1
     for substitution in substitutions {
         let parameter = flow_type_substitution_parameter(substitution)
@@ -4821,9 +4816,33 @@ fn validate_type_substitutions_for_callable(
     }
 }
 
+fn validate_effect_substitutions_for_callable(
+    substitutions: List<CoreEffectSubstitution>,
+    callable: CoreCallableContract, graph: CoreTypeGraph,
+    message: Str
+) {
+    if substitutions.len() != callable.effect_formals.len() {
+        panic(message)
+    }
+    let mut index = 0
+    while index < substitutions.len() {
+        let substitution = substitutions.get(index).unwrap()
+        if !effect_param_ref_same(
+                core_effect_substitution_parameter(substitution),
+                callable.effect_formals.get(index).unwrap()) {
+            panic(message)
+        }
+        validate_effect_set(core_effect_contract_exact(
+            core_effect_substitution_replacement(substitution)),
+            core_type_graph_count(graph))
+        index = index + 1
+    }
+}
+
 fn validate_core_callable_value_contract(
     target_type: CoreTypeRef, callable: CoreCallableContract,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<CoreEffectSubstitution>,
     effects: CoreEffectInstantiation, graph: CoreTypeGraph
 ) {
     let node = core_type_graph_node(graph, target_type)
@@ -4834,11 +4853,16 @@ fn validate_core_callable_value_contract(
     validate_type_substitutions_for_callable(
         type_substitutions, callable, graph,
         "CoreHIR: callable value type substitution differs")
+    validate_effect_substitutions_for_callable(
+        effect_substitutions, callable, graph,
+        "CoreHIR: callable value effect substitution differs")
     if !flow_type_actual_satisfies_substituted_formal(
             core_type_graph_nodes(graph), target_type,
             callable.header_type, type_substitutions) ||
-       !core_effect_contract_same(
-            callable.effects, core_effect_instantiation_source(effects)) ||
+       !flow_effect_actual_satisfies_substituted_formal(
+            core_type_graph_nodes(graph),
+            core_effect_instantiation_source(effects), callable.effects,
+            type_substitutions) ||
        !core_effect_contract_same(
             flow_type_node_callable_effects(node),
             core_effect_instantiation_result(effects)) {
@@ -4859,11 +4883,13 @@ fn validate_expr_with_program(
             validate_core_literal_type(literal, value.ty, graph),
         CoreExprValue::CallableValueExprValue {
             executable, evidence, type_substitutions,
+            effect_substitutions,
             effects: callable_effects
         } => {
             let callable = core_callable_for(callables, executable)
             validate_core_callable_value_contract(
                 value.ty, callable, type_substitutions,
+                effect_substitutions,
                 callable_effects, graph)
             validate_evidence_with_program(evidence, body, impls)
         },

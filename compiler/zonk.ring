@@ -2,6 +2,8 @@ use types::{Type, Effect, EffectRow, StructField, RecordField,
     type_to_string}
 use ast::{Pattern, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
+    HCallableTypeActual, HCallableEffectActual,
+    HCallableEffectInstantiation,
     HStructFieldInit, HNominalStructFieldInit,
     HStringInterpPart, HForInDestructure, HLambdaCapture,
     HLetDestructureBinding, HPatternBinding, ValueBindingKind, TraitDispatch,
@@ -473,7 +475,8 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 ty: z_ty, effects: z_eff, span: z_span },
         HExpr::UnaryOp { op, operand, .. } =>
             HExpr::UnaryOp { op: op, operand: zonk_expr(ctx, operand), ty: z_ty, effects: z_eff, span: z_span },
-        HExpr::Call { callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
+        HExpr::Call { callee, args, type_args, effect_instantiation,
+                      resolved_dicts, handled_evidence, callee_ref,
                       method_ref, system_host, .. } =>
             HExpr::Call {
                 // A syntactic Ident callee uses the direct ABI and gets its
@@ -481,7 +484,24 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 // position is a value position and must form a real closure.
                 callee: zonk_direct_callee(ctx, callee),
                 args: args.map(fn(a) { zonk_expr(ctx, a) }),
-                type_args: type_args.map(fn(t) { zonk_type(ctx, t) }),
+                type_args: type_args.map(fn(value) {
+                    HCallableTypeActual {
+                        owner: value.owner,
+                        source_type_var_id: value.source_type_var_id,
+                        ordinal: value.ordinal, arity: value.arity,
+                        actual: zonk_type(ctx, value.actual)
+                    }
+                }),
+                effect_instantiation: effect_instantiation.map(fn(value) {
+                    HCallableEffectInstantiation {
+                        substitutions: value.substitutions.map(fn(item) {
+                            HCallableEffectActual {
+                                source: item.source,
+                                actual: zonk_row(ctx, item.actual)
+                            }
+                        })
+                    }
+                }),
                 resolved_dicts: resolved_dicts,
                 handled_evidence: handled_evidence,
                 callee_ref: callee_ref,

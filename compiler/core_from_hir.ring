@@ -160,6 +160,7 @@ use ir_inventory::{
 }
 use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HTypeParam,
+    HCallableTypeActual, HCallableEffectInstantiation,
     HMatchArm, HEffectHandler,
     HLambdaCapture, HStringInterpPart,
     HPatternBinding, HProjectionRef, HPatternPlan, HPatternFieldPlan,
@@ -228,6 +229,7 @@ use core_type_source::{
     make_flow_generic_param_fact,
     flow_generic_param_index, flow_generic_param_arity,
     flow_generic_param_owner, flow_generic_param_bounds,
+    flow_generic_param_fact_same,
     FlowTypeSubstitution, make_flow_type_substitution,
     flow_type_kind_int, flow_type_kind_float, flow_type_kind_str,
     flow_type_kind_bool, flow_type_kind_unit, flow_type_kind_never,
@@ -312,9 +314,13 @@ use core_hir::{
 }
 use effect_contract::{
     EffectParamRef, effect_param_owner, effect_param_ordinal,
+    effect_param_ref_same,
     TypedEffectFormalFact, typed_effect_formal_raw_tail,
     typed_effect_formal_parameter,
     CoreEffectSet, CoreEffectAtom, CoreEffectContract,
+    CoreEffectSubstitution, make_core_effect_substitution,
+    core_effect_substitution_parameter,
+    core_effect_substitution_replacement,
     make_core_effect_set, make_core_effect_contract,
     make_explicit_core_effect_instantiation,
     core_effect_contract_exact, core_effect_contract_parameter,
@@ -1523,7 +1529,8 @@ fn producer_record_expr(
                 some(instantiation) => {
                     for actual in instantiation.type_args {
                         let _ = producer_record_type(
-                            producer, actual, some(executable_origin(owner)))
+                            producer, actual.actual,
+                            some(executable_origin(owner)))
                     }
                     match instantiation.effects {
                         some(effect_instantiation) => {
@@ -1554,13 +1561,24 @@ fn producer_record_expr(
         HExpr::UnaryOp { operand, .. } | HExpr::Clone { inner: operand, .. } =>
             producer_record_expr(producer, owner, operand),
         HExpr::Call {
-            callee, args, type_args, resolved_dicts, method_ref, ..
+            callee, args, type_args, effect_instantiation,
+            resolved_dicts, method_ref, ..
         } => {
             producer_record_expr(producer, owner, callee)
             for argument in args { producer_record_expr(producer, owner, argument) }
             for ty in type_args {
                 let _ = producer_record_type(
-                    producer, ty, some(executable_origin(owner)))
+                    producer, ty.actual, some(executable_origin(owner)))
+            }
+            match effect_instantiation {
+                some(instantiation) => {
+                    for substitution in instantiation.substitutions {
+                        let _ = producer_record_effect_contract(
+                            producer, substitution.actual,
+                            some(executable_origin(owner)))
+                    }
+                },
+                none => {}
             }
             for value in resolved_dicts {
                 producer_record_physical_dictionary(producer, owner, value)
@@ -1924,6 +1942,11 @@ fn producer_record_builtin_methods(mut producer: ClosedCoreProducer) {
                 index, method_vars.len(), [])
         }
         let reference = make_named_executable_ref(intrinsic_symbol)
+        for id in method_vars {
+            let _ = producer_record_type(
+                producer, Type::TypeVar { id: id, name: none },
+                some(executable_origin(reference)))
+        }
         let _ = producer_record_type(
             producer, scheme.ty, some(executable_origin(reference)))
     }
@@ -2424,6 +2447,7 @@ pub struct FrozenCoreAssemblyFacts {
     effect_parameters: List<TypedEffectFormalFact>,
     callable_effect_rows: List<TypedCallableEffectFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
+    project_callable_type_formals: List<ProjectCallableTypeFormalSource>,
     project_type_mapping: List<Int>,
     handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
     builtin_methods: List<BuiltinMethodContractFact>,
@@ -2433,6 +2457,10 @@ pub struct FrozenCoreAssemblyFacts {
 struct ProjectCallableEffectSource {
     reference: ExecutableRef,
     contract: CoreEffectContract
+}
+struct ProjectCallableTypeFormalSource {
+    reference: ExecutableRef,
+    formals: List<FlowGenericParamFact>
 }
 
 pub fn produce_closed_core_assembly_facts(
@@ -2495,7 +2523,8 @@ pub fn mutate_core_unowned_effect_tail(
         type_refs: value.type_refs, type_nodes: value.type_nodes,
         type_sources: value.type_sources, effect_parameters: retained,
         callable_effect_rows: value.callable_effect_rows,
-        project_callable_effects: [], project_type_mapping: [],
+        project_callable_effects: [], project_callable_type_formals: [],
+        project_type_mapping: [],
         handled_evidence_types: value.handled_evidence_types,
         diagnostic_seed: value.diagnostic_seed,
         builtin_methods: value.builtin_methods, program: value.program
@@ -2579,7 +2608,8 @@ fn freeze_closed_core_assembly_facts(
         type_sources: type_sources,
         effect_parameters: effect_parameters,
         callable_effect_rows: callable_effect_rows,
-        project_callable_effects: [], project_type_mapping: [],
+        project_callable_effects: [], project_callable_type_formals: [],
+        project_type_mapping: [],
         handled_evidence_types: handled_evidence_types,
         diagnostic_seed: diagnostic_seed,
         builtin_methods: if recorder.module_order == 0 {
@@ -2825,6 +2855,7 @@ struct LowerCtx {
     module_key: Str, owner: ExecutableRef,
     effect_parameters: List<TypedEffectFormalFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
+    project_callable_type_formals: List<ProjectCallableTypeFormalSource>,
     project_type_mapping: List<Int>,
     types: List<CoreTypeSourceFact>,
     type_nodes: List<FlowTypeNode>,
@@ -3083,28 +3114,103 @@ fn local_callable_effect_source(
     }
 }
 fn direct_type_substitutions(
-    ctx: LowerCtx, executable: ExecutableRef, type_args: List<Type>
+    ctx: LowerCtx, executable: ExecutableRef,
+    type_args: List<HCallableTypeActual>
 ) -> List<FlowTypeSubstitution> {
     if type_args.len() == 0 { return [] }
     if !executable_ref_is_named(executable) {
         panic("Core assembly: generic direct callee is not named")
     }
     let owner = executable_ref_named_symbol(executable)
-    let arity = type_args.len()
+    let mut declared: ProjectCallableTypeFormalSource? = none
+    for source in ctx.project_callable_type_formals {
+        if executable_ref_same(source.reference, executable) {
+            if declared.is_some() {
+                panic("Core assembly: callable type formal source repeats")
+            }
+            declared = some(source)
+        }
+    }
+    let source = match declared {
+        some(values) => values,
+        none => panic("Core assembly: generic direct callee lacks declared formals")
+    }
     let mut result: List<FlowTypeSubstitution> = []
-    let mut ordinal = 0
+    let mut prior_ordinal = 0 - 1
     for argument in type_args {
+        if !symbol_ref_same(argument.owner, owner) ||
+           argument.source_type_var_id < 0 ||
+           argument.ordinal <= prior_ordinal ||
+           argument.ordinal < 0 || argument.ordinal >= source.formals.len() ||
+           argument.arity != source.formals.len() {
+            panic("Core assembly: direct type substitution plan differs")
+        }
+        let formal = source.formals.get(argument.ordinal).unwrap()
+        if !symbol_ref_same(flow_generic_param_owner(formal), owner) ||
+           flow_generic_param_index(formal) != argument.ordinal ||
+           flow_generic_param_arity(formal) != source.formals.len() {
+            panic("Core assembly: declared type formal source differs")
+        }
         result.push(make_flow_type_substitution(
-            make_flow_generic_param_fact(owner, ordinal, arity, []),
-            type_fact_for(ctx.types, argument, ctx.module_key)))
-        ordinal = ordinal + 1
+            formal, type_fact_for(
+                ctx.types, argument.actual, ctx.module_key)))
+        prior_ordinal = argument.ordinal
     }
     result
 }
 
+fn lower_callable_effect_substitutions(
+    ctx: LowerCtx, value: HCallableEffectInstantiation?
+) -> List<CoreEffectSubstitution> {
+    match value {
+        some(instantiation) => instantiation.substitutions.map(fn(item) {
+            make_core_effect_substitution(
+                item.source, core_effect_contract_from_row(
+                    ctx.types, item.actual, ctx.module_key,
+                    ctx.effect_parameters))
+        }),
+        none => []
+    }
+}
+
+fn named_callable_effect_instantiation(
+    source: CoreEffectContract, result: CoreEffectContract,
+    substitutions: List<CoreEffectSubstitution>,
+    provenance_present: Bool
+) -> CoreEffectInstantiation {
+    match core_effect_contract_parameter(source) {
+        none => make_explicit_core_effect_instantiation(
+            source, result, result),
+        some(parameter) => {
+            if !provenance_present {
+                panic("Core assembly: open callable effect provenance is absent")
+            }
+            let mut replacement: CoreEffectContract? = none
+            for substitution in substitutions {
+                if effect_param_ref_same(
+                        core_effect_substitution_parameter(substitution),
+                        parameter) {
+                    if replacement.is_some() {
+                        panic("Core assembly: callable effect formal repeats")
+                    }
+                    replacement = some(
+                        core_effect_substitution_replacement(substitution))
+                }
+            }
+            make_explicit_core_effect_instantiation(
+                source, match replacement {
+                    some(value) => value,
+                    none => panic(
+                        "Core assembly: open callable effect actual is absent")
+                }, result)
+        }
+    }
+}
+
 fn core_callee(
     ctx: LowerCtx, value: CalleeRef, signature: Type,
-    type_args: List<Type>
+    type_args: List<HCallableTypeActual>,
+    effect_instantiation: HCallableEffectInstantiation?
 ) -> CoreCalleeRef {
     let contract = call_contract(ctx, signature, false)
     let actual_row = match signature {
@@ -3120,11 +3226,17 @@ fn core_callee(
             some(contract) => contract,
             none => panic("Core assembly: exact callable effect source is absent")
         }
+        let effect_substitutions = lower_callable_effect_substitutions(
+            ctx, effect_instantiation)
+        let instantiated_source = make_core_effect_contract(
+            core_effect_contract_exact(actual_effects),
+            core_effect_contract_parameter(source_effects))
         make_core_direct_callee(
             executable, contract,
             direct_type_substitutions(ctx, executable, type_args),
-            make_explicit_core_effect_instantiation(
-                source_effects, actual_effects, actual_effects))
+            named_callable_effect_instantiation(
+                instantiated_source, actual_effects, effect_substitutions,
+                effect_instantiation.is_some()))
     } else if callee_ref_is_local(value) {
         if type_args.len() != 0 {
             panic("Core assembly: local callable carries declaration type arguments")
@@ -3365,18 +3477,10 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                 Type::FnType { effects: actual_row, .. } => {
                     let executable = make_named_executable_ref(
                         callee_ref_named_symbol(callee))
-                    let type_args = match callable_instantiation {
-                        some(instantiation) => {
-                            match instantiation.effects {
-                                some(effect_instantiation) =>
-                                    if effect_instantiation.substitutions.len() != 0 {
-                                        panic("Core assembly: callable value effect provenance is not connected")
-                                    },
-                                none => {}
-                            }
-                            instantiation.type_args
-                        },
-                        none => []
+                    let (type_args, effect_plan) = match callable_instantiation {
+                        some(instantiation) =>
+                            (instantiation.type_args, instantiation.effects),
+                        none => ([], none)
                     }
                     let actual_effects = core_effect_contract_from_row(
                         ctx.types, actual_row, ctx.module_key,
@@ -3387,14 +3491,21 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                         none => panic(
                             "Core assembly: callable value effect source is absent")
                     }
+                    let effect_substitutions =
+                        lower_callable_effect_substitutions(ctx, effect_plan)
+                    let instantiated_source = make_core_effect_contract(
+                        core_effect_contract_exact(actual_effects),
+                        core_effect_contract_parameter(source_effects))
                     make_core_callable_value_expr(
                         ty, origin, executable,
                         match dict_closure_dicts {
                             some(values) => evidence(ctx, values), none => []
                         },
                         direct_type_substitutions(ctx, executable, type_args),
-                        make_explicit_core_effect_instantiation(
-                            source_effects, actual_effects, actual_effects))
+                        effect_substitutions,
+                        named_callable_effect_instantiation(
+                            instantiated_source, actual_effects,
+                            effect_substitutions, effect_plan.is_some()))
                 },
                 _ => panic("Core assembly: non-callable exact Ident was not elaborated")
             }
@@ -3439,7 +3550,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                                 core_callee(
                                     ctx,
                                     method_call_ref_callee_identity(method),
-                                    signature, []),
+                                    signature, [], none),
                                 exact_method_ref(method), lowered_left,
                                 [lowered_right], method_evidence, [])
                             let zero = make_core_literal_expr(
@@ -3455,7 +3566,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                             ty, effects, origin,
                             core_callee(
                                 ctx, method_call_ref_callee_identity(method),
-                                signature, []),
+                                signature, [], none),
                             exact_method_ref(method), lowered_left,
                             [lowered_right], method_evidence, [])
                     }
@@ -3466,7 +3577,8 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
             }
         },
         HExpr::Call {
-            callee, args, type_args, resolved_dicts, handled_evidence, callee_ref,
+            callee, args, type_args, effect_instantiation,
+            resolved_dicts, handled_evidence, callee_ref,
             method_ref, system_host, ..
         } => match system_host {
             some(host) => {
@@ -3486,7 +3598,8 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     make_core_method_call_expr(
                         ty, effects, origin,
                         core_callee(ctx, method_call_ref_callee_identity(method),
-                            method_call_ref_signature(method), []),
+                            method_call_ref_signature(method), [],
+                            effect_instantiation),
                         exact_method_ref(method), lower_expr(ctx, receiver),
                         args.map(fn(v) { lower_expr(ctx, v) }),
                         if method_call_ref_is_bound(method) {
@@ -3503,7 +3616,9 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                         none => panic("Core assembly: Call lacks CalleeRef") }
                     make_core_call_expr(
                         ty, effects, origin,
-                        core_callee(ctx, exact, hexpr_type(callee), type_args),
+                        core_callee(
+                            ctx, exact, hexpr_type(callee), type_args,
+                            effect_instantiation),
                         args.map(fn(v) { lower_expr(ctx, v) }),
                         evidence(ctx, resolved_dicts),
                         handled_evidence.map(fn(value) {
@@ -4026,6 +4141,10 @@ fn add_builtin_method_contracts(
         let header = final_callable_header(params, result, effects)
         let reference = make_named_executable_ref(
             intrinsic_ref_symbol(intrinsic))
+        let method_formals = builtin_method_contract_method_type_vars(fact).map(
+            fn(id) { type_fact_for(
+                facts.type_sources,
+                Type::TypeVar { id: id, name: none }, facts.module_key) })
         assembly.entries.push(make_executable_entry(
             reference, parent, executable_kind_builtin_intrinsic(),
             make_contract_only()))
@@ -4033,7 +4152,8 @@ fn add_builtin_method_contracts(
             reference,
             make_symbol_origin_ref(intrinsic_ref_symbol(intrinsic)),
             type_fact_for(facts.type_sources, header, facts.module_key),
-            [], callable_owned_effect_formals(facts, reference, header),
+            method_formals,
+            callable_owned_effect_formals(facts, reference, header),
             [], executable_contract_mode_contract_only(),
             flow_contract_from_resource_fact(
                 facts.module_key, parameter_types, result_type,
@@ -4210,6 +4330,7 @@ fn append_default_specialization(
         module_key: facts.module_key, owner: reference,
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
+        project_callable_type_formals: facts.project_callable_type_formals,
         project_type_mapping: facts.project_type_mapping,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
@@ -4217,7 +4338,7 @@ fn append_default_specialization(
         diagnostic_origins: []
     }
     let callee = core_callee(
-        call_ctx, h_exact_call_callee(forward), forward_signature, [])
+        call_ctx, h_exact_call_callee(forward), forward_signature, [], none)
     let arguments = parameter_slots.map(fn(slot) {
         let mut found: CoreTypeRef? = none
         for binder in binders {
@@ -4312,6 +4433,7 @@ fn derived_call_plan_from_method(
         module_key: facts.module_key, owner: owner,
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
+        project_callable_type_formals: facts.project_callable_type_formals,
         project_type_mapping: facts.project_type_mapping,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
@@ -4320,7 +4442,7 @@ fn derived_call_plan_from_method(
     }
     make_core_derived_call_plan(
         core_callee(
-            ctx, method_call_ref_callee_identity(method), signature, []),
+            ctx, method_call_ref_callee_identity(method), signature, [], none),
         some(exact_method_ref(method)),
         type_fact_for(facts.type_sources, result, facts.module_key),
         core_effect_contract_exact(core_effect_contract_from_row(
@@ -4348,6 +4470,7 @@ fn derived_call_plan_from_exact(
         module_key: facts.module_key, owner: owner,
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
+        project_callable_type_formals: facts.project_callable_type_formals,
         project_type_mapping: facts.project_type_mapping,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
@@ -4355,7 +4478,7 @@ fn derived_call_plan_from_exact(
         diagnostic_origins: []
     }
     make_core_derived_call_plan(
-        core_callee(ctx, h_exact_call_callee(exact), signature, []),
+        core_callee(ctx, h_exact_call_callee(exact), signature, [], none),
         h_exact_call_method(exact).map(fn(value) { exact_method_ref(value) }),
         type_fact_for(facts.type_sources, result, facts.module_key),
         core_effect_contract_exact(core_effect_contract_from_row(
@@ -5176,6 +5299,7 @@ fn append_delegate_impl(
             module_key: facts.module_key, owner: reference,
             effect_parameters: facts.effect_parameters,
             project_callable_effects: facts.project_callable_effects,
+            project_callable_type_formals: facts.project_callable_type_formals,
             project_type_mapping: facts.project_type_mapping,
             types: facts.type_sources, type_nodes: facts.type_nodes,
             handled_evidence_types: facts.handled_evidence_types,
@@ -5211,7 +5335,7 @@ fn append_delegate_impl(
             exact_method_ref(child_call),
             core_callee(
                 callee_ctx, h_delegate_method_child_callee(method),
-                method_call_ref_signature(child_call), []),
+                method_call_ref_signature(child_call), [], none),
             tail_types(parameter_types).map(fn(ty) {
                 type_fact_for(facts.type_sources, ty, facts.module_key)
             }),
@@ -5309,6 +5433,7 @@ fn add_executable_body(
         owner: reference,
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
+        project_callable_type_formals: facts.project_callable_type_formals,
         project_type_mapping: facts.project_type_mapping,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         handled_evidence_types: facts.handled_evidence_types,
@@ -5830,6 +5955,97 @@ fn close_project_callable_effect_sources(
     result
 }
 
+fn append_exact_callable_type_formal_source(
+    mut result: List<ProjectCallableTypeFormalSource>,
+    reference: ExecutableRef, formals: List<FlowGenericParamFact>
+) {
+    for existing in result {
+        if executable_ref_same(existing.reference, reference) {
+            if existing.formals.len() != formals.len() {
+                panic("Core assembly: callable type formal source drifts")
+            }
+            let mut ordinal = 0
+            while ordinal < formals.len() {
+                if !flow_generic_param_fact_same(
+                        existing.formals.get(ordinal).unwrap(),
+                        formals.get(ordinal).unwrap()) {
+                    panic("Core assembly: callable type formal source drifts")
+                }
+                ordinal = ordinal + 1
+            }
+            return
+        }
+    }
+    result.push(ProjectCallableTypeFormalSource {
+        reference: reference, formals: formals
+    })
+}
+
+fn append_callable_type_formal_source(
+    mut result: List<ProjectCallableTypeFormalSource>,
+    reference: ExecutableRef, values: List<HTypeParam>
+) {
+    if !executable_ref_is_named(reference) {
+        if values.len() != 0 {
+            panic("Core assembly: anonymous declaration has type formals")
+        }
+        return
+    }
+    let owner = executable_ref_named_symbol(reference)
+    let mut formals: List<FlowGenericParamFact> = []
+    let mut index = 0
+    for value in values {
+        formals.push(make_flow_generic_param_fact(
+            owner, index, values.len(), value.bound_refs))
+        index = index + 1
+    }
+    append_exact_callable_type_formal_source(result, reference, formals)
+}
+
+fn collect_decl_callable_type_formals(
+    decls: List<HDecl>, mut result: List<ProjectCallableTypeFormalSource>
+) {
+    for decl in decls {
+        match decl {
+            HDecl::Fn { executable_ref, type_params, .. } |
+            HDecl::ExternFn { executable_ref, type_params, .. } =>
+                append_callable_type_formal_source(
+                    result, executable_ref, type_params),
+            HDecl::Impl { methods, .. } =>
+                collect_decl_callable_type_formals(methods, result),
+            HDecl::ModBlock { decls: nested, .. } =>
+                collect_decl_callable_type_formals(nested, result),
+            _ => {}
+        }
+    }
+}
+
+fn close_project_callable_type_formal_sources(
+    values: List<FrozenCoreAssemblyFacts>
+) -> List<ProjectCallableTypeFormalSource> {
+    let result: List<ProjectCallableTypeFormalSource> = []
+    for facts in values {
+        collect_decl_callable_type_formals(facts.program.decls, result)
+        for builtin in facts.builtin_methods {
+            let reference = make_named_executable_ref(intrinsic_ref_symbol(
+                builtin_method_contract_intrinsic(builtin)))
+            let vars = builtin_method_contract_method_type_vars(builtin)
+            let owner = executable_ref_named_symbol(reference)
+            let mut formals: List<FlowGenericParamFact> = []
+            let mut index = 0
+            for id in vars {
+                let _ = id
+                formals.push(make_flow_generic_param_fact(
+                    owner, index, vars.len(), []))
+                index = index + 1
+            }
+            append_exact_callable_type_formal_source(
+                result, reference, formals)
+        }
+    }
+    result
+}
+
 fn local_type_for_project_index(
     mapping: List<Int>, project_index: Int, module_key: Str
 ) -> CoreTypeRef {
@@ -5885,7 +6101,9 @@ fn project_effect_contract_to_module(
 
 fn with_project_effect_sources(
     facts: FrozenCoreAssemblyFacts,
-    sources: List<ProjectCallableEffectSource>, mapping: List<Int>
+    sources: List<ProjectCallableEffectSource>,
+    type_formals: List<ProjectCallableTypeFormalSource>,
+    mapping: List<Int>
 ) -> FrozenCoreAssemblyFacts {
     FrozenCoreAssemblyFacts {
         module_key: facts.module_key, module_order: facts.module_order,
@@ -5894,6 +6112,7 @@ fn with_project_effect_sources(
         effect_parameters: facts.effect_parameters,
         callable_effect_rows: facts.callable_effect_rows,
         project_callable_effects: sources.map(fn(item) { item }),
+        project_callable_type_formals: type_formals.map(fn(item) { item }),
         project_type_mapping: mapping.map(fn(item) { item }),
         handled_evidence_types: facts.handled_evidence_types,
         diagnostic_seed: facts.diagnostic_seed,
@@ -6072,6 +6291,8 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
     let project = intern_project_types(values)
     let project_effect_sources = close_project_callable_effect_sources(
         values, project.mappings)
+    let project_type_formal_sources =
+        close_project_callable_type_formal_sources(values)
     let mut callables: List<CoreCallableContract> = []
     let mut impls: List<CoreImplMetadata> = []
     let mut entries: List<ExecutableEntry> = []
@@ -6084,7 +6305,8 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
         let frozen_facts = values.get(module_index).unwrap()
         let mapping = project.mappings.get(module_index).unwrap()
         let facts = with_project_effect_sources(
-            frozen_facts, project_effect_sources, mapping)
+            frozen_facts, project_effect_sources,
+            project_type_formal_sources, mapping)
         let module_body = make_module_body_ref(facts.module_key, "module-body")
         let assembly = empty_module_assembly()
         add_builtin_method_contracts(facts, assembly)

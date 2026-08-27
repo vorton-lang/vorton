@@ -223,6 +223,7 @@ fn exact_call(
             }
             HExpr::Call {
                 callee: callee, args: params, type_args: [],
+                effect_instantiation: none,
                 resolved_dicts: h_exact_call_evidence(plan),
                 handled_evidence: h_exact_call_handled_evidence(plan),
                 callee_ref: none, method_ref: some(method),
@@ -234,6 +235,7 @@ fn exact_call(
             HExpr::Call {
                 callee: diagnostic_callee(callee_ref, signature, span),
                 args: arguments, type_args: [],
+                effect_instantiation: none,
                 resolved_dicts: h_exact_call_evidence(plan),
                 handled_evidence: h_exact_call_handled_evidence(plan),
                 callee_ref: some(callee_ref), method_ref: none,
@@ -1248,7 +1250,8 @@ fn close_expr(value: HExpr) -> HExpr {
             ty: ty, effects: effects, span: span
         },
         HExpr::Call {
-            callee, args, type_args, resolved_dicts, handled_evidence,
+            callee, args, type_args, effect_instantiation,
+            resolved_dicts, handled_evidence,
             callee_ref, method_ref, system_host, ty, effects, span
         } => {
             match (callee_ref, method_ref, system_host) {
@@ -1286,7 +1289,9 @@ fn close_expr(value: HExpr) -> HExpr {
             HExpr::Call {
                 callee: close_expr(callee),
                 args: close_expr_list(args),
-                type_args: type_args, resolved_dicts: resolved_dicts,
+                type_args: type_args,
+                effect_instantiation: effect_instantiation,
+                resolved_dicts: resolved_dicts,
                 handled_evidence: handled_evidence,
                 callee_ref: callee_ref, method_ref: method_ref,
                 system_host: system_host,

@@ -152,10 +152,12 @@ fn with_call_handled_evidence(
     handled_evidence: List<HandledEvidenceRef>
 ) -> HExpr {
     match value {
-        HExpr::Call { callee, args, type_args, resolved_dicts,
+        HExpr::Call { callee, args, type_args, effect_instantiation,
+                      resolved_dicts,
                       callee_ref, method_ref, system_host,
                       ty, effects, span, .. } => HExpr::Call {
             callee: callee, args: args, type_args: type_args,
+            effect_instantiation: effect_instantiation,
             resolved_dicts: resolved_dicts,
             handled_evidence: handled_evidence,
             callee_ref: callee_ref, method_ref: method_ref,
@@ -1723,6 +1725,7 @@ fn expand_delegate_impls(
                                                     },
                                                     args: forward_args,
                                                     type_args: [],
+                                                    effect_instantiation: none,
                                                     resolved_dicts: [],
                                                     handled_evidence: [],
                                                     callee_ref: none,
@@ -1782,6 +1785,7 @@ fn expand_delegate_impls(
                                                     callee: method_access,
                                                     args: forward_args,
                                                     type_args: [],
+                                                    effect_instantiation: none,
                                                     resolved_dicts: resolved_forward_dicts,
                                                     handled_evidence: [],
                                                     callee_ref: none,

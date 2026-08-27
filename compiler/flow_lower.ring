@@ -70,6 +70,7 @@ use core_expr::{
     core_expr_origin, core_expr_literal, core_literal_kind_tag,
     core_expr_callable_executable, core_expr_callable_evidence,
     core_expr_callable_type_substitutions,
+    core_expr_callable_effect_substitutions,
     core_expr_callable_effect_instantiation,
     core_literal_int, core_literal_float, core_literal_str, core_literal_bool,
     core_expr_read_source, core_expr_primitive_operation,
@@ -1556,6 +1557,7 @@ fn emit_simple_expr(
                 executable, result_type,
                 flow_evidence(core_expr_callable_evidence(expr)),
                 core_expr_callable_type_substitutions(expr),
+                core_expr_callable_effect_substitutions(expr),
                 core_expr_callable_effect_instantiation(expr)),
             [], result), core_flow_role_expr_primary())
         return true

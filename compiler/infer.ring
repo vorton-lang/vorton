@@ -45,7 +45,7 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
     build_scheme_var_map, impl_method_core_as_scheme,
     freshen_effect_header, freshen_effect_header_types,
     freshen_effect_scheme_header,
-    instantiate_trait_method_signature, scheme_value_type_vars,
+    instantiate_trait_method_signature,
     find_impl, lookup_variant, compiler_owned_extern_manifest_entry}
 use extern_manifest::{
     compiler_extern_manifest_entry_executable,
@@ -88,6 +88,7 @@ use infer_helpers::{MethodLookupResult, StmtResult, CalleeMetadata,
     resolve_trait_dispatch, resolve_eq_dispatch,
     exact_operator_plan,
     exact_nominal_method_call,
+    exact_callable_type_args,
     is_bounded_direct_callable_ident, resolve_callee_metadata,
     check_expr_is_let_def, get_expr_def_id, is_mut_method_call, check_receiver_mutability,
     lookup_impl_method, lookup_trait_method,
@@ -1847,6 +1848,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                     callee: callee,
                     args: [recv_r.hexpr, idx_r.hexpr],
                     type_args: [],
+                    effect_instantiation: none,
                     resolved_dicts: resolved_dicts, method_ref: none,
                     handled_evidence: exact_handled_evidence_for_callable(
                         ctx, apply_subst(s, hexpr_type(callee))),
@@ -2079,26 +2081,15 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
     // reflected in the result.
     let result_type = apply_subst(s, ret_var)
 
-    let mut exact_type_args: List<Type> = []
-    match callee_metadata {
+    let exact_type_args = match callee_metadata {
         some(metadata) => match metadata.kind {
             ValueBindingKind::DirectCallable |
-            ValueBindingKind::ExternCallable => {
-                let instantiated = apply_subst(s, resolved_callee_type)
-                let var_map = build_scheme_var_map(
-                    metadata.live_scheme, instantiated)
-                for type_var in scheme_value_type_vars(metadata.live_scheme) {
-                    exact_type_args.push(match var_map.get(type_var) {
-                        some(actual) => apply_subst(s, actual),
-                        none => panic(
-                            "call inference: declared generic has no exact instantiation")
-                    })
-                }
-            },
+            ValueBindingKind::ExternCallable => exact_callable_type_args(
+                ctx, metadata, apply_subst(s, resolved_callee_type), s),
             ValueBindingKind::ConstGetter |
-            ValueBindingKind::LocalBorrow => {}
+            ValueBindingKind::LocalBorrow => []
         },
-        none => {}
+        none => []
     }
 
     // Call-site pre-boxing consumes only exact DirectCallable metadata.
@@ -2149,6 +2140,7 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
     InferResult {
         hexpr: HExpr::Call {
             callee: callee_r.hexpr, args: hargs, type_args: exact_type_args,
+            effect_instantiation: none,
             resolved_dicts: resolved_dicts,
             handled_evidence: exact_handled_evidence_for_callable(
                 ctx, resolved_callee_type),
@@ -2503,7 +2495,8 @@ fn infer_method_call_from_receiver(
                 access_kind: HFieldAccessKind::Method,
                 projection: none,
                 ty: callee_type, effects: EMPTY_ROW, span: span },
-            args: hargs, type_args: [], resolved_dicts: resolved_dicts,
+            args: hargs, type_args: [], effect_instantiation: none,
+            resolved_dicts: resolved_dicts,
             handled_evidence: exact_handled_evidence_for_callable(
                 ctx, callee_type),
             callee_ref: none,
