@@ -3536,9 +3536,7 @@ pub fn exact_pattern_plan(
                     }
                     let child = match exact_pattern_plan(
                             ctx, field.pattern,
-                            instantiate_effect_schema(
-                                ctx.env,
-                                apply_subst_map(inst_map, child_type)), subst) {
+                            apply_subst_map(inst_map, child_type), subst) {
                         some(value) => value,
                         none => return none
                     }
@@ -3564,9 +3562,7 @@ pub fn exact_pattern_plan(
                     }
                     let child = match exact_pattern_plan(
                             ctx, field.pattern,
-                            instantiate_effect_schema(
-                                ctx.env,
-                                apply_subst_map(inst_map, exact.ty)), subst) {
+                            apply_subst_map(inst_map, exact.ty), subst) {
                         some(value) => value,
                         none => return none
                     }
