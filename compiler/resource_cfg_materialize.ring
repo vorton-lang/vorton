@@ -103,12 +103,14 @@ fn bool_list_has_true(values: List<Bool>) -> Bool {
 
 fn logical_shape_may_take(shape: LogicalOwnershipShape) -> Bool {
     logical_ownership_shape_direct_drop(shape) ||
-        logical_ownership_shape_may_unique(shape)
+        logical_ownership_shape_may_unique(shape) ||
+        bool_list_has_true(logical_ownership_shape_param_deps(shape))
 }
 
 fn physical_shape_may_drop(shape: PhysicalRcShape) -> Bool {
     physical_rc_shape_physical_rc(shape) ||
-        physical_rc_shape_drop_glue(shape)
+        physical_rc_shape_drop_glue(shape) ||
+        bool_list_has_true(physical_rc_shape_param_deps(shape))
 }
 
 fn type_requires_cleanup(
@@ -134,16 +136,6 @@ fn transfer_target_cleanup_owner(
         panic("ResourcePlanner: owning transfer targets borrowed storage")
     }
     owns
-}
-
-fn require_concrete_resource_shape(
-    logical: LogicalOwnershipShape, physical: PhysicalRcShape,
-    context: Str
-) {
-    if bool_list_has_true(logical_ownership_shape_param_deps(logical)) ||
-       bool_list_has_true(physical_rc_shape_param_deps(physical)) {
-        panic("ResourcePlanner: unresolved generic resource dependency at ${context}")
-    }
 }
 
 fn require_live_state(state: SlotFlow, operation: Str) {
@@ -214,7 +206,6 @@ fn apply_demand_abstract(
     body: PlannerBody, event: PlannerEvent, operand_ordinal: Int,
     slot: Int, demand: TransferDemand,
     logical_shapes: List<LogicalOwnershipShape>,
-    physical_shapes: List<PhysicalRcShape>,
     mut states: List<SlotFlow>, collect: Bool,
     mut findings: List<ResourceDiagnostic>
 ) {
@@ -227,10 +218,6 @@ fn apply_demand_abstract(
     }
     let type_index = body.slots.get(slot).unwrap().type_index
     let logical = logical_shapes.get(type_index).unwrap()
-    let physical = physical_shapes.get(type_index).unwrap()
-    if param_mode_same(mode, param_mode_own()) {
-        require_concrete_resource_shape(logical, physical, "value edge")
-    }
     if param_mode_same(mode, param_mode_own()) &&
        (transfer_demand_force(demand) || logical_shape_may_take(logical)) {
         states.set(slot, slot_flow_moved())
@@ -265,14 +252,7 @@ fn apply_event_abstract(
         PlannerEventValue::NoOpValue => {},
         PlannerEventValue::ScopeExitValue(scope_id) => {
             for slot_index in cleanup_slot_order(body.slots, [scope_id]) {
-                let slot = body.slots.get(slot_index).unwrap()
                 let before = states.get(slot_index).unwrap()
-                if slot_flow_cleanup_owner(before) {
-                    require_concrete_resource_shape(
-                        logical_shapes.get(slot.type_index).unwrap(),
-                        physical_shapes.get(slot.type_index).unwrap(),
-                        "scope exit")
-                }
                 if !slot_flow_is_unreachable(before) {
                     states.set(slot_index, slot_flow_empty())
                 }
@@ -287,8 +267,7 @@ fn apply_event_abstract(
                     body, event, input_index,
                     input_slots.get(input_index).unwrap(),
                     decided_transfer(body, event, input_index).demand,
-                    logical_shapes, physical_shapes, states,
-                    collect, findings)
+                    logical_shapes, states, collect, findings)
                 input_index = input_index + 1
             }
             let before = states.get(target).unwrap()
@@ -311,8 +290,8 @@ fn apply_event_abstract(
             }
             let demand = decided_transfer(body, event, 0).demand
             apply_demand_abstract(
-                body, event, 0, source, demand, logical_shapes,
-                physical_shapes, states, collect, findings)
+                body, event, 0, source, demand,
+                logical_shapes, states, collect, findings)
             states.set(target, slot_flow_live_owner(
                 transfer_target_cleanup_owner(
                     body, source, target, demand,
@@ -327,7 +306,7 @@ fn apply_event_abstract(
             apply_demand_abstract(
                 body, event, 1, input,
                 decided_transfer(body, event, 1).demand,
-                logical_shapes, physical_shapes, states, collect, findings)
+                logical_shapes, states, collect, findings)
         },
         PlannerEventValue::ConsumeValue(slot, force, target) => {
             match target {
@@ -343,7 +322,7 @@ fn apply_event_abstract(
             apply_demand_abstract(
                 body, event, 0, slot,
                 decided_transfer(body, event, 0).demand,
-                logical_shapes, physical_shapes, states, collect, findings)
+                logical_shapes, states, collect, findings)
             match target {
                 some(value) => states.set(value, slot_flow_live_owner(
                     transfer_target_cleanup_owner(
@@ -360,7 +339,6 @@ fn apply_event_abstract(
             let type_index = body.slots.get(slot).unwrap().type_index
             let logical = logical_shapes.get(type_index).unwrap()
             let physical = physical_shapes.get(type_index).unwrap()
-            require_concrete_resource_shape(logical, physical, "discard")
             if physical_shape_may_drop(physical) ||
                logical_shape_may_take(logical) {
                 states.set(slot, slot_flow_empty())
@@ -370,10 +348,6 @@ fn apply_event_abstract(
             let _ = preflight_live_slot(
                 body, event, 0, rhs_temp, states.get(rhs_temp).unwrap(),
                 collect, findings)
-            let rhs_type = body.slots.get(rhs_temp).unwrap().type_index
-            require_concrete_resource_shape(
-                logical_shapes.get(rhs_type).unwrap(),
-                physical_shapes.get(rhs_type).unwrap(), "Assign RHS")
             // The semantic event occurs only after its RHS-producing events.
             // Resource materialization later emits Drop-old then Take(temp).
             if planner_place_is_slot(target) {
@@ -381,9 +355,6 @@ fn apply_event_abstract(
                 require_writable_state(
                     states.get(target_slot).unwrap(), "Assign")
                 let target_type = body.slots.get(target_slot).unwrap().type_index
-                require_concrete_resource_shape(
-                    logical_shapes.get(target_type).unwrap(),
-                    physical_shapes.get(target_type).unwrap(), "Assign target")
                 states.set(target_slot, slot_flow_live_owner(
                     body.slots.get(target_slot).unwrap().owns_storage &&
                     type_requires_cleanup(
@@ -394,11 +365,6 @@ fn apply_event_abstract(
                 let _ = preflight_live_place(
                     body, event, 1, target, states.get(base).unwrap(),
                     collect, findings)
-                let value_type = planner_place_value_type(target)
-                require_concrete_resource_shape(
-                    logical_shapes.get(value_type).unwrap(),
-                    physical_shapes.get(value_type).unwrap(),
-                    "projected Assign value")
             }
             states.set(rhs_temp, slot_flow_moved())
         },
@@ -415,8 +381,7 @@ fn apply_event_abstract(
                 apply_demand_abstract(
                     body, event, 0, source_slot,
                     decided_transfer(body, event, 0).demand,
-                    logical_shapes, physical_shapes, states,
-                    collect, findings)
+                    logical_shapes, states, collect, findings)
             } else {
                 let _ = preflight_live_place(
                     body, event, 0, source,
@@ -431,9 +396,6 @@ fn apply_event_abstract(
             let type_index = if planner_place_is_slot(source) {
                 body.slots.get(source_slot).unwrap().type_index
             } else { planner_place_value_type(source) }
-            require_concrete_resource_shape(
-                logical_shapes.get(type_index).unwrap(),
-                physical_shapes.get(type_index).unwrap(), "MovePlace")
             states.set(target, slot_flow_live_owner(
                 body.slots.get(target).unwrap().owns_storage &&
                 type_requires_cleanup(
@@ -446,20 +408,13 @@ fn apply_event_abstract(
             argument_slots, result_slot, ..
         } => {
             let effective_result_owned = event.decision.result_owned
-            if effective_result_owned || result_slot.is_some() {
-                require_concrete_resource_shape(
-                    logical_shapes.get(result_type_index).unwrap(),
-                    physical_shapes.get(result_type_index).unwrap(),
-                    "call result")
-            }
             let mut argument = 0
             while argument < argument_slots.len() {
                 apply_demand_abstract(
                     body, event, argument,
                     argument_slots.get(argument).unwrap(),
                     decided_transfer(body, event, argument).demand,
-                    logical_shapes, physical_shapes, states,
-                    collect, findings)
+                    logical_shapes, states, collect, findings)
                 argument = argument + 1
             }
             match result_slot {
@@ -513,11 +468,8 @@ fn apply_event_abstract(
             } else {
                 apply_demand_abstract(
                     body, event, 0, source, demand,
-                    logical_shapes, physical_shapes, states, collect, findings)
+                    logical_shapes, states, collect, findings)
             }
-            require_concrete_resource_shape(
-                logical_shapes.get(value_type_index).unwrap(),
-                physical_shapes.get(value_type_index).unwrap(), "projection value")
             states.set(target, slot_flow_live_owner(
                 body.slots.get(target).unwrap().owns_storage &&
                 param_mode_same(transfer_demand_mode(demand), param_mode_own()) &&
@@ -534,7 +486,7 @@ fn apply_event_abstract(
             apply_demand_abstract(
                 body, event, 0, source,
                 decided_transfer(body, event, 0).demand,
-                logical_shapes, physical_shapes, states, collect, findings)
+                logical_shapes, states, collect, findings)
             states.set(target, slot_flow_live_owner(
                 transfer_target_cleanup_owner(
                     body, source, target,
@@ -546,9 +498,8 @@ fn apply_event_abstract(
 
 fn apply_terminator_use_abstract(
     body: PlannerBody, usage: PlannerTerminatorUse,
-    logical_shapes: List<LogicalOwnershipShape>,
-    physical_shapes: List<PhysicalRcShape>, mut states: List<SlotFlow>,
-    collect: Bool, mut findings: List<ResourceDiagnostic>
+    mut states: List<SlotFlow>, collect: Bool,
+    mut findings: List<ResourceDiagnostic>
 ) {
     let before = states.get(usage.slot).unwrap()
     if slot_flow_is_unreachable(before) {
@@ -566,10 +517,6 @@ fn apply_terminator_use_abstract(
         panic("ResourcePlanner: terminator demand remains Bottom")
     }
     if param_mode_same(mode, param_mode_own()) {
-        let slot = body.slots.get(usage.slot).unwrap()
-        require_concrete_resource_shape(
-            logical_shapes.get(slot.type_index).unwrap(),
-            physical_shapes.get(slot.type_index).unwrap(), "terminator")
         states.set(usage.slot, slot_flow_moved())
     }
 }
@@ -615,19 +562,10 @@ fn cleanup_slot_order(
 }
 
 fn apply_edge_cleanup_abstract(
-    edge: PlannerEdge, slots: List<PlannerSlot>,
-    logical_shapes: List<LogicalOwnershipShape>,
-    physical_shapes: List<PhysicalRcShape>,
-    mut states: List<SlotFlow>
+    edge: PlannerEdge, slots: List<PlannerSlot>, mut states: List<SlotFlow>
 ) {
     for slot_index in cleanup_slot_order(slots, edge.exited_scope_ids) {
-        let slot = slots.get(slot_index).unwrap()
         let before = states.get(slot_index).unwrap()
-        if slot_flow_cleanup_owner(before) {
-            require_concrete_resource_shape(
-                logical_shapes.get(slot.type_index).unwrap(),
-                physical_shapes.get(slot.type_index).unwrap(), "CFG exit")
-        }
         if !slot_flow_is_unreachable(before) {
             // Empty/Moved/MaybeMoved are represented by cleared storage;
             // unconditional cleanup is physically safe and normalizes all
@@ -700,17 +638,14 @@ fn solve_body_entry_states(
                 }
                 for usage in block.terminator_uses {
                     apply_terminator_use_abstract(
-                        body, usage, solved.logical_shapes,
-                        solved.physical_shapes, states, false, ignored)
+                        body, usage, states, false, ignored)
                 }
                 for edge in block.edges {
                     match edge.target_block {
                         some(target) => {
                             let edge_states = copy_slot_states(states)
                             apply_edge_cleanup_abstract(
-                                edge, body.slots,
-                                solved.logical_shapes,
-                                solved.physical_shapes, edge_states)
+                                edge, body.slots, edge_states)
                             if !reachable.get(target).unwrap() {
                                 reachable.set(target, true)
                                 entry_states.set(target, edge_states)
@@ -751,8 +686,7 @@ fn solve_body_entry_states(
             }
             for usage in block.terminator_uses {
                 apply_terminator_use_abstract(
-                    body, usage, solved.logical_shapes,
-                    solved.physical_shapes, states, true, findings)
+                    body, usage, states, true, findings)
             }
         }
         block_index = block_index + 1
@@ -820,8 +754,6 @@ fn apply_demand_materialized(
     let type_index = body.slots.get(slot).unwrap().type_index
     let logical = solved.logical_shapes.get(type_index).unwrap()
     let physical = solved.physical_shapes.get(type_index).unwrap()
-    require_concrete_resource_shape(
-        logical, physical, "materialized value edge")
     let target_ref = match target {
         some(index) => some(rc_slot_for(body, index)),
         none => none
@@ -877,10 +809,6 @@ fn materialize_event(
                         slot.type_index).unwrap()
                     let physical = solved.physical_shapes.get(
                         slot.type_index).unwrap()
-                    if slot_flow_cleanup_owner(before) {
-                        require_concrete_resource_shape(
-                            logical, physical, "scope exit")
-                    }
                     if slot_flow_cleanup_owner(before) &&
                        type_requires_cleanup(logical, physical) {
                         before_ops.push(make_rc_cleanup_at(
@@ -1012,7 +940,6 @@ fn materialize_event(
             let type_index = body.slots.get(slot).unwrap().type_index
             let logical = solved.logical_shapes.get(type_index).unwrap()
             let physical = solved.physical_shapes.get(type_index).unwrap()
-            require_concrete_resource_shape(logical, physical, "discard")
             if slot_flow_cleanup_owner(before) &&
                type_requires_cleanup(logical, physical) {
                 before_ops.push(make_rc_drop_at(
@@ -1032,9 +959,6 @@ fn materialize_event(
             let rhs_before = states.get(rhs_temp).unwrap()
             require_live_state(rhs_before, "Assign RHS temp")
             let rhs_type = body.slots.get(rhs_temp).unwrap().type_index
-            require_concrete_resource_shape(
-                solved.logical_shapes.get(rhs_type).unwrap(),
-                solved.physical_shapes.get(rhs_type).unwrap(), "Assign RHS")
             let target_ref: SlotRef? = if planner_place_is_slot(target) {
                 let target_slot = planner_place_slot(target)
                 let target_before = states.get(target_slot).unwrap()
@@ -1042,8 +966,6 @@ fn materialize_event(
                 let target_type = body.slots.get(target_slot).unwrap().type_index
                 let target_logical = solved.logical_shapes.get(target_type).unwrap()
                 let target_physical = solved.physical_shapes.get(target_type).unwrap()
-                require_concrete_resource_shape(
-                    target_logical, target_physical, "Assign target")
                 if slot_flow_cleanup_owner(target_before) &&
                    type_requires_cleanup(target_logical, target_physical) {
                     // Exact order: all RHS events already ran; only now Drop old.
@@ -1063,8 +985,6 @@ fn materialize_event(
                 let value_type = planner_place_value_type(target)
                 let value_logical = solved.logical_shapes.get(value_type).unwrap()
                 let value_physical = solved.physical_shapes.get(value_type).unwrap()
-                require_concrete_resource_shape(
-                    value_logical, value_physical, "projected Assign value")
                 push_transition(semantic_transitions, base, base_before,
                     base_before, slot_reason_mutate())
                 if physical_shape_may_drop(value_physical) ||
@@ -1120,7 +1040,6 @@ fn materialize_event(
             } else { planner_place_value_type(source) }
             let logical = solved.logical_shapes.get(type_index).unwrap()
             let physical = solved.physical_shapes.get(type_index).unwrap()
-            require_concrete_resource_shape(logical, physical, "MovePlace")
             if planner_place_is_slot(source) {
                 apply_demand_materialized(
                     body, source_slot,
@@ -1148,12 +1067,6 @@ fn materialize_event(
             argument_slots, result_slot, ..
         } => {
             let effective_result_owned = event.decision.result_owned
-            if effective_result_owned || result_slot.is_some() {
-                require_concrete_resource_shape(
-                    solved.logical_shapes.get(result_type_index).unwrap(),
-                    solved.physical_shapes.get(result_type_index).unwrap(),
-                    "call result")
-            }
             let mut argument = 0
             while argument < argument_slots.len() {
                 apply_demand_materialized(
@@ -1233,7 +1146,6 @@ fn materialize_event(
             let demand = decided_transfer(body, event, 0).demand
             let logical = solved.logical_shapes.get(value_type_index).unwrap()
             let physical = solved.physical_shapes.get(value_type_index).unwrap()
-            require_concrete_resource_shape(logical, physical, "projection value")
             if partial {
                 if !param_mode_same(
                         transfer_demand_mode(demand), param_mode_own()) {
@@ -1337,8 +1249,6 @@ fn materialize_edge(
             if slot_flow_cleanup_owner(before) {
                 let logical = solved.logical_shapes.get(slot.type_index).unwrap()
                 let physical = solved.physical_shapes.get(slot.type_index).unwrap()
-                require_concrete_resource_shape(
-                    logical, physical, "CFG exit")
                 if physical_shape_may_drop(physical) ||
                    logical_shape_may_take(logical) {
                     cleanup_ops.push(make_rc_cleanup_at(

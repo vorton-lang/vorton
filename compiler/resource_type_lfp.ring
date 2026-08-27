@@ -3111,13 +3111,11 @@ pub fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild
         }
         for child_index in node.child_type_indices {
             let child = type_layouts.get(child_index).unwrap()
-            let mut logical_component = 0
-            while logical_component < 2 {
-                add_constraint(constraints, RULE_TYPE_CHILD,
-                    layout.logical_start + logical_component, 0,
-                    [child.logical_start + logical_component])
-                logical_component = logical_component + 1
-            }
+            // A Drop provider is exact to its declaring type. Containment only
+            // inherits the child's resulting unique capability.
+            add_constraint(constraints, RULE_TYPE_CHILD,
+                layout.logical_start + 1, 0,
+                [child.logical_start + 1])
             let mut physical_component = 0
             while physical_component < 4 {
                 add_constraint(constraints, RULE_TYPE_CHILD,

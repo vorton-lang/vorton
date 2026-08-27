@@ -180,13 +180,25 @@ fn flow_origin_ordinals(value: FlowValueOriginContract) -> List<Int> {
     flow_value_origin_alias_ordinals(value)
 }
 
+fn append_flow_resource_child(
+    mut values: List<CoreTypeRef>, child: CoreTypeRef
+) {
+    if !values.any(fn(existing) {
+            core_type_ref_same(existing, child)
+        }) {
+        values.push(child)
+    }
+}
+
 fn flow_resource_children(node: FlowTypeNode) -> List<CoreTypeRef> {
     let tag = flow_type_kind_tag(flow_type_node_kind(node))
     // Ptr pointees and callable signatures do not contribute to the value's
     // own resource representation. Nominal fields and structural elements do.
     let mut result: List<CoreTypeRef> = []
     if tag == 6 || tag == 7 || tag == 8 || tag == 9 {
-        for child in flow_type_node_children(node) { result.push(child) }
+        for child in flow_type_node_children(node) {
+            append_flow_resource_child(result, child)
+        }
     }
     if tag == 6 || tag == 7 {
         let arguments = flow_type_node_generic_arguments(node)
@@ -195,11 +207,7 @@ fn flow_resource_children(node: FlowTypeNode) -> List<CoreTypeRef> {
                 panic("ResourcePlanner: storage parameter ordinal is outside generic arguments")
             }
             let child = arguments.get(ordinal).unwrap()
-            if !result.any(fn(existing) {
-                    core_type_ref_same(existing, child)
-                }) {
-                result.push(child)
-            }
+            append_flow_resource_child(result, child)
         }
     }
     result

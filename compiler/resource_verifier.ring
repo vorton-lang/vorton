@@ -21,8 +21,10 @@ use resource_model::{
     make_transfer_demand, transfer_demand_mode, transfer_demand_force,
     transfer_demand_join, make_logical_ownership_shape,
     logical_ownership_shape_direct_drop,
-    logical_ownership_shape_may_unique, make_physical_rc_shape,
+    logical_ownership_shape_may_unique,
+    logical_ownership_shape_param_deps, make_physical_rc_shape,
     physical_rc_shape_physical_rc, physical_rc_shape_drop_glue,
+    physical_rc_shape_param_deps,
     slot_flow_same, slot_flow_empty,
     slot_flow_cleanup_owner, slot_flow_is_unreachable}
 use rc_ir::{
@@ -1145,17 +1147,13 @@ fn expected_source_constraints(
         }
         let child_site = make_structural_resource_rule_source(RULE_TYPE_CHILD)
         for child_index in node.child_type_indices {
+            result.push(make_source_constraint_spec(
+                child_site, RULE_TYPE_CHILD, 0, false,
+                make_structural_resource_cell_source(
+                    logical, type_index, 1),
+                [make_structural_resource_cell_source(
+                    logical, child_index, 1)]))
             let mut component = 0
-            while component < 2 {
-                result.push(make_source_constraint_spec(
-                    child_site, RULE_TYPE_CHILD, 0, false,
-                    make_structural_resource_cell_source(
-                        logical, type_index, component),
-                    [make_structural_resource_cell_source(
-                        logical, child_index, component)]))
-                component = component + 1
-            }
-            component = 0
             while component < 4 {
                 result.push(make_source_constraint_spec(
                     child_site, RULE_TYPE_CHILD, 0, false,
@@ -2472,16 +2470,24 @@ fn verifier_decided_transfer(
     panic("ResourcePlanner verifier: transfer decision is absent")
 }
 
+fn verifier_bool_list_has_true(values: List<Bool>) -> Bool {
+    for value in values { if value { return true } }
+    false
+}
+
 fn verifier_logical_shape_may_take(
     shape: LogicalOwnershipShape
 ) -> Bool {
     logical_ownership_shape_direct_drop(shape) ||
-        logical_ownership_shape_may_unique(shape)
+        logical_ownership_shape_may_unique(shape) ||
+        verifier_bool_list_has_true(
+            logical_ownership_shape_param_deps(shape))
 }
 
 fn verifier_physical_shape_may_drop(shape: PhysicalRcShape) -> Bool {
     physical_rc_shape_physical_rc(shape) ||
-        physical_rc_shape_drop_glue(shape)
+        physical_rc_shape_drop_glue(shape) ||
+        verifier_bool_list_has_true(physical_rc_shape_param_deps(shape))
 }
 
 
