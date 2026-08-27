@@ -1,9 +1,14 @@
 // Frozen resource facts and the exact type/callable least fixed point.
-// This is a mechanical extraction from resource_planner; the planning
-// algorithms, rank budgets, certificate sources, and panic contracts are unchanged.
+// Exact generic facts are closed only over frozen resource-child edges; ranked
+// cells then carry both that derivation and the logical/physical shape solve.
 
-use ir_identity::{core_type_ref_index, SlotRef, slot_ref_same}
+use ir_identity::{
+    core_type_ref_index, SlotRef, slot_ref_same, symbol_ref_same}
 use ir_inventory::{ExecutableRef, executable_ref_same}
+use core_type_source::{
+    FlowGenericParamFact, make_flow_generic_param_fact,
+    flow_generic_param_owner, flow_generic_param_index,
+    flow_generic_param_arity, flow_generic_param_bounds}
 use flow_ir::{
     FlowProjectionContract, FlowPlaceRef, FlowSemanticStepRef,
     flow_semantic_step_same,
@@ -108,63 +113,76 @@ fn planner_type_kind_tag(kind: PlannerTypeKind) -> Int {
     planner_type_kind_from_tag(kind.tag).tag
 }
 
-pub enum PlannerDependencyTargetValue {
-    ParentParameterTargetValue(Int),
-    ConcreteTypeTargetValue(Int)
+fn copy_planner_generic_param_fact(
+    value: FlowGenericParamFact
+) -> FlowGenericParamFact {
+    make_flow_generic_param_fact(
+        flow_generic_param_owner(value), flow_generic_param_index(value),
+        flow_generic_param_arity(value), flow_generic_param_bounds(value))
 }
 
-pub struct PlannerResourceDependency {
-    pub child_type_index: Int,
-    pub child_dependency_ordinal: Int,
-    pub target: PlannerDependencyTargetValue
+fn planner_generic_param_fact_same(
+    left: FlowGenericParamFact, right: FlowGenericParamFact
+) -> Bool {
+    if !symbol_ref_same(
+            flow_generic_param_owner(left),
+            flow_generic_param_owner(right)) ||
+       flow_generic_param_index(left) != flow_generic_param_index(right) ||
+       flow_generic_param_arity(left) != flow_generic_param_arity(right) {
+        return false
+    }
+    let left_bounds = flow_generic_param_bounds(left)
+    let right_bounds = flow_generic_param_bounds(right)
+    if left_bounds.len() != right_bounds.len() { return false }
+    let mut index = 0
+    while index < left_bounds.len() {
+        if !symbol_ref_same(
+                left_bounds.get(index).unwrap(),
+                right_bounds.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
 }
 
-pub fn make_parent_resource_dependency(
-    child_type_index: Int, child_dependency_ordinal: Int,
-    parent_parameter_ordinal: Int
-) -> PlannerResourceDependency {
-    if child_type_index < 0 || child_dependency_ordinal < 0 ||
-       parent_parameter_ordinal < 0 {
-        panic("ResourcePlanner: negative parent resource dependency")
-    }
-    PlannerResourceDependency {
-        child_type_index: child_type_index,
-        child_dependency_ordinal: child_dependency_ordinal,
-        target: PlannerDependencyTargetValue::ParentParameterTargetValue(
-            parent_parameter_ordinal)
-    }
+fn planner_generic_param_facts_contain(
+    values: List<FlowGenericParamFact>, target: FlowGenericParamFact
+) -> Bool {
+    values.any(fn(value) {
+        planner_generic_param_fact_same(value, target)
+    })
 }
 
-pub fn make_concrete_resource_dependency(
-    child_type_index: Int, child_dependency_ordinal: Int,
-    concrete_type_index: Int
-) -> PlannerResourceDependency {
-    if child_type_index < 0 || child_dependency_ordinal < 0 ||
-       concrete_type_index < 0 {
-        panic("ResourcePlanner: negative concrete resource dependency")
+fn planner_generic_param_fact_index(
+    values: List<FlowGenericParamFact>, target: FlowGenericParamFact
+) -> Int {
+    let mut index = 0
+    while index < values.len() {
+        if planner_generic_param_fact_same(
+                values.get(index).unwrap(), target) {
+            return index
+        }
+        index = index + 1
     }
-    PlannerResourceDependency {
-        child_type_index: child_type_index,
-        child_dependency_ordinal: child_dependency_ordinal,
-        target: PlannerDependencyTargetValue::ConcreteTypeTargetValue(
-            concrete_type_index)
-    }
+    panic("ResourcePlanner: exact resource dependency fact is absent")
 }
 
-fn copy_resource_dependencies(
-    values: List<PlannerResourceDependency>
-) -> List<PlannerResourceDependency> {
-    let mut result: List<PlannerResourceDependency> = []
+fn append_planner_generic_param_fact(
+    mut values: List<FlowGenericParamFact>, value: FlowGenericParamFact
+) -> Bool {
+    if planner_generic_param_facts_contain(values, value) { return false }
+    values.push(copy_planner_generic_param_fact(value))
+    true
+}
+
+fn copy_planner_generic_param_facts(
+    values: List<FlowGenericParamFact>
+) -> List<FlowGenericParamFact> {
+    let mut result: List<FlowGenericParamFact> = []
     for value in values {
-        match value.target {
-            PlannerDependencyTargetValue::ParentParameterTargetValue(parent) =>
-                result.push(make_parent_resource_dependency(
-                    value.child_type_index,
-                    value.child_dependency_ordinal, parent)),
-            PlannerDependencyTargetValue::ConcreteTypeTargetValue(concrete) =>
-                result.push(make_concrete_resource_dependency(
-                    value.child_type_index,
-                    value.child_dependency_ordinal, concrete))
+        if !append_planner_generic_param_fact(result, value) {
+            panic("ResourcePlanner: duplicate exact resource dependency fact")
         }
     }
     result
@@ -173,9 +191,8 @@ fn copy_resource_dependencies(
 pub struct PlannerTypeNode {
     pub kind: PlannerTypeKind,
     pub child_type_indices: List<Int>,
-    pub resource_dependencies: List<PlannerResourceDependency>,
-    pub type_parameter_count: Int,
-    pub parameter_index: Int?,
+    pub resource_dependency_facts: List<FlowGenericParamFact>,
+    pub parameter_fact: FlowGenericParamFact?,
     pub direct_drop_seed: Bool,
     pub may_unique_seed: Bool,
     pub physical_rc_seed: Bool,
@@ -184,33 +201,30 @@ pub struct PlannerTypeNode {
     pub foreign_containment_seed: Bool
 }
 
-pub fn make_planner_type_node(
+fn make_planner_type_node_with_dependencies(
     kind: PlannerTypeKind, child_type_indices: List<Int>,
-    resource_dependencies: List<PlannerResourceDependency>,
-    type_parameter_count: Int, parameter_index: Int?,
+    resource_dependency_facts: List<FlowGenericParamFact>,
+    parameter_fact: FlowGenericParamFact?,
     direct_drop_seed: Bool, may_unique_seed: Bool,
     physical_rc_seed: Bool, boxing_seed: Bool,
     drop_glue_seed: Bool, foreign_containment_seed: Bool
 ) -> PlannerTypeNode {
-    if type_parameter_count < 0 {
-        panic("ResourcePlanner: negative type-parameter census")
-    }
     if direct_drop_seed && !may_unique_seed {
         panic("ResourcePlanner: direct Drop type is not unique-capable")
     }
     let is_parameter = planner_type_kind_tag(kind) == PLANNER_TYPE_PARAMETER
-    match parameter_index {
-        some(index) => if !is_parameter || index < 0 ||
-                          index >= type_parameter_count {
-            panic("ResourcePlanner: invalid type-parameter node")
+    match parameter_fact {
+        some(_) => if !is_parameter {
+            panic("ResourcePlanner: non-parameter type has a generic fact")
         },
         none => if is_parameter {
-            panic("ResourcePlanner: type-parameter node lacks exact index")
+            panic("ResourcePlanner: type-parameter node lacks exact fact")
         }
     }
     if (planner_type_kind_tag(kind) == PLANNER_TYPE_ATOMIC ||
         planner_type_kind_tag(kind) == PLANNER_TYPE_PTR ||
         planner_type_kind_tag(kind) == PLANNER_TYPE_EXTERN ||
+        planner_type_kind_tag(kind) == PLANNER_TYPE_CALLABLE ||
         planner_type_kind_tag(kind) == PLANNER_TYPE_PARAMETER) &&
        child_type_indices.len() != 0 {
         panic("ResourcePlanner: leaf type has child edges")
@@ -220,25 +234,32 @@ pub fn make_planner_type_node(
         if child < 0 { panic("ResourcePlanner: negative type edge") }
         children.push(child)
     }
-    let dependencies = copy_resource_dependencies(resource_dependencies)
-    for dependency in dependencies {
-        if !int_list_contains(children, dependency.child_type_index) {
-            panic("ResourcePlanner: resource dependency names a non-child type")
-        }
-        match dependency.target {
-            PlannerDependencyTargetValue::ParentParameterTargetValue(index) =>
-                if index >= type_parameter_count {
-                    panic("ResourcePlanner: dependency target escapes parent parameters")
-                },
-            PlannerDependencyTargetValue::ConcreteTypeTargetValue(_) => {}
+    let dependencies = copy_planner_generic_param_facts(
+        resource_dependency_facts)
+    match parameter_fact {
+        some(parameter) => {
+            if dependencies.len() != 1 ||
+               !planner_generic_param_fact_same(
+                    dependencies.get(0).unwrap(), parameter) {
+                panic("ResourcePlanner: parameter dependency seed is not exact")
+            }
+        },
+        none => if (planner_type_kind_tag(kind) == PLANNER_TYPE_ATOMIC ||
+                    planner_type_kind_tag(kind) == PLANNER_TYPE_PTR ||
+                    planner_type_kind_tag(kind) == PLANNER_TYPE_EXTERN ||
+                    planner_type_kind_tag(kind) == PLANNER_TYPE_CALLABLE) &&
+                   dependencies.len() != 0 {
+            panic("ResourcePlanner: resource leaf has dependency facts")
         }
     }
     PlannerTypeNode {
         kind: kind,
         child_type_indices: children,
-        resource_dependencies: dependencies,
-        type_parameter_count: type_parameter_count,
-        parameter_index: parameter_index,
+        resource_dependency_facts: dependencies,
+        parameter_fact: match parameter_fact {
+            some(parameter) => some(copy_planner_generic_param_fact(parameter)),
+            none => none
+        },
         direct_drop_seed: direct_drop_seed,
         may_unique_seed: may_unique_seed,
         physical_rc_seed: physical_rc_seed,
@@ -248,13 +269,31 @@ pub fn make_planner_type_node(
     }
 }
 
+pub fn make_planner_type_node(
+    kind: PlannerTypeKind, child_type_indices: List<Int>,
+    parameter_fact: FlowGenericParamFact?,
+    direct_drop_seed: Bool, may_unique_seed: Bool,
+    physical_rc_seed: Bool, boxing_seed: Bool,
+    drop_glue_seed: Bool, foreign_containment_seed: Bool
+) -> PlannerTypeNode {
+    let mut dependencies: List<FlowGenericParamFact> = []
+    match parameter_fact {
+        some(parameter) => dependencies.push(
+            copy_planner_generic_param_fact(parameter)),
+        none => {}
+    }
+    make_planner_type_node_with_dependencies(
+        kind, child_type_indices, dependencies, parameter_fact,
+        direct_drop_seed, may_unique_seed, physical_rc_seed, boxing_seed,
+        drop_glue_seed, foreign_containment_seed)
+}
+
 fn copy_planner_type_nodes(values: List<PlannerTypeNode>) -> List<PlannerTypeNode> {
     let mut result: List<PlannerTypeNode> = []
     for value in values {
-        result.push(make_planner_type_node(
+        result.push(make_planner_type_node_with_dependencies(
             value.kind, value.child_type_indices,
-            value.resource_dependencies,
-            value.type_parameter_count, value.parameter_index,
+            value.resource_dependency_facts, value.parameter_fact,
             value.direct_drop_seed, value.may_unique_seed,
             value.physical_rc_seed, value.boxing_seed,
             value.drop_glue_seed, value.foreign_containment_seed))
@@ -1796,6 +1835,165 @@ fn validate_body(
     }
 }
 
+fn planner_parameter_owner_same(
+    left: FlowGenericParamFact, right: FlowGenericParamFact
+) -> Bool {
+    symbol_ref_same(
+        flow_generic_param_owner(left), flow_generic_param_owner(right)) &&
+        flow_generic_param_arity(left) == flow_generic_param_arity(right)
+}
+
+fn planner_exact_parameter_universe(
+    values: List<PlannerTypeNode>
+) -> List<FlowGenericParamFact> {
+    let mut owners: List<FlowGenericParamFact> = []
+    for node in values {
+        match node.parameter_fact {
+            some(parameter) => if !owners.any(fn(owner) {
+                    planner_parameter_owner_same(owner, parameter)
+                }) {
+                owners.push(copy_planner_generic_param_fact(parameter))
+            },
+            none => {}
+        }
+    }
+    let mut result: List<FlowGenericParamFact> = []
+    for owner in owners {
+        let mut ordinal = 0
+        while ordinal < flow_generic_param_arity(owner) {
+            for node in values {
+                match node.parameter_fact {
+                    some(parameter) => if planner_parameter_owner_same(
+                            owner, parameter) &&
+                           flow_generic_param_index(parameter) == ordinal {
+                        let _ = append_planner_generic_param_fact(
+                            result, parameter)
+                    },
+                    none => {}
+                }
+            }
+            ordinal = ordinal + 1
+        }
+    }
+    result
+}
+
+fn close_planner_type_dependencies(
+    values: List<PlannerTypeNode>
+) -> List<PlannerTypeNode> {
+    let exact_facts = planner_exact_parameter_universe(values)
+    let mut dependencies: List<List<FlowGenericParamFact>> = []
+    let mut queued: List<Bool> = []
+    let mut worklist: List<Int> = []
+    let mut index = 0
+    while index < values.len() {
+        let node = values.get(index).unwrap()
+        let mut seeds: List<FlowGenericParamFact> = []
+        match node.parameter_fact {
+            some(parameter) => {
+                let _ = append_planner_generic_param_fact(seeds, parameter)
+                worklist.push(index)
+                queued.push(true)
+            },
+            none => queued.push(false)
+        }
+        dependencies.push(seeds)
+        index = index + 1
+    }
+    let mut cursor = 0
+    while cursor < worklist.len() {
+        let child_index = worklist.get(cursor).unwrap()
+        cursor = cursor + 1
+        queued.set(child_index, false)
+        let child_facts = dependencies.get(child_index).unwrap()
+        let mut parent_index = 0
+        while parent_index < values.len() {
+            let parent = values.get(parent_index).unwrap()
+            if int_list_contains(parent.child_type_indices, child_index) {
+                let mut parent_facts = dependencies.get(parent_index).unwrap()
+                let mut changed = false
+                for fact in child_facts {
+                    if append_planner_generic_param_fact(parent_facts, fact) {
+                        changed = true
+                    }
+                }
+                dependencies.set(parent_index, parent_facts)
+                if changed && !queued.get(parent_index).unwrap() {
+                    queued.set(parent_index, true)
+                    worklist.push(parent_index)
+                }
+            }
+            parent_index = parent_index + 1
+        }
+    }
+    let mut result: List<PlannerTypeNode> = []
+    index = 0
+    while index < values.len() {
+        let node = values.get(index).unwrap()
+        let discovered = dependencies.get(index).unwrap()
+        let mut canonical: List<FlowGenericParamFact> = []
+        for fact in exact_facts {
+            if planner_generic_param_facts_contain(discovered, fact) {
+                canonical.push(copy_planner_generic_param_fact(fact))
+            }
+        }
+        result.push(make_planner_type_node_with_dependencies(
+            node.kind, node.child_type_indices, canonical,
+            node.parameter_fact, node.direct_drop_seed,
+            node.may_unique_seed, node.physical_rc_seed,
+            node.boxing_seed, node.drop_glue_seed,
+            node.foreign_containment_seed))
+        index = index + 1
+    }
+    result
+}
+
+fn validate_planner_type_dependency_closure(
+    values: List<PlannerTypeNode>
+) {
+    let exact_facts = planner_exact_parameter_universe(values)
+    for node in values {
+        let mut canonical_cursor = 0
+        for exact in exact_facts {
+            if canonical_cursor < node.resource_dependency_facts.len() &&
+               planner_generic_param_fact_same(
+                    node.resource_dependency_facts.get(
+                        canonical_cursor).unwrap(), exact) {
+                canonical_cursor = canonical_cursor + 1
+            }
+        }
+        if canonical_cursor != node.resource_dependency_facts.len() {
+            panic("ResourcePlanner: dependency facts are not in exact formal order")
+        }
+        for dependency in node.resource_dependency_facts {
+            let mut witnessed = match node.parameter_fact {
+                some(parameter) => planner_generic_param_fact_same(
+                    parameter, dependency),
+                none => false
+            }
+            for child_index in node.child_type_indices {
+                if planner_generic_param_facts_contain(
+                        values.get(child_index).unwrap().resource_dependency_facts,
+                        dependency) {
+                    witnessed = true
+                }
+            }
+            if !witnessed {
+                panic("ResourcePlanner: derived dependency lacks a direct child witness")
+            }
+        }
+        for child_index in node.child_type_indices {
+            for dependency in values.get(
+                    child_index).unwrap().resource_dependency_facts {
+                if !planner_generic_param_facts_contain(
+                        node.resource_dependency_facts, dependency) {
+                    panic("ResourcePlanner: type dependency closure is partial")
+                }
+            }
+        }
+    }
+}
+
 pub fn make_frozen_planner_input(
     flow_fingerprint: Str,
     candidate_proof: CallableCandidateProof,
@@ -1806,51 +2004,21 @@ pub fn make_frozen_planner_input(
     if flow_fingerprint.len() == 0 {
         panic("ResourcePlanner: FlowIR fingerprint is missing")
     }
-    let copied_types = copy_planner_type_nodes(type_nodes)
+    let raw_types = copy_planner_type_nodes(type_nodes)
     let copied_callables = copy_planner_callables(callables)
     let copied_bodies = copy_planner_bodies(bodies)
     let mut type_index = 0
-    while type_index < copied_types.len() {
-        let node = copied_types.get(type_index).unwrap()
+    while type_index < raw_types.len() {
+        let node = raw_types.get(type_index).unwrap()
         for child in node.child_type_indices {
-            if child < 0 || child >= copied_types.len() {
+            if child < 0 || child >= raw_types.len() {
                 panic("ResourcePlanner: type child is outside frozen graph")
-            }
-            let child_node = copied_types.get(child).unwrap()
-            let mut dependency_ordinal = 0
-            while dependency_ordinal < child_node.type_parameter_count {
-                let mut matches = 0
-                for dependency in node.resource_dependencies {
-                    if dependency.child_type_index == child &&
-                       dependency.child_dependency_ordinal == dependency_ordinal {
-                        matches = matches + 1
-                    }
-                }
-                if matches != 1 {
-                    panic("ResourcePlanner: child resource substitution is partial or ambiguous")
-                }
-                dependency_ordinal = dependency_ordinal + 1
-            }
-        }
-        for dependency in node.resource_dependencies {
-            let child = copied_types.get(
-                dependency.child_type_index).unwrap()
-            if dependency.child_dependency_ordinal >=
-                   child.type_parameter_count {
-                panic("ResourcePlanner: child dependency ordinal is outside child")
-            }
-            match dependency.target {
-                PlannerDependencyTargetValue::ConcreteTypeTargetValue(index) =>
-                    if index < 0 || index >= copied_types.len() {
-                        panic("ResourcePlanner: concrete substitution type is absent")
-                    } else if copied_types.get(index).unwrap().type_parameter_count != 0 {
-                        panic("ResourcePlanner: concrete substitution still has free dependencies")
-                    },
-                PlannerDependencyTargetValue::ParentParameterTargetValue(_) => {}
             }
         }
         type_index = type_index + 1
     }
+    let copied_types = close_planner_type_dependencies(raw_types)
+    validate_planner_type_dependency_closure(copied_types)
     let mut callable_index = 0
     while callable_index < copied_callables.len() {
         let callable = copied_callables.get(callable_index).unwrap()
@@ -1931,7 +2099,7 @@ pub fn make_frozen_planner_input(
 struct TypeCellLayout {
     logical_start: Int,
     physical_start: Int,
-    parameter_count: Int
+    dependency_count: Int
 }
 
 struct CallableCellLayout {
@@ -2738,14 +2906,14 @@ pub fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild
         let node = input.type_nodes.get(type_index).unwrap()
         let logical_start = cells.len()
         let mut component = 0
-        while component < 2 + node.type_parameter_count {
+        while component < 2 + node.resource_dependency_facts.len() {
             add_cell(cells, resource_cell_kind_logical_shape(),
                 type_index, component, 1)
             component = component + 1
         }
         let physical_start = cells.len()
         component = 0
-        while component < 4 + node.type_parameter_count {
+        while component < 4 + node.resource_dependency_facts.len() {
             add_cell(cells, resource_cell_kind_physical_shape(),
                 type_index, component, 1)
             component = component + 1
@@ -2753,7 +2921,7 @@ pub fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild
         type_layouts.push(TypeCellLayout {
             logical_start: logical_start,
             physical_start: physical_start,
-            parameter_count: node.type_parameter_count
+            dependency_count: node.resource_dependency_facts.len()
         })
         type_index = type_index + 1
     }
@@ -2930,12 +3098,14 @@ pub fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild
         add_constraint(constraints, RULE_TYPE_SEED,
             layout.physical_start + 3,
             if node.foreign_containment_seed { 1 } else { 0 }, [])
-        match node.parameter_index {
+        match node.parameter_fact {
             some(parameter) => {
+                let dependency = planner_generic_param_fact_index(
+                    node.resource_dependency_facts, parameter)
                 add_constraint(constraints, RULE_TYPE_SEED,
-                    layout.logical_start + 2 + parameter, 1, [])
+                    layout.logical_start + 2 + dependency, 1, [])
                 add_constraint(constraints, RULE_TYPE_SEED,
-                    layout.physical_start + 4 + parameter, 1, [])
+                    layout.physical_start + 4 + dependency, 1, [])
             },
             none => {}
         }
@@ -2956,40 +3126,27 @@ pub fn build_constraint_graph(input: FrozenPlannerInput) -> ConstraintGraphBuild
                 physical_component = physical_component + 1
             }
         }
-        for dependency in node.resource_dependencies {
-            let child = type_layouts.get(
-                dependency.child_type_index).unwrap()
-            match dependency.target {
-                PlannerDependencyTargetValue::ParentParameterTargetValue(
-                    parent_parameter) => {
+        let mut dependency = 0
+        while dependency < node.resource_dependency_facts.len() {
+            let fact = node.resource_dependency_facts.get(dependency).unwrap()
+            for child_index in node.child_type_indices {
+                let child_node = input.type_nodes.get(child_index).unwrap()
+                if planner_generic_param_facts_contain(
+                        child_node.resource_dependency_facts, fact) {
+                    let child_dependency = planner_generic_param_fact_index(
+                        child_node.resource_dependency_facts, fact)
+                    let child = type_layouts.get(child_index).unwrap()
                     add_constraint(constraints, RULE_TYPE_CHILD,
-                        layout.logical_start + 2 + parent_parameter, 0,
+                        layout.logical_start + 2 + dependency, 0,
                         [child.logical_start + 2 +
-                            dependency.child_dependency_ordinal])
+                            child_dependency])
                     add_constraint(constraints, RULE_TYPE_CHILD,
-                        layout.physical_start + 4 + parent_parameter, 0,
+                        layout.physical_start + 4 + dependency, 0,
                         [child.physical_start + 4 +
-                            dependency.child_dependency_ordinal])
-                },
-                PlannerDependencyTargetValue::ConcreteTypeTargetValue(
-                    concrete_index) => {
-                    let concrete = type_layouts.get(concrete_index).unwrap()
-                    let mut logical_component = 0
-                    while logical_component < 2 {
-                        add_constraint(constraints, RULE_TYPE_CHILD,
-                            layout.logical_start + logical_component, 0,
-                            [concrete.logical_start + logical_component])
-                        logical_component = logical_component + 1
-                    }
-                    let mut physical_component = 0
-                    while physical_component < 4 {
-                        add_constraint(constraints, RULE_TYPE_CHILD,
-                            layout.physical_start + physical_component, 0,
-                            [concrete.physical_start + physical_component])
-                        physical_component = physical_component + 1
-                    }
+                            child_dependency])
                 }
             }
+            dependency = dependency + 1
         }
         type_index = type_index + 1
     }
@@ -3315,11 +3472,16 @@ pub fn materialize_solved_graph(
         let mut logical_deps: List<Bool> = []
         let mut physical_deps: List<Bool> = []
         let mut parameter = 0
-        while parameter < layout.parameter_count {
-            logical_deps.push(bool_rank(
-                ranks, layout.logical_start + 2 + parameter))
-            physical_deps.push(bool_rank(
-                ranks, layout.physical_start + 4 + parameter))
+        while parameter < layout.dependency_count {
+            let logical_dependency = bool_rank(
+                ranks, layout.logical_start + 2 + parameter)
+            let physical_dependency = bool_rank(
+                ranks, layout.physical_start + 4 + parameter)
+            if !logical_dependency || !physical_dependency {
+                panic("ResourcePlanner: exact type dependency lacks a finite derivation")
+            }
+            logical_deps.push(logical_dependency)
+            physical_deps.push(physical_dependency)
             parameter = parameter + 1
         }
         logical_shapes.push(make_logical_ownership_shape(

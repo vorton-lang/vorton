@@ -17,17 +17,11 @@ use ir_inventory::{
 use core_type_source::{
     FlowTypeNode,
     flow_type_node_reference, flow_type_node_kind, flow_type_node_children,
-    flow_type_node_generic_param, flow_type_node_resource_edges,
-    flow_resource_edge_is_application, flow_resource_edge_child,
-    flow_resource_edge_child_dependency_ordinal,
-    flow_resource_edge_target,
-    flow_resource_dependency_target_is_parent,
-    flow_resource_dependency_target_parent,
-    flow_resource_dependency_target_parent_ordinal,
-    flow_resource_dependency_target_concrete_type,
+    flow_type_node_generic_arguments,
+    flow_type_node_resource_storage_parameter_ordinals,
+    flow_type_node_generic_param,
     flow_type_node_semantic_seed, flow_type_node_drop_contract,
-    flow_type_kind_tag,
-    flow_generic_param_index, flow_generic_param_arity
+    flow_type_kind_tag
 }
 use flow_ir::{
     FlowProgram,
@@ -121,9 +115,7 @@ use resource_type_lfp::{
     planner_type_kind_nominal, planner_type_kind_tuple,
     planner_type_kind_record, planner_type_kind_callable,
     planner_type_kind_parameter,
-    PlannerResourceDependency, make_parent_resource_dependency,
-    make_concrete_resource_dependency, PlannerTypeNode,
-    make_planner_type_node,
+    PlannerTypeNode, make_planner_type_node,
     PlannerCallable, make_planner_callable, PlannerScope, make_planner_scope,
     PlannerSlot, make_planner_slot, make_planner_slot_place,
     make_planner_project_place, PlannerCallTarget,
@@ -196,9 +188,13 @@ fn flow_resource_children(node: FlowTypeNode) -> List<CoreTypeRef> {
     if tag == 6 || tag == 7 || tag == 8 || tag == 9 {
         for child in flow_type_node_children(node) { result.push(child) }
     }
-    for edge in flow_type_node_resource_edges(node) {
-        if flow_resource_edge_is_application(edge) {
-            let child = flow_resource_edge_child(edge)
+    if tag == 6 || tag == 7 {
+        let arguments = flow_type_node_generic_arguments(node)
+        for ordinal in flow_type_node_resource_storage_parameter_ordinals(node) {
+            if ordinal < 0 || ordinal >= arguments.len() {
+                panic("ResourcePlanner: storage parameter ordinal is outside generic arguments")
+            }
+            let child = arguments.get(ordinal).unwrap()
             if !result.any(fn(existing) {
                     core_type_ref_same(existing, child)
                 }) {
@@ -207,31 +203,6 @@ fn flow_resource_children(node: FlowTypeNode) -> List<CoreTypeRef> {
         }
     }
     result
-}
-
-fn compute_flow_type_arities(nodes: List<FlowTypeNode>) -> List<Int> {
-    let mut arities: List<Int> = []
-    for node in nodes {
-        let tag = flow_type_kind_tag(flow_type_node_kind(node))
-        let mut arity = if tag == 12 {
-            flow_generic_param_arity(flow_type_node_generic_param(node))
-        } else {
-            0
-        }
-        for edge in flow_type_node_resource_edges(node) {
-            let target = flow_resource_edge_target(edge)
-            if flow_resource_dependency_target_is_parent(target) {
-                let target_arity = flow_generic_param_arity(
-                    flow_resource_dependency_target_parent(target))
-                if arity != 0 && arity != target_arity {
-                    panic("ResourcePlanner: FlowIR parent generic arity differs")
-                }
-                arity = target_arity
-            }
-        }
-        arities.push(arity)
-    }
-    arities
 }
 
 fn planner_type_kind_from_flow(node: FlowTypeNode) -> PlannerTypeKind {
@@ -247,9 +218,7 @@ fn planner_type_kind_from_flow(node: FlowTypeNode) -> PlannerTypeKind {
     panic("ResourcePlanner: unknown FlowIR type kind crossed adapter")
 }
 
-fn planner_type_node_from_flow(
-    node: FlowTypeNode, arity: Int
-) -> PlannerTypeNode {
+fn planner_type_node_from_flow(node: FlowTypeNode) -> PlannerTypeNode {
     let seed_tag = flow_type_semantic_seed_tag(
         flow_type_node_semantic_seed(node))
     let drop_contract = flow_type_node_drop_contract(node)
@@ -260,33 +229,16 @@ fn planner_type_node_from_flow(
     for child in flow_resource_children(node) {
         children.push(core_type_ref_index(child))
     }
-    let mut dependencies: List<PlannerResourceDependency> = []
-    for edge in flow_type_node_resource_edges(node) {
-        let child_index = core_type_ref_index(flow_resource_edge_child(edge))
-        let child_dependency = flow_resource_edge_child_dependency_ordinal(edge)
-        let target = flow_resource_edge_target(edge)
-        if flow_resource_dependency_target_is_parent(target) {
-            dependencies.push(make_parent_resource_dependency(
-                child_index, child_dependency,
-                flow_resource_dependency_target_parent_ordinal(target)))
-        } else {
-            dependencies.push(make_concrete_resource_dependency(
-                child_index, child_dependency,
-                core_type_ref_index(
-                    flow_resource_dependency_target_concrete_type(target))))
-        }
-    }
     let is_unique = seed_tag == 2 || drop_contract.is_some()
     let is_shareable = seed_tag == 3 || managed_foreign
-    let parameter_index = if flow_type_kind_tag(
+    let parameter_fact = if flow_type_kind_tag(
             flow_type_node_kind(node)) == 12 {
-        some(flow_generic_param_index(flow_type_node_generic_param(node)))
+        some(flow_type_node_generic_param(node))
     } else {
         none
     }
     make_planner_type_node(
-        planner_type_kind_from_flow(node), children, dependencies,
-        arity, parameter_index,
+        planner_type_kind_from_flow(node), children, parameter_fact,
         drop_contract.is_some(), is_unique,
         is_shareable, is_shareable || is_unique,
         is_shareable || drop_contract.is_some(), seed_tag == 4)
@@ -790,7 +742,6 @@ fn make_frozen_planner_input_from_flow(
 ) -> FrozenPlannerInput {
     validate_flow_program(program)
     let flow_types = flow_program_type_nodes(program)
-    let arities = compute_flow_type_arities(flow_types)
     let mut types: List<PlannerTypeNode> = []
     let mut type_index = 0
     while type_index < flow_types.len() {
@@ -798,8 +749,7 @@ fn make_frozen_planner_input_from_flow(
         if core_type_ref_index(flow_type_node_reference(node)) != type_index {
             panic("ResourcePlanner: FlowIR type order drifted")
         }
-        types.push(planner_type_node_from_flow(
-            node, arities.get(type_index).unwrap()))
+        types.push(planner_type_node_from_flow(node))
         type_index = type_index + 1
     }
     let flow_callables = flow_program_callables(program)

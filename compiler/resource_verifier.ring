@@ -2,8 +2,12 @@
 // This component rebuilds candidate/type rule graphs and validates exact CFG/RcIR
 // event, phase, slot, edge, and operation contracts without rerunning a solver.
 
-use ir_identity::{SlotRef, slot_ref_same}
+use ir_identity::{SlotRef, slot_ref_same, symbol_ref_same}
 use ir_inventory::{executable_ref_same}
+use core_type_source::{
+    FlowGenericParamFact, flow_generic_param_owner,
+    flow_generic_param_index, flow_generic_param_arity,
+    flow_generic_param_bounds}
 use flow_ir::{
     flow_block_ref_same, flow_instruction_ref_same,
     make_flow_instruction_ref, make_flow_block_ref,
@@ -113,7 +117,7 @@ use resource_certificate::{
 use resource_type_lfp::{
     FrozenPlannerInput, PlannerTypeNode, PlannerCallable, PlannerBody,
     PlannerBlock, PlannerEvent, PlannerEventValue, PlannerEdge,
-    PlannerSlot, PlannerDependencyTargetValue, PlannerCallableOriginValue,
+    PlannerSlot, PlannerCallableOriginValue,
     PlannerCallableLocation, TransferDecision, EventDecision,
     SolvedResourceGraph, planner_event_operand,
     make_transfer_decision, make_event_decision,
@@ -153,6 +157,125 @@ struct ExpectedResourceCell {
     source: ResourceCellSource
 }
 
+fn verifier_generic_param_fact_same(
+    left: FlowGenericParamFact, right: FlowGenericParamFact
+) -> Bool {
+    if !symbol_ref_same(
+            flow_generic_param_owner(left),
+            flow_generic_param_owner(right)) ||
+       flow_generic_param_index(left) != flow_generic_param_index(right) ||
+       flow_generic_param_arity(left) != flow_generic_param_arity(right) {
+        return false
+    }
+    let left_bounds = flow_generic_param_bounds(left)
+    let right_bounds = flow_generic_param_bounds(right)
+    if left_bounds.len() != right_bounds.len() { return false }
+    let mut index = 0
+    while index < left_bounds.len() {
+        if !symbol_ref_same(
+                left_bounds.get(index).unwrap(),
+                right_bounds.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn verifier_dependency_fact_index(
+    values: List<FlowGenericParamFact>, target: FlowGenericParamFact
+) -> Int {
+    let mut index = 0
+    while index < values.len() {
+        if verifier_generic_param_fact_same(
+                values.get(index).unwrap(), target) {
+            return index
+        }
+        index = index + 1
+    }
+    panic("ResourcePlanner verifier: exact dependency fact is absent")
+}
+
+fn verifier_dependency_facts_contain(
+    values: List<FlowGenericParamFact>, target: FlowGenericParamFact
+) -> Bool {
+    values.any(fn(value) {
+        verifier_generic_param_fact_same(value, target)
+    })
+}
+
+fn verify_type_dependency_closure(input: FrozenPlannerInput) {
+    for node in input.type_nodes {
+        let mut left = 0
+        while left < node.resource_dependency_facts.len() {
+            let dependency = node.resource_dependency_facts.get(left).unwrap()
+            let mut right = left + 1
+            while right < node.resource_dependency_facts.len() {
+                if verifier_generic_param_fact_same(
+                        dependency,
+                        node.resource_dependency_facts.get(right).unwrap()) {
+                    panic("ResourcePlanner verifier: duplicate exact dependency fact")
+                }
+                right = right + 1
+            }
+            let mut exact_seed_exists = false
+            for candidate in input.type_nodes {
+                match candidate.parameter_fact {
+                    some(parameter) => if verifier_generic_param_fact_same(
+                            parameter, dependency) {
+                        exact_seed_exists = true
+                    },
+                    none => {}
+                }
+            }
+            if !exact_seed_exists {
+                panic("ResourcePlanner verifier: dependency lacks an exact parameter seed")
+            }
+            let mut witnessed = match node.parameter_fact {
+                some(parameter) => verifier_generic_param_fact_same(
+                    parameter, dependency),
+                none => false
+            }
+            for child_index in node.child_type_indices {
+                if child_index < 0 || child_index >= input.type_nodes.len() {
+                    panic("ResourcePlanner verifier: dependency child is outside graph")
+                }
+                if verifier_dependency_facts_contain(
+                        input.type_nodes.get(
+                            child_index).unwrap().resource_dependency_facts,
+                        dependency) {
+                    witnessed = true
+                }
+            }
+            if !witnessed {
+                panic("ResourcePlanner verifier: dependency lacks a direct child witness")
+            }
+            left = left + 1
+        }
+        match node.parameter_fact {
+            some(parameter) => if node.resource_dependency_facts.len() != 1 ||
+                   !verifier_generic_param_fact_same(
+                        node.resource_dependency_facts.get(0).unwrap(),
+                        parameter) {
+                panic("ResourcePlanner verifier: parameter dependency seed drifted")
+            },
+            none => {}
+        }
+        for child_index in node.child_type_indices {
+            if child_index < 0 || child_index >= input.type_nodes.len() {
+                panic("ResourcePlanner verifier: type child is outside graph")
+            }
+            for dependency in input.type_nodes.get(
+                    child_index).unwrap().resource_dependency_facts {
+                if !verifier_dependency_facts_contain(
+                        node.resource_dependency_facts, dependency) {
+                    panic("ResourcePlanner verifier: dependency closure is partial")
+                }
+            }
+        }
+    }
+}
+
 fn make_expected_resource_cell(
     kind: ResourceCellKind, owner_index: Int, component_index: Int,
     max_rank: Int, source: ResourceCellSource
@@ -172,7 +295,7 @@ fn expected_resource_cells(
     while type_index < input.type_nodes.len() {
         let node = input.type_nodes.get(type_index).unwrap()
         let mut component = 0
-        while component < 2 + node.type_parameter_count {
+        while component < 2 + node.resource_dependency_facts.len() {
             let kind = resource_cell_kind_logical_shape()
             result.push(make_expected_resource_cell(
                 kind, type_index, component, 1,
@@ -181,7 +304,7 @@ fn expected_resource_cells(
             component = component + 1
         }
         component = 0
-        while component < 4 + node.type_parameter_count {
+        while component < 4 + node.resource_dependency_facts.len() {
             let kind = resource_cell_kind_physical_shape()
             result.push(make_expected_resource_cell(
                 kind, type_index, component, 1,
@@ -1005,16 +1128,18 @@ fn expected_source_constraints(
             seed_site, RULE_TYPE_SEED,
             if node.foreign_containment_seed { 1 } else { 0 }, false,
             make_structural_resource_cell_source(physical, type_index, 3), []))
-        match node.parameter_index {
+        match node.parameter_fact {
             some(parameter) => {
+                let dependency = verifier_dependency_fact_index(
+                    node.resource_dependency_facts, parameter)
                 result.push(make_source_constraint_spec(
                     seed_site, RULE_TYPE_SEED, 1, false,
                     make_structural_resource_cell_source(
-                        logical, type_index, 2 + parameter), []))
+                        logical, type_index, 2 + dependency), []))
                 result.push(make_source_constraint_spec(
                     seed_site, RULE_TYPE_SEED, 1, false,
                     make_structural_resource_cell_source(
-                        physical, type_index, 4 + parameter), []))
+                        physical, type_index, 4 + dependency), []))
             },
             none => {}
         }
@@ -1041,49 +1166,32 @@ fn expected_source_constraints(
                 component = component + 1
             }
         }
-        for dependency in node.resource_dependencies {
-            match dependency.target {
-                PlannerDependencyTargetValue::ParentParameterTargetValue(
-                    parent_parameter) => {
+        let mut dependency = 0
+        while dependency < node.resource_dependency_facts.len() {
+            let fact = node.resource_dependency_facts.get(dependency).unwrap()
+            for child_index in node.child_type_indices {
+                let child_node = input.type_nodes.get(child_index).unwrap()
+                if verifier_dependency_facts_contain(
+                        child_node.resource_dependency_facts, fact) {
+                    let child_dependency = verifier_dependency_fact_index(
+                        child_node.resource_dependency_facts, fact)
                     result.push(make_source_constraint_spec(
                         child_site, RULE_TYPE_CHILD, 0, false,
                         make_structural_resource_cell_source(
-                            logical, type_index, 2 + parent_parameter),
+                            logical, type_index, 2 + dependency),
                         [make_structural_resource_cell_source(
-                            logical, dependency.child_type_index,
-                            2 + dependency.child_dependency_ordinal)]))
+                            logical, child_index,
+                            2 + child_dependency)]))
                     result.push(make_source_constraint_spec(
                         child_site, RULE_TYPE_CHILD, 0, false,
                         make_structural_resource_cell_source(
-                            physical, type_index, 4 + parent_parameter),
+                            physical, type_index, 4 + dependency),
                         [make_structural_resource_cell_source(
-                            physical, dependency.child_type_index,
-                            4 + dependency.child_dependency_ordinal)]))
-                },
-                PlannerDependencyTargetValue::ConcreteTypeTargetValue(
-                    concrete_index) => {
-                    let mut component = 0
-                    while component < 2 {
-                        result.push(make_source_constraint_spec(
-                            child_site, RULE_TYPE_CHILD, 0, false,
-                            make_structural_resource_cell_source(
-                                logical, type_index, component),
-                            [make_structural_resource_cell_source(
-                                logical, concrete_index, component)]))
-                        component = component + 1
-                    }
-                    component = 0
-                    while component < 4 {
-                        result.push(make_source_constraint_spec(
-                            child_site, RULE_TYPE_CHILD, 0, false,
-                            make_structural_resource_cell_source(
-                                physical, type_index, component),
-                            [make_structural_resource_cell_source(
-                                physical, concrete_index, component)]))
-                        component = component + 1
-                    }
+                            physical, child_index,
+                            4 + child_dependency)]))
                 }
             }
+            dependency = dependency + 1
         }
         type_index = type_index + 1
     }
@@ -1430,17 +1538,22 @@ fn decode_verified_resource_ranks(
     let mut cursor = 0
     for node in input.type_nodes {
         let logical_start = cursor
-        cursor = cursor + 2 + node.type_parameter_count
+        cursor = cursor + 2 + node.resource_dependency_facts.len()
         let physical_start = cursor
-        cursor = cursor + 4 + node.type_parameter_count
+        cursor = cursor + 4 + node.resource_dependency_facts.len()
         let mut logical_deps: List<Bool> = []
         let mut physical_deps: List<Bool> = []
         let mut parameter = 0
-        while parameter < node.type_parameter_count {
-            logical_deps.push(verifier_rank_bool(
-                ranks, logical_start + 2 + parameter))
-            physical_deps.push(verifier_rank_bool(
-                ranks, physical_start + 4 + parameter))
+        while parameter < node.resource_dependency_facts.len() {
+            let logical_dependency = verifier_rank_bool(
+                ranks, logical_start + 2 + parameter)
+            let physical_dependency = verifier_rank_bool(
+                ranks, physical_start + 4 + parameter)
+            if !logical_dependency || !physical_dependency {
+                panic("ResourcePlanner verifier: dependency derivation is incomplete")
+            }
+            logical_deps.push(logical_dependency)
+            physical_deps.push(physical_dependency)
             parameter = parameter + 1
         }
         logical_shapes.push(make_logical_ownership_shape(
@@ -1548,6 +1661,7 @@ fn decode_verified_resource_ranks(
 pub fn verify_fixed_graph_contract(
     input: FrozenPlannerInput, certificate: ResourceCertificate
 ) -> SolvedResourceGraph {
+    verify_type_dependency_closure(input)
     let proof = resource_certificate_fixed_point(certificate)
     let actual_cells = resource_fixed_point_cells(proof)
     let actual_constraints = resource_fixed_point_constraints(proof)
