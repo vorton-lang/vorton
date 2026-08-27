@@ -174,7 +174,16 @@ fn main() {
     let operation_callback = handle {
         relay_operation(operation_param_step)
     } with {
-        CallablePort.relay(callback) => operation_result_step,
+        CallablePort.relay(callback) => {
+            let observed_param = handle {
+                callback(55)
+            } with {
+                OperationParamEffect.resolve(value) => 505,
+            }
+            assert(observed_param == 505,
+                "effect operation handler receives the exact parameter callable")
+            operation_result_step
+        },
     }
     let operation_result = handle {
         operation_callback(6)
