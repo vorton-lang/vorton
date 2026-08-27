@@ -100,6 +100,7 @@ use core_type_source::{
     flow_type_node_generic_param,
     flow_type_actual_satisfies_substituted_formal,
     flow_effect_actual_satisfies_substituted_formal,
+    core_effect_instantiation_projects_substitutions,
     FLOW_TYPE_INT, FLOW_TYPE_FLOAT, FLOW_TYPE_STR, FLOW_TYPE_BOOL,
     FLOW_TYPE_UNIT, FLOW_TYPE_NEVER, FLOW_TYPE_STRUCT, FLOW_TYPE_ENUM,
     FLOW_TYPE_TUPLE, FLOW_TYPE_RECORD, FLOW_TYPE_CALLABLE,
@@ -4232,6 +4233,11 @@ fn validate_direct_calls(
                                 target.effect_substitutions, candidate,
                                 type_nodes,
                                 "FlowIR: direct effect substitution identity/order differs")
+                            if !core_effect_instantiation_projects_substitutions(
+                                    target.effect_substitutions,
+                                    target.effects) {
+                                panic("FlowIR: direct top effect projection differs")
+                            }
                             if flow_call_contract_parameter_types(
                                     candidate.semantic_contract).len() !=
                                         arguments.len() ||
@@ -4522,6 +4528,10 @@ fn validate_callable_value_contract(
     validate_flow_effect_substitutions_for_callable(
         effect_substitutions, callable, type_nodes,
         "FlowIR: callable value effect substitution differs")
+    if !core_effect_instantiation_projects_substitutions(
+            effect_substitutions, effects) {
+        panic("FlowIR: callable value top effect projection differs")
+    }
     if !flow_type_actual_satisfies_substituted_formal(
             type_nodes, target_type, callable.header_type,
             type_substitutions) ||

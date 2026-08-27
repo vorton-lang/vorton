@@ -137,6 +137,7 @@ use core_type_source::{
     FlowEffectParamSubstitution, make_flow_effect_param_substitution,
     flow_type_actual_matches_formal_exact,
     flow_effect_actual_satisfies_substituted_formal,
+    core_effect_instantiation_projects_substitutions,
     remap_flow_call_contract
 }
 
@@ -4212,6 +4213,10 @@ fn validate_call_signature(
         validate_effect_substitutions_for_callable(
             callee.effect_substitutions, candidate, graph,
             "CoreHIR: direct effect substitution identity/order differs")
+        if !core_effect_instantiation_projects_substitutions(
+                callee.effect_substitutions, callee.effects) {
+            panic("CoreHIR: direct top effect projection differs")
+        }
         if !core_call_contract_actual_satisfies_formal(
                 callee.contract, candidate.semantic_contract,
                 callee.type_substitutions, graph) {
@@ -4878,6 +4883,10 @@ fn validate_core_callable_value_contract(
     validate_effect_substitutions_for_callable(
         effect_substitutions, callable, graph,
         "CoreHIR: callable value effect substitution differs")
+    if !core_effect_instantiation_projects_substitutions(
+            effect_substitutions, effects) {
+        panic("CoreHIR: callable value top effect projection differs")
+    }
     if !flow_type_actual_satisfies_substituted_formal(
             core_type_graph_nodes(graph), target_type,
             callable.header_type, type_substitutions) ||

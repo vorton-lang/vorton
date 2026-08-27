@@ -30,7 +30,8 @@ use ir_inventory::{
 }
 use effect_contract::{
     EffectParamRef, effect_param_ref_same,
-    CoreEffectAtom, CoreEffectContract,
+    CoreEffectAtom, CoreEffectContract, CoreEffectSubstitution,
+    CoreEffectInstantiation,
     make_core_fail_effect, make_core_mut_effect, make_core_unsafe_effect,
     make_core_handled_effect, make_core_system_effect,
     core_effect_atom_kind_tag, core_effect_atom_type,
@@ -39,6 +40,10 @@ use effect_contract::{
     make_core_effect_set, core_effect_set_atoms,
     make_core_effect_contract, core_effect_contract_exact,
     core_effect_contract_parameter, core_effect_contract_same,
+    core_effect_substitution_parameter,
+    core_effect_substitution_replacement,
+    core_effect_instantiation_source,
+    core_effect_instantiation_substitutions,
     core_effect_contract_actual_satisfies_formal,
     copy_core_effect_contract
 }
@@ -368,6 +373,40 @@ pub fn make_flow_effect_param_substitution(
     formal: EffectParamRef, actual: EffectParamRef
 ) -> FlowEffectParamSubstitution {
     FlowEffectParamSubstitution { formal: formal, actual: actual }
+}
+
+pub fn core_effect_instantiation_projects_substitutions(
+    values: List<CoreEffectSubstitution>,
+    instantiation: CoreEffectInstantiation
+) -> Bool {
+    let projected = core_effect_instantiation_substitutions(instantiation)
+    match core_effect_contract_parameter(
+            core_effect_instantiation_source(instantiation)) {
+        none => projected.len() == 0,
+        some(parameter) => {
+            if projected.len() != 1 ||
+               !effect_param_ref_same(
+                    core_effect_substitution_parameter(
+                        projected.get(0).unwrap()), parameter) {
+                return false
+            }
+            let mut replacement: CoreEffectContract? = none
+            for value in values {
+                if effect_param_ref_same(
+                        core_effect_substitution_parameter(value), parameter) {
+                    if replacement.is_some() { return false }
+                    replacement = some(
+                        core_effect_substitution_replacement(value))
+                }
+            }
+            match replacement {
+                some(actual) => core_effect_contract_same(
+                    actual, core_effect_substitution_replacement(
+                        projected.get(0).unwrap())),
+                none => false
+            }
+        }
+    }
 }
 
 pub fn make_flow_type_substitution(
