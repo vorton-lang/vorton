@@ -2629,6 +2629,15 @@ fn check_fn_body(
                             representative, exact_id),
                     _ => {}
                 }
+                match apply_subst(
+                        ctx.subst,
+                        Type::TypeVar { id: exact_id, name: none }) {
+                    Type::TypeVar { id: representative, .. } =>
+                        insert_canonical_type_var_id(
+                            canonical_type_var_ids,
+                            representative, exact_id),
+                    _ => {}
+                }
                 inherited_index = inherited_index + 1
             }
         },
