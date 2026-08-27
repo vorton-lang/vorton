@@ -43,7 +43,11 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
     ImplMethodSchemeCore, TypeAliasDef,
     BuiltInKind, mono, apply_subst, apply_subst_row, apply_subst_map,
     build_scheme_var_map, impl_method_core_as_scheme,
-    find_impl, lookup_variant}
+    find_impl, lookup_variant, compiler_owned_extern_manifest_entry}
+use extern_manifest::{
+    compiler_extern_manifest_entry_executable,
+    compiler_extern_manifest_entry_normalized_signature,
+    compiler_extern_manifest_entry_generic_arity}
 use unify::{unify, empty_subst}
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     fn_bound_dict_ref,
@@ -99,7 +103,8 @@ use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
     dict_ref_local, dict_ref_wrapped_inner,
     HandledEvidenceRef,
     handled_evidence_requirement,
-    make_named_executable_ref, make_system_host_callable_ref}
+    make_named_executable_ref, make_system_host_callable_ref,
+    executable_ref_is_named, executable_ref_named_symbol}
 
 fn exact_handled_evidence_for_row(
     mut ctx: InferCtx, row: EffectRow
@@ -141,9 +146,11 @@ fn exact_range_def(ctx: InferCtx) -> StructDef {
     let def = ctx.env.types.structs.get(BUILTIN_RANGE).unwrap_or_else(fn() {
         panic("Range inference: exact builtin StructDef is absent")
     })
-    if def.type_param_vars.len() != 0 || def.fields.len() != 3 ||
-       !types_equal(def.fields.get(0).unwrap().ty, INT) ||
-       !types_equal(def.fields.get(1).unwrap().ty, INT) ||
+    let formal_id = def.type_param_vars.get(0).unwrap_or(-1)
+    let formal = Type::TypeVar { id: formal_id, name: some("T") }
+    if def.type_param_vars.len() != 1 || def.fields.len() != 3 ||
+       !types_equal(def.fields.get(0).unwrap().ty, formal) ||
+       !types_equal(def.fields.get(1).unwrap().ty, formal) ||
        !types_equal(def.fields.get(2).unwrap().ty, BOOL) {
         panic("Range inference: builtin field contract differs")
     }
@@ -164,13 +171,41 @@ fn exact_list_literal_plan(
     }
     let allocator_ref = compiler_extern_ref_for_site(
         compiler_extern_site_from_tag(COMPILER_EXTERN_SLOT_ALLOC))
-    let allocator_signature = Type::FnType {
-        params: [INT],
-        return_type: Type::PtrType { pointee: element_type },
-        effects: EMPTY_ROW
+    let allocator_entry = compiler_owned_extern_manifest_entry(
+        ctx.env, compiler_extern_ref_symbol(allocator_ref)).unwrap_or_else(fn() {
+            panic("List literal: exact slot allocator manifest entry is absent")
+        })
+    let allocator_executable =
+        compiler_extern_manifest_entry_executable(allocator_entry)
+    let normalized_allocator =
+        compiler_extern_manifest_entry_normalized_signature(allocator_entry)
+    if compiler_extern_manifest_entry_generic_arity(allocator_entry) != 1 ||
+       !executable_ref_is_named(allocator_executable) {
+        panic("List literal: slot allocator manifest identity differs")
     }
+    let allocator_formal = match normalized_allocator {
+        Type::FnType { params, return_type, effects } => {
+            if params.len() != 1 || !types_equal(params.get(0).unwrap(), INT) ||
+               effects.effects.len() != 0 || effects.tail.is_some() {
+                panic("List literal: slot allocator manifest signature differs")
+            }
+            match return_type {
+                Type::PtrType { pointee } => match pointee {
+                    Type::TypeVar { id, .. } => id,
+                    _ => panic("List literal: slot allocator result is not formal")
+                },
+                _ => panic("List literal: slot allocator result is not Ptr")
+            }
+        },
+        _ => panic("List literal: slot allocator manifest is not callable")
+    }
+    let mut allocator_subst: Map<Int, Type> = map_new()
+    allocator_subst.insert(allocator_formal, element_type)
+    let allocator_signature = apply_subst_map(
+        allocator_subst, normalized_allocator)
     let allocator = make_h_exact_call_plan(
-        make_named_callee_ref(compiler_extern_ref_symbol(allocator_ref)),
+        make_named_callee_ref(
+            executable_ref_named_symbol(allocator_executable)),
         allocator_signature, none, [], [])
 
     let lookup = lookup_impl_method(ctx, BUILTIN_LIST, "push")
@@ -914,7 +949,8 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             // Range has one exact zero-generic nominal shape.
             let is_range = match iter_type {
                 Type::StructType { name, type_params } =>
-                    name == BUILTIN_RANGE && type_params.len() == 0,
+                    name == BUILTIN_RANGE && type_params.len() == 1 &&
+                    types_equal(type_params.get(0).unwrap(), INT),
                 _ => false
             }
             if !is_range {
@@ -1012,14 +1048,19 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 ctx, INT, "Ord", "cmp", s, span).unwrap_or_else(fn() {
                     panic("Range for-in: exact Int ordering plan is absent")
                 })
+            let equality = exact_operator_plan(
+                ctx, INT, "Eq", "eq", s, span).unwrap_or_else(fn() {
+                    panic("Range for-in: exact Int equality plan is absent")
+                })
             let range_plan = make_h_range_for_in_plan(
                 range_def.owner_ref,
                 range_def.fields.get(0).unwrap().field_ref,
                 range_def.fields.get(1).unwrap().field_ref,
                 range_def.fields.get(2).unwrap().field_ref,
-                order,
+                order, equality,
                 fresh_semantic_let_binder(ctx, "range-value"),
                 fresh_semantic_var_binder(ctx, "range-counter"),
+                fresh_semantic_var_binder(ctx, "range-finished"),
                 binding_binder)
             ctx.loop_depth = ctx.loop_depth + 1
             let body_result = some(infer_block(ctx, body, some(s))) catch { _ => none }
@@ -1559,7 +1600,7 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
             s = me.1
             let range_def = exact_range_def(ctx)
             let range_type = Type::StructType {
-                name: BUILTIN_RANGE, type_params: []
+                name: BUILTIN_RANGE, type_params: [INT]
             }
             let inclusive_expr = HExpr::BoolLit {
                 value: inclusive, ty: BOOL,

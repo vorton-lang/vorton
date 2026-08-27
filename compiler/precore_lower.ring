@@ -68,7 +68,9 @@ use hir::{
     h_for_in_binding_binder,
     h_range_for_in_start, h_range_for_in_end,
     h_range_for_in_inclusive, h_range_for_in_order,
+    h_range_for_in_equality,
     h_range_for_in_range_binder, h_range_for_in_counter_binder,
+    h_range_for_in_finished_binder,
     h_fail_operation_tag,
     h_projection_kind, h_projection_nominal, h_projection_variant,
     h_projection_structural, h_projection_structural_name,
@@ -751,8 +753,11 @@ fn close_for_in(
     let binding_binder = h_for_in_binding_binder(plan)
     let range_binder = h_range_for_in_range_binder(plan)
     let counter_binder = h_range_for_in_counter_binder(plan)
+    let finished_binder = h_range_for_in_finished_binder(plan)
     let range_name = binder_name("$precore_range", range_binder)
     let counter_name = binder_name("$precore_range_counter", counter_binder)
+    let finished_name = binder_name(
+        "$precore_range_finished", finished_binder)
     if source_def_id != some(binder_def_id(binding_binder)) {
         panic("PreCore closure: for binding DefId/plan differs")
     }
@@ -794,7 +799,7 @@ fn close_for_in(
         eq_plan: none, ord_plan: some(order), ty: Type::BoolType,
         effects: EMPTY_ROW, span: span
     }
-    let condition = HExpr::IfExpr {
+    let range_condition = HExpr::IfExpr {
         condition: inclusive,
         then_branch: HExpr::Block { stmts: [], tail: some(less_equal),
             ty: Type::BoolType, effects: EMPTY_ROW, span: span },
@@ -802,10 +807,49 @@ fn close_for_in(
             ty: Type::BoolType, effects: EMPTY_ROW, span: span }),
         ty: Type::BoolType, effects: EMPTY_ROW, span: span
     }
-    // Increment before the source body after saving its visible binding, so
-    // source `continue` naturally reaches the next value without a new CFG op.
+    let condition = HExpr::IfExpr {
+        condition: binder_ident(
+            finished_name, finished_binder, Type::BoolType, span),
+        then_branch: HExpr::Block { stmts: [], tail: some(HExpr::BoolLit {
+            value: false, ty: Type::BoolType,
+            effects: EMPTY_ROW, span: span }),
+            ty: Type::BoolType, effects: EMPTY_ROW, span: span },
+        else_branch: some(HExpr::Block { stmts: [],
+            tail: some(range_condition), ty: Type::BoolType,
+            effects: EMPTY_ROW, span: span }),
+        ty: Type::BoolType, effects: EMPTY_ROW, span: span
+    }
+    // Advance before the source body after saving its visible binding, so
+    // source `continue` naturally reaches the next value.  The inclusive end
+    // marks completion instead of overflowing the maximum Int endpoint.
     let binding_init = binder_ident(
         counter_name, counter_binder, Type::IntType, span)
+    let equality = h_range_for_in_equality(plan)
+    let at_end = HExpr::BinOp {
+        op: BinOp::Eq,
+        left: binder_ident(
+            counter_name, counter_binder, Type::IntType, span),
+        right: project_expr(
+            binder_ident(range_name, range_binder, range_type, span),
+            h_nominal_projection(h_range_for_in_end(plan)),
+            Type::IntType, EMPTY_ROW, span),
+        eq_dispatch: none, ord_dispatch: none,
+        eq_plan: some(equality), ord_plan: none, ty: Type::BoolType,
+        effects: EMPTY_ROW, span: span
+    }
+    let inclusive_at_end = HExpr::IfExpr {
+        condition: project_expr(
+            binder_ident(range_name, range_binder, range_type, span),
+            h_nominal_projection(h_range_for_in_inclusive(plan)),
+            Type::BoolType, EMPTY_ROW, span),
+        then_branch: HExpr::Block { stmts: [], tail: some(at_end),
+            ty: Type::BoolType, effects: EMPTY_ROW, span: span },
+        else_branch: some(HExpr::Block { stmts: [], tail: some(
+            HExpr::BoolLit { value: false, ty: Type::BoolType,
+                effects: EMPTY_ROW, span: span }),
+            ty: Type::BoolType, effects: EMPTY_ROW, span: span }),
+        ty: Type::BoolType, effects: EMPTY_ROW, span: span
+    }
     let increment = HExpr::BinOp {
         op: BinOp::Add,
         left: binder_ident(
@@ -816,14 +860,28 @@ fn close_for_in(
         eq_plan: none, ord_plan: none, ty: Type::IntType,
         effects: EMPTY_ROW, span: span
     }
+    let advance = HExpr::IfExpr {
+        condition: inclusive_at_end,
+        then_branch: HExpr::Block { stmts: [HStmt::Assign {
+            target: binder_ident(
+                finished_name, finished_binder, Type::BoolType, span),
+            value: HExpr::BoolLit { value: true, ty: Type::BoolType,
+                effects: EMPTY_ROW, span: span }, span: span }],
+            tail: none, ty: Type::UnitType,
+            effects: EMPTY_ROW, span: span },
+        else_branch: some(HExpr::Block { stmts: [HStmt::Assign {
+            target: binder_ident(
+                counter_name, counter_binder, Type::IntType, span),
+            value: increment, span: span }],
+            tail: none, ty: Type::UnitType,
+            effects: EMPTY_ROW, span: span }),
+        ty: Type::UnitType, effects: EMPTY_ROW, span: span
+    }
     let prefix: List<HStmt> = [
         binder_let(
             binding, binding_binder, Type::IntType,
             binding_init, binding_span),
-        HStmt::Assign {
-            target: binder_ident(
-                counter_name, counter_binder, Type::IntType, span),
-            value: increment, span: span }
+        HStmt::ExprStmt { expr: advance, span: span }
     ]
     let loop_body = prepend_statements(prefix, close_expr(body), span)
     [
@@ -832,6 +890,10 @@ fn close_for_in(
             closed_iterable, span),
         binder_var(
             counter_name, counter_binder, Type::IntType, start, span),
+        binder_var(
+            finished_name, finished_binder, Type::BoolType,
+            HExpr::BoolLit { value: false, ty: Type::BoolType,
+                effects: EMPTY_ROW, span: span }, span),
         HStmt::While { condition: condition, body: loop_body, span: span }
     ]
 }

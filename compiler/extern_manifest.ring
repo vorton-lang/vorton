@@ -261,6 +261,12 @@ pub fn compiler_extern_manifest_entry_executable(
 pub fn compiler_extern_manifest_entry_resource(
     value: CompilerExternManifestEntry
 ) -> CallableResourceContractFact { value.resource }
+pub fn compiler_extern_manifest_entry_normalized_signature(
+    value: CompilerExternManifestEntry
+) -> Type { value.normalized_signature }
+pub fn compiler_extern_manifest_entry_generic_arity(
+    value: CompilerExternManifestEntry
+) -> Int { value.generic_arity }
 
 pub fn compiler_extern_manifest_entry_compiler_symbol(
     value: CompilerExternManifestEntry

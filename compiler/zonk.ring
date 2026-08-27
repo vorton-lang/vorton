@@ -16,7 +16,9 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     h_for_in_binding_binder, h_range_for_in_owner,
     h_range_for_in_start, h_range_for_in_end,
     h_range_for_in_inclusive, h_range_for_in_order,
+    h_range_for_in_equality,
     h_range_for_in_range_binder, h_range_for_in_counter_binder,
+    h_range_for_in_finished_binder,
     HOperatorPlan, h_operator_is_tuple, h_operator_elements,
     h_operator_method_ref, h_operator_method, h_operator_tuple,
     MethodCallRef, make_intrinsic_method_call_ref,
@@ -118,11 +120,18 @@ fn zonk_for_in_plan(ctx: ZonkCtx, value: HForInPlan) -> HForInPlan {
         some(plan) => plan,
         none => panic("zonk: Range ordering plan disappeared")
     }
+    let equality = match zonk_operator_plan(
+            ctx, some(h_range_for_in_equality(value))) {
+        some(plan) => plan,
+        none => panic("zonk: Range equality plan disappeared")
+    }
     make_h_range_for_in_plan(
         h_range_for_in_owner(value), h_range_for_in_start(value),
-        h_range_for_in_end(value), h_range_for_in_inclusive(value), order,
+        h_range_for_in_end(value), h_range_for_in_inclusive(value),
+        order, equality,
         h_range_for_in_range_binder(value),
         h_range_for_in_counter_binder(value),
+        h_range_for_in_finished_binder(value),
         h_for_in_binding_binder(value))
 }
 

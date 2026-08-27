@@ -101,7 +101,9 @@ pub use hir_exact::{
     remap_h_for_in_handled_evidence,
     h_range_for_in_owner, h_range_for_in_start, h_range_for_in_end,
     h_range_for_in_inclusive, h_range_for_in_order,
+    h_range_for_in_equality,
     h_range_for_in_range_binder, h_range_for_in_counter_binder,
+    h_range_for_in_finished_binder,
     HFailOperationRef, h_fail_raise_ref, h_fail_operation_tag
 }
 

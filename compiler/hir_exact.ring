@@ -1203,15 +1203,19 @@ pub struct HForInPlan {
     end: NominalFieldRef,
     inclusive: NominalFieldRef,
     order: HOperatorPlan,
+    equality: HOperatorPlan,
     range_binder: BinderEntry,
     counter_binder: BinderEntry,
+    finished_binder: BinderEntry,
     binding_binder: BinderEntry
 }
 pub fn make_h_range_for_in_plan(
     owner: RegisteredNominalRef,
     start: NominalFieldRef, end: NominalFieldRef,
     inclusive: NominalFieldRef, order: HOperatorPlan,
+    equality: HOperatorPlan,
     range_binder: BinderEntry, counter_binder: BinderEntry,
+    finished_binder: BinderEntry,
     binding_binder: BinderEntry
 ) -> HForInPlan {
     let owner_symbol = registered_nominal_ref_symbol(owner)
@@ -1221,13 +1225,14 @@ pub fn make_h_range_for_in_plan(
        nominal_field_ref_index(start) != 0 ||
        nominal_field_ref_index(end) != 1 ||
        nominal_field_ref_index(inclusive) != 2 ||
-       h_operator_is_tuple(order) {
+       h_operator_is_tuple(order) || h_operator_is_tuple(equality) {
         panic("HIR Range for-in: exact field/operator plan differs")
     }
     HForInPlan {
         owner: owner, start: start, end: end, inclusive: inclusive,
-        order: order, range_binder: range_binder,
-        counter_binder: counter_binder, binding_binder: binding_binder }
+        order: order, equality: equality, range_binder: range_binder,
+        counter_binder: counter_binder, finished_binder: finished_binder,
+        binding_binder: binding_binder }
 }
 pub fn h_for_in_binding_binder(value: HForInPlan) -> BinderEntry {
     value.binding_binder
@@ -1247,11 +1252,17 @@ pub fn h_range_for_in_inclusive(value: HForInPlan) -> NominalFieldRef {
 pub fn h_range_for_in_order(value: HForInPlan) -> HOperatorPlan {
     value.order
 }
+pub fn h_range_for_in_equality(value: HForInPlan) -> HOperatorPlan {
+    value.equality
+}
 pub fn h_range_for_in_range_binder(value: HForInPlan) -> BinderEntry {
     value.range_binder
 }
 pub fn h_range_for_in_counter_binder(value: HForInPlan) -> BinderEntry {
     value.counter_binder
+}
+pub fn h_range_for_in_finished_binder(value: HForInPlan) -> BinderEntry {
+    value.finished_binder
 }
 pub fn remap_h_for_in_handled_evidence(
     value: HForInPlan, sources: List<HandledEvidenceRef>,
@@ -1260,8 +1271,10 @@ pub fn remap_h_for_in_handled_evidence(
     let _ = sources
     let _ = targets
     make_h_range_for_in_plan(
-        value.owner, value.start, value.end, value.inclusive, value.order,
-        value.range_binder, value.counter_binder, value.binding_binder)
+        value.owner, value.start, value.end, value.inclusive,
+        value.order, value.equality,
+        value.range_binder, value.counter_binder, value.finished_binder,
+        value.binding_binder)
 }
 pub struct HFailOperationRef { tag: Int }
 pub fn h_fail_raise_ref() -> HFailOperationRef {

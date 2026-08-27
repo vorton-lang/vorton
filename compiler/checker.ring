@@ -31,9 +31,11 @@ use exports::{ModuleExports, TypeDef}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
     ImportIssueKind, NamespaceKind, first_duplicate_direct_declaration,
     duplicate_direct_declaration_diagnostic,
+    first_reserved_range_declaration,
+    reserved_range_declaration_diagnostic,
     single_namespace_file_key, resolve_single_namespace_plan,
     prelude_namespace_file_key, resolve_prelude_namespace_plan}
-use codes::{E0504, E0702, E0703, E0704, E0705, E0707}
+use codes::{E0207, E0504, E0702, E0703, E0704, E0705, E0707}
 use parser::{parse}
 use ir_identity::{SymbolRef, impl_owner_ref_same, impl_method_ref_owner,
     impl_owner_ref_trait, impl_owner_ref_provider, impl_method_ref_same,
@@ -579,6 +581,13 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         },
         none => {}
     }
+    match first_reserved_range_declaration(program) {
+        some(span) => {
+            ctx.sink.report(reserved_range_declaration_diagnostic(span))
+            return duplicate_direct_declaration_error_result(ctx, file_key)
+        },
+        none => {}
+    }
     let prelude_hdecls = load_prelude(ctx)
     install_struct_identity_ledger(
         ctx, file_key,
@@ -810,6 +819,16 @@ fn report_namespace_plan_issues(
                     DiagnosticContext::OtherContext {
                         detail: some("namespace import dependency SCC")
                     }))
+            },
+            ImportIssueKind::ReservedNominal => {
+                ctx.sink.report(make_diag(
+                    E0207, Severity::SevError,
+                    "Duplicate definition: builtin type 'Range' is already defined",
+                    span,
+                    DiagnosticContext::OtherContext {
+                        detail: some(
+                            "Range is the reserved 0.1 builtin nominal")
+                    }))
             }
         }
     }
@@ -834,6 +853,10 @@ pub fn check_module(
         some(_) => panic(
             "unreachable: project checker received duplicate direct declaration"),
         none => {}
+    }
+    if first_reserved_range_declaration(program).is_some() {
+        panic(
+            "unreachable: project checker received reserved Range declaration")
     }
     let mut ctx = new_infer_ctx(
         sink, module_key, module_order)

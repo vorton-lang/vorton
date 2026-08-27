@@ -23,8 +23,9 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_predicate_trait_name,
     find_impl_by_provider, impl_target_symbol,
     specialize_trait_method_scheme, delegate_plan_not_applicable}
-use ast::{span_zero}
-use hir::{HDecl, HStructField, variant_ctor_name, compare_by_first}
+use ast::{TypeParam, span_zero}
+use hir::{HDecl, HStructField, HTypeParam,
+    variant_ctor_name, compare_by_first}
 use diagnostics::{CollectingSink}
 use ir_inventory::{CallableResourceContractFact,
     CallableResourceRoleFact,
@@ -860,6 +861,8 @@ fn register_scalar_method_intrinsics(
 // syntax and Range for-in plan both consume these exact nominal fields before
 // Core; no backend stage reconstructs the shape from the leaf name.
 fn register_range(mut env: TypeEnv) {
+    let type_var_id = env.fresh_var_id()
+    let element_type = Type::TypeVar { id: type_var_id, name: some("T") }
     let owner = make_symbol_ref(
         "$builtin", namespace_nominal(), BUILTIN_RANGE, "builtin:Range")
     let start_member = make_symbol_ref(
@@ -874,13 +877,13 @@ fn register_range(mut env: TypeEnv) {
     env.types.structs.insert(BUILTIN_RANGE, StructDef {
         name: BUILTIN_RANGE,
         owner_ref: make_registered_nominal_ref(owner, BUILTIN_RANGE),
-        type_params: [], type_param_vars: [],
+        type_params: ["T"], type_param_vars: [type_var_id],
         fields: [
-            StructField { name: "start", ty: INT, is_pub: false,
+            StructField { name: "start", ty: element_type, is_pub: false,
                 field_ref: make_nominal_field_ref(
                     owner, start_member, 0, "start"),
                 field_index: 0, span: span_zero() },
-            StructField { name: "end", ty: INT, is_pub: false,
+            StructField { name: "end", ty: element_type, is_pub: false,
                 field_ref: make_nominal_field_ref(
                     owner, end_member, 1, "end"),
                 field_index: 1, span: span_zero() },
@@ -898,8 +901,16 @@ pub fn builtin_range_hdecl(env: TypeEnv) -> HDecl {
     let def = env.types.structs.get(BUILTIN_RANGE).unwrap_or_else(fn() {
         panic("builtin Range HIR: StructDef is absent")
     })
+    if def.type_param_vars.len() != 1 {
+        panic("builtin Range HIR: formal census differs")
+    }
     HDecl::Struct {
-        name: def.name, owner_ref: def.owner_ref, type_params: [],
+        name: def.name, owner_ref: def.owner_ref,
+        type_params: [HTypeParam {
+            source: TypeParam { name: "T", bounds: [], span: span_zero() },
+            type_var_id: def.type_param_vars.get(0).unwrap(),
+            bound_refs: []
+        }],
         fields: def.fields.map(fn(field) { HStructField {
             name: field.name, ty: field.ty, is_pub: field.is_pub,
             field_ref: field.field_ref, field_index: field.field_index,

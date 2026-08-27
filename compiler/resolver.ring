@@ -75,7 +75,8 @@ pub enum ImportIssueKind {
     SourceFrameMissing,
     SourceNameMissing,
     AmbiguousBinding,
-    UnresolvedImportCycle
+    UnresolvedImportCycle,
+    ReservedNominal
 }
 
 pub struct AstSite {
@@ -259,6 +260,41 @@ pub fn first_duplicate_direct_declaration(
     program: Program
 ) -> DuplicateDirectDeclaration? {
     first_duplicate_direct_declaration_in_scope(program.decls)
+}
+
+fn first_reserved_range_declaration_in_scope(
+    decls: List<Decl>
+) -> Span? {
+    for decl in decls {
+        match decl {
+            Decl::Struct { name, span, .. } |
+            Decl::ExternType { name, span, .. } |
+            Decl::Enum { name, span, .. } |
+            Decl::TypeAlias { name, span, .. } => if name == "Range" {
+                return some(span)
+            },
+            Decl::ModBlock { decls: nested, .. } => match
+                    first_reserved_range_declaration_in_scope(nested) {
+                some(span) => return some(span), none => {}
+            },
+            _ => {}
+        }
+    }
+    none
+}
+
+pub fn first_reserved_range_declaration(program: Program) -> Span? {
+    first_reserved_range_declaration_in_scope(program.decls)
+}
+
+pub fn reserved_range_declaration_diagnostic(span: Span) -> Diagnostic {
+    make_diag(
+        E0207, Severity::SevError,
+        "Duplicate definition: builtin type 'Range' is already defined",
+        span,
+        DiagnosticContext::OtherContext {
+            detail: some("Range is the reserved 0.1 builtin nominal")
+        })
 }
 
 fn direct_declaration_namespace_is_module(
@@ -1830,7 +1866,8 @@ fn import_issue_kind_rank(kind: ImportIssueKind) -> Int {
         ImportIssueKind::SourceFrameMissing => 1,
         ImportIssueKind::SourceNameMissing => 2,
         ImportIssueKind::AmbiguousBinding => 3,
-        ImportIssueKind::UnresolvedImportCycle => 4
+        ImportIssueKind::UnresolvedImportCycle => 4,
+        ImportIssueKind::ReservedNominal => 5
     }
 }
 
@@ -2249,6 +2286,34 @@ fn add_namespace_fact(
         panic(
             "namespace invariant violated: fact candidate and occurrence targets differ")
     }
+    if namespace_is_reserved_range_type(
+            candidate.namespace, candidate.exposed_name) {
+        let mut already_reported = false
+        for issue in issues {
+            match issue.kind {
+                ImportIssueKind::ReservedNominal => if
+                    issue.site.file_key == occurrence.site.file_key &&
+                    issue.site.frame_index == occurrence.site.frame_index &&
+                    issue.site.use_index == occurrence.site.use_index &&
+                    issue.site.item_index == occurrence.site.item_index {
+                    already_reported = true
+                },
+                _ => {}
+            }
+        }
+        if !already_reported {
+            issues.push(ImportIssue {
+                kind: ImportIssueKind::ReservedNominal,
+                site: occurrence.site,
+                source_owner: candidate.owner,
+                source_name: candidate.exposed_name,
+                local_name: candidate.exposed_name,
+                namespace: candidate.namespace,
+                related_owners: []
+            })
+        }
+        return
+    }
     let key = namespace_binding_key(
         candidate.file_key, candidate.frame_index,
         candidate.exposed_name, candidate.namespace)
@@ -2544,6 +2609,17 @@ fn structural_value_import_producer(
 ) -> ValueProducerId {
     ValueProducerId {
         key: "import|${obligation_index}|${source_slot.target.file_key}|${source_slot.target.frame_index}|${source_slot.target.exposed_name}|${delivery_lane_tag(lane)}"
+    }
+}
+
+fn namespace_is_reserved_range_type(
+    namespace: NamespaceKind, exposed_name: Str
+) -> Bool {
+    if exposed_name != "Range" { return false }
+    match namespace {
+        NamespaceKind::Struct | NamespaceKind::Enum |
+        NamespaceKind::TypeAlias => true,
+        _ => false
     }
 }
 
@@ -5592,6 +5668,22 @@ pub fn build_module_graph(entry_file: Str, error_format: Str) -> ModuleGraph? {
                                 resolve_sink.report(
                                     duplicate_direct_declaration_diagnostic(
                                         duplicate))
+                                if error_format == "llm" {
+                                    eprintln(format_llm(
+                                        resolve_sink.diagnostics(),
+                                        current_mod.file_path))
+                                } else {
+                                    eprintln(format_human(
+                                        resolve_sink.diagnostics(), source))
+                                }
+                                return none
+                            },
+                            none => {}
+                        }
+                        match first_reserved_range_declaration(ast) {
+                            some(span) => {
+                                resolve_sink.report(
+                                    reserved_range_declaration_diagnostic(span))
                                 if error_format == "llm" {
                                     eprintln(format_llm(
                                         resolve_sink.diagnostics(),

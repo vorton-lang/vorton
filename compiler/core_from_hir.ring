@@ -1250,7 +1250,8 @@ fn producer_record_type(
         Type::TypeVar { id, .. } => match producer.parameter_facts.get(id) {
             some(parameter) => define_core_parameter_type_fact(
                 producer.recorder, fact, parameter),
-            none => panic("Core producer: unresolved type parameter")
+            none => panic(
+                "Core producer: unresolved type parameter ${id.to_str()} in module ${producer.module_key}")
         },
         Type::FnType { params, return_type, effects } => {
             let mut parameter_facts: List<CoreTypeFactRef> = []
