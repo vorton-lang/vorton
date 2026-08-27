@@ -23,7 +23,8 @@ use hir::{
     h_default_specialization_effects,
     h_default_specialization_forward_call,
     h_exact_call_signature, method_call_ref_signature,
-    method_call_ref_is_bound, method_call_ref_bound
+    method_call_ref_is_bound, method_call_ref_bound,
+    h_type_param_name
 }
 use builtins::{
     builtin_method_contract_facts, builtin_method_contract_intrinsic,
@@ -908,7 +909,7 @@ fn scan_decls(mut state: TypedEffectFreezeState, values: List<HDecl>) {
                 let type_args = type_params.map(fn(parameter) {
                     Type::TypeVar {
                         id: parameter.type_var_id,
-                        name: some(parameter.source.name)
+                        name: some(h_type_param_name(parameter))
                     }
                 })
                 for op in ops {
