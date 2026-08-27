@@ -42,6 +42,10 @@ fn make_reader(offset: Int) -> fn(Resource) -> Int {
     fn(value: Resource) -> Int { value.id + offset }
 }
 
+fn make_captured_str_reader(label: Str) -> fn() -> Int {
+    fn() -> Int { label.len() }
+}
+
 fn main() {
     let resource = Resource { id: 10, payload: "exact" }
     let mut score = call_exact(borrow_id, resource)
@@ -51,6 +55,10 @@ fn main() {
 
     let factory_reader = make_reader(2)
     score = score + call_exact(factory_reader, resource)
+
+    let captured_reader = make_captured_str_reader("xy")
+    score = score + captured_reader()
+    score = score + captured_reader()
 
     let readers = Readers {
         left: borrow_id,
@@ -76,6 +84,6 @@ fn main() {
     assert(resource.id == 10,
         "named/lambda/factory/field/tuple/enum borrowing kept the owner live")
     score = score + consume_same_signature(resource)
-    assert(score == 105, "exact callable carrier result")
+    assert(score == 109, "exact callable carrier result")
     print("C_EXACT_CALLABLE_OK:${score}")
 }

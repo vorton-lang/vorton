@@ -1,4 +1,4 @@
-use forward::{BridgeCtx, marker}
+use forward::{BridgeCtx, BridgeResource, marker}
 
 pub fn bridge(value: Int) -> Int { value + 1 }
 pub fn bridge_ctx(mut ctx: BridgeCtx) -> Int { ctx.value }
@@ -10,5 +10,7 @@ pub fn bridge_effect_contract() -> Int with {} {
     values.sort_by(compare_ints)
     values[0]
 }
+
+pub fn borrow_resource(value: BridgeResource) -> Int { value.id }
 
 pub fn keep_provider() -> Int { marker() }

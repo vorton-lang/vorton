@@ -138,6 +138,7 @@
         "named function value",
         "lambda",
         "closure factory",
+        "captured Str closure remains callable after its first invocation",
         "two same-signature struct function fields",
         "tuple function payloads",
         "enum function payload",
@@ -146,7 +147,7 @@
       "expected": {
         "phase": "native",
         "status": "pass",
-        "stdout": "C_EXACT_CALLABLE_OK:105\n"
+        "stdout": "C_EXACT_CALLABLE_OK:109\n"
       }
     },
     {
