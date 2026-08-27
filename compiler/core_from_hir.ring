@@ -2087,9 +2087,8 @@ fn seed_diagnostic_decls(
                 add_diagnostic_owner_seed(seed, executable_ref, module_key, span)
                 seed_diagnostic_expr(seed, module_key, span, body)
             },
-            HDecl::ExternFn { executable_ref, params, span, .. } => {
+            HDecl::ExternFn { executable_ref, span, .. } => {
                 add_diagnostic_owner_seed(seed, executable_ref, module_key, span)
-                seed_diagnostic_params(seed, module_key, params, span)
             },
             HDecl::Trait { methods, span, .. } => {
                 for method in methods {
