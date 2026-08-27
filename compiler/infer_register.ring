@@ -14,9 +14,9 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     DelegateChildProviderPlan, DelegatePlanState,
     make_delegate_child_provider_plan,
     ImplAssocPredicate, TypedImplPredicate, FrozenImplPredicateSet,
-    TypeAliasDef, FnBound,
+    FnBound,
     EffectAliasDef, AssocTypeDef, mono, apply_subst, apply_subst_effect_map,
-    apply_subst_map, add_impl, has_impl, find_impl,
+    apply_subst_map, make_type_alias_def, add_impl, has_impl, find_impl,
     find_impl_by_provider,
     find_impls_by_provider,
     install_method_core, replace_impl_method_core,
@@ -40,6 +40,7 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     validate_fn_bound_order,
     record_value_origin, record_variant_ctor_origin, record_value_binding_kind,
     record_value_symbol_ref, source_value_symbol_for_decl,
+    source_type_alias_symbol_for_decl,
     prove_dict_evidence_for_type, impl_predicate_constraints_satisfied,
     resolve_mod_uses, bind_exact_import_alias,
     enter_project_root_frame, enter_project_child_frame,
@@ -3794,7 +3795,7 @@ fn register_extern_type(
 
 fn register_type_alias(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
-    type_expr: TypeExpr, span: Span
+    type_expr: TypeExpr, span: Span, decl_index: Int
 ) {
     validate_type_param_bound_shapes(
         ctx, type_params, BoundShapeContext::OrdinaryBound, span)
@@ -3809,7 +3810,9 @@ fn register_type_alias(
     ctx.type_param_scope = saved
     let mut tp_names: List<Str> = []
     for tp in type_params { tp_names.push(tp.name) }
-    ctx.env.types.type_aliases.insert(name, TypeAliasDef { name: name, type_params: tp_names, type_param_vars: tp_vars, ty: resolved })
+    let owner_ref = source_type_alias_symbol_for_decl(ctx, decl_index)
+    ctx.env.types.type_aliases.insert(name, make_type_alias_def(
+        name, owner_ref, tp_names, tp_vars, resolved))
 }
 
 fn register_const(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, span: Span) {
@@ -3913,7 +3916,8 @@ fn register_decl(mut ctx: InferCtx, decl: Decl, decl_index: Int) {
         Decl::ExternType { name, type_params, span, .. } =>
             register_extern_type(ctx, name, type_params, span, decl_index),
         Decl::TypeAlias { name, type_params, type_expr, span, .. } =>
-            register_type_alias(ctx, name, type_params, type_expr, span),
+            register_type_alias(
+                ctx, name, type_params, type_expr, span, decl_index),
         Decl::Const { name, type_annotation, span, .. } =>
             register_const(ctx, name, type_annotation, span),
         Decl::EffectAlias { name, type_params, effects, span, .. } =>

@@ -142,8 +142,10 @@ fn al_decl(d: HDecl) -> HDecl {
                 is_pub: is_pub, span: span },
         HDecl::ExternType { name, type_params, is_pub, span } =>
             HDecl::ExternType { name: name, type_params: type_params, is_pub: is_pub, span: span },
-        HDecl::TypeAlias { name, ty, is_pub, span } =>
-            HDecl::TypeAlias { name: name, ty: ty, is_pub: is_pub, span: span },
+        HDecl::TypeAlias { name, owner_ref, ty, is_pub, span } =>
+            HDecl::TypeAlias {
+                name: name, owner_ref: owner_ref, ty: ty,
+                is_pub: is_pub, span: span },
     }
 }
 

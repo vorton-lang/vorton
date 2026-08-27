@@ -242,11 +242,18 @@ fn check_decl_inner(
                 is_pub: is_pub, span: span }
         },
         Decl::TypeAlias { name, is_pub, span, .. } => {
-            let alias_type = match ctx.env.types.type_aliases.get(name) {
-                some(alias) => alias.ty,
-                none => UNIT
+            match ctx.env.types.type_aliases.get(name) {
+                some(alias) => HDecl::TypeAlias {
+                    name: name, owner_ref: some(alias.owner_ref), ty: alias.ty,
+                    is_pub: is_pub, span: span
+                },
+                // Preserve the existing error-recovery HIR path. Successful
+                // source aliases always take the exact-owner branch above.
+                none => HDecl::TypeAlias {
+                    name: name, owner_ref: none, ty: UNIT,
+                    is_pub: is_pub, span: span
+                }
             }
-            HDecl::TypeAlias { name: name, ty: alias_type, is_pub: is_pub, span: span }
         },
         Decl::Const { name, type_annotation, init, is_pub, span } =>
             check_const_decl(ctx, name, type_annotation, init, is_pub, span),
@@ -255,13 +262,19 @@ fn check_decl_inner(
                 ctx, name, uses, decls, required_effects,
                 is_pub, span, frame_decl_index),
         Decl::EffectAlias { name, is_pub, span, .. } =>
-            HDecl::TypeAlias { name: name, ty: UNIT, is_pub: is_pub, span: span },
+            HDecl::TypeAlias {
+                name: name, owner_ref: none, ty: UNIT,
+                is_pub: is_pub, span: span },
         Decl::Delegate { span, .. } =>
             // Delegate is only valid inside impl blocks; handled by check_impl_decl
-            HDecl::TypeAlias { name: "<delegate>", ty: UNIT, is_pub: false, span: span },
+            HDecl::TypeAlias {
+                name: "<delegate>", owner_ref: none, ty: UNIT,
+                is_pub: false, span: span },
         Decl::AssocType { span, .. } =>
             // Associated types are only valid inside trait/impl blocks; handled there
-            HDecl::TypeAlias { name: "<assoc_type>", ty: UNIT, is_pub: false, span: span }
+            HDecl::TypeAlias {
+                name: "<assoc_type>", owner_ref: none, ty: UNIT,
+                is_pub: false, span: span }
     }
 }
 

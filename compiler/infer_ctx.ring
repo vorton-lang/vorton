@@ -25,7 +25,8 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     StructDef, EnumDef, TypeAliasDef, EffectDef, EffectAliasDef, TraitDef,
     ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
     new_type_env, mono,
-    apply_subst, apply_subst_row, apply_subst_map, find_impl, lookup_variant,
+    apply_subst, apply_subst_row, apply_subst_map,
+    instantiate_type_alias_schema, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
     impl_method_core_as_scheme, frozen_impl_predicates,
     impl_method_core_type,
@@ -43,6 +44,7 @@ use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     symbol_ref_canonical_payload,
     symbol_ref_origin_module_key, symbol_ref_declaration_site_path,
     symbol_ref_namespace_kind, namespace_kind_same, namespace_value,
+    namespace_nominal,
     symbol_ref_same, symbol_ref_is_prelude,
     ImplProviderRef, ImplOwnerRef,
     impl_provider_ref_same, impl_owner_ref_same,
@@ -530,6 +532,9 @@ fn apply_project_namespace_binding(
         NamespaceKind::TypeAlias => match ctx.env.types.type_aliases.get(canonical_payload) {
             none => false,
             some(def) => {
+                if !symbol_ref_same(binding.symbol, def.owner_ref) {
+                    panic("project hydration: type alias owner identity mismatch")
+                }
                 state.journal.push(ProjectNamespaceUndo::TypeAlias {
                     name: binding.exposed_name,
                     previous: ctx.env.types.type_aliases.get(binding.exposed_name)
@@ -1437,6 +1442,56 @@ pub fn source_value_symbol_for_decl(
     match found {
         some(symbol) => symbol,
         none => panic("value identity: declaration site has no resolver symbol")
+    }
+}
+
+pub fn source_type_alias_symbol_for_decl(
+    ctx: InferCtx, decl_index: Int
+) -> SymbolRef {
+    if decl_index < 0 {
+        panic("type alias identity: declaration index is negative")
+    }
+    let file_key = match ctx.struct_identity_file_key {
+        some(value) => value,
+        none => panic("type alias identity: resolver ledger is absent")
+    }
+    let frame_index = match ctx.struct_identity_frame_stack.get(
+            ctx.struct_identity_frame_stack.len() - 1) {
+        some(value) => value,
+        none => panic("type alias identity: registration frame is absent")
+    }
+    let site_path = "frame:${frame_index}|item:${decl_index}"
+    let mut found: SymbolRef? = none
+    match ctx.project_namespace_bindings.get(frame_index) {
+        some(bindings) => {
+            for binding in bindings {
+                match binding.namespace {
+                    NamespaceKind::TypeAlias => {
+                        let symbol = binding.symbol
+                        if binding.file_key == file_key &&
+                           binding.frame_index == frame_index &&
+                           symbol_ref_origin_module_key(symbol) == file_key &&
+                           namespace_kind_same(
+                               symbol_ref_namespace_kind(symbol),
+                               namespace_nominal()) &&
+                           symbol_ref_declaration_site_path(symbol) == site_path {
+                            if found.is_some() {
+                                panic(
+                                    "type alias identity: declaration site has two symbols")
+                            }
+                            found = some(symbol)
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        },
+        none => {}
+    }
+    match found {
+        some(symbol) => symbol,
+        none => panic(
+            "type alias identity: declaration site has no resolver symbol")
     }
 }
 
@@ -3033,20 +3088,17 @@ pub fn resolve_named_type(mut ctx: InferCtx, name: Str, type_args: List<TypeExpr
                         expression: none
                     })
             }
-            if alias.type_param_vars.len() == 0 { return alias.ty }
             let mut resolved_args: List<Type> = []
-            for a in type_args { resolved_args.push(resolve_type_expr(ctx, a)) }
-            let mut mapping: Map<Int, Type> = map_new()
-            let mut i = 0
-            let limit = if alias.type_param_vars.len() < resolved_args.len() { alias.type_param_vars.len() } else { resolved_args.len() }
-            while i < limit {
-                match (alias.type_param_vars.get(i), resolved_args.get(i)) {
-                    (some(var_id), some(arg)) => { mapping.insert(var_id, arg) },
-                    _ => {}
+            // Preserve nullary-alias E0301 recovery: extra syntactic arguments
+            // were not recursively diagnosed before. The schema itself is
+            // still fully freshened below.
+            if alias.type_param_vars.len() > 0 {
+                for a in type_args {
+                    resolved_args.push(resolve_type_expr(ctx, a))
                 }
-                i = i + 1
             }
-            return apply_subst_map(mapping, alias.ty)
+            return instantiate_type_alias_schema(
+                ctx.env, alias, resolved_args)
         },
         none => {}
     }
@@ -4430,7 +4482,21 @@ pub fn install_struct_identity_ledger(
     ctx.struct_identity_file_key = some(file_key)
     ctx.struct_identity_root_frame = none
     ctx.struct_identity_child_frames = map_new()
+    let retain_registration_bindings =
+        ctx.project_namespace_file_key.is_none()
+    if retain_registration_bindings {
+        // Single-file and prelude checking do not install a project overlay,
+        // but registration still consumes the same resolved binding facts.
+        ctx.project_namespace_bindings = map_new()
+    }
     for binding in plan.bindings {
+        if retain_registration_bindings && binding.file_key == file_key {
+            match ctx.project_namespace_bindings.get(binding.frame_index) {
+                some(existing) => existing.push(binding),
+                none => ctx.project_namespace_bindings.insert(
+                    binding.frame_index, [binding])
+            }
+        }
         match binding.namespace {
             NamespaceKind::Value => {
                 let payload = symbol_ref_canonical_payload(binding.symbol)

@@ -1628,8 +1628,9 @@ fn close_decl(value: HDecl) -> HDecl {
                 name: name, type_params: exact_h_type_params(type_params),
                 is_pub: is_pub, span: span
             },
-        HDecl::TypeAlias { name, ty, is_pub, span } => HDecl::TypeAlias {
-            name: name, ty: ty, is_pub: is_pub, span: span
+        HDecl::TypeAlias { name, owner_ref, ty, is_pub, span } => HDecl::TypeAlias {
+            name: name, owner_ref: owner_ref, ty: ty,
+            is_pub: is_pub, span: span
         },
         HDecl::Const {
             name, def_id, executable_ref, handled_evidence_bindings,

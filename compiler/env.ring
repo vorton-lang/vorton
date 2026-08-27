@@ -790,8 +790,10 @@ pub struct ImplEntry {
 
 pub struct TypeAliasDef {
     pub name: Str,
+    pub owner_ref: SymbolRef,
     pub type_params: List<Str>,
     pub type_param_vars: List<Int>,
+    pub schema_vars: List<Int>,
     pub ty: Type
 }
 
@@ -1970,6 +1972,149 @@ pub fn apply_subst_row_map(subst: Map<Int, Type>, row: EffectRow) -> EffectRow {
     }
 }
 
+// Type-alias schemas use definition-local negative variable IDs.  Unlike the
+// ordinary local substitution above, instantiation is deliberately one pass:
+// a live call-site TypeVar inserted for one schema key must not be chased as
+// though it were another definition-local key.
+fn apply_schema_effect_once(subst: Map<Int, Type>, eff: Effect) -> Effect {
+    match eff {
+        Effect::FailEffect { error_type } => Effect::FailEffect {
+            error_type: apply_schema_subst_once(subst, error_type)
+        },
+        Effect::MutEffect { state_type } => Effect::MutEffect {
+            state_type: apply_schema_subst_once(subst, state_type)
+        },
+        Effect::CustomEffect { reference, name, type_args } =>
+            Effect::CustomEffect {
+                reference: reference, name: name,
+                type_args: type_args.map(fn(arg) {
+                    apply_schema_subst_once(subst, arg)
+                })
+            },
+        Effect::SystemEffect { .. } => eff,
+        Effect::UnsafeEffect => Effect::UnsafeEffect
+    }
+}
+
+fn apply_schema_row_once(
+    subst: Map<Int, Type>, row: EffectRow
+) -> EffectRow {
+    let effects = row.effects.map(fn(eff) {
+        apply_schema_effect_once(subst, eff)
+    })
+    match row.tail {
+        some(id) => match subst.get(id) {
+            some(Type::TypeVar { id: mapped, .. }) =>
+                EffectRow { effects: effects, tail: some(mapped) },
+            some(Type::EffectRowType {
+                effects: extra_effects, tail: extra_tail
+            }) => {
+                let mut merged = list_clone(effects)
+                for eff in extra_effects { merged.push(eff) }
+                EffectRow { effects: merged, tail: extra_tail }
+            },
+            some(_) => EffectRow { effects: effects, tail: none },
+            none => EffectRow { effects: effects, tail: some(id) }
+        },
+        none => EffectRow { effects: effects, tail: none }
+    }
+}
+
+fn apply_schema_subst_once(
+    subst: Map<Int, Type>, ty: Type
+) -> Type {
+    match ty {
+        Type::IntType => Type::IntType,
+        Type::FloatType => Type::FloatType,
+        Type::StrType => Type::StrType,
+        Type::BoolType => Type::BoolType,
+        Type::UnitType => Type::UnitType,
+        Type::NeverType => Type::NeverType,
+        Type::AnyType => Type::AnyType,
+        Type::TypeVar { id, name } => match subst.get(id) {
+            some(mapped) => mapped,
+            none => Type::TypeVar { id: id, name: name }
+        },
+        Type::FnType { params, return_type, effects } => Type::FnType {
+            params: params.map(fn(param) {
+                apply_schema_subst_once(subst, param)
+            }),
+            return_type: apply_schema_subst_once(subst, return_type),
+            effects: apply_schema_row_once(subst, effects)
+        },
+        Type::StructType { name, type_params } => Type::StructType {
+            name: name,
+            type_params: type_params.map(fn(param) {
+                apply_schema_subst_once(subst, param)
+            })
+        },
+        Type::EnumType { name, type_params } => Type::EnumType {
+            name: name,
+            type_params: type_params.map(fn(param) {
+                apply_schema_subst_once(subst, param)
+            })
+        },
+        Type::GenericType { base, args } => Type::GenericType {
+            base: apply_schema_subst_once(subst, base),
+            args: args.map(fn(arg) {
+                apply_schema_subst_once(subst, arg)
+            })
+        },
+        Type::RecordType { fields, tail, tail_name } => {
+            let mapped_fields = fields.map(fn(field) {
+                RecordField {
+                    name: field.name,
+                    ty: apply_schema_subst_once(subst, field.ty)
+                }
+            })
+            match tail {
+                some(id) => match subst.get(id) {
+                    some(Type::TypeVar { id: mapped, name }) =>
+                        Type::RecordType {
+                            fields: mapped_fields, tail: some(mapped),
+                            tail_name: name
+                        },
+                    some(Type::RecordType {
+                        fields: extra_fields, tail: extra_tail,
+                        tail_name: extra_tail_name
+                    }) => {
+                        let mut merged = list_clone(mapped_fields)
+                        for field in extra_fields { merged.push(field) }
+                        Type::RecordType {
+                            fields: merged, tail: extra_tail,
+                            tail_name: extra_tail_name
+                        }
+                    },
+                    some(_) => Type::RecordType {
+                        fields: mapped_fields, tail: none, tail_name: none
+                    },
+                    none => Type::RecordType {
+                        fields: mapped_fields, tail: some(id),
+                        tail_name: tail_name
+                    }
+                },
+                none => Type::RecordType {
+                    fields: mapped_fields, tail: none, tail_name: tail_name
+                }
+            }
+        },
+        Type::EffectRowType { effects, tail } => {
+            let row = apply_schema_row_once(
+                subst, EffectRow { effects: effects, tail: tail })
+            Type::EffectRowType { effects: row.effects, tail: row.tail }
+        },
+        Type::TupleType { elements } => Type::TupleType {
+            elements: elements.map(fn(element) {
+                apply_schema_subst_once(subst, element)
+            })
+        },
+        Type::PtrType { pointee } => Type::PtrType {
+            pointee: apply_schema_subst_once(subst, pointee)
+        },
+        Type::ErrorType => Type::ErrorType
+    }
+}
+
 // ============================================================
 // Shared structural TypeVar mapping
 // ============================================================
@@ -2197,63 +2342,166 @@ pub fn build_scheme_var_map(
     build_type_var_map(scheme.ty, instantiated_type, scheme.type_vars)
 }
 
-fn collect_type_var_ids(t: Type, mut result: Set<Int>) {
-    match t {
-        Type::TypeVar { id, .. } => { result.insert(id) },
+fn append_ordered_type_var(mut result: List<Int>, id: Int) {
+    if !result.contains(id) { result.push(id) }
+}
+
+fn collect_ordered_effect_vars(
+    eff: Effect, mut result: List<Int>
+) {
+    match eff {
+        Effect::FailEffect { error_type } =>
+            collect_ordered_type_var_ids(error_type, result),
+        Effect::MutEffect { state_type } =>
+            collect_ordered_type_var_ids(state_type, result),
+        Effect::CustomEffect { type_args, .. } => {
+            for arg in type_args {
+                collect_ordered_type_var_ids(arg, result)
+            }
+        },
+        Effect::SystemEffect { .. } | Effect::UnsafeEffect => {}
+    }
+}
+
+fn collect_ordered_effect_row_vars(
+    row: EffectRow, mut result: List<Int>
+) {
+    for eff in row.effects {
+        collect_ordered_effect_vars(eff, result)
+    }
+    match row.tail {
+        some(id) => append_ordered_type_var(result, id),
+        none => {}
+    }
+}
+
+fn collect_ordered_type_var_ids(
+    ty: Type, mut result: List<Int>
+) {
+    match ty {
+        Type::TypeVar { id, .. } => append_ordered_type_var(result, id),
         Type::FnType { params, return_type, effects } => {
-            for param in params { collect_type_var_ids(param, result) }
-            collect_type_var_ids(return_type, result)
-            match effects.tail {
-                some(id) => { result.insert(id) }, none => {}
+            for param in params {
+                collect_ordered_type_var_ids(param, result)
             }
-            for eff in effects.effects {
-                match eff {
-                    Effect::FailEffect { error_type } =>
-                        collect_type_var_ids(error_type, result),
-                    Effect::MutEffect { state_type } =>
-                        collect_type_var_ids(state_type, result),
-                    Effect::CustomEffect { type_args, .. } => {
-                        for arg in type_args { collect_type_var_ids(arg, result) }
-                    },
-                    _ => {}
-                }
-            }
+            collect_ordered_type_var_ids(return_type, result)
+            collect_ordered_effect_row_vars(effects, result)
         },
-        Type::StructType { type_params, .. } => {
-            for param in type_params { collect_type_var_ids(param, result) }
-        },
+        Type::StructType { type_params, .. } |
         Type::EnumType { type_params, .. } => {
-            for param in type_params { collect_type_var_ids(param, result) }
+            for param in type_params {
+                collect_ordered_type_var_ids(param, result)
+            }
         },
         Type::GenericType { base, args } => {
-            collect_type_var_ids(base, result)
-            for arg in args { collect_type_var_ids(arg, result) }
+            collect_ordered_type_var_ids(base, result)
+            for arg in args { collect_ordered_type_var_ids(arg, result) }
         },
         Type::RecordType { fields, tail, .. } => {
-            for field in fields { collect_type_var_ids(field.ty, result) }
-            match tail { some(id) => { result.insert(id) }, none => {} }
-        },
-        Type::TupleType { elements } => {
-            for element in elements { collect_type_var_ids(element, result) }
-        },
-        Type::PtrType { pointee } => collect_type_var_ids(pointee, result),
-        Type::EffectRowType { effects, tail } => {
-            match tail { some(id) => { result.insert(id) }, none => {} }
-            for eff in effects {
-                match eff {
-                    Effect::FailEffect { error_type } =>
-                        collect_type_var_ids(error_type, result),
-                    Effect::MutEffect { state_type } =>
-                        collect_type_var_ids(state_type, result),
-                    Effect::CustomEffect { type_args, .. } => {
-                        for arg in type_args { collect_type_var_ids(arg, result) }
-                    },
-                    _ => {}
-                }
+            for field in fields {
+                collect_ordered_type_var_ids(field.ty, result)
+            }
+            match tail {
+                some(id) => append_ordered_type_var(result, id),
+                none => {}
             }
         },
+        Type::EffectRowType { effects, tail } =>
+            collect_ordered_effect_row_vars(
+                EffectRow { effects: effects, tail: tail }, result),
+        Type::TupleType { elements } => {
+            for element in elements {
+                collect_ordered_type_var_ids(element, result)
+            }
+        },
+        Type::PtrType { pointee } =>
+            collect_ordered_type_var_ids(pointee, result),
         _ => {}
     }
+}
+
+fn collect_type_var_ids(ty: Type, mut result: Set<Int>) {
+    let mut ordered: List<Int> = []
+    collect_ordered_type_var_ids(ty, ordered)
+    for id in ordered { result.insert(id) }
+}
+
+pub fn make_type_alias_def(
+    name: Str, owner_ref: SymbolRef,
+    type_params: List<Str>, raw_type_param_vars: List<Int>, raw_ty: Type
+) -> TypeAliasDef {
+    if type_params.len() != raw_type_param_vars.len() {
+        panic("type alias schema: explicit parameter census differs")
+    }
+    let mut raw_schema_vars = list_clone(raw_type_param_vars)
+    let mut explicit_index = 0
+    while explicit_index < raw_type_param_vars.len() {
+        let raw_id = raw_type_param_vars.get(explicit_index).unwrap()
+        let mut prior = 0
+        while prior < explicit_index {
+            if raw_type_param_vars.get(prior).unwrap() == raw_id {
+                panic("type alias schema: explicit parameter repeats")
+            }
+            prior = prior + 1
+        }
+        explicit_index = explicit_index + 1
+    }
+    collect_ordered_type_var_ids(raw_ty, raw_schema_vars)
+
+    let mut normalization: Map<Int, Type> = map_new()
+    let mut schema_vars: List<Int> = []
+    let mut index = 0
+    while index < raw_schema_vars.len() {
+        let canonical_id = -1 - index
+        normalization.insert(
+            raw_schema_vars.get(index).unwrap(),
+            Type::TypeVar { id: canonical_id, name: none })
+        schema_vars.push(canonical_id)
+        index = index + 1
+    }
+    let mut type_param_vars: List<Int> = []
+    for raw_id in raw_type_param_vars {
+        match normalization.get(raw_id) {
+            some(Type::TypeVar { id, .. }) => type_param_vars.push(id),
+            _ => panic("type alias schema: explicit parameter was not normalized")
+        }
+    }
+    TypeAliasDef {
+        name: name, owner_ref: owner_ref,
+        type_params: type_params, type_param_vars: type_param_vars,
+        schema_vars: schema_vars,
+        ty: apply_schema_subst_once(normalization, raw_ty)
+    }
+}
+
+pub fn instantiate_type_alias_schema(
+    mut env: TypeEnv, alias: TypeAliasDef, resolved_args: List<Type>
+) -> Type {
+    if alias.type_params.len() != alias.type_param_vars.len() ||
+       alias.type_param_vars.len() > alias.schema_vars.len() {
+        panic("type alias schema: explicit parameter census differs")
+    }
+    let mut mapping: Map<Int, Type> = map_new()
+    let mut index = 0
+    while index < alias.schema_vars.len() {
+        let schema_id = alias.schema_vars.get(index).unwrap()
+        if schema_id != -1 - index {
+            panic("type alias schema: variable IDs are not canonical")
+        }
+        if index < alias.type_param_vars.len() &&
+           alias.type_param_vars.get(index).unwrap() != schema_id {
+            panic("type alias schema: explicit parameters are not a prefix")
+        }
+        let replacement = if index < alias.type_param_vars.len() &&
+                                  index < resolved_args.len() {
+            resolved_args.get(index).unwrap()
+        } else {
+            env.fresh_var()
+        }
+        mapping.insert(schema_id, replacement)
+        index = index + 1
+    }
+    apply_schema_subst_once(mapping, alias.ty)
 }
 
 // Specialize a trait declaration method for one concrete/generic impl owner.
