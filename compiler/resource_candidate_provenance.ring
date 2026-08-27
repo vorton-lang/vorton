@@ -37,7 +37,7 @@ use resource_type_lfp::{
     with_planner_event_decision, make_planner_call,
     copy_planner_event, make_planner_block,
     make_planner_body, int_list_contains,
-    flow_callable_index_for_planner}
+    flow_callable_index_for_planner, planner_body_reachable_blocks}
 
 // ============================================================
 // Planner-owned callable-slot candidate fixed point
@@ -490,6 +490,7 @@ pub fn build_candidate_proof_graph(
     while body_index < bodies.len() {
         let body = bodies.get(body_index).unwrap()
         let locations = body_callable_locations(body, type_nodes)
+        let reachable = planner_body_reachable_blocks(body)
         let callable = flow_callable_index_for_planner(
             callables, body.reference)
         // Entry parameter cells.
@@ -528,6 +529,10 @@ pub fn build_candidate_proof_graph(
         let mut block_index = 0
         while block_index < body.blocks.len() {
             let block = body.blocks.get(block_index).unwrap()
+            if !reachable.get(block_index).unwrap() {
+                block_index = block_index + 1
+                continue
+            }
             let mut boundary = 0
             while boundary < block.events.len() {
                 let event = block.events.get(boundary).unwrap()
@@ -719,9 +724,14 @@ pub fn derive_candidate_selections(
     let mut body_index = 0
     while body_index < bodies.len() {
         let body = bodies.get(body_index).unwrap()
+        let reachable = planner_body_reachable_blocks(body)
         let mut block_index = 0
         while block_index < body.blocks.len() {
             let block = body.blocks.get(block_index).unwrap()
+            if !reachable.get(block_index).unwrap() {
+                block_index = block_index + 1
+                continue
+            }
             let mut boundary = 0
             while boundary < block.events.len() {
                 match block.events.get(boundary).unwrap().value {
@@ -771,11 +781,22 @@ pub fn resolve_bodies_from_candidate_proof(
     let mut body_index = 0
     while body_index < bodies.len() {
         let body = bodies.get(body_index).unwrap()
+        let reachable = planner_body_reachable_blocks(body)
         let mut blocks: List<PlannerBlock> = []
         let mut block_index = 0
         while block_index < body.blocks.len() {
             let block = body.blocks.get(block_index).unwrap()
             let mut events: List<PlannerEvent> = []
+            if !reachable.get(block_index).unwrap() {
+                for event in block.events {
+                    events.push(copy_planner_event(event))
+                }
+                blocks.push(make_planner_block(
+                    block.terminator_kind, events,
+                    block.terminator_uses, block.edges))
+                block_index = block_index + 1
+                continue
+            }
             let mut boundary = 0
             while boundary < block.events.len() {
                 let event = block.events.get(boundary).unwrap()

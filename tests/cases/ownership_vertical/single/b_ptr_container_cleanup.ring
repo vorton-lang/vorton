@@ -1,0 +1,50 @@
+struct Box<T> {
+    value: T
+}
+
+struct RawBox {
+    value: Ptr<Int>
+}
+
+mod ptr_container requires {unsafe} {
+    pub fn run() -> Int {
+        unsafe {
+            let list_ptr: Ptr<Int> = alloc(1)
+            let option_ptr: Ptr<Int> = alloc(1)
+            let map_ptr: Ptr<Int> = alloc(1)
+            let box_ptr: Ptr<Int> = alloc(1)
+            let raw_ptr: Ptr<Int> = alloc(1)
+            list_ptr.write(2)
+            option_ptr.write(3)
+            map_ptr.write(5)
+            box_ptr.write(7)
+            raw_ptr.write(11)
+
+            let listed = [list_ptr]
+            let optional = some(option_ptr)
+            let mapped = map_from([(13, map_ptr)])
+            let boxed = Box { value: box_ptr }
+            let raw = RawBox { value: raw_ptr }
+
+            let score = listed.get(0).unwrap().read() +
+                optional.unwrap().read() +
+                mapped.get(13).unwrap().read() +
+                boxed.value.read() + raw.value.read()
+
+            // Ptr is borrowed/non-owning. Explicit deallocation remains the
+            // only release; automatic aggregate cleanup must not ring_drop it.
+            dealloc(list_ptr, 1)
+            dealloc(option_ptr, 1)
+            dealloc(map_ptr, 1)
+            dealloc(box_ptr, 1)
+            dealloc(raw_ptr, 1)
+            score
+        }
+    }
+}
+
+fn main() {
+    assert(ptr_container::run() == 28,
+        "List/Option/Map/Box/struct Ptr containment stays RC-excluded")
+    print("B_PTR_CONTAINER_OK")
+}

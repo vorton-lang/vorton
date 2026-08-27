@@ -24,8 +24,8 @@ use resource_model::{
     logical_ownership_shape_may_unique,
     logical_ownership_shape_param_deps, make_physical_rc_shape,
     physical_rc_shape_physical_rc, physical_rc_shape_drop_glue,
-    physical_rc_shape_param_deps,
-    slot_flow_same, slot_flow_empty,
+    physical_rc_shape_foreign_containment, physical_rc_shape_param_deps,
+    slot_flow_same, slot_flow_empty, slot_flow_live_owner,
     slot_flow_cleanup_owner, slot_flow_is_unreachable}
 use rc_ir::{
     RcProgram, RcOperation, rc_program_flow_fingerprint,
@@ -85,7 +85,8 @@ use resource_certificate::{
     resource_certificate_fixed_point,
     resource_certificate_candidate_proof,
     resource_certificate_cfg_bodies, cfg_body_certificate_blocks,
-    cfg_body_certificate_entry_block, cfg_block_certificate_index,
+    cfg_body_certificate_entry_block, cfg_body_certificate_entry_seed,
+    cfg_block_certificate_index,
     cfg_block_certificate_source_block,
     cfg_block_certificate_terminator_kind,
     cfg_block_certificate_terminator_transitions,
@@ -132,7 +133,7 @@ use resource_type_lfp::{
     planner_callable_location_is_slot, planner_callable_location_slot,
     planner_callable_location_base, planner_callable_location_same,
     copy_planner_callable_location, flow_callable_index_for_planner,
-    int_list_contains, int_lists_same}
+    planner_body_reachable_blocks, int_list_contains, int_lists_same}
 
 const RULE_TYPE_SEED: Int = 0
 const RULE_TYPE_CHILD: Int = 1
@@ -2115,6 +2116,7 @@ fn build_verifier_candidate_graph(
     while body_index < bodies.len() {
         let body = bodies.get(body_index).unwrap()
         let locations = verifier_body_callable_locations(body, type_nodes)
+        let reachable = planner_body_reachable_blocks(body)
         let callable = flow_callable_index_for_planner(
             callables, body.reference)
         // Entry parameter cells.
@@ -2153,6 +2155,10 @@ fn build_verifier_candidate_graph(
         let mut block_index = 0
         while block_index < body.blocks.len() {
             let block = body.blocks.get(block_index).unwrap()
+            if !reachable.get(block_index).unwrap() {
+                block_index = block_index + 1
+                continue
+            }
             let mut boundary = 0
             while boundary < block.events.len() {
                 let event = block.events.get(boundary).unwrap()
@@ -2312,9 +2318,14 @@ fn actual_call_selections_from_bodies(
 ) -> List<CandidateSelection> {
     let mut result: List<CandidateSelection> = []
     for body in bodies {
+        let reachable = planner_body_reachable_blocks(body)
         let mut block_index = 0
         while block_index < body.blocks.len() {
             let block = body.blocks.get(block_index).unwrap()
+            if !reachable.get(block_index).unwrap() {
+                block_index = block_index + 1
+                continue
+            }
             let mut instruction = 0
             while instruction < block.events.len() {
                 match block.events.get(instruction).unwrap().value {
@@ -2430,6 +2441,15 @@ fn require_transition_count(
     }
 }
 
+fn require_transition_after_state(
+    transition: SlotTransitionWitness, expected: SlotFlow, context: Str
+) {
+    if !slot_flow_same(
+            slot_transition_witness_after(transition), expected) {
+        panic("ResourcePlanner verifier: ${context} owner state drifted")
+    }
+}
+
 fn apply_topology_transitions(
     mut states: List<SlotFlow>, transitions: List<SlotTransitionWitness>
 ) {
@@ -2485,9 +2505,17 @@ fn verifier_logical_shape_may_take(
 }
 
 fn verifier_physical_shape_may_drop(shape: PhysicalRcShape) -> Bool {
-    physical_rc_shape_physical_rc(shape) ||
+    !physical_rc_shape_foreign_containment(shape) &&
+       (physical_rc_shape_physical_rc(shape) ||
         physical_rc_shape_drop_glue(shape) ||
-        verifier_bool_list_has_true(physical_rc_shape_param_deps(shape))
+        verifier_bool_list_has_true(physical_rc_shape_param_deps(shape)))
+}
+
+fn verifier_type_requires_cleanup(
+    logical: LogicalOwnershipShape, physical: PhysicalRcShape
+) -> Bool {
+    verifier_logical_shape_may_take(logical) ||
+        verifier_physical_shape_may_drop(physical)
 }
 
 
@@ -2658,6 +2686,17 @@ fn verify_event_transition_contract(
             require_transition(
                 semantic.get(0).unwrap(), target,
                 slot_reason_init_live(), "Initialize target")
+            let target_value = body.slots.get(target).unwrap()
+            require_transition_after_state(
+                semantic.get(0).unwrap(),
+                slot_flow_live_owner(
+                    target_value.owns_storage &&
+                    verifier_type_requires_cleanup(
+                        solved.logical_shapes.get(
+                            target_value.type_index).unwrap(),
+                        solved.physical_shapes.get(
+                            target_value.type_index).unwrap())),
+                "Initialize target")
             require_transition_count(after, 0, "Initialize after")
         },
         PlannerEventValue::ReadValue { source, target } => {
@@ -2823,6 +2862,24 @@ fn verify_event_transition_contract(
                         slot_reason_call_result(), "Call result")
                     let effective_owned = event.decision.result_owned
                     let result_value = body.slots.get(slot).unwrap()
+                    let result_logical = solved.logical_shapes.get(
+                        result_value.type_index).unwrap()
+                    let result_physical = solved.physical_shapes.get(
+                        result_value.type_index).unwrap()
+                    let owner = if effective_owned {
+                        verifier_type_requires_cleanup(
+                            result_logical, result_physical)
+                    } else if result_value.owns_storage &&
+                              verifier_physical_shape_may_drop(
+                                  result_physical) {
+                        if verifier_logical_shape_may_take(result_logical) {
+                            panic("ResourcePlanner verifier: borrowed unique result enters owner")
+                        }
+                        true
+                    } else { false }
+                    require_transition_after_state(
+                        semantic.get(0).unwrap(),
+                        slot_flow_live_owner(owner), "Call result")
                     let needs_clone = !effective_owned &&
                         result_value.owns_storage &&
                         verifier_physical_shape_may_drop(
@@ -3255,6 +3312,26 @@ pub fn verify_rc_topology_contract(
            expected_body.entry_block !=
                 cfg_body_certificate_entry_block(cfg_body) {
             panic("ResourcePlanner verifier: body identity/entry drifted")
+        }
+        let certified_entry_seed = cfg_body_certificate_entry_seed(cfg_body)
+        if certified_entry_seed.len() != expected_body.slots.len() {
+            panic("ResourcePlanner verifier: entry seed census drifted")
+        }
+        let mut entry_slot = 0
+        while entry_slot < expected_body.slots.len() {
+            let slot = expected_body.slots.get(entry_slot).unwrap()
+            let expected_state = if slot.initially_live {
+                slot_flow_live_owner(
+                    slot.owns_storage && verifier_type_requires_cleanup(
+                        solved.logical_shapes.get(slot.type_index).unwrap(),
+                        solved.physical_shapes.get(slot.type_index).unwrap()))
+            } else { slot_flow_empty() }
+            if !slot_flow_same(
+                    certified_entry_seed.get(entry_slot).unwrap(),
+                    expected_state) {
+                panic("ResourcePlanner verifier: entry seed/owner drifted")
+            }
+            entry_slot = entry_slot + 1
         }
         let rc_slots = rc_body_slots(rc_body)
         if rc_slots.len() != expected_body.slots.len() {

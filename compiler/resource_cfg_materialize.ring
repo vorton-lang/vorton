@@ -15,7 +15,7 @@ use resource_model::{
     logical_ownership_shape_direct_drop,
     logical_ownership_shape_may_unique, logical_ownership_shape_param_deps,
     physical_rc_shape_physical_rc, physical_rc_shape_drop_glue,
-    physical_rc_shape_param_deps,
+    physical_rc_shape_foreign_containment, physical_rc_shape_param_deps,
     copy_slot_flow, slot_flow_cleanup_owner,
     slot_flow_live_owner,
     slot_flow_is_unreachable, slot_flow_is_empty, slot_flow_is_live,
@@ -108,9 +108,10 @@ fn logical_shape_may_take(shape: LogicalOwnershipShape) -> Bool {
 }
 
 fn physical_shape_may_drop(shape: PhysicalRcShape) -> Bool {
-    physical_rc_shape_physical_rc(shape) ||
+    !physical_rc_shape_foreign_containment(shape) &&
+       (physical_rc_shape_physical_rc(shape) ||
         physical_rc_shape_drop_glue(shape) ||
-        bool_list_has_true(physical_rc_shape_param_deps(shape))
+        bool_list_has_true(physical_rc_shape_param_deps(shape)))
 }
 
 fn type_requires_cleanup(

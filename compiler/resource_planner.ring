@@ -83,7 +83,8 @@ use flow_ir::{
 use flow_provenance::{flow_instruction_callable_provenance}
 use resource_model::{
     FlowSemanticRole, FlowValueOriginContract,
-    flow_type_semantic_seed_tag, flow_semantic_role_tag,
+    flow_type_semantic_seed_tag, flow_type_seed_ptr, flow_type_seed_extern,
+    flow_semantic_role_tag,
     flow_call_contract_parameter_roles, flow_call_contract_result_type,
     flow_call_contract_result_role, flow_call_contract_result_origin,
     flow_value_origin_is_fresh, flow_value_origin_alias_ordinals,
@@ -249,7 +250,9 @@ fn planner_type_node_from_flow(node: FlowTypeNode) -> PlannerTypeNode {
         planner_type_kind_from_flow(node), children, parameter_fact,
         drop_contract.is_some(), is_unique,
         is_shareable, is_shareable || is_unique,
-        is_shareable || drop_contract.is_some(), seed_tag == 4)
+        is_shareable || drop_contract.is_some(),
+        seed_tag == flow_type_semantic_seed_tag(flow_type_seed_ptr()) ||
+            seed_tag == flow_type_semantic_seed_tag(flow_type_seed_extern()))
 }
 
 fn flow_callable_index(

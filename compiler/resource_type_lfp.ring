@@ -1439,6 +1439,44 @@ pub fn make_planner_body(
     }
 }
 
+// Structural reachability is a frozen-CFG fact, not an ownership solution.
+// Candidate provenance, validation, and certificate checks share this one
+// entry/edge walk so a dead Flow block cannot contribute semantic facts.
+pub fn planner_body_reachable_blocks(body: PlannerBody) -> List<Bool> {
+    if body.blocks.len() == 0 || body.entry_block < 0 ||
+       body.entry_block >= body.blocks.len() {
+        panic("ResourcePlanner: body lacks a valid frozen entry block")
+    }
+    let mut reachable: List<Bool> = []
+    for _ in body.blocks { reachable.push(false) }
+    reachable.set(body.entry_block, true)
+    let mut changed = true
+    while changed {
+        changed = false
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            if reachable.get(block_index).unwrap() {
+                for edge in body.blocks.get(block_index).unwrap().edges {
+                    match edge.target_block {
+                        some(target) => {
+                            if target < 0 || target >= body.blocks.len() {
+                                panic("ResourcePlanner: edge target is outside frozen CFG")
+                            }
+                            if !reachable.get(target).unwrap() {
+                                reachable.set(target, true)
+                                changed = true
+                            }
+                        },
+                        none => {}
+                    }
+                }
+            }
+            block_index = block_index + 1
+        }
+    }
+    reachable
+}
+
 fn copy_planner_bodies(values: List<PlannerBody>) -> List<PlannerBody> {
     let mut result: List<PlannerBody> = []
     for value in values {
@@ -1466,7 +1504,7 @@ fn validate_slot_index(index: Int, slots: List<PlannerSlot>) {
 fn validate_event(
     event: PlannerEvent, slots: List<PlannerSlot>,
     scopes: List<PlannerScope>, callables: List<PlannerCallable>,
-    type_nodes: List<PlannerTypeNode>
+    type_nodes: List<PlannerTypeNode>, block_reachable: Bool
 ) {
     if !flow_semantic_step_same(event.step, event.decision.step) {
         panic("ResourcePlanner: event/decision step differs")
@@ -1644,8 +1682,7 @@ fn validate_event(
             result_owned, result_type_index,
             argument_slots, result_slot, ..
         } => {
-            if callable_indices.len() == 0 ||
-               argument_slots.len() != argument_demands.len() ||
+            if argument_slots.len() != argument_demands.len() ||
                result_type_index < 0 ||
                result_type_index >= type_nodes.len() {
                 panic("ResourcePlanner: call contract is incomplete")
@@ -1662,6 +1699,12 @@ fn validate_event(
                 if !planner_type_is_callable(
                         type_nodes, slots.get(target_slot).unwrap().type_index) {
                     panic("ResourcePlanner: indirect call target is not callable")
+                }
+                if block_reachable && callable_indices.len() == 0 {
+                    panic("ResourcePlanner: reachable call lacks exact candidates")
+                }
+                if !block_reachable && callable_indices.len() != 0 {
+                    panic("ResourcePlanner: unreachable call retained candidates")
                 }
             }
             for callable_index in callable_indices {
@@ -1788,10 +1831,14 @@ fn validate_body(
         }
         left_index = left_index + 1
     }
-    for block in body.blocks {
+    let reachable = planner_body_reachable_blocks(body)
+    let mut block_index = 0
+    while block_index < body.blocks.len() {
+        let block = body.blocks.get(block_index).unwrap()
         for event in block.events {
             validate_event(
-                event, body.slots, body.scopes, callables, type_nodes)
+                event, body.slots, body.scopes, callables, type_nodes,
+                reachable.get(block_index).unwrap())
         }
         let mut terminator_ordinal = 0
         for usage in block.terminator_uses {
@@ -1832,6 +1879,7 @@ fn validate_body(
                 }
             }
         }
+        block_index = block_index + 1
     }
 }
 

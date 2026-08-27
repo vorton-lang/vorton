@@ -1155,6 +1155,10 @@ pub fn cfg_body_certificate_entry_block(
     value: CfgBodyCertificate
 ) -> Int { value.entry_block }
 
+pub fn cfg_body_certificate_entry_seed(
+    value: CfgBodyCertificate
+) -> List<SlotFlow> { copy_state_vector(value.entry_seed) }
+
 pub fn cfg_body_certificate_blocks(
     value: CfgBodyCertificate
 ) -> List<CfgBlockCertificate> {
@@ -1194,6 +1198,39 @@ fn join_state_vectors(
         index = index + 1
     }
     result
+}
+
+fn cfg_certificate_reachable_blocks(
+    value: CfgBodyCertificate
+) -> List<Bool> {
+    let mut reachable: List<Bool> = []
+    for _ in value.blocks { reachable.push(false) }
+    reachable.set(value.entry_block, true)
+    let mut changed = true
+    while changed {
+        changed = false
+        let mut source_index = 0
+        while source_index < value.blocks.len() {
+            if reachable.get(source_index).unwrap() {
+                for edge in value.blocks.get(source_index).unwrap().edges {
+                    match edge.target_block {
+                        some(target) => {
+                            if target < 0 || target >= value.blocks.len() {
+                                panic("resource certificate: CFG edge target is absent")
+                            }
+                            if !reachable.get(target).unwrap() {
+                                reachable.set(target, true)
+                                changed = true
+                            }
+                        },
+                        none => {}
+                    }
+                }
+            }
+            source_index = source_index + 1
+        }
+    }
+    reachable
 }
 
 // ============================================================
@@ -2041,7 +2078,8 @@ fn verify_cfg_body_certificate(
         block_index = block_index + 1
     }
 
-    // Every reachable predecessor contributes exactly to the target entry
+    let reachable = cfg_certificate_reachable_blocks(certificate)
+    // Every entry-rooted predecessor contributes exactly to the target entry
     // state.  Equality with the join prevents both under- and over-claiming.
     let mut target_index = 0
     while target_index < certificate.blocks.len() {
@@ -2051,23 +2089,25 @@ fn verify_cfg_body_certificate(
         let mut source_index = 0
         while source_index < certificate.blocks.len() {
             let source = certificate.blocks.get(source_index).unwrap()
-            for edge in source.edges {
-                match edge.target_block {
-                    some(candidate) => if candidate == target_index {
-                        if !has_predecessor {
-                            for state in edge.exit_states { joined.push(state) }
-                            has_predecessor = true
-                        } else {
-                            let mut slot_index = 0
-                            while slot_index < joined.len() {
-                                joined.set(slot_index, slot_flow_join(
-                                    joined.get(slot_index).unwrap(),
-                                    edge.exit_states.get(slot_index).unwrap()))
-                                slot_index = slot_index + 1
+            if reachable.get(source_index).unwrap() {
+                for edge in source.edges {
+                    match edge.target_block {
+                        some(candidate) => if candidate == target_index {
+                            if !has_predecessor {
+                                for state in edge.exit_states { joined.push(state) }
+                                has_predecessor = true
+                            } else {
+                                let mut slot_index = 0
+                                while slot_index < joined.len() {
+                                    joined.set(slot_index, slot_flow_join(
+                                        joined.get(slot_index).unwrap(),
+                                        edge.exit_states.get(slot_index).unwrap()))
+                                    slot_index = slot_index + 1
+                                }
                             }
-                        }
-                    },
-                    none => {}
+                        },
+                        none => {}
+                    }
                 }
             }
             source_index = source_index + 1

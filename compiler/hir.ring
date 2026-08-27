@@ -2755,12 +2755,10 @@ pub fn is_user_drop_type(ty: Type, drop_types: Set<Str>) -> Bool {
 // Recursive types terminate via an on-stack visited set (struct/enum names);
 // monotone OR + one full exploration per name keeps reachability exact.
 pub fn type_contains_extern_handle(ty: Type, externs: Set<Str>) -> Bool {
-    if externs.len() == 0 {
-        false
-    } else {
-        let mut visited: Set<Str> = set_new()
-        type_contains_extern_rec(ty, externs, visited)
-    }
+    // Ptr<T> is foreign containment even in programs with no extern type
+    // declarations, so an empty extern registry cannot short-circuit the walk.
+    let mut visited: Set<Str> = set_new()
+    type_contains_extern_rec(ty, externs, visited)
 }
 
 fn type_contains_extern_rec(ty: Type, externs: Set<Str>, mut visited: Set<Str>) -> Bool {

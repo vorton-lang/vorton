@@ -118,6 +118,20 @@
       }
     },
     {
+      "id": "B4",
+      "path": "single/b_ptr_container_cleanup.ring",
+      "covers": [
+        "Ptr is an exact foreign-containment seed without extern declarations",
+        "List/Option/Map/Box/struct propagate Ptr containment",
+        "automatic aggregate cleanup never deep-drops a raw pointer"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_PTR_CONTAINER_OK\n"
+      }
+    },
+    {
       "id": "C1",
       "path": "single/c_exact_callable_carriers.ring",
       "covers": [
@@ -133,6 +147,20 @@
         "phase": "native",
         "status": "pass",
         "stdout": "C_EXACT_CALLABLE_OK:105\n"
+      }
+    },
+    {
+      "id": "C2",
+      "path": "single/c_dead_callable_candidate.ring",
+      "covers": [
+        "entry-unreachable Return cannot widen a callable result",
+        "dead owning callable does not pollute a reachable borrowing call",
+        "final reachable owning consumer remains exact"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "C_DEAD_CALLABLE_OK\n"
       }
     },
     {
