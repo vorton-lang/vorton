@@ -598,18 +598,25 @@ pub struct FlowCallTarget {
     value: FlowCallTargetValue,
     contract: FlowCallContract,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<CoreEffectSubstitution>,
     effects: CoreEffectInstantiation
 }
 
 pub fn make_direct_flow_call_target(
     target: ExecutableRef, contract: FlowCallContract,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<CoreEffectSubstitution>,
     effects: CoreEffectInstantiation
 ) -> FlowCallTarget {
     FlowCallTarget {
         value: FlowCallTargetValue::DirectTargetValue(target),
         contract: copy_call_contract(contract),
         type_substitutions: copy_flow_type_substitutions(type_substitutions),
+        effect_substitutions: effect_substitutions.map(fn(item) {
+            make_core_effect_substitution(
+                core_effect_substitution_parameter(item),
+                core_effect_substitution_replacement(item))
+        }),
         effects: effects
     }
 }
@@ -621,6 +628,7 @@ pub fn make_local_flow_call_target(
     FlowCallTarget {
         value: FlowCallTargetValue::LocalTargetValue(target),
         contract: copy_call_contract(contract), type_substitutions: [],
+        effect_substitutions: [],
         effects: effects
     }
 }
@@ -632,6 +640,7 @@ pub fn make_dynamic_flow_call_target(
     FlowCallTarget {
         value: FlowCallTargetValue::DynamicTargetValue(target),
         contract: copy_call_contract(contract), type_substitutions: [],
+        effect_substitutions: [],
         effects: effects
     }
 }
@@ -673,6 +682,15 @@ pub fn flow_call_target_type_substitutions(
     value: FlowCallTarget
 ) -> List<FlowTypeSubstitution> {
     copy_flow_type_substitutions(value.type_substitutions)
+}
+pub fn flow_call_target_effect_substitutions(
+    value: FlowCallTarget
+) -> List<CoreEffectSubstitution> {
+    value.effect_substitutions.map(fn(item) {
+        make_core_effect_substitution(
+            core_effect_substitution_parameter(item),
+            core_effect_substitution_replacement(item))
+    })
 }
 pub fn flow_call_target_effect_instantiation(
     value: FlowCallTarget
@@ -745,6 +763,11 @@ fn copy_call_target(value: FlowCallTarget) -> FlowCallTarget {
         value: value.value, contract: copy_call_contract(value.contract),
         type_substitutions:
             copy_flow_type_substitutions(value.type_substitutions),
+        effect_substitutions: value.effect_substitutions.map(fn(item) {
+            make_core_effect_substitution(
+                core_effect_substitution_parameter(item),
+                core_effect_substitution_replacement(item))
+        }),
         effects: make_core_effect_instantiation(
             core_effect_instantiation_source(value.effects),
             core_effect_instantiation_substitutions(value.effects),
@@ -4205,6 +4228,10 @@ fn validate_direct_calls(
                             validate_flow_type_substitutions_for_callable(
                                 substitutions, candidate, type_nodes,
                                 "FlowIR: direct type substitution identity/order differs")
+                            validate_flow_effect_substitutions_for_callable(
+                                target.effect_substitutions, candidate,
+                                type_nodes,
+                                "FlowIR: direct effect substitution identity/order differs")
                             if flow_call_contract_parameter_types(
                                     candidate.semantic_contract).len() !=
                                         arguments.len() ||
@@ -5123,6 +5150,13 @@ fn encode_call_target(value: FlowCallTarget) -> Str {
             flow_generic_param_index(parameter).to_str()}/${
             flow_generic_param_arity(parameter).to_str()}=${encode_type_ref(
                 flow_type_substitution_replacement(substitution))}")
+    }
+    for substitution in value.effect_substitutions {
+        let parameter = core_effect_substitution_parameter(substitution)
+        parts.push("Z${encode_origin(effect_param_owner(parameter))}/${
+            effect_param_ordinal(parameter).to_str()}=${
+            encode_effect_contract(
+                core_effect_substitution_replacement(substitution))}")
     }
     parts.join("/")
 }

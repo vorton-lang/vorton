@@ -116,6 +116,7 @@ use core_expr::{
     core_callee_kind_tag, core_callee_direct, core_callee_local,
     core_callee_dynamic, core_callee_contract,
     core_callee_type_substitutions,
+    core_callee_effect_substitutions,
     core_callee_effect_instantiation,
     core_evidence_dict,
     core_handled_use_reference, core_handled_use_type
@@ -863,7 +864,8 @@ fn flow_call_target(value: CoreCalleeRef) -> FlowCallTarget {
     if kind == 0 {
         make_direct_flow_call_target(
             core_callee_direct(value), contract,
-            core_callee_type_substitutions(value), effects)
+            core_callee_type_substitutions(value),
+            core_callee_effect_substitutions(value), effects)
     } else if kind == 1 {
         make_local_flow_call_target(
             core_callee_local(value), contract, effects)
@@ -1296,7 +1298,7 @@ fn emit_simple_expr(
             make_direct_flow_call_target(
                 core_callable_reference(callable),
                 core_callable_semantic_contract(callable),
-                [],
+                [], [],
                 callable_identity_effects(callable)),
             arguments,
             flow_evidence(core_expr_call_evidence(expr)),
@@ -1321,7 +1323,7 @@ fn emit_simple_expr(
             make_direct_flow_call_target(
                 core_callable_reference(callable),
                 core_callable_semantic_contract(callable),
-                [],
+                [], [],
                 callable_identity_effects(callable)),
             arguments, [], [], some(result)),
             core_flow_role_expr_primary())

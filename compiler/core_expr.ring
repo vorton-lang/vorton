@@ -672,12 +672,14 @@ pub struct CoreCalleeRef {
     dynamic: PathRef?,
     contract: FlowCallContract,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<CoreEffectSubstitution>,
     effects: CoreEffectInstantiation
 }
 
 pub fn make_core_direct_callee(
     value: ExecutableRef, contract: FlowCallContract,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<CoreEffectSubstitution>,
     effects: CoreEffectInstantiation
 ) -> CoreCalleeRef {
     if !executable_ref_is_named(value) {
@@ -689,6 +691,11 @@ pub fn make_core_direct_callee(
         direct: some(value), local: none, dynamic: none,
         contract: contract,
         type_substitutions: copy_flow_type_substitutions(type_substitutions),
+        effect_substitutions: effect_substitutions.map(fn(item) {
+            make_core_effect_substitution(
+                core_effect_substitution_parameter(item),
+                core_effect_substitution_replacement(item))
+        }),
         effects: effects
     }
 }
@@ -699,7 +706,8 @@ pub fn make_core_local_callee(
     CoreCalleeRef {
         callee: make_local_callee_ref(value), kind: CORE_CALLEE_LOCAL,
         direct: none, local: some(value), dynamic: none,
-        contract: contract, type_substitutions: [], effects: effects
+        contract: contract, type_substitutions: [], effect_substitutions: [],
+        effects: effects
     }
 }
 pub fn make_core_dynamic_callee(
@@ -709,7 +717,8 @@ pub fn make_core_dynamic_callee(
     CoreCalleeRef {
         callee: make_dynamic_callee_ref(value), kind: CORE_CALLEE_DYNAMIC,
         direct: none, local: none, dynamic: some(value),
-        contract: contract, type_substitutions: [], effects: effects
+        contract: contract, type_substitutions: [], effect_substitutions: [],
+        effects: effects
     }
 }
 pub fn core_callee_ref(value: CoreCalleeRef) -> CalleeRef { value.callee }
@@ -739,6 +748,15 @@ pub fn core_callee_type_substitutions(
     value: CoreCalleeRef
 ) -> List<FlowTypeSubstitution> {
     copy_flow_type_substitutions(value.type_substitutions)
+}
+pub fn core_callee_effect_substitutions(
+    value: CoreCalleeRef
+) -> List<CoreEffectSubstitution> {
+    value.effect_substitutions.map(fn(item) {
+        make_core_effect_substitution(
+            core_effect_substitution_parameter(item),
+            core_effect_substitution_replacement(item))
+    })
 }
 pub fn core_callee_effect_instantiation(
     value: CoreCalleeRef
@@ -3563,9 +3581,9 @@ fn remap_core_callee(
     if value.kind == CORE_CALLEE_DIRECT {
         let remapped = remap_direct_callable_instantiation(
             value.direct.unwrap(), value.type_substitutions,
-            [], value.effects, ctx)
+            value.effect_substitutions, value.effects, ctx)
         make_core_direct_callee(
-            remapped.0, contract, remapped.1, remapped.3)
+            remapped.0, contract, remapped.1, remapped.2, remapped.3)
     } else if value.kind == CORE_CALLEE_LOCAL {
         make_core_local_callee(
             value.local.unwrap(), contract,
@@ -4161,8 +4179,9 @@ fn validate_call_signature(
 ) {
     validate_call_effects(callee, expression_effects)
     if callee.kind != CORE_CALLEE_DIRECT &&
-       callee.type_substitutions.len() != 0 {
-        panic("CoreHIR: non-direct call carries declaration type substitutions")
+       (callee.type_substitutions.len() != 0 ||
+        callee.effect_substitutions.len() != 0) {
+        panic("CoreHIR: non-direct call carries declaration substitutions")
     }
     let flow_parameters = flow_call_contract_parameter_types(callee.contract)
     if arguments.len() != flow_parameters.len() {
@@ -4190,6 +4209,9 @@ fn validate_call_signature(
         validate_type_substitutions_for_callable(
             callee.type_substitutions, candidate, graph,
             "CoreHIR: direct type substitution identity/order differs")
+        validate_effect_substitutions_for_callable(
+            callee.effect_substitutions, candidate, graph,
+            "CoreHIR: direct effect substitution identity/order differs")
         if !core_call_contract_actual_satisfies_formal(
                 callee.contract, candidate.semantic_contract,
                 callee.type_substitutions, graph) {
@@ -4961,7 +4983,7 @@ fn validate_expr_with_program(
             validate_call_signature(
                 make_core_direct_callee(
                     callable.reference, callable.semantic_contract,
-                    [],
+                    [], [],
                     make_explicit_core_effect_instantiation(
                         callable.effects, callable.effects,
                         callable.effects)),
@@ -5009,7 +5031,7 @@ fn validate_expr_with_program(
             validate_call_signature(
                 make_core_direct_callee(
                     callable.reference, callable.semantic_contract,
-                    [],
+                    [], [],
                     make_explicit_core_effect_instantiation(
                         callable.effects, callable.effects,
                         callable.effects)),

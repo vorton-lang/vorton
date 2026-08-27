@@ -3234,6 +3234,7 @@ fn core_callee(
         make_core_direct_callee(
             executable, contract,
             direct_type_substitutions(ctx, executable, type_args),
+            effect_substitutions,
             named_callable_effect_instantiation(
                 instantiated_source, actual_effects, effect_substitutions,
                 effect_instantiation.is_some()))
