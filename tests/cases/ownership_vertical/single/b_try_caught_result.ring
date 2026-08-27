@@ -1,12 +1,20 @@
-fn raise_text() -> Int with {fail<Str>} {
-    fail.raise("caught")
+fn maybe_text(should_fail: Bool) -> Str with {fail<Str>} {
+    if should_fail {
+        fail.raise("caught")
+    }
+    "success"
 }
 
 fn main() {
-    let score = raise_text() catch {
-        error => error.len() + error.len()
+    let protected = maybe_text(false) catch {
+        error => "unexpected:${error}"
     }
-    assert(score == 12,
-        "caught fresh error is live and remains owned through the arm")
-    print("B_TRY_CAUGHT_RESULT_OK:${score}")
+    let caught = maybe_text(true) catch {
+        error => "${error}:${error}"
+    }
+    assert(protected == "success",
+        "protected result stays owned on the success successor")
+    assert(caught == "caught:caught",
+        "caught fresh error stays owned through the caught successor")
+    print("B_TRY_RESULT_PATHS_OK:${protected}/${caught}")
 }

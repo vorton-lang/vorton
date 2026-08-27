@@ -179,14 +179,15 @@
       "id": "B8",
       "path": "single/b_try_caught_result.ring",
       "covers": [
+        "Try protected success keeps its fresh result on the success successor",
         "Try caught edge creates one fresh error result",
         "caught binder is Live only on the caught successor",
-        "fresh result cleanup ownership follows its exact slot and type"
+        "success and caught cleanup ownership follow their exact slots and types"
       ],
       "expected": {
         "phase": "native",
         "status": "pass",
-        "stdout": "B_TRY_CAUGHT_RESULT_OK:12\n"
+        "stdout": "B_TRY_RESULT_PATHS_OK:success/caught:caught\n"
       }
     },
     {
@@ -301,6 +302,63 @@
         "status": "fail",
         "diagnostic_code": "E0103",
         "diagnostic_contains": "Effect operation bodies are not supported in Ring 0.1"
+      }
+    },
+    {
+      "id": "D7",
+      "path": "single/d_effect_header_composites.ring",
+      "covers": [
+        "Box<fn> branch merge preserves the actual callable effect tail",
+        "positional and named enum fields preserve nested callable tails",
+        "effect operation callable parameters and results preserve their tails",
+        "generic fail<T> preserves a nested callable actual tail",
+        "generic custom-effect payload preserves a nested callable actual tail"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_EFFECT_HEADER_COMPOSITES_OK:93\n"
+      }
+    },
+    {
+      "id": "D8",
+      "path": "modules/d_effect_order_left/main.ring",
+      "support_paths": [
+        "modules/d_effect_order_left/base.ring",
+        "modules/d_effect_order_left/alpha.ring",
+        "modules/d_effect_order_left/beta.ring"
+      ],
+      "parity_group": "D-effect-dependency-order",
+      "covers": [
+        "two dependency-local raw effect tails remain distinct",
+        "same-origin base callable survives a dependency diamond",
+        "alpha-before-beta import order"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_EFFECT_DEP_ORDER_OK:111/220/13/40\n"
+      }
+    },
+    {
+      "id": "D9",
+      "path": "modules/d_effect_order_right/main.ring",
+      "support_paths": [
+        "modules/d_effect_order_right/base.ring",
+        "modules/d_effect_order_right/alpha.ring",
+        "modules/d_effect_order_right/beta.ring"
+      ],
+      "parity_group": "D-effect-dependency-order",
+      "covers": [
+        "two dependency-local raw effect tails remain distinct",
+        "same-origin base callable survives a dependency diamond",
+        "beta-before-alpha import order"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_EFFECT_DEP_ORDER_OK:111/220/13/40\n",
+        "same_stdout_as": "D8"
       }
     },
     {
