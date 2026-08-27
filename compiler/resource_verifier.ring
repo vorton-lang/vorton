@@ -1005,10 +1005,19 @@ fn append_expected_event_demand_constraints(
                 argument = argument + 1
             }
         },
-        PlannerEventValue::ProjectValue { source, .. } =>
+        PlannerEventValue::ProjectValue {
+            source, target, partial, ..
+        } => {
             append_expected_local_floor(
                 result, site, body, block_index, boundary, source,
-                make_transfer_demand(param_mode_borrow(), false)),
+                make_transfer_demand(param_mode_borrow(), false))
+            if partial {
+                append_expected_local_copy(
+                    result, site, RULE_LOCAL_READ, body,
+                    block_index, boundary, source,
+                    block_index, next, target)
+            }
+        },
         PlannerEventValue::CaptureValue { source, demand, .. } =>
             append_expected_local_floor(
                 result, site, body, block_index, boundary, source, demand)
@@ -3000,15 +3009,30 @@ fn verify_event_transition_contract(
             if partial {
                 let takes_place = param_mode_same(mode, param_mode_own()) &&
                     needs_cleanup
-                require_transition_count(
-                    before, if takes_place { 1 } else { 0 },
-                    "partial Project source")
-                if before.len() == 1 {
+                let source_state = states.get(source).unwrap()
+                if !slot_flow_is_live(source_state) {
+                    panic("ResourcePlanner verifier: partial Project source is not live")
+                }
+                if takes_place && !slot_flow_cleanup_owner(source_state) {
+                    panic("ResourcePlanner verifier: owning partial Project source is not owner")
+                }
+                if takes_place && !body.slots.get(target).unwrap().owns_storage {
+                    panic("ResourcePlanner verifier: owning partial Project target is borrowed")
+                }
+                require_transition_count(before, 1, "partial Project source")
+                if takes_place {
                     require_transition(
                         before.get(0).unwrap(), source,
                         slot_reason_take_projected_source(),
                         "partial Project source")
+                } else {
+                    require_transition(
+                        before.get(0).unwrap(), source,
+                        slot_reason_borrow(), "partial Project source")
                 }
+                require_transition_after_state(
+                    before.get(0).unwrap(), source_state,
+                    "partial Project source")
             } else {
                 if param_mode_same(mode, param_mode_own()) &&
                    verifier_logical_shape_may_take(
@@ -3036,6 +3060,14 @@ fn verify_event_transition_contract(
                 else if needs_clone { slot_reason_clone_target() }
                 else { slot_reason_assign_scalar() },
                 "Project target")
+            if partial {
+                require_transition_after_state(
+                    semantic.get(0).unwrap(),
+                    slot_flow_live_owner(
+                        param_mode_same(mode, param_mode_own()) &&
+                            needs_cleanup),
+                    "partial Project target")
+            }
             require_transition_count(
                 after, if needs_clone { 1 } else { 0 }, "Project after")
             if needs_clone {

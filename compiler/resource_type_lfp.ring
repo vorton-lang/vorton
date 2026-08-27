@@ -2903,12 +2903,24 @@ fn add_body_event_demand_constraints(
                 argument = argument + 1
             }
         },
-        PlannerEventValue::ProjectValue { source, .. } =>
-            // A value projection observes its aggregate base. Demand for the
-            // projected result must not turn into a whole-aggregate Own edge.
+        PlannerEventValue::ProjectValue {
+            source, target, partial, ..
+        } => {
+            // Every projection observes its aggregate base. Ordinary field
+            // reads never turn result demand into whole-aggregate ownership.
             add_local_demand_floor(
                 constraints, site, layout, block_index, boundary, source,
-                make_transfer_demand(param_mode_borrow(), false)),
+                make_transfer_demand(param_mode_borrow(), false))
+            // Pattern projection is the one 0.1 partial-transfer producer.
+            // Its exact result demand therefore propagates to the base so an
+            // owning extraction reaches the callable parameter/entry seed.
+            if partial {
+                add_local_demand_copy(
+                    constraints, site, RULE_LOCAL_READ, layout,
+                    block_index, boundary, source,
+                    block_index, next, target)
+            }
+        },
         PlannerEventValue::CaptureValue { source, demand, .. } =>
             add_local_demand_floor(
                 constraints, site, layout, block_index, boundary,

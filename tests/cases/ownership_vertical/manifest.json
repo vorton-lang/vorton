@@ -190,6 +190,21 @@
       }
     },
     {
+      "id": "B9",
+      "path": "single/b_pattern_projection_own_reuse.ring",
+      "covers": [
+        "Own pattern extraction propagates result demand to its aggregate parameter",
+        "the caller transfers Option<Resource> ownership into extract",
+        "caller reuse is rejected by the ONE ResourcePlanner"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0801",
+        "diagnostic_contains": "use of moved value: 'source'"
+      }
+    },
+    {
       "id": "C1",
       "path": "single/c_exact_callable_carriers.ring",
       "covers": [

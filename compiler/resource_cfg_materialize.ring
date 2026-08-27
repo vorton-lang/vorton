@@ -464,8 +464,19 @@ fn apply_event_abstract(
             let source_live = preflight_live_slot(
                 body, event, 0, source, states.get(source).unwrap(),
                 collect, findings)
+            let logical = logical_shapes.get(value_type_index).unwrap()
+            let physical = physical_shapes.get(value_type_index).unwrap()
+            let takes_place = partial && param_mode_same(
+                    transfer_demand_mode(demand), param_mode_own()) &&
+                type_requires_cleanup(logical, physical)
+            if takes_place && source_live &&
+               !slot_flow_cleanup_owner(states.get(source).unwrap()) {
+                panic("ResourcePlanner: owning partial projection lacks source ownership")
+            }
+            if takes_place && !body.slots.get(target).unwrap().owns_storage {
+                panic("ResourcePlanner: owning partial projection targets borrowed storage")
+            }
             if !partial {
-                let logical = logical_shapes.get(value_type_index).unwrap()
                 if source_live && collect &&
                    param_mode_same(
                         transfer_demand_mode(demand), param_mode_own()) &&
@@ -483,19 +494,20 @@ fn apply_event_abstract(
                             slot_flow_moved()))
                 }
             }
-            let target_owner = body.slots.get(target).unwrap().owns_storage &&
-                param_mode_same(transfer_demand_mode(demand), param_mode_own()) &&
-                if partial {
-                    type_requires_cleanup(
-                        logical_shapes.get(value_type_index).unwrap(),
-                        physical_shapes.get(value_type_index).unwrap())
-                } else {
-                    !logical_shape_may_take(
-                        logical_shapes.get(value_type_index).unwrap()) &&
-                    physical_shape_may_drop(
-                        physical_shapes.get(value_type_index).unwrap())
+            if partial && !source_live {
+                // Do not manufacture a live pattern binder from an unavailable
+                // base; the exact source diagnostic remains authoritative.
+                states.set(target, slot_flow_empty())
+            } else {
+                let target_owner = if partial { takes_place } else {
+                    body.slots.get(target).unwrap().owns_storage &&
+                        param_mode_same(
+                            transfer_demand_mode(demand), param_mode_own()) &&
+                        !logical_shape_may_take(
+                            logical) && physical_shape_may_drop(physical)
                 }
-            states.set(target, slot_flow_live_owner(target_owner))
+                states.set(target, slot_flow_live_owner(target_owner))
+            }
         },
         PlannerEventValue::CaptureValue { source, target, demand } => {
             let before_target = states.get(target).unwrap()
@@ -1205,9 +1217,16 @@ fn materialize_event(
             let logical = solved.logical_shapes.get(value_type_index).unwrap()
             let physical = solved.physical_shapes.get(value_type_index).unwrap()
             if partial {
-                if param_mode_same(
+                let takes_place = param_mode_same(
                         transfer_demand_mode(demand), param_mode_own()) &&
-                   type_requires_cleanup(logical, physical) {
+                    type_requires_cleanup(logical, physical)
+                if takes_place {
+                    if !slot_flow_cleanup_owner(source_before) {
+                        panic("ResourcePlanner: owning partial projection lacks source ownership")
+                    }
+                    if !body.slots.get(target).unwrap().owns_storage {
+                        panic("ResourcePlanner: owning partial projection targets borrowed storage")
+                    }
                     before_ops.push(make_rc_take_place_at(
                         make_rc_instruction_site(
                             instruction, rc_site_before_instruction(), 0),
@@ -1216,6 +1235,12 @@ fn materialize_event(
                     push_transition(
                         before_transitions, source, source_before,
                         source_before, slot_reason_take_projected_source())
+                } else {
+                    // Borrow aliases and scalar Own projections still need an
+                    // exact, operation-free witness bound to the source slot.
+                    push_transition(
+                        before_transitions, source, source_before,
+                        source_before, slot_reason_borrow())
                 }
             } else {
                 if param_mode_same(
@@ -1236,10 +1261,16 @@ fn materialize_event(
                 panic("ResourcePlanner: owning field projection targets borrowed storage")
             }
             let target_state = slot_flow_live_owner(
-                body.slots.get(target).unwrap().owns_storage &&
-                param_mode_same(transfer_demand_mode(demand), param_mode_own()) &&
-                if partial { type_requires_cleanup(logical, physical) }
-                else { needs_clone })
+                if partial {
+                    param_mode_same(
+                        transfer_demand_mode(demand), param_mode_own()) &&
+                        type_requires_cleanup(logical, physical)
+                } else {
+                    body.slots.get(target).unwrap().owns_storage &&
+                        param_mode_same(
+                            transfer_demand_mode(demand), param_mode_own()) &&
+                        needs_clone
+                })
             states.set(target, target_state)
             let target_reason = if partial &&
                     param_mode_same(
