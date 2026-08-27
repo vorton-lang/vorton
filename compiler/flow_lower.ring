@@ -925,7 +925,7 @@ fn move_update_field_type(
     }
 }
 
-fn move_update_projection_contract(
+fn partial_projection_contract(
     field: CoreFieldRef, base_type: CoreTypeRef,
     value_type: CoreTypeRef, role: FlowSemanticRole
 ) -> FlowProjectionContract {
@@ -975,7 +975,7 @@ fn lower_move_update_source_place(
             let base_type = frozen_slot_type_at(ctx, source)
             let value_type = core_expr_type(base)
             let result = make_flow_project_place(
-                source, move_update_projection_contract(
+            source, partial_projection_contract(
                     core_expr_project_field(base), base_type, value_type,
                     flow_semantic_role_consume()), value_type)
             restore_core_node(ctx, previous)
@@ -1085,6 +1085,103 @@ fn flow_pattern(value: CorePattern) -> FlowPatternContract {
     } else {
         panic("Flow lowering: unknown Core pattern")
     }
+}
+
+fn pattern_has_bindings(value: CorePattern) -> Bool {
+    let kind = core_pattern_kind_tag(value)
+    if kind == 1 { return true }
+    if kind == 3 {
+        for element in core_pattern_elements(value) {
+            if pattern_has_bindings(element) { return true }
+        }
+    } else if kind == 4 || kind == 5 {
+        for field in core_pattern_fields(value) {
+            if pattern_has_bindings(core_pattern_field_pattern(field)) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn lower_pattern_projection(
+    mut ctx: FlowLowerCtx, source: SlotRef, pattern: CorePattern,
+    scope: FlowScopeRef, origin: OriginRef, mut dispatch_ordinal: Int
+) -> Int {
+    let kind = core_pattern_kind_tag(pattern)
+    if kind == 1 {
+        emit_instruction(ctx, make_flow_read(
+            next_instruction_ref(ctx), origin, source,
+            core_pattern_binding(pattern)),
+            core_flow_role_control_dispatch(dispatch_ordinal))
+        return dispatch_ordinal + 1
+    }
+    if kind == 0 || kind == 2 { return dispatch_ordinal }
+    let base_type = frozen_slot_type_at(ctx, source)
+    if kind == 3 {
+        let elements = core_pattern_elements(pattern)
+        let mut index = 0
+        while index < elements.len() {
+            let child = elements.get(index).unwrap()
+            if pattern_has_bindings(child) {
+                let child_type = core_pattern_type(child)
+                let target = if core_pattern_kind_tag(child) == 1 {
+                    core_pattern_binding(child)
+                } else {
+                    new_admin_slot(
+                        ctx, child_type, scope, binder_kind_pattern_projection(),
+                        "pattern-projection", dispatch_ordinal,
+                        flow_storage_temp(), flow_initial_slot_empty())
+                }
+                emit_instruction(ctx, make_flow_project(
+                    next_instruction_ref(ctx), origin,
+                    partial_projection_contract(
+                        make_core_tuple_field(index), base_type, child_type,
+                        flow_semantic_role_read()),
+                    source, target),
+                    core_flow_role_control_dispatch(dispatch_ordinal))
+                dispatch_ordinal = dispatch_ordinal + 1
+                if core_pattern_kind_tag(child) != 1 {
+                    dispatch_ordinal = lower_pattern_projection(
+                        ctx, target, child, scope, origin,
+                        dispatch_ordinal)
+                }
+            }
+            index = index + 1
+        }
+        return dispatch_ordinal
+    }
+    if kind == 4 || kind == 5 {
+        for field in core_pattern_fields(pattern) {
+            let child = core_pattern_field_pattern(field)
+            if pattern_has_bindings(child) {
+                let child_type = core_pattern_type(child)
+                let target = if core_pattern_kind_tag(child) == 1 {
+                    core_pattern_binding(child)
+                } else {
+                    new_admin_slot(
+                        ctx, child_type, scope, binder_kind_pattern_projection(),
+                        "pattern-projection", dispatch_ordinal,
+                        flow_storage_temp(), flow_initial_slot_empty())
+                }
+                emit_instruction(ctx, make_flow_project(
+                    next_instruction_ref(ctx), origin,
+                    partial_projection_contract(
+                        core_pattern_field_ref(field), base_type, child_type,
+                        flow_semantic_role_read()),
+                    source, target),
+                    core_flow_role_control_dispatch(dispatch_ordinal))
+                dispatch_ordinal = dispatch_ordinal + 1
+                if core_pattern_kind_tag(child) != 1 {
+                    dispatch_ordinal = lower_pattern_projection(
+                        ctx, target, child, scope, origin,
+                        dispatch_ordinal)
+                }
+            }
+        }
+        return dispatch_ordinal
+    }
+    panic("Flow lowering: unknown pattern projection")
 }
 
 fn repeated_role(count: Int, role: FlowSemanticRole) -> List<FlowSemanticRole> {
@@ -1273,7 +1370,7 @@ fn emit_simple_expr(
             }
             match override_slot {
                 some(slot) => {
-                    let target_contract = move_update_projection_contract(
+                    let target_contract = partial_projection_contract(
                         field, result_type, field_type,
                         flow_semantic_role_mutate())
                     emit_instruction(ctx, make_flow_assign(
@@ -1289,7 +1386,7 @@ fn emit_simple_expr(
                 ctx, field_type, scope, binder_kind_pre_anf(),
                 "move-update-field", inputs.len(), flow_storage_temp(),
                 flow_initial_slot_empty())
-            let projection = move_update_projection_contract(
+            let projection = partial_projection_contract(
                 field, result_type, field_type,
                 flow_semantic_role_consume())
             emit_instruction(ctx, make_flow_project(
@@ -1562,6 +1659,7 @@ fn lower_match_arms(
         test_index = test_index + 1
     }
     let mut index = 0
+    let mut dispatch_ordinal = arm_base
     while index < arms.len() {
         set_current(ctx, tests.get(index).unwrap())
         let arm = arms.get(index).unwrap()
@@ -1569,6 +1667,8 @@ fn lower_match_arms(
         let arm_scope = new_child_scope(ctx, parent_scope)
         activate_pattern_binders(
             ctx, core_match_arm_pattern(arm), arm_scope)
+        let projection = new_draft(
+            ctx, core_match_arm_origin(arm), arm_scope)
         let candidate = new_draft(
             ctx, core_match_arm_origin(arm), arm_scope)
         let next = if index + 1 < tests.len() {
@@ -1579,8 +1679,16 @@ fn lower_match_arms(
         terminate(ctx, make_flow_pattern_branch(
             core_match_arm_origin(arm), scrutinee,
             flow_pattern(core_match_arm_pattern(arm)),
-            successor_to(ctx, candidate), successor_to(ctx, next)),
-            core_flow_role_control_dispatch(arm_base + index * 2))
+            successor_to(ctx, projection), successor_to(ctx, next)),
+            core_flow_role_control_dispatch(dispatch_ordinal))
+        dispatch_ordinal = dispatch_ordinal + 1
+        set_current(ctx, projection)
+        dispatch_ordinal = lower_pattern_projection(
+            ctx, scrutinee, core_match_arm_pattern(arm), arm_scope,
+            core_match_arm_origin(arm), dispatch_ordinal)
+        terminate_goto(ctx, candidate, core_match_arm_origin(arm),
+            core_flow_role_control_dispatch(dispatch_ordinal))
+        dispatch_ordinal = dispatch_ordinal + 1
         set_current(ctx, candidate)
         match core_match_arm_guard(arm) {
             some(guard) => {
@@ -1591,8 +1699,8 @@ fn lower_match_arms(
                 terminate(ctx, make_flow_branch(
                     core_expr_origin(guard), guard_slot,
                     successor_to(ctx, guarded_body), successor_to(ctx, next)),
-                    core_flow_role_control_dispatch(
-                        arm_base + index * 2 + 1))
+                    core_flow_role_control_dispatch(dispatch_ordinal))
+                dispatch_ordinal = dispatch_ordinal + 1
                 set_current(ctx, guarded_body)
             },
             none => {}

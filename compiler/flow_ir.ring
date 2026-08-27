@@ -2399,46 +2399,6 @@ pub fn flow_pattern_kind_tag(value: FlowPatternContract) -> Int {
         FlowPatternContractValue::FlowVariantPattern { .. } => 5
     }
 }
-pub fn flow_pattern_binding(value: FlowPatternContract) -> SlotRef {
-    match value.value {
-        FlowPatternContractValue::FlowBindingPattern(slot) => slot,
-        _ => panic("FlowIR: pattern is not a binding")
-    }
-}
-pub fn flow_pattern_tuple_elements(
-    value: FlowPatternContract
-) -> List<FlowPatternContract> {
-    match value.value {
-        FlowPatternContractValue::FlowTuplePattern(elements) =>
-            copy_flow_patterns(elements),
-        _ => panic("FlowIR: pattern is not a tuple")
-    }
-}
-pub fn flow_pattern_struct_fields(
-    value: FlowPatternContract
-) -> List<FlowPatternField> {
-    match value.value {
-        FlowPatternContractValue::FlowStructPattern { fields, .. } =>
-            copy_flow_pattern_fields(fields),
-        _ => panic("FlowIR: pattern is not a struct")
-    }
-}
-pub fn flow_pattern_variant_fields(
-    value: FlowPatternContract
-) -> List<FlowPatternField> {
-    match value.value {
-        FlowPatternContractValue::FlowVariantPattern { fields, .. } =>
-            copy_flow_pattern_fields(fields),
-        _ => panic("FlowIR: pattern is not a variant")
-    }
-}
-pub fn flow_pattern_field_identity(
-    value: FlowPatternField
-) -> FlowFieldIdentity { value.field }
-pub fn flow_pattern_field_pattern(
-    value: FlowPatternField
-) -> FlowPatternContract { value.pattern }
-
 pub struct FlowSuccessor {
     target: FlowBlockRef,
     exited_scopes: List<FlowScopeRef>,
@@ -3051,54 +3011,10 @@ pub fn flow_block_terminator_operands(value: FlowBlock) -> List<FlowOperandRef> 
     }
 }
 
-fn flow_pattern_binding_slots(value: FlowPatternContract) -> List<SlotRef> {
-    let mut result: List<SlotRef> = []
-    match value.value {
-        FlowPatternContractValue::FlowBindingPattern(slot) => result.push(slot),
-        FlowPatternContractValue::FlowTuplePattern(elements) => {
-            for element in elements {
-                for slot in flow_pattern_binding_slots(element) {
-                    result.push(slot)
-                }
-            }
-        },
-        FlowPatternContractValue::FlowStructPattern {
-            fields: field_values, ..
-        } => {
-            for field in field_values {
-                for slot in flow_pattern_binding_slots(field.pattern) {
-                    result.push(slot)
-                }
-            }
-        },
-        FlowPatternContractValue::FlowVariantPattern {
-            fields: field_values, ..
-        } => {
-            for field in field_values {
-                for slot in flow_pattern_binding_slots(field.pattern) {
-                    result.push(slot)
-                }
-            }
-        },
-        _ => {}
-    }
-    result
-}
-
 pub fn flow_block_terminator_results(value: FlowBlock) -> List<FlowResultRef> {
     let step = make_flow_terminator_step_ref(value.reference)
     let mut result: List<FlowResultRef> = []
     match value.terminator.value {
-        FlowTerminatorValue::PatternValue { pattern, .. } => {
-            let mut ordinal = 0
-            for slot in flow_pattern_binding_slots(pattern) {
-                result.push(FlowResultRef {
-                    step: step, ordinal: ordinal, slot: slot,
-                    origin: make_aliasing_flow_value_origin([0])
-                })
-                ordinal = ordinal + 1
-            }
-        },
         FlowTerminatorValue::TryValue { error, .. } => result.push(
             FlowResultRef {
                 step: step, ordinal: 0, slot: error,
