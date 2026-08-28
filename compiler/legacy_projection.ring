@@ -13,7 +13,6 @@ use ir_identity::{
     SymbolRef, ModuleBodyRef, OriginRef, SlotRef,
     IntrinsicRef, intrinsic_ref_symbol, intrinsic_ref_same,
     ImplOwnerRef, ImplMethodRef,
-    handled_effect_ref_same, system_effect_ref_same,
     symbol_ref_same, symbol_ref_origin_module_key,
     origin_module_key_is_prelude,
     module_body_ref_same, module_body_ref_origin_module_key,
@@ -38,13 +37,11 @@ use ir_inventory::{
 use hir::{DictRef}
 use hir_exact::{dict_ref_exact, dict_ref_physical_same}
 use effect_contract::{
-    CoreEffectAtom, CoreEffectSet, TypedHandledEffectInstance,
+    CoreEffectSet, TypedHandledEffectInstance,
     make_typed_handled_effect_instance,
     typed_handled_effect_instance_same,
-    make_core_effect_set, core_effect_set_atoms,
-    core_effect_atom_kind_tag, core_effect_atom_type,
+    make_core_effect_set, core_effect_set_atoms, core_effect_atom_same,
     core_effect_atom_handled_ref, core_effect_atom_type_arguments,
-    core_effect_atom_system_ref
 }
 use core_hir::{core_program_type_graph, core_program_inventory}
 use core_type_source::{
@@ -148,26 +145,6 @@ fn copy_legacy_types(
     result
 }
 
-fn core_effect_atom_projection_same(
-    left: CoreEffectAtom, right: CoreEffectAtom
-) -> Bool {
-    let tag = core_effect_atom_kind_tag(left)
-    if tag != core_effect_atom_kind_tag(right) { return false }
-    if tag == 0 || tag == 1 {
-        return core_type_ref_same(
-            core_effect_atom_type(left), core_effect_atom_type(right))
-    }
-    if tag == 2 { return true }
-    if tag == 3 {
-        return handled_effect_ref_same(
-            core_effect_atom_handled_ref(left),
-            core_effect_atom_handled_ref(right))
-    }
-    system_effect_ref_same(
-        core_effect_atom_system_ref(left),
-        core_effect_atom_system_ref(right))
-}
-
 fn core_effect_sets_same(left: CoreEffectSet, right: CoreEffectSet) -> Bool {
     let left_atoms = core_effect_set_atoms(left)
     let right_atoms = core_effect_set_atoms(right)
@@ -175,7 +152,7 @@ fn core_effect_sets_same(left: CoreEffectSet, right: CoreEffectSet) -> Bool {
     for left_atom in left_atoms {
         let mut matches = 0
         for right_atom in right_atoms {
-            if core_effect_atom_projection_same(left_atom, right_atom) {
+            if core_effect_atom_same(left_atom, right_atom) {
                 matches = matches + 1
             }
         }

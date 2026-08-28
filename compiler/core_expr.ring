@@ -3419,19 +3419,6 @@ fn append_effect_ctx_token(
         values.push(token)
     }
 }
-fn collect_effect_ctx_layout_tokens(
-    value: CoreEffectCtxLayout, mut result: List<CoreEffectCtxTokenRef>
-) {
-    for token in value.entries { append_effect_ctx_token(result, token) }
-}
-fn collect_effect_ctx_argument_tokens(
-    value: CoreEffectCtxArgument, mut result: List<CoreEffectCtxTokenRef>
-) {
-    collect_effect_ctx_layout_tokens(
-        core_effect_ctx_argument_source_layout(value), result)
-    collect_effect_ctx_layout_tokens(
-        core_effect_ctx_argument_target_layout(value), result)
-}
 fn collect_expr_effect_ctx_tokens(
     value: CoreExpr, mut result: List<CoreEffectCtxTokenRef>
 ) {
@@ -3441,17 +3428,15 @@ fn collect_expr_effect_ctx_tokens(
                 operand, result) }
         },
         CoreExprValue::CallExprValue {
-            arguments, effect_ctx, ..
+            arguments, ..
         } => {
-            collect_effect_ctx_argument_tokens(effect_ctx, result)
             for argument in arguments {
                 collect_expr_effect_ctx_tokens(argument, result)
             }
         },
         CoreExprValue::MethodCallExprValue {
-            receiver, arguments, effect_ctx, ..
+            receiver, arguments, ..
         } => {
-            collect_effect_ctx_argument_tokens(effect_ctx, result)
             collect_expr_effect_ctx_tokens(receiver, result)
             for argument in arguments {
                 collect_expr_effect_ctx_tokens(argument, result)
@@ -3460,8 +3445,6 @@ fn collect_expr_effect_ctx_tokens(
         CoreExprValue::EffectCallExprValue {
             arguments, effect_ctx_lookup, ..
         } => {
-            collect_effect_ctx_layout_tokens(
-                effect_ctx_lookup.layout, result)
             append_effect_ctx_token(result, effect_ctx_lookup.token)
             for argument in arguments {
                 collect_expr_effect_ctx_tokens(argument, result)
@@ -3475,22 +3458,14 @@ fn collect_expr_effect_ctx_tokens(
             collect_expr_effect_ctx_tokens(payload, result),
         CoreExprValue::ProjectExprValue { base, .. } =>
             collect_expr_effect_ctx_tokens(base, result),
-        CoreExprValue::ConstructExprValue { fields, effect_ctx, .. } => {
-            match effect_ctx {
-                some(argument) => collect_effect_ctx_argument_tokens(
-                    argument, result), none => {}
-            }
+        CoreExprValue::ConstructExprValue { fields, .. } => {
             for field in fields {
                 collect_expr_effect_ctx_tokens(field.value, result)
             }
         },
         CoreExprValue::MoveUpdateExprValue {
-            base, overrides, effect_ctx, ..
+            base, overrides, ..
         } => {
-            match effect_ctx {
-                some(argument) => collect_effect_ctx_argument_tokens(
-                    argument, result), none => {}
-            }
             collect_expr_effect_ctx_tokens(base, result)
             for field in overrides {
                 collect_expr_effect_ctx_tokens(field.value, result)
@@ -3579,14 +3554,6 @@ pub fn core_body_effect_ctx_tokens(
     let result: List<CoreEffectCtxTokenRef> = []
     collect_block_effect_ctx_tokens(value.body, result)
     result
-}
-pub fn core_callable_effect_ctx_tokens(
-    value: CoreCallableContract
-) -> List<CoreEffectCtxTokenRef> {
-    match value.effect_ctx {
-        some(context) => copy_effect_ctx_tokens(context.layout.entries),
-        none => []
-    }
 }
 
 fn collect_core_expr_origins(value: CoreExpr, mut result: List<OriginRef>) {
