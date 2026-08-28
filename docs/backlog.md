@@ -47,6 +47,8 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **Core effect closure（2026-08-26 用户批准）**：TypedHIR freeze必须把普通effect inference变量完全求解，并把合法多态tail generalize为稳定`EffectParamRef(owner, ordinal)`；raw UnionFind/type-var tail禁止进入Core。`CoreCallableEffectContract`保存canonical system/handled/fail/mut/unsafe atoms与可选formal effect参数，call site保存exact实例化；first-class/dynamic candidate逐项核对effect/evidence契约。Core/Flow不重跑effect inference，Planner不消费effect。本边界是现有0.1 effect-polymorphic HOF/B-167与B-194/B-195的真实consumer，不是未来扩展hook。
 
+> **Recursive SCC inference gate（2026-08-28 用户批准 A+）**：当前#268/#269的effect-formal producer必须先把top-level、inline module、impl method与singleton self-recursion统一到一个HM递归组生命周期：组内monomorphic provisional schemes共享constraints且peer/self lookup不instantiate；整组完成后相对组外env一次性final-zonk/generalize、生成canonical effect schema与exact call/value provenance，并原子rebind/HIR finalize。不得只修top-level Phase2b、在现有impl effect pre-pass上叠第三authority、premint formal或新增post-SCC HIR patch。0.1明确不支持polymorphic recursion；普通generic recursion保持。验收必须覆盖四类递归入口、组失败零部分发布、组外独立实例化、B-122/#149回归、effect-HOF/diamond/import-order矩阵，并杀死first-use mint、owner-stack、importer remint和provenance缺失mutation；通过前effect build/matrix/长门冻结。
+
 > **U1a no-partial-inline-module gate（2026-08-22 用户决定）**：0.1 中同一 direct parent scope 的 `mod name` 只能声明一次，第二个 ModBlock 在 resolver source census 立即报 `E0207`；不同 AstSite 不能因 canonical payload 相同合并，`E0707` 只保留给不同 origin 的 import ambiguity。Import/re-export/same-origin diamond 仍幂等复用 exact origin，不同 parent 同 leaf 与多个 impl block 不受影响。仓内 compiler/std/examples 零迁移；3 个 active resolver fixture 机械合为单 block 或改成 duplicate-mod 负例，staged b107 probes 同步重写/退役。验收必须由 source-built exact candidate 的真实 parser/resolver 覆盖 duplicate ModBlock、单 block 内 Fn/Const/Extern/Struct/ExternType/Enum/TypeAlias/Effect/Alias/Trait direct duplicates 及 delivery 非回归；Python source scan 只作非权威 scope guard。未来若有真实大规模 consumer，以显式新 feature 重新设计，不保留隐藏兼容路径。
 
 > **0.1 surface simplification / CoreHIR closure（2026-08-23 用户决定）**：compiler/std/examples 对函数default parameters、sig placeholder、refinement placeholder、user effect default body与delegate surface均无必须保留的真实consumer。0.1 clean break删除函数default parameter、只注册/transport `SigDef`、parse-and-discard `where`与user default evidence全链；trait default method不受影响。Delegate因能表达组合关系而保留，但只在TypedHIR→CoreHIR一次展开成普通trait impl。每个新surface feature必须提供唯一CoreHIR lowering或证明自身为canonical core，禁止把surface-only variant、待生成body/impl/evidence带入下游。Sig/refinement/default provider分别只按B-192/B-001/B-197的完整未来门重入。
@@ -927,6 +929,14 @@ async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评�
 **研究范围**：比较完整`IndexMut` trait、少数内建容器专属语法与继续使用显式mutator；固定List越界、Map缺key时replace-vs-insert、Str不可变、用户类型coherence、`grid[0][1]`嵌套place、求值顺序、`mut self`/alias失效、exact projection与Drop-old/Take-new资源契约。禁止用receiver leaf/name表把赋值偷偷改写成`set`/`insert`。
 
 **进入 / 验收门**：至少一个首次0.1后的真实consumer及用户decision dossier；获批后必须给出唯一ResolvedAST→TypedHIR→CoreHIR place authority、Flow/RcIR exact projected overwrite、single/project与正反例矩阵。获批前parser/checker稳定给可修hard error，仓库只依赖`List.set(mut self, ...)`、`Map.insert(mut self, ...)`等显式API。
+
+### B-203 Post-0.1 polymorphic recursion 应用场景复核 [design-align] [P3] [M] [judgment] [queued] [after: B-175] [deferred: post-0.1-release+real-consumer]
+
+> **2026-08-28 用户决定**：0.1递归组内部按HM monomorphic recursion检查，不支持同一SCC成员以彼此不可统一的类型实例递归调用；普通generic recursion不受影响。当前compiler/std/examples/tests无polymorphic-recursion承诺或真实consumer，0.1 IR/checker不预留annotation、rank、carrier、fallback或兼容路径。
+
+**进入门**：首次0.1发布后，至少一个真实程序必须证明其递归环确实需要同一函数/方法在两个不可统一的实例上调用，且普通泛型递归、显式sum/erasure、拆分非递归wrapper或数据结构重写均不足。只有用户确认该场景值得扩大类型系统后才进入planning。
+
+**届时研究范围**：比较显式完整签名下的受限polymorphic recursion与继续拒绝；核对可判定性、principal type、termination、trait/effect参数、dictionary/evidence ABI、跨模块scheme与诊断。不得以当前A+递归组实现“不够通用”为由提前启动，也不得回填0.1空carrier。
 
 ## 基础设施
 
