@@ -3,7 +3,7 @@ use types::{Type, Effect, EffectRow, StructField, RecordField,
 use ast::{Pattern, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     HCallableTypeActual, HCallableEffectActual,
-    HCallableEffectInstantiation,
+    HCallableEffectInstantiation, HCallableValueInstantiation,
     HStructFieldInit, HNominalStructFieldInit,
     HStringInterpPart, HForInDestructure, HLambdaCapture,
     HLetDestructureBinding, HPatternBinding, ValueBindingKind, TraitDispatch,
@@ -312,6 +312,34 @@ pub fn zonk_row(ctx: ZonkCtx, r: EffectRow) -> EffectRow {
         apply_subst_row(ctx.subst, r))
 }
 
+fn zonk_callable_value_instantiation(
+    ctx: ZonkCtx, value: HCallableValueInstantiation?
+) -> HCallableValueInstantiation? {
+    value.map(fn(instantiation) {
+        HCallableValueInstantiation {
+            type_args: instantiation.type_args.map(fn(actual) {
+                HCallableTypeActual {
+                    owner: actual.owner,
+                    source_type_var_id: actual.source_type_var_id,
+                    ordinal: actual.ordinal,
+                    arity: actual.arity,
+                    actual: zonk_type(ctx, actual.actual)
+                }
+            }),
+            effects: instantiation.effects.map(fn(effects) {
+                HCallableEffectInstantiation {
+                    substitutions: effects.substitutions.map(fn(actual) {
+                        HCallableEffectActual {
+                            source: actual.source,
+                            actual: zonk_row(ctx, actual.actual)
+                        }
+                    })
+                }
+            })
+        }
+    })
+}
+
 pub fn zonk_param(ctx: ZonkCtx, p: HParam) -> HParam {
     HParam { name: p.name, ty: zonk_type(ctx, p.ty), def_id: p.def_id, is_mutable: p.is_mutable }
 }
@@ -450,7 +478,8 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 name: name, resolved_name: resolved_name, def_id: def_id,
                 source_slot: source_slot, callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
-                callable_instantiation: callable_instantiation,
+                callable_instantiation: zonk_callable_value_instantiation(
+                    ctx, callable_instantiation),
                 ty: z_ty, effects: z_eff, span: z_span
             }
             match ctx.dict_resolver {
@@ -742,7 +771,8 @@ fn zonk_direct_callee(ctx: ZonkCtx, callee: HExpr) -> HExpr {
                 name: name, resolved_name: resolved_name, def_id: def_id,
                 source_slot: source_slot, callee_identity: callee_identity,
                 dict_closure_dicts: dict_closure_dicts,
-                callable_instantiation: callable_instantiation,
+                callable_instantiation: zonk_callable_value_instantiation(
+                    ctx, callable_instantiation),
                 ty: z_ty, effects: z_eff, span: z_span
             }
             match ctx.dict_resolver {
