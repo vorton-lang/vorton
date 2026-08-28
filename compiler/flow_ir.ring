@@ -102,7 +102,6 @@ use effect_contract::{
     core_effect_instantiation_source,
     core_effect_instantiation_substitutions,
     core_effect_instantiation_result,
-    core_effect_contract_handled_requirements
 }
 use core_type_source::{
     FlowTypeNode, FlowFieldIdentity, FlowNominalFieldFact,

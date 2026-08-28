@@ -91,7 +91,7 @@ use effect_contract::{
     core_effect_instantiation_source,
     core_effect_instantiation_substitutions,
     core_effect_instantiation_result,
-    core_effect_contract_handled_requirements
+    core_effect_contract_handled_instances
 }
 use core_type_source::{
     CoreTypeFactAllocator,
@@ -5358,10 +5358,10 @@ fn validate_expr_with_program(
             }
             let callable = core_callable_for(
                 callables, effect_operation_ref_callable(operation))
-            if !core_effect_contract_handled_requirements(
-                    callable.effects).any(fn(requirement) {
+            if !core_effect_contract_handled_instances(
+                    callable.effects).any(fn(instance) {
                         handled_effect_ref_same(
-                            requirement,
+                            core_effect_atom_handled_ref(instance),
                             effect_operation_ref_effect(operation))
                     }) {
                 panic("CoreHIR: handled operation callable lacks its effect")
