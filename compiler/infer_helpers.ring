@@ -34,6 +34,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     register_callable_value_shadow,
     resolve_or_defer_dicts_from_scheme, PendingDictPurpose,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
+    has_variant_ctor_origin_def_id,
     current_executable_owner, current_dictionary_evidence_owner,
     journal_boxed_var_insert}
 use ir_identity::{IntrinsicRef, ImplMethodRef,
@@ -907,6 +908,53 @@ pub fn resolve_value_ident(
 ) -> HExpr {
     let _ = s
     finalize_value_ident_no_solve(ctx, harg)
+}
+
+fn mark_direct_callee_no_solve(ident: HExpr) -> HExpr {
+    match ident {
+        HExpr::Ident { .. } => HExpr::Ident {
+            ..ident, dict_closure_dicts: some([])
+        },
+        _ => panic("direct callee finalization: marker target is not Ident")
+    }
+}
+
+fn clear_direct_callee_no_solve(ident: HExpr) -> HExpr {
+    match ident {
+        HExpr::Ident { .. } => HExpr::Ident {
+            ..ident, dict_closure_dicts: none
+        },
+        _ => panic("direct callee finalization: clear target is not Ident")
+    }
+}
+
+pub fn finalize_direct_callee_no_solve(
+    ctx: InferCtx, harg: HExpr
+) -> HExpr {
+    match harg {
+        HExpr::Ident { def_id, .. } => match value_binding_kind(ctx, def_id) {
+            ValueBindingKind::DirectCallable |
+            ValueBindingKind::ExternCallable =>
+                mark_direct_callee_no_solve(harg),
+            ValueBindingKind::ConstGetter => {
+                let getter = finalize_value_ident_no_solve(ctx, harg)
+                match getter {
+                    HExpr::Call { .. } => getter,
+                    _ => panic(
+                        "direct callee finalization: const getter was not lowered")
+                }
+            },
+            ValueBindingKind::LocalBorrow => match def_id {
+                some(id) => if has_variant_ctor_origin_def_id(ctx, id) {
+                    mark_direct_callee_no_solve(harg)
+                } else {
+                    clear_direct_callee_no_solve(harg)
+                },
+                none => clear_direct_callee_no_solve(harg)
+            }
+        },
+        _ => harg
+    }
 }
 
 // ============================================================
