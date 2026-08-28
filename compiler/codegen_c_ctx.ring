@@ -1546,14 +1546,15 @@ pub fn rt_known_arity(name: Str) -> Int? {
 
 fn ctype_of(ch: Str) -> Str {
     if ch == "p" { "void*" }
+    else if ch == "e" { "EffectCtx*" }
     else if ch == "i" { "int64_t" }
     else if ch == "d" { "double" }
     else if ch == "c" { "const char*" }
     else { "void" }
 }
 
-// sig encoding: "<params>><ret>", one char per param: p=void* i=int64_t
-// d=double c=const char*; ret additionally v=void.
+// sig encoding: "<params>><ret>", one char per param: p=void*,
+// e=EffectCtx*, i=int64_t, d=double, c=const char*; ret additionally v=void.
 fn sig_to_proto(name: Str, enc: Str) -> Str {
     let sep = match enc.index_of(">") {
         some(i) => i,
@@ -1642,7 +1643,8 @@ fn rt_sig(name: Str) -> Str? {
     if name == "ring_list_concat" { return some("pp>p") }
     if name == "ring_list_slice" { return some("pii>p") }
     if name == "ring_list_reverse" { return some("p>p") }
-    if name == "ring_list_sort" { return some("pp>p") }
+    if name == "ring_list_sort" { return some("ppe>p") }
+    if name == "ring_list_sort_bridge" { return some("ppe>p") }
     if name == "ring_list_pop" { return some("p>p") }
     if name == "ring_list_is_empty" { return some("p>i") }
     if name == "ring_list_first" { return some("p>p") }
@@ -1691,14 +1693,14 @@ fn rt_sig(name: Str) -> Str? {
        name == "ring_cl_eq_bool" || name == "ring_cl_ne_bool" ||
        name == "ring_cl_cmp_int" || name == "ring_cl_cmp_float" ||
        name == "ring_cl_cmp_str" || name == "ring_cl_cmp_bool" {
-        return some("ppp>p")
+        return some("pppe>p")
     }
     if name == "ring_cl_debug_int" || name == "ring_cl_debug_float" ||
        name == "ring_cl_debug_str" || name == "ring_cl_debug_bool" ||
        name == "ring_cl_hash_int_export" ||
        name == "ring_cl_hash_str_export" ||
        name == "ring_cl_hash_bool_export" {
-        return some("pp>p")
+        return some("ppe>p")
     }
     // Option
     if name == "ring_Option_unwrap_or" { return some("pp>p") }

@@ -309,6 +309,8 @@ fn c_preamble() -> List<Str> {
         "#include <math.h>",
         "#include <setjmp.h>",
         "",
+        "typedef struct EffectCtx EffectCtx;",
+        "",
         "#define RING_INT(v)    ((void*)(uintptr_t)((((uint64_t)(int64_t)(v)) << 1) | 1u))",
         "#define RING_BOOL(v)   RING_INT(v)",
         "#define RING_TRUE      ((void*)(uintptr_t)3)",
