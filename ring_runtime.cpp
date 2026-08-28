@@ -1947,8 +1947,13 @@ extern "C" void* ring_Cell_update(
     (void)effect_ctx;
     void* new_val = fn(
         cl->env_ptr, old_val, ring_effect_ctx_empty());
-    ring_drop(old_val);            // drop our held reference
+    // A reentrant callback may have installed an interim value through
+    // Cell.set. Install the callback result before releasing that separate
+    // owned sink, matching ring_Cell_set's store-before-drop discipline.
+    void* interim = *(void**)cell;
     *(void**)cell = new_val;
+    if (interim) ring_drop(interim);
+    ring_drop(old_val);            // drop our retained reference exactly once
     return cell;
 }
 
