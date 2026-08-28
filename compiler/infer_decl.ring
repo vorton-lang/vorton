@@ -1133,9 +1133,15 @@ fn draft_canonical_type_var_ids(
         match apply_subst(
                 frozen_subst,
                 Type::TypeVar { id: source, name: none }) {
-            Type::TypeVar { id: representative, .. } =>
-                insert_canonical_type_var_id(
-                    result, representative, source),
+            Type::TypeVar { id: representative, .. } => {
+                match result.get(representative) {
+                    some(existing) => if !effect_tails.contains(existing) {
+                        panic(
+                            "function zonk: effect tail shares a value formal representative")
+                    },
+                    none => result.insert(representative, source)
+                }
+            },
             _ => {}
         }
     }
