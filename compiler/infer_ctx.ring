@@ -5,6 +5,7 @@ use types::{Type, Effect, EffectRow, RecordField, StructField,
 use ast::{Span, Pattern, TypeExpr, RecordTypeField, NamedPatternField, span_zero, EffectExpr,
     UseDecl, UseImport}
 use hir::{HExpr, HStmt, HParam, ValueBindingKind,
+    HCallableEffectActual, HCallableEffectInstantiation,
     HPatternBinding, HPatternPlan, HPatternFieldPlan,
     h_pattern_wildcard, h_pattern_binding, h_pattern_literal,
     h_pattern_tuple, h_pattern_struct, h_pattern_variant, h_pattern_or,
@@ -29,12 +30,15 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     apply_subst, apply_subst_row, apply_subst_map,
     instantiate_effect_header_schema,
     define_effect_header_schema, publish_effect_header_schema,
+    validate_effect_header_schema,
+    project_existing_effect_header_schema,
     effect_fact_checkpoint, rollback_effect_facts,
     register_callable_effect_header,
     instantiate_type_alias_schema, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
     impl_method_core_as_scheme, frozen_impl_predicates,
     impl_method_core_type, impl_method_core_type_vars,
+    impl_method_core_effect_schema,
     impl_predicate_subject_type_var, impl_predicate_trait_name,
     impl_predicate_assoc_constraints, impl_assoc_predicate_name,
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
@@ -96,7 +100,11 @@ use ir_inventory::{ExecutableRef, ExactDictRef,
     binder_kind_handled_evidence_local,
     binder_kind_handled_evidence_capture}
 use effect_contract::{TypedEffectHeaderSchema,
-    empty_typed_effect_header_schema}
+    empty_typed_effect_header_schema,
+    typed_effect_header_schema_bindings,
+    typed_effect_header_binding_raw_tail,
+    typed_effect_header_binding_parameter,
+    effect_param_ref_same}
 // ============================================================
 // InferResult — return type for expression inference
 // ============================================================
@@ -416,7 +424,7 @@ fn recursive_callable_groups_same(
     true
 }
 
-fn recursive_callable_is_active(
+pub fn recursive_callable_is_active(
     ctx: InferCtx, executable: ExecutableRef
 ) -> Bool {
     recursive_callable_list_contains(
@@ -492,6 +500,72 @@ pub fn rollback_recursive_effect_facts(
     mut ctx: InferCtx, checkpoint: EffectFactCheckpoint
 ) {
     rollback_effect_facts(ctx.env, checkpoint)
+}
+
+fn build_callable_effect_instantiation(
+    scheme: TypeScheme, instantiated_signature: Type, subst: UnionFind
+) -> HCallableEffectInstantiation {
+    let mapping = build_scheme_var_map(scheme, instantiated_signature)
+    let mut substitutions: List<HCallableEffectActual> = []
+    let mut raw_tails: List<Int> = []
+    for binding in typed_effect_header_schema_bindings(
+            scheme.effect_schema) {
+        let raw_tail = typed_effect_header_binding_raw_tail(binding)
+        let source = typed_effect_header_binding_parameter(binding)
+        if raw_tails.contains(raw_tail) {
+            panic("callable effect instantiation: raw formal repeats")
+        }
+        for existing in substitutions {
+            if effect_param_ref_same(existing.source, source) {
+                panic("callable effect instantiation: source formal repeats")
+            }
+        }
+        let mapped = match mapping.get(raw_tail) {
+            some(actual) => apply_subst(subst, actual),
+            none => panic(
+                "callable effect instantiation: formal mapping is absent")
+        }
+        let actual = match mapped {
+            Type::EffectRowType { effects, tail } => EffectRow {
+                effects: effects, tail: tail
+            },
+            _ => panic(
+                "callable effect instantiation: formal mapped to non-row")
+        }
+        raw_tails.push(raw_tail)
+        substitutions.push(HCallableEffectActual {
+            source: source, actual: actual
+        })
+    }
+
+    HCallableEffectInstantiation { substitutions: substitutions }
+}
+
+pub fn build_scheme_callable_effect_instantiation(
+    scheme: TypeScheme, instantiated_signature: Type, subst: UnionFind
+) -> HCallableEffectInstantiation {
+    validate_effect_header_schema(
+        [scheme.ty], scheme.type_vars, scheme.effect_schema)
+    build_callable_effect_instantiation(
+        scheme, instantiated_signature, subst)
+}
+
+pub fn build_impl_method_callable_effect_instantiation(
+    core: ImplMethodSchemeCore,
+    instantiated_signature: Type, subst: UnionFind
+) -> HCallableEffectInstantiation {
+    build_callable_effect_instantiation(
+        impl_method_core_as_scheme(core), instantiated_signature, subst)
+}
+
+// Constraint-only recursive HIR is discarded before group publication. The
+// retained pass runs after end_recursive_callable_group and publishes facts.
+pub fn publish_anonymous_callable_effect_header(
+    mut ctx: InferCtx, executable: ExecutableRef, signature: Type
+) {
+    if ctx.active_recursive_callables.len() != 0 { return }
+    let schema = project_existing_effect_header_schema(ctx.env, signature)
+    publish_exact_callable_effect_header(ctx, executable, signature, schema)
 }
 
 fn install_monomorphic_scheme_bounds(

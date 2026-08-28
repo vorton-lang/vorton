@@ -4,7 +4,7 @@ use types::{Type, Effect, EffectRow,
     type_to_builtin_name}
 use ast::{Expr, Pattern, Span, NamedPatternField}
 use hir::{HExpr, HStmt, TraitDispatch, DictRef, ValueBindingKind,
-    HCallableTypeActual, HCallableEffectInstantiation,
+    HCallableTypeActual,
     HCallableValueInstantiation,
     MethodCallRef,
     HOperatorPlan, h_operator_method, h_operator_tuple,
@@ -29,12 +29,15 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     type_error, unify_at, resolve_relative_qualifier,
     resolve_dict_ref_for_type, resolve_dicts_from_scheme, variant_ctor_origin,
     instantiate_callable_scheme, instantiate_callable_impl_method,
+    build_scheme_callable_effect_instantiation,
+    recursive_callable_is_active,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
     current_executable_owner, current_dictionary_evidence_owner}
 use ir_identity::{IntrinsicRef, ImplMethodRef,
     impl_method_ref_owner, impl_owner_ref_trait, impl_owner_ref_provider,
     make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
     slot_domain_lexical}
+use ir_inventory::{make_named_executable_ref}
 
 fn make_inferred_ident(
     ctx: InferCtx, name: Str, resolved_name: Str?, scheme: TypeScheme?,
@@ -787,13 +790,19 @@ fn exact_callable_value_instantiation(
 ) -> HCallableValueInstantiation? {
     let scheme = metadata.live_scheme
     if scheme.type_vars.len() == 0 { return none }
-    if ordered_effect_tail_vars(scheme.ty).len() != 0 {
-        panic("callable value: open effect provenance is absent")
+    let executable = make_named_executable_ref(
+        value_symbol_ref(ctx, metadata.def_id))
+    let effect_instantiation = if recursive_callable_is_active(
+            ctx, executable) {
+        none
+    } else {
+        some(build_scheme_callable_effect_instantiation(
+            scheme, instantiated_type, subst))
     }
     some(HCallableValueInstantiation {
         type_args: exact_callable_type_args(
             ctx, metadata, instantiated_type, subst),
-        effects: some(HCallableEffectInstantiation { substitutions: [] })
+        effects: effect_instantiation
     })
 }
 
@@ -938,7 +947,11 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                             def_id: def_id, source_slot: source_slot,
                             callee_identity: callee_identity,
                             dict_closure_dicts: some([]),
-                            callable_instantiation: callable_instantiation,
+                            callable_instantiation: match metadata {
+                                some(m) => exact_callable_value_instantiation(
+                                    ctx, m, ty, s),
+                                none => callable_instantiation
+                            },
                             ty: ty, effects: effects, span: span
                         },
                         none => harg

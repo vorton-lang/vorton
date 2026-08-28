@@ -1228,7 +1228,11 @@ impl TypeEnv {
                 none => {}
             }
         }
-        apply_subst_map(mapping, scheme.ty)
+        let instantiated = apply_subst_map(mapping, scheme.ty)
+        let instantiated_schema = remap_effect_header_schema(
+            mapping, scheme.effect_schema)
+        publish_effect_header_schema(self, instantiated_schema)
+        instantiated
     }
 
     pub fn instantiate_impl_method_core(
@@ -1252,7 +1256,12 @@ impl TypeEnv {
                     "impl method instantiation: predicate subject is not quantified")
             }
         }
-        apply_subst_map(mapping, impl_method_core_type(core))
+        let instantiated = apply_subst_map(
+            mapping, impl_method_core_type(core))
+        let instantiated_schema = remap_effect_header_schema(
+            mapping, impl_method_core_effect_schema(core))
+        publish_effect_header_schema(self, instantiated_schema)
+        instantiated
     }
 }
 
@@ -2218,17 +2227,6 @@ fn collect_effect_var_mappings(
     source_row: EffectRow, target_row: EffectRow,
     source_vars: Set<Int>, mut result: Map<Int, Type>
 ) {
-    match (source_row.tail, target_row.tail) {
-        (some(source_id), some(target_id)) => {
-            if source_vars.contains(source_id) {
-                result.insert(source_id, Type::TypeVar {
-                    id: target_id, name: none
-                })
-            }
-        },
-        _ => {}
-    }
-
     for source_effect in source_row.effects {
         for target_effect in target_row.effects {
             if effects_match_kind(source_effect, target_effect) {
@@ -2259,6 +2257,26 @@ fn collect_effect_var_mappings(
                 }
             }
         }
+    }
+
+    // A source tail denotes the target row after removing labels already
+    // fixed by the source header. Preserve that row explicitly so a closed or
+    // expanded use-site tail remains an EffectRowType, not a guessed TypeVar.
+    match source_row.tail {
+        some(source_id) => if source_vars.contains(source_id) {
+            let mut residual_effects: List<Effect> = []
+            for target_effect in target_row.effects {
+                if !source_row.effects.any(fn(source_effect) {
+                        effects_match_kind(source_effect, target_effect)
+                    }) {
+                    residual_effects.push(target_effect)
+                }
+            }
+            result.insert(source_id, Type::EffectRowType {
+                effects: residual_effects, tail: target_row.tail
+            })
+        },
+        none => {}
     }
 }
 
@@ -2693,6 +2711,36 @@ pub fn validate_effect_header_schema(
         }
         index = index + 1
     }
+}
+
+// Pure projection for a finalized anonymous callable. Every open raw tail
+// must already be related to one definition-owned EffectParamRef; this path
+// never creates identity from an executable stack or use site.
+pub fn project_existing_effect_header_schema(
+    env: TypeEnv, signature: Type
+) -> TypedEffectHeaderSchema {
+    let tails = ordered_effect_tail_vars(signature)
+    let mut bindings: List<TypedEffectHeaderBinding> = []
+    for raw_tail in tails {
+        let parameter = match effect_formal_for_raw(env, raw_tail) {
+            some(existing) => existing,
+            none => panic(
+                "anonymous callable effect schema: open tail has no existing formal")
+        }
+        for binding in bindings {
+            if effect_param_ref_same(
+                    typed_effect_header_binding_parameter(binding),
+                    parameter) {
+                panic(
+                    "anonymous callable effect schema: formal maps from multiple tails")
+            }
+        }
+        bindings.push(make_typed_effect_header_binding(
+            raw_tail, parameter))
+    }
+    let schema = make_typed_effect_header_schema(bindings)
+    validate_effect_header_schema([signature], tails, schema)
+    schema
 }
 
 fn effect_tails_excluding(
