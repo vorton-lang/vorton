@@ -2827,7 +2827,7 @@ pub fn uninstall_effect_ctx(mut ctx: InferCtx) {
     if ctx.effect_ctx_active_stack.len() <= base + 1 {
         panic("effect context: no owned child install")
     }
-    ctx.effect_ctx_active_stack.pop()
+    let _ = ctx.effect_ctx_active_stack.pop()
 }
 pub fn fresh_child_executable(mut ctx: InferCtx, role: Str) -> ExecutableRef {
     if role.len() == 0 { panic("executable identity: empty child role") }
