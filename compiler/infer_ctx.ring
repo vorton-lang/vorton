@@ -3421,7 +3421,7 @@ fn purpose_reports_assoc_mismatch(purpose: PendingDictPurpose) -> Bool {
     match purpose {
         PendingDictPurpose::DirectCallPublish { .. } => true,
         PendingDictPurpose::ExternCallValidate => true,
-        PendingDictPurpose::CallableValueShadow { .. } => true
+        PendingDictPurpose::CallableValueShadow { .. } => false
     }
 }
 
@@ -3430,6 +3430,45 @@ fn purpose_reports_drain_failure(purpose: PendingDictPurpose) -> Bool {
         PendingDictPurpose::DirectCallPublish { .. } => true,
         PendingDictPurpose::ExternCallValidate => true,
         PendingDictPurpose::CallableValueShadow { .. } => true
+    }
+}
+
+fn purpose_is_callable_value(purpose: PendingDictPurpose) -> Bool {
+    match purpose {
+        PendingDictPurpose::CallableValueShadow { .. } => true,
+        _ => false
+    }
+}
+
+fn report_callable_value_assoc_mismatch(
+    sink: CollectingSink, source: PendingEvidenceSource, span: Span
+) {
+    let trait_name = match source {
+        PendingEvidenceSource::SchemeEvidenceSource(scheme) =>
+            match scheme.bounds.find(fn(bound) {
+                    bound.assoc_constraints.len() != 0
+                }) {
+                some(bound) => bound.trait_name,
+                none => panic(
+                    "callable value evidence: assoc mismatch has no bound")
+            },
+        PendingEvidenceSource::ImplOwnerEvidenceSource { .. } => panic(
+            "callable value evidence: impl source is unsupported")
+    }
+    report_evidence_failures(sink, [EvidenceFailure {
+        trait_name: trait_name, suppress_diagnostic: false
+    }], span)
+}
+
+fn publish_resolved_evidence(
+    sink: CollectingSink, source: PendingEvidenceSource,
+    purpose: PendingDictPurpose, dicts: List<DictRef>,
+    assoc_mismatch: Bool, span: Span
+) {
+    if assoc_mismatch && purpose_is_callable_value(purpose) {
+        report_callable_value_assoc_mismatch(sink, source, span)
+    } else {
+        publish_resolved_dicts(purpose, dicts)
     }
 }
 
@@ -3525,16 +3564,21 @@ pub fn register_callable_value_shadow(
     s: UnionFind, span: Span, output_slot: List<DictRef>
 ) {
     if scheme.bounds.len() == 0 { return }
+    let purpose = PendingDictPurpose::CallableValueShadow {
+        output_slot: output_slot
+    }
     match resolve_scheme_evidence(
         current_dictionary_evidence_owner(ctx),
         ctx.sink, ctx.env, ctx.current_fn_bounds,
-        scheme, receipt, s, span, false
+        scheme, receipt, s, span,
+        purpose_reports_assoc_mismatch(purpose)
     ) {
-        SchemeEvidenceResolution::Resolved { dicts, .. } =>
-            publish_resolved_dicts(
-                PendingDictPurpose::CallableValueShadow {
-                    output_slot: output_slot
-                }, dicts),
+        SchemeEvidenceResolution::Resolved {
+            dicts, assoc_mismatch
+        } => publish_resolved_evidence(
+            ctx.sink,
+            PendingEvidenceSource::SchemeEvidenceSource(scheme),
+            purpose, dicts, assoc_mismatch, span),
         SchemeEvidenceResolution::Pending { .. } =>
             ctx.pending_dict_obligations.push(PendingDictObligation {
                 runtime_owner: current_dictionary_evidence_owner(ctx),
@@ -3542,9 +3586,7 @@ pub fn register_callable_value_shadow(
                 receipt: receipt,
                 fn_bounds: list_clone(ctx.current_fn_bounds),
                 span: span,
-                purpose: PendingDictPurpose::CallableValueShadow {
-                    output_slot: output_slot
-                }
+                purpose: purpose
             }),
         SchemeEvidenceResolution::Missing { failures } =>
             report_evidence_failures(ctx.sink, failures, span)
@@ -3623,8 +3665,12 @@ fn drain_pending_dict_obligations(
                 obligation.span,
                 purpose_reports_assoc_mismatch(obligation.purpose)
             ) {
-                SchemeEvidenceResolution::Resolved { dicts, .. } =>
-                    publish_resolved_dicts(obligation.purpose, dicts),
+                SchemeEvidenceResolution::Resolved {
+                    dicts, assoc_mismatch
+                } => publish_resolved_evidence(
+                    ctx.sink, obligation.source,
+                    obligation.purpose, dicts,
+                    assoc_mismatch, obligation.span),
                 SchemeEvidenceResolution::Missing { failures } => {
                     if purpose_reports_drain_failure(obligation.purpose) {
                         report_evidence_failures(
@@ -3649,8 +3695,12 @@ fn drain_pending_dict_obligations(
             obligation.span,
             purpose_reports_assoc_mismatch(obligation.purpose)
         ) {
-            SchemeEvidenceResolution::Resolved { dicts, .. } =>
-                publish_resolved_dicts(obligation.purpose, dicts),
+            SchemeEvidenceResolution::Resolved {
+                dicts, assoc_mismatch
+            } => publish_resolved_evidence(
+                ctx.sink, obligation.source,
+                obligation.purpose, dicts,
+                assoc_mismatch, obligation.span),
             SchemeEvidenceResolution::Missing { failures } => {
                 if purpose_reports_drain_failure(obligation.purpose) {
                     report_evidence_failures(
