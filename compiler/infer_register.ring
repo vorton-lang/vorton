@@ -3792,7 +3792,8 @@ pub fn inject_assoc_types_from_bounds(mut ctx: InferCtx, type_params: List<TypeP
 fn register_fn_common(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
     params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?,
-    span: Span, check_dup: Bool, track_mut_params: Bool, track_fn_bounds: Bool
+    span: Span, check_dup: Bool, track_mut_params: Bool,
+    track_fn_bounds: Bool, infer_body_effects: Bool
 ) {
     validate_type_param_bound_shapes(
         ctx, type_params, BoundShapeContext::OrdinaryBound, span)
@@ -3853,9 +3854,9 @@ fn register_fn_common(
         some(de) => resolve_declared_effects(ctx, de),
         // Keep registration provisional: the checker constrains this raw row
         // and publishes a formal identity only after the definition closes.
-        none => EffectRow {
-            effects: [], tail: some(ctx.env.fresh_var_id())
-        }
+        none => if infer_body_effects {
+            EffectRow { effects: [], tail: some(ctx.env.fresh_var_id()) }
+        } else { EMPTY_ROW }
     }
     let fn_type = Type::FnType { params: param_types, return_type: ret, effects: effects }
     for tail in ordered_effect_tail_vars(fn_type) {
@@ -3951,11 +3952,13 @@ fn register_fn_common(
 }
 
 fn register_fn(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?, span: Span) {
-    register_fn_common(ctx, name, type_params, params, return_type, declared_effects, span, true, true, true)
+    register_fn_common(ctx, name, type_params, params, return_type,
+        declared_effects, span, true, true, true, true)
 }
 
 fn register_extern_fn(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?, span: Span) {
-    register_fn_common(ctx, name, type_params, params, return_type, declared_effects, span, false, false, false)
+    register_fn_common(ctx, name, type_params, params, return_type,
+        declared_effects, span, false, false, false, false)
 }
 
 fn register_extern_type_common(
