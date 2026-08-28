@@ -35,7 +35,7 @@ use delegate_plan::{
     delegate_body_result_type, delegate_body_wrapper_receiver,
     delegate_body_forwarded_arguments,
     delegate_body_effects, delegate_body_evidence,
-    delegate_body_handled_uses,
+    delegate_body_effect_ctx,
     delegate_body_origin
 }
 
@@ -85,7 +85,7 @@ fn elaborate_delegate_method(
         delegate_method_child_call(method),
         projected, forwarded_arguments,
         delegate_body_evidence(body),
-        delegate_body_handled_uses(body))
+        delegate_body_effect_ctx(body))
     let block = make_core_block([], some(forwarded), body_origin)
     let result = make_core_body(
         delegate_method_executable(method), delegate_method_origin(method),
