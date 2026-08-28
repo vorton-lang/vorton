@@ -817,16 +817,14 @@ pub fn is_bounded_direct_callable_ident(ctx: InferCtx, expr: HExpr) -> Bool {
     }
 }
 
-pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
-    let metadata = resolve_callee_metadata(ctx, harg)
+pub fn finalize_value_ident_no_solve(
+    ctx: InferCtx, harg: HExpr
+) -> HExpr {
     match harg {
         HExpr::Ident { name, resolved_name, def_id, source_slot,
                        callee_identity, dict_closure_dicts,
                        callable_instantiation, ty, effects, span } => {
-            let kind = match metadata {
-                some(m) => m.kind,
-                none => ValueBindingKind::LocalBorrow
-            }
+            let kind = value_binding_kind(ctx, def_id)
 
             // A const identifier denotes a call to its zero-argument getter.
             // This remains explicit even when the stored value itself is a
@@ -878,44 +876,9 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
             }
 
             match kind {
-                ValueBindingKind::DirectCallable => {
-                    match metadata {
-                        some(m) => {
-                            let as_ = m.live_scheme
-                            if as_.bounds.len() != 0 {
-                                panic("callable value: receipt-backed dictionaries are absent")
-                            }
-                            HExpr::Ident {
-                                name: name, resolved_name: resolved_name,
-                                def_id: def_id, source_slot: source_slot,
-                                callee_identity: callee_identity,
-                                dict_closure_dicts: some([]),
-                                callable_instantiation: callable_instantiation,
-                                ty: ty, effects: effects, span: span
-                            }
-                        },
-                        none => harg
-                    }
-                },
-                ValueBindingKind::ExternCallable => {
-                    match metadata {
-                        some(m) => {
-                            let as_ = m.live_scheme
-                            if as_.bounds.len() != 0 {
-                                panic("extern callable value: receipt validation is absent")
-                            }
-                            HExpr::Ident {
-                                name: name, resolved_name: resolved_name,
-                                def_id: def_id, source_slot: source_slot,
-                                callee_identity: callee_identity,
-                                dict_closure_dicts: some([]),
-                                callable_instantiation: callable_instantiation,
-                                ty: ty, effects: effects, span: span
-                            }
-                        },
-                        none => harg
-                    }
-                },
+                ValueBindingKind::DirectCallable |
+                ValueBindingKind::ExternCallable => panic(
+                    "callable value finalization: dictionary alias is absent"),
                 ValueBindingKind::ConstGetter => harg,
                 ValueBindingKind::LocalBorrow => {
                     // Positional variant constructors have their own exact
@@ -937,6 +900,13 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
         },
         _ => harg
     }
+}
+
+pub fn resolve_value_ident(
+    ctx: InferCtx, harg: HExpr, s: UnionFind
+) -> HExpr {
+    let _ = s
+    finalize_value_ident_no_solve(ctx, harg)
 }
 
 // ============================================================

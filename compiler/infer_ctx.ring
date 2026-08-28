@@ -35,6 +35,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     validate_effect_header_schema,
     effect_fact_checkpoint, rollback_effect_facts,
     detach_effect_fact_suffix, remap_effect_fact_batch,
+    remap_type_to_canonical_ids,
     stage_effect_header_in_batch, stage_callable_effect_in_batch,
     try_project_effect_header_from_batch,
     try_project_existing_effect_header_schema,
@@ -2836,10 +2837,18 @@ pub fn prepare_callable_handled_evidence(
     }
 }
 
-pub fn canonicalize_callable_handled_evidence(
-    mut ctx: InferCtx, final_effects: EffectRow
+pub fn canonicalize_callable_handled_evidence_closure(
+    mut ctx: InferCtx, final_effects: EffectRow,
+    extra_requirements: List<HandledEffectRef>
 ) -> (List<HandledEvidenceRef>, List<HandledEvidenceRef>) {
-    let requirements = callable_handled_requirements(final_effects)
+    let mut requirements = callable_handled_requirements(final_effects)
+    for requirement in extra_requirements {
+        if !requirements.any(fn(existing) {
+                handled_effect_ref_same(existing, requirement)
+            }) {
+            requirements.push(requirement)
+        }
+    }
     let existing = current_handled_evidence_bindings(ctx)
     let current = current_executable_owner(ctx)
     let mut sources: List<HandledEvidenceRef> = []
@@ -2926,6 +2935,13 @@ pub fn canonicalize_callable_handled_evidence(
     ctx.handled_evidence_frames.set(
         frame_index, copy_handled_evidence_refs(targets))
     (sources, targets)
+}
+
+pub fn canonicalize_callable_handled_evidence(
+    ctx: InferCtx, final_effects: EffectRow
+) -> (List<HandledEvidenceRef>, List<HandledEvidenceRef>) {
+    canonicalize_callable_handled_evidence_closure(
+        ctx, final_effects, [])
 }
 
 pub fn install_handled_evidence(
@@ -3786,17 +3802,22 @@ pub fn drain_owner_batch_dictionaries(
 
 pub fn stage_owner_batch_facts(
     ctx: InferCtx, mut batch: OwnerInferenceBatch,
-    owner_executable: ExecutableRef, owner_signature: Type,
-    owner_schema: TypedEffectHeaderSchema, frozen_subst: UnionFind
+    owner_executable: ExecutableRef, final_owner_signature: Type,
+    owner_schema: TypedEffectHeaderSchema, frozen_subst: UnionFind,
+    canonical_ids: Map<Int, Int>
 ) -> OwnerInferenceBatch {
     if batch.pending_dicts.len() != 0 {
         panic("owner batch stage: dictionary obligations are not drained")
     }
     let mut facts = remap_effect_fact_batch(
-        batch.effect_facts, frozen_subst)
+        batch.effect_facts, frozen_subst, canonical_ids)
     facts = stage_effect_header_in_batch(ctx.env, facts, owner_schema)
-    let final_owner_signature = apply_subst(
-        frozen_subst, owner_signature)
+    if !types_equal(
+            final_owner_signature,
+            remap_type_to_canonical_ids(
+                final_owner_signature, canonical_ids)) {
+        panic("owner batch stage: owner signature is not canonical")
+    }
     let owner_effects = match final_owner_signature {
         Type::FnType { effects, .. } => effects,
         _ => panic("owner batch stage: owner signature is not callable")
@@ -3805,7 +3826,8 @@ pub fn stage_owner_batch_facts(
         ctx.env, facts, owner_executable, owner_effects)
 
     for pending in batch.pending_anonymous {
-        let signature = apply_subst(frozen_subst, pending.signature)
+        let signature = remap_type_to_canonical_ids(
+            apply_subst(frozen_subst, pending.signature), canonical_ids)
         let schema = match try_project_effect_header_from_batch(
                 ctx.env, facts, signature) {
             some(value) => value,

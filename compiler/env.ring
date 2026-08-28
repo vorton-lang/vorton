@@ -2869,8 +2869,37 @@ fn append_callable_effect_to_batch(
     }
 }
 
+fn canonical_type_var_mapping(
+    canonical_ids: Map<Int, Int>
+) -> Map<Int, Type> {
+    let mapping: Map<Int, Type> = map_new()
+    for entry in canonical_ids.entries() {
+        let (representative, canonical) = entry
+        mapping.insert(representative, Type::TypeVar {
+            id: canonical, name: none
+        })
+    }
+    mapping
+}
+
+pub fn remap_type_to_canonical_ids(
+    value: Type, canonical_ids: Map<Int, Int>
+) -> Type {
+    apply_subst_map(canonical_type_var_mapping(canonical_ids), value)
+}
+
+fn remap_raw_tail_to_canonical(
+    raw_tail: Int, canonical_ids: Map<Int, Int>
+) -> Int {
+    match canonical_ids.get(raw_tail) {
+        some(canonical) => canonical,
+        none => raw_tail
+    }
+}
+
 pub fn remap_effect_fact_batch(
-    batch: EffectFactBatch, frozen_subst: UnionFind
+    batch: EffectFactBatch, frozen_subst: UnionFind,
+    canonical_ids: Map<Int, Int>
 ) -> EffectFactBatch {
     let mut result = empty_effect_fact_batch()
     for fact in batch.effect_formals {
@@ -2885,13 +2914,16 @@ pub fn remap_effect_fact_batch(
         }
         match mapped_tail {
             some(raw_tail) => {
-                match batch_effect_formal_for_raw(result, raw_tail) {
+                let canonical_tail = remap_raw_tail_to_canonical(
+                    raw_tail, canonical_ids)
+                match batch_effect_formal_for_raw(result, canonical_tail) {
                     some(existing) => if !effect_param_ref_same(
                             existing, parameter) {
                         panic("effect fact batch: remapped tail conflicts")
                     },
                     none => result.effect_formals.push(
-                        make_typed_effect_formal_fact(raw_tail, parameter))
+                        make_typed_effect_formal_fact(
+                            canonical_tail, parameter))
                 }
             },
             none => {}
@@ -2899,8 +2931,18 @@ pub fn remap_effect_fact_batch(
     }
     for fact in batch.callable_effects {
         let reference = typed_callable_effect_reference(fact)
-        let row = apply_subst_row(
+        let resolved_row = apply_subst_row(
             frozen_subst, typed_callable_effect_row(fact))
+        let row = match remap_type_to_canonical_ids(
+                Type::EffectRowType {
+                    effects: resolved_row.effects,
+                    tail: resolved_row.tail
+                }, canonical_ids) {
+            Type::EffectRowType { effects, tail } => EffectRow {
+                effects: effects, tail: tail
+            },
+            _ => panic("effect fact batch: canonical row is not a row")
+        }
         match callable_effect_row_in_batch(result, reference) {
             some(existing) => if !types_equal(
                     Type::EffectRowType {
