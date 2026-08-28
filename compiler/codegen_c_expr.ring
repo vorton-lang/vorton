@@ -49,9 +49,13 @@ use effect_contract::{TypedHandledEffectInstance,
     typed_callable_effect_ctx_binding,
     typed_effect_ctx_source_is_empty, typed_effect_ctx_source_context,
     make_empty_effect_ctx_source,
-    typed_effect_ctx_lookup_instance,
+    typed_effect_ctx_lookup_context, typed_effect_ctx_lookup_instance,
+    typed_effect_ctx_install_parent, typed_effect_ctx_install_child,
+    typed_effect_ctx_install_entries,
     typed_handled_effect_instance_reference,
     typed_handled_effect_instance_same}
+use legacy_projection::{
+    legacy_effect_ctx_token_ordinal, legacy_effect_ctx_token_instance}
 use extern_manifest::{compiler_extern_ref_for_executable}
 use ir_identity::{CalleeRef, SlotRef, SymbolRef,
     callee_ref_is_named, callee_ref_named_symbol,
@@ -108,9 +112,12 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEmitState, CHandleCl
     c_new_closure_edge, c_fresh_load_id,
     c_record_capture_extract, c_record_capture_store, c_record_closure_edge,
     c_record_receiver_load, c_record_closure_call, c_mangle_fn,
+    c_effect_ctx_token_symbol,
     c_resolve_fn,
     c_mangle_method, c_sanitize, c_symbol_fragment, c_global_cstr, c_interned_cstr, c_stub_stmt, c_stub_expr,
-    c_line_directive, rt_use, rt_known_arity, get_or_assign_c_typeid,
+    c_line_directive, rt_use, rt_use_raw, rt_known_arity,
+    get_or_assign_c_typeid,
+    fresh_effect_ctx_token_array, fresh_effect_ctx_evidence_array,
     c_push_fn, c_pop_fn}
 
 // ============================================================
@@ -173,6 +180,28 @@ fn c_effect_ctx_source_value(
     } else {
         c_ref_c_name(c_effect_ctx_ref(
             ctx, typed_effect_ctx_source_context(source)))
+    }
+}
+
+fn c_effect_ctx_token_value(
+    ctx: CCtx, instance: TypedHandledEffectInstance
+) -> Str {
+    let mut found: Int? = none
+    for token in ctx.effect_ctx_tokens {
+        if typed_handled_effect_instance_same(
+                legacy_effect_ctx_token_instance(token), instance) {
+            match found {
+                some(_) => panic(
+                    "C codegen: EffectCtx sidecar instance repeats"),
+                none => { found = some(
+                    legacy_effect_ctx_token_ordinal(token)) }
+            }
+        }
+    }
+    match found {
+        some(ordinal) =>
+            "((const void*)&${c_effect_ctx_token_symbol(ordinal)})",
+        none => panic("C codegen: EffectCtx sidecar instance is absent")
     }
 }
 
@@ -2163,6 +2192,27 @@ pub fn gen_c_closure_call(
     t
 }
 
+// Handler operation arms are an explicit internal callable domain. Their
+// parent context is owned by the env; they do not receive the child context as
+// an ordinary trailing ABI argument.
+fn gen_c_handler_arm_call(
+    mut ctx: CCtx, closure_ref: CTypedRef, arg_vals: List<Str>
+) -> Str {
+    let closure_val = c_ref_c_name(closure_ref)
+    let mut cast_tys: List<Str> = ["void*"]
+    let mut call_args: List<Str> = ["((void**)${closure_val})[1]"]
+    for arg in arg_vals {
+        cast_tys.push("void*")
+        call_args.push(arg)
+    }
+    let result = fresh_tmp(ctx)
+    c_emit(ctx,
+        "${result} = ((void* (*)(${cast_tys.join(", ")}))(((void**)${closure_val})[0]))(${call_args.join(", ")});")
+    c_record_closure_call(
+        ctx, closure_ref, closure_val, result, arg_vals.len() + 1)
+    result
+}
+
 // Trait method call through exact dictionary evidence:
 // load exact evidence, read the resolver-issued callable slot, and call it.
 fn gen_c_bound_method_call(
@@ -2476,8 +2526,15 @@ fn gen_c_try_catch(mut ctx: CCtx, body: HExpr, arms: List<HMatchArm>) -> Str {
     res
 }
 
-// Handle expression. Custom typed installation awaits the Core token sidecar;
-// fail.raise remains the independent abort form.
+fn emit_c_owned_ctx_drops(mut ctx: CCtx, owned_ctx_vars: List<Str>) {
+    for owned_ctx in owned_ctx_vars {
+        rt_use(ctx, "ring_drop", 1)
+        c_emit(ctx, "ring_drop(${owned_ctx});")
+    }
+}
+
+// Handle expression. Each custom handle builds owned evidence objects, then
+// transfers them into one owned child overlay keyed by Core/Rc-issued tokens.
 fn gen_c_handle_expr(
     mut ctx: CCtx, body: HExpr, handlers: List<HEffectHandler>,
     effect_ctx_install: TypedEffectCtxInstall?
@@ -2494,12 +2551,79 @@ fn gen_c_handle_expr(
         }
     }
 
-    if effect_ctx_install.is_some() || has_custom_handler {
-        panic("C codegen: typed EffectCtx install awaits Core token sidecar")
-    }
-
     let has_fail_abort = abort_handler.is_some()
-    let owned_ctx_vars: List<Str> = []
+    let mut owned_ctx_vars: List<Str> = []
+    match effect_ctx_install {
+        some(install) => {
+            if !has_custom_handler {
+                panic("C codegen: EffectCtx install has no custom handlers")
+            }
+            let entries = typed_effect_ctx_install_entries(install)
+            if entries.len() == 0 {
+                panic("C codegen: EffectCtx install is empty")
+            }
+            let parent_ref = c_effect_ctx_ref(
+                ctx, typed_effect_ctx_install_parent(install))
+            let child_slot = c_local_effect_ctx_slot(
+                ctx, effect_ctx_slot(
+                    typed_effect_ctx_install_child(install)),
+                "__effect_ctx_child")
+            let child_name = c_exact_slot_c_name(child_slot)
+            let token_array = fresh_effect_ctx_token_array(
+                ctx, entries.len())
+            let evidence_array = fresh_effect_ctx_evidence_array(
+                ctx, entries.len())
+
+            for index in 0..entries.len() {
+                let entry = entries.get(index).unwrap()
+                let mut entry_handlers: List<HEffectHandler> = []
+                for handler in handlers {
+                    match handler.handled_instance {
+                        some(instance) => if
+                                typed_handled_effect_instance_same(
+                                    instance, entry) {
+                            entry_handlers.push(handler)
+                        },
+                        none => {}
+                    }
+                }
+                if entry_handlers.len() == 0 {
+                    panic("C codegen: EffectCtx entry has no handlers")
+                }
+                let evidence = build_c_handler_evidence(
+                    ctx, entry, entry_handlers)
+                c_emit(ctx, "${token_array}[${index}] = ${c_effect_ctx_token_value(ctx, entry)};")
+                c_emit(ctx, "${evidence_array}[${index}] = ${evidence};")
+            }
+            for handler in handlers {
+                match handler.handled_instance {
+                    some(instance) => {
+                        let mut matches = 0
+                        for entry in entries {
+                            if typed_handled_effect_instance_same(
+                                    instance, entry) {
+                                matches = matches + 1
+                            }
+                        }
+                        if matches != 1 {
+                            panic("C codegen: handler/install instance differs")
+                        }
+                    },
+                    none => if handler.fail_ref.is_none() {
+                        panic("C codegen: handler lacks typed identity")
+                    }
+                }
+            }
+            rt_use_raw(ctx, "ring_effect_ctx_overlay",
+                "EffectCtx* ring_effect_ctx_overlay(EffectCtx* parent, int64_t entry_count, const void* const* tokens, void* const* evidence_values);")
+            c_emit(ctx,
+                "${child_name} = ring_effect_ctx_overlay(${c_ref_c_name(parent_ref)}, ${entries.len()}, ${token_array}, ${evidence_array});")
+            owned_ctx_vars.push(child_name)
+        },
+        none => if has_custom_handler {
+            panic("C codegen: custom handlers lack EffectCtx install")
+        }
+    }
 
     if has_fail_abort {
         // Abort (fail.raise) handler: inline setjmp like gen_c_try_catch. On
@@ -2523,6 +2647,7 @@ fn gen_c_handle_expr(
         let _popped = ctx.handle_cleanup_stack.pop()
         c_emit(ctx, "${res} = ${body_val};")
         c_emit(ctx, "ring_catch_pop();")
+        emit_c_owned_ctx_drops(ctx, owned_ctx_vars)
         c_emit(ctx, "goto ${merge_lbl};")
 
         // --- catch path: deactivate current handle, then execute abort arm ---
@@ -2530,6 +2655,7 @@ fn gen_c_handle_expr(
         let error_val = fresh_tmp(ctx)
         c_emit(ctx, "${error_val} = ring_catch_get_error(${frame});")
         c_emit(ctx, "ring_catch_pop();")
+        emit_c_owned_ctx_drops(ctx, owned_ctx_vars)
 
         // The operation parameter is a lexical binder. Isolate it from the
         // enclosing map so a same-named outer local is restored at the merge.
@@ -2575,6 +2701,7 @@ fn gen_c_handle_expr(
         // before owned handle context cleanup.
         let res = fresh_tmp(ctx)
         c_emit(ctx, "${res} = ${result};")
+        emit_c_owned_ctx_drops(ctx, owned_ctx_vars)
         res
     }
 }
@@ -2676,8 +2803,30 @@ fn gen_c_effect_op(
                 effect_operation_ref_effect(operation)) {
             panic("C codegen: effect operation typed lookup differs")
         }
-        let _ = args
-        panic("C codegen: typed EffectCtx lookup awaits Core token sidecar")
+        let mut arg_vals: List<Str> = []
+        for arg in args { arg_vals.push(gen_c_expr(ctx, arg)) }
+        let instance = typed_effect_ctx_lookup_instance(lookup)
+        let context = c_effect_ctx_ref(
+            ctx, typed_effect_ctx_lookup_context(lookup))
+        rt_use_raw(ctx, "ring_effect_ctx_lookup",
+            "void* ring_effect_ctx_lookup(const EffectCtx* ctx, const void* token);")
+        let evidence = fresh_tmp(ctx)
+        c_emit(ctx,
+            "${evidence} = ring_effect_ctx_lookup(${c_ref_c_name(context)}, ${c_effect_ctx_token_value(ctx, instance)});")
+        let missing = c_interned_cstr(
+            ctx, "unhandled typed effect operation")
+        rt_use(ctx, "ring_str_from_cstr", 1)
+        rt_use(ctx, "ring_panic", 1)
+        c_emit(ctx,
+            "if (${evidence} == NULL) ring_panic(ring_str_from_cstr(${missing}));")
+        let index = effect_operation_ref_source_index(operation)
+        if index < 0 {
+            panic("C codegen: negative effect operation index")
+        }
+        let closure_ref = emit_c_receiver_load(
+            ctx, c_ref_computed(evidence, "effect-ctx-lookup"),
+            index + 1, "effect")
+        gen_c_handler_arm_call(ctx, closure_ref, arg_vals)
     }
 }
 

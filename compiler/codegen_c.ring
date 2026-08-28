@@ -20,6 +20,7 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTy
     c_param_effect_ctx_slot, c_exact_slot_c_name,
     c_local, c_mangle_fn,
     c_mangle_fn_with_prefix, c_mangle_method, c_sanitize, c_symbol_for_fn_key, c_symbol_fragment,
+    c_effect_ctx_token_symbol,
     c_line_directive,
     rt_use, rt_use_raw,
     get_or_assign_c_typeid, is_runtime_symbol, fresh_tmp,
@@ -32,7 +33,10 @@ use ir_inventory::{ExecutableRef,
     executable_ref_is_named, executable_ref_named_symbol,
     effect_ctx_slot}
 use effect_contract::{TypedCallableEffectCtx,
-    typed_callable_effect_ctx_binding}
+    typed_callable_effect_ctx_binding,
+    typed_handled_effect_instance_same}
+use legacy_projection::{LegacyEffectCtxToken,
+    legacy_effect_ctx_token_ordinal, legacy_effect_ctx_token_instance}
 use resolver::{module_prefix}
 
 // ============================================================
@@ -41,14 +45,41 @@ use resolver::{module_prefix}
 // emit_lines: #line directive toggle (--no-c-lines disables).
 // ============================================================
 
+fn c_register_effect_ctx_tokens(
+    mut ctx: CCtx, tokens: List<LegacyEffectCtxToken>
+) {
+    let mut index = 0
+    for token in tokens {
+        let ordinal = legacy_effect_ctx_token_ordinal(token)
+        if ordinal != index {
+            panic("C codegen: upstream EffectCtx token ordinals are not dense")
+        }
+        for existing in ctx.effect_ctx_tokens {
+            if typed_handled_effect_instance_same(
+                    legacy_effect_ctx_token_instance(existing),
+                    legacy_effect_ctx_token_instance(token)) {
+                panic("C codegen: upstream EffectCtx token instance repeats")
+            }
+        }
+        ctx.effect_ctx_tokens.push(token)
+        // Non-const address-taken objects cannot be merged; pointer identity
+        // is the runtime's opaque token representation.
+        ctx.globals.push(
+            "static unsigned char ${c_effect_ctx_token_symbol(ordinal)};")
+        index = index + 1
+    }
+}
+
 pub fn generate_c(
-    program: HProgram, c_path: Str, o_path: Str, emit_lines: Bool,
+    program: HProgram, effect_ctx_tokens: List<LegacyEffectCtxToken>,
+    c_path: Str, o_path: Str, emit_lines: Bool,
     emit_identity_ledger: Bool
 ) -> Bool {
     if program.derived_impls.len() != 0 {
         panic("C ABI boundary: semantic DerivedImpl carrier was not retired")
     }
     let mut ctx = new_c_ctx(emit_lines)
+    c_register_effect_ctx_tokens(ctx, effect_ctx_tokens)
     if emit_identity_ledger { c_enable_identity_ledger(ctx) }
 
     // B-091: auto-boxed mut-cell def_ids (closure write-through capture).
@@ -113,9 +144,11 @@ pub fn generate_c(
 pub fn generate_c_project(
     modules: List<(Str, HProgram, List<UseDecl>)>, entry_prefix: Str,
     c_path: Str, o_path: Str, emit_lines: Bool,
-    extern_forward_bridges: Map<Str, Str>
+    extern_forward_bridges: Map<Str, Str>,
+    effect_ctx_tokens: List<LegacyEffectCtxToken>
 ) -> Bool {
     let mut ctx = new_c_ctx(emit_lines)
+    c_register_effect_ctx_tokens(ctx, effect_ctx_tokens)
     let mut exact_body_mut_keys: Map<Str, Str> = map_new()
     let mut exact_extern_mut_keys: Map<Str, Str> = map_new()
     for entry in extern_forward_bridges.entries() {

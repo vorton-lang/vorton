@@ -1,5 +1,4 @@
 use ast::{Program}
-use hir::{HProgram}
 use diagnostics::{Diagnostic, new_collecting_sink}
 use formatter::{format_human, format_llm}
 use checker::{CheckResult, check as check_single}
@@ -19,7 +18,9 @@ use ownership_pipeline::{
     ownership_pipeline_outcome_verified,
     ownership_pipeline_failure_diagnostics,
     verified_ownership_program_flow}
-use rc_hir_bridge::{materialize_verified_hir}
+use rc_hir_bridge::{MaterializedVerifiedHir, materialize_verified_hir,
+    materialized_verified_hir_program,
+    materialized_verified_hir_effect_ctx_tokens}
 use phase_timing::{
     new_phase_timing,
     PHASE_INPUT_ENTRY_LOAD, PHASE_ENTRY_PARSE,
@@ -270,7 +271,7 @@ pub fn cli_main() {
         exit_process(1)
         return
     }
-    let rc_program = materialize_single_verified_ownership(
+    let rc_artifact = materialize_single_verified_ownership(
         check_result, assembly,
         ownership_pipeline_outcome_verified(ownership))
     timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
@@ -295,7 +296,9 @@ pub fn cli_main() {
                 file_path.replace(".ring", ".o")
             }
             let build_ok = generate_c(
-                rc_program, c_path, o_path, parsed.c_lines,
+                materialized_verified_hir_program(rc_artifact),
+                materialized_verified_hir_effect_ctx_tokens(rc_artifact),
+                c_path, o_path, parsed.c_lines,
                 parsed.identity_ledger)
             timing.finish_command(build_ok)
             if build_ok == false {
@@ -338,7 +341,7 @@ fn report_single_ownership_failure(
 fn materialize_single_verified_ownership(
     result: CheckResult, assembly: CoreAssemblyResult,
     verified: VerifiedOwnershipProgram
-) -> HProgram {
+) -> MaterializedVerifiedHir {
     let legacy_facts = match result.legacy_facts {
         some(value) => value,
         none => panic("ownership pipeline: successful check lacks legacy facts")

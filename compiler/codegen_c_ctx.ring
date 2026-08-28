@@ -12,6 +12,7 @@ use types::{Type}
 use ast::{Span}
 use hir::{HDictDef, TraitBound}
 use ir_identity::{SlotRef, slot_ref_stable_key}
+use legacy_projection::{LegacyEffectCtxToken}
 
 // Per-function registration info (forward-declare pass).
 // Exact C prototype arity. Ring callables include one trailing EffectCtx*;
@@ -170,6 +171,9 @@ pub struct CCtx {
     // stays canonical through HIR; only a proven genuine extern call consults
     // this map and crosses back to the ABI leaf.
     pub extern_abi_names: Map<Str, Str>,
+    // One project-wide Core/Rc-issued dense token table. C preserves upstream
+    // ordinals verbatim and never interns typed instances itself.
+    pub effect_ctx_tokens: List<LegacyEffectCtxToken>,
     pub boxed_vars: Set<Int>,
     pub type_to_typeid: Map<Str, Int>,
     pub next_user_typeid: Int,
@@ -285,6 +289,7 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         ring_callable_names: set_new(),
         extern_callable_names: extern_callable_names,
         extern_abi_names: extern_abi_names,
+        effect_ctx_tokens: [],
         boxed_vars: set_new(),
         type_to_typeid: map_new(),
         next_user_typeid: 64,
@@ -391,6 +396,13 @@ pub fn c_symbol_fragment(name: Str) -> Str {
     if name.index_of("$$_").is_some() { c_module_symbol(name) } else { c_sanitize(name) }
 }
 
+pub fn c_effect_ctx_token_symbol(ordinal: Int) -> Str {
+    if ordinal < 0 {
+        panic("C codegen: negative upstream EffectCtx token ordinal")
+    }
+    "__ring_effect_ctx_token_${ordinal}"
+}
+
 pub fn c_mangle_fn(name: Str) -> Str {
     if name.index_of("$$_").is_some() {
         "ring_${name}"
@@ -479,6 +491,28 @@ pub fn fresh_tmp(mut ctx: CCtx) -> Str {
     ctx.tmp_counter = n + 1
     let name = "t${n}"
     ctx.cur_decls.push("    void* ${name};")
+    name
+}
+
+pub fn fresh_effect_ctx_token_array(mut ctx: CCtx, count: Int) -> Str {
+    if count <= 0 {
+        panic("C codegen: EffectCtx token array must be non-empty")
+    }
+    let n = ctx.tmp_counter
+    ctx.tmp_counter = n + 1
+    let name = "effect_tokens_${n}"
+    ctx.cur_decls.push("    const void* ${name}[${count}];")
+    name
+}
+
+pub fn fresh_effect_ctx_evidence_array(mut ctx: CCtx, count: Int) -> Str {
+    if count <= 0 {
+        panic("C codegen: EffectCtx evidence array must be non-empty")
+    }
+    let n = ctx.tmp_counter
+    ctx.tmp_counter = n + 1
+    let name = "effect_evidence_${n}"
+    ctx.cur_decls.push("    void* ${name}[${count}];")
     name
 }
 

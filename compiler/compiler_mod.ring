@@ -39,6 +39,8 @@ use ownership_pipeline::{
     verified_ownership_program_flow}
 use rc_hir_bridge::{VerifiedProjectHirShell,
     make_verified_project_hir_shell, materialize_verified_project_hir,
+    MaterializedProjectHirResult, materialized_project_hir_modules,
+    materialized_project_hir_effect_ctx_tokens,
     materialized_project_hir_module_key,
     materialized_project_hir_program}
 use codes::{E0708}
@@ -144,7 +146,7 @@ fn report_project_ownership_failure(
 fn materialize_verified_project_ownership(
     phases: CompilePhaseResult, assembly: CoreAssemblyResult,
     verified: VerifiedOwnershipProgram
-) -> Map<Str, HProgram> {
+) -> MaterializedProjectHirResult {
     let mut legacy_facts: List<LegacyProjectionFacts> = []
     let mut shells: List<VerifiedProjectHirShell> = []
     for key in phases.graph.topo_order {
@@ -162,18 +164,18 @@ fn materialize_verified_project_ownership(
         verified_ownership_program_flow(verified))
     let materialized = materialize_verified_project_hir(
         shells, phases.prelude_physical_owner_module_key, verified, projection)
-    let mut result: Map<Str, HProgram> = map_new()
-    for value in materialized {
+    let mut seen: Set<Str> = set_new()
+    for value in materialized_project_hir_modules(materialized) {
         let key = materialized_project_hir_module_key(value)
-        if result.contains_key(key) {
+        if seen.contains(key) {
             panic("project ownership: materialized module repeats")
         }
-        result.insert(key, materialized_project_hir_program(value))
+        seen.insert(key)
     }
-    if result.len() != phases.graph.topo_order.len() {
+    if seen.len() != phases.graph.topo_order.len() {
         panic("project ownership: materialized module census differs")
     }
-    result
+    materialized
 }
 
 // Project checking produces one already-dict-lowered HProgram per module.
@@ -684,13 +686,23 @@ pub fn compile_project_c(
             let materialized = materialize_verified_project_ownership(
                 phases, assembly,
                 ownership_pipeline_outcome_verified(ownership))
+            let effect_ctx_tokens =
+                materialized_project_hir_effect_ctx_tokens(materialized)
+            let mut materialized_programs: Map<Str, HProgram> = map_new()
+            for value in materialized_project_hir_modules(materialized) {
+                materialized_programs.insert(
+                    materialized_project_hir_module_key(value),
+                    materialized_project_hir_program(value))
+            }
 
             // Build list of (module_prefix, HProgram, uses) in topo order
             let mut modules: List<(Str, HProgram, List<UseDecl>)> = []
             let mut entry_prefix = ""
 
             for key in phases.graph.topo_order {
-                match (phases.graph.modules.get(key), materialized.get(key), phases.module_asts.get(key)) {
+                match (phases.graph.modules.get(key),
+                       materialized_programs.get(key),
+                       phases.module_asts.get(key)) {
                     (some(mod_), some(hir), some(ast)) => {
                         let prefix = module_prefix(mod_.path_segments)
                         modules.push((prefix, hir, ast.uses))
@@ -712,7 +724,8 @@ pub fn compile_project_c(
             timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
             let build_ok = generate_c_project(
                 modules, entry_prefix, c_path, o_path, emit_lines,
-                codegen_extern_forward_bridges(run.redirects))
+                codegen_extern_forward_bridges(run.redirects),
+                effect_ctx_tokens)
             CProjectCompileResult { success: build_ok }
         },
     }
