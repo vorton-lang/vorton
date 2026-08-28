@@ -1273,12 +1273,19 @@ fn emit_simple_expr(
         }
         if is_terminated(ctx) { return true }
         let evidence = flow_evidence(core_expr_call_evidence(expr))
+        let effect_ctx = if core_callee_kind_tag(callee) == 0 &&
+                core_callable_effect_ctx(callable_for(
+                    ctx, core_callee_direct(callee))).is_none() {
+            make_foreign_leaf_flow_effect_ctx_use()
+        } else {
+            make_argument_flow_effect_ctx_use(
+                core_expr_call_effect_ctx_argument(expr))
+        }
         emit_instruction(ctx, make_flow_call(
             next_instruction_ref(ctx), origin,
             flow_call_target(callee), arguments,
             evidence,
-            make_argument_flow_effect_ctx_use(
-                core_expr_call_effect_ctx_argument(expr)),
+            effect_ctx,
             some(result)), core_flow_role_expr_primary())
         return true
     }
