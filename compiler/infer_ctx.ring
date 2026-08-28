@@ -3732,14 +3732,54 @@ pub fn drain_pending_dicts(
     drain_pending_dict_obligations(ctx, obligations, s)
 }
 
+fn preflight_pending_dict_obligation(value: PendingDictObligation) {
+    validate_fn_bound_order(value.fn_bounds)
+    match value.source {
+        PendingEvidenceSource::SchemeEvidenceSource(scheme) =>
+            assert_callable_receipt_sources(
+                value.receipt, scheme.type_vars),
+        PendingEvidenceSource::ImplOwnerEvidenceSource {
+            method_core, ..
+        } => assert_callable_receipt_sources(
+            value.receipt, impl_method_core_type_vars(method_core))
+    }
+    match value.purpose {
+        PendingDictPurpose::DirectCallPublish { output_slot } |
+        PendingDictPurpose::CallableValueShadow { output_slot } =>
+            if output_slot.len() != 0 {
+                panic("owner batch dictionary preflight: output is not empty")
+            },
+        PendingDictPurpose::ExternCallValidate => {}
+    }
+}
+
+pub fn drain_owner_batch_dictionary_group(
+    mut ctx: InferCtx, mut batches: List<OwnerInferenceBatch>,
+    frozen_subst: UnionFind
+) -> List<OwnerInferenceBatch> {
+    let mut obligations: List<PendingDictObligation> = []
+    for batch in batches {
+        for obligation in batch.pending_dicts {
+            preflight_pending_dict_obligation(obligation)
+            obligations.push(obligation)
+        }
+    }
+    // Clear only after every batch and obligation has passed preflight and the
+    // deterministic draft/order concatenation is complete.
+    for batch in batches { batch.pending_dicts = [] }
+    drain_pending_dict_obligations(ctx, obligations, frozen_subst)
+    batches
+}
+
 pub fn drain_owner_batch_dictionaries(
-    mut ctx: InferCtx, mut batch: OwnerInferenceBatch,
+    mut ctx: InferCtx, batch: OwnerInferenceBatch,
     frozen_subst: UnionFind
 ) -> OwnerInferenceBatch {
-    drain_pending_dict_obligations(
-        ctx, batch.pending_dicts, frozen_subst)
-    batch.pending_dicts = []
-    batch
+    let drained = drain_owner_batch_dictionary_group(
+        ctx, [batch], frozen_subst)
+    drained.first().unwrap_or_else(fn() {
+        panic("owner batch dictionary drain: singleton result is absent")
+    })
 }
 
 pub fn stage_owner_batch_facts(
