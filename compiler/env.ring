@@ -19,7 +19,7 @@ use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
     trait_method_ref_trait, trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index, trait_method_ref_same,
-    handled_effect_ref_same,
+    handled_effect_ref_same, origin_ref_same,
     symbol_ref_namespace_kind, namespace_kind_same,
     namespace_member, namespace_trait,
     impl_provider_ref_same, intrinsic_ref_same,
@@ -47,7 +47,7 @@ use effect_contract::{
     TypedCallableEffectFact, make_typed_callable_effect_fact,
     typed_callable_effect_reference, typed_callable_effect_row,
     make_effect_param_ref,
-    effect_param_ref_same, make_typed_effect_formal_fact,
+    effect_param_owner, effect_param_ref_same, make_typed_effect_formal_fact,
     typed_effect_formal_raw_tail, typed_effect_formal_parameter
 }
 
@@ -2751,6 +2751,30 @@ pub fn register_callable_effect_header(
 
 fn empty_effect_fact_batch() -> EffectFactBatch {
     EffectFactBatch { effect_formals: [], callable_effects: [] }
+}
+
+pub fn filter_effect_fact_batch_for_owners(
+    batch: EffectFactBatch, formal_owners: List<OriginRef>,
+    callable_owners: List<ExecutableRef>
+) -> EffectFactBatch {
+    let mut result = empty_effect_fact_batch()
+    for fact in batch.effect_formals {
+        let parameter = typed_effect_formal_parameter(fact)
+        if formal_owners.any(fn(owner) {
+                origin_ref_same(owner, effect_param_owner(parameter))
+            }) {
+            result.effect_formals.push(fact)
+        }
+    }
+    for fact in batch.callable_effects {
+        let reference = typed_callable_effect_reference(fact)
+        if callable_owners.any(fn(owner) {
+                executable_ref_same(owner, reference)
+            }) {
+            result.callable_effects.push(fact)
+        }
+    }
+    result
 }
 
 fn batch_effect_formal_for_raw(

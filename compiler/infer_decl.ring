@@ -1123,6 +1123,22 @@ fn draft_canonical_type_var_ids(
             _ => {}
         }
     }
+    let effect_tails = ordered_effect_tail_vars(
+        draft.registration_scheme.ty)
+    for index in declared_count..draft.registration_scheme.type_vars.len() {
+        let source = draft.registration_scheme.type_vars.get(index).unwrap()
+        if !effect_tails.contains(source) {
+            panic("function zonk: registration suffix is not an effect tail")
+        }
+        match apply_subst(
+                frozen_subst,
+                Type::TypeVar { id: source, name: none }) {
+            Type::TypeVar { id: representative, .. } =>
+                insert_canonical_type_var_id(
+                    result, representative, source),
+            _ => {}
+        }
+    }
     result
 }
 

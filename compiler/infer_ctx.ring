@@ -34,7 +34,8 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     define_effect_header_schema, publish_effect_header_schema,
     validate_effect_header_schema,
     effect_fact_checkpoint, rollback_effect_facts,
-    detach_effect_fact_suffix, remap_effect_fact_batch,
+    detach_effect_fact_suffix, filter_effect_fact_batch_for_owners,
+    remap_effect_fact_batch,
     remap_type_to_canonical_ids,
     stage_effect_header_in_batch, stage_callable_effect_in_batch,
     try_project_effect_header_from_batch,
@@ -3714,6 +3715,16 @@ pub fn stage_owner_batch_facts(
     if batch.pending_dicts.len() != 0 {
         panic("owner batch stage: dictionary obligations are not drained")
     }
+    let mut formal_owners: List<OriginRef> = [
+        executable_effect_origin(owner_executable)
+    ]
+    let mut callable_owners: List<ExecutableRef> = [owner_executable]
+    for pending in batch.pending_anonymous {
+        formal_owners.push(executable_effect_origin(pending.executable))
+        callable_owners.push(pending.executable)
+    }
+    batch.effect_facts = filter_effect_fact_batch_for_owners(
+        batch.effect_facts, formal_owners, callable_owners)
     let mut facts = remap_effect_fact_batch(
         batch.effect_facts, frozen_subst, canonical_ids)
     facts = stage_effect_header_in_batch(ctx.env, facts, owner_schema)

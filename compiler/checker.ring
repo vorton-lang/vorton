@@ -112,7 +112,7 @@ fn duplicate_direct_declaration_error_result(
 }
 
 const STD_FILES: List<Str> =
-    ["io.ring", "iterator.ring", "list.ring", "map.ring", "set.ring", "str.ring", "num.ring", "result.ring", "fs.ring", "path.ring", "process.ring"]
+    ["str.ring", "io.ring", "iterator.ring", "list.ring", "map.ring", "set.ring", "num.ring", "result.ring", "fs.ring", "path.ring", "process.ring"]
 
 fn canonicalize_prelude_decl(decl: Decl) -> Decl {
     match decl {
