@@ -2698,7 +2698,7 @@ fn typed_effect_ctx_formal_for_tail(
                         existing, parameter) {
                     panic("typed effect context: raw tail maps twice")
                 },
-                none => found = some(parameter)
+                none => { found = some(parameter) }
             }
         }
     }
