@@ -2847,22 +2847,11 @@ fn gen_c_intrinsic_method_call(
        intrinsic_is_callback_leaf(tag) {
         call_args.push(c_effect_ctx_source_value(ctx, effect_ctx))
     }
-    if intrinsic_is_callback_leaf(tag) {
-        match rt_known_arity(runtime_name) {
-            some(expected) => if call_args.len() != expected {
-                panic("C codegen: callback intrinsic arity differs")
-            },
-            none => panic("C codegen: callback intrinsic lacks runtime ABI")
-        }
-    } else {
-        match rt_known_arity(runtime_name) {
-            some(expected) => {
-                while call_args.len() < expected {
-                    call_args.push("RING_UNIT")
-                }
-            },
-            none => {}
-        }
+    match rt_known_arity(runtime_name) {
+        some(expected) => if call_args.len() != expected {
+            panic("C codegen: exact intrinsic runtime arity differs")
+        },
+        none => panic("C codegen: exact intrinsic lacks runtime ABI")
     }
     rt_use(ctx, runtime_name, call_args.len())
     let result = fresh_tmp(ctx)
