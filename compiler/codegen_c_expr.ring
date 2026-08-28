@@ -2717,7 +2717,18 @@ fn validate_c_callback_intrinsic_census() {
     ]
     for entry in expected {
         let (tag, runtime_name) = entry
-        if INTRINSIC_RUNTIME_NAMES.get(tag).unwrap_or("") != runtime_name {
+        if INTRINSIC_RUNTIME_NAMES.get(tag).unwrap_or("") != runtime_name ||
+           !intrinsic_is_callback_leaf(tag) {
+            panic("C codegen: callback intrinsic census differs")
+        }
+    }
+    for tag in 0..BUILTIN_METHOD_SITE_COUNT {
+        let mut should_be_callback = false
+        for entry in expected {
+            let (expected_tag, _runtime_name) = entry
+            if tag == expected_tag { should_be_callback = true }
+        }
+        if intrinsic_is_callback_leaf(tag) != should_be_callback {
             panic("C codegen: callback intrinsic census differs")
         }
     }
@@ -2836,13 +2847,22 @@ fn gen_c_intrinsic_method_call(
        intrinsic_is_callback_leaf(tag) {
         call_args.push(c_effect_ctx_source_value(ctx, effect_ctx))
     }
-    match rt_known_arity(runtime_name) {
-        some(expected) => {
-            while call_args.len() < expected {
-                call_args.push("RING_UNIT")
-            }
-        },
-        none => {}
+    if intrinsic_is_callback_leaf(tag) {
+        match rt_known_arity(runtime_name) {
+            some(expected) => if call_args.len() != expected {
+                panic("C codegen: callback intrinsic arity differs")
+            },
+            none => panic("C codegen: callback intrinsic lacks runtime ABI")
+        }
+    } else {
+        match rt_known_arity(runtime_name) {
+            some(expected) => {
+                while call_args.len() < expected {
+                    call_args.push("RING_UNIT")
+                }
+            },
+            none => {}
+        }
     }
     rt_use(ctx, runtime_name, call_args.len())
     let result = fresh_tmp(ctx)
