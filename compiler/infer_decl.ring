@@ -5,6 +5,8 @@ use hir::{HDecl, HParam, HTypeParam, HExpr, HStmt, HProgram, DerivedImpl, TraitB
     HStructField, HEnumVariant, HEffectOp, HTraitMethod, HFieldAccessKind,
     HNominalStructFieldInit, HStructFieldInit,
     HMatchArm, HEffectHandler, HStringInterpPart, HLambdaCapture,
+    HCallableTypeActual, HCallableEffectInstantiation,
+    HCallableValueInstantiation,
     h_nominal_projection,
     HDelegateMethodPlan, HDelegateAssocPlan,
     HDefaultSpecializationPlan, make_h_default_specialization_plan,
@@ -48,9 +50,16 @@ use effect_contract::{TypedEffectHeaderSchema, TypedCallableEffectCtx,
     TypedEffectCtxLayout, TypedEffectCtxSource,
     empty_typed_effect_header_schema,
     typed_effect_header_schema_bindings,
+    typed_effect_header_binding_raw_tail,
     make_empty_effect_ctx_source, make_typed_callable_effect_ctx,
     typed_callable_effect_ctx_binding, typed_effect_ctx_source_is_empty,
-    typed_handled_effect_instances_from_row}
+    typed_callable_effect_ctx_layout, typed_effect_ctx_layout_entries,
+    typed_effect_ctx_lookup_instance, typed_effect_ctx_install_entries,
+    typed_handled_effect_instances_from_row,
+    typed_handled_effect_instance_is_fully_closed,
+    typed_callable_header_has_closed_handled_instances,
+    typed_runtime_actual_type_has_closed_handled_instances,
+    typed_runtime_effect_actual_has_closed_handled_instances}
 use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     ImplEntry,
     apply_subst, apply_subst_map,
@@ -95,6 +104,7 @@ use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
     exit_executable_owner,
     current_typed_callable_effect_ctx, effect_ctx_source_for_callable,
     current_typed_callable_effect_ctx_from_owner_batch,
+    typed_effect_ctx_layout_for_row,
     typed_effect_ctx_layout_from_owner_batch,
     typed_effect_ctx_layout_from_published_schema,
     current_identity_file_key, semantic_parameter_binder,
@@ -817,16 +827,32 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
     let scheme = TypeScheme { ty: gen_scheme.ty,
         type_vars: gen_scheme.type_vars, bounds: gen_scheme.bounds,
         effect_schema: gen_scheme.effect_schema, def_id: old_def_id }
-    ctx.env.rebind(name, scheme)
-    let effect_schema = publish_final_value_effect_schema(
-        ctx, name, const_executable, Type::FnType {
-            params: [], return_type: resolved,
-            effects: hexpr_effects(final_init_unremapped)
-        })
+    let effect_schema = build_final_callable_effect_schema(
+        scheme, const_executable, [])
+    let final_scheme = TypeScheme { ..scheme,
+        effect_schema: effect_schema }
+    validate_effect_header_schema(
+        [final_scheme.ty], final_scheme.type_vars, effect_schema)
+    let callable_signature = Type::FnType {
+        params: [], return_type: resolved,
+        effects: hexpr_effects(final_init_unremapped)
+    }
+    let d1_checkpoint = ctx.sink.save()
     let final_init = finalize_effect_ctx_expr(
-        ctx, none, final_init_unremapped)
+        ctx, FinalEffectCtxAuthority::FinalEffectCtxHeader(effect_schema),
+        final_init_unremapped)
     let effect_ctx = current_typed_callable_effect_ctx(
         ctx, hexpr_effects(final_init), effect_schema)
+    check_final_runtime_handled_contract(
+        ctx, callable_signature, some(effect_ctx), name, span)
+    if diagnostics_since_has_errors(ctx, d1_checkpoint) {
+        exit_executable_owner(ctx)
+        ctx.subst = saved_subst
+        fail.raise(CompileError {})
+    }
+    rebind_fn_scheme_with_alias(ctx, name, final_scheme)
+    publish_exact_callable_effect_header(
+        ctx, const_executable, callable_signature, effect_schema)
     exit_executable_owner(ctx)
     ctx.subst = saved_subst
     HDecl::Const { name: name, def_id: old_def_id,
@@ -1205,6 +1231,73 @@ fn stage_fn_draft_scheme(
         span: draft.span
     }
 }
+
+fn report_open_runtime_handled_instance(
+    mut ctx: InferCtx, carrier: Str, span: Span
+) {
+    let _ = type_error(
+        ctx.sink, E0404,
+        "Runtime handled effect instance in '${carrier}' must use fully closed type arguments",
+        span, DiagnosticContext::OtherContext { detail: some(
+            "instantiate the custom effect with closed type arguments before perform or handle") })
+}
+
+fn callable_effect_ctx_is_fully_closed(
+    value: TypedCallableEffectCtx
+) -> Bool {
+    typed_effect_ctx_layout_entries(
+        typed_callable_effect_ctx_layout(value)).all(fn(instance) {
+            typed_handled_effect_instance_is_fully_closed(instance)
+        })
+}
+
+fn check_final_runtime_handled_contract(
+    mut ctx: InferCtx, header: Type, effect_ctx: TypedCallableEffectCtx?,
+    carrier: Str, span: Span
+) {
+    let context_closed = match effect_ctx {
+        some(value) => callable_effect_ctx_is_fully_closed(value),
+        none => true
+    }
+    if !typed_callable_header_has_closed_handled_instances(header) ||
+       !context_closed {
+        report_open_runtime_handled_instance(ctx, carrier, span)
+    }
+}
+
+fn callable_type_actuals_are_fully_closed(
+    values: List<HCallableTypeActual>
+) -> Bool {
+    values.all(fn(value) {
+        typed_runtime_actual_type_has_closed_handled_instances(value.actual)
+    })
+}
+
+fn callable_effect_instantiation_is_fully_closed(
+    value: HCallableEffectInstantiation?
+) -> Bool {
+    match value {
+        some(instantiation) => instantiation.substitutions.all(fn(actual) {
+            typed_runtime_effect_actual_has_closed_handled_instances(
+                actual.actual)
+        }),
+        none => true
+    }
+}
+
+fn callable_value_instantiation_is_fully_closed(
+    value: HCallableValueInstantiation?
+) -> Bool {
+    match value {
+        some(instantiation) =>
+            callable_type_actuals_are_fully_closed(
+                instantiation.type_args) &&
+            callable_effect_instantiation_is_fully_closed(
+                instantiation.effects),
+        none => true
+    }
+}
+
 fn finalize_call_effect_ctx(
     existing: TypedEffectCtxSource, callable: Type
 ) -> TypedEffectCtxSource {
@@ -1222,18 +1315,38 @@ fn finalize_call_effect_ctx(
     existing
 }
 
+enum FinalEffectCtxAuthority {
+    FinalEffectCtxOwnerBatch(OwnerInferenceBatch),
+    FinalEffectCtxHeader(TypedEffectHeaderSchema)
+}
+
 fn finalized_callable_effect_ctx_layout(
-    ctx: InferCtx, batch: OwnerInferenceBatch?, row: EffectRow
+    ctx: InferCtx, authority: FinalEffectCtxAuthority, row: EffectRow
 ) -> TypedEffectCtxLayout {
-    match batch {
-        some(owner_batch) => typed_effect_ctx_layout_from_owner_batch(
+    match authority {
+        FinalEffectCtxAuthority::FinalEffectCtxOwnerBatch(owner_batch) =>
+            typed_effect_ctx_layout_from_owner_batch(
             ctx, owner_batch, row),
-        none => typed_effect_ctx_layout_from_published_schema(ctx, row)
+        FinalEffectCtxAuthority::FinalEffectCtxHeader(schema) => {
+            let represented = match row.tail {
+                some(raw_tail) => typed_effect_header_schema_bindings(
+                    schema).any(fn(binding) {
+                        typed_effect_header_binding_raw_tail(binding) ==
+                            raw_tail
+                    }),
+                none => true
+            }
+            if represented {
+                typed_effect_ctx_layout_for_row(row, schema)
+            } else {
+                typed_effect_ctx_layout_from_published_schema(ctx, row)
+            }
+        }
     }
 }
 
 fn finalize_effect_ctx_match_arms(
-    mut ctx: InferCtx, batch: OwnerInferenceBatch?,
+    mut ctx: InferCtx, batch: FinalEffectCtxAuthority,
     values: List<HMatchArm>
 ) -> List<HMatchArm> {
     values.map(fn(value) { HMatchArm {
@@ -1248,7 +1361,7 @@ fn finalize_effect_ctx_match_arms(
 }
 
 fn finalize_effect_ctx_captures(
-    mut ctx: InferCtx, batch: OwnerInferenceBatch?,
+    mut ctx: InferCtx, batch: FinalEffectCtxAuthority,
     values: List<HLambdaCapture>
 ) -> List<HLambdaCapture> {
     values.map(fn(value) { HLambdaCapture {
@@ -1261,7 +1374,7 @@ fn finalize_effect_ctx_captures(
 }
 
 fn finalize_effect_ctx_stmt(
-    mut ctx: InferCtx, batch: OwnerInferenceBatch?, value: HStmt
+    mut ctx: InferCtx, batch: FinalEffectCtxAuthority, value: HStmt
 ) -> HStmt {
     match value {
         HStmt::Let { name, name_span, def_id, ty, init, span } =>
@@ -1326,9 +1439,36 @@ fn finalize_effect_ctx_stmt(
 }
 
 fn finalize_effect_ctx_handler(
-    mut ctx: InferCtx, batch: OwnerInferenceBatch?,
+    mut ctx: InferCtx, batch: FinalEffectCtxAuthority,
     handler: HEffectHandler
 ) -> HEffectHandler {
+    let final_effect_ctx = make_typed_callable_effect_ctx(
+        typed_callable_effect_ctx_binding(handler.effect_ctx),
+        finalized_callable_effect_ctx_layout(
+            ctx, batch, hexpr_effects(handler.body)))
+    let final_body = finalize_effect_ctx_expr(
+        ctx, batch, handler.body)
+    let mut header_params = handler.params.map(fn(param) { param.ty })
+    match handler.resume_binding {
+        some(binding) => header_params.push(binding.ty),
+        none => {}
+    }
+    let header = Type::FnType {
+        params: header_params, return_type: hexpr_type(final_body),
+        effects: hexpr_effects(final_body)
+    }
+    let handled_closed = match handler.handled_instance {
+        some(instance) =>
+            typed_handled_effect_instance_is_fully_closed(instance),
+        none => true
+    }
+    if !handled_closed ||
+       !typed_callable_header_has_closed_handled_instances(header) ||
+       !callable_effect_ctx_is_fully_closed(final_effect_ctx) {
+        report_open_runtime_handled_instance(
+            ctx, "handler ${handler.effect_name}.${handler.op_name}",
+            hexpr_span(final_body))
+    }
     HEffectHandler {
         effect_name: handler.effect_name,
         handled_instance: handler.handled_instance,
@@ -1337,19 +1477,16 @@ fn finalize_effect_ctx_handler(
         executable_ref: handler.executable_ref,
         captures: finalize_effect_ctx_captures(
             ctx, batch, handler.captures),
-        effect_ctx: make_typed_callable_effect_ctx(
-            typed_callable_effect_ctx_binding(handler.effect_ctx),
-            finalized_callable_effect_ctx_layout(
-                ctx, batch, hexpr_effects(handler.body))),
+        effect_ctx: final_effect_ctx,
         parent_ctx: handler.parent_ctx,
         op_name: handler.op_name, params: handler.params,
         resume_binding: handler.resume_binding,
-        body: finalize_effect_ctx_expr(ctx, batch, handler.body)
+        body: final_body
     }
 }
 
 fn finalize_effect_ctx_expr(
-    mut ctx: InferCtx, batch: OwnerInferenceBatch?, value: HExpr
+    mut ctx: InferCtx, batch: FinalEffectCtxAuthority, value: HExpr
 ) -> HExpr {
     match value {
         HExpr::Call {
@@ -1361,6 +1498,20 @@ fn finalize_effect_ctx_expr(
                 HExpr::Ident { .. } =>
                     finalize_direct_callee_no_solve(ctx, callee),
                 _ => finalize_effect_ctx_expr(ctx, batch, callee)
+            }
+            let callee_value_closed = match callee {
+                HExpr::Ident { callable_instantiation, .. } =>
+                    callable_value_instantiation_is_fully_closed(
+                        callable_instantiation),
+                _ => true
+            }
+            if !typed_callable_header_has_closed_handled_instances(
+                    hexpr_type(callee)) ||
+               !callable_type_actuals_are_fully_closed(type_args) ||
+               !callable_effect_instantiation_is_fully_closed(
+                    effect_instantiation) ||
+               !callee_value_closed {
+                report_open_runtime_handled_instance(ctx, "call", span)
             }
             HExpr::Call {
                 callee: callee,
@@ -1380,22 +1531,48 @@ fn finalize_effect_ctx_expr(
         HExpr::EffectOp {
             effect_name, op_name, operation_ref, fail_ref,
             effect_ctx_lookup, args, ty, effects, span
-        } => HExpr::EffectOp {
-            effect_name: effect_name, op_name: op_name,
-            operation_ref: operation_ref, fail_ref: fail_ref,
-            effect_ctx_lookup: effect_ctx_lookup,
-            args: args.map(fn(arg) {
-                finalize_effect_ctx_expr(ctx, batch, arg)
-            }), ty: ty, effects: effects, span: span },
+        } => {
+            match effect_ctx_lookup {
+                some(lookup) => if
+                        !typed_handled_effect_instance_is_fully_closed(
+                            typed_effect_ctx_lookup_instance(lookup)) {
+                    report_open_runtime_handled_instance(
+                        ctx, "effect operation ${effect_name}.${op_name}",
+                        span)
+                },
+                none => {}
+            }
+            HExpr::EffectOp {
+                effect_name: effect_name, op_name: op_name,
+                operation_ref: operation_ref, fail_ref: fail_ref,
+                effect_ctx_lookup: effect_ctx_lookup,
+                args: args.map(fn(arg) {
+                    finalize_effect_ctx_expr(ctx, batch, arg)
+                }), ty: ty, effects: effects, span: span
+            }
+        },
         HExpr::HandleExpr {
             body, handlers, effect_ctx_install, ty, effects, span
-        } => HExpr::HandleExpr {
-            body: finalize_effect_ctx_expr(ctx, batch, body),
-            handlers: handlers.map(fn(handler) {
-                finalize_effect_ctx_handler(ctx, batch, handler)
-            }),
-            effect_ctx_install: effect_ctx_install,
-            ty: ty, effects: effects, span: span
+        } => {
+            match effect_ctx_install {
+                some(install) => if !typed_effect_ctx_install_entries(
+                        install).all(fn(instance) {
+                            typed_handled_effect_instance_is_fully_closed(
+                                instance)
+                        }) {
+                    report_open_runtime_handled_instance(
+                        ctx, "handle", span)
+                },
+                none => {}
+            }
+            HExpr::HandleExpr {
+                body: finalize_effect_ctx_expr(ctx, batch, body),
+                handlers: handlers.map(fn(handler) {
+                    finalize_effect_ctx_handler(ctx, batch, handler)
+                }),
+                effect_ctx_install: effect_ctx_install,
+                ty: ty, effects: effects, span: span
+            }
         },
         HExpr::Lambda {
             executable_ref, params, captures, effect_ctx,
@@ -1405,16 +1582,22 @@ fn finalize_effect_ctx_expr(
                 Type::FnType { effects, .. } => effects,
                 _ => panic("effect context finalization: lambda is not callable")
             }
+            let final_effect_ctx = make_typed_callable_effect_ctx(
+                typed_callable_effect_ctx_binding(effect_ctx),
+                finalized_callable_effect_ctx_layout(
+                    ctx, batch, callable_effects))
+            let final_body = finalize_effect_ctx_expr(ctx, batch, body)
+            if !typed_callable_header_has_closed_handled_instances(ty) ||
+               !callable_effect_ctx_is_fully_closed(final_effect_ctx) {
+                report_open_runtime_handled_instance(ctx, "lambda", span)
+            }
             HExpr::Lambda {
                 executable_ref: executable_ref, params: params,
                 captures: finalize_effect_ctx_captures(
                     ctx, batch, captures),
-                effect_ctx: make_typed_callable_effect_ctx(
-                    typed_callable_effect_ctx_binding(effect_ctx),
-                    finalized_callable_effect_ctx_layout(
-                        ctx, batch, callable_effects)),
+                effect_ctx: final_effect_ctx,
                 return_type: return_type,
-                body: finalize_effect_ctx_expr(ctx, batch, body),
+                body: final_body,
                 ty: ty, effects: effects, span: span
             }
         },
@@ -1542,7 +1725,21 @@ fn finalize_effect_ctx_expr(
             HExpr::UnsafeBlock {
                 body: finalize_effect_ctx_expr(ctx, batch, body),
                 ty: ty, effects: effects, span: span },
-        HExpr::Ident { .. } => finalize_value_ident_no_solve(ctx, value),
+        HExpr::Ident { .. } => {
+            let finalized = finalize_value_ident_no_solve(ctx, value)
+            match finalized {
+                HExpr::Ident { callable_instantiation, ty, span, .. } => if
+                        !callable_value_instantiation_is_fully_closed(
+                            callable_instantiation) ||
+                        !typed_runtime_actual_type_has_closed_handled_instances(
+                            ty) {
+                    report_open_runtime_handled_instance(
+                        ctx, "callable value", span)
+                },
+                _ => panic("effect context finalization: Ident changed kind")
+            }
+            finalized
+        },
         HExpr::IntLit { .. } |
         HExpr::FloatLit { .. } |
         HExpr::StrLit { .. } |
@@ -1562,7 +1759,9 @@ fn finalize_draft_effect_ctx(
 ) -> FinalDraftEffectCtx {
     enter_executable_owner(ctx, draft.executable)
     let result = some(FinalDraftEffectCtx {
-        body: finalize_effect_ctx_expr(ctx, some(batch), body),
+        body: finalize_effect_ctx_expr(
+            ctx, FinalEffectCtxAuthority::FinalEffectCtxOwnerBatch(batch),
+            body),
         effect_ctx: current_typed_callable_effect_ctx_from_owner_batch(
             ctx, batch, final_effects)
     }) catch { _ => none }
@@ -1667,6 +1866,17 @@ fn finalize_fn_draft(
         _ => panic("function validation: capability context is incomplete")
     }
 
+    let assembled_signature = Type::FnType {
+        params: final_params.map(fn(parameter) { parameter.ty }),
+        return_type: final_return, effects: final_effects
+    }
+    if !types_equal(assembled_signature, final_scheme.ty) {
+        panic("function finalization: HIR signature differs from scheme")
+    }
+    check_final_runtime_handled_contract(
+        ctx, assembled_signature, some(effect_ctx.effect_ctx),
+        draft.name, draft.span)
+
     let mut mut_flags: List<Bool> = []
     for parameter in final_params {
         mut_flags.push(
@@ -1678,13 +1888,6 @@ fn finalize_fn_draft(
         some(def_id) => journal_record_def_span(
             ctx, def_id, draft.span),
         none => {}
-    }
-    let assembled_signature = Type::FnType {
-        params: final_params.map(fn(parameter) { parameter.ty }),
-        return_type: final_return, effects: final_effects
-    }
-    if !types_equal(assembled_signature, final_scheme.ty) {
-        panic("function finalization: HIR signature differs from scheme")
     }
     HDecl::Fn {
         name: draft.name,
@@ -2350,6 +2553,13 @@ fn check_impl_decl_canonical(
                         generated_executable,
                         ctx.sink, ctx.env, impl_bounds,
                         impl_owner, core, signature, ctx.subst, span)
+                    let d1_checkpoint = ctx.sink.save()
+                    check_final_runtime_handled_contract(
+                        ctx, signature, some(generated_effect_ctx),
+                        trait_method.name, span)
+                    if diagnostics_since_has_errors(ctx, d1_checkpoint) {
+                        fail.raise(CompileError {})
+                    }
                     publish_exact_callable_effect_header(
                         ctx, generated_executable, signature,
                         impl_method_core_effect_schema(core))
@@ -3107,6 +3317,20 @@ fn expand_delegate_impls(
                                             }
                                             let validation_checkpoint =
                                                 ctx.sink.save()
+                                            let generated_signature = Type::FnType {
+                                                params: parameter_types,
+                                                return_type: ret_ty,
+                                                effects: eff
+                                            }
+                                            check_final_runtime_handled_contract(
+                                                ctx, generated_signature,
+                                                some(generated_effect_ctx),
+                                                tm.name, span)
+                                            if !typed_callable_header_has_closed_handled_instances(
+                                                    field_callee_type) {
+                                                report_open_runtime_handled_instance(
+                                                    ctx, "delegate call", span)
+                                            }
                                             match (validation.capability,
                                                    validation.capability_span) {
                                                 (some(capability), some(cap_span)) =>
@@ -3123,11 +3347,8 @@ fn expand_delegate_impls(
                                             }
                                             publish_exact_callable_effect_header(
                                                 ctx, generated_executable,
-                                                Type::FnType {
-                                                    params: parameter_types,
-                                                    return_type: ret_ty,
-                                                    effects: eff
-                                                }, generated_schema)
+                                                generated_signature,
+                                                generated_schema)
                                             delegate_method_plans.push(
                                                 make_h_delegate_method_plan(
                                                     tm.method_ref,
@@ -3574,16 +3795,27 @@ fn check_trait_default_body(
     ctx.type_param_scope = saved_tp_scope
     ctx.qualified_assoc_scope = saved_qualified_assoc
     assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
-    publish_exact_callable_effect_header(
-        ctx, executable_ref, Type::FnType {
-            params: hparams.map(fn(param) { param.ty }),
-            return_type: method_return, effects: method_effects
-        }, method_schema)
+    let callable_signature = Type::FnType {
+        params: hparams.map(fn(param) { param.ty }),
+        return_type: method_return, effects: method_effects
+    }
+    let d1_checkpoint = ctx.sink.save()
     let effect_ctx = current_typed_callable_effect_ctx(
         ctx, method_effects, method_schema)
     let final_body = final_body_unremapped.map(fn(value) {
-        finalize_effect_ctx_expr(ctx, none, value)
+        finalize_effect_ctx_expr(
+            ctx, FinalEffectCtxAuthority::FinalEffectCtxHeader(method_schema),
+            value)
     })
+    check_final_runtime_handled_contract(
+        ctx, callable_signature, some(effect_ctx),
+        method_identity, method_span)
+    if diagnostics_since_has_errors(ctx, d1_checkpoint) {
+        exit_executable_owner(ctx)
+        fail.raise(CompileError {})
+    }
+    publish_exact_callable_effect_header(
+        ctx, executable_ref, callable_signature, method_schema)
     exit_executable_owner(ctx)
     TraitDefaultBodyResult {
         body: final_body,
@@ -4297,16 +4529,25 @@ fn check_test_decl(
         }
     }
     ctx.env.pop_scope()
-    publish_exact_callable_effect_header(
-        ctx, test_executable, Type::FnType {
-            params: [], return_type: hexpr_type(final_body_unremapped),
-            effects: hexpr_effects(final_body_unremapped)
-        }, empty_typed_effect_header_schema())
+    let effect_schema = empty_typed_effect_header_schema()
+    let callable_signature = Type::FnType {
+        params: [], return_type: hexpr_type(final_body_unremapped),
+        effects: hexpr_effects(final_body_unremapped)
+    }
+    let d1_checkpoint = ctx.sink.save()
     let final_body = finalize_effect_ctx_expr(
-        ctx, none, final_body_unremapped)
+        ctx, FinalEffectCtxAuthority::FinalEffectCtxHeader(
+            effect_schema), final_body_unremapped)
     let effect_ctx = current_typed_callable_effect_ctx(
-        ctx, hexpr_effects(final_body),
-        empty_typed_effect_header_schema())
+        ctx, hexpr_effects(final_body), effect_schema)
+    check_final_runtime_handled_contract(
+        ctx, callable_signature, some(effect_ctx), "test", span)
+    if diagnostics_since_has_errors(ctx, d1_checkpoint) {
+        exit_executable_owner(ctx)
+        fail.raise(CompileError {})
+    }
+    publish_exact_callable_effect_header(
+        ctx, test_executable, callable_signature, effect_schema)
     exit_executable_owner(ctx)
 
     HDecl::Test { description: description,

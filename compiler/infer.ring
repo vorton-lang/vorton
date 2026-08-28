@@ -4150,7 +4150,8 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 params: handler_param_types,
                 return_type: apply_subst(s, hexpr_type(handler.body)),
                 effects: apply_subst_row(s, hexpr_effects(handler.body))
-            })
+            }, "handler ${handler.effect_name}.${handler.op_name}",
+            hexpr_span(handler.body))
     }
 
     let mut installed_instances = []
@@ -4567,7 +4568,7 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                 ctx, lambda_body, exact_lambda_depth,
                 lambda_executable, captures)
             record_pending_anonymous_callable_header(
-                ctx, lambda_executable, fn_type)
+                ctx, lambda_executable, fn_type, "lambda", span)
             InferResult {
                 hexpr: HExpr::Lambda {
                     executable_ref: lambda_executable,

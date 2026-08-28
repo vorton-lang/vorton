@@ -90,6 +90,160 @@ pub fn typed_handled_effect_instance_same(
     true
 }
 
+fn typed_runtime_effect_is_fully_closed(value: Effect) -> Bool {
+    match value {
+        Effect::SystemEffect { .. } | Effect::UnsafeEffect => true,
+        Effect::FailEffect { error_type } =>
+            typed_runtime_handled_argument_is_fully_closed(error_type),
+        Effect::MutEffect { state_type } =>
+            typed_runtime_handled_argument_is_fully_closed(state_type),
+        Effect::CustomEffect { type_args, .. } => type_args.all(fn(ty) {
+            typed_runtime_handled_argument_is_fully_closed(ty)
+        })
+    }
+}
+
+fn typed_runtime_effect_row_is_fully_closed(value: EffectRow) -> Bool {
+    value.tail.is_none() && value.effects.all(fn(atom) {
+        typed_runtime_effect_is_fully_closed(atom)
+    })
+}
+
+// The one recursive Typed predicate for runtime handled-instance arguments.
+// Unlike ordinary generic type compatibility, every formal/open component is
+// rejected because it would change the physical token after finalization.
+pub fn typed_runtime_handled_argument_is_fully_closed(
+    value: Type
+) -> Bool {
+    match value {
+        Type::IntType | Type::FloatType | Type::StrType |
+        Type::BoolType | Type::UnitType | Type::NeverType |
+        Type::AnyType => true,
+        Type::TypeVar { .. } | Type::ErrorType => false,
+        Type::FnType { params, return_type, effects } =>
+            params.all(fn(ty) {
+                typed_runtime_handled_argument_is_fully_closed(ty)
+            }) &&
+            typed_runtime_handled_argument_is_fully_closed(return_type) &&
+            typed_runtime_effect_row_is_fully_closed(effects),
+        Type::StructType { type_params, .. } |
+        Type::EnumType { type_params, .. } => type_params.all(fn(ty) {
+            typed_runtime_handled_argument_is_fully_closed(ty)
+        }),
+        Type::GenericType { base, args } =>
+            typed_runtime_handled_argument_is_fully_closed(base) &&
+            args.all(fn(ty) {
+                typed_runtime_handled_argument_is_fully_closed(ty)
+            }),
+        Type::RecordType { fields, tail, .. } => tail.is_none() &&
+            fields.all(fn(field) {
+                typed_runtime_handled_argument_is_fully_closed(field.ty)
+            }),
+        Type::EffectRowType { effects, tail } => tail.is_none() &&
+            effects.all(fn(atom) {
+                typed_runtime_effect_is_fully_closed(atom)
+            }),
+        Type::TupleType { elements } => elements.all(fn(ty) {
+            typed_runtime_handled_argument_is_fully_closed(ty)
+        }),
+        Type::PtrType { pointee } =>
+            typed_runtime_handled_argument_is_fully_closed(pointee)
+    }
+}
+
+pub fn typed_handled_effect_instance_is_fully_closed(
+    value: TypedHandledEffectInstance
+) -> Bool {
+    value.type_arguments.all(fn(ty) {
+        typed_runtime_handled_argument_is_fully_closed(ty)
+    })
+}
+
+fn typed_runtime_nested_type_has_closed_handled_instances(
+    value: Type
+) -> Bool {
+    match value {
+        Type::FnType { params, return_type, effects } =>
+            params.all(fn(ty) {
+                typed_runtime_nested_type_has_closed_handled_instances(ty)
+            }) &&
+            typed_runtime_nested_type_has_closed_handled_instances(
+                return_type) &&
+            typed_runtime_effect_row_has_closed_handled_instances(
+                effects),
+        Type::StructType { type_params, .. } |
+        Type::EnumType { type_params, .. } => type_params.all(fn(ty) {
+            typed_runtime_nested_type_has_closed_handled_instances(ty)
+        }),
+        Type::GenericType { base, args } =>
+            typed_runtime_nested_type_has_closed_handled_instances(base) &&
+            args.all(fn(ty) {
+                typed_runtime_nested_type_has_closed_handled_instances(ty)
+            }),
+        Type::RecordType { fields, .. } => fields.all(fn(field) {
+            typed_runtime_nested_type_has_closed_handled_instances(field.ty)
+        }),
+        Type::EffectRowType { effects, .. } =>
+            effects.all(fn(atom) {
+                typed_runtime_effect_has_closed_handled_instances(atom)
+            }),
+        Type::TupleType { elements } => elements.all(fn(ty) {
+            typed_runtime_nested_type_has_closed_handled_instances(ty)
+        }),
+        Type::PtrType { pointee } =>
+            typed_runtime_nested_type_has_closed_handled_instances(pointee),
+        _ => true
+    }
+}
+
+fn typed_runtime_effect_has_closed_handled_instances(
+    value: Effect
+) -> Bool {
+    match value {
+        Effect::CustomEffect { type_args, .. } => type_args.all(fn(ty) {
+            typed_runtime_handled_argument_is_fully_closed(ty)
+        }),
+        Effect::FailEffect { .. } | Effect::MutEffect { .. } |
+        Effect::SystemEffect { .. } | Effect::UnsafeEffect => true
+    }
+}
+
+fn typed_runtime_effect_row_has_closed_handled_instances(
+    value: EffectRow
+) -> Bool {
+    value.effects.all(fn(atom) {
+        typed_runtime_effect_has_closed_handled_instances(atom)
+    })
+}
+
+pub fn typed_callable_header_has_closed_handled_instances(
+    value: Type
+) -> Bool {
+    match value {
+        Type::FnType { params, return_type, effects } =>
+            params.all(fn(ty) {
+                typed_runtime_nested_type_has_closed_handled_instances(ty)
+            }) &&
+            typed_runtime_nested_type_has_closed_handled_instances(
+                return_type) &&
+            typed_runtime_effect_row_has_closed_handled_instances(
+                effects),
+        _ => typed_runtime_nested_type_has_closed_handled_instances(value)
+    }
+}
+
+pub fn typed_runtime_actual_type_has_closed_handled_instances(
+    value: Type
+) -> Bool {
+    typed_runtime_nested_type_has_closed_handled_instances(value)
+}
+
+pub fn typed_runtime_effect_actual_has_closed_handled_instances(
+    value: EffectRow
+) -> Bool {
+    typed_runtime_effect_row_has_closed_handled_instances(value)
+}
+
 pub fn typed_handled_effect_instances_from_row(
     row: EffectRow
 ) -> List<TypedHandledEffectInstance> {

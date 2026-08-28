@@ -21,7 +21,7 @@ use hir_exact::{
     make_simple_dict_ref, make_static_dict_ref, make_wrapped_dict_ref
 }
 use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink, Severity, Suggestion, make_diag, make_diagnostic}
-use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
+use codes::{E0201, E0204, E0301, E0302, E0404, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
 use union_find::{UnionFind, new_union_find, uf_find}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     EffectFactCheckpoint, EffectFactBatch,
@@ -112,6 +112,7 @@ use effect_contract::{EffectParamRef, TypedEffectHeaderSchema,
     TypedCallableEffectCtx, TypedEffectCtxSource, TypedEffectCtxLookup,
     TypedEffectCtxInstall,
     typed_handled_effect_instances_from_row,
+    typed_callable_header_has_closed_handled_instances,
     make_typed_effect_ctx_layout, make_typed_callable_effect_ctx,
     make_empty_effect_ctx_source, make_borrowed_effect_ctx_source,
     make_typed_effect_ctx_lookup, make_typed_effect_ctx_install}
@@ -250,7 +251,9 @@ pub struct ProjectNamespaceFrameState {
 
 struct PendingAnonymousCallableHeader {
     executable: ExecutableRef,
-    signature: Type
+    signature: Type,
+    carrier: Str,
+    span: Span
 }
 
 struct PendingCallableProjection {
@@ -833,7 +836,8 @@ pub fn pending_anonymous_callable_checkpoint(ctx: InferCtx) -> Int {
 }
 
 pub fn record_pending_anonymous_callable_header(
-    mut ctx: InferCtx, executable: ExecutableRef, signature: Type
+    mut ctx: InferCtx, executable: ExecutableRef, signature: Type,
+    carrier: Str, span: Span
 ) {
     if executable_ref_is_named(executable) {
         panic("anonymous callable header: executable is named")
@@ -849,7 +853,8 @@ pub fn record_pending_anonymous_callable_header(
     }
     ctx.pending_anonymous_callable_headers.push(
         PendingAnonymousCallableHeader {
-            executable: executable, signature: signature
+            executable: executable, signature: signature,
+            carrier: carrier, span: span
         })
 }
 
@@ -879,11 +884,19 @@ pub fn drain_representable_pending_anonymous(
         let pending = ctx.pending_anonymous_callable_headers.get(
             index).unwrap()
         let signature = apply_subst(final_subst, pending.signature)
-        match try_project_existing_effect_header_schema(
-                ctx.env, signature) {
-            some(schema) => publish_exact_callable_effect_header(
-                ctx, pending.executable, signature, schema),
-            none => unmatched.push(pending)
+        if !typed_callable_header_has_closed_handled_instances(signature) {
+            let _ = type_error(
+                ctx.sink, E0404,
+                "Runtime handled effect instance in '${pending.carrier}' must use fully closed type arguments",
+                pending.span, DiagnosticContext::OtherContext { detail: some(
+                    "instantiate the custom effect with closed type arguments before perform or handle") })
+        } else {
+            match try_project_existing_effect_header_schema(
+                    ctx.env, signature) {
+                some(schema) => publish_exact_callable_effect_header(
+                    ctx, pending.executable, signature, schema),
+                none => unmatched.push(pending)
+            }
         }
         index = index + 1
     }
@@ -1911,6 +1924,15 @@ fn infer_suggestion(code: Str, message: Str, context: DiagnosticContext) -> List
             },
             _ => {}
         }
+    }
+
+    if code == "E0404" &&
+       message.starts_with("Runtime handled effect instance in '") {
+        suggestions.push(Suggestion {
+            message: "Instantiate the custom effect with fully closed type arguments before perform or handle",
+            replacement: none,
+            span: none
+        })
     }
 
     // Effect mismatch — suggest handler when effects leak into pure context
