@@ -167,11 +167,13 @@ Effect 按求值组合：
 
 ### Effectful function value 的 evidence
 
-普通 lambda/closure 不捕获定义点当前安装的 handled-effect evidence。其 body row 冻结在函数类型中，并对应 callable 自身的 hidden evidence 参数；每次调用从调用点当前 dynamic handler environment 借用 exact evidence。没有对应 handler 时，effect继续传播到调用者，不能因为closure在某个`handle`内创建而被提前消除。
+普通 lambda/closure 不捕获定义点当前安装的 handled-effect evidence。其 body row 冻结在函数类型中；所有Ring callable统一接收一个显式borrowed `EffectCtx*`，每次调用从调用点当前 dynamic handler environment传入。没有对应typed handler entry时，effect继续传播到调用者，不能因为closure在某个`handle`内创建而被提前消除。
 
 因此，一个pure factory可以返回effectful closure：调用factory不需要该effect，调用返回值时才需要。closure在`handle`内创建后逃逸，也不会延长旧handler的动态范围；在新的handler内调用时使用新handler。Handler arm/re-perform的内部runtime对象可显式持有outer evidence，但不改变ordinary user closure规则。
 
-Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、handled-effect evidence；direct/method调用省略`env`但保持其余相对顺序。Handled evidence是borrow，不进入ordinary closure env的owned capture；System effect没有evidence参数。
+Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`EffectCtx*`；direct/method调用省略`env`但保持其余相对顺序。Pure与system-only Ring callable传immortal empty context；HostImport/top-level C extern leaf不接收context。Context entry由完整typed handled instance（exact effect identity + exact type arguments）索引，不能按名字或nominal leaf合并；`GenericProbe<Str>`与`GenericProbe<Int>`是两个不同entry。
+
+`handle`创建owned child overlay并引用parent context；ordinary calls只borrow并转发指针，returned closure不捕获。Closed row可用冻结layout的静态位置，open row通过同一个typed context/view转发。禁止C varargs、TLS/global/root handler、runtime name lookup以及closed/open两套function-pointer ABI。Handler arm/re-perform内部对象可显式持parent context，其生命周期不改变ordinary closure规则。
 
 ## Effect 消除
 
