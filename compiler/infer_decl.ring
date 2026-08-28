@@ -583,8 +583,8 @@ fn cache_inline_impls_in_mod_body(
     })
     match capability {
         some(row) => {
-            ctx.mod_unsafe_allowed = row.effects.any(fn(effect) {
-                match effect {
+            ctx.mod_unsafe_allowed = row.effects.any(fn(eff) {
+                match eff {
                     Effect::UnsafeEffect => true,
                     _ => false
                 }
@@ -1204,6 +1204,7 @@ fn stage_fn_draft_scheme(
         scheme: scheme,
         span: draft.span
     }
+}
 fn finalize_call_effect_ctx(
     existing: TypedEffectCtxSource, callable: Type
 ) -> TypedEffectCtxSource {
@@ -1571,7 +1572,6 @@ fn finalize_draft_effect_ctx(
         none => fail.raise(CompileError {})
     }
 }
-}
 
 fn validate_draft_assoc_sources(
     mut ctx: InferCtx, draft: FnDraft, zctx: ZonkCtx,
@@ -1586,8 +1586,8 @@ fn validate_draft_assoc_sources(
         }
         if !represented {
             let mut escapes = false
-            for effect in final_effects.effects {
-                match effect {
+            for eff in final_effects.effects {
+                match eff {
                     Effect::FailEffect { error_type } => {
                         if type_contains_exact(error_type, checked) {
                             escapes = true
@@ -1631,8 +1631,8 @@ fn finalize_fn_draft(
         ctx, draft, final_batch, zonked_body, final_effects)
 
     if draft.name == "main" || draft.name.ends_with("$$_main") {
-        for effect in final_effects.effects {
-            match effect {
+        for eff in final_effects.effects {
+            match eff {
                 Effect::CustomEffect { name, .. } => {
                     let display = nominal_display_name(name)
                     let notes: List<DiagnosticNote> = [
@@ -1938,8 +1938,8 @@ fn validate_impl_draft_group(
                 match declaration {
                     HDecl::Fn { name: method_name, effects, span, .. } => {
                         if method_name == "drop" {
-                            for effect in effects.effects {
-                                match effect {
+                            for eff in effects.effects {
+                                match eff {
                                     Effect::FailEffect { .. } => {
                                         let _ = type_error(
                                             ctx.sink, E0803,
@@ -4380,8 +4380,8 @@ fn infer_inline_draft_in_mod_body(
     })
     match capability {
         some(row) => {
-            ctx.mod_unsafe_allowed = row.effects.any(fn(effect) {
-                match effect {
+            ctx.mod_unsafe_allowed = row.effects.any(fn(eff) {
+                match eff {
                     Effect::UnsafeEffect => true,
                     _ => false
                 }
