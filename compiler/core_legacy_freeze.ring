@@ -315,13 +315,13 @@ fn add_callable_fact(
     kind: ExecutableKind, container: LegacyContainerRef,
     type_params: List<HTypeParam>, trait_bounds: List<TraitBound>,
     params: List<HParam>, result_type: Type, effects: EffectRow,
-    is_public: Bool, physical_name: Str?
+    has_lexical_body: Bool, is_public: Bool, physical_name: Str?
 ) {
     let type_parameters = callable_type_parameters(type_params, trait_bounds)
     let bounds = callable_trait_bounds(type_parameters, trait_bounds)
-    let parameter_facts = params.map(fn(param) {
-        source_parameter_fact(builder, param)
-    })
+    let parameter_facts = if has_lexical_body {
+        params.map(fn(param) { source_parameter_fact(builder, param) })
+    } else { [] }
     let origin = executable_origin(reference)
     if executable_ref_is_prelude(reference) {
         if !builder.owns_prelude {
@@ -545,7 +545,7 @@ fn scan_expr(
                     builder, handler.executable_ref, executable_kind_handler(),
                     make_legacy_executable_container(owner), [], [], params,
                     hexpr_type(handler.body), hexpr_effects(handler.body),
-                    false, none)
+                    true, false, none)
                 scan_expr(builder, handler.executable_ref, handler.body)
             }
         },
@@ -555,7 +555,7 @@ fn scan_expr(
             add_callable_fact(
                 builder, executable_ref, executable_kind_lambda(),
                 make_legacy_executable_container(owner), [], [], params,
-                return_type, hexpr_effects(body), false, none)
+                return_type, hexpr_effects(body), true, false, none)
             scan_expr(builder, executable_ref, body)
         },
         HExpr::EffectOp { args, .. } => {
@@ -749,21 +749,21 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
                         executable_kind_impl_method()
                     } else { executable_kind_fn() },
                     module_container, type_params, trait_bounds, params,
-                    return_type, effects, is_pub, some(name))
+                    return_type, effects, true, is_pub, some(name))
                 scan_expr(builder, executable_ref, body)
             },
             HDecl::Test { description, executable_ref, body, .. } => {
                 add_callable_fact(
                     builder, executable_ref, executable_kind_test(),
                     module_container, [], [], [], hexpr_type(body),
-                    hexpr_effects(body), false, some(description))
+                    hexpr_effects(body), true, false, some(description))
                 scan_expr(builder, executable_ref, body)
             },
             HDecl::Const { name, executable_ref, ty, init, .. } => {
                 add_callable_fact(
                     builder, executable_ref,
                     executable_kind_const_getter(), module_container,
-                    [], [], [], ty, hexpr_effects(init), false, some(name))
+                    [], [], [], ty, hexpr_effects(init), true, false, some(name))
                 scan_expr(builder, executable_ref, init)
             },
             HDecl::ExternFn {
@@ -772,7 +772,7 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
             } => add_callable_fact(
                 builder, executable_ref, executable_kind_extern_fn(),
                 module_container, type_params, trait_bounds, params,
-                return_type, effects, is_pub, some(name)),
+                return_type, effects, false, is_pub, some(name)),
             HDecl::Trait { name, methods, .. } => {
                 for method in methods {
                     add_callable_fact(
@@ -781,7 +781,8 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
                             executable_kind_trait_default()
                         } else { executable_kind_bodyless_trait_member() },
                         module_container, [], [], method.params,
-                        method.return_type, method.effects, false,
+                        method.return_type, method.effects,
+                        method.body.is_some(), false,
                         some("__${name}_${method.name}"))
                     match method.body {
                         some(body) => scan_expr(
@@ -798,7 +799,7 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
                             executable_kind_bodyless_effect_operation(),
                             module_container, [], [], op.params,
                             op.return_type,
-                            EffectRow { effects: [], tail: none }, false,
+                            EffectRow { effects: [], tail: none }, false, false,
                             some("__${name}_${op.name}")),
                         none => {}
                     }

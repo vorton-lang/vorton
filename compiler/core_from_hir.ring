@@ -2221,10 +2221,13 @@ fn seed_diagnostic_decls(
                 for method in methods {
                     add_diagnostic_owner_seed(
                         seed, method.executable_ref, module_key, span)
-                    seed_diagnostic_params(seed, module_key, method.params, span)
                     match method.body {
-                        some(body) => seed_diagnostic_expr(
-                            seed, module_key, span, body), none => {}
+                        some(body) => {
+                            seed_diagnostic_params(
+                                seed, module_key, method.params, span)
+                            seed_diagnostic_expr(seed, module_key, span, body)
+                        },
+                        none => {}
                     }
                 }
             },
