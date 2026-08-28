@@ -44,7 +44,6 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
     EffectOpDef, TraitDef, TraitMethodDef, ImplEntry,
     ImplMethodSchemeCore, TypeAliasDef,
     BuiltInKind, mono, apply_subst, apply_subst_row, apply_subst_map,
-    build_scheme_var_map, impl_method_core_as_scheme,
     instantiate_effect_header_schema,
     instantiate_trait_method_signature,
     find_impl, lookup_variant, compiler_owned_extern_manifest_entry}
@@ -62,13 +61,15 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     exact_pattern_plan,
     resolve_or_defer_dicts_from_scheme,
     resolve_or_defer_dicts_from_impl_owner,
-    register_callable_value_shadow,
+    CallableInstantiationReceipt,
+    callable_receipt_type, callable_receipt_type_args,
+    callable_receipt_effects,
     instantiate_callable_scheme, instantiate_callable_impl_method,
+    instantiate_assoc_type_from_callable_receipt,
     pending_anonymous_callable_checkpoint,
     record_pending_anonymous_callable_header,
     rollback_pending_anonymous_callable_headers,
-    drain_pending_anonymous_callable_headers,
-    recursive_callable_group_is_active,
+    drain_representable_pending_anonymous,
     pending_dict_checkpoint, has_pending_dicts_since,
     remove_fail_effect,
     generalize, free_type_vars, resolve_relative_qualifier,
@@ -86,12 +87,16 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     canonicalize_callable_handled_evidence,
     executable_capture_slot, fresh_semantic_path,
     fresh_semantic_let_binder, fresh_semantic_var_binder,
-    semantic_for_binder}
+    semantic_for_binder,
+    journal_boxed_var_insert, journal_var_lambda_depth_set,
+    journal_record_def_span, journal_mutable_var_insert,
+    journal_let_def_insert, journal_mut_param_def_insert}
 use exhaustive::{check_exhaustive}
 use infer_helpers::{MethodLookupResult, StmtResult, CalleeMetadata,
     is_value_type, cancel_local_mut_effects, resolve_var_id,
     check_assign_target_mutable, find_root_expr, get_assign_target_root_def_id, get_hexpr_root_type,
-    infer_ident, infer_numeric_op, is_primitive_ord,
+    infer_ident, infer_ident_with_receipt,
+    infer_numeric_op, is_primitive_ord,
     resolve_trait_dispatch, resolve_eq_dispatch,
     exact_operator_plan,
     exact_nominal_method_call,
@@ -117,7 +122,8 @@ use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
     handled_evidence_requirement,
     make_named_executable_ref, make_system_host_callable_ref,
     executable_ref_is_named, executable_ref_named_symbol}
-use effect_contract::{typed_effect_header_schema_bindings}
+use effect_contract::{typed_effect_header_schema_bindings,
+    empty_typed_effect_header_schema}
 
 fn exact_handled_evidence_for_row(
     mut ctx: InferCtx, row: EffectRow
@@ -574,33 +580,15 @@ fn hexpr_contains_bounded_callable_value(ctx: InferCtx, expr: HExpr) -> Bool {
     found.len() > 0
 }
 
-// Register each exact DefId/live-scheme callable value once for its owner.
-// The shadow shares the canonical evidence/assoc resolver with calls but never
-// attaches DictRefs; resolve_value_ident remains the final-zonk authority.
+// Receipt-backed callable values register their exact evidence obligation at
+// infer_ident time.  Keep this legacy owner hook inert until infer_decl drops
+// its old traversal call; it must never reconstruct an instantiation by shape.
 fn register_bounded_callable_value_shadows_inner(
     mut ctx: InferCtx, expr: HExpr, s: UnionFind
 ) {
-    let found: List<HExpr> = []
-    collect_bounded_callable_values(ctx, expr, found)
-    for callable in found {
-        match resolve_callee_metadata(ctx, callable) {
-            some(metadata) => match metadata.kind {
-                ValueBindingKind::DirectCallable |
-                ValueBindingKind::ExternCallable => {
-                    if metadata.live_scheme.bounds.len() > 0 {
-                        register_callable_value_shadow(
-                            ctx, metadata.live_scheme,
-                            hexpr_type(callable), s,
-                            hexpr_span(callable))
-                    }
-                },
-                ValueBindingKind::ConstGetter |
-                ValueBindingKind::LocalBorrow => {
-                }
-            },
-            none => {}
-        }
-    }
+    let _ = ctx
+    let _ = expr
+    let _ = s
 }
 
 pub fn register_bounded_callable_value_shadows(
@@ -686,6 +674,7 @@ struct MethodCallSelection {
     method_type: Type?,
     type_args: List<HCallableTypeActual>,
     effect_instantiation: HCallableEffectInstantiation?,
+    receipt: CallableInstantiationReceipt?,
     method_core: ImplMethodSchemeCore?,
     impl_owner: ImplEntry?,
     impl_method_ref: ImplMethodRef?,
@@ -707,9 +696,10 @@ fn select_for_protocol_method(
     let receipt = instantiate_callable_impl_method(
         ctx, impl_entry, impl_core, method_ref)
     MethodCallSelection {
-        method_type: some(receipt.ty),
-        type_args: receipt.type_args,
-        effect_instantiation: receipt.effect_instantiation,
+        method_type: some(callable_receipt_type(receipt)),
+        type_args: callable_receipt_type_args(receipt),
+        effect_instantiation: callable_receipt_effects(receipt),
+        receipt: some(receipt),
         method_core: some(impl_core),
         impl_owner: some(impl_entry),
         impl_method_ref: some(method_ref),
@@ -717,33 +707,12 @@ fn select_for_protocol_method(
     }
 }
 
-fn for_protocol_call_method_type(mut ctx: InferCtx, call: HExpr, span: Span) -> Type {
-    match call {
-        HExpr::Call { callee, .. } => match callee {
-            HExpr::FieldAccess { ty, .. } => ty,
-            _ => {
-                let _ = type_error(ctx.sink, E0305,
-                    "Internal iteration lowering expected a method call",
-                    span, DiagnosticContext::OtherContext { detail: some("protocol call lost method provenance") })
-                fail.raise(CompileError {})
-            }
-        },
-        _ => {
-            let _ = type_error(ctx.sink, E0305,
-                "Internal iteration lowering expected a call expression",
-                span, DiagnosticContext::OtherContext { detail: some("protocol call was not lowered as an ordinary call") })
-            fail.raise(CompileError {})
-        }
-    }
-}
-
-// Instantiate an impl-associated type through the exact method scheme that
-// ordinary call inference instantiated. build_scheme_var_map follows scheme
-// variable identity through the receiver/return structure; there is no
-// positional associated-type substitution here.
+// Instantiate an impl-associated type through the exact receipt produced by
+// the same method instantiation. No type-shape reconstruction is permitted.
 fn for_protocol_assoc_type(
-    mut ctx: InferCtx, impl_entry: ImplEntry, method: Str,
-    assoc_name: Str, call: HExpr, subst: UnionFind, span: Span
+    mut ctx: InferCtx, impl_entry: ImplEntry,
+    assoc_name: Str, receipt: CallableInstantiationReceipt,
+    subst: UnionFind, span: Span
 ) -> Type {
     let raw_assoc = match impl_entry.assoc_types.get(assoc_name) {
         some(ty) => ty,
@@ -754,10 +723,6 @@ fn for_protocol_assoc_type(
             fail.raise(CompileError {})
         }
     }
-    let scheme = impl_method_core_as_scheme(
-        for_protocol_method_scheme(ctx, impl_entry, method, span))
-    let instantiated_method = for_protocol_call_method_type(ctx, call, span)
-    let var_map = build_scheme_var_map(scheme, instantiated_method)
     let assoc_schema = match
             impl_entry.assoc_type_effect_schemas.get(assoc_name) {
         some(value) => value,
@@ -765,8 +730,8 @@ fn for_protocol_assoc_type(
     }
     let localized_assoc = instantiate_effect_header_schema(
         ctx.env, [raw_assoc], assoc_schema).0.get(0).unwrap()
-    apply_subst(subst, apply_subst_map(
-        var_map, localized_assoc))
+    instantiate_assoc_type_from_callable_receipt(
+        receipt, localized_assoc, subst)
 }
 
 pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult {
@@ -827,9 +792,10 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 some(bs) => {
                     match bs.def_id {
                         some(did) => {
-                            ctx.env.record_def_span(did, name_span)
-                            ctx.env.scope.let_defs.insert(did)
-                            ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                            journal_record_def_span(ctx, did, name_span)
+                            journal_let_def_insert(ctx, did)
+                            journal_var_lambda_depth_set(
+                                ctx, did, ctx.lambda_depth)
                             let schema = define_exact_effect_header(
                                 ctx, local_effect_header_origin(ctx, did),
                                 [bs.ty], bs.type_vars)
@@ -843,14 +809,12 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 },
                 none => none
             }
-            if !recursive_callable_group_is_active(ctx) {
-                let final_scheme = ctx.env.lookup(name).unwrap_or_else(fn() {
-                    panic("let anonymous header: final scheme is absent")
-                })
-                drain_pending_anonymous_callable_headers(
-                    ctx, anonymous_checkpoint,
-                    final_scheme.effect_schema, s)
-            }
+            let final_scheme = ctx.env.lookup(name).unwrap_or_else(fn() {
+                panic("let anonymous header: final scheme is absent")
+            })
+            drain_representable_pending_anonymous(
+                ctx, anonymous_checkpoint,
+                final_scheme.effect_schema, s)
             StmtResult {
                 hstmt: HStmt::Let { name: name, name_span: name_span, def_id: bound_def_id, ty: resolved, init: init_r.hexpr, span: span },
                 subst: s,
@@ -858,7 +822,19 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             }
         },
         Stmt::Var { name, name_span, type_annotation, init, span } => {
-            let init_r = infer_expr(ctx, init, subst)
+            let anonymous_checkpoint =
+                pending_anonymous_callable_checkpoint(ctx)
+            let init_result = some(infer_expr(ctx, init, subst)) catch {
+                _ => none
+            }
+            let init_r = match init_result {
+                some(value) => value,
+                none => {
+                    rollback_pending_anonymous_callable_headers(
+                        ctx, anonymous_checkpoint)
+                    fail.raise(CompileError {})
+                }
+            }
             let mut s = init_r.subst
             let mut var_type = hexpr_type(init_r.hexpr)
             match type_annotation {
@@ -879,12 +855,16 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 some(vs) => {
                     match vs.def_id {
                         some(did) => {
-                            ctx.env.record_def_span(did, name_span)
-                            ctx.env.scope.mutable_vars.insert(did)
-                            ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                            journal_record_def_span(ctx, did, name_span)
+                            journal_mutable_var_insert(ctx, did)
+                            journal_var_lambda_depth_set(
+                                ctx, did, ctx.lambda_depth)
                         },
                         none => {}
                     }
+                    drain_representable_pending_anonymous(
+                        ctx, anonymous_checkpoint,
+                        empty_typed_effect_header_schema(), s)
                     StmtResult {
                         hstmt: HStmt::Var { name: name, name_span: name_span, def_id: vs.def_id, ty: apply_subst(s, var_type), init: init_r.hexpr, span: span },
                         subst: s,
@@ -1064,8 +1044,10 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                                     some(ds) => {
                                         match (ds.def_id, destr.spans.get(di)) {
                                             (some(did), some(dspan)) => {
-                                                ctx.env.record_def_span(did, dspan)
-                                                ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                                                journal_record_def_span(
+                                                    ctx, did, dspan)
+                                                journal_var_lambda_depth_set(
+                                                    ctx, did, ctx.lambda_depth)
                                             },
                                             _ => {}
                                         }
@@ -1096,8 +1078,9 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             match binding_scheme {
                 some(bs) => match bs.def_id {
                     some(did) => {
-                        ctx.env.record_def_span(did, binding_span)
-                        ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                        journal_record_def_span(ctx, did, binding_span)
+                        journal_var_lambda_depth_set(
+                            ctx, did, ctx.lambda_depth)
                     },
                     none => {}
                 },
@@ -1205,8 +1188,10 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                                             some(bs) => {
                                                 match bs.def_id {
                                                     some(did) => {
-                                                        ctx.env.record_def_span(did, pspan)
-                                                        ctx.env.scope.let_defs.insert(did)
+                                                        journal_record_def_span(
+                                                            ctx, did, pspan)
+                                                        journal_let_def_insert(
+                                                            ctx, did)
                                                     },
                                                     none => {}
                                                 }
@@ -1361,17 +1346,18 @@ fn lower_protocol_for_in(
 
         let iterable_selection = select_for_protocol_method(
             ctx, iterable_impl, "iter", span)
+        let iterable_receipt = iterable_selection.receipt.unwrap_or_else(fn() {
+            panic("iteration protocol: iter receipt is absent")
+        })
         let iter_call_result = infer_method_call_from_receiver(
             ctx, none, iterable_result, "iter", [], span,
             some(iterable_selection))
         s = iter_call_result.subst
 
         let associated_iter_type = for_protocol_assoc_type(
-            ctx, iterable_impl, "iter", "Iter",
-            iter_call_result.hexpr, s, span)
+            ctx, iterable_impl, "Iter", iterable_receipt, s, span)
         let associated_item_type = for_protocol_assoc_type(
-            ctx, iterable_impl, "iter", "Item",
-            iter_call_result.hexpr, s, span)
+            ctx, iterable_impl, "Item", iterable_receipt, s, span)
         let iter_notes: List<DiagnosticNote> = [
             DiagnosticNote {
                 message: "Iterable::Iter is '${type_to_string(associated_iter_type)}'",
@@ -1398,9 +1384,10 @@ fn lower_protocol_for_in(
         }
         match iterator_scheme.def_id {
             some(did) => {
-                ctx.env.record_def_span(did, span)
-                ctx.env.scope.mutable_vars.insert(did)
-                ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                journal_record_def_span(ctx, did, span)
+                journal_mutable_var_insert(ctx, did)
+                journal_var_lambda_depth_set(
+                    ctx, did, ctx.lambda_depth)
             },
             none => {}
         }
@@ -1479,14 +1466,16 @@ fn lower_protocol_for_in(
             let next_receiver = infer_expr(ctx, iterator_expr, s)
             let next_selection = select_for_protocol_method(
                 ctx, iterator_impl, "next", span)
+            let next_receipt = next_selection.receipt.unwrap_or_else(fn() {
+                panic("iteration protocol: next receipt is absent")
+            })
             let next_call_result = infer_method_call_from_receiver(
                 ctx, some(iterator_expr), next_receiver,
                 "next", [], span, some(next_selection))
             s = next_call_result.subst
 
             let iterator_item_type = for_protocol_assoc_type(
-                ctx, iterator_impl, "next", "Item",
-                next_call_result.hexpr, s, span)
+                ctx, iterator_impl, "Item", next_receipt, s, span)
             let next_expected = make_option_type(iterator_item_type)
             let next_notes: List<DiagnosticNote> = [
                 DiagnosticNote {
@@ -1865,7 +1854,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
             }
             let callee_receipt = instantiate_callable_scheme(
                 ctx, callee_scheme)
-            let callee_ty = callee_receipt.ty
+            let callee_ty = callable_receipt_type(callee_receipt)
             let callee = HExpr::Ident {
                 name: callee_name, resolved_name: none,
                 def_id: callee_scheme.def_id, source_slot: none,
@@ -1877,8 +1866,8 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 dict_closure_dicts: none,
                 callable_instantiation: some(
                     HCallableValueInstantiation {
-                        type_args: callee_receipt.type_args,
-                        effects: callee_receipt.effect_instantiation
+                        type_args: callable_receipt_type_args(callee_receipt),
+                        effects: callable_receipt_effects(callee_receipt)
                     }),
                 ty: callee_ty, effects: EMPTY_ROW, span: span
             }
@@ -1901,7 +1890,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
 
             let resolved_dicts: List<DictRef> = []
             resolve_or_defer_dicts_from_scheme(
-                ctx, callee_scheme, hexpr_type(callee), s, span,
+                ctx, callee_scheme, callee_receipt, s, span,
                 PendingDictPurpose::DirectCallPublish {
                     output_slot: resolved_dicts
                 })
@@ -2036,7 +2025,24 @@ fn infer_unary_op(mut ctx: InferCtx, op: UnaryOp, operand: Expr, span: Span, sub
 // ============================================================
 
 fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, subst: UnionFind) -> InferResult {
-    let callee_r = infer_expr(ctx, callee, subst)
+    let callee_receipts: List<CallableInstantiationReceipt> = []
+    let callee_r = match callee {
+        Expr::Ident { name, qualifier, span: ident_span } =>
+            infer_ident_with_receipt(
+                ctx, name, ident_span, subst, qualifier,
+                false, callee_receipts),
+        _ => infer_expr(ctx, callee, subst)
+    }
+    let callee_receipt: CallableInstantiationReceipt? = match
+            callee_receipts.first() {
+        some(value) => {
+            if callee_receipts.len() != 1 {
+                panic("direct call: callee produced multiple receipts")
+            }
+            some(value)
+        },
+        none => none
+    }
     let callee_metadata = resolve_callee_metadata(ctx, callee_r.hexpr)
     let mut s = callee_r.subst
     let mut effects = callee_r.effects
@@ -2119,9 +2125,11 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
         some(metadata) => match metadata.kind {
             ValueBindingKind::DirectCallable => {
                 if metadata.live_scheme.bounds.len() > 0 {
+                    let receipt = callee_receipt.unwrap_or_else(fn() {
+                        panic("direct call: bounded callee receipt is absent")
+                    })
                     resolve_or_defer_dicts_from_scheme(
-                        ctx, metadata.live_scheme,
-                        hexpr_type(callee_r.hexpr), s, span,
+                        ctx, metadata.live_scheme, receipt, s, span,
                         PendingDictPurpose::DirectCallPublish {
                             output_slot: resolved_dicts
                         })
@@ -2129,11 +2137,13 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
             },
             ValueBindingKind::ExternCallable => {
                 if metadata.live_scheme.bounds.len() > 0 {
+                    let receipt = callee_receipt.unwrap_or_else(fn() {
+                        panic("extern call: bounded callee receipt is absent")
+                    })
                     // Extern ABI never receives Ring dictionaries. Resolution
                     // remains mandatory for static bound validation.
                     resolve_or_defer_dicts_from_scheme(
-                        ctx, metadata.live_scheme,
-                        hexpr_type(callee_r.hexpr), s, span,
+                        ctx, metadata.live_scheme, receipt, s, span,
                         PendingDictPurpose::ExternCallValidate)
                 }
             },
@@ -2165,7 +2175,8 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
                                                         some(pt) => {
                                                             let resolved_pt = apply_subst(s, pt)
                                                             if is_value_type(resolved_pt) {
-                                                                ctx.boxed_vars.insert(arg_did)
+                                                                journal_boxed_var_insert(
+                                                                    ctx, arg_did)
                                                             }
                                                         },
                                                         none => {}
@@ -2276,6 +2287,7 @@ fn infer_method_call_from_receiver(
     let mut method_type: Type? = none
     let mut method_type_args: List<HCallableTypeActual> = []
     let mut method_effect_instantiation: HCallableEffectInstantiation? = none
+    let mut method_receipt: CallableInstantiationReceipt? = none
     let mut method_core: ImplMethodSchemeCore? = none
     let mut impl_owner: ImplEntry? = none
     let mut impl_method_ref: ImplMethodRef? = none
@@ -2289,6 +2301,7 @@ fn infer_method_call_from_receiver(
             method_type = selected.method_type
             method_type_args = selected.type_args
             method_effect_instantiation = selected.effect_instantiation
+            method_receipt = selected.receipt
             method_core = selected.method_core
             impl_owner = selected.impl_owner
             impl_method_ref = selected.impl_method_ref
@@ -2305,6 +2318,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_type_args = r.type_args
                 method_effect_instantiation = r.effect_instantiation
+                method_receipt = r.receipt
                 method_core = r.method_core
                 impl_owner = r.impl_owner
                 impl_method_ref = r.impl_method_ref
@@ -2315,6 +2329,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_type_args = r.type_args
                 method_effect_instantiation = r.effect_instantiation
+                method_receipt = r.receipt
                 method_core = r.method_core
                 impl_owner = r.impl_owner
                 impl_method_ref = r.impl_method_ref
@@ -2332,6 +2347,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_type_args = r.type_args
                 method_effect_instantiation = r.effect_instantiation
+                method_receipt = r.receipt
                 method_core = r.method_core
                 impl_owner = r.impl_owner
                 impl_method_ref = r.impl_method_ref
@@ -2349,6 +2365,7 @@ fn infer_method_call_from_receiver(
                 method_type = r.method_type
                 method_type_args = r.type_args
                 method_effect_instantiation = r.effect_instantiation
+                method_receipt = r.receipt
                 method_core = r.method_core
                 impl_owner = r.impl_owner
                 impl_method_ref = r.impl_method_ref
@@ -2527,8 +2544,11 @@ fn infer_method_call_from_receiver(
     let resolved_dicts: List<DictRef> = []
     match (impl_owner, method_core, method_type) {
         (some(owner), some(core), some(mt)) => {
+            let receipt = method_receipt.unwrap_or_else(fn() {
+                panic("method call: exact instantiation receipt is absent")
+            })
             resolve_or_defer_dicts_from_impl_owner(
-                ctx, owner, core, mt, s, span,
+                ctx, owner, core, receipt, s, span,
                 PendingDictPurpose::DirectCallPublish {
                     output_slot: resolved_dicts
                 })
@@ -3936,7 +3956,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     none => panic(
                         "unreachable: handler parameter has no exact DefId")
                 }
-                ctx.env.record_def_span(param_def_id, p.span)
+                journal_record_def_span(ctx, param_def_id, p.span)
                 hparams.push(HParam { name: p.name, ty: pt,
                     def_id: some(param_def_id), is_mutable: false })
                 hi = hi + 1
@@ -3965,7 +3985,8 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                         none => panic(
                             "unreachable: handler resume binding has no exact DefId")
                     }
-                    ctx.env.record_def_span(resume_def_id, handler.span)
+                    journal_record_def_span(
+                        ctx, resume_def_id, handler.span)
                     resume_binding = some(HPatternBinding {
                         name: rn, def_id: resume_def_id,
                         slot: make_source_slot_ref(
@@ -4498,13 +4519,14 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
             some(ls) => {
                 match ls.def_id {
                     some(did) => {
-                        ctx.env.record_def_span(did, p.span)
-                        ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                        journal_record_def_span(ctx, did, p.span)
+                        journal_var_lambda_depth_set(
+                            ctx, did, ctx.lambda_depth)
                         if p.is_mutable {
-                            ctx.env.scope.mutable_vars.insert(did)
-                            ctx.env.scope.mut_param_defs.insert(did)
+                            journal_mutable_var_insert(ctx, did)
+                            journal_mut_param_def_insert(ctx, did)
                         } else {
-                            ctx.env.scope.let_defs.insert(did)
+                            journal_let_def_insert(ctx, did)
                         }
                     },
                     none => {}

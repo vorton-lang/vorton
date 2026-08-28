@@ -944,6 +944,13 @@ pub struct EffectFactCheckpoint {
     callable_effect_len: Int
 }
 
+// Opaque detached suffix used by the A1 owner transaction.  It contains only
+// facts that already existed or were staged from an explicit final schema.
+pub struct EffectFactBatch {
+    effect_formals: List<TypedEffectFormalFact>,
+    callable_effects: List<TypedCallableEffectFact>
+}
+
 // ============================================================
 // Constructor + helpers
 // ============================================================
@@ -1206,75 +1213,6 @@ impl TypeEnv {
         none
     }
 
-    pub fn instantiate(mut self, scheme: TypeScheme) -> Type {
-        self.instantiate_type_scheme_with_mapping(scheme).0
-    }
-
-    pub fn instantiate_type_scheme_with_mapping(
-        mut self, scheme: TypeScheme
-    ) -> (Type, Map<Int, Type>) {
-        let mut mapping: Map<Int, Type> = map_new()
-        if scheme.type_vars.len() == 0 { return (scheme.ty, mapping) }
-        for tv in scheme.type_vars {
-            mapping.insert(tv, self.fresh_var())
-        }
-        for bound in scheme.bounds {
-            match mapping.get(bound.type_var) {
-                some(fresh) => match fresh {
-                    Type::TypeVar { id, .. } => {
-                        let mut existing: Set<Str> = match self.scope.var_bounds.get(id) {
-                            some(s) => s,
-                            none => set_new()
-                        }
-                        existing.insert(bound.trait_name)
-                        self.scope.var_bounds.insert(id, existing)
-                    },
-                    _ => {}
-                },
-                none => {}
-            }
-        }
-        let instantiated = apply_subst_map(mapping, scheme.ty)
-        let instantiated_schema = remap_effect_header_schema(
-            mapping, scheme.effect_schema)
-        publish_effect_header_schema(self, instantiated_schema)
-        (instantiated, mapping)
-    }
-
-    pub fn instantiate_impl_method_core(
-        mut self, owner: ImplEntry, core: ImplMethodSchemeCore
-    ) -> Type {
-        self.instantiate_impl_method_core_with_mapping(owner, core).0
-    }
-
-    pub fn instantiate_impl_method_core_with_mapping(
-        mut self, owner: ImplEntry, core: ImplMethodSchemeCore
-    ) -> (Type, Map<Int, Type>) {
-        let mut mapping: Map<Int, Type> = map_new()
-        for type_var in impl_method_core_type_vars(core) {
-            mapping.insert(type_var, self.fresh_var())
-        }
-        for predicate in frozen_impl_predicates(owner.predicates) {
-            match mapping.get(impl_predicate_subject_type_var(predicate)) {
-                some(Type::TypeVar { id, .. }) => {
-                    let mut existing = match self.scope.var_bounds.get(id) {
-                        some(bounds) => bounds,
-                        none => set_new()
-                    }
-                    existing.insert(impl_predicate_trait_name(predicate))
-                    self.scope.var_bounds.insert(id, existing)
-                },
-                _ => panic(
-                    "impl method instantiation: predicate subject is not quantified")
-            }
-        }
-        let instantiated = apply_subst_map(
-            mapping, impl_method_core_type(core))
-        let instantiated_schema = remap_effect_header_schema(
-            mapping, impl_method_core_effect_schema(core))
-        publish_effect_header_schema(self, instantiated_schema)
-        (instantiated, mapping)
-    }
 }
 
 // ============================================================
@@ -2453,12 +2391,6 @@ pub fn build_type_var_map(
     result
 }
 
-pub fn build_scheme_var_map(
-    scheme: TypeScheme, instantiated_type: Type
-) -> Map<Int, Type> {
-    build_type_var_map(scheme.ty, instantiated_type, scheme.type_vars)
-}
-
 fn append_ordered_type_var(mut result: List<Int>, id: Int) {
     if !result.contains(id) { result.push(id) }
 }
@@ -2665,6 +2597,26 @@ pub fn effect_fact_checkpoint(env: TypeEnv) -> EffectFactCheckpoint {
     }
 }
 
+pub fn detach_effect_fact_suffix(
+    mut env: TypeEnv, checkpoint: EffectFactCheckpoint
+) -> EffectFactBatch {
+    if env.effect_formal_facts.len() < checkpoint.effect_formal_len ||
+       env.callable_effect_facts.len() < checkpoint.callable_effect_len {
+        panic("effect fact detach: checkpoint exceeds current registry")
+    }
+    let detached = EffectFactBatch {
+        effect_formals: env.effect_formal_facts.slice(
+            checkpoint.effect_formal_len, env.effect_formal_facts.len()),
+        callable_effects: env.callable_effect_facts.slice(
+            checkpoint.callable_effect_len, env.callable_effect_facts.len())
+    }
+    env.effect_formal_facts = env.effect_formal_facts.slice(
+        0, checkpoint.effect_formal_len)
+    env.callable_effect_facts = env.callable_effect_facts.slice(
+        0, checkpoint.callable_effect_len)
+    detached
+}
+
 pub fn rollback_effect_facts(
     mut env: TypeEnv, checkpoint: EffectFactCheckpoint
 ) {
@@ -2715,36 +2667,6 @@ pub fn validate_effect_header_schema(
         }
         index = index + 1
     }
-}
-
-// Pure projection for a finalized anonymous callable. Every open raw tail
-// must already be related to one definition-owned EffectParamRef; this path
-// never creates identity from an executable stack or use site.
-pub fn project_existing_effect_header_schema(
-    env: TypeEnv, signature: Type
-) -> TypedEffectHeaderSchema {
-    let tails = ordered_effect_tail_vars(signature)
-    let mut bindings: List<TypedEffectHeaderBinding> = []
-    for raw_tail in tails {
-        let parameter = match effect_formal_for_raw(env, raw_tail) {
-            some(existing) => existing,
-            none => panic(
-                "anonymous callable effect schema: open tail has no existing formal")
-        }
-        for binding in bindings {
-            if effect_param_ref_same(
-                    typed_effect_header_binding_parameter(binding),
-                    parameter) {
-                panic(
-                    "anonymous callable effect schema: formal maps from multiple tails")
-            }
-        }
-        bindings.push(make_typed_effect_header_binding(
-            raw_tail, parameter))
-    }
-    let schema = make_typed_effect_header_schema(bindings)
-    validate_effect_header_schema([signature], tails, schema)
-    schema
 }
 
 fn effect_tails_excluding(
@@ -2825,6 +2747,266 @@ pub fn register_callable_effect_header(
     }
     env.callable_effect_facts.push(
         make_typed_callable_effect_fact(reference, row))
+}
+
+fn empty_effect_fact_batch() -> EffectFactBatch {
+    EffectFactBatch { effect_formals: [], callable_effects: [] }
+}
+
+fn batch_effect_formal_for_raw(
+    batch: EffectFactBatch, raw_tail: Int
+) -> EffectParamRef? {
+    let mut found: EffectParamRef? = none
+    for fact in batch.effect_formals {
+        if typed_effect_formal_raw_tail(fact) == raw_tail {
+            let parameter = typed_effect_formal_parameter(fact)
+            match found {
+                some(existing) => if !effect_param_ref_same(
+                        existing, parameter) {
+                    panic("effect fact batch: raw tail changed parameter")
+                },
+                none => found = some(parameter)
+            }
+        }
+    }
+    found
+}
+
+fn combined_effect_formal_for_raw(
+    env: TypeEnv, batch: EffectFactBatch, raw_tail: Int
+) -> EffectParamRef? {
+    match (effect_formal_for_raw(env, raw_tail),
+           batch_effect_formal_for_raw(batch, raw_tail)) {
+        (some(global), some(local)) => {
+            if !effect_param_ref_same(global, local) {
+                panic("effect fact batch: global/local formal differs")
+            }
+            some(global)
+        },
+        (some(global), none) => some(global),
+        (none, some(local)) => some(local),
+        (none, none) => none
+    }
+}
+
+fn append_effect_formal_to_batch(
+    env: TypeEnv, mut batch: EffectFactBatch,
+    raw_tail: Int, parameter: EffectParamRef
+) {
+    match combined_effect_formal_for_raw(env, batch, raw_tail) {
+        some(existing) => if !effect_param_ref_same(existing, parameter) {
+            panic("effect fact batch: raw tail changed parameter")
+        },
+        none => batch.effect_formals.push(
+            make_typed_effect_formal_fact(raw_tail, parameter))
+    }
+}
+
+fn callable_effect_row_in_batch(
+    batch: EffectFactBatch, reference: ExecutableRef
+) -> EffectRow? {
+    let mut found: EffectRow? = none
+    for fact in batch.callable_effects {
+        if executable_ref_same(
+                typed_callable_effect_reference(fact), reference) {
+            let row = typed_callable_effect_row(fact)
+            match found {
+                some(existing) => if !types_equal(
+                        Type::EffectRowType {
+                            effects: existing.effects, tail: existing.tail
+                        }, Type::EffectRowType {
+                            effects: row.effects, tail: row.tail
+                        }) {
+                    panic("effect fact batch: callable row changed")
+                },
+                none => found = some(row)
+            }
+        }
+    }
+    found
+}
+
+fn callable_effect_row_in_env(
+    env: TypeEnv, reference: ExecutableRef
+) -> EffectRow? {
+    let batch = EffectFactBatch {
+        effect_formals: [],
+        callable_effects: env.callable_effect_facts
+    }
+    callable_effect_row_in_batch(batch, reference)
+}
+
+fn append_callable_effect_to_batch(
+    env: TypeEnv, mut batch: EffectFactBatch,
+    reference: ExecutableRef, row: EffectRow
+) {
+    let mut existing = callable_effect_row_in_env(env, reference)
+    match callable_effect_row_in_batch(batch, reference) {
+        some(local) => match existing {
+            some(global) => if !types_equal(
+                    Type::EffectRowType {
+                        effects: global.effects, tail: global.tail
+                    }, Type::EffectRowType {
+                        effects: local.effects, tail: local.tail
+                    }) {
+                panic("effect fact batch: global/local callable differs")
+            },
+            none => existing = some(local)
+        },
+        none => {}
+    }
+    match existing {
+        some(value) => if !types_equal(
+                Type::EffectRowType {
+                    effects: value.effects, tail: value.tail
+                }, Type::EffectRowType {
+                    effects: row.effects, tail: row.tail
+                }) {
+            panic("effect fact batch: callable row changed")
+        },
+        none => batch.callable_effects.push(
+            make_typed_callable_effect_fact(reference, row))
+    }
+}
+
+pub fn remap_effect_fact_batch(
+    batch: EffectFactBatch, frozen_subst: UnionFind
+) -> EffectFactBatch {
+    let mut result = empty_effect_fact_batch()
+    for fact in batch.effect_formals {
+        let parameter = typed_effect_formal_parameter(fact)
+        let resolved = apply_subst(frozen_subst, Type::TypeVar {
+            id: typed_effect_formal_raw_tail(fact), name: none
+        })
+        let mapped_tail: Int? = match resolved {
+            Type::TypeVar { id, .. } => some(id),
+            Type::EffectRowType { tail, .. } => tail,
+            _ => panic("effect fact batch: formal resolved to non-row")
+        }
+        match mapped_tail {
+            some(raw_tail) => {
+                match batch_effect_formal_for_raw(result, raw_tail) {
+                    some(existing) => if !effect_param_ref_same(
+                            existing, parameter) {
+                        panic("effect fact batch: remapped tail conflicts")
+                    },
+                    none => result.effect_formals.push(
+                        make_typed_effect_formal_fact(raw_tail, parameter))
+                }
+            },
+            none => {}
+        }
+    }
+    for fact in batch.callable_effects {
+        let reference = typed_callable_effect_reference(fact)
+        let row = apply_subst_row(
+            frozen_subst, typed_callable_effect_row(fact))
+        match callable_effect_row_in_batch(result, reference) {
+            some(existing) => if !types_equal(
+                    Type::EffectRowType {
+                        effects: existing.effects, tail: existing.tail
+                    }, Type::EffectRowType {
+                        effects: row.effects, tail: row.tail
+                    }) {
+                panic("effect fact batch: remapped callable conflicts")
+            },
+            none => result.callable_effects.push(
+                make_typed_callable_effect_fact(reference, row))
+        }
+    }
+    result
+}
+
+pub fn stage_effect_header_in_batch(
+    env: TypeEnv, mut batch: EffectFactBatch,
+    schema: TypedEffectHeaderSchema
+) -> EffectFactBatch {
+    for binding in typed_effect_header_schema_bindings(schema) {
+        append_effect_formal_to_batch(
+            env, batch,
+            typed_effect_header_binding_raw_tail(binding),
+            typed_effect_header_binding_parameter(binding))
+    }
+    batch
+}
+
+pub fn stage_callable_effect_in_batch(
+    env: TypeEnv, mut batch: EffectFactBatch,
+    reference: ExecutableRef, row: EffectRow
+) -> EffectFactBatch {
+    append_callable_effect_to_batch(env, batch, reference, row)
+    batch
+}
+
+pub fn try_project_effect_header_from_batch(
+    env: TypeEnv, batch: EffectFactBatch, signature: Type
+) -> TypedEffectHeaderSchema? {
+    let tails = ordered_effect_tail_vars(signature)
+    let mut bindings: List<TypedEffectHeaderBinding> = []
+    for raw_tail in tails {
+        let parameter = match combined_effect_formal_for_raw(
+                env, batch, raw_tail) {
+            some(existing) => existing,
+            none => return none
+        }
+        for binding in bindings {
+            if effect_param_ref_same(
+                    typed_effect_header_binding_parameter(binding),
+                    parameter) {
+                panic("effect fact batch: projected formal repeats")
+            }
+        }
+        bindings.push(make_typed_effect_header_binding(
+            raw_tail, parameter))
+    }
+    let schema = make_typed_effect_header_schema(bindings)
+    validate_effect_header_schema([signature], tails, schema)
+    some(schema)
+}
+
+pub fn try_project_existing_effect_header_schema(
+    env: TypeEnv, signature: Type
+) -> TypedEffectHeaderSchema? {
+    try_project_effect_header_from_batch(
+        env, empty_effect_fact_batch(), signature)
+}
+
+pub fn preflight_effect_fact_batches(
+    env: TypeEnv, batches: List<EffectFactBatch>
+) {
+    let mut aggregate = empty_effect_fact_batch()
+    for batch in batches {
+        for fact in batch.effect_formals {
+            append_effect_formal_to_batch(
+                env, aggregate,
+                typed_effect_formal_raw_tail(fact),
+                typed_effect_formal_parameter(fact))
+        }
+        for fact in batch.callable_effects {
+            append_callable_effect_to_batch(
+                env, aggregate,
+                typed_callable_effect_reference(fact),
+                typed_callable_effect_row(fact))
+        }
+    }
+}
+
+pub fn publish_effect_fact_batches(
+    mut env: TypeEnv, batches: List<EffectFactBatch>
+) {
+    preflight_effect_fact_batches(env, batches)
+    for batch in batches {
+        for fact in batch.effect_formals {
+            append_effect_formal_fact(
+                env, typed_effect_formal_raw_tail(fact),
+                typed_effect_formal_parameter(fact))
+        }
+        for fact in batch.callable_effects {
+            register_callable_effect_header(
+                env, typed_callable_effect_reference(fact),
+                typed_callable_effect_row(fact))
+        }
+    }
 }
 
 pub fn type_env_callable_effect_facts(

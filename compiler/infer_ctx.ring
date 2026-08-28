@@ -24,22 +24,28 @@ use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink,
 use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
 use union_find::{UnionFind, new_union_find, uf_find}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
-    EffectFactCheckpoint,
+    EffectFactCheckpoint, EffectFactBatch,
     StructDef, EnumDef, TypeAliasDef, EffectDef, EffectAliasDef, TraitDef,
     ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
     new_type_env, mono,
     apply_subst, apply_subst_row, apply_subst_map,
     instantiate_effect_header_schema,
+    apply_effect_header_schema_subst,
     define_effect_header_schema, publish_effect_header_schema,
     validate_effect_header_schema,
-    project_existing_effect_header_schema,
     effect_fact_checkpoint, rollback_effect_facts,
+    detach_effect_fact_suffix, remap_effect_fact_batch,
+    stage_effect_header_in_batch, stage_callable_effect_in_batch,
+    try_project_effect_header_from_batch,
+    try_project_existing_effect_header_schema,
+    preflight_effect_fact_batches, publish_effect_fact_batches,
     register_callable_effect_header,
     instantiate_type_alias_schema, find_impl, lookup_variant,
-    exact_scheme_value_origin, build_scheme_var_map,
+    exact_scheme_value_origin,
     ordered_effect_tail_vars, scheme_value_type_vars,
     impl_method_core_as_scheme, frozen_impl_predicates,
     impl_method_core_type, impl_method_core_type_vars,
+    impl_method_core_effect_schema,
     impl_predicate_subject_type_var, impl_predicate_trait_name,
     impl_predicate_assoc_constraints, impl_assoc_predicate_name,
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
@@ -168,7 +174,7 @@ pub struct AssocRebindEntry {
 pub enum PendingDictPurpose {
     DirectCallPublish { output_slot: List<DictRef> },
     ExternCallValidate,
-    CallableValueShadow
+    CallableValueShadow { output_slot: List<DictRef> }
 }
 
 pub enum PendingEvidenceSource {
@@ -180,12 +186,11 @@ pub enum PendingEvidenceSource {
 }
 
 pub struct PendingDictObligation {
-    pub runtime_owner: ExecutableRef,
-    pub source: PendingEvidenceSource,
-    pub callee_type: Type,
-    pub fn_bounds: List<FnBoundsEntry>,
-    pub span: Span,
-    pub purpose: PendingDictPurpose
+    runtime_owner: ExecutableRef,
+    source: PendingEvidenceSource,
+    receipt: CallableInstantiationReceipt,
+    span: Span,
+    purpose: PendingDictPurpose
 }
 
 struct EvidenceFailure {
@@ -245,15 +250,30 @@ struct PendingAnonymousCallableHeader {
     signature: Type
 }
 
-struct FinalAnonymousCallableHeader {
-    executable: ExecutableRef,
-    signature: Type,
-    schema: TypedEffectHeaderSchema
+pub struct OwnerBatchCheckpoint {
+    pending_dict_len: Int,
+    pending_anonymous_len: Int,
+    effect_facts: EffectFactCheckpoint
 }
 
-pub struct RecursiveEffectFactCheckpoint {
-    effect_facts: EffectFactCheckpoint,
-    pending_anonymous_len: Int
+pub struct OwnerInferenceBatch {
+    pending_dicts: List<PendingDictObligation>,
+    pending_anonymous: List<PendingAnonymousCallableHeader>,
+    effect_facts: EffectFactBatch
+}
+
+enum InferMutationUndo {
+    BoxedVar { def_id: Int, was_present: Bool },
+    VarLambdaDepth { def_id: Int, previous: Int? },
+    DefSpan { def_id: Int, previous: Span? },
+    MutableVar { def_id: Int, was_present: Bool },
+    LetDef { def_id: Int, was_present: Bool },
+    MutParamDef { def_id: Int, was_present: Bool },
+    FnMutParams { name: Str, previous: List<Bool>? },
+    RebindAssoc {
+        owner: Str, previous: List<AssocRebindEntry>?
+    },
+    VarBounds { type_var: Int, previous: Set<Str>? }
 }
 
 pub struct InferCtx {
@@ -274,7 +294,9 @@ pub struct InferCtx {
     pub current_fn_return_type: Type?,
     pub current_fn_bounds: List<FnBoundsEntry>,
     pub fn_bounds_stack: List<List<FnBoundsEntry>>,
-    pub pending_dict_obligations: List<PendingDictObligation>,
+    pending_dict_obligations: List<PendingDictObligation>,
+    infer_mutation_undos: List<InferMutationUndo>,
+    infer_mutation_checkpoints: List<Int>,
     pub loop_depth: Int,
     pub mod_path_stack: List<Str>,
     // Local binding DefId -> canonical value origin.  DefIds are lexical, so
@@ -364,6 +386,8 @@ pub fn new_infer_ctx(
         current_fn_bounds: [],
         fn_bounds_stack: [],
         pending_dict_obligations: [],
+        infer_mutation_undos: [],
+        infer_mutation_checkpoints: [],
         loop_depth: 0,
         mod_path_stack: [],
         use_aliases: map_new(),
@@ -405,6 +429,229 @@ pub fn new_infer_ctx(
         impl_check_frame_stack: [],
         impl_check_owners: map_new()
     }
+}
+
+fn infer_mutation_journal_active(ctx: InferCtx) -> Bool {
+    ctx.infer_mutation_checkpoints.len() != 0
+}
+
+pub fn begin_infer_mutation_journal(mut ctx: InferCtx) -> Int {
+    if ctx.infer_mutation_checkpoints.len() == 0 &&
+       ctx.infer_mutation_undos.len() != 0 {
+        panic("inference mutation journal: inactive journal is not empty")
+    }
+    let checkpoint = ctx.infer_mutation_undos.len()
+    ctx.infer_mutation_checkpoints.push(checkpoint)
+    checkpoint
+}
+
+fn assert_infer_mutation_checkpoint(
+    ctx: InferCtx, checkpoint: Int
+) {
+    match ctx.infer_mutation_checkpoints.last() {
+        some(active) => if active != checkpoint {
+            panic("inference mutation journal: checkpoint is not active")
+        },
+        none => panic("inference mutation journal: no active checkpoint")
+    }
+}
+
+pub fn commit_infer_mutation_journal(
+    mut ctx: InferCtx, checkpoint: Int
+) {
+    assert_infer_mutation_checkpoint(ctx, checkpoint)
+    ctx.infer_mutation_checkpoints.pop()
+    if ctx.infer_mutation_checkpoints.len() == 0 {
+        ctx.infer_mutation_undos = []
+    }
+}
+
+fn restore_set_membership(
+    mut values: Set<Int>, value: Int, was_present: Bool
+) {
+    if was_present { values.insert(value) } else { values.remove(value) }
+}
+
+pub fn rollback_infer_mutation_journal(
+    mut ctx: InferCtx, checkpoint: Int
+) {
+    assert_infer_mutation_checkpoint(ctx, checkpoint)
+    let mut index = ctx.infer_mutation_undos.len()
+    while index > checkpoint {
+        let undo = ctx.infer_mutation_undos.get(index - 1).unwrap()
+        match undo {
+            InferMutationUndo::BoxedVar { def_id, was_present } =>
+                restore_set_membership(
+                    ctx.boxed_vars, def_id, was_present),
+            InferMutationUndo::VarLambdaDepth { def_id, previous } =>
+                match previous {
+                    some(value) => ctx.var_lambda_depth.insert(def_id, value),
+                    none => { ctx.var_lambda_depth.remove(def_id) }
+                },
+            InferMutationUndo::DefSpan { def_id, previous } =>
+                match previous {
+                    some(value) => ctx.env.scope.def_spans.insert(
+                        def_id, value),
+                    none => { ctx.env.scope.def_spans.remove(def_id) }
+                },
+            InferMutationUndo::MutableVar { def_id, was_present } =>
+                restore_set_membership(
+                    ctx.env.scope.mutable_vars, def_id, was_present),
+            InferMutationUndo::LetDef { def_id, was_present } =>
+                restore_set_membership(
+                    ctx.env.scope.let_defs, def_id, was_present),
+            InferMutationUndo::MutParamDef { def_id, was_present } =>
+                restore_set_membership(
+                    ctx.env.scope.mut_param_defs, def_id, was_present),
+            InferMutationUndo::FnMutParams { name, previous } =>
+                match previous {
+                    some(value) => ctx.fn_mut_params.insert(name, value),
+                    none => { ctx.fn_mut_params.remove(name) }
+                },
+            InferMutationUndo::RebindAssoc { owner, previous } =>
+                match previous {
+                    some(value) => ctx.rebind_assoc_provenance.insert(
+                        owner, value),
+                    none => { ctx.rebind_assoc_provenance.remove(owner) }
+                },
+            InferMutationUndo::VarBounds { type_var, previous } =>
+                match previous {
+                    some(value) => ctx.env.scope.var_bounds.insert(
+                        type_var, value),
+                    none => { ctx.env.scope.var_bounds.remove(type_var) }
+                }
+        }
+        index = index - 1
+    }
+    ctx.infer_mutation_undos = ctx.infer_mutation_undos.slice(
+        0, checkpoint)
+    ctx.infer_mutation_checkpoints.pop()
+}
+
+pub fn journal_boxed_var_insert(mut ctx: InferCtx, def_id: Int) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::BoxedVar {
+            def_id: def_id, was_present: ctx.boxed_vars.contains(def_id)
+        })
+    }
+    ctx.boxed_vars.insert(def_id)
+}
+
+pub fn journal_var_lambda_depth_set(
+    mut ctx: InferCtx, def_id: Int, depth: Int
+) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(
+            InferMutationUndo::VarLambdaDepth {
+                def_id: def_id,
+                previous: ctx.var_lambda_depth.get(def_id)
+            })
+    }
+    ctx.var_lambda_depth.insert(def_id, depth)
+}
+
+pub fn journal_record_def_span(
+    mut ctx: InferCtx, def_id: Int, span: Span
+) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::DefSpan {
+            def_id: def_id, previous: ctx.env.scope.def_spans.get(def_id)
+        })
+    }
+    ctx.env.record_def_span(def_id, span)
+}
+
+pub fn journal_mutable_var_insert(mut ctx: InferCtx, def_id: Int) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::MutableVar {
+            def_id: def_id,
+            was_present: ctx.env.scope.mutable_vars.contains(def_id)
+        })
+    }
+    ctx.env.scope.mutable_vars.insert(def_id)
+}
+
+pub fn journal_let_def_insert(mut ctx: InferCtx, def_id: Int) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::LetDef {
+            def_id: def_id,
+            was_present: ctx.env.scope.let_defs.contains(def_id)
+        })
+    }
+    ctx.env.scope.let_defs.insert(def_id)
+}
+
+pub fn journal_mut_param_def_insert(mut ctx: InferCtx, def_id: Int) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::MutParamDef {
+            def_id: def_id,
+            was_present: ctx.env.scope.mut_param_defs.contains(def_id)
+        })
+    }
+    ctx.env.scope.mut_param_defs.insert(def_id)
+}
+
+pub fn journal_fn_mut_params_set(
+    mut ctx: InferCtx, name: Str, value: List<Bool>
+) {
+    if infer_mutation_journal_active(ctx) {
+        let previous = ctx.fn_mut_params.get(name).map(fn(existing) {
+            list_clone(existing)
+        })
+        ctx.infer_mutation_undos.push(InferMutationUndo::FnMutParams {
+            name: name, previous: previous
+        })
+    }
+    ctx.fn_mut_params.insert(name, value)
+}
+
+pub fn journal_fn_mut_params_remove(mut ctx: InferCtx, name: Str) {
+    if infer_mutation_journal_active(ctx) {
+        let previous = ctx.fn_mut_params.get(name).map(fn(existing) {
+            list_clone(existing)
+        })
+        ctx.infer_mutation_undos.push(InferMutationUndo::FnMutParams {
+            name: name, previous: previous
+        })
+    }
+    ctx.fn_mut_params.remove(name)
+}
+
+pub fn journal_rebind_assoc_provenance_set(
+    mut ctx: InferCtx, owner: Str, value: List<AssocRebindEntry>
+) {
+    if infer_mutation_journal_active(ctx) {
+        let previous = ctx.rebind_assoc_provenance.get(owner).map(
+            fn(existing) { list_clone(existing) })
+        ctx.infer_mutation_undos.push(InferMutationUndo::RebindAssoc {
+            owner: owner, previous: previous
+        })
+    }
+    ctx.rebind_assoc_provenance.insert(owner, value)
+}
+
+pub fn journal_var_bounds_set(
+    mut ctx: InferCtx, type_var: Int, value: Set<Str>
+) {
+    if infer_mutation_journal_active(ctx) {
+        let previous = ctx.env.scope.var_bounds.get(type_var).map(
+            fn(existing) { set_from(existing.to_list()) })
+        ctx.infer_mutation_undos.push(InferMutationUndo::VarBounds {
+            type_var: type_var, previous: previous
+        })
+    }
+    ctx.env.scope.var_bounds.insert(type_var, value)
+}
+
+pub fn journal_var_bound_insert(
+    mut ctx: InferCtx, type_var: Int, trait_name: Str
+) {
+    let mut bounds: Set<Str> = match ctx.env.scope.var_bounds.get(type_var) {
+        some(existing) => set_from(existing.to_list()),
+        none => set_new()
+    }
+    bounds.insert(trait_name)
+    journal_var_bounds_set(ctx, type_var, bounds)
 }
 
 fn recursive_callable_list_contains(
@@ -511,22 +758,57 @@ pub fn recursive_callable_is_closed(
     recursive_callable_list_contains(ctx.closed_recursive_callables, executable)
 }
 
-pub fn recursive_effect_fact_checkpoint(
-    ctx: InferCtx
-) -> RecursiveEffectFactCheckpoint {
-    RecursiveEffectFactCheckpoint {
-        effect_facts: effect_fact_checkpoint(ctx.env),
+pub fn owner_batch_checkpoint(ctx: InferCtx) -> OwnerBatchCheckpoint {
+    OwnerBatchCheckpoint {
+        pending_dict_len: ctx.pending_dict_obligations.len(),
         pending_anonymous_len:
-            ctx.pending_anonymous_callable_headers.len()
+            ctx.pending_anonymous_callable_headers.len(),
+        effect_facts: effect_fact_checkpoint(ctx.env)
     }
 }
 
-pub fn rollback_recursive_effect_facts(
-    mut ctx: InferCtx, checkpoint: RecursiveEffectFactCheckpoint
+pub fn rollback_owner_batch(
+    mut ctx: InferCtx, checkpoint: OwnerBatchCheckpoint
 ) {
+    if checkpoint.pending_dict_len > ctx.pending_dict_obligations.len() ||
+       checkpoint.pending_anonymous_len >
+            ctx.pending_anonymous_callable_headers.len() {
+        panic("owner batch rollback: checkpoint exceeds pending state")
+    }
+    ctx.pending_dict_obligations = ctx.pending_dict_obligations.slice(
+        0, checkpoint.pending_dict_len)
+    ctx.pending_anonymous_callable_headers =
+        ctx.pending_anonymous_callable_headers.slice(
+            0, checkpoint.pending_anonymous_len)
     rollback_effect_facts(ctx.env, checkpoint.effect_facts)
-    rollback_pending_anonymous_callable_headers(
-        ctx, checkpoint.pending_anonymous_len)
+}
+
+pub fn detach_owner_batch(
+    mut ctx: InferCtx, checkpoint: OwnerBatchCheckpoint
+) -> OwnerInferenceBatch {
+    if checkpoint.pending_dict_len > ctx.pending_dict_obligations.len() ||
+       checkpoint.pending_anonymous_len >
+            ctx.pending_anonymous_callable_headers.len() {
+        panic("owner batch detach: checkpoint exceeds pending state")
+    }
+    let effect_facts = detach_effect_fact_suffix(
+        ctx.env, checkpoint.effect_facts)
+    let batch = OwnerInferenceBatch {
+        pending_dicts: ctx.pending_dict_obligations.slice(
+            checkpoint.pending_dict_len,
+            ctx.pending_dict_obligations.len()),
+        pending_anonymous:
+            ctx.pending_anonymous_callable_headers.slice(
+                checkpoint.pending_anonymous_len,
+                ctx.pending_anonymous_callable_headers.len()),
+        effect_facts: effect_facts
+    }
+    ctx.pending_dict_obligations = ctx.pending_dict_obligations.slice(
+        0, checkpoint.pending_dict_len)
+    ctx.pending_anonymous_callable_headers =
+        ctx.pending_anonymous_callable_headers.slice(
+            0, checkpoint.pending_anonymous_len)
+    batch
 }
 
 pub fn pending_anonymous_callable_checkpoint(ctx: InferCtx) -> Int {
@@ -565,42 +847,94 @@ pub fn rollback_pending_anonymous_callable_headers(
         ctx.pending_anonymous_callable_headers.slice(0, checkpoint)
 }
 
-pub fn drain_pending_anonymous_callable_headers(
+pub fn drain_representable_pending_anonymous(
     mut ctx: InferCtx, checkpoint: Int,
     owner_schema: TypedEffectHeaderSchema, final_subst: UnionFind
 ) {
     if checkpoint < 0 ||
        checkpoint > ctx.pending_anonymous_callable_headers.len() {
-        panic("anonymous callable header: invalid drain checkpoint")
+        panic("anonymous callable header: invalid selective checkpoint")
     }
     publish_effect_header_schema(ctx.env, owner_schema)
-    let mut finalized: List<FinalAnonymousCallableHeader> = []
+    let mut unmatched: List<PendingAnonymousCallableHeader> = []
     let mut index = checkpoint
     while index < ctx.pending_anonymous_callable_headers.len() {
         let pending = ctx.pending_anonymous_callable_headers.get(
             index).unwrap()
         let signature = apply_subst(final_subst, pending.signature)
-        let schema = project_existing_effect_header_schema(
-            ctx.env, signature)
-        finalized.push(FinalAnonymousCallableHeader {
-            executable: pending.executable,
-            signature: signature,
-            schema: schema
-        })
+        match try_project_existing_effect_header_schema(
+                ctx.env, signature) {
+            some(schema) => publish_exact_callable_effect_header(
+                ctx, pending.executable, signature, schema),
+            none => unmatched.push(pending)
+        }
         index = index + 1
-    }
-    for value in finalized {
-        publish_exact_callable_effect_header(
-            ctx, value.executable, value.signature, value.schema)
     }
     ctx.pending_anonymous_callable_headers =
         ctx.pending_anonymous_callable_headers.slice(0, checkpoint)
+    for pending in unmatched {
+        ctx.pending_anonymous_callable_headers.push(pending)
+    }
 }
 
 pub struct CallableInstantiationReceipt {
-    pub ty: Type,
-    pub type_args: List<HCallableTypeActual>,
-    pub effect_instantiation: HCallableEffectInstantiation?
+    ty: Type,
+    source_to_actual: Map<Int, Type>,
+    type_args: List<HCallableTypeActual>,
+    effect_instantiation: HCallableEffectInstantiation?
+}
+
+pub fn callable_receipt_type(value: CallableInstantiationReceipt) -> Type {
+    value.ty
+}
+
+pub fn callable_receipt_type_args(
+    value: CallableInstantiationReceipt
+) -> List<HCallableTypeActual> {
+    value.type_args.map(fn(actual) { actual })
+}
+
+pub fn callable_receipt_effects(
+    value: CallableInstantiationReceipt
+) -> HCallableEffectInstantiation? {
+    value.effect_instantiation
+}
+
+pub fn error_callable_receipt() -> CallableInstantiationReceipt {
+    CallableInstantiationReceipt {
+        ty: Type::ErrorType, source_to_actual: map_new(),
+        type_args: [], effect_instantiation: none
+    }
+}
+
+fn callable_receipt_actual(
+    value: CallableInstantiationReceipt, source: Int
+) -> Type? {
+    value.source_to_actual.get(source)
+}
+
+fn assert_callable_receipt_sources(
+    value: CallableInstantiationReceipt, expected: List<Int>
+) {
+    if value.source_to_actual.len() != expected.len() {
+        panic("callable receipt: source formal census differs")
+    }
+    for source in expected {
+        if !value.source_to_actual.contains_key(source) {
+            panic("callable receipt: expected source formal is absent")
+        }
+    }
+}
+
+fn identity_instantiation_mapping(ids: List<Int>) -> Map<Int, Type> {
+    let mapping: Map<Int, Type> = map_new()
+    for id in ids {
+        if mapping.contains_key(id) {
+            panic("callable instantiation: source formal repeats")
+        }
+        mapping.insert(id, Type::TypeVar { id: id, name: none })
+    }
+    mapping
 }
 
 fn declared_callable_type_vars(scheme: TypeScheme) -> List<Int> {
@@ -684,6 +1018,14 @@ fn callable_instantiation_from_mapping(
     owner: SymbolRef, scheme: TypeScheme, declared: List<Int>,
     mapping: Map<Int, Type>
 ) -> HCallableValueInstantiation {
+    if mapping.len() != scheme.type_vars.len() {
+        panic("callable instantiation: mapping census differs")
+    }
+    for source in scheme.type_vars {
+        if !mapping.contains_key(source) {
+            panic("callable instantiation: source formal mapping is absent")
+        }
+    }
     HCallableValueInstantiation {
         type_args: callable_type_actuals_from_mapping(
             owner, scheme, declared, mapping),
@@ -699,14 +1041,34 @@ fn install_monomorphic_scheme_bounds(
         if !scheme.type_vars.contains(bound.type_var) {
             panic("recursive callable scheme: bound subject is not quantified")
         }
-        let mut existing: Set<Str> = match
-                ctx.env.scope.var_bounds.get(bound.type_var) {
-            some(bounds) => bounds,
-            none => set_new()
-        }
-        existing.insert(bound.trait_name)
-        ctx.env.scope.var_bounds.insert(bound.type_var, existing)
+        journal_var_bound_insert(
+            ctx, bound.type_var, bound.trait_name)
     }
+}
+
+fn instantiate_scheme_with_receipt_mapping(
+    mut ctx: InferCtx, scheme: TypeScheme
+) -> (Type, Map<Int, Type>) {
+    let mapping: Map<Int, Type> = map_new()
+    for source in scheme.type_vars {
+        if mapping.contains_key(source) {
+            panic("callable instantiation: scheme formal repeats")
+        }
+        mapping.insert(source, ctx.env.fresh_var())
+    }
+    for bound in scheme.bounds {
+        match mapping.get(bound.type_var) {
+            some(Type::TypeVar { id, .. }) =>
+                journal_var_bound_insert(ctx, id, bound.trait_name),
+            _ => panic(
+                "callable instantiation: bound subject is not quantified")
+        }
+    }
+    let instantiated = apply_subst_map(mapping, scheme.ty)
+    let schema = apply_effect_header_schema_subst(
+        mapping, scheme.effect_schema)
+    publish_effect_header_schema(ctx.env, schema)
+    (instantiated, mapping)
 }
 
 pub fn instantiate_callable_scheme(
@@ -717,15 +1079,25 @@ pub fn instantiate_callable_scheme(
             some(symbol) => if recursive_callable_is_active(
                     ctx, make_named_executable_ref(symbol)) {
                 install_monomorphic_scheme_bounds(ctx, scheme)
+                let mapping = identity_instantiation_mapping(
+                    scheme.type_vars)
+                let exact = callable_instantiation_from_mapping(
+                    symbol, scheme, declared_callable_type_vars(scheme),
+                    mapping)
                 return CallableInstantiationReceipt {
-                    ty: scheme.ty, type_args: [], effect_instantiation: none
+                    ty: scheme.ty, source_to_actual: mapping,
+                    type_args: exact.type_args,
+                    effect_instantiation: exact.effects
                 }
             },
             none => {}
         },
         none => {}
     }
-    let instantiated = ctx.env.instantiate_type_scheme_with_mapping(scheme)
+    let instantiated = instantiate_scheme_with_receipt_mapping(ctx, scheme)
+    if instantiated.1.len() != scheme.type_vars.len() {
+        panic("callable instantiation: complete mapping is absent")
+    }
     let exact = match scheme.def_id {
         some(def_id) => match ctx.value_symbols.get(def_id) {
             some(symbol) => {
@@ -741,11 +1113,13 @@ pub fn instantiate_callable_scheme(
     }
     match exact {
         some(value) => CallableInstantiationReceipt {
-            ty: instantiated.0, type_args: value.type_args,
+            ty: instantiated.0, source_to_actual: instantiated.1,
+            type_args: value.type_args,
             effect_instantiation: value.effects
         },
         none => CallableInstantiationReceipt {
-            ty: instantiated.0, type_args: [], effect_instantiation: none
+            ty: instantiated.0, source_to_actual: instantiated.1,
+            type_args: [], effect_instantiation: none
         }
     }
 }
@@ -759,14 +1133,35 @@ fn install_monomorphic_impl_predicates(
         if !type_vars.contains(subject) {
             panic("recursive impl method: predicate subject is not quantified")
         }
-        let mut existing: Set<Str> = match
-                ctx.env.scope.var_bounds.get(subject) {
-            some(bounds) => bounds,
-            none => set_new()
-        }
-        existing.insert(impl_predicate_trait_name(predicate))
-        ctx.env.scope.var_bounds.insert(subject, existing)
+        journal_var_bound_insert(
+            ctx, subject, impl_predicate_trait_name(predicate))
     }
+}
+
+fn instantiate_impl_with_receipt_mapping(
+    mut ctx: InferCtx, owner: ImplEntry, core: ImplMethodSchemeCore
+) -> (Type, Map<Int, Type>) {
+    let mapping: Map<Int, Type> = map_new()
+    for source in impl_method_core_type_vars(core) {
+        if mapping.contains_key(source) {
+            panic("impl method instantiation: formal repeats")
+        }
+        mapping.insert(source, ctx.env.fresh_var())
+    }
+    for predicate in frozen_impl_predicates(owner.predicates) {
+        match mapping.get(impl_predicate_subject_type_var(predicate)) {
+            some(Type::TypeVar { id, .. }) => journal_var_bound_insert(
+                ctx, id, impl_predicate_trait_name(predicate)),
+            _ => panic(
+                "impl method instantiation: predicate subject is not quantified")
+        }
+    }
+    let instantiated = apply_subst_map(
+        mapping, impl_method_core_type(core))
+    let schema = apply_effect_header_schema_subst(
+        mapping, impl_method_core_effect_schema(core))
+    publish_effect_header_schema(ctx.env, schema)
+    (instantiated, mapping)
 }
 
 pub fn instantiate_callable_impl_method(
@@ -777,13 +1172,29 @@ pub fn instantiate_callable_impl_method(
         impl_method_ref_member(method_ref))
     if recursive_callable_is_active(ctx, executable) {
         install_monomorphic_impl_predicates(ctx, owner, core)
+        let mapping = identity_instantiation_mapping(
+            impl_method_core_type_vars(core))
+        let scheme = impl_method_core_as_scheme(core)
+        let effect_tails = ordered_effect_tail_vars(scheme.ty)
+        let declared = scheme.type_vars.filter(fn(id) {
+            !owner.type_param_vars.contains(id) && !effect_tails.contains(id)
+        })
+        let callable_owner = match owner.method_intrinsics.get(
+                impl_method_ref_name(method_ref)) {
+            some(intrinsic) => intrinsic_ref_symbol(intrinsic),
+            none => impl_method_ref_member(method_ref)
+        }
+        let exact = callable_instantiation_from_mapping(
+            callable_owner, scheme, declared, mapping)
         return CallableInstantiationReceipt {
             ty: impl_method_core_type(core),
-            type_args: [], effect_instantiation: none
+            source_to_actual: mapping,
+            type_args: exact.type_args,
+            effect_instantiation: exact.effects
         }
     }
-    let instantiated = ctx.env.instantiate_impl_method_core_with_mapping(
-        owner, core)
+    let instantiated = instantiate_impl_with_receipt_mapping(
+        ctx, owner, core)
     let method_name = impl_method_ref_name(method_ref)
     let callable_owner = match owner.method_intrinsics.get(method_name) {
         some(intrinsic) => intrinsic_ref_symbol(intrinsic),
@@ -798,6 +1209,7 @@ pub fn instantiate_callable_impl_method(
         callable_owner, scheme, declared, instantiated.1)
     CallableInstantiationReceipt {
         ty: instantiated.0,
+        source_to_actual: instantiated.1,
         type_args: exact.type_args,
         effect_instantiation: exact.effects
     }
@@ -915,8 +1327,10 @@ fn apply_project_value_binding(
                 none => ctx.fn_mut_params.get(ultimate)
             }
             match source_mut {
-                some(flags) => { ctx.fn_mut_params.insert(binding.exposed_name, flags) },
-                none => { ctx.fn_mut_params.remove(binding.exposed_name) }
+                some(flags) => journal_fn_mut_params_set(
+                    ctx, binding.exposed_name, flags),
+                none => journal_fn_mut_params_remove(
+                    ctx, binding.exposed_name)
             }
             true
         }
@@ -1079,8 +1493,8 @@ fn restore_project_namespace_undo(mut ctx: InferCtx, undo: ProjectNamespaceUndo)
             none => { ctx.env.types.variant_to_enum.remove(name) }
         },
         ProjectNamespaceUndo::FnMutParams { name, previous } => match previous {
-            some(flags) => { ctx.fn_mut_params.insert(name, flags) },
-            none => { ctx.fn_mut_params.remove(name) }
+            some(flags) => journal_fn_mut_params_set(ctx, name, flags),
+            none => journal_fn_mut_params_remove(ctx, name)
         }
     }
 }
@@ -2763,15 +3177,17 @@ fn resolve_scheme_evidence(
     runtime_owner: ExecutableRef,
     sink: CollectingSink, env: TypeEnv,
     current_fn_bounds: List<FnBoundsEntry>,
-    scheme: TypeScheme, callee_type: Type, s: UnionFind, span: Span,
+    scheme: TypeScheme, receipt: CallableInstantiationReceipt,
+    s: UnionFind, span: Span,
     report_assoc_mismatch: Bool
 ) -> SchemeEvidenceResolution {
+    assert_callable_receipt_sources(receipt, scheme.type_vars)
     if scheme.bounds.len() == 0 {
         return SchemeEvidenceResolution::Resolved {
             dicts: [], assoc_mismatch: false
         }
     }
-    let var_map = build_scheme_var_map(scheme, callee_type)
+    let var_map = receipt.source_to_actual
     let mut resolved_dicts: List<DictRef> = []
     let mut pending_failures: List<EvidenceFailure> = []
     let mut missing_failures: List<EvidenceFailure> = []
@@ -2855,7 +3271,7 @@ fn purpose_reports_assoc_mismatch(purpose: PendingDictPurpose) -> Bool {
     match purpose {
         PendingDictPurpose::DirectCallPublish { .. } => true,
         PendingDictPurpose::ExternCallValidate => true,
-        PendingDictPurpose::CallableValueShadow => false
+        PendingDictPurpose::CallableValueShadow { .. } => true
     }
 }
 
@@ -2863,7 +3279,7 @@ fn purpose_reports_drain_failure(purpose: PendingDictPurpose) -> Bool {
     match purpose {
         PendingDictPurpose::DirectCallPublish { .. } => true,
         PendingDictPurpose::ExternCallValidate => true,
-        PendingDictPurpose::CallableValueShadow => false
+        PendingDictPurpose::CallableValueShadow { .. } => false
     }
 }
 
@@ -2879,51 +3295,11 @@ fn publish_resolved_dicts(
             for dict_ref in dicts { output.push(dict_ref) }
         },
         PendingDictPurpose::ExternCallValidate => {},
-        PendingDictPurpose::CallableValueShadow => {}
-    }
-}
-
-pub fn resolve_dicts_from_scheme(
-    runtime_owner: ExecutableRef,
-    sink: CollectingSink, env: TypeEnv,
-    current_fn_bounds: List<FnBoundsEntry>,
-    scheme: TypeScheme, callee_type: Type, s: UnionFind, span: Span
-) -> List<DictRef> {
-    match resolve_scheme_evidence(
-        runtime_owner, sink, env, current_fn_bounds,
-        scheme, callee_type, s, span, true
-    ) {
-        SchemeEvidenceResolution::Resolved { dicts, .. } => dicts,
-        SchemeEvidenceResolution::Pending { failures } => {
-            report_evidence_failures(sink, failures, span)
-            []
-        },
-        SchemeEvidenceResolution::Missing { failures } => {
-            report_evidence_failures(sink, failures, span)
-            []
-        }
-    }
-}
-
-pub fn resolve_dicts_from_impl_owner(
-    runtime_owner: ExecutableRef,
-    sink: CollectingSink, env: TypeEnv,
-    current_fn_bounds: List<FnBoundsEntry>,
-    owner: ImplEntry, method_core: ImplMethodSchemeCore,
-    callee_type: Type, s: UnionFind, span: Span
-) -> List<DictRef> {
-    match resolve_impl_owner_evidence(
-        runtime_owner, sink, env, current_fn_bounds, owner, method_core,
-        callee_type, s, span, true
-    ) {
-        SchemeEvidenceResolution::Resolved { dicts, .. } => dicts,
-        SchemeEvidenceResolution::Pending { failures } => {
-            report_evidence_failures(sink, failures, span)
-            []
-        },
-        SchemeEvidenceResolution::Missing { failures } => {
-            report_evidence_failures(sink, failures, span)
-            []
+        PendingDictPurpose::CallableValueShadow { output_slot: output } => {
+            if output.len() != 0 {
+                panic("unreachable: callable value dictionaries filled twice")
+            }
+            for dict_ref in dicts { output.push(dict_ref) }
         }
     }
 }
@@ -2932,14 +3308,15 @@ pub fn resolve_dicts_from_impl_owner(
 // exact same alias is retained by the obligation and populated only after all
 // bounds resolve atomically.
 pub fn resolve_or_defer_dicts_from_scheme(
-    mut ctx: InferCtx, scheme: TypeScheme, callee_type: Type,
+    mut ctx: InferCtx, scheme: TypeScheme,
+    receipt: CallableInstantiationReceipt,
     s: UnionFind, span: Span, purpose: PendingDictPurpose
 ) {
     if scheme.bounds.len() == 0 { return }
     match resolve_scheme_evidence(
         current_dictionary_evidence_owner(ctx),
         ctx.sink, ctx.env, ctx.current_fn_bounds,
-        scheme, callee_type, s, span,
+        scheme, receipt, s, span,
         purpose_reports_assoc_mismatch(purpose)
     ) {
         SchemeEvidenceResolution::Resolved { dicts, .. } =>
@@ -2948,8 +3325,7 @@ pub fn resolve_or_defer_dicts_from_scheme(
             ctx.pending_dict_obligations.push(PendingDictObligation {
                 runtime_owner: current_dictionary_evidence_owner(ctx),
                 source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
-                callee_type: callee_type,
-                fn_bounds: list_clone(ctx.current_fn_bounds),
+                receipt: receipt,
                 span: span,
                 purpose: purpose
             }),
@@ -2960,14 +3336,15 @@ pub fn resolve_or_defer_dicts_from_scheme(
 
 pub fn resolve_or_defer_dicts_from_impl_owner(
     mut ctx: InferCtx, owner: ImplEntry,
-    method_core: ImplMethodSchemeCore, callee_type: Type,
+    method_core: ImplMethodSchemeCore,
+    receipt: CallableInstantiationReceipt,
     s: UnionFind, span: Span, purpose: PendingDictPurpose
 ) {
     if frozen_impl_predicates(owner.predicates).len() == 0 { return }
     match resolve_impl_owner_evidence(
         current_dictionary_evidence_owner(ctx),
         ctx.sink, ctx.env, ctx.current_fn_bounds,
-        owner, method_core, callee_type, s, span,
+        owner, method_core, receipt, s, span,
         purpose_reports_assoc_mismatch(purpose)
     ) {
         SchemeEvidenceResolution::Resolved { dicts, .. } =>
@@ -2978,8 +3355,7 @@ pub fn resolve_or_defer_dicts_from_impl_owner(
                 source: PendingEvidenceSource::ImplOwnerEvidenceSource {
                     owner: owner, method_core: method_core
                 },
-                callee_type: callee_type,
-                fn_bounds: list_clone(ctx.current_fn_bounds),
+                receipt: receipt,
                 span: span,
                 purpose: purpose
             }),
@@ -2988,30 +3364,37 @@ pub fn resolve_or_defer_dicts_from_impl_owner(
     }
 }
 
-// Callable values keep final DictRef attachment in resolve_value_ident.  This
-// shadow participates only in the owner's canonical evidence/associated-type
-// fixed point, so ordinary shadow failures stay silent until final zonk.
+// A callable value owns one HIR output alias immediately. If evidence is not
+// yet concrete, the owner batch retains this exact receipt and fills the alias
+// during its single finalizer-time drain.
 pub fn register_callable_value_shadow(
-    mut ctx: InferCtx, scheme: TypeScheme, callee_type: Type,
-    s: UnionFind, span: Span
+    mut ctx: InferCtx, scheme: TypeScheme,
+    receipt: CallableInstantiationReceipt,
+    s: UnionFind, span: Span, output_slot: List<DictRef>
 ) {
     if scheme.bounds.len() == 0 { return }
     match resolve_scheme_evidence(
         current_dictionary_evidence_owner(ctx),
         ctx.sink, ctx.env, ctx.current_fn_bounds,
-        scheme, callee_type, s, span, false
+        scheme, receipt, s, span, false
     ) {
-        SchemeEvidenceResolution::Resolved { .. } => {},
+        SchemeEvidenceResolution::Resolved { dicts, .. } =>
+            publish_resolved_dicts(
+                PendingDictPurpose::CallableValueShadow {
+                    output_slot: output_slot
+                }, dicts),
         SchemeEvidenceResolution::Pending { .. } =>
             ctx.pending_dict_obligations.push(PendingDictObligation {
                 runtime_owner: current_dictionary_evidence_owner(ctx),
                 source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
-                callee_type: callee_type,
-                fn_bounds: list_clone(ctx.current_fn_bounds),
+                receipt: receipt,
                 span: span,
-                purpose: PendingDictPurpose::CallableValueShadow
+                purpose: PendingDictPurpose::CallableValueShadow {
+                    output_slot: output_slot
+                }
             }),
-        SchemeEvidenceResolution::Missing { .. } => {}
+        SchemeEvidenceResolution::Missing { failures } =>
+            report_evidence_failures(ctx.sink, failures, span)
     }
 }
 
@@ -3070,20 +3453,11 @@ fn pending_evidence_attempt_budget(
     if evidence_sites == 0 { 1 } else { evidence_sites + 1 }
 }
 
-// Drain exactly one declaration owner's suffix to the finite evidence-site
-// fixed point before diagnosing call/extern failures.  Callable-value shadows
-// stay silent here; final zonk remains their diagnostic and attachment owner.
-pub fn drain_pending_dicts(
-    mut ctx: InferCtx, checkpoint: Int, s: UnionFind
+fn drain_pending_dict_obligations(
+    mut ctx: InferCtx, obligations: List<PendingDictObligation>,
+    s: UnionFind
 ) {
-    if checkpoint > ctx.pending_dict_obligations.len() {
-        panic("unreachable: invalid pending dictionary checkpoint")
-    }
-    let mut remaining = ctx.pending_dict_obligations.slice(
-        checkpoint, ctx.pending_dict_obligations.len())
-    ctx.pending_dict_obligations =
-        ctx.pending_dict_obligations.slice(0, checkpoint)
-
+    let mut remaining = obligations
     let max_attempts = pending_evidence_attempt_budget(remaining)
     let mut attempt = 0
     while remaining.len() > 0 && attempt < max_attempts {
@@ -3091,8 +3465,8 @@ pub fn drain_pending_dicts(
         for obligation in remaining {
             match resolve_pending_evidence_source(
                 obligation.runtime_owner,
-                ctx.sink, ctx.env, obligation.fn_bounds,
-                obligation.source, obligation.callee_type, s,
+                ctx.sink, ctx.env, ctx.current_fn_bounds,
+                obligation.source, obligation.receipt, s,
                 obligation.span,
                 purpose_reports_assoc_mismatch(obligation.purpose)
             ) {
@@ -3117,8 +3491,8 @@ pub fn drain_pending_dicts(
     for obligation in remaining {
         match resolve_pending_evidence_source(
             obligation.runtime_owner,
-            ctx.sink, ctx.env, obligation.fn_bounds,
-            obligation.source, obligation.callee_type, s,
+            ctx.sink, ctx.env, ctx.current_fn_bounds,
+            obligation.source, obligation.receipt, s,
             obligation.span,
             purpose_reports_assoc_mismatch(obligation.purpose)
         ) {
@@ -3138,6 +3512,104 @@ pub fn drain_pending_dicts(
             }
         }
     }
+}
+
+// Legacy acyclic owner entry now delegates to the same receipt-backed drain.
+// A1 recursive finalization detaches first and uses the opaque batch API.
+pub fn drain_pending_dicts(
+    mut ctx: InferCtx, checkpoint: Int, s: UnionFind
+) {
+    if checkpoint > ctx.pending_dict_obligations.len() {
+        panic("unreachable: invalid pending dictionary checkpoint")
+    }
+    let obligations = ctx.pending_dict_obligations.slice(
+        checkpoint, ctx.pending_dict_obligations.len())
+    ctx.pending_dict_obligations =
+        ctx.pending_dict_obligations.slice(0, checkpoint)
+    drain_pending_dict_obligations(ctx, obligations, s)
+}
+
+pub fn drain_owner_batch_dictionaries(
+    mut ctx: InferCtx, mut batch: OwnerInferenceBatch,
+    frozen_subst: UnionFind
+) -> OwnerInferenceBatch {
+    drain_pending_dict_obligations(
+        ctx, batch.pending_dicts, frozen_subst)
+    batch.pending_dicts = []
+    batch
+}
+
+pub fn stage_owner_batch_facts(
+    ctx: InferCtx, mut batch: OwnerInferenceBatch,
+    owner_executable: ExecutableRef, owner_signature: Type,
+    owner_schema: TypedEffectHeaderSchema, frozen_subst: UnionFind
+) -> OwnerInferenceBatch {
+    if batch.pending_dicts.len() != 0 {
+        panic("owner batch stage: dictionary obligations are not drained")
+    }
+    let mut facts = remap_effect_fact_batch(
+        batch.effect_facts, frozen_subst)
+    facts = stage_effect_header_in_batch(ctx.env, facts, owner_schema)
+    let final_owner_signature = apply_subst(
+        frozen_subst, owner_signature)
+    let owner_effects = match final_owner_signature {
+        Type::FnType { effects, .. } => effects,
+        _ => panic("owner batch stage: owner signature is not callable")
+    }
+    facts = stage_callable_effect_in_batch(
+        ctx.env, facts, owner_executable, owner_effects)
+
+    for pending in batch.pending_anonymous {
+        let signature = apply_subst(frozen_subst, pending.signature)
+        let schema = match try_project_effect_header_from_batch(
+                ctx.env, facts, signature) {
+            some(value) => value,
+            none => panic(
+                "owner batch stage: anonymous callable has orphan effect tail")
+        }
+        facts = stage_effect_header_in_batch(ctx.env, facts, schema)
+        let effects = match signature {
+            Type::FnType { effects, .. } => effects,
+            _ => panic(
+                "owner batch stage: anonymous signature is not callable")
+        }
+        facts = stage_callable_effect_in_batch(
+            ctx.env, facts, pending.executable, effects)
+    }
+    batch.pending_anonymous = []
+    batch.effect_facts = facts
+    batch
+}
+
+pub fn preflight_owner_batches(
+    ctx: InferCtx, batches: List<OwnerInferenceBatch>
+) {
+    let mut facts: List<EffectFactBatch> = []
+    for batch in batches {
+        if batch.pending_dicts.len() != 0 ||
+           batch.pending_anonymous.len() != 0 {
+            panic("owner batch preflight: batch is not finalized")
+        }
+        facts.push(batch.effect_facts)
+    }
+    preflight_effect_fact_batches(ctx.env, facts)
+}
+
+pub fn publish_owner_batches(
+    mut ctx: InferCtx, batches: List<OwnerInferenceBatch>
+) {
+    preflight_owner_batches(ctx, batches)
+    let mut facts: List<EffectFactBatch> = []
+    for batch in batches { facts.push(batch.effect_facts) }
+    publish_effect_fact_batches(ctx.env, facts)
+}
+
+pub fn instantiate_assoc_type_from_callable_receipt(
+    receipt: CallableInstantiationReceipt,
+    value: Type, subst: UnionFind
+) -> Type {
+    apply_subst(subst, apply_subst_map(
+        receipt.source_to_actual, value))
 }
 
 // Check associated type constraints on a bound against an impl entry's actual
@@ -3704,7 +4176,7 @@ fn bind_pattern_recovery(mut ctx: InferCtx, pattern: Pattern) {
             ctx.env.bind_mono(name, Type::ErrorType)
             match ctx.env.lookup(name) {
                 some(scheme) => match scheme.def_id {
-                    some(did) => ctx.env.record_def_span(did, span),
+                    some(did) => journal_record_def_span(ctx, did, span),
                     none => {}
                 },
                 none => {}
@@ -3747,7 +4219,7 @@ pub fn bind_pattern(mut ctx: InferCtx, pattern: Pattern, expected_type: Type, su
             ctx.env.bind_mono(name, apply_subst(subst, expected_type))
             match ctx.env.lookup(name) {
                 some(scheme) => match scheme.def_id {
-                    some(did) => ctx.env.record_def_span(did, span),
+                    some(did) => journal_record_def_span(ctx, did, span),
                     none => {}
                 },
                 none => {}
@@ -4669,7 +5141,8 @@ pub fn bind_exact_import_alias(
                         none => {}
                     }
                     match mut_flags {
-                        some(flags) => { ctx.fn_mut_params.insert(alias_name, flags) },
+                        some(flags) => journal_fn_mut_params_set(
+                            ctx, alias_name, flags),
                         none => {}
                     }
                 }
@@ -4906,17 +5379,18 @@ fn resolve_impl_owner_evidence(
     sink: CollectingSink, env: TypeEnv,
     current_fn_bounds: List<FnBoundsEntry>,
     owner: ImplEntry, core: ImplMethodSchemeCore,
-    callee_type: Type, s: UnionFind, span: Span,
+    receipt: CallableInstantiationReceipt, s: UnionFind, span: Span,
     report_assoc_mismatch: Bool
 ) -> SchemeEvidenceResolution {
+    assert_callable_receipt_sources(
+        receipt, impl_method_core_type_vars(core))
     let predicates = frozen_impl_predicates(owner.predicates)
     if predicates.len() == 0 {
         return SchemeEvidenceResolution::Resolved {
             dicts: [], assoc_mismatch: false
         }
     }
-    let core_scheme = impl_method_core_as_scheme(core)
-    let var_map = build_scheme_var_map(core_scheme, callee_type)
+    let var_map = receipt.source_to_actual
     let mut resolved_dicts: List<DictRef> = []
     let mut pending_failures: List<EvidenceFailure> = []
     let mut missing_failures: List<EvidenceFailure> = []
@@ -4987,20 +5461,21 @@ fn resolve_pending_evidence_source(
     runtime_owner: ExecutableRef,
     sink: CollectingSink, env: TypeEnv,
     fn_bounds: List<FnBoundsEntry>, source: PendingEvidenceSource,
-    callee_type: Type, s: UnionFind, span: Span,
+    receipt: CallableInstantiationReceipt, s: UnionFind, span: Span,
     report_assoc_mismatch: Bool
 ) -> SchemeEvidenceResolution {
     match source {
         PendingEvidenceSource::SchemeEvidenceSource(scheme) =>
             resolve_scheme_evidence(
                 runtime_owner, sink, env, fn_bounds,
-                scheme, callee_type, s, span,
+                scheme, receipt, s, span,
                 report_assoc_mismatch),
         PendingEvidenceSource::ImplOwnerEvidenceSource {
             owner, method_core
-        } => resolve_impl_owner_evidence(
+        } =>
+            resolve_impl_owner_evidence(
             runtime_owner, sink, env, fn_bounds, owner, method_core,
-            callee_type, s, span, report_assoc_mismatch)
+            receipt, s, span, report_assoc_mismatch)
     }
 }
 
