@@ -435,15 +435,17 @@
       "id": "D15",
       "path": "single/d_pending_anonymous_effect_owner.ring",
       "covers": [
-        "acyclic factory lambda inherits its outer callback open effect tail",
-        "tail-resumptive handler arm inherits the same outer callback tail",
-        "anonymous callable headers publish only after the named owner schema is final",
-        "pure and handled instances preserve exact behavior"
+        "outside-created effectful closure borrows evidence at its later call",
+        "inside-created escaped closure uses a different current handler without stale evidence",
+        "two factory layers remain creation-pure across nested handler rebinding",
+        "nested same-effect handlers select the innermost evidence and restore the outer evidence",
+        "runtime handler arm receives surrounding evidence for its open callback tail",
+        "indirect generic call orders closure env, Hash dictionary, and handled evidence"
       ],
       "expected": {
         "phase": "native",
         "status": "pass",
-        "stdout": "D_PENDING_ANONYMOUS_OWNER_OK:5/9/6/10\n"
+        "stdout": "D_DYNAMIC_EVIDENCE_OK:12/22/35306/45/77\n"
       }
     },
     {
@@ -458,6 +460,20 @@
         "phase": "native",
         "status": "pass",
         "stdout": "D_GENERIC_EFFECT_ORDER_OK:5/ring\n"
+      }
+    },
+    {
+      "id": "D17",
+      "path": "single/d_dynamic_evidence_missing_handler.ring",
+      "covers": [
+        "closure creation under a handler does not capture handled evidence",
+        "calling the escaped closure without a current handler fails loud"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0403",
+        "diagnostic_contains": "Unhandled effect 'MissingDynamic' in main function"
       }
     },
     {

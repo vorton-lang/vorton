@@ -14,6 +14,16 @@ fn make_wrapper(
     }
 }
 
+fn make_double_wrapper(
+    callback: fn(Int) -> Int
+) -> fn(Int) -> fn(Int) -> Int {
+    fn(delta: Int) -> fn(Int) -> Int {
+        fn(value: Int) {
+            callback(value) + delta
+        }
+    }
+}
+
 fn handle_callback(
     callback: fn(Int) -> Int,
     value: Int
@@ -25,30 +35,84 @@ fn handle_callback(
     }
 }
 
-fn increment(value: Int) -> Int { value + 1 }
-
 fn inherited_step(value: Int) -> Int with {InheritedStep} {
     InheritedStep.apply(value)
 }
 
+fn hash_with_step<T: Hash>(value: T) -> Int with {InheritedStep} {
+    InheritedStep.apply(value.hash())
+}
+
+fn call_bounded<T: Hash>(
+    callback: fn(T) -> Int,
+    value: T
+) -> Int {
+    callback(value)
+}
+
 fn main() {
-    let pure_wrapper = make_wrapper(increment)
-    let effect_wrapper = make_wrapper(inherited_step)
-    let pure_factory = pure_wrapper(3)
-    let effect_factory = handle {
-        effect_wrapper(3)
+    // Creation is pure. The first call borrows the handler installed later.
+    let outside = make_wrapper(inherited_step)
+    let outside_inside = handle {
+        outside(1)
     } with {
-        InheritedStep.apply(value) => value + 5,
-    }
-    let pure_arm = handle_callback(increment, 3)
-    let effect_arm = handle {
-        handle_callback(inherited_step, 3)
-    } with {
-        InheritedStep.apply(value) => value + 5,
+        InheritedStep.apply(value) => value + 10,
     }
 
-    assert(pure_factory == 5 && effect_factory == 9 &&
-        pure_arm == 6 && effect_arm == 10,
-        "anonymous children inherit their finalized owner effect formal")
-    print("D_PENDING_ANONYMOUS_OWNER_OK:${pure_factory}/${effect_factory}/${pure_arm}/${effect_arm}")
+    // Creation under +100 must not retain that evidence after escape.
+    let escaped = handle {
+        make_wrapper(inherited_step)
+    } with {
+        InheritedStep.apply(value) => value + 100,
+    }
+    let rebound = handle {
+        escaped(1)
+    } with {
+        InheritedStep.apply(value) => value + 20,
+    }
+
+    // Neither factory layer captures its creation handler. The innermost
+    // dynamic handler wins, then the enclosing handler is restored.
+    let double = handle {
+        make_double_wrapper(inherited_step)
+    } with {
+        InheritedStep.apply(value) => value + 100,
+    }
+    let leaf = handle {
+        double(2)
+    } with {
+        InheritedStep.apply(value) => value + 200,
+    }
+    let nested = handle {
+        let inner = handle {
+            leaf(3)
+        } with {
+            InheritedStep.apply(value) => value + 30,
+        }
+        let outer_again = leaf(4)
+        inner * 1000 + outer_again
+    } with {
+        InheritedStep.apply(value) => value + 300,
+    }
+
+    // A runtime handler arm is internal: its callback tail receives the
+    // surrounding dynamic evidence while the Trigger arm is executing.
+    let arm = handle {
+        handle_callback(inherited_step, 3)
+    } with {
+        InheritedStep.apply(value) => value + 40,
+    }
+
+    // Indirect generic dispatch carries env, the Hash dictionary, then the
+    // current handled evidence without swapping either hidden argument.
+    let ordered = handle {
+        call_bounded(hash_with_step, 7)
+    } with {
+        InheritedStep.apply(value) => 77,
+    }
+
+    assert(outside_inside == 12 && rebound == 22 &&
+        nested == 35306 && arm == 45 && ordered == 77,
+        "ordinary closures use current dynamic handled evidence")
+    print("D_DYNAMIC_EVIDENCE_OK:${outside_inside}/${rebound}/${nested}/${arm}/${ordered}")
 }
