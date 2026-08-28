@@ -1,8 +1,8 @@
 # Ring-lang 竞品与行业定位
 
-> 最后更新：2026-08-23
+> 最后更新：2026-08-28
 >
-> 外部事实截止：2026-08-23（版本、活跃度与 stars 均为时点数据）
+> 外部事实截止：2026-08-28（版本、活跃度与 stars 均为时点数据）
 >
 > 用途：产品定位、路线图取舍、B-001 Refinement Types 与 B-111 LLM eval harness 的证据输入
 
@@ -22,7 +22,7 @@
 
 ### 1.1 Ring 仍有差异化，但不能再表述为「无直接竞品」
 
-截至 2026-08-23 的一手来源复查，尚未发现一个项目**同时交付**以下组合：
+截至 2026-08-28 的一手来源复查，尚未发现一个项目**同时交付**以下组合：
 
 - 面向应用开发、接近脚本语言的低标注表面；
 - HM 类型推断与 application-facing effect inference；
@@ -66,6 +66,8 @@
 | **中低 / 机制高** | Roc / Flux | ARC、platform capability、bounded refinement 工程先例 | 当前产品成熟度有限，但分别直接约束资源/effect 与 B-001 设计 |
 | **低** | Mog | 小规范、嵌入式 capability 模型 | 活跃度低，保留为规格压缩启发 |
 
+2026-08-28 保鲜复查没有改变上述排序。正式版本的净变化只有 Astral `ty` 0.0.75 与 Effekt 0.78.0；BAML 0.17.1、Mojo 1.1 与 Verus 的更新仍分别属于 nightly/dev/rolling，不能升级为新的稳定能力。TypeScript 7、MoonBit、Zero、Mojo stable、Koka、Flix 与 Unison 的最新正式版本均未变化。该结果只更新时点事实，不产生新的 Ring feature、backlog 或 0.1 前置。
+
 ### 1.3 五个最重要的路线图含义
 
 1. **B-111 是立论门，不是营销附件。** TS7 已正式发布，Ring 必须用同协议、同模型、同预算的实验回答“effect 签名是否真的减少 token/轮数/运行时错误”。
@@ -105,17 +107,17 @@ stars 和发布频率只辅助判断后两项，不直接证明产品质量。
 
 | 项目 | 时点状态 | 已发货核心 | Agent 路线 | 保证层 | 对 Ring 的关系 |
 |---|---|---|---|---|---|
-| **Ring** | C11-only 自举；I′ exact identity checkpoint 已 fixed-point 接受，#268/#269 仍 critical/doing | current main 为 HM + trait、legacy `io/fail/mut`、limited handler、Perceus/verifier 与 C11 native；分层 IR、effect 分域及若干 0.1 clean break 是已批准目标，不是当前实现 | 结构化诊断已有；inspection/primer 与 B-111 待交付 | G1 机制已有、整体 ownership/resource guarantee blocked | 被比较对象 |
-| **TypeScript 7** | 7.0 正式通道；截至 2026-08-23 最新正式 release 为 7.0.2 | Go native 编译器、LSP、`strict` 默认、并行检查 | 海量训练数据 + 编辑器/agent 生态 | G1 的结构类型子集 | 最大主流替代 |
-| **Python + Astral** | Ruff/uv/ty 持续发展；`ty` 0.0.74；OpenAI 收购协议未确认交割 | 极低摩擦生态与高速 lint/env/type/LSP 工具链 | Codex/agent 原生使用场景 | G0–G1（依工具） | 最大低阻力替代 |
+| **Ring** | C11-only 自举；I′ exact identity checkpoint 已 fixed-point 接受，#268/#269 仍 critical/doing | current main 为 HM + trait、legacy `io/fail/mut`、limited handler、Perceus/verifier 与 C11 native；A1递归组、R1动态evidence、P2统一`EffectCtx`与分层IR属于已批准且在isolated authority实现中的目标，尚无aggregate behavior acceptance | 结构化诊断已有；inspection/primer 与 B-111 待交付 | G1 机制已有、整体 ownership/resource guarantee blocked | 被比较对象 |
+| **TypeScript 7** | 7.0 正式通道；截至 2026-08-28 最新正式 release 为 7.0.2 | Go native 编译器、LSP、`strict` 默认、并行检查 | 海量训练数据 + 编辑器/agent 生态 | G1 的结构类型子集 | 最大主流替代 |
+| **Python + Astral** | Ruff/uv/ty 持续发展；`ty` 0.0.75；OpenAI 收购协议未确认交割 | 极低摩擦生态与高速 lint/env/type/LSP 工具链 | Codex/agent 原生使用场景 | G0–G1（依工具） | 最大低阻力替代 |
 | **Rust** | 1.98；Polonius Alpha 与 next trait solver 在 nightly 默认启用、仍未稳定 | ownership/borrow、trait、unsafe 隔离、native | 高训练覆盖 + LSP/agent 工具 | 强 G1 | 安全基线与底层替代 |
 | **MoonBit** | v0.10.9；1.0 目标 Q3 2026 | ML 风类型、Wasm/JS/C/native、LSP、包管理、Pilot、`errdefer`/async cleanup | 专用 coding agent 与工具链 | G1；`moon prove` 仍为实验性 G3 | 最接近产品竞品 |
 | **Zero** | v0.3.4、experimental；semantic graph 是程序数据库、`.0` 是 projection | checked graph/patch、query/inspect/check/test/run、显式 capability | agent 直接操作图并消费版本匹配 skills | G0–G1 | 最直接 agent 产品面竞品 |
-| **BAML** | 新 BAML Language 0.17.0、legacy BAML v0 0.226.1；新通道仍在迁移期 | TypeScript 风类型、typed errors、bytecode VM/GC、green-thread workflow、standalone run、跨宿主 bridge、内建 tests/evals | `agent install`、`describe`/`grep`、project-local toolchain pin、LSP 与 Agent Tries BAML | G0–G1（类型/错误；非确定性 ownership） | 直接 agent-language 产品/叙事竞品；运行与资源路线不同 |
+| **BAML** | 新 BAML Language stable仍为0.17.0；0.17.1仅nightly，legacy BAML v0 0.226.1；新通道仍在迁移期 | TypeScript 风类型、typed errors、bytecode VM/GC、green-thread workflow、standalone run、跨宿主 bridge、内建 tests/evals | `agent install`、`describe`/`grep`、project-local toolchain pin、LSP 与 Agent Tries BAML | G0–G1（类型/错误；非确定性 ownership） | 直接 agent-language 产品/叙事竞品；运行与资源路线不同 |
 | **Mojo** | 1.0；compiler/tooling 已完整开源 | Pythonic syntax、linear/lifetime types、compile-time reflection、AI compute；多数核心语言进入 source stability | 官方 agent skills | G1 | 高资源与产品威胁；ABI、stdlib 稳定面及部分能力仍有限 |
 | **Koka** | v3.2.3；活跃研究语言 | effect inference/handlers、evidence passing、Perceus、C backend | 非主要目标 | G1 | Ring 最接近理论与实现来源 |
 | **Flix** | v0.75.3；活跃 | effect polymorphism、subeffecting/exclusion、handlers、purity-driven optimization | 官方已直接研究 LLM 对新语言的影响 | G1 | 直接机制近邻 |
-| **Effekt** | v0.77 | algebraic effects、contextual effect polymorphism、capabilities/resources、持续优化 | 非主要目标 | G1 | 活跃的 effect 实验场 |
+| **Effekt** | v0.78.0 | algebraic effects、contextual effect polymorphism、capabilities/resources、持续优化 | 非主要目标 | G1 | 活跃的 effect 实验场 |
 | **Unison** | 1.4.0；已过 1.0 | abilities、content-addressed codebase、语义重构、分布式能力 | MCP/agent 工具持续增加 | G1 | “效果 + 语义程序库”最强先例 |
 | **Verus** | 2026-08 稳定/rolling release 持续 | Rust 子集、spec/proof/exec、ghost erasure、SMT、权限模型 | CryptoProver、Vero 等 repo/cross-file proof 研究继续推进 | G3 | 形式化验证首要参照，非应用语言直接替代 |
 | **Roc** | 仍明确未 ready for 0.1 | 低标注函数式应用语言、platform-controlled I/O、ARC + opportunistic reuse | 提供 experimental AI-friendly docs | G1 目标 | 应用/ARC/platform capability 机制近邻，产品成熟度有限 |
@@ -137,7 +139,7 @@ TypeScript 7.0 已在 2026-07-08 正式发布，不应再称为 tsgo beta。官�
 - 7.0 默认启用 `strict`，支持稳定类型排序与并行检查；
 - 7.0 暂无旧式 programmatic API，Vue/MDX/Astro/Svelte 及部分 Angular 嵌入式流程仍可能需要 TypeScript 6；官方提供 `@typescript/typescript6` 并行安装路径。
 
-截至 2026-08-23，最新正式 release 为 7.0.2；原报告设定的“7.1 恢复 programmatic API并完成主流 framework 迁移”提前复查门尚未触发。
+截至 2026-08-28，最新正式 release 仍为 7.0.2；原报告设定的“7.1 恢复 programmatic API并完成主流 framework 迁移”提前复查门尚未触发。
 
 这意味着 Ring 不能再用“编译器更快”作为充分差异。TS7 的优势是：
 
@@ -152,7 +154,7 @@ Ring 的可证伪反论必须交给 B-111：在同模型、同任务、同预算
 Python 的核心优势不是静态保证，而是：
 
 - 模型训练覆盖广、库生态大、生成成功先验高；
-- Ruff、uv、`ty` 等工具持续压低 lint、环境与类型反馈成本；`ty` 0.0.74 已提供多平台 type-check、LSP 与结构化诊断产品面；
+- Ruff、uv、`ty` 等工具持续压低 lint、环境与类型反馈成本；`ty` 0.0.75 已提供多平台 type-check、LSP 与结构化诊断产品面；该版继续补PEP 723脚本环境、pytest fixture导航、autofix、泛型推断与unsound narrowing修复，但仍是0.0.x通道；
 - OpenAI 2026-03-19 宣布与 Astral 签署收购协议，并明确工具与 Codex 的协同方向。
 
 截至本报告日期，OpenAI 和 Astral 官方页面仍使用“拟收购/已签协议/将加入”措辞，本文不把交易写成已完成。
@@ -211,7 +213,7 @@ MoonBit 当前比 Ring 成熟得多：多后端、包管理、LSP、文档与专
 
 ### 5.2 BAML：已经正面占据“programming language for agents”
 
-2026-08-23 复核确认，BAML 已不再只把自己描述成 prompt/structured-output DSL。官方默认分支、仓库 description 与新官网统一使用 **“the programming language for agents”**；新 BAML Language 通道已发布 0.17.0，legacy BAML v0 已到 0.226.1。两条产品面仍处于迁移期：旧文档首页继续把 BAML 定义为 structured-output DSL，而新官网与新工具链已经展示更广的 standalone agent/workflow language。
+2026-08-28 复核确认，BAML 已不再只把自己描述成 prompt/structured-output DSL。官方默认分支、仓库 description 与新官网统一使用 **“the programming language for agents”**；新 BAML Language 的最新稳定版仍为0.17.0，8月26日可见的0.17.1仍是nightly，legacy BAML v0 已到0.226.1。两条产品面仍处于迁移期：旧文档首页继续把 BAML 定义为 structured-output DSL，而新官网与新工具链已经展示更广的 standalone agent/workflow language。
 
 #### 已交付或可由官方产物核验的产品面
 
@@ -246,7 +248,7 @@ BAML 最值得 Ring 响应的不是 TypeScript 风语法或“agent-first”标�
 
 ### 5.3 Zero：graph-native 已从叙事推进为完整 agent loop
 
-截至 2026-08-23，Zero 最新正式 release 仍为 v0.3.4，项目仍明确标为 experimental；其 semantic graph 继续作为 program database，`.0` 文本是 human-readable projection，而不是普通 authoring 真值，checked graph 是 compiler input。其公开 loop 包括：
+截至 2026-08-28，Zero 最新正式 release 仍为 v0.3.4，项目仍明确标为 experimental；其 semantic graph 继续作为 program database，`.0` 文本是 human-readable projection，而不是普通 authoring 真值，checked graph 是 compiler input。其公开 loop 包括：
 
 - `zero query` / `zero inspect` 获取 stable graph facts，`zero patch` 以 graph hash 拒绝陈旧或非法编辑；
 - `zero check` / `zero test` / `zero run` 覆盖日常闭环，并提供一行安装与 `--version`；
@@ -285,7 +287,7 @@ Roc 的产品威胁为中低，机制参考价值为中高。其 platform 模型
 
 ### 6.1 Koka：最接近的理论与实现来源
 
-截至 2026-08-23，Koka 最新 release 仍为 v3.2.3，官方 dev 主线保持活跃。它已经证明：
+截至 2026-08-28，Koka 最新 release 仍为 v3.2.3，官方 dev 主线保持活跃。它已经证明：
 
 - polymorphic type/effect inference 与 algebraic handlers 可工程实现；
 - evidence passing 可把 handlers 降为高效直接代码；
@@ -311,7 +313,7 @@ Flix 偏函数式/JVM 与研究型生态，市场替代威胁有限；机制与 
 
 ### 6.3 Effekt：活跃的 capability/effect 实验场
 
-Effekt 已更新到 v0.77，近期版本密集，并继续加入 monomorphization 等优化。核心包括：
+Effekt 已于2026-08-24更新到v0.78.0；本次正式版主要加速array/bytearray，并通过CSE改善aliased value sharing，没有改变其公开effect模型或Ring威胁层级。近期版本密集，并继续加入monomorphization等优化。核心包括：
 
 - algebraic effects/handlers；
 - contextual effect polymorphism；
@@ -496,6 +498,7 @@ Pel、Quasar、Dana、Darklang 的 agent 化方向主要是 workflow/orchestrati
 - #268/#269 仍为 `[critical] [doing]`；I′ 不能外推为完整 callable ownership mode、atomic transfer、cleanup 或全局 RC/resource-safety acceptance；
 - `AST → ResolvedAST → TypedHIR → CoreHIR → FlowIR → RcIR → AbiIR → C11` 是已批准迁移终态；fixed main 尚无这些独立 compiler stages，仍由 legacy HIR/Perceus/codegen 承担语义；
 - 0.1 已批准 `SystemEffectRef(console/fs/process)` / `HandledEffectRef(custom)` 分域、删除 user effect default body，并把用户 Drop 限制为 effect-free；但 current main 仍保留 legacy `io` 与旧 default/evidence/Drop 路径；
+- 0.1 已批准A1递归组single-inference、R1调用点dynamic handled evidence与P2统一`EffectCtx` ABI；isolated authority已有typed producer/HIR/C/runtime纵切代码，但尚未通过fresh candidate、统一single/project矩阵或最终长门，不能写成current main已发货能力；
 - 0.1 已决定删除 partial/reopened inline module、function default parameters、inert `sig`、refinement `where` placeholder；`T?` 也由 B-191 在 preview 前 clean break。除已明确形成的局部证据外，这些决定不能统称为 fixed main 已发货能力；
 - refinement types 未实现：参数位 `where` 仍不能表达，struct-field `where` 在 current main 仍是 parse-and-discard + warning，等待 B-193 删除；
 - RIIR 标准库迁移尚未完成；
@@ -527,7 +530,7 @@ Pel、Quasar、Dana、Darklang 的 agent 化方向主要是 workflow/orchestrati
 
 ## 11. 相关工作项
 
-- **#268/#269**：仍是当前 correctness 总门。I′ identity-only fixed point 保留为 durable claim；完整 FlowIR freeze、single ResourcePlanner、RcIR/certificate 与最终 full/ASan/self-host/CI acceptance 尚未完成。
+- **#268/#269**：仍是当前 correctness 总门。I′ identity-only fixed point 保留为 durable claim；A1/R1/P2与exact callback set仍在isolated authority的development green boundary，完整 FlowIR freeze、single ResourcePlanner、RcIR/certificate 与最终 full/ASan/self-host/CI acceptance 尚未完成。
 - **B-174/B-177/B-175**：按 CLI 闭环 → 版本化 agent contract → Windows/Linux candidate artifacts 交付可安装、可运行、可诊断的 preview；BAML 的 wrapper/toolchain pin/run/bridge 说明版本匹配与渐进采用已成为竞争基线，但首个 Ring preview 不以多宿主 bridge 为前置。
 - **B-176/B-180/B-187/B-190/B-183**：ownership 后建立可复现 baseline与 2× 开发反馈目标，并完成 bounded 文档复核，再做 overengineering audit，随后才执行 Vorton/GitHub workflow cutover；竞品变化不改变该顺序。
 - **B-181**：单独建立生成程序 runtime、内存/分配与产物尺寸的 release baseline/budget。
@@ -552,7 +555,7 @@ Pel、Quasar、Dana、Darklang 的 agent 化方向主要是 workflow/orchestrati
 
 ### 12.2 复查节奏
 
-常规保鲜期：**6 周**。下次定期复查建议不晚于 2026-10-04。
+常规保鲜期：**6 周**。下次定期复查建议不晚于 2026-10-09。
 
 出现以下任一事件时提前复查：
 
@@ -576,15 +579,15 @@ Pel、Quasar、Dana、Darklang 的 agent 化方向主要是 workflow/orchestrati
 
 - TypeScript：[Announcing TypeScript 7.0](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/)、[7.0.2 release](https://github.com/microsoft/typescript-go/releases/tag/typescript%2Fv7.0.2)
 - OpenAI：[OpenAI to acquire Astral](https://openai.com/index/openai-to-acquire-astral/)
-- Astral：[About Astral](https://astral.sh/about)、[`ty` documentation](https://docs.astral.sh/ty/)、[`ty` releases](https://github.com/astral-sh/ty/releases)
+- Astral：[About Astral](https://astral.sh/about)、[`ty` documentation](https://docs.astral.sh/ty/)、[`ty` 0.0.75](https://github.com/astral-sh/ty/releases/tag/0.0.75)
 - Rust：[Rust 1.98.0](https://blog.rust-lang.org/2026/08/20/Rust-1.98.0/)、[Polonius Alpha on nightly](https://blog.rust-lang.org/2026/08/04/enabling-polonius-alpha-on-nightly/)、[next trait solver on nightly](https://blog.rust-lang.org/2026/08/21/enabling-next-solver-on-nightly/)
 
 ### 直接与相邻语言
 
 - MoonBit：[v0.10.9 release](https://www.moonbitlang.com/updates/2026/08/19/index)、[Formal Verification](https://docs.moonbitlang.com/en/latest/language/verification.html)
 - Zero：[vercel-labs/zerolang](https://github.com/vercel-labs/zerolang)、[releases](https://github.com/vercel-labs/zerolang/releases)
-- BAML：[BoundaryML/baml](https://github.com/BoundaryML/baml)、[BAML Language 0.17.0](https://github.com/BoundaryML/baml/releases/tag/baml-language-0.17.0)、[0.17 changelog](https://github.com/BoundaryML/baml/blob/baml-language-0.17.0/baml_language/CHANGELOG.md)、[new language overview](https://boundaryml.com/)、[quickstart](https://boundaryml.com/quickstart)、[legacy changelog](https://docs.boundaryml.com/changelog/changelog)、[Agent Tries BAML](https://boundaryml.com/atb)
-- Mojo：[Mojo 1.0](https://mojolang.org/releases/v1.0.0/)、[compiler/toolchain open source](https://www.modular.com/blog/mojo-open-source)、[stability contract](https://mojolang.org/docs/api-docs/stability/)
+- BAML：[BoundaryML/baml](https://github.com/BoundaryML/baml)、[BAML Language 0.17.0](https://github.com/BoundaryML/baml/releases/tag/baml-language-0.17.0)、[0.17.1 nightly](https://github.com/BoundaryML/baml/releases/tag/baml-language-0.17.1-nightly.20260826.a)、[0.17 changelog](https://github.com/BoundaryML/baml/blob/baml-language-0.17.0/baml_language/CHANGELOG.md)、[new language overview](https://boundaryml.com/)、[quickstart](https://boundaryml.com/quickstart)、[legacy changelog](https://docs.boundaryml.com/changelog/changelog)、[Agent Tries BAML](https://boundaryml.com/atb)
+- Mojo：[release channels](https://mojolang.org/releases/)、[Mojo 1.0](https://mojolang.org/releases/v1.0.0/)、[compiler/toolchain open source](https://www.modular.com/blog/mojo-open-source)、[stability contract](https://mojolang.org/docs/api-docs/stability/)
 - Roc：[repository](https://github.com/roc-lang/roc)、[platform model](https://www.roc-lang.org/docs/main/langref/platforms/)、[alpha4 ARC string model](https://www.roc-lang.org/builtins/alpha4/Str/)、[tutorial/AI docs](https://www.roc-lang.org/tutorial)
 - Rue：[rue-lang.dev](https://rue-lang.dev/)、[rue-language/rue](https://github.com/rue-language/rue)
 - Mog：[moglang.org](https://moglang.org/)、[voltropy/mog](https://github.com/voltropy/mog)
@@ -594,12 +597,12 @@ Pel、Quasar、Dana、Darklang 的 agent 化方向主要是 workflow/orchestrati
 - Koka：[documentation](https://koka-lang.github.io/koka/doc/index.html)、[koka-lang/koka](https://github.com/koka-lang/koka)
 - Flux：[repository](https://github.com/flux-rs/flux)、[Flux Book](https://flux-rs.github.io/flux/)
 - Flix：[The Flix Effect System](https://doc.flix.dev/effect-system.html)、[releases](https://github.com/flix/flix/releases)、[Will LLMs Help or Hurt New Programming Languages?](https://blog.flix.dev/blog/will-llms-help-or-hurt-new-programming-languages/)
-- Effekt：[documentation](https://effekt-lang.org/docs)、[releases](https://github.com/effekt-lang/effekt/releases)
+- Effekt：[documentation](https://effekt-lang.org/docs)、[v0.78.0](https://github.com/effekt-lang/effekt/releases/tag/v0.78.0)
 - Unison：[website](https://www.unison-lang.org/)、[abilities](https://www.unison-lang.org/docs/fundamentals/abilities/)、[releases](https://github.com/unisonweb/unison/releases)
 
 ### Verus 与 AI proof
 
-- Verus：[repository](https://github.com/verus-lang/verus)、[code architecture](https://github.com/verus-lang/verus/blob/main/source/CODE.md)
+- Verus：[repository](https://github.com/verus-lang/verus)、[rolling releases](https://github.com/verus-lang/verus/releases)、[code architecture](https://github.com/verus-lang/verus/blob/main/source/CODE.md)
 - Verus guide：[Trusted Computing Base](https://verus-lang.github.io/verus/guide/tcb.html)、[SMT failures](https://verus-lang.github.io/verus/guide/smt_failures.html)、[memory safety](https://verus-lang.github.io/verus/guide/memory-safety.html)
 - Verus std：[raw pointer permissions](https://verus-lang.github.io/verus/verusdoc/vstd/raw_ptr/index.html)
 - 论文：[Verus: Verifying Rust Programs using Linear Ghost Types (SOSP)](https://www.andrew.cmu.edu/user/bparno/papers/verus-sys.pdf)、[VerusBelt (PLDI 2026)](https://iris-project.org/pdfs/2026-pldi-verusbelt.pdf)
