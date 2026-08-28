@@ -254,7 +254,6 @@ struct PendingAnonymousCallableHeader {
 struct PendingCallableProjection {
     receipt: CallableInstantiationReceipt,
     target: ExecutableRef,
-    declared_type_vars: List<Int>,
     type_args_output: List<HCallableTypeActual>,
     effect_actuals_output: List<HCallableEffectActual>
 }
@@ -979,7 +978,7 @@ fn identity_instantiation_mapping(ids: List<Int>) -> Map<Int, Type> {
 
 fn pending_callable_receipt(
     mut ctx: InferCtx, target: ExecutableRef,
-    ty: Type, mapping: Map<Int, Type>, declared_type_vars: List<Int>
+    ty: Type, mapping: Map<Int, Type>
 ) -> CallableInstantiationReceipt {
     let type_args_output: List<HCallableTypeActual> = []
     let effect_actuals_output: List<HCallableEffectActual> = []
@@ -993,7 +992,6 @@ fn pending_callable_receipt(
     ctx.pending_callable_projections.push(PendingCallableProjection {
         receipt: receipt,
         target: target,
-        declared_type_vars: declared_type_vars,
         type_args_output: type_args_output,
         effect_actuals_output: effect_actuals_output
     })
@@ -1157,21 +1155,32 @@ pub fn project_owner_batch_receipts(
         }
         let header = finalization_header_for_target(
             headers, pending.target)
-        let effect_tails = ordered_effect_tail_vars(
-            header.final_scheme.ty)
-        let mut declared_seen: List<Int> = []
-        for source in pending.declared_type_vars {
-            if declared_seen.contains(source) ||
-               !header.final_scheme.type_vars.contains(source) ||
-               effect_tails.contains(source) {
-                panic("callable receipt projection: declared formal differs")
+        let final_mapping: Map<Int, Type> = map_new()
+        for source in header.final_scheme.type_vars {
+            if final_mapping.contains_key(source) {
+                panic("callable receipt projection: final formal repeats")
             }
-            declared_seen.push(source)
+            match pending.receipt.source_to_actual.get(source) {
+                some(Type::TypeVar { id, .. }) => {
+                    if id != source {
+                        panic("callable receipt projection: active mapping is not identity")
+                    }
+                    final_mapping.insert(source, Type::TypeVar {
+                        id: source, name: none
+                    })
+                },
+                some(_) => panic(
+                    "callable receipt projection: active actual is not raw var"),
+                none => final_mapping.insert(source, Type::TypeVar {
+                    id: source, name: none
+                })
+            }
         }
         let exact = callable_instantiation_from_mapping(
             executable_ref_named_symbol(header.executable),
-            header.final_scheme, pending.declared_type_vars,
-            pending.receipt.source_to_actual)
+            header.final_scheme,
+            declared_callable_type_vars(header.final_scheme),
+            final_mapping)
         let effect_actuals = match exact.effects {
             some(value) => value.substitutions,
             none => panic(
@@ -1246,8 +1255,7 @@ pub fn instantiate_callable_scheme(
                     scheme.type_vars)
                 return pending_callable_receipt(
                     ctx, make_named_executable_ref(symbol),
-                    scheme.ty, mapping,
-                    declared_callable_type_vars(scheme))
+                    scheme.ty, mapping)
             },
             none => {}
         },
@@ -1333,15 +1341,9 @@ pub fn instantiate_callable_impl_method(
         install_monomorphic_impl_predicates(ctx, owner, core)
         let mapping = identity_instantiation_mapping(
             impl_method_core_type_vars(core))
-        let scheme = impl_method_core_as_scheme(core)
-        let effect_tails = ordered_effect_tail_vars(scheme.ty)
-        let declared = scheme.type_vars.filter(fn(id) {
-            !owner.type_param_vars.contains(id) &&
-                !effect_tails.contains(id)
-        })
         return pending_callable_receipt(
             ctx, executable, impl_method_core_type(core),
-            mapping, declared)
+            mapping)
     }
     let instantiated = instantiate_impl_with_receipt_mapping(
         ctx, owner, core)
