@@ -1973,7 +1973,7 @@ fn validate_effect_ctx_lookup_expr(
             }
             validate_effect_ctx_lookup_expr(body, layout, installs)
             match effect_ctx_install {
-                some(_) => { installs.pop() },
+                some(_) => { let _ = installs.pop() },
                 none => {}
             }
             for handler in handlers {
