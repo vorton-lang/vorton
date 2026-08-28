@@ -165,6 +165,14 @@ Effect 按求值组合：
 
 函数声明没有 `with` 时，以函数体推断出的 row 为准。显式封闭 row 漏掉实际 effect 时编译失败。Host operation 不得因为是 `extern`、runtime bridge 或 builtin 而省略 system effect。
 
+### Effectful function value 的 evidence
+
+普通 lambda/closure 不捕获定义点当前安装的 handled-effect evidence。其 body row 冻结在函数类型中，并对应 callable 自身的 hidden evidence 参数；每次调用从调用点当前 dynamic handler environment 借用 exact evidence。没有对应 handler 时，effect继续传播到调用者，不能因为closure在某个`handle`内创建而被提前消除。
+
+因此，一个pure factory可以返回effectful closure：调用factory不需要该effect，调用返回值时才需要。closure在`handle`内创建后逃逸，也不会延长旧handler的动态范围；在新的handler内调用时使用新handler。Handler arm/re-perform的内部runtime对象可显式持有outer evidence，但不改变ordinary user closure规则。
+
+Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、handled-effect evidence；direct/method调用省略`env`但保持其余相对顺序。Handled evidence是borrow，不进入ordinary closure env的owned capture；System effect没有evidence参数。
+
 ## Effect 消除
 
 ### `catch`
@@ -191,7 +199,7 @@ let result = handle {
 }
 ```
 
-Handler 在词法范围内提供 handled-effect operations。被显式处理的 exact handled effect 从 body row 中消除；开放尾未知 effect 与 handler arm 新产生的 effect继续传播。System effect、`mut<T>` 与 `unsafe` 不能由 `handle` 删去。
+Handler 在其body的动态调用范围内提供 handled-effect operations。被显式处理的 exact handled effect 从 body row 中消除；开放尾未知 effect 与 handler arm 新产生的 effect继续传播。System effect、`mut<T>` 与 `unsafe` 不能由 `handle` 删去。只在该范围内创建但未调用的ordinary closure不会捕获handler；它逃逸后的effect仍由未来调用点处理。
 
 ## Handler 语义
 

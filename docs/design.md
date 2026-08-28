@@ -651,13 +651,11 @@ handle {
 }
 ```
 
-**一等 effectful function value 的 evidence 绑定（2026-07-28，过渡语义）**：
+**一等 effectful function value 的调用点动态 evidence（2026-08-28 用户批准 R1，0.1 最终语义）**：lambda/closure 创建本身是 pure，body effect只进入函数类型；ordinary user closure 永不捕获定义处的 handled-effect evidence。每个 effectful named/anonymous callable 按其冻结 effect row 拥有 hidden evidence 参数，每次 direct/method/indirect 调用从当前 dynamic handler environment 借用并传入；当前调用点没有对应 handler 时 effect 继续向外传播，不能被创建处状态或 unknown open tail 静默消除。
 
-- 当前 C-only 实现中，closure 仍使用**创建处词法捕获**的 custom-effect evidence；调用点不会给既有 function value 动态换绑 evidence。
-- custom handler 只消除 body effect row 中**显式出现**的同名 effect label；未知 open tail 必须原样向外传播，不能因为 `handle { callback() }` 就假定 callback 的未知 effect 已被内层 handler 截获。
-- 因此，直接 effect 调用和 handler 内创建的 closure 可以使用当前 handler；handler 外创建后再传入的 effectful callback 仍使用其创建处 evidence。`with_mock_fs(callback)`、`capture_logs(callback)` 等动态注入式高阶封装在此阶段需要显式 capability、把 closure 创建移入 handler，或保留 effect 向外传播。
+`handle` 安装的 evidence 只在其动态调用范围内生效。closure 即使在 `handle` 内创建，逃逸后调用也不得继续使用已经结束的 handler；若在另一层 handler 内调用，则使用新的当前 evidence。实现 handler arm/re-perform 的内部 runtime handler object 可持有其显式 outer evidence 和普通词法值，但该内部对象不得与返回给用户的 ordinary closure capture 规则混用。
 
-这是 sound 过渡边界，不是首个公开 preview 应冻结的最终语言语义。LLVM 已退役；B-168/B-169 固定 failure/control 与 typed evidence substrate 后，B-167 将改为 **A：调用点动态 evidence ABI**，使外部创建的 callback 也由调用点内层 handler 截获。C → A 是可观测语义升级，因此排在 v0.1 candidate 之前并以迁移测试锁定。
+共享 callable ABI 的顺序固定为：`closure env`（仅 indirect closure）→ ordinary arguments → trait dictionaries → custom handled-effect evidence。Handled evidence 按 borrow 传递，不转移给 ordinary closure env；SystemEffectRef 永不进入该参数列。R1 将 B-167 的 custom handled-function-value 完整纵切前移并入当前 #268/#269，直接取代旧 C-only lexical-capture 过渡路径；不保留 hybrid/fallback。B-168 failure/control 与 B-169 其余研究仍按原排期，并必须兼容该已冻结最小 ABI。
 
 > **边界**：Ring 不计划实现 post-resume / multi-resume Full Algebraic Effects。现行公开模型固定为 tail-resumptive + abort；需要并发挂起的场景由 async 设计单独建模。
 
