@@ -432,6 +432,35 @@
       }
     },
     {
+      "id": "D15",
+      "path": "single/d_pending_anonymous_effect_owner.ring",
+      "covers": [
+        "acyclic factory lambda inherits its outer callback open effect tail",
+        "tail-resumptive handler arm inherits the same outer callback tail",
+        "anonymous callable headers publish only after the named owner schema is final",
+        "pure and handled instances preserve exact behavior"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_PENDING_ANONYMOUS_OWNER_OK:5/9/6/10\n"
+      }
+    },
+    {
+      "id": "D16",
+      "path": "single/d_generic_effect_instantiation_order.ring",
+      "covers": [
+        "one generic callable carries fixed mut<T> plus an open callback tail",
+        "Int/mut<Str> and Str/mut<Int> instances reverse same-kind atom order",
+        "type and effect actuals come from instantiation rather than residual reconstruction"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_GENERIC_EFFECT_ORDER_OK:5/ring\n"
+      }
+    },
+    {
       "id": "E1",
       "path": "single/e_user_extern_same_spelling.ring",
       "covers": [
