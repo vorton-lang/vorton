@@ -40,8 +40,10 @@ use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
     callable_resource_role_consume,
     make_named_executable_ref,
     make_anonymous_executable_ref, executable_ref_named_symbol,
-    effect_operation_ref_callable}
-use effect_contract::{empty_typed_effect_header_schema}
+    executable_ref_same, effect_operation_ref_callable}
+use effect_contract::{TypedEffectHeaderSchema,
+    empty_typed_effect_header_schema,
+    typed_effect_header_schema_bindings}
 use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     ImplEntry,
     ImplMethodSchemeCore,
@@ -58,7 +60,10 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     install_method_core, replace_impl_method_core,
     impl_method_core_as_scheme, impl_method_core_from_scheme,
     impl_method_core_type,
-    build_type_var_map, freshen_effect_header}
+    build_type_var_map, ordered_effect_tail_vars,
+    build_definition_effect_header_schema,
+    validate_effect_header_schema,
+    instantiate_effect_header_schema}
 use extern_manifest::{compiler_extern_manifest_entry_executable,
     compiler_extern_manifest_entry_resource}
 use union_find::{UnionFind}
@@ -73,7 +78,8 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     resolve_dicts_from_impl_owner,
     pending_dict_checkpoint, drain_pending_dicts, rollback_pending_dicts,
     assert_pending_dict_owner_closed,
-    generalize, collect_free_vars, free_type_vars_in_env, resolve_mod_uses,
+    generalize, collect_free_vars, free_type_vars,
+    free_type_vars_in_env, resolve_mod_uses,
     enter_project_root_frame, enter_project_child_frame,
     exit_project_namespace_frame,
     enter_impl_check_root_frame, enter_impl_check_child_frame,
@@ -85,7 +91,12 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     prepare_callable_handled_evidence,
     canonicalize_callable_handled_evidence,
     current_identity_file_key, semantic_parameter_binder,
-    register_exact_callable_effect_header}
+    executable_effect_origin, publish_exact_callable_effect_header,
+    begin_recursive_callable_group, end_recursive_callable_group,
+    mark_recursive_callable_group_closed,
+    recursive_callable_is_closed,
+    recursive_effect_fact_checkpoint,
+    rollback_recursive_effect_facts}
 use infer_helpers::{is_value_type}
 use resolver::{single_namespace_file_key}
 use infer_register::{register_decls_two_phase, register_module_decls_two_phase,
@@ -98,6 +109,23 @@ use infer::{infer_block, infer_expr,
 use zonk::{ZonkCtx, zonk_type, zonk_row, zonk_param, zonk_block, zonk_expr}
 use derive::{run_derive_pass}
 use scc::{build_call_graph, tarjan_scc, collect_registered_fn_names, collect_self_method_callees}
+
+enum FnCheckPhase {
+    OrdinaryFnCheck,
+    RecursiveConstraintCheck
+}
+
+struct StagedCallableClose {
+    name: Str,
+    executable: ExecutableRef,
+    scheme: TypeScheme,
+    span: Span
+}
+
+struct CachedImplClose {
+    owner_ref: ImplOwnerRef,
+    declarations: List<HDecl>
+}
 
 fn ensure_callable_handled_evidence(
     mut ctx: InferCtx, effects: EffectRow
@@ -192,11 +220,12 @@ fn test_executable_for_site(ctx: InferCtx, decl_index: Int) -> ExecutableRef {
 }
 
 fn check_decl(
-    mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?
+    mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?,
+    cached_impls: List<CachedImplClose>
 ) -> HDecl {
     let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let result = some(check_decl_inner(
-        ctx, decl, frame_decl_index)) catch { _ => none }
+        ctx, decl, frame_decl_index, cached_impls)) catch { _ => none }
     match result {
         some(hdecl) => {
             assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
@@ -210,7 +239,8 @@ fn check_decl(
 }
 
 fn check_decl_inner(
-    mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?
+    mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?,
+    cached_impls: List<CachedImplClose>
 ) -> HDecl {
     match decl {
         Decl::Struct { name, type_params, is_pub, span, .. } =>
@@ -226,7 +256,8 @@ fn check_decl_inner(
         Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span, .. } =>
             check_fn_decl(ctx, name, type_params, params, return_type,
                 declared_effects, body, is_pub, span,
-                none, none, none, none, []),
+                none, none, none, none, [],
+                FnCheckPhase::OrdinaryFnCheck),
         Decl::Test { description, body, span } =>
             check_test_decl(
                 ctx, description, body, span,
@@ -264,7 +295,7 @@ fn check_decl_inner(
         Decl::ModBlock { name, uses, decls, required_effects, is_pub, span } =>
             check_mod_decl(
                 ctx, name, uses, decls, required_effects,
-                is_pub, span, frame_decl_index),
+                is_pub, span, frame_decl_index, cached_impls),
         Decl::EffectAlias { name, is_pub, span, .. } =>
             HDecl::TypeAlias {
                 name: name, owner_ref: none, ty: UNIT,
@@ -282,10 +313,22 @@ fn check_decl_inner(
     }
 }
 
+fn cached_impl_declarations(
+    cached_impls: List<CachedImplClose>, owner_ref: ImplOwnerRef
+) -> List<HDecl>? {
+    for cached in cached_impls {
+        if impl_owner_ref_same(cached.owner_ref, owner_ref) {
+            return some(cached.declarations)
+        }
+    }
+    none
+}
+
 fn check_mod_decl_body(
     mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
     decls: List<Decl>, required_effects: List<EffectExpr>?,
-    is_pub: Bool, span: Span, project_frame_active: Bool
+    is_pub: Bool, span: Span, project_frame_active: Bool,
+    cached_impls: List<CachedImplClose>
 ) -> HDecl {
     // Register short-name aliases for mod-internal types so that
     // type annotations like `c: Circle` resolve to `shapes::Circle`.
@@ -333,14 +376,35 @@ fn check_mod_decl_body(
         } else {
             prefix_decl_name(mod_name, decl)
         }
+        let cached = match prefixed {
+            Decl::Impl { .. } => cached_impl_declarations(
+                cached_impls, impl_check_owner(ctx, decl_index)),
+            _ => none
+        }
+        match cached {
+            some(values) => {
+                for value in values {
+                    match cap_row {
+                        some(cap) => check_capability(ctx, value, cap, span),
+                        none => {}
+                    }
+                    hdecls.push(value)
+                }
+            },
+            none => {
         let result = some(check_decl(
-            ctx, prefixed, some(decl_index))) catch { _ => none }
+            ctx, prefixed, some(decl_index), cached_impls)) catch { _ => none }
         match result {
             some(hd) => {
                 // Update fn effects (same as check_one_decl)
                 match hd {
-                    HDecl::Fn { name, effects, .. } => {
-                        if effects.effects.len() > 0 {
+                    HDecl::Fn { name, executable_ref, params,
+                                return_type, effects, span: fn_span, .. } => {
+                        if recursive_callable_is_closed(ctx, executable_ref) {
+                            validate_closed_value_callable(
+                                ctx, name, executable_ref, params,
+                                return_type, effects, fn_span)
+                        } else if effects.effects.len() > 0 {
                             update_fn_effects(ctx.env, name, effects)
                         }
                     },
@@ -382,6 +446,8 @@ fn check_mod_decl_body(
             },
             none => {}
         }
+            }
+        }
     }
     HDecl::ModBlock { name: mod_name, decls: hdecls, is_pub: is_pub, span: span }
 }
@@ -389,7 +455,8 @@ fn check_mod_decl_body(
 fn check_mod_decl(
     mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
     decls: List<Decl>, required_effects: List<EffectExpr>?,
-    is_pub: Bool, span: Span, frame_decl_index: Int?
+    is_pub: Bool, span: Span, frame_decl_index: Int?,
+    cached_impls: List<CachedImplClose>
 ) -> HDecl {
     let project_active = ctx.project_namespace_file_key.is_some()
     let impl_decl_index = frame_decl_index.unwrap_or(-1)
@@ -415,7 +482,7 @@ fn check_mod_decl(
     let prev_unsafe_allowed = ctx.mod_unsafe_allowed
     let result = check_mod_decl_body(
         ctx, mod_name, uses, decls, required_effects,
-        is_pub, span, project_active) catch { _ => {
+        is_pub, span, project_active, cached_impls) catch { _ => {
             ctx.mod_unsafe_allowed = prev_unsafe_allowed
             let _ = ctx.mod_path_stack.pop()
             if entered_project_frame {
@@ -432,6 +499,57 @@ fn check_mod_decl(
     }
     exit_impl_check_frame(ctx)
     result
+}
+
+fn cache_checked_impl_decl(
+    mut ctx: InferCtx, decl: Decl, decl_index: Int,
+    mut cached_impls: List<CachedImplClose>
+) {
+    let owner_ref = impl_check_owner(ctx, decl_index)
+    if cached_impl_declarations(cached_impls, owner_ref).is_some() {
+        panic("impl close cache: exact owner was checked twice")
+    }
+    let hdecl = check_decl(
+        ctx, decl, some(decl_index), cached_impls)
+    let mut declarations: List<HDecl> = [hdecl]
+    match decl {
+        Decl::Impl { methods, .. } => {
+            for source_member_index in 0..methods.len() {
+                match methods.get(source_member_index) {
+                    some(Decl::Delegate { field, span, .. }) => {
+                        let expanded = expand_delegate_impls(
+                            ctx, hdecl, source_member_index, field, span)
+                        for child in expanded { declarations.push(child) }
+                    },
+                    _ => {}
+                }
+            }
+        },
+        _ => panic("impl close cache: source declaration is not an impl")
+    }
+    cached_impls.push(CachedImplClose {
+        owner_ref: owner_ref, declarations: declarations
+    })
+}
+
+fn prepare_impl_close_cache(
+    mut ctx: InferCtx, decls: List<Decl>,
+    mut cached_impls: List<CachedImplClose>
+) {
+    for decl_index in 0..decls.len() {
+        match decls.get(decl_index).unwrap() {
+            Decl::Impl { .. } => cache_checked_impl_decl(
+                ctx, decls.get(decl_index).unwrap(),
+                decl_index, cached_impls),
+            Decl::ModBlock { name, uses, decls: mod_decls,
+                             required_effects, .. } => {
+                let _ = walk_inline_check_in_mod(
+                    ctx, name, uses, mod_decls, required_effects,
+                    decl_index, none, false, [], cached_impls)
+            },
+            _ => {}
+        }
+    }
 }
 
 fn check_capability(mut ctx: InferCtx, decl: HDecl, cap: EffectRow, mod_span: Span) {
@@ -479,6 +597,46 @@ fn check_effects_capability(mut ctx: InferCtx, name: Str, effects: EffectRow, ca
     //      per-effect check on that caller's declaration.
     //   This is why E0408 ("Open effect row in capability-restricted module")
     //   is defined but never emitted.
+}
+
+fn build_final_callable_effect_schema(
+    scheme: TypeScheme, executable: ExecutableRef,
+    inherited_type_vars: List<Int>
+) -> TypedEffectHeaderSchema {
+    let mut owned_tails: List<Int> = []
+    for tail in ordered_effect_tail_vars(scheme.ty) {
+        if scheme.type_vars.contains(tail) &&
+           !inherited_type_vars.contains(tail) {
+            owned_tails.push(tail)
+        }
+    }
+    if typed_effect_header_schema_bindings(
+            scheme.effect_schema).len() > 0 || owned_tails.len() == 0 {
+        scheme.effect_schema
+    } else {
+        build_definition_effect_header_schema(
+            executable_effect_origin(executable), [scheme.ty],
+            owned_tails)
+    }
+}
+
+fn publish_final_value_effect_schema(
+    mut ctx: InferCtx, name: Str, executable: ExecutableRef,
+    callable_signature: Type
+) -> TypedEffectHeaderSchema {
+    let scheme = match ctx.env.lookup(name) {
+        some(value) => value,
+        none => panic("effect header schema: final value scheme is absent")
+    }
+    let schema = build_final_callable_effect_schema(
+        scheme, executable, [])
+    let final_scheme = TypeScheme { ..scheme, effect_schema: schema }
+    validate_effect_header_schema(
+        [final_scheme.ty], final_scheme.type_vars, schema)
+    rebind_fn_scheme_with_alias(ctx, name, final_scheme)
+    publish_exact_callable_effect_header(
+        ctx, executable, callable_signature, schema)
+    schema
 }
 
 fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, init: Expr, is_pub: Bool, span: Span) -> HDecl {
@@ -554,8 +712,8 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
         final_init_unremapped, evidence_remap.0, evidence_remap.1)
     let handled_evidence_bindings =
         current_handled_evidence_bindings(ctx)
-    register_exact_callable_effect_header(
-        ctx, const_executable, Type::FnType {
+    let _ = publish_final_value_effect_schema(
+        ctx, name, const_executable, Type::FnType {
             params: [], return_type: resolved,
             effects: hexpr_effects(final_init)
         })
@@ -748,6 +906,241 @@ fn store_rebound_impl_method_scheme(
         owner.method_refs.get(method_name).unwrap(), span)
 }
 
+fn check_impl_method_body(
+    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
+    impl_owner: ImplEntry, impl_self_type: Type,
+    method: Decl, check_phase: FnCheckPhase
+) -> HDecl {
+    match method {
+        Decl::Fn { name, type_params: mtps, params, return_type,
+                   declared_effects, body, is_pub, span, .. } => {
+            let registration_scheme = registered_impl_method_scheme(
+                ctx, target_type, trait_name,
+                impl_owner.owner_ref.unwrap(), name)
+            let exact_method = impl_owner.method_refs.get(
+                name).unwrap_or_else(fn() {
+                panic("impl checking: method has no exact identity")
+            })
+            let rebind_identity = symbol_ref_declaration_site_path(
+                impl_method_ref_member(exact_method))
+            let hdecl = check_fn_decl(
+                ctx, name, mtps, params, return_type, declared_effects,
+                body, is_pub, span, some(impl_self_type),
+                registration_scheme, some(rebind_identity),
+                some(exact_method), impl_owner.type_param_vars,
+                check_phase)
+            let qualified_key = "${target_type}_${name}"
+            match ctx.fn_mut_params.get(name) {
+                some(flags) => ctx.fn_mut_params.insert(
+                    qualified_key, flags),
+                none => {}
+            }
+            hdecl
+        },
+        _ => panic("impl method group: member is not a function")
+    }
+}
+
+fn stage_callable_close(
+    mut ctx: InferCtx, name: Str, provenance_key: Str,
+    executable: ExecutableRef, registration_scheme: TypeScheme,
+    source_params: List<HParam>, source_return: Type,
+    source_effects: EffectRow, span: Span,
+    group_subst: UnionFind?, external_free: Set<Int>?,
+    inherited_type_vars: List<Int>
+) -> StagedCallableClose {
+    let rebound = match group_subst {
+        some(subst) => finalize_recursive_callable_scheme(
+            ctx, provenance_key, registration_scheme, source_params,
+            span, subst, external_free.unwrap_or_else(fn() {
+                panic("recursive callable group: external environment is absent")
+            })),
+        none => rebind_checked_fn_scheme(
+            ctx, provenance_key, registration_scheme,
+            source_params, source_return, source_effects, span)
+    }
+    let schema = build_final_callable_effect_schema(
+        rebound, executable, inherited_type_vars)
+    let final_scheme = TypeScheme { ..rebound, effect_schema: schema }
+    let quantified = final_scheme.type_vars.filter(fn(id) {
+        !inherited_type_vars.contains(id)
+    })
+    validate_effect_header_schema(
+        [final_scheme.ty], quantified, final_scheme.effect_schema)
+    StagedCallableClose {
+        name: name, executable: executable,
+        scheme: final_scheme, span: span
+    }
+}
+
+fn stage_impl_method_close(
+    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
+    impl_owner: ImplEntry, provisional_hir: HDecl,
+    group_subst: UnionFind?, external_free: Set<Int>?
+) -> StagedCallableClose {
+    let (name, source_params, source_return, source_effects,
+         source_span, method_ref, executable) = match provisional_hir {
+        HDecl::Fn { name, params, return_type, effects, span,
+                    impl_method_ref: some(method_ref), executable_ref, .. } =>
+            (name, params, return_type, effects, span,
+             method_ref, executable_ref),
+        _ => panic("impl method group: provisional HIR is not an exact method")
+    }
+    let registration_scheme = registered_impl_method_scheme(
+        ctx, target_type, trait_name,
+        impl_owner.owner_ref.unwrap(), name).unwrap_or_else(fn() {
+        panic("impl method group: provisional scheme is absent")
+    })
+    if !executable_ref_same(
+           executable,
+           make_named_executable_ref(impl_method_ref_member(method_ref))) {
+        panic("impl method group: exact member identity changed")
+    }
+    let provenance_key = symbol_ref_declaration_site_path(
+        impl_method_ref_member(method_ref))
+    stage_callable_close(
+        ctx, name, provenance_key, executable, registration_scheme,
+        source_params, source_return, source_effects, source_span,
+        group_subst, external_free, impl_owner.type_param_vars)
+}
+
+fn commit_impl_method_group(
+    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
+    owner_ref: ImplOwnerRef, staged: List<StagedCallableClose>
+) {
+    for value in staged {
+        store_rebound_impl_method_scheme(
+            ctx, target_type, trait_name, owner_ref,
+            value.name, value.scheme, value.span)
+    }
+    for value in staged {
+        publish_exact_callable_effect_header(
+            ctx, value.executable, value.scheme.ty,
+            value.scheme.effect_schema)
+    }
+}
+
+fn validate_closed_callable_scheme(
+    mut ctx: InferCtx, provenance_key: Str,
+    scheme: TypeScheme, executable: ExecutableRef,
+    params: List<HParam>, return_type: Type, effects: EffectRow,
+    span: Span, inherited_type_vars: List<Int>
+) {
+    if !recursive_callable_is_closed(ctx, executable) {
+        panic("recursive callable validation: executable is not closed")
+    }
+    let checked = rebind_checked_fn_scheme(
+        ctx, provenance_key, scheme,
+        params, return_type, effects, span)
+    if !types_equal(checked.ty, scheme.ty) {
+        panic("recursive callable validation: final HIR signature changed")
+    }
+    let quantified = scheme.type_vars.filter(fn(id) {
+        !inherited_type_vars.contains(id)
+    })
+    validate_effect_header_schema(
+        [scheme.ty], quantified, scheme.effect_schema)
+}
+
+fn validate_closed_impl_method(
+    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
+    impl_owner: ImplEntry, hdecl: HDecl
+) {
+    match hdecl {
+        HDecl::Fn { name, params, return_type, effects, span,
+                    impl_method_ref: some(method_ref), executable_ref, .. } => {
+            let scheme = registered_impl_method_scheme(
+                ctx, target_type, trait_name,
+                impl_owner.owner_ref.unwrap(), name).unwrap_or_else(fn() {
+                panic("recursive impl method validation: scheme is absent")
+            })
+            let provenance_key = symbol_ref_declaration_site_path(
+                impl_method_ref_member(method_ref))
+            validate_closed_callable_scheme(
+                ctx, provenance_key, scheme, executable_ref,
+                params, return_type, effects, span,
+                impl_owner.type_param_vars)
+        },
+        _ => panic("recursive impl method validation: HIR member is invalid")
+    }
+}
+
+fn check_recursive_impl_method_group(
+    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
+    impl_owner: ImplEntry, impl_self_type: Type,
+    group: List<Str>, impl_fn_map: Map<Str, Decl>
+) -> List<HDecl> {
+    let mut names = group.map(fn(name) { name })
+    names.sort()
+    let mut executables: List<ExecutableRef> = []
+    for name in names {
+        let method_ref = impl_owner.method_refs.get(name).unwrap_or_else(fn() {
+            panic("recursive impl method group: exact member is absent")
+        })
+        executables.push(make_named_executable_ref(
+            impl_method_ref_member(method_ref)))
+    }
+
+    let saved_subst = ctx.subst
+    let saved_fn_mut_params = map_clone(ctx.fn_mut_params)
+    let saved_rebind_provenance = map_clone(
+        ctx.rebind_assoc_provenance)
+    let effect_fact_checkpoint = recursive_effect_fact_checkpoint(ctx)
+    ctx.subst = empty_subst()
+    begin_recursive_callable_group(ctx, executables)
+    let prepared = some({
+        let mut provisional: List<HDecl> = []
+        for name in names {
+            provisional.push(check_impl_method_body(
+                ctx, target_type, trait_name, impl_owner, impl_self_type,
+                impl_fn_map.get(name).unwrap(),
+                FnCheckPhase::RecursiveConstraintCheck))
+        }
+        let group_subst = ctx.subst
+        let external_free = free_type_vars_outside_recursive_group(
+            ctx, executables, group_subst)
+        let mut staged: List<StagedCallableClose> = []
+        for hdecl in provisional {
+            staged.push(stage_impl_method_close(
+                ctx, target_type, trait_name, impl_owner,
+                hdecl, some(group_subst), some(external_free)))
+        }
+        staged
+    }) catch { _ => none }
+    let staged = match prepared {
+        some(value) => value,
+        none => {
+            rollback_recursive_effect_facts(ctx, effect_fact_checkpoint)
+            end_recursive_callable_group(ctx, executables)
+            ctx.subst = saved_subst
+            ctx.fn_mut_params = saved_fn_mut_params
+            ctx.rebind_assoc_provenance = saved_rebind_provenance
+            fail.raise(CompileError {})
+        }
+    }
+    ctx.fn_mut_params = saved_fn_mut_params
+    ctx.rebind_assoc_provenance = saved_rebind_provenance
+    rollback_recursive_effect_facts(ctx, effect_fact_checkpoint)
+    commit_impl_method_group(
+        ctx, target_type, trait_name,
+        impl_owner.owner_ref.unwrap(), staged)
+    mark_recursive_callable_group_closed(ctx, executables)
+    end_recursive_callable_group(ctx, executables)
+    ctx.subst = saved_subst
+
+    let mut retained: List<HDecl> = []
+    for name in names {
+        let final_hir = check_impl_method_body(
+            ctx, target_type, trait_name, impl_owner, impl_self_type,
+            impl_fn_map.get(name).unwrap(),
+            FnCheckPhase::OrdinaryFnCheck)
+        validate_closed_impl_method(
+            ctx, target_type, trait_name, impl_owner, final_hir)
+        retained.push(final_hir)
+    }
+    retained
+}
+
 fn check_impl_decl(
     mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
     trait_name: Str?, methods: List<Decl>, span: Span, decl_index: Int
@@ -934,7 +1327,9 @@ fn check_impl_decl_canonical(
                 collect_self_method_callees(body, impl_fn_names, callees)
                 let mut sorted_callees: List<Str> = []
                 for c in callees {
-                    if c != name { sorted_callees.push(c) }
+                    // Retain self recursion so singleton SCCs enter the same
+                    // monomorphic group lifecycle as mutual recursion.
+                    sorted_callees.push(c)
                 }
                 sorted_callees.sort()
                 impl_call_graph.insert(name, sorted_callees)
@@ -946,78 +1341,26 @@ fn check_impl_decl_canonical(
     // Step 3: Run Tarjan SCC to get reverse topo order (callees first)
     let sccs = tarjan_scc(impl_call_graph)
 
-    // Step 4: Build reordered method list — SCC-ordered Fn methods, then non-Fn decls
-    let mut ordered_methods: List<Decl> = []
-    let mut ordered_fn_names: Set<Str> = set_new()
-    for scc in sccs {
-        for name in scc {
-            if !ordered_fn_names.contains(name) {
-                match impl_fn_map.get(name) {
-                    some(decl) => {
-                        ordered_methods.push(decl)
-                        ordered_fn_names.insert(name)
-                    },
-                    none => {}
-                }
-            }
-        }
-    }
-    // Append non-Fn decls (ExternFn, AssocType, Delegate) in original order
-    for method in methods {
-        match method {
-            Decl::Fn { .. } => {},  // Already in ordered_methods
-            _ => ordered_methods.push(method)
-        }
-    }
-
     let mut hmethods: List<HDecl> = []
-    for method in ordered_methods {
-        match method {
-            Decl::Fn { name, type_params: mtps, params, return_type, declared_effects, body, is_pub, span: mspan, .. } => {
-                let registration_scheme = registered_impl_method_scheme(
-                    ctx, target_type, trait_name, selected_owner, name)
-                let exact_method = match impl_owner.method_refs.get(name) {
-                    some(method_ref) => method_ref,
-                    none => panic("impl checking: method has no exact identity")
-                }
-                let rebind_identity = symbol_ref_declaration_site_path(
-                    impl_method_ref_member(exact_method))
-                let hdecl = check_fn_decl(
-                    ctx, name, mtps, params, return_type, declared_effects,
-                    body, is_pub, mspan, some(impl_self_type),
-                    registration_scheme, some(rebind_identity),
-                    some(exact_method), impl_owner.type_param_vars)
-                // #210: Also register fn_mut_params with qualified key for cross-module export.
-                // check_fn_decl inserts with unqualified `name`; exports.ring looks up
-                // with "${target_type}_${mname}", so we mirror that key here.
-                let qual_key = "${target_type}_${name}"
-                match ctx.fn_mut_params.get(name) {
-                    some(flags) => ctx.fn_mut_params.insert(qual_key, flags),
-                    none => {}
-                }
-                match hdecl {
-                    HDecl::Fn {
-                        name: mname, params: mparams,
-                        return_type: mret, effects: meffects,
-                        span: checked_span, ..
-                    } => match registration_scheme {
-                        some(scheme) => {
-                            let rebound = rebind_checked_fn_scheme(
-                                ctx, rebind_identity, scheme,
-                                mparams, mret, meffects, checked_span)
-                            store_rebound_impl_method_scheme(
-                                ctx, target_type, trait_name, selected_owner,
-                                mname, rebound, checked_span)
-                        }
-                        none => {}
-                    },
-                    _ => {}
-                }
+    for scc in sccs {
+        if scc_group_is_recursive(scc, impl_call_graph) {
+            let retained = check_recursive_impl_method_group(
+                ctx, target_type, trait_name, impl_owner,
+                impl_self_type, scc, impl_fn_map)
+            for hdecl in retained { hmethods.push(hdecl) }
+        } else {
+            for name in scc {
+                let hdecl = check_impl_method_body(
+                    ctx, target_type, trait_name, impl_owner,
+                    impl_self_type, impl_fn_map.get(name).unwrap(),
+                    FnCheckPhase::OrdinaryFnCheck)
+                let staged = stage_impl_method_close(
+                    ctx, target_type, trait_name, impl_owner,
+                    hdecl, none, none)
+                commit_impl_method_group(
+                    ctx, target_type, trait_name, selected_owner, [staged])
                 hmethods.push(hdecl)
-            },
-            Decl::Delegate { .. } => {},  // Handled at check_one_decl level
-            Decl::AssocType { .. } => {},  // Already handled above
-            _ => {}
+            }
         }
     }
 
@@ -1406,12 +1749,22 @@ fn expand_delegate_impls(
                                         assoc_entries.sort_by(compare_by_first)
                                         for assoc_entry in assoc_entries {
                                             let (assoc_name, assoc_type) = assoc_entry
+                                            let assoc_schema = match
+                                                    field_entry.assoc_type_effect_schemas.get(
+                                                        assoc_name) {
+                                                some(schema) => schema,
+                                                none => panic(
+                                                    "delegate HIR: assoc effect schema is absent")
+                                            }
+                                            let localized =
+                                                instantiate_effect_header_schema(
+                                                    ctx.env, [assoc_type],
+                                                    assoc_schema)
                                             field_assoc_map.insert(
                                                 assoc_name,
                                                 apply_subst_map(
                                                     field_var_map,
-                                                    freshen_effect_header(
-                                                        ctx.env, assoc_type)))
+                                                    localized.0.get(0).unwrap()))
                                         }
                                     },
                                     none => {}
@@ -2084,7 +2437,7 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
                             make_named_executable_ref(
                                 trait_method_ref_member(m.method_ref)),
                             self_var, hparams, fn_ret, fn_effects,
-                            method_span, abody)
+                            m.effect_schema, method_span, abody)
                         method_body = checked_default.body
                         method_body_bindings = some(
                             checked_default.handled_evidence_bindings)
@@ -2142,7 +2495,8 @@ fn check_trait_default_body(
     mut ctx: InferCtx, trait_name: Str, method_identity: Str,
     executable_ref: ExecutableRef,
     self_var: Type, hparams: List<HParam>, method_return: Type,
-    method_effects: EffectRow, method_span: Span, body: Expr
+    method_effects: EffectRow, method_schema: TypedEffectHeaderSchema,
+    method_span: Span, body: Expr
 ) -> TraitDefaultBodyResult {
     enter_executable_owner(ctx, executable_ref)
     prepare_callable_handled_evidence(ctx, method_effects)
@@ -2297,11 +2651,11 @@ fn check_trait_default_body(
     })
     let handled_evidence_bindings =
         current_handled_evidence_bindings(ctx)
-    register_exact_callable_effect_header(
+    publish_exact_callable_effect_header(
         ctx, executable_ref, Type::FnType {
             params: hparams.map(fn(param) { param.ty }),
             return_type: method_return, effects: method_effects
-        })
+        }, method_schema)
     exit_executable_owner(ctx)
     TraitDefaultBodyResult {
         body: remapped_body,
@@ -2373,9 +2727,10 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
         },
         none => conservative_extern_resource_contract(hparams, fn_ret)
     }
-    let extern_effects = match declared_effects {
-        some(de) => resolve_declared_effects(ctx, de),
-        none => EMPTY_ROW
+    let _ = declared_effects
+    let extern_effects = match scheme.ty {
+        Type::FnType { effects, .. } => effects,
+        _ => EMPTY_ROW
     }
     let mut system_count = 0
     let mut system_contract_invalid = extern_effects.tail.is_some()
@@ -2407,8 +2762,8 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
     ensure_callable_handled_evidence(ctx, extern_effects)
     let handled_evidence_bindings =
         current_handled_evidence_bindings(ctx)
-    register_exact_callable_effect_header(
-        ctx, executable_ref, Type::FnType {
+    let _ = publish_final_value_effect_schema(
+        ctx, name, executable_ref, Type::FnType {
             params: hparams.map(fn(param) { param.ty }),
             return_type: fn_ret, effects: extern_effects
         })
@@ -2553,6 +2908,8 @@ fn check_fn_body(
     hparams: List<HParam>,
     expected_ret: Type,
     declared_effects: EffectRow?,
+    registered_effects: EffectRow?,
+    canonical_registration_vars: List<Int>,
     body: Expr,
     saved_tp_scope: Map<Str, Type>,
     span: Span,
@@ -2588,7 +2945,23 @@ fn check_fn_body(
             ctx.subst = constrained.1
             constrained.0
         },
-        none => body_result.effects
+        none => match registered_effects {
+            some(provisional_row) => {
+                ctx.subst = unify_at(
+                    ctx.sink, ctx.env,
+                    Type::EffectRowType {
+                        effects: body_result.effects.effects,
+                        tail: body_result.effects.tail
+                    },
+                    Type::EffectRowType {
+                        effects: provisional_row.effects,
+                        tail: provisional_row.tail
+                    },
+                    ctx.subst, span)
+                provisional_row
+            },
+            none => body_result.effects
+        }
     }
 
     register_bounded_callable_value_shadows(
@@ -2682,6 +3055,27 @@ fn check_fn_body(
                 }
                 inherited_index = inherited_index + 1
             }
+            let mut inherited_registration_ids: List<Int> = []
+            for inherited_index in 0..inherited_type_var_ids.len() {
+                inherited_registration_ids.push(
+                    scheme.type_vars.get(inherited_index).unwrap())
+            }
+            for source_tail in ordered_effect_tail_vars(scheme.ty) {
+                if scheme.type_vars.contains(source_tail) &&
+                   !inherited_registration_ids.contains(source_tail) {
+                    match apply_subst(
+                            ctx.subst,
+                            Type::TypeVar {
+                                id: source_tail, name: none
+                            }) {
+                        Type::TypeVar { id: representative, .. } =>
+                            insert_canonical_type_var_id(
+                                canonical_type_var_ids,
+                                representative, source_tail),
+                        _ => {}
+                    }
+                }
+            }
         },
         none => if inherited_type_var_ids.len() != 0 {
             panic("function zonk: inherited type parameters lack registration")
@@ -2695,6 +3089,16 @@ fn check_fn_body(
                 insert_canonical_type_var_id(
                     canonical_type_var_ids, representative, source_id)
             },
+            _ => {}
+        }
+    }
+    for source_id in canonical_registration_vars {
+        match apply_subst(
+                ctx.subst,
+                Type::TypeVar { id: source_id, name: none }) {
+            Type::TypeVar { id: representative, .. } =>
+                insert_canonical_type_var_id(
+                    canonical_type_var_ids, representative, source_id),
             _ => {}
         }
     }
@@ -2868,7 +3272,8 @@ fn check_fn_decl(
     declared_effects: List<EffectExpr>?, body: Expr,
     is_pub: Bool, span: Span, self_type: Type?,
     registration_override: TypeScheme?, rebind_identity: Str?,
-    impl_method_ref: ImplMethodRef?, inherited_type_var_ids: List<Int>
+    impl_method_ref: ImplMethodRef?, inherited_type_var_ids: List<Int>,
+    check_phase: FnCheckPhase
 ) -> HDecl {
     let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let registered_def_id = match registration_override {
@@ -2890,7 +3295,7 @@ fn check_fn_decl(
         declared_effects, body, is_pub, span, self_type,
         registration_override, rebind_identity, impl_method_ref,
         executable_ref, inherited_type_var_ids,
-        obligation_checkpoint)) catch { _ => none }
+        obligation_checkpoint, check_phase)) catch { _ => none }
     exit_executable_owner(ctx)
     match result {
         some(hdecl) => {
@@ -2913,13 +3318,29 @@ fn check_fn_decl_transaction(
     impl_method_ref: ImplMethodRef?,
     executable_ref: ExecutableRef,
     inherited_type_var_ids: List<Int>,
-    obligation_checkpoint: Int
+    obligation_checkpoint: Int,
+    requested_phase: FnCheckPhase
 ) -> HDecl {
     // Save the registration scheme before entering the parameter scope: a
     // parameter is allowed to have the same spelling as its function.
     let registration_scheme = match registration_override {
         some(scheme) => some(scheme),
         none => ctx.env.lookup(name)
+    }
+    let recursive_constraint = match requested_phase {
+        FnCheckPhase::RecursiveConstraintCheck => true,
+        FnCheckPhase::OrdinaryFnCheck => false
+    }
+    let closed_validation = !recursive_constraint &&
+        recursive_callable_is_closed(ctx, executable_ref)
+    let use_registration_signature = recursive_constraint || closed_validation
+    let registered_signature = match registration_scheme {
+        some(scheme) => match scheme.ty {
+            Type::FnType { params, return_type, effects } =>
+                some((params, return_type, effects)),
+            _ => none
+        },
+        none => none
     }
     let provenance_key = match rebind_identity {
         some(identity) => identity,
@@ -2930,7 +3351,7 @@ fn check_fn_decl_transaction(
     ctx.rebind_assoc_provenance.insert(provenance_key, [])
 
     let saved_subst = ctx.subst
-    ctx.subst = empty_subst()
+    if !recursive_constraint { ctx.subst = empty_subst() }
     ctx.env.push_scope()
 
     let saved_tp_scope = map_clone(ctx.type_param_scope)
@@ -2998,8 +3419,18 @@ fn check_fn_decl_transaction(
 
     let mut hparams: List<HParam> = []
     let mut param_types: List<Type> = []
+    let mut parameter_index = 0
     for p in params {
-        let ptype = match p.type_annotation {
+        let ptype = if use_registration_signature {
+            match registered_signature {
+                some(signature) => signature.0.get(
+                    parameter_index).unwrap_or_else(fn() {
+                    panic("recursive callable: registration parameter arity differs")
+                }),
+                none => panic(
+                    "recursive callable: registration is not a function")
+            }
+        } else { match p.type_annotation {
             some(ta) => resolve_type_expr(ctx, ta),
             none => {
                 if p.name == "self" {
@@ -3008,7 +3439,7 @@ fn check_fn_decl_transaction(
                     ctx.env.fresh_var()
                 }
             }
-        }
+        } }
         ctx.env.bind_mono(p.name, ptype)
         let param_scheme = ctx.env.lookup(p.name)
         match param_scheme {
@@ -3038,20 +3469,57 @@ fn check_fn_decl_transaction(
             none => hparams.push(HParam { name: p.name, ty: ptype, def_id: none, is_mutable: p.is_mutable })
         }
         param_types.push(ptype)
+        parameter_index = parameter_index + 1
+    }
+    if use_registration_signature {
+        match registered_signature {
+            some(signature) => if signature.0.len() != parameter_index {
+                panic("recursive callable: registration parameter census differs")
+            },
+            none => {}
+        }
     }
 
     let saved_fn_return = ctx.current_fn_return_type
-    let expected_ret = match return_type {
+    let expected_ret = if use_registration_signature {
+        match registered_signature {
+            some(signature) => signature.1,
+            none => panic("recursive callable: registration return is absent")
+        }
+    } else { match return_type {
         some(rt) => resolve_type_expr(ctx, rt),
         none => ctx.env.fresh_var()
-    }
+    } }
     ctx.current_fn_return_type = some(expected_ret)
     // Resolve while this owner's type-parameter and associated-type scopes
     // are live.  check_fn_body applies the payload constraints before drain.
+    let has_declared_effects = declared_effects.is_some()
     let owner_declared_effects = match declared_effects {
-        some(de) => some(resolve_declared_effects(ctx, de)),
+        some(de) => if use_registration_signature {
+            let _ = de
+            match registered_signature {
+                some(signature) => some(signature.2),
+                none => panic(
+                    "recursive callable: registration effects are absent")
+            }
+        } else {
+            some(resolve_declared_effects(ctx, de))
+        },
         none => none
     }
+    let registered_inferred_effects = if use_registration_signature &&
+            !has_declared_effects {
+        match registered_signature {
+            some(signature) => some(signature.2),
+            none => panic("recursive callable: provisional effects are absent")
+        }
+    } else { none }
+    let canonical_registration_vars = if use_registration_signature {
+        match registration_scheme {
+            some(scheme) => scheme.type_vars,
+            none => []
+        }
+    } else { [] }
     match owner_declared_effects {
         some(row) => prepare_callable_handled_evidence(ctx, row),
         none => {}
@@ -3062,6 +3530,8 @@ fn check_fn_decl_transaction(
             ctx, provenance_key, registration_scheme, type_params,
             inherited_type_var_ids, source_type_var_ids, hparams,
             expected_ret, owner_declared_effects,
+            registered_inferred_effects,
+            canonical_registration_vars,
             body, saved_tp_scope, span,
             obligation_checkpoint
         )
@@ -3076,7 +3546,7 @@ fn check_fn_decl_transaction(
     ctx.type_param_scope = saved_tp_scope
     ctx.qualified_assoc_scope = saved_qualified_assoc
     ctx.current_fn_bounds = match ctx.fn_bounds_stack.pop() { some(prev) => prev, none => [] }
-    ctx.subst = saved_subst
+    if !recursive_constraint { ctx.subst = saved_subst }
 
     let fn_result = match try_result {
         some(r) => r,
@@ -3093,7 +3563,8 @@ fn check_fn_decl_transaction(
     // Check: main function must not have unhandled custom effects.
     // Builtin effects have dedicated 0.1 rules,
     // but CustomEffect requires an explicit handler and cannot propagate past main.
-    if name == "main" || name.ends_with("$$_main") {
+    if !recursive_constraint &&
+       (name == "main" || name.ends_with("$$_main")) {
         for eff in final_effects.effects {
             match eff {
                 Effect::CustomEffect { name: eff_name, .. } => {
@@ -3153,11 +3624,6 @@ fn check_fn_decl_transaction(
         fi = fi + 1
     }
     ctx.fn_mut_params.insert(name, mut_flags)
-    register_exact_callable_effect_header(
-        ctx, executable_ref, Type::FnType {
-            params: final_params.map(fn(param) { param.ty }),
-            return_type: final_ret, effects: final_effects
-        })
     HDecl::Fn {
         name: name, def_id: fn_def_id,
         executable_ref: executable_ref,
@@ -3220,11 +3686,11 @@ fn check_test_decl(
         final_body_unremapped, evidence_remap.0, evidence_remap.1)
     let handled_evidence_bindings =
         current_handled_evidence_bindings(ctx)
-    register_exact_callable_effect_header(
+    publish_exact_callable_effect_header(
         ctx, test_executable, Type::FnType {
             params: [], return_type: hexpr_type(final_body),
             effects: hexpr_effects(final_body)
-        })
+        }, empty_typed_effect_header_schema())
     exit_executable_owner(ctx)
 
     HDecl::Test { description: description,
@@ -3237,45 +3703,16 @@ fn check_test_decl(
 // Public entry point
 // ============================================================
 
-fn check_one_decl(
-    mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?,
-    mut hdecls: List<HDecl>
+fn validate_closed_value_callable(
+    mut ctx: InferCtx, name: Str, executable: ExecutableRef,
+    params: List<HParam>, return_type: Type, effects: EffectRow, span: Span
 ) {
-    let hd = check_decl(ctx, decl, frame_decl_index)
-
-    // Update fn effects before push (modifies ctx.env, not hdecls)
-    match hd {
-        HDecl::Fn { name, effects, .. } => {
-            if effects.effects.len() > 0 {
-                update_fn_effects(ctx.env, name, effects)
-            }
-        },
-        _ => {}
-    }
-
-    // Expand delegates first, collect results before pushing anything to hdecls.
-    // If expand_delegate_impls fails (raises CompileError), neither the impl HIR
-    // nor partial delegate HIR will be left in hdecls.
-    let mut delegate_decls: List<HDecl> = []
-    match decl {
-        Decl::Impl { target_type, type_params, methods, span, .. } => {
-            for source_member_index in 0..methods.len() {
-                match methods.get(source_member_index) {
-                    some(Decl::Delegate { field, span: dspan, .. }) => {
-                        let delegate_impls = expand_delegate_impls(
-                            ctx, hd, source_member_index, field, dspan)
-                        for di in delegate_impls { delegate_decls.push(di) }
-                    },
-                    _ => {}
-                }
-            }
-        },
-        _ => {}
-    }
-
-    // Only push after everything succeeded
-    hdecls.push(hd)
-    for di in delegate_decls { hdecls.push(di) }
+    let scheme = ctx.env.lookup(name).unwrap_or_else(fn() {
+        panic("recursive callable validation: final scheme is absent")
+    })
+    validate_closed_callable_scheme(
+        ctx, name, scheme, executable,
+        params, return_type, effects, span, [])
 }
 
 // B-122: Check a declaration and rebind fn/impl-method types with resolved types.
@@ -3284,13 +3721,19 @@ fn check_one_decl(
 // so that subsequent callers (in SCC topological order) see correct return types.
 fn check_one_decl_with_rebind(
     mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?,
-    mut hdecls: List<HDecl>
+    mut hdecls: List<HDecl>, cached_impls: List<CachedImplClose>
 ) {
-    let hd = check_decl(ctx, decl, frame_decl_index)
+    let hd = check_decl(ctx, decl, frame_decl_index, cached_impls)
 
     // Update fn effects and rebind resolved types
     match hd {
-        HDecl::Fn { name, params, return_type, effects, span, .. } => {
+        HDecl::Fn { name, executable_ref, params, return_type,
+                    effects, span, .. } => {
+            if recursive_callable_is_closed(ctx, executable_ref) {
+                validate_closed_value_callable(
+                    ctx, name, executable_ref, params,
+                    return_type, effects, span)
+            } else {
             // update_fn_effects installs check-time effect variables into the
             // live scheme.  Snapshot the authoritative registration identity
             // first so effect-only type parameters still map back to the same
@@ -3303,6 +3746,12 @@ fn check_one_decl_with_rebind(
             rebind_fn_type(
                 ctx, name, params, return_type, effects, span,
                 registration_scheme)
+            let _ = publish_final_value_effect_schema(
+                ctx, name, executable_ref, Type::FnType {
+                    params: params.map(fn(param) { param.ty }),
+                    return_type: return_type, effects: effects
+                })
+            }
         },
         // Impl methods are rebound against their exact ImplEntry schemes in
         // check_impl_decl_canonical; a bare method spelling is not an identity.
@@ -3336,14 +3785,29 @@ fn check_one_decl_with_rebind(
 // in the same module context used by the final HIR pass.  This lets recursive
 // call-graph ordering cross ModBlock boundaries without flattening the emitted
 // HIR or losing self/super import resolution.
-fn precheck_inline_fn_in_mod_body(
-    mut ctx: InferCtx,
-    mod_name: Str,
-    uses: List<UseDecl>,
-    decls: List<Decl>,
-    required_effects: List<EffectExpr>?,
-    target_name: Str,
-    project_frame_active: Bool
+fn check_recursive_constraint_fn_decl(
+    mut ctx: InferCtx, decl: Decl
+) -> HDecl {
+    match decl {
+        Decl::Fn { name, type_params, params, return_type,
+                   declared_effects, body, is_pub, span, .. } =>
+            check_fn_decl(
+                ctx, name, type_params, params, return_type,
+                declared_effects, body, is_pub, span,
+                none, none, none, none, [],
+                FnCheckPhase::RecursiveConstraintCheck),
+        _ => panic("recursive callable group: member is not a function")
+    }
+}
+
+// One exact inline-module traversal serves ordinary dependency prechecks,
+// recursive constraint members, and the single retained impl-close cache.
+fn walk_inline_check_in_mod_body(
+    mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
+    decls: List<Decl>, required_effects: List<EffectExpr>?,
+    project_frame_active: Bool, target_name: Str?, recursive: Bool,
+    mut provisional: List<HDecl>,
+    mut cached_impls: List<CachedImplClose>
 ) -> Bool {
     if !project_frame_active {
         insert_mod_aliases(ctx, mod_name, decls, false)
@@ -3359,64 +3823,84 @@ fn precheck_inline_fn_in_mod_body(
         none => { ctx.mod_unsafe_allowed = false }
     }
 
-    let mut found = false
     for decl_index in 0..decls.len() {
-        let decl = decls.get(decl_index).unwrap()
-        let prefixed = prefix_decl_name(mod_name, decl)
-        match prefixed {
-            Decl::Fn { name, .. } => {
-                if name == target_name {
-                    let mut discarded: List<HDecl> = []
-                    let result = some(check_one_decl_with_rebind(
-                        ctx, prefixed, some(decl_index),
-                        discarded)) catch { _ => none }
-                    found = true
-                }
+        let prefixed = prefix_decl_name(
+            mod_name, decls.get(decl_index).unwrap())
+        match target_name {
+            some(wanted) => match prefixed {
+                Decl::Fn { name, .. } => if name == wanted {
+                    if recursive {
+                        provisional.push(
+                            check_recursive_constraint_fn_decl(ctx, prefixed))
+                    } else {
+                        let mut discarded: List<HDecl> = []
+                        let result = some(check_one_decl_with_rebind(
+                            ctx, prefixed, some(decl_index),
+                            discarded, [])) catch { _ => none }
+                    }
+                    return true
+                },
+                Decl::ModBlock { name, uses: nested_uses,
+                                 decls: nested_decls,
+                                 required_effects: nested_required, .. } => {
+                    if walk_inline_check_in_mod(
+                            ctx, name, nested_uses, nested_decls,
+                            nested_required, decl_index, target_name,
+                            recursive, provisional, cached_impls) {
+                        return true
+                    }
+                },
+                _ => {}
             },
-            Decl::ModBlock { name, uses: nested_uses, decls: nested_decls, required_effects: nested_required, .. } => {
-                if !found && precheck_inline_fn_in_mod(
-                    ctx, name, nested_uses, nested_decls,
-                    nested_required, target_name, decl_index) {
-                    found = true
-                }
-            },
-            _ => {}
+            none => match prefixed {
+                Decl::Impl { .. } => cache_checked_impl_decl(
+                    ctx, prefixed, decl_index, cached_impls),
+                Decl::ModBlock { name, uses: nested_uses,
+                                 decls: nested_decls,
+                                 required_effects: nested_required, .. } => {
+                    let _ = walk_inline_check_in_mod(
+                        ctx, name, nested_uses, nested_decls,
+                        nested_required, decl_index, none, false,
+                        provisional, cached_impls)
+                },
+                _ => {}
+            }
         }
-        if found { break }
     }
-    found
+    false
 }
 
-fn precheck_inline_fn_in_mod(
-    mut ctx: InferCtx,
-    mod_name: Str,
-    uses: List<UseDecl>,
-    decls: List<Decl>,
-    required_effects: List<EffectExpr>?,
-    target_name: Str,
-    frame_decl_index: Int
+fn walk_inline_check_in_mod(
+    mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
+    decls: List<Decl>, required_effects: List<EffectExpr>?,
+    frame_decl_index: Int, target_name: Str?, recursive: Bool,
+    mut provisional: List<HDecl>,
+    mut cached_impls: List<CachedImplClose>
 ) -> Bool {
+    enter_impl_check_child_frame(ctx, frame_decl_index)
     let project_active = ctx.project_namespace_file_key.is_some()
     let mut entered_project_frame = false
     if project_active {
         entered_project_frame = enter_project_child_frame(
             ctx, frame_decl_index)
         if !entered_project_frame {
-            panic("unreachable: resolver plan missing inline precheck frame")
+            exit_impl_check_frame(ctx)
+            panic("unreachable: resolver plan missing inline check frame")
         }
     }
     let segments = mod_name.split("::")
     let simple_name = segments.get(segments.len() - 1).unwrap_or(mod_name)
     ctx.mod_path_stack.push(simple_name)
     let prev_unsafe_allowed = ctx.mod_unsafe_allowed
-    let result = precheck_inline_fn_in_mod_body(
-        ctx, mod_name, uses, decls, required_effects,
-        target_name, project_active) catch { _ => {
+    let result = walk_inline_check_in_mod_body(
+        ctx, mod_name, uses, decls, required_effects, project_active,
+        target_name, recursive, provisional, cached_impls) catch { _ => {
             ctx.mod_unsafe_allowed = prev_unsafe_allowed
             let _ = ctx.mod_path_stack.pop()
             if entered_project_frame {
                 let _ = exit_project_namespace_frame(ctx)
             }
+            exit_impl_check_frame(ctx)
             fail.raise(CompileError {})
         }
     }
@@ -3425,24 +3909,48 @@ fn precheck_inline_fn_in_mod(
     if entered_project_frame {
         let _ = exit_project_namespace_frame(ctx)
     }
+    exit_impl_check_frame(ctx)
     result
 }
 
-fn precheck_inline_fn(
-    mut ctx: InferCtx, decls: List<Decl>, target_name: Str
+fn walk_inline_check(
+    mut ctx: InferCtx, decls: List<Decl>, target_name: Str?,
+    recursive: Bool, mut provisional: List<HDecl>,
+    mut cached_impls: List<CachedImplClose>
 ) -> Bool {
     for decl_index in 0..decls.len() {
-        let decl = decls.get(decl_index).unwrap()
-        match decl {
-            Decl::ModBlock { name, uses, decls: mod_decls, required_effects, .. } => {
-                if precheck_inline_fn_in_mod(
-                    ctx, name, uses, mod_decls, required_effects,
-                    target_name, decl_index) { return true }
+        match decls.get(decl_index).unwrap() {
+            Decl::ModBlock { name, uses, decls: mod_decls,
+                             required_effects, .. } => {
+                if walk_inline_check_in_mod(
+                        ctx, name, uses, mod_decls, required_effects,
+                        decl_index, target_name, recursive,
+                        provisional, cached_impls) {
+                    return true
+                }
             },
             _ => {}
         }
     }
     false
+}
+
+fn precheck_inline_fn(
+    mut ctx: InferCtx, decls: List<Decl>, target_name: Str
+) -> Bool {
+    walk_inline_check(ctx, decls, some(target_name), false, [], [])
+}
+
+fn check_recursive_inline_fn(
+    mut ctx: InferCtx, decls: List<Decl>, target_name: Str
+) -> HDecl {
+    let mut provisional: List<HDecl> = []
+    if !walk_inline_check(
+            ctx, decls, some(target_name), true, provisional, []) ||
+       provisional.len() != 1 {
+        panic("recursive callable group: inline member is absent")
+    }
+    provisional.get(0).unwrap()
 }
 
 fn collect_impl_scc_fn_names(
@@ -3511,10 +4019,301 @@ fn precheck_top_level_fn_at(
         some(decl) => {
             let mut discarded: List<HDecl> = []
             let result = some(check_one_decl_with_rebind(
-                ctx, decl, none, discarded)) catch { _ => none }
+                ctx, decl, none, discarded, [])) catch { _ => none }
         },
         none => {}
     }
+}
+
+fn scc_group_is_recursive(
+    group: List<Str>, graph: Map<Str, List<Str>>
+) -> Bool {
+    if group.len() > 1 { return true }
+    match group.get(0) {
+        some(member) => match graph.get(member) {
+            some(edges) => edges.contains(member),
+            none => false
+        },
+        none => false
+    }
+}
+
+fn value_callable_executable(
+    ctx: InferCtx, name: Str
+) -> ExecutableRef {
+    let scheme = ctx.env.lookup(name).unwrap_or_else(fn() {
+        panic("recursive callable group: registered value is absent")
+    })
+    named_executable_for_def_id(
+        ctx, scheme.def_id, "recursive function '${name}'")
+}
+
+fn executable_group_contains(
+    values: List<ExecutableRef>, wanted: ExecutableRef
+) -> Bool {
+    for value in values {
+        if executable_ref_same(value, wanted) { return true }
+    }
+    false
+}
+
+fn scheme_is_recursive_group_member(
+    ctx: InferCtx, scheme: TypeScheme,
+    executables: List<ExecutableRef>
+) -> Bool {
+    match scheme.def_id {
+        some(def_id) => match ctx.value_symbols.get(def_id) {
+            some(symbol) => executable_group_contains(
+                executables, make_named_executable_ref(symbol)),
+            none => false
+        },
+        none => false
+    }
+}
+
+// HM generalization for a recursive value group is relative to the environment
+// outside that group. Alias bindings whose exact executable is a member are
+// excluded together with the canonical binding; all other lexical values stay
+// visible as the external monomorphic boundary.
+fn free_type_vars_outside_recursive_group(
+    ctx: InferCtx, executables: List<ExecutableRef>, subst: UnionFind
+) -> Set<Int> {
+    let mut result: Set<Int> = set_new()
+    for scope in ctx.env.scope.scopes {
+        let mut bindings = scope.variables.entries()
+        bindings.sort_by(compare_by_first)
+        for entry in bindings {
+            let (_, scheme) = entry
+            if scheme_is_recursive_group_member(
+                    ctx, scheme, executables) { continue }
+            let free = free_type_vars(scheme.ty, subst)
+            let mut quantified: Set<Int> = set_new()
+            for source in scheme.type_vars {
+                match apply_subst(
+                        subst,
+                        Type::TypeVar { id: source, name: none }) {
+                    Type::TypeVar { id, .. } => { quantified.insert(id) },
+                    _ => { quantified.insert(source) }
+                }
+            }
+            for id in free {
+                if !quantified.contains(id) { result.insert(id) }
+            }
+        }
+    }
+    result
+}
+
+fn canonical_recursive_signature(
+    ctx: InferCtx, scheme: TypeScheme, subst: UnionFind
+) -> Type {
+    let canonical_ids: Map<Int, Int> = map_new()
+    for source in scheme.type_vars {
+        match apply_subst(
+                subst, Type::TypeVar { id: source, name: none }) {
+            Type::TypeVar { id: representative, .. } =>
+                insert_canonical_type_var_id(
+                    canonical_ids, representative, source),
+            _ => {}
+        }
+    }
+    zonk_type(ZonkCtx {
+        subst: subst, names: map_new(),
+        canonical_type_var_ids: canonical_ids,
+        dict_resolver: some(ctx)
+    }, scheme.ty)
+}
+
+fn finalize_recursive_callable_scheme(
+    mut ctx: InferCtx, provenance_key: Str,
+    scheme: TypeScheme, source_params: List<HParam>,
+    span: Span, group_subst: UnionFind,
+    external_free: Set<Int>
+) -> TypeScheme {
+    let final_type = canonical_recursive_signature(
+        ctx, scheme, group_subst)
+    let (parameter_types, return_type, effects) = match final_type {
+        Type::FnType { params, return_type, effects } =>
+            (params, return_type, effects),
+        _ => panic("recursive callable group: final type is not callable")
+    }
+    if source_params.len() != parameter_types.len() {
+        panic("recursive callable group: final parameter census differs")
+    }
+    let mut final_params: List<HParam> = []
+    for index in 0..parameter_types.len() {
+        let source = source_params.get(index).unwrap()
+        final_params.push(HParam {
+            name: source.name,
+            ty: parameter_types.get(index).unwrap(),
+            def_id: source.def_id,
+            is_mutable: source.is_mutable
+        })
+    }
+
+    // Reuse the bounded final rebind audit for associated-type/fail provenance;
+    // the recursive group's direct zonk above remains the type authority.
+    let audited = rebind_checked_fn_scheme(
+        ctx, provenance_key, scheme, final_params,
+        return_type, effects, span)
+
+    let mut type_vars = list_clone(scheme.type_vars)
+    let final_free = free_type_vars(final_type, empty_subst())
+    let mut ordered_free = final_free.to_list()
+    ordered_free.sort()
+    for id in ordered_free {
+        if !type_vars.contains(id) && !external_free.contains(id) {
+            type_vars.push(id)
+        }
+    }
+    let mut bounds: List<SchemeBound> = []
+    for bound in audited.bounds {
+        if type_vars.contains(bound.type_var) { bounds.push(bound) }
+    }
+    for id in type_vars {
+        match ctx.env.scope.var_bounds.get(id) {
+            some(traits) => {
+                let mut ordered_traits = traits.to_list()
+                ordered_traits.sort()
+                for trait_name in ordered_traits {
+                    if !bounds.any(fn(bound) {
+                            bound.type_var == id &&
+                            bound.trait_name == trait_name
+                        }) {
+                        bounds.push(SchemeBound {
+                            type_var: id, trait_name: trait_name,
+                            assoc_constraints: []
+                        })
+                    }
+                }
+            },
+            none => {}
+        }
+    }
+    TypeScheme {
+        ty: final_type, type_vars: type_vars, bounds: bounds,
+        effect_schema: scheme.effect_schema, def_id: scheme.def_id
+    }
+}
+
+fn stage_recursive_value_callable(
+    mut ctx: InferCtx, name: Str, executable: ExecutableRef,
+    provisional_hir: HDecl, group_subst: UnionFind,
+    external_free: Set<Int>
+) -> StagedCallableClose {
+    let registration_scheme = ctx.env.lookup(name).unwrap_or_else(fn() {
+        panic("recursive callable group: provisional scheme is absent")
+    })
+    let (source_params, source_return, source_effects,
+         source_span, source_executable) = match provisional_hir {
+        HDecl::Fn { params, return_type, effects,
+                    span, executable_ref, .. } =>
+            (params, return_type, effects, span, executable_ref),
+        _ => panic("recursive callable group: provisional HIR is not a function")
+    }
+    if !executable_ref_same(source_executable, executable) {
+        panic("recursive callable group: provisional member identity changed")
+    }
+    stage_callable_close(
+        ctx, name, name, executable, registration_scheme,
+        source_params, source_return, source_effects, source_span,
+        some(group_subst), some(external_free), [])
+}
+
+fn prepare_recursive_value_group(
+    mut ctx: InferCtx, decls: List<Decl>, names: List<Str>,
+    top_level_indices: Map<Str, Int>,
+    executables: List<ExecutableRef>
+) -> List<StagedCallableClose> {
+    let mut provisional_hir: List<HDecl> = []
+    for name in names {
+        match top_level_indices.get(name) {
+            some(index) => match decls.get(index) {
+                some(decl) => provisional_hir.push(
+                    check_recursive_constraint_fn_decl(ctx, decl)),
+                none => panic(
+                    "recursive callable group: top-level member is absent")
+            },
+            none => provisional_hir.push(
+                check_recursive_inline_fn(ctx, decls, name))
+        }
+    }
+    let group_subst = ctx.subst
+    let external_free = free_type_vars_outside_recursive_group(
+        ctx, executables, group_subst)
+    let mut staged: List<StagedCallableClose> = []
+    for index in 0..names.len() {
+        staged.push(stage_recursive_value_callable(
+            ctx,
+            names.get(index).unwrap(),
+            executables.get(index).unwrap(),
+            provisional_hir.get(index).unwrap(),
+            group_subst, external_free))
+    }
+    staged
+}
+
+fn close_recursive_value_group(
+    mut ctx: InferCtx, decls: List<Decl>, group: List<Str>,
+    top_level_indices: Map<Str, Int>, impl_fn_names: Set<Str>
+) {
+    let mut names: List<Str> = []
+    for name in group {
+        if !name.starts_with("impl::") &&
+           !impl_fn_names.contains(name) {
+            names.push(name)
+        }
+    }
+    names.sort()
+    if names.len() == 0 { return }
+
+    let mut executables: List<ExecutableRef> = []
+    for name in names {
+        executables.push(value_callable_executable(ctx, name))
+    }
+
+    let saved_subst = ctx.subst
+    let saved_fn_mut_params = map_clone(ctx.fn_mut_params)
+    let saved_rebind_provenance = map_clone(
+        ctx.rebind_assoc_provenance)
+    let effect_fact_checkpoint = recursive_effect_fact_checkpoint(ctx)
+    ctx.subst = empty_subst()
+    begin_recursive_callable_group(ctx, executables)
+    let prepared = some(prepare_recursive_value_group(
+        ctx, decls, names, top_level_indices, executables)) catch { _ => none }
+    let staged = match prepared {
+        some(value) => value,
+        none => {
+            rollback_recursive_effect_facts(ctx, effect_fact_checkpoint)
+            end_recursive_callable_group(ctx, executables)
+            ctx.subst = saved_subst
+            ctx.fn_mut_params = saved_fn_mut_params
+            ctx.rebind_assoc_provenance = saved_rebind_provenance
+            fail.raise(CompileError {})
+        }
+    }
+
+    // Discard all checker-side metadata written by the provisional HIR pass.
+    // The staged schemes already consumed its provenance; the retained pass
+    // will recreate final mutability/provenance facts after group closure.
+    ctx.fn_mut_params = saved_fn_mut_params
+    ctx.rebind_assoc_provenance = saved_rebind_provenance
+    rollback_recursive_effect_facts(ctx, effect_fact_checkpoint)
+
+    // Every fallible scheme/schema derivation completed above. Publish the
+    // complete value group, then close its exact executable identities as one
+    // scheduler transaction.
+    for value in staged {
+        rebind_fn_scheme_with_alias(ctx, value.name, value.scheme)
+    }
+    for value in staged {
+        publish_exact_callable_effect_header(
+            ctx, value.executable, value.scheme.ty,
+            value.scheme.effect_schema)
+    }
+    mark_recursive_callable_group_closed(ctx, executables)
+    end_recursive_callable_group(ctx, executables)
+    ctx.subst = saved_subst
 }
 
 // B-122: Rebind a fn's type scheme with resolved return type and effects.
@@ -4842,8 +5641,9 @@ fn check_registered(
     let derived_impls = run_derive_pass(ctx)
     for derived in derived_impls {
         for method in derived.methods {
-            register_exact_callable_effect_header(
-                ctx, method.executable_ref, method.signature)
+            publish_exact_callable_effect_header(
+                ctx, method.executable_ref, method.signature,
+                empty_typed_effect_header_schema())
         }
     }
     let project_active = ctx.project_namespace_file_key.is_some()
@@ -4874,23 +5674,6 @@ fn check_registered_body(
     mut ctx: InferCtx, program: Program,
     derived_impls: List<DerivedImpl>
 ) -> HProgram {
-    // Effect pre-pass: rebind impl-owner method cores with inferred effects.
-    // Without this, callers defined before impl blocks see EMPTY_ROW effects from Pass 1.
-    // The main pass re-checks with correct effects visible.
-    // DiagnosticSink deduplication (by code+span) prevents double error reporting.
-    let mut effect_decl_index = 0
-    for decl in program.decls {
-        match decl {
-            Decl::Impl { target_type, type_params, trait_name, methods, span } => {
-                let _ = some(check_impl_decl(
-                    ctx, target_type, type_params, trait_name,
-                    methods, span, effect_decl_index)) catch { _ => none }
-            },
-            _ => {}
-        }
-        effect_decl_index = effect_decl_index + 1
-    }
-
     // B-122: Build SCC for fn/impl declaration ordering.
     // Callees are checked before callers so that rebinding makes resolved
     // return types visible to callers (fixing the #149 unsound ret-var hole).
@@ -4935,12 +5718,30 @@ fn check_registered_body(
         }
     }
     let precheck_nodes = inline_dependency_closure(call_graph, inline_roots, impl_fn_names)
+
+    // Method calls are not ordinary value-call graph edges. Close every exact
+    // impl once before any recursive value group is constrained, then retain
+    // its HIR/delegate expansion for insertion at the original emission site.
+    // This replaces the retired double-check effect pre-pass with one owner.
+    let mut cached_impls: List<CachedImplClose> = []
+    prepare_impl_close_cache(ctx, program.decls, cached_impls)
+
     for scc_group in scc_groups {
-        for name in scc_group {
-            if precheck_nodes.contains(name) {
-                match fn_name_to_idx.get(name) {
-                    some(i) => precheck_top_level_fn_at(ctx, program.decls, i),
-                    none => { let _ = precheck_inline_fn(ctx, program.decls, name) }
+        if scc_group_is_recursive(scc_group, call_graph) {
+            close_recursive_value_group(
+                ctx, program.decls, scc_group,
+                fn_name_to_idx, impl_fn_names)
+        } else {
+            for name in scc_group {
+                if precheck_nodes.contains(name) {
+                    match fn_name_to_idx.get(name) {
+                        some(i) => precheck_top_level_fn_at(
+                            ctx, program.decls, i),
+                        none => {
+                            let _ = precheck_inline_fn(
+                                ctx, program.decls, name)
+                        }
+                    }
                 }
             }
         }
@@ -4959,7 +5760,8 @@ fn check_registered_body(
             Decl::Impl { .. } => {},
             _ => {
                 let result = some(check_one_decl_with_rebind(
-                    ctx, decl, some(di), hdecls)) catch { _ => none }
+                    ctx, decl, some(di), hdecls,
+                    cached_impls)) catch { _ => none }
                 checked.insert(di)
             }
         }
@@ -4967,16 +5769,19 @@ fn check_registered_body(
     }
 
     // Phase 2a: Check impl blocks in source order (before top-level fns).
-    // This re-checks impls with effects populated by the pre-pass.
-    // Must happen before top-level fns so that method effects are visible
-    // to callers (method calls are invisible to the call graph).
+    // Each impl closes its internal method SCCs leaf-first before returning,
+    // so top-level callers only observe final method schemes/headers.
     let mut ii = 0
     for decl in program.decls {
         match decl {
             Decl::Impl { .. } => {
                 if !checked.contains(ii) {
-                    let result = some(check_one_decl_with_rebind(
-                        ctx, decl, some(ii), hdecls)) catch { _ => none }
+                    let owner_ref = impl_check_owner(ctx, ii)
+                    let cached = cached_impl_declarations(
+                        cached_impls, owner_ref).unwrap_or_else(fn() {
+                        panic("impl close cache: root owner is absent")
+                    })
+                    for hdecl in cached { hdecls.push(hdecl) }
                     checked.insert(ii)
                 }
             },
@@ -4997,7 +5802,8 @@ fn check_registered_body(
                         match program.decls.get(i) {
                             some(decl) => {
                                 let result = some(check_one_decl_with_rebind(
-                                    ctx, decl, some(i), hdecls)) catch { _ => none }
+                                    ctx, decl, some(i), hdecls,
+                                    cached_impls)) catch { _ => none }
                                 checked.insert(i)
                             },
                             none => {}
@@ -5015,7 +5821,8 @@ fn check_registered_body(
     for decl in program.decls {
         if !checked.contains(ri) {
             let result = some(check_one_decl_with_rebind(
-                ctx, decl, some(ri), hdecls)) catch { _ => none }
+                ctx, decl, some(ri), hdecls,
+                cached_impls)) catch { _ => none }
         }
         ri = ri + 1
     }
@@ -5059,7 +5866,8 @@ pub fn check_prelude_decl(
         },
         none => {}
     }
-    let result = some(check_decl(ctx, decl, some(decl_index))) catch { _ => {
+    let result = some(check_decl(
+        ctx, decl, some(decl_index), [])) catch { _ => {
         exit_impl_check_frame(ctx)
         fail.raise(CompileError {})
     } }

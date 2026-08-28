@@ -22,6 +22,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     install_method_core, replace_impl_method_core,
     make_impl_method_scheme_core, impl_method_core_as_scheme,
     impl_method_core_type, impl_method_core_type_vars,
+    impl_method_core_effect_schema,
     impl_method_core_def_id,
     make_impl_assoc_predicate, make_typed_impl_predicate,
     direct_impl_predicate_provenance, expanded_impl_predicate_provenance,
@@ -33,8 +34,10 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     impl_target_symbol,
     specialize_trait_method_scheme, build_type_var_map,
     ordered_effect_tail_vars,
-    freshen_effect_header,
-    register_effect_header_types,
+    enum_variant_constructor_effect_schema,
+    define_effect_header_schema, publish_effect_header_schema,
+    instantiate_effect_header_schema,
+    apply_effect_header_schema_subst,
     register_callable_effect_header,
     delegate_plan_not_applicable, delegate_plan_pending,
     delegate_plan_final,
@@ -68,7 +71,9 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     executable_effect_origin}
 use ir_inventory::{effect_operation_ref_callable, make_named_executable_ref}
 use effect_contract::{TypedEffectHeaderSchema,
-    empty_typed_effect_header_schema}
+    empty_typed_effect_header_schema,
+    typed_effect_header_schema_bindings,
+    typed_effect_header_binding_raw_tail}
 use infer_helpers::{is_value_type}
 use resolver::{StructIdentityFact, DelegateProviderFact,
     ImplMethodIdentityFact}
@@ -91,7 +96,8 @@ use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
     make_symbol_ref, namespace_member,
     impl_provider_ref_same,
     registered_trait_ref_symbol, symbol_ref_canonical_payload,
-    make_symbol_origin_ref}
+    make_symbol_origin_ref, OriginRef, make_path_origin_ref,
+    make_path_ref, path_role_declaration}
 
 // ============================================================
 // Public entry points
@@ -1686,12 +1692,14 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
                             ctx, f.type_annotation)) catch { _ => none }
                         match resolved {
                             some(field_type) => {
-                                let _ = register_effect_header_types(
+                                let schema = define_effect_header_schema(
                                     ctx.env,
                                     make_symbol_origin_ref(
                                         nominal_field_ref_member(
                                             field_identity.field_ref)),
-                                    [field_type], [])
+                                    [field_type],
+                                    definition_effect_tail_vars(
+                                        [field_type], def.type_param_vars))
                                 resolved_fields.push(StructField {
                                     name: f.name,
                                     ty: field_type,
@@ -1700,8 +1708,7 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
                                     field_index: field_index,
                                     span: f.span
                                 })
-                                resolved_field_schemas.push(
-                                    empty_typed_effect_header_schema())
+                                resolved_field_schemas.push(schema)
                             },
                             none => { resolution_failed = true }
                         }
@@ -1859,16 +1866,21 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                 if header_variant.fields.len() != header_refs.len() {
                     panic("effect header registry: enum field census differs")
                 }
+                let mut field_schemas: List<TypedEffectHeaderSchema> = []
                 let mut header_field_index = 0
                 while header_field_index < header_variant.fields.len() {
-                    let _ = register_effect_header_types(
+                    let field_type = header_variant.fields.get(
+                        header_field_index).unwrap()
+                    field_schemas.push(define_effect_header_schema(
                         ctx.env,
                         make_symbol_origin_ref(variant_field_ref_member(
                             header_refs.get(header_field_index).unwrap())),
-                        [header_variant.fields.get(
-                            header_field_index).unwrap()], [])
+                        [field_type], definition_effect_tail_vars(
+                            [field_type], def.type_param_vars)))
                     header_field_index = header_field_index + 1
                 }
+                def.variant_field_effect_schemas.set(
+                    header_variant_index, field_schemas)
                 header_variant_index = header_variant_index + 1
             }
             let tv_ids = def.type_param_vars
@@ -1900,11 +1912,12 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                     for tail in ordered_effect_tail_vars(fn_type) {
                         if !ctor_vars.contains(tail) { ctor_vars.push(tail) }
                     }
+                    let ctor_schema = enum_variant_constructor_effect_schema(
+                        def, ctor_index - 1)
                     if ctor_vars.len() > 0 {
                         ctx.env.bind(binding_name, TypeScheme {
                             ty: fn_type, type_vars: ctor_vars,
-                            bounds: [],
-                            effect_schema: empty_typed_effect_header_schema(),
+                            bounds: [], effect_schema: ctor_schema,
                             def_id: none })
                     } else {
                         ctx.env.bind_mono(binding_name, fn_type)
@@ -1997,10 +2010,11 @@ fn register_effect(
         let operation = identity.operations.get(op_index).unwrap()
         let mut operation_header = param_types.map(fn(value) { value })
         operation_header.push(ret)
-        let _ = register_effect_header_types(
+        let operation_schema = define_effect_header_schema(
             ctx.env,
             executable_effect_origin(effect_operation_ref_callable(operation)),
-            operation_header, [])
+            operation_header,
+            definition_effect_tail_vars(operation_header, tp_vars))
         let effect_type_args = tp_vars.map(fn(id) {
             Type::TypeVar { id: id, name: none }
         })
@@ -2014,7 +2028,7 @@ fn register_effect(
             name: op.name,
             operation_ref: some(operation),
             params: param_types, return_type: ret,
-            effect_schema: empty_typed_effect_header_schema()
+            effect_schema: operation_schema
         })
         op_index = op_index + 1
     }
@@ -2288,20 +2302,22 @@ fn register_trait(
                 }
                 let member_ref = identity.assoc_members.get(
                     assoc_slot_index).unwrap()
-                match default_ty {
-                    some(value) => {
-                        let _ = register_effect_header_types(
-                            ctx.env, make_symbol_origin_ref(member_ref),
-                            [value], [])
-                    },
-                    none => {}
-                }
+                let default_effect_schema = default_ty.map(fn(value) {
+                    let mut inherited = list_clone(tp_vars)
+                    inherited.push(self_type_var_id)
+                    for existing_assoc in assoc_type_defs {
+                        inherited.push(existing_assoc.var_id)
+                    }
+                    inherited.push(at_var_id)
+                    define_effect_header_schema(
+                        ctx.env, make_symbol_origin_ref(member_ref),
+                        [value], definition_effect_tail_vars(
+                            [value], inherited))
+                })
                 assoc_type_defs.push(AssocTypeDef {
                     name: aname, member_ref: member_ref,
                     bounds: bound_names, default_type: default_ty,
-                    default_effect_schema: default_ty.map(fn(_) {
-                        empty_typed_effect_header_schema()
-                    }),
+                    default_effect_schema: default_effect_schema,
                     var_id: at_var_id
                 })
                 assoc_slot_index = assoc_slot_index + 1
@@ -2390,10 +2406,14 @@ fn register_trait(
                     }
                 }
                 let fn_type = Type::FnType { params: param_types, return_type: ret, effects: method_effects }
-                let _ = register_effect_header_types(
+                let mut inherited = list_clone(tp_vars)
+                inherited.push(self_type_var_id)
+                for assoc in assoc_type_defs { inherited.push(assoc.var_id) }
+                let method_schema = define_effect_header_schema(
                     ctx.env,
                     make_symbol_origin_ref(trait_method_ref_member(method_ref)),
-                    [fn_type], [])
+                    [fn_type], definition_effect_tail_vars(
+                        [fn_type], inherited))
                 register_callable_effect_header(
                     ctx.env,
                     make_named_executable_ref(
@@ -2401,7 +2421,7 @@ fn register_trait(
                     method_effects)
                 trait_methods.push(TraitMethodDef {
                     name: mname, method_ref: method_ref, ty: fn_type,
-                    effect_schema: empty_typed_effect_header_schema(),
+                    effect_schema: method_schema,
                     has_default: !is_abstract,
                     param_mutabilities: param_muts,
                     method_type_params: method_tps
@@ -2455,14 +2475,31 @@ fn register_trait(
 // Impl registration
 // ============================================================
 
-fn empty_assoc_effect_schemas(
-    values: Map<Str, Type>
-) -> Map<Str, TypedEffectHeaderSchema> {
-    let mut result: Map<Str, TypedEffectHeaderSchema> = map_new()
-    for entry in values.entries() {
-        result.insert(entry.0, empty_typed_effect_header_schema())
+fn definition_effect_tail_vars(
+    headers: List<Type>, inherited: List<Int>
+) -> List<Int> {
+    let mut result: List<Int> = []
+    for header in headers {
+        for tail in ordered_effect_tail_vars(header) {
+            if !inherited.contains(tail) && !result.contains(tail) {
+                result.push(tail)
+            }
+        }
     }
     result
+}
+
+fn impl_assoc_definition_origin(
+    provider: ImplProviderRef, source_member_index: Int
+) -> OriginRef {
+    if source_member_index < 0 {
+        panic("impl assoc effect schema: source index is negative")
+    }
+    let site = impl_provider_ref_site(provider)
+    let mut path = path_ref_normalized_child_path(site)
+    path.push("assoc:${source_member_index.to_str()}")
+    make_path_origin_ref(make_path_ref(
+        path_ref_owner(site), path, path_role_declaration()))
 }
 
 fn reject_unsupported_protocol_impl_bounds(
@@ -2597,13 +2634,22 @@ fn register_impl_canonical(
 
     // Collect associated type assignments from impl
     let mut assoc_type_map: Map<Str, Type> = map_new()
-    for method in methods {
+    let mut assoc_effect_schema_map:
+        Map<Str, TypedEffectHeaderSchema> = map_new()
+    for source_member_index in 0..methods.len() {
+        let method = methods.get(source_member_index).unwrap()
         match method {
             Decl::AssocType { name: aname, value: avalue, span: aspan, .. } => {
                 match avalue {
                     some(v) => {
                         let resolved_ty = resolve_type_expr(ctx, v)
                         assoc_type_map.insert(aname, resolved_ty)
+                        assoc_effect_schema_map.insert(
+                            aname, define_effect_header_schema(
+                                ctx.env, impl_assoc_definition_origin(
+                                    provider_ref, source_member_index),
+                                [resolved_ty], definition_effect_tail_vars(
+                                    [resolved_ty], impl_tv_ids)))
                         // Also inject into type_param_scope so method signatures can reference it
                         ctx.type_param_scope.insert(aname, resolved_ty)
                     },
@@ -2702,9 +2748,22 @@ fn register_impl_canonical(
                             match atdef.default_type {
                                 some(dt) => {
                                     // Use the default
+                                    let source_schema = match
+                                            atdef.default_effect_schema {
+                                        some(schema) => schema,
+                                        none => panic(
+                                            "impl assoc schema: trait default schema is absent")
+                                    }
+                                    let localized =
+                                        instantiate_effect_header_schema(
+                                            ctx.env, [dt], source_schema)
                                     assoc_type_map.insert(
                                         atdef.name,
-                                        freshen_effect_header(ctx.env, dt))
+                                        localized.0.get(0).unwrap())
+                                    assoc_effect_schema_map.insert(
+                                        atdef.name, localized.1)
+                                    publish_effect_header_schema(
+                                        ctx.env, localized.1)
                                 },
                                 none => {
                                     let _ = type_error(ctx.sink, E0510,
@@ -2796,7 +2855,7 @@ fn register_impl_canonical(
                            !declared_method_names.contains(trait_method.name) {
                             exact_method_schemes.insert(
                                 trait_method.name,
-                                freshen_generated_effect_formals(
+                                localize_generated_effect_schema(
                                     ctx, specialize_trait_method_scheme(
                                         trait_def, trait_method,
                                         impl_self_type, trait_type_args,
@@ -2881,7 +2940,7 @@ fn register_impl_canonical(
             method_names: explicit_method_names,
             assoc_types: map_clone(assoc_type_map),
             assoc_type_effect_schemas:
-                empty_assoc_effect_schemas(assoc_type_map),
+                map_clone(assoc_effect_schema_map),
             method_schemes: map_clone(exact_method_schemes),
             method_refs: exact_method_refs,
             method_intrinsics: map_new(),
@@ -2984,7 +3043,12 @@ fn register_impl_method(
 
     let impl_m_effects = match declared_effects {
         some(de) => resolve_declared_effects(ctx, de),
-        none => infer_hof_effect_row(param_types)
+        // A body-less registration owns one raw outer row variable. Recursive
+        // group checking constrains this exact variable monomorphically; only
+        // final group closure may turn a surviving tail into a formal schema.
+        none => EffectRow {
+            effects: [], tail: some(ctx.env.fresh_var_id())
+        }
     }
     let fn_type = Type::FnType { params: param_types, return_type: ret, effects: impl_m_effects }
     for tail in ordered_effect_tail_vars(fn_type) {
@@ -3048,41 +3112,38 @@ pub fn impl_owner_fn_bounds(owner: ImplEntry) -> List<FnBoundsEntry> {
     result
 }
 
-// A generated impl method is a new callable authority.  Any generalized
-// effect-row tail retained from the source trait/field scheme must therefore
-// be alpha-renamed before HIR is built; Core may never repair shared raw
-// inference identities after the TypedHIR freeze.
-fn freshen_generated_effect_formals(
+// A generated definition alpha-localizes only the source schema's raw tokens;
+// it preserves every existing EffectParamRef and publishes no new authority.
+fn localize_generated_effect_schema(
     mut ctx: InferCtx, core: ImplMethodSchemeCore
 ) -> ImplMethodSchemeCore {
     let source_type = impl_method_core_type(core)
-    let tails = ordered_effect_tail_vars(source_type)
-    if tails.len() == 0 { return core }
-
-    let mut mapping: Map<Int, Type> = map_new()
-    let source_quantified = impl_method_core_type_vars(core)
-    for tail in tails {
-        if !source_quantified.contains(tail) {
-            panic("generated effect formal: source tail is not quantified")
-        }
-        if !mapping.contains_key(tail) {
-            mapping.insert(tail, ctx.env.fresh_var())
-        }
+    let source_schema = impl_method_core_effect_schema(core)
+    let source_bindings = typed_effect_header_schema_bindings(source_schema)
+    if source_bindings.len() == 0 { return core }
+    let localized = instantiate_effect_header_schema(
+        ctx.env, [source_type], source_schema)
+    let localized_bindings = typed_effect_header_schema_bindings(localized.1)
+    if source_bindings.len() != localized_bindings.len() {
+        panic("generated effect schema: binding census changed")
     }
     let mut quantified: List<Int> = []
-    for source_id in source_quantified {
-        match mapping.get(source_id) {
-            some(Type::TypeVar { id, .. }) => {
-                if !quantified.contains(id) { quantified.push(id) }
-            },
-            _ => if !quantified.contains(source_id) {
-                quantified.push(source_id)
+    for source_id in impl_method_core_type_vars(core) {
+        let mut mapped = source_id
+        let mut index = 0
+        while index < source_bindings.len() {
+            if typed_effect_header_binding_raw_tail(
+                    source_bindings.get(index).unwrap()) == source_id {
+                mapped = typed_effect_header_binding_raw_tail(
+                    localized_bindings.get(index).unwrap())
             }
+            index = index + 1
         }
+        if !quantified.contains(mapped) { quantified.push(mapped) }
     }
+    publish_effect_header_schema(ctx.env, localized.1)
     make_impl_method_scheme_core(
-        apply_subst_map(mapping, source_type), quantified,
-        empty_typed_effect_header_schema(),
+        localized.0.get(0).unwrap(), quantified, localized.1,
         impl_method_core_def_id(core))
 }
 
@@ -3129,10 +3190,11 @@ fn specialize_delegate_method_core(
         }
     }
 
-    freshen_generated_effect_formals(ctx,
+    localize_generated_effect_schema(ctx,
         make_impl_method_scheme_core(
             specialized_type, type_vars,
-            empty_typed_effect_header_schema(), none))
+            apply_effect_header_schema_subst(
+                field_var_map, field_scheme.effect_schema), none))
 }
 
 fn delegate_constraint_lists_same(
@@ -3429,18 +3491,38 @@ fn register_delegate_traits(
                                 }
 
                                 let mut field_assoc_types: Map<Str, Type> = map_new()
+                                let mut field_assoc_schemas:
+                                    Map<Str, TypedEffectHeaderSchema> = map_new()
                                 match field_impl {
                                     some(found) => {
                                         let mut assoc_entries = found.assoc_types.entries()
                                         assoc_entries.sort_by(compare_by_first)
                                         for assoc_entry in assoc_entries {
                                             let (assoc_name, assoc_type) = assoc_entry
+                                            let source_schema = match
+                                                    found.assoc_type_effect_schemas.get(
+                                                        assoc_name) {
+                                                some(schema) => schema,
+                                                none => panic(
+                                                    "delegate assoc schema: source is absent")
+                                            }
+                                            let localized =
+                                                instantiate_effect_header_schema(
+                                                    ctx.env, [assoc_type],
+                                                    source_schema)
                                             field_assoc_types.insert(
                                                 assoc_name,
                                                 apply_subst_map(
                                                     field_var_map,
-                                                    freshen_effect_header(
-                                                        ctx.env, assoc_type)))
+                                                    localized.0.get(0).unwrap()))
+                                            let mapped_schema =
+                                                apply_effect_header_schema_subst(
+                                                    field_var_map,
+                                                    localized.1)
+                                            publish_effect_header_schema(
+                                                ctx.env, mapped_schema)
+                                            field_assoc_schemas.insert(
+                                                assoc_name, mapped_schema)
                                         }
                                     },
                                     none => {}
@@ -3527,8 +3609,7 @@ fn register_delegate_traits(
                                     method_names: method_names,
                                     assoc_types: map_clone(field_assoc_types),
                                     assoc_type_effect_schemas:
-                                        empty_assoc_effect_schemas(
-                                            field_assoc_types),
+                                        map_clone(field_assoc_schemas),
                                     method_schemes: map_clone(exact_method_schemes),
                                     method_refs: exact_method_refs,
                                     method_intrinsics: map_new(),
@@ -3627,19 +3708,6 @@ fn expand_effect_exprs(mut ctx: InferCtx, decl_effects: List<EffectExpr>, mut ex
         }
     }
     effects
-}
-
-fn infer_hof_effect_row(param_types: List<Type>) -> EffectRow {
-    for pt in param_types {
-        match pt {
-            Type::FnType { effects, .. } => match effects.tail {
-                some(t_id) => { return EffectRow { effects: [], tail: some(t_id) } },
-                none => {}
-            },
-            _ => {}
-        }
-    }
-    EMPTY_ROW
 }
 
 pub fn resolve_declared_effects(mut ctx: InferCtx, decl_effects: List<EffectExpr>) -> EffectRow {
@@ -3783,7 +3851,11 @@ fn register_fn_common(
 
     let effects = match declared_effects {
         some(de) => resolve_declared_effects(ctx, de),
-        none => infer_hof_effect_row(param_types)
+        // Keep registration provisional: the checker constrains this raw row
+        // and publishes a formal identity only after the definition closes.
+        none => EffectRow {
+            effects: [], tail: some(ctx.env.fresh_var_id())
+        }
     }
     let fn_type = Type::FnType { params: param_types, return_type: ret, effects: effects }
     for tail in ordered_effect_tail_vars(fn_type) {

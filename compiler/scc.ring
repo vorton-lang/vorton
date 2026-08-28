@@ -91,7 +91,9 @@ fn collect_decl_edges(decl: Decl, registered_fns: Set<Str>, mut graph: Map<Str, 
             collect_expr_callees(body, registered_fns, caller, edges)
             let mut sorted_edges: List<Str> = []
             for e in edges {
-                if e != caller { sorted_edges.push(e) }
+                // Keep self edges: a singleton SCC is recursive only when its
+                // own call edge survives graph construction.
+                sorted_edges.push(e)
             }
             sorted_edges.sort()
             match graph.get(caller) {
