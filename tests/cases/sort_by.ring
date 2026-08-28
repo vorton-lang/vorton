@@ -1,3 +1,11 @@
+effect SortOrder {
+    fn compare(left: Int, right: Int) -> Int
+}
+
+fn compare_with_current(left: Int, right: Int) -> Int with {SortOrder} {
+    SortOrder.compare(left, right)
+}
+
 fn main() {
     // sort_by ascending
     let mut xs = [3, 1, 4, 1, 5]
@@ -30,6 +38,23 @@ fn main() {
         some(v) => assert(v == "hi", "shortest first"),
         none => assert(false, "shortest first none")
     }
+
+    // The exact runtime sort bridge synchronously forwards the caller's
+    // borrowed context to every comparator invocation.
+    let mut effectful = [4, 2, 3, 1]
+    let mut comparisons = 0
+    let completed = handle {
+        effectful.sort_by(compare_with_current)
+        1
+    } with {
+        SortOrder.compare(left, right) => {
+            comparisons = comparisons + 1
+            left - right
+        },
+    }
+    assert(completed == 1 && comparisons > 0 &&
+        effectful[0] == 1 && effectful[3] == 4,
+        "sort comparator receives the current handled context")
 
     print("sort_by: all tests passed")
 }

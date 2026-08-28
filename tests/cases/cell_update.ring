@@ -21,5 +21,15 @@ fn main() {
     s.update(fn(x) { "${x} world" })
     assert(s.get() == "hello world", "cell str update")
 
+    // Cell.update has a closed callback contract, so its runtime intrinsic
+    // supplies the immortal empty context. An owned Str result must survive a
+    // later set after the update's detach/dup/drop sequence completes.
+    let owned = Cell("seed")
+    owned.update(fn(old) { "${old}-after" })
+    let survived = owned.get()
+    owned.set("replacement")
+    assert(survived == "seed-after" && owned.get() == "replacement",
+        "update and later set preserve owned Str lifetimes")
+
     print("cell_update: all tests passed")
 }
