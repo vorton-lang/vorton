@@ -3980,7 +3980,6 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
             params: hparams.map(fn(param) { param.ty }),
             return_type: fn_ret, effects: extern_effects
         })
-    exit_executable_owner(ctx)
     let mut trait_bounds: List<TraitBound> = []
     let extern_type_var_ids = exact_source_type_var_ids(
         scheme, 0, type_params.len())
@@ -4308,6 +4307,7 @@ fn infer_fn_draft(
         return_type, declared_effects, body, is_pub, span, self_type,
         registration_scheme, impl_method_ref, inherited_type_var_ids,
         validation, batch_checkpoint)) catch { _ => none }
+    exit_executable_owner(ctx)
     match result {
         some(draft) => draft,
         none => {

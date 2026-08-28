@@ -7,7 +7,7 @@ fn make_probe<T>() -> fn() -> T {
 }
 
 fn main() {
-    let callback = make_probe<Int>()
+    let callback: fn() -> Int = make_probe()
     let value = handle {
         callback()
     } with {
