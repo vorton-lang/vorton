@@ -24,6 +24,8 @@ Effect row 中的 atom 共享组合与推断机制，但并不共享同一种运
 
 递归 callable 的effect formal按类型系统的递归绑定组规则产生。组内 peer/self 使用共享 provisional row，不在首个引用处实例化或分配正式身份；整组约束求解后，才为最终量化tail生成 canonical `EffectParamRef`、发布 source-formal→actual 关系并原子写回全组header。Top-level、inline module与impl method使用同一协议。禁止premint、first-use/body scan、executable-stack可见性、importer remint或post-SCC HIR patch恢复identity。
 
+递归组body只做一次effect inference；其raw effect row随内部draft等待整组求解，随后恰好一次final-zonk、evidence canonicalization与header publication。每个scheme/callable实例的effect actual必须来自该实例唯一的full mapping receipt，并与type actual、dictionary/evidence共用；禁止按已zonk类型再次结构匹配重建effect或dictionary替换。
+
 ## System effects 与 HostImport
 
 0.1 只定义当前真实 API 所需的三类 system effect：

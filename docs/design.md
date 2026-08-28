@@ -712,6 +712,10 @@ fn process(items) {
 
 **递归组泛化（2026-08-28 用户决定）**：自递归与互递归 callable 先按现有调用图形成 SCC；组内所有成员共享 registration 产生的 monomorphic provisional variables，peer/self 引用不得在组闭合前执行普通 scheme instantiation。整组 body 约束求解完成后，才相对组外环境一次性 final-zonk、generalize、生成 canonical type/effect schema、最终化 HIR provenance，并原子 rebind 全组；失败不得发布部分成员。该协议统一覆盖 top-level、inline module 与 impl method SCC，不能为三个入口各建一套推断或 post-HIR patch authority。组间仍按依赖顺序使用已闭合 scheme。
 
+**A1 单次推断实现边界（2026-08-28 用户批准）**：每个递归组成员的 body 只能执行一次 inference，产出 checker-internal `FnDraft`；draft 保留 raw params/return/effect/HExpr、exact owner/registration、final-zonk 所需的 type-param/bound/qualified-assoc provenance，以及 owner-scoped pending dictionary/evidence/anonymous-callable facts，但不得 drain、zonk、canonicalize evidence、重写 callable 或保存整个 `InferCtx`。整组共享唯一 constraint/UnionFind；全部 body 无诊断后，每个 draft 在最终 group 解上恰好一次消费 pending facts、final-zonk 与生成 HIR/schema。全组结果先完整验证，再原子 rebind/publish；禁止“constraint pass 后安装 scheme、再重新 infer body”的双 authority，也禁止把 raw UF/pending state塞进 TypedHIR/CoreHIR 延迟处理。
+
+一次 scheme instantiation 只产生一份完整 mapping receipt。type actual、effect formal→actual 与 trait dictionary/evidence 必须共同消费这份 receipt；禁止任何消费者再用 `build_scheme_var_map`、类型结构匹配或等价算法重建替换关系。receipt 是当前调用/函数值的 typed provenance，不是新 solver，最终随 HIR/Core 的 exact instantiation 关系运输。
+
 Ring 0.1 明确不支持 **polymorphic recursion**：递归环中的同一 callable 不能以彼此不可统一的类型实例调用自己或 peer。普通泛型递归仍支持，只要递归环内共享同一组类型参数；函数离开递归组后仍是正常泛型 scheme。Post-0.1 只有真实 consumer 证明该限制无法由普通泛型递归、显式数据建模或非递归 wrapper 表达时，才由 B-203 重新评估；0.1 不预留相关 IR、annotation 或 fallback。
 
 **函数默认参数（2026-08-23 用户决定）**：Ring 0.1 不支持 `fn f(x: T = expr)`。默认参数只省略调用点实参，显式 wrapper 函数可完整表达，却要求保存/复制 typed HIR template、freshen 全部 binder identity 并给每个下游阶段保留 default-specialization authority；compiler/std/examples 当前无 consumer。0.1 clean break 删除该语法与 call-site expansion，不影响 trait method default body。未来若出现独立 API 建模价值，再作为新 feature 评估，不保留兼容路径。
