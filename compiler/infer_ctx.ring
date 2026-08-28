@@ -932,7 +932,7 @@ fn assert_callable_receipt_sources(
 }
 
 fn identity_instantiation_mapping(ids: List<Int>) -> Map<Int, Type> {
-    let mapping: Map<Int, Type> = map_new()
+    let mut mapping: Map<Int, Type> = map_new()
     for id in ids {
         if mapping.contains_key(id) {
             panic("callable instantiation: source formal repeats")
@@ -1121,7 +1121,7 @@ pub fn project_owner_batch_receipts(
         }
         let header = finalization_header_for_target(
             headers, pending.target)
-        let final_mapping: Map<Int, Type> = map_new()
+        let mut final_mapping: Map<Int, Type> = map_new()
         for source in header.final_scheme.type_vars {
             if final_mapping.contains_key(source) {
                 panic("callable receipt projection: final formal repeats")
@@ -1187,7 +1187,7 @@ fn install_monomorphic_scheme_bounds(
 fn instantiate_scheme_with_receipt_mapping(
     mut ctx: InferCtx, scheme: TypeScheme
 ) -> (Type, Map<Int, Type>) {
-    let mapping: Map<Int, Type> = map_new()
+    let mut mapping: Map<Int, Type> = map_new()
     for source in scheme.type_vars {
         if mapping.contains_key(source) {
             panic("callable instantiation: scheme formal repeats")
@@ -1274,7 +1274,7 @@ fn install_monomorphic_impl_predicates(
 fn instantiate_impl_with_receipt_mapping(
     mut ctx: InferCtx, owner: ImplEntry, core: ImplMethodSchemeCore
 ) -> (Type, Map<Int, Type>) {
-    let mapping: Map<Int, Type> = map_new()
+    let mut mapping: Map<Int, Type> = map_new()
     for source in impl_method_core_type_vars(core) {
         if mapping.contains_key(source) {
             panic("impl method instantiation: formal repeats")
@@ -3637,7 +3637,13 @@ pub fn drain_owner_batch_dictionary_group(
     }
     // Clear only after every batch and obligation has passed preflight and the
     // deterministic draft/order concatenation is complete.
-    for batch in batches { batch.pending_dicts = [] }
+    let mut batch_index = 0
+    while batch_index < batches.len() {
+        let mut batch = batches.get(batch_index).unwrap()
+        batch.pending_dicts = []
+        batches.set(batch_index, batch)
+        batch_index = batch_index + 1
+    }
     drain_pending_dict_obligations(ctx, obligations, frozen_subst)
     batches
 }
