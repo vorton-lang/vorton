@@ -430,18 +430,18 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                             some(value) => value,
                             none => true
                         }
-                        if publish {
-                            let result = some(check_prelude_decl(
-                                ctx, decl, site.file_key, site.decl_index,
-                                some(canonical_prelude_extern_symbol(
-                                    ctx.env, source, name)))) catch { _ => none }
-                            match result {
-                                some(HDecl::ExternFn {
-                                    name, abi_name, def_id, executable_ref,
-                                    type_params, params,
-                                    return_type, effects, resource_contract,
-                                    trait_bounds, is_pub, span
-                                }) => {
+                        let result = some(check_prelude_decl(
+                            ctx, decl, site.file_key, site.decl_index,
+                            some(canonical_prelude_extern_symbol(
+                                ctx.env, source, name)))) catch { _ => none }
+                        match result {
+                            some(HDecl::ExternFn {
+                                name, abi_name, def_id, executable_ref,
+                                type_params, params,
+                                return_type, effects, resource_contract,
+                                trait_bounds, is_pub, span
+                            }) => {
+                                if publish {
                                     // The source spelling is diagnostic/ABI
                                     // metadata only. ExecutableRef is the sole
                                     // callable identity transported downstream.
@@ -456,10 +456,10 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                         trait_bounds: trait_bounds,
                                         is_pub: is_pub, span: span
                                     })
-                                },
-                                some(_) => {},
-                                none => {}
-                            }
+                                }
+                            },
+                            some(_) => {},
+                            none => {}
                         }
                     },
                     _ => {}
