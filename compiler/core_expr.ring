@@ -3433,9 +3433,10 @@ fn collect_expr_effect_ctx_tokens(
     value: CoreExpr, mut result: List<CoreEffectCtxTokenRef>
 ) {
     match value.value {
-        CoreExprValue::PrimitiveExprValue { operands, .. } =>
+        CoreExprValue::PrimitiveExprValue { operands, .. } => {
             for operand in operands { collect_expr_effect_ctx_tokens(
-                operand, result) },
+                operand, result) }
+        },
         CoreExprValue::CallExprValue {
             arguments, effect_ctx, ..
         } => {
@@ -3463,9 +3464,10 @@ fn collect_expr_effect_ctx_tokens(
                 collect_expr_effect_ctx_tokens(argument, result)
             }
         },
-        CoreExprValue::SystemCallExprValue { arguments, .. } =>
+        CoreExprValue::SystemCallExprValue { arguments, .. } => {
             for argument in arguments { collect_expr_effect_ctx_tokens(
-                argument, result) },
+                argument, result) }
+        },
         CoreExprValue::FailRaiseExprValue { payload } =>
             collect_expr_effect_ctx_tokens(payload, result),
         CoreExprValue::ProjectExprValue { base, .. } =>
@@ -3510,8 +3512,10 @@ fn collect_expr_effect_ctx_tokens(
         },
         CoreExprValue::HandleExprValue { body, installation } => {
             match installation {
-                some(context) => for entry in context.entries {
-                    append_effect_ctx_token(result, entry.token)
+                some(context) => {
+                    for entry in context.entries {
+                        append_effect_ctx_token(result, entry.token)
+                    }
                 },
                 none => {}
             }
@@ -3644,9 +3648,11 @@ fn collect_core_expr_origins(value: CoreExpr, mut result: List<OriginRef>) {
         CoreExprValue::HandleExprValue { body, installation } => {
             collect_core_block_origins(body, result)
             match installation {
-                some(context) => for entry in context.entries {
-                    for operation in entry.operations {
-                        result.push(operation.origin)
+                some(context) => {
+                    for entry in context.entries {
+                        for operation in entry.operations {
+                            result.push(operation.origin)
+                        }
                     }
                 },
                 none => {}
