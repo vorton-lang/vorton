@@ -189,6 +189,7 @@ pub struct PendingDictObligation {
     runtime_owner: ExecutableRef,
     source: PendingEvidenceSource,
     receipt: CallableInstantiationReceipt,
+    fn_bounds: List<FnBoundsEntry>,
     span: Span,
     purpose: PendingDictPurpose
 }
@@ -250,15 +251,37 @@ struct PendingAnonymousCallableHeader {
     signature: Type
 }
 
+struct PendingCallableProjection {
+    receipt: CallableInstantiationReceipt,
+    target: ExecutableRef,
+    declared_type_vars: List<Int>,
+    type_args_output: List<HCallableTypeActual>,
+    effect_actuals_output: List<HCallableEffectActual>
+}
+
+struct FinalCallableProjection {
+    type_args_output: List<HCallableTypeActual>,
+    effect_actuals_output: List<HCallableEffectActual>,
+    type_args: List<HCallableTypeActual>,
+    effect_actuals: List<HCallableEffectActual>
+}
+
+pub struct CallableFinalizationHeader {
+    executable: ExecutableRef,
+    final_scheme: TypeScheme
+}
+
 pub struct OwnerBatchCheckpoint {
     pending_dict_len: Int,
     pending_anonymous_len: Int,
+    pending_projection_len: Int,
     effect_facts: EffectFactCheckpoint
 }
 
 pub struct OwnerInferenceBatch {
     pending_dicts: List<PendingDictObligation>,
     pending_anonymous: List<PendingAnonymousCallableHeader>,
+    pending_projections: List<PendingCallableProjection>,
     effect_facts: EffectFactBatch
 }
 
@@ -295,6 +318,7 @@ pub struct InferCtx {
     pub current_fn_bounds: List<FnBoundsEntry>,
     pub fn_bounds_stack: List<List<FnBoundsEntry>>,
     pending_dict_obligations: List<PendingDictObligation>,
+    pending_callable_projections: List<PendingCallableProjection>,
     infer_mutation_undos: List<InferMutationUndo>,
     infer_mutation_checkpoints: List<Int>,
     pub loop_depth: Int,
@@ -386,6 +410,7 @@ pub fn new_infer_ctx(
         current_fn_bounds: [],
         fn_bounds_stack: [],
         pending_dict_obligations: [],
+        pending_callable_projections: [],
         infer_mutation_undos: [],
         infer_mutation_checkpoints: [],
         loop_depth: 0,
@@ -763,6 +788,8 @@ pub fn owner_batch_checkpoint(ctx: InferCtx) -> OwnerBatchCheckpoint {
         pending_dict_len: ctx.pending_dict_obligations.len(),
         pending_anonymous_len:
             ctx.pending_anonymous_callable_headers.len(),
+        pending_projection_len:
+            ctx.pending_callable_projections.len(),
         effect_facts: effect_fact_checkpoint(ctx.env)
     }
 }
@@ -772,7 +799,9 @@ pub fn rollback_owner_batch(
 ) {
     if checkpoint.pending_dict_len > ctx.pending_dict_obligations.len() ||
        checkpoint.pending_anonymous_len >
-            ctx.pending_anonymous_callable_headers.len() {
+            ctx.pending_anonymous_callable_headers.len() ||
+       checkpoint.pending_projection_len >
+            ctx.pending_callable_projections.len() {
         panic("owner batch rollback: checkpoint exceeds pending state")
     }
     ctx.pending_dict_obligations = ctx.pending_dict_obligations.slice(
@@ -780,6 +809,9 @@ pub fn rollback_owner_batch(
     ctx.pending_anonymous_callable_headers =
         ctx.pending_anonymous_callable_headers.slice(
             0, checkpoint.pending_anonymous_len)
+    ctx.pending_callable_projections =
+        ctx.pending_callable_projections.slice(
+            0, checkpoint.pending_projection_len)
     rollback_effect_facts(ctx.env, checkpoint.effect_facts)
 }
 
@@ -788,7 +820,9 @@ pub fn detach_owner_batch(
 ) -> OwnerInferenceBatch {
     if checkpoint.pending_dict_len > ctx.pending_dict_obligations.len() ||
        checkpoint.pending_anonymous_len >
-            ctx.pending_anonymous_callable_headers.len() {
+            ctx.pending_anonymous_callable_headers.len() ||
+       checkpoint.pending_projection_len >
+            ctx.pending_callable_projections.len() {
         panic("owner batch detach: checkpoint exceeds pending state")
     }
     let effect_facts = detach_effect_fact_suffix(
@@ -801,6 +835,9 @@ pub fn detach_owner_batch(
             ctx.pending_anonymous_callable_headers.slice(
                 checkpoint.pending_anonymous_len,
                 ctx.pending_anonymous_callable_headers.len()),
+        pending_projections: ctx.pending_callable_projections.slice(
+            checkpoint.pending_projection_len,
+            ctx.pending_callable_projections.len()),
         effect_facts: effect_facts
     }
     ctx.pending_dict_obligations = ctx.pending_dict_obligations.slice(
@@ -808,6 +845,9 @@ pub fn detach_owner_batch(
     ctx.pending_anonymous_callable_headers =
         ctx.pending_anonymous_callable_headers.slice(
             0, checkpoint.pending_anonymous_len)
+    ctx.pending_callable_projections =
+        ctx.pending_callable_projections.slice(
+            0, checkpoint.pending_projection_len)
     batch
 }
 
@@ -891,7 +931,7 @@ pub fn callable_receipt_type(value: CallableInstantiationReceipt) -> Type {
 pub fn callable_receipt_type_args(
     value: CallableInstantiationReceipt
 ) -> List<HCallableTypeActual> {
-    value.type_args.map(fn(actual) { actual })
+    value.type_args
 }
 
 pub fn callable_receipt_effects(
@@ -935,6 +975,29 @@ fn identity_instantiation_mapping(ids: List<Int>) -> Map<Int, Type> {
         mapping.insert(id, Type::TypeVar { id: id, name: none })
     }
     mapping
+}
+
+fn pending_callable_receipt(
+    mut ctx: InferCtx, target: ExecutableRef,
+    ty: Type, mapping: Map<Int, Type>, declared_type_vars: List<Int>
+) -> CallableInstantiationReceipt {
+    let type_args_output: List<HCallableTypeActual> = []
+    let effect_actuals_output: List<HCallableEffectActual> = []
+    let receipt = CallableInstantiationReceipt {
+        ty: ty, source_to_actual: mapping,
+        type_args: type_args_output,
+        effect_instantiation: some(HCallableEffectInstantiation {
+            substitutions: effect_actuals_output
+        })
+    }
+    ctx.pending_callable_projections.push(PendingCallableProjection {
+        receipt: receipt,
+        target: target,
+        declared_type_vars: declared_type_vars,
+        type_args_output: type_args_output,
+        effect_actuals_output: effect_actuals_output
+    })
+    receipt
 }
 
 fn declared_callable_type_vars(scheme: TypeScheme) -> List<Int> {
@@ -1034,6 +1097,106 @@ fn callable_instantiation_from_mapping(
     }
 }
 
+pub fn make_callable_finalization_header(
+    executable: ExecutableRef, final_scheme: TypeScheme
+) -> CallableFinalizationHeader {
+    if !executable_ref_is_named(executable) {
+        panic("callable finalization header: executable is anonymous")
+    }
+    match final_scheme.ty {
+        Type::FnType { .. } => {},
+        _ => panic("callable finalization header: scheme is not callable")
+    }
+    CallableFinalizationHeader {
+        executable: executable, final_scheme: final_scheme
+    }
+}
+
+fn finalization_header_for_target(
+    headers: List<CallableFinalizationHeader>, target: ExecutableRef
+) -> CallableFinalizationHeader {
+    let mut found: CallableFinalizationHeader? = none
+    for header in headers {
+        if executable_ref_same(header.executable, target) {
+            if found.is_some() {
+                panic("callable receipt projection: target header repeats")
+            }
+            found = some(header)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("callable receipt projection: target header is absent")
+    }
+}
+
+pub fn project_owner_batch_receipts(
+    mut batch: OwnerInferenceBatch,
+    headers: List<CallableFinalizationHeader>
+) -> OwnerInferenceBatch {
+    let mut left = 0
+    while left < headers.len() {
+        let left_header = headers.get(left).unwrap()
+        let mut right = left + 1
+        while right < headers.len() {
+            if executable_ref_same(
+                    left_header.executable,
+                    headers.get(right).unwrap().executable) {
+                panic("callable receipt projection: header target repeats")
+            }
+            right = right + 1
+        }
+        left = left + 1
+    }
+
+    let mut finalized: List<FinalCallableProjection> = []
+    for pending in batch.pending_projections {
+        if pending.type_args_output.len() != 0 ||
+           pending.effect_actuals_output.len() != 0 {
+            panic("callable receipt projection: output alias is not empty")
+        }
+        let header = finalization_header_for_target(
+            headers, pending.target)
+        let effect_tails = ordered_effect_tail_vars(
+            header.final_scheme.ty)
+        let mut declared_seen: List<Int> = []
+        for source in pending.declared_type_vars {
+            if declared_seen.contains(source) ||
+               !header.final_scheme.type_vars.contains(source) ||
+               effect_tails.contains(source) {
+                panic("callable receipt projection: declared formal differs")
+            }
+            declared_seen.push(source)
+        }
+        let exact = callable_instantiation_from_mapping(
+            executable_ref_named_symbol(header.executable),
+            header.final_scheme, pending.declared_type_vars,
+            pending.receipt.source_to_actual)
+        let effect_actuals = match exact.effects {
+            some(value) => value.substitutions,
+            none => panic(
+                "callable receipt projection: effect projection is absent")
+        }
+        finalized.push(FinalCallableProjection {
+            type_args_output: pending.type_args_output,
+            effect_actuals_output: pending.effect_actuals_output,
+            type_args: exact.type_args,
+            effect_actuals: effect_actuals
+        })
+    }
+
+    for projection in finalized {
+        for actual in projection.type_args {
+            projection.type_args_output.push(actual)
+        }
+        for actual in projection.effect_actuals {
+            projection.effect_actuals_output.push(actual)
+        }
+    }
+    batch.pending_projections = []
+    batch
+}
+
 fn install_monomorphic_scheme_bounds(
     mut ctx: InferCtx, scheme: TypeScheme
 ) {
@@ -1081,14 +1244,10 @@ pub fn instantiate_callable_scheme(
                 install_monomorphic_scheme_bounds(ctx, scheme)
                 let mapping = identity_instantiation_mapping(
                     scheme.type_vars)
-                let exact = callable_instantiation_from_mapping(
-                    symbol, scheme, declared_callable_type_vars(scheme),
-                    mapping)
-                return CallableInstantiationReceipt {
-                    ty: scheme.ty, source_to_actual: mapping,
-                    type_args: exact.type_args,
-                    effect_instantiation: exact.effects
-                }
+                return pending_callable_receipt(
+                    ctx, make_named_executable_ref(symbol),
+                    scheme.ty, mapping,
+                    declared_callable_type_vars(scheme))
             },
             none => {}
         },
@@ -1177,21 +1336,12 @@ pub fn instantiate_callable_impl_method(
         let scheme = impl_method_core_as_scheme(core)
         let effect_tails = ordered_effect_tail_vars(scheme.ty)
         let declared = scheme.type_vars.filter(fn(id) {
-            !owner.type_param_vars.contains(id) && !effect_tails.contains(id)
+            !owner.type_param_vars.contains(id) &&
+                !effect_tails.contains(id)
         })
-        let callable_owner = match owner.method_intrinsics.get(
-                impl_method_ref_name(method_ref)) {
-            some(intrinsic) => intrinsic_ref_symbol(intrinsic),
-            none => impl_method_ref_member(method_ref)
-        }
-        let exact = callable_instantiation_from_mapping(
-            callable_owner, scheme, declared, mapping)
-        return CallableInstantiationReceipt {
-            ty: impl_method_core_type(core),
-            source_to_actual: mapping,
-            type_args: exact.type_args,
-            effect_instantiation: exact.effects
-        }
+        return pending_callable_receipt(
+            ctx, executable, impl_method_core_type(core),
+            mapping, declared)
     }
     let instantiated = instantiate_impl_with_receipt_mapping(
         ctx, owner, core)
@@ -3279,7 +3429,7 @@ fn purpose_reports_drain_failure(purpose: PendingDictPurpose) -> Bool {
     match purpose {
         PendingDictPurpose::DirectCallPublish { .. } => true,
         PendingDictPurpose::ExternCallValidate => true,
-        PendingDictPurpose::CallableValueShadow { .. } => false
+        PendingDictPurpose::CallableValueShadow { .. } => true
     }
 }
 
@@ -3326,6 +3476,7 @@ pub fn resolve_or_defer_dicts_from_scheme(
                 runtime_owner: current_dictionary_evidence_owner(ctx),
                 source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
                 receipt: receipt,
+                fn_bounds: list_clone(ctx.current_fn_bounds),
                 span: span,
                 purpose: purpose
             }),
@@ -3356,6 +3507,7 @@ pub fn resolve_or_defer_dicts_from_impl_owner(
                     owner: owner, method_core: method_core
                 },
                 receipt: receipt,
+                fn_bounds: list_clone(ctx.current_fn_bounds),
                 span: span,
                 purpose: purpose
             }),
@@ -3388,6 +3540,7 @@ pub fn register_callable_value_shadow(
                 runtime_owner: current_dictionary_evidence_owner(ctx),
                 source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
                 receipt: receipt,
+                fn_bounds: list_clone(ctx.current_fn_bounds),
                 span: span,
                 purpose: PendingDictPurpose::CallableValueShadow {
                     output_slot: output_slot
@@ -3465,7 +3618,7 @@ fn drain_pending_dict_obligations(
         for obligation in remaining {
             match resolve_pending_evidence_source(
                 obligation.runtime_owner,
-                ctx.sink, ctx.env, ctx.current_fn_bounds,
+                ctx.sink, ctx.env, obligation.fn_bounds,
                 obligation.source, obligation.receipt, s,
                 obligation.span,
                 purpose_reports_assoc_mismatch(obligation.purpose)
@@ -3491,7 +3644,7 @@ fn drain_pending_dict_obligations(
     for obligation in remaining {
         match resolve_pending_evidence_source(
             obligation.runtime_owner,
-            ctx.sink, ctx.env, ctx.current_fn_bounds,
+            ctx.sink, ctx.env, obligation.fn_bounds,
             obligation.source, obligation.receipt, s,
             obligation.span,
             purpose_reports_assoc_mismatch(obligation.purpose)
@@ -3587,7 +3740,8 @@ pub fn preflight_owner_batches(
     let mut facts: List<EffectFactBatch> = []
     for batch in batches {
         if batch.pending_dicts.len() != 0 ||
-           batch.pending_anonymous.len() != 0 {
+           batch.pending_anonymous.len() != 0 ||
+           batch.pending_projections.len() != 0 {
             panic("owner batch preflight: batch is not finalized")
         }
         facts.push(batch.effect_facts)
