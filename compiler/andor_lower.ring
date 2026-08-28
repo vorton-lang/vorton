@@ -57,13 +57,13 @@ pub fn lower_andor(program: HProgram) -> HProgram {
 
 fn al_decl(d: HDecl) -> HDecl {
     match d {
-        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } =>
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, effect_ctx, body, is_pub, trait_bounds, span } =>
             HDecl::Fn { name: name, def_id: def_id,
                 executable_ref: executable_ref,
                 impl_method_ref: impl_method_ref,
                 type_params: type_params, params: params,
                 return_type: return_type, effects: effects,
-                handled_evidence_bindings: handled_evidence_bindings,
+                effect_ctx: effect_ctx,
                 body: al_expr(body),
                 is_pub: is_pub, trait_bounds: trait_bounds, span: span },
         HDecl::Impl { target_type, target_ty, owner_ref, provider_ref, trait_ref,
@@ -80,15 +80,15 @@ fn al_decl(d: HDecl) -> HDecl {
                 type_params: type_params, trait_name: trait_name,
                 methods: new_methods, assoc_types: assoc_types, span: span }
         },
-        HDecl::Test { description, executable_ref, handled_evidence_bindings, body, span } =>
+        HDecl::Test { description, executable_ref, effect_ctx, body, span } =>
             HDecl::Test { description: description,
                 executable_ref: executable_ref,
-                handled_evidence_bindings: handled_evidence_bindings,
+                effect_ctx: effect_ctx,
                 body: al_expr(body), span: span },
-        HDecl::Const { name, def_id, executable_ref, handled_evidence_bindings, ty, init, is_pub, span } =>
+        HDecl::Const { name, def_id, executable_ref, effect_ctx, ty, init, is_pub, span } =>
             HDecl::Const { name: name, def_id: def_id,
                 executable_ref: executable_ref, ty: ty,
-                handled_evidence_bindings: handled_evidence_bindings,
+                effect_ctx: effect_ctx,
                 init: al_expr(init), is_pub: is_pub, span: span },
         HDecl::ModBlock { name, decls, is_pub, span } => {
             let mut new_inner: List<HDecl> = []
@@ -108,8 +108,7 @@ fn al_decl(d: HDecl) -> HDecl {
                     return_type: tm.return_type, effects: tm.effects,
                     has_default: tm.has_default,
                     executable_ref: tm.executable_ref,
-                    handled_evidence_bindings:
-                        tm.handled_evidence_bindings,
+                    effect_ctx: tm.effect_ctx,
                     body: new_body })
             }
             HDecl::Trait { name: name, owner_ref: trait_owner_ref,
@@ -132,12 +131,11 @@ fn al_decl(d: HDecl) -> HDecl {
             }
             HDecl::Effect { name: name, owner_ref: owner_ref, handled_ref: handled_ref, type_params: type_params, ops: new_ops, is_pub: is_pub, span: span }
         },
-        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, resource_contract, handled_evidence_bindings, trait_bounds, is_pub, span } =>
+        HDecl::ExternFn { name, abi_name, def_id, executable_ref, type_params, params, return_type, effects, resource_contract, trait_bounds, is_pub, span } =>
             HDecl::ExternFn { name: name, abi_name: abi_name, def_id: def_id,
                 executable_ref: executable_ref, type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
                 resource_contract: resource_contract,
-                handled_evidence_bindings: handled_evidence_bindings,
                 trait_bounds: trait_bounds,
                 is_pub: is_pub, span: span },
         HDecl::ExternType { name, type_params, is_pub, span } =>
@@ -203,7 +201,7 @@ fn al_expr(e: HExpr) -> HExpr {
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op, operand: al_expr(operand), ty: ty, effects: effects, span: span },
         HExpr::Call { callee, args, type_args, effect_instantiation,
-                      resolved_dicts, handled_evidence, callee_ref,
+                      resolved_dicts, effect_ctx, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             let new_callee = al_expr(callee)
             let mut new_args: List<HExpr> = []
@@ -211,7 +209,7 @@ fn al_expr(e: HExpr) -> HExpr {
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
                 effect_instantiation: effect_instantiation,
                 resolved_dicts: resolved_dicts,
-                handled_evidence: handled_evidence, callee_ref: callee_ref,
+                effect_ctx: effect_ctx, callee_ref: callee_ref,
                 method_ref: method_ref, system_host: system_host,
                 ty: ty, effects: effects, span: span }
         },
@@ -290,11 +288,11 @@ fn al_expr(e: HExpr) -> HExpr {
         HExpr::TryCatch { body, arms, ty, effects, span } =>
             HExpr::TryCatch { body: al_expr(body),
                 arms: al_arms(arms), ty: ty, effects: effects, span: span },
-        HExpr::HandleExpr { body, handlers, installed_evidence, ty, effects, span } => {
+        HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
                 new_handlers.push(HEffectHandler { effect_name: h.effect_name,
-                    handled_ref: h.handled_ref,
+                    handled_instance: h.handled_instance,
                     operation_ref: h.operation_ref,
                     fail_ref: h.fail_ref,
                     executable_ref: h.executable_ref, op_name: h.op_name,
@@ -302,34 +300,32 @@ fn al_expr(e: HExpr) -> HExpr {
                         source: capture.source, target: capture.target,
                         value: capture.value.map(fn(value) { al_expr(value) }),
                         resource_site: capture.resource_site } }),
-                    handled_evidence_bindings:
-                        h.handled_evidence_bindings,
-                    evidence_captures: h.evidence_captures,
+                    effect_ctx: h.effect_ctx,
+                    parent_ctx: h.parent_ctx,
                     params: h.params, resume_binding: h.resume_binding,
                     body: al_expr(h.body) })
             }
             HExpr::HandleExpr { body: al_expr(body), handlers: new_handlers,
-                installed_evidence: installed_evidence,
+                effect_ctx_install: effect_ctx_install,
                 ty: ty, effects: effects, span: span }
         },
-        HExpr::Lambda { executable_ref, params, captures, handled_evidence_bindings, evidence_captures, return_type, body, ty, effects, span } =>
+        HExpr::Lambda { executable_ref, params, captures, effect_ctx, return_type, body, ty, effects, span } =>
             HExpr::Lambda { executable_ref: executable_ref,
                 params: params,
                 captures: captures.map(fn(capture) { HLambdaCapture {
                     source: capture.source, target: capture.target,
                     value: capture.value.map(fn(value) { al_expr(value) }),
                     resource_site: capture.resource_site } }),
-                handled_evidence_bindings: handled_evidence_bindings,
-                evidence_captures: evidence_captures,
+                effect_ctx: effect_ctx,
                 return_type: return_type,
                 body: al_expr(body), ty: ty, effects: effects, span: span },
-        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, handled_evidence,
+        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, effect_ctx_lookup,
                           args, ty, effects, span } => {
             let mut new_args: List<HExpr> = []
             for a in args { new_args.push(al_expr(a)) }
             HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
                 operation_ref: operation_ref, fail_ref: fail_ref,
-                handled_evidence: handled_evidence,
+                effect_ctx_lookup: effect_ctx_lookup,
                 args: new_args, ty: ty, effects: effects, span: span }
         },
         HExpr::ListLit { elements, plan, ty, effects, span } => {

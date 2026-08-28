@@ -1,4 +1,4 @@
-use types::{Type, Effect, EffectRow, StructField, EnumVariant,
+use types::{Type, EffectRow, StructField, EnumVariant,
     INT, STR, BOOL, EMPTY_ROW, BUILTIN_OPTION, types_equal,
     type_to_builtin_name}
 use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
@@ -17,7 +17,10 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_target_symbol,
     delegate_plan_not_applicable}
 use builtins::{builtin_option_derived_owners}
-use effect_contract::{empty_typed_effect_header_schema}
+use effect_contract::{
+    empty_typed_effect_header_schema, empty_typed_effect_ctx_layout,
+    make_typed_callable_effect_ctx, make_empty_effect_ctx_source
+}
 use ast::{Span, DeriveAttribute, TypeParam, TypeBound, span_zero}
 use diagnostics::{CollectingSink, Severity, DiagnosticContext, make_diag}
 use codes::{E0503}
@@ -49,7 +52,7 @@ use ir_identity::{SymbolRef, ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     make_symbol_ref, namespace_member,
     make_path_ref, path_owner_for_symbol, path_role_declaration,
     path_role_parameter,
-    make_source_slot_ref, make_synthetic_slot_ref, slot_domain_lexical,
+    make_source_slot_ref, slot_domain_lexical,
     impl_provider_ref_site, path_ref_owner,
     path_owner_ref_module_body, module_body_ref_origin_module_key,
     path_ref_normalized_child_path,
@@ -63,15 +66,14 @@ use ir_identity::{SymbolRef, ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     symbol_ref_origin_module_key}
 use ir_identity::{builtin_value_site_from_tag, builtin_value_symbol,
     BUILTIN_VALUE_HASH_COMBINE}
-use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
+use ir_inventory::{ExecutableRef, BinderEntry,
     make_parameter_dict_ref, make_exact_static_dict_ref,
     make_exact_wrapped_dict_ref, dict_ref_wrapped_base,
     make_named_executable_ref, executable_ref_is_named,
     executable_ref_named_symbol,
     make_source_binder_entry, binder_kind_let,
     binder_kind_source_param,
-    make_semantic_evidence_binder, make_handled_evidence_ref,
-    binder_kind_handled_evidence_param}
+    make_effect_ctx_parameter_ref}
 use infer_ctx::{InferCtx, value_symbol_ref}
 use infer_helpers::{exact_nominal_method_call}
 
@@ -1299,30 +1301,6 @@ fn exact_derived_methods(
                     ["derived-parameter:${index.to_str()}"],
                     path_role_parameter())))
         }
-        let method_effects = match signature {
-            Type::FnType { effects, .. } => effects,
-            _ => EMPTY_ROW
-        }
-        let mut handled_evidence_bindings: List<HandledEvidenceRef> = []
-        for atom in method_effects.effects {
-            match atom {
-                Effect::CustomEffect { reference, .. } => {
-                    let ordinal = handled_evidence_bindings.len()
-                    let site = make_path_ref(
-                        path_owner_for_symbol(symbol),
-                        ["derived-handled-evidence:${ordinal.to_str()}"],
-                        path_role_parameter())
-                    handled_evidence_bindings.push(
-                        make_handled_evidence_ref(
-                            reference,
-                            make_semantic_evidence_binder(
-                                make_synthetic_slot_ref(site), executable,
-                                binder_kind_handled_evidence_param(), site),
-                            executable, ordinal))
-                },
-                _ => {}
-            }
-        }
         result.push(DerivedMethod {
             semantic_kind: derived_method_semantic_kind(
                 trait_name, method_name),
@@ -1330,7 +1308,9 @@ fn exact_derived_methods(
             executable_ref: executable,
             signature: signature,
             binders: binders,
-            handled_evidence_bindings: handled_evidence_bindings
+            effect_ctx: make_typed_callable_effect_ctx(
+                make_effect_ctx_parameter_ref(executable),
+                empty_typed_effect_ctx_layout())
         })
     }
     result
@@ -1352,7 +1332,8 @@ fn derived_hash_mix_call() -> DerivedDirectCall {
         BUILTIN_VALUE_HASH_COMBINE))
     DerivedDirectCall {
         plan: make_h_exact_call_plan(
-            make_named_callee_ref(symbol), signature, none, [], [])
+            make_named_callee_ref(symbol), signature, none, [],
+            make_empty_effect_ctx_source())
     }
 }
 
@@ -1693,19 +1674,19 @@ fn exact_derived_text_plan(mut ctx: InferCtx, di: DerivedImpl) -> DerivedTextPla
     }
     let builder = make_h_exact_call_plan(
         make_named_callee_ref(value_symbol_ref(ctx, builder_def_id)),
-        builder_scheme.ty, none, [], [])
+        builder_scheme.ty, none, [], make_empty_effect_ctx_source())
     let append_method = exact_nominal_method_call(
         ctx, "StringBuilder", "add")
     let finish_method = exact_nominal_method_call(
         ctx, "StringBuilder", "to_str")
     let append = make_h_exact_call_plan(
         method_call_ref_callee_identity(append_method),
-        method_call_ref_signature(append_method),
-        some(append_method), [], [])
+        method_call_ref_signature(append_method), some(append_method), [],
+        make_empty_effect_ctx_source())
     let finish = make_h_exact_call_plan(
         method_call_ref_callee_identity(finish_method),
-        method_call_ref_signature(finish_method),
-        some(finish_method), [], [])
+        method_call_ref_signature(finish_method), some(finish_method), [],
+        make_empty_effect_ctx_source())
     let struct_sequence = match di.struct_fields {
         some(fields) => some(derived_struct_text_sequence(di, fields)),
         none => none

@@ -17,6 +17,7 @@ use hir_exact::{
     dict_ref_simple_name, dict_ref_static_name,
     dict_ref_wrapped_name, dict_ref_wrapped_physical_inner
 }
+use effect_contract::{make_empty_effect_ctx_source}
 use diagnostics::{DiagnosticContext, DiagnosticNote}
 use codes::{E0201, E0205, E0208, E0303, E0307, E0308, E0504, E0705}
 use union_find::{UnionFind, uf_find, uf_lookup}
@@ -850,7 +851,7 @@ pub fn finalize_value_ident_no_solve(
                         callee: getter, args: [], type_args: [],
                         effect_instantiation: none,
                         resolved_dicts: [],
-                        handled_evidence: [],
+                        effect_ctx: make_empty_effect_ctx_source(),
                         callee_ref: match def_id {
                             some(id) => some(make_named_callee_ref(
                                 value_symbol_ref(ctx, id))),

@@ -440,8 +440,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                     name, abi_name, def_id, executable_ref,
                                     type_params, params,
                                     return_type, effects, resource_contract,
-                                    handled_evidence_bindings, trait_bounds,
-                                    is_pub, span
+                                    trait_bounds, is_pub, span
                                 }) => {
                                     // The source spelling is diagnostic/ABI
                                     // metadata only. ExecutableRef is the sole
@@ -454,8 +453,6 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                         params: params, return_type: return_type,
                                         effects: effects,
                                         resource_contract: resource_contract,
-                                        handled_evidence_bindings:
-                                            handled_evidence_bindings,
                                         trait_bounds: trait_bounds,
                                         is_pub: is_pub, span: span
                                     })

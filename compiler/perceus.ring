@@ -133,14 +133,14 @@ fn mutate_drop_params(decls: List<HDecl>) -> List<HDecl> {
     let mut out: List<HDecl> = []
     for d in decls {
         match d {
-            HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } => {
+            HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, effect_ctx, body, is_pub, trait_bounds, span } => {
                 out.push(HDecl::Fn {
                     name: name, def_id: def_id,
                     executable_ref: executable_ref,
                     impl_method_ref: impl_method_ref,
                     type_params: type_params,
                     params: params, return_type: return_type, effects: effects,
-                    handled_evidence_bindings: handled_evidence_bindings,
+                    effect_ctx: effect_ctx,
                     body: mutate_append_param_drops(
                         body, params, executable_ref),
                     is_pub: is_pub, trait_bounds: trait_bounds, span: span
@@ -253,14 +253,14 @@ fn fresh_anf_tmp(mut counter: List<Int>) -> (Str, Int) {
 
 fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
     match decl {
-        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } => {
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, effect_ctx, body, is_pub, trait_bounds, span } => {
             HDecl::Fn {
                 name: name, def_id: def_id,
                 executable_ref: executable_ref,
                 impl_method_ref: impl_method_ref,
                 type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
-                handled_evidence_bindings: handled_evidence_bindings,
+                effect_ctx: effect_ctx,
                 body: anf_fn_body(body, externs, counter), is_pub: is_pub,
                 trait_bounds: trait_bounds, span: span
             }
@@ -282,19 +282,19 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
                 assoc_types: assoc_types, span: span
             }
         },
-        HDecl::Test { description, executable_ref, handled_evidence_bindings, body, span } => {
+        HDecl::Test { description, executable_ref, effect_ctx, body, span } => {
             HDecl::Test { description: description,
                 executable_ref: executable_ref,
-                handled_evidence_bindings: handled_evidence_bindings,
+                effect_ctx: effect_ctx,
                 body: anf_fn_body(body, externs, counter), span: span }
         },
-        HDecl::Const { name, def_id, executable_ref, handled_evidence_bindings, ty, init, is_pub, span } => {
+        HDecl::Const { name, def_id, executable_ref, effect_ctx, ty, init, is_pub, span } => {
             // Const init is in escape position with no enclosing statement list to
             // hoist into; normalise its nested subexprs into a Block tail if any
             // materialisation is needed.
             HDecl::Const { name: name, def_id: def_id,
                 executable_ref: executable_ref, ty: ty,
-                handled_evidence_bindings: handled_evidence_bindings,
+                effect_ctx: effect_ctx,
                 init: anf_value_in_own_scope(init, externs, counter), is_pub: is_pub, span: span }
         },
         HDecl::ModBlock { name, decls: mod_decls, is_pub, span } => {
@@ -972,7 +972,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
         },
 
         HExpr::Call { callee, args, type_args, effect_instantiation,
-                      resolved_dicts, handled_evidence, callee_ref,
+                      resolved_dicts, effect_ctx, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             // Callee is a borrow read (FieldAccess receiver / Ident) — normalise its
             // subexprs but it is not itself a materialisable value.
@@ -997,7 +997,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
                 effect_instantiation: effect_instantiation,
                 resolved_dicts: resolved_dicts,
-                handled_evidence: handled_evidence, callee_ref: callee_ref,
+                effect_ctx: effect_ctx, callee_ref: callee_ref,
                 method_ref: method_ref, system_host: system_host,
                 ty: ty, effects: effects, span: span }
         },
@@ -1197,13 +1197,14 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             HExpr::TryCatch { body: new_body, arms: new_arms, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::HandleExpr { body, handlers, installed_evidence, ty, effects, span } => {
+        HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {
             let new_body = anf_block_expr(body, externs, counter)
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
                 let h_body = anf_block_expr(h.body, externs, counter)
                 new_handlers.push(HEffectHandler {
-                    effect_name: h.effect_name, handled_ref: h.handled_ref,
+                    effect_name: h.effect_name,
+                    handled_instance: h.handled_instance,
                     operation_ref: h.operation_ref,
                     fail_ref: h.fail_ref,
                     executable_ref: h.executable_ref,
@@ -1212,20 +1213,19 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                         value: capture.value.map(fn(value) {
                             anf_operand(value, hoists, externs, counter) }),
                         resource_site: capture.resource_site } }),
-                    handled_evidence_bindings:
-                        h.handled_evidence_bindings,
-                    evidence_captures: h.evidence_captures,
+                    effect_ctx: h.effect_ctx,
+                    parent_ctx: h.parent_ctx,
                     op_name: h.op_name,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
             }
             HExpr::HandleExpr { body: new_body, handlers: new_handlers,
-                installed_evidence: installed_evidence,
+                effect_ctx_install: effect_ctx_install,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Lambda { executable_ref, params, captures, handled_evidence_bindings, evidence_captures, return_type, body, ty, effects, span } => {
+        HExpr::Lambda { executable_ref, params, captures, effect_ctx, return_type, body, ty, effects, span } => {
             // The lambda body is its own function scope.  Captures are dup'd by
             // gen_lambda; perceus handles the body.  Normalise the body in place.
             HExpr::Lambda { executable_ref: executable_ref,
@@ -1235,14 +1235,13 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                     value: capture.value.map(fn(value) {
                         anf_operand(value, hoists, externs, counter) }),
                     resource_site: capture.resource_site } }),
-                handled_evidence_bindings: handled_evidence_bindings,
-                evidence_captures: evidence_captures,
+                effect_ctx: effect_ctx,
                 return_type: return_type,
                 body: anf_block_expr(body, externs, counter),
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, handled_evidence,
+        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, effect_ctx_lookup,
                           args, ty, effects, span } => {
             // B-104 D1 Stage 2 — EFFECT-OP ARG position (closes the W1-era
             // conservative hold-out).  Args are BORROW-passed to the handler
@@ -1267,7 +1266,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             for a in args { new_args.push(anf_operand(a, hoists, externs, counter)) }
             HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
                 operation_ref: operation_ref, fail_ref: fail_ref,
-                handled_evidence: handled_evidence, args: new_args,
+                effect_ctx_lookup: effect_ctx_lookup, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 
@@ -1345,7 +1344,7 @@ fn transform_decl(
     drop_types: Set<Str>, mut gensym: List<Int>
 ) -> HDecl {
     match decl {
-        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, handled_evidence_bindings, body, is_pub, trait_bounds, span } => {
+        HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, effect_ctx, body, is_pub, trait_bounds, span } => {
             let new_body = transform_fn_body(
                 params, body, boxed, externs, drop_types, gensym)
             HDecl::Fn {
@@ -1354,7 +1353,7 @@ fn transform_decl(
                 impl_method_ref: impl_method_ref,
                 type_params: type_params,
                 params: params, return_type: return_type, effects: effects,
-                handled_evidence_bindings: handled_evidence_bindings,
+                effect_ctx: effect_ctx,
                 body: new_body, is_pub: is_pub, trait_bounds: trait_bounds, span: span
             }
         },
@@ -1375,23 +1374,23 @@ fn transform_decl(
                 assoc_types: assoc_types, span: span
             }
         },
-        HDecl::Test { description, executable_ref, handled_evidence_bindings, body, span } => {
+        HDecl::Test { description, executable_ref, effect_ctx, body, span } => {
             // Transform test bodies as parameterless functions
             let new_body = transform_fn_body(
                 [], body, boxed, externs, drop_types, gensym)
             HDecl::Test { description: description,
                 executable_ref: executable_ref,
-                handled_evidence_bindings: handled_evidence_bindings,
+                effect_ctx: effect_ctx,
                 body: new_body, span: span }
         },
-        HDecl::Const { name, def_id, executable_ref, handled_evidence_bindings, ty, init, is_pub, span } => {
+        HDecl::Const { name, def_id, executable_ref, effect_ctx, ty, init, is_pub, span } => {
             // B-098: the const owns its value → the initialiser is in escape
             // position, with an empty enclosing owned scope (no locals at top level).
             let owned: List<OwnedSlot> = []
             let new_init = rc_escape(init, owned, boxed, externs, drop_types, gensym, 0 - 1)
             HDecl::Const { name: name, def_id: def_id,
                 executable_ref: executable_ref, ty: ty,
-                handled_evidence_bindings: handled_evidence_bindings,
+                effect_ctx: effect_ctx,
                 init: new_init, is_pub: is_pub, span: span }
         },
         HDecl::ModBlock { name, decls: mod_decls, is_pub, span } => {
@@ -2737,7 +2736,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
         },
 
         HExpr::Call { callee, args, type_args, effect_instantiation,
-                      resolved_dicts, handled_evidence, callee_ref,
+                      resolved_dicts, effect_ctx, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             // Callee is a borrow.  Arguments BORROW by default (the callee does not
             // drop them — point 4) EXCEPT two ownership-taking sinks:
@@ -2771,7 +2770,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             HExpr::Call { callee: new_callee, args: new_args, type_args: type_args,
                 effect_instantiation: effect_instantiation,
                 resolved_dicts: resolved_dicts,
-                handled_evidence: handled_evidence, callee_ref: callee_ref,
+                effect_ctx: effect_ctx, callee_ref: callee_ref,
                 method_ref: method_ref, system_host: system_host,
                 ty: ty, effects: effects, span: span }
         },
@@ -2912,7 +2911,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             HExpr::TryCatch { body: new_body, arms: new_arms, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::HandleExpr { body, handlers, installed_evidence, ty, effects, span } => {
+        HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {
             // body inherits escape.  Each handler arm becomes a closure at codegen
             // (gen_handle_expr → build_handler_evidence).  B-098 closure model:
             // captures are owned and DUP'd at construction by gen_lambda (not in
@@ -2929,7 +2928,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 // escape position.
                 let h_body = rc_block_root(h.body, true, [], boxed, externs, drop_types, gensym, 0 - 1)
                 new_handlers.push(HEffectHandler {
-                    effect_name: h.effect_name, handled_ref: h.handled_ref,
+                    effect_name: h.effect_name,
+                    handled_instance: h.handled_instance,
                     operation_ref: h.operation_ref,
                     fail_ref: h.fail_ref,
                     executable_ref: h.executable_ref,
@@ -2939,20 +2939,19 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                             rc_escape(value, owned, boxed, externs,
                                 drop_types, gensym, loop_base) }),
                         resource_site: capture.resource_site } }),
-                    handled_evidence_bindings:
-                        h.handled_evidence_bindings,
-                    evidence_captures: h.evidence_captures,
+                    effect_ctx: h.effect_ctx,
+                    parent_ctx: h.parent_ctx,
                     op_name: h.op_name,
                     params: h.params, resume_binding: h.resume_binding,
                     body: h_body
                 })
             }
             HExpr::HandleExpr { body: new_body, handlers: new_handlers,
-                installed_evidence: installed_evidence,
+                effect_ctx_install: effect_ctx_install,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::Lambda { executable_ref, params, captures, handled_evidence_bindings, evidence_captures, return_type, body, ty, effects, span } => {
+        HExpr::Lambda { executable_ref, params, captures, effect_ctx, return_type, body, ty, effects, span } => {
             // Conservative closure model (B-098 all-owned captures): every captured
             // outer owned local is DUP'd at CONSTRUCTION by gen_lambda (the env
             // takes its own reference), released when the env dies (B-084
@@ -2970,13 +2969,12 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                         rc_escape(value, owned, boxed, externs, drop_types,
                             gensym, loop_base) }),
                     resource_site: capture.resource_site } }),
-                handled_evidence_bindings: handled_evidence_bindings,
-                evidence_captures: evidence_captures,
+                effect_ctx: effect_ctx,
                 return_type: return_type, body: new_body,
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, handled_evidence,
+        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, effect_ctx_lookup,
                           args, ty, effects, span } => {
             // Effect-op args: treat like ordinary call args — borrow (the handler
             // closure receives them; full effect-arg ownership is B-096 scope).
@@ -2984,7 +2982,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
             for a in args { new_args.push(rc_expr(a, false, owned, boxed, externs, drop_types, gensym, loop_base)) }
             HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
                 operation_ref: operation_ref, fail_ref: fail_ref,
-                handled_evidence: handled_evidence, args: new_args,
+                effect_ctx_lookup: effect_ctx_lookup, args: new_args,
                 ty: ty, effects: effects, span: span }
         },
 
