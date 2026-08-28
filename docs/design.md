@@ -651,11 +651,13 @@ handle {
 }
 ```
 
-**一等 effectful function value 的调用点动态 evidence（2026-08-28 用户批准 R1，0.1 最终语义）**：lambda/closure 创建本身是 pure，body effect只进入函数类型；ordinary user closure 永不捕获定义处的 handled-effect evidence。每个 effectful named/anonymous callable 按其冻结 effect row 拥有 hidden evidence 参数，每次 direct/method/indirect 调用从当前 dynamic handler environment 借用并传入；当前调用点没有对应 handler 时 effect 继续向外传播，不能被创建处状态或 unknown open tail 静默消除。
+**一等 effectful function value 的调用点动态 evidence（2026-08-28 用户批准 R1，0.1 最终语义）**：lambda/closure 创建本身是 pure，body effect只进入函数类型；ordinary user closure 永不捕获定义处的 handled-effect evidence。所有 Ring callable 统一接收一个显式 borrowed `EffectCtx*`，每次 direct/method/indirect 调用传入当前 dynamic handler context；当前调用点没有对应 handler 时 context 中没有该 typed entry，effect 继续向外传播，不能被创建处状态或 unknown open tail 静默消除。
 
 `handle` 安装的 evidence 只在其动态调用范围内生效。closure 即使在 `handle` 内创建，逃逸后调用也不得继续使用已经结束的 handler；若在另一层 handler 内调用，则使用新的当前 evidence。实现 handler arm/re-perform 的内部 runtime handler object 可持有其显式 outer evidence 和普通词法值，但该内部对象不得与返回给用户的 ordinary closure capture 规则混用。
 
-共享 callable ABI 的顺序固定为：`closure env`（仅 indirect closure）→ ordinary arguments → trait dictionaries → custom handled-effect evidence。Handled evidence 按 borrow 传递，不转移给 ordinary closure env；SystemEffectRef 永不进入该参数列。R1 将 B-167 的 custom handled-function-value 完整纵切前移并入当前 #268/#269，直接取代旧 C-only lexical-capture 过渡路径；不保留 hybrid/fallback。B-168 failure/control 与 B-169 其余研究仍按原排期，并必须兼容该已冻结最小 ABI。
+**P2 统一 evidence context ABI（2026-08-28 用户批准）**：共享 callable ABI 固定为 `closure env`（仅 indirect closure）→ ordinary arguments → trait dictionaries → `EffectCtx*`。Pure 与 system-only Ring callable同样接收 immortal empty context；HostImport/top-level C extern leaf保持原ABI，由Ring wrapper接收但不向foreign leaf转发context。Context key是完整typed handled instance（exact `HandledEffectRef`及其exact type arguments），由TypedHIR/Core/AbiIR产生并跨import/re-export原样运输；runtime/C不得按name、nominal leaf、import顺序或临时hash重建。
+
+`EffectCtx`是显式typed overlay：empty context为never-drop singleton；每个`handle`拥有一个child overlay，记录其安装的ordered exact entries并引用parent，inner exact typed match优先；ordinary call只borrow一个context指针，不逐effect改变prototype，也不在closure env捕获context。Closed/fixed contract可用冻结layout的静态位置；open formal通过同一typed context/view转发，禁止variadic、TLS/global/root handler或runtime name lookup。Planner只处理overlay/evidence的Borrow/Own与all-exit cleanup，不求解effect；handler arm/re-perform内部对象可显式持parent context，但与ordinary callable ABI分域。P1 mixed trailing-args+formal-pack因callback prototype不兼容删除；P3双ABI+adapter inventory因更大authority与维护成本拒绝。R1/B-167纵切按P2前移并入#268/#269；B-168 failure/control与B-169其余研究仍按原排期并兼容该ABI。
 
 > **边界**：Ring 不计划实现 post-resume / multi-resume Full Algebraic Effects。现行公开模型固定为 tail-resumptive + abort；需要并发挂起的场景由 async 设计单独建模。
 
