@@ -1416,25 +1416,33 @@ extern "C" int64_t ring_Option_is_none(void* opt) {
     return *(int64_t*)opt == 1 ? 1 : 0;
 }
 
-extern "C" void* ring_Option_map(void* opt, void* closure) {
+typedef void* (*ring_option_fn_1)(
+    void* env, void* arg, EffectCtx* effect_ctx);
+typedef void* (*ring_option_fn_0)(void* env, EffectCtx* effect_ctx);
+
+extern "C" void* ring_Option_map(
+    void* opt, void* closure, EffectCtx* effect_ctx
+) {
     int64_t tag = *(int64_t*)opt;
     if (tag == 0) {
         void* val = *((void**)((int64_t*)opt + 1));
         RingClosure* cl = (RingClosure*)closure;
-        ring_fn_1 fn = (ring_fn_1)cl->fn_ptr;
-        void* result = fn(cl->env_ptr, val);
+        ring_option_fn_1 fn = (ring_option_fn_1)cl->fn_ptr;
+        void* result = fn(cl->env_ptr, val, effect_ctx);
         return ring_enum_some(result);
     }
     return ring_enum_none();
 }
 
-extern "C" void* ring_Option_and_then(void* opt, void* closure) {
+extern "C" void* ring_Option_and_then(
+    void* opt, void* closure, EffectCtx* effect_ctx
+) {
     int64_t tag = *(int64_t*)opt;
     if (tag == 0) {
         void* val = *((void**)((int64_t*)opt + 1));
         RingClosure* cl = (RingClosure*)closure;
-        ring_fn_1 fn = (ring_fn_1)cl->fn_ptr;
-        return fn(cl->env_ptr, val);  // closure returns Option<U> directly
+        ring_option_fn_1 fn = (ring_option_fn_1)cl->fn_ptr;
+        return fn(cl->env_ptr, val, effect_ctx);
     }
     return ring_enum_none();
 }
@@ -1456,7 +1464,9 @@ extern "C" void* ring_Option_to_fail(void* opt, void* err) {
     return nullptr;
 }
 
-extern "C" void* ring_Option_unwrap_or_else(void* opt, void* closure) {
+extern "C" void* ring_Option_unwrap_or_else(
+    void* opt, void* closure, EffectCtx* effect_ctx
+) {
     int64_t tag = *(int64_t*)opt;
     if (tag == 0) {
         void* value = *((void**)((int64_t*)opt + 1));
@@ -1464,9 +1474,8 @@ extern "C" void* ring_Option_unwrap_or_else(void* opt, void* closure) {
         return value;
     }
     RingClosure* cl = (RingClosure*)closure;
-    typedef void* (*ring_fn_0)(void* env);
-    ring_fn_0 fn = (ring_fn_0)cl->fn_ptr;
-    return fn(cl->env_ptr);
+    ring_option_fn_0 fn = (ring_option_fn_0)cl->fn_ptr;
+    return fn(cl->env_ptr, effect_ctx);
 }
 
 extern "C" int64_t ring_list_any(void* list, void* closure) {
@@ -1919,7 +1928,12 @@ extern "C" void* ring_Cell_set(void* cell, void* new_val) {
     return cell;                 // return receiver (Unit-typed call site discards this)
 }
 
-extern "C" void* ring_Cell_update(void* cell, void* closure) {
+typedef void* (*ring_cell_update_fn)(
+    void* env, void* arg, EffectCtx* effect_ctx);
+
+extern "C" void* ring_Cell_update(
+    void* cell, void* closure, EffectCtx* effect_ctx
+) {
     // #165: Reentrant-safe Cell.update. If the callback captures the same Cell
     // and calls .set(new_value), ring_Cell_set would drop old_val (the value we
     // passed to the callback). Setting the cell to nullptr before the call
@@ -1929,8 +1943,10 @@ extern "C" void* ring_Cell_update(void* cell, void* closure) {
     *(void**)cell = nullptr;       // prevent callback's .set() from dropping old_val
     ring_dup(old_val);             // callback consumes one ref, we drop the other
     RingClosure* cl = (RingClosure*)closure;
-    ring_fn_1 fn = (ring_fn_1)cl->fn_ptr;
-    void* new_val = fn(cl->env_ptr, old_val);
+    ring_cell_update_fn fn = (ring_cell_update_fn)cl->fn_ptr;
+    (void)effect_ctx;
+    void* new_val = fn(
+        cl->env_ptr, old_val, ring_effect_ctx_empty());
     ring_drop(old_val);            // drop our held reference
     *(void**)cell = new_val;
     return cell;

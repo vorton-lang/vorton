@@ -14,11 +14,12 @@ use hir::{HDictDef, TraitBound}
 use ir_identity::{SlotRef, slot_ref_stable_key}
 
 // Per-function registration info (forward-declare pass).
-// total_params = ring params + trait-bound dict params + evidence params —
-// the exact C prototype arity (clang enforces call-site arity for us).
+// Exact C prototype arity. Ring callables include one trailing EffectCtx*;
+// backend-only helpers do not.
 pub struct CFnInfo {
     pub c_name: Str,
-    pub total_params: Int
+    pub total_params: Int,
+    pub takes_effect_ctx: Bool
 }
 
 // Struct field layout registration (field ORDER is the C struct layout:
@@ -48,13 +49,11 @@ pub struct CEnumInfo {
     pub max_fields: Int
 }
 
-// One enclosing handle-expr / try-catch scope.  A `return` inside the body must pop the
-// catch frame and drop the handler evidence structs before returning (#173);
-// ev_drop_vars holds the hoisted C variable names (unique per handle — no
-// name-based double free on nested handles for the same effect).
+// One enclosing handle/try scope. A return must pop its catch frame and drop
+// each owned child EffectCtx before leaving the C stack frame.
 pub struct CHandleCleanup {
     pub needs_catch_pop: Bool,
-    pub ev_drop_vars: List<Str>
+    pub owned_ctx_vars: List<Str>
 }
 
 // H+T final-emission authority. Exact and backend name-only registrations
@@ -143,7 +142,6 @@ pub struct CCtx {
     // Semantic/synthetic SlotRef identity is independent from legacy DefId.
     pub value_slots_by_slot_key: Map<Str, CExactSlotRef>,
     pub functions: Map<Str, CFnInfo>,          // C mangled name -> info
-    pub fn_evidence_params: Map<Str, List<Str>>, // C mangled name -> evidence param names
     pub fn_mut_params: Map<Str, List<Bool>>,
     pub struct_types: Map<Str, CStructInfo>,
     pub enum_types: Map<Str, CEnumInfo>,
@@ -203,7 +201,7 @@ pub struct CCtx {
     pub dict_getters: Set<Str>,
     // Function-value dict ABI invariant: the checker must attach exactly one
     // DictRef per bound.  Codegen keeps the declared bounds only to reject a
-    // missing/partial closure-evidence list; it never re-resolves types.
+    // missing/partial dictionary list; it never re-resolves types.
     pub fn_trait_bounds: Map<Str, List<TraitBound>>,
     // Module-wide counters for synthesised functions (deterministic order).
     pub lambda_counter: Int,
@@ -276,7 +274,6 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         value_slots_by_def_id: map_new(),
         value_slots_by_slot_key: map_new(),
         functions: map_new(),
-        fn_evidence_params: map_new(),
         fn_mut_params: map_new(),
         struct_types: map_new(),
         enum_types: map_new(),
@@ -638,7 +635,8 @@ pub fn c_exact_value_slot(
 }
 
 fn c_register_semantic_slot(
-    mut ctx: CCtx, slot: SlotRef, suggested_name: Str, parameter: Bool
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str, parameter: Bool,
+    c_type: Str
 ) -> CExactSlotRef {
     let key = slot_ref_stable_key(slot)
     if ctx.value_slots_by_slot_key.contains_key(key) {
@@ -646,7 +644,7 @@ fn c_register_semantic_slot(
     }
     let cname = c_unique_local(ctx, suggested_name)
     if !parameter {
-        ctx.cur_decls.push("    void* ${cname} = NULL;")
+        ctx.cur_decls.push("    ${c_type} ${cname} = NULL;")
     }
     let result = CExactSlotRef {
         c_name: cname, source_name: key, def_id: -2
@@ -658,13 +656,27 @@ fn c_register_semantic_slot(
 pub fn c_local_semantic_slot(
     mut ctx: CCtx, slot: SlotRef, suggested_name: Str
 ) -> CExactSlotRef {
-    c_register_semantic_slot(ctx, slot, suggested_name, false)
+    c_register_semantic_slot(ctx, slot, suggested_name, false, "void*")
 }
 
 pub fn c_param_semantic_slot(
     mut ctx: CCtx, slot: SlotRef, suggested_name: Str
 ) -> CExactSlotRef {
-    c_register_semantic_slot(ctx, slot, suggested_name, true)
+    c_register_semantic_slot(ctx, slot, suggested_name, true, "void*")
+}
+
+pub fn c_local_effect_ctx_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str
+) -> CExactSlotRef {
+    c_register_semantic_slot(
+        ctx, slot, suggested_name, false, "EffectCtx*")
+}
+
+pub fn c_param_effect_ctx_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str
+) -> CExactSlotRef {
+    c_register_semantic_slot(
+        ctx, slot, suggested_name, true, "EffectCtx*")
 }
 
 pub fn c_semantic_value_slot(
@@ -1634,6 +1646,7 @@ fn rt_sig(name: Str) -> Str? {
     if name == "ring_register_never_drop" { return some("i>v") }
     if name == "ring_const_intern" { return some("p>p") }
     if name == "ring_unit_intern" { return some("p>p") }
+    if name == "ring_effect_ctx_empty" { return some(">e") }
     // List
     if name == "ring_list_new" { return some(">p") }
     if name == "ring_list_push" { return some("pp>p") }
@@ -1707,16 +1720,16 @@ fn rt_sig(name: Str) -> Str? {
     if name == "ring_Option_unwrap" { return some("p>p") }
     if name == "ring_Option_is_some" { return some("p>i") }
     if name == "ring_Option_is_none" { return some("p>i") }
-    if name == "ring_Option_map" { return some("pp>p") }
-    if name == "ring_Option_and_then" { return some("pp>p") }
-    if name == "ring_Option_unwrap_or_else" { return some("pp>p") }
+    if name == "ring_Option_map" { return some("ppe>p") }
+    if name == "ring_Option_and_then" { return some("ppe>p") }
+    if name == "ring_Option_unwrap_or_else" { return some("ppe>p") }
     if name == "ring_Option_to_fail" { return some("pp>p") }
     if name == "ring_Option_none" { return some(">p") }
     // Cell
     if name == "ring_Cell_new" { return some("p>p") }
     if name == "ring_Cell_get" { return some("p>p") }
     if name == "ring_Cell_set" { return some("pp>p") }
-    if name == "ring_Cell_update" { return some("pp>p") }
+    if name == "ring_Cell_update" { return some("ppe>p") }
     // B-125 Ptr<T> primitives
     if name == "ring_raw_alloc" { return some("p>p") }
     if name == "ring_raw_dealloc" { return some("pp>v") }
