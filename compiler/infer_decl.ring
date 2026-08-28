@@ -114,7 +114,8 @@ use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
     journal_record_def_span, journal_mutable_var_insert,
     journal_let_def_insert, journal_mut_param_def_insert,
     journal_fn_mut_params_set}
-use infer_helpers::{is_value_type, finalize_value_ident_no_solve}
+use infer_helpers::{is_value_type, finalize_value_ident_no_solve,
+    finalize_direct_callee_no_solve}
 use resolver::{single_namespace_file_key}
 use infer_register::{register_decls_two_phase, register_module_decls_two_phase,
     resolve_declared_effects, prefix_decl_name, insert_mod_aliases,
@@ -1472,8 +1473,12 @@ fn finalize_evidence_expr(
             resolved_dicts, handled_evidence: _, callee_ref,
             method_ref, system_host, ty, effects, span
         } => {
-            let callee = finalize_evidence_expr(
-                ctx, callee, child_requirements)
+            let callee = match callee {
+                HExpr::Ident { .. } =>
+                    finalize_direct_callee_no_solve(ctx, callee),
+                _ => finalize_evidence_expr(
+                    ctx, callee, child_requirements)
+            }
             HExpr::Call {
                 handled_evidence: final_handled_evidence_for_callable(
                     ctx, hexpr_type(callee)),
