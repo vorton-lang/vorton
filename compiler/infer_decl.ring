@@ -1,8 +1,10 @@
-use types::{Type, Effect, EffectRow, RecordField, UNIT, EMPTY_ROW, type_to_string, effect_to_string, nominal_display_name, effects_match_kind, effect_kind_name, types_equal}
-use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, Span, Position, EffectOpDecl, EffectExpr,
+use types::{Type, Effect, EffectRow, UNIT, EMPTY_ROW, type_to_string, effect_to_string, nominal_display_name, effects_match_kind, types_equal}
+use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, Span, EffectOpDecl, EffectExpr,
     UseDecl}
 use hir::{HDecl, HParam, HTypeParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssocType,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod, HFieldAccessKind,
+    HNominalStructFieldInit, HStructFieldInit,
+    HMatchArm, HEffectHandler, HStringInterpPart, HLambdaCapture,
     h_nominal_projection,
     HDelegateMethodPlan, HDelegateAssocPlan,
     HDefaultSpecializationPlan, make_h_default_specialization_plan,
@@ -17,12 +19,13 @@ use hir::{HDecl, HParam, HTypeParam, HExpr, HStmt, HProgram, DerivedImpl, TraitB
     remap_hir_handled_evidence,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
 use hir_exact::{make_static_dict_ref}
-use ir_identity::{SymbolRef, NominalFieldRef,
+use ir_identity::{SymbolRef, NominalFieldRef, HandledEffectRef,
     nominal_field_ref_index, symbol_ref_same,
     ImplOwnerRef, ImplMethodRef,
     impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_target,
     impl_owner_ref_same,
-    impl_method_ref_member, symbol_ref_declaration_site_path,
+    impl_method_ref_member, impl_method_ref_owner, impl_method_ref_same,
+    symbol_ref_declaration_site_path, symbol_ref_canonical_payload,
     registered_nominal_ref_symbol, registered_trait_ref_symbol,
     trait_method_ref_trait,
     trait_method_ref_member,
@@ -30,8 +33,11 @@ use ir_identity::{SymbolRef, NominalFieldRef,
     trait_method_ref_callable_slot_index, trait_method_ref_name,
     make_module_body_ref, path_owner_for_module_body, make_path_ref,
     path_role_declaration, make_source_slot_ref, slot_domain_lexical,
-    make_named_callee_ref, make_local_callee_ref, make_symbol_origin_ref}
+    make_named_callee_ref, make_local_callee_ref, make_symbol_origin_ref,
+    handled_effect_ref_same}
 use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
+    HandledEvidenceCapture, handled_evidence_requirement,
+    handled_evidence_capture_requirement,
     make_exact_static_dict_ref,
     CallableResourceContractFact, CallableResourceRoleFact,
     make_callable_resource_contract_fact,
@@ -39,15 +45,15 @@ use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
     callable_resource_role_read, callable_resource_role_mutate,
     callable_resource_role_consume,
     make_named_executable_ref,
-    make_anonymous_executable_ref, executable_ref_named_symbol,
-    executable_ref_same, effect_operation_ref_callable}
+    make_anonymous_executable_ref,
+    executable_ref_same,
+    effect_operation_ref_effect}
 use effect_contract::{TypedEffectHeaderSchema,
     empty_typed_effect_header_schema,
     typed_effect_header_schema_bindings}
 use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     ImplEntry,
-    ImplMethodSchemeCore,
-    apply_subst, apply_subst_map, apply_subst_row_map,
+    apply_subst, apply_subst_map,
     find_impl, find_impl_by_provider,
     find_impls_by_provider, find_delegate_child_provider_plan,
     optional_symbol_ref_same,
@@ -68,18 +74,19 @@ use extern_manifest::{compiler_extern_manifest_entry_executable,
     compiler_extern_manifest_entry_resource}
 use union_find::{UnionFind}
 use unify::{empty_subst}
-use diagnostics::{DiagnosticContext, DiagnosticNote}
-use codes::{E0201, E0204, E0301, E0402, E0403, E0404, E0405, E0407, E0501, E0503, E0507, E0802, E0803}
-use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileError,
+use diagnostics::{DiagnosticContext, DiagnosticNote, Severity}
+use codes::{E0201, E0204, E0402, E0403, E0404, E0405, E0407, E0501, E0503, E0504, E0802, E0803}
+use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
+    OwnerInferenceBatch, OwnerBatchCheckpoint, CallableFinalizationHeader,
+    CompileError,
     validate_fn_bound_order,
     type_error, type_error_with_notes,
-    unify_at, unify_at_noted, update_fn_effects,
-    resolve_type_expr, resolve_self_type, resolve_dicts_from_scheme,
+    unify_at, unify_at_noted,
+    resolve_type_expr, resolve_self_type,
     resolve_dicts_from_impl_owner,
     pending_dict_checkpoint, drain_pending_dicts, rollback_pending_dicts,
     assert_pending_dict_owner_closed,
-    generalize, collect_free_vars, free_type_vars,
-    free_type_vars_in_env, resolve_mod_uses,
+    generalize, free_type_vars, resolve_mod_uses,
     enter_project_root_frame, enter_project_child_frame,
     exit_project_namespace_frame,
     enter_impl_check_root_frame, enter_impl_check_child_frame,
@@ -88,15 +95,24 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, AssocRebindEntry, CompileE
     current_impl_check_site, enter_executable_owner,
     exit_executable_owner, current_handled_evidence_bindings,
     current_handled_evidence_captures, resolve_handled_evidence,
+    install_handled_evidence, uninstall_handled_evidence,
     prepare_callable_handled_evidence,
     canonicalize_callable_handled_evidence,
     current_identity_file_key, semantic_parameter_binder,
     executable_effect_origin, publish_exact_callable_effect_header,
     begin_recursive_callable_group, end_recursive_callable_group,
     mark_recursive_callable_group_closed,
-    recursive_callable_is_closed,
-    recursive_effect_fact_checkpoint,
-    rollback_recursive_effect_facts}
+    owner_batch_checkpoint, rollback_owner_batch, detach_owner_batch,
+    drain_owner_batch_dictionary_group, stage_owner_batch_facts,
+    preflight_owner_batches, publish_owner_batches,
+    make_callable_finalization_header, project_owner_batch_receipts,
+    begin_infer_mutation_journal, commit_infer_mutation_journal,
+    rollback_infer_mutation_journal,
+    journal_boxed_var_insert, journal_var_lambda_depth_set,
+    journal_record_def_span, journal_mutable_var_insert,
+    journal_let_def_insert, journal_mut_param_def_insert,
+    journal_fn_mut_params_set,
+    journal_rebind_assoc_provenance_set}
 use infer_helpers::{is_value_type}
 use resolver::{single_namespace_file_key}
 use infer_register::{register_decls_two_phase, register_module_decls_two_phase,
@@ -110,9 +126,45 @@ use zonk::{ZonkCtx, zonk_type, zonk_row, zonk_param, zonk_block, zonk_expr}
 use derive::{run_derive_pass}
 use scc::{build_call_graph, tarjan_scc, collect_registered_fn_names, collect_self_method_callees}
 
-enum FnCheckPhase {
-    OrdinaryFnCheck,
-    RecursiveConstraintCheck
+struct FnValidationContext {
+    capability: EffectRow?,
+    capability_span: Span?
+}
+
+struct FnDraft {
+    name: Str,
+    provenance_key: Str,
+    executable: ExecutableRef,
+    impl_method_ref: ImplMethodRef?,
+    registration_scheme: TypeScheme,
+    inherited_type_var_ids: List<Int>,
+    source_type_var_ids: List<Int>,
+    is_pub: Bool,
+    span: Span,
+    type_params: List<HTypeParam>,
+    trait_bounds: List<TraitBound>,
+    params: List<HParam>,
+    expected_return: Type,
+    owner_effects: EffectRow,
+    body: HExpr,
+    raw_type_var_names: Map<Int, Str>,
+    assoc_rebind_sources: List<AssocRebindEntry>,
+    handled_bindings: List<HandledEvidenceRef>,
+    handled_captures: List<HandledEvidenceCapture>,
+    validation: FnValidationContext,
+    batch: OwnerInferenceBatch
+}
+
+fn diagnostics_since_has_errors(ctx: InferCtx, checkpoint: Int) -> Bool {
+    let recent = ctx.sink.items.slice(
+        checkpoint, ctx.sink.items.len())
+    for diagnostic in recent {
+        match diagnostic.severity {
+            Severity::SevError => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 struct StagedCallableClose {
@@ -125,6 +177,22 @@ struct StagedCallableClose {
 struct CachedImplClose {
     owner_ref: ImplOwnerRef,
     declarations: List<HDecl>
+}
+
+struct CachedValueClose {
+    executable: ExecutableRef,
+    declaration: HDecl
+}
+
+fn cached_value_declaration(
+    values: List<CachedValueClose>, executable: ExecutableRef
+) -> HDecl? {
+    for value in values {
+        if executable_ref_same(value.executable, executable) {
+            return some(value.declaration)
+        }
+    }
+    none
 }
 
 fn ensure_callable_handled_evidence(
@@ -221,11 +289,13 @@ fn test_executable_for_site(ctx: InferCtx, decl_index: Int) -> ExecutableRef {
 
 fn check_decl(
     mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?,
-    cached_impls: List<CachedImplClose>
+    cached_impls: List<CachedImplClose>,
+    cached_values: List<CachedValueClose>
 ) -> HDecl {
     let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let result = some(check_decl_inner(
-        ctx, decl, frame_decl_index, cached_impls)) catch { _ => none }
+        ctx, decl, frame_decl_index,
+        cached_impls, cached_values)) catch { _ => none }
     match result {
         some(hdecl) => {
             assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
@@ -240,7 +310,8 @@ fn check_decl(
 
 fn check_decl_inner(
     mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?,
-    cached_impls: List<CachedImplClose>
+    cached_impls: List<CachedImplClose>,
+    cached_values: List<CachedValueClose>
 ) -> HDecl {
     match decl {
         Decl::Struct { name, type_params, is_pub, span, .. } =>
@@ -252,12 +323,13 @@ fn check_decl_inner(
         Decl::Impl { target_type, type_params, trait_name, methods, span } =>
             check_impl_decl(
                 ctx, target_type, type_params, trait_name, methods, span,
-                frame_decl_index.unwrap_or(-1)),
+                frame_decl_index.unwrap_or(-1), FnValidationContext {
+                    capability: none, capability_span: none
+                }),
         Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span, .. } =>
             check_fn_decl(ctx, name, type_params, params, return_type,
                 declared_effects, body, is_pub, span,
-                none, none, none, none, [],
-                FnCheckPhase::OrdinaryFnCheck),
+                none, none, none, none, []),
         Decl::Test { description, body, span } =>
             check_test_decl(
                 ctx, description, body, span,
@@ -295,7 +367,8 @@ fn check_decl_inner(
         Decl::ModBlock { name, uses, decls, required_effects, is_pub, span } =>
             check_mod_decl(
                 ctx, name, uses, decls, required_effects,
-                is_pub, span, frame_decl_index, cached_impls),
+                is_pub, span, frame_decl_index,
+                cached_impls, cached_values),
         Decl::EffectAlias { name, is_pub, span, .. } =>
             HDecl::TypeAlias {
                 name: name, owner_ref: none, ty: UNIT,
@@ -328,7 +401,8 @@ fn check_mod_decl_body(
     mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
     decls: List<Decl>, required_effects: List<EffectExpr>?,
     is_pub: Bool, span: Span, project_frame_active: Bool,
-    cached_impls: List<CachedImplClose>
+    cached_impls: List<CachedImplClose>,
+    cached_values: List<CachedValueClose>
 ) -> HDecl {
     // Register short-name aliases for mod-internal types so that
     // type annotations like `c: Circle` resolve to `shapes::Circle`.
@@ -376,76 +450,40 @@ fn check_mod_decl_body(
         } else {
             prefix_decl_name(mod_name, decl)
         }
-        let cached = match prefixed {
-            Decl::Impl { .. } => cached_impl_declarations(
-                cached_impls, impl_check_owner(ctx, decl_index)),
-            _ => none
-        }
-        match cached {
-            some(values) => {
-                for value in values {
-                    match cap_row {
-                        some(cap) => check_capability(ctx, value, cap, span),
-                        none => {}
-                    }
+        match prefixed {
+            Decl::Fn { name, .. } => {
+                let executable = value_callable_executable(ctx, name)
+                let cached = cached_value_declaration(
+                    cached_values, executable).unwrap_or_else(fn() {
+                    panic("inline HIR cache: final function is absent")
+                })
+                hdecls.push(cached)
+            },
+            Decl::Impl { .. } => {
+                let cached = cached_impl_declarations(
+                    cached_impls,
+                    impl_check_owner(ctx, decl_index)).unwrap_or_else(fn() {
+                    panic("inline HIR cache: final impl is absent")
+                })
+                for value in cached {
                     hdecls.push(value)
                 }
             },
-            none => {
-        let result = some(check_decl(
-            ctx, prefixed, some(decl_index), cached_impls)) catch { _ => none }
-        match result {
-            some(hd) => {
-                // Update fn effects (same as check_one_decl)
-                match hd {
-                    HDecl::Fn { name, executable_ref, params,
-                                return_type, effects, span: fn_span, .. } => {
-                        if recursive_callable_is_closed(ctx, executable_ref) {
-                            validate_closed_value_callable(
-                                ctx, name, executable_ref, params,
-                                return_type, effects, fn_span)
-                        } else if effects.effects.len() > 0 {
-                            update_fn_effects(ctx.env, name, effects)
+            _ => {
+                let result = some(check_decl(
+                    ctx, prefixed, some(decl_index),
+                    cached_impls, cached_values)) catch { _ => none }
+                match result {
+                    some(hdecl) => {
+                        match cap_row {
+                            some(capability) => check_capability(
+                                ctx, hdecl, capability, span),
+                            none => {}
                         }
+                        hdecls.push(hdecl)
                     },
-                    _ => {}
-                }
-                // Check capability restriction on function declarations
-                match cap_row {
-                    some(cap) => check_capability(ctx, hd, cap, span),
                     none => {}
                 }
-                let mut delegate_decls: List<HDecl> = []
-                match prefixed {
-                    Decl::Impl { methods, .. } => {
-                        for source_member_index in 0..methods.len() {
-                            match methods.get(source_member_index) {
-                                some(Decl::Delegate {
-                                    field, span: dspan, ..
-                                }) => {
-                                    let expanded = expand_delegate_impls(
-                                        ctx, hd, source_member_index,
-                                        field, dspan)
-                                    for child in expanded {
-                                        match cap_row {
-                                            some(cap) => check_capability(
-                                                ctx, child, cap, span),
-                                            none => {}
-                                        }
-                                        delegate_decls.push(child)
-                                    }
-                                },
-                                _ => {}
-                            }
-                        }
-                    },
-                    _ => {}
-                }
-                hdecls.push(hd)
-                for child in delegate_decls { hdecls.push(child) }
-            },
-            none => {}
-        }
             }
         }
     }
@@ -456,7 +494,8 @@ fn check_mod_decl(
     mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
     decls: List<Decl>, required_effects: List<EffectExpr>?,
     is_pub: Bool, span: Span, frame_decl_index: Int?,
-    cached_impls: List<CachedImplClose>
+    cached_impls: List<CachedImplClose>,
+    cached_values: List<CachedValueClose>
 ) -> HDecl {
     let project_active = ctx.project_namespace_file_key.is_some()
     let impl_decl_index = frame_decl_index.unwrap_or(-1)
@@ -482,7 +521,8 @@ fn check_mod_decl(
     let prev_unsafe_allowed = ctx.mod_unsafe_allowed
     let result = check_mod_decl_body(
         ctx, mod_name, uses, decls, required_effects,
-        is_pub, span, project_active, cached_impls) catch { _ => {
+        is_pub, span, project_active,
+        cached_impls, cached_values) catch { _ => {
             ctx.mod_unsafe_allowed = prev_unsafe_allowed
             let _ = ctx.mod_path_stack.pop()
             if entered_project_frame {
@@ -503,14 +543,21 @@ fn check_mod_decl(
 
 fn cache_checked_impl_decl(
     mut ctx: InferCtx, decl: Decl, decl_index: Int,
-    mut cached_impls: List<CachedImplClose>
+    mut cached_impls: List<CachedImplClose>,
+    validation: FnValidationContext
 ) {
     let owner_ref = impl_check_owner(ctx, decl_index)
     if cached_impl_declarations(cached_impls, owner_ref).is_some() {
         panic("impl close cache: exact owner was checked twice")
     }
-    let hdecl = check_decl(
-        ctx, decl, some(decl_index), cached_impls)
+    let hdecl = match decl {
+        Decl::Impl {
+            target_type, type_params, trait_name, methods, span
+        } => check_impl_decl(
+            ctx, target_type, type_params, trait_name, methods,
+            span, decl_index, validation),
+        _ => panic("impl close cache: source declaration is not an impl")
+    }
     let mut declarations: List<HDecl> = [hdecl]
     match decl {
         Decl::Impl { methods, .. } => {
@@ -518,7 +565,8 @@ fn cache_checked_impl_decl(
                 match methods.get(source_member_index) {
                     some(Decl::Delegate { field, span, .. }) => {
                         let expanded = expand_delegate_impls(
-                            ctx, hdecl, source_member_index, field, span)
+                            ctx, hdecl, source_member_index, field, span,
+                            validation)
                         for child in expanded { declarations.push(child) }
                     },
                     _ => {}
@@ -532,6 +580,85 @@ fn cache_checked_impl_decl(
     })
 }
 
+fn cache_inline_impls_in_mod_body(
+    mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
+    decls: List<Decl>, required_effects: List<EffectExpr>?,
+    module_span: Span, project_frame_active: Bool,
+    mut cached_impls: List<CachedImplClose>
+) {
+    if !project_frame_active {
+        insert_mod_aliases(ctx, mod_name, decls, false)
+        resolve_mod_uses(ctx, uses, true)
+    }
+    let capability = required_effects.map(fn(values) {
+        resolve_declared_effects(ctx, values)
+    })
+    match capability {
+        some(row) => {
+            ctx.mod_unsafe_allowed = row.effects.any(fn(effect) {
+                match effect {
+                    Effect::UnsafeEffect => true,
+                    _ => false
+                }
+            })
+        },
+        none => { ctx.mod_unsafe_allowed = false }
+    }
+    let validation = FnValidationContext {
+        capability: capability,
+        capability_span: capability.map(fn(_) { module_span })
+    }
+
+    for decl_index in 0..decls.len() {
+        let prefixed = prefix_decl_name(
+            mod_name, decls.get(decl_index).unwrap())
+        match prefixed {
+            Decl::Impl { .. } => cache_checked_impl_decl(
+                ctx, prefixed, decl_index, cached_impls, validation),
+            Decl::ModBlock {
+                name, uses: nested_uses, decls: nested_decls,
+                required_effects: nested_required, span: nested_span, ..
+            } => cache_inline_impls_in_mod(
+                ctx, name, nested_uses, nested_decls,
+                nested_required, nested_span, decl_index, cached_impls),
+            _ => {}
+        }
+    }
+}
+
+fn cache_inline_impls_in_mod(
+    mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
+    decls: List<Decl>, required_effects: List<EffectExpr>?,
+    module_span: Span, frame_decl_index: Int,
+    mut cached_impls: List<CachedImplClose>
+) {
+    enter_impl_check_child_frame(ctx, frame_decl_index)
+    let project_active = ctx.project_namespace_file_key.is_some()
+    let mut entered_project_frame = false
+    if project_active {
+        entered_project_frame = enter_project_child_frame(
+            ctx, frame_decl_index)
+        if !entered_project_frame {
+            exit_impl_check_frame(ctx)
+            panic("unreachable: resolver plan missing inline impl frame")
+        }
+    }
+    let segments = mod_name.split("::")
+    let simple_name = segments.get(segments.len() - 1).unwrap_or(mod_name)
+    ctx.mod_path_stack.push(simple_name)
+    let previous_unsafe = ctx.mod_unsafe_allowed
+    let result = some(cache_inline_impls_in_mod_body(
+        ctx, mod_name, uses, decls, required_effects,
+        module_span, project_active, cached_impls)) catch { _ => none }
+    ctx.mod_unsafe_allowed = previous_unsafe
+    let _ = ctx.mod_path_stack.pop()
+    if entered_project_frame {
+        let _ = exit_project_namespace_frame(ctx)
+    }
+    exit_impl_check_frame(ctx)
+    if result.is_none() { fail.raise(CompileError {}) }
+}
+
 fn prepare_impl_close_cache(
     mut ctx: InferCtx, decls: List<Decl>,
     mut cached_impls: List<CachedImplClose>
@@ -539,19 +666,20 @@ fn prepare_impl_close_cache(
     for decl_index in 0..decls.len() {
         match decls.get(decl_index).unwrap() {
             Decl::Impl { .. } => cache_checked_impl_decl(
-                ctx, decls.get(decl_index).unwrap(),
-                decl_index, cached_impls),
-            Decl::ModBlock { name, uses, decls: mod_decls,
-                             required_effects, .. } => {
-                let _ = walk_inline_check_in_mod(
-                    ctx, name, uses, mod_decls, required_effects,
-                    decl_index, none, false, [], cached_impls)
-            },
+                ctx, decls.get(decl_index).unwrap(), decl_index,
+                cached_impls, FnValidationContext {
+                    capability: none, capability_span: none
+                }),
+            Decl::ModBlock {
+                name, uses, decls: mod_decls,
+                required_effects, span, ..
+            } => cache_inline_impls_in_mod(
+                ctx, name, uses, mod_decls, required_effects,
+                span, decl_index, cached_impls),
             _ => {}
         }
     }
 }
-
 fn check_capability(mut ctx: InferCtx, decl: HDecl, cap: EffectRow, mod_span: Span) {
     match decl {
         HDecl::Fn { name, effects, span, .. } => {
@@ -858,10 +986,9 @@ fn check_effect_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
 }
 
 fn registered_impl_method_scheme(
-    ctx: InferCtx, target_type: Str, trait_name: Str?,
+    ctx: InferCtx, target_type: Str,
     owner_ref: ImplOwnerRef, method_name: Str
 ) -> TypeScheme? {
-    let _ = trait_name
     match find_impl_by_provider(
             ctx.env.trait_reg, target_type,
             impl_owner_ref_trait(owner_ref),
@@ -881,7 +1008,7 @@ fn registered_impl_method_scheme(
 }
 
 fn store_rebound_impl_method_scheme(
-    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
+    mut ctx: InferCtx, target_type: Str,
     owner_ref: ImplOwnerRef, method_name: Str, scheme: TypeScheme, span: Span
 ) {
     let owner = match find_impl_by_provider(
@@ -900,250 +1027,1160 @@ fn store_rebound_impl_method_scheme(
     let core = impl_method_core_from_scheme(scheme)
     replace_impl_method_core(
         ctx.env.trait_reg, target_type, owner_ref, method_name, core)
-    let _ = install_method_core(
+    let installed = install_method_core(
         ctx.env.trait_reg, ctx.sink,
         target_type, method_name, core,
         owner.method_refs.get(method_name).unwrap(), span)
+    if !installed {
+        panic("impl method commit: preflighted method index changed")
+    }
 }
 
-fn check_impl_method_body(
-    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
-    impl_owner: ImplEntry, impl_self_type: Type,
-    method: Decl, check_phase: FnCheckPhase
-) -> HDecl {
+fn infer_impl_method_draft(
+    mut ctx: InferCtx, target_type: Str,
+    impl_owner: ImplEntry, impl_self_type: Type, method: Decl,
+    validation: FnValidationContext
+) -> FnDraft {
     match method {
-        Decl::Fn { name, type_params: mtps, params, return_type,
-                   declared_effects, body, is_pub, span, .. } => {
+        Decl::Fn {
+            name, type_params, params, return_type,
+            declared_effects, body, is_pub, span, ..
+        } => {
             let registration_scheme = registered_impl_method_scheme(
-                ctx, target_type, trait_name,
-                impl_owner.owner_ref.unwrap(), name)
+                ctx, target_type,
+                impl_owner.owner_ref.unwrap(), name).unwrap_or_else(fn() {
+                panic("impl method draft: registration scheme is absent")
+            })
             let exact_method = impl_owner.method_refs.get(
                 name).unwrap_or_else(fn() {
-                panic("impl checking: method has no exact identity")
+                panic("impl method draft: exact identity is absent")
             })
-            let rebind_identity = symbol_ref_declaration_site_path(
-                impl_method_ref_member(exact_method))
-            let hdecl = check_fn_decl(
-                ctx, name, mtps, params, return_type, declared_effects,
-                body, is_pub, span, some(impl_self_type),
-                registration_scheme, some(rebind_identity),
+            infer_fn_draft(
+                ctx, name, type_params, params, return_type,
+                declared_effects, body, is_pub, span,
+                some(impl_self_type), some(registration_scheme),
+                some(symbol_ref_declaration_site_path(
+                    impl_method_ref_member(exact_method))),
                 some(exact_method), impl_owner.type_param_vars,
-                check_phase)
-            let qualified_key = "${target_type}_${name}"
-            match ctx.fn_mut_params.get(name) {
-                some(flags) => ctx.fn_mut_params.insert(
-                    qualified_key, flags),
-                none => {}
-            }
-            hdecl
+                validation)
         },
-        _ => panic("impl method group: member is not a function")
+        _ => panic("impl method draft: member is not a function")
+    }
+}
+fn draft_canonical_type_var_ids(
+    draft: FnDraft, frozen_subst: UnionFind
+) -> Map<Int, Int> {
+    let mut result: Map<Int, Int> = map_new()
+    let declared_count = draft.inherited_type_var_ids.len() +
+        draft.source_type_var_ids.len()
+    for index in 0..declared_count {
+        let source = draft.registration_scheme.type_vars.get(index).unwrap()
+        let canonical = if index < draft.inherited_type_var_ids.len() {
+            draft.inherited_type_var_ids.get(index).unwrap()
+        } else {
+            draft.source_type_var_ids.get(
+                index - draft.inherited_type_var_ids.len()).unwrap()
+        }
+        match apply_subst(
+                frozen_subst,
+                Type::TypeVar { id: source, name: none }) {
+            Type::TypeVar { id: representative, .. } =>
+                insert_canonical_type_var_id(
+                    result, representative, canonical),
+            _ => {}
+        }
+        match apply_subst(
+                frozen_subst,
+                Type::TypeVar { id: canonical, name: none }) {
+            Type::TypeVar { id: representative, .. } =>
+                insert_canonical_type_var_id(
+                    result, representative, canonical),
+            _ => {}
+        }
+    }
+    result
+}
+
+fn draft_type_var_names(
+    draft: FnDraft, frozen_subst: UnionFind
+) -> Map<Int, Str> {
+    let mut result: Map<Int, Str> = map_new()
+    for entry in draft.raw_type_var_names.entries() {
+        let (raw_id, name) = entry
+        match apply_subst(
+                frozen_subst,
+                Type::TypeVar { id: raw_id, name: none }) {
+            Type::TypeVar { id, .. } => result.insert(id, name),
+            _ => {}
+        }
+    }
+    result
+}
+
+fn canonical_draft_type_var_id(
+    source: Int, canonical_ids: Map<Int, Int>,
+    frozen_subst: UnionFind
+) -> Int {
+    match apply_subst(
+            frozen_subst,
+            Type::TypeVar { id: source, name: none }) {
+        Type::TypeVar { id, .. } => canonical_ids.get(id).unwrap_or(id),
+        _ => source
     }
 }
 
-fn stage_callable_close(
-    mut ctx: InferCtx, name: Str, provenance_key: Str,
-    executable: ExecutableRef, registration_scheme: TypeScheme,
-    source_params: List<HParam>, source_return: Type,
-    source_effects: EffectRow, span: Span,
-    group_subst: UnionFind?, external_free: Set<Int>?,
-    inherited_type_vars: List<Int>
+fn stage_fn_draft_scheme(
+    mut ctx: InferCtx, draft: FnDraft,
+    frozen_subst: UnionFind, external_free: Set<Int>
 ) -> StagedCallableClose {
-    let rebound = match group_subst {
-        some(subst) => finalize_recursive_callable_scheme(
-            ctx, provenance_key, registration_scheme, source_params,
-            span, subst, external_free.unwrap_or_else(fn() {
-                panic("recursive callable group: external environment is absent")
-            })),
-        none => rebind_checked_fn_scheme(
-            ctx, provenance_key, registration_scheme,
-            source_params, source_return, source_effects, span)
+    let canonical_ids = draft_canonical_type_var_ids(
+        draft, frozen_subst)
+    let zctx = ZonkCtx {
+        subst: frozen_subst,
+        names: draft_type_var_names(draft, frozen_subst),
+        canonical_type_var_ids: canonical_ids,
+        dict_resolver: none
+    }
+    let final_type = zonk_type(zctx, draft.registration_scheme.ty)
+    let mut type_vars: List<Int> = []
+    for source in draft.registration_scheme.type_vars {
+        match apply_subst(
+                frozen_subst,
+                Type::TypeVar { id: source, name: none }) {
+            Type::TypeVar { id, .. } => {
+                let canonical = canonical_ids.get(id).unwrap_or(id)
+                if !type_vars.contains(canonical) {
+                    type_vars.push(canonical)
+                }
+            },
+            _ => {}
+        }
+    }
+    let mut final_free = free_type_vars(
+        final_type, empty_subst()).to_list()
+    final_free.sort()
+    for id in final_free {
+        if !type_vars.contains(id) && !external_free.contains(id) {
+            type_vars.push(id)
+        }
+    }
+
+    let mut bounds: List<SchemeBound> = []
+    for bound in draft.registration_scheme.bounds {
+        let subject = canonical_draft_type_var_id(
+            bound.type_var, canonical_ids, frozen_subst)
+        let mut constraints: List<AssocConstraintEntry> = []
+        for constraint in bound.assoc_constraints {
+            constraints.push(AssocConstraintEntry {
+                name: constraint.name,
+                ty: zonk_type(zctx, constraint.ty)
+            })
+        }
+        bounds.push(SchemeBound {
+            type_var: subject,
+            trait_name: bound.trait_name,
+            assoc_constraints: constraints
+        })
+    }
+    for id in type_vars {
+        match ctx.env.scope.var_bounds.get(id) {
+            some(traits) => {
+                let mut ordered = traits.to_list()
+                ordered.sort()
+                for trait_name in ordered {
+                    if !bounds.any(fn(bound) {
+                            bound.type_var == id &&
+                            bound.trait_name == trait_name
+                        }) {
+                        bounds.push(SchemeBound {
+                            type_var: id,
+                            trait_name: trait_name,
+                            assoc_constraints: []
+                        })
+                    }
+                }
+            },
+            none => {}
+        }
+    }
+    let provisional = TypeScheme {
+        ty: final_type, type_vars: type_vars, bounds: bounds,
+        effect_schema: draft.registration_scheme.effect_schema,
+        def_id: draft.registration_scheme.def_id
     }
     let schema = build_final_callable_effect_schema(
-        rebound, executable, inherited_type_vars)
-    let final_scheme = TypeScheme { ..rebound, effect_schema: schema }
-    let quantified = final_scheme.type_vars.filter(fn(id) {
-        !inherited_type_vars.contains(id)
+        provisional, draft.executable,
+        draft.inherited_type_var_ids)
+    let scheme = TypeScheme { ..provisional, effect_schema: schema }
+    let quantified = scheme.type_vars.filter(fn(id) {
+        !draft.inherited_type_var_ids.contains(id)
     })
-    validate_effect_header_schema(
-        [final_scheme.ty], quantified, final_scheme.effect_schema)
+    validate_effect_header_schema([scheme.ty], quantified, schema)
     StagedCallableClose {
-        name: name, executable: executable,
-        scheme: final_scheme, span: span
+        name: draft.name,
+        executable: draft.executable,
+        scheme: scheme,
+        span: draft.span
     }
 }
 
-fn stage_impl_method_close(
-    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
-    impl_owner: ImplEntry, provisional_hir: HDecl,
-    group_subst: UnionFind?, external_free: Set<Int>?
-) -> StagedCallableClose {
-    let (name, source_params, source_return, source_effects,
-         source_span, method_ref, executable) = match provisional_hir {
-        HDecl::Fn { name, params, return_type, effects, span,
-                    impl_method_ref: some(method_ref), executable_ref, .. } =>
-            (name, params, return_type, effects, span,
-             method_ref, executable_ref),
-        _ => panic("impl method group: provisional HIR is not an exact method")
+fn final_handled_evidence_for_row(
+    mut ctx: InferCtx, row: EffectRow
+) -> List<HandledEvidenceRef> {
+    let mut result: List<HandledEvidenceRef> = []
+    for effect in row.effects {
+        match effect {
+            Effect::CustomEffect { reference, .. } => {
+                if !result.any(fn(existing) {
+                        handled_effect_ref_same(
+                            handled_evidence_requirement(existing),
+                            reference)
+                    }) {
+                    result.push(resolve_handled_evidence(ctx, reference))
+                }
+            },
+            _ => {}
+        }
     }
-    let registration_scheme = registered_impl_method_scheme(
-        ctx, target_type, trait_name,
-        impl_owner.owner_ref.unwrap(), name).unwrap_or_else(fn() {
-        panic("impl method group: provisional scheme is absent")
-    })
-    if !executable_ref_same(
-           executable,
-           make_named_executable_ref(impl_method_ref_member(method_ref))) {
-        panic("impl method group: exact member identity changed")
-    }
-    let provenance_key = symbol_ref_declaration_site_path(
-        impl_method_ref_member(method_ref))
-    stage_callable_close(
-        ctx, name, provenance_key, executable, registration_scheme,
-        source_params, source_return, source_effects, source_span,
-        group_subst, external_free, impl_owner.type_param_vars)
+    result
 }
 
-fn commit_impl_method_group(
-    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
-    owner_ref: ImplOwnerRef, staged: List<StagedCallableClose>
+fn final_handled_evidence_for_callable(
+    mut ctx: InferCtx, callable: Type
+) -> List<HandledEvidenceRef> {
+    match callable {
+        Type::FnType { effects, .. } =>
+            final_handled_evidence_for_row(ctx, effects),
+        _ => []
+    }
+}
+
+fn seed_final_handled_evidence(
+    mut ctx: InferCtx, raw_bindings: List<HandledEvidenceRef>,
+    final_effects: EffectRow, body: HExpr
+) -> HExpr {
+    for binding in raw_bindings {
+        let _ = resolve_handled_evidence(
+            ctx, handled_evidence_requirement(binding))
+    }
+    prepare_callable_handled_evidence(ctx, final_effects)
+    let bindings = current_handled_evidence_bindings(ctx)
+    let mut sources: List<HandledEvidenceRef> = []
+    let mut targets: List<HandledEvidenceRef> = []
+    for source in raw_bindings {
+        let requirement = handled_evidence_requirement(source)
+        let target = bindings.find(fn(candidate) {
+            handled_effect_ref_same(
+                handled_evidence_requirement(candidate), requirement)
+        }).unwrap_or_else(fn() {
+            panic("handled evidence finalization: raw binding disappeared")
+        })
+        sources.push(source)
+        targets.push(target)
+    }
+    remap_hir_handled_evidence(body, sources, targets)
+}
+
+fn finalize_evidence_match_arms(
+    mut ctx: InferCtx, values: List<HMatchArm>
+) -> List<HMatchArm> {
+    values.map(fn(value) { HMatchArm {
+        pattern: value.pattern, pattern_plan: value.pattern_plan,
+        bindings: value.bindings,
+        guard: value.guard.map(fn(expr) {
+            finalize_evidence_expr(ctx, expr)
+        }),
+        body: finalize_evidence_expr(ctx, value.body),
+        span: value.span
+    } })
+}
+
+fn finalize_evidence_captures(
+    mut ctx: InferCtx, values: List<HLambdaCapture>
+) -> List<HLambdaCapture> {
+    values.map(fn(value) { HLambdaCapture {
+        source: value.source, target: value.target,
+        value: value.value.map(fn(expr) {
+            finalize_evidence_expr(ctx, expr)
+        }),
+        resource_site: value.resource_site
+    } })
+}
+
+fn finalize_evidence_stmt(mut ctx: InferCtx, value: HStmt) -> HStmt {
+    match value {
+        HStmt::Let { name, name_span, def_id, ty, init, span } =>
+            HStmt::Let { name: name, name_span: name_span,
+                def_id: def_id, ty: ty,
+                init: finalize_evidence_expr(ctx, init), span: span },
+        HStmt::Var { name, name_span, def_id, ty, init, span } =>
+            HStmt::Var { name: name, name_span: name_span,
+                def_id: def_id, ty: ty,
+                init: finalize_evidence_expr(ctx, init), span: span },
+        HStmt::Assign { target, value, span } => HStmt::Assign {
+            target: finalize_evidence_expr(ctx, target),
+            value: finalize_evidence_expr(ctx, value), span: span },
+        HStmt::ExprStmt { expr, span } => HStmt::ExprStmt {
+            expr: finalize_evidence_expr(ctx, expr), span: span },
+        HStmt::Return { value, span } => HStmt::Return {
+            value: value.map(fn(expr) {
+                finalize_evidence_expr(ctx, expr)
+            }), span: span },
+        HStmt::While { condition, body, span } => HStmt::While {
+            condition: finalize_evidence_expr(ctx, condition),
+            body: finalize_evidence_expr(ctx, body), span: span },
+        HStmt::ForIn {
+            binding, binding_span, def_id, destructure, plan,
+            iterable, body, iterable_type_name, iter_type_name, span
+        } => HStmt::ForIn {
+            binding: binding, binding_span: binding_span,
+            def_id: def_id, destructure: destructure, plan: plan,
+            iterable: finalize_evidence_expr(ctx, iterable),
+            body: finalize_evidence_expr(ctx, body),
+            iterable_type_name: iterable_type_name,
+            iter_type_name: iter_type_name, span: span },
+        HStmt::Break { span } => HStmt::Break { span: span },
+        HStmt::Continue { span } => HStmt::Continue { span: span },
+        HStmt::LetDestructure {
+            pattern, pattern_plan, bindings, init, span
+        } => HStmt::LetDestructure {
+            pattern: pattern, pattern_plan: pattern_plan,
+            bindings: bindings,
+            init: finalize_evidence_expr(ctx, init), span: span },
+        HStmt::IfLet {
+            pattern, pattern_plan, bindings, expr,
+            then_block, else_block, span
+        } => HStmt::IfLet {
+            pattern: pattern, pattern_plan: pattern_plan,
+            bindings: bindings,
+            expr: finalize_evidence_expr(ctx, expr),
+            then_block: finalize_evidence_expr(ctx, then_block),
+            else_block: else_block.map(fn(branch) {
+                finalize_evidence_expr(ctx, branch)
+            }), span: span },
+        HStmt::Drop {
+            name, def_id, slot, place_target, site, reason, ty, span
+        } => HStmt::Drop { name: name, def_id: def_id, slot: slot,
+            place_target: place_target.map(fn(expr) {
+                finalize_evidence_expr(ctx, expr)
+            }), site: site, reason: reason, ty: ty, span: span }
+    }
+}
+
+struct NestedDraftEvidence {
+    body: HExpr,
+    bindings: List<HandledEvidenceRef>,
+    captures: List<HandledEvidenceCapture>
+}
+
+fn finalize_nested_evidence_owner(
+    mut ctx: InferCtx, executable: ExecutableRef,
+    raw_bindings: List<HandledEvidenceRef>,
+    final_effects: EffectRow, body: HExpr
+) -> NestedDraftEvidence {
+    enter_executable_owner(ctx, executable)
+    let seeded = seed_final_handled_evidence(
+        ctx, raw_bindings, final_effects, body)
+    let finalized = finalize_evidence_expr(ctx, seeded)
+    let remap = canonicalize_callable_handled_evidence(
+        ctx, final_effects)
+    let body = remap_hir_handled_evidence(
+        finalized, remap.0, remap.1)
+    let result = NestedDraftEvidence {
+        body: body,
+        bindings: current_handled_evidence_bindings(ctx),
+        captures: current_handled_evidence_captures(ctx)
+    }
+    exit_executable_owner(ctx)
+    result
+}
+
+fn finalize_evidence_handler(
+    mut ctx: InferCtx, handler: HEffectHandler
+) -> HEffectHandler {
+    let captures = finalize_evidence_captures(ctx, handler.captures)
+    let finalized = finalize_nested_evidence_owner(
+        ctx, handler.executable_ref,
+        handler.handled_evidence_bindings,
+        hexpr_effects(handler.body), handler.body)
+    HEffectHandler {
+        effect_name: handler.effect_name,
+        handled_ref: handler.handled_ref,
+        operation_ref: handler.operation_ref,
+        fail_ref: handler.fail_ref,
+        executable_ref: handler.executable_ref,
+        captures: captures,
+        handled_evidence_bindings: finalized.bindings,
+        evidence_captures: finalized.captures,
+        op_name: handler.op_name, params: handler.params,
+        resume_binding: handler.resume_binding,
+        body: finalized.body
+    }
+}
+
+fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
+    match value {
+        HExpr::Call {
+            callee, args, type_args, effect_instantiation,
+            resolved_dicts, handled_evidence: _, callee_ref,
+            method_ref, system_host, ty, effects, span
+        } => {
+            let callee = finalize_evidence_expr(ctx, callee)
+            HExpr::Call {
+                handled_evidence: final_handled_evidence_for_callable(
+                    ctx, hexpr_type(callee)),
+                callee: callee,
+                args: args.map(fn(arg) {
+                    finalize_evidence_expr(ctx, arg)
+                }),
+                type_args: type_args,
+                effect_instantiation: effect_instantiation,
+                resolved_dicts: resolved_dicts,
+                callee_ref: callee_ref, method_ref: method_ref,
+                system_host: system_host,
+                ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::EffectOp {
+            effect_name, op_name, operation_ref, fail_ref,
+            handled_evidence: _, args, ty, effects, span
+        } => HExpr::EffectOp {
+            effect_name: effect_name, op_name: op_name,
+            operation_ref: operation_ref, fail_ref: fail_ref,
+            handled_evidence: match operation_ref {
+                some(reference) => [resolve_handled_evidence(
+                    ctx, effect_operation_ref_effect(reference))],
+                none => []
+            },
+            args: args.map(fn(arg) {
+                finalize_evidence_expr(ctx, arg)
+            }), ty: ty, effects: effects, span: span },
+        HExpr::HandleExpr {
+            body, handlers, installed_evidence, ty, effects, span
+        } => {
+            let mut requirements: List<HandledEffectRef> = []
+            for evidence in installed_evidence {
+                let requirement = handled_evidence_requirement(evidence)
+                if !requirements.any(fn(existing) {
+                        handled_effect_ref_same(existing, requirement)
+                    }) {
+                    requirements.push(requirement)
+                }
+            }
+            for handler in handlers {
+                match handler.handled_ref {
+                    some(requirement) => if !requirements.any(fn(existing) {
+                            handled_effect_ref_same(existing, requirement)
+                        }) {
+                        panic("handled evidence finalization: handle lost lexical installation")
+                    },
+                    none => {}
+                }
+            }
+            let installed = install_handled_evidence(ctx, requirements)
+            let seeded_body = remap_hir_handled_evidence(
+                body, installed_evidence, installed)
+            let body = finalize_evidence_expr(ctx, seeded_body)
+            uninstall_handled_evidence(ctx)
+            HExpr::HandleExpr {
+                body: body,
+                handlers: handlers.map(fn(handler) {
+                    finalize_evidence_handler(ctx, handler)
+                }),
+                installed_evidence: installed,
+                ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::Lambda {
+            executable_ref, params, captures,
+            handled_evidence_bindings, evidence_captures: _,
+            return_type, body, ty, effects, span
+        } => {
+            let captures = finalize_evidence_captures(ctx, captures)
+            let callable_effects = match ty {
+                Type::FnType { effects, .. } => effects,
+                _ => panic("handled evidence finalization: lambda is not callable")
+            }
+            let finalized = finalize_nested_evidence_owner(
+                ctx, executable_ref, handled_evidence_bindings,
+                callable_effects, body)
+            HExpr::Lambda {
+                executable_ref: executable_ref, params: params,
+                captures: captures,
+                handled_evidence_bindings: finalized.bindings,
+                evidence_captures: finalized.captures,
+                return_type: return_type, body: finalized.body,
+                ty: ty, effects: effects, span: span
+            }
+        },
+        HExpr::BinOp {
+            op, left, right, eq_dispatch, ord_dispatch,
+            eq_plan, ord_plan, ty, effects, span
+        } => HExpr::BinOp { op: op,
+            left: finalize_evidence_expr(ctx, left),
+            right: finalize_evidence_expr(ctx, right),
+            eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
+            eq_plan: eq_plan, ord_plan: ord_plan,
+            ty: ty, effects: effects, span: span },
+        HExpr::UnaryOp { op, operand, ty, effects, span } =>
+            HExpr::UnaryOp { op: op,
+                operand: finalize_evidence_expr(ctx, operand),
+                ty: ty, effects: effects, span: span },
+        HExpr::FieldAccess {
+            receiver, field, access_kind, projection, ty, effects, span
+        } => HExpr::FieldAccess {
+            receiver: finalize_evidence_expr(ctx, receiver),
+            field: field, access_kind: access_kind,
+            projection: projection,
+            ty: ty, effects: effects, span: span },
+        HExpr::StructLit {
+            name, owner_ref, type_args, fields, spread, constructor,
+            ty, effects, span
+        } => HExpr::StructLit {
+            name: name, owner_ref: owner_ref, type_args: type_args,
+            fields: fields.map(fn(field) { HNominalStructFieldInit {
+                name: field.name, field_ref: field.field_ref,
+                field_index: field.field_index,
+                value: finalize_evidence_expr(ctx, field.value)
+            } }),
+            spread: spread.map(fn(expr) {
+                finalize_evidence_expr(ctx, expr)
+            }), constructor: constructor,
+            ty: ty, effects: effects, span: span },
+        HExpr::NamedVariantConstruct {
+            enum_name, variant_name, variant_ref, fields, spread,
+            constructor, ty, effects, span
+        } => HExpr::NamedVariantConstruct {
+            enum_name: enum_name, variant_name: variant_name,
+            variant_ref: variant_ref,
+            fields: fields.map(fn(field) { HStructFieldInit {
+                name: field.name, field_ref: field.field_ref,
+                value: finalize_evidence_expr(ctx, field.value)
+            } }),
+            spread: spread.map(fn(expr) {
+                finalize_evidence_expr(ctx, expr)
+            }), constructor: constructor,
+            ty: ty, effects: effects, span: span },
+        HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
+            HExpr::MatchExpr {
+                scrutinee: finalize_evidence_expr(ctx, scrutinee),
+                arms: finalize_evidence_match_arms(ctx, arms),
+                ty: ty, effects: effects, span: span },
+        HExpr::Block { stmts, tail, ty, effects, span } =>
+            HExpr::Block {
+                stmts: stmts.map(fn(stmt) {
+                    finalize_evidence_stmt(ctx, stmt)
+                }),
+                tail: tail.map(fn(expr) {
+                    finalize_evidence_expr(ctx, expr)
+                }), ty: ty, effects: effects, span: span },
+        HExpr::IfExpr {
+            condition, then_branch, else_branch, ty, effects, span
+        } => HExpr::IfExpr {
+            condition: finalize_evidence_expr(ctx, condition),
+            then_branch: finalize_evidence_expr(ctx, then_branch),
+            else_branch: else_branch.map(fn(expr) {
+                finalize_evidence_expr(ctx, expr)
+            }), ty: ty, effects: effects, span: span },
+        HExpr::StringInterp { parts, plan, ty, effects, span } =>
+            HExpr::StringInterp {
+                parts: parts.map(fn(part) { match part {
+                    HStringInterpPart::Literal(text) =>
+                        HStringInterpPart::Literal(text),
+                    HStringInterpPart::Expression(expr) =>
+                        HStringInterpPart::Expression(
+                            finalize_evidence_expr(ctx, expr))
+                } }), plan: plan,
+                ty: ty, effects: effects, span: span },
+        HExpr::TryCatch { body, arms, ty, effects, span } =>
+            HExpr::TryCatch {
+                body: finalize_evidence_expr(ctx, body),
+                arms: finalize_evidence_match_arms(ctx, arms),
+                ty: ty, effects: effects, span: span },
+        HExpr::ListLit { elements, plan, ty, effects, span } =>
+            HExpr::ListLit {
+                elements: elements.map(fn(expr) {
+                    finalize_evidence_expr(ctx, expr)
+                }), plan: plan,
+                ty: ty, effects: effects, span: span },
+        HExpr::TupleLit { elements, constructor, ty, effects, span } =>
+            HExpr::TupleLit {
+                elements: elements.map(fn(expr) {
+                    finalize_evidence_expr(ctx, expr)
+                }), constructor: constructor,
+                ty: ty, effects: effects, span: span },
+        HExpr::IndexExpr {
+            receiver, index, call_plan, projection, ty, effects, span
+        } => HExpr::IndexExpr {
+            receiver: finalize_evidence_expr(ctx, receiver),
+            index: finalize_evidence_expr(ctx, index),
+            call_plan: call_plan, projection: projection,
+            ty: ty, effects: effects, span: span },
+        HExpr::Clone { inner, ty, effects, span } => HExpr::Clone {
+            inner: finalize_evidence_expr(ctx, inner),
+            ty: ty, effects: effects, span: span },
+        HExpr::Take {
+            source, source_slot, saved_slot, site, ty, effects, span
+        } => HExpr::Take {
+            source: finalize_evidence_expr(ctx, source),
+            source_slot: source_slot, saved_slot: saved_slot,
+            site: site, ty: ty, effects: effects, span: span },
+        HExpr::ReturnExpr { value, ty, effects, span } =>
+            HExpr::ReturnExpr {
+                value: value.map(fn(expr) {
+                    finalize_evidence_expr(ctx, expr)
+                }), ty: ty, effects: effects, span: span },
+        HExpr::UnsafeBlock { body, ty, effects, span } =>
+            HExpr::UnsafeBlock {
+                body: finalize_evidence_expr(ctx, body),
+                ty: ty, effects: effects, span: span },
+        HExpr::IntLit { .. } |
+        HExpr::FloatLit { .. } |
+        HExpr::StrLit { .. } |
+        HExpr::BoolLit { .. } |
+        HExpr::Ident { .. } |
+        HExpr::DictConstruct { .. } => value
+    }
+}
+
+struct FinalDraftEvidence {
+    body: HExpr,
+    bindings: List<HandledEvidenceRef>,
+    captures: List<HandledEvidenceCapture>
+}
+
+fn finalize_draft_evidence(
+    mut ctx: InferCtx, draft: FnDraft,
+    body: HExpr, final_effects: EffectRow
+) -> FinalDraftEvidence {
+    enter_executable_owner(ctx, draft.executable)
+    let seeded = seed_final_handled_evidence(
+        ctx, draft.handled_bindings, final_effects, body)
+    let finalized = finalize_evidence_expr(ctx, seeded)
+    let remap = canonicalize_callable_handled_evidence(
+        ctx, final_effects)
+    let body = remap_hir_handled_evidence(
+        finalized, remap.0, remap.1)
+    let result = FinalDraftEvidence {
+        body: body,
+        bindings: current_handled_evidence_bindings(ctx),
+        captures: current_handled_evidence_captures(ctx)
+    }
+    for raw_capture in draft.handled_captures {
+        let requirement = handled_evidence_capture_requirement(raw_capture)
+        if !result.captures.any(fn(capture) {
+                handled_effect_ref_same(
+                    handled_evidence_capture_requirement(capture),
+                    requirement)
+            }) {
+            panic("handled evidence finalization: raw capture disappeared")
+        }
+    }
+    exit_executable_owner(ctx)
+    result
+}
+
+fn validate_draft_assoc_sources(
+    mut ctx: InferCtx, draft: FnDraft, zctx: ZonkCtx,
+    final_effects: EffectRow
 ) {
-    for value in staged {
+    for source in draft.assoc_rebind_sources {
+        let checked = zonk_type(zctx, source.check_type)
+        let represented = match source.registration_type {
+            some(value) => types_equal(
+                checked, zonk_type(zctx, value)),
+            none => false
+        }
+        if !represented {
+            let mut escapes = false
+            for effect in final_effects.effects {
+                match effect {
+                    Effect::FailEffect { error_type } => {
+                        if type_contains_exact(error_type, checked) {
+                            escapes = true
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            if escapes {
+                let trait_display = nominal_display_name(source.trait_name)
+                let detail = "associated type '${source.owner_name}::${source.assoc_name} (${trait_display})' has no exact registration representation"
+                let _ = type_error(ctx.sink, E0503,
+                    "Cannot finalize fail payload in '${nominal_display_name(draft.name)}': ${detail}",
+                    draft.span,
+                    DiagnosticContext::TraitError { detail: detail })
+            }
+        }
+    }
+}
+
+fn finalize_fn_draft(
+    mut ctx: InferCtx, draft: FnDraft,
+    frozen_subst: UnionFind, final_scheme: TypeScheme
+) -> HDecl {
+    let canonical_ids = draft_canonical_type_var_ids(
+        draft, frozen_subst)
+    let zctx = ZonkCtx {
+        subst: frozen_subst,
+        names: draft_type_var_names(draft, frozen_subst),
+        canonical_type_var_ids: canonical_ids,
+        dict_resolver: none
+    }
+    let final_params = draft.params.map(fn(param) {
+        zonk_param(zctx, param)
+    })
+    let final_return = zonk_type(zctx, draft.expected_return)
+    let final_effects = zonk_row(zctx, draft.owner_effects)
+    let zonked_body = zonk_block(zctx, draft.body)
+    validate_draft_assoc_sources(
+        ctx, draft, zctx, final_effects)
+    journal_rebind_assoc_provenance_set(
+        ctx, draft.provenance_key, draft.assoc_rebind_sources)
+    let evidence = finalize_draft_evidence(
+        ctx, draft, zonked_body, final_effects)
+
+    if draft.name == "main" || draft.name.ends_with("$$_main") {
+        for effect in final_effects.effects {
+            match effect {
+                Effect::CustomEffect { name, .. } => {
+                    let display = nominal_display_name(name)
+                    let notes: List<DiagnosticNote> = [
+                        DiagnosticNote {
+                            message: "effect '${display}' is used but not handled in main",
+                            span: some(draft.span)
+                        },
+                        DiagnosticNote {
+                            message: "handle the effect before returning from main",
+                            span: none
+                        }
+                    ]
+                    let _ = type_error_with_notes(
+                        ctx.sink, E0403,
+                        "Unhandled effect '${display}' in main function; custom effects must be handled before reaching main",
+                        draft.span,
+                        DiagnosticContext::EffectUnhandled {
+                            eff: display, in_function: some("main")
+                        }, notes)
+                },
+                _ => {}
+            }
+        }
+    }
+    match (draft.validation.capability,
+           draft.validation.capability_span) {
+        (some(capability), some(capability_span)) =>
+            check_effects_capability(
+                ctx, draft.name, final_effects,
+                capability, capability_span),
+        (none, none) => {},
+        _ => panic("function validation: capability context is incomplete")
+    }
+
+    let mut mut_flags: List<Bool> = []
+    for parameter in final_params {
+        mut_flags.push(
+            parameter.name != "self" && parameter.is_mutable &&
+            is_value_type(parameter.ty))
+    }
+    journal_fn_mut_params_set(ctx, draft.name, mut_flags)
+    match final_scheme.def_id {
+        some(def_id) => journal_record_def_span(
+            ctx, def_id, draft.span),
+        none => {}
+    }
+    let assembled_signature = Type::FnType {
+        params: final_params.map(fn(parameter) { parameter.ty }),
+        return_type: final_return, effects: final_effects
+    }
+    if !types_equal(assembled_signature, final_scheme.ty) {
+        panic("function finalization: HIR signature differs from scheme")
+    }
+    HDecl::Fn {
+        name: draft.name,
+        def_id: final_scheme.def_id,
+        executable_ref: draft.executable,
+        impl_method_ref: draft.impl_method_ref,
+        type_params: draft.type_params,
+        params: final_params,
+        return_type: final_return,
+        effects: final_effects,
+        handled_evidence_bindings: evidence.bindings,
+        body: evidence.body,
+        is_pub: draft.is_pub,
+        trait_bounds: draft.trait_bounds,
+        span: draft.span
+    }
+}
+
+struct PreparedFnDraftGroup {
+    declarations: List<HDecl>,
+    staged: List<StagedCallableClose>,
+    batches: List<OwnerInferenceBatch>
+}
+
+fn prepare_fn_draft_group(
+    mut ctx: InferCtx, mut drafts: List<FnDraft>,
+    executables: List<ExecutableRef>, diagnostic_checkpoint: Int
+) -> PreparedFnDraftGroup {
+    if diagnostics_since_has_errors(ctx, diagnostic_checkpoint) {
+        fail.raise(CompileError {})
+    }
+
+    let mut batch_inputs: List<OwnerInferenceBatch> = []
+    for draft in drafts { batch_inputs.push(draft.batch) }
+    let drained = some(drain_owner_batch_dictionary_group(
+        ctx, batch_inputs, ctx.subst)) catch { _ => none }
+    let drained_batches = match drained {
+        some(values) => values,
+        none => fail.raise(CompileError {})
+    }
+    if drained_batches.len() != drafts.len() {
+        panic("function draft group: dictionary batch census differs")
+    }
+    for index in 0..drafts.len() {
+        let mut draft = drafts.get(index).unwrap()
+        draft.batch = drained_batches.get(index).unwrap()
+        drafts.set(index, draft)
+    }
+    if diagnostics_since_has_errors(ctx, diagnostic_checkpoint) {
+        fail.raise(CompileError {})
+    }
+
+    let resolved_subst = ctx.subst
+    let external_free = free_type_vars_outside_recursive_group(
+        ctx, executables, resolved_subst)
+    let mut staged: List<StagedCallableClose> = []
+    for draft in drafts {
+        staged.push(stage_fn_draft_scheme(
+            ctx, draft, resolved_subst, external_free))
+    }
+    let mut headers: List<CallableFinalizationHeader> = []
+    for index in 0..staged.len() {
+        headers.push(make_callable_finalization_header(
+            drafts.get(index).unwrap().executable,
+            staged.get(index).unwrap().scheme))
+    }
+    for index in 0..drafts.len() {
+        let mut draft = drafts.get(index).unwrap()
+        draft.batch = project_owner_batch_receipts(
+            draft.batch, headers)
+        drafts.set(index, draft)
+    }
+
+    // Receipt projection is the final non-zonk operation. No inference or UF
+    // mutation is permitted after this alias is taken.
+    let frozen_subst = ctx.subst
+    let mut declarations: List<HDecl> = []
+    let mut batches: List<OwnerInferenceBatch> = []
+    for index in 0..drafts.len() {
+        let draft = drafts.get(index).unwrap()
+        let final_scheme = staged.get(index).unwrap().scheme
+        declarations.push(finalize_fn_draft(
+            ctx, draft, frozen_subst, final_scheme))
+        batches.push(stage_owner_batch_facts(
+            ctx, draft.batch, draft.executable,
+            draft.registration_scheme.ty,
+            final_scheme.effect_schema, frozen_subst))
+    }
+    if diagnostics_since_has_errors(ctx, diagnostic_checkpoint) {
+        fail.raise(CompileError {})
+    }
+    if declarations.len() != executables.len() ||
+       staged.len() != executables.len() ||
+       batches.len() != executables.len() {
+        panic("function draft group: final artifact census differs")
+    }
+    for index in 0..executables.len() {
+        if !executable_ref_same(
+                staged.get(index).unwrap().executable,
+                executables.get(index).unwrap()) {
+            panic("function draft group: final executable order changed")
+        }
+    }
+    preflight_owner_batches(ctx, batches)
+    PreparedFnDraftGroup {
+        declarations: declarations,
+        staged: staged,
+        batches: batches
+    }
+}
+
+fn commit_value_draft_group(
+    mut ctx: InferCtx, prepared: PreparedFnDraftGroup
+) -> List<HDecl> {
+    for value in prepared.staged {
+        rebind_fn_scheme_with_alias(ctx, value.name, value.scheme)
+    }
+    publish_owner_batches(ctx, prepared.batches)
+    prepared.declarations
+}
+
+fn preflight_value_draft_group(
+    ctx: InferCtx, prepared: PreparedFnDraftGroup
+) {
+    for value in prepared.staged {
+        let current = ctx.env.lookup(value.name).unwrap_or_else(fn() {
+            panic("function group preflight: canonical binding is absent")
+        })
+        if current.def_id != value.scheme.def_id {
+            panic("function group preflight: canonical DefId changed")
+        }
+        let current_executable = named_executable_for_def_id(
+            ctx, current.def_id, "function group preflight")
+        if !executable_ref_same(
+                current_executable, value.executable) {
+            panic("function group preflight: canonical executable changed")
+        }
+
+        // Commit updates every lexical alias whose exact DefId maps to this
+        // canonical binding. Verify those same entries before any rebind.
+        for scope in ctx.env.scope.scopes {
+            let mut aliases = scope.variables.entries()
+            aliases.sort_by(compare_by_first)
+            for entry in aliases {
+                let (alias_name, alias_scheme) = entry
+                match alias_scheme.def_id {
+                    some(alias_id) => match ctx.use_aliases.get(alias_id) {
+                        some(origin) => if origin == value.name {
+                            match scope.variables.get(alias_name) {
+                                some(current_alias) => if
+                                        current_alias.def_id != some(alias_id) {
+                                    panic(
+                                        "function group preflight: alias DefId changed")
+                                },
+                                none => panic(
+                                    "function group preflight: alias target is absent")
+                            }
+                        },
+                        none => {}
+                    },
+                    none => {}
+                }
+            }
+        }
+    }
+}
+
+fn preflight_impl_draft_group(
+    mut ctx: InferCtx, target_type: Str,
+    owner_ref: ImplOwnerRef, prepared: PreparedFnDraftGroup
+) {
+    let owner = find_impl_by_provider(
+        ctx.env.trait_reg, target_type,
+        impl_owner_ref_trait(owner_ref),
+        impl_owner_ref_provider(owner_ref)).unwrap_or_else(fn() {
+        panic("impl group preflight: exact owner is absent")
+    })
+    match owner.owner_ref {
+        some(current_owner) => if !impl_owner_ref_same(
+                current_owner, owner_ref) {
+            panic("impl group preflight: exact owner changed")
+        },
+        none => panic("impl group preflight: owner identity is absent")
+    }
+
+    let mut seen_names: Set<Str> = set_new()
+    let mut invalid = false
+    for value in prepared.staged {
+        if seen_names.contains(value.name) {
+            panic("impl group preflight: method repeats")
+        }
+        seen_names.insert(value.name)
+        if !owner.method_schemes.contains_key(value.name) {
+            panic("impl group preflight: method core is absent")
+        }
+        let incoming = owner.method_refs.get(
+            value.name).unwrap_or_else(fn() {
+            panic("impl group preflight: method identity is absent")
+        })
+        if !impl_owner_ref_same(
+                impl_method_ref_owner(incoming), owner_ref) {
+            panic("impl group preflight: method owner changed")
+        }
+        if !executable_ref_same(
+                make_named_executable_ref(
+                    impl_method_ref_member(incoming)),
+                value.executable) {
+            panic("impl group preflight: method executable changed")
+        }
+        match ctx.env.trait_reg.method_index.get(target_type) {
+            some(methods) => match methods.get(value.name) {
+                some(existing) => if !impl_method_ref_same(
+                        existing, incoming) {
+                    let old_owner = match impl_owner_ref_trait(
+                            impl_method_ref_owner(existing)) {
+                        some(trait_ref) => "trait '${nominal_display_name(
+                            symbol_ref_canonical_payload(trait_ref))}'",
+                        none => "an inherent impl"
+                    }
+                    let new_owner = match owner.trait_name {
+                        some(name) => "trait '${nominal_display_name(name)}'",
+                        none => "an inherent impl"
+                    }
+                    let _ = type_error(
+                        ctx.sink, E0504,
+                        "Ambiguous method '${value.name}' on '${nominal_display_name(target_type)}': provided by ${old_owner} and ${new_owner}",
+                        value.span,
+                        DiagnosticContext::TraitError {
+                            detail: "same-target method origins must be unique"
+                        })
+                    invalid = true
+                },
+                none => {}
+            },
+            none => {}
+        }
+    }
+    if invalid { fail.raise(CompileError {}) }
+}
+
+fn validate_impl_draft_group(
+    mut ctx: InferCtx, trait_name: Str?, declarations: List<HDecl>
+) {
+    match trait_name {
+        some(name) => if name == "Drop" {
+            for declaration in declarations {
+                match declaration {
+                    HDecl::Fn { name: method_name, effects, span, .. } => {
+                        if method_name == "drop" {
+                            for effect in effects.effects {
+                                match effect {
+                                    Effect::FailEffect { .. } => {
+                                        let _ = type_error(
+                                            ctx.sink, E0803,
+                                            "Drop::drop must not have fail effect",
+                                            span,
+                                            DiagnosticContext::TraitError {
+                                                detail: "drop must not fail"
+                                            })
+                                    },
+                                    _ => {}
+                                }
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        },
+        none => {}
+    }
+}
+
+fn commit_impl_draft_group(
+    mut ctx: InferCtx, target_type: Str,
+    owner_ref: ImplOwnerRef, prepared: PreparedFnDraftGroup
+) -> List<HDecl> {
+    for value in prepared.staged {
         store_rebound_impl_method_scheme(
-            ctx, target_type, trait_name, owner_ref,
+            ctx, target_type, owner_ref,
             value.name, value.scheme, value.span)
     }
-    for value in staged {
-        publish_exact_callable_effect_header(
-            ctx, value.executable, value.scheme.ty,
-            value.scheme.effect_schema)
+    publish_owner_batches(ctx, prepared.batches)
+    for declaration in prepared.declarations {
+        match declaration {
+            HDecl::Fn { name, .. } => {
+                match ctx.fn_mut_params.get(name) {
+                    some(flags) => journal_fn_mut_params_set(
+                        ctx, "${target_type}_${name}", flags),
+                    none => {}
+                }
+            },
+            _ => {}
+        }
     }
+    prepared.declarations
 }
 
-fn validate_closed_callable_scheme(
-    mut ctx: InferCtx, provenance_key: Str,
-    scheme: TypeScheme, executable: ExecutableRef,
-    params: List<HParam>, return_type: Type, effects: EffectRow,
-    span: Span, inherited_type_vars: List<Int>
-) {
-    if !recursive_callable_is_closed(ctx, executable) {
-        panic("recursive callable validation: executable is not closed")
+fn finalize_singleton_fn_draft(
+    mut ctx: InferCtx, draft: FnDraft,
+    diagnostic_checkpoint: Int
+) -> HDecl {
+    if draft.impl_method_ref.is_some() {
+        panic("function singleton: impl method requires exact owner commit")
     }
-    let checked = rebind_checked_fn_scheme(
-        ctx, provenance_key, scheme,
-        params, return_type, effects, span)
-    if !types_equal(checked.ty, scheme.ty) {
-        panic("recursive callable validation: final HIR signature changed")
-    }
-    let quantified = scheme.type_vars.filter(fn(id) {
-        !inherited_type_vars.contains(id)
-    })
-    validate_effect_header_schema(
-        [scheme.ty], quantified, scheme.effect_schema)
+    let prepared = prepare_fn_draft_group(
+        ctx, [draft], [draft.executable], diagnostic_checkpoint)
+    preflight_value_draft_group(ctx, prepared)
+    commit_value_draft_group(ctx, prepared).get(0).unwrap()
 }
 
-fn validate_closed_impl_method(
-    mut ctx: InferCtx, target_type: Str, trait_name: Str?,
-    impl_owner: ImplEntry, hdecl: HDecl
-) {
-    match hdecl {
-        HDecl::Fn { name, params, return_type, effects, span,
-                    impl_method_ref: some(method_ref), executable_ref, .. } => {
-            let scheme = registered_impl_method_scheme(
-                ctx, target_type, trait_name,
-                impl_owner.owner_ref.unwrap(), name).unwrap_or_else(fn() {
-                panic("recursive impl method validation: scheme is absent")
-            })
-            let provenance_key = symbol_ref_declaration_site_path(
-                impl_method_ref_member(method_ref))
-            validate_closed_callable_scheme(
-                ctx, provenance_key, scheme, executable_ref,
-                params, return_type, effects, span,
-                impl_owner.type_param_vars)
-        },
-        _ => panic("recursive impl method validation: HIR member is invalid")
-    }
-}
-
-fn check_recursive_impl_method_group(
+fn infer_and_commit_impl_draft_group(
     mut ctx: InferCtx, target_type: Str, trait_name: Str?,
     impl_owner: ImplEntry, impl_self_type: Type,
-    group: List<Str>, impl_fn_map: Map<Str, Decl>
+    group: List<Str>, impl_fn_map: Map<Str, Decl>, recursive: Bool,
+    validation: FnValidationContext
 ) -> List<HDecl> {
     let mut names = group.map(fn(name) { name })
     names.sort()
     let mut executables: List<ExecutableRef> = []
     for name in names {
         let method_ref = impl_owner.method_refs.get(name).unwrap_or_else(fn() {
-            panic("recursive impl method group: exact member is absent")
+            panic("impl method group: exact member is absent")
         })
         executables.push(make_named_executable_ref(
             impl_method_ref_member(method_ref)))
     }
 
     let saved_subst = ctx.subst
-    let saved_fn_mut_params = map_clone(ctx.fn_mut_params)
-    let saved_rebind_provenance = map_clone(
-        ctx.rebind_assoc_provenance)
-    let effect_fact_checkpoint = recursive_effect_fact_checkpoint(ctx)
+    let diagnostic_checkpoint = ctx.sink.save()
+    let mutation_checkpoint = begin_infer_mutation_journal(ctx)
     ctx.subst = empty_subst()
-    begin_recursive_callable_group(ctx, executables)
-    let prepared = some({
-        let mut provisional: List<HDecl> = []
+    if recursive {
+        begin_recursive_callable_group(ctx, executables)
+    }
+    let result = some({
+        let mut drafts: List<FnDraft> = []
         for name in names {
-            provisional.push(check_impl_method_body(
-                ctx, target_type, trait_name, impl_owner, impl_self_type,
-                impl_fn_map.get(name).unwrap(),
-                FnCheckPhase::RecursiveConstraintCheck))
+            drafts.push(infer_impl_method_draft(
+                ctx, target_type, impl_owner, impl_self_type,
+                impl_fn_map.get(name).unwrap(), validation))
         }
-        let group_subst = ctx.subst
-        let external_free = free_type_vars_outside_recursive_group(
-            ctx, executables, group_subst)
-        let mut staged: List<StagedCallableClose> = []
-        for hdecl in provisional {
-            staged.push(stage_impl_method_close(
-                ctx, target_type, trait_name, impl_owner,
-                hdecl, some(group_subst), some(external_free)))
+        if diagnostics_since_has_errors(ctx, diagnostic_checkpoint) {
+            fail.raise(CompileError {})
         }
-        staged
+        let prepared = prepare_fn_draft_group(
+            ctx, drafts, executables, diagnostic_checkpoint)
+        validate_impl_draft_group(
+            ctx, trait_name, prepared.declarations)
+        if diagnostics_since_has_errors(ctx, diagnostic_checkpoint) {
+            fail.raise(CompileError {})
+        }
+        preflight_impl_draft_group(
+            ctx, target_type, impl_owner.owner_ref.unwrap(), prepared)
+        prepared
     }) catch { _ => none }
-    let staged = match prepared {
-        some(value) => value,
-        none => {
-            rollback_recursive_effect_facts(ctx, effect_fact_checkpoint)
-            end_recursive_callable_group(ctx, executables)
+
+    match result {
+        some(prepared) => {
+            if recursive {
+                end_recursive_callable_group(ctx, executables)
+            }
+            let declarations = commit_impl_draft_group(
+                ctx, target_type,
+                impl_owner.owner_ref.unwrap(), prepared)
+            commit_infer_mutation_journal(ctx, mutation_checkpoint)
+            if recursive {
+                mark_recursive_callable_group_closed(ctx, executables)
+            }
             ctx.subst = saved_subst
-            ctx.fn_mut_params = saved_fn_mut_params
-            ctx.rebind_assoc_provenance = saved_rebind_provenance
+            declarations
+        },
+        none => {
+            if recursive {
+                end_recursive_callable_group(ctx, executables)
+            }
+            rollback_infer_mutation_journal(ctx, mutation_checkpoint)
+            ctx.subst = saved_subst
             fail.raise(CompileError {})
         }
     }
-    ctx.fn_mut_params = saved_fn_mut_params
-    ctx.rebind_assoc_provenance = saved_rebind_provenance
-    rollback_recursive_effect_facts(ctx, effect_fact_checkpoint)
-    commit_impl_method_group(
-        ctx, target_type, trait_name,
-        impl_owner.owner_ref.unwrap(), staged)
-    mark_recursive_callable_group_closed(ctx, executables)
-    end_recursive_callable_group(ctx, executables)
-    ctx.subst = saved_subst
-
-    let mut retained: List<HDecl> = []
-    for name in names {
-        let final_hir = check_impl_method_body(
-            ctx, target_type, trait_name, impl_owner, impl_self_type,
-            impl_fn_map.get(name).unwrap(),
-            FnCheckPhase::OrdinaryFnCheck)
-        validate_closed_impl_method(
-            ctx, target_type, trait_name, impl_owner, final_hir)
-        retained.push(final_hir)
-    }
-    retained
 }
-
 fn check_impl_decl(
     mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
-    trait_name: Str?, methods: List<Decl>, span: Span, decl_index: Int
+    trait_name: Str?, methods: List<Decl>, span: Span, decl_index: Int,
+    validation: FnValidationContext
 ) -> HDecl {
     if decl_index < 0 {
         panic("impl checking: source declaration index is missing")
@@ -1155,13 +2192,13 @@ fn check_impl_decl(
     }
     check_impl_decl_canonical(
         ctx, canonical_target, type_params, canonical_trait, methods, span,
-        selected_owner)
+        selected_owner, validation)
 }
 
 fn check_impl_decl_canonical(
     mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
     trait_name: Str?, methods: List<Decl>, span: Span,
-    selected_owner: ImplOwnerRef
+    selected_owner: ImplOwnerRef, validation: FnValidationContext
 ) -> HDecl {
     for source_member in methods {
         match source_member {
@@ -1303,6 +2340,29 @@ fn check_impl_decl_canonical(
         }
     }
 
+    let mut impl_owner_invalid = false
+    match trait_name {
+        some(name) => {
+            let conflicts = if name == "Drop" {
+                has_impl(ctx.env.trait_reg, target_type, "Clone")
+            } else if name == "Clone" {
+                has_impl(ctx.env.trait_reg, target_type, "Drop") ||
+                    ctx.drop_types.contains(target_type)
+            } else { false }
+            if conflicts {
+                impl_owner_invalid = true
+                let target_display = nominal_display_name(target_type)
+                let _ = type_error(ctx.sink, E0802,
+                    "type '${target_display}' cannot implement both Drop and Clone",
+                    span, DiagnosticContext::TraitError {
+                        detail: "Drop and Clone are mutually exclusive"
+                    })
+            }
+        },
+        none => {}
+    }
+    if impl_owner_invalid { fail.raise(CompileError {}) }
+
     // B-138: Reorder impl methods by SCC topological order so that callees
     // are checked before callers, enabling correct effect propagation.
     // Step 1: Collect Decl::Fn method names
@@ -1343,25 +2403,11 @@ fn check_impl_decl_canonical(
 
     let mut hmethods: List<HDecl> = []
     for scc in sccs {
-        if scc_group_is_recursive(scc, impl_call_graph) {
-            let retained = check_recursive_impl_method_group(
-                ctx, target_type, trait_name, impl_owner,
-                impl_self_type, scc, impl_fn_map)
-            for hdecl in retained { hmethods.push(hdecl) }
-        } else {
-            for name in scc {
-                let hdecl = check_impl_method_body(
-                    ctx, target_type, trait_name, impl_owner,
-                    impl_self_type, impl_fn_map.get(name).unwrap(),
-                    FnCheckPhase::OrdinaryFnCheck)
-                let staged = stage_impl_method_close(
-                    ctx, target_type, trait_name, impl_owner,
-                    hdecl, none, none)
-                commit_impl_method_group(
-                    ctx, target_type, trait_name, selected_owner, [staged])
-                hmethods.push(hdecl)
-            }
-        }
+        let declarations = infer_and_commit_impl_draft_group(
+            ctx, target_type, trait_name, impl_owner, impl_self_type,
+            scc, impl_fn_map,
+            scc_group_is_recursive(scc, impl_call_graph), validation)
+        for declaration in declarations { hmethods.push(declaration) }
     }
 
     let mut default_specializations: List<HDefaultSpecializationPlan> = []
@@ -1430,53 +2476,12 @@ fn check_impl_decl_canonical(
         none => {}
     }
 
-    // B-002p1: impl Drop validation
     match trait_name {
-        some(tn) => {
-            if tn == "Drop" {
-                // Drop + Clone conflict: a Drop type cannot also impl Clone
-                if has_impl(ctx.env.trait_reg, target_type, "Clone") {
-                    let target_display = nominal_display_name(target_type)
-                    let _ = type_error(ctx.sink, E0802,
-                        "type '${target_display}' cannot implement both Drop and Clone",
-                        span, DiagnosticContext::TraitError { detail: "Drop and Clone are mutually exclusive" })
-                }
-                // Drop method must not have fail effect
-                for hm in hmethods {
-                    match hm {
-                        HDecl::Fn { name: mname, effects: meff, span: mspan, .. } => {
-                            if mname == "drop" {
-                                for eff in meff.effects {
-                                    match eff {
-                                        Effect::FailEffect { .. } => {
-                                            let _ = type_error(ctx.sink, E0803,
-                                                "Drop::drop must not have fail effect",
-                                                mspan, DiagnosticContext::TraitError { detail: "drop must not fail" })
-                                        },
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        },
-                        _ => {}
-                    }
-                }
-                // Register this type as a Drop type
-                ctx.drop_types.insert(target_type)
-            }
-            // Reverse check: Clone impl on a Drop type
-            if tn == "Clone" {
-                if has_impl(ctx.env.trait_reg, target_type, "Drop") || ctx.drop_types.contains(target_type) {
-                    let target_display = nominal_display_name(target_type)
-                    let _ = type_error(ctx.sink, E0802,
-                        "type '${target_display}' cannot implement both Drop and Clone",
-                        span, DiagnosticContext::TraitError { detail: "Drop and Clone are mutually exclusive" })
-                }
-            }
+        some(name) => if name == "Drop" {
+            ctx.drop_types.insert(target_type)
         },
         none => {}
     }
-
     ctx.current_fn_bounds = saved_impl_bounds
     ctx.type_param_scope = saved_tp_scope
     ctx.qualified_assoc_scope = saved_qualified_assoc
@@ -1504,7 +2509,7 @@ fn check_impl_decl_canonical(
 
 fn expand_delegate_impls(
     mut ctx: InferCtx, outer_impl: HDecl, source_member_index: Int,
-    field: Str, span: Span
+    field: Str, span: Span, validation: FnValidationContext
 ) -> List<HDecl> {
     let mut result: List<HDecl> = []
     let (target_type, target_ty, type_params,
@@ -2201,6 +3206,22 @@ fn expand_delegate_impls(
                                                 none => panic(
                                                     "delegate HIR: generated effect schema is absent")
                                             }
+                                            let validation_checkpoint =
+                                                ctx.sink.save()
+                                            match (validation.capability,
+                                                   validation.capability_span) {
+                                                (some(capability), some(cap_span)) =>
+                                                    check_effects_capability(
+                                                        ctx, tm.name, eff,
+                                                        capability, cap_span),
+                                                (none, none) => {},
+                                                _ => panic(
+                                                    "delegate validation: capability context is incomplete")
+                                            }
+                                            if diagnostics_since_has_errors(
+                                                    ctx, validation_checkpoint) {
+                                                fail.raise(CompileError {})
+                                            }
                                             publish_exact_callable_effect_header(
                                                 ctx, generated_executable,
                                                 Type::FnType {
@@ -2587,7 +3608,7 @@ fn check_trait_default_body(
         if p.is_mutable {
             match ctx.env.lookup(p.name) {
                 some(ps) => match ps.def_id {
-                    some(did) => { ctx.env.scope.mutable_vars.insert(did) },
+                    some(did) => journal_mutable_var_insert(ctx, did),
                     none => {}
                 },
                 none => {}
@@ -2822,13 +3843,6 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
     }
 }
 
-struct FnBodyResult {
-    params: List<HParam>,
-    ret: Type,
-    eff: EffectRow,
-    body: HExpr
-}
-
 // Statement-form `return value` constrains current_fn_return_type directly,
 // while a no-tail block is still represented as Unit.  Distinguish that
 // terminal control transfer from a genuinely Unit-valued function body.
@@ -2915,29 +3929,21 @@ fn insert_canonical_type_var_id(
     }
 }
 
-fn check_fn_body(
-    mut ctx: InferCtx,
-    fn_name: Str,
-    registration_scheme: TypeScheme?,
-    type_params: List<TypeParam>,
-    inherited_type_var_ids: List<Int>,
-    source_type_var_ids: List<Int>,
-    hparams: List<HParam>,
-    expected_ret: Type,
-    declared_effects: EffectRow?,
-    registered_effects: EffectRow?,
-    canonical_registration_vars: List<Int>,
-    body: Expr,
-    saved_tp_scope: Map<Str, Type>,
-    span: Span,
-    obligation_checkpoint: Int
-) -> FnBodyResult {
+struct FnConstraintResult {
+    body: HExpr,
+    owner_effects: EffectRow
+}
+
+fn infer_fn_body_constraints(
+    mut ctx: InferCtx, fn_name: Str, expected_ret: Type,
+    declared_effects: EffectRow?, registered_effects: EffectRow?,
+    body: Expr, span: Span
+) -> FnConstraintResult {
     let body_result = infer_block(ctx, body, some(ctx.subst))
     ctx.subst = body_result.subst
     // Skip body-vs-return unification when the body type is Never (bottom).
     // Never is compatible with any type, but unify(Never, ?T) would bind ?T = Never,
-    // contaminating the return type.  With B-122 rebind_fn_type this turns the
-    // scheme's return type into Never, so all callers see the function as diverging.
+    // contaminating the return type and the final callable scheme.
     // Functions whose body ends with fail.raise / panic still have correct return
     // types from their `return` statements (which unify with expected_ret directly).
     let body_type_resolved = apply_subst(ctx.subst, hexpr_type(body_result.hexpr))
@@ -2983,304 +3989,367 @@ fn check_fn_body(
 
     register_bounded_callable_value_shadows(
         ctx, body_result.hexpr, ctx.subst)
-
-    // Defaults and the body share this function owner's inference variables.
-    // Return/annotation/arm/effect constraints are now complete; settle every
-    // call slot before zonk or restoration can detach those variables.
-    drain_pending_dicts(ctx, obligation_checkpoint, ctx.subst)
-
-    let mut local_names: Map<Int, Str> = map_new()
-    for tp in type_params {
-        match ctx.type_param_scope.get(tp.name) {
-            some(tv) => match tv {
-                Type::TypeVar { .. } => {
-                    let resolved = apply_subst(ctx.subst, tv)
-                    match resolved { Type::TypeVar { id: rid, .. } => { local_names.insert(rid, tp.name) }, _ => {} }
-                },
-                _ => {}
-            },
-            none => {}
-        }
+    FnConstraintResult {
+        body: body_result.hexpr,
+        owner_effects: owner_effects
     }
-    let mut declared_names: Set<Str> = set_new()
-    for tp in type_params { declared_names.insert(tp.name) }
-    let mut sorted_tp_scope2 = ctx.type_param_scope.entries()
-    sorted_tp_scope2.sort_by(compare_by_first)
-    for entry in sorted_tp_scope2 {
-        let (tpname, tv) = entry
-        if !saved_tp_scope.contains_key(tpname) && !declared_names.contains(tpname) {
-            match tv {
-                Type::TypeVar { .. } => {
-                    let resolved = apply_subst(ctx.subst, tv)
-                    match resolved { Type::TypeVar { id: rid, .. } => { local_names.insert(rid, tpname) }, _ => {} }
-                },
-                _ => {}
-            }
-        }
-    }
-
-    // Add associated type variable names from trait bounds so error messages
-    // show "Item" instead of "?NNN" for associated types
-    let mut seen_traits: Set<Str> = set_new()
-    for fb in ctx.current_fn_bounds {
-        if seen_traits.contains(fb.trait_name) { continue }
-        seen_traits.insert(fb.trait_name)
-        match ctx.env.trait_reg.traits.get(fb.trait_name) {
-            some(tdef) => {
-                for atdef in tdef.assoc_types {
-                    if !local_names.contains_key(atdef.var_id) {
-                        let resolved = apply_subst(ctx.subst, Type::TypeVar { id: atdef.var_id, name: none })
-                        match resolved { Type::TypeVar { id: rid, .. } => { local_names.insert(rid, atdef.name) }, _ => {} }
-                    }
-                }
-            },
-            none => {}
-        }
-    }
-
-    let mut canonical_type_var_ids: Map<Int, Int> = map_new()
-    match registration_scheme {
-        some(scheme) => {
-            if inherited_type_var_ids.len() > scheme.type_vars.len() {
-                panic("function zonk: inherited registration prefix is incomplete")
-            }
-            let mut inherited_index = 0
-            while inherited_index < inherited_type_var_ids.len() {
-                let registration_id = scheme.type_vars.get(
-                    inherited_index).unwrap()
-                let exact_id = inherited_type_var_ids.get(
-                    inherited_index).unwrap()
-                match apply_subst(
-                        ctx.subst,
-                        Type::TypeVar {
-                            id: registration_id, name: none
-                        }) {
-                    Type::TypeVar { id: representative, .. } =>
-                        insert_canonical_type_var_id(
-                            canonical_type_var_ids,
-                            representative, exact_id),
-                    _ => {}
-                }
-                match apply_subst(
-                        ctx.subst,
-                        Type::TypeVar { id: exact_id, name: none }) {
-                    Type::TypeVar { id: representative, .. } =>
-                        insert_canonical_type_var_id(
-                            canonical_type_var_ids,
-                            representative, exact_id),
-                    _ => {}
-                }
-                inherited_index = inherited_index + 1
-            }
-            let mut inherited_registration_ids: List<Int> = []
-            for inherited_index in 0..inherited_type_var_ids.len() {
-                inherited_registration_ids.push(
-                    scheme.type_vars.get(inherited_index).unwrap())
-            }
-            for source_tail in ordered_effect_tail_vars(scheme.ty) {
-                if scheme.type_vars.contains(source_tail) &&
-                   !inherited_registration_ids.contains(source_tail) {
-                    match apply_subst(
-                            ctx.subst,
-                            Type::TypeVar {
-                                id: source_tail, name: none
-                            }) {
-                        Type::TypeVar { id: representative, .. } =>
-                            insert_canonical_type_var_id(
-                                canonical_type_var_ids,
-                                representative, source_tail),
-                        _ => {}
-                    }
-                }
-            }
-        },
-        none => if inherited_type_var_ids.len() != 0 {
-            panic("function zonk: inherited type parameters lack registration")
-        }
-    }
-    for source_id in source_type_var_ids {
-        match apply_subst(
-                ctx.subst,
-                Type::TypeVar { id: source_id, name: none }) {
-            Type::TypeVar { id: representative, .. } => {
-                insert_canonical_type_var_id(
-                    canonical_type_var_ids, representative, source_id)
-            },
-            _ => {}
-        }
-    }
-    for source_id in canonical_registration_vars {
-        match apply_subst(
-                ctx.subst,
-                Type::TypeVar { id: source_id, name: none }) {
-            Type::TypeVar { id: representative, .. } =>
-                insert_canonical_type_var_id(
-                    canonical_type_var_ids, representative, source_id),
-            _ => {}
-        }
-    }
-    let zctx = ZonkCtx {
-        subst: ctx.subst, names: local_names,
-        canonical_type_var_ids: canonical_type_var_ids,
-        dict_resolver: some(ctx)
-    }
-    let mut final_params: List<HParam> = []
-    for hp in hparams { final_params.push(zonk_param(zctx, hp)) }
-    let final_ret = zonk_type(zctx, expected_ret)
-    let eff = zonk_row(zctx, owner_effects)
-    let final_body = zonk_block(zctx, body_result.hexpr)
-    match registration_scheme {
-        some(scheme) => capture_assoc_rebind_provenance(
-            ctx, fn_name, scheme, final_params, final_ret, eff, ctx.subst
-        ),
-        none => {}
-    }
-    FnBodyResult { params: final_params, ret: final_ret, eff: eff, body: final_body }
 }
 
-// Capture the owner-qualified identity of check-time associated-type variables
-// while the function's transient scopes are still live. rebind_fn_type runs
-// after check_fn_decl returns, when qualified_assoc_scope/current_fn_bounds have
-// already been restored, so it cannot reconstruct this safely from a bare
-// TypeVar id.
-fn capture_assoc_rebind_provenance(
-    mut ctx: InferCtx,
-    fn_name: Str,
-    registration_scheme: TypeScheme,
-    checked_params: List<HParam>,
-    checked_return: Type,
-    checked_effects: EffectRow,
-    final_subst: UnionFind
-) {
-    let mut captured: List<AssocRebindEntry> = []
-    match registration_scheme.ty {
-        Type::FnType {
-            params: registration_params,
-            return_type: registration_return,
-            effects: registration_effects
-        } => {
-            // First map each check-time owner (T/U/...) back to the corresponding
-            // registration-time owner using the ordinary function shape.
-            let mut owner_mapping: Map<Int, Type> = map_new()
-            let mut owner_conflicts: Set<Int> = set_new()
-            let mut param_index = 0
-            for checked_param in checked_params {
-                match registration_params.get(param_index) {
-                    some(registration_param) =>
-                        build_var_mapping(
-                            checked_param.ty, registration_param,
-                            owner_mapping, owner_conflicts
-                        ),
-                    none => {}
-                }
-                param_index = param_index + 1
+fn capture_raw_type_var_names(
+    ctx: InferCtx, type_params: List<TypeParam>,
+    saved_tp_scope: Map<Str, Type>
+) -> Map<Int, Str> {
+    let mut result: Map<Int, Str> = map_new()
+    let mut declared_names: Set<Str> = set_new()
+    for parameter in type_params {
+        declared_names.insert(parameter.name)
+        match ctx.type_param_scope.get(parameter.name) {
+            some(Type::TypeVar { id, .. }) =>
+                result.insert(id, parameter.name),
+            _ => {}
+        }
+    }
+    let mut entries = ctx.type_param_scope.entries()
+    entries.sort_by(compare_by_first)
+    for entry in entries {
+        let (name, value) = entry
+        if !saved_tp_scope.contains_key(name) &&
+           !declared_names.contains(name) {
+            match value {
+                Type::TypeVar { id, .. } => result.insert(id, name),
+                _ => {}
             }
-            build_var_mapping(
-                checked_return, registration_return,
-                owner_mapping, owner_conflicts
-            )
-            build_effect_var_mapping(
-                checked_effects, registration_effects,
-                owner_mapping, owner_conflicts
-            )
+        }
+    }
+    for bound in ctx.current_fn_bounds {
+        for constraint in bound.assoc_constraints {
+            match constraint.ty {
+                Type::TypeVar { id, .. } =>
+                    result.insert(id, constraint.name),
+                _ => {}
+            }
+        }
+    }
+    result
+}
 
-            for fn_bound in ctx.current_fn_bounds {
-                let checked_owner = apply_subst(
-                    final_subst,
-                    Type::TypeVar {
-                        id: fn_bound.type_param_var_id,
-                        name: some(fn_bound.type_param_name)
-                    }
-                )
-                let registration_owner_id = match checked_owner {
-                    Type::TypeVar { id: checked_owner_id, .. } => {
-                        if owner_conflicts.contains(checked_owner_id) {
-                            none
-                        } else {
-                            let registration_owner = apply_subst_map(
-                                owner_mapping, checked_owner
-                            )
-                            match registration_owner {
-                                Type::TypeVar { id, .. } => some(id),
-                                _ => none
-                            }
-                        }
-                    },
-                    _ => none
-                }
-
-                match ctx.env.trait_reg.traits.get(fn_bound.trait_name) {
-                    some(trait_def) => {
-                        for assoc_def in trait_def.assoc_types {
-                            let origin = "${fn_bound.type_param_name}::${assoc_def.name}"
-                            match ctx.qualified_assoc_scope.get(origin) {
-                                some(checked_assoc) => {
-                                    let zonked_assoc = apply_subst(
-                                        final_subst, checked_assoc
-                                    )
-                                    let mut found_target = false
-                                    match registration_owner_id {
-                                        some(owner_id) => {
-                                            for scheme_bound in registration_scheme.bounds {
-                                                if scheme_bound.type_var == owner_id &&
-                                                   scheme_bound.trait_name == fn_bound.trait_name {
-                                                    for constraint in scheme_bound.assoc_constraints {
-                                                        if constraint.name == assoc_def.name {
-                                                            found_target = true
-                                                            captured.push(AssocRebindEntry {
-                                                                check_type: zonked_assoc,
-                                                                registration_type: some(constraint.ty),
-                                                                owner_name: fn_bound.type_param_name,
-                                                                trait_name: fn_bound.trait_name,
-                                                                assoc_name: assoc_def.name
-                                                            })
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        none => {}
-                                    }
-                                    // Impl method cores are deliberately
-                                    // boundless. Their registration predicate
-                                    // authority is current_fn_bounds, materialized
-                                    // from the exact owning ImplEntry above.
-                                    if !found_target &&
-                                       registration_scheme.bounds.len() == 0 {
-                                        for constraint in fn_bound.assoc_constraints {
-                                            if constraint.name == assoc_def.name {
-                                                found_target = true
-                                                captured.push(AssocRebindEntry {
-                                                    check_type: zonked_assoc,
-                                                    registration_type: some(constraint.ty),
-                                                    owner_name: fn_bound.type_param_name,
-                                                    trait_name: fn_bound.trait_name,
-                                                    assoc_name: assoc_def.name
-                                                })
-                                            }
+fn capture_raw_assoc_rebind_sources(
+    ctx: InferCtx, registration_scheme: TypeScheme
+) -> List<AssocRebindEntry> {
+    let mut result: List<AssocRebindEntry> = []
+    for bound in ctx.current_fn_bounds {
+        match ctx.env.trait_reg.traits.get(bound.trait_name) {
+            some(trait_def) => {
+                for assoc in trait_def.assoc_types {
+                    let key = "${bound.type_param_name}::${assoc.name}"
+                    match ctx.qualified_assoc_scope.get(key) {
+                        some(check_type) => {
+                            let mut registration_type: Type? = none
+                            for scheme_bound in registration_scheme.bounds {
+                                if scheme_bound.type_var ==
+                                       bound.type_param_var_id &&
+                                   scheme_bound.trait_name ==
+                                       bound.trait_name {
+                                    for constraint in
+                                            scheme_bound.assoc_constraints {
+                                        if constraint.name == assoc.name {
+                                            registration_type =
+                                                some(constraint.ty)
                                         }
                                     }
-                                    if !found_target {
-                                        captured.push(AssocRebindEntry {
-                                            check_type: zonked_assoc,
-                                            registration_type: none,
-                                            owner_name: fn_bound.type_param_name,
-                                            trait_name: fn_bound.trait_name,
-                                            assoc_name: assoc_def.name
-                                        })
-                                    }
-                                },
-                                none => {}
+                                }
                             }
-                        }
-                    },
-                    none => {}
+                            if registration_type.is_none() &&
+                               registration_scheme.bounds.len() == 0 {
+                                for constraint in bound.assoc_constraints {
+                                    if constraint.name == assoc.name {
+                                        registration_type = some(constraint.ty)
+                                    }
+                                }
+                            }
+                            result.push(AssocRebindEntry {
+                                check_type: check_type,
+                                registration_type: registration_type,
+                                owner_name: bound.type_param_name,
+                                trait_name: bound.trait_name,
+                                assoc_name: assoc.name
+                            })
+                        },
+                        none => {}
+                    }
                 }
-            }
-        },
-        _ => {}
+            },
+            none => {}
+        }
     }
-    ctx.rebind_assoc_provenance.insert(fn_name, captured)
+    result
+}
+fn materialize_trait_bounds(
+    ctx: InferCtx, values: List<FnBoundsEntry>
+) -> List<TraitBound> {
+    let mut result: List<TraitBound> = []
+    for value in values {
+        let trait_def = ctx.env.trait_reg.traits.get(
+            value.trait_name).unwrap_or_else(fn() {
+            panic("function HIR: bound trait is absent")
+        })
+        result.push(TraitBound {
+            type_param: value.type_param_name,
+            trait_name: value.trait_name,
+            type_var_id: value.type_param_var_id,
+            trait_ref: registered_trait_ref_symbol(trait_def.owner_ref),
+            dict_ordinal: value.dict_ordinal
+        })
+    }
+    result
+}
+
+fn infer_fn_draft(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    params: List<Param>, return_type: TypeExpr?,
+    declared_effects: List<EffectExpr>?, body: Expr,
+    is_pub: Bool, span: Span, self_type: Type?,
+    registration_override: TypeScheme?, rebind_identity: Str?,
+    impl_method_ref: ImplMethodRef?, inherited_type_var_ids: List<Int>,
+    validation: FnValidationContext
+) -> FnDraft {
+    let registration_scheme = match registration_override {
+        some(scheme) => scheme,
+        none => ctx.env.lookup(name).unwrap_or_else(fn() {
+            panic("function draft: registration scheme is absent")
+        })
+    }
+    let executable = match impl_method_ref {
+        some(method_ref) => make_named_executable_ref(
+            impl_method_ref_member(method_ref)),
+        none => named_executable_for_def_id(
+            ctx, registration_scheme.def_id, "function '${name}'")
+    }
+    let provenance_key = match rebind_identity {
+        some(identity) => identity,
+        none => name
+    }
+    enter_executable_owner(ctx, executable)
+    let batch_checkpoint = owner_batch_checkpoint(ctx)
+    let result = some(infer_fn_draft_transaction(
+        ctx, name, provenance_key, executable, type_params, params,
+        return_type, declared_effects, body, is_pub, span, self_type,
+        registration_scheme, impl_method_ref, inherited_type_var_ids,
+        validation, batch_checkpoint)) catch { _ => none }
+    match result {
+        some(draft) => {
+            exit_executable_owner(ctx)
+            draft
+        },
+        none => {
+            rollback_owner_batch(ctx, batch_checkpoint)
+            exit_executable_owner(ctx)
+            fail.raise(CompileError {})
+        }
+    }
+}
+
+fn infer_fn_draft_transaction(
+    mut ctx: InferCtx, name: Str, provenance_key: Str,
+    executable: ExecutableRef, type_params: List<TypeParam>,
+    params: List<Param>, return_type: TypeExpr?,
+    declared_effects: List<EffectExpr>?, body: Expr,
+    is_pub: Bool, span: Span, self_type: Type?,
+    registration_scheme: TypeScheme,
+    impl_method_ref: ImplMethodRef?,
+    inherited_type_var_ids: List<Int>,
+    validation: FnValidationContext,
+    batch_checkpoint: OwnerBatchCheckpoint
+) -> FnDraft {
+    let (registered_params, registered_return, registered_effects) =
+        match registration_scheme.ty {
+            Type::FnType { params, return_type, effects } =>
+                (params, return_type, effects),
+            _ => panic("function draft: registration is not callable")
+        }
+    if registered_params.len() != params.len() {
+        panic("function draft: registration parameter census differs")
+    }
+
+    ctx.env.push_scope()
+    let saved_fn_return = ctx.current_fn_return_type
+    let saved_tp_scope = map_clone(ctx.type_param_scope)
+    let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
+    ctx.fn_bounds_stack.push(ctx.current_fn_bounds)
+    let mut inherited_bounds: List<FnBoundsEntry> = []
+    for bound in ctx.current_fn_bounds { inherited_bounds.push(bound) }
+    ctx.current_fn_bounds = inherited_bounds
+
+    let source_type_var_ids = exact_source_type_var_ids(
+        registration_scheme, inherited_type_var_ids.len(), type_params.len())
+    for index in 0..type_params.len() {
+        let parameter = type_params.get(index).unwrap()
+        let source_id = source_type_var_ids.get(index).unwrap()
+        let variable = Type::TypeVar {
+            id: source_id, name: some(parameter.name)
+        }
+        ctx.type_param_scope.insert(parameter.name, variable)
+        ctx.env.bind_mono(parameter.name, variable)
+    }
+
+    for parameter in type_params {
+        match ctx.type_param_scope.get(parameter.name) {
+            some(Type::TypeVar { id, .. }) => {
+                for bound in parameter.bounds {
+                    let trait_name = resolve_trait_identity(
+                        ctx, bound.trait_name)
+                    let mut constraints: List<AssocConstraintEntry> = []
+                    for constraint in bound.assoc_constraints {
+                        constraints.push(AssocConstraintEntry {
+                            name: constraint.name,
+                            ty: resolve_type_expr(ctx, constraint.ty)
+                        })
+                    }
+                    ctx.current_fn_bounds.push(FnBoundsEntry {
+                        type_param_var_id: id,
+                        trait_name: trait_name,
+                        type_param_name: parameter.name,
+                        dict_ordinal: ctx.current_fn_bounds.len(),
+                        assoc_constraints: constraints
+                    })
+                    for supertrait in collect_all_supertraits(
+                            ctx, trait_name) {
+                        ctx.current_fn_bounds.push(FnBoundsEntry {
+                            type_param_var_id: id,
+                            trait_name: supertrait,
+                            type_param_name: parameter.name,
+                            dict_ordinal: ctx.current_fn_bounds.len(),
+                            assoc_constraints: []
+                        })
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    validate_fn_bound_order(ctx.current_fn_bounds)
+    inject_assoc_types_from_bounds(ctx, type_params)
+
+    let mut hparams: List<HParam> = []
+    for index in 0..params.len() {
+        let source = params.get(index).unwrap()
+        let parameter_type = registered_params.get(index).unwrap()
+        if source.name == "self" && source.type_annotation.is_none() {
+            match self_type {
+                some(expected_self) => {
+                    ctx.subst = unify_at(
+                        ctx.sink, ctx.env, parameter_type,
+                        expected_self, ctx.subst, source.span)
+                },
+                none => {}
+            }
+        }
+        ctx.env.bind_mono(source.name, parameter_type)
+        let bound = ctx.env.lookup(source.name).unwrap_or_else(fn() {
+            panic("function draft: parameter binding is absent")
+        })
+        match bound.def_id {
+            some(def_id) => {
+                journal_record_def_span(ctx, def_id, source.span)
+                journal_var_lambda_depth_set(
+                    ctx, def_id, ctx.lambda_depth)
+                if source.is_mutable {
+                    journal_mutable_var_insert(ctx, def_id)
+                    journal_mut_param_def_insert(ctx, def_id)
+                    if source.name != "self" &&
+                       is_value_type(apply_subst(
+                           ctx.subst, parameter_type)) {
+                        journal_boxed_var_insert(ctx, def_id)
+                    }
+                } else {
+                    journal_let_def_insert(ctx, def_id)
+                }
+            },
+            none => {}
+        }
+        hparams.push(HParam {
+            name: source.name, ty: parameter_type,
+            def_id: bound.def_id, is_mutable: source.is_mutable
+        })
+    }
+
+    ctx.current_fn_return_type = some(registered_return)
+    let owner_declared_effects = if declared_effects.is_some() {
+        some(registered_effects)
+    } else {
+        none
+    }
+    match owner_declared_effects {
+        some(row) => prepare_callable_handled_evidence(ctx, row),
+        none => {}
+    }
+
+    let inferred = some(infer_fn_body_constraints(
+        ctx, provenance_key, registered_return,
+        owner_declared_effects,
+        if declared_effects.is_some() {
+            none
+        } else {
+            some(registered_effects)
+        },
+        body, span)) catch { _ => none }
+
+    let complete_bounds = ctx.current_fn_bounds
+    let result = match inferred {
+        some(value) => {
+            let raw_names = capture_raw_type_var_names(
+                ctx, type_params, saved_tp_scope)
+            let assoc_sources = capture_raw_assoc_rebind_sources(
+                ctx, registration_scheme)
+            let exact_type_params = exact_h_type_params(
+                ctx, type_params, source_type_var_ids)
+            let trait_bounds = materialize_trait_bounds(
+                ctx, complete_bounds)
+            let handled_bindings =
+                current_handled_evidence_bindings(ctx)
+            let handled_captures =
+                current_handled_evidence_captures(ctx)
+            let batch = detach_owner_batch(ctx, batch_checkpoint)
+            some(FnDraft {
+                name: name,
+                provenance_key: provenance_key,
+                executable: executable,
+                impl_method_ref: impl_method_ref,
+                registration_scheme: registration_scheme,
+                inherited_type_var_ids: inherited_type_var_ids,
+                source_type_var_ids: source_type_var_ids,
+                is_pub: is_pub,
+                span: span,
+                type_params: exact_type_params,
+                trait_bounds: trait_bounds,
+                params: hparams,
+                expected_return: registered_return,
+                owner_effects: value.owner_effects,
+                body: value.body,
+                raw_type_var_names: raw_names,
+                assoc_rebind_sources: assoc_sources,
+                handled_bindings: handled_bindings,
+                handled_captures: handled_captures,
+                validation: validation,
+                batch: batch
+            })
+        },
+        none => none
+    }
+
+    ctx.current_fn_return_type = saved_fn_return
+    ctx.env.pop_scope()
+    ctx.type_param_scope = saved_tp_scope
+    ctx.qualified_assoc_scope = saved_qualified_assoc
+    ctx.current_fn_bounds = match ctx.fn_bounds_stack.pop() {
+        some(previous) => previous,
+        none => []
+    }
+
+    match result {
+        some(draft) => draft,
+        none => fail.raise(CompileError {})
+    }
 }
 
 fn check_fn_decl(
@@ -3289,376 +4358,36 @@ fn check_fn_decl(
     declared_effects: List<EffectExpr>?, body: Expr,
     is_pub: Bool, span: Span, self_type: Type?,
     registration_override: TypeScheme?, rebind_identity: Str?,
-    impl_method_ref: ImplMethodRef?, inherited_type_var_ids: List<Int>,
-    check_phase: FnCheckPhase
+    impl_method_ref: ImplMethodRef?, inherited_type_var_ids: List<Int>
 ) -> HDecl {
-    let obligation_checkpoint = pending_dict_checkpoint(ctx)
-    let registered_def_id = match registration_override {
-        some(scheme) => scheme.def_id,
-        none => match ctx.env.lookup(name) {
-            some(scheme) => scheme.def_id,
-            none => none
-        }
-    }
-    let executable_ref = match impl_method_ref {
-        some(method_ref) => make_named_executable_ref(
-            impl_method_ref_member(method_ref)),
-        none => named_executable_for_def_id(
-            ctx, registered_def_id, "function '${name}'")
-    }
-    enter_executable_owner(ctx, executable_ref)
-    let result = some(check_fn_decl_transaction(
-        ctx, name, type_params, params, return_type,
-        declared_effects, body, is_pub, span, self_type,
-        registration_override, rebind_identity, impl_method_ref,
-        executable_ref, inherited_type_var_ids,
-        obligation_checkpoint, check_phase)) catch { _ => none }
-    exit_executable_owner(ctx)
+    let saved_subst = ctx.subst
+    let diagnostic_checkpoint = ctx.sink.save()
+    let mutation_checkpoint = begin_infer_mutation_journal(ctx)
+    ctx.subst = empty_subst()
+    let result = some({
+        let draft = infer_fn_draft(
+            ctx, name, type_params, params, return_type,
+            declared_effects, body, is_pub, span, self_type,
+            registration_override, rebind_identity, impl_method_ref,
+            inherited_type_var_ids, FnValidationContext {
+                capability: none, capability_span: none
+            })
+        finalize_singleton_fn_draft(
+            ctx, draft, diagnostic_checkpoint)
+    }) catch { _ => none }
     match result {
         some(hdecl) => {
-            assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
+            commit_infer_mutation_journal(ctx, mutation_checkpoint)
+            ctx.subst = saved_subst
             hdecl
         },
         none => {
-            rollback_pending_dicts(ctx, obligation_checkpoint)
+            rollback_infer_mutation_journal(ctx, mutation_checkpoint)
+            ctx.subst = saved_subst
             fail.raise(CompileError {})
         }
     }
 }
-
-fn check_fn_decl_transaction(
-    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
-    params: List<Param>, return_type: TypeExpr?,
-    declared_effects: List<EffectExpr>?, body: Expr,
-    is_pub: Bool, span: Span, self_type: Type?,
-    registration_override: TypeScheme?, rebind_identity: Str?,
-    impl_method_ref: ImplMethodRef?,
-    executable_ref: ExecutableRef,
-    inherited_type_var_ids: List<Int>,
-    obligation_checkpoint: Int,
-    requested_phase: FnCheckPhase
-) -> HDecl {
-    // Save the registration scheme before entering the parameter scope: a
-    // parameter is allowed to have the same spelling as its function.
-    let registration_scheme = match registration_override {
-        some(scheme) => some(scheme),
-        none => ctx.env.lookup(name)
-    }
-    let recursive_constraint = match requested_phase {
-        FnCheckPhase::RecursiveConstraintCheck => true,
-        FnCheckPhase::OrdinaryFnCheck => false
-    }
-    let closed_validation = !recursive_constraint &&
-        recursive_callable_is_closed(ctx, executable_ref)
-    let use_registration_signature = recursive_constraint || closed_validation
-    let registered_signature = match registration_scheme {
-        some(scheme) => match scheme.ty {
-            Type::FnType { params, return_type, effects } =>
-                some((params, return_type, effects)),
-            _ => none
-        },
-        none => none
-    }
-    let provenance_key = match rebind_identity {
-        some(identity) => identity,
-        none => name
-    }
-    // A failed or repeated check must never reuse provenance from an earlier
-    // inline/SCC precheck of the same canonical function identity.
-    ctx.rebind_assoc_provenance.insert(provenance_key, [])
-
-    let saved_subst = ctx.subst
-    if !recursive_constraint { ctx.subst = empty_subst() }
-    ctx.env.push_scope()
-
-    let saved_tp_scope = map_clone(ctx.type_param_scope)
-    let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
-    let source_type_var_ids = exact_source_type_var_ids(
-        match registration_scheme {
-            some(value) => value,
-            none => panic("function HIR: registration scheme is absent")
-        }, inherited_type_var_ids.len(), type_params.len())
-    let mut source_type_var_index = 0
-    for tp in type_params {
-        let tv = Type::TypeVar {
-            id: source_type_var_ids.get(source_type_var_index).unwrap(),
-            name: some(tp.name)
-        }
-        source_type_var_index = source_type_var_index + 1
-        ctx.type_param_scope.insert(tp.name, tv)
-        ctx.env.bind_mono(tp.name, tv)
-    }
-    ctx.fn_bounds_stack.push(ctx.current_fn_bounds)
-    let mut inherited_bounds: List<FnBoundsEntry> = []
-    for ib in ctx.current_fn_bounds { inherited_bounds.push(ib) }
-    ctx.current_fn_bounds = inherited_bounds
-    for tp in type_params {
-        match ctx.type_param_scope.get(tp.name) {
-            some(tv) => match tv {
-                Type::TypeVar { id, .. } => {
-                    for bound in tp.bounds {
-                        let bound_trait = resolve_trait_identity(ctx, bound.trait_name)
-                        let mut assoc_constraints: List<AssocConstraintEntry> = []
-                        for constraint in bound.assoc_constraints {
-                            assoc_constraints.push(AssocConstraintEntry {
-                                name: constraint.name,
-                                ty: resolve_type_expr(ctx, constraint.ty)
-                            })
-                        }
-                        ctx.current_fn_bounds.push(FnBoundsEntry {
-                            type_param_var_id: id, trait_name: bound_trait,
-                            type_param_name: tp.name,
-                            dict_ordinal: ctx.current_fn_bounds.len(),
-                            assoc_constraints: assoc_constraints
-                        })
-                        // Expand supertrait bounds: if T: Ord and Ord: Eq, add T: Eq too
-                        let supers = collect_all_supertraits(ctx, bound_trait)
-                        for st_name in supers {
-                            ctx.current_fn_bounds.push(FnBoundsEntry {
-                                type_param_var_id: id, trait_name: st_name,
-                                type_param_name: tp.name,
-                                dict_ordinal: ctx.current_fn_bounds.len(),
-                                assoc_constraints: []
-                            })
-                        }
-                    }
-                },
-                _ => {}
-            },
-            none => {}
-        }
-    }
-    validate_fn_bound_order(ctx.current_fn_bounds)
-
-    // Inject associated types from type param bounds into type_param_scope
-    // so that zonk names map includes associated type variable names (e.g., Item instead of ?NNN)
-    inject_assoc_types_from_bounds(ctx, type_params)
-
-    let mut hparams: List<HParam> = []
-    let mut param_types: List<Type> = []
-    let mut parameter_index = 0
-    for p in params {
-        let ptype = if use_registration_signature {
-            match registered_signature {
-                some(signature) => signature.0.get(
-                    parameter_index).unwrap_or_else(fn() {
-                    panic("recursive callable: registration parameter arity differs")
-                }),
-                none => panic(
-                    "recursive callable: registration is not a function")
-            }
-        } else { match p.type_annotation {
-            some(ta) => resolve_type_expr(ctx, ta),
-            none => {
-                if p.name == "self" {
-                    match self_type { some(st) => st, none => ctx.env.fresh_var() }
-                } else {
-                    ctx.env.fresh_var()
-                }
-            }
-        } }
-        ctx.env.bind_mono(p.name, ptype)
-        let param_scheme = ctx.env.lookup(p.name)
-        match param_scheme {
-            some(ps) => {
-                match ps.def_id {
-                    some(did) => {
-                        ctx.env.record_def_span(did, p.span)
-                        ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
-                        if p.is_mutable {
-                            ctx.env.scope.mutable_vars.insert(did)
-                            ctx.env.scope.mut_param_defs.insert(did)
-                            // Auto-box mut value-type parameters (not self)
-                            if p.name != "self" {
-                                let resolved_pt = apply_subst(ctx.subst, ptype)
-                                if is_value_type(resolved_pt) {
-                                    ctx.boxed_vars.insert(did)
-                                }
-                            }
-                        } else {
-                            ctx.env.scope.let_defs.insert(did)
-                        }
-                    },
-                    none => {}
-                }
-                hparams.push(HParam { name: p.name, ty: ptype, def_id: ps.def_id, is_mutable: p.is_mutable })
-            },
-            none => hparams.push(HParam { name: p.name, ty: ptype, def_id: none, is_mutable: p.is_mutable })
-        }
-        param_types.push(ptype)
-        parameter_index = parameter_index + 1
-    }
-    if use_registration_signature {
-        match registered_signature {
-            some(signature) => if signature.0.len() != parameter_index {
-                panic("recursive callable: registration parameter census differs")
-            },
-            none => {}
-        }
-    }
-
-    let saved_fn_return = ctx.current_fn_return_type
-    let expected_ret = if use_registration_signature {
-        match registered_signature {
-            some(signature) => signature.1,
-            none => panic("recursive callable: registration return is absent")
-        }
-    } else { match return_type {
-        some(rt) => resolve_type_expr(ctx, rt),
-        none => ctx.env.fresh_var()
-    } }
-    ctx.current_fn_return_type = some(expected_ret)
-    // Resolve while this owner's type-parameter and associated-type scopes
-    // are live.  check_fn_body applies the payload constraints before drain.
-    let has_declared_effects = declared_effects.is_some()
-    let owner_declared_effects = match declared_effects {
-        some(de) => if use_registration_signature {
-            let _ = de
-            match registered_signature {
-                some(signature) => some(signature.2),
-                none => panic(
-                    "recursive callable: registration effects are absent")
-            }
-        } else {
-            some(resolve_declared_effects(ctx, de))
-        },
-        none => none
-    }
-    let registered_inferred_effects = if use_registration_signature &&
-            !has_declared_effects {
-        match registered_signature {
-            some(signature) => some(signature.2),
-            none => panic("recursive callable: provisional effects are absent")
-        }
-    } else { none }
-    let canonical_registration_vars = if use_registration_signature {
-        match registration_scheme {
-            some(scheme) => scheme.type_vars,
-            none => []
-        }
-    } else { [] }
-    match owner_declared_effects {
-        some(row) => prepare_callable_handled_evidence(ctx, row),
-        none => {}
-    }
-
-    let try_result = some(
-        check_fn_body(
-            ctx, provenance_key, registration_scheme, type_params,
-            inherited_type_var_ids, source_type_var_ids, hparams,
-            expected_ret, owner_declared_effects,
-            registered_inferred_effects,
-            canonical_registration_vars,
-            body, saved_tp_scope, span,
-            obligation_checkpoint
-        )
-    ) catch { _ => none }
-
-    // Save complete bounds (inherited + own) before pop
-    let complete_fn_bounds = ctx.current_fn_bounds
-
-    // Cleanup
-    ctx.current_fn_return_type = saved_fn_return
-    ctx.env.pop_scope()
-    ctx.type_param_scope = saved_tp_scope
-    ctx.qualified_assoc_scope = saved_qualified_assoc
-    ctx.current_fn_bounds = match ctx.fn_bounds_stack.pop() { some(prev) => prev, none => [] }
-    if !recursive_constraint { ctx.subst = saved_subst }
-
-    let fn_result = match try_result {
-        some(r) => r,
-        none => fail.raise(CompileError {})
-    }
-    let final_params = fn_result.params
-    let final_ret = fn_result.ret
-    let final_effects = fn_result.eff
-    let evidence_remap = canonicalize_callable_handled_evidence(
-        ctx, final_effects)
-    let final_body = remap_hir_handled_evidence(
-        fn_result.body, evidence_remap.0, evidence_remap.1)
-
-    // Check: main function must not have unhandled custom effects.
-    // Builtin effects have dedicated 0.1 rules,
-    // but CustomEffect requires an explicit handler and cannot propagate past main.
-    if !recursive_constraint &&
-       (name == "main" || name.ends_with("$$_main")) {
-        for eff in final_effects.effects {
-            match eff {
-                Effect::CustomEffect { name: eff_name, .. } => {
-                    let effect_display = nominal_display_name(eff_name)
-                    let effect_notes: List<DiagnosticNote> = [
-                        DiagnosticNote { message: "effect '${effect_display}' is used but not handled in main", span: some(span) },
-                        DiagnosticNote { message: "use 'handle ... with { ${effect_display} { op_name(args) => result } }' to handle this effect", span: none }
-                    ]
-                    let _ = type_error_with_notes(ctx.sink, E0403,
-                        "Unhandled effect '${effect_display}' in main function; custom effects must be handled before reaching main",
-                        span,
-                        DiagnosticContext::EffectUnhandled { eff: effect_display, in_function: some("main") },
-                        effect_notes)
-                },
-                _ => {}
-            }
-        }
-    }
-
-    let mut trait_bounds: List<TraitBound> = []
-    for fb in complete_fn_bounds {
-        let trait_def = ctx.env.trait_reg.traits.get(
-            fb.trait_name).unwrap_or_else(fn() {
-            panic("function HIR: bound trait is absent")
-        })
-        trait_bounds.push(TraitBound {
-            type_param: fb.type_param_name, trait_name: fb.trait_name,
-            type_var_id: fb.type_param_var_id,
-            trait_ref: registered_trait_ref_symbol(trait_def.owner_ref),
-            dict_ordinal: fb.dict_ordinal })
-    }
-
-    let fn_def_id = match registration_scheme {
-        some(scheme) => scheme.def_id,
-        none => none
-    }
-    match fn_def_id {
-        some(did) => ctx.env.record_def_span(did, span),
-        none => {}
-    }
-
-    // Register fn_mut_params for call-site pre-boxing analysis
-    // Only flag params that are mut AND value-type (Int/Float/Bool/Str).
-    // self params and reference-type params are never boxed.
-    let mut mut_flags: List<Bool> = []
-    let mut fi = 0
-    for p in params {
-        if p.name == "self" || !p.is_mutable {
-            mut_flags.push(false)
-        } else {
-            // Check if the param's resolved type is a value type
-            match final_params.get(fi) {
-                some(fp) => mut_flags.push(is_value_type(fp.ty)),
-                none => mut_flags.push(false)
-            }
-        }
-        fi = fi + 1
-    }
-    ctx.fn_mut_params.insert(name, mut_flags)
-    HDecl::Fn {
-        name: name, def_id: fn_def_id,
-        executable_ref: executable_ref,
-        impl_method_ref: impl_method_ref,
-        type_params: exact_h_type_params(
-            ctx, type_params,
-            exact_source_type_var_ids(
-                match registration_scheme {
-                    some(value) => value,
-                    none => panic("function HIR: registration scheme is absent")
-                }, inherited_type_var_ids.len(), type_params.len())),
-        params: final_params, return_type: final_ret, effects: final_effects,
-        handled_evidence_bindings:
-            current_handled_evidence_bindings(ctx),
-        body: final_body, is_pub: is_pub, trait_bounds: trait_bounds, span: span
-    }
-}
-
 fn check_test_decl(
     mut ctx: InferCtx, description: Str, body: Expr, span: Span,
     decl_index: Int
@@ -3720,72 +4449,27 @@ fn check_test_decl(
 // Public entry point
 // ============================================================
 
-fn validate_closed_value_callable(
-    mut ctx: InferCtx, name: Str, executable: ExecutableRef,
-    params: List<HParam>, return_type: Type, effects: EffectRow, span: Span
-) {
-    let scheme = ctx.env.lookup(name).unwrap_or_else(fn() {
-        panic("recursive callable validation: final scheme is absent")
-    })
-    validate_closed_callable_scheme(
-        ctx, name, scheme, executable,
-        params, return_type, effects, span, [])
-}
-
-// B-122: Check a declaration and rebind fn/impl-method types with resolved types.
-// After check_fn_decl, the registered type scheme still has unresolved fresh vars
-// from Pass 1. Rebinding replaces it with the fully-resolved type from inference,
-// so that subsequent callers (in SCC topological order) see correct return types.
-fn check_one_decl_with_rebind(
+fn emit_checked_decl(
     mut ctx: InferCtx, decl: Decl, frame_decl_index: Int?,
-    mut hdecls: List<HDecl>, cached_impls: List<CachedImplClose>
+    mut hdecls: List<HDecl>, cached_impls: List<CachedImplClose>,
+    cached_values: List<CachedValueClose>
 ) {
-    let hd = check_decl(ctx, decl, frame_decl_index, cached_impls)
-
-    // Update fn effects and rebind resolved types
-    match hd {
-        HDecl::Fn { name, executable_ref, params, return_type,
-                    effects, span, .. } => {
-            if recursive_callable_is_closed(ctx, executable_ref) {
-                validate_closed_value_callable(
-                    ctx, name, executable_ref, params,
-                    return_type, effects, span)
-            } else {
-            // update_fn_effects installs check-time effect variables into the
-            // live scheme.  Snapshot the authoritative registration identity
-            // first so effect-only type parameters still map back to the same
-            // variables owned by type_vars / SchemeBounds during rebind.
-            let registration_scheme = ctx.env.lookup(name)
-            if effects.effects.len() > 0 {
-                update_fn_effects(ctx.env, name, effects)
-            }
-            // B-122: Rebind with fully-resolved type from inference
-            rebind_fn_type(
-                ctx, name, params, return_type, effects, span,
-                registration_scheme)
-            let _ = publish_final_value_effect_schema(
-                ctx, name, executable_ref, Type::FnType {
-                    params: params.map(fn(param) { param.ty }),
-                    return_type: return_type, effects: effects
-                })
-            }
-        },
-        // Impl methods are rebound against their exact ImplEntry schemes in
-        // check_impl_decl_canonical; a bare method spelling is not an identity.
-        HDecl::Impl { .. } => {},
-        _ => {}
-    }
-
-    // Delegate expansion (same as check_one_decl)
+    let hd = check_decl(
+        ctx, decl, frame_decl_index, cached_impls, cached_values)
     let mut delegate_decls: List<HDecl> = []
     match decl {
-        Decl::Impl { target_type, type_params, methods, span, .. } => {
+        Decl::Impl { methods, .. } => {
             for source_member_index in 0..methods.len() {
                 match methods.get(source_member_index) {
-                    some(Decl::Delegate { field, span: dspan, .. }) => {
-                        let delegate_impls = expand_delegate_impls(
-                            ctx, hd, source_member_index, field, dspan)
-                        for di in delegate_impls { delegate_decls.push(di) }
+                    some(Decl::Delegate { field, span, .. }) => {
+                        for expanded in expand_delegate_impls(
+                                ctx, hd, source_member_index, field, span,
+                                FnValidationContext {
+                                    capability: none,
+                                    capability_span: none
+                                }) {
+                            delegate_decls.push(expanded)
+                        }
                     },
                     _ => {}
                 }
@@ -3793,106 +4477,84 @@ fn check_one_decl_with_rebind(
         },
         _ => {}
     }
-
     hdecls.push(hd)
-    for di in delegate_decls { hdecls.push(di) }
+    for expanded in delegate_decls { hdecls.push(expanded) }
 }
-
-// Locate one inline function by its exact canonical SCC node and pre-check it
-// in the same module context used by the final HIR pass.  This lets recursive
-// call-graph ordering cross ModBlock boundaries without flattening the emitted
-// HIR or losing self/super import resolution.
-fn check_recursive_constraint_fn_decl(
-    mut ctx: InferCtx, decl: Decl
-) -> HDecl {
+fn infer_value_fn_draft(
+    mut ctx: InferCtx, decl: Decl, validation: FnValidationContext
+) -> FnDraft {
     match decl {
-        Decl::Fn { name, type_params, params, return_type,
-                   declared_effects, body, is_pub, span, .. } =>
-            check_fn_decl(
-                ctx, name, type_params, params, return_type,
-                declared_effects, body, is_pub, span,
-                none, none, none, none, [],
-                FnCheckPhase::RecursiveConstraintCheck),
-        _ => panic("recursive callable group: member is not a function")
+        Decl::Fn {
+            name, type_params, params, return_type,
+            declared_effects, body, is_pub, span, ..
+        } => infer_fn_draft(
+            ctx, name, type_params, params, return_type,
+            declared_effects, body, is_pub, span,
+            none, none, none, none, [], validation),
+        _ => panic("value draft: declaration is not a function")
     }
 }
 
-// One exact inline-module traversal serves ordinary dependency prechecks,
-// recursive constraint members, and the single retained impl-close cache.
-fn walk_inline_check_in_mod_body(
+fn infer_inline_draft_in_mod_body(
     mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
     decls: List<Decl>, required_effects: List<EffectExpr>?,
-    project_frame_active: Bool, target_name: Str?, recursive: Bool,
-    mut provisional: List<HDecl>,
-    mut cached_impls: List<CachedImplClose>
+    module_span: Span, target_name: Str, project_frame_active: Bool,
+    mut output: List<FnDraft>
 ) -> Bool {
     if !project_frame_active {
         insert_mod_aliases(ctx, mod_name, decls, false)
         resolve_mod_uses(ctx, uses, true)
     }
-    match required_effects {
-        some(req_effs) => {
-            let cap = resolve_declared_effects(ctx, req_effs)
-            ctx.mod_unsafe_allowed = cap.effects.any(fn(e) {
-                match e { Effect::UnsafeEffect => true, _ => false }
+    let capability = required_effects.map(fn(values) {
+        resolve_declared_effects(ctx, values)
+    })
+    match capability {
+        some(row) => {
+            ctx.mod_unsafe_allowed = row.effects.any(fn(effect) {
+                match effect {
+                    Effect::UnsafeEffect => true,
+                    _ => false
+                }
             })
         },
         none => { ctx.mod_unsafe_allowed = false }
     }
+    let capability_span = capability.map(fn(_) { module_span })
 
     for decl_index in 0..decls.len() {
         let prefixed = prefix_decl_name(
             mod_name, decls.get(decl_index).unwrap())
-        match target_name {
-            some(wanted) => match prefixed {
-                Decl::Fn { name, .. } => if name == wanted {
-                    if recursive {
-                        provisional.push(
-                            check_recursive_constraint_fn_decl(ctx, prefixed))
-                    } else {
-                        let mut discarded: List<HDecl> = []
-                        let result = some(check_one_decl_with_rebind(
-                            ctx, prefixed, some(decl_index),
-                            discarded, [])) catch { _ => none }
-                    }
-                    return true
-                },
-                Decl::ModBlock { name, uses: nested_uses,
-                                 decls: nested_decls,
-                                 required_effects: nested_required, .. } => {
-                    if walk_inline_check_in_mod(
-                            ctx, name, nested_uses, nested_decls,
-                            nested_required, decl_index, target_name,
-                            recursive, provisional, cached_impls) {
-                        return true
-                    }
-                },
-                _ => {}
+        match prefixed {
+            Decl::Fn { name, .. } => if name == target_name {
+                output.push(infer_value_fn_draft(
+                    ctx, prefixed, FnValidationContext {
+                        capability: capability,
+                        capability_span: capability_span
+                    }))
+                return true
             },
-            none => match prefixed {
-                Decl::Impl { .. } => cache_checked_impl_decl(
-                    ctx, prefixed, decl_index, cached_impls),
-                Decl::ModBlock { name, uses: nested_uses,
-                                 decls: nested_decls,
-                                 required_effects: nested_required, .. } => {
-                    let _ = walk_inline_check_in_mod(
+            Decl::ModBlock {
+                name, uses: nested_uses, decls: nested_decls,
+                required_effects: nested_required, span: nested_span, ..
+            } => {
+                if infer_inline_draft_in_mod(
                         ctx, name, nested_uses, nested_decls,
-                        nested_required, decl_index, none, false,
-                        provisional, cached_impls)
-                },
-                _ => {}
-            }
+                        nested_required, nested_span,
+                        target_name, decl_index, output) {
+                    return true
+                }
+            },
+            _ => {}
         }
     }
     false
 }
 
-fn walk_inline_check_in_mod(
+fn infer_inline_draft_in_mod(
     mut ctx: InferCtx, mod_name: Str, uses: List<UseDecl>,
     decls: List<Decl>, required_effects: List<EffectExpr>?,
-    frame_decl_index: Int, target_name: Str?, recursive: Bool,
-    mut provisional: List<HDecl>,
-    mut cached_impls: List<CachedImplClose>
+    module_span: Span, target_name: Str, frame_decl_index: Int,
+    mut output: List<FnDraft>
 ) -> Bool {
     enter_impl_check_child_frame(ctx, frame_decl_index)
     let project_active = ctx.project_namespace_file_key.is_some()
@@ -3902,17 +4564,17 @@ fn walk_inline_check_in_mod(
             ctx, frame_decl_index)
         if !entered_project_frame {
             exit_impl_check_frame(ctx)
-            panic("unreachable: resolver plan missing inline check frame")
+            panic("unreachable: resolver plan missing inline draft frame")
         }
     }
     let segments = mod_name.split("::")
     let simple_name = segments.get(segments.len() - 1).unwrap_or(mod_name)
     ctx.mod_path_stack.push(simple_name)
-    let prev_unsafe_allowed = ctx.mod_unsafe_allowed
-    let result = walk_inline_check_in_mod_body(
-        ctx, mod_name, uses, decls, required_effects, project_active,
-        target_name, recursive, provisional, cached_impls) catch { _ => {
-            ctx.mod_unsafe_allowed = prev_unsafe_allowed
+    let previous_unsafe = ctx.mod_unsafe_allowed
+    let result = infer_inline_draft_in_mod_body(
+        ctx, mod_name, uses, decls, required_effects,
+        module_span, target_name, project_active, output) catch { _ => {
+            ctx.mod_unsafe_allowed = previous_unsafe
             let _ = ctx.mod_path_stack.pop()
             if entered_project_frame {
                 let _ = exit_project_namespace_frame(ctx)
@@ -3921,7 +4583,7 @@ fn walk_inline_check_in_mod(
             fail.raise(CompileError {})
         }
     }
-    ctx.mod_unsafe_allowed = prev_unsafe_allowed
+    ctx.mod_unsafe_allowed = previous_unsafe
     let _ = ctx.mod_path_stack.pop()
     if entered_project_frame {
         let _ = exit_project_namespace_frame(ctx)
@@ -3930,79 +4592,32 @@ fn walk_inline_check_in_mod(
     result
 }
 
-fn walk_inline_check(
-    mut ctx: InferCtx, decls: List<Decl>, target_name: Str?,
-    recursive: Bool, mut provisional: List<HDecl>,
-    mut cached_impls: List<CachedImplClose>
-) -> Bool {
+fn infer_inline_value_draft(
+    mut ctx: InferCtx, decls: List<Decl>, target_name: Str
+) -> FnDraft {
+    let mut output: List<FnDraft> = []
     for decl_index in 0..decls.len() {
         match decls.get(decl_index).unwrap() {
-            Decl::ModBlock { name, uses, decls: mod_decls,
-                             required_effects, .. } => {
-                if walk_inline_check_in_mod(
+            Decl::ModBlock {
+                name, uses, decls: mod_decls,
+                required_effects, span, ..
+            } => {
+                if infer_inline_draft_in_mod(
                         ctx, name, uses, mod_decls, required_effects,
-                        decl_index, target_name, recursive,
-                        provisional, cached_impls) {
-                    return true
+                        span, target_name, decl_index, output) {
+                    break
                 }
             },
             _ => {}
         }
     }
-    false
-}
-
-fn precheck_inline_fn(
-    mut ctx: InferCtx, decls: List<Decl>, target_name: Str
-) -> Bool {
-    walk_inline_check(ctx, decls, some(target_name), false, [], [])
-}
-
-fn check_recursive_inline_fn(
-    mut ctx: InferCtx, decls: List<Decl>, target_name: Str
-) -> HDecl {
-    let mut provisional: List<HDecl> = []
-    if !walk_inline_check(
-            ctx, decls, some(target_name), true, provisional, []) ||
-       provisional.len() != 1 {
-        panic("recursive callable group: inline member is absent")
+    if output.len() != 1 {
+        panic("inline value draft: exact member is absent")
     }
-    provisional.get(0).unwrap()
+    output.get(0).unwrap()
 }
-
-fn collect_impl_scc_fn_names(
-    decls: List<Decl>, prefix: Str?, mut names: Set<Str>
-) {
-    for decl in decls {
-        match decl {
-            Decl::Impl { methods, .. } => {
-                for method in methods {
-                    match method {
-                        Decl::Fn { name, .. } => {
-                            let full_name = match prefix {
-                                some(p) => "${p}::${name}",
-                                none => name
-                            }
-                            names.insert(full_name)
-                        },
-                        _ => {}
-                    }
-                }
-            },
-            Decl::ModBlock { name, decls: nested, .. } => {
-                let nested_prefix = match prefix {
-                    some(p) => "${p}::${name}",
-                    none => name
-                }
-                collect_impl_scc_fn_names(nested, some(nested_prefix), names)
-            },
-            _ => {}
-        }
-    }
-}
-
-fn inline_dependency_closure(
-    graph: Map<Str, List<Str>>, roots: Set<Str>, blocked: Set<Str>
+fn value_dependency_closure(
+    graph: Map<Str, List<Str>>, roots: Set<Str>
 ) -> Set<Str> {
     let mut closure: Set<Str> = set_new()
     let mut pending: List<Str> = []
@@ -4015,7 +4630,8 @@ fn inline_dependency_closure(
             some(node) => match graph.get(node) {
                 some(deps) => {
                     for dep in deps {
-                        if !blocked.contains(dep) && !dep.starts_with("impl::") && !closure.contains(dep) {
+                        if !dep.starts_with("impl::") &&
+                           !closure.contains(dep) {
                             closure.insert(dep)
                             pending.push(dep)
                         }
@@ -4027,19 +4643,6 @@ fn inline_dependency_closure(
         }
     }
     closure
-}
-
-fn precheck_top_level_fn_at(
-    mut ctx: InferCtx, decls: List<Decl>, index: Int
-) {
-    match decls.get(index) {
-        some(decl) => {
-            let mut discarded: List<HDecl> = []
-            let result = some(check_one_decl_with_rebind(
-                ctx, decl, none, discarded, [])) catch { _ => none }
-        },
-        none => {}
-    }
 }
 
 fn scc_group_is_recursive(
@@ -4121,166 +4724,14 @@ fn free_type_vars_outside_recursive_group(
     result
 }
 
-fn canonical_recursive_signature(
-    ctx: InferCtx, scheme: TypeScheme, subst: UnionFind
-) -> Type {
-    let canonical_ids: Map<Int, Int> = map_new()
-    for source in scheme.type_vars {
-        match apply_subst(
-                subst, Type::TypeVar { id: source, name: none }) {
-            Type::TypeVar { id: representative, .. } =>
-                insert_canonical_type_var_id(
-                    canonical_ids, representative, source),
-            _ => {}
-        }
-    }
-    zonk_type(ZonkCtx {
-        subst: subst, names: map_new(),
-        canonical_type_var_ids: canonical_ids,
-        dict_resolver: some(ctx)
-    }, scheme.ty)
-}
-
-fn finalize_recursive_callable_scheme(
-    mut ctx: InferCtx, provenance_key: Str,
-    scheme: TypeScheme, source_params: List<HParam>,
-    span: Span, group_subst: UnionFind,
-    external_free: Set<Int>
-) -> TypeScheme {
-    let final_type = canonical_recursive_signature(
-        ctx, scheme, group_subst)
-    let (parameter_types, return_type, effects) = match final_type {
-        Type::FnType { params, return_type, effects } =>
-            (params, return_type, effects),
-        _ => panic("recursive callable group: final type is not callable")
-    }
-    if source_params.len() != parameter_types.len() {
-        panic("recursive callable group: final parameter census differs")
-    }
-    let mut final_params: List<HParam> = []
-    for index in 0..parameter_types.len() {
-        let source = source_params.get(index).unwrap()
-        final_params.push(HParam {
-            name: source.name,
-            ty: parameter_types.get(index).unwrap(),
-            def_id: source.def_id,
-            is_mutable: source.is_mutable
-        })
-    }
-
-    // Reuse the bounded final rebind audit for associated-type/fail provenance;
-    // the recursive group's direct zonk above remains the type authority.
-    let audited = rebind_checked_fn_scheme(
-        ctx, provenance_key, scheme, final_params,
-        return_type, effects, span)
-
-    let mut type_vars = list_clone(scheme.type_vars)
-    let final_free = free_type_vars(final_type, empty_subst())
-    let mut ordered_free = final_free.to_list()
-    ordered_free.sort()
-    for id in ordered_free {
-        if !type_vars.contains(id) && !external_free.contains(id) {
-            type_vars.push(id)
-        }
-    }
-    let mut bounds: List<SchemeBound> = []
-    for bound in audited.bounds {
-        if type_vars.contains(bound.type_var) { bounds.push(bound) }
-    }
-    for id in type_vars {
-        match ctx.env.scope.var_bounds.get(id) {
-            some(traits) => {
-                let mut ordered_traits = traits.to_list()
-                ordered_traits.sort()
-                for trait_name in ordered_traits {
-                    if !bounds.any(fn(bound) {
-                            bound.type_var == id &&
-                            bound.trait_name == trait_name
-                        }) {
-                        bounds.push(SchemeBound {
-                            type_var: id, trait_name: trait_name,
-                            assoc_constraints: []
-                        })
-                    }
-                }
-            },
-            none => {}
-        }
-    }
-    TypeScheme {
-        ty: final_type, type_vars: type_vars, bounds: bounds,
-        effect_schema: scheme.effect_schema, def_id: scheme.def_id
-    }
-}
-
-fn stage_recursive_value_callable(
-    mut ctx: InferCtx, name: Str, executable: ExecutableRef,
-    provisional_hir: HDecl, group_subst: UnionFind,
-    external_free: Set<Int>
-) -> StagedCallableClose {
-    let registration_scheme = ctx.env.lookup(name).unwrap_or_else(fn() {
-        panic("recursive callable group: provisional scheme is absent")
-    })
-    let (source_params, source_return, source_effects,
-         source_span, source_executable) = match provisional_hir {
-        HDecl::Fn { params, return_type, effects,
-                    span, executable_ref, .. } =>
-            (params, return_type, effects, span, executable_ref),
-        _ => panic("recursive callable group: provisional HIR is not a function")
-    }
-    if !executable_ref_same(source_executable, executable) {
-        panic("recursive callable group: provisional member identity changed")
-    }
-    stage_callable_close(
-        ctx, name, name, executable, registration_scheme,
-        source_params, source_return, source_effects, source_span,
-        some(group_subst), some(external_free), [])
-}
-
-fn prepare_recursive_value_group(
-    mut ctx: InferCtx, decls: List<Decl>, names: List<Str>,
-    top_level_indices: Map<Str, Int>,
-    executables: List<ExecutableRef>
-) -> List<StagedCallableClose> {
-    let mut provisional_hir: List<HDecl> = []
-    for name in names {
-        match top_level_indices.get(name) {
-            some(index) => match decls.get(index) {
-                some(decl) => provisional_hir.push(
-                    check_recursive_constraint_fn_decl(ctx, decl)),
-                none => panic(
-                    "recursive callable group: top-level member is absent")
-            },
-            none => provisional_hir.push(
-                check_recursive_inline_fn(ctx, decls, name))
-        }
-    }
-    let group_subst = ctx.subst
-    let external_free = free_type_vars_outside_recursive_group(
-        ctx, executables, group_subst)
-    let mut staged: List<StagedCallableClose> = []
-    for index in 0..names.len() {
-        staged.push(stage_recursive_value_callable(
-            ctx,
-            names.get(index).unwrap(),
-            executables.get(index).unwrap(),
-            provisional_hir.get(index).unwrap(),
-            group_subst, external_free))
-    }
-    staged
-}
-
-fn close_recursive_value_group(
+fn infer_and_commit_value_draft_group(
     mut ctx: InferCtx, decls: List<Decl>, group: List<Str>,
-    top_level_indices: Map<Str, Int>, impl_fn_names: Set<Str>
+    top_level_indices: Map<Str, Int>, recursive: Bool,
+    mut cached_values: List<CachedValueClose>
 ) {
-    let mut names: List<Str> = []
-    for name in group {
-        if !name.starts_with("impl::") &&
-           !impl_fn_names.contains(name) {
-            names.push(name)
-        }
-    }
+    let mut names = group.filter(fn(name) {
+        !name.starts_with("impl::")
+    })
     names.sort()
     if names.len() == 0 { return }
 
@@ -4288,51 +4739,66 @@ fn close_recursive_value_group(
     for name in names {
         executables.push(value_callable_executable(ctx, name))
     }
-
     let saved_subst = ctx.subst
-    let saved_fn_mut_params = map_clone(ctx.fn_mut_params)
-    let saved_rebind_provenance = map_clone(
-        ctx.rebind_assoc_provenance)
-    let effect_fact_checkpoint = recursive_effect_fact_checkpoint(ctx)
+    let diagnostic_checkpoint = ctx.sink.save()
+    let mutation_checkpoint = begin_infer_mutation_journal(ctx)
     ctx.subst = empty_subst()
-    begin_recursive_callable_group(ctx, executables)
-    let prepared = some(prepare_recursive_value_group(
-        ctx, decls, names, top_level_indices, executables)) catch { _ => none }
-    let staged = match prepared {
-        some(value) => value,
-        none => {
-            rollback_recursive_effect_facts(ctx, effect_fact_checkpoint)
-            end_recursive_callable_group(ctx, executables)
+    if recursive {
+        begin_recursive_callable_group(ctx, executables)
+    }
+    let result = some({
+        let mut drafts: List<FnDraft> = []
+        for name in names {
+            match top_level_indices.get(name) {
+                some(index) => match decls.get(index) {
+                    some(decl) => drafts.push(infer_value_fn_draft(
+                        ctx, decl, FnValidationContext {
+                            capability: none, capability_span: none
+                        })),
+                    none => panic(
+                        "value draft group: top-level member is absent")
+                },
+                none => drafts.push(infer_inline_value_draft(
+                    ctx, decls, name))
+            }
+        }
+        if diagnostics_since_has_errors(ctx, diagnostic_checkpoint) {
+            fail.raise(CompileError {})
+        }
+        let prepared = prepare_fn_draft_group(
+            ctx, drafts, executables, diagnostic_checkpoint)
+        preflight_value_draft_group(ctx, prepared)
+        prepared
+    }) catch { _ => none }
+
+    match result {
+        some(prepared) => {
+            if recursive {
+                end_recursive_callable_group(ctx, executables)
+            }
+            let declarations = commit_value_draft_group(ctx, prepared)
+            for index in 0..declarations.len() {
+                cached_values.push(CachedValueClose {
+                    executable: executables.get(index).unwrap(),
+                    declaration: declarations.get(index).unwrap()
+                })
+            }
+            commit_infer_mutation_journal(ctx, mutation_checkpoint)
+            if recursive {
+                mark_recursive_callable_group_closed(ctx, executables)
+            }
             ctx.subst = saved_subst
-            ctx.fn_mut_params = saved_fn_mut_params
-            ctx.rebind_assoc_provenance = saved_rebind_provenance
+        },
+        none => {
+            if recursive {
+                end_recursive_callable_group(ctx, executables)
+            }
+            rollback_infer_mutation_journal(ctx, mutation_checkpoint)
+            ctx.subst = saved_subst
             fail.raise(CompileError {})
         }
     }
-
-    // Discard all checker-side metadata written by the provisional HIR pass.
-    // The staged schemes already consumed its provenance; the retained pass
-    // will recreate final mutability/provenance facts after group closure.
-    ctx.fn_mut_params = saved_fn_mut_params
-    ctx.rebind_assoc_provenance = saved_rebind_provenance
-    rollback_recursive_effect_facts(ctx, effect_fact_checkpoint)
-
-    // Every fallible scheme/schema derivation completed above. Publish the
-    // complete value group, then close its exact executable identities as one
-    // scheduler transaction.
-    for value in staged {
-        rebind_fn_scheme_with_alias(ctx, value.name, value.scheme)
-    }
-    for value in staged {
-        publish_exact_callable_effect_header(
-            ctx, value.executable, value.scheme.ty,
-            value.scheme.effect_schema)
-    }
-    mark_recursive_callable_group_closed(ctx, executables)
-    end_recursive_callable_group(ctx, executables)
-    ctx.subst = saved_subst
 }
-
 // B-122: Rebind a fn's type scheme with resolved return type and effects.
 //
 // After check_fn_decl, the registered type scheme may have a free TypeVar for
@@ -4383,295 +4849,6 @@ fn rebind_fn_scheme_with_alias(mut ctx: InferCtx, name: Str, scheme: TypeScheme)
                 none => {}
             }
         }
-    }
-}
-
-fn type_contains_fn(ty: Type) -> Bool {
-    match ty {
-        Type::FnType { .. } => true,
-        Type::StructType { type_params, .. } => {
-            for tp in type_params {
-                if type_contains_fn(tp) { return true }
-            }
-            false
-        },
-        Type::EnumType { type_params, .. } => {
-            for tp in type_params {
-                if type_contains_fn(tp) { return true }
-            }
-            false
-        },
-        Type::GenericType { base, args } => {
-            if type_contains_fn(base) { return true }
-            for arg in args {
-                if type_contains_fn(arg) { return true }
-            }
-            false
-        },
-        Type::RecordType { fields, .. } => {
-            for field in fields {
-                if type_contains_fn(field.ty) { return true }
-            }
-            false
-        },
-        Type::EffectRowType { effects, .. } => {
-            for eff in effects {
-                match eff {
-                    Effect::FailEffect { error_type } => {
-                        if type_contains_fn(error_type) { return true }
-                    },
-                    Effect::MutEffect { state_type } => {
-                        if type_contains_fn(state_type) { return true }
-                    },
-                    Effect::CustomEffect { type_args, .. } => {
-                        for arg in type_args {
-                            if type_contains_fn(arg) { return true }
-                        }
-                    },
-                    _ => {}
-                }
-            }
-            false
-        },
-        Type::TupleType { elements } => {
-            for element in elements {
-                if type_contains_fn(element) { return true }
-            }
-            false
-        },
-        Type::PtrType { pointee } => type_contains_fn(pointee),
-        _ => false
-    }
-}
-
-fn report_rebind_shape_mismatch(
-    mut ctx: InferCtx, fn_name: Str, reg_ty: Type, check_ty: Type, span: Span
-) {
-    let display = nominal_display_name(fn_name)
-    let expected = type_to_string(reg_ty)
-    let actual = type_to_string(check_ty)
-    let _ = type_error(ctx.sink, E0301,
-        "Cannot safely rebind higher-order parameter in '${display}': registered shape '${expected}' does not match inferred shape '${actual}'",
-        span,
-        DiagnosticContext::TypeMismatch {
-            expected: expected, actual: actual,
-            expression: some("higher-order parameter rebind")
-        })
-}
-
-// A check-time variable is safe to write into a scheme only when the existing
-// positional mapping takes it back to a variable already owned by that scheme
-// (or to a concrete type). Named variables and variables carrying var_bounds
-// may denote declared generics/associated types; generalizing them as a fresh
-// anonymous fail payload would discard their bound provenance.
-fn audit_fail_payload_var(
-    mut ctx: InferCtx,
-    fn_name: Str,
-    id: Int,
-    var_name: Str?,
-    mapping: Map<Int, Type>,
-    original_scheme_vars: Set<Int>,
-    mut unsafe_vars: Set<Int>,
-    mut diagnosed_vars: Set<Int>,
-    span: Span
-) {
-    // Conflicted or ownerless associated-type provenance is pre-seeded by
-    // rebind_fn_type. Reject it only if it is about to escape through a newly
-    // written fail payload; unrelated associated types remain untouched.
-    if unsafe_vars.contains(id) {
-        if !diagnosed_vars.contains(id) {
-            diagnosed_vars.insert(id)
-            let display = nominal_display_name(fn_name)
-            let detail = "owner-qualified associated type has no unique registration-time target"
-            let _ = type_error(ctx.sink, E0503,
-                "Cannot rebind fail payload in '${display}': ${detail}",
-                span,
-                DiagnosticContext::TraitError { detail: detail })
-        }
-        return
-    }
-
-    let mapped = apply_subst_map(mapping, Type::TypeVar { id: id, name: var_name })
-    let mut mapped_vars: Set<Int> = set_new()
-    collect_free_vars(mapped, mapped_vars)
-    let mut new_vars: List<Int> = []
-    for mapped_id in mapped_vars {
-        if !original_scheme_vars.contains(mapped_id) {
-            new_vars.push(mapped_id)
-        }
-    }
-    if new_vars.len() == 0 { return }
-
-    let check_name = match var_name {
-        some(n) => n,
-        none => ""
-    }
-    let mut trait_names: Set<Str> = set_new()
-    match ctx.env.scope.var_bounds.get(id) {
-        some(bounds) => {
-            for trait_name in bounds { trait_names.insert(trait_name) }
-        },
-        none => {}
-    }
-    for mapped_id in new_vars {
-        match ctx.env.scope.var_bounds.get(mapped_id) {
-            some(bounds) => {
-                for trait_name in bounds { trait_names.insert(trait_name) }
-            },
-            none => {}
-        }
-    }
-    if check_name == "" && trait_names.len() == 0 { return }
-
-    unsafe_vars.insert(id)
-    for mapped_id in new_vars { unsafe_vars.insert(mapped_id) }
-    if diagnosed_vars.contains(id) { return }
-    diagnosed_vars.insert(id)
-    for mapped_id in new_vars { diagnosed_vars.insert(mapped_id) }
-
-    let display = nominal_display_name(fn_name)
-    let mut sorted_traits = trait_names.to_list()
-    sorted_traits.sort()
-    let traits_display = sorted_traits.join(", ")
-    let detail = if check_name != "" && sorted_traits.len() > 0 {
-        "named check-time variable '${check_name}' has untracked obligations: ${traits_display}"
-    } else if check_name != "" {
-        "named check-time variable '${check_name}' has no registration-time provenance"
-    } else {
-        "check-time variable has untracked obligations: ${traits_display}"
-    }
-    let _ = type_error(ctx.sink, E0503,
-        "Cannot rebind fail payload in '${display}': ${detail}",
-        span,
-        DiagnosticContext::TraitError { detail: detail })
-}
-
-fn audit_fail_payload_type(
-    mut ctx: InferCtx,
-    fn_name: Str,
-    ty: Type,
-    mapping: Map<Int, Type>,
-    original_scheme_vars: Set<Int>,
-    mut unsafe_vars: Set<Int>,
-    mut diagnosed_vars: Set<Int>,
-    span: Span
-) {
-    match ty {
-        Type::TypeVar { id, name } =>
-            audit_fail_payload_var(
-                ctx, fn_name, id, name, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            ),
-        Type::FnType { params, return_type, effects } => {
-            for param in params {
-                audit_fail_payload_type(
-                    ctx, fn_name, param, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-            audit_fail_payload_type(
-                ctx, fn_name, return_type, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            )
-            for eff in effects.effects {
-                match eff {
-                    Effect::FailEffect { error_type } =>
-                        audit_fail_payload_type(
-                            ctx, fn_name, error_type, mapping, original_scheme_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        ),
-                    Effect::MutEffect { state_type } =>
-                        audit_fail_payload_type(
-                            ctx, fn_name, state_type, mapping, original_scheme_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        ),
-                    Effect::CustomEffect { type_args, .. } => {
-                        for arg in type_args {
-                            audit_fail_payload_type(
-                                ctx, fn_name, arg, mapping, original_scheme_vars,
-                                unsafe_vars, diagnosed_vars, span
-                            )
-                        }
-                    },
-                    _ => {}
-                }
-            }
-        },
-        Type::StructType { type_params, .. } => {
-            for tp in type_params {
-                audit_fail_payload_type(
-                    ctx, fn_name, tp, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::EnumType { type_params, .. } => {
-            for tp in type_params {
-                audit_fail_payload_type(
-                    ctx, fn_name, tp, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::GenericType { base, args } => {
-            audit_fail_payload_type(
-                ctx, fn_name, base, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            )
-            for arg in args {
-                audit_fail_payload_type(
-                    ctx, fn_name, arg, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::RecordType { fields, .. } => {
-            for field in fields {
-                audit_fail_payload_type(
-                    ctx, fn_name, field.ty, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::EffectRowType { effects, .. } => {
-            for eff in effects {
-                match eff {
-                    Effect::FailEffect { error_type } =>
-                        audit_fail_payload_type(
-                            ctx, fn_name, error_type, mapping, original_scheme_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        ),
-                    Effect::MutEffect { state_type } =>
-                        audit_fail_payload_type(
-                            ctx, fn_name, state_type, mapping, original_scheme_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        ),
-                    Effect::CustomEffect { type_args, .. } => {
-                        for arg in type_args {
-                            audit_fail_payload_type(
-                                ctx, fn_name, arg, mapping, original_scheme_vars,
-                                unsafe_vars, diagnosed_vars, span
-                            )
-                        }
-                    },
-                    _ => {}
-                }
-            }
-        },
-        Type::TupleType { elements } => {
-            for element in elements {
-                audit_fail_payload_type(
-                    ctx, fn_name, element, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::PtrType { pointee } =>
-            audit_fail_payload_type(
-                ctx, fn_name, pointee, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            ),
-        _ => {}
     }
 }
 
@@ -4756,884 +4933,6 @@ fn type_contains_exact(ty: Type, needle: Type) -> Bool {
     }
 }
 
-fn unsafe_structured_assoc_origin(
-    ctx: InferCtx, fn_name: Str, payload: Type
-) -> Str? {
-    match ctx.rebind_assoc_provenance.get(fn_name) {
-        some(entries) => {
-            for entry in entries {
-                match entry.check_type {
-                    Type::TypeVar { .. } => {},
-                    checked_shape => {
-                        let represented_by_scheme = match entry.registration_type {
-                            some(registration_shape) =>
-                                types_equal(checked_shape, registration_shape),
-                            none => false
-                        }
-                        if !represented_by_scheme &&
-                           type_contains_exact(payload, checked_shape) {
-                            let trait_display = nominal_display_name(entry.trait_name)
-                            return some(
-                                "${entry.owner_name}::${entry.assoc_name} (${trait_display})"
-                            )
-                        }
-                    }
-                }
-            }
-        },
-        none => {}
-    }
-    none
-}
-
-fn audit_fail_row(
-    mut ctx: InferCtx,
-    fn_name: Str,
-    row: EffectRow,
-    mapping: Map<Int, Type>,
-    original_scheme_vars: Set<Int>,
-    mut unsafe_vars: Set<Int>,
-    mut diagnosed_vars: Set<Int>,
-    span: Span
-) {
-    for eff in row.effects {
-        match eff {
-            Effect::FailEffect { error_type } => {
-                match unsafe_structured_assoc_origin(ctx, fn_name, error_type) {
-                    some(origin) => {
-                        let display = nominal_display_name(fn_name)
-                        let detail = "associated type '${origin}' was constrained to a structure that the registration scheme cannot represent"
-                        let _ = type_error(ctx.sink, E0503,
-                            "Cannot rebind fail payload in '${display}': ${detail}",
-                            span,
-                            DiagnosticContext::TraitError { detail: detail })
-                    },
-                    none => {}
-                }
-                audit_fail_payload_type(
-                    ctx, fn_name, error_type, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            },
-            _ => {}
-        }
-    }
-}
-
-fn audit_fail_rows_in_type(
-    mut ctx: InferCtx,
-    fn_name: Str,
-    ty: Type,
-    mapping: Map<Int, Type>,
-    original_scheme_vars: Set<Int>,
-    mut unsafe_vars: Set<Int>,
-    mut diagnosed_vars: Set<Int>,
-    span: Span
-) {
-    match ty {
-        Type::FnType { params, return_type, effects } => {
-            audit_fail_row(
-                ctx, fn_name, effects, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            )
-            for param in params {
-                audit_fail_rows_in_type(
-                    ctx, fn_name, param, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-            audit_fail_rows_in_type(
-                ctx, fn_name, return_type, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            )
-        },
-        Type::StructType { type_params, .. } => {
-            for tp in type_params {
-                audit_fail_rows_in_type(
-                    ctx, fn_name, tp, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::EnumType { type_params, .. } => {
-            for tp in type_params {
-                audit_fail_rows_in_type(
-                    ctx, fn_name, tp, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::GenericType { base, args } => {
-            audit_fail_rows_in_type(
-                ctx, fn_name, base, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            )
-            for arg in args {
-                audit_fail_rows_in_type(
-                    ctx, fn_name, arg, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::RecordType { fields, .. } => {
-            for field in fields {
-                audit_fail_rows_in_type(
-                    ctx, fn_name, field.ty, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::TupleType { elements } => {
-            for element in elements {
-                audit_fail_rows_in_type(
-                    ctx, fn_name, element, mapping, original_scheme_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            }
-        },
-        Type::PtrType { pointee } =>
-            audit_fail_rows_in_type(
-                ctx, fn_name, pointee, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            ),
-        _ => {}
-    }
-}
-
-// Preserve the registration-time parameter skeleton. Checked shapes are used
-// only to update effect rows of structurally corresponding function nodes.
-// The one expansion is an unquantified registration TypeVar refined directly
-// to a FnType; this is required for unannotated higher-order parameters.
-fn rebind_param_fn_rows(
-    mut ctx: InferCtx,
-    fn_name: Str,
-    reg_ty: Type,
-    check_ty: Type,
-    mapping: Map<Int, Type>,
-    original_type_vars: List<Int>,
-    original_scheme_vars: Set<Int>,
-    mut row_candidates: Set<Int>,
-    mut monomorphic_expansion_vars: Set<Int>,
-    mut unsafe_vars: Set<Int>,
-    mut diagnosed_vars: Set<Int>,
-    span: Span
-) -> Type {
-    match (reg_ty, check_ty) {
-        (Type::TypeVar { id, name },
-         Type::FnType { params: check_params, return_type: check_ret, effects: check_effects }) => {
-            let registered = Type::TypeVar { id: id, name: name }
-            let checked = Type::FnType {
-                params: check_params, return_type: check_ret, effects: check_effects
-            }
-            if original_type_vars.contains(id) {
-                report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
-                return registered
-            }
-
-            audit_fail_rows_in_type(
-                ctx, fn_name, checked, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            )
-            let mapped = apply_subst_map(mapping, checked)
-            let mut mapped_free: Set<Int> = set_new()
-            collect_free_vars(mapped, mapped_free)
-            let mut sorted_free = mapped_free.to_list()
-            sorted_free.sort()
-            for free_id in sorted_free {
-                if !original_scheme_vars.contains(free_id) {
-                    monomorphic_expansion_vars.insert(free_id)
-                    match ctx.env.scope.var_bounds.get(free_id) {
-                        some(bounds) => {
-                            if bounds.len() > 0 && !diagnosed_vars.contains(free_id) {
-                                diagnosed_vars.insert(free_id)
-                                unsafe_vars.insert(free_id)
-                                let mut traits = bounds.to_list()
-                                traits.sort()
-                                let display = nominal_display_name(fn_name)
-                                let traits_display = traits.join(", ")
-                                let detail = "inferred higher-order parameter variable has untracked obligations: ${traits_display}"
-                                let _ = type_error(ctx.sink, E0503,
-                                    "Cannot rebind inferred higher-order parameter in '${display}': ${detail}",
-                                    span,
-                                    DiagnosticContext::TraitError { detail: detail })
-                            }
-                        },
-                        none => {}
-                    }
-                }
-            }
-            mapped
-        },
-        (Type::TypeVar { id, name }, checked) => {
-            let registered = Type::TypeVar { id: id, name: name }
-            if type_contains_fn(checked) {
-                report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
-            }
-            registered
-        },
-        (Type::FnType { params: reg_params, return_type: reg_ret, effects: reg_effects },
-         Type::FnType { params: check_params, return_type: check_ret, effects: check_effects }) => {
-            let registered = Type::FnType {
-                params: reg_params, return_type: reg_ret, effects: reg_effects
-            }
-            let checked = Type::FnType {
-                params: check_params, return_type: check_ret, effects: check_effects
-            }
-            if reg_params.len() != check_params.len() {
-                report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
-                return registered
-            }
-
-            audit_fail_row(
-                ctx, fn_name, check_effects, mapping, original_scheme_vars,
-                unsafe_vars, diagnosed_vars, span
-            )
-            let mapped_effects = apply_subst_row_map(mapping, check_effects)
-            match reg_effects.tail {
-                some(owner_id) => {
-                    if original_type_vars.contains(owner_id) {
-                        collect_free_vars(Type::EffectRowType {
-                            effects: mapped_effects.effects, tail: mapped_effects.tail
-                        }, row_candidates)
-                    }
-                },
-                none => {}
-            }
-
-            let mut rebound_params: List<Type> = []
-            let mut i = 0
-            while i < reg_params.len() {
-                match (reg_params.get(i), check_params.get(i)) {
-                    (some(reg_param), some(check_param)) =>
-                        rebound_params.push(rebind_param_fn_rows(
-                            ctx, fn_name, reg_param, check_param, mapping,
-                            original_type_vars, original_scheme_vars,
-                            row_candidates, monomorphic_expansion_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        )),
-                    _ => {}
-                }
-                i = i + 1
-            }
-            let rebound_ret = rebind_param_fn_rows(
-                ctx, fn_name, reg_ret, check_ret, mapping,
-                original_type_vars, original_scheme_vars,
-                row_candidates, monomorphic_expansion_vars,
-                unsafe_vars, diagnosed_vars, span
-            )
-            Type::FnType {
-                params: rebound_params,
-                return_type: rebound_ret,
-                effects: mapped_effects
-            }
-        },
-        (Type::StructType { name: reg_name, type_params: reg_args },
-         Type::StructType { name: check_name, type_params: check_args }) => {
-            let registered = Type::StructType { name: reg_name, type_params: reg_args }
-            let checked = Type::StructType { name: check_name, type_params: check_args }
-            if reg_name != check_name || reg_args.len() != check_args.len() {
-                if type_contains_fn(registered) || type_contains_fn(checked) {
-                    report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
-                }
-                return registered
-            }
-            let mut rebound_args: List<Type> = []
-            let mut i = 0
-            while i < reg_args.len() {
-                match (reg_args.get(i), check_args.get(i)) {
-                    (some(reg_arg), some(check_arg)) =>
-                        rebound_args.push(rebind_param_fn_rows(
-                            ctx, fn_name, reg_arg, check_arg, mapping,
-                            original_type_vars, original_scheme_vars,
-                            row_candidates, monomorphic_expansion_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        )),
-                    _ => {}
-                }
-                i = i + 1
-            }
-            Type::StructType { name: reg_name, type_params: rebound_args }
-        },
-        (Type::EnumType { name: reg_name, type_params: reg_args },
-         Type::EnumType { name: check_name, type_params: check_args }) => {
-            let registered = Type::EnumType { name: reg_name, type_params: reg_args }
-            let checked = Type::EnumType { name: check_name, type_params: check_args }
-            if reg_name != check_name || reg_args.len() != check_args.len() {
-                if type_contains_fn(registered) || type_contains_fn(checked) {
-                    report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
-                }
-                return registered
-            }
-            let mut rebound_args: List<Type> = []
-            let mut i = 0
-            while i < reg_args.len() {
-                match (reg_args.get(i), check_args.get(i)) {
-                    (some(reg_arg), some(check_arg)) =>
-                        rebound_args.push(rebind_param_fn_rows(
-                            ctx, fn_name, reg_arg, check_arg, mapping,
-                            original_type_vars, original_scheme_vars,
-                            row_candidates, monomorphic_expansion_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        )),
-                    _ => {}
-                }
-                i = i + 1
-            }
-            Type::EnumType { name: reg_name, type_params: rebound_args }
-        },
-        (Type::TupleType { elements: reg_elements },
-         Type::TupleType { elements: check_elements }) => {
-            let registered = Type::TupleType { elements: reg_elements }
-            let checked = Type::TupleType { elements: check_elements }
-            if reg_elements.len() != check_elements.len() {
-                if type_contains_fn(registered) || type_contains_fn(checked) {
-                    report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
-                }
-                return registered
-            }
-            let mut rebound_elements: List<Type> = []
-            let mut i = 0
-            while i < reg_elements.len() {
-                match (reg_elements.get(i), check_elements.get(i)) {
-                    (some(reg_element), some(check_element)) =>
-                        rebound_elements.push(rebind_param_fn_rows(
-                            ctx, fn_name, reg_element, check_element, mapping,
-                            original_type_vars, original_scheme_vars,
-                            row_candidates, monomorphic_expansion_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        )),
-                    _ => {}
-                }
-                i = i + 1
-            }
-            Type::TupleType { elements: rebound_elements }
-        },
-        (Type::GenericType { base: reg_base, args: reg_args },
-         Type::GenericType { base: check_base, args: check_args }) => {
-            let registered = Type::GenericType { base: reg_base, args: reg_args }
-            let checked = Type::GenericType { base: check_base, args: check_args }
-            if reg_args.len() != check_args.len() {
-                if type_contains_fn(registered) || type_contains_fn(checked) {
-                    report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
-                }
-                return registered
-            }
-            let rebound_base = rebind_param_fn_rows(
-                ctx, fn_name, reg_base, check_base, mapping,
-                original_type_vars, original_scheme_vars,
-                row_candidates, monomorphic_expansion_vars,
-                unsafe_vars, diagnosed_vars, span
-            )
-            let mut rebound_args: List<Type> = []
-            let mut i = 0
-            while i < reg_args.len() {
-                match (reg_args.get(i), check_args.get(i)) {
-                    (some(reg_arg), some(check_arg)) =>
-                        rebound_args.push(rebind_param_fn_rows(
-                            ctx, fn_name, reg_arg, check_arg, mapping,
-                            original_type_vars, original_scheme_vars,
-                            row_candidates, monomorphic_expansion_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        )),
-                    _ => {}
-                }
-                i = i + 1
-            }
-            Type::GenericType { base: rebound_base, args: rebound_args }
-        },
-        (Type::RecordType { fields: reg_fields, tail: reg_tail, tail_name: reg_tail_name },
-         Type::RecordType { fields: check_fields, tail: check_tail, tail_name: check_tail_name }) => {
-            let registered = Type::RecordType {
-                fields: reg_fields, tail: reg_tail, tail_name: reg_tail_name
-            }
-            let checked = Type::RecordType {
-                fields: check_fields, tail: check_tail, tail_name: check_tail_name
-            }
-            let mut reliable = reg_fields.len() == check_fields.len()
-            for reg_field in reg_fields {
-                let mut found = false
-                for check_field in check_fields {
-                    if reg_field.name == check_field.name { found = true }
-                }
-                if !found { reliable = false }
-            }
-            if !reliable {
-                if type_contains_fn(registered) || type_contains_fn(checked) {
-                    report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
-                }
-                return registered
-            }
-
-            let mut rebound_fields: List<RecordField> = []
-            for reg_field in reg_fields {
-                let mut found = false
-                let mut check_field_type = UNIT
-                for check_field in check_fields {
-                    if reg_field.name == check_field.name {
-                        found = true
-                        check_field_type = check_field.ty
-                    }
-                }
-                if found {
-                    rebound_fields.push(RecordField {
-                        name: reg_field.name,
-                        ty: rebind_param_fn_rows(
-                            ctx, fn_name, reg_field.ty, check_field_type, mapping,
-                            original_type_vars, original_scheme_vars,
-                            row_candidates, monomorphic_expansion_vars,
-                            unsafe_vars, diagnosed_vars, span
-                        )
-                    })
-                }
-            }
-            Type::RecordType {
-                fields: rebound_fields, tail: reg_tail, tail_name: reg_tail_name
-            }
-        },
-        (Type::PtrType { pointee: reg_pointee },
-         Type::PtrType { pointee: check_pointee }) =>
-            Type::PtrType {
-                pointee: rebind_param_fn_rows(
-                    ctx, fn_name, reg_pointee, check_pointee, mapping,
-                    original_type_vars, original_scheme_vars,
-                    row_candidates, monomorphic_expansion_vars,
-                    unsafe_vars, diagnosed_vars, span
-                )
-            },
-        (registered, checked) => {
-            if type_contains_fn(registered) || type_contains_fn(checked) {
-                report_rebind_shape_mismatch(ctx, fn_name, registered, checked, span)
-            }
-            registered
-        }
-    }
-}
-
-// Shared exact-scheme rebind. Top-level functions and impl methods both pass
-// their own authoritative registration scheme through this one algorithm.
-fn rebind_checked_fn_scheme(
-    mut ctx: InferCtx, name: Str, scheme: TypeScheme,
-    params: List<HParam>, return_type: Type,
-    effects: EffectRow, span: Span
-) -> TypeScheme {
-    let mut original_scheme_vars: Set<Int> = set_new()
-    collect_free_vars(scheme.ty, original_scheme_vars)
-    // Associated-type variables may be owned exclusively by a SchemeBound
-    // constraint and not occur in the registration-time function shape until
-    // an open callback row is refined.
-    for owned_var in scheme.type_vars {
-        original_scheme_vars.insert(owned_var)
-    }
-    for scheme_bound in scheme.bounds {
-        original_scheme_vars.insert(scheme_bound.type_var)
-        for constraint in scheme_bound.assoc_constraints {
-            collect_free_vars(constraint.ty, original_scheme_vars)
-        }
-    }
-    match scheme.ty {
-            Type::FnType { params: reg_params, return_type: reg_ret, effects: reg_effects } => {
-                // Build mapping: check-time var id → registration-time var id
-                // by comparing resolved params with registered params position-by-position.
-                let mut var_mapping: Map<Int, Type> = map_new()
-                let mut structural_conflicts: Set<Int> = set_new()
-                let mut pi = 0
-                for p in params {
-                    match reg_params.get(pi) {
-                        some(reg_p) => build_var_mapping(
-                            p.ty, reg_p, var_mapping, structural_conflicts
-                        ),
-                        none => {}
-                    }
-                    pi = pi + 1
-                }
-                // Return/effect positions can own variables that never appear
-                // in ordinary parameters.
-                build_var_mapping(
-                    return_type, reg_ret, var_mapping, structural_conflicts
-                )
-                build_effect_var_mapping(
-                    effects, reg_effects, var_mapping, structural_conflicts
-                )
-
-                // Reconcile the structural candidates above with the
-                // owner-qualified associated-type targets captured before
-                // cleanup. A check variable unified with both T::Item and some
-                // other registered variable represents an equality that the
-                // current scheme cannot publish, so it must fail closed.
-                let mut assoc_targets: Map<Int, Type> = map_new()
-                let mut assoc_unsafe_vars: Set<Int> = set_new()
-                match ctx.rebind_assoc_provenance.get(name) {
-                    some(entries) => {
-                        for entry in entries {
-                            match entry.check_type {
-                                Type::TypeVar { id: check_var_id, .. } => {
-                                    if structural_conflicts.contains(check_var_id) {
-                                        // Only conflicts on the associated
-                                        // payload identity are relevant here.
-                                        // Ordinary generic/row conflicts may
-                                        // already be represented by the
-                                        // registration scheme and must not
-                                        // poison unrelated fail<T> payloads.
-                                        assoc_unsafe_vars.insert(check_var_id)
-                                    } else {
-                                        match entry.registration_type {
-                                            some(target) => {
-                                                match assoc_targets.get(check_var_id) {
-                                                    some(existing) => {
-                                                        if !types_equal(existing, target) {
-                                                            // A single check-time
-                                                            // variable was unified
-                                                            // from two different
-                                                            // associated-type owners.
-                                                            assoc_unsafe_vars.insert(check_var_id)
-                                                        }
-                                                    },
-                                                    none => assoc_targets.insert(check_var_id, target)
-                                                }
-                                            },
-                                            none => assoc_unsafe_vars.insert(check_var_id)
-                                        }
-                                    }
-                                },
-                                // Structured associated types are audited
-                                // directly at each new fail payload below. They
-                                // cannot be represented as a TypeVar substitution.
-                                _ => {}
-                            }
-                        }
-                    },
-                    none => {}
-                }
-                let mut sorted_assoc_ids = assoc_targets.keys()
-                sorted_assoc_ids.sort()
-                for check_id in sorted_assoc_ids {
-                    match assoc_targets.get(check_id) {
-                        some(target) => {
-                            if !assoc_unsafe_vars.contains(check_id) {
-                                match var_mapping.get(check_id) {
-                                    some(structural_target) => {
-                                        if !types_equal(structural_target, target) {
-                                            assoc_unsafe_vars.insert(check_id)
-                                        }
-                                    },
-                                    none => {
-                                        // Owner-qualified provenance supplies
-                                        // the otherwise missing identity.
-                                        var_mapping.insert(check_id, target)
-                                    }
-                                }
-                            }
-                        },
-                        none => {}
-                    }
-                }
-
-                // Map the resolved return type back to registration-time vars
-                let mapped_ret = apply_subst_map(var_mapping, return_type)
-
-                // Also map effects
-                let mapped_effects = apply_subst_row_map(var_mapping, effects)
-
-                // Preserve only checked effect-row refinements inside the
-                // registration parameter skeleton. Arbitrary inferred shapes
-                // must not become a new public parameter ABI.
-                let mut mapped_params: List<Type> = []
-                let mut param_row_candidates: Set<Int> = set_new()
-                let mut monomorphic_expansion_vars: Set<Int> = set_new()
-                let mut unsafe_provenance_vars = assoc_unsafe_vars
-                let mut diagnosed_vars: Set<Int> = set_new()
-                audit_fail_row(
-                    ctx, name, effects, var_mapping, original_scheme_vars,
-                    unsafe_provenance_vars, diagnosed_vars, span
-                )
-                let mut mapped_pi = 0
-                for p in params {
-                    match reg_params.get(mapped_pi) {
-                        some(reg_param) =>
-                            mapped_params.push(rebind_param_fn_rows(
-                                ctx, name, reg_param, p.ty, var_mapping,
-                                scheme.type_vars, original_scheme_vars,
-                                param_row_candidates, monomorphic_expansion_vars,
-                                unsafe_provenance_vars, diagnosed_vars, span
-                            )),
-                        none => {}
-                    }
-                    mapped_pi = mapped_pi + 1
-                }
-
-                // Generalize only outer-row variables and parameter-row
-                // variables owned by an originally quantified registration
-                // tail. Mono→Fn expansion variables remain shared.
-                // Mirroring infer_ctx::generalize is important here: a
-                // monomorphic env variable (e.g. an unannotated `raise_arg(x)`)
-                // must remain shared, while a body-local/callee-instantiation
-                // variable gets a fresh instance at every call site.
-                let mut row_free: Set<Int> = set_new()
-                for candidate in param_row_candidates { row_free.insert(candidate) }
-                collect_free_vars(Type::EffectRowType {
-                    effects: mapped_effects.effects, tail: mapped_effects.tail
-                }, row_free)
-                let env_free = free_type_vars_in_env(ctx.env, empty_subst())
-                let mut new_type_vars = list_clone(scheme.type_vars)
-                let mut new_bounds = list_clone(scheme.bounds)
-                let mut sorted_row_free = row_free.to_list()
-                sorted_row_free.sort()
-                for v in sorted_row_free {
-                    if new_type_vars.contains(v) == false &&
-                       env_free.contains(v) == false &&
-                       monomorphic_expansion_vars.contains(v) == false &&
-                       unsafe_provenance_vars.contains(v) == false {
-                        new_type_vars.push(v)
-
-                        // instantiate() records trait obligations for fresh
-                        // variables in var_bounds.  Preserve those obligations
-                        // when the propagated effect variable is generalized,
-                        // using the same deterministic reconstruction contract
-                        // as infer_ctx::generalize.  Existing SchemeBounds —
-                        // including associated constraints — are left intact.
-                        match ctx.env.scope.var_bounds.get(v) {
-                            some(traits) => {
-                                let mut sorted_traits = traits.to_list()
-                                sorted_traits.sort()
-                                for trait_name in sorted_traits {
-                                    let exists = new_bounds.any(fn(b) {
-                                        b.type_var == v && b.trait_name == trait_name
-                                    })
-                                    if !exists {
-                                        new_bounds.push(SchemeBound {
-                                            type_var: v,
-                                            trait_name: trait_name,
-                                            assoc_constraints: []
-                                        })
-                                    }
-                                }
-                            },
-                            none => {},
-                        }
-                    }
-                }
-
-                let new_type = Type::FnType {
-                    params: mapped_params, return_type: mapped_ret, effects: mapped_effects
-                }
-                TypeScheme {
-                    ..scheme,
-                    ty: new_type,
-                    type_vars: new_type_vars,
-                    bounds: new_bounds
-                }
-            },
-            _ => scheme
-    }
-}
-
-fn rebind_fn_type(
-    mut ctx: InferCtx, name: Str, params: List<HParam>, return_type: Type,
-    effects: EffectRow, span: Span, registration_scheme: TypeScheme?
-) {
-    match registration_scheme {
-        some(scheme) => {
-            let rebound = rebind_checked_fn_scheme(
-                ctx, name, scheme, params, return_type, effects, span)
-            rebind_fn_scheme_with_alias(ctx, name, rebound)
-        },
-        none => {}
-    }
-}
-
-// Build a var-id mapping by structurally comparing two types.
-// If check_ty = TypeVar(?42) and reg_ty = TypeVar(?1), records ?42 → ?1.
-fn record_var_mapping(
-    check_id: Int,
-    registration_type: Type,
-    mut mapping: Map<Int, Type>,
-    mut conflicts: Set<Int>
-) {
-    // update_fn_effects runs immediately before rebind and may place a
-    // check-time variable into the scheme's outer effect row. Mapping that
-    // variable to itself carries no registration identity; treating it as a
-    // candidate would conflict with the real parameter/bound target.
-    match registration_type {
-        Type::TypeVar { id: registration_id, .. } => {
-            if registration_id == check_id { return }
-        },
-        _ => {}
-    }
-    match mapping.get(check_id) {
-        some(existing) => {
-            if !types_equal(existing, registration_type) {
-                conflicts.insert(check_id)
-            }
-        },
-        none => mapping.insert(check_id, registration_type)
-    }
-}
-
-fn build_var_mapping(
-    check_ty: Type,
-    reg_ty: Type,
-    mut mapping: Map<Int, Type>,
-    mut conflicts: Set<Int>
-) {
-    match (check_ty, reg_ty) {
-        (Type::TypeVar { id: check_id, .. }, _) => {
-            record_var_mapping(check_id, reg_ty, mapping, conflicts)
-        },
-        (Type::FnType { params: cp, return_type: cr, effects: ce },
-         Type::FnType { params: rp, return_type: rr, effects: re }) => {
-            let mut i = 0
-            for c in cp {
-                match rp.get(i) {
-                    some(r) => build_var_mapping(c, r, mapping, conflicts),
-                    none => {}
-                }
-                i = i + 1
-            }
-            build_var_mapping(cr, rr, mapping, conflicts)
-            build_effect_var_mapping(ce, re, mapping, conflicts)
-        },
-        (Type::StructType { name: cn, type_params: ct },
-         Type::StructType { name: rn, type_params: rt }) => {
-            if cn == rn && ct.len() == rt.len() {
-                let mut i = 0
-                for c in ct {
-                    match rt.get(i) {
-                        some(r) => build_var_mapping(c, r, mapping, conflicts),
-                        none => {}
-                    }
-                    i = i + 1
-                }
-            }
-        },
-        (Type::EnumType { name: cn, type_params: ct },
-         Type::EnumType { name: rn, type_params: rt }) => {
-            if cn == rn && ct.len() == rt.len() {
-                let mut i = 0
-                for c in ct {
-                    match rt.get(i) {
-                        some(r) => build_var_mapping(c, r, mapping, conflicts),
-                        none => {}
-                    }
-                    i = i + 1
-                }
-            }
-        },
-        (Type::TupleType { elements: ce }, Type::TupleType { elements: re }) => {
-            if ce.len() == re.len() {
-                let mut i = 0
-                for c in ce {
-                    match re.get(i) {
-                        some(r) => build_var_mapping(c, r, mapping, conflicts),
-                        none => {}
-                    }
-                    i = i + 1
-                }
-            }
-        },
-        (Type::GenericType { base: cb, args: ca },
-         Type::GenericType { base: rb, args: ra }) => {
-            if ca.len() == ra.len() {
-                build_var_mapping(cb, rb, mapping, conflicts)
-                let mut i = 0
-                for c in ca {
-                    match ra.get(i) {
-                        some(r) => build_var_mapping(c, r, mapping, conflicts),
-                        none => {}
-                    }
-                    i = i + 1
-                }
-            }
-        },
-        (Type::RecordType { fields: cf, tail: ct, .. },
-         Type::RecordType { fields: rf, tail: rt, .. }) => {
-            // Common named fields remain reliable even when an open
-            // registration row has expanded with additional checked fields.
-            // Skipping them would hide owner conflicts nested in those fields.
-            for check_field in cf {
-                for reg_field in rf {
-                    if check_field.name == reg_field.name {
-                        build_var_mapping(
-                            check_field.ty, reg_field.ty, mapping, conflicts
-                        )
-                    }
-                }
-            }
-
-            // Tail identity is only reliable when both visible field sets are
-            // exactly the same. Extra/missing fields may have been absorbed by
-            // an open row and change what the tail denotes.
-            let mut same_fields = cf.len() == rf.len()
-            for reg_field in rf {
-                let mut found = false
-                for check_field in cf {
-                    if check_field.name == reg_field.name { found = true }
-                }
-                if !found { same_fields = false }
-            }
-            if same_fields {
-                match (ct, rt) {
-                    (some(check_tail), some(reg_tail)) => {
-                        record_var_mapping(
-                            check_tail,
-                            Type::TypeVar { id: reg_tail, name: none },
-                            mapping,
-                            conflicts
-                        )
-                    },
-                    _ => {}
-                }
-            }
-        },
-        (Type::PtrType { pointee: cp }, Type::PtrType { pointee: rp }) =>
-            build_var_mapping(cp, rp, mapping, conflicts),
-        _ => {}
-    }
-}
-
-fn build_effect_var_mapping(
-    check_row: EffectRow,
-    reg_row: EffectRow,
-    mut mapping: Map<Int, Type>,
-    mut conflicts: Set<Int>
-) {
-    match (check_row.tail, reg_row.tail) {
-        (some(check_tail), some(reg_tail)) => {
-            record_var_mapping(
-                check_tail,
-                Type::TypeVar { id: reg_tail, name: none },
-                mapping,
-                conflicts
-            )
-        },
-        _ => {},
-    }
-
-    for check_eff in check_row.effects {
-        for reg_eff in reg_row.effects {
-            if effects_match_kind(check_eff, reg_eff) {
-                match (check_eff, reg_eff) {
-                    (Effect::FailEffect { error_type: ct }, Effect::FailEffect { error_type: rt }) =>
-                        build_var_mapping(ct, rt, mapping, conflicts),
-                    (Effect::MutEffect { state_type: ct }, Effect::MutEffect { state_type: rt }) =>
-                        build_var_mapping(ct, rt, mapping, conflicts),
-                    (Effect::CustomEffect { type_args: ca, .. }, Effect::CustomEffect { type_args: ra, .. }) => {
-                        let mut i = 0
-                        while i < ca.len() && i < ra.len() {
-                            match (ca.get(i), ra.get(i)) {
-                                (some(ct), some(rt)) =>
-                                    build_var_mapping(ct, rt, mapping, conflicts),
-                                _ => {},
-                            }
-                            i = i + 1
-                        }
-                    },
-                    _ => {},
-                }
-            }
-        }
-    }
-}
-
 pub fn check(mut ctx: InferCtx, program: Program) -> HProgram {
     register_decls_two_phase(ctx, program.decls)
     let file_key = single_namespace_file_key(program)
@@ -5698,72 +4997,68 @@ fn check_registered_body(
     let call_graph = build_call_graph(program.decls, registered_fns)
     let scc_groups = tarjan_scc(call_graph)
 
-    // Build lookup before the inline pre-pass. Besides driving Phase 2b, this
-    // distinguishes top-level SCC nodes that are already checked exactly once
-    // below from inline nodes that need module-context prechecking.
     let mut fn_name_to_idx: Map<Str, Int> = map_new()
-    let mut impl_node_to_idx: Map<Str, Int> = map_new()
-    let mut idx = 0
-    for decl in program.decls {
-        match decl {
-            Decl::Fn { name, .. } => {
-                fn_name_to_idx.insert(name, idx)
-            },
-            Decl::Impl { target_type, trait_name, .. } => {
-                let inode = match trait_name {
-                    some(tn) => "impl::${target_type}::${tn}",
-                    none => "impl::${target_type}"
-                }
-                impl_node_to_idx.insert(inode, idx)
-            },
+    for index in 0..program.decls.len() {
+        match program.decls.get(index).unwrap() {
+            Decl::Fn { name, .. } => fn_name_to_idx.insert(name, index),
             _ => {}
         }
-        idx = idx + 1
     }
 
-    // Inline functions are emitted inside HDecl::ModBlock and therefore have
-    // no direct program.decls index for Phase 2b below. Starting from those
-    // nodes, follow caller -> callee edges and pre-check only that dependency
-    // closure leaf-first. This includes file-root callees reached via super::,
-    // while ordinary file modules with no inline functions do no extra work.
-    let mut impl_fn_names: Set<Str> = set_new()
-    collect_impl_scc_fn_names(program.decls, none, impl_fn_names)
-    let mut inline_roots: Set<Str> = set_new()
-    for name in registered_fns {
-        if !fn_name_to_idx.contains_key(name) && !impl_fn_names.contains(name) {
-            inline_roots.insert(name)
-        }
+    let mut impl_roots: Set<Str> = set_new()
+    for node in call_graph.keys() {
+        if node.starts_with("impl::") { impl_roots.insert(node) }
     }
-    let precheck_nodes = inline_dependency_closure(call_graph, inline_roots, impl_fn_names)
-
-    // Method calls are not ordinary value-call graph edges. Close every exact
-    // impl once before any recursive value group is constrained, then retain
-    // its HIR/delegate expansion for insertion at the original emission site.
-    // This replaces the retired double-check effect pre-pass with one owner.
+    let impl_dependencies = value_dependency_closure(
+        call_graph, impl_roots)
     let mut cached_impls: List<CachedImplClose> = []
-    prepare_impl_close_cache(ctx, program.decls, cached_impls)
+    let mut cached_values: List<CachedValueClose> = []
+    let mut finalized_values: Set<Str> = set_new()
 
-    for scc_group in scc_groups {
-        if scc_group_is_recursive(scc_group, call_graph) {
-            close_recursive_value_group(
-                ctx, program.decls, scc_group,
-                fn_name_to_idx, impl_fn_names)
-        } else {
-            for name in scc_group {
-                if precheck_nodes.contains(name) {
-                    match fn_name_to_idx.get(name) {
-                        some(i) => precheck_top_level_fn_at(
-                            ctx, program.decls, i),
-                        none => {
-                            let _ = precheck_inline_fn(
-                                ctx, program.decls, name)
-                        }
-                    }
+    // Exact value dependencies of impl bodies close leaf-first first. Method
+    // calls have no resolver-safe AST edge, so all remaining values wait until
+    // the retained impl cache is complete.
+    for group in scc_groups {
+        let mut needed = false
+        for name in group {
+            if !name.starts_with("impl::") &&
+               impl_dependencies.contains(name) {
+                needed = true
+            }
+        }
+        if needed {
+            infer_and_commit_value_draft_group(
+                ctx, program.decls, group, fn_name_to_idx,
+                scc_group_is_recursive(group, call_graph), cached_values)
+            for name in group {
+                if !name.starts_with("impl::") {
+                    finalized_values.insert(name)
                 }
             }
         }
     }
 
+    prepare_impl_close_cache(ctx, program.decls, cached_impls)
+
+    for group in scc_groups {
+        let mut pending = false
+        for name in group {
+            if !name.starts_with("impl::") &&
+               !finalized_values.contains(name) {
+                pending = true
+            }
+        }
+        if pending {
+            infer_and_commit_value_draft_group(
+                ctx, program.decls, group, fn_name_to_idx,
+                scc_group_is_recursive(group, call_graph), cached_values)
+            for name in group {
+                if !name.starts_with("impl::") {
+                    finalized_values.insert(name)
+                }
+            }
+        }
+    }
     let mut hdecls: List<HDecl> = []
     let mut checked: Set<Int> = set_new()
 
@@ -5776,9 +5071,9 @@ fn check_registered_body(
             Decl::Fn { .. } => {},
             Decl::Impl { .. } => {},
             _ => {
-                let result = some(check_one_decl_with_rebind(
+                let result = some(emit_checked_decl(
                     ctx, decl, some(di), hdecls,
-                    cached_impls)) catch { _ => none }
+                    cached_impls, cached_values)) catch { _ => none }
                 checked.insert(di)
             }
         }
@@ -5807,10 +5102,7 @@ fn check_registered_body(
         ii = ii + 1
     }
 
-    // Phase 2b: Check top-level fn declarations in SCC topological order.
-    // tarjan_scc returns SCCs with leaf dependencies first (reverse topo),
-    // so callees are checked before callers. After each check, rebinding
-    // makes the resolved return type visible to subsequent callers.
+    // Phase 2b: emit each already-finalized top-level function exactly once.
     for scc_group in scc_groups {
         for name in scc_group {
             match fn_name_to_idx.get(name) {
@@ -5818,9 +5110,15 @@ fn check_registered_body(
                     if !checked.contains(i) {
                         match program.decls.get(i) {
                             some(decl) => {
-                                let result = some(check_one_decl_with_rebind(
-                                    ctx, decl, some(i), hdecls,
-                                    cached_impls)) catch { _ => none }
+                                let _ = decl
+                                let executable = value_callable_executable(
+                                    ctx, name)
+                                let hdecl = cached_value_declaration(
+                                    cached_values, executable).unwrap_or_else(
+                                        fn() {
+                                    panic("top-level HIR cache: final function is absent")
+                                })
+                                hdecls.push(hdecl)
                                 checked.insert(i)
                             },
                             none => {}
@@ -5837,9 +5135,9 @@ fn check_registered_body(
     let mut ri = 0
     for decl in program.decls {
         if !checked.contains(ri) {
-            let result = some(check_one_decl_with_rebind(
+            let result = some(emit_checked_decl(
                 ctx, decl, some(ri), hdecls,
-                cached_impls)) catch { _ => none }
+                cached_impls, cached_values)) catch { _ => none }
         }
         ri = ri + 1
     }
@@ -5884,7 +5182,7 @@ pub fn check_prelude_decl(
         none => {}
     }
     let result = some(check_decl(
-        ctx, decl, some(decl_index), [])) catch { _ => {
+        ctx, decl, some(decl_index), [], [])) catch { _ => {
         exit_impl_check_frame(ctx)
         fail.raise(CompileError {})
     } }
