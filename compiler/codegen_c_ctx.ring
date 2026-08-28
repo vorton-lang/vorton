@@ -50,11 +50,10 @@ pub struct CEnumInfo {
     pub max_fields: Int
 }
 
-// One enclosing handle/try scope. A return must pop its catch frame and drop
-// each owned child EffectCtx before leaving the C stack frame.
+// One enclosing handle/try scope. Resource cleanup is explicit RcHIR; this
+// stack only tracks control frames that an early return must pop.
 pub struct CHandleCleanup {
-    pub needs_catch_pop: Bool,
-    pub owned_ctx_vars: List<Str>
+    pub needs_catch_pop: Bool
 }
 
 // H+T final-emission authority. Exact and backend name-only registrations

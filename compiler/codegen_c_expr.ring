@@ -2454,9 +2454,8 @@ fn rt_use_catch_fns(mut ctx: CCtx) {
     rt_use(ctx, "ring_catch_pop", 0)
 }
 
-// #173/#193: walk the enclosing handle/try scopes innermost-first, popping
-// catch frames and dropping handler evidence — a `return` inside a body must
-// not skip the normal-path epilogue.  Port of emit_return's cleanup walk.
+// #173/#193: walk enclosing control scopes innermost-first and pop catch
+// frames. All resource cleanup, including EffectCtx, is explicit RcHIR.
 fn emit_c_cleanup_walk(mut ctx: CCtx) {
     let n = ctx.handle_cleanup_stack.len()
     for i in 0..n {
@@ -2465,10 +2464,6 @@ fn emit_c_cleanup_walk(mut ctx: CCtx) {
                 if cleanup.needs_catch_pop {
                     rt_use(ctx, "ring_catch_pop", 0)
                     c_emit(ctx, "ring_catch_pop();")
-                }
-                for owned_ctx in cleanup.owned_ctx_vars {
-                    rt_use(ctx, "ring_drop", 1)
-                    c_emit(ctx, "ring_drop(${owned_ctx});")
                 }
             },
             none => {},
@@ -2495,7 +2490,7 @@ fn gen_c_try_catch(mut ctx: CCtx, body: HExpr, arms: List<HMatchArm>) -> Str {
     // --- normal path: body inline, pop frame ---
     // #173: a `return` inside the body must pop this catch frame.
     ctx.handle_cleanup_stack.push(CHandleCleanup {
-        needs_catch_pop: true, owned_ctx_vars: [] })
+        needs_catch_pop: true })
     let body_val = gen_c_expr(ctx, body)
     let _popped = ctx.handle_cleanup_stack.pop()
     c_emit(ctx, "${res} = ${body_val};")
@@ -2526,13 +2521,6 @@ fn gen_c_try_catch(mut ctx: CCtx, body: HExpr, arms: List<HMatchArm>) -> Str {
     res
 }
 
-fn emit_c_owned_ctx_drops(mut ctx: CCtx, owned_ctx_vars: List<Str>) {
-    for owned_ctx in owned_ctx_vars {
-        rt_use(ctx, "ring_drop", 1)
-        c_emit(ctx, "ring_drop(${owned_ctx});")
-    }
-}
-
 // Handle expression. Each custom handle builds owned evidence objects, then
 // transfers them into one owned child overlay keyed by Core/Rc-issued tokens.
 fn gen_c_handle_expr(
@@ -2552,7 +2540,6 @@ fn gen_c_handle_expr(
     }
 
     let has_fail_abort = abort_handler.is_some()
-    let mut owned_ctx_vars: List<Str> = []
     match effect_ctx_install {
         some(install) => {
             if !has_custom_handler {
@@ -2618,7 +2605,6 @@ fn gen_c_handle_expr(
                 "EffectCtx* ring_effect_ctx_overlay(EffectCtx* parent, int64_t entry_count, const void* const* tokens, void* const* evidence_values);")
             c_emit(ctx,
                 "${child_name} = ring_effect_ctx_overlay(${c_ref_c_name(parent_ref)}, ${entries.len()}, ${token_array}, ${evidence_array});")
-            owned_ctx_vars.push(child_name)
         },
         none => if has_custom_handler {
             panic("C codegen: custom handlers lack EffectCtx install")
@@ -2642,12 +2628,11 @@ fn gen_c_handle_expr(
 
         // --- normal path ---
         ctx.handle_cleanup_stack.push(CHandleCleanup {
-            needs_catch_pop: true, owned_ctx_vars: owned_ctx_vars })
+            needs_catch_pop: true })
         let body_val = gen_c_expr(ctx, body)
         let _popped = ctx.handle_cleanup_stack.pop()
         c_emit(ctx, "${res} = ${body_val};")
         c_emit(ctx, "ring_catch_pop();")
-        emit_c_owned_ctx_drops(ctx, owned_ctx_vars)
         c_emit(ctx, "goto ${merge_lbl};")
 
         // --- catch path: deactivate current handle, then execute abort arm ---
@@ -2655,7 +2640,6 @@ fn gen_c_handle_expr(
         let error_val = fresh_tmp(ctx)
         c_emit(ctx, "${error_val} = ring_catch_get_error(${frame});")
         c_emit(ctx, "ring_catch_pop();")
-        emit_c_owned_ctx_drops(ctx, owned_ctx_vars)
 
         // The operation parameter is a lexical binder. Isolate it from the
         // enclosing map so a same-named outer local is restored at the merge.
@@ -2694,14 +2678,13 @@ fn gen_c_handle_expr(
     } else {
         // No custom install: execute the body with the existing context.
         ctx.handle_cleanup_stack.push(CHandleCleanup {
-            needs_catch_pop: false, owned_ctx_vars: owned_ctx_vars })
+            needs_catch_pop: false })
         let result = gen_c_expr(ctx, body)
         let _popped = ctx.handle_cleanup_stack.pop()
         // The result may be a pure-constant expression — materialise it
-        // before owned handle context cleanup.
+        // before leaving the handle lowering.
         let res = fresh_tmp(ctx)
         c_emit(ctx, "${res} = ${result};")
-        emit_c_owned_ctx_drops(ctx, owned_ctx_vars)
         res
     }
 }
