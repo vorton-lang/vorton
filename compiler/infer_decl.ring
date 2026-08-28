@@ -112,7 +112,8 @@ use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
     begin_recursive_callable_group, end_recursive_callable_group,
     mark_recursive_callable_group_closed,
     owner_batch_checkpoint, rollback_owner_batch, detach_owner_batch,
-    drain_owner_batch_dictionary_group, stage_owner_batch_facts,
+    drain_owner_batch_dictionary_group, drain_owner_batch_dictionaries,
+    stage_owner_batch_facts,
     preflight_owner_batches, publish_owner_batches,
     make_callable_finalization_header, project_owner_batch_receipts,
     begin_infer_mutation_journal, commit_infer_mutation_journal,
@@ -766,7 +767,7 @@ fn publish_final_value_effect_schema(
 }
 
 fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, init: Expr, is_pub: Bool, span: Span) -> HDecl {
-    let obligation_checkpoint = pending_dict_checkpoint(ctx)
+    let batch_checkpoint = owner_batch_checkpoint(ctx)
     let saved_subst = ctx.subst
     ctx.subst = empty_subst()
     // Retrieve the def_id assigned during registration
@@ -786,6 +787,7 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
             _ => none } {
         some(value) => value,
         none => {
+            rollback_owner_batch(ctx, batch_checkpoint)
             exit_executable_owner(ctx)
             ctx.subst = saved_subst
             fail.raise(CompileError {})
@@ -800,14 +802,24 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
         },
         none => {}
     }
-    drain_pending_dicts(ctx, obligation_checkpoint, s)
+    let batch = detach_owner_batch(ctx, batch_checkpoint)
+    let final_batch_unstaged = match some(
+            drain_owner_batch_dictionaries(ctx, batch, s)) catch { _ => none } {
+        some(value) => value,
+        none => {
+            rollback_owner_batch(ctx, batch_checkpoint)
+            exit_executable_owner(ctx)
+            ctx.subst = saved_subst
+            fail.raise(CompileError {})
+        }
+    }
     // A const initializer is a value position.  Resolve its fully unified
     // function-value evidence before restoring the declaration substitution;
     // otherwise a bounded module function reaches codegen without its DictRef.
     let zctx = ZonkCtx {
         subst: s, names: map_new(),
         canonical_type_var_ids: map_new(),
-        dict_resolver: some(ctx)
+        dict_resolver: none
     }
     let resolved = zonk_type(zctx, init_ty)
     let zonked_init = some(zonk_expr(zctx, init_r.hexpr)) catch { _ => none }
@@ -816,7 +828,7 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
         none => {
             // Declaration-level recovery continues checking later declarations.
             // Never leak this const's isolated substitution through that path.
-            rollback_pending_dicts(ctx, obligation_checkpoint)
+            rollback_owner_batch(ctx, batch_checkpoint)
             exit_executable_owner(ctx)
             ctx.subst = saved_subst
             fail.raise(CompileError {})
@@ -837,22 +849,26 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
         params: [], return_type: resolved,
         effects: hexpr_effects(final_init_unremapped)
     }
+    let final_batch = stage_owner_batch_facts(
+        ctx, final_batch_unstaged, const_executable,
+        callable_signature, effect_schema, s, map_new())
     let d1_checkpoint = ctx.sink.save()
     let final_init = finalize_effect_ctx_expr(
-        ctx, FinalEffectCtxAuthority::FinalEffectCtxHeader(effect_schema),
+        ctx, FinalEffectCtxAuthority::FinalEffectCtxOwnerBatch(final_batch),
         final_init_unremapped)
-    let effect_ctx = current_typed_callable_effect_ctx(
-        ctx, hexpr_effects(final_init), effect_schema)
+    let effect_ctx = current_typed_callable_effect_ctx_from_owner_batch(
+        ctx, final_batch, hexpr_effects(final_init))
     check_final_runtime_handled_contract(
         ctx, callable_signature, some(effect_ctx), name, span)
     if diagnostics_since_has_errors(ctx, d1_checkpoint) {
+        rollback_owner_batch(ctx, batch_checkpoint)
         exit_executable_owner(ctx)
         ctx.subst = saved_subst
         fail.raise(CompileError {})
     }
+    preflight_owner_batches(ctx, [final_batch])
     rebind_fn_scheme_with_alias(ctx, name, final_scheme)
-    publish_exact_callable_effect_header(
-        ctx, const_executable, callable_signature, effect_schema)
+    publish_owner_batches(ctx, [final_batch])
     exit_executable_owner(ctx)
     ctx.subst = saved_subst
     HDecl::Const { name: name, def_id: old_def_id,
@@ -3653,8 +3669,8 @@ fn check_trait_default_body(
     method_effects: EffectRow, method_schema: TypedEffectHeaderSchema,
     method_span: Span, body: Expr
 ) -> TraitDefaultBodyResult {
+    let batch_checkpoint = owner_batch_checkpoint(ctx)
     enter_executable_owner(ctx, executable_ref)
-    let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let saved_subst = ctx.subst
     let saved_fn_return = ctx.current_fn_return_type
     ctx.subst = empty_subst()
@@ -3733,6 +3749,7 @@ fn check_trait_default_body(
     }
 
     let body_result = some(infer_block(ctx, body, none)) catch { _ => none }
+    let mut detached_batch: OwnerInferenceBatch? = none
 
     let final_body_unremapped = match body_result {
         some(br) => {
@@ -3771,18 +3788,27 @@ fn check_trait_default_body(
                 ctx, method_identity, br.effects, method_effects,
                 method_span, ctx.subst)
             ctx.subst = constrained_subst
-            drain_pending_dicts(ctx, obligation_checkpoint, ctx.subst)
-            let zctx = ZonkCtx {
-                subst: ctx.subst, names: map_new(),
-                canonical_type_var_ids: map_new(),
-                dict_resolver: some(ctx)
+            let batch = detach_owner_batch(ctx, batch_checkpoint)
+            match some(drain_owner_batch_dictionaries(
+                    ctx, batch, ctx.subst)) catch { _ => none } {
+                some(value) => {
+                    detached_batch = some(value)
+                    let zctx = ZonkCtx {
+                        subst: ctx.subst, names: map_new(),
+                        canonical_type_var_ids: map_new(),
+                        dict_resolver: none
+                    }
+                    some(zonk_block(zctx, br.hexpr))
+                },
+                none => {
+                    rollback_owner_batch(ctx, batch_checkpoint)
+                    ctx.subst = saved_subst
+                    none
+                }
             }
-            let result = some(zonk_block(zctx, br.hexpr))
-            ctx.subst = saved_subst
-            result
         },
         none => {
-            rollback_pending_dicts(ctx, obligation_checkpoint)
+            rollback_owner_batch(ctx, batch_checkpoint)
             ctx.subst = saved_subst
             none
         }
@@ -3794,28 +3820,42 @@ fn check_trait_default_body(
     ctx.current_fn_bounds = match ctx.fn_bounds_stack.pop() { some(prev) => prev, none => [] }
     ctx.type_param_scope = saved_tp_scope
     ctx.qualified_assoc_scope = saved_qualified_assoc
-    assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
+    let final_batch_unstaged = match detached_batch {
+        some(value) => value,
+        none => {
+            exit_executable_owner(ctx)
+            ctx.subst = saved_subst
+            fail.raise(CompileError {})
+        }
+    }
+    let frozen_subst = ctx.subst
     let callable_signature = Type::FnType {
         params: hparams.map(fn(param) { param.ty }),
         return_type: method_return, effects: method_effects
     }
+    let final_batch = stage_owner_batch_facts(
+        ctx, final_batch_unstaged, executable_ref,
+        callable_signature, method_schema, frozen_subst, map_new())
     let d1_checkpoint = ctx.sink.save()
-    let effect_ctx = current_typed_callable_effect_ctx(
-        ctx, method_effects, method_schema)
+    let effect_ctx = current_typed_callable_effect_ctx_from_owner_batch(
+        ctx, final_batch, method_effects)
     let final_body = final_body_unremapped.map(fn(value) {
         finalize_effect_ctx_expr(
-            ctx, FinalEffectCtxAuthority::FinalEffectCtxHeader(method_schema),
+            ctx, FinalEffectCtxAuthority::FinalEffectCtxOwnerBatch(final_batch),
             value)
     })
     check_final_runtime_handled_contract(
         ctx, callable_signature, some(effect_ctx),
         method_identity, method_span)
     if diagnostics_since_has_errors(ctx, d1_checkpoint) {
+        rollback_owner_batch(ctx, batch_checkpoint)
+        ctx.subst = saved_subst
         exit_executable_owner(ctx)
         fail.raise(CompileError {})
     }
-    publish_exact_callable_effect_header(
-        ctx, executable_ref, callable_signature, method_schema)
+    preflight_owner_batches(ctx, [final_batch])
+    publish_owner_batches(ctx, [final_batch])
+    ctx.subst = saved_subst
     exit_executable_owner(ctx)
     TraitDefaultBodyResult {
         body: final_body,
@@ -4498,28 +4538,38 @@ fn check_test_decl(
     decl_index: Int
 ) -> HDecl {
     let test_executable = test_executable_for_site(ctx, decl_index)
+    let batch_checkpoint = owner_batch_checkpoint(ctx)
     enter_executable_owner(ctx, test_executable)
-    let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let saved_subst = ctx.subst
     ctx.subst = empty_subst()
     ctx.env.push_scope()
     let body_result = some(infer_block(ctx, body, none)) catch { _ => none }
+    let mut detached_batch: OwnerInferenceBatch? = none
 
     let final_body_unremapped = match body_result {
         some(br) => {
             ctx.subst = br.subst
-            drain_pending_dicts(ctx, obligation_checkpoint, ctx.subst)
+            let batch = detach_owner_batch(ctx, batch_checkpoint)
+            detached_batch = match some(drain_owner_batch_dictionaries(
+                    ctx, batch, ctx.subst)) catch { _ => none } {
+                some(value) => some(value),
+                none => {
+                    rollback_owner_batch(ctx, batch_checkpoint)
+                    ctx.subst = saved_subst
+                    ctx.env.pop_scope()
+                    exit_executable_owner(ctx)
+                    fail.raise(CompileError {})
+                }
+            }
             let zctx = ZonkCtx {
                 subst: ctx.subst, names: map_new(),
                 canonical_type_var_ids: map_new(),
-                dict_resolver: some(ctx)
+                dict_resolver: none
             }
-            let result = zonk_block(zctx, br.hexpr)
-            ctx.subst = saved_subst
-            result
+            zonk_block(zctx, br.hexpr)
         },
         none => {
-            rollback_pending_dicts(ctx, obligation_checkpoint)
+            rollback_owner_batch(ctx, batch_checkpoint)
             ctx.subst = saved_subst
             // The scope must be restored before re-raising the declaration
             // error; the success path pops once below after value-zonk.
@@ -4529,25 +4579,36 @@ fn check_test_decl(
         }
     }
     ctx.env.pop_scope()
+    let final_batch_unstaged = match detached_batch {
+        some(value) => value,
+        none => panic("test owner batch: detached batch is absent")
+    }
+    let frozen_subst = ctx.subst
     let effect_schema = empty_typed_effect_header_schema()
     let callable_signature = Type::FnType {
         params: [], return_type: hexpr_type(final_body_unremapped),
         effects: hexpr_effects(final_body_unremapped)
     }
+    let final_batch = stage_owner_batch_facts(
+        ctx, final_batch_unstaged, test_executable,
+        callable_signature, effect_schema, frozen_subst, map_new())
     let d1_checkpoint = ctx.sink.save()
     let final_body = finalize_effect_ctx_expr(
-        ctx, FinalEffectCtxAuthority::FinalEffectCtxHeader(
-            effect_schema), final_body_unremapped)
-    let effect_ctx = current_typed_callable_effect_ctx(
-        ctx, hexpr_effects(final_body), effect_schema)
+        ctx, FinalEffectCtxAuthority::FinalEffectCtxOwnerBatch(final_batch),
+        final_body_unremapped)
+    let effect_ctx = current_typed_callable_effect_ctx_from_owner_batch(
+        ctx, final_batch, hexpr_effects(final_body))
     check_final_runtime_handled_contract(
         ctx, callable_signature, some(effect_ctx), "test", span)
     if diagnostics_since_has_errors(ctx, d1_checkpoint) {
+        rollback_owner_batch(ctx, batch_checkpoint)
+        ctx.subst = saved_subst
         exit_executable_owner(ctx)
         fail.raise(CompileError {})
     }
-    publish_exact_callable_effect_header(
-        ctx, test_executable, callable_signature, effect_schema)
+    preflight_owner_batches(ctx, [final_batch])
+    publish_owner_batches(ctx, [final_batch])
+    ctx.subst = saved_subst
     exit_executable_owner(ctx)
 
     HDecl::Test { description: description,

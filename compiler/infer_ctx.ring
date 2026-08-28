@@ -876,25 +876,10 @@ pub fn drain_representable_pending_anonymous(
         panic("anonymous callable header: invalid selective checkpoint")
     }
     publish_effect_header_schema(ctx.env, owner_schema)
-    let mut unmatched: List<PendingAnonymousCallableHeader> = []
-    let mut index = checkpoint
-    while index < ctx.pending_anonymous_callable_headers.len() {
-        let pending = ctx.pending_anonymous_callable_headers.get(
-            index).unwrap()
-        let signature = apply_subst(final_subst, pending.signature)
-        match try_project_existing_effect_header_schema(
-                ctx.env, signature) {
-            some(schema) => publish_exact_callable_effect_header(
-                ctx, pending.executable, signature, schema),
-            none => unmatched.push(pending)
-        }
-        index = index + 1
-    }
-    ctx.pending_anonymous_callable_headers =
-        ctx.pending_anonymous_callable_headers.slice(0, checkpoint)
-    for pending in unmatched {
-        ctx.pending_anonymous_callable_headers.push(pending)
-    }
+    let _ = final_subst
+    // Per-statement drain publishes only the owner's already-selected formal
+    // schema. Anonymous callable headers stay pending until the enclosing
+    // executable's frozen-subst OwnerInferenceBatch stages them atomically.
 }
 
 pub struct CallableInstantiationReceipt {

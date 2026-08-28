@@ -2,6 +2,19 @@ effect GenericProbe<T> {
     fn read() -> T
 }
 
+test "test owner closes a later-constrained monomorphic callback" {
+    let mut callback = fn() {
+        GenericProbe.read()
+    }
+    let value: Int = handle {
+        callback()
+    } with {
+        GenericProbe.read() => 40,
+    }
+    assert(value == 40,
+        "test owner finalization closes its anonymous callback")
+}
+
 fn main() {
     // `let mut` remains monomorphic. The closure's result/effect instance is
     // closed by a later statement in this same owner, not at let-statement end.

@@ -545,7 +545,8 @@
       "path": "single/d_late_constrained_mono_closure.ring",
       "covers": [
         "provisional anonymous drain does not finalize a same-owner monomorphic token",
-        "a later handle/result annotation closes the callback instance before A1 finalization"
+        "a later handle/result annotation closes the callback instance before A1 finalization",
+        "test executable OwnerInferenceBatch closes the same later-constrained callback shape"
       ],
       "expected": {
         "phase": "native",
