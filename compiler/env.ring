@@ -937,6 +937,13 @@ pub struct TypeEnv {
     callable_effect_facts: List<TypedCallableEffectFact>
 }
 
+// Exact append-only registry position used by discarded inference passes.
+// The payload is intentionally only two lengths, never a fact snapshot.
+pub struct EffectFactCheckpoint {
+    effect_formal_len: Int,
+    callable_effect_len: Int
+}
+
 // ============================================================
 // Constructor + helpers
 // ============================================================
@@ -2627,6 +2634,26 @@ fn append_effect_formal_fact(
         none => env.effect_formal_facts.push(
             make_typed_effect_formal_fact(raw_tail, parameter))
     }
+}
+
+pub fn effect_fact_checkpoint(env: TypeEnv) -> EffectFactCheckpoint {
+    EffectFactCheckpoint {
+        effect_formal_len: env.effect_formal_facts.len(),
+        callable_effect_len: env.callable_effect_facts.len()
+    }
+}
+
+pub fn rollback_effect_facts(
+    mut env: TypeEnv, checkpoint: EffectFactCheckpoint
+) {
+    if env.effect_formal_facts.len() < checkpoint.effect_formal_len ||
+       env.callable_effect_facts.len() < checkpoint.callable_effect_len {
+        panic("effect fact rollback: checkpoint exceeds current registry")
+    }
+    env.effect_formal_facts = env.effect_formal_facts.slice(
+        0, checkpoint.effect_formal_len)
+    env.callable_effect_facts = env.callable_effect_facts.slice(
+        0, checkpoint.callable_effect_len)
 }
 
 // Append-only module-local bridge derived from an already authoritative

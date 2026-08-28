@@ -22,12 +22,14 @@ use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink,
 use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
 use union_find::{UnionFind, new_union_find, uf_find}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
+    EffectFactCheckpoint,
     StructDef, EnumDef, TypeAliasDef, EffectDef, EffectAliasDef, TraitDef,
     ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
     new_type_env, mono,
     apply_subst, apply_subst_row, apply_subst_map,
     instantiate_effect_header_schema,
     define_effect_header_schema, publish_effect_header_schema,
+    effect_fact_checkpoint, rollback_effect_facts,
     register_callable_effect_header,
     instantiate_type_alias_schema, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
@@ -478,6 +480,18 @@ pub fn recursive_callable_is_closed(
     ctx: InferCtx, executable: ExecutableRef
 ) -> Bool {
     recursive_callable_list_contains(ctx.closed_recursive_callables, executable)
+}
+
+pub fn recursive_effect_fact_checkpoint(
+    ctx: InferCtx
+) -> EffectFactCheckpoint {
+    effect_fact_checkpoint(ctx.env)
+}
+
+pub fn rollback_recursive_effect_facts(
+    mut ctx: InferCtx, checkpoint: EffectFactCheckpoint
+) {
+    rollback_effect_facts(ctx.env, checkpoint)
 }
 
 fn install_monomorphic_scheme_bounds(
