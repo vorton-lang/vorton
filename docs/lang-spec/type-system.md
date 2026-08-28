@@ -119,6 +119,8 @@ generalize(τ, Γ):
 
 自递归和互递归函数/方法按调用图的强连通分量组成递归绑定组。组内成员在推断期间使用同一批 monomorphic provisional variables：引用自己或 peer 时复用该草稿类型，不执行普通多态实例化。整组 body 约束全部求解后，编译器才相对组外环境对每个成员 final-zonk 与 generalize，并原子发布全组 type scheme；任一成员失败时不得留下部分更新。
 
+每个成员的 body 只推断一次。推断结果以尚未 final-zonk 的内部 draft 保留；dictionary/evidence选择、类型替换与最终HIR生成均等到整组约束闭合后执行一次。编译器不得为生成最终HIR重新推断同一body，也不得把未完成的推断状态带入TypedHIR或CoreHIR。
+
 该规则同样适用于顶层函数、inline module 函数和 impl methods。普通泛型递归合法，只要递归环内保持同一类型参数关系：
 
 ```ring
@@ -143,6 +145,8 @@ instantiate(∀α₁..αₙ. τ [bounds]):
 ```
 
 上述实例化只适用于已经闭合并发布的 type scheme。递归组的 provisional scheme 以及尚未完成 final-zonk/generalize 的 callable 不得走该规则。
+
+一次实例化的 `mapping` 是唯一替换真值：普通类型实参、effect参数实例和trait dictionary/evidence选择必须使用同一份结果。它们不得分别从最终类型结构重新推导替换关系。
 
 每个使用点获得 fresh 类型变量，实现多态复用。
 
