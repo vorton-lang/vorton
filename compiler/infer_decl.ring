@@ -38,6 +38,7 @@ use ir_identity::{SymbolRef, NominalFieldRef, HandledEffectRef,
 use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
     HandledEvidenceCapture, handled_evidence_requirement,
     handled_evidence_capture_requirement,
+    handled_evidence_capture_source, handled_evidence_ref_same,
     make_exact_static_dict_ref,
     CallableResourceContractFact, CallableResourceRoleFact,
     make_callable_resource_contract_fact,
@@ -98,6 +99,7 @@ use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
     install_handled_evidence, uninstall_handled_evidence,
     prepare_callable_handled_evidence,
     canonicalize_callable_handled_evidence,
+    canonicalize_callable_handled_evidence_closure,
     current_identity_file_key, semantic_parameter_binder,
     executable_effect_origin, publish_exact_callable_effect_header,
     begin_recursive_callable_group, end_recursive_callable_group,
@@ -111,17 +113,15 @@ use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
     journal_boxed_var_insert, journal_var_lambda_depth_set,
     journal_record_def_span, journal_mutable_var_insert,
     journal_let_def_insert, journal_mut_param_def_insert,
-    journal_fn_mut_params_set,
-    journal_rebind_assoc_provenance_set}
-use infer_helpers::{is_value_type}
+    journal_fn_mut_params_set}
+use infer_helpers::{is_value_type, finalize_value_ident_no_solve}
 use resolver::{single_namespace_file_key}
 use infer_register::{register_decls_two_phase, register_module_decls_two_phase,
     resolve_declared_effects, prefix_decl_name, insert_mod_aliases,
     collect_all_supertraits, inject_assoc_types_from_bounds,
     impl_owner_fn_bounds,
     resolve_trait_identity, resolve_nominal_identity}
-use infer::{infer_block, infer_expr,
-    register_bounded_callable_value_shadows}
+use infer::{infer_block, infer_expr}
 use zonk::{ZonkCtx, zonk_type, zonk_row, zonk_param, zonk_block, zonk_expr}
 use derive::{run_derive_pass}
 use scc::{build_call_graph, tarjan_scc, collect_registered_fn_names, collect_self_method_callees}
@@ -133,7 +133,6 @@ struct FnValidationContext {
 
 struct FnDraft {
     name: Str,
-    provenance_key: Str,
     executable: ExecutableRef,
     impl_method_ref: ImplMethodRef?,
     registration_scheme: TypeScheme,
@@ -802,10 +801,6 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
         },
         none => {}
     }
-    // Annotation constraints are final for this const owner.  Callable-value
-    // shadows join the same assoc fixed point without publishing DictRefs.
-    register_bounded_callable_value_shadows(
-        ctx, init_r.hexpr, s)
     drain_pending_dicts(ctx, obligation_checkpoint, s)
     // A const initializer is a value position.  Resolve its fully unified
     // function-value evidence before restoring the declaration substitution;
@@ -1281,62 +1276,97 @@ fn seed_final_handled_evidence(
     remap_hir_handled_evidence(body, sources, targets)
 }
 
+fn append_child_capture_requirements(
+    ctx: InferCtx, captures: List<HandledEvidenceCapture>,
+    mut requirements: List<HandledEffectRef>
+) {
+    let bindings = current_handled_evidence_bindings(ctx)
+    for capture in captures {
+        let source = handled_evidence_capture_source(capture)
+        if bindings.any(fn(binding) {
+                handled_evidence_ref_same(binding, source)
+            }) {
+            let requirement = handled_evidence_requirement(source)
+            if !requirements.any(fn(existing) {
+                    handled_effect_ref_same(existing, requirement)
+                }) {
+                requirements.push(requirement)
+            }
+        }
+    }
+}
+
 fn finalize_evidence_match_arms(
-    mut ctx: InferCtx, values: List<HMatchArm>
+    mut ctx: InferCtx, values: List<HMatchArm>,
+    mut child_requirements: List<HandledEffectRef>
 ) -> List<HMatchArm> {
     values.map(fn(value) { HMatchArm {
         pattern: value.pattern, pattern_plan: value.pattern_plan,
         bindings: value.bindings,
         guard: value.guard.map(fn(expr) {
-            finalize_evidence_expr(ctx, expr)
+            finalize_evidence_expr(ctx, expr, child_requirements)
         }),
-        body: finalize_evidence_expr(ctx, value.body),
+        body: finalize_evidence_expr(
+            ctx, value.body, child_requirements),
         span: value.span
     } })
 }
 
 fn finalize_evidence_captures(
-    mut ctx: InferCtx, values: List<HLambdaCapture>
+    mut ctx: InferCtx, values: List<HLambdaCapture>,
+    mut child_requirements: List<HandledEffectRef>
 ) -> List<HLambdaCapture> {
     values.map(fn(value) { HLambdaCapture {
         source: value.source, target: value.target,
         value: value.value.map(fn(expr) {
-            finalize_evidence_expr(ctx, expr)
+            finalize_evidence_expr(ctx, expr, child_requirements)
         }),
         resource_site: value.resource_site
     } })
 }
 
-fn finalize_evidence_stmt(mut ctx: InferCtx, value: HStmt) -> HStmt {
+fn finalize_evidence_stmt(
+    mut ctx: InferCtx, value: HStmt,
+    mut child_requirements: List<HandledEffectRef>
+) -> HStmt {
     match value {
         HStmt::Let { name, name_span, def_id, ty, init, span } =>
             HStmt::Let { name: name, name_span: name_span,
                 def_id: def_id, ty: ty,
-                init: finalize_evidence_expr(ctx, init), span: span },
+                init: finalize_evidence_expr(
+                    ctx, init, child_requirements), span: span },
         HStmt::Var { name, name_span, def_id, ty, init, span } =>
             HStmt::Var { name: name, name_span: name_span,
                 def_id: def_id, ty: ty,
-                init: finalize_evidence_expr(ctx, init), span: span },
+                init: finalize_evidence_expr(
+                    ctx, init, child_requirements), span: span },
         HStmt::Assign { target, value, span } => HStmt::Assign {
-            target: finalize_evidence_expr(ctx, target),
-            value: finalize_evidence_expr(ctx, value), span: span },
+            target: finalize_evidence_expr(
+                ctx, target, child_requirements),
+            value: finalize_evidence_expr(
+                ctx, value, child_requirements), span: span },
         HStmt::ExprStmt { expr, span } => HStmt::ExprStmt {
-            expr: finalize_evidence_expr(ctx, expr), span: span },
+            expr: finalize_evidence_expr(
+                ctx, expr, child_requirements), span: span },
         HStmt::Return { value, span } => HStmt::Return {
             value: value.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr)
+                finalize_evidence_expr(ctx, expr, child_requirements)
             }), span: span },
         HStmt::While { condition, body, span } => HStmt::While {
-            condition: finalize_evidence_expr(ctx, condition),
-            body: finalize_evidence_expr(ctx, body), span: span },
+            condition: finalize_evidence_expr(
+                ctx, condition, child_requirements),
+            body: finalize_evidence_expr(
+                ctx, body, child_requirements), span: span },
         HStmt::ForIn {
             binding, binding_span, def_id, destructure, plan,
             iterable, body, iterable_type_name, iter_type_name, span
         } => HStmt::ForIn {
             binding: binding, binding_span: binding_span,
             def_id: def_id, destructure: destructure, plan: plan,
-            iterable: finalize_evidence_expr(ctx, iterable),
-            body: finalize_evidence_expr(ctx, body),
+            iterable: finalize_evidence_expr(
+                ctx, iterable, child_requirements),
+            body: finalize_evidence_expr(
+                ctx, body, child_requirements),
             iterable_type_name: iterable_type_name,
             iter_type_name: iter_type_name, span: span },
         HStmt::Break { span } => HStmt::Break { span: span },
@@ -1346,23 +1376,27 @@ fn finalize_evidence_stmt(mut ctx: InferCtx, value: HStmt) -> HStmt {
         } => HStmt::LetDestructure {
             pattern: pattern, pattern_plan: pattern_plan,
             bindings: bindings,
-            init: finalize_evidence_expr(ctx, init), span: span },
+            init: finalize_evidence_expr(
+                ctx, init, child_requirements), span: span },
         HStmt::IfLet {
             pattern, pattern_plan, bindings, expr,
             then_block, else_block, span
         } => HStmt::IfLet {
             pattern: pattern, pattern_plan: pattern_plan,
             bindings: bindings,
-            expr: finalize_evidence_expr(ctx, expr),
-            then_block: finalize_evidence_expr(ctx, then_block),
+            expr: finalize_evidence_expr(
+                ctx, expr, child_requirements),
+            then_block: finalize_evidence_expr(
+                ctx, then_block, child_requirements),
             else_block: else_block.map(fn(branch) {
-                finalize_evidence_expr(ctx, branch)
+                finalize_evidence_expr(
+                    ctx, branch, child_requirements)
             }), span: span },
         HStmt::Drop {
             name, def_id, slot, place_target, site, reason, ty, span
         } => HStmt::Drop { name: name, def_id: def_id, slot: slot,
             place_target: place_target.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr)
+                finalize_evidence_expr(ctx, expr, child_requirements)
             }), site: site, reason: reason, ty: ty, span: span }
     }
 }
@@ -1379,30 +1413,40 @@ fn finalize_nested_evidence_owner(
     final_effects: EffectRow, body: HExpr
 ) -> NestedDraftEvidence {
     enter_executable_owner(ctx, executable)
-    let seeded = seed_final_handled_evidence(
-        ctx, raw_bindings, final_effects, body)
-    let finalized = finalize_evidence_expr(ctx, seeded)
-    let remap = canonicalize_callable_handled_evidence(
-        ctx, final_effects)
-    let body = remap_hir_handled_evidence(
-        finalized, remap.0, remap.1)
-    let result = NestedDraftEvidence {
-        body: body,
-        bindings: current_handled_evidence_bindings(ctx),
-        captures: current_handled_evidence_captures(ctx)
-    }
+    let result = some({
+        let child_requirements: List<HandledEffectRef> = []
+        let seeded = seed_final_handled_evidence(
+            ctx, raw_bindings, final_effects, body)
+        let finalized = finalize_evidence_expr(
+            ctx, seeded, child_requirements)
+        let remap = canonicalize_callable_handled_evidence_closure(
+            ctx, final_effects, child_requirements)
+        NestedDraftEvidence {
+            body: remap_hir_handled_evidence(
+                finalized, remap.0, remap.1),
+            bindings: current_handled_evidence_bindings(ctx),
+            captures: current_handled_evidence_captures(ctx)
+        }
+    }) catch { _ => none }
     exit_executable_owner(ctx)
-    result
+    match result {
+        some(value) => value,
+        none => fail.raise(CompileError {})
+    }
 }
 
 fn finalize_evidence_handler(
-    mut ctx: InferCtx, handler: HEffectHandler
+    mut ctx: InferCtx, handler: HEffectHandler,
+    mut child_requirements: List<HandledEffectRef>
 ) -> HEffectHandler {
-    let captures = finalize_evidence_captures(ctx, handler.captures)
+    let captures = finalize_evidence_captures(
+        ctx, handler.captures, child_requirements)
     let finalized = finalize_nested_evidence_owner(
         ctx, handler.executable_ref,
         handler.handled_evidence_bindings,
         hexpr_effects(handler.body), handler.body)
+    append_child_capture_requirements(
+        ctx, finalized.captures, child_requirements)
     HEffectHandler {
         effect_name: handler.effect_name,
         handled_ref: handler.handled_ref,
@@ -1418,20 +1462,24 @@ fn finalize_evidence_handler(
     }
 }
 
-fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
+fn finalize_evidence_expr(
+    mut ctx: InferCtx, value: HExpr,
+    mut child_requirements: List<HandledEffectRef>
+) -> HExpr {
     match value {
         HExpr::Call {
             callee, args, type_args, effect_instantiation,
             resolved_dicts, handled_evidence: _, callee_ref,
             method_ref, system_host, ty, effects, span
         } => {
-            let callee = finalize_evidence_expr(ctx, callee)
+            let callee = finalize_evidence_expr(
+                ctx, callee, child_requirements)
             HExpr::Call {
                 handled_evidence: final_handled_evidence_for_callable(
                     ctx, hexpr_type(callee)),
                 callee: callee,
                 args: args.map(fn(arg) {
-                    finalize_evidence_expr(ctx, arg)
+                    finalize_evidence_expr(ctx, arg, child_requirements)
                 }),
                 type_args: type_args,
                 effect_instantiation: effect_instantiation,
@@ -1453,7 +1501,7 @@ fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
                 none => []
             },
             args: args.map(fn(arg) {
-                finalize_evidence_expr(ctx, arg)
+                finalize_evidence_expr(ctx, arg, child_requirements)
             }), ty: ty, effects: effects, span: span },
         HExpr::HandleExpr {
             body, handlers, installed_evidence, ty, effects, span
@@ -1480,12 +1528,14 @@ fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
             let installed = install_handled_evidence(ctx, requirements)
             let seeded_body = remap_hir_handled_evidence(
                 body, installed_evidence, installed)
-            let body = finalize_evidence_expr(ctx, seeded_body)
+            let body = finalize_evidence_expr(
+                ctx, seeded_body, child_requirements)
             uninstall_handled_evidence(ctx)
             HExpr::HandleExpr {
                 body: body,
                 handlers: handlers.map(fn(handler) {
-                    finalize_evidence_handler(ctx, handler)
+                    finalize_evidence_handler(
+                        ctx, handler, child_requirements)
                 }),
                 installed_evidence: installed,
                 ty: ty, effects: effects, span: span
@@ -1496,7 +1546,8 @@ fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
             handled_evidence_bindings, evidence_captures: _,
             return_type, body, ty, effects, span
         } => {
-            let captures = finalize_evidence_captures(ctx, captures)
+            let captures = finalize_evidence_captures(
+                ctx, captures, child_requirements)
             let callable_effects = match ty {
                 Type::FnType { effects, .. } => effects,
                 _ => panic("handled evidence finalization: lambda is not callable")
@@ -1504,6 +1555,8 @@ fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
             let finalized = finalize_nested_evidence_owner(
                 ctx, executable_ref, handled_evidence_bindings,
                 callable_effects, body)
+            append_child_capture_requirements(
+                ctx, finalized.captures, child_requirements)
             HExpr::Lambda {
                 executable_ref: executable_ref, params: params,
                 captures: captures,
@@ -1517,19 +1570,23 @@ fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
             op, left, right, eq_dispatch, ord_dispatch,
             eq_plan, ord_plan, ty, effects, span
         } => HExpr::BinOp { op: op,
-            left: finalize_evidence_expr(ctx, left),
-            right: finalize_evidence_expr(ctx, right),
+            left: finalize_evidence_expr(
+                ctx, left, child_requirements),
+            right: finalize_evidence_expr(
+                ctx, right, child_requirements),
             eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
             eq_plan: eq_plan, ord_plan: ord_plan,
             ty: ty, effects: effects, span: span },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op,
-                operand: finalize_evidence_expr(ctx, operand),
+                operand: finalize_evidence_expr(
+                    ctx, operand, child_requirements),
                 ty: ty, effects: effects, span: span },
         HExpr::FieldAccess {
             receiver, field, access_kind, projection, ty, effects, span
         } => HExpr::FieldAccess {
-            receiver: finalize_evidence_expr(ctx, receiver),
+            receiver: finalize_evidence_expr(
+                ctx, receiver, child_requirements),
             field: field, access_kind: access_kind,
             projection: projection,
             ty: ty, effects: effects, span: span },
@@ -1541,10 +1598,11 @@ fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
             fields: fields.map(fn(field) { HNominalStructFieldInit {
                 name: field.name, field_ref: field.field_ref,
                 field_index: field.field_index,
-                value: finalize_evidence_expr(ctx, field.value)
+                value: finalize_evidence_expr(
+                    ctx, field.value, child_requirements)
             } }),
             spread: spread.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr)
+                finalize_evidence_expr(ctx, expr, child_requirements)
             }), constructor: constructor,
             ty: ty, effects: effects, span: span },
         HExpr::NamedVariantConstruct {
@@ -1555,32 +1613,39 @@ fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
             variant_ref: variant_ref,
             fields: fields.map(fn(field) { HStructFieldInit {
                 name: field.name, field_ref: field.field_ref,
-                value: finalize_evidence_expr(ctx, field.value)
+                value: finalize_evidence_expr(
+                    ctx, field.value, child_requirements)
             } }),
             spread: spread.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr)
+                finalize_evidence_expr(ctx, expr, child_requirements)
             }), constructor: constructor,
             ty: ty, effects: effects, span: span },
         HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
             HExpr::MatchExpr {
-                scrutinee: finalize_evidence_expr(ctx, scrutinee),
-                arms: finalize_evidence_match_arms(ctx, arms),
+                scrutinee: finalize_evidence_expr(
+                    ctx, scrutinee, child_requirements),
+                arms: finalize_evidence_match_arms(
+                    ctx, arms, child_requirements),
                 ty: ty, effects: effects, span: span },
         HExpr::Block { stmts, tail, ty, effects, span } =>
             HExpr::Block {
                 stmts: stmts.map(fn(stmt) {
-                    finalize_evidence_stmt(ctx, stmt)
+                    finalize_evidence_stmt(
+                        ctx, stmt, child_requirements)
                 }),
                 tail: tail.map(fn(expr) {
-                    finalize_evidence_expr(ctx, expr)
+                    finalize_evidence_expr(
+                        ctx, expr, child_requirements)
                 }), ty: ty, effects: effects, span: span },
         HExpr::IfExpr {
             condition, then_branch, else_branch, ty, effects, span
         } => HExpr::IfExpr {
-            condition: finalize_evidence_expr(ctx, condition),
-            then_branch: finalize_evidence_expr(ctx, then_branch),
+            condition: finalize_evidence_expr(
+                ctx, condition, child_requirements),
+            then_branch: finalize_evidence_expr(
+                ctx, then_branch, child_requirements),
             else_branch: else_branch.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr)
+                finalize_evidence_expr(ctx, expr, child_requirements)
             }), ty: ty, effects: effects, span: span },
         HExpr::StringInterp { parts, plan, ty, effects, span } =>
             HExpr::StringInterp {
@@ -1589,56 +1654,64 @@ fn finalize_evidence_expr(mut ctx: InferCtx, value: HExpr) -> HExpr {
                         HStringInterpPart::Literal(text),
                     HStringInterpPart::Expression(expr) =>
                         HStringInterpPart::Expression(
-                            finalize_evidence_expr(ctx, expr))
+                            finalize_evidence_expr(
+                                ctx, expr, child_requirements))
                 } }), plan: plan,
                 ty: ty, effects: effects, span: span },
         HExpr::TryCatch { body, arms, ty, effects, span } =>
             HExpr::TryCatch {
-                body: finalize_evidence_expr(ctx, body),
-                arms: finalize_evidence_match_arms(ctx, arms),
+                body: finalize_evidence_expr(
+                    ctx, body, child_requirements),
+                arms: finalize_evidence_match_arms(
+                    ctx, arms, child_requirements),
                 ty: ty, effects: effects, span: span },
         HExpr::ListLit { elements, plan, ty, effects, span } =>
             HExpr::ListLit {
                 elements: elements.map(fn(expr) {
-                    finalize_evidence_expr(ctx, expr)
+                    finalize_evidence_expr(ctx, expr, child_requirements)
                 }), plan: plan,
                 ty: ty, effects: effects, span: span },
         HExpr::TupleLit { elements, constructor, ty, effects, span } =>
             HExpr::TupleLit {
                 elements: elements.map(fn(expr) {
-                    finalize_evidence_expr(ctx, expr)
+                    finalize_evidence_expr(ctx, expr, child_requirements)
                 }), constructor: constructor,
                 ty: ty, effects: effects, span: span },
         HExpr::IndexExpr {
             receiver, index, call_plan, projection, ty, effects, span
         } => HExpr::IndexExpr {
-            receiver: finalize_evidence_expr(ctx, receiver),
-            index: finalize_evidence_expr(ctx, index),
+            receiver: finalize_evidence_expr(
+                ctx, receiver, child_requirements),
+            index: finalize_evidence_expr(
+                ctx, index, child_requirements),
             call_plan: call_plan, projection: projection,
             ty: ty, effects: effects, span: span },
         HExpr::Clone { inner, ty, effects, span } => HExpr::Clone {
-            inner: finalize_evidence_expr(ctx, inner),
+            inner: finalize_evidence_expr(
+                ctx, inner, child_requirements),
             ty: ty, effects: effects, span: span },
         HExpr::Take {
             source, source_slot, saved_slot, site, ty, effects, span
         } => HExpr::Take {
-            source: finalize_evidence_expr(ctx, source),
+            source: finalize_evidence_expr(
+                ctx, source, child_requirements),
             source_slot: source_slot, saved_slot: saved_slot,
             site: site, ty: ty, effects: effects, span: span },
         HExpr::ReturnExpr { value, ty, effects, span } =>
             HExpr::ReturnExpr {
                 value: value.map(fn(expr) {
-                    finalize_evidence_expr(ctx, expr)
+                    finalize_evidence_expr(ctx, expr, child_requirements)
                 }), ty: ty, effects: effects, span: span },
         HExpr::UnsafeBlock { body, ty, effects, span } =>
             HExpr::UnsafeBlock {
-                body: finalize_evidence_expr(ctx, body),
+                body: finalize_evidence_expr(
+                    ctx, body, child_requirements),
                 ty: ty, effects: effects, span: span },
+        HExpr::Ident { .. } => finalize_value_ident_no_solve(ctx, value),
         HExpr::IntLit { .. } |
         HExpr::FloatLit { .. } |
         HExpr::StrLit { .. } |
         HExpr::BoolLit { .. } |
-        HExpr::Ident { .. } |
         HExpr::DictConstruct { .. } => value
     }
 }
@@ -1654,30 +1727,38 @@ fn finalize_draft_evidence(
     body: HExpr, final_effects: EffectRow
 ) -> FinalDraftEvidence {
     enter_executable_owner(ctx, draft.executable)
-    let seeded = seed_final_handled_evidence(
-        ctx, draft.handled_bindings, final_effects, body)
-    let finalized = finalize_evidence_expr(ctx, seeded)
-    let remap = canonicalize_callable_handled_evidence(
-        ctx, final_effects)
-    let body = remap_hir_handled_evidence(
-        finalized, remap.0, remap.1)
-    let result = FinalDraftEvidence {
-        body: body,
-        bindings: current_handled_evidence_bindings(ctx),
-        captures: current_handled_evidence_captures(ctx)
-    }
-    for raw_capture in draft.handled_captures {
-        let requirement = handled_evidence_capture_requirement(raw_capture)
-        if !result.captures.any(fn(capture) {
-                handled_effect_ref_same(
-                    handled_evidence_capture_requirement(capture),
-                    requirement)
-            }) {
-            panic("handled evidence finalization: raw capture disappeared")
+    let result = some({
+        let child_requirements: List<HandledEffectRef> = []
+        let seeded = seed_final_handled_evidence(
+            ctx, draft.handled_bindings, final_effects, body)
+        let finalized = finalize_evidence_expr(
+            ctx, seeded, child_requirements)
+        let remap = canonicalize_callable_handled_evidence_closure(
+            ctx, final_effects, child_requirements)
+        let finalized_owner = FinalDraftEvidence {
+            body: remap_hir_handled_evidence(
+                finalized, remap.0, remap.1),
+            bindings: current_handled_evidence_bindings(ctx),
+            captures: current_handled_evidence_captures(ctx)
         }
-    }
+        for raw_capture in draft.handled_captures {
+            let requirement = handled_evidence_capture_requirement(raw_capture)
+            if !finalized_owner.captures.any(fn(capture) {
+                    handled_effect_ref_same(
+                        handled_evidence_capture_requirement(capture),
+                        requirement)
+                }) {
+                panic(
+                    "handled evidence finalization: raw capture disappeared")
+            }
+        }
+        finalized_owner
+    }) catch { _ => none }
     exit_executable_owner(ctx)
-    result
+    match result {
+        some(value) => value,
+        none => fail.raise(CompileError {})
+    }
 }
 
 fn validate_draft_assoc_sources(
@@ -1717,10 +1798,9 @@ fn validate_draft_assoc_sources(
 
 fn finalize_fn_draft(
     mut ctx: InferCtx, draft: FnDraft,
-    frozen_subst: UnionFind, final_scheme: TypeScheme
+    frozen_subst: UnionFind, canonical_ids: Map<Int, Int>,
+    final_scheme: TypeScheme
 ) -> HDecl {
-    let canonical_ids = draft_canonical_type_var_ids(
-        draft, frozen_subst)
     let zctx = ZonkCtx {
         subst: frozen_subst,
         names: draft_type_var_names(draft, frozen_subst),
@@ -1735,8 +1815,6 @@ fn finalize_fn_draft(
     let zonked_body = zonk_block(zctx, draft.body)
     validate_draft_assoc_sources(
         ctx, draft, zctx, final_effects)
-    journal_rebind_assoc_provenance_set(
-        ctx, draft.provenance_key, draft.assoc_rebind_sources)
     let evidence = finalize_draft_evidence(
         ctx, draft, zonked_body, final_effects)
 
@@ -1876,12 +1954,14 @@ fn prepare_fn_draft_group(
     for index in 0..drafts.len() {
         let draft = drafts.get(index).unwrap()
         let final_scheme = staged.get(index).unwrap().scheme
+        let canonical_ids = draft_canonical_type_var_ids(
+            draft, frozen_subst)
         declarations.push(finalize_fn_draft(
-            ctx, draft, frozen_subst, final_scheme))
+            ctx, draft, frozen_subst, canonical_ids, final_scheme))
         batches.push(stage_owner_batch_facts(
             ctx, draft.batch, draft.executable,
-            draft.registration_scheme.ty,
-            final_scheme.effect_schema, frozen_subst))
+            final_scheme.ty, final_scheme.effect_schema,
+            frozen_subst, canonical_ids))
     }
     if diagnostics_since_has_errors(ctx, diagnostic_checkpoint) {
         fail.raise(CompileError {})
@@ -3655,8 +3735,6 @@ fn check_trait_default_body(
                 ctx, method_identity, br.effects, method_effects,
                 method_span, ctx.subst)
             ctx.subst = constrained_subst
-            register_bounded_callable_value_shadows(
-                ctx, br.hexpr, ctx.subst)
             drain_pending_dicts(ctx, obligation_checkpoint, ctx.subst)
             let zctx = ZonkCtx {
                 subst: ctx.subst, names: map_new(),
@@ -3987,8 +4065,6 @@ fn infer_fn_body_constraints(
         }
     }
 
-    register_bounded_callable_value_shadows(
-        ctx, body_result.hexpr, ctx.subst)
     FnConstraintResult {
         body: body_result.hexpr,
         owner_effects: owner_effects
@@ -4129,21 +4205,18 @@ fn infer_fn_draft(
         some(identity) => identity,
         none => name
     }
-    enter_executable_owner(ctx, executable)
     let batch_checkpoint = owner_batch_checkpoint(ctx)
+    enter_executable_owner(ctx, executable)
     let result = some(infer_fn_draft_transaction(
         ctx, name, provenance_key, executable, type_params, params,
         return_type, declared_effects, body, is_pub, span, self_type,
         registration_scheme, impl_method_ref, inherited_type_var_ids,
         validation, batch_checkpoint)) catch { _ => none }
+    exit_executable_owner(ctx)
     match result {
-        some(draft) => {
-            exit_executable_owner(ctx)
-            draft
-        },
+        some(draft) => draft,
         none => {
             rollback_owner_batch(ctx, batch_checkpoint)
-            exit_executable_owner(ctx)
             fail.raise(CompileError {})
         }
     }
@@ -4171,10 +4244,14 @@ fn infer_fn_draft_transaction(
         panic("function draft: registration parameter census differs")
     }
 
-    ctx.env.push_scope()
     let saved_fn_return = ctx.current_fn_return_type
     let saved_tp_scope = map_clone(ctx.type_param_scope)
     let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
+    let saved_fn_bounds = ctx.current_fn_bounds
+    let env_scope_depth = ctx.env.scope.scopes.len()
+    let fn_bounds_stack_depth = ctx.fn_bounds_stack.len()
+    let transaction = some({
+    ctx.env.push_scope()
     ctx.fn_bounds_stack.push(ctx.current_fn_bounds)
     let mut inherited_bounds: List<FnBoundsEntry> = []
     for bound in ctx.current_fn_bounds { inherited_bounds.push(bound) }
@@ -4284,7 +4361,7 @@ fn infer_fn_draft_transaction(
         none => {}
     }
 
-    let inferred = some(infer_fn_body_constraints(
+    let inferred = infer_fn_body_constraints(
         ctx, provenance_key, registered_return,
         owner_declared_effects,
         if declared_effects.is_some() {
@@ -4292,61 +4369,62 @@ fn infer_fn_draft_transaction(
         } else {
             some(registered_effects)
         },
-        body, span)) catch { _ => none }
+        body, span)
 
     let complete_bounds = ctx.current_fn_bounds
-    let result = match inferred {
-        some(value) => {
-            let raw_names = capture_raw_type_var_names(
-                ctx, type_params, saved_tp_scope)
-            let assoc_sources = capture_raw_assoc_rebind_sources(
-                ctx, registration_scheme)
-            let exact_type_params = exact_h_type_params(
-                ctx, type_params, source_type_var_ids)
-            let trait_bounds = materialize_trait_bounds(
-                ctx, complete_bounds)
-            let handled_bindings =
-                current_handled_evidence_bindings(ctx)
-            let handled_captures =
-                current_handled_evidence_captures(ctx)
-            let batch = detach_owner_batch(ctx, batch_checkpoint)
-            some(FnDraft {
-                name: name,
-                provenance_key: provenance_key,
-                executable: executable,
-                impl_method_ref: impl_method_ref,
-                registration_scheme: registration_scheme,
-                inherited_type_var_ids: inherited_type_var_ids,
-                source_type_var_ids: source_type_var_ids,
-                is_pub: is_pub,
-                span: span,
-                type_params: exact_type_params,
-                trait_bounds: trait_bounds,
-                params: hparams,
-                expected_return: registered_return,
-                owner_effects: value.owner_effects,
-                body: value.body,
-                raw_type_var_names: raw_names,
-                assoc_rebind_sources: assoc_sources,
-                handled_bindings: handled_bindings,
-                handled_captures: handled_captures,
-                validation: validation,
-                batch: batch
-            })
-        },
-        none => none
+    let raw_names = capture_raw_type_var_names(
+        ctx, type_params, saved_tp_scope)
+    let assoc_sources = capture_raw_assoc_rebind_sources(
+        ctx, registration_scheme)
+    let exact_type_params = exact_h_type_params(
+        ctx, type_params, source_type_var_ids)
+    let trait_bounds = materialize_trait_bounds(
+        ctx, complete_bounds)
+    let handled_bindings =
+        current_handled_evidence_bindings(ctx)
+    let handled_captures =
+        current_handled_evidence_captures(ctx)
+    let batch = detach_owner_batch(ctx, batch_checkpoint)
+    FnDraft {
+        name: name,
+        executable: executable,
+        impl_method_ref: impl_method_ref,
+        registration_scheme: registration_scheme,
+        inherited_type_var_ids: inherited_type_var_ids,
+        source_type_var_ids: source_type_var_ids,
+        is_pub: is_pub,
+        span: span,
+        type_params: exact_type_params,
+        trait_bounds: trait_bounds,
+        params: hparams,
+        expected_return: registered_return,
+        owner_effects: inferred.owner_effects,
+        body: inferred.body,
+        raw_type_var_names: raw_names,
+        assoc_rebind_sources: assoc_sources,
+        handled_bindings: handled_bindings,
+        handled_captures: handled_captures,
+        validation: validation,
+        batch: batch
     }
+    }) catch { _ => none }
 
+    if ctx.env.scope.scopes.len() < env_scope_depth ||
+       ctx.fn_bounds_stack.len() < fn_bounds_stack_depth {
+        panic("function draft cleanup: transient stack underflow")
+    }
+    while ctx.env.scope.scopes.len() > env_scope_depth {
+        ctx.env.pop_scope()
+    }
+    while ctx.fn_bounds_stack.len() > fn_bounds_stack_depth {
+        ctx.fn_bounds_stack.pop()
+    }
     ctx.current_fn_return_type = saved_fn_return
-    ctx.env.pop_scope()
     ctx.type_param_scope = saved_tp_scope
     ctx.qualified_assoc_scope = saved_qualified_assoc
-    ctx.current_fn_bounds = match ctx.fn_bounds_stack.pop() {
-        some(previous) => previous,
-        none => []
-    }
+    ctx.current_fn_bounds = saved_fn_bounds
 
-    match result {
+    match transaction {
         some(draft) => draft,
         none => fail.raise(CompileError {})
     }
@@ -4403,8 +4481,6 @@ fn check_test_decl(
     let final_body_unremapped = match body_result {
         some(br) => {
             ctx.subst = br.subst
-            register_bounded_callable_value_shadows(
-                ctx, br.hexpr, ctx.subst)
             drain_pending_dicts(ctx, obligation_checkpoint, ctx.subst)
             let zctx = ZonkCtx {
                 subst: ctx.subst, names: map_new(),
