@@ -7,13 +7,12 @@
 
 use ir_identity::{
     CoreTypeRef, core_type_ref_same, core_type_ref_index,
-    SymbolRef, NominalFieldRef, TraitMethodRef, HandledEffectRef,
+    SymbolRef, NominalFieldRef, TraitMethodRef,
     ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     SlotRef, OriginRef,
     symbol_ref_same, symbol_ref_namespace_kind,
     namespace_kind_same, namespace_member, namespace_trait,
     registered_trait_ref_symbol,
-    handled_effect_ref_same,
     nominal_field_ref_owner,
     trait_method_ref_same, trait_method_ref_trait,
     trait_method_ref_source_member_index,
@@ -30,6 +29,7 @@ use ir_identity::{
 }
 use ir_inventory::{
     ExecutableRef, ExactMethodRef,
+    effect_ctx_slot,
     exact_method_ref_is_intrinsic, exact_method_ref_is_impl,
     exact_method_ref_is_trait, exact_method_ref_impl,
     exact_method_ref_trait,
@@ -46,8 +46,9 @@ use env::{
     registered_trait_assoc_member
 }
 use effect_contract::{
-    CoreEffectSet, core_effect_set_atoms, make_core_effect_set,
-    core_effect_atom_kind_tag, core_effect_atom_handled_ref
+    CoreEffectSet, core_effect_set_atoms, core_effect_set_same,
+    make_core_effect_set,
+    core_effect_contract_exact, core_effect_instantiation_result
 }
 use core_type_source::{
     CoreTypeGraph, core_type_graph_count, core_type_graph_node,
@@ -56,12 +57,11 @@ use core_type_source::{
 }
 use core_expr::{
     CoreCalleeRef, CoreEvidenceRef, CoreBinder,
-    CoreHandledEvidenceBinding, CoreHandledEvidenceUse,
+    CoreCallableEffectCtx, CoreEffectCtxArgument,
     core_evidence_dict,
-    core_handled_evidence_requirement, core_handled_evidence_slot,
-    core_handled_evidence_type,
-    core_handled_use_requirement, core_handled_use_slot,
-    core_handled_use_type,
+    core_callable_effect_ctx_reference, core_callable_effect_ctx_type,
+    core_effect_ctx_argument_kind_tag, core_effect_ctx_argument_context,
+    core_effect_ctx_argument_receipt,
     core_binder_reference, core_binder_type
 }
 
@@ -122,20 +122,6 @@ fn copy_evidence(values: List<CoreEvidenceRef>) -> List<CoreEvidenceRef> {
     for value in values { result.push(value) }
     result
 }
-fn copy_handled_bindings(
-    values: List<CoreHandledEvidenceBinding>
-) -> List<CoreHandledEvidenceBinding> {
-    let mut result: List<CoreHandledEvidenceBinding> = []
-    for value in values { result.push(value) }
-    result
-}
-fn copy_handled_uses(
-    values: List<CoreHandledEvidenceUse>
-) -> List<CoreHandledEvidenceUse> {
-    let mut result: List<CoreHandledEvidenceUse> = []
-    for value in values { result.push(value) }
-    result
-}
 fn core_evidence_same(left: CoreEvidenceRef, right: CoreEvidenceRef) -> Bool {
     dict_ref_same(core_evidence_dict(left), core_evidence_dict(right))
 }
@@ -154,8 +140,8 @@ pub struct DelegateMethodBodyPlan {
     forwarded_argument_slots: List<SlotRef>,
     effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
-    handled_bindings: List<CoreHandledEvidenceBinding>,
-    handled_uses: List<CoreHandledEvidenceUse>,
+    callable_ctx: CoreCallableEffectCtx,
+    effect_ctx: CoreEffectCtxArgument,
     body_origin: OriginRef
 }
 
@@ -177,8 +163,8 @@ pub fn make_delegate_method_body_plan(
     wrapper_receiver_slot: SlotRef,
     forwarded_argument_slots: List<SlotRef>,
     effects: CoreEffectSet, evidence: List<CoreEvidenceRef>,
-    handled_bindings: List<CoreHandledEvidenceBinding>,
-    handled_uses: List<CoreHandledEvidenceUse>,
+    callable_ctx: CoreCallableEffectCtx,
+    effect_ctx: CoreEffectCtxArgument,
     body_origin: OriginRef
 ) -> DelegateMethodBodyPlan {
     DelegateMethodBodyPlan {
@@ -190,8 +176,7 @@ pub fn make_delegate_method_body_plan(
         forwarded_argument_slots: copy_slot_refs(forwarded_argument_slots),
         effects: make_core_effect_set(core_effect_set_atoms(effects)),
         evidence: copy_evidence(evidence),
-        handled_bindings: copy_handled_bindings(handled_bindings),
-        handled_uses: copy_handled_uses(handled_uses),
+        callable_ctx: callable_ctx, effect_ctx: effect_ctx,
         body_origin: body_origin
     }
 }
@@ -280,11 +265,9 @@ pub fn delegate_body_effects(value: DelegateMethodBodyPlan) -> CoreEffectSet {
 pub fn delegate_body_evidence(
     value: DelegateMethodBodyPlan
 ) -> List<CoreEvidenceRef> { copy_evidence(value.evidence) }
-pub fn delegate_body_handled_uses(
+pub fn delegate_body_effect_ctx(
     value: DelegateMethodBodyPlan
-) -> List<CoreHandledEvidenceUse> {
-    copy_handled_uses(value.handled_uses)
-}
+) -> CoreEffectCtxArgument { value.effect_ctx }
 pub fn delegate_body_origin(value: DelegateMethodBodyPlan) -> OriginRef {
     value.body_origin
 }
@@ -423,19 +406,19 @@ fn method_body_is_closed(
         }
         argument_index = argument_index + 1
     }
-    for binding in value.handled_bindings {
-        match body_binder_type(value, core_handled_evidence_slot(binding)) {
-            some(ty) => if !core_type_ref_same(
-                    ty, core_handled_evidence_type(binding)) {
-                return false
-            },
-            none => return false
-        }
-    }
-    for use_ in value.handled_uses {
-        if body_binder_index(value, core_handled_use_slot(use_)).is_none() {
+    let context_slot = effect_ctx_slot(
+        core_callable_effect_ctx_reference(value.callable_ctx))
+    match body_binder_type(value, context_slot) {
+        some(ty) => if !core_type_ref_same(
+                ty, core_callable_effect_ctx_type(value.callable_ctx)) {
             return false
-        }
+        },
+        none => return false
+    }
+    if core_effect_ctx_argument_kind_tag(value.effect_ctx) != 0 &&
+       body_binder_index(value, effect_ctx_slot(
+            core_effect_ctx_argument_context(value.effect_ctx))).is_none() {
+        return false
     }
     true
 }
@@ -545,51 +528,11 @@ fn evidence_requirements_match(
     true
 }
 
-fn handled_evidence_requirements_match(body: DelegateMethodBodyPlan) -> Bool {
-    let mut required: List<HandledEffectRef> = []
-    for atom in core_effect_set_atoms(body.effects) {
-        if core_effect_atom_kind_tag(atom) == 3 {
-            required.push(core_effect_atom_handled_ref(atom))
-        }
-    }
-    if required.len() != body.handled_bindings.len() ||
-       required.len() != body.handled_uses.len() {
-        return false
-    }
-    let mut index = 0
-    while index < required.len() {
-        let binding = body.handled_bindings.get(index).unwrap()
-        let use_ = body.handled_uses.get(index).unwrap()
-        if !handled_effect_ref_same(
-                required.get(index).unwrap(),
-                core_handled_evidence_requirement(binding)) ||
-           !handled_effect_ref_same(
-                required.get(index).unwrap(),
-                core_handled_use_requirement(use_)) ||
-           !core_type_ref_same(
-                core_handled_evidence_type(binding),
-                core_handled_use_type(use_)) ||
-           !slot_ref_same(
-                core_handled_evidence_slot(binding),
-                core_handled_use_slot(use_)) {
-            return false
-        }
-        let mut right_index = index + 1
-        while right_index < body.handled_bindings.len() {
-            let right = body.handled_bindings.get(right_index).unwrap()
-            if handled_effect_ref_same(
-                    core_handled_evidence_requirement(binding),
-                    core_handled_evidence_requirement(right)) ||
-               slot_ref_same(
-                    core_handled_evidence_slot(binding),
-                    core_handled_evidence_slot(right)) {
-                return false
-            }
-            right_index = right_index + 1
-        }
-        index = index + 1
-    }
-    true
+fn effect_ctx_requirements_match(body: DelegateMethodBodyPlan) -> Bool {
+    core_effect_set_same(
+        body.effects,
+        core_effect_contract_exact(core_effect_instantiation_result(
+            core_effect_ctx_argument_receipt(body.effect_ctx))))
 }
 
 fn method_contains_plan_evidence(
@@ -684,7 +627,7 @@ pub fn validate_delegate_plan(input: DelegatePlanInput) -> DelegateTypedPlan {
         }
         if !core_type_ref_same(method.body.field_type, input.field_type) ||
            !core_type_ref_same(method.body.outer_type, input.outer_type) ||
-           !handled_evidence_requirements_match(method.body) ||
+           !effect_ctx_requirements_match(method.body) ||
            !method_contains_plan_evidence(method, input) ||
            !method_body_is_closed(
                 method.body, core_type_graph_count(input.type_graph),

@@ -65,13 +65,13 @@ use flow_ir::{
 // Total CoreTypeRef <-> legacy Type bijection
 // ============================================================
 
-const LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE: Int = 0
+const LEGACY_INTERNAL_EFFECT_CTX_OPAQUE: Int = 0
 pub struct LegacyInternalTypeKind { tag: Int }
-pub fn legacy_internal_handled_evidence_opaque() -> LegacyInternalTypeKind {
-    LegacyInternalTypeKind { tag: LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE }
+pub fn legacy_internal_effect_ctx_opaque() -> LegacyInternalTypeKind {
+    LegacyInternalTypeKind { tag: LEGACY_INTERNAL_EFFECT_CTX_OPAQUE }
 }
 fn legacy_internal_type_kind_valid(kind: LegacyInternalTypeKind) -> Bool {
-    kind.tag == LEGACY_INTERNAL_HANDLED_EVIDENCE_OPAQUE
+    kind.tag == LEGACY_INTERNAL_EFFECT_CTX_OPAQUE
 }
 
 pub struct LegacyTypeProjection {

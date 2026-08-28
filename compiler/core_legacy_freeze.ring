@@ -74,9 +74,9 @@ use typed_effect_freeze::{
     typed_effect_freeze_callables
 }
 use core_type_source::{
-    CoreTypeSourceFact, CoreHandledEvidenceTypeSource,
+    CoreTypeSourceFact, CoreEffectCtxTypeSource,
     core_type_source_type, core_type_source_fact,
-    core_handled_evidence_source_aggregate_fact
+    core_effect_ctx_source_aggregate_fact
 }
 use effect_contract::{make_core_effect_set}
 use core_from_hir::{
@@ -84,7 +84,7 @@ use core_from_hir::{
     produce_closed_core_assembly_facts,
     frozen_core_assembly_program,
     frozen_core_assembly_type_sources,
-    frozen_core_assembly_handled_sources,
+    frozen_core_assembly_effect_ctx_type,
     make_core_effect_set_fact_from_row
 }
 use legacy_projection::{
@@ -116,7 +116,7 @@ use legacy_projection::{
     make_legacy_trait_bound_projection,
     make_legacy_impl_fact_projection,
     make_legacy_internal_type_fact_projection,
-    legacy_internal_handled_evidence_opaque,
+    legacy_internal_effect_ctx_opaque,
     legacy_effect_fact_projection_row,
     legacy_binder_fact_slot, legacy_binder_fact_name,
     legacy_binder_fact_type, legacy_type_parameter_name,
@@ -892,7 +892,7 @@ fn add_builtin_facts(mut builder: LegacyFactBuilder, env: TypeEnv) {
 fn freeze_legacy_semantic_facts(
     module_key: Str, module_order: Int, closed: HProgram,
     env: TypeEnv, type_sources: List<CoreTypeSourceFact>,
-    handled_evidence_types: List<CoreHandledEvidenceTypeSource>,
+    effect_ctx_type: CoreEffectCtxTypeSource,
     prelude_physical_owner_module_key: Str,
     physical_module_prefix: Str
 ) -> LegacyProjectionFacts {
@@ -913,11 +913,9 @@ fn freeze_legacy_semantic_facts(
     scan_decls(builder, closed.decls)
     add_derived_impl_facts(builder, closed.derived_impls)
     if module_order == 0 { add_builtin_facts(builder, env) }
-    let mut internal_types = handled_evidence_types.map(fn(value) {
-        make_legacy_internal_type_fact_projection(
-            core_handled_evidence_source_aggregate_fact(value),
-            legacy_internal_handled_evidence_opaque())
-    })
+    let mut internal_types = [make_legacy_internal_type_fact_projection(
+        core_effect_ctx_source_aggregate_fact(effect_ctx_type),
+        legacy_internal_effect_ctx_opaque())]
     make_legacy_projection_facts(
         module_key, module_order,
         type_sources.len() + internal_types.len(), type_sources,
@@ -942,11 +940,10 @@ pub fn freeze_core_and_legacy_facts(
         typed_effect_freeze_callables(effect_freeze))
     let sealed_program = frozen_core_assembly_program(core)
     let type_sources = frozen_core_assembly_type_sources(core)
-    let handled_evidence_types =
-        frozen_core_assembly_handled_sources(core)
+    let effect_ctx_type = frozen_core_assembly_effect_ctx_type(core)
     let legacy = freeze_legacy_semantic_facts(
         module_key, module_order, sealed_program, env, type_sources,
-        handled_evidence_types,
+        effect_ctx_type,
         prelude_physical_owner_module_key,
         physical_module_prefix)
     FrozenCoreAndLegacyFacts { core: core, legacy: legacy }

@@ -44,8 +44,8 @@ use ir_identity::{
     origin_ref_is_symbol, origin_ref_symbol, origin_ref_path
 }
 use ir_inventory::{
-    ExecutableRef, BinderKind, BinderEntry, HandledEvidenceRef,
-    HandledEvidenceCapture,
+    ExecutableRef, BinderKind, BinderEntry, EffectCtxRef,
+    EffectCtxParentCapture,
     make_named_executable_ref,
     EffectOperationRef, SystemHostCallableRef, ExactMethodRef, ExactDictRef,
     ExecutableContractMode, executable_contract_mode_same,
@@ -53,13 +53,11 @@ use ir_inventory::{
     executable_ref_same, executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_origin_module_key,
     make_source_binder_entry, make_synthetic_binder_entry,
-    binder_kind_tag, binder_kind_handled_evidence_local,
+    binder_kind_tag, binder_kind_effect_ctx_local,
     binder_entry_slot, binder_entry_owner, binder_entry_kind, binder_entry_site,
-    handled_evidence_requirement, handled_evidence_binding,
-    handled_evidence_slot, handled_evidence_contract_owner,
-    handled_evidence_ordinal, handled_evidence_ref_same,
-    handled_evidence_capture_requirement,
-    handled_evidence_capture_source, handled_evidence_capture_target,
+    effect_ctx_binding, effect_ctx_slot, effect_ctx_contract_owner,
+    effect_ctx_ref_same,
+    effect_ctx_parent_capture_source, effect_ctx_parent_capture_target,
     effect_operation_ref_effect, effect_operation_ref_callable,
     effect_operation_ref_same, effect_operation_ref_source_index,
     system_host_callable_effect, system_host_callable_executable,
@@ -69,7 +67,8 @@ use ir_inventory::{
     dict_ref_is_local, dict_ref_is_static, dict_ref_local, dict_ref_static,
     dict_ref_wrapped_base, dict_ref_wrapped_inner, dict_ref_same,
     binder_kind_dictionary_evidence_local,
-    binder_kind_dictionary_evidence_param, binder_kind_lambda_capture
+    binder_kind_dictionary_evidence_param, binder_kind_lambda_capture,
+    binder_kind_effect_ctx_param, binder_kind_effect_ctx_parent_capture
 }
 use effect_contract::{
     EffectParamRef, effect_param_owner, effect_param_ordinal,
@@ -80,7 +79,7 @@ use effect_contract::{
     make_core_handled_effect, make_core_system_effect,
     core_effect_atom_kind_tag, core_effect_atom_type,
     core_effect_atom_handled_ref, core_effect_atom_type_arguments,
-    core_effect_atom_system_ref,
+    core_effect_atom_system_ref, core_effect_atom_same,
     make_core_effect_set, core_effect_set_atoms, core_effect_set_same,
     core_effect_set_contains_atom,
     make_core_effect_contract, make_closed_core_effect_contract,
@@ -142,141 +141,328 @@ use core_type_source::{
 }
 
 // ============================================================
-// Exact typed/effect references
+// Frozen explicit EffectCtx contract
 // ============================================================
 
-pub struct CoreHandledEvidenceBinding {
-    reference: HandledEvidenceRef,
-    aggregate_type: CoreTypeRef
+pub struct CoreEffectCtxTokenRef { instance: CoreEffectAtom }
+pub fn make_core_effect_ctx_token_ref(
+    instance: CoreEffectAtom
+) -> CoreEffectCtxTokenRef {
+    if core_effect_atom_kind_tag(instance) != 3 {
+        panic("CoreHIR: EffectCtx token is not a full handled atom")
+    }
+    CoreEffectCtxTokenRef { instance: instance }
+}
+pub fn core_effect_ctx_token_instance(
+    value: CoreEffectCtxTokenRef
+) -> CoreEffectAtom { value.instance }
+pub fn core_effect_ctx_token_same(
+    left: CoreEffectCtxTokenRef, right: CoreEffectCtxTokenRef
+) -> Bool { core_effect_atom_same(left.instance, right.instance) }
+fn copy_effect_ctx_tokens(
+    values: List<CoreEffectCtxTokenRef>
+) -> List<CoreEffectCtxTokenRef> {
+    values.map(fn(value) { make_core_effect_ctx_token_ref(value.instance) })
 }
 
-pub fn make_core_handled_evidence_binding(
-    reference: HandledEvidenceRef, aggregate_type: CoreTypeRef
-) -> CoreHandledEvidenceBinding {
+pub struct CoreEffectCtxLayout {
+    entries: List<CoreEffectCtxTokenRef>, formal: EffectParamRef?
+}
+pub fn make_core_effect_ctx_layout(
+    entries: List<CoreEffectCtxTokenRef>, formal: EffectParamRef?
+) -> CoreEffectCtxLayout {
+    let mut left = 0
+    while left < entries.len() {
+        let mut right = left + 1
+        while right < entries.len() {
+            if core_effect_ctx_token_same(
+                    entries.get(left).unwrap(), entries.get(right).unwrap()) {
+                panic("CoreHIR: EffectCtx layout repeats an exact entry")
+            }
+            right = right + 1
+        }
+        left = left + 1
+    }
+    CoreEffectCtxLayout {
+        entries: copy_effect_ctx_tokens(entries), formal: formal
+    }
+}
+pub fn empty_core_effect_ctx_layout() -> CoreEffectCtxLayout {
+    make_core_effect_ctx_layout([], none)
+}
+pub fn core_effect_ctx_layout_entries(
+    value: CoreEffectCtxLayout
+) -> List<CoreEffectCtxTokenRef> { copy_effect_ctx_tokens(value.entries) }
+pub fn core_effect_ctx_layout_formal(
+    value: CoreEffectCtxLayout
+) -> EffectParamRef? { value.formal }
+pub fn core_effect_ctx_layout_is_empty(value: CoreEffectCtxLayout) -> Bool {
+    value.entries.len() == 0 && value.formal.is_none()
+}
+pub fn core_effect_ctx_layout_same(
+    left: CoreEffectCtxLayout, right: CoreEffectCtxLayout
+) -> Bool {
+    if left.entries.len() != right.entries.len() { return false }
+    let mut index = 0
+    while index < left.entries.len() {
+        if !core_effect_ctx_token_same(
+                left.entries.get(index).unwrap(),
+                right.entries.get(index).unwrap()) { return false }
+        index = index + 1
+    }
+    match (left.formal, right.formal) {
+        (some(a), some(b)) => effect_param_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+fn effect_ctx_layout_matches_contract(
+    layout: CoreEffectCtxLayout, effects: CoreEffectContract
+) -> Bool {
+    let expected = core_effect_set_atoms(
+        core_effect_contract_exact(effects)).filter(fn(atom) {
+        core_effect_atom_kind_tag(atom) == 3
+    })
+    if layout.entries.len() != expected.len() { return false }
+    let mut index = 0
+    while index < expected.len() {
+        if !core_effect_atom_same(
+                layout.entries.get(index).unwrap().instance,
+                expected.get(index).unwrap()) { return false }
+        index = index + 1
+    }
+    match (layout.formal, core_effect_contract_parameter(effects)) {
+        (some(a), some(b)) => effect_param_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+pub struct CoreCallableEffectCtx {
+    reference: EffectCtxRef,
+    layout: CoreEffectCtxLayout,
+    aggregate_type: CoreTypeRef
+}
+pub fn make_core_callable_effect_ctx(
+    reference: EffectCtxRef, layout: CoreEffectCtxLayout,
+    aggregate_type: CoreTypeRef
+) -> CoreCallableEffectCtx {
     if core_type_ref_index(aggregate_type) < 0 ||
-       !slot_ref_same(
-            handled_evidence_slot(reference),
-            binder_entry_slot(handled_evidence_binding(reference))) {
-        panic("CoreHIR: invalid typed handled-evidence binding")
+       !slot_ref_same(effect_ctx_slot(reference),
+            binder_entry_slot(effect_ctx_binding(reference))) {
+        panic("CoreHIR: invalid callable EffectCtx binding")
     }
-    CoreHandledEvidenceBinding {
-        reference: reference, aggregate_type: aggregate_type
+    CoreCallableEffectCtx {
+        reference: reference, layout: layout,
+        aggregate_type: aggregate_type
     }
 }
-pub fn core_handled_evidence_reference(
-    value: CoreHandledEvidenceBinding
-) -> HandledEvidenceRef { value.reference }
-pub fn core_handled_evidence_requirement(
-    value: CoreHandledEvidenceBinding
-) -> HandledEffectRef { handled_evidence_requirement(value.reference) }
-pub fn core_handled_evidence_slot(
-    value: CoreHandledEvidenceBinding
-) -> SlotRef { handled_evidence_slot(value.reference) }
-pub fn core_handled_evidence_owner(
-    value: CoreHandledEvidenceBinding
-) -> ExecutableRef { handled_evidence_contract_owner(value.reference) }
-pub fn core_handled_evidence_ordinal(
-    value: CoreHandledEvidenceBinding
-) -> Int { handled_evidence_ordinal(value.reference) }
-pub fn core_handled_evidence_type(
-    value: CoreHandledEvidenceBinding
+pub fn core_callable_effect_ctx_reference(
+    value: CoreCallableEffectCtx
+) -> EffectCtxRef { value.reference }
+pub fn core_callable_effect_ctx_layout(
+    value: CoreCallableEffectCtx
+) -> CoreEffectCtxLayout {
+    make_core_effect_ctx_layout(value.layout.entries, value.layout.formal)
+}
+pub fn core_callable_effect_ctx_type(
+    value: CoreCallableEffectCtx
 ) -> CoreTypeRef { value.aggregate_type }
-fn copy_handled_evidence_bindings(
-    values: List<CoreHandledEvidenceBinding>
-) -> List<CoreHandledEvidenceBinding> {
-    let mut result: List<CoreHandledEvidenceBinding> = []
-    for value in values {
-        result.push(make_core_handled_evidence_binding(
-            value.reference, value.aggregate_type))
+
+enum CoreEffectCtxArgumentValue {
+    EmptyEffectCtxArgument { receipt: CoreEffectInstantiation },
+    BorrowCurrentEffectCtxArgument {
+        context: EffectCtxRef, layout: CoreEffectCtxLayout,
+        receipt: CoreEffectInstantiation
+    },
+    BorrowViewEffectCtxArgument {
+        context: EffectCtxRef,
+        source_layout: CoreEffectCtxLayout,
+        target_layout: CoreEffectCtxLayout,
+        receipt: CoreEffectInstantiation
     }
-    result
+}
+pub struct CoreEffectCtxArgument { value: CoreEffectCtxArgumentValue }
+
+fn receipt_copy(value: CoreEffectInstantiation) -> CoreEffectInstantiation {
+    make_core_effect_instantiation(
+        core_effect_instantiation_source(value),
+        core_effect_instantiation_substitutions(value),
+        core_effect_instantiation_result(value))
+}
+fn validate_effect_ctx_view_receipt(
+    source: CoreEffectCtxLayout, target: CoreEffectCtxLayout,
+    receipt: CoreEffectInstantiation
+) {
+    if !effect_ctx_layout_matches_contract(
+            target, core_effect_instantiation_result(receipt)) ||
+       !core_effect_instantiation_projects_substitutions(
+            core_effect_instantiation_substitutions(receipt), receipt) {
+        panic("CoreHIR: EffectCtx view differs from exact effect receipt")
+    }
+    let substitutions = core_effect_instantiation_substitutions(receipt)
+    for token in target.entries {
+        if !source.entries.any(fn(entry) {
+                core_effect_ctx_token_same(entry, token)
+            }) {
+            if source.formal.is_none() || !substitutions.any(fn(item) {
+                    core_effect_set_atoms(core_effect_contract_exact(
+                        core_effect_substitution_replacement(item))).any(
+                        fn(atom) {
+                            core_effect_atom_kind_tag(atom) == 3 &&
+                            core_effect_ctx_token_same(
+                                make_core_effect_ctx_token_ref(atom), token)
+                        })
+                }) {
+                panic("CoreHIR: EffectCtx view invents a fixed entry")
+            }
+        }
+    }
+    match target.formal {
+        some(target_formal) => match source.formal {
+            some(source_formal) => if !effect_param_ref_same(
+                    target_formal, source_formal) {
+                panic("CoreHIR: EffectCtx view changes runtime formal")
+            },
+            none => panic("CoreHIR: closed EffectCtx projects open")
+        },
+        none => {}
+    }
+}
+pub fn make_empty_core_effect_ctx_argument(
+    receipt: CoreEffectInstantiation
+) -> CoreEffectCtxArgument {
+    if !effect_ctx_layout_matches_contract(
+            empty_core_effect_ctx_layout(),
+            core_effect_instantiation_result(receipt)) {
+        panic("CoreHIR: empty EffectCtx drops handled requirements")
+    }
+    CoreEffectCtxArgument { value:
+        CoreEffectCtxArgumentValue::EmptyEffectCtxArgument {
+            receipt: receipt_copy(receipt)
+        } }
+}
+pub fn make_borrow_current_core_effect_ctx_argument(
+    context: EffectCtxRef, layout: CoreEffectCtxLayout,
+    receipt: CoreEffectInstantiation
+) -> CoreEffectCtxArgument {
+    if core_effect_ctx_layout_is_empty(layout) ||
+       !effect_ctx_layout_matches_contract(
+            layout, core_effect_instantiation_result(receipt)) {
+        panic("CoreHIR: current EffectCtx layout/receipt differs")
+    }
+    CoreEffectCtxArgument { value:
+        CoreEffectCtxArgumentValue::BorrowCurrentEffectCtxArgument {
+            context: context, layout: layout, receipt: receipt_copy(receipt)
+        } }
+}
+pub fn make_borrow_view_core_effect_ctx_argument(
+    context: EffectCtxRef, source_layout: CoreEffectCtxLayout,
+    target_layout: CoreEffectCtxLayout,
+    receipt: CoreEffectInstantiation
+) -> CoreEffectCtxArgument {
+    if core_effect_ctx_layout_is_empty(target_layout) ||
+       core_effect_ctx_layout_same(source_layout, target_layout) {
+        panic("CoreHIR: EffectCtx view is not a proper typed projection")
+    }
+    validate_effect_ctx_view_receipt(source_layout, target_layout, receipt)
+    CoreEffectCtxArgument { value:
+        CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument {
+            context: context, source_layout: source_layout,
+            target_layout: target_layout, receipt: receipt_copy(receipt)
+        } }
+}
+pub fn core_effect_ctx_argument_kind_tag(value: CoreEffectCtxArgument) -> Int {
+    match value.value {
+        CoreEffectCtxArgumentValue::EmptyEffectCtxArgument { .. } => 0,
+        CoreEffectCtxArgumentValue::BorrowCurrentEffectCtxArgument { .. } => 1,
+        CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument { .. } => 2
+    }
+}
+pub fn core_effect_ctx_argument_context(
+    value: CoreEffectCtxArgument
+) -> EffectCtxRef {
+    match value.value {
+        CoreEffectCtxArgumentValue::BorrowCurrentEffectCtxArgument {
+            context, ..
+        } | CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument {
+            context, ..
+        } => context,
+        _ => panic("CoreHIR: empty EffectCtx has no binding")
+    }
+}
+pub fn core_effect_ctx_argument_source_layout(
+    value: CoreEffectCtxArgument
+) -> CoreEffectCtxLayout {
+    match value.value {
+        CoreEffectCtxArgumentValue::BorrowCurrentEffectCtxArgument {
+            layout, ..
+        } => make_core_effect_ctx_layout(layout.entries, layout.formal),
+        CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument {
+            source_layout, ..
+        } => make_core_effect_ctx_layout(
+            source_layout.entries, source_layout.formal),
+        _ => empty_core_effect_ctx_layout()
+    }
+}
+pub fn core_effect_ctx_argument_target_layout(
+    value: CoreEffectCtxArgument
+) -> CoreEffectCtxLayout {
+    match value.value {
+        CoreEffectCtxArgumentValue::EmptyEffectCtxArgument { .. } =>
+            empty_core_effect_ctx_layout(),
+        CoreEffectCtxArgumentValue::BorrowCurrentEffectCtxArgument {
+            layout, ..
+        } => make_core_effect_ctx_layout(layout.entries, layout.formal),
+        CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument {
+            target_layout, ..
+        } => make_core_effect_ctx_layout(
+            target_layout.entries, target_layout.formal)
+    }
+}
+pub fn core_effect_ctx_argument_receipt(
+    value: CoreEffectCtxArgument
+) -> CoreEffectInstantiation {
+    match value.value {
+        CoreEffectCtxArgumentValue::EmptyEffectCtxArgument { receipt } |
+        CoreEffectCtxArgumentValue::BorrowCurrentEffectCtxArgument {
+            receipt, ..
+        } | CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument {
+            receipt, ..
+        } => receipt_copy(receipt)
+    }
 }
 
-pub struct CoreHandledEvidenceUse {
-    reference: HandledEvidenceRef,
-    aggregate_type: CoreTypeRef
+pub struct CoreEffectCtxLookup {
+    context: EffectCtxRef,
+    layout: CoreEffectCtxLayout,
+    token: CoreEffectCtxTokenRef
 }
-pub fn make_core_handled_evidence_use(
-    reference: HandledEvidenceRef, aggregate_type: CoreTypeRef
-) -> CoreHandledEvidenceUse {
-    if core_type_ref_index(aggregate_type) < 0 {
-        panic("CoreHIR: invalid typed handled-evidence use")
+pub fn make_core_effect_ctx_lookup(
+    context: EffectCtxRef, layout: CoreEffectCtxLayout,
+    token: CoreEffectCtxTokenRef
+) -> CoreEffectCtxLookup {
+    if !layout.entries.any(fn(entry) {
+            core_effect_ctx_token_same(entry, token)
+        }) {
+        panic("CoreHIR: lookup token is absent from active fixed layout")
     }
-    CoreHandledEvidenceUse {
-        reference: reference, aggregate_type: aggregate_type
-    }
-}
-pub fn core_handled_use_reference(
-    value: CoreHandledEvidenceUse
-) -> HandledEvidenceRef { value.reference }
-pub fn core_handled_use_requirement(
-    value: CoreHandledEvidenceUse
-) -> HandledEffectRef { handled_evidence_requirement(value.reference) }
-pub fn core_handled_use_slot(value: CoreHandledEvidenceUse) -> SlotRef {
-    handled_evidence_slot(value.reference)
-}
-pub fn core_handled_use_owner(value: CoreHandledEvidenceUse) -> ExecutableRef {
-    handled_evidence_contract_owner(value.reference)
-}
-pub fn core_handled_use_ordinal(value: CoreHandledEvidenceUse) -> Int {
-    handled_evidence_ordinal(value.reference)
-}
-pub fn core_handled_use_type(value: CoreHandledEvidenceUse) -> CoreTypeRef {
-    value.aggregate_type
-}
-fn copy_handled_evidence_uses(
-    values: List<CoreHandledEvidenceUse>
-) -> List<CoreHandledEvidenceUse> {
-    let mut result: List<CoreHandledEvidenceUse> = []
-    for value in values {
-        result.push(make_core_handled_evidence_use(
-            value.reference, value.aggregate_type))
-    }
-    result
-}
-
-pub struct CoreHandledEvidenceCapture {
-    reference: HandledEvidenceCapture,
-    aggregate_type: CoreTypeRef
-}
-pub fn make_core_handled_evidence_capture(
-    reference: HandledEvidenceCapture, aggregate_type: CoreTypeRef
-) -> CoreHandledEvidenceCapture {
-    if core_type_ref_index(aggregate_type) < 0 {
-        panic("CoreHIR: invalid typed handled-evidence capture")
-    }
-    CoreHandledEvidenceCapture {
-        reference: reference, aggregate_type: aggregate_type
+    CoreEffectCtxLookup {
+        context: context, layout: layout, token: token
     }
 }
-pub fn core_handled_capture_requirement(
-    value: CoreHandledEvidenceCapture
-) -> HandledEffectRef {
-    handled_evidence_capture_requirement(value.reference)
+pub fn core_effect_ctx_lookup_context(
+    value: CoreEffectCtxLookup
+) -> EffectCtxRef { value.context }
+pub fn core_effect_ctx_lookup_layout(
+    value: CoreEffectCtxLookup
+) -> CoreEffectCtxLayout {
+    make_core_effect_ctx_layout(value.layout.entries, value.layout.formal)
 }
-pub fn core_handled_capture_source(
-    value: CoreHandledEvidenceCapture
-) -> HandledEvidenceRef {
-    handled_evidence_capture_source(value.reference)
-}
-pub fn core_handled_capture_target(
-    value: CoreHandledEvidenceCapture
-) -> HandledEvidenceRef {
-    handled_evidence_capture_target(value.reference)
-}
-pub fn core_handled_capture_type(
-    value: CoreHandledEvidenceCapture
-) -> CoreTypeRef { value.aggregate_type }
-fn copy_handled_evidence_captures(
-    values: List<CoreHandledEvidenceCapture>
-) -> List<CoreHandledEvidenceCapture> {
-    let mut result: List<CoreHandledEvidenceCapture> = []
-    for value in values {
-        result.push(make_core_handled_evidence_capture(
-            value.reference, value.aggregate_type))
-    }
-    result
-}
+pub fn core_effect_ctx_lookup_token(
+    value: CoreEffectCtxLookup
+) -> CoreEffectCtxTokenRef { value.token }
 
 pub struct CoreCallableContract {
     reference: ExecutableRef,
@@ -288,7 +474,7 @@ pub struct CoreCallableContract {
     mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
     effects: CoreEffectContract,
-    handled_evidence: List<CoreHandledEvidenceBinding>
+    effect_ctx: CoreCallableEffectCtx?
 }
 
 fn copy_core_type_refs(values: List<CoreTypeRef>) -> List<CoreTypeRef> {
@@ -308,7 +494,7 @@ pub fn make_core_callable_contract(
     parameter_slots: List<SlotRef>, mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
     effects: CoreEffectContract,
-    handled_evidence: List<CoreHandledEvidenceBinding>
+    effect_ctx: CoreCallableEffectCtx?
 ) -> CoreCallableContract {
     if core_type_ref_index(header_type) < 0 {
         panic("CoreHIR: callable header type is invalid")
@@ -352,32 +538,17 @@ pub fn make_core_callable_contract(
        (!concrete && parameter_slots.len() != 0) {
         panic("CoreHIR: callable parameter-slot relation differs")
     }
-    let mut left_index = 0
-    while left_index < handled_evidence.len() {
-        let left = handled_evidence.get(left_index).unwrap()
-        if core_handled_evidence_ordinal(left) != left_index ||
-           !executable_ref_same(
-                core_handled_evidence_owner(left), reference) ||
-           !executable_ref_same(
-                binder_entry_owner(handled_evidence_binding(left.reference)),
-                reference) {
-            panic("CoreHIR: callable handled-evidence owner/order differs")
-        }
-        let mut right_index = left_index + 1
-        while right_index < handled_evidence.len() {
-            let right = handled_evidence.get(right_index).unwrap()
-            if handled_effect_ref_same(
-                    core_handled_evidence_requirement(left),
-                    core_handled_evidence_requirement(right)) ||
-               slot_ref_same(
-                    core_handled_evidence_slot(left),
-                    core_handled_evidence_slot(right)) ||
-               handled_evidence_ref_same(left.reference, right.reference) {
-                panic("CoreHIR: callable repeats handled evidence")
+    match effect_ctx {
+        some(context) => {
+            if !executable_ref_same(
+                    effect_ctx_contract_owner(context.reference), reference) ||
+               !effect_ctx_layout_matches_contract(context.layout, effects) {
+                panic("CoreHIR: callable EffectCtx owner/layout differs")
             }
-            right_index = right_index + 1
+        },
+        none => if concrete {
+            panic("CoreHIR: concrete Ring callable lacks EffectCtx")
         }
-        left_index = left_index + 1
     }
     CoreCallableContract {
         reference: reference, origin: origin,
@@ -388,7 +559,7 @@ pub fn make_core_callable_contract(
         mode: mode,
         semantic_contract: semantic_contract,
         effects: copy_core_effect_contract(effects),
-        handled_evidence: copy_handled_evidence_bindings(handled_evidence)
+        effect_ctx: effect_ctx
     }
 }
 pub fn core_callable_reference(value: CoreCallableContract) -> ExecutableRef {
@@ -437,11 +608,9 @@ pub fn core_callable_semantic_contract(
 pub fn core_callable_effect_contract(
     value: CoreCallableContract
 ) -> CoreEffectContract { copy_core_effect_contract(value.effects) }
-pub fn core_callable_handled_evidence(
+pub fn core_callable_effect_ctx(
     value: CoreCallableContract
-) -> List<CoreHandledEvidenceBinding> {
-    copy_handled_evidence_bindings(value.handled_evidence)
-}
+) -> CoreCallableEffectCtx? { value.effect_ctx }
 
 pub struct CoreExecutableRedirect {
     source: ExecutableRef,
@@ -541,13 +710,57 @@ fn callable_redirect_semantic_shell_same(
     true
 }
 
+fn callable_redirect_effect_ctx_same(
+    source: CoreCallableEffectCtx, target: CoreCallableEffectCtx,
+    type_substitutions: List<FlowTypeSubstitution>,
+    effect_pairs: List<(EffectParamRef, EffectParamRef)>,
+    graph: CoreTypeGraph
+) -> Bool {
+    if !core_type_ref_same(source.aggregate_type, target.aggregate_type) ||
+       source.layout.entries.len() != target.layout.entries.len() {
+        return false
+    }
+    let mut index = 0
+    while index < source.layout.entries.len() {
+        let actual = source.layout.entries.get(index).unwrap().instance
+        let formal = target.layout.entries.get(index).unwrap().instance
+        if !handled_effect_ref_same(
+                core_effect_atom_handled_ref(actual),
+                core_effect_atom_handled_ref(formal)) {
+            return false
+        }
+        let actual_args = core_effect_atom_type_arguments(actual)
+        let formal_args = core_effect_atom_type_arguments(formal)
+        if actual_args.len() != formal_args.len() { return false }
+        let mut argument = 0
+        while argument < actual_args.len() {
+            if !flow_type_actual_satisfies_substituted_formal(
+                    core_type_graph_nodes(graph),
+                    actual_args.get(argument).unwrap(),
+                    formal_args.get(argument).unwrap(), type_substitutions) {
+                return false
+            }
+            argument = argument + 1
+        }
+        index = index + 1
+    }
+    match (source.layout.formal, target.layout.formal) {
+        (none, none) => true,
+        (some(actual), some(formal)) => effect_pairs.any(fn(pair) {
+            effect_param_ref_same(pair.0, actual) &&
+                effect_param_ref_same(pair.1, formal)
+        }),
+        _ => false
+    }
+}
+
 pub fn core_callable_redirect(
     source: CoreCallableContract, target: CoreCallableContract,
     graph: CoreTypeGraph
 ) -> CoreExecutableRedirect? {
     if source.type_formals.len() != target.type_formals.len() ||
        source.effect_formals.len() != target.effect_formals.len() ||
-       source.handled_evidence.len() != target.handled_evidence.len() ||
+       source.effect_ctx.is_some() != target.effect_ctx.is_some() ||
        !callable_redirect_semantic_shell_same(source, target) ||
        !executable_ref_is_named(source.reference) ||
        !executable_ref_is_named(target.reference) {
@@ -609,19 +822,13 @@ pub fn core_callable_redirect(
             effect_substitutions) {
         return none
     }
-    let mut handled_index = 0
-    while handled_index < source.handled_evidence.len() {
-        let left = source.handled_evidence.get(handled_index).unwrap()
-        let right = target.handled_evidence.get(handled_index).unwrap()
-        if !handled_effect_ref_same(
-                core_handled_evidence_requirement(left),
-                core_handled_evidence_requirement(right)) ||
-           !core_type_ref_same(
-                core_handled_evidence_type(left),
-                core_handled_evidence_type(right)) {
+    match (source.effect_ctx, target.effect_ctx) {
+        (some(left), some(right)) => if !callable_redirect_effect_ctx_same(
+                left, right, type_substitutions, effect_pairs, graph) {
             return none
-        }
-        handled_index = handled_index + 1
+        },
+        (none, none) => {},
+        _ => return none
     }
     some(make_core_executable_redirect(
         source.reference, target.reference, type_pairs, effect_pairs))
@@ -636,7 +843,7 @@ fn copy_core_callable_contracts(
             value.reference, value.origin,
             value.header_type, value.type_formals, value.effect_formals,
             value.parameter_slots, value.mode,
-            value.semantic_contract, value.effects, value.handled_evidence))
+            value.semantic_contract, value.effects, value.effect_ctx))
     }
     result
 }
@@ -1376,7 +1583,7 @@ enum CoreExprValue {
         callee: CoreCalleeRef,
         arguments: List<CoreExpr>,
         evidence: List<CoreEvidenceRef>,
-        handled_evidence: List<CoreHandledEvidenceUse>
+        effect_ctx: CoreEffectCtxArgument
     },
     MethodCallExprValue {
         callee: CoreCalleeRef,
@@ -1384,13 +1591,13 @@ enum CoreExprValue {
         receiver: CoreExpr,
         arguments: List<CoreExpr>,
         evidence: List<CoreEvidenceRef>,
-        handled_evidence: List<CoreHandledEvidenceUse>
+        effect_ctx: CoreEffectCtxArgument
     },
     EffectCallExprValue {
         operation: EffectOperationRef,
         arguments: List<CoreExpr>,
         evidence: List<CoreEvidenceRef>,
-        handled_evidence: List<CoreHandledEvidenceUse>
+        effect_ctx_lookup: CoreEffectCtxLookup
     },
     SystemCallExprValue {
         host: SystemHostCallableRef,
@@ -1404,7 +1611,8 @@ enum CoreExprValue {
     },
     ConstructExprValue {
         constructor: CoreConstructorRef,
-        fields: List<CoreFieldValue>
+        fields: List<CoreFieldValue>,
+        effect_ctx: CoreEffectCtxArgument?
     },
     MoveUpdateExprValue {
         base: CoreExpr,
@@ -1414,8 +1622,7 @@ enum CoreExprValue {
     },
     LambdaExprValue {
         executable: ExecutableRef,
-        captures: List<CoreCapture>,
-        handled_captures: List<CoreHandledEvidenceCapture>
+        captures: List<CoreCapture>
     },
     BlockExprValue(CoreBlock),
     IfExprValue {
@@ -1434,7 +1641,7 @@ enum CoreExprValue {
     },
     HandleExprValue {
         body: CoreBlock,
-        installations: List<CoreHandlerInstallation>
+        installation: CoreEffectCtxInstall?
     }
 }
 
@@ -1483,14 +1690,20 @@ pub struct CoreHandlerOperation {
     parameter_slots: List<SlotRef>,
     resume_slot: SlotRef?,
     captures: List<CoreCapture>,
-    handled_captures: List<CoreHandledEvidenceCapture>,
+    parent_ctx: EffectCtxParentCapture,
     origin: OriginRef
 }
 
 pub struct CoreHandlerInstallation {
-    evidence: CoreHandledEvidenceBinding,
+    token: CoreEffectCtxTokenRef,
     operations: List<CoreHandlerOperation>,
     origin: OriginRef
+}
+
+pub struct CoreEffectCtxInstall {
+    parent: EffectCtxRef,
+    child: EffectCtxRef,
+    entries: List<CoreHandlerInstallation>
 }
 
 fn copy_slot_refs(values: List<SlotRef>) -> List<SlotRef> {
@@ -1518,8 +1731,7 @@ fn copy_handler_operations(
             parameter_slots: copy_slot_refs(value.parameter_slots),
             resume_slot: value.resume_slot,
             captures: copy_captures(value.captures),
-            handled_captures: copy_handled_evidence_captures(
-                value.handled_captures),
+            parent_ctx: value.parent_ctx,
             origin: value.origin
         })
     }
@@ -1531,13 +1743,18 @@ fn copy_handler_installations(
     let mut result: List<CoreHandlerInstallation> = []
     for value in values {
         result.push(CoreHandlerInstallation {
-            evidence: make_core_handled_evidence_binding(
-                value.evidence.reference, value.evidence.aggregate_type),
+            token: make_core_effect_ctx_token_ref(value.token.instance),
             operations: copy_handler_operations(value.operations),
             origin: value.origin
         })
     }
     result
+}
+fn copy_effect_ctx_install(value: CoreEffectCtxInstall) -> CoreEffectCtxInstall {
+    CoreEffectCtxInstall {
+        parent: value.parent, child: value.child,
+        entries: copy_handler_installations(value.entries)
+    }
 }
 fn make_core_expr(
     ty: CoreTypeRef, effects: CoreEffectSet,
@@ -1602,13 +1819,13 @@ pub fn make_core_call_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     callee: CoreCalleeRef, arguments: List<CoreExpr>,
     evidence: List<CoreEvidenceRef>,
-    handled_evidence: List<CoreHandledEvidenceUse>
+    effect_ctx: CoreEffectCtxArgument
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::CallExprValue {
             callee: callee, arguments: copy_core_exprs(arguments),
             evidence: copy_evidence(evidence),
-            handled_evidence: copy_handled_evidence_uses(handled_evidence)
+            effect_ctx: effect_ctx
         })
 }
 pub fn make_core_method_call_expr(
@@ -1616,34 +1833,32 @@ pub fn make_core_method_call_expr(
     callee: CoreCalleeRef, method: ExactMethodRef,
     receiver: CoreExpr, arguments: List<CoreExpr>,
     evidence: List<CoreEvidenceRef>,
-    handled_evidence: List<CoreHandledEvidenceUse>
+    effect_ctx: CoreEffectCtxArgument
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::MethodCallExprValue {
             callee: callee, method: method, receiver: receiver,
             arguments: copy_core_exprs(arguments),
             evidence: copy_evidence(evidence),
-            handled_evidence: copy_handled_evidence_uses(handled_evidence)
+            effect_ctx: effect_ctx
         })
 }
 pub fn make_core_effect_call_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     operation: EffectOperationRef, arguments: List<CoreExpr>,
     evidence: List<CoreEvidenceRef>,
-    handled_evidence: List<CoreHandledEvidenceUse>
+    effect_ctx_lookup: CoreEffectCtxLookup
 ) -> CoreExpr {
-    if handled_evidence.len() != 1 ||
-       !handled_effect_ref_same(
-            core_handled_use_requirement(
-                handled_evidence.get(0).unwrap()),
+    if !handled_effect_ref_same(
+            core_effect_atom_handled_ref(effect_ctx_lookup.token.instance),
             effect_operation_ref_effect(operation)) {
-        panic("CoreHIR: custom effect call lacks one exact handled use")
+        panic("CoreHIR: custom effect lookup instance differs")
     }
     make_core_expr(ty, effects, origin,
         CoreExprValue::EffectCallExprValue {
             operation: operation, arguments: copy_core_exprs(arguments),
             evidence: copy_evidence(evidence),
-            handled_evidence: copy_handled_evidence_uses(handled_evidence)
+            effect_ctx_lookup: effect_ctx_lookup
         })
 }
 pub fn make_core_system_call_expr(
@@ -1674,11 +1889,12 @@ pub fn make_core_project_expr(
 pub fn make_core_construct_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     constructor: CoreConstructorRef,
-    fields: List<CoreFieldValue>
+    fields: List<CoreFieldValue>, effect_ctx: CoreEffectCtxArgument?
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::ConstructExprValue {
-            constructor: constructor, fields: copy_field_values(fields)
+            constructor: constructor, fields: copy_field_values(fields),
+            effect_ctx: effect_ctx
         })
 }
 pub fn make_core_move_update_expr(
@@ -1695,13 +1911,11 @@ pub fn make_core_move_update_expr(
 }
 pub fn make_core_lambda_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
-    executable: ExecutableRef, captures: List<CoreCapture>,
-    handled_captures: List<CoreHandledEvidenceCapture>
+    executable: ExecutableRef, captures: List<CoreCapture>
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::LambdaExprValue {
-            executable: executable, captures: copy_captures(captures),
-            handled_captures: copy_handled_evidence_captures(handled_captures)
+            executable: executable, captures: copy_captures(captures)
         })
 }
 
@@ -1725,7 +1939,7 @@ pub fn make_core_handler_operation(
     parameter_slots: List<SlotRef>,
     resume_slot: SlotRef?,
     captures: List<CoreCapture>,
-    handled_captures: List<CoreHandledEvidenceCapture>,
+    parent_ctx: EffectCtxParentCapture,
     origin: OriginRef
 ) -> CoreHandlerOperation {
     CoreHandlerOperation {
@@ -1733,23 +1947,18 @@ pub fn make_core_handler_operation(
         parameter_slots: copy_slot_refs(parameter_slots),
         resume_slot: resume_slot,
         captures: copy_captures(captures),
-        handled_captures: copy_handled_evidence_captures(handled_captures),
+        parent_ctx: parent_ctx,
         origin: origin
     }
 }
 pub fn make_core_handler_installation(
-    evidence: CoreHandledEvidenceBinding,
+    token: CoreEffectCtxTokenRef,
     operations: List<CoreHandlerOperation>, origin: OriginRef
 ) -> CoreHandlerInstallation {
     if operations.len() == 0 {
         panic("CoreHIR: handled effect installation has no operations")
     }
-    if binder_kind_tag(binder_entry_kind(
-            handled_evidence_binding(evidence.reference))) !=
-       binder_kind_tag(binder_kind_handled_evidence_local()) {
-        panic("CoreHIR: handled installation evidence is not local")
-    }
-    let requirement = core_handled_evidence_requirement(evidence)
+    let requirement = core_effect_atom_handled_ref(token.instance)
     let mut index = 0
     while index < operations.len() {
         let operation = operations.get(index).unwrap()
@@ -1771,8 +1980,35 @@ pub fn make_core_handler_installation(
         index = index + 1
     }
     CoreHandlerInstallation {
-        evidence: evidence,
+        token: token,
         operations: copy_handler_operations(operations), origin: origin
+    }
+}
+pub fn make_core_effect_ctx_install(
+    parent: EffectCtxRef, child: EffectCtxRef,
+    entries: List<CoreHandlerInstallation>
+) -> CoreEffectCtxInstall {
+    if effect_ctx_ref_same(parent, child) || entries.len() == 0 ||
+       binder_kind_tag(binder_entry_kind(effect_ctx_binding(child))) !=
+            binder_kind_tag(binder_kind_effect_ctx_local()) {
+        panic("CoreHIR: invalid owned EffectCtx child install")
+    }
+    let mut left = 0
+    while left < entries.len() {
+        let mut right = left + 1
+        while right < entries.len() {
+            if core_effect_ctx_token_same(
+                    entries.get(left).unwrap().token,
+                    entries.get(right).unwrap().token) {
+                panic("CoreHIR: EffectCtx install repeats an exact entry")
+            }
+            right = right + 1
+        }
+        left = left + 1
+    }
+    CoreEffectCtxInstall {
+        parent: parent, child: child,
+        entries: copy_handler_installations(entries)
     }
 }
 pub fn make_core_block_expr(
@@ -1818,35 +2054,14 @@ pub fn make_core_try_catch_expr(
 pub fn make_core_handle_expr(
     ty: CoreTypeRef, effects: CoreEffectSet,
     origin: OriginRef, body: CoreBlock,
-    installations: List<CoreHandlerInstallation>
+    installation: CoreEffectCtxInstall?
 ) -> CoreExpr {
-    if installations.len() == 0 {
-        panic("CoreHIR: handle has no effect installations")
-    }
-    let mut index = 0
-    while index < installations.len() {
-        let current = installations.get(index).unwrap()
-        if index > 0 && core_handled_evidence_ordinal(current.evidence) <=
-                core_handled_evidence_ordinal(
-                    installations.get(index - 1).unwrap().evidence) {
-            panic("CoreHIR: handled installations are not in exact order")
-        }
-        let mut right = index + 1
-        while right < installations.len() {
-            if handled_effect_ref_same(
-                    core_handled_evidence_requirement(current.evidence),
-                    core_handled_evidence_requirement(
-                        installations.get(right).unwrap().evidence)) {
-                panic("CoreHIR: handled installations repeat an effect")
-            }
-            right = right + 1
-        }
-        index = index + 1
-    }
     make_core_expr(ty, effects, origin,
         CoreExprValue::HandleExprValue {
             body: body,
-            installations: copy_handler_installations(installations)
+            installation: installation.map(fn(value) {
+                copy_effect_ctx_install(value)
+            })
         })
 }
 
@@ -2078,17 +2293,20 @@ pub fn core_expr_call_evidence(value: CoreExpr) -> List<CoreEvidenceRef> {
         _ => panic("CoreHIR: expression has no evidence list")
     }
 }
-pub fn core_expr_call_handled_evidence(
+pub fn core_expr_call_effect_ctx_argument(
     value: CoreExpr
-) -> List<CoreHandledEvidenceUse> {
+) -> CoreEffectCtxArgument {
     match value.value {
-        CoreExprValue::CallExprValue { handled_evidence, .. } =>
-            copy_handled_evidence_uses(handled_evidence),
-        CoreExprValue::MethodCallExprValue { handled_evidence, .. } =>
-            copy_handled_evidence_uses(handled_evidence),
-        CoreExprValue::EffectCallExprValue { handled_evidence, .. } =>
-            copy_handled_evidence_uses(handled_evidence),
-        _ => panic("CoreHIR: expression has no handled-evidence list")
+        CoreExprValue::CallExprValue { effect_ctx, .. } => effect_ctx,
+        CoreExprValue::MethodCallExprValue { effect_ctx, .. } => effect_ctx,
+        _ => panic("CoreHIR: expression has no EffectCtx argument")
+    }
+}
+pub fn core_expr_effect_ctx_lookup(value: CoreExpr) -> CoreEffectCtxLookup {
+    match value.value {
+        CoreExprValue::EffectCallExprValue { effect_ctx_lookup, .. } =>
+            effect_ctx_lookup,
+        _ => panic("CoreHIR: expression has no EffectCtx lookup")
     }
 }
 pub fn core_expr_method_ref(value: CoreExpr) -> ExactMethodRef {
@@ -2152,6 +2370,14 @@ pub fn core_expr_constructor_fields(value: CoreExpr) -> List<CoreFieldValue> {
         _ => panic("CoreHIR: expression is not Construct")
     }
 }
+pub fn core_expr_constructor_effect_ctx(
+    value: CoreExpr
+) -> CoreEffectCtxArgument? {
+    match value.value {
+        CoreExprValue::ConstructExprValue { effect_ctx, .. } => effect_ctx,
+        _ => panic("CoreHIR: expression is not Construct")
+    }
+}
 pub fn core_expr_move_update_base(value: CoreExpr) -> CoreExpr {
     match value.value {
         CoreExprValue::MoveUpdateExprValue { base, .. } => base,
@@ -2187,15 +2413,6 @@ pub fn core_expr_lambda_executable(value: CoreExpr) -> ExecutableRef {
 pub fn core_expr_lambda_captures(value: CoreExpr) -> List<CoreCapture> {
     match value.value {
         CoreExprValue::LambdaExprValue { captures, .. } => copy_captures(captures),
-        _ => panic("CoreHIR: expression is not Lambda")
-    }
-}
-pub fn core_expr_lambda_handled_captures(
-    value: CoreExpr
-) -> List<CoreHandledEvidenceCapture> {
-    match value.value {
-        CoreExprValue::LambdaExprValue { handled_captures, .. } =>
-            copy_handled_evidence_captures(handled_captures),
         _ => panic("CoreHIR: expression is not Lambda")
     }
 }
@@ -2254,12 +2471,12 @@ pub fn core_expr_handle_body(value: CoreExpr) -> CoreBlock {
         _ => panic("CoreHIR: expression is not Handle")
     }
 }
-pub fn core_expr_handler_installations(
+pub fn core_expr_effect_ctx_install(
     value: CoreExpr
-) -> List<CoreHandlerInstallation> {
+) -> CoreEffectCtxInstall? {
     match value.value {
-        CoreExprValue::HandleExprValue { installations, .. } =>
-            copy_handler_installations(installations),
+        CoreExprValue::HandleExprValue { installation, .. } =>
+            installation.map(fn(item) { copy_effect_ctx_install(item) }),
         _ => panic("CoreHIR: expression is not Handle")
     }
 }
@@ -2293,17 +2510,15 @@ pub fn core_handler_operation_resume_slot(
 pub fn core_handler_operation_captures(
     value: CoreHandlerOperation
 ) -> List<CoreCapture> { copy_captures(value.captures) }
-pub fn core_handler_operation_handled_captures(
+pub fn core_handler_operation_parent_ctx(
     value: CoreHandlerOperation
-) -> List<CoreHandledEvidenceCapture> {
-    copy_handled_evidence_captures(value.handled_captures)
-}
+) -> EffectCtxParentCapture { value.parent_ctx }
 pub fn core_handler_operation_origin(
     value: CoreHandlerOperation
 ) -> OriginRef { value.origin }
-pub fn core_handler_installation_evidence(
+pub fn core_handler_installation_token(
     value: CoreHandlerInstallation
-) -> CoreHandledEvidenceBinding { value.evidence }
+) -> CoreEffectCtxTokenRef { value.token }
 pub fn core_handler_installation_operations(
     value: CoreHandlerInstallation
 ) -> List<CoreHandlerOperation> {
@@ -2312,6 +2527,17 @@ pub fn core_handler_installation_operations(
 pub fn core_handler_installation_origin(
     value: CoreHandlerInstallation
 ) -> OriginRef { value.origin }
+pub fn core_effect_ctx_install_parent(
+    value: CoreEffectCtxInstall
+) -> EffectCtxRef { value.parent }
+pub fn core_effect_ctx_install_child(
+    value: CoreEffectCtxInstall
+) -> EffectCtxRef { value.child }
+pub fn core_effect_ctx_install_entries(
+    value: CoreEffectCtxInstall
+) -> List<CoreHandlerInstallation> {
+    copy_handler_installations(value.entries)
+}
 
 // ============================================================
 // Closed structured body and recursive validator
@@ -2493,85 +2719,55 @@ fn validate_evidence(values: List<CoreEvidenceRef>, body: CoreBody) {
     }
 }
 
-fn validate_handled_evidence_uses(
-    values: List<CoreHandledEvidenceUse>, body: CoreBody
-) {
-    let mut index = 0
-    while index < values.len() {
-        let value = values.get(index).unwrap()
-        require_binder(body.binders, core_handled_use_slot(value))
-        let binder = body.binders.get(
-            binder_index(body.binders, core_handled_use_slot(value)).unwrap()
-        ).unwrap()
-        if !core_type_ref_same(binder.ty, value.aggregate_type) ||
-           !executable_ref_same(core_handled_use_owner(value), body.reference) {
-            panic("CoreHIR: handled-evidence use binder/type/owner differs")
-        }
-        let mut right = index + 1
-        while right < values.len() {
-            let other = values.get(right).unwrap()
-            if handled_effect_ref_same(
-                    core_handled_use_requirement(value),
-                    core_handled_use_requirement(other)) ||
-               slot_ref_same(
-                    core_handled_use_slot(value),
-                    core_handled_use_slot(other)) {
-                panic("CoreHIR: call repeats handled-evidence use")
-            }
-            right = right + 1
-        }
-        index = index + 1
-    }
-}
-
-fn validate_handled_installation(
-    value: CoreHandlerInstallation, body: CoreBody
-) {
-    let slot = core_handled_evidence_slot(value.evidence)
+fn validate_effect_ctx_reference(value: EffectCtxRef, body: CoreBody) {
+    let slot = effect_ctx_slot(value)
     require_binder(body.binders, slot)
-    let binder = body.binders.get(binder_index(body.binders, slot).unwrap()).unwrap()
-    if !core_type_ref_same(binder.ty, value.evidence.aggregate_type) ||
-       !executable_ref_same(
-            core_handled_evidence_owner(value.evidence), body.reference) {
-        panic("CoreHIR: handled installation evidence differs from body")
+    let binder = body.binders.get(
+        binder_index(body.binders, slot).unwrap()).unwrap()
+    let kind = binder_kind_tag(binder.kind)
+    if !executable_ref_same(effect_ctx_contract_owner(value), body.reference) ||
+       (kind != binder_kind_tag(binder_kind_effect_ctx_param()) &&
+        kind != binder_kind_tag(binder_kind_effect_ctx_local()) &&
+        kind != binder_kind_tag(binder_kind_effect_ctx_parent_capture())) {
+        panic("CoreHIR: EffectCtx reference binder/owner differs")
     }
 }
-
-fn validate_handled_captures(
-    values: List<CoreHandledEvidenceCapture>,
-    body: CoreBody, target_owner: ExecutableRef
+fn validate_effect_ctx_argument(
+    value: CoreEffectCtxArgument, body: CoreBody
 ) {
-    let mut index = 0
-    while index < values.len() {
-        let value = values.get(index).unwrap()
-        let source = core_handled_capture_source(value)
-        let target = core_handled_capture_target(value)
-        let source_slot = handled_evidence_slot(source)
-        require_binder(body.binders, source_slot)
-        let binder = body.binders.get(
-            binder_index(body.binders, source_slot).unwrap()).unwrap()
-        if !core_type_ref_same(binder.ty, value.aggregate_type) ||
-           !executable_ref_same(
-                handled_evidence_contract_owner(source), body.reference) ||
-           !executable_ref_same(
-                handled_evidence_contract_owner(target), target_owner) {
-            panic("CoreHIR: handled capture owner/type differs")
-        }
-        let mut right = index + 1
-        while right < values.len() {
-            let other = values.get(right).unwrap()
-            if handled_effect_ref_same(
-                    core_handled_capture_requirement(value),
-                    core_handled_capture_requirement(other)) ||
-               slot_ref_same(
-                    handled_evidence_slot(target),
-                    handled_evidence_slot(
-                        core_handled_capture_target(other))) {
-                panic("CoreHIR: handled capture is duplicated")
-            }
-            right = right + 1
-        }
-        index = index + 1
+    if core_effect_ctx_argument_kind_tag(value) != 0 {
+        validate_effect_ctx_reference(
+            core_effect_ctx_argument_context(value), body)
+    }
+    if !effect_ctx_layout_matches_contract(
+            core_effect_ctx_argument_target_layout(value),
+            core_effect_instantiation_result(
+                core_effect_ctx_argument_receipt(value))) {
+        panic("CoreHIR: EffectCtx argument receipt/layout differs")
+    }
+}
+fn validate_effect_ctx_install(
+    value: CoreEffectCtxInstall, body: CoreBody
+) {
+    validate_effect_ctx_reference(value.parent, body)
+    validate_effect_ctx_reference(value.child, body)
+    if binder_kind_tag(binder_entry_kind(effect_ctx_binding(value.child))) !=
+            binder_kind_tag(binder_kind_effect_ctx_local()) {
+        panic("CoreHIR: EffectCtx child is not an owned local")
+    }
+}
+fn validate_parent_ctx_capture(
+    value: EffectCtxParentCapture, body: CoreBody,
+    target_owner: ExecutableRef
+) {
+    validate_effect_ctx_reference(
+        effect_ctx_parent_capture_source(value), body)
+    let target = effect_ctx_parent_capture_target(value)
+    if !executable_ref_same(
+            effect_ctx_contract_owner(target), target_owner) ||
+       binder_kind_tag(binder_entry_kind(effect_ctx_binding(target))) !=
+            binder_kind_tag(binder_kind_effect_ctx_parent_capture()) {
+        panic("CoreHIR: handler parent EffectCtx capture differs")
     }
 }
 
@@ -2772,17 +2968,17 @@ fn validate_expr_with_loop_depth(
             }
         },
         CoreExprValue::CallExprValue {
-            callee, arguments, evidence, handled_evidence
+            callee, arguments, evidence, effect_ctx
         } => {
             validate_callee(callee, body)
             for argument in arguments {
                 validate_expr_with_loop_depth(argument, body, loop_depth)
             }
             validate_evidence(evidence, body)
-            validate_handled_evidence_uses(handled_evidence, body)
+            validate_effect_ctx_argument(effect_ctx, body)
         },
         CoreExprValue::MethodCallExprValue {
-            callee, receiver, arguments, evidence, handled_evidence, ..
+            callee, receiver, arguments, evidence, effect_ctx, ..
         } => {
             validate_callee(callee, body)
             validate_expr_with_loop_depth(receiver, body, loop_depth)
@@ -2790,22 +2986,21 @@ fn validate_expr_with_loop_depth(
                 validate_expr_with_loop_depth(argument, body, loop_depth)
             }
             validate_evidence(evidence, body)
-            validate_handled_evidence_uses(handled_evidence, body)
+            validate_effect_ctx_argument(effect_ctx, body)
         },
         CoreExprValue::EffectCallExprValue {
-            operation, arguments, evidence, handled_evidence
+            operation, arguments, evidence, effect_ctx_lookup
         } => {
             for argument in arguments {
                 validate_expr_with_loop_depth(argument, body, loop_depth)
             }
             validate_evidence(evidence, body)
-            validate_handled_evidence_uses(handled_evidence, body)
-            if handled_evidence.len() != 1 ||
-               !handled_effect_ref_same(
-                    core_handled_use_requirement(
-                        handled_evidence.get(0).unwrap()),
+            validate_effect_ctx_reference(effect_ctx_lookup.context, body)
+            if !handled_effect_ref_same(
+                    core_effect_atom_handled_ref(
+                        effect_ctx_lookup.token.instance),
                     effect_operation_ref_effect(operation)) {
-                panic("CoreHIR: effect call handled use differs")
+                panic("CoreHIR: effect call lookup differs")
             }
         },
         CoreExprValue::SystemCallExprValue { arguments, .. } => {
@@ -2817,8 +3012,18 @@ fn validate_expr_with_loop_depth(
             validate_expr_with_loop_depth(payload, body, loop_depth),
         CoreExprValue::ProjectExprValue { base, .. } =>
             validate_expr_with_loop_depth(base, body, loop_depth),
-        CoreExprValue::ConstructExprValue { constructor, fields } =>
-            validate_constructor_fields(constructor, fields, body, loop_depth),
+        CoreExprValue::ConstructExprValue {
+            constructor, fields, effect_ctx
+        } => {
+            validate_constructor_fields(constructor, fields, body, loop_depth)
+            if constructor.executable.is_some() != effect_ctx.is_some() {
+                panic("CoreHIR: executable constructor EffectCtx differs")
+            }
+            match effect_ctx {
+                some(argument) => validate_effect_ctx_argument(argument, body),
+                none => {}
+            }
+        },
         CoreExprValue::MoveUpdateExprValue {
             base, constructor, schema, overrides
         } => {
@@ -2864,13 +3069,10 @@ fn validate_expr_with_loop_depth(
                 _ => panic("CoreHIR: move update constructor is not nominal")
             }
         },
-        CoreExprValue::LambdaExprValue {
-            executable, captures, handled_captures
-        } => {
+        CoreExprValue::LambdaExprValue { captures, .. } => {
             for capture in captures {
                 require_binder(body.binders, capture.source)
             }
-            validate_handled_captures(handled_captures, body, executable)
         },
         CoreExprValue::BlockExprValue(block) =>
             validate_block_with_loop_depth(block, body, loop_depth),
@@ -2893,35 +3095,26 @@ fn validate_expr_with_loop_depth(
             for arm in arms { validate_match_arm(arm, body, loop_depth) }
         },
         CoreExprValue::HandleExprValue {
-            body: handled_body, installations
+            body: handled_body, installation
         } => {
             validate_block_with_loop_depth(handled_body, body, loop_depth)
-            let mut index = 0
-            while index < installations.len() {
-                let installation = installations.get(index).unwrap()
-                validate_origin(installation.origin, body.reference)
-                validate_handled_installation(installation, body)
-                for operation in installation.operations {
-                    validate_origin(operation.origin, operation.executable)
-                    for capture in operation.captures {
-                        require_binder(body.binders, capture.source)
+            match installation {
+                some(context) => {
+                    validate_effect_ctx_install(context, body)
+                    for entry in context.entries {
+                        validate_origin(entry.origin, body.reference)
+                        for operation in entry.operations {
+                            validate_origin(operation.origin, operation.executable)
+                            for capture in operation.captures {
+                                require_binder(body.binders, capture.source)
+                            }
+                            validate_parent_ctx_capture(
+                                operation.parent_ctx, body,
+                                operation.executable)
+                        }
                     }
-                    validate_handled_captures(
-                        operation.handled_captures,
-                        body, operation.executable)
-                }
-                let mut right_index = index + 1
-                while right_index < installations.len() {
-                    let right = installations.get(right_index).unwrap()
-                    if handled_effect_ref_same(
-                            core_handled_evidence_requirement(
-                                installation.evidence),
-                            core_handled_evidence_requirement(right.evidence)) {
-                        panic("CoreHIR: handle repeats an exact effect")
-                    }
-                    right_index = right_index + 1
-                }
-                index = index + 1
+                },
+                none => {}
             }
         }
     }
@@ -3256,12 +3449,15 @@ fn collect_core_expr_origins(value: CoreExpr, mut result: List<OriginRef>) {
                 collect_core_block_origins(arm.body, result)
             }
         },
-        CoreExprValue::HandleExprValue { body, installations } => {
+        CoreExprValue::HandleExprValue { body, installation } => {
             collect_core_block_origins(body, result)
-            for installation in installations {
-                for operation in installation.operations {
-                    result.push(operation.origin)
-                }
+            match installation {
+                some(context) => for entry in context.entries {
+                    for operation in entry.operations {
+                        result.push(operation.origin)
+                    }
+                },
+                none => {}
             }
         },
         _ => {}
@@ -3497,26 +3693,51 @@ fn remap_core_effect_instantiation(
     }
 }
 
-fn remap_handled_binding(
-    value: CoreHandledEvidenceBinding, ctx: CoreRewriteContext
-) -> CoreHandledEvidenceBinding {
-    make_core_handled_evidence_binding(
-        value.reference, remap_core_type_reference(value.aggregate_type, ctx))
+fn remap_effect_ctx_token(
+    value: CoreEffectCtxTokenRef, ctx: CoreRewriteContext
+) -> CoreEffectCtxTokenRef {
+    make_core_effect_ctx_token_ref(remap_core_effect_atom(
+        value.instance, ctx))
 }
-fn remap_handled_use(
-    value: CoreHandledEvidenceUse, ctx: CoreRewriteContext
-) -> CoreHandledEvidenceUse {
-    make_core_handled_evidence_use(
-        value.reference, remap_core_type_reference(value.aggregate_type, ctx))
+fn remap_effect_ctx_layout(
+    value: CoreEffectCtxLayout, ctx: CoreRewriteContext
+) -> CoreEffectCtxLayout {
+    make_core_effect_ctx_layout(value.entries.map(fn(entry) {
+        remap_effect_ctx_token(entry, ctx)
+    }), value.formal)
 }
-fn remap_handled_uses(
-    values: List<CoreHandledEvidenceUse>, ctx: CoreRewriteContext
-) -> List<CoreHandledEvidenceUse> {
-    let mut result: List<CoreHandledEvidenceUse> = []
-    for value in values {
-        result.push(remap_handled_use(value, ctx))
+fn remap_callable_effect_ctx(
+    value: CoreCallableEffectCtx, ctx: CoreRewriteContext
+) -> CoreCallableEffectCtx {
+    make_core_callable_effect_ctx(
+        value.reference, remap_effect_ctx_layout(value.layout, ctx),
+        remap_core_type_reference(value.aggregate_type, ctx))
+}
+fn remap_effect_ctx_argument(
+    value: CoreEffectCtxArgument, ctx: CoreRewriteContext
+) -> CoreEffectCtxArgument {
+    let receipt = remap_core_effect_instantiation(
+        core_effect_ctx_argument_receipt(value), ctx, none)
+    let kind = core_effect_ctx_argument_kind_tag(value)
+    if kind == 0 { return make_empty_core_effect_ctx_argument(receipt) }
+    let source = remap_effect_ctx_layout(
+        core_effect_ctx_argument_source_layout(value), ctx)
+    let target = remap_effect_ctx_layout(
+        core_effect_ctx_argument_target_layout(value), ctx)
+    if kind == 1 {
+        make_borrow_current_core_effect_ctx_argument(
+            core_effect_ctx_argument_context(value), target, receipt)
+    } else {
+        make_borrow_view_core_effect_ctx_argument(
+            core_effect_ctx_argument_context(value), source, target, receipt)
     }
-    result
+}
+fn remap_effect_ctx_lookup(
+    value: CoreEffectCtxLookup, ctx: CoreRewriteContext
+) -> CoreEffectCtxLookup {
+    make_core_effect_ctx_lookup(
+        value.context, remap_effect_ctx_layout(value.layout, ctx),
+        remap_effect_ctx_token(value.token, ctx))
 }
 
 fn remap_direct_callable_instantiation(
@@ -3698,7 +3919,7 @@ fn remap_core_expr_types(
                 })
             },
         CoreExprValue::CallExprValue {
-            callee, arguments, evidence, handled_evidence
+            callee, arguments, evidence, effect_ctx
         } =>
             CoreExprValue::CallExprValue {
                 callee: remap_core_callee(callee, ctx),
@@ -3706,10 +3927,10 @@ fn remap_core_expr_types(
                     remap_core_expr_types(argument, ctx)
                 }),
                 evidence: copy_evidence(evidence),
-                handled_evidence: remap_handled_uses(handled_evidence, ctx)
+                effect_ctx: remap_effect_ctx_argument(effect_ctx, ctx)
             },
         CoreExprValue::MethodCallExprValue {
-            callee, method, receiver, arguments, evidence, handled_evidence
+            callee, method, receiver, arguments, evidence, effect_ctx
         } => CoreExprValue::MethodCallExprValue {
             callee: remap_core_callee(callee, ctx),
             method: method,
@@ -3718,16 +3939,16 @@ fn remap_core_expr_types(
                 remap_core_expr_types(argument, ctx)
             }),
             evidence: copy_evidence(evidence),
-            handled_evidence: remap_handled_uses(handled_evidence, ctx)
+            effect_ctx: remap_effect_ctx_argument(effect_ctx, ctx)
         },
         CoreExprValue::EffectCallExprValue {
-            operation, arguments, evidence, handled_evidence
+            operation, arguments, evidence, effect_ctx_lookup
         } => CoreExprValue::EffectCallExprValue {
             operation: operation, arguments: arguments.map(fn(argument) {
                 remap_core_expr_types(argument, ctx)
             }),
             evidence: copy_evidence(evidence),
-            handled_evidence: remap_handled_uses(handled_evidence, ctx)
+            effect_ctx_lookup: remap_effect_ctx_lookup(effect_ctx_lookup, ctx)
         },
         CoreExprValue::SystemCallExprValue { host, arguments } =>
             CoreExprValue::SystemCallExprValue {
@@ -3744,12 +3965,16 @@ fn remap_core_expr_types(
                 base: remap_core_expr_types(base, ctx),
                 field: field, partial: partial
             },
-        CoreExprValue::ConstructExprValue { constructor, fields } =>
+        CoreExprValue::ConstructExprValue {
+            constructor, fields, effect_ctx
+        } =>
             CoreExprValue::ConstructExprValue {
                 constructor: constructor, fields: fields.map(fn(field) {
                     make_core_field_value(
                         field.field, remap_core_expr_types(
                             field.value, ctx))
+                }), effect_ctx: effect_ctx.map(fn(argument) {
+                    remap_effect_ctx_argument(argument, ctx)
                 })
             },
         CoreExprValue::MoveUpdateExprValue {
@@ -3764,17 +3989,10 @@ fn remap_core_expr_types(
                         field.value, ctx))
             })
         },
-        CoreExprValue::LambdaExprValue {
-            executable, captures, handled_captures
-        } =>
+        CoreExprValue::LambdaExprValue { executable, captures } =>
             CoreExprValue::LambdaExprValue {
             executable: executable,
-            captures: copy_captures(captures),
-            handled_captures: handled_captures.map(fn(capture) {
-                make_core_handled_evidence_capture(
-                    capture.reference,
-                    remap_core_type_reference(capture.aggregate_type, ctx))
-            })
+            captures: copy_captures(captures)
         },
         CoreExprValue::BlockExprValue(block) =>
             CoreExprValue::BlockExprValue(
@@ -3801,14 +4019,16 @@ fn remap_core_expr_types(
                     remap_core_match_arm_types(arm, ctx)
                 })
             },
-        CoreExprValue::HandleExprValue { body, installations } =>
+        CoreExprValue::HandleExprValue { body, installation } =>
             CoreExprValue::HandleExprValue {
                 body: remap_core_block_types(body, ctx),
-                installations: installations.map(fn(installation) {
-                    CoreHandlerInstallation {
-                        evidence: remap_handled_binding(
-                            installation.evidence, ctx),
-                        operations: installation.operations.map(fn(operation) {
+                installation: installation.map(fn(install) {
+                    CoreEffectCtxInstall {
+                        parent: install.parent, child: install.child,
+                        entries: install.entries.map(fn(entry) {
+                          CoreHandlerInstallation {
+                            token: remap_effect_ctx_token(entry.token, ctx),
+                            operations: entry.operations.map(fn(operation) {
                             CoreHandlerOperation {
                                 operation: operation.operation,
                                 executable: operation.executable,
@@ -3816,17 +4036,13 @@ fn remap_core_expr_types(
                                     operation.parameter_slots),
                                 resume_slot: operation.resume_slot,
                                 captures: copy_captures(operation.captures),
-                                handled_captures:
-                                    operation.handled_captures.map(fn(capture) {
-                                        make_core_handled_evidence_capture(
-                                            capture.reference,
-                                            remap_core_type_reference(
-                                                capture.aggregate_type, ctx))
-                                    }),
+                                parent_ctx: operation.parent_ctx,
                                 origin: operation.origin
                             }
                         }),
-                        origin: installation.origin
+                            origin: entry.origin
+                          }
+                        })
                     }
                 })
             }
@@ -3879,8 +4095,8 @@ pub fn remap_core_callable_types(
         value.mode,
         remap_flow_call_contract(value.semantic_contract, mapping, module_key),
         remap_core_effect_contract(value.effects, ctx),
-        value.handled_evidence.map(fn(binding) {
-            remap_handled_binding(binding, ctx)
+        value.effect_ctx.map(fn(context) {
+            remap_callable_effect_ctx(context, ctx)
         }))
 }
 
@@ -4058,8 +4274,16 @@ pub fn validate_core_callable_contracts(
         for parameter in parameter_types {
             let _ = core_type_graph_node(graph, parameter)
         }
-        for binding in left.handled_evidence {
-            let _ = core_type_graph_node(graph, binding.aggregate_type)
+        match left.effect_ctx {
+            some(context) => {
+                let _ = core_type_graph_node(graph, context.aggregate_type)
+                for entry in context.layout.entries {
+                    for ty in core_effect_atom_type_arguments(entry.instance) {
+                        let _ = core_type_graph_node(graph, ty)
+                    }
+                }
+            },
+            none => {}
         }
         let mut right_index = left_index + 1
         while right_index < values.len() {
@@ -4091,27 +4315,6 @@ fn require_core_type_actual_satisfies_formal(
             core_type_graph_node(graph, actual),
             core_type_graph_node(graph, formal_ref)) {
         panic(message)
-    }
-}
-
-fn validate_instantiated_handled_uses(
-    uses: List<CoreHandledEvidenceUse>, effects: CoreEffectContract,
-    body: CoreBody
-) {
-    let requirements = core_effect_contract_handled_requirements(effects)
-    if uses.len() != requirements.len() {
-        panic("CoreHIR: handled-evidence census differs from effect instantiation")
-    }
-    validate_handled_evidence_uses(uses, body)
-    let mut index = 0
-    while index < uses.len() {
-        let actual = uses.get(index).unwrap()
-        if !handled_effect_ref_same(
-                core_handled_use_requirement(actual),
-                requirements.get(index).unwrap()) {
-            panic("CoreHIR: handled-evidence requirement order differs")
-        }
-        index = index + 1
     }
 }
 
@@ -4175,10 +4378,16 @@ fn validate_call_signature(
     callee: CoreCalleeRef, arguments: List<CoreExpr>, result_type: CoreTypeRef,
     expression_effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
-    handled_evidence: List<CoreHandledEvidenceUse>, body: CoreBody,
+    effect_ctx: CoreEffectCtxArgument, body: CoreBody,
     graph: CoreTypeGraph, callables: List<CoreCallableContract>
 ) {
     validate_call_effects(callee, expression_effects)
+    if !core_effect_contract_same(
+            core_effect_instantiation_result(
+                core_effect_ctx_argument_receipt(effect_ctx)),
+            core_effect_instantiation_result(callee.effects)) {
+        panic("CoreHIR: call EffectCtx receipt differs from callee")
+    }
     if callee.kind != CORE_CALLEE_DIRECT &&
        (callee.type_substitutions.len() != 0 ||
         callee.effect_substitutions.len() != 0) {
@@ -4229,9 +4438,7 @@ fn validate_call_signature(
             panic("CoreHIR: direct call effect source contract differs")
         }
         validate_evidence(evidence, body)
-        validate_instantiated_handled_uses(
-            handled_evidence,
-            core_effect_instantiation_result(callee.effects), body)
+        validate_effect_ctx_argument(effect_ctx, body)
     } else if callee.kind == CORE_CALLEE_LOCAL {
         let callable_ty = core_type_graph_node(
             graph, core_binder_type_for(body, core_callee_local(callee)))
@@ -4241,14 +4448,10 @@ fn validate_call_signature(
             panic("CoreHIR: local callee slot is not exact callable type")
         }
         validate_evidence(evidence, body)
-        validate_instantiated_handled_uses(
-            handled_evidence,
-            core_effect_instantiation_result(callee.effects), body)
+        validate_effect_ctx_argument(effect_ctx, body)
     } else if callee.kind == CORE_CALLEE_DYNAMIC {
         validate_evidence(evidence, body)
-        validate_instantiated_handled_uses(
-            handled_evidence,
-            core_effect_instantiation_result(callee.effects), body)
+        validate_effect_ctx_argument(effect_ctx, body)
     } else {
         panic("CoreHIR: unknown callee identity form")
     }
@@ -4789,26 +4992,16 @@ fn validate_method_call_identity(
     }
 }
 
-fn validate_handled_capture_targets(
-    captures: List<CoreHandledEvidenceCapture>,
-    contract: CoreCallableContract, graph: CoreTypeGraph
+fn validate_parent_ctx_target(
+    capture: EffectCtxParentCapture, contract: CoreCallableContract
 ) {
-    for capture in captures {
-        let target = core_handled_capture_target(capture)
-        let mut found = false
-        for binding in contract.handled_evidence {
-            if handled_evidence_ref_same(target, binding.reference) {
-                if !core_type_ref_same(
-                        capture.aggregate_type, binding.aggregate_type) {
-                    panic("CoreHIR: handled capture target type differs")
-                }
-                found = true
-            }
-        }
-        if !found {
-            panic("CoreHIR: handled capture target is absent from callable")
-        }
-        let _ = core_type_graph_node(graph, capture.aggregate_type)
+    match contract.effect_ctx {
+        some(context) => if !effect_ctx_ref_same(
+                effect_ctx_parent_capture_target(capture),
+                context.reference) {
+            panic("CoreHIR: handler parent EffectCtx target differs")
+        },
+        none => panic("CoreHIR: handler parent targets foreign leaf")
     }
 }
 
@@ -4937,7 +5130,7 @@ fn validate_expr_with_program(
                 operation, operands, value.ty, body, graph)
         },
         CoreExprValue::CallExprValue {
-            callee, arguments, evidence, handled_evidence
+            callee, arguments, evidence, effect_ctx
         } => {
             for argument in arguments {
                 validate_expr_with_program(
@@ -4947,11 +5140,11 @@ fn validate_expr_with_program(
             validate_evidence_with_program(evidence, body, impls)
             validate_call_signature(
                 callee, arguments, value.ty, value.effects,
-                evidence, handled_evidence,
+                evidence, effect_ctx,
                 body, graph, callables)
         },
         CoreExprValue::MethodCallExprValue {
-            callee, method, receiver, arguments, evidence, handled_evidence
+            callee, method, receiver, arguments, evidence, effect_ctx
         } => {
             validate_method_call_identity(
                 method, callee, evidence, body, impls)
@@ -4968,11 +5161,11 @@ fn validate_expr_with_program(
             validate_evidence_with_program(evidence, body, impls)
             validate_call_signature(
                 callee, all_arguments, value.ty, value.effects,
-                evidence, handled_evidence,
+                evidence, effect_ctx,
                 body, graph, callables)
         },
         CoreExprValue::EffectCallExprValue {
-            operation, arguments, evidence, handled_evidence
+            operation, arguments, evidence, effect_ctx_lookup
         } => {
             for argument in arguments {
                 validate_expr_with_program(
@@ -4997,15 +5190,16 @@ fn validate_expr_with_program(
                         callable.effects, callable.effects,
                         callable.effects)),
                 arguments, value.ty, value.effects,
-                evidence, handled_evidence,
+                evidence, make_borrow_current_core_effect_ctx_argument(
+                    effect_ctx_lookup.context, effect_ctx_lookup.layout,
+                    make_explicit_core_effect_instantiation(
+                        callable.effects, callable.effects, callable.effects)),
                 body, graph, callables)
             validate_evidence_with_program(evidence, body, impls)
-            let handled = effect_operation_ref_effect(operation)
             let mut present = false
             for atom in core_effect_set_atoms(value.effects) {
-                if core_effect_atom_kind_tag(atom) == 3 &&
-                   handled_effect_ref_same(
-                        core_effect_atom_handled_ref(atom), handled) {
+                if core_effect_atom_same(
+                        atom, effect_ctx_lookup.token.instance) {
                     present = true
                 }
             }
@@ -5021,7 +5215,7 @@ fn validate_expr_with_program(
             }
             let callable = core_callable_for(
                 callables, system_host_callable_executable(host))
-            if callable.handled_evidence.len() != 0 {
+            if callable.effect_ctx.is_some() {
                 panic("CoreHIR: system host call entered evidence domain")
             }
             let system = system_host_callable_effect(host)
@@ -5045,7 +5239,10 @@ fn validate_expr_with_program(
                         callable.effects, callable.effects,
                         callable.effects)),
                 arguments, value.ty, value.effects,
-                [], [], body, graph, callables)
+                [], make_empty_core_effect_ctx_argument(
+                    make_explicit_core_effect_instantiation(
+                        callable.effects, callable.effects, callable.effects)),
+                body, graph, callables)
             let mut present = false
             for atom in core_effect_set_atoms(value.effects) {
                 if core_effect_atom_kind_tag(atom) == 4 &&
@@ -5083,7 +5280,9 @@ fn validate_expr_with_program(
                     field, core_expr_type(base), graph),
                 graph, "CoreHIR: projection result type differs")
         },
-        CoreExprValue::ConstructExprValue { constructor, fields } => {
+        CoreExprValue::ConstructExprValue {
+            constructor, fields, effect_ctx
+        } => {
             for field in fields {
                 validate_expr_with_program(
                     field.value, body, graph, callables,
@@ -5096,7 +5295,19 @@ fn validate_expr_with_program(
                     if core_constructor_kind_tag(constructor) != 1 {
                         panic("CoreHIR: structural constructor has executable")
                     }
-                    let _ = core_callable_for(callables, executable)
+                    let callable = core_callable_for(callables, executable)
+                    match effect_ctx {
+                        some(argument) => {
+                            if !core_effect_contract_same(
+                                    core_effect_instantiation_result(
+                                        core_effect_ctx_argument_receipt(argument)),
+                                    callable.effects) {
+                                panic("CoreHIR: constructor EffectCtx differs")
+                            }
+                        },
+                        none => panic(
+                            "CoreHIR: executable constructor lacks EffectCtx")
+                    }
                 },
                 none => if core_constructor_kind_tag(constructor) == 1 {
                     panic("CoreHIR: variant constructor has no exact executable")
@@ -5129,18 +5340,15 @@ fn validate_expr_with_program(
                 }
             }
         },
-        CoreExprValue::LambdaExprValue {
-            executable, handled_captures, ..
-        } => {
+        CoreExprValue::LambdaExprValue { executable, .. } => {
             let contract = core_callable_for(callables, executable)
-            validate_core_callable_value_contract(
-                value.ty, contract, graph)
+            require_core_type_same(
+                value.ty, contract.header_type,
+                "CoreHIR: lambda callable type differs")
             if !executable_contract_mode_same(
                     contract.mode, executable_contract_mode_concrete_body()) {
                 panic("CoreHIR: lambda references a bodyless callable")
             }
-            validate_handled_capture_targets(
-                handled_captures, contract, graph)
         },
         CoreExprValue::BlockExprValue(block) => {
             validate_block_with_program(
@@ -5210,34 +5418,31 @@ fn validate_expr_with_program(
                 require_block_result_type(arm.body, value.ty, graph)
             }
         },
-        CoreExprValue::HandleExprValue { body: handled, installations } => {
+        CoreExprValue::HandleExprValue { body: handled, installation } => {
             validate_block_with_program(
                 handled, body, graph, callables,
                 impls, current_callable, loop_depth)
             require_block_result_type(handled, value.ty, graph)
-            for installation in installations {
-                let _ = core_type_graph_node(
-                    graph, installation.evidence.aggregate_type)
-                if !executable_ref_same(
-                        core_handled_evidence_owner(installation.evidence),
-                        current_callable.reference) {
-                    panic("CoreHIR: handler installation owner differs")
-                }
-                for operation in installation.operations {
-                    let operation_callable = effect_operation_ref_callable(
-                        operation.operation)
-                    let handler_contract = core_callable_for(
-                        callables, operation.executable)
-                    let _ = core_callable_for(callables, operation_callable)
-                    if !executable_contract_mode_same(
-                            handler_contract.mode,
-                            executable_contract_mode_concrete_body()) {
-                        panic("CoreHIR: handler executable is bodyless")
+            match installation {
+                some(context) => {
+                    for entry in context.entries {
+                        for operation in entry.operations {
+                            let operation_callable = effect_operation_ref_callable(
+                                operation.operation)
+                            let handler_contract = core_callable_for(
+                                callables, operation.executable)
+                            let _ = core_callable_for(callables, operation_callable)
+                            if !executable_contract_mode_same(
+                                    handler_contract.mode,
+                                    executable_contract_mode_concrete_body()) {
+                                panic("CoreHIR: handler executable is bodyless")
+                            }
+                            validate_parent_ctx_target(
+                                operation.parent_ctx, handler_contract)
+                        }
                     }
-                    validate_handled_capture_targets(
-                        operation.handled_captures,
-                        handler_contract, graph)
-                }
+                },
+                none => {}
             }
         }
     }

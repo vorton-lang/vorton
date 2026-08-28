@@ -17,8 +17,7 @@ use effect_contract::{
     CoreEffectSet, make_core_effect_set, core_effect_set_atoms
 }
 use core_expr::{
-    CoreCalleeRef, CoreEvidenceRef,
-    CoreHandledEvidenceUse,
+    CoreCalleeRef, CoreEvidenceRef, CoreEffectCtxArgument,
     CoreFieldRef, CoreFieldValue, CoreConstructorRef,
     CoreBinder, CoreBody, CoreBlock, CoreStmt, CoreExpr,
     CorePattern, CorePatternField, CoreMatchArm,
@@ -53,13 +52,6 @@ fn copy_slots(values: List<SlotRef>) -> List<SlotRef> {
 }
 fn copy_evidence(values: List<CoreEvidenceRef>) -> List<CoreEvidenceRef> {
     let mut result: List<CoreEvidenceRef> = []
-    for value in values { result.push(value) }
-    result
-}
-fn copy_handled_uses(
-    values: List<CoreHandledEvidenceUse>
-) -> List<CoreHandledEvidenceUse> {
-    let mut result: List<CoreHandledEvidenceUse> = []
     for value in values { result.push(value) }
     result
 }
@@ -184,7 +176,7 @@ pub struct CoreDerivedCallPlan {
     result_type: CoreTypeRef,
     effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
-    handled_evidence: List<CoreHandledEvidenceUse>,
+    effect_ctx: CoreEffectCtxArgument,
     origin: OriginRef
 }
 
@@ -192,13 +184,13 @@ pub fn make_core_derived_call_plan(
     callee: CoreCalleeRef, method: ExactMethodRef?,
     result_type: CoreTypeRef, effects: CoreEffectSet,
     evidence: List<CoreEvidenceRef>,
-    handled_evidence: List<CoreHandledEvidenceUse>, origin: OriginRef
+    effect_ctx: CoreEffectCtxArgument, origin: OriginRef
 ) -> CoreDerivedCallPlan {
     CoreDerivedCallPlan {
         callee: callee, method: method, result_type: result_type,
         effects: make_core_effect_set(core_effect_set_atoms(effects)),
         evidence: copy_evidence(evidence),
-        handled_evidence: copy_handled_uses(handled_evidence),
+        effect_ctx: effect_ctx,
         origin: origin
     }
 }
@@ -221,11 +213,11 @@ fn derived_call(
             make_core_method_call_expr(
                 plan.result_type, plan.effects, plan.origin,
                 plan.callee, method, receiver, params, plan.evidence,
-                plan.handled_evidence)
+                plan.effect_ctx)
         },
         none => make_core_call_expr(
             plan.result_type, plan.effects, plan.origin,
-            plan.callee, arguments, plan.evidence, plan.handled_evidence)
+            plan.callee, arguments, plan.evidence, plan.effect_ctx)
     }
 }
 
@@ -1723,7 +1715,7 @@ fn clone_field_expr(value: CoreDerivedFieldPlan) -> CoreExpr {
                 index = index + 1
             }
             make_core_construct_expr(
-                value.ty, effects, origin, exact, values)
+                value.ty, effects, origin, exact, values, none)
         }
     }
 }
@@ -1731,12 +1723,14 @@ fn clone_field_expr(value: CoreDerivedFieldPlan) -> CoreExpr {
 pub struct CoreDerivedCloneVariantPlan {
     variant: VariantRef,
     constructor: CoreConstructorRef,
+    effect_ctx: CoreEffectCtxArgument,
     pattern_slots: List<SlotRef>,
     fields: List<CoreDerivedFieldPlan>,
     origin: OriginRef
 }
 pub fn make_core_derived_clone_variant_plan(
     variant: VariantRef, constructor: CoreConstructorRef,
+    effect_ctx: CoreEffectCtxArgument,
     pattern_slots: List<SlotRef>,
     fields: List<CoreDerivedFieldPlan>, origin: OriginRef
 ) -> CoreDerivedCloneVariantPlan {
@@ -1747,6 +1741,7 @@ pub fn make_core_derived_clone_variant_plan(
     }
     CoreDerivedCloneVariantPlan {
         variant: variant, constructor: constructor,
+        effect_ctx: effect_ctx,
         pattern_slots: copy_slots(pattern_slots),
         fields: copy_derived_fields(fields), origin: origin
     }
@@ -1891,7 +1886,7 @@ pub fn elaborate_core_derived_clone_body(
             }
             make_core_construct_expr(
                 plan.target_type, plan.header.result_effects,
-                plan.header.body_origin, constructor, values)
+                plan.header.body_origin, constructor, values, none)
         },
         CoreDerivedClonePlanValue::EnumClone(variants) => {
             let scrutinee = make_core_read_expr(
@@ -1906,7 +1901,8 @@ pub fn elaborate_core_derived_clone_body(
                 }
                 let constructed = make_core_construct_expr(
                     plan.target_type, plan.header.result_effects,
-                    variant.origin, variant.constructor, values)
+                    variant.origin, variant.constructor, values,
+                    some(variant.effect_ctx))
                 arms.push(make_core_match_arm(
                     clone_variant_pattern(plan.target_type, variant), none,
                     make_core_block([], some(constructed), variant.origin),

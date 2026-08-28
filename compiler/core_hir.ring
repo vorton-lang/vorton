@@ -15,6 +15,7 @@ use ir_inventory::{
     executable_ref_same,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_entry_reference, executable_entry_contract,
+    executable_entry_kind, executable_kind_same, executable_kind_extern_fn,
     executable_contract_mode, executable_contract_mode_same,
     executable_contract_mode_concrete_body,
     executable_contract_mode_contract_only,
@@ -31,7 +32,7 @@ use core_expr::{
     validate_core_body, validate_core_callable_contracts,
     validate_core_body_with_program,
     core_body_reference, core_body_origin,
-    core_callable_reference, core_callable_mode,
+    core_callable_reference, core_callable_mode, core_callable_effect_ctx,
     copy_core_callables, copy_core_impl_metadata,
     core_impl_methods, core_impl_assoc_bindings,
     core_assoc_binding_type
@@ -146,6 +147,11 @@ fn validate_core_callable_inventory(
                 executable_entry_reference(entry),
                 core_callable_reference(callable)) {
             panic("CoreHIR: callable order differs from inventory")
+        }
+        let foreign_leaf = executable_kind_same(
+            executable_entry_kind(entry), executable_kind_extern_fn())
+        if foreign_leaf == core_callable_effect_ctx(callable).is_some() {
+            panic("CoreHIR: Ring callable/foreign leaf EffectCtx boundary differs")
         }
         let inventory_mode = executable_contract_mode(
             executable_entry_contract(entry))
