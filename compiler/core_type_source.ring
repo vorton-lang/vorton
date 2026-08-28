@@ -961,7 +961,8 @@ fn substituted_effect_contract_satisfies(
     exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
 ) -> Bool {
-    if substitutions.len() == 0 && effect_substitutions.len() == 0 && !exact {
+    if substitutions.len() == 0 && effect_substitutions.len() == 0 &&
+       effect_actuals.len() == 0 && !exact {
         return core_effect_contract_actual_satisfies_formal(actual, formal)
     }
     let actual_atoms = core_effect_set_atoms(core_effect_contract_exact(actual))
@@ -1188,10 +1189,12 @@ pub fn flow_type_actual_matches_formal_exact(
 pub fn flow_effect_actual_satisfies_substituted_formal(
     nodes: List<FlowTypeNode>, actual: CoreEffectContract,
     formal: CoreEffectContract,
-    substitutions: List<FlowTypeSubstitution>
+    substitutions: List<FlowTypeSubstitution>,
+    effect_actuals: List<CoreEffectSubstitution>
 ) -> Bool {
     substituted_effect_contract_satisfies(
-        nodes, actual, formal, substitutions, [], [], false, [], [])
+        nodes, actual, formal, substitutions, [], effect_actuals,
+        false, [], [])
 }
 
 fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {

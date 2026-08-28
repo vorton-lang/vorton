@@ -4475,7 +4475,8 @@ fn validate_direct_calls(
                                     type_nodes,
                                     core_effect_instantiation_source(
                                         target.effects), candidate.effects,
-                                    substitutions) {
+                                    substitutions,
+                                    target.effect_substitutions) {
                                 panic("FlowIR: direct callable effect source differs")
                             }
                             if candidate.effect_ctx.is_some() ==
@@ -4748,7 +4749,8 @@ fn validate_callable_value_contract(
             type_substitutions, effect_substitutions) ||
        !flow_effect_actual_satisfies_substituted_formal(
             type_nodes, core_effect_instantiation_source(effects),
-            callable.effects, type_substitutions) ||
+            callable.effects, type_substitutions,
+            effect_substitutions) ||
        !core_effect_contract_same(
             node.callable_effects.unwrap(),
             core_effect_instantiation_result(effects)) {

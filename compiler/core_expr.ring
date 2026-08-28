@@ -306,7 +306,15 @@ fn validate_effect_ctx_view_receipt(
         if !source.entries.any(fn(entry) {
                 core_effect_ctx_token_same(entry, token)
             }) {
-            if source.formal.is_none() || !substitutions.any(fn(item) {
+            let source_formal = match source.formal {
+                some(value) => value,
+                none => panic(
+                    "CoreHIR: EffectCtx view invents a fixed entry")
+            }
+            if !substitutions.any(fn(item) {
+                    effect_param_ref_same(
+                        core_effect_substitution_parameter(item),
+                        source_formal) &&
                     core_effect_set_atoms(core_effect_contract_exact(
                         core_effect_substitution_replacement(item))).any(
                         fn(atom) {
@@ -4608,7 +4616,8 @@ fn validate_call_signature(
         if !flow_effect_actual_satisfies_substituted_formal(
                 core_type_graph_nodes(graph),
                 core_effect_instantiation_source(callee.effects),
-                candidate.effects, callee.type_substitutions) {
+                candidate.effects, callee.type_substitutions,
+                callee.effect_substitutions) {
             panic("CoreHIR: direct call effect source contract differs")
         }
         validate_evidence(evidence, body)
@@ -5261,7 +5270,7 @@ fn validate_core_callable_value_contract(
        !flow_effect_actual_satisfies_substituted_formal(
             core_type_graph_nodes(graph),
             core_effect_instantiation_source(effects), callable.effects,
-            type_substitutions) ||
+            type_substitutions, effect_substitutions) ||
        !core_effect_contract_same(
             flow_type_node_callable_effects(node),
             core_effect_instantiation_result(effects)) {
