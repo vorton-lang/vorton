@@ -541,6 +541,19 @@
       }
     },
     {
+      "id": "D22",
+      "path": "single/d_late_constrained_mono_closure.ring",
+      "covers": [
+        "provisional anonymous drain does not finalize a same-owner monomorphic token",
+        "a later handle/result annotation closes the callback instance before A1 finalization"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_LATE_CONSTRAINED_MONO_OK:41\n"
+      }
+    },
+    {
       "id": "E1",
       "path": "single/e_user_extern_same_spelling.ring",
       "covers": [
