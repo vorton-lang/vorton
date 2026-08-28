@@ -1333,6 +1333,31 @@ pub fn instantiate_callable_impl_method(
     }
 }
 
+pub fn make_callable_impl_definition_receipt(
+    owner: ImplEntry, core: ImplMethodSchemeCore,
+    method_ref: ImplMethodRef
+) -> CallableInstantiationReceipt {
+    let scheme = impl_method_core_as_scheme(core)
+    let mapping = identity_instantiation_mapping(scheme.type_vars)
+    let method_name = impl_method_ref_name(method_ref)
+    let callable_owner = match owner.method_intrinsics.get(method_name) {
+        some(intrinsic) => intrinsic_ref_symbol(intrinsic),
+        none => impl_method_ref_member(method_ref)
+    }
+    let effect_tails = ordered_effect_tail_vars(scheme.ty)
+    let declared = scheme.type_vars.filter(fn(id) {
+        !owner.type_param_vars.contains(id) && !effect_tails.contains(id)
+    })
+    let exact = callable_instantiation_from_mapping(
+        callable_owner, scheme, declared, mapping)
+    CallableInstantiationReceipt {
+        ty: scheme.ty,
+        source_to_actual: mapping,
+        type_args: exact.type_args,
+        effect_instantiation: exact.effects
+    }
+}
+
 fn project_child_site_key(parent_frame_index: Int, decl_index: Int) -> Str {
     "${parent_frame_index}|${decl_index}"
 }
@@ -3360,6 +3385,27 @@ fn publish_resolved_dicts(
                 panic("unreachable: callable value dictionaries filled twice")
             }
             for dict_ref in dicts { output.push(dict_ref) }
+        }
+    }
+}
+
+pub fn resolve_immediate_impl_owner_dicts(
+    runtime_owner: ExecutableRef,
+    sink: CollectingSink, env: TypeEnv,
+    current_fn_bounds: List<FnBoundsEntry>,
+    owner: ImplEntry, method_core: ImplMethodSchemeCore,
+    receipt: CallableInstantiationReceipt,
+    s: UnionFind, span: Span
+) -> List<DictRef> {
+    match resolve_impl_owner_evidence(
+        runtime_owner, sink, env, current_fn_bounds,
+        owner, method_core, receipt, s, span, true
+    ) {
+        SchemeEvidenceResolution::Resolved { dicts, .. } => dicts,
+        SchemeEvidenceResolution::Pending { failures } |
+        SchemeEvidenceResolution::Missing { failures } => {
+            report_evidence_failures(sink, failures, span)
+            []
         }
     }
 }

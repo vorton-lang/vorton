@@ -91,7 +91,8 @@ use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
     type_error, type_error_with_notes,
     unify_at, unify_at_noted,
     resolve_type_expr, resolve_self_type,
-    resolve_dicts_from_impl_owner,
+    make_callable_impl_definition_receipt,
+    resolve_immediate_impl_owner_dicts,
     pending_dict_checkpoint, drain_pending_dicts, rollback_pending_dicts,
     assert_pending_dict_owner_closed,
     generalize, free_type_vars, resolve_mod_uses,
@@ -2565,10 +2566,14 @@ fn check_impl_decl_canonical(
                     let forward_effect_ctx = effect_ctx_source_for_callable(
                         ctx, signature)
                     exit_executable_owner(ctx)
-                    let dict_evidence = resolve_dicts_from_impl_owner(
+                    let definition_receipt =
+                        make_callable_impl_definition_receipt(
+                            impl_owner, core, generated_method)
+                    let dict_evidence = resolve_immediate_impl_owner_dicts(
                         generated_executable,
                         ctx.sink, ctx.env, impl_bounds,
-                        impl_owner, core, signature, ctx.subst, span)
+                        impl_owner, core, definition_receipt,
+                        ctx.subst, span)
                     let d1_checkpoint = ctx.sink.save()
                     check_final_runtime_handled_contract(
                         ctx, signature, some(generated_effect_ctx),
@@ -3223,17 +3228,29 @@ fn expand_delegate_impls(
                                                     span: span
                                                 }
                                             } else {
-                                                let resolved_forward_dicts = match (field_impl, field_method_scheme) {
-                                                    (some(field_owner), some((field_core, field_scheme))) => {
-                                                        resolve_dicts_from_impl_owner(
+                                                let resolved_forward_dicts = match delegate_impl {
+                                                    some(generated_owner) => {
+                                                        let generated_core =
+                                                            generated_owner.method_schemes.get(
+                                                                tm.name).unwrap_or_else(fn() {
+                                                                    panic(
+                                                                        "delegate HIR: generated method core is absent")
+                                                                })
+                                                        let definition_receipt =
+                                                            make_callable_impl_definition_receipt(
+                                                                generated_owner,
+                                                                generated_core,
+                                                                generated_method_ref)
+                                                        resolve_immediate_impl_owner_dicts(
                                                             generated_executable,
                                                             ctx.sink, ctx.env,
                                                             generated_fn_bounds,
-                                                            field_owner, field_core,
-                                                            field_callee_type,
+                                                            generated_owner,
+                                                            generated_core,
+                                                            definition_receipt,
                                                             ctx.subst, span)
                                                     },
-                                                    _ => []
+                                                    none => []
                                                 }
                                                 // Build: self.field.method — as FieldAccess for UFCS dispatch
                                                 let method_access = HExpr::FieldAccess {
