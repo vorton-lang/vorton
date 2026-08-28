@@ -26,6 +26,10 @@ Effect row 中的 atom 共享组合与推断机制，但并不共享同一种运
 
 递归组body只做一次effect inference；其raw effect row随内部draft等待整组求解，随后恰好一次final-zonk、evidence canonicalization与header publication。每个scheme/callable实例的effect actual必须来自该实例唯一的full mapping receipt，并与type actual、dictionary/evidence共用；禁止按已zonk类型再次结构匹配重建effect或dictionary替换。
 
+Generic custom effect声明仍可参数化，closed concrete实例保持不同的typed identity，例如`Reader<Int>`与`Reader<Str>`。0.1不支持runtime handled token依赖尚未闭合的generic formal：任何实际进入callable header、nested function type、body context layout、operation lookup、handler install或call/value instantiation的custom handled instance，其type arguments必须递归fully closed；不得含当前或外层callable/impl/trait/lambda的type formal、nested callable effect formal/open row、open structural row或其他仍可实例化部分。违反时在TypedHIR atomic publish前报错，不能靠runtime token remap、specialization或type erasure补救。`fail<T>`、`mut<T>`和顶层effect-row formal不受此限制；effect alias展开后再按同一规则检查。
+
+Effect declaration及其bodyless operation contract本身不产生runtime token；只有可执行body中真实lookup/install等物理consumer进入project token table。CoreHIR用已冻结type graph复核closed条件和token producer census，但不重跑类型/effect推断。
+
 ## System effects 与 HostImport
 
 0.1 只定义当前真实 API 所需的三类 system effect：
@@ -173,7 +177,7 @@ Effect 按求值组合：
 
 Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`EffectCtx*`；direct/method调用省略`env`但保持其余相对顺序。Pure与system-only Ring callable传immortal empty context。普通用户top-level extern与不会回调Ring callable的普通HostImport leaf不接收context；exact compiler-owned runtime intrinsic只要会调用Ring callable，就必须显式接收并转发context。0.1当前穷尽集合为`ring_list_sort_bridge`/`ring_list_sort`、`Option.map`、`Option.and_then`、`Option.unwrap_or_else`与`Cell.update`：sort和Option三项转发current context，pure `Cell.update` callback接收immortal empty context。调用同步完成，leaf不保存或retain context；集合由exact compiler intrinsic identity裁决，禁止名字猜测、thunk或通用adapter，也不新增用户extern callback能力。Context entry由完整typed handled instance（exact effect identity + exact type arguments）索引，不能按名字或nominal leaf合并；`GenericProbe<Str>`与`GenericProbe<Int>`是两个不同entry。
 
-`handle`创建owned child overlay并引用parent context；ordinary calls只borrow并转发指针，returned closure不捕获。Closed row可用冻结layout的静态位置，open row通过同一个typed context/view转发。禁止C varargs、TLS/global/root handler、runtime name lookup以及closed/open两套function-pointer ABI。Handler arm/re-perform内部对象可显式持parent context，其生命周期不改变ordinary closure规则。
+`handle`创建owned child overlay并引用parent context；ordinary calls只borrow并转发指针，returned closure不捕获。Closed row可用冻结layout的静态位置；open effect-row formal原样转发同一个context pointer，typed view只作静态证明，不产生stack/heap remap。禁止C varargs、stack remap view、closure remap descriptor、TLS/global/root handler、runtime name lookup以及closed/open两套function-pointer ABI。Handler arm/re-perform内部对象可显式持parent context，其生命周期不改变ordinary closure规则。
 
 ## Effect 消除
 
