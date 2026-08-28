@@ -293,9 +293,6 @@ enum InferMutationUndo {
     LetDef { def_id: Int, was_present: Bool },
     MutParamDef { def_id: Int, was_present: Bool },
     FnMutParams { name: Str, previous: List<Bool>? },
-    RebindAssoc {
-        owner: Str, previous: List<AssocRebindEntry>?
-    },
     VarBounds { type_var: Int, previous: Set<Str>? }
 }
 
@@ -345,7 +342,6 @@ pub struct InferCtx {
     pub qualified_assoc_scope: Map<Str, Type>,
     // Function identity -> owner-qualified associated-type provenance captured
     // before check_fn_decl restores its transient scopes.
-    pub rebind_assoc_provenance: Map<Str, List<AssocRebindEntry>>,
     // Transient checker protocol for scheduler-owned recursive callable SCCs.
     // ExecutableRef membership is exact; this state never owns a scheme/schema.
     active_recursive_callables: List<ExecutableRef>,
@@ -425,7 +421,6 @@ pub fn new_infer_ctx(
         fn_mut_params: map_new(),
         file_extern_types: set_new(),
         qualified_assoc_scope: map_new(),
-        rebind_assoc_provenance: map_new(),
         active_recursive_callables: [],
         closed_recursive_callables: [],
         pending_anonymous_callable_headers: [],
@@ -533,12 +528,6 @@ pub fn rollback_infer_mutation_journal(
                     some(value) => ctx.fn_mut_params.insert(name, value),
                     none => { ctx.fn_mut_params.remove(name) }
                 },
-            InferMutationUndo::RebindAssoc { owner, previous } =>
-                match previous {
-                    some(value) => ctx.rebind_assoc_provenance.insert(
-                        owner, value),
-                    none => { ctx.rebind_assoc_provenance.remove(owner) }
-                },
             InferMutationUndo::VarBounds { type_var, previous } =>
                 match previous {
                     some(value) => ctx.env.scope.var_bounds.insert(
@@ -640,19 +629,6 @@ pub fn journal_fn_mut_params_remove(mut ctx: InferCtx, name: Str) {
         })
     }
     ctx.fn_mut_params.remove(name)
-}
-
-pub fn journal_rebind_assoc_provenance_set(
-    mut ctx: InferCtx, owner: Str, value: List<AssocRebindEntry>
-) {
-    if infer_mutation_journal_active(ctx) {
-        let previous = ctx.rebind_assoc_provenance.get(owner).map(
-            fn(existing) { list_clone(existing) })
-        ctx.infer_mutation_undos.push(InferMutationUndo::RebindAssoc {
-            owner: owner, previous: previous
-        })
-    }
-    ctx.rebind_assoc_provenance.insert(owner, value)
 }
 
 pub fn journal_var_bounds_set(

@@ -121,7 +121,8 @@ use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
     HandledEvidenceRef,
     handled_evidence_requirement,
     make_named_executable_ref, make_system_host_callable_ref,
-    executable_ref_is_named, executable_ref_named_symbol}
+    executable_ref_is_named, executable_ref_named_symbol,
+    executable_ref_same}
 use effect_contract::{typed_effect_header_schema_bindings,
     empty_typed_effect_header_schema}
 
@@ -578,23 +579,6 @@ fn hexpr_contains_bounded_callable_value(ctx: InferCtx, expr: HExpr) -> Bool {
     let found: List<HExpr> = []
     collect_bounded_callable_values(ctx, expr, found)
     found.len() > 0
-}
-
-// Receipt-backed callable values register their exact evidence obligation at
-// infer_ident time.  Keep this legacy owner hook inert until infer_decl drops
-// its old traversal call; it must never reconstruct an instantiation by shape.
-fn register_bounded_callable_value_shadows_inner(
-    mut ctx: InferCtx, expr: HExpr, s: UnionFind
-) {
-    let _ = ctx
-    let _ = expr
-    let _ = s
-}
-
-pub fn register_bounded_callable_value_shadows(
-    ctx: InferCtx, expr: HExpr, s: UnionFind
-) {
-    register_bounded_callable_value_shadows_inner(ctx, expr, s)
 }
 
 // B-163 C': non-Range for-in is lowered while inference still owns the
@@ -4485,68 +4469,76 @@ fn collect_lambda_capture_expr(
 }
 
 fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, subst: UnionFind, expected_param_types: List<Type>?) -> InferResult {
+    let saved_scope_depth = ctx.env.scope.scopes.len()
+    let saved_lambda_depth = ctx.lambda_depth
+    let saved_executable_depth = ctx.executable_stack.len()
+    let saved_executable = current_executable_owner(ctx)
     let dictionary_owner = current_dictionary_evidence_owner(ctx)
     let lambda_executable = fresh_child_executable(ctx, "lambda")
-    enter_executable_owner(ctx, lambda_executable)
-    inherit_dictionary_evidence_owner(ctx, dictionary_owner)
-    ctx.env.push_scope()
-    ctx.lambda_depth = ctx.lambda_depth + 1
-    let exact_lambda_depth = ctx.lambda_depth
-    let mut s = subst
-    let mut hparams: List<HParam> = []
-    let mut param_types: List<Type> = []
+    let mut entered_owner = false
+    let lambda_result: InferResult? = some({
+        enter_executable_owner(ctx, lambda_executable)
+        entered_owner = true
+        inherit_dictionary_evidence_owner(ctx, dictionary_owner)
+        ctx.env.push_scope()
+        ctx.lambda_depth = saved_lambda_depth + 1
+        let exact_lambda_depth = ctx.lambda_depth
+        let mut s = subst
+        let mut hparams: List<HParam> = []
+        let mut param_types: List<Type> = []
 
-    let mut pi = 0
-    for p in params {
-        let pt = match p.type_annotation {
-            some(ta) => resolve_type_expr(ctx, ta),
-            none => ctx.env.fresh_var()
-        }
-        match expected_param_types {
-            some(epts) => {
-                if p.type_annotation.is_none() {
-                    match epts.get(pi) {
-                        some(expected_t) => { s = unify_at(ctx.sink, ctx.env, pt, expected_t, s, span) },
+        let mut pi = 0
+        for p in params {
+            let pt = match p.type_annotation {
+                some(ta) => resolve_type_expr(ctx, ta),
+                none => ctx.env.fresh_var()
+            }
+            match expected_param_types {
+                some(epts) => {
+                    if p.type_annotation.is_none() {
+                        match epts.get(pi) {
+                            some(expected_t) => { s = unify_at(ctx.sink, ctx.env, pt, expected_t, s, span) },
+                            none => {}
+                        }
+                    }
+                },
+                none => {}
+            }
+            ctx.env.bind_mono(p.name, pt)
+            let lam_scheme = ctx.env.lookup(p.name)
+            match lam_scheme {
+                some(ls) => {
+                    match ls.def_id {
+                        some(did) => {
+                            journal_record_def_span(ctx, did, p.span)
+                            journal_var_lambda_depth_set(
+                                ctx, did, ctx.lambda_depth)
+                            if p.is_mutable {
+                                journal_mutable_var_insert(ctx, did)
+                                journal_mut_param_def_insert(ctx, did)
+                            } else {
+                                journal_let_def_insert(ctx, did)
+                            }
+                        },
                         none => {}
                     }
+                    hparams.push(HParam { name: p.name, ty: pt, def_id: ls.def_id, is_mutable: p.is_mutable })
+                },
+                none => {
+                    hparams.push(HParam { name: p.name, ty: pt, def_id: none, is_mutable: p.is_mutable })
                 }
-            },
-            none => {}
-        }
-        ctx.env.bind_mono(p.name, pt)
-        let lam_scheme = ctx.env.lookup(p.name)
-        match lam_scheme {
-            some(ls) => {
-                match ls.def_id {
-                    some(did) => {
-                        journal_record_def_span(ctx, did, p.span)
-                        journal_var_lambda_depth_set(
-                            ctx, did, ctx.lambda_depth)
-                        if p.is_mutable {
-                            journal_mutable_var_insert(ctx, did)
-                            journal_mut_param_def_insert(ctx, did)
-                        } else {
-                            journal_let_def_insert(ctx, did)
-                        }
-                    },
-                    none => {}
-                }
-                hparams.push(HParam { name: p.name, ty: pt, def_id: ls.def_id, is_mutable: p.is_mutable })
-            },
-            none => {
-                hparams.push(HParam { name: p.name, ty: pt, def_id: none, is_mutable: p.is_mutable })
             }
+            param_types.push(pt)
+            pi = pi + 1
         }
-        param_types.push(pt)
-        pi = pi + 1
-    }
 
-    let body_result = some(infer_expr(ctx, body, s)) catch { _ => none }
-    ctx.lambda_depth = ctx.lambda_depth - 1
-    ctx.env.pop_scope()
+        let body_r = infer_expr(ctx, body, s)
+        ctx.lambda_depth = saved_lambda_depth
+        if ctx.env.scope.scopes.len() != saved_scope_depth + 1 {
+            panic("lambda lifecycle: body leaked lexical scope")
+        }
+        ctx.env.pop_scope()
 
-    match body_result {
-        some(body_r) => {
             s = body_r.subst
             let mut applied_params: List<Type> = []
             for pt in param_types { applied_params.push(apply_subst(s, pt)) }
@@ -4577,8 +4569,6 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                 current_handled_evidence_captures(ctx)
             record_pending_anonymous_callable_header(
                 ctx, lambda_executable, fn_type)
-            exit_executable_owner(ctx)
-
             InferResult {
                 hexpr: HExpr::Lambda {
                     executable_ref: lambda_executable,
@@ -4592,11 +4582,39 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                 },
                 subst: s, effects: EMPTY_ROW
             }
-        },
-        none => {
-            exit_executable_owner(ctx)
-            fail.raise(CompileError {})
+    }) catch { _ => none }
+
+    ctx.lambda_depth = saved_lambda_depth
+    if ctx.env.scope.scopes.len() < saved_scope_depth {
+        panic("lambda lifecycle: lexical scope underflow")
+    }
+    while ctx.env.scope.scopes.len() > saved_scope_depth {
+        ctx.env.pop_scope()
+    }
+    if entered_owner {
+        if ctx.executable_stack.len() < saved_executable_depth + 1 {
+            panic("lambda lifecycle: executable stack underflow")
         }
+        while ctx.executable_stack.len() > saved_executable_depth + 1 {
+            exit_executable_owner(ctx)
+        }
+        if !executable_ref_same(
+                current_executable_owner(ctx), lambda_executable) {
+            panic("lambda lifecycle: active executable differs")
+        }
+        exit_executable_owner(ctx)
+    }
+    if ctx.executable_stack.len() != saved_executable_depth ||
+       !executable_ref_same(
+            current_executable_owner(ctx), saved_executable) ||
+       !executable_ref_same(
+            current_dictionary_evidence_owner(ctx), dictionary_owner) {
+        panic("lambda lifecycle: enclosing executable context changed")
+    }
+
+    match lambda_result {
+        some(value) => value,
+        none => fail.raise(CompileError {})
     }
 }
 
