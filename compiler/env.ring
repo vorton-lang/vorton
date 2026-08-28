@@ -2872,7 +2872,7 @@ fn append_callable_effect_to_batch(
 fn canonical_type_var_mapping(
     canonical_ids: Map<Int, Int>
 ) -> Map<Int, Type> {
-    let mapping: Map<Int, Type> = map_new()
+    let mut mapping: Map<Int, Type> = map_new()
     for entry in canonical_ids.entries() {
         let (representative, canonical) = entry
         mapping.insert(representative, Type::TypeVar {
@@ -3190,7 +3190,7 @@ pub fn instantiate_effect_header_schema(
     mut env: TypeEnv, headers: List<Type>,
     schema: TypedEffectHeaderSchema
 ) -> (List<Type>, TypedEffectHeaderSchema) {
-    let mapping: Map<Int, Type> = map_new()
+    let mut mapping: Map<Int, Type> = map_new()
     for binding in typed_effect_header_schema_bindings(schema) {
         mapping.insert(
             typed_effect_header_binding_raw_tail(binding), env.fresh_var())
