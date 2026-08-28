@@ -4,7 +4,7 @@ use types::{Type, Effect, EffectRow,
     type_to_builtin_name}
 use ast::{Expr, Pattern, Span, NamedPatternField}
 use hir::{HExpr, HStmt, TraitDispatch, DictRef, ValueBindingKind,
-    HCallableTypeActual,
+    HCallableTypeActual, HCallableEffectInstantiation,
     HCallableValueInstantiation,
     MethodCallRef,
     HOperatorPlan, h_operator_method, h_operator_tuple,
@@ -21,28 +21,32 @@ use diagnostics::{DiagnosticContext, DiagnosticNote}
 use codes::{E0201, E0205, E0208, E0303, E0307, E0308, E0504, E0705}
 use union_find::{UnionFind, uf_find, uf_lookup}
 use env::{TypeEnv, TypeScheme, ImplEntry, ImplMethodSchemeCore,
-    apply_subst, build_scheme_var_map, scheme_value_type_vars,
-    ordered_effect_tail_vars,
+    apply_subst,
     has_impl, lookup_variant, find_impl_by_provider}
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     fn_bound_dict_ref,
     type_error, unify_at, resolve_relative_qualifier,
     resolve_dict_ref_for_type, resolve_dicts_from_scheme, variant_ctor_origin,
+    CallableInstantiationReceipt,
     instantiate_callable_scheme, instantiate_callable_impl_method,
-    build_scheme_callable_effect_instantiation,
-    recursive_callable_is_active,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
     current_executable_owner, current_dictionary_evidence_owner}
 use ir_identity::{IntrinsicRef, ImplMethodRef,
     impl_method_ref_owner, impl_owner_ref_trait, impl_owner_ref_provider,
     make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
     slot_domain_lexical}
-use ir_inventory::{make_named_executable_ref}
+
+fn empty_callable_instantiation_receipt(ty: Type) -> CallableInstantiationReceipt {
+    CallableInstantiationReceipt {
+        ty: ty, type_args: [], effect_instantiation: none
+    }
+}
 
 fn make_inferred_ident(
     ctx: InferCtx, name: Str, resolved_name: Str?, scheme: TypeScheme?,
-    ty: Type, span: Span
+    receipt: CallableInstantiationReceipt, span: Span
 ) -> HExpr {
+    let ty = receipt.ty
     let def_id = match scheme { some(value) => value.def_id, none => none }
     let kind = value_binding_kind(ctx, def_id)
     let is_constructor = resolved_name.is_some()
@@ -72,16 +76,40 @@ fn make_inferred_ident(
         } else { none },
         none => none
     }
+    let callable_instantiation = if is_callable {
+        match kind {
+            ValueBindingKind::DirectCallable |
+            ValueBindingKind::ExternCallable => some(
+                HCallableValueInstantiation {
+                    type_args: receipt.type_args,
+                    effects: receipt.effect_instantiation
+                }),
+            ValueBindingKind::LocalBorrow => {
+                if is_constructor {
+                    match receipt.effect_instantiation {
+                        some(effects) => if effects.substitutions.len() != 0 {
+                            panic("variant constructor: open callable producer is absent")
+                        },
+                        none => {}
+                    }
+                }
+                none
+            },
+            ValueBindingKind::ConstGetter => none
+        }
+    } else { none }
     HExpr::Ident { name: name, resolved_name: resolved_name,
         def_id: def_id, source_slot: source_slot,
         callee_identity: callee_identity, dict_closure_dicts: none,
-        callable_instantiation: none,
+        callable_instantiation: callable_instantiation,
         ty: ty, effects: EMPTY_ROW, span: span }
 }
 
 
 pub struct MethodLookupResult {
     method_type: Type?,
+    type_args: List<HCallableTypeActual>,
+    effect_instantiation: HCallableEffectInstantiation?,
     method_core: ImplMethodSchemeCore?,
     impl_owner: ImplEntry?,
     impl_method_ref: ImplMethodRef?,
@@ -339,7 +367,9 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
                             span, DiagnosticContext::OtherContext { detail: some("relative path out of scope") })
                         return InferResult {
                             hexpr: make_inferred_ident(
-                                ctx, name, none, none, Type::ErrorType, span),
+                                ctx, name, none, none,
+                                empty_callable_instantiation_receipt(
+                                    Type::ErrorType), span),
                             subst: subst, effects: EMPTY_ROW
                         }
                     }
@@ -403,7 +433,9 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
                         DiagnosticContext::UndefinedVariable { name: name, scope_locals: none })
                     return InferResult {
                         hexpr: make_inferred_ident(
-                            ctx, name, none, none, Type::ErrorType, span),
+                            ctx, name, none, none,
+                            empty_callable_instantiation_receipt(
+                                Type::ErrorType), span),
                         subst: subst, effects: EMPTY_ROW
                     }
                 },
@@ -413,7 +445,9 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
                 DiagnosticContext::UndefinedVariable { name: name, scope_locals: none })
             InferResult {
                 hexpr: make_inferred_ident(
-                    ctx, name, none, none, Type::ErrorType, span),
+                    ctx, name, none, none,
+                    empty_callable_instantiation_receipt(
+                        Type::ErrorType), span),
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -744,68 +778,6 @@ pub fn is_bounded_direct_callable_ident(ctx: InferCtx, expr: HExpr) -> Bool {
     }
 }
 
-fn declared_callable_type_vars(scheme: TypeScheme) -> List<Int> {
-    let effect_tails = ordered_effect_tail_vars(scheme.ty)
-    scheme.type_vars.filter(fn(id) { !effect_tails.contains(id) })
-}
-
-pub fn exact_callable_type_args(
-    ctx: InferCtx, metadata: CalleeMetadata,
-    instantiated_type: Type, subst: UnionFind
-) -> List<HCallableTypeActual> {
-    let scheme = metadata.live_scheme
-    let declared = declared_callable_type_vars(scheme)
-    let exact_type = apply_subst(subst, instantiated_type)
-    let mapping = build_scheme_var_map(scheme, exact_type)
-    let mut result: List<HCallableTypeActual> = []
-    for formal in scheme_value_type_vars(scheme) {
-        let mut ordinal: Int? = none
-        let mut index = 0
-        while index < declared.len() {
-            if declared.get(index).unwrap() == formal { ordinal = some(index) }
-            index = index + 1
-        }
-        result.push(HCallableTypeActual {
-            owner: value_symbol_ref(ctx, metadata.def_id),
-            source_type_var_id: formal,
-            ordinal: match ordinal {
-                some(value) => value,
-                none => panic(
-                    "callable value: used type formal is not declared")
-            },
-            arity: declared.len(),
-            actual: match mapping.get(formal) {
-            some(actual) => apply_subst(subst, actual),
-            none => panic(
-                "callable value: declared generic has no exact instantiation")
-            }
-        })
-    }
-    result
-}
-
-fn exact_callable_value_instantiation(
-    ctx: InferCtx, metadata: CalleeMetadata,
-    instantiated_type: Type, subst: UnionFind
-) -> HCallableValueInstantiation? {
-    let scheme = metadata.live_scheme
-    if scheme.type_vars.len() == 0 { return none }
-    let executable = make_named_executable_ref(
-        value_symbol_ref(ctx, metadata.def_id))
-    let effect_instantiation = if recursive_callable_is_active(
-            ctx, executable) {
-        none
-    } else {
-        some(build_scheme_callable_effect_instantiation(
-            scheme, instantiated_type, subst))
-    }
-    some(HCallableValueInstantiation {
-        type_args: exact_callable_type_args(
-            ctx, metadata, instantiated_type, subst),
-        effects: effect_instantiation
-    })
-}
-
 pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
     let metadata = resolve_callee_metadata(ctx, harg)
     match harg {
@@ -871,8 +843,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                     match metadata {
                         some(m) => {
                             let as_ = m.live_scheme
-                            let exact_instantiation =
-                                exact_callable_value_instantiation(ctx, m, ty, s)
+                            let exact_instantiation = callable_instantiation
                             if as_.bounds.len() == 0 {
                                 HExpr::Ident {
                                     name: name, resolved_name: resolved_name,
@@ -908,8 +879,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                     match metadata {
                         some(m) => {
                             let as_ = m.live_scheme
-                            let exact_instantiation =
-                                exact_callable_value_instantiation(ctx, m, ty, s)
+                            let exact_instantiation = callable_instantiation
                             let valid = if as_.bounds.len() > 0 {
                                 let validated = resolve_dicts_from_scheme(
                                     current_dictionary_evidence_owner(ctx),
@@ -947,11 +917,7 @@ pub fn resolve_value_ident(ctx: InferCtx, harg: HExpr, s: UnionFind) -> HExpr {
                             def_id: def_id, source_slot: source_slot,
                             callee_identity: callee_identity,
                             dict_closure_dicts: some([]),
-                            callable_instantiation: match metadata {
-                                some(m) => exact_callable_value_instantiation(
-                                    ctx, m, ty, s),
-                                none => callable_instantiation
-                            },
+                            callable_instantiation: callable_instantiation,
                             ty: ty, effects: effects, span: span
                         },
                         none => harg
@@ -1068,13 +1034,19 @@ pub fn lookup_impl_method(mut ctx: InferCtx, type_name: Str, method: Str) -> Met
                 impl_owner_ref_provider(owner_ref)
             ) {
                 some(owner) => match owner.method_schemes.get(method) {
-                    some(core) => MethodLookupResult {
-                        method_type: some(instantiate_callable_impl_method(
-                            ctx, owner, core, method_ref)),
-                        method_core: some(core),
-                        impl_owner: some(owner),
-                        impl_method_ref: some(method_ref),
-                        intrinsic_ref: owner.method_intrinsics.get(method)
+                    some(core) => {
+                        let receipt = instantiate_callable_impl_method(
+                            ctx, owner, core, method_ref)
+                        MethodLookupResult {
+                            method_type: some(receipt.ty),
+                            type_args: receipt.type_args,
+                            effect_instantiation:
+                                receipt.effect_instantiation,
+                            method_core: some(core),
+                            impl_owner: some(owner),
+                            impl_method_ref: some(method_ref),
+                            intrinsic_ref: owner.method_intrinsics.get(method)
+                        }
                     },
                     none => panic("method lookup: owner lost method core")
                 },
@@ -1082,13 +1054,15 @@ pub fn lookup_impl_method(mut ctx: InferCtx, type_name: Str, method: Str) -> Met
                 }
             },
             none => MethodLookupResult {
-                method_type: none, method_core: none, impl_owner: none,
+                method_type: none, type_args: [], effect_instantiation: none,
+                method_core: none, impl_owner: none,
                 impl_method_ref: none,
                 intrinsic_ref: none
             }
         },
         none => MethodLookupResult {
-            method_type: none, method_core: none, impl_owner: none,
+            method_type: none, type_args: [], effect_instantiation: none,
+            method_core: none, impl_owner: none,
             impl_method_ref: none,
             intrinsic_ref: none
         }
@@ -1186,7 +1160,8 @@ pub fn exact_nominal_method_call(
 
 pub fn lookup_trait_method(mut ctx: InferCtx, type_name: Str, method: Str, span: Span) -> MethodLookupResult {
     let mut found: MethodLookupResult = MethodLookupResult {
-        method_type: none, method_core: none, impl_owner: none,
+        method_type: none, type_args: [], effect_instantiation: none,
+        method_core: none, impl_owner: none,
         impl_method_ref: none,
         intrinsic_ref: none
     }
@@ -1219,11 +1194,15 @@ pub fn lookup_trait_method(mut ctx: InferCtx, type_name: Str, method: Str, span:
                                                     none => panic(
                                                         "trait method lookup: owner lost exact method ref")
                                                 }
+                                                let receipt =
+                                                    instantiate_callable_impl_method(
+                                                        ctx, impl_entry, core,
+                                                        method_ref)
                                                 found = MethodLookupResult {
-                                                    method_type: some(
-                                                        instantiate_callable_impl_method(
-                                                            ctx, impl_entry, core,
-                                                            method_ref)),
+                                                    method_type: some(receipt.ty),
+                                                    type_args: receipt.type_args,
+                                                    effect_instantiation:
+                                                        receipt.effect_instantiation,
                                                     method_core: some(core),
                                                     impl_owner: some(impl_entry),
                                                     impl_method_ref: some(method_ref),

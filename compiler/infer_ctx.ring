@@ -5,7 +5,8 @@ use types::{Type, Effect, EffectRow, RecordField, StructField,
 use ast::{Span, Pattern, TypeExpr, RecordTypeField, NamedPatternField, span_zero, EffectExpr,
     UseDecl, UseImport}
 use hir::{HExpr, HStmt, HParam, ValueBindingKind,
-    HCallableEffectActual, HCallableEffectInstantiation,
+    HCallableTypeActual, HCallableEffectActual,
+    HCallableEffectInstantiation, HCallableValueInstantiation,
     HPatternBinding, HPatternPlan, HPatternFieldPlan,
     h_pattern_wildcard, h_pattern_binding, h_pattern_literal,
     h_pattern_tuple, h_pattern_struct, h_pattern_variant, h_pattern_or,
@@ -36,9 +37,9 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     register_callable_effect_header,
     instantiate_type_alias_schema, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
+    ordered_effect_tail_vars, scheme_value_type_vars,
     impl_method_core_as_scheme, frozen_impl_predicates,
     impl_method_core_type, impl_method_core_type_vars,
-    impl_method_core_effect_schema,
     impl_predicate_subject_type_var, impl_predicate_trait_name,
     impl_predicate_assoc_constraints, impl_assoc_predicate_name,
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
@@ -58,7 +59,8 @@ use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     symbol_ref_same, symbol_ref_is_prelude,
     ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     impl_provider_ref_same, impl_owner_ref_same,
-    impl_method_ref_member,
+    impl_method_ref_member, impl_method_ref_name,
+    intrinsic_ref_symbol,
     nominal_field_ref_same, trait_method_ref_same,
     registered_nominal_ref_same, variant_ref_same,
     variant_field_ref_same,
@@ -238,6 +240,22 @@ pub struct ProjectNamespaceFrameState {
     pub journal: List<ProjectNamespaceUndo>
 }
 
+struct PendingAnonymousCallableHeader {
+    executable: ExecutableRef,
+    signature: Type
+}
+
+struct FinalAnonymousCallableHeader {
+    executable: ExecutableRef,
+    signature: Type,
+    schema: TypedEffectHeaderSchema
+}
+
+pub struct RecursiveEffectFactCheckpoint {
+    effect_facts: EffectFactCheckpoint,
+    pending_anonymous_len: Int
+}
+
 pub struct InferCtx {
     pub core_module_key: Str,
     pub core_module_order: Int,
@@ -286,6 +304,8 @@ pub struct InferCtx {
     // ExecutableRef membership is exact; this state never owns a scheme/schema.
     active_recursive_callables: List<ExecutableRef>,
     closed_recursive_callables: List<ExecutableRef>,
+    pending_anonymous_callable_headers:
+        List<PendingAnonymousCallableHeader>,
     // B-125: whether the current module context allows unsafe blocks
     pub mod_unsafe_allowed: Bool,
     // B-002p1: types with user `impl Drop` — collected during impl checking
@@ -359,6 +379,7 @@ pub fn new_infer_ctx(
         rebind_assoc_provenance: map_new(),
         active_recursive_callables: [],
         closed_recursive_callables: [],
+        pending_anonymous_callable_headers: [],
         mod_unsafe_allowed: false,
         drop_types: set_new(),
         project_namespace_file_key: none,
@@ -431,6 +452,10 @@ pub fn recursive_callable_is_active(
         ctx.active_recursive_callables, executable)
 }
 
+pub fn recursive_callable_group_is_active(ctx: InferCtx) -> Bool {
+    ctx.active_recursive_callables.len() != 0
+}
+
 pub fn begin_recursive_callable_group(
     mut ctx: InferCtx, executables: List<ExecutableRef>
 ) {
@@ -464,14 +489,10 @@ pub fn end_recursive_callable_group(
 pub fn mark_recursive_callable_group_closed(
     mut ctx: InferCtx, executables: List<ExecutableRef>
 ) {
-    if ctx.active_recursive_callables.len() == 0 {
-        panic("recursive callable group: closure without activation")
+    if ctx.active_recursive_callables.len() != 0 {
+        panic("recursive callable group: closure before deactivation")
     }
     let members = recursive_callable_group_members(executables)
-    if !recursive_callable_groups_same(
-            ctx.active_recursive_callables, members) {
-        panic("recursive callable group: closure membership differs")
-    }
     // Preflight the whole group before mutating the append-only marker set.
     for executable in members {
         if recursive_callable_list_contains(
@@ -492,24 +513,142 @@ pub fn recursive_callable_is_closed(
 
 pub fn recursive_effect_fact_checkpoint(
     ctx: InferCtx
-) -> EffectFactCheckpoint {
-    effect_fact_checkpoint(ctx.env)
+) -> RecursiveEffectFactCheckpoint {
+    RecursiveEffectFactCheckpoint {
+        effect_facts: effect_fact_checkpoint(ctx.env),
+        pending_anonymous_len:
+            ctx.pending_anonymous_callable_headers.len()
+    }
 }
 
 pub fn rollback_recursive_effect_facts(
-    mut ctx: InferCtx, checkpoint: EffectFactCheckpoint
+    mut ctx: InferCtx, checkpoint: RecursiveEffectFactCheckpoint
 ) {
-    rollback_effect_facts(ctx.env, checkpoint)
+    rollback_effect_facts(ctx.env, checkpoint.effect_facts)
+    rollback_pending_anonymous_callable_headers(
+        ctx, checkpoint.pending_anonymous_len)
 }
 
-fn build_callable_effect_instantiation(
-    scheme: TypeScheme, instantiated_signature: Type, subst: UnionFind
+pub fn pending_anonymous_callable_checkpoint(ctx: InferCtx) -> Int {
+    ctx.pending_anonymous_callable_headers.len()
+}
+
+pub fn record_pending_anonymous_callable_header(
+    mut ctx: InferCtx, executable: ExecutableRef, signature: Type
+) {
+    if executable_ref_is_named(executable) {
+        panic("anonymous callable header: executable is named")
+    }
+    match signature {
+        Type::FnType { .. } => {},
+        _ => panic("anonymous callable header: signature is not callable")
+    }
+    for pending in ctx.pending_anonymous_callable_headers {
+        if executable_ref_same(pending.executable, executable) {
+            panic("anonymous callable header: executable recorded twice")
+        }
+    }
+    ctx.pending_anonymous_callable_headers.push(
+        PendingAnonymousCallableHeader {
+            executable: executable, signature: signature
+        })
+}
+
+pub fn rollback_pending_anonymous_callable_headers(
+    mut ctx: InferCtx, checkpoint: Int
+) {
+    if checkpoint < 0 ||
+       checkpoint > ctx.pending_anonymous_callable_headers.len() {
+        panic("anonymous callable header: invalid checkpoint")
+    }
+    ctx.pending_anonymous_callable_headers =
+        ctx.pending_anonymous_callable_headers.slice(0, checkpoint)
+}
+
+pub fn drain_pending_anonymous_callable_headers(
+    mut ctx: InferCtx, checkpoint: Int,
+    owner_schema: TypedEffectHeaderSchema, final_subst: UnionFind
+) {
+    if checkpoint < 0 ||
+       checkpoint > ctx.pending_anonymous_callable_headers.len() {
+        panic("anonymous callable header: invalid drain checkpoint")
+    }
+    publish_effect_header_schema(ctx.env, owner_schema)
+    let mut finalized: List<FinalAnonymousCallableHeader> = []
+    let mut index = checkpoint
+    while index < ctx.pending_anonymous_callable_headers.len() {
+        let pending = ctx.pending_anonymous_callable_headers.get(
+            index).unwrap()
+        let signature = apply_subst(final_subst, pending.signature)
+        let schema = project_existing_effect_header_schema(
+            ctx.env, signature)
+        finalized.push(FinalAnonymousCallableHeader {
+            executable: pending.executable,
+            signature: signature,
+            schema: schema
+        })
+        index = index + 1
+    }
+    for value in finalized {
+        publish_exact_callable_effect_header(
+            ctx, value.executable, value.signature, value.schema)
+    }
+    ctx.pending_anonymous_callable_headers =
+        ctx.pending_anonymous_callable_headers.slice(0, checkpoint)
+}
+
+pub struct CallableInstantiationReceipt {
+    pub ty: Type,
+    pub type_args: List<HCallableTypeActual>,
+    pub effect_instantiation: HCallableEffectInstantiation?
+}
+
+fn declared_callable_type_vars(scheme: TypeScheme) -> List<Int> {
+    let effect_tails = ordered_effect_tail_vars(scheme.ty)
+    scheme.type_vars.filter(fn(id) { !effect_tails.contains(id) })
+}
+
+fn callable_type_actuals_from_mapping(
+    owner: SymbolRef, scheme: TypeScheme, declared: List<Int>,
+    mapping: Map<Int, Type>
+) -> List<HCallableTypeActual> {
+    let mut result: List<HCallableTypeActual> = []
+    for formal in scheme_value_type_vars(scheme) {
+        if declared.contains(formal) {
+            let mut ordinal: Int? = none
+            let mut index = 0
+            while index < declared.len() {
+                if declared.get(index).unwrap() == formal {
+                    ordinal = some(index)
+                }
+                index = index + 1
+            }
+            result.push(HCallableTypeActual {
+                owner: owner,
+                source_type_var_id: formal,
+                ordinal: match ordinal {
+                    some(value) => value,
+                    none => panic(
+                        "callable instantiation: type formal has no ordinal")
+                },
+                arity: declared.len(),
+                actual: match mapping.get(formal) {
+                    some(actual) => actual,
+                    none => panic(
+                        "callable instantiation: type formal mapping is absent")
+                }
+            })
+        }
+    }
+    result
+}
+
+fn callable_effect_actuals_from_mapping(
+    schema: TypedEffectHeaderSchema, mapping: Map<Int, Type>
 ) -> HCallableEffectInstantiation {
-    let mapping = build_scheme_var_map(scheme, instantiated_signature)
     let mut substitutions: List<HCallableEffectActual> = []
     let mut raw_tails: List<Int> = []
-    for binding in typed_effect_header_schema_bindings(
-            scheme.effect_schema) {
+    for binding in typed_effect_header_schema_bindings(schema) {
         let raw_tail = typed_effect_header_binding_raw_tail(binding)
         let source = typed_effect_header_binding_parameter(binding)
         if raw_tails.contains(raw_tail) {
@@ -521,16 +660,16 @@ fn build_callable_effect_instantiation(
             }
         }
         let mapped = match mapping.get(raw_tail) {
-            some(actual) => apply_subst(subst, actual),
+            some(actual) => actual,
             none => panic(
                 "callable effect instantiation: formal mapping is absent")
         }
         let actual = match mapped {
-            Type::EffectRowType { effects, tail } => EffectRow {
-                effects: effects, tail: tail
+            Type::TypeVar { id, .. } => EffectRow {
+                effects: [], tail: some(id)
             },
             _ => panic(
-                "callable effect instantiation: formal mapped to non-row")
+                "callable effect instantiation: formal did not map to fresh tail")
         }
         raw_tails.push(raw_tail)
         substitutions.push(HCallableEffectActual {
@@ -541,31 +680,16 @@ fn build_callable_effect_instantiation(
     HCallableEffectInstantiation { substitutions: substitutions }
 }
 
-pub fn build_scheme_callable_effect_instantiation(
-    scheme: TypeScheme, instantiated_signature: Type, subst: UnionFind
-) -> HCallableEffectInstantiation {
-    validate_effect_header_schema(
-        [scheme.ty], scheme.type_vars, scheme.effect_schema)
-    build_callable_effect_instantiation(
-        scheme, instantiated_signature, subst)
-}
-
-pub fn build_impl_method_callable_effect_instantiation(
-    core: ImplMethodSchemeCore,
-    instantiated_signature: Type, subst: UnionFind
-) -> HCallableEffectInstantiation {
-    build_callable_effect_instantiation(
-        impl_method_core_as_scheme(core), instantiated_signature, subst)
-}
-
-// Constraint-only recursive HIR is discarded before group publication. The
-// retained pass runs after end_recursive_callable_group and publishes facts.
-pub fn publish_anonymous_callable_effect_header(
-    mut ctx: InferCtx, executable: ExecutableRef, signature: Type
-) {
-    if ctx.active_recursive_callables.len() != 0 { return }
-    let schema = project_existing_effect_header_schema(ctx.env, signature)
-    publish_exact_callable_effect_header(ctx, executable, signature, schema)
+fn callable_instantiation_from_mapping(
+    owner: SymbolRef, scheme: TypeScheme, declared: List<Int>,
+    mapping: Map<Int, Type>
+) -> HCallableValueInstantiation {
+    HCallableValueInstantiation {
+        type_args: callable_type_actuals_from_mapping(
+            owner, scheme, declared, mapping),
+        effects: some(callable_effect_actuals_from_mapping(
+            scheme.effect_schema, mapping))
+    }
 }
 
 fn install_monomorphic_scheme_bounds(
@@ -587,19 +711,43 @@ fn install_monomorphic_scheme_bounds(
 
 pub fn instantiate_callable_scheme(
     mut ctx: InferCtx, scheme: TypeScheme
-) -> Type {
+) -> CallableInstantiationReceipt {
     match scheme.def_id {
         some(def_id) => match ctx.value_symbols.get(def_id) {
             some(symbol) => if recursive_callable_is_active(
                     ctx, make_named_executable_ref(symbol)) {
                 install_monomorphic_scheme_bounds(ctx, scheme)
-                return scheme.ty
+                return CallableInstantiationReceipt {
+                    ty: scheme.ty, type_args: [], effect_instantiation: none
+                }
             },
             none => {}
         },
         none => {}
     }
-    ctx.env.instantiate(scheme)
+    let instantiated = ctx.env.instantiate_type_scheme_with_mapping(scheme)
+    let exact = match scheme.def_id {
+        some(def_id) => match ctx.value_symbols.get(def_id) {
+            some(symbol) => {
+                validate_effect_header_schema(
+                    [scheme.ty], scheme.type_vars, scheme.effect_schema)
+                some(callable_instantiation_from_mapping(
+                    symbol, scheme, declared_callable_type_vars(scheme),
+                    instantiated.1))
+            },
+            none => none
+        },
+        none => none
+    }
+    match exact {
+        some(value) => CallableInstantiationReceipt {
+            ty: instantiated.0, type_args: value.type_args,
+            effect_instantiation: value.effects
+        },
+        none => CallableInstantiationReceipt {
+            ty: instantiated.0, type_args: [], effect_instantiation: none
+        }
+    }
 }
 
 fn install_monomorphic_impl_predicates(
@@ -624,14 +772,35 @@ fn install_monomorphic_impl_predicates(
 pub fn instantiate_callable_impl_method(
     mut ctx: InferCtx, owner: ImplEntry, core: ImplMethodSchemeCore,
     method_ref: ImplMethodRef
-) -> Type {
+) -> CallableInstantiationReceipt {
     let executable = make_named_executable_ref(
         impl_method_ref_member(method_ref))
     if recursive_callable_is_active(ctx, executable) {
         install_monomorphic_impl_predicates(ctx, owner, core)
-        return impl_method_core_type(core)
+        return CallableInstantiationReceipt {
+            ty: impl_method_core_type(core),
+            type_args: [], effect_instantiation: none
+        }
     }
-    ctx.env.instantiate_impl_method_core(owner, core)
+    let instantiated = ctx.env.instantiate_impl_method_core_with_mapping(
+        owner, core)
+    let method_name = impl_method_ref_name(method_ref)
+    let callable_owner = match owner.method_intrinsics.get(method_name) {
+        some(intrinsic) => intrinsic_ref_symbol(intrinsic),
+        none => impl_method_ref_member(method_ref)
+    }
+    let scheme = impl_method_core_as_scheme(core)
+    let effect_tails = ordered_effect_tail_vars(scheme.ty)
+    let declared = scheme.type_vars.filter(fn(id) {
+        !owner.type_param_vars.contains(id) && !effect_tails.contains(id)
+    })
+    let exact = callable_instantiation_from_mapping(
+        callable_owner, scheme, declared, instantiated.1)
+    CallableInstantiationReceipt {
+        ty: instantiated.0,
+        type_args: exact.type_args,
+        effect_instantiation: exact.effects
+    }
 }
 
 fn project_child_site_key(parent_frame_index: Int, decl_index: Int) -> Str {

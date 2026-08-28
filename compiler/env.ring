@@ -1207,8 +1207,14 @@ impl TypeEnv {
     }
 
     pub fn instantiate(mut self, scheme: TypeScheme) -> Type {
-        if scheme.type_vars.len() == 0 { return scheme.ty }
+        self.instantiate_type_scheme_with_mapping(scheme).0
+    }
+
+    pub fn instantiate_type_scheme_with_mapping(
+        mut self, scheme: TypeScheme
+    ) -> (Type, Map<Int, Type>) {
         let mut mapping: Map<Int, Type> = map_new()
+        if scheme.type_vars.len() == 0 { return (scheme.ty, mapping) }
         for tv in scheme.type_vars {
             mapping.insert(tv, self.fresh_var())
         }
@@ -1232,12 +1238,18 @@ impl TypeEnv {
         let instantiated_schema = remap_effect_header_schema(
             mapping, scheme.effect_schema)
         publish_effect_header_schema(self, instantiated_schema)
-        instantiated
+        (instantiated, mapping)
     }
 
     pub fn instantiate_impl_method_core(
         mut self, owner: ImplEntry, core: ImplMethodSchemeCore
     ) -> Type {
+        self.instantiate_impl_method_core_with_mapping(owner, core).0
+    }
+
+    pub fn instantiate_impl_method_core_with_mapping(
+        mut self, owner: ImplEntry, core: ImplMethodSchemeCore
+    ) -> (Type, Map<Int, Type>) {
         let mut mapping: Map<Int, Type> = map_new()
         for type_var in impl_method_core_type_vars(core) {
             mapping.insert(type_var, self.fresh_var())
@@ -1261,7 +1273,7 @@ impl TypeEnv {
         let instantiated_schema = remap_effect_header_schema(
             mapping, impl_method_core_effect_schema(core))
         publish_effect_header_schema(self, instantiated_schema)
-        instantiated
+        (instantiated, mapping)
     }
 }
 
@@ -2227,6 +2239,17 @@ fn collect_effect_var_mappings(
     source_row: EffectRow, target_row: EffectRow,
     source_vars: Set<Int>, mut result: Map<Int, Type>
 ) {
+    match (source_row.tail, target_row.tail) {
+        (some(source_id), some(target_id)) => {
+            if source_vars.contains(source_id) {
+                result.insert(source_id, Type::TypeVar {
+                    id: target_id, name: none
+                })
+            }
+        },
+        _ => {}
+    }
+
     for source_effect in source_row.effects {
         for target_effect in target_row.effects {
             if effects_match_kind(source_effect, target_effect) {
@@ -2259,25 +2282,6 @@ fn collect_effect_var_mappings(
         }
     }
 
-    // A source tail denotes the target row after removing labels already
-    // fixed by the source header. Preserve that row explicitly so a closed or
-    // expanded use-site tail remains an EffectRowType, not a guessed TypeVar.
-    match source_row.tail {
-        some(source_id) => if source_vars.contains(source_id) {
-            let mut residual_effects: List<Effect> = []
-            for target_effect in target_row.effects {
-                if !source_row.effects.any(fn(source_effect) {
-                        effects_match_kind(source_effect, target_effect)
-                    }) {
-                    residual_effects.push(target_effect)
-                }
-            }
-            result.insert(source_id, Type::EffectRowType {
-                effects: residual_effects, tail: target_row.tail
-            })
-        },
-        none => {}
-    }
 }
 
 fn collect_var_mappings(

@@ -8,7 +8,8 @@ use ast::{Program, Decl, Expr, Stmt, Param, MatchArm, StructFieldInit,
     EffectOpDecl}
 use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HPatternBinding, HLambdaCapture,
-    HCallableEffectInstantiation,
+    HCallableTypeActual, HCallableEffectInstantiation,
+    HCallableValueInstantiation,
     HPatternPlan, HOperatorPlan,
     HProjectionRef, h_nominal_projection, h_structural_projection,
     h_tuple_projection,
@@ -63,10 +64,11 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     resolve_or_defer_dicts_from_impl_owner,
     register_callable_value_shadow,
     instantiate_callable_scheme, instantiate_callable_impl_method,
-    build_scheme_callable_effect_instantiation,
-    build_impl_method_callable_effect_instantiation,
-    recursive_callable_is_active,
-    publish_anonymous_callable_effect_header,
+    pending_anonymous_callable_checkpoint,
+    record_pending_anonymous_callable_header,
+    rollback_pending_anonymous_callable_headers,
+    drain_pending_anonymous_callable_headers,
+    recursive_callable_group_is_active,
     pending_dict_checkpoint, has_pending_dicts_since,
     remove_fail_effect,
     generalize, free_type_vars, resolve_relative_qualifier,
@@ -75,7 +77,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     enter_executable_owner, exit_executable_owner,
     current_executable_owner, current_dictionary_evidence_owner,
     local_effect_header_origin,
-    define_exact_effect_header, publish_exact_callable_effect_header,
+    define_exact_effect_header,
     inherit_dictionary_evidence_owner,
     resolve_handled_evidence, install_handled_evidence,
     uninstall_handled_evidence,
@@ -93,7 +95,6 @@ use infer_helpers::{MethodLookupResult, StmtResult, CalleeMetadata,
     resolve_trait_dispatch, resolve_eq_dispatch,
     exact_operator_plan,
     exact_nominal_method_call,
-    exact_callable_type_args,
     is_bounded_direct_callable_ident, resolve_callee_metadata,
     check_expr_is_let_def, get_expr_def_id, is_mut_method_call, check_receiver_mutability,
     lookup_impl_method, lookup_trait_method,
@@ -106,7 +107,6 @@ use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
     compiler_extern_site_from_tag, compiler_extern_ref_for_site,
     compiler_extern_ref_symbol, COMPILER_EXTERN_SLOT_ALLOC,
     callee_ref_is_named, callee_ref_named_symbol,
-    impl_method_ref_member,
     slot_domain_lexical, slot_ref_same,
     path_owner_for_symbol, make_path_ref, path_role_synthetic,
     variant_ref_member}
@@ -117,6 +117,7 @@ use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
     handled_evidence_requirement,
     make_named_executable_ref, make_system_host_callable_ref,
     executable_ref_is_named, executable_ref_named_symbol}
+use effect_contract::{typed_effect_header_schema_bindings}
 
 fn exact_handled_evidence_for_row(
     mut ctx: InferCtx, row: EffectRow
@@ -154,22 +155,17 @@ fn exact_call_callee_ref(ctx: InferCtx, callee: HExpr) -> CalleeRef? {
     }
 }
 
-fn exact_named_call_effect_instantiation(
-    ctx: InferCtx, scheme: TypeScheme, instantiated_signature: Type,
-    subst: UnionFind, callee: CalleeRef?
-) -> HCallableEffectInstantiation? {
+fn exact_call_actuals(
+    callee: HExpr
+) -> (List<HCallableTypeActual>, HCallableEffectInstantiation?) {
     match callee {
-        some(exact) => if callee_ref_is_named(exact) {
-            let executable = make_named_executable_ref(
-                callee_ref_named_symbol(exact))
-            if recursive_callable_is_active(ctx, executable) {
-                none
-            } else {
-                some(build_scheme_callable_effect_instantiation(
-                    scheme, instantiated_signature, subst))
-            }
-        } else { none },
-        none => none
+        HExpr::Ident { callee_identity: some(identity),
+                       callable_instantiation: some(actual), .. } => {
+            if callee_ref_is_named(identity) {
+                (actual.type_args, actual.effects)
+            } else { ([], none) }
+        },
+        _ => ([], none)
     }
 }
 
@@ -688,6 +684,8 @@ fn for_protocol_method_scheme(
 
 struct MethodCallSelection {
     method_type: Type?,
+    type_args: List<HCallableTypeActual>,
+    effect_instantiation: HCallableEffectInstantiation?,
     method_core: ImplMethodSchemeCore?,
     impl_owner: ImplEntry?,
     impl_method_ref: ImplMethodRef?,
@@ -706,10 +704,12 @@ fn select_for_protocol_method(
         some(value) => value,
         none => panic("iteration protocol: method has no exact ImplMethodRef")
     }
-    let registered_method = instantiate_callable_impl_method(
+    let receipt = instantiate_callable_impl_method(
         ctx, impl_entry, impl_core, method_ref)
     MethodCallSelection {
-        method_type: some(registered_method),
+        method_type: some(receipt.ty),
+        type_args: receipt.type_args,
+        effect_instantiation: receipt.effect_instantiation,
         method_core: some(impl_core),
         impl_owner: some(impl_entry),
         impl_method_ref: some(method_ref),
@@ -773,7 +773,19 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
     match stmt {
         Stmt::Let { name, name_span, type_annotation, init, span } => {
             let obligation_checkpoint = pending_dict_checkpoint(ctx)
-            let init_r = infer_expr(ctx, init, subst)
+            let anonymous_checkpoint =
+                pending_anonymous_callable_checkpoint(ctx)
+            let init_result = some(infer_expr(ctx, init, subst)) catch {
+                _ => none
+            }
+            let init_r = match init_result {
+                some(value) => value,
+                none => {
+                    rollback_pending_anonymous_callable_headers(
+                        ctx, anonymous_checkpoint)
+                    fail.raise(CompileError {})
+                }
+            }
             let mut s = init_r.subst
             let mut var_type = hexpr_type(init_r.hexpr)
             match type_annotation {
@@ -830,6 +842,14 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                     }
                 },
                 none => none
+            }
+            if !recursive_callable_group_is_active(ctx) {
+                let final_scheme = ctx.env.lookup(name).unwrap_or_else(fn() {
+                    panic("let anonymous header: final scheme is absent")
+                })
+                drain_pending_anonymous_callable_headers(
+                    ctx, anonymous_checkpoint,
+                    final_scheme.effect_schema, s)
             }
             StmtResult {
                 hstmt: HStmt::Let { name: name, name_span: name_span, def_id: bound_def_id, ty: resolved, init: init_r.hexpr, span: span },
@@ -1843,7 +1863,9 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 some(scheme) => scheme,
                 none => panic("unreachable: canonical prelude map_get_panic is missing")
             }
-            let callee_ty = instantiate_callable_scheme(ctx, callee_scheme)
+            let callee_receipt = instantiate_callable_scheme(
+                ctx, callee_scheme)
+            let callee_ty = callee_receipt.ty
             let callee = HExpr::Ident {
                 name: callee_name, resolved_name: none,
                 def_id: callee_scheme.def_id, source_slot: none,
@@ -1853,7 +1875,11 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                     none => panic("map index helper: exact DefId is absent")
                 },
                 dict_closure_dicts: none,
-                callable_instantiation: none,
+                callable_instantiation: some(
+                    HCallableValueInstantiation {
+                        type_args: callee_receipt.type_args,
+                        effects: callee_receipt.effect_instantiation
+                    }),
                 ty: callee_ty, effects: EMPTY_ROW, span: span
             }
             let effect_tail = ctx.env.fresh_var_id()
@@ -1882,16 +1908,13 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
 
             let final_result_ty = apply_subst(s, result_ty)
             let exact_callee = exact_call_callee_ref(ctx, callee)
-            let exact_effect_instantiation =
-                exact_named_call_effect_instantiation(
-                    ctx, callee_scheme, hexpr_type(callee), s,
-                    exact_callee)
+            let exact_actuals = exact_call_actuals(callee)
             InferResult {
                 hexpr: HExpr::Call {
                     callee: callee,
                     args: [recv_r.hexpr, idx_r.hexpr],
-                    type_args: [],
-                    effect_instantiation: exact_effect_instantiation,
+                    type_args: exact_actuals.0,
+                    effect_instantiation: exact_actuals.1,
                     resolved_dicts: resolved_dicts, method_ref: none,
                     handled_evidence: exact_handled_evidence_for_callable(
                         ctx, apply_subst(s, hexpr_type(callee))),
@@ -2124,17 +2147,6 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
     // reflected in the result.
     let result_type = apply_subst(s, ret_var)
 
-    let exact_type_args = match callee_metadata {
-        some(metadata) => match metadata.kind {
-            ValueBindingKind::DirectCallable |
-            ValueBindingKind::ExternCallable => exact_callable_type_args(
-                ctx, metadata, apply_subst(s, resolved_callee_type), s),
-            ValueBindingKind::ConstGetter |
-            ValueBindingKind::LocalBorrow => []
-        },
-        none => []
-    }
-
     // Call-site pre-boxing consumes only exact DirectCallable metadata.
     match callee_metadata {
         some(metadata) => match metadata.mut_flags {
@@ -2178,18 +2190,14 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
     }
 
     let exact_callee = exact_call_callee_ref(ctx, callee_r.hexpr)
-    let exact_effect_instantiation = match callee_metadata {
-        some(metadata) => exact_named_call_effect_instantiation(
-            ctx, metadata.live_scheme, hexpr_type(callee_r.hexpr), s,
-            exact_callee),
-        none => none
-    }
+    let exact_actuals = exact_call_actuals(callee_r.hexpr)
     let system_host = exact_system_host_callable(
         ctx, callee_r.hexpr, resolved_callee_type, exact_callee)
     InferResult {
         hexpr: HExpr::Call {
-            callee: callee_r.hexpr, args: hargs, type_args: exact_type_args,
-            effect_instantiation: exact_effect_instantiation,
+            callee: callee_r.hexpr, args: hargs,
+            type_args: exact_actuals.0,
+            effect_instantiation: exact_actuals.1,
             resolved_dicts: resolved_dicts,
             handled_evidence: exact_handled_evidence_for_callable(
                 ctx, resolved_callee_type),
@@ -2266,6 +2274,8 @@ fn infer_method_call_from_receiver(
     }
 
     let mut method_type: Type? = none
+    let mut method_type_args: List<HCallableTypeActual> = []
+    let mut method_effect_instantiation: HCallableEffectInstantiation? = none
     let mut method_core: ImplMethodSchemeCore? = none
     let mut impl_owner: ImplEntry? = none
     let mut impl_method_ref: ImplMethodRef? = none
@@ -2277,6 +2287,8 @@ fn infer_method_call_from_receiver(
     match selection {
         some(selected) => {
             method_type = selected.method_type
+            method_type_args = selected.type_args
+            method_effect_instantiation = selected.effect_instantiation
             method_core = selected.method_core
             impl_owner = selected.impl_owner
             impl_method_ref = selected.impl_method_ref
@@ -2291,6 +2303,8 @@ fn infer_method_call_from_receiver(
             Type::StructType { name, .. } => {
                 let r = lookup_impl_method(ctx, name, method)
                 method_type = r.method_type
+                method_type_args = r.type_args
+                method_effect_instantiation = r.effect_instantiation
                 method_core = r.method_core
                 impl_owner = r.impl_owner
                 impl_method_ref = r.impl_method_ref
@@ -2299,6 +2313,8 @@ fn infer_method_call_from_receiver(
             Type::EnumType { name, .. } => {
                 let r = lookup_impl_method(ctx, name, method)
                 method_type = r.method_type
+                method_type_args = r.type_args
+                method_effect_instantiation = r.effect_instantiation
                 method_core = r.method_core
                 impl_owner = r.impl_owner
                 impl_method_ref = r.impl_method_ref
@@ -2314,6 +2330,8 @@ fn infer_method_call_from_receiver(
             some(prim_name) => {
                 let r = lookup_impl_method(ctx, prim_name, method)
                 method_type = r.method_type
+                method_type_args = r.type_args
+                method_effect_instantiation = r.effect_instantiation
                 method_core = r.method_core
                 impl_owner = r.impl_owner
                 impl_method_ref = r.impl_method_ref
@@ -2329,6 +2347,8 @@ fn infer_method_call_from_receiver(
             some(type_name) => {
                 let r = lookup_trait_method(ctx, type_name, method, span)
                 method_type = r.method_type
+                method_type_args = r.type_args
+                method_effect_instantiation = r.effect_instantiation
                 method_core = r.method_core
                 impl_owner = r.impl_owner
                 impl_method_ref = r.impl_method_ref
@@ -2354,6 +2374,10 @@ fn infer_method_call_from_receiver(
                                 let tm = trait_def.methods.find(fn(m) { m.name == method })
                                 match tm {
                                     some(found_method) => {
+                                        if typed_effect_header_schema_bindings(
+                                                found_method.effect_schema).len() != 0 {
+                                            panic("bound method call: open effect formal has no 0.1 receipt consumer")
+                                        }
                                         method_type = some(
                                             instantiate_trait_method_signature(
                                                 ctx.env, found_method))
@@ -2537,19 +2561,6 @@ fn infer_method_call_from_receiver(
             }
         }
     }
-    let exact_effect_instantiation = match (method_core, impl_method_ref) {
-        (some(core), some(method_ref)) => {
-            let executable = make_named_executable_ref(
-                impl_method_ref_member(method_ref))
-            if recursive_callable_is_active(ctx, executable) {
-                none
-            } else {
-                some(build_impl_method_callable_effect_instantiation(
-                    core, callee_type, s))
-            }
-        },
-        _ => none
-    }
     InferResult {
         hexpr: HExpr::Call {
             callee: HExpr::FieldAccess {
@@ -2557,8 +2568,8 @@ fn infer_method_call_from_receiver(
                 access_kind: HFieldAccessKind::Method,
                 projection: none,
                 ty: callee_type, effects: EMPTY_ROW, span: span },
-            args: hargs, type_args: [],
-            effect_instantiation: exact_effect_instantiation,
+            args: hargs, type_args: method_type_args,
+            effect_instantiation: method_effect_instantiation,
             resolved_dicts: resolved_dicts,
             handled_evidence: exact_handled_evidence_for_callable(
                 ctx, callee_type),
@@ -4145,7 +4156,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 apply_subst(s, binding.ty)),
             none => {}
         }
-        publish_anonymous_callable_effect_header(
+        record_pending_anonymous_callable_header(
             ctx, handler.executable_ref, Type::FnType {
                 params: handler_param_types,
                 return_type: apply_subst(s, hexpr_type(handler.body)),
@@ -4542,7 +4553,7 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                 current_handled_evidence_bindings(ctx)
             let evidence_captures =
                 current_handled_evidence_captures(ctx)
-            publish_anonymous_callable_effect_header(
+            record_pending_anonymous_callable_header(
                 ctx, lambda_executable, fn_type)
             exit_executable_owner(ctx)
 
