@@ -2765,7 +2765,7 @@ fn batch_effect_formal_for_raw(
                         existing, parameter) {
                     panic("effect fact batch: raw tail changed parameter")
                 },
-                none => found = some(parameter)
+                none => { found = some(parameter) }
             }
         }
     }
@@ -2819,7 +2819,7 @@ fn callable_effect_row_in_batch(
                         }) {
                     panic("effect fact batch: callable row changed")
                 },
-                none => found = some(row)
+                none => { found = some(row) }
             }
         }
     }
@@ -2851,7 +2851,7 @@ fn append_callable_effect_to_batch(
                     }) {
                 panic("effect fact batch: global/local callable differs")
             },
-            none => existing = some(local)
+            none => { existing = some(local) }
         },
         none => {}
     }
