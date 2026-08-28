@@ -4911,7 +4911,7 @@ fn derived_enum_plans(
                             next_origin: 0, diagnostic_origins: []
                         },
                         make_named_executable_ref(
-                            variant_ref_member(variant.variant_ref))))),
+                            variant_ref_member(variant.variant_ref)))),
                 left_slots, fields, executable_origin(method.executable_ref)))
         }
         variant_index = variant_index + 1
