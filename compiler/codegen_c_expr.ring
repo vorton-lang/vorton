@@ -20,7 +20,7 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HNominalStructFieldInit, HFieldAccessKind,
     HEffectHandler, HConstructorPlan, DictRef,
     h_dict_construct_trait, h_dict_construct_effect_ctx,
-    h_constructor_effect_ctx,
+    h_constructor_kind, h_constructor_fields, h_constructor_effect_ctx,
     TraitDispatch, MethodCallRef,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_is_bound,
@@ -3436,9 +3436,17 @@ fn gen_c_struct_lit(
     fields: List<HNominalStructFieldInit>, spread: HExpr?,
     constructor: HConstructorPlan?
 ) -> Str {
-    match constructor {
-        some(plan) => { let _ = h_constructor_effect_ctx(plan) },
+    let planned_fields = match constructor {
+        some(plan) => {
+            if h_constructor_kind(plan) != 2 {
+                panic("C codegen: struct literal constructor is not structural")
+            }
+            h_constructor_fields(plan).len()
+        },
         none => panic("C codegen: struct literal lacks constructor plan")
+    }
+    if planned_fields != fields.len() {
+        panic("C codegen: struct literal plan field census differs")
     }
     match spread {
         some(_) => panic(
@@ -3449,6 +3457,9 @@ fn gen_c_struct_lit(
         some(info) => {
             rt_use(ctx, "ring_alloc", 2)
             let n = info.field_names.len()
+            if fields.len() != n {
+                panic("C codegen: struct literal field census differs")
+            }
             let tid = get_or_assign_c_typeid(ctx, name)
             let t = fresh_tmp(ctx)
             c_emit(ctx, "${t} = ring_alloc((int64_t)(${n} * sizeof(void*)), ${tid});")
@@ -3484,6 +3495,16 @@ fn gen_c_variant_construct(
     fields: List<HStructFieldInit>, spread: HExpr?,
     constructor: HConstructorPlan?
 ) -> Str {
+    let constructor_ctx = match constructor {
+        some(plan) => {
+            if h_constructor_kind(plan) != 0 ||
+               h_constructor_fields(plan).len() != fields.len() {
+                panic("C codegen: variant constructor plan differs")
+            }
+            h_constructor_effect_ctx(plan)
+        },
+        none => panic("C codegen: variant construct lacks exact plan")
+    }
     match spread {
         some(_) => panic(
             "C codegen: variant spread crossed verified ownership lowering"),
@@ -3531,13 +3552,8 @@ fn gen_c_variant_construct(
                     for f in fields {
                         args.push(gen_c_expr(ctx, f.value))
                     }
-                    let plan = match constructor {
-                        some(value) => value,
-                        none => panic(
-                            "C codegen: variant construct lacks exact plan")
-                    }
                     args.push(c_effect_ctx_source_value(
-                        ctx, h_constructor_effect_ctx(plan)))
+                        ctx, constructor_ctx))
                     let t = fresh_tmp(ctx)
                     c_emit(ctx, "${t} = ${fi.c_name}(${args.join(", ")});")
                     t
