@@ -171,7 +171,7 @@ Effect 按求值组合：
 
 因此，一个pure factory可以返回effectful closure：调用factory不需要该effect，调用返回值时才需要。closure在`handle`内创建后逃逸，也不会延长旧handler的动态范围；在新的handler内调用时使用新handler。Handler arm/re-perform的内部runtime对象可显式持有outer evidence，但不改变ordinary user closure规则。
 
-Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`EffectCtx*`；direct/method调用省略`env`但保持其余相对顺序。Pure与system-only Ring callable传immortal empty context；HostImport/top-level C extern leaf不接收context。Context entry由完整typed handled instance（exact effect identity + exact type arguments）索引，不能按名字或nominal leaf合并；`GenericProbe<Str>`与`GenericProbe<Int>`是两个不同entry。
+Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`EffectCtx*`；direct/method调用省略`env`但保持其余相对顺序。Pure与system-only Ring callable传immortal empty context。普通用户top-level extern与不会回调Ring callable的普通HostImport leaf不接收context；exact compiler-owned C→Ring callback bridge必须显式接收并转发context。0.1唯一此类leaf是`ring_list_sort_bridge`/`ring_list_sort`：它同步以`env, a, b, ctx`调用`List.sort_by` comparator，不保存或retain context，也不建立thunk或通用adapter。该例外不新增用户extern callback能力。Context entry由完整typed handled instance（exact effect identity + exact type arguments）索引，不能按名字或nominal leaf合并；`GenericProbe<Str>`与`GenericProbe<Int>`是两个不同entry。
 
 `handle`创建owned child overlay并引用parent context；ordinary calls只borrow并转发指针，returned closure不捕获。Closed row可用冻结layout的静态位置，open row通过同一个typed context/view转发。禁止C varargs、TLS/global/root handler、runtime name lookup以及closed/open两套function-pointer ABI。Handler arm/re-perform内部对象可显式持parent context，其生命周期不改变ordinary closure规则。
 
