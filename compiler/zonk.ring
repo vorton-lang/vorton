@@ -17,7 +17,7 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     h_pattern_plan_variant,
     HExactCallPlan, make_h_exact_call_plan,
     h_exact_call_callee, h_exact_call_signature, h_exact_call_method,
-    h_exact_call_evidence, h_exact_call_handled_evidence,
+    h_exact_call_evidence, h_exact_call_effect_ctx,
     HListLiteralPlan, make_h_list_literal_plan,
     h_list_literal_builder, h_list_literal_owner,
     h_list_literal_constructor, h_list_literal_allocator,
@@ -42,6 +42,20 @@ use union_find::{UnionFind}
 use env::{apply_subst, apply_subst_row}
 use infer_ctx::{InferCtx, value_binding_kind, has_variant_ctor_origin_def_id}
 use infer_helpers::{resolve_value_ident}
+use effect_contract::{
+    TypedHandledEffectInstance, TypedEffectCtxLayout, TypedCallableEffectCtx,
+    TypedEffectCtxLookup, TypedEffectCtxInstall,
+    make_typed_handled_effect_instance,
+    typed_handled_effect_instance_reference,
+    typed_handled_effect_instance_type_arguments,
+    make_typed_effect_ctx_layout, typed_effect_ctx_layout_entries,
+    typed_effect_ctx_layout_formal,
+    make_typed_callable_effect_ctx, typed_callable_effect_ctx_binding,
+    typed_callable_effect_ctx_layout,
+    make_typed_effect_ctx_lookup, typed_effect_ctx_lookup_context,
+    typed_effect_ctx_lookup_instance,
+    make_typed_effect_ctx_install, typed_effect_ctx_install_parent,
+    typed_effect_ctx_install_child, typed_effect_ctx_install_entries}
 
 pub struct ZonkCtx {
     pub subst: UnionFind,
@@ -56,6 +70,58 @@ pub struct ZonkCtx {
 pub fn zonk_type(ctx: ZonkCtx, t: Type) -> Type {
     let resolved = apply_subst(ctx.subst, t)
     label_vars(ctx.names, ctx.canonical_type_var_ids, resolved)
+}
+
+fn zonk_typed_handled_effect_instance(
+    ctx: ZonkCtx, value: TypedHandledEffectInstance
+) -> TypedHandledEffectInstance {
+    make_typed_handled_effect_instance(
+        typed_handled_effect_instance_reference(value),
+        typed_handled_effect_instance_type_arguments(value).map(fn(ty) {
+            zonk_type(ctx, ty)
+        }))
+}
+
+fn zonk_typed_effect_ctx_layout(
+    ctx: ZonkCtx, value: TypedEffectCtxLayout
+) -> TypedEffectCtxLayout {
+    make_typed_effect_ctx_layout(
+        typed_effect_ctx_layout_entries(value).map(fn(instance) {
+            zonk_typed_handled_effect_instance(ctx, instance)
+        }), typed_effect_ctx_layout_formal(value))
+}
+
+fn zonk_typed_callable_effect_ctx(
+    ctx: ZonkCtx, value: TypedCallableEffectCtx
+) -> TypedCallableEffectCtx {
+    make_typed_callable_effect_ctx(
+        typed_callable_effect_ctx_binding(value),
+        zonk_typed_effect_ctx_layout(
+            ctx, typed_callable_effect_ctx_layout(value)))
+}
+
+fn zonk_typed_effect_ctx_lookup(
+    ctx: ZonkCtx, value: TypedEffectCtxLookup?
+) -> TypedEffectCtxLookup? {
+    value.map(fn(lookup) {
+        make_typed_effect_ctx_lookup(
+            typed_effect_ctx_lookup_context(lookup),
+            zonk_typed_handled_effect_instance(
+                ctx, typed_effect_ctx_lookup_instance(lookup)))
+    })
+}
+
+fn zonk_typed_effect_ctx_install(
+    ctx: ZonkCtx, value: TypedEffectCtxInstall?
+) -> TypedEffectCtxInstall? {
+    value.map(fn(install) {
+        make_typed_effect_ctx_install(
+            typed_effect_ctx_install_parent(install),
+            typed_effect_ctx_install_child(install),
+            typed_effect_ctx_install_entries(install).map(fn(instance) {
+                zonk_typed_handled_effect_instance(ctx, instance)
+            }))
+    })
 }
 
 fn zonk_method_call_ref(
@@ -111,7 +177,7 @@ fn zonk_exact_call_plan(
         zonk_type(ctx, h_exact_call_signature(value)),
         zonk_method_call_ref(ctx, h_exact_call_method(value)),
         h_exact_call_evidence(value),
-        h_exact_call_handled_evidence(value))
+        h_exact_call_effect_ctx(value))
 }
 
 fn zonk_list_literal_plan(
@@ -505,7 +571,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
         HExpr::UnaryOp { op, operand, .. } =>
             HExpr::UnaryOp { op: op, operand: zonk_expr(ctx, operand), ty: z_ty, effects: z_eff, span: z_span },
         HExpr::Call { callee, args, type_args, effect_instantiation,
-                      resolved_dicts, handled_evidence, callee_ref,
+                      resolved_dicts, effect_ctx, callee_ref,
                       method_ref, system_host, .. } =>
             HExpr::Call {
                 // A syntactic Ident callee uses the direct ABI and gets its
@@ -532,7 +598,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                     }
                 }),
                 resolved_dicts: resolved_dicts,
-                handled_evidence: handled_evidence,
+                effect_ctx: effect_ctx,
                 callee_ref: callee_ref,
                 method_ref: zonk_method_call_ref(ctx, method_ref),
                 system_host: system_host,
@@ -654,13 +720,15 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 }),
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::HandleExpr { body, handlers, installed_evidence, .. } =>
+        HExpr::HandleExpr { body, handlers, effect_ctx_install, .. } =>
             HExpr::HandleExpr {
                 body: zonk_expr(ctx, body),
                 handlers: handlers.map(fn(h) {
                     HEffectHandler {
                         effect_name: h.effect_name,
-                        handled_ref: h.handled_ref,
+                        handled_instance: h.handled_instance.map(fn(instance) {
+                            zonk_typed_handled_effect_instance(ctx, instance)
+                        }),
                         operation_ref: h.operation_ref,
                         fail_ref: h.fail_ref,
                         executable_ref: h.executable_ref, op_name: h.op_name,
@@ -669,9 +737,9 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                             value: capture.value.map(fn(value) {
                                 zonk_expr(ctx, value) }),
                             resource_site: capture.resource_site } }),
-                        handled_evidence_bindings:
-                            h.handled_evidence_bindings,
-                        evidence_captures: h.evidence_captures,
+                        effect_ctx: zonk_typed_callable_effect_ctx(
+                            ctx, h.effect_ctx),
+                        parent_ctx: h.parent_ctx,
                         params: h.params.map(fn(p) { zonk_param(ctx, p) }),
                         resume_binding: match h.resume_binding {
                             some(binding) => some(HPatternBinding {
@@ -685,10 +753,12 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                         body: zonk_expr(ctx, h.body)
                     }
                 }),
-                installed_evidence: installed_evidence,
+                effect_ctx_install: zonk_typed_effect_ctx_install(
+                    ctx, effect_ctx_install),
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::Lambda { executable_ref, params, captures, handled_evidence_bindings, evidence_captures, return_type, body, .. } =>
+        HExpr::Lambda { executable_ref, params, captures, effect_ctx,
+                        return_type, body, .. } =>
             HExpr::Lambda {
                 executable_ref: executable_ref,
                 params: params.map(fn(p) { zonk_param(ctx, p) }),
@@ -697,17 +767,18 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                     value: capture.value.map(fn(value) {
                         zonk_expr(ctx, value) }),
                     resource_site: capture.resource_site } }),
-                handled_evidence_bindings: handled_evidence_bindings,
-                evidence_captures: evidence_captures,
+                effect_ctx: zonk_typed_callable_effect_ctx(ctx, effect_ctx),
                 return_type: zonk_type(ctx, return_type),
                 body: zonk_expr(ctx, body),
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref, handled_evidence,
+        HExpr::EffectOp { effect_name, op_name, operation_ref, fail_ref,
+                          effect_ctx_lookup,
                           args, .. } =>
             HExpr::EffectOp { effect_name: effect_name, op_name: op_name,
                 operation_ref: operation_ref, fail_ref: fail_ref,
-                handled_evidence: handled_evidence,
+                effect_ctx_lookup: zonk_typed_effect_ctx_lookup(
+                    ctx, effect_ctx_lookup),
                 args: args.map(fn(a) { zonk_expr(ctx, a) }),
                 ty: z_ty, effects: z_eff, span: z_span },
         HExpr::ListLit { elements, plan, .. } =>

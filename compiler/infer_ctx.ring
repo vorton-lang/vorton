@@ -96,24 +96,25 @@ use ir_inventory::{ExecutableRef, ExactDictRef,
     BinderEntry, BinderKind, make_source_binder_entry, binder_kind_let,
     binder_kind_var,
     binder_kind_for, binder_kind_destructure, binder_kind_source_param,
-    HandledEvidenceRef, HandledEvidenceCapture,
-    make_semantic_evidence_binder, make_handled_evidence_ref,
-    make_handled_evidence_capture,
-    handled_evidence_requirement, handled_evidence_binding,
-    handled_evidence_contract_owner, handled_evidence_ordinal,
-    handled_evidence_ref_same,
-    handled_evidence_capture_requirement,
-    handled_evidence_capture_source, handled_evidence_capture_target,
+    EffectCtxRef, EffectCtxParentCapture,
+    make_semantic_effect_ctx_binder, make_effect_ctx_ref,
+    make_effect_ctx_parent_capture, make_effect_ctx_parameter_ref,
     binder_entry_kind, binder_kind_tag,
-    binder_kind_handled_evidence_param,
-    binder_kind_handled_evidence_local,
-    binder_kind_handled_evidence_capture}
-use effect_contract::{TypedEffectHeaderSchema,
+    binder_kind_effect_ctx_local,
+    binder_kind_effect_ctx_parent_capture}
+use effect_contract::{EffectParamRef, TypedEffectHeaderSchema,
     empty_typed_effect_header_schema,
     typed_effect_header_schema_bindings,
     typed_effect_header_binding_raw_tail,
     typed_effect_header_binding_parameter,
-    effect_param_ref_same}
+    effect_param_ref_same,
+    TypedHandledEffectInstance, TypedEffectCtxLayout,
+    TypedCallableEffectCtx, TypedEffectCtxSource, TypedEffectCtxLookup,
+    TypedEffectCtxInstall,
+    typed_handled_effect_instances_from_row,
+    make_typed_effect_ctx_layout, make_typed_callable_effect_ctx,
+    make_empty_effect_ctx_source, make_borrowed_effect_ctx_source,
+    make_typed_effect_ctx_lookup, make_typed_effect_ctx_install}
 // ============================================================
 // InferResult — return type for expression inference
 // ============================================================
@@ -303,10 +304,10 @@ pub struct InferCtx {
     dictionary_evidence_owner_stack: List<ExecutableRef>,
     anonymous_child_counters: List<Int>,
     semantic_site_counters: List<Int>,
-    handled_evidence_bindings_stack: List<List<HandledEvidenceRef>>,
-    handled_evidence_captures_stack: List<List<HandledEvidenceCapture>>,
-    handled_evidence_frames: List<List<HandledEvidenceRef>>,
-    handled_evidence_frame_bases: List<Int>,
+    effect_ctx_bindings_stack: List<EffectCtxRef>,
+    effect_ctx_parent_captures_stack: List<EffectCtxParentCapture?>,
+    effect_ctx_active_stack: List<EffectCtxRef>,
+    effect_ctx_active_bases: List<Int>,
     pub env: TypeEnv,
     pub subst: UnionFind,
     pub sink: CollectingSink,
@@ -394,10 +395,10 @@ pub fn new_infer_ctx(
         dictionary_evidence_owner_stack: [],
         anonymous_child_counters: [],
         semantic_site_counters: [],
-        handled_evidence_bindings_stack: [],
-        handled_evidence_captures_stack: [],
-        handled_evidence_frames: [],
-        handled_evidence_frame_bases: [],
+        effect_ctx_bindings_stack: [],
+        effect_ctx_parent_captures_stack: [],
+        effect_ctx_active_stack: [],
+        effect_ctx_active_bases: [],
         env: new_type_env(),
         subst: empty_subst(),
         sink: sink,
@@ -2520,16 +2521,37 @@ pub fn current_impl_check_site(ctx: InferCtx) -> (Str, Int) {
     }
 }
 
-pub fn enter_executable_owner(mut ctx: InferCtx, value: ExecutableRef) {
-    ctx.handled_evidence_frame_bases.push(
-        ctx.handled_evidence_frames.len())
+fn enter_effect_ctx_owner(
+    mut ctx: InferCtx, value: ExecutableRef,
+    parent: EffectCtxRef?
+) {
+    ctx.effect_ctx_active_bases.push(ctx.effect_ctx_active_stack.len())
     ctx.executable_stack.push(value)
     ctx.dictionary_evidence_owner_stack.push(value)
     ctx.anonymous_child_counters.push(0)
     ctx.semantic_site_counters.push(0)
-    ctx.handled_evidence_bindings_stack.push([])
-    ctx.handled_evidence_captures_stack.push([])
-    ctx.handled_evidence_frames.push([])
+    let binding = match parent {
+        some(_) => make_effect_ctx_for_executable(
+            value, binder_kind_effect_ctx_parent_capture(),
+            "effect-ctx-parent", 0, path_role_capture()),
+        none => make_effect_ctx_parameter_ref(value)
+    }
+    let capture = parent.map(fn(source) {
+        make_effect_ctx_parent_capture(source, binding)
+    })
+    ctx.effect_ctx_bindings_stack.push(binding)
+    ctx.effect_ctx_parent_captures_stack.push(capture)
+    ctx.effect_ctx_active_stack.push(binding)
+}
+
+pub fn enter_executable_owner(mut ctx: InferCtx, value: ExecutableRef) {
+    enter_effect_ctx_owner(ctx, value, none)
+}
+
+pub fn enter_handler_executable_owner(
+    mut ctx: InferCtx, value: ExecutableRef, parent: EffectCtxRef
+) {
+    enter_effect_ctx_owner(ctx, value, some(parent))
 }
 
 pub fn exit_executable_owner(mut ctx: InferCtx) {
@@ -2541,16 +2563,16 @@ pub fn exit_executable_owner(mut ctx: InferCtx) {
     if ctx.semantic_site_counters.pop().is_none() {
         panic("semantic identity: site stack underflow")
     }
-    if ctx.handled_evidence_bindings_stack.pop().is_none() ||
-       ctx.handled_evidence_captures_stack.pop().is_none() {
-        panic("handled evidence: executable stack underflow")
+    if ctx.effect_ctx_bindings_stack.pop().is_none() ||
+       ctx.effect_ctx_parent_captures_stack.pop().is_none() {
+        panic("effect context: executable stack underflow")
     }
-    let frame_base = match ctx.handled_evidence_frame_bases.pop() {
+    let active_base = match ctx.effect_ctx_active_bases.pop() {
         some(value) => value,
-        none => panic("handled evidence: frame base underflow")
+        none => panic("effect context: active base underflow")
     }
-    while ctx.handled_evidence_frames.len() > frame_base {
-        ctx.handled_evidence_frames.pop()
+    while ctx.effect_ctx_active_stack.len() > active_base {
+        ctx.effect_ctx_active_stack.pop()
     }
 }
 
@@ -2615,43 +2637,32 @@ pub fn inherit_dictionary_evidence_owner(
     ctx.dictionary_evidence_owner_stack.set(index, value)
 }
 
-fn copy_handled_evidence_refs(
-    values: List<HandledEvidenceRef>
-) -> List<HandledEvidenceRef> {
-    let mut result: List<HandledEvidenceRef> = []
-    for value in values { result.push(value) }
-    result
-}
-
-fn copy_handled_evidence_captures(
-    values: List<HandledEvidenceCapture>
-) -> List<HandledEvidenceCapture> {
-    let mut result: List<HandledEvidenceCapture> = []
-    for value in values { result.push(value) }
-    result
-}
-
-pub fn current_handled_evidence_bindings(
-    ctx: InferCtx
-) -> List<HandledEvidenceRef> {
-    match ctx.handled_evidence_bindings_stack.last() {
-        some(values) => copy_handled_evidence_refs(values),
-        none => panic("handled evidence: no current executable bindings")
+pub fn current_effect_ctx_binding(ctx: InferCtx) -> EffectCtxRef {
+    match ctx.effect_ctx_bindings_stack.last() {
+        some(value) => value,
+        none => panic("effect context: no current callable binding")
     }
 }
 
-pub fn current_handled_evidence_captures(
+pub fn current_effect_ctx_parent_capture(
     ctx: InferCtx
-) -> List<HandledEvidenceCapture> {
-    match ctx.handled_evidence_captures_stack.last() {
-        some(values) => copy_handled_evidence_captures(values),
-        none => panic("handled evidence: no current executable captures")
+) -> EffectCtxParentCapture {
+    match ctx.effect_ctx_parent_captures_stack.last() {
+        some(some(value)) => value,
+        some(none) => panic("effect context: ordinary callable has no parent capture"),
+        none => panic("effect context: no current callable")
     }
 }
 
-fn handled_evidence_site(
-    executable: ExecutableRef, label: Str, ordinal: Int,
-    role: PathRole
+pub fn current_effect_ctx(ctx: InferCtx) -> EffectCtxRef {
+    match ctx.effect_ctx_active_stack.last() {
+        some(value) => value,
+        none => panic("effect context: no active context")
+    }
+}
+
+fn effect_ctx_site(
+    executable: ExecutableRef, label: Str, ordinal: Int, role: PathRole
 ) -> PathRef {
     let (owner, prefix) = if executable_ref_is_named(executable) {
         (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
@@ -2664,294 +2675,163 @@ fn handled_evidence_site(
     make_path_ref(owner, child_path, role)
 }
 
-fn make_handled_evidence_for_executable(
-    requirement: HandledEffectRef, executable: ExecutableRef,
-    kind: BinderKind, label: Str, path_ordinal: Int,
-    contract_ordinal: Int,
-    role: PathRole
-) -> HandledEvidenceRef {
-    let site = handled_evidence_site(
-        executable, label, path_ordinal, role)
-    let binding = make_semantic_evidence_binder(
-        make_synthetic_slot_ref(site), executable, kind, site)
-    make_handled_evidence_ref(
-        requirement, binding, executable, contract_ordinal)
+fn make_effect_ctx_for_executable(
+    executable: ExecutableRef, kind: BinderKind,
+    label: Str, path_ordinal: Int, role: PathRole
+) -> EffectCtxRef {
+    let site = effect_ctx_site(executable, label, path_ordinal, role)
+    make_effect_ctx_ref(
+        make_semantic_effect_ctx_binder(
+            make_synthetic_slot_ref(site), executable, kind, site),
+        executable)
 }
 
-fn make_current_handled_evidence(
-    ctx: InferCtx, requirement: HandledEffectRef,
-    kind: BinderKind, label: Str, path_ordinal: Int,
-    contract_ordinal: Int, role: PathRole
-) -> HandledEvidenceRef {
-    make_handled_evidence_for_executable(
-        requirement, current_executable_owner(ctx), kind, label,
-        path_ordinal, contract_ordinal, role)
-}
-
-fn append_current_handled_evidence_inventory(
-    mut ctx: InferCtx, value: HandledEvidenceRef
-) {
-    let stack_index = ctx.handled_evidence_bindings_stack.len() - 1
-    let mut bindings = ctx.handled_evidence_bindings_stack.get(
-        stack_index).unwrap()
-    bindings.push(value)
-    ctx.handled_evidence_bindings_stack.set(stack_index, bindings)
-}
-
-fn append_current_handled_evidence_binding(
-    mut ctx: InferCtx, value: HandledEvidenceRef
-) {
-    append_current_handled_evidence_inventory(ctx, value)
-    let frame_index = ctx.handled_evidence_frame_bases.last().unwrap()
-    let mut frame = ctx.handled_evidence_frames.get(frame_index).unwrap()
-    frame.push(value)
-    ctx.handled_evidence_frames.set(frame_index, frame)
-}
-
-fn capture_outer_handled_evidence(
-    mut ctx: InferCtx, source: HandledEvidenceRef
-) -> HandledEvidenceRef {
-    let capture_index = ctx.handled_evidence_captures_stack.len() - 1
-    let mut captures = ctx.handled_evidence_captures_stack.get(
-        capture_index).unwrap()
-    let path_ordinal = captures.len()
-    let contract_ordinal = current_handled_evidence_bindings(ctx).len()
-    let target = make_current_handled_evidence(
-        ctx, handled_evidence_requirement(source),
-        binder_kind_handled_evidence_capture(),
-        "handled-evidence-capture", path_ordinal, contract_ordinal,
-        path_role_capture())
-    captures.push(make_handled_evidence_capture(
-        handled_evidence_requirement(source), source, target))
-    ctx.handled_evidence_captures_stack.set(capture_index, captures)
-    append_current_handled_evidence_inventory(ctx, target)
-    let frame_index = ctx.handled_evidence_frame_bases.last().unwrap()
-    let mut frame = ctx.handled_evidence_frames.get(frame_index).unwrap()
-    frame.push(target)
-    ctx.handled_evidence_frames.set(frame_index, frame)
-    target
-}
-
-pub fn resolve_handled_evidence(
-    mut ctx: InferCtx, requirement: HandledEffectRef
-) -> HandledEvidenceRef {
-    let current = current_executable_owner(ctx)
-    let mut frame_index = ctx.handled_evidence_frames.len() - 1
-    while frame_index >= 0 {
-        let frame = ctx.handled_evidence_frames.get(frame_index).unwrap()
-        let mut item_index = frame.len() - 1
-        while item_index >= 0 {
-            let candidate = frame.get(item_index).unwrap()
-            if handled_effect_ref_same(
-                    handled_evidence_requirement(candidate), requirement) {
-                if executable_ref_same(
-                        handled_evidence_contract_owner(candidate), current) {
-                    return candidate
-                }
-                return capture_outer_handled_evidence(ctx, candidate)
-            }
-            item_index = item_index - 1
-        }
-        frame_index = frame_index - 1
-    }
-    if ctx.executable_stack.len() > 1 {
-        let parent_stack_index = ctx.executable_stack.len() - 2
-        let parent = ctx.executable_stack.get(parent_stack_index).unwrap()
-        let mut parent_bindings = ctx.handled_evidence_bindings_stack.get(
-            parent_stack_index).unwrap()
-        let parent_ordinal = parent_bindings.len()
-        let source = make_handled_evidence_for_executable(
-            requirement, parent,
-            binder_kind_handled_evidence_param(),
-            "handled-evidence-param", parent_ordinal, parent_ordinal,
-            path_role_parameter())
-        parent_bindings.push(source)
-        ctx.handled_evidence_bindings_stack.set(
-            parent_stack_index, parent_bindings)
-        let parent_frame_index = ctx.handled_evidence_frame_bases.get(
-            parent_stack_index).unwrap()
-        let mut parent_frame = ctx.handled_evidence_frames.get(
-            parent_frame_index).unwrap()
-        parent_frame.push(source)
-        ctx.handled_evidence_frames.set(parent_frame_index, parent_frame)
-        return capture_outer_handled_evidence(ctx, source)
-    }
-    let ordinal = current_handled_evidence_bindings(ctx).len()
-    let binding = make_current_handled_evidence(
-        ctx, requirement, binder_kind_handled_evidence_param(),
-        "handled-evidence-param", ordinal, ordinal,
-        path_role_parameter())
-    append_current_handled_evidence_binding(ctx, binding)
-    binding
-}
-
-fn callable_handled_requirements(
-    effects: EffectRow
-) -> List<HandledEffectRef> {
-    let mut result: List<HandledEffectRef> = []
-    for atom in effects.effects {
-        match atom {
-            Effect::CustomEffect { reference, .. } => {
-                if result.any(fn(existing) {
-                        handled_effect_ref_same(existing, reference)
-                    }) {
-                    panic("handled evidence: callable requirement repeats")
-                }
-                result.push(reference)
-            },
-            _ => {}
-        }
-    }
-    result
-}
-
-pub fn prepare_callable_handled_evidence(
-    mut ctx: InferCtx, declared_effects: EffectRow
-) {
-    for requirement in callable_handled_requirements(declared_effects) {
-        let _ = resolve_handled_evidence(ctx, requirement)
-    }
-}
-
-pub fn canonicalize_callable_handled_evidence_closure(
-    mut ctx: InferCtx, final_effects: EffectRow,
-    extra_requirements: List<HandledEffectRef>
-) -> (List<HandledEvidenceRef>, List<HandledEvidenceRef>) {
-    let mut requirements = callable_handled_requirements(final_effects)
-    for requirement in extra_requirements {
-        if !requirements.any(fn(existing) {
-                handled_effect_ref_same(existing, requirement)
-            }) {
-            requirements.push(requirement)
-        }
-    }
-    let existing = current_handled_evidence_bindings(ctx)
-    let current = current_executable_owner(ctx)
-    let mut sources: List<HandledEvidenceRef> = []
-    let mut targets: List<HandledEvidenceRef> = []
-    for index in 0..requirements.len() {
-        let requirement = requirements.get(index).unwrap()
-        let mut found: HandledEvidenceRef? = none
-        for value in existing {
-            if handled_effect_ref_same(
-                    handled_evidence_requirement(value), requirement) {
-                if found.is_some() {
-                    panic("handled evidence: callable requirement is ambiguous")
-                }
-                found = some(value)
+fn typed_effect_ctx_formal_for_tail(
+    schema: TypedEffectHeaderSchema, raw_tail: Int
+) -> EffectParamRef {
+    let mut found: EffectParamRef? = none
+    for binding in typed_effect_header_schema_bindings(schema) {
+        if typed_effect_header_binding_raw_tail(binding) == raw_tail {
+            let parameter = typed_effect_header_binding_parameter(binding)
+            match found {
+                some(existing) => if !effect_param_ref_same(
+                        existing, parameter) {
+                    panic("typed effect context: raw tail maps twice")
+                },
+                none => found = some(parameter)
             }
         }
-        let source = match found {
-            some(value) => value,
-            none => panic(
-                "handled evidence: final callable requirement was not produced")
-        }
-        if !executable_ref_same(
-                handled_evidence_contract_owner(source), current) {
-            panic("handled evidence: final binding owner differs")
-        }
-        let kind = binder_entry_kind(handled_evidence_binding(source))
-        let kind_tag = binder_kind_tag(kind)
-        let target = if kind_tag == binder_kind_tag(
-                binder_kind_handled_evidence_param()) {
-            make_current_handled_evidence(
-                ctx, requirement, binder_kind_handled_evidence_param(),
-                "handled-evidence-param", index, index,
-                path_role_parameter())
-        } else if kind_tag == binder_kind_tag(
-                binder_kind_handled_evidence_capture()) {
-            make_current_handled_evidence(
-                ctx, requirement, binder_kind_handled_evidence_capture(),
-                "handled-evidence-capture", index, index,
-                path_role_capture())
-        } else {
-            panic("handled evidence: callable inventory contains a local")
-        }
-        sources.push(source)
-        targets.push(target)
     }
-
-    let capture_index = ctx.handled_evidence_captures_stack.len() - 1
-    let existing_captures = ctx.handled_evidence_captures_stack.get(
-        capture_index).unwrap()
-    let mut captures: List<HandledEvidenceCapture> = []
-    for index in 0..sources.len() {
-        let source = sources.get(index).unwrap()
-        let target = targets.get(index).unwrap()
-        if binder_kind_tag(binder_entry_kind(
-                handled_evidence_binding(source))) ==
-                binder_kind_tag(binder_kind_handled_evidence_capture()) {
-            let mut found: HandledEvidenceCapture? = none
-            for capture in existing_captures {
-                if handled_evidence_ref_same(
-                        handled_evidence_capture_target(capture), source) {
-                    if found.is_some() {
-                        panic("handled evidence: capture target repeats")
-                    }
-                    found = some(capture)
-                }
-            }
-            let capture = match found {
-                some(value) => value,
-                none => panic("handled evidence: capture relation is absent")
-            }
-            captures.push(make_handled_evidence_capture(
-                handled_evidence_capture_requirement(capture),
-                handled_evidence_capture_source(capture), target))
-        }
+    match found {
+        some(parameter) => parameter,
+        none => panic("typed effect context: stable formal is absent")
     }
-    ctx.handled_evidence_captures_stack.set(capture_index, captures)
-    let binding_index = ctx.handled_evidence_bindings_stack.len() - 1
-    ctx.handled_evidence_bindings_stack.set(
-        binding_index, copy_handled_evidence_refs(targets))
-    let frame_index = ctx.handled_evidence_frame_bases.last().unwrap()
-    if ctx.handled_evidence_frames.len() != frame_index + 1 {
-        panic("handled evidence: callable finalized with an installed frame")
-    }
-    ctx.handled_evidence_frames.set(
-        frame_index, copy_handled_evidence_refs(targets))
-    (sources, targets)
 }
 
-pub fn canonicalize_callable_handled_evidence(
-    ctx: InferCtx, final_effects: EffectRow
-) -> (List<HandledEvidenceRef>, List<HandledEvidenceRef>) {
-    canonicalize_callable_handled_evidence_closure(
-        ctx, final_effects, [])
+pub fn typed_effect_ctx_layout_for_row(
+    row: EffectRow, schema: TypedEffectHeaderSchema
+) -> TypedEffectCtxLayout {
+    make_typed_effect_ctx_layout(
+        typed_handled_effect_instances_from_row(row),
+        row.tail.map(fn(raw_tail) {
+            typed_effect_ctx_formal_for_tail(schema, raw_tail)
+        }))
 }
 
-pub fn install_handled_evidence(
-    mut ctx: InferCtx, requirements: List<HandledEffectRef>
-) -> List<HandledEvidenceRef> {
-    let mut installed: List<HandledEvidenceRef> = []
+pub fn current_typed_callable_effect_ctx(
+    ctx: InferCtx, row: EffectRow, schema: TypedEffectHeaderSchema
+) -> TypedCallableEffectCtx {
+    make_typed_callable_effect_ctx(
+        current_effect_ctx_binding(ctx),
+        typed_effect_ctx_layout_for_row(row, schema))
+}
+
+// Inference constructs nested callable bodies before the owner batch publishes
+// their final header schema.  This draft carries only the already-known fixed
+// entries; finalization must replace it from that exact batch before HIR
+// validation.  No raw tail is stored or exposed as semantic identity.
+pub fn current_draft_callable_effect_ctx(
+    ctx: InferCtx, row: EffectRow
+) -> TypedCallableEffectCtx {
+    make_typed_callable_effect_ctx(
+        current_effect_ctx_binding(ctx),
+        make_typed_effect_ctx_layout(
+            typed_handled_effect_instances_from_row(row), none))
+}
+
+pub fn typed_effect_ctx_layout_from_owner_batch(
+    ctx: InferCtx, batch: OwnerInferenceBatch, row: EffectRow
+) -> TypedEffectCtxLayout {
+    let signature = Type::EffectRowType {
+        effects: row.effects, tail: row.tail
+    }
+    let schema = match try_project_effect_header_from_batch(
+            ctx.env, batch.effect_facts, signature) {
+        some(value) => value,
+        none => panic("typed effect context: owner batch schema is absent")
+    }
+    typed_effect_ctx_layout_for_row(row, schema)
+}
+
+pub fn typed_effect_ctx_layout_from_published_schema(
+    ctx: InferCtx, row: EffectRow
+) -> TypedEffectCtxLayout {
+    let signature = Type::EffectRowType {
+        effects: row.effects, tail: row.tail
+    }
+    let schema = match try_project_existing_effect_header_schema(
+            ctx.env, signature) {
+        some(value) => value,
+        none => panic("typed effect context: published schema is absent")
+    }
+    typed_effect_ctx_layout_for_row(row, schema)
+}
+
+pub fn current_typed_callable_effect_ctx_from_owner_batch(
+    ctx: InferCtx, batch: OwnerInferenceBatch, row: EffectRow
+) -> TypedCallableEffectCtx {
+    make_typed_callable_effect_ctx(
+        current_effect_ctx_binding(ctx),
+        typed_effect_ctx_layout_from_owner_batch(ctx, batch, row))
+}
+
+pub fn effect_ctx_source_for_callable(
+    ctx: InferCtx, callable: Type
+) -> TypedEffectCtxSource {
+    match callable {
+        Type::FnType { effects, .. } => {
+            let has_fixed = typed_handled_effect_instances_from_row(
+                effects).len() != 0
+            if !has_fixed && effects.tail.is_none() {
+                make_empty_effect_ctx_source()
+            } else {
+                make_borrowed_effect_ctx_source(current_effect_ctx(ctx))
+            }
+        },
+        _ => panic("typed effect context: call target is not callable")
+    }
+}
+
+pub fn effect_ctx_lookup_for_instance(
+    ctx: InferCtx, instance: TypedHandledEffectInstance
+) -> TypedEffectCtxLookup {
+    make_typed_effect_ctx_lookup(current_effect_ctx(ctx), instance)
+}
+
+pub struct EffectCtxInstallSeed {
+    parent: EffectCtxRef,
+    child: EffectCtxRef
+}
+
+pub fn begin_effect_ctx_install(mut ctx: InferCtx) -> EffectCtxInstallSeed {
+    let parent = current_effect_ctx(ctx)
     let counter_index = ctx.semantic_site_counters.len() - 1
-    for requirement in requirements {
-        if installed.any(fn(existing) {
-                handled_effect_ref_same(
-                    handled_evidence_requirement(existing), requirement)
-            }) {
-            continue
-        }
-        let ordinal = ctx.semantic_site_counters.get(counter_index).unwrap()
-        ctx.semantic_site_counters.set(counter_index, ordinal + 1)
-        installed.push(make_current_handled_evidence(
-            ctx, requirement, binder_kind_handled_evidence_local(),
-            "handled-evidence-local", ordinal, ordinal,
-            path_role_handler()))
+    if counter_index < 0 {
+        panic("effect context: install is outside executable")
     }
-    ctx.handled_evidence_frames.push(
-        copy_handled_evidence_refs(installed))
-    installed
+    let ordinal = ctx.semantic_site_counters.get(counter_index).unwrap()
+    ctx.semantic_site_counters.set(counter_index, ordinal + 1)
+    let child = make_effect_ctx_for_executable(
+        current_executable_owner(ctx), binder_kind_effect_ctx_local(),
+        "effect-ctx-local", ordinal, path_role_handler())
+    ctx.effect_ctx_active_stack.push(child)
+    EffectCtxInstallSeed { parent: parent, child: child }
 }
 
-pub fn uninstall_handled_evidence(mut ctx: InferCtx) {
-    let base = ctx.handled_evidence_frame_bases.last().unwrap()
-    if ctx.handled_evidence_frames.len() <= base + 1 {
-        panic("handled evidence: no installed frame")
-    }
-    ctx.handled_evidence_frames.pop()
+pub fn finish_effect_ctx_install(
+    value: EffectCtxInstallSeed,
+    entries: List<TypedHandledEffectInstance>
+) -> TypedEffectCtxInstall {
+    make_typed_effect_ctx_install(value.parent, value.child, entries)
 }
 
+pub fn uninstall_effect_ctx(mut ctx: InferCtx) {
+    let base = ctx.effect_ctx_active_bases.last().unwrap()
+    if ctx.effect_ctx_active_stack.len() <= base + 1 {
+        panic("effect context: no owned child install")
+    }
+    ctx.effect_ctx_active_stack.pop()
+}
 pub fn fresh_child_executable(mut ctx: InferCtx, role: Str) -> ExecutableRef {
     if role.len() == 0 { panic("executable identity: empty child role") }
     let parent = current_executable_owner(ctx)

@@ -33,8 +33,7 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HForInDestructure, HLetDestructureBinding, ValueBindingKind,
     trait_bound_param_name,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET, BUILTIN_OPTION,
-    hexpr_type, hexpr_effects, hexpr_span, map_index_helper_identity,
-    remap_hir_handled_evidence}
+    hexpr_type, hexpr_effects, hexpr_span, map_index_helper_identity}
 use hir_exact::{dict_ref_exact}
 use diagnostics::{DiagnosticContext, DiagnosticNote, CollectingSink, Severity, make_diag}
 use codes::{E0201, E0203, E0205, E0206, E0301, E0303, E0304, E0305, E0306,
@@ -75,16 +74,17 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     generalize, free_type_vars, resolve_relative_qualifier,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
     has_variant_ctor_origin_def_id, fresh_child_executable,
-    enter_executable_owner, exit_executable_owner,
+    enter_executable_owner, enter_handler_executable_owner,
+    exit_executable_owner,
     current_executable_owner, current_dictionary_evidence_owner,
     local_effect_header_origin,
     define_exact_effect_header,
     inherit_dictionary_evidence_owner,
-    resolve_handled_evidence, install_handled_evidence,
-    uninstall_handled_evidence,
-    current_handled_evidence_bindings,
-    current_handled_evidence_captures,
-    canonicalize_callable_handled_evidence,
+    current_effect_ctx, current_effect_ctx_parent_capture,
+    current_draft_callable_effect_ctx,
+    effect_ctx_source_for_callable, effect_ctx_lookup_for_instance,
+    begin_effect_ctx_install, finish_effect_ctx_install,
+    uninstall_effect_ctx,
     executable_capture_slot, fresh_semantic_path,
     fresh_semantic_let_binder, fresh_semantic_var_binder,
     semantic_for_binder,
@@ -118,41 +118,13 @@ use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
 use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
     ExactDictRef, dict_ref_is_local, dict_ref_is_wrapped,
     dict_ref_local, dict_ref_wrapped_inner,
-    HandledEvidenceRef,
-    handled_evidence_requirement,
     make_named_executable_ref, make_system_host_callable_ref,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_same}
 use effect_contract::{typed_effect_header_schema_bindings,
-    empty_typed_effect_header_schema}
-
-fn exact_handled_evidence_for_row(
-    mut ctx: InferCtx, row: EffectRow
-) -> List<HandledEvidenceRef> {
-    let mut result: List<HandledEvidenceRef> = []
-    for atom in row.effects {
-        match atom {
-            Effect::CustomEffect { reference, .. } => if !result.any(
-                    fn(existing) { handled_effect_ref_same(
-                        handled_evidence_requirement(existing),
-                        reference) }) {
-                result.push(resolve_handled_evidence(ctx, reference))
-            },
-            _ => {}
-        }
-    }
-    result
-}
-
-fn exact_handled_evidence_for_callable(
-    ctx: InferCtx, callable: Type
-) -> List<HandledEvidenceRef> {
-    match callable {
-        Type::FnType { effects, .. } =>
-            exact_handled_evidence_for_row(ctx, effects),
-        _ => []
-    }
-}
+    empty_typed_effect_header_schema,
+    make_typed_handled_effect_instance, typed_handled_effect_instance_same,
+    make_empty_effect_ctx_source}
 
 fn exact_call_callee_ref(ctx: InferCtx, callee: HExpr) -> CalleeRef? {
     let _ = ctx
@@ -240,7 +212,7 @@ fn exact_list_literal_plan(
     let allocator = make_h_exact_call_plan(
         make_named_callee_ref(
             executable_ref_named_symbol(allocator_executable)),
-        allocator_signature, none, [], [])
+        allocator_signature, none, [], make_empty_effect_ctx_source())
 
     let lookup = lookup_impl_method(ctx, BUILTIN_LIST, "push")
     let raw_signature = lookup.method_type.unwrap_or_else(fn() {
@@ -270,7 +242,7 @@ fn exact_list_literal_plan(
         exact_method, push_signature, true)
     let push = make_h_exact_call_plan(
         method_call_ref_callee_identity(push_method),
-        push_signature, some(push_method), [], [])
+        push_signature, some(push_method), [], make_empty_effect_ctx_source())
     let constructor = make_h_record_constructor_plan(
         def.fields.map(fn(field) {
             h_nominal_projection(field.field_ref)
@@ -1778,7 +1750,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                         params: [recv_type, INT],
                         return_type: apply_subst(s, result_ty),
                         effects: EMPTY_ROW
-                    }, none, [], []))
+                    }, none, [], make_empty_effect_ctx_source()))
                 index_projection = some(h_structural_projection(make_path_ref(
                     path_owner_for_symbol(symbol), ["result"],
                     path_role_synthetic()), "result"))
@@ -1808,7 +1780,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 make_named_callee_ref(symbol), Type::FnType {
                     params: [STR, INT], return_type: STR,
                     effects: EMPTY_ROW
-                }, none, [], []))
+                }, none, [], make_empty_effect_ctx_source()))
             index_projection = some(h_structural_projection(make_path_ref(
                 path_owner_for_symbol(symbol), ["result"],
                 path_role_synthetic()), "result"))
@@ -1889,7 +1861,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                     type_args: exact_actuals.0,
                     effect_instantiation: exact_actuals.1,
                     resolved_dicts: resolved_dicts, method_ref: none,
-                    handled_evidence: exact_handled_evidence_for_callable(
+                    effect_ctx: effect_ctx_source_for_callable(
                         ctx, apply_subst(s, hexpr_type(callee))),
                     callee_ref: exact_callee,
                     system_host: none,
@@ -2194,7 +2166,7 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
             type_args: exact_actuals.0,
             effect_instantiation: exact_actuals.1,
             resolved_dicts: resolved_dicts,
-            handled_evidence: exact_handled_evidence_for_callable(
+            effect_ctx: effect_ctx_source_for_callable(
                 ctx, resolved_callee_type),
             callee_ref: exact_callee,
             method_ref: none,
@@ -2575,7 +2547,7 @@ fn infer_method_call_from_receiver(
             args: hargs, type_args: method_type_args,
             effect_instantiation: method_effect_instantiation,
             resolved_dicts: resolved_dicts,
-            handled_evidence: exact_handled_evidence_for_callable(
+            effect_ctx: effect_ctx_source_for_callable(
                 ctx, callee_type),
             callee_ref: none,
             method_ref: exact_method_ref,
@@ -2601,7 +2573,7 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
             return InferResult {
                 hexpr: HExpr::EffectOp { effect_name: effect_name,
                     op_name: op_name, operation_ref: none, fail_ref: none,
-                    handled_evidence: [],
+                    effect_ctx_lookup: none,
                     args: [], ty: Type::ErrorType,
                     effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
@@ -2623,7 +2595,7 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
             return InferResult {
                 hexpr: HExpr::EffectOp { effect_name: canonical_effect_name,
                     op_name: op_name, operation_ref: none, fail_ref: none,
-                    handled_evidence: [],
+                    effect_ctx_lookup: none,
                     args: [], ty: Type::ErrorType,
                     effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
@@ -2717,10 +2689,13 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
                 some(BuiltInKind::BkFail) => some(h_fail_raise_ref()),
                 _ => none
             },
-            handled_evidence: match effect_def.handled_ref {
-                some(requirement) => [resolve_handled_evidence(
-                    ctx, requirement)],
-                none => []
+            effect_ctx_lookup: match effect_def.handled_ref {
+                some(requirement) => some(effect_ctx_lookup_for_instance(
+                    ctx, make_typed_handled_effect_instance(
+                        requirement, inst_type_args.map(fn(ty) {
+                            apply_subst(s, ty)
+                        })))),
+                none => none
             },
             args: hargs, ty: inst_ret, effects: effects, span: span },
         subst: s, effects: effects
@@ -3161,7 +3136,7 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
                     variant_ref_member(exact_variant_ref)),
                 hfields.map(fn(field) {
                     h_variant_projection(field.field_ref)
-                }))),
+                }), make_empty_effect_ctx_source())),
             ty: enum_type, effects: effects, span: span
         },
         subst: s, effects: effects
@@ -3421,7 +3396,8 @@ fn is_interpolatable_type(t: Type) -> Bool {
 fn exact_method_plan(method: MethodCallRef) -> HExactCallPlan {
     make_h_exact_call_plan(
         method_call_ref_callee_identity(method),
-        method_call_ref_signature(method), some(method), [], [])
+        method_call_ref_signature(method), some(method), [],
+        make_empty_effect_ctx_source())
 }
 
 fn exact_string_conversion_plan(
@@ -3432,12 +3408,12 @@ fn exact_string_conversion_plan(
             make_named_callee_ref(builtin_str_identity_symbol()),
             Type::FnType {
                 params: [STR], return_type: STR, effects: EMPTY_ROW
-            }, none, [], [])),
+            }, none, [], make_empty_effect_ctx_source())),
         Type::BoolType => some(make_h_exact_call_plan(
             make_named_callee_ref(builtin_bool_to_str_symbol()),
             Type::FnType {
                 params: [BOOL], return_type: STR, effects: EMPTY_ROW
-            }, none, [], [])),
+            }, none, [], make_empty_effect_ctx_source())),
         Type::IntType => some(exact_method_plan(
             exact_nominal_method_call(ctx, "Int", "to_str"))),
         Type::FloatType => some(exact_method_plan(
@@ -3465,7 +3441,7 @@ fn exact_string_interp_plan(
     }
     let builder = make_h_exact_call_plan(
         make_named_callee_ref(value_symbol_ref(ctx, builder_def_id)),
-        builder_scheme.ty, none, [], [])
+        builder_scheme.ty, none, [], make_empty_effect_ctx_source())
     let add = exact_method_plan(
         exact_nominal_method_call(ctx, "StringBuilder", "add"))
     let finish = exact_method_plan(
@@ -3650,10 +3626,16 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
             none => {}
         }
     }
-    let installed_evidence = install_handled_evidence(
-        ctx, installed_requirements)
+    let effect_ctx_seed = if installed_requirements.len() == 0 {
+        none
+    } else {
+        some(begin_effect_ctx_install(ctx))
+    }
     let body_result = some(infer_expr(ctx, body, subst)) catch { _ => none }
-    uninstall_handled_evidence(ctx)
+    match effect_ctx_seed {
+        some(_) => uninstall_effect_ctx(ctx),
+        none => {}
+    }
     let body_r = match body_result {
         some(value) => value,
         none => fail.raise(CompileError {})
@@ -3689,7 +3671,8 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
 
     for handler in handlers {
         let handler_executable = fresh_child_executable(ctx, "handler")
-        enter_executable_owner(ctx, handler_executable)
+        enter_handler_executable_owner(
+            ctx, handler_executable, current_effect_ctx(ctx))
         ctx.env.push_scope()
         // Tail-resumptive arms are lowered to closures; #251 abort arms execute
         // inline after the current handler is inactive. Infer both at one deeper
@@ -4063,17 +4046,19 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 }
             }
             let handler_effects = apply_subst_row(s, hbr.effects)
-            let evidence_remap = canonicalize_callable_handled_evidence(
-                ctx, handler_effects)
-            let handler_body = remap_hir_handled_evidence(
-                hbr.hexpr, evidence_remap.0, evidence_remap.1)
+            let handler_body = hbr.hexpr
             let mut handler_captures: List<HLambdaCapture> = []
             collect_lambda_capture_expr(
                 ctx, handler_body, ctx.lambda_depth,
                 handler_executable, handler_captures)
             hhandlers.push(HEffectHandler {
                 effect_name: canonical_effect_name,
-                handled_ref: handler_handled_ref,
+                handled_instance: handler_handled_ref.map(fn(reference) {
+                    make_typed_handled_effect_instance(
+                        reference, handler_inst_type_args.map(fn(ty) {
+                            apply_subst(s, ty)
+                        }))
+                }),
                 operation_ref: match op_def {
                     some(operation) => operation.operation_ref,
                     none => none
@@ -4083,10 +4068,9 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 } else { none },
                 executable_ref: handler_executable,
                 captures: handler_captures,
-                handled_evidence_bindings:
-                    current_handled_evidence_bindings(ctx),
-                evidence_captures:
-                    current_handled_evidence_captures(ctx),
+                effect_ctx: current_draft_callable_effect_ctx(
+                    ctx, handler_effects),
+                parent_ctx: current_effect_ctx_parent_capture(ctx),
                 op_name: handler.op_name,
                 params: hparams, resume_binding: resume_binding,
                 body: handler_body
@@ -4169,10 +4153,32 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
             })
     }
 
+    let mut installed_instances = []
+    for handler in hhandlers {
+        match handler.handled_instance {
+            some(instance) => if !installed_instances.any(fn(existing) {
+                    typed_handled_effect_instance_same(existing, instance)
+                }) {
+                installed_instances.push(instance)
+            },
+            none => {}
+        }
+    }
+    let effect_ctx_install = match effect_ctx_seed {
+        some(seed) => some(finish_effect_ctx_install(
+            seed, installed_instances)),
+        none => {
+            if installed_instances.len() != 0 {
+                panic("handle EffectCtx: entries exist without child install")
+            }
+            none
+        }
+    }
+
     InferResult {
         hexpr: HExpr::HandleExpr {
             body: body_r.hexpr, handlers: hhandlers,
-            installed_evidence: installed_evidence,
+            effect_ctx_install: effect_ctx_install,
             ty: apply_subst(s, result_type), effects: effects, span: span
         },
         subst: s, effects: effects
@@ -4555,27 +4561,19 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
                 final_hparams.push(HParam { name: hp.name, ty: apply_subst(s, hp.ty), def_id: hp.def_id, is_mutable: hp.is_mutable })
             }
 
-            let evidence_remap = canonicalize_callable_handled_evidence(
-                ctx, applied_effects)
-            let lambda_body = remap_hir_handled_evidence(
-                body_r.hexpr, evidence_remap.0, evidence_remap.1)
+            let lambda_body = body_r.hexpr
             let mut captures: List<HLambdaCapture> = []
             collect_lambda_capture_expr(
                 ctx, lambda_body, exact_lambda_depth,
                 lambda_executable, captures)
-            let handled_evidence_bindings =
-                current_handled_evidence_bindings(ctx)
-            let evidence_captures =
-                current_handled_evidence_captures(ctx)
             record_pending_anonymous_callable_header(
                 ctx, lambda_executable, fn_type)
             InferResult {
                 hexpr: HExpr::Lambda {
                     executable_ref: lambda_executable,
                     params: final_hparams, captures: captures,
-                    handled_evidence_bindings:
-                        handled_evidence_bindings,
-                    evidence_captures: evidence_captures,
+                    effect_ctx: current_draft_callable_effect_ctx(
+                        ctx, applied_effects),
                     return_type: applied_ret,
                     body: lambda_body, ty: fn_type,
                     effects: EMPTY_ROW, span: span

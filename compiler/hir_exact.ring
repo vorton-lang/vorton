@@ -4,14 +4,13 @@
 
 use types::{Type, EffectRow, types_equal}
 use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
-    ImplOwnerRef, OriginRef, VariantRef, VariantFieldRef, HandledEffectRef,
+    ImplOwnerRef, OriginRef, VariantRef, VariantFieldRef,
     ImplMethodRef, IntrinsicRef, CalleeRef, SlotRef, PathRef,
     callee_ref_is_named, callee_ref_named_symbol,
     intrinsic_ref_same, impl_method_ref_same, trait_method_ref_same,
     intrinsic_ref_symbol, make_named_callee_ref,
     RegisteredNominalRef, symbol_ref_same, registered_nominal_ref_symbol,
     registered_trait_ref_symbol,
-    handled_effect_ref_same,
     nominal_field_ref_owner, nominal_field_ref_index,
     nominal_field_ref_same,
     trait_method_ref_trait, trait_method_ref_member,
@@ -20,16 +19,19 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     variant_ref_member, impl_provider_ref_same,
     slot_ref_is_source, slot_ref_source_domain,
     slot_domain_dictionary, slot_domain_same}
-use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
+use ir_inventory::{ExecutableRef, BinderEntry, EffectCtxRef,
     ExactDictRef, dict_ref_same, dict_ref_is_local, dict_ref_is_static,
     dict_ref_is_wrapped, dict_ref_wrapped_inner,
     executable_ref_is_named, executable_ref_named_symbol,
-    handled_evidence_ref_same, handled_evidence_requirement}
+    effect_ctx_ref_same}
+use effect_contract::{
+    TypedCallableEffectCtx, TypedEffectCtxSource,
+    typed_effect_ctx_source_is_empty, typed_effect_ctx_source_context,
+    make_empty_effect_ctx_source, make_borrowed_effect_ctx_source}
 use env::{RegisteredTraitContract,
     registered_trait_contract_owner,
     registered_trait_contract_methods,
     registered_trait_contract_assoc_items,
-    registered_trait_contract_handled_effects,
     registered_trait_contract_dict_obligations,
     registered_trait_method_ref, registered_trait_assoc_member}
 
@@ -417,11 +419,11 @@ pub struct HExactCallPlan {
     signature: Type,
     method: MethodCallRef?,
     evidence: List<DictRef>,
-    handled_evidence: List<HandledEvidenceRef>
+    effect_ctx: TypedEffectCtxSource
 }
 pub fn make_h_exact_call_plan(
     callee: CalleeRef, signature: Type, method: MethodCallRef?,
-    evidence: List<DictRef>, handled_evidence: List<HandledEvidenceRef>
+    evidence: List<DictRef>, effect_ctx: TypedEffectCtxSource
 ) -> HExactCallPlan {
     match signature {
         Type::FnType { .. } => {},
@@ -441,7 +443,7 @@ pub fn make_h_exact_call_plan(
     }
     HExactCallPlan { callee: callee, signature: signature, method: method,
         evidence: evidence.map(fn(value) { value }),
-        handled_evidence: handled_evidence.map(fn(value) { value }) }
+        effect_ctx: effect_ctx }
 }
 pub fn h_exact_call_callee(value: HExactCallPlan) -> CalleeRef {
     value.callee
@@ -455,51 +457,44 @@ pub fn h_exact_call_method(value: HExactCallPlan) -> MethodCallRef? {
 pub fn h_exact_call_evidence(value: HExactCallPlan) -> List<DictRef> {
     value.evidence.map(fn(item) { item })
 }
-pub fn h_exact_call_handled_evidence(
+pub fn h_exact_call_effect_ctx(
     value: HExactCallPlan
-) -> List<HandledEvidenceRef> {
-    value.handled_evidence.map(fn(item) { item })
-}
+) -> TypedEffectCtxSource { value.effect_ctx }
 
-pub fn remap_h_handled_evidence_ref(
-    value: HandledEvidenceRef, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
-) -> HandledEvidenceRef {
+pub fn remap_h_effect_ctx_ref(
+    value: EffectCtxRef, sources: List<EffectCtxRef>,
+    targets: List<EffectCtxRef>
+) -> EffectCtxRef {
     if sources.len() != targets.len() {
-        panic("HIR handled evidence remap: mapping arity differs")
+        panic("HIR effect context remap: mapping arity differs")
     }
     for index in 0..sources.len() {
         let source = sources.get(index).unwrap()
         let target = targets.get(index).unwrap()
-        if !handled_effect_ref_same(
-                handled_evidence_requirement(source),
-                handled_evidence_requirement(target)) {
-            panic("HIR handled evidence remap: requirement differs")
-        }
-        if handled_evidence_ref_same(value, source) { return target }
+        if effect_ctx_ref_same(value, source) { return target }
     }
     value
 }
 
-pub fn remap_h_handled_evidence_refs(
-    values: List<HandledEvidenceRef>, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
-) -> List<HandledEvidenceRef> {
-    let mut result: List<HandledEvidenceRef> = []
-    for value in values {
-        result.push(remap_h_handled_evidence_ref(value, sources, targets))
+pub fn remap_h_effect_ctx_source(
+    value: TypedEffectCtxSource, sources: List<EffectCtxRef>,
+    targets: List<EffectCtxRef>
+) -> TypedEffectCtxSource {
+    if typed_effect_ctx_source_is_empty(value) {
+        make_empty_effect_ctx_source()
+    } else {
+        make_borrowed_effect_ctx_source(remap_h_effect_ctx_ref(
+            typed_effect_ctx_source_context(value), sources, targets))
     }
-    result
 }
 
-pub fn remap_h_exact_call_handled_evidence(
-    value: HExactCallPlan, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
+pub fn remap_h_exact_call_effect_ctx(
+    value: HExactCallPlan, sources: List<EffectCtxRef>,
+    targets: List<EffectCtxRef>
 ) -> HExactCallPlan {
     make_h_exact_call_plan(
         value.callee, value.signature, value.method, value.evidence,
-        remap_h_handled_evidence_refs(
-            value.handled_evidence, sources, targets))
+        remap_h_effect_ctx_source(value.effect_ctx, sources, targets))
 }
 
 enum HOperatorPlanValue {
@@ -535,16 +530,19 @@ pub fn h_operator_elements(value: HOperatorPlan) -> List<HOperatorPlan> {
 
 enum HConstructorPlanValue {
     ExecutableConstructor { executable: ExecutableRef,
-                            fields: List<HProjectionRef> },
+                            fields: List<HProjectionRef>,
+                            effect_ctx: TypedEffectCtxSource },
     TupleStructural { arity: Int },
     RecordStructural { fields: List<HProjectionRef> }
 }
 pub struct HConstructorPlan { value: HConstructorPlanValue }
 pub fn make_h_executable_constructor_plan(
-    executable: ExecutableRef, fields: List<HProjectionRef>
+    executable: ExecutableRef, fields: List<HProjectionRef>,
+    effect_ctx: TypedEffectCtxSource
 ) -> HConstructorPlan {
     HConstructorPlan { value: HConstructorPlanValue::ExecutableConstructor {
-        executable: executable, fields: fields.map(fn(value) { value }) } }
+        executable: executable, fields: fields.map(fn(value) { value }),
+        effect_ctx: effect_ctx } }
 }
 pub fn make_h_tuple_constructor_plan(arity: Int) -> HConstructorPlan {
     if arity < 0 { panic("HIR constructor: negative tuple arity") }
@@ -579,6 +577,15 @@ pub fn h_constructor_fields(value: HConstructorPlan) -> List<HProjectionRef> {
             fields.map(fn(item) { item }),
         HConstructorPlanValue::TupleStructural { .. } =>
             panic("HIR constructor: tuple plan has no stored fields")
+    }
+}
+pub fn h_constructor_effect_ctx(
+    value: HConstructorPlan
+) -> TypedEffectCtxSource {
+    match value.value {
+        HConstructorPlanValue::ExecutableConstructor { effect_ctx, .. } =>
+            effect_ctx,
+        _ => panic("HIR constructor: structural plan has no EffectCtx")
     }
 }
 pub fn h_constructor_tuple_arity(value: HConstructorPlan) -> Int {
@@ -649,15 +656,15 @@ pub fn h_list_literal_allocator(
 pub fn h_list_literal_push(value: HListLiteralPlan) -> HExactCallPlan {
     value.push
 }
-pub fn remap_h_list_literal_handled_evidence(
-    value: HListLiteralPlan, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
+pub fn remap_h_list_literal_effect_ctx(
+    value: HListLiteralPlan, sources: List<EffectCtxRef>,
+    targets: List<EffectCtxRef>
 ) -> HListLiteralPlan {
     make_h_list_literal_plan(
         value.builder, value.owner, value.constructor,
-        remap_h_exact_call_handled_evidence(
+        remap_h_exact_call_effect_ctx(
             value.allocator, sources, targets),
-        remap_h_exact_call_handled_evidence(value.push, sources, targets))
+        remap_h_exact_call_effect_ctx(value.push, sources, targets))
 }
 
 pub struct HStringInterpPlan {
@@ -698,24 +705,24 @@ pub fn h_string_interp_value_to_string(
     value: HStringInterpPlan
 ) -> List<HExactCallPlan> { value.value_to_string.map(fn(item) { item }) }
 
-pub fn remap_h_string_interp_handled_evidence(
-    value: HStringInterpPlan, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
+pub fn remap_h_string_interp_effect_ctx(
+    value: HStringInterpPlan, sources: List<EffectCtxRef>,
+    targets: List<EffectCtxRef>
 ) -> HStringInterpPlan {
     let mut value_to_string: List<HExactCallPlan> = []
     for call in value.value_to_string {
-        value_to_string.push(remap_h_exact_call_handled_evidence(
+        value_to_string.push(remap_h_exact_call_effect_ctx(
             call, sources, targets))
     }
     make_h_string_interp_plan(
         value.builder_binder,
-        remap_h_exact_call_handled_evidence(
+        remap_h_exact_call_effect_ctx(
             value.builder, sources, targets),
-        remap_h_exact_call_handled_evidence(
+        remap_h_exact_call_effect_ctx(
             value.append_literal, sources, targets),
-        remap_h_exact_call_handled_evidence(
+        remap_h_exact_call_effect_ctx(
             value.append_value, sources, targets),
-        remap_h_exact_call_handled_evidence(
+        remap_h_exact_call_effect_ctx(
             value.finish, sources, targets),
         value_to_string)
 }
@@ -724,11 +731,13 @@ pub struct HDictConstructPlan {
     constructor: ExecutableRef,
     base: ImplOwnerRef,
     inner: List<ExactDictRef>,
-    result: SlotRef
+    result: SlotRef,
+    effect_ctx: TypedEffectCtxSource
 }
 pub fn make_h_dict_construct_plan(
     constructor: ExecutableRef, base: ImplOwnerRef,
-    inner: List<ExactDictRef>, result: SlotRef
+    inner: List<ExactDictRef>, result: SlotRef,
+    effect_ctx: TypedEffectCtxSource
 ) -> HDictConstructPlan {
     if impl_owner_ref_trait(base).is_none() {
         panic("HIR dictionary construct: base is not a trait impl")
@@ -740,7 +749,8 @@ pub fn make_h_dict_construct_plan(
     }
     HDictConstructPlan {
         constructor: constructor, base: base,
-        inner: inner.map(fn(item) { item }), result: result
+        inner: inner.map(fn(item) { item }), result: result,
+        effect_ctx: effect_ctx
     }
 }
 pub fn h_dict_construct_executable(value: HDictConstructPlan) -> ExecutableRef {
@@ -757,6 +767,9 @@ pub fn h_dict_construct_inner(
 pub fn h_dict_construct_result(value: HDictConstructPlan) -> SlotRef {
     value.result
 }
+pub fn h_dict_construct_effect_ctx(
+    value: HDictConstructPlan
+) -> TypedEffectCtxSource { value.effect_ctx }
 pub fn h_dict_construct_trait(value: HDictConstructPlan) -> SymbolRef {
     match impl_owner_ref_trait(value.base) {
         some(trait_ref) => trait_ref,
@@ -776,8 +789,8 @@ pub struct HDelegateMethodPlan {
     result_type: Type,
     effects: EffectRow,
     evidence: List<DictRef>,
-    handled_evidence_bindings: List<HandledEvidenceRef>,
-    handled_evidence_uses: List<HandledEvidenceRef>
+    effect_ctx: TypedCallableEffectCtx,
+    child_effect_ctx: TypedEffectCtxSource
 }
 pub fn make_h_delegate_method_plan(
     required_method: TraitMethodRef, generated_method: ImplMethodRef,
@@ -785,8 +798,8 @@ pub fn make_h_delegate_method_plan(
     child_call: MethodCallRef, child_callee: CalleeRef,
     binders: List<BinderEntry>, parameter_types: List<Type>,
     result_type: Type, effects: EffectRow, evidence: List<DictRef>,
-    handled_evidence_bindings: List<HandledEvidenceRef>,
-    handled_evidence_uses: List<HandledEvidenceRef>
+    effect_ctx: TypedCallableEffectCtx,
+    child_effect_ctx: TypedEffectCtxSource
 ) -> HDelegateMethodPlan {
     if !executable_ref_is_named(executable) ||
        !symbol_ref_same(executable_ref_named_symbol(executable),
@@ -802,10 +815,8 @@ pub fn make_h_delegate_method_plan(
         result_type: result_type,
         effects: EffectRow { effects: effects.effects, tail: effects.tail },
         evidence: evidence.map(fn(value) { value }),
-        handled_evidence_bindings:
-            handled_evidence_bindings.map(fn(value) { value }),
-        handled_evidence_uses:
-            handled_evidence_uses.map(fn(value) { value })
+        effect_ctx: effect_ctx,
+        child_effect_ctx: child_effect_ctx
     }
 }
 pub fn h_delegate_method_required(value: HDelegateMethodPlan) -> TraitMethodRef {
@@ -841,16 +852,12 @@ pub fn h_delegate_method_effects(value: HDelegateMethodPlan) -> EffectRow {
 pub fn h_delegate_method_evidence(value: HDelegateMethodPlan) -> List<DictRef> {
     value.evidence.map(fn(item) { item })
 }
-pub fn h_delegate_method_handled_bindings(
+pub fn h_delegate_method_effect_ctx(
     value: HDelegateMethodPlan
-) -> List<HandledEvidenceRef> {
-    value.handled_evidence_bindings.map(fn(item) { item })
-}
-pub fn h_delegate_method_handled_uses(
+) -> TypedCallableEffectCtx { value.effect_ctx }
+pub fn h_delegate_method_child_effect_ctx(
     value: HDelegateMethodPlan
-) -> List<HandledEvidenceRef> {
-    value.handled_evidence_uses.map(fn(item) { item })
-}
+) -> TypedEffectCtxSource { value.child_effect_ctx }
 
 pub struct HDelegateAssocPlan { member: SymbolRef, ty: Type }
 pub fn make_h_delegate_assoc_plan(
@@ -874,7 +881,6 @@ pub struct HDelegateTypedPlan {
     source_member_index: Int,
     methods: List<HDelegateMethodPlan>,
     assoc_bindings: List<HDelegateAssocPlan>,
-    handled_evidence: List<HandledEffectRef>,
     dict_evidence: List<DictRef>
 }
 pub fn make_h_delegate_typed_plan(
@@ -885,7 +891,7 @@ pub fn make_h_delegate_typed_plan(
     field: NominalFieldRef, trait_ref: SymbolRef,
     source_member_index: Int, methods: List<HDelegateMethodPlan>,
     assoc_bindings: List<HDelegateAssocPlan>,
-    handled_evidence: List<HandledEffectRef>, dict_evidence: List<DictRef>
+    dict_evidence: List<DictRef>
 ) -> HDelegateTypedPlan {
     if !symbol_ref_same(
             registered_trait_ref_symbol(
@@ -943,17 +949,6 @@ pub fn make_h_delegate_typed_plan(
             panic("HIR delegate plan: frozen assoc order differs")
         }
     }
-    let contract_effects = registered_trait_contract_handled_effects(contract)
-    if contract_effects.len() != handled_evidence.len() {
-        panic("HIR delegate plan: frozen handled census differs")
-    }
-    for index in 0..contract_effects.len() {
-        if !handled_effect_ref_same(
-                contract_effects.get(index).unwrap(),
-                handled_evidence.get(index).unwrap()) {
-            panic("HIR delegate plan: frozen handled order differs")
-        }
-    }
     if registered_trait_contract_dict_obligations(contract).len() !=
            dict_evidence.len() {
         panic("HIR delegate plan: frozen dictionary census differs")
@@ -967,7 +962,6 @@ pub fn make_h_delegate_typed_plan(
         source_member_index: source_member_index,
         methods: methods.map(fn(value) { value }),
         assoc_bindings: assoc_bindings.map(fn(value) { value }),
-        handled_evidence: handled_evidence.map(fn(value) { value }),
         dict_evidence: dict_evidence.map(fn(value) { value })
     }
 }
@@ -989,9 +983,6 @@ pub fn h_delegate_methods(value: HDelegateTypedPlan) -> List<HDelegateMethodPlan
 pub fn h_delegate_assoc_bindings(value: HDelegateTypedPlan) -> List<HDelegateAssocPlan> {
     value.assoc_bindings.map(fn(item) { item })
 }
-pub fn h_delegate_handled_evidence(value: HDelegateTypedPlan) -> List<HandledEffectRef> {
-    value.handled_evidence.map(fn(item) { item })
-}
 pub fn h_delegate_dict_evidence(value: HDelegateTypedPlan) -> List<DictRef> {
     value.dict_evidence.map(fn(item) { item })
 }
@@ -1007,6 +998,7 @@ pub struct HDefaultSpecializationPlan {
     binders: List<BinderEntry>,
     result_type: Type,
     effects: EffectRow,
+    effect_ctx: TypedCallableEffectCtx,
     forward_call: HExactCallPlan
 }
 
@@ -1017,6 +1009,7 @@ pub fn make_h_default_specialization_plan(
     parameter_types: List<Type>, parameter_mutabilities: List<Bool>,
     binders: List<BinderEntry>,
     result_type: Type, effects: EffectRow,
+    effect_ctx: TypedCallableEffectCtx,
     forward_call: HExactCallPlan
 ) -> HDefaultSpecializationPlan {
     if !impl_owner_ref_same(
@@ -1049,6 +1042,7 @@ pub fn make_h_default_specialization_plan(
         binders: binders.map(fn(value) { value }),
         result_type: result_type,
         effects: EffectRow { effects: effects.effects, tail: effects.tail },
+        effect_ctx: effect_ctx,
         forward_call: forward_call
     }
 }
@@ -1082,6 +1076,9 @@ pub fn h_default_specialization_result_type(
 pub fn h_default_specialization_effects(
     value: HDefaultSpecializationPlan
 ) -> EffectRow { value.effects }
+pub fn h_default_specialization_effect_ctx(
+    value: HDefaultSpecializationPlan
+) -> TypedCallableEffectCtx { value.effect_ctx }
 pub fn h_default_specialization_forward_call(
     value: HDefaultSpecializationPlan
 ) -> HExactCallPlan { value.forward_call }
@@ -1264,9 +1261,9 @@ pub fn h_range_for_in_counter_binder(value: HForInPlan) -> BinderEntry {
 pub fn h_range_for_in_finished_binder(value: HForInPlan) -> BinderEntry {
     value.finished_binder
 }
-pub fn remap_h_for_in_handled_evidence(
-    value: HForInPlan, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
+pub fn remap_h_for_in_effect_ctx(
+    value: HForInPlan, sources: List<EffectCtxRef>,
+    targets: List<EffectCtxRef>
 ) -> HForInPlan {
     let _ = sources
     let _ = targets

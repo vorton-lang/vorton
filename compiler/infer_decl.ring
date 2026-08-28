@@ -16,7 +16,6 @@ use hir::{HDecl, HParam, HTypeParam, HExpr, HStmt, HProgram, DerivedImpl, TraitB
     make_bound_method_call_ref,
     make_h_exact_call_plan,
     hexpr_type, hexpr_effects, hexpr_span,
-    remap_hir_handled_evidence,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
 use hir_exact::{make_static_dict_ref}
 use ir_identity::{SymbolRef, NominalFieldRef, HandledEffectRef,
@@ -35,10 +34,7 @@ use ir_identity::{SymbolRef, NominalFieldRef, HandledEffectRef,
     path_role_declaration, make_source_slot_ref, slot_domain_lexical,
     make_named_callee_ref, make_local_callee_ref, make_symbol_origin_ref,
     handled_effect_ref_same}
-use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
-    HandledEvidenceCapture, handled_evidence_requirement,
-    handled_evidence_capture_requirement,
-    handled_evidence_capture_source, handled_evidence_ref_same,
+use ir_inventory::{ExecutableRef, BinderEntry,
     make_exact_static_dict_ref,
     CallableResourceContractFact, CallableResourceRoleFact,
     make_callable_resource_contract_fact,
@@ -47,11 +43,14 @@ use ir_inventory::{ExecutableRef, BinderEntry, HandledEvidenceRef,
     callable_resource_role_consume,
     make_named_executable_ref,
     make_anonymous_executable_ref,
-    executable_ref_same,
-    effect_operation_ref_effect}
-use effect_contract::{TypedEffectHeaderSchema,
+    executable_ref_same}
+use effect_contract::{TypedEffectHeaderSchema, TypedCallableEffectCtx,
+    TypedEffectCtxLayout, TypedEffectCtxSource,
     empty_typed_effect_header_schema,
-    typed_effect_header_schema_bindings}
+    typed_effect_header_schema_bindings,
+    make_empty_effect_ctx_source, make_typed_callable_effect_ctx,
+    typed_callable_effect_ctx_binding, typed_effect_ctx_source_is_empty,
+    typed_handled_effect_instances_from_row}
 use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     ImplEntry,
     apply_subst, apply_subst_map,
@@ -61,7 +60,6 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     delegate_child_provider_ref,
     delegate_child_provider_produced_owner_count,
     delegate_child_provider_had_semantic_error,
-    registered_trait_contract_handled_effects,
     has_impl, impl_target_symbol,
     compiler_owned_extern_manifest_entry,
     install_method_core, replace_impl_method_core,
@@ -94,12 +92,11 @@ use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
     exit_impl_check_frame, impl_check_owner, value_symbol_ref,
     commit_final_prelude_value_symbol_ref,
     current_impl_check_site, enter_executable_owner,
-    exit_executable_owner, current_handled_evidence_bindings,
-    current_handled_evidence_captures, resolve_handled_evidence,
-    install_handled_evidence, uninstall_handled_evidence,
-    prepare_callable_handled_evidence,
-    canonicalize_callable_handled_evidence,
-    canonicalize_callable_handled_evidence_closure,
+    exit_executable_owner,
+    current_typed_callable_effect_ctx, effect_ctx_source_for_callable,
+    current_typed_callable_effect_ctx_from_owner_batch,
+    typed_effect_ctx_layout_from_owner_batch,
+    typed_effect_ctx_layout_from_published_schema,
     current_identity_file_key, semantic_parameter_binder,
     executable_effect_origin, publish_exact_callable_effect_header,
     begin_recursive_callable_group, end_recursive_callable_group,
@@ -149,8 +146,6 @@ struct FnDraft {
     body: HExpr,
     raw_type_var_names: Map<Int, Str>,
     assoc_rebind_sources: List<AssocRebindEntry>,
-    handled_bindings: List<HandledEvidenceRef>,
-    handled_captures: List<HandledEvidenceCapture>,
     validation: FnValidationContext,
     batch: OwnerInferenceBatch
 }
@@ -195,13 +190,6 @@ fn cached_value_declaration(
     none
 }
 
-fn ensure_callable_handled_evidence(
-    mut ctx: InferCtx, effects: EffectRow
-) {
-    prepare_callable_handled_evidence(ctx, effects)
-    let _ = canonicalize_callable_handled_evidence(ctx, effects)
-}
-
 fn exact_h_type_params(
     ctx: InferCtx, source: List<TypeParam>, type_var_ids: List<Int>
 ) -> List<HTypeParam> {
@@ -244,9 +232,9 @@ fn exact_source_type_var_ids(
     result
 }
 
-fn with_call_handled_evidence(
+fn with_call_effect_ctx(
     value: HExpr,
-    handled_evidence: List<HandledEvidenceRef>
+    effect_ctx: TypedEffectCtxSource
 ) -> HExpr {
     match value {
         HExpr::Call { callee, args, type_args, effect_instantiation,
@@ -256,11 +244,11 @@ fn with_call_handled_evidence(
             callee: callee, args: args, type_args: type_args,
             effect_instantiation: effect_instantiation,
             resolved_dicts: resolved_dicts,
-            handled_evidence: handled_evidence,
+            effect_ctx: effect_ctx,
             callee_ref: callee_ref, method_ref: method_ref,
             system_host: system_host, ty: ty, effects: effects, span: span
         },
-        _ => panic("handled evidence: expected exact Call")
+        _ => panic("effect context: expected exact Call")
     }
 }
 
@@ -830,22 +818,20 @@ fn check_const_decl(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, in
         type_vars: gen_scheme.type_vars, bounds: gen_scheme.bounds,
         effect_schema: gen_scheme.effect_schema, def_id: old_def_id }
     ctx.env.rebind(name, scheme)
-    let evidence_remap = canonicalize_callable_handled_evidence(
-        ctx, hexpr_effects(final_init_unremapped))
-    let final_init = remap_hir_handled_evidence(
-        final_init_unremapped, evidence_remap.0, evidence_remap.1)
-    let handled_evidence_bindings =
-        current_handled_evidence_bindings(ctx)
-    let _ = publish_final_value_effect_schema(
+    let effect_schema = publish_final_value_effect_schema(
         ctx, name, const_executable, Type::FnType {
             params: [], return_type: resolved,
-            effects: hexpr_effects(final_init)
+            effects: hexpr_effects(final_init_unremapped)
         })
+    let final_init = finalize_effect_ctx_expr(
+        ctx, none, final_init_unremapped)
+    let effect_ctx = current_typed_callable_effect_ctx(
+        ctx, hexpr_effects(final_init), effect_schema)
     exit_executable_owner(ctx)
     ctx.subst = saved_subst
     HDecl::Const { name: name, def_id: old_def_id,
         executable_ref: const_executable,
-        handled_evidence_bindings: handled_evidence_bindings,
+        effect_ctx: effect_ctx,
         ty: resolved, init: final_init, is_pub: is_pub, span: span }
 }
 
@@ -1218,156 +1204,96 @@ fn stage_fn_draft_scheme(
         scheme: scheme,
         span: draft.span
     }
-}
-
-fn final_handled_evidence_for_row(
-    mut ctx: InferCtx, row: EffectRow
-) -> List<HandledEvidenceRef> {
-    let mut result: List<HandledEvidenceRef> = []
-    for effect in row.effects {
-        match effect {
-            Effect::CustomEffect { reference, .. } => {
-                if !result.any(fn(existing) {
-                        handled_effect_ref_same(
-                            handled_evidence_requirement(existing),
-                            reference)
-                    }) {
-                    result.push(resolve_handled_evidence(ctx, reference))
-                }
-            },
-            _ => {}
-        }
+fn finalize_call_effect_ctx(
+    existing: TypedEffectCtxSource, callable: Type
+) -> TypedEffectCtxSource {
+    let effects = match callable {
+        Type::FnType { effects, .. } => effects,
+        _ => panic("effect context finalization: call target is not callable")
     }
-    result
+    let requires_ctx =
+        typed_handled_effect_instances_from_row(effects).len() != 0 ||
+        effects.tail.is_some()
+    if !requires_ctx { return make_empty_effect_ctx_source() }
+    if typed_effect_ctx_source_is_empty(existing) {
+        panic("effect context finalization: effectful call lost current context")
+    }
+    existing
 }
 
-fn final_handled_evidence_for_callable(
-    mut ctx: InferCtx, callable: Type
-) -> List<HandledEvidenceRef> {
-    match callable {
-        Type::FnType { effects, .. } =>
-            final_handled_evidence_for_row(ctx, effects),
-        _ => []
+fn finalized_callable_effect_ctx_layout(
+    ctx: InferCtx, batch: OwnerInferenceBatch?, row: EffectRow
+) -> TypedEffectCtxLayout {
+    match batch {
+        some(owner_batch) => typed_effect_ctx_layout_from_owner_batch(
+            ctx, owner_batch, row),
+        none => typed_effect_ctx_layout_from_published_schema(ctx, row)
     }
 }
 
-fn seed_final_handled_evidence(
-    mut ctx: InferCtx, raw_bindings: List<HandledEvidenceRef>,
-    final_effects: EffectRow, body: HExpr
-) -> HExpr {
-    for binding in raw_bindings {
-        let _ = resolve_handled_evidence(
-            ctx, handled_evidence_requirement(binding))
-    }
-    prepare_callable_handled_evidence(ctx, final_effects)
-    let bindings = current_handled_evidence_bindings(ctx)
-    let mut sources: List<HandledEvidenceRef> = []
-    let mut targets: List<HandledEvidenceRef> = []
-    for source in raw_bindings {
-        let requirement = handled_evidence_requirement(source)
-        let target = bindings.find(fn(candidate) {
-            handled_effect_ref_same(
-                handled_evidence_requirement(candidate), requirement)
-        }).unwrap_or_else(fn() {
-            panic("handled evidence finalization: raw binding disappeared")
-        })
-        sources.push(source)
-        targets.push(target)
-    }
-    remap_hir_handled_evidence(body, sources, targets)
-}
-
-fn append_child_capture_requirements(
-    ctx: InferCtx, captures: List<HandledEvidenceCapture>,
-    mut requirements: List<HandledEffectRef>
-) {
-    let bindings = current_handled_evidence_bindings(ctx)
-    for capture in captures {
-        let source = handled_evidence_capture_source(capture)
-        if bindings.any(fn(binding) {
-                handled_evidence_ref_same(binding, source)
-            }) {
-            let requirement = handled_evidence_requirement(source)
-            if !requirements.any(fn(existing) {
-                    handled_effect_ref_same(existing, requirement)
-                }) {
-                requirements.push(requirement)
-            }
-        }
-    }
-}
-
-fn finalize_evidence_match_arms(
-    mut ctx: InferCtx, values: List<HMatchArm>,
-    mut child_requirements: List<HandledEffectRef>
+fn finalize_effect_ctx_match_arms(
+    mut ctx: InferCtx, batch: OwnerInferenceBatch?,
+    values: List<HMatchArm>
 ) -> List<HMatchArm> {
     values.map(fn(value) { HMatchArm {
         pattern: value.pattern, pattern_plan: value.pattern_plan,
         bindings: value.bindings,
         guard: value.guard.map(fn(expr) {
-            finalize_evidence_expr(ctx, expr, child_requirements)
+            finalize_effect_ctx_expr(ctx, batch, expr)
         }),
-        body: finalize_evidence_expr(
-            ctx, value.body, child_requirements),
+        body: finalize_effect_ctx_expr(ctx, batch, value.body),
         span: value.span
     } })
 }
 
-fn finalize_evidence_captures(
-    mut ctx: InferCtx, values: List<HLambdaCapture>,
-    mut child_requirements: List<HandledEffectRef>
+fn finalize_effect_ctx_captures(
+    mut ctx: InferCtx, batch: OwnerInferenceBatch?,
+    values: List<HLambdaCapture>
 ) -> List<HLambdaCapture> {
     values.map(fn(value) { HLambdaCapture {
         source: value.source, target: value.target,
         value: value.value.map(fn(expr) {
-            finalize_evidence_expr(ctx, expr, child_requirements)
+            finalize_effect_ctx_expr(ctx, batch, expr)
         }),
         resource_site: value.resource_site
     } })
 }
 
-fn finalize_evidence_stmt(
-    mut ctx: InferCtx, value: HStmt,
-    mut child_requirements: List<HandledEffectRef>
+fn finalize_effect_ctx_stmt(
+    mut ctx: InferCtx, batch: OwnerInferenceBatch?, value: HStmt
 ) -> HStmt {
     match value {
         HStmt::Let { name, name_span, def_id, ty, init, span } =>
             HStmt::Let { name: name, name_span: name_span,
                 def_id: def_id, ty: ty,
-                init: finalize_evidence_expr(
-                    ctx, init, child_requirements), span: span },
+                init: finalize_effect_ctx_expr(ctx, batch, init),
+                span: span },
         HStmt::Var { name, name_span, def_id, ty, init, span } =>
             HStmt::Var { name: name, name_span: name_span,
                 def_id: def_id, ty: ty,
-                init: finalize_evidence_expr(
-                    ctx, init, child_requirements), span: span },
+                init: finalize_effect_ctx_expr(ctx, batch, init),
+                span: span },
         HStmt::Assign { target, value, span } => HStmt::Assign {
-            target: finalize_evidence_expr(
-                ctx, target, child_requirements),
-            value: finalize_evidence_expr(
-                ctx, value, child_requirements), span: span },
+            target: finalize_effect_ctx_expr(ctx, batch, target),
+            value: finalize_effect_ctx_expr(ctx, batch, value),
+            span: span },
         HStmt::ExprStmt { expr, span } => HStmt::ExprStmt {
-            expr: finalize_evidence_expr(
-                ctx, expr, child_requirements), span: span },
+            expr: finalize_effect_ctx_expr(ctx, batch, expr), span: span },
         HStmt::Return { value, span } => HStmt::Return {
             value: value.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr, child_requirements)
+                finalize_effect_ctx_expr(ctx, batch, expr)
             }), span: span },
         HStmt::While { condition, body, span } => HStmt::While {
-            condition: finalize_evidence_expr(
-                ctx, condition, child_requirements),
-            body: finalize_evidence_expr(
-                ctx, body, child_requirements), span: span },
+            condition: finalize_effect_ctx_expr(ctx, batch, condition),
+            body: finalize_effect_ctx_expr(ctx, batch, body), span: span },
         HStmt::ForIn {
             binding, binding_span, def_id, destructure, plan,
             iterable, body, iterable_type_name, iter_type_name, span
         } => HStmt::ForIn {
             binding: binding, binding_span: binding_span,
             def_id: def_id, destructure: destructure, plan: plan,
-            iterable: finalize_evidence_expr(
-                ctx, iterable, child_requirements),
-            body: finalize_evidence_expr(
-                ctx, body, child_requirements),
+            iterable: finalize_effect_ctx_expr(ctx, batch, iterable),
+            body: finalize_effect_ctx_expr(ctx, batch, body),
             iterable_type_name: iterable_type_name,
             iter_type_name: iter_type_name, span: span },
         HStmt::Break { span } => HStmt::Break { span: span },
@@ -1377,118 +1303,74 @@ fn finalize_evidence_stmt(
         } => HStmt::LetDestructure {
             pattern: pattern, pattern_plan: pattern_plan,
             bindings: bindings,
-            init: finalize_evidence_expr(
-                ctx, init, child_requirements), span: span },
+            init: finalize_effect_ctx_expr(ctx, batch, init), span: span },
         HStmt::IfLet {
             pattern, pattern_plan, bindings, expr,
             then_block, else_block, span
         } => HStmt::IfLet {
             pattern: pattern, pattern_plan: pattern_plan,
             bindings: bindings,
-            expr: finalize_evidence_expr(
-                ctx, expr, child_requirements),
-            then_block: finalize_evidence_expr(
-                ctx, then_block, child_requirements),
+            expr: finalize_effect_ctx_expr(ctx, batch, expr),
+            then_block: finalize_effect_ctx_expr(ctx, batch, then_block),
             else_block: else_block.map(fn(branch) {
-                finalize_evidence_expr(
-                    ctx, branch, child_requirements)
+                finalize_effect_ctx_expr(ctx, batch, branch)
             }), span: span },
         HStmt::Drop {
             name, def_id, slot, place_target, site, reason, ty, span
         } => HStmt::Drop { name: name, def_id: def_id, slot: slot,
             place_target: place_target.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr, child_requirements)
+                finalize_effect_ctx_expr(ctx, batch, expr)
             }), site: site, reason: reason, ty: ty, span: span }
     }
 }
 
-struct NestedDraftEvidence {
-    body: HExpr,
-    bindings: List<HandledEvidenceRef>,
-    captures: List<HandledEvidenceCapture>
-}
-
-fn finalize_nested_evidence_owner(
-    mut ctx: InferCtx, executable: ExecutableRef,
-    raw_bindings: List<HandledEvidenceRef>,
-    final_effects: EffectRow, body: HExpr
-) -> NestedDraftEvidence {
-    enter_executable_owner(ctx, executable)
-    let result = some({
-        let child_requirements: List<HandledEffectRef> = []
-        let seeded = seed_final_handled_evidence(
-            ctx, raw_bindings, final_effects, body)
-        let finalized = finalize_evidence_expr(
-            ctx, seeded, child_requirements)
-        let remap = canonicalize_callable_handled_evidence_closure(
-            ctx, final_effects, child_requirements)
-        NestedDraftEvidence {
-            body: remap_hir_handled_evidence(
-                finalized, remap.0, remap.1),
-            bindings: current_handled_evidence_bindings(ctx),
-            captures: current_handled_evidence_captures(ctx)
-        }
-    }) catch { _ => none }
-    exit_executable_owner(ctx)
-    match result {
-        some(value) => value,
-        none => fail.raise(CompileError {})
-    }
-}
-
-fn finalize_evidence_handler(
-    mut ctx: InferCtx, handler: HEffectHandler,
-    mut child_requirements: List<HandledEffectRef>
+fn finalize_effect_ctx_handler(
+    mut ctx: InferCtx, batch: OwnerInferenceBatch?,
+    handler: HEffectHandler
 ) -> HEffectHandler {
-    let captures = finalize_evidence_captures(
-        ctx, handler.captures, child_requirements)
-    let finalized = finalize_nested_evidence_owner(
-        ctx, handler.executable_ref,
-        handler.handled_evidence_bindings,
-        hexpr_effects(handler.body), handler.body)
-    append_child_capture_requirements(
-        ctx, finalized.captures, child_requirements)
     HEffectHandler {
         effect_name: handler.effect_name,
-        handled_ref: handler.handled_ref,
+        handled_instance: handler.handled_instance,
         operation_ref: handler.operation_ref,
         fail_ref: handler.fail_ref,
         executable_ref: handler.executable_ref,
-        captures: captures,
-        handled_evidence_bindings: finalized.bindings,
-        evidence_captures: finalized.captures,
+        captures: finalize_effect_ctx_captures(
+            ctx, batch, handler.captures),
+        effect_ctx: make_typed_callable_effect_ctx(
+            typed_callable_effect_ctx_binding(handler.effect_ctx),
+            finalized_callable_effect_ctx_layout(
+                ctx, batch, hexpr_effects(handler.body))),
+        parent_ctx: handler.parent_ctx,
         op_name: handler.op_name, params: handler.params,
         resume_binding: handler.resume_binding,
-        body: finalized.body
+        body: finalize_effect_ctx_expr(ctx, batch, handler.body)
     }
 }
 
-fn finalize_evidence_expr(
-    mut ctx: InferCtx, value: HExpr,
-    mut child_requirements: List<HandledEffectRef>
+fn finalize_effect_ctx_expr(
+    mut ctx: InferCtx, batch: OwnerInferenceBatch?, value: HExpr
 ) -> HExpr {
     match value {
         HExpr::Call {
             callee, args, type_args, effect_instantiation,
-            resolved_dicts, handled_evidence: _, callee_ref,
+            resolved_dicts, effect_ctx, callee_ref,
             method_ref, system_host, ty, effects, span
         } => {
             let callee = match callee {
                 HExpr::Ident { .. } =>
                     finalize_direct_callee_no_solve(ctx, callee),
-                _ => finalize_evidence_expr(
-                    ctx, callee, child_requirements)
+                _ => finalize_effect_ctx_expr(ctx, batch, callee)
             }
             HExpr::Call {
-                handled_evidence: final_handled_evidence_for_callable(
-                    ctx, hexpr_type(callee)),
                 callee: callee,
                 args: args.map(fn(arg) {
-                    finalize_evidence_expr(ctx, arg, child_requirements)
+                    finalize_effect_ctx_expr(ctx, batch, arg)
                 }),
                 type_args: type_args,
                 effect_instantiation: effect_instantiation,
                 resolved_dicts: resolved_dicts,
+                effect_ctx: finalize_call_effect_ctx(
+                    effect_ctx, hexpr_type(callee)),
                 callee_ref: callee_ref, method_ref: method_ref,
                 system_host: system_host,
                 ty: ty, effects: effects, span: span
@@ -1496,78 +1378,42 @@ fn finalize_evidence_expr(
         },
         HExpr::EffectOp {
             effect_name, op_name, operation_ref, fail_ref,
-            handled_evidence: _, args, ty, effects, span
+            effect_ctx_lookup, args, ty, effects, span
         } => HExpr::EffectOp {
             effect_name: effect_name, op_name: op_name,
             operation_ref: operation_ref, fail_ref: fail_ref,
-            handled_evidence: match operation_ref {
-                some(reference) => [resolve_handled_evidence(
-                    ctx, effect_operation_ref_effect(reference))],
-                none => []
-            },
+            effect_ctx_lookup: effect_ctx_lookup,
             args: args.map(fn(arg) {
-                finalize_evidence_expr(ctx, arg, child_requirements)
+                finalize_effect_ctx_expr(ctx, batch, arg)
             }), ty: ty, effects: effects, span: span },
         HExpr::HandleExpr {
-            body, handlers, installed_evidence, ty, effects, span
-        } => {
-            let mut requirements: List<HandledEffectRef> = []
-            for evidence in installed_evidence {
-                let requirement = handled_evidence_requirement(evidence)
-                if !requirements.any(fn(existing) {
-                        handled_effect_ref_same(existing, requirement)
-                    }) {
-                    requirements.push(requirement)
-                }
-            }
-            for handler in handlers {
-                match handler.handled_ref {
-                    some(requirement) => if !requirements.any(fn(existing) {
-                            handled_effect_ref_same(existing, requirement)
-                        }) {
-                        panic("handled evidence finalization: handle lost lexical installation")
-                    },
-                    none => {}
-                }
-            }
-            let installed = install_handled_evidence(ctx, requirements)
-            let seeded_body = remap_hir_handled_evidence(
-                body, installed_evidence, installed)
-            let body = finalize_evidence_expr(
-                ctx, seeded_body, child_requirements)
-            uninstall_handled_evidence(ctx)
-            HExpr::HandleExpr {
-                body: body,
-                handlers: handlers.map(fn(handler) {
-                    finalize_evidence_handler(
-                        ctx, handler, child_requirements)
-                }),
-                installed_evidence: installed,
-                ty: ty, effects: effects, span: span
-            }
+            body, handlers, effect_ctx_install, ty, effects, span
+        } => HExpr::HandleExpr {
+            body: finalize_effect_ctx_expr(ctx, batch, body),
+            handlers: handlers.map(fn(handler) {
+                finalize_effect_ctx_handler(ctx, batch, handler)
+            }),
+            effect_ctx_install: effect_ctx_install,
+            ty: ty, effects: effects, span: span
         },
         HExpr::Lambda {
-            executable_ref, params, captures,
-            handled_evidence_bindings, evidence_captures: _,
+            executable_ref, params, captures, effect_ctx,
             return_type, body, ty, effects, span
         } => {
-            let captures = finalize_evidence_captures(
-                ctx, captures, child_requirements)
             let callable_effects = match ty {
                 Type::FnType { effects, .. } => effects,
-                _ => panic("handled evidence finalization: lambda is not callable")
+                _ => panic("effect context finalization: lambda is not callable")
             }
-            let finalized = finalize_nested_evidence_owner(
-                ctx, executable_ref, handled_evidence_bindings,
-                callable_effects, body)
-            append_child_capture_requirements(
-                ctx, finalized.captures, child_requirements)
             HExpr::Lambda {
                 executable_ref: executable_ref, params: params,
-                captures: captures,
-                handled_evidence_bindings: finalized.bindings,
-                evidence_captures: finalized.captures,
-                return_type: return_type, body: finalized.body,
+                captures: finalize_effect_ctx_captures(
+                    ctx, batch, captures),
+                effect_ctx: make_typed_callable_effect_ctx(
+                    typed_callable_effect_ctx_binding(effect_ctx),
+                    finalized_callable_effect_ctx_layout(
+                        ctx, batch, callable_effects)),
+                return_type: return_type,
+                body: finalize_effect_ctx_expr(ctx, batch, body),
                 ty: ty, effects: effects, span: span
             }
         },
@@ -1575,23 +1421,19 @@ fn finalize_evidence_expr(
             op, left, right, eq_dispatch, ord_dispatch,
             eq_plan, ord_plan, ty, effects, span
         } => HExpr::BinOp { op: op,
-            left: finalize_evidence_expr(
-                ctx, left, child_requirements),
-            right: finalize_evidence_expr(
-                ctx, right, child_requirements),
+            left: finalize_effect_ctx_expr(ctx, batch, left),
+            right: finalize_effect_ctx_expr(ctx, batch, right),
             eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
             eq_plan: eq_plan, ord_plan: ord_plan,
             ty: ty, effects: effects, span: span },
         HExpr::UnaryOp { op, operand, ty, effects, span } =>
             HExpr::UnaryOp { op: op,
-                operand: finalize_evidence_expr(
-                    ctx, operand, child_requirements),
+                operand: finalize_effect_ctx_expr(ctx, batch, operand),
                 ty: ty, effects: effects, span: span },
         HExpr::FieldAccess {
             receiver, field, access_kind, projection, ty, effects, span
         } => HExpr::FieldAccess {
-            receiver: finalize_evidence_expr(
-                ctx, receiver, child_requirements),
+            receiver: finalize_effect_ctx_expr(ctx, batch, receiver),
             field: field, access_kind: access_kind,
             projection: projection,
             ty: ty, effects: effects, span: span },
@@ -1603,11 +1445,10 @@ fn finalize_evidence_expr(
             fields: fields.map(fn(field) { HNominalStructFieldInit {
                 name: field.name, field_ref: field.field_ref,
                 field_index: field.field_index,
-                value: finalize_evidence_expr(
-                    ctx, field.value, child_requirements)
+                value: finalize_effect_ctx_expr(ctx, batch, field.value)
             } }),
             spread: spread.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr, child_requirements)
+                finalize_effect_ctx_expr(ctx, batch, expr)
             }), constructor: constructor,
             ty: ty, effects: effects, span: span },
         HExpr::NamedVariantConstruct {
@@ -1618,39 +1459,35 @@ fn finalize_evidence_expr(
             variant_ref: variant_ref,
             fields: fields.map(fn(field) { HStructFieldInit {
                 name: field.name, field_ref: field.field_ref,
-                value: finalize_evidence_expr(
-                    ctx, field.value, child_requirements)
+                value: finalize_effect_ctx_expr(ctx, batch, field.value)
             } }),
             spread: spread.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr, child_requirements)
+                finalize_effect_ctx_expr(ctx, batch, expr)
             }), constructor: constructor,
             ty: ty, effects: effects, span: span },
         HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
             HExpr::MatchExpr {
-                scrutinee: finalize_evidence_expr(
-                    ctx, scrutinee, child_requirements),
-                arms: finalize_evidence_match_arms(
-                    ctx, arms, child_requirements),
+                scrutinee: finalize_effect_ctx_expr(
+                    ctx, batch, scrutinee),
+                arms: finalize_effect_ctx_match_arms(ctx, batch, arms),
                 ty: ty, effects: effects, span: span },
         HExpr::Block { stmts, tail, ty, effects, span } =>
             HExpr::Block {
                 stmts: stmts.map(fn(stmt) {
-                    finalize_evidence_stmt(
-                        ctx, stmt, child_requirements)
+                    finalize_effect_ctx_stmt(ctx, batch, stmt)
                 }),
                 tail: tail.map(fn(expr) {
-                    finalize_evidence_expr(
-                        ctx, expr, child_requirements)
+                    finalize_effect_ctx_expr(ctx, batch, expr)
                 }), ty: ty, effects: effects, span: span },
         HExpr::IfExpr {
             condition, then_branch, else_branch, ty, effects, span
         } => HExpr::IfExpr {
-            condition: finalize_evidence_expr(
-                ctx, condition, child_requirements),
-            then_branch: finalize_evidence_expr(
-                ctx, then_branch, child_requirements),
+            condition: finalize_effect_ctx_expr(
+                ctx, batch, condition),
+            then_branch: finalize_effect_ctx_expr(
+                ctx, batch, then_branch),
             else_branch: else_branch.map(fn(expr) {
-                finalize_evidence_expr(ctx, expr, child_requirements)
+                finalize_effect_ctx_expr(ctx, batch, expr)
             }), ty: ty, effects: effects, span: span },
         HExpr::StringInterp { parts, plan, ty, effects, span } =>
             HExpr::StringInterp {
@@ -1659,58 +1496,50 @@ fn finalize_evidence_expr(
                         HStringInterpPart::Literal(text),
                     HStringInterpPart::Expression(expr) =>
                         HStringInterpPart::Expression(
-                            finalize_evidence_expr(
-                                ctx, expr, child_requirements))
+                            finalize_effect_ctx_expr(ctx, batch, expr))
                 } }), plan: plan,
                 ty: ty, effects: effects, span: span },
         HExpr::TryCatch { body, arms, ty, effects, span } =>
             HExpr::TryCatch {
-                body: finalize_evidence_expr(
-                    ctx, body, child_requirements),
-                arms: finalize_evidence_match_arms(
-                    ctx, arms, child_requirements),
+                body: finalize_effect_ctx_expr(ctx, batch, body),
+                arms: finalize_effect_ctx_match_arms(ctx, batch, arms),
                 ty: ty, effects: effects, span: span },
         HExpr::ListLit { elements, plan, ty, effects, span } =>
             HExpr::ListLit {
                 elements: elements.map(fn(expr) {
-                    finalize_evidence_expr(ctx, expr, child_requirements)
+                    finalize_effect_ctx_expr(ctx, batch, expr)
                 }), plan: plan,
                 ty: ty, effects: effects, span: span },
         HExpr::TupleLit { elements, constructor, ty, effects, span } =>
             HExpr::TupleLit {
                 elements: elements.map(fn(expr) {
-                    finalize_evidence_expr(ctx, expr, child_requirements)
+                    finalize_effect_ctx_expr(ctx, batch, expr)
                 }), constructor: constructor,
                 ty: ty, effects: effects, span: span },
         HExpr::IndexExpr {
             receiver, index, call_plan, projection, ty, effects, span
         } => HExpr::IndexExpr {
-            receiver: finalize_evidence_expr(
-                ctx, receiver, child_requirements),
-            index: finalize_evidence_expr(
-                ctx, index, child_requirements),
+            receiver: finalize_effect_ctx_expr(ctx, batch, receiver),
+            index: finalize_effect_ctx_expr(ctx, batch, index),
             call_plan: call_plan, projection: projection,
             ty: ty, effects: effects, span: span },
         HExpr::Clone { inner, ty, effects, span } => HExpr::Clone {
-            inner: finalize_evidence_expr(
-                ctx, inner, child_requirements),
+            inner: finalize_effect_ctx_expr(ctx, batch, inner),
             ty: ty, effects: effects, span: span },
         HExpr::Take {
             source, source_slot, saved_slot, site, ty, effects, span
         } => HExpr::Take {
-            source: finalize_evidence_expr(
-                ctx, source, child_requirements),
+            source: finalize_effect_ctx_expr(ctx, batch, source),
             source_slot: source_slot, saved_slot: saved_slot,
             site: site, ty: ty, effects: effects, span: span },
         HExpr::ReturnExpr { value, ty, effects, span } =>
             HExpr::ReturnExpr {
                 value: value.map(fn(expr) {
-                    finalize_evidence_expr(ctx, expr, child_requirements)
+                    finalize_effect_ctx_expr(ctx, batch, expr)
                 }), ty: ty, effects: effects, span: span },
         HExpr::UnsafeBlock { body, ty, effects, span } =>
             HExpr::UnsafeBlock {
-                body: finalize_evidence_expr(
-                    ctx, body, child_requirements),
+                body: finalize_effect_ctx_expr(ctx, batch, body),
                 ty: ty, effects: effects, span: span },
         HExpr::Ident { .. } => finalize_value_ident_no_solve(ctx, value),
         HExpr::IntLit { .. } |
@@ -1721,49 +1550,27 @@ fn finalize_evidence_expr(
     }
 }
 
-struct FinalDraftEvidence {
+struct FinalDraftEffectCtx {
     body: HExpr,
-    bindings: List<HandledEvidenceRef>,
-    captures: List<HandledEvidenceCapture>
+    effect_ctx: TypedCallableEffectCtx
 }
 
-fn finalize_draft_evidence(
-    mut ctx: InferCtx, draft: FnDraft,
+fn finalize_draft_effect_ctx(
+    mut ctx: InferCtx, draft: FnDraft, batch: OwnerInferenceBatch,
     body: HExpr, final_effects: EffectRow
-) -> FinalDraftEvidence {
+) -> FinalDraftEffectCtx {
     enter_executable_owner(ctx, draft.executable)
-    let result = some({
-        let child_requirements: List<HandledEffectRef> = []
-        let seeded = seed_final_handled_evidence(
-            ctx, draft.handled_bindings, final_effects, body)
-        let finalized = finalize_evidence_expr(
-            ctx, seeded, child_requirements)
-        let remap = canonicalize_callable_handled_evidence_closure(
-            ctx, final_effects, child_requirements)
-        let finalized_owner = FinalDraftEvidence {
-            body: remap_hir_handled_evidence(
-                finalized, remap.0, remap.1),
-            bindings: current_handled_evidence_bindings(ctx),
-            captures: current_handled_evidence_captures(ctx)
-        }
-        for raw_capture in draft.handled_captures {
-            let requirement = handled_evidence_capture_requirement(raw_capture)
-            if !finalized_owner.captures.any(fn(capture) {
-                    handled_effect_ref_same(
-                        handled_evidence_capture_requirement(capture),
-                        requirement)
-                }) {
-                panic(
-                    "handled evidence finalization: raw capture disappeared")
-            }
-        }
-        finalized_owner
+    let result = some(FinalDraftEffectCtx {
+        body: finalize_effect_ctx_expr(ctx, some(batch), body),
+        effect_ctx: current_typed_callable_effect_ctx_from_owner_batch(
+            ctx, batch, final_effects)
     }) catch { _ => none }
     exit_executable_owner(ctx)
     match result {
         some(value) => value,
         none => fail.raise(CompileError {})
     }
+}
 }
 
 fn validate_draft_assoc_sources(
@@ -1804,7 +1611,7 @@ fn validate_draft_assoc_sources(
 fn finalize_fn_draft(
     mut ctx: InferCtx, draft: FnDraft,
     frozen_subst: UnionFind, canonical_ids: Map<Int, Int>,
-    final_scheme: TypeScheme
+    final_scheme: TypeScheme, final_batch: OwnerInferenceBatch
 ) -> HDecl {
     let zctx = ZonkCtx {
         subst: frozen_subst,
@@ -1820,8 +1627,8 @@ fn finalize_fn_draft(
     let zonked_body = zonk_block(zctx, draft.body)
     validate_draft_assoc_sources(
         ctx, draft, zctx, final_effects)
-    let evidence = finalize_draft_evidence(
-        ctx, draft, zonked_body, final_effects)
+    let effect_ctx = finalize_draft_effect_ctx(
+        ctx, draft, final_batch, zonked_body, final_effects)
 
     if draft.name == "main" || draft.name.ends_with("$$_main") {
         for effect in final_effects.effects {
@@ -1888,8 +1695,8 @@ fn finalize_fn_draft(
         params: final_params,
         return_type: final_return,
         effects: final_effects,
-        handled_evidence_bindings: evidence.bindings,
-        body: evidence.body,
+        effect_ctx: effect_ctx.effect_ctx,
+        body: effect_ctx.body,
         is_pub: draft.is_pub,
         trait_bounds: draft.trait_bounds,
         span: draft.span
@@ -1961,12 +1768,14 @@ fn prepare_fn_draft_group(
         let final_scheme = staged.get(index).unwrap().scheme
         let canonical_ids = draft_canonical_type_var_ids(
             draft, frozen_subst)
-        declarations.push(finalize_fn_draft(
-            ctx, draft, frozen_subst, canonical_ids, final_scheme))
-        batches.push(stage_owner_batch_facts(
+        let final_batch = stage_owner_batch_facts(
             ctx, draft.batch, draft.executable,
             final_scheme.ty, final_scheme.effect_schema,
-            frozen_subst, canonical_ids))
+            frozen_subst, canonical_ids)
+        declarations.push(finalize_fn_draft(
+            ctx, draft, frozen_subst, canonical_ids,
+            final_scheme, final_batch))
+        batches.push(final_batch)
     }
     if diagnostics_since_has_errors(ctx, diagnostic_checkpoint) {
         fail.raise(CompileError {})
@@ -2532,8 +2341,10 @@ fn check_impl_decl_canonical(
                             "default-specialization"))
                     }
                     enter_executable_owner(ctx, generated_executable)
-                    ensure_callable_handled_evidence(ctx, effects)
-                    let handled_uses = current_handled_evidence_bindings(ctx)
+                    let generated_effect_ctx = current_typed_callable_effect_ctx(
+                        ctx, effects, impl_method_core_effect_schema(core))
+                    let forward_effect_ctx = effect_ctx_source_for_callable(
+                        ctx, signature)
                     exit_executable_owner(ctx)
                     let dict_evidence = resolve_dicts_from_impl_owner(
                         generated_executable,
@@ -2548,13 +2359,13 @@ fn check_impl_decl_canonical(
                             generated_executable, trait_method.method_ref,
                             default_executable, parameter_types,
                             trait_method.param_mutabilities, binders,
-                            result_type, effects,
+                            result_type, effects, generated_effect_ctx,
                             make_h_exact_call_plan(
                                 make_named_callee_ref(
                                     trait_method_ref_member(
                                         trait_method.method_ref)),
                                 signature, none,
-                                dict_evidence, handled_uses)))
+                                dict_evidence, forward_effect_ctx)))
                 }
             }
         },
@@ -3176,7 +2987,8 @@ fn expand_delegate_impls(
                                                     type_args: [],
                                                     effect_instantiation: none,
                                                     resolved_dicts: [],
-                                                    handled_evidence: [],
+                                                    effect_ctx:
+                                                        make_empty_effect_ctx_source(),
                                                     callee_ref: none,
                                                     method_ref: some(exact_bound_ref),
                                                     system_host: none,
@@ -3236,7 +3048,8 @@ fn expand_delegate_impls(
                                                     type_args: [],
                                                     effect_instantiation: none,
                                                     resolved_dicts: resolved_forward_dicts,
-                                                    handled_evidence: [],
+                                                    effect_ctx:
+                                                        make_empty_effect_ctx_source(),
                                                     callee_ref: none,
                                                     method_ref: some(exact_forward_ref),
                                                     system_host: none,
@@ -3246,17 +3059,25 @@ fn expand_delegate_impls(
                                                 }
                                             }
 
+                                            let generated_schema = match
+                                                    resolved_method_scheme {
+                                                some(scheme) =>
+                                                    scheme.effect_schema,
+                                                none => panic(
+                                                    "delegate HIR: generated effect schema is absent")
+                                            }
                                             enter_executable_owner(
                                                 ctx, generated_executable)
-                                            ensure_callable_handled_evidence(
-                                                ctx, eff)
-                                            let generated_handled_bindings =
-                                                current_handled_evidence_bindings(ctx)
+                                            let generated_effect_ctx =
+                                                current_typed_callable_effect_ctx(
+                                                    ctx, eff, generated_schema)
+                                            let child_effect_ctx =
+                                                effect_ctx_source_for_callable(
+                                                    ctx, field_callee_type)
                                             exit_executable_owner(ctx)
                                             let call_expr =
-                                                with_call_handled_evidence(
-                                                    call_expr,
-                                                    generated_handled_bindings)
+                                                with_call_effect_ctx(
+                                                    call_expr, child_effect_ctx)
                                             let (child_call, child_evidence) =
                                                 match call_expr {
                                                     HExpr::Call {
@@ -3283,13 +3104,6 @@ fn expand_delegate_impls(
                                                         "delegate"))
                                                 parameter_types.push(parameter.ty)
                                                 binder_index = binder_index + 1
-                                            }
-                                            let generated_schema = match
-                                                    resolved_method_scheme {
-                                                some(scheme) =>
-                                                    scheme.effect_schema,
-                                                none => panic(
-                                                    "delegate HIR: generated effect schema is absent")
                                             }
                                             let validation_checkpoint =
                                                 ctx.sink.save()
@@ -3329,8 +3143,8 @@ fn expand_delegate_impls(
                                                     parameter_types,
                                                     ret_ty, eff,
                                                     child_evidence,
-                                                    generated_handled_bindings,
-                                                    generated_handled_bindings))
+                                                    generated_effect_ctx,
+                                                    child_effect_ctx))
                                             trait_hmethods.push(HDecl::Fn {
                                                 name: tm.name,
                                                 def_id: some(ctx.env.fresh_def_id()),
@@ -3344,8 +3158,7 @@ fn expand_delegate_impls(
                                                 params: hparams,
                                                 return_type: ret_ty,
                                                 effects: eff,
-                                                handled_evidence_bindings:
-                                                    generated_handled_bindings,
+                                                effect_ctx: generated_effect_ctx,
                                                 body: call_expr,
                                                 is_pub: false,
                                                 trait_bounds: generated_trait_bounds,
@@ -3428,9 +3241,7 @@ fn expand_delegate_impls(
                                     exact_field_ref, produced_trait_ref,
                                     source_member_index,
                                     delegate_method_plans,
-                                    delegate_assoc_plans,
-                                    registered_trait_contract_handled_effects(
-                                        trait_def.contract), [])
+                                    delegate_assoc_plans, [])
                                 result.push(HDecl::Impl {
                                     target_type: target_type,
                                     target_ty: target_ty,
@@ -3545,7 +3356,7 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
         }
 
         let mut method_body: HExpr? = none
-        let mut method_body_bindings: List<HandledEvidenceRef>? = none
+        let mut method_body_effect_ctx: TypedCallableEffectCtx? = none
         if m.has_default {
             match ast_method {
                 Decl::Fn { body: abody, span: method_span, .. } => {
@@ -3562,8 +3373,8 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
                             self_var, hparams, fn_ret, fn_effects,
                             m.effect_schema, method_span, abody)
                         method_body = checked_default.body
-                        method_body_bindings = some(
-                            checked_default.handled_evidence_bindings)
+                        method_body_effect_ctx = some(
+                            checked_default.effect_ctx)
                     }
                 },
                 _ => panic("trait HIR: exact default method changed kind")
@@ -3572,12 +3383,12 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
 
         let method_executable = make_named_executable_ref(
             trait_method_ref_member(m.method_ref))
-        let handled_evidence_bindings = match method_body_bindings {
+        let effect_ctx = match method_body_effect_ctx {
             some(values) => values,
             none => {
                 enter_executable_owner(ctx, method_executable)
-                ensure_callable_handled_evidence(ctx, fn_effects)
-                let values = current_handled_evidence_bindings(ctx)
+                let values = current_typed_callable_effect_ctx(
+                    ctx, fn_effects, m.effect_schema)
                 exit_executable_owner(ctx)
                 values
             }
@@ -3587,7 +3398,7 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
             params: hparams, return_type: fn_ret,
             effects: fn_effects, has_default: m.has_default,
             executable_ref: method_executable,
-            handled_evidence_bindings: handled_evidence_bindings,
+            effect_ctx: effect_ctx,
             body: method_body
         })
     }
@@ -3611,7 +3422,7 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
 
 struct TraitDefaultBodyResult {
     body: HExpr?,
-    handled_evidence_bindings: List<HandledEvidenceRef>
+    effect_ctx: TypedCallableEffectCtx
 }
 
 fn check_trait_default_body(
@@ -3622,7 +3433,6 @@ fn check_trait_default_body(
     method_span: Span, body: Expr
 ) -> TraitDefaultBodyResult {
     enter_executable_owner(ctx, executable_ref)
-    prepare_callable_handled_evidence(ctx, method_effects)
     let obligation_checkpoint = pending_dict_checkpoint(ctx)
     let saved_subst = ctx.subst
     let saved_fn_return = ctx.current_fn_return_type
@@ -3764,23 +3574,20 @@ fn check_trait_default_body(
     ctx.type_param_scope = saved_tp_scope
     ctx.qualified_assoc_scope = saved_qualified_assoc
     assert_pending_dict_owner_closed(ctx, obligation_checkpoint)
-    let evidence_remap = canonicalize_callable_handled_evidence(
-        ctx, method_effects)
-    let remapped_body = final_body_unremapped.map(fn(value) {
-        remap_hir_handled_evidence(
-            value, evidence_remap.0, evidence_remap.1)
-    })
-    let handled_evidence_bindings =
-        current_handled_evidence_bindings(ctx)
     publish_exact_callable_effect_header(
         ctx, executable_ref, Type::FnType {
             params: hparams.map(fn(param) { param.ty }),
             return_type: method_return, effects: method_effects
         }, method_schema)
+    let effect_ctx = current_typed_callable_effect_ctx(
+        ctx, method_effects, method_schema)
+    let final_body = final_body_unremapped.map(fn(value) {
+        finalize_effect_ctx_expr(ctx, none, value)
+    })
     exit_executable_owner(ctx)
     TraitDefaultBodyResult {
-        body: remapped_body,
-        handled_evidence_bindings: handled_evidence_bindings
+        body: final_body,
+        effect_ctx: effect_ctx
     }
 }
 
@@ -3879,10 +3686,6 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
         some(entry) => compiler_extern_manifest_entry_executable(entry),
         none => make_named_executable_ref(source_symbol)
     }
-    enter_executable_owner(ctx, executable_ref)
-    ensure_callable_handled_evidence(ctx, extern_effects)
-    let handled_evidence_bindings =
-        current_handled_evidence_bindings(ctx)
     let _ = publish_final_value_effect_schema(
         ctx, name, executable_ref, Type::FnType {
             params: hparams.map(fn(param) { param.ty }),
@@ -3920,7 +3723,6 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
             ctx, type_params, extern_type_var_ids),
         params: hparams, return_type: fn_ret, effects: extern_effects,
         resource_contract: resource_contract,
-        handled_evidence_bindings: handled_evidence_bindings,
         trait_bounds: trait_bounds,
         is_pub: is_pub, span: span
     }
@@ -4217,7 +4019,6 @@ fn infer_fn_draft(
         return_type, declared_effects, body, is_pub, span, self_type,
         registration_scheme, impl_method_ref, inherited_type_var_ids,
         validation, batch_checkpoint)) catch { _ => none }
-    exit_executable_owner(ctx)
     match result {
         some(draft) => draft,
         none => {
@@ -4361,11 +4162,6 @@ fn infer_fn_draft_transaction(
     } else {
         none
     }
-    match owner_declared_effects {
-        some(row) => prepare_callable_handled_evidence(ctx, row),
-        none => {}
-    }
-
     let inferred = infer_fn_body_constraints(
         ctx, provenance_key, registered_return,
         owner_declared_effects,
@@ -4385,10 +4181,6 @@ fn infer_fn_draft_transaction(
         ctx, type_params, source_type_var_ids)
     let trait_bounds = materialize_trait_bounds(
         ctx, complete_bounds)
-    let handled_bindings =
-        current_handled_evidence_bindings(ctx)
-    let handled_captures =
-        current_handled_evidence_captures(ctx)
     let batch = detach_owner_batch(ctx, batch_checkpoint)
     FnDraft {
         name: name,
@@ -4407,8 +4199,6 @@ fn infer_fn_draft_transaction(
         body: inferred.body,
         raw_type_var_names: raw_names,
         assoc_rebind_sources: assoc_sources,
-        handled_bindings: handled_bindings,
-        handled_captures: handled_captures,
         validation: validation,
         batch: batch
     }
@@ -4507,22 +4297,21 @@ fn check_test_decl(
         }
     }
     ctx.env.pop_scope()
-    let evidence_remap = canonicalize_callable_handled_evidence(
-        ctx, hexpr_effects(final_body_unremapped))
-    let final_body = remap_hir_handled_evidence(
-        final_body_unremapped, evidence_remap.0, evidence_remap.1)
-    let handled_evidence_bindings =
-        current_handled_evidence_bindings(ctx)
     publish_exact_callable_effect_header(
         ctx, test_executable, Type::FnType {
-            params: [], return_type: hexpr_type(final_body),
-            effects: hexpr_effects(final_body)
+            params: [], return_type: hexpr_type(final_body_unremapped),
+            effects: hexpr_effects(final_body_unremapped)
         }, empty_typed_effect_header_schema())
+    let final_body = finalize_effect_ctx_expr(
+        ctx, none, final_body_unremapped)
+    let effect_ctx = current_typed_callable_effect_ctx(
+        ctx, hexpr_effects(final_body),
+        empty_typed_effect_header_schema())
     exit_executable_owner(ctx)
 
     HDecl::Test { description: description,
         executable_ref: test_executable,
-        handled_evidence_bindings: handled_evidence_bindings,
+        effect_ctx: effect_ctx,
         body: final_body, span: span }
 }
 

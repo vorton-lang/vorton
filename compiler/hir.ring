@@ -30,19 +30,27 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     impl_provider_ref_same, impl_provider_ref_kind,
     impl_provider_kind_tag}
 use ir_inventory::{ExecutableRef, EffectOperationRef, SystemHostCallableRef,
-    BinderEntry, HandledEvidenceRef, HandledEvidenceCapture,
+    BinderEntry, EffectCtxRef, EffectCtxParentCapture,
     CallableResourceContractFact,
     executable_ref_is_named, executable_ref_named_symbol,
-    executable_ref_same,
-    handled_evidence_requirement,
-    handled_evidence_contract_owner, handled_evidence_ordinal,
-    make_handled_evidence_capture,
-    handled_evidence_capture_requirement,
-    handled_evidence_capture_source, handled_evidence_capture_target,
+    executable_ref_same, effect_ctx_contract_owner, effect_ctx_ref_same,
+    effect_ctx_parent_capture_source, effect_ctx_parent_capture_target,
     effect_operation_ref_effect,
     effect_operation_ref_source_index,
     system_host_callable_effect, system_host_callable_executable}
-use effect_contract::{EffectParamRef, effect_param_ref_same}
+use effect_contract::{EffectParamRef, effect_param_ref_same,
+    TypedHandledEffectInstance, TypedEffectCtxLayout, TypedCallableEffectCtx,
+    TypedEffectCtxSource, TypedEffectCtxLookup, TypedEffectCtxInstall,
+    typed_handled_effect_instances_from_row,
+    typed_handled_effect_instance_reference,
+    typed_handled_effect_instance_same,
+    typed_effect_ctx_layout_entries, typed_effect_ctx_layout_formal,
+    typed_effect_ctx_layout_is_empty,
+    typed_callable_effect_ctx_binding, typed_callable_effect_ctx_layout,
+    typed_effect_ctx_source_is_empty,
+    typed_effect_ctx_lookup_instance,
+    typed_effect_ctx_install_parent,
+    typed_effect_ctx_install_entries}
 
 pub use hir_exact::{
     DictRef, MethodCallRef, make_intrinsic_method_call_ref, method_call_ref_intrinsic,
@@ -55,33 +63,36 @@ pub use hir_exact::{
     h_projection_structural_name, h_projection_tuple_index, h_projection_intrinsic, HExactCallPlan,
     make_h_exact_call_plan, h_exact_call_callee, h_exact_call_signature,
     h_exact_call_method,
-    h_exact_call_evidence, h_exact_call_handled_evidence,
-    remap_h_handled_evidence_ref, remap_h_handled_evidence_refs,
-    remap_h_exact_call_handled_evidence,
+    h_exact_call_evidence, h_exact_call_effect_ctx,
+    remap_h_effect_ctx_ref, remap_h_effect_ctx_source,
+    remap_h_exact_call_effect_ctx,
     HOperatorPlan, h_operator_method, h_operator_tuple, h_operator_is_tuple,
     h_operator_method_ref, h_operator_elements, HConstructorPlan, make_h_executable_constructor_plan,
     make_h_tuple_constructor_plan, make_h_record_constructor_plan, h_constructor_kind, h_constructor_executable,
-    h_constructor_fields, h_constructor_tuple_arity, HStringInterpPlan, make_h_string_interp_plan,
+    h_constructor_fields, h_constructor_effect_ctx, h_constructor_tuple_arity,
+    HStringInterpPlan, make_h_string_interp_plan,
     h_string_interp_builder_binder, h_string_interp_builder, h_string_interp_append_literal, h_string_interp_append_value,
     h_string_interp_finish, h_string_interp_value_to_string,
-    remap_h_string_interp_handled_evidence,
+    remap_h_string_interp_effect_ctx,
     HListLiteralPlan, make_h_list_literal_plan,
     h_list_literal_builder, h_list_literal_owner,
     h_list_literal_constructor, h_list_literal_allocator,
-    h_list_literal_push, remap_h_list_literal_handled_evidence,
+    h_list_literal_push, remap_h_list_literal_effect_ctx,
     HDictConstructPlan, make_h_dict_construct_plan,
-    h_dict_construct_executable, h_dict_construct_trait, HDelegateMethodPlan, make_h_delegate_method_plan,
+    h_dict_construct_executable, h_dict_construct_trait,
+    h_dict_construct_effect_ctx, HDelegateMethodPlan, make_h_delegate_method_plan,
     h_delegate_method_required, h_delegate_method_generated, h_delegate_method_executable, h_delegate_method_origin,
     h_delegate_method_child_call, h_delegate_method_child_callee, h_delegate_method_binders, h_delegate_method_parameter_types,
     h_delegate_method_result_type, h_delegate_method_effects,
-    h_delegate_method_evidence, h_delegate_method_handled_bindings,
-    h_delegate_method_handled_uses, HDelegateAssocPlan,
+    h_delegate_method_evidence, h_delegate_method_effect_ctx,
+    h_delegate_method_child_effect_ctx, HDelegateAssocPlan,
     make_h_delegate_assoc_plan, h_delegate_assoc_member, h_delegate_assoc_type, HDelegateTypedPlan,
     make_h_delegate_typed_plan, h_delegate_contract,
     h_delegate_outer_owner, h_delegate_child_owner, h_delegate_child_provider,
     h_delegate_field_owner, h_delegate_field_provider, h_delegate_field_target, h_delegate_field,
-    h_delegate_trait, h_delegate_source_member_index, h_delegate_methods, h_delegate_assoc_bindings,
-    h_delegate_handled_evidence, h_delegate_dict_evidence, HPatternPlan, HPatternFieldPlan,
+    h_delegate_trait, h_delegate_source_member_index, h_delegate_methods,
+    h_delegate_assoc_bindings, h_delegate_dict_evidence,
+    HPatternPlan, HPatternFieldPlan,
     HDefaultSpecializationPlan, make_h_default_specialization_plan,
     h_default_specialization_owner,
     h_default_specialization_generated_method,
@@ -93,13 +104,14 @@ pub use hir_exact::{
     h_default_specialization_binders,
     h_default_specialization_result_type,
     h_default_specialization_effects,
+    h_default_specialization_effect_ctx,
     h_default_specialization_forward_call,
     make_h_pattern_field_plan, h_pattern_field_projection, h_pattern_field_pattern, h_pattern_wildcard,
     h_pattern_binding, h_pattern_literal, h_pattern_tuple, h_pattern_struct,
     h_pattern_variant, h_pattern_or, h_pattern_kind, h_pattern_plan_binding,
     h_pattern_plan_children, h_pattern_plan_fields, h_pattern_plan_struct_owner, h_pattern_plan_variant,
     HForInPlan, make_h_range_for_in_plan, h_for_in_binding_binder,
-    remap_h_for_in_handled_evidence,
+    remap_h_for_in_effect_ctx,
     h_range_for_in_owner, h_range_for_in_start, h_range_for_in_end,
     h_range_for_in_inclusive, h_range_for_in_order,
     h_range_for_in_equality,
@@ -363,13 +375,13 @@ pub struct HMatchArm {
 
 pub struct HEffectHandler {
     pub effect_name: Str,
-    pub handled_ref: HandledEffectRef?,
+    pub handled_instance: TypedHandledEffectInstance?,
     pub operation_ref: EffectOperationRef?,
     pub fail_ref: HFailOperationRef?,
     pub executable_ref: ExecutableRef,
     pub captures: List<HLambdaCapture>,
-    pub handled_evidence_bindings: List<HandledEvidenceRef>,
-    pub evidence_captures: List<HandledEvidenceCapture>,
+    pub effect_ctx: TypedCallableEffectCtx,
+    pub parent_ctx: EffectCtxParentCapture,
     pub op_name: Str,
     pub params: List<HParam>,
     pub resume_binding: HPatternBinding?,
@@ -519,7 +531,7 @@ pub enum HExpr {
            type_args: List<HCallableTypeActual>,
            effect_instantiation: HCallableEffectInstantiation?,
            resolved_dicts: List<DictRef>,
-           handled_evidence: List<HandledEvidenceRef>,
+           effect_ctx: TypedEffectCtxSource,
            callee_ref: CalleeRef?, method_ref: MethodCallRef?,
            system_host: SystemHostCallableRef?, ty: Type,
            effects: EffectRow, span: Span },
@@ -542,16 +554,17 @@ pub enum HExpr {
     StringInterp { parts: List<HStringInterpPart>, plan: HStringInterpPlan?,
                    ty: Type, effects: EffectRow, span: Span },
     TryCatch { body: HExpr, arms: List<HMatchArm>, ty: Type, effects: EffectRow, span: Span },
-    HandleExpr { body: HExpr, handlers: List<HEffectHandler>, installed_evidence: List<HandledEvidenceRef>, ty: Type, effects: EffectRow, span: Span },
+    HandleExpr { body: HExpr, handlers: List<HEffectHandler>,
+                 effect_ctx_install: TypedEffectCtxInstall?,
+                 ty: Type, effects: EffectRow, span: Span },
     Lambda { executable_ref: ExecutableRef, params: List<HParam>,
              captures: List<HLambdaCapture>,
-             handled_evidence_bindings: List<HandledEvidenceRef>,
-             evidence_captures: List<HandledEvidenceCapture>, return_type: Type,
+             effect_ctx: TypedCallableEffectCtx, return_type: Type,
              body: HExpr, ty: Type, effects: EffectRow, span: Span },
     EffectOp { effect_name: Str, op_name: Str,
                operation_ref: EffectOperationRef?,
                fail_ref: HFailOperationRef?,
-               handled_evidence: List<HandledEvidenceRef>, args: List<HExpr>,
+               effect_ctx_lookup: TypedEffectCtxLookup?, args: List<HExpr>,
                ty: Type, effects: EffectRow, span: Span },
     ListLit { elements: List<HExpr>, plan: HListLiteralPlan?,
               ty: Type, effects: EffectRow, span: Span },
@@ -658,7 +671,7 @@ pub struct HTraitMethod {
     pub effects: EffectRow,
     pub has_default: Bool,
     pub executable_ref: ExecutableRef,
-    pub handled_evidence_bindings: List<HandledEvidenceRef>,
+    pub effect_ctx: TypedCallableEffectCtx,
     pub body: HExpr?
 }
 
@@ -693,7 +706,7 @@ pub enum HDecl {
     Fn { name: Str, def_id: Int?, executable_ref: ExecutableRef,
          impl_method_ref: ImplMethodRef?, type_params: List<HTypeParam>,
          params: List<HParam>, return_type: Type, effects: EffectRow,
-         handled_evidence_bindings: List<HandledEvidenceRef>,
+         effect_ctx: TypedCallableEffectCtx,
          body: HExpr, is_pub: Bool, trait_bounds: List<TraitBound>, span: Span },
     Struct { name: Str, owner_ref: RegisteredNominalRef, type_params: List<HTypeParam>, fields: List<HStructField>, is_pub: Bool, span: Span },
     Enum { name: Str, owner_ref: RegisteredNominalRef, type_params: List<HTypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
@@ -705,21 +718,20 @@ pub enum HDecl {
            methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
     Effect { name: Str, owner_ref: SymbolRef?, handled_ref: HandledEffectRef?, type_params: List<HTypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
     Test { description: Str, executable_ref: ExecutableRef,
-           handled_evidence_bindings: List<HandledEvidenceRef>,
+           effect_ctx: TypedCallableEffectCtx,
            body: HExpr, span: Span },
     Trait { name: Str, owner_ref: RegisteredTraitRef, type_params: List<HTypeParam>, methods: List<HTraitMethod>, supertraits: List<Str>, assoc_types: List<HAssocType>, is_pub: Bool, span: Span },
     ExternFn { name: Str, abi_name: Str, def_id: Int?,
                executable_ref: ExecutableRef, type_params: List<HTypeParam>,
-               params: List<HParam>, return_type: Type, effects: EffectRow,
-               resource_contract: CallableResourceContractFact,
-               handled_evidence_bindings: List<HandledEvidenceRef>,
-               trait_bounds: List<TraitBound>,
+                params: List<HParam>, return_type: Type, effects: EffectRow,
+                resource_contract: CallableResourceContractFact,
+                trait_bounds: List<TraitBound>,
                is_pub: Bool, span: Span },
     ExternType { name: Str, type_params: List<HTypeParam>, is_pub: Bool, span: Span },
     TypeAlias { name: Str, owner_ref: SymbolRef?, ty: Type,
                 is_pub: Bool, span: Span },
     Const { name: Str, def_id: Int?, executable_ref: ExecutableRef,
-            handled_evidence_bindings: List<HandledEvidenceRef>,
+            effect_ctx: TypedCallableEffectCtx,
             ty: Type, init: HExpr, is_pub: Bool, span: Span },
     ModBlock { name: Str, decls: List<HDecl>, is_pub: Bool, span: Span }
 }
@@ -831,7 +843,7 @@ pub struct DerivedMethod {
     pub executable_ref: ExecutableRef,
     pub signature: Type,
     pub binders: List<BinderEntry>,
-    pub handled_evidence_bindings: List<HandledEvidenceRef>
+    pub effect_ctx: TypedCallableEffectCtx
 }
 
 pub struct DerivedDirectCall {
@@ -874,439 +886,6 @@ pub struct HProgram {
     pub drop_types: Set<Str>
 }
 
-fn remap_h_evidence_capture(
-    value: HandledEvidenceCapture, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
-) -> HandledEvidenceCapture {
-    make_handled_evidence_capture(
-        handled_evidence_capture_requirement(value),
-        remap_h_handled_evidence_ref(
-            handled_evidence_capture_source(value), sources, targets),
-        remap_h_handled_evidence_ref(
-            handled_evidence_capture_target(value), sources, targets))
-}
-
-fn remap_h_evidence_captures(
-    values: List<HandledEvidenceCapture>, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
-) -> List<HandledEvidenceCapture> {
-    let mut result: List<HandledEvidenceCapture> = []
-    for value in values {
-        result.push(remap_h_evidence_capture(value, sources, targets))
-    }
-    result
-}
-
-fn remap_h_lambda_captures(
-    values: List<HLambdaCapture>, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
-) -> List<HLambdaCapture> {
-    let mut result: List<HLambdaCapture> = []
-    for value in values {
-        result.push(HLambdaCapture {
-            source: value.source, target: value.target,
-            value: value.value.map(fn(expr) {
-                remap_hir_handled_evidence(expr, sources, targets)
-            }),
-            resource_site: value.resource_site
-        })
-    }
-    result
-}
-
-fn remap_h_match_arms(
-    values: List<HMatchArm>, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
-) -> List<HMatchArm> {
-    let mut result: List<HMatchArm> = []
-    for value in values {
-        result.push(HMatchArm {
-            pattern: value.pattern, pattern_plan: value.pattern_plan,
-            bindings: value.bindings,
-            guard: value.guard.map(fn(expr) {
-                remap_hir_handled_evidence(expr, sources, targets)
-            }),
-            body: remap_hir_handled_evidence(
-                value.body, sources, targets),
-            span: value.span
-        })
-    }
-    result
-}
-
-fn remap_h_stmt_handled_evidence(
-    value: HStmt, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
-) -> HStmt {
-    match value {
-        HStmt::Let { name, name_span, def_id, ty, init, span } => HStmt::Let {
-            name: name, name_span: name_span, def_id: def_id, ty: ty,
-            init: remap_hir_handled_evidence(init, sources, targets),
-            span: span
-        },
-        HStmt::Var { name, name_span, def_id, ty, init, span } => HStmt::Var {
-            name: name, name_span: name_span, def_id: def_id, ty: ty,
-            init: remap_hir_handled_evidence(init, sources, targets),
-            span: span
-        },
-        HStmt::Assign { target, value, span } => HStmt::Assign {
-            target: remap_hir_handled_evidence(target, sources, targets),
-            value: remap_hir_handled_evidence(value, sources, targets),
-            span: span
-        },
-        HStmt::ExprStmt { expr, span } => HStmt::ExprStmt {
-            expr: remap_hir_handled_evidence(expr, sources, targets),
-            span: span
-        },
-        HStmt::Return { value, span } => HStmt::Return {
-            value: value.map(fn(expr) {
-                remap_hir_handled_evidence(expr, sources, targets)
-            }), span: span
-        },
-        HStmt::While { condition, body, span } => HStmt::While {
-            condition: remap_hir_handled_evidence(
-                condition, sources, targets),
-            body: remap_hir_handled_evidence(body, sources, targets),
-            span: span
-        },
-        HStmt::ForIn {
-            binding, binding_span, def_id, destructure, plan,
-            iterable, body, iterable_type_name, iter_type_name, span
-        } => HStmt::ForIn {
-            binding: binding, binding_span: binding_span, def_id: def_id,
-            destructure: destructure,
-            plan: plan.map(fn(value) {
-                remap_h_for_in_handled_evidence(value, sources, targets)
-            }),
-            iterable: remap_hir_handled_evidence(
-                iterable, sources, targets),
-            body: remap_hir_handled_evidence(body, sources, targets),
-            iterable_type_name: iterable_type_name,
-            iter_type_name: iter_type_name, span: span
-        },
-        HStmt::Break { span } => HStmt::Break { span: span },
-        HStmt::Continue { span } => HStmt::Continue { span: span },
-        HStmt::LetDestructure {
-            pattern, pattern_plan, bindings, init, span
-        } => HStmt::LetDestructure {
-            pattern: pattern, pattern_plan: pattern_plan, bindings: bindings,
-            init: remap_hir_handled_evidence(init, sources, targets),
-            span: span
-        },
-        HStmt::IfLet {
-            pattern, pattern_plan, bindings, expr,
-            then_block, else_block, span
-        } => HStmt::IfLet {
-            pattern: pattern, pattern_plan: pattern_plan, bindings: bindings,
-            expr: remap_hir_handled_evidence(expr, sources, targets),
-            then_block: remap_hir_handled_evidence(
-                then_block, sources, targets),
-            else_block: else_block.map(fn(value) {
-                remap_hir_handled_evidence(value, sources, targets)
-            }), span: span
-        },
-        HStmt::Drop {
-            name, def_id, slot, place_target, site, reason, ty, span
-        } =>
-            HStmt::Drop { name: name, def_id: def_id, slot: slot,
-                place_target: place_target.map(fn(value) {
-                    remap_hir_handled_evidence(value, sources, targets)
-                }), site: site, reason: reason, ty: ty, span: span }
-    }
-}
-
-pub fn remap_hir_handled_evidence(
-    value: HExpr, sources: List<HandledEvidenceRef>,
-    targets: List<HandledEvidenceRef>
-) -> HExpr {
-    match value {
-        HExpr::IntLit { value, ty, effects, span } => HExpr::IntLit {
-            value: value, ty: ty, effects: effects, span: span },
-        HExpr::FloatLit { value, ty, effects, span } => HExpr::FloatLit {
-            value: value, ty: ty, effects: effects, span: span },
-        HExpr::StrLit { value, ty, effects, span } => HExpr::StrLit {
-            value: value, ty: ty, effects: effects, span: span },
-        HExpr::BoolLit { value, ty, effects, span } => HExpr::BoolLit {
-            value: value, ty: ty, effects: effects, span: span },
-        HExpr::Ident { name, resolved_name, def_id, source_slot,
-                       callee_identity, dict_closure_dicts,
-                       callable_instantiation, ty, effects, span } => HExpr::Ident {
-            name: name, resolved_name: resolved_name, def_id: def_id,
-            source_slot: source_slot, callee_identity: callee_identity,
-            dict_closure_dicts: dict_closure_dicts,
-            callable_instantiation: callable_instantiation,
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch,
-                       eq_plan, ord_plan, ty, effects, span } => HExpr::BinOp {
-            op: op,
-            left: remap_hir_handled_evidence(left, sources, targets),
-            right: remap_hir_handled_evidence(right, sources, targets),
-            eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
-            eq_plan: eq_plan, ord_plan: ord_plan,
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::UnaryOp { op, operand, ty, effects, span } => HExpr::UnaryOp {
-            op: op,
-            operand: remap_hir_handled_evidence(
-                operand, sources, targets),
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::Call {
-            callee, args, type_args, effect_instantiation,
-            resolved_dicts, handled_evidence,
-            callee_ref, method_ref, system_host, ty, effects, span
-        } => {
-            let mut remapped_args: List<HExpr> = []
-            for arg in args {
-                remapped_args.push(remap_hir_handled_evidence(
-                    arg, sources, targets))
-            }
-            HExpr::Call {
-                callee: remap_hir_handled_evidence(
-                    callee, sources, targets),
-                args: remapped_args,
-                type_args: type_args,
-                effect_instantiation: effect_instantiation,
-                resolved_dicts: resolved_dicts,
-                handled_evidence: remap_h_handled_evidence_refs(
-                    handled_evidence, sources, targets),
-                callee_ref: callee_ref, method_ref: method_ref,
-                system_host: system_host,
-                ty: ty, effects: effects, span: span
-            }
-        },
-        HExpr::FieldAccess {
-            receiver, field, access_kind, projection, ty, effects, span
-        } => HExpr::FieldAccess {
-            receiver: remap_hir_handled_evidence(
-                receiver, sources, targets),
-            field: field, access_kind: access_kind, projection: projection,
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::StructLit {
-            name, owner_ref, type_args, fields: field_values, spread, constructor,
-            ty, effects, span
-        } => {
-            let mut remapped_fields: List<HNominalStructFieldInit> = []
-            for field in field_values {
-                remapped_fields.push(HNominalStructFieldInit {
-                    name: field.name, field_ref: field.field_ref,
-                    field_index: field.field_index,
-                    value: remap_hir_handled_evidence(
-                        field.value, sources, targets)
-                })
-            }
-            HExpr::StructLit {
-                name: name, owner_ref: owner_ref, type_args: type_args,
-                fields: remapped_fields,
-                spread: spread.map(fn(value) {
-                    remap_hir_handled_evidence(value, sources, targets)
-                }),
-                constructor: constructor,
-                ty: ty, effects: effects, span: span
-            }
-        },
-        HExpr::NamedVariantConstruct {
-            enum_name, variant_name, variant_ref, fields: field_values, spread,
-            constructor, ty, effects, span
-        } => {
-            let mut remapped_fields: List<HStructFieldInit> = []
-            for field in field_values {
-                remapped_fields.push(HStructFieldInit {
-                    name: field.name, field_ref: field.field_ref,
-                    value: remap_hir_handled_evidence(
-                        field.value, sources, targets)
-                })
-            }
-            HExpr::NamedVariantConstruct {
-                enum_name: enum_name, variant_name: variant_name,
-                variant_ref: variant_ref, fields: remapped_fields,
-                spread: spread.map(fn(value) {
-                    remap_hir_handled_evidence(value, sources, targets)
-                }), constructor: constructor,
-                ty: ty, effects: effects, span: span
-            }
-        },
-        HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
-            HExpr::MatchExpr {
-                scrutinee: remap_hir_handled_evidence(
-                    scrutinee, sources, targets),
-                arms: remap_h_match_arms(arms, sources, targets),
-                ty: ty, effects: effects, span: span
-            },
-        HExpr::Block { stmts, tail, ty, effects, span } => {
-            let mut remapped_stmts: List<HStmt> = []
-            for stmt in stmts {
-                remapped_stmts.push(remap_h_stmt_handled_evidence(
-                    stmt, sources, targets))
-            }
-            HExpr::Block {
-                stmts: remapped_stmts,
-                tail: tail.map(fn(value) {
-                    remap_hir_handled_evidence(value, sources, targets)
-                }), ty: ty, effects: effects, span: span
-            }
-        },
-        HExpr::IfExpr {
-            condition, then_branch, else_branch, ty, effects, span
-        } => HExpr::IfExpr {
-            condition: remap_hir_handled_evidence(
-                condition, sources, targets),
-            then_branch: remap_hir_handled_evidence(
-                then_branch, sources, targets),
-            else_branch: else_branch.map(fn(value) {
-                remap_hir_handled_evidence(value, sources, targets)
-            }), ty: ty, effects: effects, span: span
-        },
-        HExpr::StringInterp { parts, plan, ty, effects, span } => {
-            let mut remapped_parts: List<HStringInterpPart> = []
-            for part in parts {
-                match part {
-                    HStringInterpPart::Literal(text) =>
-                        remapped_parts.push(HStringInterpPart::Literal(text)),
-                    HStringInterpPart::Expression(expr) =>
-                        remapped_parts.push(HStringInterpPart::Expression(
-                            remap_hir_handled_evidence(
-                                expr, sources, targets)))
-                }
-            }
-            HExpr::StringInterp {
-                parts: remapped_parts,
-                plan: plan.map(fn(value) {
-                    remap_h_string_interp_handled_evidence(
-                        value, sources, targets)
-                }), ty: ty, effects: effects, span: span
-            }
-        },
-        HExpr::TryCatch { body, arms, ty, effects, span } => HExpr::TryCatch {
-            body: remap_hir_handled_evidence(body, sources, targets),
-            arms: remap_h_match_arms(arms, sources, targets),
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::HandleExpr {
-            body, handlers, installed_evidence, ty, effects, span
-        } => {
-            let mut remapped_handlers: List<HEffectHandler> = []
-            for handler in handlers {
-                remapped_handlers.push(HEffectHandler {
-                    effect_name: handler.effect_name,
-                    handled_ref: handler.handled_ref,
-                    operation_ref: handler.operation_ref,
-                    fail_ref: handler.fail_ref,
-                    executable_ref: handler.executable_ref,
-                    captures: remap_h_lambda_captures(
-                        handler.captures, sources, targets),
-                    handled_evidence_bindings:
-                        remap_h_handled_evidence_refs(
-                            handler.handled_evidence_bindings,
-                            sources, targets),
-                    evidence_captures: remap_h_evidence_captures(
-                        handler.evidence_captures, sources, targets),
-                    op_name: handler.op_name, params: handler.params,
-                    resume_binding: handler.resume_binding,
-                    body: remap_hir_handled_evidence(
-                        handler.body, sources, targets)
-                })
-            }
-            HExpr::HandleExpr {
-                body: remap_hir_handled_evidence(body, sources, targets),
-                handlers: remapped_handlers,
-                installed_evidence: remap_h_handled_evidence_refs(
-                    installed_evidence, sources, targets),
-                ty: ty, effects: effects, span: span
-            }
-        },
-        HExpr::Lambda {
-            executable_ref, params, captures, handled_evidence_bindings,
-            evidence_captures, return_type, body, ty, effects, span
-        } => HExpr::Lambda {
-            executable_ref: executable_ref, params: params,
-            captures: remap_h_lambda_captures(captures, sources, targets),
-            handled_evidence_bindings: remap_h_handled_evidence_refs(
-                handled_evidence_bindings, sources, targets),
-            evidence_captures: remap_h_evidence_captures(
-                evidence_captures, sources, targets),
-            return_type: return_type,
-            body: remap_hir_handled_evidence(body, sources, targets),
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::EffectOp {
-            effect_name, op_name, operation_ref, fail_ref,
-            handled_evidence, args, ty, effects, span
-        } => {
-            let mut remapped_args: List<HExpr> = []
-            for arg in args {
-                remapped_args.push(remap_hir_handled_evidence(
-                    arg, sources, targets))
-            }
-            HExpr::EffectOp {
-                effect_name: effect_name, op_name: op_name,
-                operation_ref: operation_ref, fail_ref: fail_ref,
-                handled_evidence: remap_h_handled_evidence_refs(
-                    handled_evidence, sources, targets),
-                args: remapped_args, ty: ty, effects: effects, span: span
-            }
-        },
-        HExpr::ListLit { elements, plan, ty, effects, span } => {
-            let mut remapped: List<HExpr> = []
-            for element in elements {
-                remapped.push(remap_hir_handled_evidence(
-                    element, sources, targets))
-            }
-            HExpr::ListLit { elements: remapped,
-                plan: plan.map(fn(value) {
-                    remap_h_list_literal_handled_evidence(
-                        value, sources, targets)
-                }),
-                ty: ty, effects: effects, span: span }
-        },
-        HExpr::TupleLit { elements, constructor, ty, effects, span } => {
-            let mut remapped: List<HExpr> = []
-            for element in elements {
-                remapped.push(remap_hir_handled_evidence(
-                    element, sources, targets))
-            }
-            HExpr::TupleLit { elements: remapped, constructor: constructor,
-                ty: ty, effects: effects, span: span }
-        },
-        HExpr::IndexExpr {
-            receiver, index, call_plan, projection, ty, effects, span
-        } => HExpr::IndexExpr {
-            receiver: remap_hir_handled_evidence(
-                receiver, sources, targets),
-            index: remap_hir_handled_evidence(index, sources, targets),
-            call_plan: call_plan.map(fn(value) {
-                remap_h_exact_call_handled_evidence(
-                    value, sources, targets)
-            }), projection: projection,
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::DictConstruct { base_dict, plan, inner, ty, effects, span } =>
-            HExpr::DictConstruct { base_dict: base_dict, plan: plan,
-                inner: inner, ty: ty, effects: effects, span: span },
-        HExpr::Clone { inner, ty, effects, span } => HExpr::Clone {
-            inner: remap_hir_handled_evidence(inner, sources, targets),
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::Take {
-            source, source_slot, saved_slot, site, ty, effects, span
-        } => HExpr::Take {
-            source: remap_hir_handled_evidence(source, sources, targets),
-            source_slot: source_slot, saved_slot: saved_slot, site: site,
-            ty: ty, effects: effects, span: span
-        },
-        HExpr::ReturnExpr { value, ty, effects, span } => HExpr::ReturnExpr {
-            value: value.map(fn(expr) {
-                remap_hir_handled_evidence(expr, sources, targets)
-            }), ty: ty, effects: effects, span: span
-        },
-        HExpr::UnsafeBlock { body, ty, effects, span } => HExpr::UnsafeBlock {
-            body: remap_hir_handled_evidence(body, sources, targets),
-            ty: ty, effects: effects, span: span
-        }
-    }
-}
 
 // Definition identity is a cross-pass invariant.  Validate immediately after
 // synthetic lowering and again after RC insertion so a missing/colliding slot
@@ -1749,50 +1328,46 @@ fn validate_hir_expr_values(
     }
 }
 
-fn handled_requirements(row: EffectRow) -> List<HandledEffectRef> {
-    let mut result: List<HandledEffectRef> = []
-    for atom in row.effects {
-        match atom {
-            Effect::CustomEffect { reference, .. } => if !result.any(
-                    fn(existing) {
-                        handled_effect_ref_same(existing, reference)
-                    }) {
-                result.push(reference)
-            },
-            _ => {}
-        }
-    }
-    result
+fn handled_instances(row: EffectRow) -> List<TypedHandledEffectInstance> {
+    typed_handled_effect_instances_from_row(row)
 }
 
-fn validate_handled_evidence_uses(
-    row: EffectRow, values: List<HandledEvidenceRef>, label: Str
-) {
-    let required = handled_requirements(row)
-    if required.len() != values.len() {
-        panic("HIR ${label}: handled evidence arity differs")
-    }
-    for index in 0..required.len() {
-        if !handled_effect_ref_same(
-                required.get(index).unwrap(),
-                handled_evidence_requirement(values.get(index).unwrap())) {
-            panic("HIR ${label}: handled evidence order differs")
-        }
-    }
-}
-
-fn validate_callable_handled_bindings(
-    row: EffectRow, values: List<HandledEvidenceRef>,
+fn validate_callable_effect_ctx(
+    row: EffectRow, value: TypedCallableEffectCtx,
     owner: ExecutableRef, label: Str
 ) {
-    validate_handled_evidence_uses(row, values, label)
-    for index in 0..values.len() {
-        let value = values.get(index).unwrap()
-        if !executable_ref_same(
-                handled_evidence_contract_owner(value), owner) ||
-           handled_evidence_ordinal(value) != index {
-            panic("HIR ${label}: handled evidence owner/ordinal differs")
+    let binding = typed_callable_effect_ctx_binding(value)
+    if !executable_ref_same(effect_ctx_contract_owner(binding), owner) {
+        panic("HIR ${label}: EffectCtx owner differs")
+    }
+    let required = handled_instances(row)
+    let layout = typed_callable_effect_ctx_layout(value)
+    let entries = typed_effect_ctx_layout_entries(layout)
+    if required.len() != entries.len() {
+        panic("HIR ${label}: EffectCtx fixed entry arity differs")
+    }
+    for index in 0..required.len() {
+        if !typed_handled_effect_instance_same(
+                required.get(index).unwrap(),
+                entries.get(index).unwrap()) {
+            panic("HIR ${label}: EffectCtx fixed entry order differs")
         }
+    }
+    if row.tail.is_some() != typed_effect_ctx_layout_formal(layout).is_some() {
+        panic("HIR ${label}: EffectCtx formal presence differs")
+    }
+    if required.len() == 0 && row.tail.is_none() &&
+       !typed_effect_ctx_layout_is_empty(layout) {
+        panic("HIR ${label}: empty EffectCtx layout differs")
+    }
+}
+
+fn validate_effect_ctx_source_for_row(
+    row: EffectRow, source: TypedEffectCtxSource, label: Str
+) {
+    let empty = handled_instances(row).len() == 0 && row.tail.is_none()
+    if typed_effect_ctx_source_is_empty(source) != empty {
+        panic("HIR ${label}: EffectCtx empty/borrowed source differs")
     }
 }
 
@@ -1922,7 +1497,7 @@ fn validate_hir_expr(
         HExpr::UnaryOp { operand, .. } =>
             validate_hir_expr(operand, seen, scope),
         HExpr::Call { callee, args, type_args, effect_instantiation,
-                      handled_evidence,
+                      effect_ctx,
                       callee_ref, method_ref, system_host,
                       effects, .. } => {
             if callee_ref.is_some() && method_ref.is_some() {
@@ -1948,8 +1523,8 @@ fn validate_hir_expr(
                     _ => panic("HIR call: callee type is not callable")
                 }
             }
-            validate_handled_evidence_uses(
-                callable_effects, handled_evidence, "call")
+            validate_effect_ctx_source_for_row(
+                callable_effects, effect_ctx, "call")
             match system_host {
                 some(host) => {
                     if method_ref.is_some() {
@@ -2035,6 +1610,8 @@ fn validate_hir_expr(
             }
             if h_constructor_kind(plan) != 0 ||
                h_constructor_fields(plan).len() != field_values.len() ||
+               !typed_effect_ctx_source_is_empty(
+                    h_constructor_effect_ctx(plan)) ||
                !symbol_ref_same(
                     executable_ref_named_symbol(
                         h_constructor_executable(plan)),
@@ -2093,23 +1670,24 @@ fn validate_hir_expr(
                 validate_hir_arm(arm, seen, scope, "catch arm")
             }
         },
-        HExpr::HandleExpr { body, handlers, installed_evidence, .. } => {
+        HExpr::HandleExpr { body, handlers, effect_ctx_install, .. } => {
             validate_hir_expr(body, seen, scope)
-            let mut installed_requirements: List<HandledEffectRef> = []
+            let mut installed_instances: List<TypedHandledEffectInstance> = []
             for handler in handlers {
                 if executable_ref_is_named(handler.executable_ref) {
                     panic("HIR effect handler: handler body executable is named")
                 }
-                match (handler.handled_ref, handler.operation_ref,
+                match (handler.handled_instance, handler.operation_ref,
                        handler.fail_ref) {
-                    (some(effect_ref), some(operation_ref), none) => {
-                        if !installed_requirements.any(fn(existing) {
-                                handled_effect_ref_same(existing, effect_ref)
+                    (some(instance), some(operation_ref), none) => {
+                        if !installed_instances.any(fn(existing) {
+                                typed_handled_effect_instance_same(
+                                    existing, instance)
                             }) {
-                            installed_requirements.push(effect_ref)
+                            installed_instances.push(instance)
                         }
                         if !handled_effect_ref_same(
-                                effect_ref,
+                                typed_handled_effect_instance_reference(instance),
                                 effect_operation_ref_effect(operation_ref)) {
                             panic("HIR effect handler: operation/effect identity drifted")
                         }
@@ -2119,17 +1697,29 @@ fn validate_hir_expr(
                     },
                     _ => panic("HIR effect handler: operation identity presence drifted")
                 }
-                validate_callable_handled_bindings(
-                    hexpr_effects(handler.body),
-                    handler.handled_evidence_bindings,
+                validate_callable_effect_ctx(
+                    hexpr_effects(handler.body), handler.effect_ctx,
                     handler.executable_ref, "handler")
-                for capture in handler.evidence_captures {
-                    if !executable_ref_same(
-                            handled_evidence_contract_owner(
-                                handled_evidence_capture_target(capture)),
-                            handler.executable_ref) {
-                        panic("HIR handler: evidence capture target owner differs")
-                    }
+                let parent_source = effect_ctx_parent_capture_source(
+                    handler.parent_ctx)
+                let parent_target = effect_ctx_parent_capture_target(
+                    handler.parent_ctx)
+                if !effect_ctx_ref_same(
+                        parent_target,
+                        typed_callable_effect_ctx_binding(
+                            handler.effect_ctx)) ||
+                   !executable_ref_same(
+                        effect_ctx_contract_owner(parent_target),
+                        handler.executable_ref) {
+                    panic("HIR handler: parent EffectCtx carrier differs")
+                }
+                match effect_ctx_install {
+                    some(install) => if !effect_ctx_ref_same(
+                            parent_source,
+                            typed_effect_ctx_install_parent(install)) {
+                        panic("HIR handler: parent EffectCtx source differs")
+                    },
+                    none => {}
                 }
                 let label = "handler '${handler.effect_name}.${handler.op_name}'"
                 push_hir_validation_scope(scope)
@@ -2146,20 +1736,27 @@ fn validate_hir_expr(
                 validate_hir_expr(handler.body, seen, scope)
                 pop_hir_validation_scope(scope)
             }
-            if installed_requirements.len() != installed_evidence.len() {
-                panic("HIR handle: installed evidence arity differs")
-            }
-            for index in 0..installed_requirements.len() {
-                if !handled_effect_ref_same(
-                        installed_requirements.get(index).unwrap(),
-                        handled_evidence_requirement(
-                            installed_evidence.get(index).unwrap())) {
-                    panic("HIR handle: installed evidence order differs")
+            match effect_ctx_install {
+                some(install) => {
+                    let entries = typed_effect_ctx_install_entries(install)
+                    if installed_instances.len() != entries.len() {
+                        panic("HIR handle: EffectCtx install arity differs")
+                    }
+                    for index in 0..installed_instances.len() {
+                        if !typed_handled_effect_instance_same(
+                                installed_instances.get(index).unwrap(),
+                                entries.get(index).unwrap()) {
+                            panic("HIR handle: EffectCtx install order differs")
+                        }
+                    }
+                },
+                none => if installed_instances.len() != 0 {
+                    panic("HIR handle: custom handler lacks EffectCtx install")
                 }
             }
         },
         HExpr::Lambda { executable_ref, params, captures,
-                        handled_evidence_bindings, evidence_captures,
+                        effect_ctx,
                         body, ty, .. } => {
             let mut capture_index = 0
             while capture_index < captures.len() {
@@ -2186,38 +1783,34 @@ fn validate_hir_expr(
                 Type::FnType { effects, .. } => effects,
                 _ => panic("HIR lambda: callable type is absent")
             }
-            validate_callable_handled_bindings(
-                lambda_effects, handled_evidence_bindings,
+            validate_callable_effect_ctx(
+                lambda_effects, effect_ctx,
                 executable_ref, "lambda")
-            for capture in evidence_captures {
-                if !executable_ref_same(
-                        handled_evidence_contract_owner(
-                            handled_evidence_capture_target(capture)),
-                        executable_ref) {
-                    panic("HIR lambda: evidence capture target owner differs")
-                }
-            }
             push_hir_validation_scope(scope)
             validate_hir_params(params, seen, scope, "lambda")
             validate_hir_expr(body, seen, scope)
             pop_hir_validation_scope(scope)
         },
         HExpr::EffectOp { operation_ref, fail_ref,
-                          handled_evidence, args, .. } => {
+                          effect_ctx_lookup, args, .. } => {
             match (operation_ref, fail_ref) {
                 (some(operation), none) => {
-                    if handled_evidence.len() != 1 ||
-                       !handled_effect_ref_same(
+                    let lookup = match effect_ctx_lookup {
+                        some(value) => value,
+                        none => panic(
+                            "HIR identity: effect operation lacks EffectCtx lookup")
+                    }
+                    if !handled_effect_ref_same(
                             effect_operation_ref_effect(operation),
-                            handled_evidence_requirement(
-                                handled_evidence.get(0).unwrap())) {
-                        panic("HIR identity: effect operation evidence differs")
+                            typed_handled_effect_instance_reference(
+                                typed_effect_ctx_lookup_instance(lookup))) {
+                        panic("HIR identity: effect operation lookup differs")
                     }
                 },
                 (none, some(exact_fail)) => {
                     let _ = h_fail_operation_tag(exact_fail)
-                    if handled_evidence.len() != 0 {
-                        panic("HIR identity: fail operation carries handled evidence")
+                    if effect_ctx_lookup.is_some() {
+                        panic("HIR identity: fail operation carries EffectCtx lookup")
                     }
                 },
                 _ => panic("HIR identity: effect operation domain is ambiguous/absent")
@@ -2276,11 +1869,225 @@ fn validate_hir_expr(
         },
         HExpr::UnsafeBlock { body, .. } =>
             validate_hir_expr(body, seen, scope),
-        HExpr::DictConstruct { plan, .. } => if plan.is_none() {
-            panic("HIR dictionary construct: exact plan is absent")
+        HExpr::DictConstruct { plan, .. } => match plan {
+            some(exact) => if !typed_effect_ctx_source_is_empty(
+                    h_dict_construct_effect_ctx(exact)) {
+                panic("HIR dictionary construct: generated helper ctx is not empty")
+            },
+            none => panic("HIR dictionary construct: exact plan is absent")
         },
         HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
         HExpr::StrLit { .. } | HExpr::BoolLit { .. } => {}
+    }
+}
+
+fn effect_ctx_lookup_is_available(
+    layout: TypedEffectCtxLayout,
+    installs: List<List<TypedHandledEffectInstance>>,
+    instance: TypedHandledEffectInstance
+) -> Bool {
+    let mut install_index = installs.len() - 1
+    while install_index >= 0 {
+        if installs.get(install_index).unwrap().any(fn(candidate) {
+                typed_handled_effect_instance_same(candidate, instance)
+            }) {
+            return true
+        }
+        install_index = install_index - 1
+    }
+    typed_effect_ctx_layout_entries(layout).any(fn(candidate) {
+        typed_handled_effect_instance_same(candidate, instance)
+    })
+}
+
+fn validate_effect_ctx_lookup_stmt(
+    value: HStmt, layout: TypedEffectCtxLayout,
+    mut installs: List<List<TypedHandledEffectInstance>>
+) {
+    match value {
+        HStmt::Let { init, .. } | HStmt::Var { init, .. } |
+        HStmt::ExprStmt { expr: init, .. } |
+        HStmt::LetDestructure { init, .. } =>
+            validate_effect_ctx_lookup_expr(init, layout, installs),
+        HStmt::Assign { target, value, .. } => {
+            validate_effect_ctx_lookup_expr(target, layout, installs)
+            validate_effect_ctx_lookup_expr(value, layout, installs)
+        },
+        HStmt::Return { value, .. } => match value {
+            some(expr) => validate_effect_ctx_lookup_expr(
+                expr, layout, installs),
+            none => {}
+        },
+        HStmt::While { condition, body, .. } => {
+            validate_effect_ctx_lookup_expr(condition, layout, installs)
+            validate_effect_ctx_lookup_expr(body, layout, installs)
+        },
+        HStmt::ForIn { iterable, body, .. } => {
+            validate_effect_ctx_lookup_expr(iterable, layout, installs)
+            validate_effect_ctx_lookup_expr(body, layout, installs)
+        },
+        HStmt::IfLet { expr, then_block, else_block, .. } => {
+            validate_effect_ctx_lookup_expr(expr, layout, installs)
+            validate_effect_ctx_lookup_expr(then_block, layout, installs)
+            match else_block {
+                some(branch) => validate_effect_ctx_lookup_expr(
+                    branch, layout, installs),
+                none => {}
+            }
+        },
+        HStmt::Drop { place_target, .. } => match place_target {
+            some(expr) => validate_effect_ctx_lookup_expr(
+                expr, layout, installs),
+            none => {}
+        },
+        HStmt::Break { .. } | HStmt::Continue { .. } => {}
+    }
+}
+
+fn validate_effect_ctx_lookup_expr(
+    value: HExpr, layout: TypedEffectCtxLayout,
+    mut installs: List<List<TypedHandledEffectInstance>>
+) {
+    match value {
+        HExpr::EffectOp { operation_ref: some(_),
+                          effect_ctx_lookup: some(lookup), args, .. } => {
+            if !effect_ctx_lookup_is_available(
+                    layout, installs,
+                    typed_effect_ctx_lookup_instance(lookup)) {
+                panic("HIR EffectCtx: named operation is outside fixed/install entries")
+            }
+            for arg in args {
+                validate_effect_ctx_lookup_expr(arg, layout, installs)
+            }
+        },
+        HExpr::EffectOp { args, .. } => for arg in args {
+            validate_effect_ctx_lookup_expr(arg, layout, installs)
+        },
+        HExpr::HandleExpr { body, handlers, effect_ctx_install, .. } => {
+            match effect_ctx_install {
+                some(install) => installs.push(
+                    typed_effect_ctx_install_entries(install)),
+                none => {}
+            }
+            validate_effect_ctx_lookup_expr(body, layout, installs)
+            match effect_ctx_install {
+                some(_) => { installs.pop() },
+                none => {}
+            }
+            for handler in handlers {
+                for capture in handler.captures {
+                    match capture.value {
+                        some(expr) => validate_effect_ctx_lookup_expr(
+                            expr, layout, installs),
+                        none => {}
+                    }
+                }
+                validate_effect_ctx_lookup_expr(
+                    handler.body,
+                    typed_callable_effect_ctx_layout(handler.effect_ctx), [])
+            }
+        },
+        HExpr::Lambda { captures, effect_ctx, body, .. } => {
+            for capture in captures {
+                match capture.value {
+                    some(expr) => validate_effect_ctx_lookup_expr(
+                        expr, layout, installs),
+                    none => {}
+                }
+            }
+            validate_effect_ctx_lookup_expr(
+                body, typed_callable_effect_ctx_layout(effect_ctx), [])
+        },
+        HExpr::Call { callee, args, .. } => {
+            validate_effect_ctx_lookup_expr(callee, layout, installs)
+            for arg in args {
+                validate_effect_ctx_lookup_expr(arg, layout, installs)
+            }
+        },
+        HExpr::BinOp { left, right, .. } => {
+            validate_effect_ctx_lookup_expr(left, layout, installs)
+            validate_effect_ctx_lookup_expr(right, layout, installs)
+        },
+        HExpr::UnaryOp { operand, .. } |
+        HExpr::FieldAccess { receiver: operand, .. } |
+        HExpr::Clone { inner: operand, .. } |
+        HExpr::Take { source: operand, .. } |
+        HExpr::UnsafeBlock { body: operand, .. } =>
+            validate_effect_ctx_lookup_expr(operand, layout, installs),
+        HExpr::StructLit { fields, spread, .. } => {
+            for field in fields {
+                validate_effect_ctx_lookup_expr(field.value, layout, installs)
+            }
+            match spread {
+                some(expr) => validate_effect_ctx_lookup_expr(
+                    expr, layout, installs),
+                none => {}
+            }
+        },
+        HExpr::NamedVariantConstruct { fields, spread, .. } => {
+            for field in fields {
+                validate_effect_ctx_lookup_expr(field.value, layout, installs)
+            }
+            match spread {
+                some(expr) => validate_effect_ctx_lookup_expr(
+                    expr, layout, installs),
+                none => {}
+            }
+        },
+        HExpr::MatchExpr { scrutinee, arms, .. } |
+        HExpr::TryCatch { body: scrutinee, arms, .. } => {
+            validate_effect_ctx_lookup_expr(scrutinee, layout, installs)
+            for arm in arms {
+                match arm.guard {
+                    some(guard) => validate_effect_ctx_lookup_expr(
+                        guard, layout, installs),
+                    none => {}
+                }
+                validate_effect_ctx_lookup_expr(arm.body, layout, installs)
+            }
+        },
+        HExpr::Block { stmts, tail, .. } => {
+            for stmt in stmts {
+                validate_effect_ctx_lookup_stmt(stmt, layout, installs)
+            }
+            match tail {
+                some(expr) => validate_effect_ctx_lookup_expr(
+                    expr, layout, installs),
+                none => {}
+            }
+        },
+        HExpr::IfExpr { condition, then_branch, else_branch, .. } => {
+            validate_effect_ctx_lookup_expr(condition, layout, installs)
+            validate_effect_ctx_lookup_expr(then_branch, layout, installs)
+            match else_branch {
+                some(expr) => validate_effect_ctx_lookup_expr(
+                    expr, layout, installs),
+                none => {}
+            }
+        },
+        HExpr::StringInterp { parts, .. } => for part in parts {
+            match part {
+                HStringInterpPart::Expression(expr) =>
+                    validate_effect_ctx_lookup_expr(expr, layout, installs),
+                HStringInterpPart::Literal(_) => {}
+            }
+        },
+        HExpr::ListLit { elements, .. } |
+        HExpr::TupleLit { elements, .. } => for expr in elements {
+            validate_effect_ctx_lookup_expr(expr, layout, installs)
+        },
+        HExpr::IndexExpr { receiver, index, .. } => {
+            validate_effect_ctx_lookup_expr(receiver, layout, installs)
+            validate_effect_ctx_lookup_expr(index, layout, installs)
+        },
+        HExpr::ReturnExpr { value, .. } => match value {
+            some(expr) => validate_effect_ctx_lookup_expr(
+                expr, layout, installs),
+            none => {}
+        },
+        HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
+        HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
+        HExpr::Ident { .. } | HExpr::DictConstruct { .. } => {}
     }
 }
 
@@ -2288,7 +2095,7 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
     for decl in decls {
         match decl {
             HDecl::Fn { name, def_id, executable_ref, impl_method_ref,
-                        params, body, .. } => {
+                        params, effects, effect_ctx, body, .. } => {
                 if !executable_ref_is_named(executable_ref) {
                     panic("HIR identity: function executable is not named")
                 }
@@ -2308,7 +2115,12 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                 let mut scope = new_hir_validation_scope()
                 validate_hir_params(
                     params, seen, scope, "function '${name}'")
+                validate_callable_effect_ctx(
+                    effects, effect_ctx, executable_ref,
+                    "function '${name}'")
                 validate_hir_expr(body, seen, scope)
+                validate_effect_ctx_lookup_expr(
+                    body, typed_callable_effect_ctx_layout(effect_ctx), [])
             },
             HDecl::Impl { owner_ref, provider_ref, trait_name, trait_ref,
                           delegate_plan, default_specializations,
@@ -2406,9 +2218,13 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     }
                 }
             },
-            HDecl::Test { body, .. } => {
+            HDecl::Test { executable_ref, effect_ctx, body, .. } => {
                 let mut scope = new_hir_validation_scope()
+                validate_callable_effect_ctx(
+                    hexpr_effects(body), effect_ctx, executable_ref, "test")
                 validate_hir_expr(body, seen, scope)
+                validate_effect_ctx_lookup_expr(
+                    body, typed_callable_effect_ctx_layout(effect_ctx), [])
             },
             HDecl::Trait { name, owner_ref, methods, .. } => {
                 if registered_trait_ref_display_name(owner_ref) != name {
@@ -2439,18 +2255,27 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     if method.has_default != method.body.is_some() {
                         panic("HIR identity: trait default/body relation drifted")
                     }
+                    validate_callable_effect_ctx(
+                        method.effects, method.effect_ctx,
+                        method.executable_ref,
+                        "trait method '${name}.${method.name}'")
                     match method.body {
                         some(body) => {
                             let mut scope = new_hir_validation_scope()
                             validate_hir_params(method.params, seen, scope,
                                 "trait default '${name}.${method.name}'")
                             validate_hir_expr(body, seen, scope)
+                            validate_effect_ctx_lookup_expr(
+                                body,
+                                typed_callable_effect_ctx_layout(
+                                    method.effect_ctx), [])
                         },
                         none => {}
                     }
                 }
             },
-            HDecl::Const { name, def_id, executable_ref, init, .. } => {
+            HDecl::Const { name, def_id, executable_ref,
+                           effect_ctx, init, .. } => {
                 if !executable_ref_is_named(executable_ref) {
                     panic("HIR identity: const executable is not named")
                 }
@@ -2460,7 +2285,12 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     none => {}
                 }
                 let mut scope = new_hir_validation_scope()
+                validate_callable_effect_ctx(
+                    hexpr_effects(init), effect_ctx, executable_ref,
+                    "const '${name}'")
                 validate_hir_expr(init, seen, scope)
+                validate_effect_ctx_lookup_expr(
+                    init, typed_callable_effect_ctx_layout(effect_ctx), [])
             },
             HDecl::ModBlock { decls: inner, .. } =>
                 validate_hir_decls(inner, seen),

@@ -11,8 +11,11 @@ use ir_identity::{
     HandledEffectRef, SystemEffectRef,
     handled_effect_ref_same, system_effect_ref_same
 }
-use ir_inventory::{ExecutableRef}
-use types::{EffectRow}
+use ir_inventory::{ExecutableRef, EffectCtxRef, effect_ctx_ref_same,
+    effect_ctx_binding, binder_entry_kind, binder_kind_tag,
+    binder_kind_effect_ctx_param, binder_kind_effect_ctx_local,
+    binder_kind_effect_ctx_parent_capture}
+use types::{Type, Effect, EffectRow, types_equal}
 
 pub struct EffectParamRef {
     owner: OriginRef,
@@ -41,6 +44,314 @@ pub fn effect_param_ref_same(
 ) -> Bool {
     origin_ref_same(left.owner, right.owner) &&
         left.ordinal == right.ordinal
+}
+
+// Complete TypedHIR identity for one handled-effect context entry.  The
+// nominal reference alone is deliberately insufficient: GenericProbe<Str>
+// and GenericProbe<Int> are distinct entries even when both are live.
+pub struct TypedHandledEffectInstance {
+    reference: HandledEffectRef,
+    type_arguments: List<Type>
+}
+
+pub fn make_typed_handled_effect_instance(
+    reference: HandledEffectRef, type_arguments: List<Type>
+) -> TypedHandledEffectInstance {
+    TypedHandledEffectInstance {
+        reference: reference,
+        type_arguments: type_arguments.map(fn(value) { value })
+    }
+}
+
+pub fn typed_handled_effect_instance_reference(
+    value: TypedHandledEffectInstance
+) -> HandledEffectRef { value.reference }
+
+pub fn typed_handled_effect_instance_type_arguments(
+    value: TypedHandledEffectInstance
+) -> List<Type> { value.type_arguments.map(fn(item) { item }) }
+
+pub fn typed_handled_effect_instance_same(
+    left: TypedHandledEffectInstance, right: TypedHandledEffectInstance
+) -> Bool {
+    if !handled_effect_ref_same(left.reference, right.reference) ||
+       left.type_arguments.len() != right.type_arguments.len() {
+        return false
+    }
+    let mut index = 0
+    while index < left.type_arguments.len() {
+        if !types_equal(
+                left.type_arguments.get(index).unwrap(),
+                right.type_arguments.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+pub fn typed_handled_effect_instances_from_row(
+    row: EffectRow
+) -> List<TypedHandledEffectInstance> {
+    let mut result: List<TypedHandledEffectInstance> = []
+    for atom in row.effects {
+        match atom {
+            Effect::CustomEffect { reference, type_args, .. } => {
+                let instance = make_typed_handled_effect_instance(
+                    reference, type_args)
+                if result.any(fn(existing) {
+                        typed_handled_effect_instance_same(existing, instance)
+                    }) {
+                    panic("typed effect context: callable entry repeats")
+                }
+                result.push(instance)
+            },
+            _ => {}
+        }
+    }
+    result
+}
+
+enum TypedEffectCtxLayoutValue {
+    EmptyEffectCtxLayout,
+    FixedEffectCtxLayout(List<TypedHandledEffectInstance>),
+    OpenEffectCtxLayout {
+        entries: List<TypedHandledEffectInstance>,
+        formal: EffectParamRef
+    }
+}
+
+// The variant itself is the empty/fixed/open marker.  No raw inference tail
+// crosses this contract and no downstream consumer may reclassify the row.
+pub struct TypedEffectCtxLayout { value: TypedEffectCtxLayoutValue }
+
+fn copy_typed_handled_effect_instances(
+    values: List<TypedHandledEffectInstance>
+) -> List<TypedHandledEffectInstance> {
+    values.map(fn(value) {
+        make_typed_handled_effect_instance(
+            value.reference, value.type_arguments)
+    })
+}
+
+fn validate_typed_effect_ctx_entries(
+    entries: List<TypedHandledEffectInstance>
+) {
+    let mut left = 0
+    while left < entries.len() {
+        let mut right = left + 1
+        while right < entries.len() {
+            if typed_handled_effect_instance_same(
+                    entries.get(left).unwrap(),
+                    entries.get(right).unwrap()) {
+                panic("typed effect context: exact entry repeats")
+            }
+            right = right + 1
+        }
+        left = left + 1
+    }
+}
+
+pub fn make_typed_effect_ctx_layout(
+    entries: List<TypedHandledEffectInstance>, formal: EffectParamRef?
+) -> TypedEffectCtxLayout {
+    validate_typed_effect_ctx_entries(entries)
+    let copied = copy_typed_handled_effect_instances(entries)
+    match formal {
+        some(parameter) => TypedEffectCtxLayout {
+            value: TypedEffectCtxLayoutValue::OpenEffectCtxLayout {
+                entries: copied, formal: parameter
+            }
+        },
+        none => if copied.len() == 0 {
+            TypedEffectCtxLayout {
+                value: TypedEffectCtxLayoutValue::EmptyEffectCtxLayout
+            }
+        } else {
+            TypedEffectCtxLayout {
+                value: TypedEffectCtxLayoutValue::FixedEffectCtxLayout(copied)
+            }
+        }
+    }
+}
+
+pub fn empty_typed_effect_ctx_layout() -> TypedEffectCtxLayout {
+    make_typed_effect_ctx_layout([], none)
+}
+
+pub fn typed_effect_ctx_layout_entries(
+    value: TypedEffectCtxLayout
+) -> List<TypedHandledEffectInstance> {
+    match value.value {
+        TypedEffectCtxLayoutValue::EmptyEffectCtxLayout => [],
+        TypedEffectCtxLayoutValue::FixedEffectCtxLayout(entries) =>
+            copy_typed_handled_effect_instances(entries),
+        TypedEffectCtxLayoutValue::OpenEffectCtxLayout { entries, .. } =>
+            copy_typed_handled_effect_instances(entries)
+    }
+}
+
+pub fn typed_effect_ctx_layout_formal(
+    value: TypedEffectCtxLayout
+) -> EffectParamRef? {
+    match value.value {
+        TypedEffectCtxLayoutValue::OpenEffectCtxLayout { formal, .. } =>
+            some(formal),
+        _ => none
+    }
+}
+
+pub fn typed_effect_ctx_layout_is_empty(
+    value: TypedEffectCtxLayout
+) -> Bool {
+    match value.value {
+        TypedEffectCtxLayoutValue::EmptyEffectCtxLayout => true,
+        _ => false
+    }
+}
+
+pub fn typed_effect_ctx_layout_same(
+    left: TypedEffectCtxLayout, right: TypedEffectCtxLayout
+) -> Bool {
+    let left_entries = typed_effect_ctx_layout_entries(left)
+    let right_entries = typed_effect_ctx_layout_entries(right)
+    if left_entries.len() != right_entries.len() { return false }
+    let mut index = 0
+    while index < left_entries.len() {
+        if !typed_handled_effect_instance_same(
+                left_entries.get(index).unwrap(),
+                right_entries.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    match (typed_effect_ctx_layout_formal(left),
+           typed_effect_ctx_layout_formal(right)) {
+        (some(a), some(b)) => effect_param_ref_same(a, b),
+        (none, none) => true,
+        _ => false
+    }
+}
+
+pub struct TypedCallableEffectCtx {
+    binding: EffectCtxRef,
+    layout: TypedEffectCtxLayout
+}
+
+pub fn make_typed_callable_effect_ctx(
+    binding: EffectCtxRef, layout: TypedEffectCtxLayout
+) -> TypedCallableEffectCtx {
+    let kind = binder_kind_tag(binder_entry_kind(effect_ctx_binding(binding)))
+    if kind != binder_kind_tag(binder_kind_effect_ctx_param()) &&
+       kind != binder_kind_tag(binder_kind_effect_ctx_parent_capture()) {
+        panic("typed effect context: callable binding is not borrowed")
+    }
+    TypedCallableEffectCtx { binding: binding, layout: layout }
+}
+
+pub fn typed_callable_effect_ctx_binding(
+    value: TypedCallableEffectCtx
+) -> EffectCtxRef { value.binding }
+
+pub fn typed_callable_effect_ctx_layout(
+    value: TypedCallableEffectCtx
+) -> TypedEffectCtxLayout { value.layout }
+
+enum TypedEffectCtxSourceValue {
+    EmptyEffectCtxSource,
+    BorrowedEffectCtxSource(EffectCtxRef)
+}
+
+pub struct TypedEffectCtxSource { value: TypedEffectCtxSourceValue }
+
+pub fn make_empty_effect_ctx_source() -> TypedEffectCtxSource {
+    TypedEffectCtxSource {
+        value: TypedEffectCtxSourceValue::EmptyEffectCtxSource
+    }
+}
+
+pub fn make_borrowed_effect_ctx_source(
+    context: EffectCtxRef
+) -> TypedEffectCtxSource {
+    TypedEffectCtxSource {
+        value: TypedEffectCtxSourceValue::BorrowedEffectCtxSource(context)
+    }
+}
+
+pub fn typed_effect_ctx_source_is_empty(
+    value: TypedEffectCtxSource
+) -> Bool {
+    match value.value {
+        TypedEffectCtxSourceValue::EmptyEffectCtxSource => true,
+        TypedEffectCtxSourceValue::BorrowedEffectCtxSource(_) => false
+    }
+}
+
+pub fn typed_effect_ctx_source_context(
+    value: TypedEffectCtxSource
+) -> EffectCtxRef {
+    match value.value {
+        TypedEffectCtxSourceValue::BorrowedEffectCtxSource(context) => context,
+        TypedEffectCtxSourceValue::EmptyEffectCtxSource =>
+            panic("typed effect context: empty source has no binding")
+    }
+}
+
+pub struct TypedEffectCtxLookup {
+    context: EffectCtxRef,
+    instance: TypedHandledEffectInstance
+}
+
+pub fn make_typed_effect_ctx_lookup(
+    context: EffectCtxRef, instance: TypedHandledEffectInstance
+) -> TypedEffectCtxLookup {
+    TypedEffectCtxLookup {
+        context: context, instance: instance
+    }
+}
+
+pub fn typed_effect_ctx_lookup_context(
+    value: TypedEffectCtxLookup
+) -> EffectCtxRef { value.context }
+
+pub fn typed_effect_ctx_lookup_instance(
+    value: TypedEffectCtxLookup
+) -> TypedHandledEffectInstance { value.instance }
+
+pub struct TypedEffectCtxInstall {
+    parent: EffectCtxRef,
+    child: EffectCtxRef,
+    entries: List<TypedHandledEffectInstance>
+}
+
+pub fn make_typed_effect_ctx_install(
+    parent: EffectCtxRef, child: EffectCtxRef,
+    entries: List<TypedHandledEffectInstance>
+) -> TypedEffectCtxInstall {
+    if effect_ctx_ref_same(parent, child) || entries.len() == 0 ||
+       binder_kind_tag(binder_entry_kind(effect_ctx_binding(child))) !=
+            binder_kind_tag(binder_kind_effect_ctx_local()) {
+        panic("typed effect context: invalid owned child install")
+    }
+    validate_typed_effect_ctx_entries(entries)
+    TypedEffectCtxInstall {
+        parent: parent, child: child,
+        entries: copy_typed_handled_effect_instances(entries)
+    }
+}
+
+pub fn typed_effect_ctx_install_parent(
+    value: TypedEffectCtxInstall
+) -> EffectCtxRef { value.parent }
+
+pub fn typed_effect_ctx_install_child(
+    value: TypedEffectCtxInstall
+) -> EffectCtxRef { value.child }
+
+pub fn typed_effect_ctx_install_entries(
+    value: TypedEffectCtxInstall
+) -> List<TypedHandledEffectInstance> {
+    copy_typed_handled_effect_instances(value.entries)
 }
 
 // One canonical TypedHIR definition-header relation.  The raw tail remains a
@@ -509,14 +820,14 @@ pub fn core_effect_instantiation_substitutions(
 pub fn core_effect_instantiation_result(
     value: CoreEffectInstantiation
 ) -> CoreEffectContract { copy_core_effect_contract(value.result) }
-pub fn core_effect_contract_handled_requirements(
+pub fn core_effect_contract_handled_instances(
     value: CoreEffectContract
-) -> List<HandledEffectRef> {
-    let mut result: List<HandledEffectRef> = []
+) -> List<CoreEffectAtom> {
+    let mut result: List<CoreEffectAtom> = []
     for atom in value.exact.atoms {
         match atom.value {
-            CoreEffectAtomValue::HandledEffectValue { effect_ref, .. } =>
-                result.push(effect_ref),
+            CoreEffectAtomValue::HandledEffectValue { .. } =>
+                result.push(atom),
             _ => {}
         }
     }

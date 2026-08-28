@@ -998,9 +998,9 @@ const BINDER_PATTERN_PROJECTION: Int = 17
 const BINDER_SCOPE_RESULT: Int = 18
 const BINDER_CONTROL_RESULT: Int = 19
 const BINDER_ASSIGN_TEMP: Int = 20
-const BINDER_HANDLED_EVIDENCE_PARAM: Int = 21
-const BINDER_HANDLED_EVIDENCE_LOCAL: Int = 22
-const BINDER_HANDLED_EVIDENCE_CAPTURE: Int = 23
+const BINDER_EFFECT_CTX_PARAM: Int = 21
+const BINDER_EFFECT_CTX_LOCAL: Int = 22
+const BINDER_EFFECT_CTX_PARENT_CAPTURE: Int = 23
 const BINDER_DICTIONARY_EVIDENCE_PARAM: Int = 24
 const BINDER_KIND_COUNT: Int = 25
 
@@ -1044,24 +1044,24 @@ pub fn binder_kind_pattern_projection() -> BinderKind { binder_kind_from_tag(BIN
 pub fn binder_kind_scope_result() -> BinderKind { binder_kind_from_tag(BINDER_SCOPE_RESULT) }
 pub fn binder_kind_control_result() -> BinderKind { binder_kind_from_tag(BINDER_CONTROL_RESULT) }
 pub fn binder_kind_assign_temp() -> BinderKind { binder_kind_from_tag(BINDER_ASSIGN_TEMP) }
-pub fn binder_kind_handled_evidence_param() -> BinderKind {
-    binder_kind_from_tag(BINDER_HANDLED_EVIDENCE_PARAM)
+pub fn binder_kind_effect_ctx_param() -> BinderKind {
+    binder_kind_from_tag(BINDER_EFFECT_CTX_PARAM)
 }
-pub fn binder_kind_handled_evidence_local() -> BinderKind {
-    binder_kind_from_tag(BINDER_HANDLED_EVIDENCE_LOCAL)
+pub fn binder_kind_effect_ctx_local() -> BinderKind {
+    binder_kind_from_tag(BINDER_EFFECT_CTX_LOCAL)
 }
-pub fn binder_kind_handled_evidence_capture() -> BinderKind {
-    binder_kind_from_tag(BINDER_HANDLED_EVIDENCE_CAPTURE)
+pub fn binder_kind_effect_ctx_parent_capture() -> BinderKind {
+    binder_kind_from_tag(BINDER_EFFECT_CTX_PARENT_CAPTURE)
 }
 pub fn binder_kind_dictionary_evidence_param() -> BinderKind {
     binder_kind_from_tag(BINDER_DICTIONARY_EVIDENCE_PARAM)
 }
 
-fn binder_kind_is_handled_evidence(kind: BinderKind) -> Bool {
+fn binder_kind_is_effect_ctx(kind: BinderKind) -> Bool {
     let tag = binder_kind_tag(kind)
-    tag == BINDER_HANDLED_EVIDENCE_PARAM ||
-        tag == BINDER_HANDLED_EVIDENCE_LOCAL ||
-        tag == BINDER_HANDLED_EVIDENCE_CAPTURE
+    tag == BINDER_EFFECT_CTX_PARAM ||
+        tag == BINDER_EFFECT_CTX_LOCAL ||
+        tag == BINDER_EFFECT_CTX_PARENT_CAPTURE
 }
 
 fn binder_kind_is_source(kind: BinderKind) -> Bool {
@@ -1132,8 +1132,8 @@ pub fn make_source_binder_entry(
 pub fn make_synthetic_binder_entry(
     slot: SlotRef, owner: ExecutableRef, kind: BinderKind, site: PathRef
 ) -> BinderEntry {
-    if binder_kind_is_handled_evidence(kind) {
-        panic("IR inventory: handled evidence requires semantic binder constructor")
+    if binder_kind_is_effect_ctx(kind) {
+        panic("IR inventory: effect context requires semantic binder constructor")
     }
     if binder_kind_is_source(kind) {
         panic("IR inventory: source BinderEntry activation is deferred")
@@ -1154,19 +1154,18 @@ pub fn make_synthetic_binder_entry(
     BinderEntry { slot: slot, owner: owner, kind: kind, site: site }
 }
 
-// Hidden handled evidence is semantic Core input but has no source spelling
-// or source DefId.  This narrow constructor is the only pre-Flow authority
-// allowed to pair a deterministic synthetic SlotRef with the three evidence
-// binder domains.
-pub fn make_semantic_evidence_binder(
+// EffectCtx is semantic Core input but has no source spelling or source DefId.
+// This narrow constructor is the only pre-Flow authority allowed to pair a
+// deterministic synthetic SlotRef with the three context binder domains.
+pub fn make_semantic_effect_ctx_binder(
     slot: SlotRef, owner: ExecutableRef, kind: BinderKind, site: PathRef
 ) -> BinderEntry {
-    if !binder_kind_is_handled_evidence(kind) || slot_ref_is_source(slot) ||
+    if !binder_kind_is_effect_ctx(kind) || slot_ref_is_source(slot) ||
        !executable_ref_contains_path(owner, site) ||
        !path_role_same(
             path_ref_role(site), binder_kind_expected_path_role(kind)) ||
        !path_ref_same(slot_ref_synthetic_path(slot), site) {
-        panic("IR inventory: invalid semantic handled-evidence binder")
+        panic("IR inventory: invalid semantic effect-context binder")
     }
     BinderEntry { slot: slot, owner: owner, kind: kind, site: site }
 }
@@ -1176,83 +1175,85 @@ pub fn binder_entry_owner(value: BinderEntry) -> ExecutableRef { value.owner }
 pub fn binder_entry_kind(value: BinderEntry) -> BinderKind { value.kind }
 pub fn binder_entry_site(value: BinderEntry) -> PathRef { value.site }
 
-pub struct HandledEvidenceRef {
-    requirement: HandledEffectRef,
+pub struct EffectCtxRef {
     binding: BinderEntry,
-    contract_owner: ExecutableRef,
-    ordinal: Int
+    contract_owner: ExecutableRef
 }
 
-pub fn make_handled_evidence_ref(
-    requirement: HandledEffectRef, binding: BinderEntry,
-    contract_owner: ExecutableRef, ordinal: Int
-) -> HandledEvidenceRef {
-    if ordinal < 0 || !binder_kind_is_handled_evidence(binding.kind) ||
+pub fn make_effect_ctx_ref(
+    binding: BinderEntry, contract_owner: ExecutableRef
+) -> EffectCtxRef {
+    if !binder_kind_is_effect_ctx(binding.kind) ||
        !executable_ref_same(binding.owner, contract_owner) {
-        panic("IR inventory: invalid handled evidence contract binding")
+        panic("IR inventory: invalid effect-context contract binding")
     }
-    HandledEvidenceRef {
-        requirement: requirement, binding: binding,
-        contract_owner: contract_owner, ordinal: ordinal
+    EffectCtxRef {
+        binding: binding, contract_owner: contract_owner
     }
 }
 
-pub fn handled_evidence_requirement(
-    value: HandledEvidenceRef
-) -> HandledEffectRef { value.requirement }
-pub fn handled_evidence_binding(
-    value: HandledEvidenceRef
+// Canonical identity for the one borrowed EffectCtx parameter carried by an
+// ordinary Ring callable.  TypedHIR and exact generated-callable producers
+// share this constructor; labels, ordinals, and paths are not caller inputs.
+pub fn make_effect_ctx_parameter_ref(
+    executable: ExecutableRef
+) -> EffectCtxRef {
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("effect-ctx-param:0")
+    let site = make_path_ref(owner, child_path, path_role_parameter())
+    make_effect_ctx_ref(
+        make_semantic_effect_ctx_binder(
+            make_synthetic_slot_ref(site), executable,
+            binder_kind_effect_ctx_param(), site),
+        executable)
+}
+
+pub fn effect_ctx_binding(
+    value: EffectCtxRef
 ) -> BinderEntry { value.binding }
-pub fn handled_evidence_slot(value: HandledEvidenceRef) -> SlotRef {
+pub fn effect_ctx_slot(value: EffectCtxRef) -> SlotRef {
     value.binding.slot
 }
-pub fn handled_evidence_contract_owner(
-    value: HandledEvidenceRef
+pub fn effect_ctx_contract_owner(
+    value: EffectCtxRef
 ) -> ExecutableRef { value.contract_owner }
-pub fn handled_evidence_ordinal(value: HandledEvidenceRef) -> Int {
-    value.ordinal
-}
-pub fn handled_evidence_ref_same(
-    left: HandledEvidenceRef, right: HandledEvidenceRef
+pub fn effect_ctx_ref_same(
+    left: EffectCtxRef, right: EffectCtxRef
 ) -> Bool {
-    handled_effect_ref_same(left.requirement, right.requirement) &&
-        slot_ref_same(left.binding.slot, right.binding.slot) &&
+    slot_ref_same(left.binding.slot, right.binding.slot) &&
         executable_ref_same(left.contract_owner, right.contract_owner) &&
-        left.ordinal == right.ordinal &&
         path_ref_same(left.binding.site, right.binding.site)
 }
 
-pub struct HandledEvidenceCapture {
-    requirement: HandledEffectRef,
-    source: HandledEvidenceRef,
-    target: HandledEvidenceRef
+pub struct EffectCtxParentCapture {
+    source: EffectCtxRef,
+    target: EffectCtxRef
 }
 
-pub fn make_handled_evidence_capture(
-    requirement: HandledEffectRef,
-    source: HandledEvidenceRef, target: HandledEvidenceRef
-) -> HandledEvidenceCapture {
-    if !handled_effect_ref_same(
-            requirement, source.requirement) ||
-       !handled_effect_ref_same(requirement, target.requirement) ||
+pub fn make_effect_ctx_parent_capture(
+    source: EffectCtxRef, target: EffectCtxRef
+) -> EffectCtxParentCapture {
+    if
        binder_kind_tag(target.binding.kind) !=
-            BINDER_HANDLED_EVIDENCE_CAPTURE ||
+            BINDER_EFFECT_CTX_PARENT_CAPTURE ||
        slot_ref_same(source.binding.slot, target.binding.slot) {
-        panic("IR inventory: invalid handled evidence capture")
+        panic("IR inventory: invalid effect-context parent capture")
     }
-    HandledEvidenceCapture {
-        requirement: requirement, source: source, target: target }
+    EffectCtxParentCapture { source: source, target: target }
 }
 
-pub fn handled_evidence_capture_requirement(
-    value: HandledEvidenceCapture
-) -> HandledEffectRef { value.requirement }
-pub fn handled_evidence_capture_source(
-    value: HandledEvidenceCapture
-) -> HandledEvidenceRef { value.source }
-pub fn handled_evidence_capture_target(
-    value: HandledEvidenceCapture
-) -> HandledEvidenceRef { value.target }
+pub fn effect_ctx_parent_capture_source(
+    value: EffectCtxParentCapture
+) -> EffectCtxRef { value.source }
+pub fn effect_ctx_parent_capture_target(
+    value: EffectCtxParentCapture
+) -> EffectCtxRef { value.target }
 
 fn copy_binder_entries(values: List<BinderEntry>) -> List<BinderEntry> {
     let mut result: List<BinderEntry> = []
