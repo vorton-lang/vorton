@@ -59,7 +59,7 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     compiler_owned_extern_manifest_entry,
     install_method_core, replace_impl_method_core,
     impl_method_core_as_scheme, impl_method_core_from_scheme,
-    impl_method_core_type,
+    impl_method_core_type, impl_method_core_effect_schema,
     build_type_var_map, ordered_effect_tail_vars,
     build_definition_effect_header_schema,
     validate_effect_header_schema,
@@ -1408,6 +1408,9 @@ fn check_impl_decl_canonical(
                         generated_executable,
                         ctx.sink, ctx.env, impl_bounds,
                         impl_owner, core, signature, ctx.subst, span)
+                    publish_exact_callable_effect_header(
+                        ctx, generated_executable, signature,
+                        impl_method_core_effect_schema(core))
                     default_specializations.push(
                         make_h_default_specialization_plan(
                             selected_owner, generated_method,
@@ -2191,6 +2194,20 @@ fn expand_delegate_impls(
                                                 parameter_types.push(parameter.ty)
                                                 binder_index = binder_index + 1
                                             }
+                                            let generated_schema = match
+                                                    resolved_method_scheme {
+                                                some(scheme) =>
+                                                    scheme.effect_schema,
+                                                none => panic(
+                                                    "delegate HIR: generated effect schema is absent")
+                                            }
+                                            publish_exact_callable_effect_header(
+                                                ctx, generated_executable,
+                                                Type::FnType {
+                                                    params: parameter_types,
+                                                    return_type: ret_ty,
+                                                    effects: eff
+                                                }, generated_schema)
                                             delegate_method_plans.push(
                                                 make_h_delegate_method_plan(
                                                     tm.method_ref,
