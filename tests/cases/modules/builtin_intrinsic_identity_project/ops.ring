@@ -28,3 +28,10 @@ pub fn project_compare(
 ) -> Int with {ProjectStep} {
     ProjectStep.apply(left - right)
 }
+
+pub fn project_compare_two(
+    left: Int,
+    right: Int
+) -> Int with {ProjectStep, ProjectScale} {
+    ProjectScale.apply(ProjectStep.apply(left - right))
+}

@@ -1,5 +1,5 @@
 use ops::{scalar_text, option_value, ProjectStep, ProjectScale,
-    project_one, project_two, project_compare}
+    project_one, project_two, project_compare, project_compare_two}
 
 fn main() {
     let cell = Cell(option_value(5))
@@ -84,6 +84,26 @@ fn main() {
     assert(sort_complete == 1 && sort_calls > 0 &&
         values[0] == 1 && values[2] == 3,
         "project sort forwards its current context across modules")
+
+    let mut two_values = [6, 4, 5]
+    let mut project_order_hits = 0
+    let mut project_scale_hits = 0
+    let two_sort_complete = handle {
+        two_values.sort_by(project_compare_two)
+        1
+    } with {
+        ProjectStep.apply(value) => {
+            project_order_hits = project_order_hits + 1
+            value
+        },
+        ProjectScale.apply(value) => {
+            project_scale_hits = project_scale_hits + 1
+            value * 2
+        },
+    }
+    assert(two_sort_complete == 1 && project_order_hits > 0 &&
+        project_scale_hits > 0 && two_values[0] == 4 && two_values[2] == 6,
+        "project sort forwards two exact handled entries across modules")
 
     print("${scalar_text(7, 2.5)}|${cell.get()}")
 }
