@@ -43,8 +43,9 @@ Map、Set、tuple 与 recursive 八个资源形态都必须各自产生 E0801，
 `Wrapper<Int>` 的 `plain` 必须不被误报；旧 native stdout 观测已退役，
 不再是 fixture 或 PASS 证据。D1 现以两个同签名 handled effect
 验证 evidence 顺序，终态 stdout 为 `D_HANDLED_HOF_OK:1235`；D3 以同一个
-open HOF formal 分别实例化 pure 与 handled row，终态 stdout 为
-`D_GENERALIZED_TAIL_OK:6/12`。D1、D3 在 updated aggregate compiler 上尚未
+open HOF formal 分别实例化 pure、一个与两个 handled effect，并覆盖
+fixed-handled + formal，终态 stdout 为 `D_GENERALIZED_TAIL_OK:6/12/24/17`。
+D1、D3 在 updated aggregate compiler 上尚未
 运行，不能沿用旧 fixture 的 native 绿色。详细期望与 furthest phase 见
 manifest。B3 还逐字校验实际 reuse token 的行列，禁止退回 owner declaration span。
 

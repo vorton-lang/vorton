@@ -260,7 +260,9 @@
         "closed pure HOF",
         "closed console HOF",
         "pure and console same-signature callable identity",
-        "system extern function value"
+        "pure and system-only Ring callables execute through the uniform empty context",
+        "SystemEffectRef contributes zero handled context entries",
+        "system extern function value uses a Ring wrapper without changing the HostImport leaf ABI"
       ],
       "expected": {
         "phase": "native",
@@ -272,14 +274,15 @@
       "id": "D3",
       "path": "single/d_generalized_effect_tail.ring",
       "covers": [
-        "one open HOF formal instantiates a pure callback",
-        "the same formal independently instantiates a custom-effect callback",
-        "pure and effectful owner outputs are distinguishable"
+        "one open HOF formal independently instantiates pure, one-effect, and two-effect callbacks",
+        "the two handled effects share an operation signature but retain exact entries",
+        "one callable combines a fixed handled entry with the callback effect formal",
+        "pure, one-effect, two-effect, and fixed-plus-formal outputs are distinguishable"
       ],
       "expected": {
         "phase": "native",
         "status": "pass",
-        "stdout": "D_GENERALIZED_TAIL_OK:6/12\n"
+        "stdout": "D_GENERALIZED_TAIL_OK:6/12/24/17\n"
       }
     },
     {
@@ -310,9 +313,11 @@
       "covers": [
         "Box<fn> actual and fallback branches preserve distinct exact effects and results",
         "positional and named enum fields preserve distinct exact callable effects and results",
+        "struct and enum constructor paths receive the uniform Ring callable context",
         "effect operation callable parameter and result preserve distinct exact effects and results",
         "generic fail<T> preserves its nested callable exact effect and result",
-        "generic custom-effect payload preserves its nested callable exact effect and result"
+        "generic custom-effect payload preserves its nested callable exact effect and result",
+        "nested callable formals transport exact handled context entries"
       ],
       "expected": {
         "phase": "native",
@@ -332,7 +337,8 @@
       "covers": [
         "two dependency-local raw effect tails remain distinct",
         "same-origin base callable survives a dependency diamond",
-        "alpha-before-beta import order"
+        "alpha-before-beta import order",
+        "cross-module re-exported open HOF forwards the typed context"
       ],
       "expected": {
         "phase": "native",
@@ -352,7 +358,8 @@
       "covers": [
         "two dependency-local raw effect tails remain distinct",
         "same-origin base callable survives a dependency diamond",
-        "beta-before-alpha import order"
+        "beta-before-alpha import order",
+        "cross-module re-exported open HOF forwards the typed context"
       ],
       "expected": {
         "phase": "native",
@@ -409,7 +416,8 @@
       "covers": [
         "inherent impl singleton self recursion",
         "inherent impl mutual-method recursion",
-        "method SCC callback effect formals preserve pure and handled behavior"
+        "method SCC callback effect formals preserve pure and handled behavior",
+        "direct inherent method and recursive peer calls forward the current context"
       ],
       "expected": {
         "phase": "native",
@@ -440,7 +448,9 @@
         "two factory layers remain creation-pure across nested handler rebinding",
         "nested same-effect handlers select the innermost evidence and restore the outer evidence",
         "runtime handler arm receives surrounding evidence for its open callback tail",
-        "indirect generic call orders closure env, Hash dictionary, and handled evidence"
+        "direct named and indirect closure calls share the current typed context",
+        "indirect generic call orders closure env, Hash dictionary, and EffectCtx",
+        "first-class generic Hash dispatch exercises the runtime builtin trait closure before EffectCtx"
       ],
       "expected": {
         "phase": "native",
@@ -454,7 +464,8 @@
       "covers": [
         "one generic callable carries fixed mut<T> plus an open callback tail",
         "Int/mut<Str> and Str/mut<Int> instances reverse same-kind atom order",
-        "type and effect actuals come from instantiation rather than residual reconstruction"
+        "type and effect actuals come from instantiation rather than residual reconstruction",
+        "fixed non-handled atoms keep the uniform context at zero handled entries"
       ],
       "expected": {
         "phase": "native",
