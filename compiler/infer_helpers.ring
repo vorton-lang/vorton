@@ -28,6 +28,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     fn_bound_dict_ref,
     type_error, unify_at, resolve_relative_qualifier,
     resolve_dict_ref_for_type, resolve_dicts_from_scheme, variant_ctor_origin,
+    instantiate_callable_scheme, instantiate_callable_impl_method,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
     current_executable_owner, current_dictionary_evidence_owner}
 use ir_identity::{IntrinsicRef, ImplMethodRef,
@@ -352,7 +353,7 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
             let mod_scheme = ctx.env.lookup(qualified_name)
             match mod_scheme {
                 some(ms) => {
-                    let t = ctx.env.instantiate(ms)
+                    let t = instantiate_callable_scheme(ctx, ms)
                     let actual_name = exact_value_origin(ctx, qualified_name, ms)
                     return InferResult {
                         hexpr: make_inferred_ident(
@@ -370,7 +371,7 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
                         let full_scheme = ctx.env.lookup(full_qualified)
                         match full_scheme {
                             some(fs) => {
-                                let t = ctx.env.instantiate(fs)
+                                let t = instantiate_callable_scheme(ctx, fs)
                                 let actual_name = exact_value_origin(ctx, full_qualified, fs)
                                 return InferResult {
                                     hexpr: make_inferred_ident(
@@ -414,7 +415,7 @@ pub fn infer_ident(mut ctx: InferCtx, name: Str, span: Span, subst: UnionFind, q
             }
         },
         some(s) => {
-            let t = ctx.env.instantiate(s)
+            let t = instantiate_callable_scheme(ctx, s)
             // Auto-boxing: mark mutable vars captured by closures
             match s.def_id {
                 some(did) => {
@@ -1055,8 +1056,8 @@ pub fn lookup_impl_method(mut ctx: InferCtx, type_name: Str, method: Str) -> Met
             ) {
                 some(owner) => match owner.method_schemes.get(method) {
                     some(core) => MethodLookupResult {
-                        method_type: some(
-                            ctx.env.instantiate_impl_method_core(owner, core)),
+                        method_type: some(instantiate_callable_impl_method(
+                            ctx, owner, core, method_ref)),
                         method_core: some(core),
                         impl_owner: some(owner),
                         impl_method_ref: some(method_ref),
@@ -1199,14 +1200,20 @@ pub fn lookup_trait_method(mut ctx: InferCtx, type_name: Str, method: Str, span:
                                     none => {
                                         match impl_entry.method_schemes.get(method) {
                                             some(core) => {
+                                                let method_ref = match
+                                                        impl_entry.method_refs.get(method) {
+                                                    some(value) => value,
+                                                    none => panic(
+                                                        "trait method lookup: owner lost exact method ref")
+                                                }
                                                 found = MethodLookupResult {
                                                     method_type: some(
-                                                        ctx.env.instantiate_impl_method_core(
-                                                            impl_entry, core)),
+                                                        instantiate_callable_impl_method(
+                                                            ctx, impl_entry, core,
+                                                            method_ref)),
                                                     method_core: some(core),
                                                     impl_owner: some(impl_entry),
-                                                    impl_method_ref:
-                                                        impl_entry.method_refs.get(method),
+                                                    impl_method_ref: some(method_ref),
                                                     intrinsic_ref:
                                                         impl_entry.method_intrinsics.get(method)
                                                 }

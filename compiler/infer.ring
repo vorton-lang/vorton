@@ -43,8 +43,7 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
     ImplMethodSchemeCore, TypeAliasDef,
     BuiltInKind, mono, apply_subst, apply_subst_row, apply_subst_map,
     build_scheme_var_map, impl_method_core_as_scheme,
-    freshen_effect_header, freshen_effect_header_types,
-    freshen_effect_scheme_header,
+    instantiate_effect_header_schema,
     instantiate_trait_method_signature,
     find_impl, lookup_variant, compiler_owned_extern_manifest_entry}
 use extern_manifest::{
@@ -62,6 +61,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     resolve_or_defer_dicts_from_scheme,
     resolve_or_defer_dicts_from_impl_owner,
     register_callable_value_shadow,
+    instantiate_callable_scheme, instantiate_callable_impl_method,
     pending_dict_checkpoint, has_pending_dicts_since,
     remove_fail_effect,
     generalize, free_type_vars, resolve_relative_qualifier,
@@ -70,7 +70,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     enter_executable_owner, exit_executable_owner,
     current_executable_owner, current_dictionary_evidence_owner,
     local_effect_header_origin,
-    register_exact_effect_header, register_exact_callable_effect_header,
+    define_exact_effect_header, publish_exact_callable_effect_header,
     inherit_dictionary_evidence_owner,
     resolve_handled_evidence, install_handled_evidence,
     uninstall_handled_evidence,
@@ -677,13 +677,17 @@ fn select_for_protocol_method(
     mut ctx: InferCtx, impl_entry: ImplEntry, method: Str, span: Span
 ) -> MethodCallSelection {
     let impl_core = for_protocol_method_scheme(ctx, impl_entry, method, span)
-    let registered_method = ctx.env.instantiate_impl_method_core(
-        impl_entry, impl_core)
+    let method_ref = match impl_entry.method_refs.get(method) {
+        some(value) => value,
+        none => panic("iteration protocol: method has no exact ImplMethodRef")
+    }
+    let registered_method = instantiate_callable_impl_method(
+        ctx, impl_entry, impl_core, method_ref)
     MethodCallSelection {
         method_type: some(registered_method),
         method_core: some(impl_core),
         impl_owner: some(impl_entry),
-        impl_method_ref: impl_entry.method_refs.get(method),
+        impl_method_ref: some(method_ref),
         intrinsic_ref: impl_entry.method_intrinsics.get(method)
     }
 }
@@ -729,8 +733,15 @@ fn for_protocol_assoc_type(
         for_protocol_method_scheme(ctx, impl_entry, method, span))
     let instantiated_method = for_protocol_call_method_type(ctx, call, span)
     let var_map = build_scheme_var_map(scheme, instantiated_method)
+    let assoc_schema = match
+            impl_entry.assoc_type_effect_schemas.get(assoc_name) {
+        some(value) => value,
+        none => panic("iteration protocol: assoc effect schema is absent")
+    }
+    let localized_assoc = instantiate_effect_header_schema(
+        ctx.env, [raw_assoc], assoc_schema).0.get(0).unwrap()
     apply_subst(subst, apply_subst_map(
-        var_map, freshen_effect_header(ctx.env, raw_assoc)))
+        var_map, localized_assoc))
 }
 
 pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult {
@@ -771,8 +782,7 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             let scheme = if ftv.len() == 0 || init_has_bounds || init_has_pending {
                 mono(resolved)
             } else {
-                freshen_effect_scheme_header(
-                    ctx.env, generalize(ctx.env, resolved, s))
+                generalize(ctx.env, resolved, s)
             }
             ctx.env.bind(name, scheme)
             let bound_scheme = ctx.env.lookup(name)
@@ -783,9 +793,12 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                             ctx.env.record_def_span(did, name_span)
                             ctx.env.scope.let_defs.insert(did)
                             ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
-                            register_exact_effect_header(
+                            let schema = define_exact_effect_header(
                                 ctx, local_effect_header_origin(ctx, did),
-                                [bs.ty])
+                                [bs.ty], bs.type_vars)
+                            ctx.env.rebind(name, TypeScheme {
+                                ..bs, effect_schema: schema
+                            })
                             some(did)
                         },
                         none => none
@@ -1805,7 +1818,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 some(scheme) => scheme,
                 none => panic("unreachable: canonical prelude map_get_panic is missing")
             }
-            let callee_ty = ctx.env.instantiate(callee_scheme)
+            let callee_ty = instantiate_callable_scheme(ctx, callee_scheme)
             let callee = HExpr::Ident {
                 name: callee_name, resolved_name: none,
                 def_id: callee_scheme.def_id, source_slot: none,
@@ -2572,8 +2585,9 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
     let mut raw_signature: List<Type> = []
     for pt in op.params { raw_signature.push(pt) }
     raw_signature.push(op.return_type)
-    let fresh_header = freshen_effect_header_types(ctx.env, raw_signature)
-    let instantiated_signature = fresh_header.map(fn(value) {
+    let localized_header = instantiate_effect_header_schema(
+        ctx.env, raw_signature, op.effect_schema)
+    let instantiated_signature = localized_header.0.map(fn(value) {
         apply_subst_map(inst_map, value)
     })
     let mut inst_params: List<Type> = []
@@ -2683,9 +2697,12 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
                                 }
                                 fi = fi + 1
                             }
+                            let field_schema = struct_def.field_effect_schemas.get(
+                                found_field.field_index).unwrap()
+                            let localized = instantiate_effect_header_schema(
+                                ctx.env, [found_field.ty], field_schema)
                             field_type = apply_subst_map(
-                                inst_map, freshen_effect_header(
-                                    ctx.env, found_field.ty))
+                                inst_map, localized.0.get(0).unwrap())
                         },
                         none => { let _ = type_error(ctx.sink, E0304,
                             "Struct ${name} has no field ${field}",
@@ -2924,8 +2941,12 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
         let def_field = struct_def.fields.find(fn(f) { f.name == field.name })
         match def_field {
             some(df) => {
+                let field_schema = struct_def.field_effect_schemas.get(
+                    df.field_index).unwrap()
+                let localized = instantiate_effect_header_schema(
+                    ctx.env, [df.ty], field_schema)
                 let ft = apply_subst_map(
-                    inst_map, freshen_effect_header(ctx.env, df.ty))
+                    inst_map, localized.0.get(0).unwrap())
                 let field_notes: List<DiagnosticNote> = [
                     DiagnosticNote { message: "field '${field.name}' of struct '${name}' expects type '${type_to_string(ft)}'", span: some(field.span) },
                     DiagnosticNote { message: "provided value has type '${type_to_string(apply_subst(s, hexpr_type(fr.hexpr)))}'", span: some(hexpr_span(fr.hexpr)) }
@@ -3028,8 +3049,14 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
             some(idx) => match (variant.fields.get(idx),
                                 exact_field_refs.get(idx)) {
                 (some(ftype), some(field_ref)) => {
+                    let variant_index = enum_def.variant_index.get(
+                        variant_name).unwrap()
+                    let field_schema = enum_def.variant_field_effect_schemas.get(
+                        variant_index).unwrap().get(idx).unwrap()
+                    let localized = instantiate_effect_header_schema(
+                        ctx.env, [ftype], field_schema)
                     let ft = apply_subst_map(
-                        inst_map, freshen_effect_header(ctx.env, ftype))
+                        inst_map, localized.0.get(0).unwrap())
                     s = unify_at(ctx.sink, ctx.env, hexpr_type(fr.hexpr), ft, s, span)
                     hfields.push(HStructFieldInit {
                         name: field.name, field_ref: field_ref,
@@ -3983,12 +4010,6 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 some(binding) => handler_param_types.push(binding.ty),
                 none => {}
             }
-            register_exact_callable_effect_header(
-                ctx, handler_executable, Type::FnType {
-                    params: handler_param_types,
-                    return_type: hexpr_type(handler_body),
-                    effects: handler_effects
-                })
             hhandlers.push(HEffectHandler {
                 effect_name: canonical_effect_name,
                 handled_ref: handler_handled_ref,
@@ -4435,8 +4456,6 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
             let applied_ret = apply_subst(s, hexpr_type(body_r.hexpr))
 
             let fn_type = Type::FnType { params: applied_params, return_type: applied_ret, effects: body_r.effects }
-            register_exact_callable_effect_header(
-                ctx, lambda_executable, fn_type)
 
             let mut final_hparams: List<HParam> = []
             for hp in hparams {

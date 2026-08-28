@@ -7,7 +7,7 @@ use diagnostics::{CollectingSink, DiagnosticSink, DiagnosticContext, Severity,
 use codes::{E0504}
 use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     ImplOwnerRef, ImplMethodRef,
-    OriginRef, origin_ref_same,
+    OriginRef,
     HandledEffectRef,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     VariantRef, VariantFieldRef,
@@ -46,7 +46,7 @@ use effect_contract::{
     typed_effect_header_schema_same,
     TypedCallableEffectFact, make_typed_callable_effect_fact,
     typed_callable_effect_reference, typed_callable_effect_row,
-    make_effect_param_ref, effect_param_owner, effect_param_ordinal,
+    make_effect_param_ref,
     effect_param_ref_same, make_typed_effect_formal_fact,
     typed_effect_formal_raw_tail, typed_effect_formal_parameter
 }
@@ -623,6 +623,28 @@ pub struct ImplMethodSchemeCore {
     type_vars: List<Int>,
     effect_schema: TypedEffectHeaderSchema,
     def_id: Int?
+}
+
+pub fn enum_variant_constructor_effect_schema(
+    def: EnumDef, variant_index: Int
+) -> TypedEffectHeaderSchema {
+    let variant = def.variants.get(variant_index).unwrap_or_else(fn() {
+        panic("enum effect schema: variant index is invalid")
+    })
+    let schemas = def.variant_field_effect_schemas.get(
+        variant_index).unwrap_or_else(fn() {
+        panic("enum effect schema: variant schema is absent")
+    })
+    if variant.fields.len() != schemas.len() {
+        panic("enum effect schema: field census differs")
+    }
+    let mut bindings: List<TypedEffectHeaderBinding> = []
+    for schema in schemas {
+        for binding in typed_effect_header_schema_bindings(schema) {
+            bindings.push(binding)
+        }
+    }
+    make_typed_effect_header_schema(bindings)
 }
 
 pub fn make_impl_method_scheme_core(
@@ -2607,110 +2629,94 @@ fn append_effect_formal_fact(
     }
 }
 
-fn next_effect_parameter_ordinal(env: TypeEnv, owner: OriginRef) -> Int {
-    let mut parameters: List<EffectParamRef> = []
-    for fact in env.effect_formal_facts {
-        let parameter = typed_effect_formal_parameter(fact)
-        if origin_ref_same(effect_param_owner(parameter), owner) &&
-           !parameters.any(fn(existing) {
-               effect_param_ref_same(existing, parameter)
-           }) {
-            parameters.push(parameter)
-        }
+// Append-only module-local bridge derived from an already authoritative
+// definition schema.  This function never creates EffectParamRef identity.
+pub fn publish_effect_header_schema(
+    mut env: TypeEnv, schema: TypedEffectHeaderSchema
+) {
+    for binding in typed_effect_header_schema_bindings(schema) {
+        append_effect_formal_fact(
+            env, typed_effect_header_binding_raw_tail(binding),
+            typed_effect_header_binding_parameter(binding))
     }
-    let mut expected = 0
-    for parameter in parameters {
-        if effect_param_ordinal(parameter) != expected {
-            panic("effect header registry: owner ordinal is not contiguous")
-        }
-        expected = expected + 1
-    }
-    expected
 }
 
-pub fn register_effect_header_types(
-    mut env: TypeEnv, owner: OriginRef, headers: List<Type>,
-    allowed_free_owners: List<OriginRef>
-) -> List<EffectParamRef> {
-    let mut result: List<EffectParamRef> = []
-    let mut tails: List<Int> = []
+pub fn validate_effect_header_schema(
+    headers: List<Type>, quantified: List<Int>,
+    schema: TypedEffectHeaderSchema
+) {
+    let mut expected: List<Int> = []
     for header in headers {
-        for tail in ordered_effect_tail_vars(header) {
-            append_ordered_type_var(tails, tail)
-        }
-    }
-    for raw_tail in tails {
-        let parameter = match effect_formal_for_raw(env, raw_tail) {
-            some(existing) => {
-                let existing_owner = effect_param_owner(existing)
-                if !origin_ref_same(existing_owner, owner) &&
-                   !allowed_free_owners.any(fn(allowed) {
-                       origin_ref_same(allowed, existing_owner)
-                   }) {
-                    panic("effect header registry: unrelated header reused tail")
-                }
-                existing
-            },
-            none => {
-                let created = make_effect_param_ref(
-                    owner, next_effect_parameter_ordinal(env, owner))
-                append_effect_formal_fact(env, raw_tail, created)
-                created
+        for raw_tail in ordered_effect_tail_vars(header) {
+            if quantified.contains(raw_tail) {
+                append_ordered_type_var(expected, raw_tail)
             }
         }
-        result.push(parameter)
+    }
+    let bindings = typed_effect_header_schema_bindings(schema)
+    if expected.len() != bindings.len() {
+        panic("typed effect header: quantified tail/schema census differs")
+    }
+    let mut index = 0
+    while index < expected.len() {
+        if expected.get(index).unwrap() !=
+           typed_effect_header_binding_raw_tail(
+                bindings.get(index).unwrap()) {
+            panic("typed effect header: structural tail order differs")
+        }
+        index = index + 1
+    }
+}
+
+fn effect_tails_excluding(
+    headers: List<Type>, inherited: List<Int>
+) -> List<Int> {
+    let mut result: List<Int> = []
+    for header in headers {
+        for raw_tail in ordered_effect_tail_vars(header) {
+            if !inherited.contains(raw_tail) {
+                append_ordered_type_var(result, raw_tail)
+            }
+        }
     }
     result
 }
 
-pub fn freshen_effect_header_types(
-    mut env: TypeEnv, headers: List<Type>
-) -> List<Type> {
-    let mut tails: List<Int> = []
+// Pure definition-formal builder. Structural header order fixes ordinals;
+// only tails explicitly quantified by this definition participate. Free or
+// inherited tails remain references to their existing schema and consume no
+// ordinal here. Publishing is a separate append-only transaction step.
+pub fn build_definition_effect_header_schema(
+    owner: OriginRef, headers: List<Type>,
+    quantified: List<Int>
+) -> TypedEffectHeaderSchema {
+    let mut ordered: List<Int> = []
     for header in headers {
-        for tail in ordered_effect_tail_vars(header) {
-            append_ordered_type_var(tails, tail)
+        for raw_tail in ordered_effect_tail_vars(header) {
+            if quantified.contains(raw_tail) {
+                append_ordered_type_var(ordered, raw_tail)
+            }
         }
     }
-    let mut mapping: Map<Int, Type> = map_new()
-    for source_tail in tails {
-        let fresh = env.fresh_var()
-        match fresh {
-            Type::TypeVar { .. } => mapping.insert(source_tail, fresh),
-            _ => panic("effect header registry: fresh tail is not TypeVar")
-        }
+    let mut bindings: List<TypedEffectHeaderBinding> = []
+    for raw_tail in ordered {
+        bindings.push(make_typed_effect_header_binding(
+            raw_tail, make_effect_param_ref(owner, bindings.len())))
     }
-    headers.map(fn(header) { apply_subst_map(mapping, header) })
+    let schema = make_typed_effect_header_schema(bindings)
+    validate_effect_header_schema(headers, quantified, schema)
+    schema
 }
 
-pub fn freshen_effect_header(
-    mut env: TypeEnv, header: Type
-) -> Type {
-    freshen_effect_header_types(env, [header]).get(0).unwrap()
-}
-
-pub fn freshen_effect_scheme_header(
-    mut env: TypeEnv, scheme: TypeScheme
-) -> TypeScheme {
-    let tails = ordered_effect_tail_vars(scheme.ty)
-    if tails.len() == 0 { return scheme }
-    let mapping: Map<Int, Type> = map_new()
-    fresh_mapping_for_ids(env, tails, mapping)
-    let mut type_vars: List<Int> = []
-    for source in scheme.type_vars {
-        match mapping.get(source) {
-            some(Type::TypeVar { id, .. }) => type_vars.push(id),
-            some(_) => panic(
-                "effect header registry: scheme tail mapped to non-TypeVar"),
-            none => type_vars.push(source)
-        }
-    }
-    TypeScheme {
-        ty: apply_subst_map(mapping, scheme.ty),
-        type_vars: type_vars, bounds: scheme.bounds,
-        effect_schema: remap_effect_header_schema(mapping, scheme.effect_schema),
-        def_id: scheme.def_id
-    }
+// Existing single-definition path: preserve build-then-publish behavior.
+pub fn define_effect_header_schema(
+    mut env: TypeEnv, owner: OriginRef, headers: List<Type>,
+    quantified: List<Int>
+) -> TypedEffectHeaderSchema {
+    let schema = build_definition_effect_header_schema(
+        owner, headers, quantified)
+    publish_effect_header_schema(env, schema)
+    schema
 }
 
 pub fn type_env_effect_formal_facts(
@@ -2848,12 +2854,58 @@ fn remap_effect_header_schema(
     make_typed_effect_header_schema(bindings)
 }
 
+pub fn apply_effect_header_schema_subst(
+    mapping: Map<Int, Type>, schema: TypedEffectHeaderSchema
+) -> TypedEffectHeaderSchema {
+    let mut bindings: List<TypedEffectHeaderBinding> = []
+    for binding in typed_effect_header_schema_bindings(schema) {
+        let source = typed_effect_header_binding_raw_tail(binding)
+        let mut mapped: Int? = some(source)
+        if mapping.contains_key(source) {
+            mapped = match apply_subst_map(
+                    mapping, Type::TypeVar { id: source, name: none }) {
+                Type::TypeVar { id, .. } => some(id),
+                Type::EffectRowType { tail, .. } => tail,
+                _ => none
+            }
+        }
+        match mapped {
+            some(raw_tail) => bindings.push(
+                make_typed_effect_header_binding(
+                    raw_tail,
+                    typed_effect_header_binding_parameter(binding))),
+            none => {}
+        }
+    }
+    make_typed_effect_header_schema(bindings)
+}
+
+// Schema-directed alpha-localization for one use or generated definition.
+// Unlike the retired raw-tail scanner, only authoritative schema bindings are
+// freshened and their EffectParamRef identities are preserved.
+pub fn instantiate_effect_header_schema(
+    mut env: TypeEnv, headers: List<Type>,
+    schema: TypedEffectHeaderSchema
+) -> (List<Type>, TypedEffectHeaderSchema) {
+    let mapping: Map<Int, Type> = map_new()
+    for binding in typed_effect_header_schema_bindings(schema) {
+        mapping.insert(
+            typed_effect_header_binding_raw_tail(binding), env.fresh_var())
+    }
+    (
+        headers.map(fn(header) { apply_subst_map(mapping, header) }),
+        remap_effect_header_schema(mapping, schema)
+    )
+}
+
 // Exported value schemes cross an InferCtx boundary.  Definition-local raw
 // variables must therefore be fresh in the consumer; their semantic owner is
 // transported separately as the exact SymbolRef held by ModuleExports.
 pub fn localize_imported_type_scheme(
     mut env: TypeEnv, value: TypeScheme
 ) -> TypeScheme {
+    validate_effect_header_schema(
+        [value.ty], value.type_vars, value.effect_schema)
     for tail in ordered_effect_tail_vars(value.ty) {
         if !value.type_vars.contains(tail) {
             panic("import header localization: effect tail is not quantified")
@@ -2899,6 +2951,10 @@ pub fn localize_imported_struct_def(
     let mut field_index = 0
     while field_index < value.fields.len() {
         let field = value.fields.get(field_index).unwrap()
+        validate_effect_header_schema(
+            [field.ty], effect_tails_excluding(
+                [field.ty], value.type_param_vars),
+            value.field_effect_schemas.get(field_index).unwrap())
         let mapping = map_clone(base)
         extend_mapping_for_type(env, field.ty, mapping)
         fields.push(StructField {
@@ -2947,6 +3003,10 @@ pub fn localize_imported_enum_def(
         let mut field_index = 0
         while field_index < variant.fields.len() {
             let field = variant.fields.get(field_index).unwrap()
+            validate_effect_header_schema(
+                [field], effect_tails_excluding(
+                    [field], value.type_param_vars),
+                source_schemas.get(field_index).unwrap())
             let mapping = map_clone(base)
             extend_mapping_for_type(env, field, mapping)
             fields.push(apply_subst_map(mapping, field))
@@ -2984,6 +3044,11 @@ pub fn localize_imported_effect_def(
         let mapping = map_clone(base)
         for param in op.params { extend_mapping_for_type(env, param, mapping) }
         extend_mapping_for_type(env, op.return_type, mapping)
+        let mut op_headers = op.params.map(fn(param) { param })
+        op_headers.push(op.return_type)
+        validate_effect_header_schema(
+            op_headers, effect_tails_excluding(
+                op_headers, value.type_param_vars), op.effect_schema)
         ops.push(EffectOpDef {
             name: op.name, operation_ref: op.operation_ref,
             params: op.params.map(fn(param) {
@@ -3017,6 +3082,12 @@ pub fn localize_imported_trait_def(
     for method in value.methods {
         let mapping = map_clone(base)
         extend_mapping_for_type(env, method.ty, mapping)
+        let mut inherited = list_clone(value.type_param_vars)
+        inherited.push(value.self_type_var_id)
+        for assoc in value.assoc_types { inherited.push(assoc.var_id) }
+        validate_effect_header_schema(
+            [method.ty], effect_tails_excluding(
+                [method.ty], inherited), method.effect_schema)
         let localized = apply_subst_map(mapping, method.ty)
         methods.push(TraitMethodDef {
             name: method.name, method_ref: method.method_ref,
@@ -3047,6 +3118,19 @@ pub fn localize_imported_trait_def(
         let localized_default = assoc.default_type.map(fn(default_type) {
             apply_subst_map(mapping, default_type)
         })
+        let mut assoc_inherited = list_clone(value.type_param_vars)
+        assoc_inherited.push(value.self_type_var_id)
+        for inherited_assoc in value.assoc_types {
+            assoc_inherited.push(inherited_assoc.var_id)
+        }
+        match (assoc.default_type, assoc.default_effect_schema) {
+            (some(default_type), some(schema)) =>
+                validate_effect_header_schema(
+                    [default_type], effect_tails_excluding(
+                        [default_type], assoc_inherited), schema),
+            (none, none) => {},
+            _ => panic("import header localization: trait assoc schema differs")
+        }
         let localized_id = mapped_var_ids(base, [assoc.var_id]).get(0).unwrap()
         let localized_value = apply_subst_map(mapping, contract.value_type)
         assoc_types.push(AssocTypeDef {
@@ -3117,6 +3201,9 @@ pub fn localize_imported_impl_entry(
             none => panic(
                 "import header localization: impl assoc schema is absent")
         }
+        validate_effect_header_schema(
+            [ty], effect_tails_excluding(
+                [ty], value.type_param_vars), schema)
         assoc_types.insert(name, apply_subst_map(mapping, ty))
         assoc_schemas.insert(name,
             remap_effect_header_schema(mapping, schema))
@@ -3126,6 +3213,11 @@ pub fn localize_imported_impl_entry(
     for entry in value.method_schemes.entries() {
         let (name, core) = entry
         let mapping = map_clone(base)
+        let method_quantified = impl_method_core_type_vars(core).filter(
+            fn(id) { !value.type_param_vars.contains(id) })
+        validate_effect_header_schema(
+            [impl_method_core_type(core)], method_quantified,
+            impl_method_core_effect_schema(core))
         fresh_mapping_for_ids(
             env, impl_method_core_type_vars(core), mapping)
         method_schemes.insert(name, make_impl_method_scheme_core(
@@ -3134,6 +3226,13 @@ pub fn localize_imported_impl_entry(
             remap_effect_header_schema(
                 mapping, impl_method_core_effect_schema(core)),
             impl_method_core_def_id(core)))
+    }
+    for entry in assoc_schemas.entries() {
+        publish_effect_header_schema(env, entry.1)
+    }
+    for entry in method_schemes.entries() {
+        publish_effect_header_schema(
+            env, impl_method_core_effect_schema(entry.1))
     }
 
     ImplEntry {
@@ -3305,7 +3404,8 @@ pub fn specialize_trait_method_scheme(
     }
     make_impl_method_scheme_core(
         specialized_type, quantified,
-        empty_typed_effect_header_schema(), none)
+        apply_effect_header_schema_subst(
+            mapping, method.effect_schema), none)
 }
 
 // ============================================================

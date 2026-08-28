@@ -26,13 +26,13 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
     new_type_env, mono,
     apply_subst, apply_subst_row, apply_subst_map,
-    freshen_effect_header,
-    register_effect_header_types,
+    instantiate_effect_header_schema,
+    define_effect_header_schema, publish_effect_header_schema,
     register_callable_effect_header,
     instantiate_type_alias_schema, find_impl, lookup_variant,
     exact_scheme_value_origin, build_scheme_var_map,
     impl_method_core_as_scheme, frozen_impl_predicates,
-    impl_method_core_type,
+    impl_method_core_type, impl_method_core_type_vars,
     impl_predicate_subject_type_var, impl_predicate_trait_name,
     impl_predicate_assoc_constraints, impl_assoc_predicate_name,
     impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
@@ -50,7 +50,7 @@ use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     symbol_ref_namespace_kind, namespace_kind_same, namespace_value,
     namespace_nominal,
     symbol_ref_same, symbol_ref_is_prelude,
-    ImplProviderRef, ImplOwnerRef,
+    ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     impl_provider_ref_same, impl_owner_ref_same,
     impl_method_ref_member,
     nominal_field_ref_same, trait_method_ref_same,
@@ -93,7 +93,8 @@ use ir_inventory::{ExecutableRef, ExactDictRef,
     binder_kind_handled_evidence_param,
     binder_kind_handled_evidence_local,
     binder_kind_handled_evidence_capture}
-use effect_contract::{empty_typed_effect_header_schema}
+use effect_contract::{TypedEffectHeaderSchema,
+    empty_typed_effect_header_schema}
 // ============================================================
 // InferResult — return type for expression inference
 // ============================================================
@@ -271,6 +272,10 @@ pub struct InferCtx {
     // Function identity -> owner-qualified associated-type provenance captured
     // before check_fn_decl restores its transient scopes.
     pub rebind_assoc_provenance: Map<Str, List<AssocRebindEntry>>,
+    // Transient checker protocol for scheduler-owned recursive callable SCCs.
+    // ExecutableRef membership is exact; this state never owns a scheme/schema.
+    active_recursive_callables: List<ExecutableRef>,
+    closed_recursive_callables: List<ExecutableRef>,
     // B-125: whether the current module context allows unsafe blocks
     pub mod_unsafe_allowed: Bool,
     // B-002p1: types with user `impl Drop` — collected during impl checking
@@ -342,6 +347,8 @@ pub fn new_infer_ctx(
         file_extern_types: set_new(),
         qualified_assoc_scope: map_new(),
         rebind_assoc_provenance: map_new(),
+        active_recursive_callables: [],
+        closed_recursive_callables: [],
         mod_unsafe_allowed: false,
         drop_types: set_new(),
         project_namespace_file_key: none,
@@ -367,6 +374,176 @@ pub fn new_infer_ctx(
         impl_check_frame_stack: [],
         impl_check_owners: map_new()
     }
+}
+
+fn recursive_callable_list_contains(
+    values: List<ExecutableRef>, wanted: ExecutableRef
+) -> Bool {
+    for value in values {
+        if executable_ref_same(value, wanted) { return true }
+    }
+    false
+}
+
+fn recursive_callable_group_members(
+    executables: List<ExecutableRef>
+) -> List<ExecutableRef> {
+    let mut members: List<ExecutableRef> = []
+    for executable in executables {
+        if !executable_ref_is_named(executable) {
+            panic("recursive callable group: member is not a named executable")
+        }
+        if recursive_callable_list_contains(members, executable) {
+            panic("recursive callable group: duplicate executable")
+        }
+        members.push(executable)
+    }
+    if members.len() == 0 {
+        panic("recursive callable group: empty group")
+    }
+    members
+}
+
+fn recursive_callable_groups_same(
+    left: List<ExecutableRef>, right: List<ExecutableRef>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    for executable in right {
+        if !recursive_callable_list_contains(left, executable) { return false }
+    }
+    true
+}
+
+fn recursive_callable_is_active(
+    ctx: InferCtx, executable: ExecutableRef
+) -> Bool {
+    recursive_callable_list_contains(
+        ctx.active_recursive_callables, executable)
+}
+
+pub fn begin_recursive_callable_group(
+    mut ctx: InferCtx, executables: List<ExecutableRef>
+) {
+    if ctx.active_recursive_callables.len() != 0 {
+        panic("recursive callable group: nested activation")
+    }
+    let members = recursive_callable_group_members(executables)
+    for executable in members {
+        if recursive_callable_list_contains(
+                ctx.closed_recursive_callables, executable) {
+            panic("recursive callable group: closed executable reactivated")
+        }
+    }
+    ctx.active_recursive_callables = members
+}
+
+pub fn end_recursive_callable_group(
+    mut ctx: InferCtx, executables: List<ExecutableRef>
+) {
+    if ctx.active_recursive_callables.len() == 0 {
+        panic("recursive callable group: deactivation without activation")
+    }
+    let members = recursive_callable_group_members(executables)
+    if !recursive_callable_groups_same(
+            ctx.active_recursive_callables, members) {
+        panic("recursive callable group: deactivation membership differs")
+    }
+    ctx.active_recursive_callables = []
+}
+
+pub fn mark_recursive_callable_group_closed(
+    mut ctx: InferCtx, executables: List<ExecutableRef>
+) {
+    if ctx.active_recursive_callables.len() == 0 {
+        panic("recursive callable group: closure without activation")
+    }
+    let members = recursive_callable_group_members(executables)
+    if !recursive_callable_groups_same(
+            ctx.active_recursive_callables, members) {
+        panic("recursive callable group: closure membership differs")
+    }
+    // Preflight the whole group before mutating the append-only marker set.
+    for executable in members {
+        if recursive_callable_list_contains(
+                ctx.closed_recursive_callables, executable) {
+            panic("recursive callable group: executable closed twice")
+        }
+    }
+    for executable in members {
+        ctx.closed_recursive_callables.push(executable)
+    }
+}
+
+pub fn recursive_callable_is_closed(
+    ctx: InferCtx, executable: ExecutableRef
+) -> Bool {
+    recursive_callable_list_contains(ctx.closed_recursive_callables, executable)
+}
+
+fn install_monomorphic_scheme_bounds(
+    mut ctx: InferCtx, scheme: TypeScheme
+) {
+    for bound in scheme.bounds {
+        if !scheme.type_vars.contains(bound.type_var) {
+            panic("recursive callable scheme: bound subject is not quantified")
+        }
+        let mut existing: Set<Str> = match
+                ctx.env.scope.var_bounds.get(bound.type_var) {
+            some(bounds) => bounds,
+            none => set_new()
+        }
+        existing.insert(bound.trait_name)
+        ctx.env.scope.var_bounds.insert(bound.type_var, existing)
+    }
+}
+
+pub fn instantiate_callable_scheme(
+    mut ctx: InferCtx, scheme: TypeScheme
+) -> Type {
+    match scheme.def_id {
+        some(def_id) => match ctx.value_symbols.get(def_id) {
+            some(symbol) => if recursive_callable_is_active(
+                    ctx, make_named_executable_ref(symbol)) {
+                install_monomorphic_scheme_bounds(ctx, scheme)
+                return scheme.ty
+            },
+            none => {}
+        },
+        none => {}
+    }
+    ctx.env.instantiate(scheme)
+}
+
+fn install_monomorphic_impl_predicates(
+    mut ctx: InferCtx, owner: ImplEntry, core: ImplMethodSchemeCore
+) {
+    let type_vars = impl_method_core_type_vars(core)
+    for predicate in frozen_impl_predicates(owner.predicates) {
+        let subject = impl_predicate_subject_type_var(predicate)
+        if !type_vars.contains(subject) {
+            panic("recursive impl method: predicate subject is not quantified")
+        }
+        let mut existing: Set<Str> = match
+                ctx.env.scope.var_bounds.get(subject) {
+            some(bounds) => bounds,
+            none => set_new()
+        }
+        existing.insert(impl_predicate_trait_name(predicate))
+        ctx.env.scope.var_bounds.insert(subject, existing)
+    }
+}
+
+pub fn instantiate_callable_impl_method(
+    mut ctx: InferCtx, owner: ImplEntry, core: ImplMethodSchemeCore,
+    method_ref: ImplMethodRef
+) -> Type {
+    let executable = make_named_executable_ref(
+        impl_method_ref_member(method_ref))
+    if recursive_callable_is_active(ctx, executable) {
+        install_monomorphic_impl_predicates(ctx, owner, core)
+        return impl_method_core_type(core)
+    }
+    ctx.env.instantiate_impl_method_core(owner, core)
 }
 
 fn project_child_site_key(parent_frame_index: Int, decl_index: Int) -> Str {
@@ -1592,44 +1769,28 @@ pub fn executable_effect_origin(value: ExecutableRef) -> OriginRef {
     }
 }
 
-pub fn current_effect_free_owners(ctx: InferCtx) -> List<OriginRef> {
-    ctx.executable_stack.map(fn(value) { executable_effect_origin(value) })
-}
-
 pub fn local_effect_header_origin(ctx: InferCtx, def_id: Int) -> OriginRef {
     if def_id < 0 {
         panic("effect header registry: local DefId is synthetic")
     }
-    let executable = current_executable_owner(ctx)
-    let mut path: List<Str> = if executable_ref_is_named(executable) {
-        []
-    } else {
-        path_ref_normalized_child_path(
-            executable_ref_anonymous_path(executable))
-    }
-    path.push("effect-local")
-    path.push(def_id.to_str())
-    let owner = if executable_ref_is_named(executable) {
-        path_owner_for_symbol(executable_ref_named_symbol(executable))
-    } else {
-        path_ref_owner(executable_ref_anonymous_path(executable))
-    }
+    let owner = path_owner_for_module_body(make_module_body_ref(
+        current_identity_file_key(ctx), "typed-effect-locals"))
     make_path_origin_ref(make_path_ref(
-        owner, path, path_role_declaration()))
+        owner, ["def:${def_id.to_str()}"], path_role_declaration()))
 }
 
-pub fn register_exact_effect_header(
-    mut ctx: InferCtx, owner: OriginRef, headers: List<Type>
-) {
-    let _ = register_effect_header_types(
-        ctx.env, owner, headers, current_effect_free_owners(ctx))
+pub fn define_exact_effect_header(
+    mut ctx: InferCtx, owner: OriginRef, headers: List<Type>,
+    quantified: List<Int>
+) -> TypedEffectHeaderSchema {
+    define_effect_header_schema(ctx.env, owner, headers, quantified)
 }
 
-pub fn register_exact_callable_effect_header(
-    mut ctx: InferCtx, executable: ExecutableRef, signature: Type
+pub fn publish_exact_callable_effect_header(
+    mut ctx: InferCtx, executable: ExecutableRef, signature: Type,
+    schema: TypedEffectHeaderSchema
 ) {
-    register_exact_effect_header(
-        ctx, executable_effect_origin(executable), [signature])
+    publish_effect_header_schema(ctx.env, schema)
     match signature {
         Type::FnType { effects, .. } => register_callable_effect_header(
             ctx.env, executable, effects),
@@ -2725,6 +2886,42 @@ pub fn drain_pending_dicts(
 // Check associated type constraints on a bound against an impl entry's actual
 // assoc types.  var_map maps scheme TypeVar ids to instantiation-fresh TypeVars
 // so that ac.ty (a scheme-level TypeVar) can be resolved to the call-site var.
+fn instantiate_impl_assoc_header(
+    mut env: TypeEnv, entry: ImplEntry, name: Str, ty: Type
+) -> Type {
+    let schema = match entry.assoc_type_effect_schemas.get(name) {
+        some(value) => value,
+        none => panic("impl assoc effect schema: exact schema is absent")
+    }
+    instantiate_effect_header_schema(
+        env, [ty], schema).0.get(0).unwrap()
+}
+
+fn instantiate_struct_field_header(
+    mut env: TypeEnv, def: StructDef, field: StructField
+) -> Type {
+    let schema = def.field_effect_schemas.get(
+        field.field_index).unwrap_or_else(fn() {
+        panic("struct effect schema: field schema is absent")
+    })
+    instantiate_effect_header_schema(
+        env, [field.ty], schema).0.get(0).unwrap()
+}
+
+fn instantiate_enum_field_header(
+    mut env: TypeEnv, def: EnumDef,
+    variant_index: Int, field_index: Int, field_type: Type
+) -> Type {
+    let schema = def.variant_field_effect_schemas.get(
+        variant_index).unwrap_or_else(fn() {
+        panic("enum effect schema: variant schema is absent")
+    }).get(field_index).unwrap_or_else(fn() {
+        panic("enum effect schema: field schema is absent")
+    })
+    instantiate_effect_header_schema(
+        env, [field_type], schema).0.get(0).unwrap()
+}
+
 fn check_assoc_constraints(
     sink: CollectingSink, env: TypeEnv,
     bound: SchemeBound, target_type_name: Str,
@@ -2750,7 +2947,8 @@ fn check_assoc_constraints(
                         }
                         let expected_ty = apply_subst(s, mapped_ty)
                         let actual_resolved = apply_subst(
-                            s, freshen_effect_header(env, actual_ty))
+                            s, instantiate_impl_assoc_header(
+                                env, entry, ac.name, actual_ty))
                         match expected_ty {
                             Type::TypeVar { .. } => {
                                 // Implicit assoc type var — unify with the impl's
@@ -3705,8 +3903,10 @@ fn bind_constructor_pattern(
                         while i < fields.len() {
                             match (fields.get(i), v.fields.get(i)) {
                                 (some(fpat), some(ftype)) => {
-                                    let field_type = freshen_effect_header(
-                                        ctx.env, ftype)
+                                    let variant_index = enum_def.variant_index.get(
+                                        name).unwrap()
+                                    let field_type = instantiate_enum_field_header(
+                                        ctx.env, enum_def, variant_index, i, ftype)
                                     let field_type = if inst_map.len() > 0 {
                                         apply_subst_map(inst_map, field_type)
                                     } else { field_type }
@@ -3814,8 +4014,11 @@ fn bind_named_constructor_pattern(
                                 match field_idx {
                                     some(idx) => match v.fields.get(idx) {
                                         some(ftype) => {
-                                            let field_type = freshen_effect_header(
-                                                ctx.env, ftype)
+                                            let variant_index = enum_def.variant_index.get(
+                                                name).unwrap()
+                                            let field_type = instantiate_enum_field_header(
+                                                ctx.env, enum_def,
+                                                variant_index, idx, ftype)
                                             let field_type = if inst_map.len() > 0 {
                                                 apply_subst_map(
                                                     inst_map, field_type)
@@ -3896,7 +4099,8 @@ fn bind_struct_pattern_fields(
                 let found = struct_def.fields.find(fn(sf) { sf.name == field.name })
                 match found {
                     some(sf) => {
-                        let field_type = freshen_effect_header(ctx.env, sf.ty)
+                        let field_type = instantiate_struct_field_header(
+                            ctx.env, struct_def, sf)
                         let field_type = if inst_map.len() > 0 {
                             apply_subst_map(inst_map, field_type)
                         } else { field_type }
@@ -3936,8 +4140,8 @@ fn bind_struct_pattern_fields(
                             let found = sdef.fields.find(fn(sf) { sf.name == field.name })
                             match found {
                                 some(sf) => {
-                                    let field_type = freshen_effect_header(
-                                        ctx.env, sf.ty)
+                                    let field_type = instantiate_struct_field_header(
+                                        ctx.env, sdef, sf)
                                     let field_type = if inst_map.len() > 0 {
                                         apply_subst_map(
                                             inst_map, field_type)
@@ -4340,7 +4544,9 @@ fn impl_assoc_constraints_match_concrete(
                 let expected_ty = apply_subst(s, apply_subst_map(
                     var_map, impl_assoc_predicate_type(expected)))
                 let actual_ty = apply_subst(s, apply_subst_map(
-                    owner_map, freshen_effect_header(env, actual)))
+                    owner_map, instantiate_impl_assoc_header(
+                        env, entry,
+                        impl_assoc_predicate_name(expected), actual)))
                 if !types_equal(expected_ty, actual_ty) { return false }
             },
             none => return false
