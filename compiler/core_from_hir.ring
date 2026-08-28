@@ -261,7 +261,8 @@ use core_type_source::{
     flow_field_identity_nominal, flow_field_identity_variant,
     flow_field_identity_path,
     flow_type_node_intern_ready, flow_type_node_intern_key_same,
-    flow_type_node_contract_same, remap_flow_type_node
+    flow_type_node_contract_same, remap_flow_type_node,
+    validate_runtime_effect_ctx_token_type
 }
 use core_expr::{
     CoreCallableContract, CoreImplMetadata, CoreAssocBinding,
@@ -312,7 +313,7 @@ use core_expr::{
     core_binder_reference, core_binder_type, core_binder_kind,
     core_callable_semantic_contract, core_callable_effect_contract,
     core_callable_effect_ctx,
-    core_callable_effect_ctx_tokens, core_body_effect_ctx_tokens,
+    core_body_effect_ctx_tokens,
     core_callable_effect_ctx_reference, core_callable_effect_ctx_layout,
     core_effect_ctx_layout_entries, core_effect_ctx_layout_formal,
     core_effect_ctx_layout_same,
@@ -3658,7 +3659,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     }
                     let target = core_callee(
                         ctx, method_call_ref_callee_identity(method),
-                        method_call_ref_signature(method), [],
+                        method_call_ref_signature(method), type_args,
                         effect_instantiation)
                     make_core_method_call_expr(
                         ty, effects, origin,
@@ -6471,18 +6472,19 @@ fn append_project_effect_ctx_token(
 }
 
 fn freeze_project_effect_ctx_tokens(
-    callables: List<CoreCallableContract>, bodies: List<CoreBodyEntry>
+    graph: CoreTypeGraph, bodies: List<CoreBodyEntry>
 ) -> List<CoreEffectCtxTokenBinding> {
     let mut tokens: List<CoreEffectCtxTokenRef> = []
-    for callable in callables {
-        for token in core_callable_effect_ctx_tokens(callable) {
-            append_project_effect_ctx_token(tokens, token)
-        }
-    }
     for entry in bodies {
         for token in core_body_effect_ctx_tokens(
                 core_body_entry_body(entry)) {
             append_project_effect_ctx_token(tokens, token)
+        }
+    }
+    for token in tokens {
+        for ty in core_effect_atom_type_arguments(
+                core_effect_ctx_token_instance(token)) {
+            validate_runtime_effect_ctx_token_type(graph, ty)
         }
     }
     let mut keyed = tokens.map(fn(token) {
@@ -6580,7 +6582,7 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
     let diagnostic_projection = build_core_diagnostic_projection(
         values, bodies, diagnostic_origins)
     let effect_ctx_tokens = freeze_project_effect_ctx_tokens(
-        callables, bodies)
+        project.graph, bodies)
     let program = make_core_program(project.graph, callables, impls, bodies,
         make_executable_inventory(entries))
     CoreAssemblyResult {

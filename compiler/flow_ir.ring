@@ -3890,6 +3890,116 @@ fn validate_typed_terminators(
     }
 }
 
+fn validate_effect_ctx_overlays(bodies: List<FlowBody>) {
+    for body in bodies {
+        for block in body.blocks {
+            let mut overlays: List<FlowInstruction> = []
+            for instruction in block.instructions {
+                match instruction.value {
+                    FlowInstructionValue::InitializeValue { operation, .. } => {
+                        if flow_operation_contract_kind_tag(operation) == 13 {
+                            overlays.push(instruction)
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            match block.terminator.value {
+                FlowTerminatorValue::HandleInstallValue {
+                    installation, ..
+                } => {
+                    if overlays.len() != 1 {
+                        panic("FlowIR: HandleInstall lacks one exact overlay")
+                    }
+                    let overlay = overlays.get(0).unwrap()
+                    let (operation, inputs, target) = match overlay.value {
+                        FlowInstructionValue::InitializeValue {
+                            operation, inputs, target
+                        } => (operation, inputs, target),
+                        _ => panic("FlowIR: overlay is not Initialize")
+                    }
+                    if !effect_ctx_ref_same(
+                            flow_operation_contract_effect_ctx_parent(operation),
+                            installation.parent) ||
+                       !effect_ctx_ref_same(
+                            flow_operation_contract_effect_ctx_child(operation),
+                            installation.child) ||
+                       !slot_ref_same(target, effect_ctx_slot(
+                            installation.child)) {
+                        panic("FlowIR: HandleInstall overlay identity differs")
+                    }
+                    let operation_tokens =
+                        flow_operation_contract_effect_ctx_entries(operation)
+                    if operation_tokens.len() != installation.entries.len() {
+                        panic("FlowIR: HandleInstall overlay token census differs")
+                    }
+                    let mut token_index = 0
+                    while token_index < operation_tokens.len() {
+                        if !core_effect_ctx_token_same(
+                                operation_tokens.get(token_index).unwrap(),
+                                installation.entries.get(
+                                    token_index).unwrap().token) {
+                            panic("FlowIR: HandleInstall overlay token order differs")
+                        }
+                        token_index = token_index + 1
+                    }
+                    let mut expected_inputs: List<SlotRef> = [
+                        effect_ctx_slot(installation.parent)
+                    ]
+                    for entry in installation.entries {
+                        for handler in entry.handlers {
+                            expected_inputs.push(handler.closure)
+                        }
+                    }
+                    if inputs.len() != expected_inputs.len() ||
+                       operation.input_types.len() != expected_inputs.len() ||
+                       operation.input_roles.len() != expected_inputs.len() {
+                        panic("FlowIR: HandleInstall overlay input arity differs")
+                    }
+                    let mut input_index = 0
+                    while input_index < expected_inputs.len() {
+                        let expected = expected_inputs.get(input_index).unwrap()
+                        if !slot_ref_same(
+                                inputs.get(input_index).unwrap(), expected) ||
+                           !core_type_ref_same(
+                                operation.input_types.get(input_index).unwrap(),
+                                slot_type_for(body, expected)) {
+                            panic("FlowIR: HandleInstall overlay input/type differs")
+                        }
+                        let expected_role = if input_index == 0 {
+                            flow_semantic_role_read()
+                        } else { flow_semantic_role_consume() }
+                        if flow_semantic_role_tag(
+                                operation.input_roles.get(input_index).unwrap()) !=
+                           flow_semantic_role_tag(expected_role) {
+                            panic("FlowIR: HandleInstall overlay role differs")
+                        }
+                        let mut right = input_index + 1
+                        while right < expected_inputs.len() {
+                            if slot_ref_same(
+                                    expected,
+                                    expected_inputs.get(right).unwrap()) {
+                                panic("FlowIR: HandleInstall overlay input repeats")
+                            }
+                            right = right + 1
+                        }
+                        input_index = input_index + 1
+                    }
+                    require_same_flow_type(
+                        operation.target_type,
+                        slot_type_for(body, target),
+                        "FlowIR: HandleInstall overlay target type differs")
+                },
+                _ => {
+                    if overlays.len() != 0 {
+                        panic("FlowIR: overlay Initialize lacks HandleInstall")
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn block_index(values: List<FlowBlock>, target: FlowBlockRef) -> Int? {
     let mut index = 0
     for value in values {
@@ -4276,6 +4386,7 @@ fn validate_bodies(
 fn flow_call_contract_actual_satisfies_formal(
     actual: FlowCallContract, formal: FlowCallContract,
     substitutions: List<FlowTypeSubstitution>,
+    effect_actuals: List<CoreEffectSubstitution>,
     type_nodes: List<FlowTypeNode>
 ) -> Bool {
     let module_same = match (
@@ -4294,7 +4405,8 @@ fn flow_call_contract_actual_satisfies_formal(
        !flow_type_actual_satisfies_substituted_formal(
             type_nodes,
             flow_call_contract_result_type(actual),
-            flow_call_contract_result_type(formal), substitutions) ||
+            flow_call_contract_result_type(formal), substitutions,
+            effect_actuals) ||
        flow_semantic_role_tag(flow_call_contract_result_role(actual)) !=
             flow_semantic_role_tag(flow_call_contract_result_role(formal)) ||
        !value_origin_same(
@@ -4308,7 +4420,8 @@ fn flow_call_contract_actual_satisfies_formal(
                 flow_semantic_role_tag(formal_roles.get(index).unwrap()) ||
            !flow_type_actual_satisfies_substituted_formal(
                 type_nodes, actual_types.get(index).unwrap(),
-                formal_types.get(index).unwrap(), substitutions) {
+                formal_types.get(index).unwrap(), substitutions,
+                effect_actuals) {
             return false
         }
         index = index + 1
@@ -4354,7 +4467,8 @@ fn validate_direct_calls(
                                         arguments.len() ||
                                !flow_call_contract_actual_satisfies_formal(
                                     contract, candidate.semantic_contract,
-                                    substitutions, type_nodes) {
+                                    substitutions, target.effect_substitutions,
+                                    type_nodes) {
                                 panic("FlowIR: direct callable contract differs")
                             }
                             if !flow_effect_actual_satisfies_substituted_formal(
@@ -4631,7 +4745,7 @@ fn validate_callable_value_contract(
     }
     if !flow_type_actual_satisfies_substituted_formal(
             type_nodes, target_type, callable.header_type,
-            type_substitutions) ||
+            type_substitutions, effect_substitutions) ||
        !flow_effect_actual_satisfies_substituted_formal(
             type_nodes, core_effect_instantiation_source(effects),
             callable.effects, type_substitutions) ||
@@ -5859,6 +5973,7 @@ pub fn make_flow_program(
     validate_callables(callables, type_nodes)
     validate_type_provider_contracts(type_nodes, callables)
     validate_bodies(bodies, callables, type_nodes)
+    validate_effect_ctx_overlays(bodies)
     validate_direct_calls(bodies, callables, type_nodes)
     validate_typed_instructions(bodies, callables, type_nodes)
     let frozen_types = copy_flow_type_graph_nodes(type_nodes)

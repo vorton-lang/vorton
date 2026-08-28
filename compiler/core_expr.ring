@@ -713,6 +713,7 @@ fn callable_redirect_semantic_shell_same(
 fn callable_redirect_effect_ctx_same(
     source: CoreCallableEffectCtx, target: CoreCallableEffectCtx,
     type_substitutions: List<FlowTypeSubstitution>,
+    effect_substitutions: List<FlowEffectParamSubstitution>,
     effect_pairs: List<(EffectParamRef, EffectParamRef)>,
     graph: CoreTypeGraph
 ) -> Bool {
@@ -734,10 +735,11 @@ fn callable_redirect_effect_ctx_same(
         if actual_args.len() != formal_args.len() { return false }
         let mut argument = 0
         while argument < actual_args.len() {
-            if !flow_type_actual_satisfies_substituted_formal(
+            if !flow_type_actual_matches_formal_exact(
                     core_type_graph_nodes(graph),
                     actual_args.get(argument).unwrap(),
-                    formal_args.get(argument).unwrap(), type_substitutions) {
+                    formal_args.get(argument).unwrap(), type_substitutions,
+                    effect_substitutions) {
                 return false
             }
             argument = argument + 1
@@ -824,7 +826,8 @@ pub fn core_callable_redirect(
     }
     match (source.effect_ctx, target.effect_ctx) {
         (some(left), some(right)) => if !callable_redirect_effect_ctx_same(
-                left, right, type_substitutions, effect_pairs, graph) {
+                left, right, type_substitutions, effect_substitutions,
+                effect_pairs, graph) {
             return none
         },
         (none, none) => {},
@@ -4533,7 +4536,8 @@ fn validate_call_effects(
 
 fn core_call_contract_actual_satisfies_formal(
     actual: FlowCallContract, formal: FlowCallContract,
-    substitutions: List<FlowTypeSubstitution>, graph: CoreTypeGraph
+    substitutions: List<FlowTypeSubstitution>,
+    effect_actuals: List<CoreEffectSubstitution>, graph: CoreTypeGraph
 ) -> Bool {
     let module_same = match (
             flow_call_contract_module_key(actual),
@@ -4551,7 +4555,8 @@ fn core_call_contract_actual_satisfies_formal(
        !flow_type_actual_satisfies_substituted_formal(
             core_type_graph_nodes(graph),
             flow_call_contract_result_type(actual),
-            flow_call_contract_result_type(formal), substitutions) ||
+            flow_call_contract_result_type(formal), substitutions,
+            effect_actuals) ||
        flow_semantic_role_tag(flow_call_contract_result_role(actual)) !=
             flow_semantic_role_tag(flow_call_contract_result_role(formal)) ||
        !value_origin_same(
@@ -4566,7 +4571,8 @@ fn core_call_contract_actual_satisfies_formal(
            !flow_type_actual_satisfies_substituted_formal(
                 core_type_graph_nodes(graph),
                 actual_types.get(index).unwrap(),
-                formal_types.get(index).unwrap(), substitutions) {
+                formal_types.get(index).unwrap(), substitutions,
+                effect_actuals) {
             return false
         }
         index = index + 1
@@ -4628,7 +4634,8 @@ fn validate_call_signature(
         }
         if !core_call_contract_actual_satisfies_formal(
                 callee.contract, candidate.semantic_contract,
-                callee.type_substitutions, graph) {
+                callee.type_substitutions, callee.effect_substitutions,
+                graph) {
             panic("CoreHIR: direct call semantic contract differs")
         }
         if !flow_effect_actual_satisfies_substituted_formal(
@@ -5282,7 +5289,8 @@ fn validate_core_callable_value_contract(
     }
     if !flow_type_actual_satisfies_substituted_formal(
             core_type_graph_nodes(graph), target_type,
-            callable.header_type, type_substitutions) ||
+            callable.header_type, type_substitutions,
+            effect_substitutions) ||
        !flow_effect_actual_satisfies_substituted_formal(
             core_type_graph_nodes(graph),
             core_effect_instantiation_source(effects), callable.effects,

@@ -36,7 +36,7 @@ use effect_contract::{
     make_core_handled_effect, make_core_system_effect,
     core_effect_atom_kind_tag, core_effect_atom_type,
     core_effect_atom_handled_ref, core_effect_atom_type_arguments,
-    core_effect_atom_system_ref,
+    core_effect_atom_system_ref, core_effect_atom_same,
     make_core_effect_set, core_effect_set_atoms,
     make_core_effect_contract, core_effect_contract_exact,
     core_effect_contract_parameter, core_effect_contract_same,
@@ -44,6 +44,7 @@ use effect_contract::{
     core_effect_substitution_replacement,
     core_effect_instantiation_source,
     core_effect_instantiation_substitutions,
+    make_explicit_core_effect_instantiation,
     core_effect_contract_actual_satisfies_formal,
     copy_core_effect_contract
 }
@@ -818,6 +819,7 @@ fn exact_record_shape_satisfies(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode,
     substitutions: List<FlowTypeSubstitution>,
     effect_substitutions: List<FlowEffectParamSubstitution>,
+    effect_actuals: List<CoreEffectSubstitution>,
     exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
 ) -> Bool {
@@ -836,7 +838,7 @@ fn exact_record_shape_satisfies(
                 nodes,
                 flow_satisfaction_type_node(nodes, actual_field.ty),
                 flow_satisfaction_type_node(nodes, formal_field.ty),
-                substitutions, effect_substitutions, exact,
+                substitutions, effect_substitutions, effect_actuals, exact,
                 false, actual_path, formal_path) {
             return false
         }
@@ -849,6 +851,7 @@ fn substituted_effect_atom_matches(
     nodes: List<FlowTypeNode>, actual: CoreEffectAtom,
     formal: CoreEffectAtom, substitutions: List<FlowTypeSubstitution>,
     effect_substitutions: List<FlowEffectParamSubstitution>,
+    effect_actuals: List<CoreEffectSubstitution>,
     exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
 ) -> Bool {
@@ -859,7 +862,7 @@ fn substituted_effect_atom_matches(
             nodes,
             flow_satisfaction_type_node(nodes, core_effect_atom_type(actual)),
             flow_satisfaction_type_node(nodes, core_effect_atom_type(formal)),
-            substitutions, effect_substitutions, exact,
+            substitutions, effect_substitutions, effect_actuals, exact,
             false, actual_path, formal_path)
     }
     if kind == 2 { return true }
@@ -881,7 +884,7 @@ fn substituted_effect_atom_matches(
                         nodes, actual_args.get(index).unwrap()),
                     flow_satisfaction_type_node(
                         nodes, formal_args.get(index).unwrap()),
-                    substitutions, effect_substitutions, exact,
+                    substitutions, effect_substitutions, effect_actuals, exact,
                     false, actual_path, formal_path) {
                 return false
             }
@@ -914,10 +917,47 @@ fn substituted_effect_parameter_matches(
     }
 }
 
+fn instantiate_nested_callable_effect_formal(
+    formal: CoreEffectContract,
+    actuals: List<CoreEffectSubstitution>
+) -> CoreEffectContract? {
+    let parameter = match core_effect_contract_parameter(formal) {
+        some(value) => value,
+        none => return some(formal)
+    }
+    let mut replacement: CoreEffectContract? = none
+    for item in actuals {
+        if effect_param_ref_same(
+                core_effect_substitution_parameter(item), parameter) {
+            if replacement.is_some() {
+                panic("CoreHIR: nested effect substitution repeats")
+            }
+            replacement = some(core_effect_substitution_replacement(item))
+        }
+    }
+    let exact = match replacement {
+        some(value) => value,
+        none => return none
+    }
+    let mut atoms = core_effect_set_atoms(core_effect_contract_exact(formal))
+    for atom in core_effect_set_atoms(core_effect_contract_exact(exact)) {
+        if !atoms.any(fn(existing) {
+                core_effect_atom_same(existing, atom)
+            }) {
+            atoms.push(atom)
+        }
+    }
+    let result = make_core_effect_contract(
+        make_core_effect_set(atoms), core_effect_contract_parameter(exact))
+    let _ = make_explicit_core_effect_instantiation(formal, exact, result)
+    some(result)
+}
+
 fn substituted_effect_contract_satisfies(
     nodes: List<FlowTypeNode>, actual: CoreEffectContract,
     formal: CoreEffectContract, substitutions: List<FlowTypeSubstitution>,
     effect_substitutions: List<FlowEffectParamSubstitution>,
+    effect_actuals: List<CoreEffectSubstitution>,
     exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
 ) -> Bool {
@@ -937,7 +977,7 @@ fn substituted_effect_contract_satisfies(
         for candidate in actual_atoms {
             if substituted_effect_atom_matches(
                     nodes, candidate, required, substitutions,
-                    effect_substitutions, exact,
+                    effect_substitutions, effect_actuals, exact,
                     actual_path, formal_path) {
                 matches = matches + 1
             }
@@ -959,13 +999,19 @@ fn flow_type_actual_satisfies_formal_inner(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode,
     substitutions: List<FlowTypeSubstitution>,
     effect_substitutions: List<FlowEffectParamSubstitution>,
+    effect_actuals: List<CoreEffectSubstitution>,
     exact: Bool,
     allow_record_widening: Bool,
     mut actual_path: List<CoreTypeRef>, mut formal_path: List<CoreTypeRef>
 ) -> Bool {
-    if core_type_ref_same(actual.reference, formal.reference) { return true }
     let actual_kind = flow_type_kind_tag(actual.kind)
     let formal_kind = flow_type_kind_tag(formal.kind)
+    if core_type_ref_same(actual.reference, formal.reference) &&
+       !(formal_kind == FLOW_TYPE_CALLABLE && effect_actuals.len() != 0 &&
+         core_effect_contract_parameter(
+            formal.callable_effects.unwrap()).is_some()) {
+        return true
+    }
     if formal_kind == FLOW_TYPE_PARAMETER {
         return match substituted_parameter_replacement(
                 substitutions, formal.generic_param.unwrap()) {
@@ -976,12 +1022,17 @@ fn flow_type_actual_satisfies_formal_inner(
     }
     if formal_kind == FLOW_TYPE_CALLABLE &&
        actual_kind == FLOW_TYPE_CALLABLE {
+        let nested_formal = match instantiate_nested_callable_effect_formal(
+                formal.callable_effects.unwrap(), effect_actuals) {
+            some(value) => value,
+            none => return false
+        }
         if actual.parameter_count != formal.parameter_count ||
            actual.children.len() != formal.children.len() ||
            !substituted_effect_contract_satisfies(
                 nodes, actual.callable_effects.unwrap(),
-                formal.callable_effects.unwrap(), substitutions,
-                effect_substitutions, exact,
+                nested_formal, substitutions,
+                effect_substitutions, effect_actuals, true,
                 actual_path, formal_path) {
             return false
         }
@@ -993,7 +1044,7 @@ fn flow_type_actual_satisfies_formal_inner(
                         nodes, actual.children.get(index).unwrap()),
                     flow_satisfaction_type_node(
                         nodes, formal.children.get(index).unwrap()),
-                    substitutions, effect_substitutions, exact,
+                    substitutions, effect_substitutions, effect_actuals, exact,
                     false, actual_path, formal_path) {
                 return false
             }
@@ -1018,7 +1069,8 @@ fn flow_type_actual_satisfies_formal_inner(
                             nodes, actual.generic_arguments.get(index).unwrap()),
                         flow_satisfaction_type_node(
                             nodes, formal.generic_arguments.get(index).unwrap()),
-                        substitutions, effect_substitutions, exact,
+                        substitutions, effect_substitutions, effect_actuals,
+                        exact,
                         false, actual_path, formal_path) {
                     return false
                 }
@@ -1036,7 +1088,8 @@ fn flow_type_actual_satisfies_formal_inner(
                             nodes, actual.children.get(index).unwrap()),
                         flow_satisfaction_type_node(
                             nodes, formal.children.get(index).unwrap()),
-                        substitutions, effect_substitutions, exact,
+                        substitutions, effect_substitutions, effect_actuals,
+                        exact,
                         false, actual_path, formal_path) {
                     return false
                 }
@@ -1047,7 +1100,7 @@ fn flow_type_actual_satisfies_formal_inner(
         if formal_kind == FLOW_TYPE_RECORD && !allow_record_widening {
             return exact_record_shape_satisfies(
                 nodes, actual, formal, substitutions,
-                effect_substitutions, exact,
+                effect_substitutions, effect_actuals, exact,
                 actual_path, formal_path)
         }
     }
@@ -1072,7 +1125,8 @@ fn flow_type_actual_satisfies_formal_inner(
                                 nodes,
                                 flow_satisfaction_type_node(nodes, candidate.ty),
                                 flow_satisfaction_type_node(nodes, required.ty),
-                                substitutions, effect_substitutions, exact,
+                                substitutions, effect_substitutions,
+                                effect_actuals, exact,
                                 true,
                                 actual_path, formal_path) {
                         found = true
@@ -1099,7 +1153,7 @@ pub fn flow_type_actual_satisfies_formal(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode
 ) -> Bool {
     flow_type_actual_satisfies_formal_inner(
-        nodes, actual, formal, [], [], false, true, [], [])
+        nodes, actual, formal, [], [], [], false, true, [], [])
 }
 
 // Direct generic calls carry an explicit declared-formal -> actual map.  This
@@ -1108,12 +1162,13 @@ pub fn flow_type_actual_satisfies_formal(
 // actual-satisfies-formal relation.
 pub fn flow_type_actual_satisfies_substituted_formal(
     nodes: List<FlowTypeNode>, actual: CoreTypeRef, formal: CoreTypeRef,
-    substitutions: List<FlowTypeSubstitution>
+    substitutions: List<FlowTypeSubstitution>,
+    effect_actuals: List<CoreEffectSubstitution>
 ) -> Bool {
     flow_type_actual_satisfies_formal_inner(
         nodes, flow_satisfaction_type_node(nodes, actual),
         flow_satisfaction_type_node(nodes, formal),
-        substitutions, [], false, true, [], [])
+        substitutions, [], effect_actuals, false, true, [], [])
 }
 
 // Exact callable-header alpha comparison.  It shares the sole recursive type
@@ -1127,7 +1182,7 @@ pub fn flow_type_actual_matches_formal_exact(
     flow_type_actual_satisfies_formal_inner(
         nodes, flow_satisfaction_type_node(nodes, actual),
         flow_satisfaction_type_node(nodes, formal),
-        substitutions, effect_substitutions, true, false, [], [])
+        substitutions, effect_substitutions, [], true, false, [], [])
 }
 
 pub fn flow_effect_actual_satisfies_substituted_formal(
@@ -1136,7 +1191,7 @@ pub fn flow_effect_actual_satisfies_substituted_formal(
     substitutions: List<FlowTypeSubstitution>
 ) -> Bool {
     substituted_effect_contract_satisfies(
-        nodes, actual, formal, substitutions, [], false, [], [])
+        nodes, actual, formal, substitutions, [], [], false, [], [])
 }
 
 fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {
@@ -1798,5 +1853,71 @@ pub fn core_type_graph_ref_from_flow(
         some(module_key) => make_module_core_type_ref(
             module_key, core_type_ref_index(reference)),
         none => make_core_type_ref(core_type_ref_index(reference))
+    }
+}
+
+fn runtime_effect_ctx_token_type_closed_inner(
+    graph: CoreTypeGraph, reference: CoreTypeRef,
+    mut active: List<CoreTypeRef>
+) -> Bool {
+    if active.any(fn(value) { core_type_ref_same(value, reference) }) {
+        return true
+    }
+    active.push(reference)
+    let node = core_type_graph_node(graph, reference)
+    let kind = flow_type_kind_tag(node.kind)
+    if kind == FLOW_TYPE_PARAMETER { return false }
+    if kind >= FLOW_TYPE_INT && kind <= FLOW_TYPE_NEVER { return true }
+    if kind == FLOW_TYPE_RECORD &&
+       flow_type_semantic_seed_tag(node.semantic_seed) ==
+            flow_type_semantic_seed_tag(flow_type_seed_unique()) {
+        return false
+    }
+    if kind == FLOW_TYPE_CALLABLE {
+        let effects = match node.callable_effects {
+            some(value) => value,
+            none => return false
+        }
+        if core_effect_contract_parameter(effects).is_some() { return false }
+        for atom in core_effect_set_atoms(core_effect_contract_exact(effects)) {
+            let effect_kind = core_effect_atom_kind_tag(atom)
+            if effect_kind == 0 || effect_kind == 1 {
+                if !runtime_effect_ctx_token_type_closed_inner(
+                        graph, core_effect_atom_type(atom), active) {
+                    return false
+                }
+            } else if effect_kind == 3 {
+                for ty in core_effect_atom_type_arguments(atom) {
+                    if !runtime_effect_ctx_token_type_closed_inner(
+                            graph, ty, active) {
+                        return false
+                    }
+                }
+            }
+        }
+    }
+    for argument in node.generic_arguments {
+        if !runtime_effect_ctx_token_type_closed_inner(
+                graph, argument, active) {
+            return false
+        }
+    }
+    if kind == FLOW_TYPE_TUPLE || kind == FLOW_TYPE_RECORD ||
+       kind == FLOW_TYPE_CALLABLE || kind == FLOW_TYPE_PTR {
+        for child in node.children {
+            if !runtime_effect_ctx_token_type_closed_inner(
+                    graph, child, active) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+pub fn validate_runtime_effect_ctx_token_type(
+    graph: CoreTypeGraph, reference: CoreTypeRef
+) {
+    if !runtime_effect_ctx_token_type_closed_inner(graph, reference, []) {
+        panic("CoreHIR: runtime EffectCtx token type argument is not closed")
     }
 }
