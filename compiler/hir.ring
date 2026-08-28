@@ -1960,8 +1960,10 @@ fn validate_effect_ctx_lookup_expr(
                 validate_effect_ctx_lookup_expr(arg, layout, installs)
             }
         },
-        HExpr::EffectOp { args, .. } => for arg in args {
-            validate_effect_ctx_lookup_expr(arg, layout, installs)
+        HExpr::EffectOp { args, .. } => {
+            for arg in args {
+                validate_effect_ctx_lookup_expr(arg, layout, installs)
+            }
         },
         HExpr::HandleExpr { body, handlers, effect_ctx_install, .. } => {
             match effect_ctx_install {
@@ -2065,16 +2067,20 @@ fn validate_effect_ctx_lookup_expr(
                 none => {}
             }
         },
-        HExpr::StringInterp { parts, .. } => for part in parts {
-            match part {
-                HStringInterpPart::Expression(expr) =>
-                    validate_effect_ctx_lookup_expr(expr, layout, installs),
-                HStringInterpPart::Literal(_) => {}
+        HExpr::StringInterp { parts, .. } => {
+            for part in parts {
+                match part {
+                    HStringInterpPart::Expression(expr) =>
+                        validate_effect_ctx_lookup_expr(expr, layout, installs),
+                    HStringInterpPart::Literal(_) => {}
+                }
             }
         },
         HExpr::ListLit { elements, .. } |
-        HExpr::TupleLit { elements, .. } => for expr in elements {
-            validate_effect_ctx_lookup_expr(expr, layout, installs)
+        HExpr::TupleLit { elements, .. } => {
+            for expr in elements {
+                validate_effect_ctx_lookup_expr(expr, layout, installs)
+            }
         },
         HExpr::IndexExpr { receiver, index, .. } => {
             validate_effect_ctx_lookup_expr(receiver, layout, installs)
