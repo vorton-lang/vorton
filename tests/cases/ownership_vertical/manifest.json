@@ -316,8 +316,8 @@
         "struct and enum constructor paths receive the uniform Ring callable context",
         "effect operation callable parameter and result preserve distinct exact effects and results",
         "generic fail<T> preserves its nested callable exact effect and result",
-        "generic custom-effect payload preserves its nested callable exact effect and result",
-        "nested callable formals transport exact handled context entries"
+        "fully closed generic custom-effect instance preserves its nested callable effect and result",
+        "nested callable closed effect row contributes one stable handled token"
       ],
       "expected": {
         "phase": "native",
@@ -485,6 +485,59 @@
         "status": "fail",
         "diagnostic_code": "E0403",
         "diagnostic_contains": "Unhandled effect 'MissingDynamic' in main function"
+      }
+    },
+    {
+      "id": "D18",
+      "path": "single/d_open_handled_type_formal.ring",
+      "covers": [
+        "direct NestedPort<T> runtime token rejects its callable type formal"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0404",
+        "diagnostic_contains": "must use fully closed type arguments"
+      }
+    },
+    {
+      "id": "D19",
+      "path": "single/d_open_handled_nested_list.ring",
+      "covers": [
+        "NestedPort<List<T>> recursively rejects a nested type formal"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0404",
+        "diagnostic_contains": "must use fully closed type arguments"
+      }
+    },
+    {
+      "id": "D20",
+      "path": "single/d_open_handled_factory_lambda.ring",
+      "covers": [
+        "generic factory cannot hide Probe<T> in an escaped lambda",
+        "a later closed call cannot legalize the factory owner's open token"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0404",
+        "diagnostic_contains": "must use fully closed type arguments"
+      }
+    },
+    {
+      "id": "D21",
+      "path": "single/d_open_handled_nested_fn_row.ring",
+      "covers": [
+        "handled token type argument rejects a nested function open effect formal"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0404",
+        "diagnostic_contains": "must use fully closed type arguments"
       }
     },
     {

@@ -120,7 +120,11 @@ fn raise_value<T>(value: T) -> T with {fail<T>} {
     fail.raise(value)
 }
 
-fn relay_nested<T>(value: T) -> T with {NestedPort<T>} {
+fn relay_nested(
+    value: fn(Int) -> Int with {CustomNestedEffect}
+) -> (fn(Int) -> Int with {CustomNestedEffect}) with {
+    NestedPort<fn(Int) -> Int with {CustomNestedEffect}>
+} {
     NestedPort.relay(value)
 }
 
@@ -217,7 +221,7 @@ fn main() {
         CustomNestedEffect.resolve(value) => 808,
     }
     assert(custom == 808,
-        "generic custom effect keeps the nested callable actual effect")
+        "fully closed custom effect keeps its nested callable token")
 
     print("D_EFFECT_HEADER_COMPOSITES_OK:box=${box_actual}/${box_fallback};enum=${positional}/${named};op=${operation_param}/${operation_result};fail=${failed};custom=${custom}")
 }
