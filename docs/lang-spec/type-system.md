@@ -115,6 +115,20 @@ generalize(τ, Γ):
 
 出现在环境中的自由变量不被泛化（它们代表来自外层上下文的约束）。
 
+### 递归绑定组
+
+自递归和互递归函数/方法按调用图的强连通分量组成递归绑定组。组内成员在推断期间使用同一批 monomorphic provisional variables：引用自己或 peer 时复用该草稿类型，不执行普通多态实例化。整组 body 约束全部求解后，编译器才相对组外环境对每个成员 final-zonk 与 generalize，并原子发布全组 type scheme；任一成员失败时不得留下部分更新。
+
+该规则同样适用于顶层函数、inline module 函数和 impl methods。普通泛型递归合法，只要递归环内保持同一类型参数关系：
+
+```ring
+fn repeat<T>(value: T, depth: Int) -> T {
+    if depth == 0 { value } else { repeat(value, depth - 1) }
+}
+```
+
+Ring 0.1 不支持 polymorphic recursion：同一递归组成员不能在递归环中以彼此不可统一的类型实例调用自己或 peer。该限制不影响函数在递归组闭合后被外部调用点正常多态实例化。Post-0.1 仅在 B-203 的真实应用场景门满足后重新评估。
+
 ### 实例化（Instantiation）
 
 在多态绑定的每个使用点：
@@ -127,6 +141,8 @@ instantiate(∀α₁..αₙ. τ [bounds]):
   将 bounds 从 αᵢ 转移到 βᵢ
   return τ'
 ```
+
+上述实例化只适用于已经闭合并发布的 type scheme。递归组的 provisional scheme 以及尚未完成 final-zonk/generalize 的 callable 不得走该规则。
 
 每个使用点获得 fresh 类型变量，实现多态复用。
 

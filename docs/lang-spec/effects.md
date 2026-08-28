@@ -22,6 +22,8 @@ Effect row 中的 atom 共享组合与推断机制，但并不共享同一种运
 
 因此callable的冻结契约只有两种形态：closed exact atoms，或exact atoms加一个正式effect参数。Effect alias在此前已递归展开；first-class function value与每个调用点保留同一正式参数及exact实例化关系。CoreHIR、FlowIR、ResourcePlanner、AbiIR与后端均不得重新运行effect inference、按函数名恢复row，或把正式effect参数静默当成空row。System effect实例化仍不产生evidence；handled effect实例化必须与ordered typed evidence一致。
 
+递归 callable 的effect formal按类型系统的递归绑定组规则产生。组内 peer/self 使用共享 provisional row，不在首个引用处实例化或分配正式身份；整组约束求解后，才为最终量化tail生成 canonical `EffectParamRef`、发布 source-formal→actual 关系并原子写回全组header。Top-level、inline module与impl method使用同一协议。禁止premint、first-use/body scan、executable-stack可见性、importer remint或post-SCC HIR patch恢复identity。
+
 ## System effects 与 HostImport
 
 0.1 只定义当前真实 API 所需的三类 system effect：

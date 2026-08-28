@@ -710,6 +710,10 @@ fn process(items) {
 
 **有 bounds 的函数标识符不泛化（2026-06-27）**：`let f = display`（display 有 trait bounds）使 f 单态——f 的类型在 let 点实例化，不保留多态性。即 `f(42); f("hello")` 不合法（f 已绑定到首次使用的具体类型）。这是 HM value restriction 的自然延伸：有 bounds 的函数赋值给变量后，bounds 无法在变量层面泛化。若未来需要"多态函数变量"需重新审视此设计。
 
+**递归组泛化（2026-08-28 用户决定）**：自递归与互递归 callable 先按现有调用图形成 SCC；组内所有成员共享 registration 产生的 monomorphic provisional variables，peer/self 引用不得在组闭合前执行普通 scheme instantiation。整组 body 约束求解完成后，才相对组外环境一次性 final-zonk、generalize、生成 canonical type/effect schema、最终化 HIR provenance，并原子 rebind 全组；失败不得发布部分成员。该协议统一覆盖 top-level、inline module 与 impl method SCC，不能为三个入口各建一套推断或 post-HIR patch authority。组间仍按依赖顺序使用已闭合 scheme。
+
+Ring 0.1 明确不支持 **polymorphic recursion**：递归环中的同一 callable 不能以彼此不可统一的类型实例调用自己或 peer。普通泛型递归仍支持，只要递归环内共享同一组类型参数；函数离开递归组后仍是正常泛型 scheme。Post-0.1 只有真实 consumer 证明该限制无法由普通泛型递归、显式数据建模或非递归 wrapper 表达时，才由 B-203 重新评估；0.1 不预留相关 IR、annotation 或 fallback。
+
 **函数默认参数（2026-08-23 用户决定）**：Ring 0.1 不支持 `fn f(x: T = expr)`。默认参数只省略调用点实参，显式 wrapper 函数可完整表达，却要求保存/复制 typed HIR template、freshen 全部 binder identity 并给每个下游阶段保留 default-specialization authority；compiler/std/examples 当前无 consumer。0.1 clean break 删除该语法与 call-site expansion，不影响 trait method default body。未来若出现独立 API 建模价值，再作为新 feature 评估，不保留兼容路径。
 
 ### 3.2 Formatter：标注密度管理器
@@ -1270,6 +1274,8 @@ Parse / project Resolver / Type+Effect
 **FlowIR 契约**：TypedHIR → CoreHIR 已完成 trait default、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 与 handled-effect evidence 等全部 semantic elaboration；函数默认参数、effect default body、`sig` 与 impl-member `extern fn` 不属于 0.1 surface。FlowIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait default、Test、Const、Lambda/handler、derived/intrinsic/constructor/drop/dict helper 等所有 executable body 或显式 contract进入一个共享 `ExecutableInventory`。Builtin inherent method在Core闭合前已是exact `IntrinsicRef` contract，而不是由backend按类型名/方法名补造的FFI body。System effect只随exact call contract进入AbiIR HostImport，不成为executable handler root。每个first-class callable同时携带freeze后的effect contract；dynamic candidate不得只按参数/返回类型匹配而丢失system/handled/fail/mut/unsafe或正式effect参数。Neutral ANF只保持同一evaluation region内严格左到右求值，不跨short-circuit、branch、loop/lambda、guard、catch/handle、unsafe或control-transfer边界，也不产生`Clone/Take/Drop/Cleanup`。FlowIR freeze后任何阶段新增binder都是internal error。
 
 **Core effect closure（2026-08-26 用户批准）**：CoreHIR不存在“稍后再解”的effect。TypedHIR freeze先求解普通effect inference metavariable；合法多态tail必须generalize为带`owner + ordinal`的稳定`EffectParamRef`，无法归属formal scheme的raw UnionFind/type-var tail直接fail loud。`CoreCallableEffectContract`只允许canonical exact atoms（`SystemEffectRef`、`HandledEffectRef`、`fail<CoreTypeRef>`、`mut<CoreTypeRef>`、`unsafe`）及至多一个正式`EffectParamRef`；effect alias已展开。每个调用点在进入Core前固定formal effect参数的exact实例化。Core/Flow只运输、比较和验证这些契约，不重跑effect inference；ResourcePlanner不消费effect格。正式effect参数等价于已量化类型参数，不等于未解析变量。
+
+递归 callable 的正式 effect 参数服从 §3.1 的递归组泛化：registration/provisional scheme 只提供组内共享 raw constraints，不能提前 mint `EffectParamRef`；definition schema 与 source-formal→actual instantiation 只在整组求解后发布。禁止按 first use、当前 executable stack、body/HIR 扫描、import 顺序或 raw id 猜 owner，也禁止在组后另建 HIR 修补 pass。现有 SCC scheduler、HM constraint/UnionFind 与 canonical header schema 是唯一 authority；inline/top-level/impl method 复用同一 group finalization。
 
 **Identity**：具名 source/member 使用 resolver/registry 已选定 origin 构造的 typed `SymbolRef { origin_module_key, namespace_kind, canonical_payload, declaration_site_path }`；re-export 原样携带，same-origin diamond 自然相等，不消耗共享 source counter。局部槽使用 `SlotRef(module_key, domain, local_def_id)`；Lambda、call-result、ANF/result/projection 等 synthetic identity 使用 final normalized tree 的 owner+path `PathRef`，只服务 planner/certificate，不进入 C 名称。Static call 必须携带 `CalleeRef`；dynamic call 必须落到 exact callable slot，freeze 后缺 identity 直接 fatal，Planner 不查 name/resolver/FnType fallback。
 
