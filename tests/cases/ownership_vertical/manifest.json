@@ -362,6 +362,76 @@
       }
     },
     {
+      "id": "D10",
+      "path": "single/d_recursive_generic_self.ring",
+      "covers": [
+        "ordinary generic self recursion keeps one monomorphic in-group type",
+        "the closed function scheme instantiates independently for Int and Str",
+        "the closed callback effect formal instantiates independently for pure and handled calls"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_RECURSIVE_GENERIC_SELF_OK:5/ring/12\n"
+      }
+    },
+    {
+      "id": "D11",
+      "path": "single/d_recursive_top_level_mutual.ring",
+      "covers": [
+        "top-level mutual recursion closes as one SCC",
+        "peer calls share callback type and effect constraints",
+        "both finalized peers accept exact pure or handled callback instances"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_RECURSIVE_TOP_SCC_OK:4/10\n"
+      }
+    },
+    {
+      "id": "D12",
+      "path": "single/d_recursive_inline_module.ring",
+      "covers": [
+        "inline-module mutual recursion closes as one SCC",
+        "private peer recursion preserves the public entry callback effect formal",
+        "one finalized module entry accepts independent pure and handled instances"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_RECURSIVE_INLINE_MODULE_OK:2/10\n"
+      }
+    },
+    {
+      "id": "D13",
+      "path": "single/d_recursive_impl_methods.ring",
+      "covers": [
+        "inherent impl singleton self recursion",
+        "inherent impl mutual-method recursion",
+        "method SCC callback effect formals preserve pure and handled behavior"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_RECURSIVE_IMPL_METHODS_OK:13/18\n"
+      }
+    },
+    {
+      "id": "D14",
+      "path": "single/d_polymorphic_recursion_rejected.ring",
+      "covers": [
+        "one recursive provisional type cannot instantiate from T to List<T>",
+        "Ring 0.1 polymorphic recursion fails through the existing occurs-check diagnostic"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0302",
+        "diagnostic_contains": "infinite type (occurs check)"
+      }
+    },
+    {
       "id": "E1",
       "path": "single/e_user_extern_same_spelling.ring",
       "covers": [
