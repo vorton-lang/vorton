@@ -1618,7 +1618,8 @@ enum CoreExprValue {
         base: CoreExpr,
         constructor: CoreConstructorRef,
         schema: List<CoreFieldRef>,
-        overrides: List<CoreFieldValue>
+        overrides: List<CoreFieldValue>,
+        effect_ctx: CoreEffectCtxArgument?
     },
     LambdaExprValue {
         executable: ExecutableRef,
@@ -1900,13 +1901,14 @@ pub fn make_core_construct_expr(
 pub fn make_core_move_update_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     base: CoreExpr, constructor: CoreConstructorRef,
-    schema: List<CoreFieldRef>, overrides: List<CoreFieldValue>
+    schema: List<CoreFieldRef>, overrides: List<CoreFieldValue>,
+    effect_ctx: CoreEffectCtxArgument?
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::MoveUpdateExprValue {
             base: base, constructor: constructor,
             schema: copy_core_field_refs(schema),
-            overrides: copy_field_values(overrides)
+            overrides: copy_field_values(overrides), effect_ctx: effect_ctx
         })
 }
 pub fn make_core_lambda_expr(
@@ -2538,6 +2540,14 @@ pub fn core_effect_ctx_install_entries(
 ) -> List<CoreHandlerInstallation> {
     copy_handler_installations(value.entries)
 }
+pub fn core_expr_move_update_effect_ctx(
+    value: CoreExpr
+) -> CoreEffectCtxArgument? {
+    match value.value {
+        CoreExprValue::MoveUpdateExprValue { effect_ctx, .. } => effect_ctx,
+        _ => panic("CoreHIR: expression is not MoveUpdate")
+    }
+}
 
 // ============================================================
 // Closed structured body and recursive validator
@@ -3025,7 +3035,7 @@ fn validate_expr_with_loop_depth(
             }
         },
         CoreExprValue::MoveUpdateExprValue {
-            base, constructor, schema, overrides
+            base, constructor, schema, overrides, effect_ctx
         } => {
             validate_expr_with_loop_depth(base, body, loop_depth)
             for override_value in overrides {
@@ -3067,6 +3077,13 @@ fn validate_expr_with_loop_depth(
                 CoreConstructorRefValue::StructConstructorValue { .. } |
                 CoreConstructorRefValue::VariantConstructorValue(_) => {},
                 _ => panic("CoreHIR: move update constructor is not nominal")
+            }
+            if constructor.executable.is_some() != effect_ctx.is_some() {
+                panic("CoreHIR: move-update constructor EffectCtx differs")
+            }
+            match effect_ctx {
+                some(argument) => validate_effect_ctx_argument(argument, body),
+                none => {}
             }
         },
         CoreExprValue::LambdaExprValue { captures, .. } => {
@@ -3388,6 +3405,181 @@ pub fn core_body_effect_sets(value: CoreBody) -> List<CoreEffectSet> {
     let mut result: List<CoreEffectSet> = []
     collect_block_effect_sets(value.body, result)
     result
+}
+
+fn append_effect_ctx_token(
+    mut values: List<CoreEffectCtxTokenRef>, token: CoreEffectCtxTokenRef
+) {
+    if !values.any(fn(existing) {
+            core_effect_ctx_token_same(existing, token)
+        }) {
+        values.push(token)
+    }
+}
+fn collect_effect_ctx_layout_tokens(
+    value: CoreEffectCtxLayout, mut result: List<CoreEffectCtxTokenRef>
+) {
+    for token in value.entries { append_effect_ctx_token(result, token) }
+}
+fn collect_effect_ctx_argument_tokens(
+    value: CoreEffectCtxArgument, mut result: List<CoreEffectCtxTokenRef>
+) {
+    collect_effect_ctx_layout_tokens(
+        core_effect_ctx_argument_source_layout(value), result)
+    collect_effect_ctx_layout_tokens(
+        core_effect_ctx_argument_target_layout(value), result)
+}
+fn collect_expr_effect_ctx_tokens(
+    value: CoreExpr, mut result: List<CoreEffectCtxTokenRef>
+) {
+    match value.value {
+        CoreExprValue::PrimitiveExprValue { operands, .. } =>
+            for operand in operands { collect_expr_effect_ctx_tokens(
+                operand, result) },
+        CoreExprValue::CallExprValue {
+            arguments, effect_ctx, ..
+        } => {
+            collect_effect_ctx_argument_tokens(effect_ctx, result)
+            for argument in arguments {
+                collect_expr_effect_ctx_tokens(argument, result)
+            }
+        },
+        CoreExprValue::MethodCallExprValue {
+            receiver, arguments, effect_ctx, ..
+        } => {
+            collect_effect_ctx_argument_tokens(effect_ctx, result)
+            collect_expr_effect_ctx_tokens(receiver, result)
+            for argument in arguments {
+                collect_expr_effect_ctx_tokens(argument, result)
+            }
+        },
+        CoreExprValue::EffectCallExprValue {
+            arguments, effect_ctx_lookup, ..
+        } => {
+            collect_effect_ctx_layout_tokens(
+                effect_ctx_lookup.layout, result)
+            append_effect_ctx_token(result, effect_ctx_lookup.token)
+            for argument in arguments {
+                collect_expr_effect_ctx_tokens(argument, result)
+            }
+        },
+        CoreExprValue::SystemCallExprValue { arguments, .. } =>
+            for argument in arguments { collect_expr_effect_ctx_tokens(
+                argument, result) },
+        CoreExprValue::FailRaiseExprValue { payload } =>
+            collect_expr_effect_ctx_tokens(payload, result),
+        CoreExprValue::ProjectExprValue { base, .. } =>
+            collect_expr_effect_ctx_tokens(base, result),
+        CoreExprValue::ConstructExprValue { fields, effect_ctx, .. } => {
+            match effect_ctx {
+                some(argument) => collect_effect_ctx_argument_tokens(
+                    argument, result), none => {}
+            }
+            for field in fields {
+                collect_expr_effect_ctx_tokens(field.value, result)
+            }
+        },
+        CoreExprValue::MoveUpdateExprValue {
+            base, overrides, effect_ctx, ..
+        } => {
+            match effect_ctx {
+                some(argument) => collect_effect_ctx_argument_tokens(
+                    argument, result), none => {}
+            }
+            collect_expr_effect_ctx_tokens(base, result)
+            for field in overrides {
+                collect_expr_effect_ctx_tokens(field.value, result)
+            }
+        },
+        CoreExprValue::BlockExprValue(block) =>
+            collect_block_effect_ctx_tokens(block, result),
+        CoreExprValue::IfExprValue {
+            condition, then_block, else_block
+        } => {
+            collect_expr_effect_ctx_tokens(condition, result)
+            collect_block_effect_ctx_tokens(then_block, result)
+            collect_block_effect_ctx_tokens(else_block, result)
+        },
+        CoreExprValue::MatchExprValue { scrutinee, arms } => {
+            collect_expr_effect_ctx_tokens(scrutinee, result)
+            for arm in arms { collect_arm_effect_ctx_tokens(arm, result) }
+        },
+        CoreExprValue::TryCatchExprValue { body, arms, .. } => {
+            collect_block_effect_ctx_tokens(body, result)
+            for arm in arms { collect_arm_effect_ctx_tokens(arm, result) }
+        },
+        CoreExprValue::HandleExprValue { body, installation } => {
+            match installation {
+                some(context) => for entry in context.entries {
+                    append_effect_ctx_token(result, entry.token)
+                },
+                none => {}
+            }
+            collect_block_effect_ctx_tokens(body, result)
+        },
+        _ => {}
+    }
+}
+fn collect_arm_effect_ctx_tokens(
+    value: CoreMatchArm, mut result: List<CoreEffectCtxTokenRef>
+) {
+    match value.guard {
+        some(guard) => collect_expr_effect_ctx_tokens(guard, result),
+        none => {}
+    }
+    collect_block_effect_ctx_tokens(value.body, result)
+}
+fn collect_stmt_effect_ctx_tokens(
+    value: CoreStmt, mut result: List<CoreEffectCtxTokenRef>
+) {
+    match value.value {
+        CoreStmtValue::Bind { value: expr, .. } |
+        CoreStmtValue::ExprStmt { value: expr, .. } =>
+            collect_expr_effect_ctx_tokens(expr, result),
+        CoreStmtValue::Assign { target, value: expr, .. } => {
+            match target.value {
+                CorePlaceRefValue::CoreProjectPlaceValue { base, .. } =>
+                    collect_expr_effect_ctx_tokens(base, result),
+                _ => {}
+            }
+            collect_expr_effect_ctx_tokens(expr, result)
+        },
+        CoreStmtValue::While { condition, body, .. } => {
+            collect_expr_effect_ctx_tokens(condition, result)
+            collect_block_effect_ctx_tokens(body, result)
+        },
+        CoreStmtValue::Return { value: returned, .. } => match returned {
+            some(expr) => collect_expr_effect_ctx_tokens(expr, result),
+            none => {}
+        },
+        _ => {}
+    }
+}
+fn collect_block_effect_ctx_tokens(
+    value: CoreBlock, mut result: List<CoreEffectCtxTokenRef>
+) {
+    for statement in value.statements {
+        collect_stmt_effect_ctx_tokens(statement, result)
+    }
+    match value.tail {
+        some(expr) => collect_expr_effect_ctx_tokens(expr, result),
+        none => {}
+    }
+}
+pub fn core_body_effect_ctx_tokens(
+    value: CoreBody
+) -> List<CoreEffectCtxTokenRef> {
+    let result: List<CoreEffectCtxTokenRef> = []
+    collect_block_effect_ctx_tokens(value.body, result)
+    result
+}
+pub fn core_callable_effect_ctx_tokens(
+    value: CoreCallableContract
+) -> List<CoreEffectCtxTokenRef> {
+    match value.effect_ctx {
+        some(context) => copy_effect_ctx_tokens(context.layout.entries),
+        none => []
+    }
 }
 
 fn collect_core_expr_origins(value: CoreExpr, mut result: List<OriginRef>) {
@@ -3978,7 +4170,7 @@ fn remap_core_expr_types(
                 })
             },
         CoreExprValue::MoveUpdateExprValue {
-            base, constructor, schema, overrides
+            base, constructor, schema, overrides, effect_ctx
         } => CoreExprValue::MoveUpdateExprValue {
             base: remap_core_expr_types(base, ctx),
             constructor: constructor,
@@ -3987,6 +4179,8 @@ fn remap_core_expr_types(
                 make_core_field_value(
                     field.field, remap_core_expr_types(
                         field.value, ctx))
+            }), effect_ctx: effect_ctx.map(fn(argument) {
+                remap_effect_ctx_argument(argument, ctx)
             })
         },
         CoreExprValue::LambdaExprValue { executable, captures } =>
@@ -5315,7 +5509,7 @@ fn validate_expr_with_program(
             }
         },
         CoreExprValue::MoveUpdateExprValue {
-            base, constructor, schema, overrides
+            base, constructor, schema, overrides, effect_ctx
         } => {
             validate_expr_with_program(
                 base, body, graph, callables,
@@ -5333,7 +5527,17 @@ fn validate_expr_with_program(
                     if core_constructor_kind_tag(constructor) != 1 {
                         panic("CoreHIR: move update structural constructor has executable")
                     }
-                    let _ = core_callable_for(callables, executable)
+                    let callable = core_callable_for(callables, executable)
+                    match effect_ctx {
+                        some(argument) => if !core_effect_contract_same(
+                                core_effect_instantiation_result(
+                                    core_effect_ctx_argument_receipt(argument)),
+                                callable.effects) {
+                            panic("CoreHIR: move-update EffectCtx differs")
+                        },
+                        none => panic(
+                            "CoreHIR: move-update constructor lacks EffectCtx")
+                    }
                 },
                 none => if core_constructor_kind_tag(constructor) == 1 {
                     panic("CoreHIR: move update variant constructor has no executable")

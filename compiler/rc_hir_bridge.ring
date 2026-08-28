@@ -37,8 +37,8 @@ use ir_inventory::{
     executable_kind_handler, executable_kind_default_specialization,
     executable_kind_derived_impl,
     executable_kind_dict_helper,
-    HandledEvidenceRef, HandledEvidenceCapture,
-    make_handled_evidence_capture,
+    EffectCtxRef, EffectCtxParentCapture,
+    effect_ctx_parent_capture_source, effect_ctx_parent_capture_target,
     effect_operation_ref_effect, effect_operation_ref_member,
     system_host_callable_executable,
     exact_method_ref_is_intrinsic, exact_method_ref_is_impl,
@@ -116,10 +116,12 @@ use core_expr::{
     CoreBody, CoreBinder, CoreBlock, CoreStmt, CoreExpr, CoreMatchArm,
     CorePattern, CorePatternField, CoreFieldRef, CoreFieldValue,
     CoreCalleeRef, CoreEvidenceRef, CoreConstructorRef, CorePlaceRef,
-    CoreImplMetadata, CoreCallableContract, CoreHandledEvidenceCapture,
+    CoreImplMetadata, CoreCallableContract,
+    CoreEffectCtxTokenRef, CoreEffectCtxLayout,
+    CoreCallableEffectCtx, CoreEffectCtxArgument, CoreEffectCtxLookup,
     CoreHandlerOperation, CoreHandlerInstallation,
-    core_callable_reference, core_callable_handled_evidence,
-    core_handled_evidence_reference,
+    core_callable_reference, core_callable_effect_ctx,
+    core_callable_effect_ctx_reference, core_callable_effect_ctx_layout,
     core_body_reference, core_body_origin, core_body_block,
     core_body_binders,
     core_binder_reference, core_binder_type,
@@ -137,24 +139,23 @@ use core_expr::{
     core_expr_primitive_operation, core_primitive_op_tag,
     core_expr_primitive_operands,
     core_expr_call_callee, core_expr_call_arguments,
-    core_expr_call_evidence, core_expr_call_handled_evidence,
-    core_handled_use_reference,
+    core_expr_call_evidence, core_expr_call_effect_ctx_argument,
+    core_expr_effect_ctx_lookup,
     core_expr_method_ref,
     core_expr_method_receiver, core_expr_effect_operation,
     core_expr_system_host, core_expr_fail_payload,
     core_expr_project_base, core_expr_project_field,
     core_expr_constructor, core_expr_constructor_fields,
+    core_expr_constructor_effect_ctx,
     core_expr_move_update_base, core_expr_move_update_constructor,
     core_expr_move_update_schema, core_expr_move_update_overrides,
+    core_expr_move_update_effect_ctx,
     core_expr_lambda_executable, core_expr_lambda_captures,
-    core_expr_lambda_handled_captures,
     core_capture_source, core_capture_target,
-    core_handled_capture_requirement, core_handled_capture_source,
-    core_handled_capture_target,
     core_expr_block, core_expr_then_block, core_expr_else_block,
     core_expr_condition, core_expr_scrutinee,
     core_expr_match_arms, core_expr_try_body, core_expr_handle_body,
-    core_expr_error_slot, core_expr_handler_installations,
+    core_expr_error_slot, core_expr_effect_ctx_install,
     core_match_arm_pattern, core_match_arm_guard, core_match_arm_body,
     core_pattern_kind_tag, core_pattern_type, core_pattern_binding,
     core_pattern_literal, core_pattern_elements, core_pattern_fields,
@@ -174,18 +175,32 @@ use core_expr::{
     core_callee_local, core_callee_dynamic, core_callee_contract,
     core_callee_effect_instantiation,
     core_evidence_dict,
-    core_handler_installation_evidence,
+    core_handler_installation_token,
     core_handler_installation_operations,
     core_handler_operation_ref, core_handler_operation_executable,
     core_handler_operation_parameter_slots,
     core_handler_operation_resume_slot,
     core_handler_operation_captures,
-    core_handler_operation_handled_captures,
+    core_handler_operation_parent_ctx,
+    core_effect_ctx_install_parent, core_effect_ctx_install_child,
+    core_effect_ctx_install_entries,
+    core_effect_ctx_token_instance,
+    core_effect_ctx_layout_entries, core_effect_ctx_layout_formal,
+    core_effect_ctx_argument_kind_tag, core_effect_ctx_argument_context,
+    core_effect_ctx_argument_target_layout,
+    core_effect_ctx_lookup_context, core_effect_ctx_lookup_token,
     core_impl_owner, core_impl_methods, core_impl_assoc_bindings,
     core_assoc_binding_member
 }
 use effect_contract::{
-    CoreEffectSet,
+    CoreEffectSet, TypedHandledEffectInstance,
+    TypedEffectCtxLayout, TypedCallableEffectCtx,
+    TypedEffectCtxSource, TypedEffectCtxLookup,
+    make_typed_handled_effect_instance,
+    make_typed_effect_ctx_layout, make_typed_callable_effect_ctx,
+    make_empty_effect_ctx_source, make_borrowed_effect_ctx_source,
+    make_typed_effect_ctx_lookup, make_typed_effect_ctx_install,
+    core_effect_atom_handled_ref, core_effect_atom_type_arguments,
     core_effect_instantiation_result, core_effect_contract_exact
 }
 use flow_lower::{
@@ -225,12 +240,15 @@ use legacy_projection::{
     LegacyBinderProjection, LegacyCallableProjection,
     LegacyTypeParameterProjection, LegacyTraitBoundProjection,
     LegacyImplProjection, LegacyAssocBindingProjection,
+    LegacyEffectCtxToken,
     make_legacy_binder_projection,
     legacy_projection_core_type_count,
     legacy_projection_type_for, legacy_projection_effect_for,
     legacy_projection_binder_for, legacy_projection_callable_for,
     legacy_projection_impl_for, legacy_projection_dictionary,
     legacy_projection_executable_physical_identity,
+    legacy_projection_effect_ctx_tokens,
+    legacy_effect_ctx_token_ordinal, legacy_effect_ctx_token_instance,
     legacy_type_projection_type, legacy_effect_projection_row,
     legacy_binder_projection_name, legacy_binder_projection_def_id,
     legacy_binder_projection_type, legacy_binder_projection_is_mutable,
@@ -377,6 +395,53 @@ fn legacy_type_for(
 ) -> Type {
     legacy_type_projection_type(
         legacy_projection_type_for(projection, core_type))
+}
+fn typed_effect_ctx_instance(
+    projection: LegacyProjectionTable, token: CoreEffectCtxTokenRef
+) -> TypedHandledEffectInstance {
+    let atom = core_effect_ctx_token_instance(token)
+    make_typed_handled_effect_instance(
+        core_effect_atom_handled_ref(atom),
+        core_effect_atom_type_arguments(atom).map(fn(ty) {
+            legacy_type_for(projection, ty)
+        }))
+}
+fn typed_effect_ctx_layout(
+    projection: LegacyProjectionTable,
+    value: CoreEffectCtxLayout
+) -> TypedEffectCtxLayout {
+    make_typed_effect_ctx_layout(
+        core_effect_ctx_layout_entries(value).map(fn(token) {
+            typed_effect_ctx_instance(projection, token)
+        }), core_effect_ctx_layout_formal(value))
+}
+fn typed_callable_effect_ctx(
+    projection: LegacyProjectionTable,
+    value: CoreCallableEffectCtx
+) -> TypedCallableEffectCtx {
+    make_typed_callable_effect_ctx(
+        core_callable_effect_ctx_reference(value),
+        typed_effect_ctx_layout(
+            projection, core_callable_effect_ctx_layout(value)))
+}
+fn typed_effect_ctx_source(
+    value: CoreEffectCtxArgument
+) -> TypedEffectCtxSource {
+    if core_effect_ctx_argument_kind_tag(value) == 0 {
+        make_empty_effect_ctx_source()
+    } else {
+        make_borrowed_effect_ctx_source(
+            core_effect_ctx_argument_context(value))
+    }
+}
+fn typed_effect_ctx_lookup(
+    projection: LegacyProjectionTable,
+    value: CoreEffectCtxLookup
+) -> TypedEffectCtxLookup {
+    make_typed_effect_ctx_lookup(
+        core_effect_ctx_lookup_context(value),
+        typed_effect_ctx_instance(
+            projection, core_effect_ctx_lookup_token(value)))
 }
 
 fn legacy_effects_for(
@@ -1375,10 +1440,8 @@ fn simple_core_expr(
             callee: call_callee, args: args, type_args: [],
             effect_instantiation: none,
             resolved_dicts: evidence,
-            handled_evidence:
-                core_expr_call_handled_evidence(expr).map(fn(value) {
-                    core_handled_use_reference(value)
-                }),
+            effect_ctx: typed_effect_ctx_source(
+                core_expr_call_effect_ctx_argument(expr)),
             callee_ref: if kind == 3 {
                 some(core_callee_ref(callee))
             } else { none },
@@ -1407,10 +1470,8 @@ fn simple_core_expr(
                 effect_operation_ref_member(operation)),
             operation_ref: some(operation),
             fail_ref: none,
-            handled_evidence:
-                core_expr_call_handled_evidence(expr).map(fn(value) {
-                    core_handled_use_reference(value)
-                }),
+            effect_ctx_lookup: some(typed_effect_ctx_lookup(
+                ctx.projection, core_expr_effect_ctx_lookup(expr))),
             args: args,
             ty: ty, effects: effects, span: span_zero()
         } }
@@ -1435,7 +1496,7 @@ fn simple_core_expr(
             args: args,
             type_args: [], effect_instantiation: none,
             resolved_dicts: [],
-            handled_evidence: [],
+            effect_ctx: make_empty_effect_ctx_source(),
             callee_ref: some(make_named_callee_ref(
                 executable_ref_named_symbol(executable))), method_ref: none,
             system_host: some(core_expr_system_host(expr)),
@@ -1528,7 +1589,10 @@ fn simple_core_expr(
                     core_constructor_executable(constructor).unwrap(),
                     fields.map(fn(field) {
                         hir_projection(core_field_value_field(field))
-                    }))),
+                    }), typed_effect_ctx_source(
+                        core_expr_constructor_effect_ctx(expr).unwrap_or_else(
+                            fn() { panic("RcHIR bridge: constructor lacks EffectCtx")
+                            })))),
                 ty: ty, effects: effects, span: span_zero()
             } }
         }
@@ -1582,12 +1646,10 @@ fn simple_core_expr(
         return simple_operand(HExpr::Lambda {
             executable_ref: executable,
             params: legacy_params(callable), captures: captures,
-            handled_evidence_bindings: core_callable_handled_refs(
-                ctx.stages.core, executable),
-            evidence_captures:
-                core_expr_lambda_handled_captures(expr).map(fn(capture) {
-                    core_handled_capture_ref(capture)
-                }),
+            effect_ctx: typed_callable_effect_ctx(
+                ctx.projection,
+                core_callable_effect_ctx_for(
+                    ctx.stages.core, executable)),
             return_type: legacy_callable_result_type(callable),
             body: serialize_callable_body(ctx, executable),
             ty: ty, effects: effects, span: span_zero()
@@ -1632,7 +1694,7 @@ fn serialize_core_expr(
             value: HExpr::EffectOp {
                 effect_name: "fail", op_name: "raise",
                 operation_ref: none, fail_ref: some(h_fail_raise_ref()),
-                handled_evidence: [],
+                effect_ctx_lookup: none,
                 args: [bridge_binder_ident(ctx, sink)],
                 ty: legacy_type_for(ctx.projection, core_expr_type(expr)),
                 effects: legacy_effects_for(
@@ -2080,6 +2142,7 @@ fn serialize_callable_body(
 
 fn serialize_handler(
     mut ctx: HirBridgeCtx, handler: CoreHandlerOperation,
+    token: CoreEffectCtxTokenRef,
     node_ordinal: Int, dispatch_ordinal: Int
 ) -> HEffectHandler {
     let operation = core_handler_operation_ref(handler)
@@ -2127,16 +2190,17 @@ fn serialize_handler(
         result
     })
     HEffectHandler {
-        handled_ref: some(effect_operation_ref_effect(operation)),
+        handled_instance: some(typed_effect_ctx_instance(
+            ctx.projection, token)),
         operation_ref: some(operation),
         fail_ref: none,
         executable_ref: core_handler_operation_executable(handler),
         captures: captures,
-        handled_evidence_bindings: core_callable_handled_refs(
-            ctx.stages.core, core_handler_operation_executable(handler)),
-        evidence_captures:
-            core_handler_operation_handled_captures(handler).map(
-                fn(capture) { core_handled_capture_ref(capture) }),
+        effect_ctx: typed_callable_effect_ctx(
+            ctx.projection, core_callable_effect_ctx_for(
+                ctx.stages.core,
+                core_handler_operation_executable(handler))),
+        parent_ctx: core_handler_operation_parent_ctx(handler),
         effect_name: symbol_ref_canonical_payload(
             handled_effect_ref_symbol(effect_operation_ref_effect(operation))),
         op_name: symbol_ref_canonical_payload(
@@ -2171,8 +2235,9 @@ fn serialize_trait_method(
         effects: validate_legacy_effect_row(value.effects),
         has_default: value.has_default,
         executable_ref: value.executable_ref,
-        handled_evidence_bindings: core_callable_handled_refs(
-            ctx.stages.core, value.executable_ref),
+        effect_ctx: typed_callable_effect_ctx(
+            ctx.projection, core_callable_effect_ctx_for(
+                ctx.stages.core, value.executable_ref)),
         body: body
     }
 }
@@ -2232,22 +2297,13 @@ fn exact_core_callable(
     }
 }
 
-fn core_callable_handled_refs(
+fn core_callable_effect_ctx_for(
     core: CoreProgram, reference: ExecutableRef
-) -> List<HandledEvidenceRef> {
-    core_callable_handled_evidence(
-        exact_core_callable(core, reference)).map(fn(binding) {
-            core_handled_evidence_reference(binding)
-        })
-}
-
-fn core_handled_capture_ref(
-    value: CoreHandledEvidenceCapture
-) -> HandledEvidenceCapture {
-    make_handled_evidence_capture(
-        core_handled_capture_requirement(value),
-        core_handled_capture_source(value),
-        core_handled_capture_target(value))
+) -> CoreCallableEffectCtx {
+    match core_callable_effect_ctx(exact_core_callable(core, reference)) {
+        some(value) => value,
+        none => panic("RcHIR bridge: Ring callable lacks EffectCtx")
+    }
 }
 
 fn generated_method_decl(
@@ -2264,8 +2320,9 @@ fn generated_method_decl(
         return_type: legacy_callable_result_type(callable),
         effects: validate_legacy_effect_row(
             legacy_callable_effects(callable)),
-        handled_evidence_bindings: core_callable_handled_refs(
-            ctx.stages.core, executable),
+        effect_ctx: typed_callable_effect_ctx(
+            ctx.projection, core_callable_effect_ctx_for(
+                ctx.stages.core, executable)),
         body: serialize_callable_body(ctx, executable),
         is_pub: legacy_callable_is_public(callable),
         trait_bounds: legacy_trait_bounds(callable), span: span_zero()
@@ -2285,8 +2342,9 @@ fn generated_standalone_decl(
         return_type: legacy_callable_result_type(callable),
         effects: validate_legacy_effect_row(
             legacy_callable_effects(callable)),
-        handled_evidence_bindings: core_callable_handled_refs(
-            ctx.stages.core, reference),
+        effect_ctx: typed_callable_effect_ctx(
+            ctx.projection, core_callable_effect_ctx_for(
+                ctx.stages.core, reference)),
         body: serialize_callable_body(ctx, reference),
         is_pub: legacy_callable_is_public(callable),
         trait_bounds: legacy_trait_bounds(callable), span: span_zero()
@@ -2374,23 +2432,26 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
             type_params: type_params, params: params,
             return_type: return_type,
             effects: validate_legacy_effect_row(effects),
-            handled_evidence_bindings: core_callable_handled_refs(
-                ctx.stages.core, executable_ref),
+            effect_ctx: typed_callable_effect_ctx(
+                ctx.projection, core_callable_effect_ctx_for(
+                    ctx.stages.core, executable_ref)),
             body: serialize_callable_body(ctx, executable_ref),
             is_pub: is_pub, trait_bounds: trait_bounds, span: span
         },
         HDecl::Test { description, executable_ref, span, .. } => HDecl::Test {
             description: description, executable_ref: executable_ref,
-            handled_evidence_bindings: core_callable_handled_refs(
-                ctx.stages.core, executable_ref),
+            effect_ctx: typed_callable_effect_ctx(
+                ctx.projection, core_callable_effect_ctx_for(
+                    ctx.stages.core, executable_ref)),
             body: serialize_callable_body(ctx, executable_ref), span: span
         },
         HDecl::Const {
             name, def_id, executable_ref, ty, is_pub, span, ..
         } => HDecl::Const {
             name: name, def_id: def_id, executable_ref: executable_ref,
-            handled_evidence_bindings: core_callable_handled_refs(
-                ctx.stages.core, executable_ref),
+            effect_ctx: typed_callable_effect_ctx(
+                ctx.projection, core_callable_effect_ctx_for(
+                    ctx.stages.core, executable_ref)),
             ty: ty, init: serialize_callable_body(ctx, executable_ref),
             is_pub: is_pub, span: span
         },
@@ -2479,8 +2540,6 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
             params: params, return_type: return_type,
             effects: validate_legacy_effect_row(effects),
             resource_contract: resource_contract,
-            handled_evidence_bindings: core_callable_handled_refs(
-                ctx.stages.core, executable_ref),
             trait_bounds: trait_bounds,
             is_pub: is_pub, span: span
         },
@@ -2566,6 +2625,21 @@ pub fn materialized_project_hir_program(
     value: MaterializedProjectHir
 ) -> HProgram { value.program }
 
+pub struct MaterializedProjectHirResult {
+    modules: List<MaterializedProjectHir>,
+    effect_ctx_tokens: List<LegacyEffectCtxToken>
+}
+pub fn materialized_project_hir_modules(
+    value: MaterializedProjectHirResult
+) -> List<MaterializedProjectHir> {
+    value.modules.map(fn(item) { item })
+}
+pub fn materialized_project_hir_effect_ctx_tokens(
+    value: MaterializedProjectHirResult
+) -> List<LegacyEffectCtxToken> {
+    value.effect_ctx_tokens.map(fn(item) { item })
+}
+
 struct ProjectHirDraft {
     module_key: Str,
     shell: HProgram,
@@ -2595,7 +2669,7 @@ pub fn materialize_verified_project_hir(
     prelude_physical_owner_module_key: Str,
     verified: VerifiedOwnershipProgram,
     projection: LegacyProjectionTable
-) -> List<MaterializedProjectHir> {
+) -> MaterializedProjectHirResult {
     if shells_in_topological_order.len() == 0 {
         panic("RcHIR bridge: project has no module shells")
     }
@@ -2704,18 +2778,37 @@ pub fn materialize_verified_project_hir(
             module_key: draft.module_key, program: program
         })
     }
-    result
+    MaterializedProjectHirResult {
+        modules: result,
+        effect_ctx_tokens: legacy_projection_effect_ctx_tokens(projection)
+    }
+}
+
+pub struct MaterializedVerifiedHir {
+    program: HProgram,
+    effect_ctx_tokens: List<LegacyEffectCtxToken>
+}
+pub fn materialized_verified_hir_program(
+    value: MaterializedVerifiedHir
+) -> HProgram { value.program }
+pub fn materialized_verified_hir_effect_ctx_tokens(
+    value: MaterializedVerifiedHir
+) -> List<LegacyEffectCtxToken> {
+    value.effect_ctx_tokens.map(fn(item) { item })
 }
 
 pub fn materialize_verified_hir(
     module_key: Str, shell: HProgram, verified: VerifiedOwnershipProgram,
     projection: LegacyProjectionTable
-) -> HProgram {
+) -> MaterializedVerifiedHir {
     let result = materialize_verified_project_hir(
         [make_verified_project_hir_shell(module_key, shell)], module_key,
         verified, projection)
-    match result.get(0) {
-        some(value) => value.program,
+    match result.modules.get(0) {
+        some(value) => MaterializedVerifiedHir {
+            program: value.program,
+            effect_ctx_tokens: result.effect_ctx_tokens.map(fn(item) { item })
+        },
         none => panic("RcHIR bridge: single project materialization is empty")
     }
 }
@@ -3193,7 +3286,11 @@ fn serialize_move_update_expr(
             fields: fields, spread: none,
             constructor: some(make_h_executable_constructor_plan(
                 core_constructor_executable(constructor).unwrap(),
-                schema.map(fn(field) { hir_projection(field) }))),
+                schema.map(fn(field) { hir_projection(field) }),
+                typed_effect_ctx_source(
+                    core_expr_move_update_effect_ctx(expr).unwrap_or_else(fn() {
+                        panic("RcHIR bridge: update constructor lacks EffectCtx")
+                    })))),
             ty: ty, effects: effects, span: span_zero()
         }
     } else {
@@ -3348,22 +3445,29 @@ fn serialize_structured_core_expr(
             ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0)
         append_all(suffix, edge_cleanup_statements(
             ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
-        let installations = core_expr_handler_installations(expr)
-        let mut installed_evidence: List<HandledEvidenceRef> = []
         let mut handlers: List<HEffectHandler> = []
         let mut dispatch_ordinal = 1
-        for installation in installations {
-            installed_evidence.push(core_handled_evidence_reference(
-                core_handler_installation_evidence(installation)))
-            for operation in core_handler_installation_operations(installation) {
-                handlers.push(serialize_handler(
-                    ctx, operation, node_ordinal, dispatch_ordinal))
-                dispatch_ordinal = dispatch_ordinal + 1
+        let core_install = core_expr_effect_ctx_install(expr)
+        let typed_install = core_install.map(fn(installation) {
+            let mut instances: List<TypedHandledEffectInstance> = []
+            for entry in core_effect_ctx_install_entries(installation) {
+                let token = core_handler_installation_token(entry)
+                instances.push(typed_effect_ctx_instance(
+                    ctx.projection, token))
+                for operation in core_handler_installation_operations(entry) {
+                    handlers.push(serialize_handler(
+                        ctx, operation, token,
+                        node_ordinal, dispatch_ordinal))
+                    dispatch_ordinal = dispatch_ordinal + 1
+                }
             }
-            // Flow lowering emits one aggregate Initialize after each effect's
+            // Flow lowering emits one owned overlay Initialize after all
             // ordered handler closures.
             dispatch_ordinal = dispatch_ordinal + 1
-        }
+            make_typed_effect_ctx_install(
+                core_effect_ctx_install_parent(installation),
+                core_effect_ctx_install_child(installation), instances)
+        })
         return SerializedExpr {
             node_ordinal: node_ordinal, prefix: prefix,
             value: HExpr::HandleExpr {
@@ -3374,7 +3478,7 @@ fn serialize_structured_core_expr(
                         ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 0),
                     suffix),
                 handlers: handlers,
-                installed_evidence: installed_evidence,
+                effect_ctx_install: typed_install,
                 ty: ty, effects: effects, span: span_zero()
             },
             after: []

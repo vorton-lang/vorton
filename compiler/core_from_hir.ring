@@ -312,6 +312,7 @@ use core_expr::{
     core_binder_reference, core_binder_type, core_binder_kind,
     core_callable_semantic_contract, core_callable_effect_contract,
     core_callable_effect_ctx,
+    core_callable_effect_ctx_tokens, core_body_effect_ctx_tokens,
     core_callable_effect_ctx_reference, core_callable_effect_ctx_layout,
     core_effect_ctx_layout_entries, core_effect_ctx_layout_formal,
     core_effect_ctx_layout_same,
@@ -3419,7 +3420,7 @@ fn lower_named_update(
     mut ctx: LowerCtx, ty: CoreTypeRef, effects: CoreEffectSet,
     origin: OriginRef, spread: HExpr,
     inputs: List<LowerUpdateInput>, schema: List<FlowNominalFieldFact>,
-    constructor: CoreConstructorRef
+    constructor: CoreConstructorRef, effect_ctx: CoreEffectCtxArgument?
 ) -> CoreExpr {
     for input in inputs {
         if !schema.any(fn(fact) {
@@ -3438,7 +3439,8 @@ fn lower_named_update(
     }
     make_core_move_update_expr(
         ty, effects, origin, base, constructor,
-        schema.map(fn(fact) { lower_update_core_field(fact) }), overrides)
+        schema.map(fn(fact) { lower_update_core_field(fact) }), overrides,
+        effect_ctx)
 }
 
 fn primitive_tag(op: BinOp) -> Int {
@@ -3718,7 +3720,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     }
                     lower_named_update(
                         ctx, ty, effects, origin, base, inputs,
-                        schema, constructor)
+                        schema, constructor, none)
                 },
                 none => make_core_construct_expr(ty, effects, origin,
                     make_core_struct_constructor(
@@ -3749,7 +3751,11 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     }
                     lower_named_update(
                         ctx, ty, effects, origin, base, inputs,
-                        schema, constructor)
+                        schema, constructor,
+                        some(core_effect_ctx_argument_from_source(
+                            ctx, h_constructor_effect_ctx(plan),
+                            closed_callable_effect_receipt(
+                                ctx, h_constructor_executable(plan)))))
                 },
                 none => make_core_construct_expr(ty, effects, origin,
                     constructor,
@@ -6454,18 +6460,13 @@ fn effect_ctx_token_sort_key(value: CoreEffectCtxTokenRef) -> Str {
     parts.join("/")
 }
 
-fn append_effect_ctx_tokens_from_contract(
-    mut values: List<CoreEffectCtxTokenRef>, contract: CoreEffectContract
+fn append_project_effect_ctx_token(
+    mut values: List<CoreEffectCtxTokenRef>, token: CoreEffectCtxTokenRef
 ) {
-    for atom in core_effect_set_atoms(core_effect_contract_exact(contract)) {
-        if core_effect_atom_kind_tag(atom) == 3 {
-            let token = make_core_effect_ctx_token_ref(atom)
-            if !values.any(fn(existing) {
-                    core_effect_ctx_token_same(existing, token)
-                }) {
-                values.push(token)
-            }
-        }
+    if !values.any(fn(existing) {
+            core_effect_ctx_token_same(existing, token)
+        }) {
+        values.push(token)
     }
 }
 
@@ -6474,13 +6475,14 @@ fn freeze_project_effect_ctx_tokens(
 ) -> List<CoreEffectCtxTokenBinding> {
     let mut tokens: List<CoreEffectCtxTokenRef> = []
     for callable in callables {
-        append_effect_ctx_tokens_from_contract(
-            tokens, core_callable_effect_contract(callable))
+        for token in core_callable_effect_ctx_tokens(callable) {
+            append_project_effect_ctx_token(tokens, token)
+        }
     }
     for entry in bodies {
-        for effects in core_body_effect_sets(core_body_entry_body(entry)) {
-            append_effect_ctx_tokens_from_contract(
-                tokens, make_core_effect_contract(effects, none))
+        for token in core_body_effect_ctx_tokens(
+                core_body_entry_body(entry)) {
+            append_project_effect_ctx_token(tokens, token)
         }
     }
     let mut keyed = tokens.map(fn(token) {

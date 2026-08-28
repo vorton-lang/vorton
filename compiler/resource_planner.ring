@@ -73,7 +73,8 @@ use flow_ir::{
     flow_place_is_slot, flow_place_slot, flow_place_base,
     flow_place_projection, flow_place_value_type,
     flow_projection_contract_result_type, flow_call_target,
-    flow_call_arguments, flow_call_result, flow_project_contract,
+    flow_call_arguments, flow_call_result, flow_call_effect_ctx,
+    flow_effect_ctx_use_borrowed_slot, flow_project_contract,
     flow_project_base,
     flow_project_result, flow_project_is_partial, flow_capture_source,
     flow_capture_target, flow_capture_source_role,
@@ -92,6 +93,7 @@ use resource_model::{
     flow_storage_contract_tag,
     TransferDemand, LogicalOwnershipShape, PhysicalRcShape,
     param_mode_borrow, param_mode_mut_borrow, param_mode_own,
+    param_mode_same,
     make_transfer_demand, transfer_demand_mode, transfer_demand_force,
     make_logical_ownership_shape, logical_ownership_shape_direct_drop,
     logical_ownership_shape_may_unique, logical_ownership_shape_param_deps,
@@ -523,6 +525,28 @@ fn planner_event_value_from_flow(
         let mut demands: List<TransferDemand> = []
         for role in flow_call_contract_parameter_roles(contract) {
             demands.push(transfer_demand_from_flow_role(role))
+        }
+        match flow_effect_ctx_use_borrowed_slot(
+                flow_call_effect_ctx(instruction)) {
+            some(reference) => {
+                let exact = flow_slot_index(slots, reference)
+                let mut matches = 0
+                for operand in operands {
+                    if operand.slot == exact {
+                        if !param_mode_same(
+                                transfer_demand_mode(operand.lower_bound),
+                                param_mode_borrow()) ||
+                           transfer_demand_force(operand.lower_bound) {
+                            panic("ResourcePlanner: EffectCtx is not borrowed")
+                        }
+                        matches = matches + 1
+                    }
+                }
+                if matches != 1 {
+                    panic("ResourcePlanner: call lacks one EffectCtx borrow")
+                }
+            },
+            none => {}
         }
         let result = match flow_call_result(instruction) {
             some(slot) => some(flow_slot_index(slots, slot)),

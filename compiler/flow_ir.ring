@@ -55,15 +55,30 @@ use ir_inventory::{
     effect_operation_ref_callable,
     effect_operation_ref_same, effect_operation_ref_effect,
     effect_operation_ref_source_index,
-    HandledEvidenceRef, handled_evidence_requirement,
-    handled_evidence_slot, handled_evidence_contract_owner,
-    handled_evidence_ordinal, handled_evidence_ref_same,
+    EffectCtxRef, EffectCtxParentCapture,
+    effect_ctx_slot, effect_ctx_contract_owner, effect_ctx_ref_same,
+    effect_ctx_parent_capture_source, effect_ctx_parent_capture_target,
     ExecutableContractMode, executable_contract_mode_same,
     executable_contract_mode_concrete_body,
     executable_contract_mode_contract_only,
     BinderManifest, BinderEntry,
     binder_manifest_owner, binder_manifest_entries,
     binder_entry_slot, make_binder_manifest
+}
+use core_expr::{
+    CoreEffectCtxTokenRef, CoreEffectCtxLayout, CoreCallableEffectCtx,
+    CoreEffectCtxArgument, CoreEffectCtxLookup,
+    core_effect_ctx_token_instance, core_effect_ctx_token_same,
+    core_effect_ctx_layout_entries, core_effect_ctx_layout_formal,
+    core_effect_ctx_layout_same,
+    core_callable_effect_ctx_reference, core_callable_effect_ctx_layout,
+    core_callable_effect_ctx_type,
+    core_effect_ctx_argument_kind_tag, core_effect_ctx_argument_context,
+    core_effect_ctx_argument_source_layout,
+    core_effect_ctx_argument_target_layout,
+    core_effect_ctx_argument_receipt,
+    core_effect_ctx_lookup_context, core_effect_ctx_lookup_layout,
+    core_effect_ctx_lookup_token
 }
 use effect_contract::{
     EffectParamRef,
@@ -142,86 +157,64 @@ use resource_model::{
 // Finite, exact type graph
 // ============================================================
 
-pub struct FlowHandledEvidenceBinding {
-    reference: HandledEvidenceRef,
-    aggregate_type: CoreTypeRef
+enum FlowEffectCtxUseValue {
+    ForeignLeafEffectCtxUse,
+    ArgumentEffectCtxUse(CoreEffectCtxArgument),
+    LookupEffectCtxUse(CoreEffectCtxLookup)
 }
-
-pub fn make_flow_handled_evidence_binding(
-    reference: HandledEvidenceRef, aggregate_type: CoreTypeRef
-) -> FlowHandledEvidenceBinding {
-    if core_type_ref_index(aggregate_type) < 0 {
-        panic("FlowIR: handled evidence has invalid aggregate type")
-    }
-    FlowHandledEvidenceBinding {
-        reference: reference, aggregate_type: aggregate_type
-    }
+pub struct FlowEffectCtxUse { value: FlowEffectCtxUseValue }
+pub fn make_foreign_leaf_flow_effect_ctx_use() -> FlowEffectCtxUse {
+    FlowEffectCtxUse { value: FlowEffectCtxUseValue::ForeignLeafEffectCtxUse }
 }
-pub fn flow_handled_evidence_reference(
-    value: FlowHandledEvidenceBinding
-) -> HandledEvidenceRef { value.reference }
-pub fn flow_handled_evidence_requirement(
-    value: FlowHandledEvidenceBinding
-) -> HandledEffectRef { handled_evidence_requirement(value.reference) }
-pub fn flow_handled_evidence_slot(
-    value: FlowHandledEvidenceBinding
-) -> SlotRef { handled_evidence_slot(value.reference) }
-pub fn flow_handled_evidence_owner(
-    value: FlowHandledEvidenceBinding
-) -> ExecutableRef { handled_evidence_contract_owner(value.reference) }
-pub fn flow_handled_evidence_ordinal(
-    value: FlowHandledEvidenceBinding
-) -> Int { handled_evidence_ordinal(value.reference) }
-pub fn flow_handled_evidence_type(
-    value: FlowHandledEvidenceBinding
-) -> CoreTypeRef { value.aggregate_type }
-fn copy_flow_handled_evidence_bindings(
-    values: List<FlowHandledEvidenceBinding>
-) -> List<FlowHandledEvidenceBinding> {
-    values.map(fn(value) {
-        make_flow_handled_evidence_binding(
-            value.reference, value.aggregate_type)
-    })
-}
-
-pub struct FlowHandledEvidenceUse {
-    reference: HandledEvidenceRef,
-    aggregate_type: CoreTypeRef
-}
-pub fn make_flow_handled_evidence_use(
-    reference: HandledEvidenceRef, aggregate_type: CoreTypeRef
-) -> FlowHandledEvidenceUse {
-    if core_type_ref_index(aggregate_type) < 0 {
-        panic("FlowIR: handled evidence use has invalid aggregate type")
-    }
-    FlowHandledEvidenceUse {
-        reference: reference, aggregate_type: aggregate_type
+pub fn make_argument_flow_effect_ctx_use(
+    argument: CoreEffectCtxArgument
+) -> FlowEffectCtxUse {
+    FlowEffectCtxUse {
+        value: FlowEffectCtxUseValue::ArgumentEffectCtxUse(argument)
     }
 }
-pub fn flow_handled_use_reference(
-    value: FlowHandledEvidenceUse
-) -> HandledEvidenceRef { value.reference }
-pub fn flow_handled_use_requirement(
-    value: FlowHandledEvidenceUse
-) -> HandledEffectRef { handled_evidence_requirement(value.reference) }
-pub fn flow_handled_use_slot(value: FlowHandledEvidenceUse) -> SlotRef {
-    handled_evidence_slot(value.reference)
+pub fn make_lookup_flow_effect_ctx_use(
+    lookup: CoreEffectCtxLookup
+) -> FlowEffectCtxUse {
+    FlowEffectCtxUse {
+        value: FlowEffectCtxUseValue::LookupEffectCtxUse(lookup)
+    }
 }
-pub fn flow_handled_use_owner(value: FlowHandledEvidenceUse) -> ExecutableRef {
-    handled_evidence_contract_owner(value.reference)
+pub fn flow_effect_ctx_use_kind_tag(value: FlowEffectCtxUse) -> Int {
+    match value.value {
+        FlowEffectCtxUseValue::ForeignLeafEffectCtxUse => 0,
+        FlowEffectCtxUseValue::ArgumentEffectCtxUse(_) => 1,
+        FlowEffectCtxUseValue::LookupEffectCtxUse(_) => 2
+    }
 }
-pub fn flow_handled_use_ordinal(value: FlowHandledEvidenceUse) -> Int {
-    handled_evidence_ordinal(value.reference)
+pub fn flow_effect_ctx_use_argument(
+    value: FlowEffectCtxUse
+) -> CoreEffectCtxArgument {
+    match value.value {
+        FlowEffectCtxUseValue::ArgumentEffectCtxUse(argument) => argument,
+        _ => panic("FlowIR: EffectCtx use is not an argument")
+    }
 }
-pub fn flow_handled_use_type(value: FlowHandledEvidenceUse) -> CoreTypeRef {
-    value.aggregate_type
+pub fn flow_effect_ctx_use_lookup(
+    value: FlowEffectCtxUse
+) -> CoreEffectCtxLookup {
+    match value.value {
+        FlowEffectCtxUseValue::LookupEffectCtxUse(lookup) => lookup,
+        _ => panic("FlowIR: EffectCtx use is not a lookup")
+    }
 }
-fn copy_flow_handled_evidence_uses(
-    values: List<FlowHandledEvidenceUse>
-) -> List<FlowHandledEvidenceUse> {
-    values.map(fn(value) {
-        make_flow_handled_evidence_use(value.reference, value.aggregate_type)
-    })
+pub fn flow_effect_ctx_use_borrowed_slot(
+    value: FlowEffectCtxUse
+) -> SlotRef? {
+    match value.value {
+        FlowEffectCtxUseValue::ForeignLeafEffectCtxUse => none,
+        FlowEffectCtxUseValue::ArgumentEffectCtxUse(argument) =>
+            if core_effect_ctx_argument_kind_tag(argument) == 0 { none }
+            else { some(effect_ctx_slot(
+                core_effect_ctx_argument_context(argument))) },
+        FlowEffectCtxUseValue::LookupEffectCtxUse(lookup) =>
+            some(effect_ctx_slot(core_effect_ctx_lookup_context(lookup)))
+    }
 }
 
 pub struct FlowCallable {
@@ -234,7 +227,7 @@ pub struct FlowCallable {
     mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
     effects: CoreEffectContract,
-    handled_evidence: List<FlowHandledEvidenceBinding>
+    effect_ctx: CoreCallableEffectCtx?
 }
 
 pub fn make_flow_callable(
@@ -244,7 +237,7 @@ pub fn make_flow_callable(
     parameter_slots: List<SlotRef>, mode: ExecutableContractMode,
     semantic_contract: FlowCallContract,
     effects: CoreEffectContract,
-    handled_evidence: List<FlowHandledEvidenceBinding>
+    effect_ctx: CoreCallableEffectCtx?
 ) -> FlowCallable {
     if core_type_ref_index(header_type) < 0 {
         panic("FlowIR: callable header type is invalid")
@@ -302,8 +295,7 @@ pub fn make_flow_callable(
         mode: mode,
         semantic_contract: copy_call_contract(semantic_contract),
         effects: copy_core_effect_contract(effects),
-        handled_evidence:
-            copy_flow_handled_evidence_bindings(handled_evidence)
+        effect_ctx: effect_ctx
     }
 }
 
@@ -332,11 +324,9 @@ pub fn flow_callable_semantic_contract(value: FlowCallable) -> FlowCallContract 
 pub fn flow_callable_effect_contract(
     value: FlowCallable
 ) -> CoreEffectContract { copy_core_effect_contract(value.effects) }
-pub fn flow_callable_handled_evidence(
+pub fn flow_callable_effect_ctx(
     value: FlowCallable
-) -> List<FlowHandledEvidenceBinding> {
-    copy_flow_handled_evidence_bindings(value.handled_evidence)
-}
+) -> CoreCallableEffectCtx? { value.effect_ctx }
 
 // ============================================================
 // Body-local frozen identities, scopes, and slots
@@ -428,11 +418,12 @@ const FLOW_STORAGE_LOCAL: Int = 1
 const FLOW_STORAGE_TEMP: Int = 2
 const FLOW_STORAGE_RESULT: Int = 3
 const FLOW_STORAGE_CAPTURE: Int = 4
+const FLOW_STORAGE_CONTEXT: Int = 5
 
 pub struct FlowStorageClass { tag: Int }
 
 fn flow_storage_class_from_tag(tag: Int) -> FlowStorageClass {
-    if tag < FLOW_STORAGE_PARAMETER || tag > FLOW_STORAGE_CAPTURE {
+    if tag < FLOW_STORAGE_PARAMETER || tag > FLOW_STORAGE_CONTEXT {
         panic("FlowIR: invalid storage class")
     }
     FlowStorageClass { tag: tag }
@@ -452,6 +443,9 @@ pub fn flow_storage_result() -> FlowStorageClass {
 }
 pub fn flow_storage_capture() -> FlowStorageClass {
     flow_storage_class_from_tag(FLOW_STORAGE_CAPTURE)
+}
+pub fn flow_storage_context() -> FlowStorageClass {
+    flow_storage_class_from_tag(FLOW_STORAGE_CONTEXT)
 }
 pub fn flow_storage_class_tag(value: FlowStorageClass) -> Int {
     flow_storage_class_from_tag(value.tag).tag
@@ -837,7 +831,15 @@ enum FlowOperationValue {
     BoolLiteralOperationValue(Bool),
     UnitLiteralOperationValue,
     PrimitiveOperationValue(FlowPrimitiveOp),
-    ConstructorOperationValue(ExecutableRef),
+    ConstructorOperationValue {
+        executable: ExecutableRef,
+        effect_ctx: CoreEffectCtxArgument
+    },
+    EffectCtxOverlayOperationValue {
+        parent: EffectCtxRef,
+        child: EffectCtxRef,
+        entries: List<CoreEffectCtxTokenRef>
+    },
     TupleAggregateOperationValue(Int),
     RecordAggregateOperationValue(Int),
     ClosureOperationValue {
@@ -1031,12 +1033,33 @@ pub fn make_flow_constructor_contract(
     input_roles: List<FlowSemanticRole>,
     input_locations: List<FlowAggregateInputRef?>,
     target_type: CoreTypeRef,
-    target_role: FlowSemanticRole, target_origin: FlowValueOriginContract
+    target_role: FlowSemanticRole, target_origin: FlowValueOriginContract,
+    effect_ctx: CoreEffectCtxArgument
 ) -> FlowOperationContract {
     make_flow_operation_contract(
-        FlowOperationValue::ConstructorOperationValue(constructor),
+        FlowOperationValue::ConstructorOperationValue {
+            executable: constructor, effect_ctx: effect_ctx
+        },
         input_types, input_roles, input_locations,
         target_type, target_role, target_origin)
+}
+pub fn make_flow_effect_ctx_overlay_contract(
+    parent: EffectCtxRef, child: EffectCtxRef,
+    entries: List<CoreEffectCtxTokenRef>,
+    input_types: List<CoreTypeRef>, input_roles: List<FlowSemanticRole>,
+    target_type: CoreTypeRef
+) -> FlowOperationContract {
+    if effect_ctx_ref_same(parent, child) || entries.len() == 0 ||
+       input_types.len() == 0 || input_types.len() != input_roles.len() {
+        panic("FlowIR: invalid EffectCtx overlay contract")
+    }
+    make_flow_operation_contract(
+        FlowOperationValue::EffectCtxOverlayOperationValue {
+            parent: parent, child: child,
+            entries: entries.map(fn(value) { value })
+        }, input_types, input_roles,
+        empty_aggregate_inputs(input_types.len()), target_type,
+        flow_semantic_role_read(), make_fresh_flow_value_origin())
 }
 pub fn make_flow_tuple_aggregate_contract(
     arity: Int, input_types: List<CoreTypeRef>,
@@ -1132,11 +1155,12 @@ pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
         FlowOperationValue::BoolLiteralOperationValue(_) => 3,
         FlowOperationValue::UnitLiteralOperationValue => 4,
         FlowOperationValue::PrimitiveOperationValue(_) => 5,
-        FlowOperationValue::ConstructorOperationValue(_) => 6,
+        FlowOperationValue::ConstructorOperationValue { .. } => 6,
         FlowOperationValue::TupleAggregateOperationValue(_) => 9,
         FlowOperationValue::RecordAggregateOperationValue(_) => 10,
         FlowOperationValue::ClosureOperationValue { .. } => 11,
-        FlowOperationValue::CallableValueOperationValue { .. } => 12
+        FlowOperationValue::CallableValueOperationValue { .. } => 12,
+        FlowOperationValue::EffectCtxOverlayOperationValue { .. } => 13
     }
 }
 pub fn flow_operation_contract_input_roles(
@@ -1173,8 +1197,45 @@ pub fn flow_operation_contract_executable(
     value: FlowOperationContract
 ) -> ExecutableRef {
     match value.value {
-        FlowOperationValue::ConstructorOperationValue(executable) => executable,
+        FlowOperationValue::ConstructorOperationValue { executable, .. } =>
+            executable,
         _ => panic("FlowIR: operation has no executable contract")
+    }
+}
+pub fn flow_operation_contract_constructor_effect_ctx(
+    value: FlowOperationContract
+) -> CoreEffectCtxArgument {
+    match value.value {
+        FlowOperationValue::ConstructorOperationValue { effect_ctx, .. } =>
+            effect_ctx,
+        _ => panic("FlowIR: operation is not an executable constructor")
+    }
+}
+pub fn flow_operation_contract_effect_ctx_parent(
+    value: FlowOperationContract
+) -> EffectCtxRef {
+    match value.value {
+        FlowOperationValue::EffectCtxOverlayOperationValue { parent, .. } =>
+            parent,
+        _ => panic("FlowIR: operation is not an EffectCtx overlay")
+    }
+}
+pub fn flow_operation_contract_effect_ctx_child(
+    value: FlowOperationContract
+) -> EffectCtxRef {
+    match value.value {
+        FlowOperationValue::EffectCtxOverlayOperationValue { child, .. } =>
+            child,
+        _ => panic("FlowIR: operation is not an EffectCtx overlay")
+    }
+}
+pub fn flow_operation_contract_effect_ctx_entries(
+    value: FlowOperationContract
+) -> List<CoreEffectCtxTokenRef> {
+    match value.value {
+        FlowOperationValue::EffectCtxOverlayOperationValue { entries, .. } =>
+            entries.map(fn(item) { item }),
+        _ => panic("FlowIR: operation is not an EffectCtx overlay")
     }
 }
 pub fn flow_operation_contract_closure_executable(
@@ -1484,7 +1545,7 @@ enum FlowInstructionValue {
     CallValue {
         target: FlowCallTarget, arguments: List<SlotRef>,
         evidence: List<FlowEvidenceRef>,
-        handled_evidence: List<FlowHandledEvidenceUse>,
+        effect_ctx: FlowEffectCtxUse,
         result: SlotRef?
     },
     ProjectValue {
@@ -1626,7 +1687,7 @@ pub fn make_flow_call(
     reference: FlowInstructionRef, origin: OriginRef,
     target: FlowCallTarget, arguments: List<SlotRef>,
     evidence: List<FlowEvidenceRef>,
-    handled_evidence: List<FlowHandledEvidenceUse>, result: SlotRef?
+    effect_ctx: FlowEffectCtxUse, result: SlotRef?
 ) -> FlowInstruction {
     FlowInstruction {
         reference: reference, origin: origin,
@@ -1634,8 +1695,7 @@ pub fn make_flow_call(
             target: copy_call_target(target),
             arguments: copy_slot_refs(arguments),
             evidence: copy_flow_evidence(evidence),
-            handled_evidence:
-                copy_flow_handled_evidence_uses(handled_evidence),
+            effect_ctx: effect_ctx,
             result: result
         }
     }
@@ -1849,12 +1909,11 @@ pub fn flow_call_evidence(value: FlowInstruction) -> List<FlowEvidenceRef> {
         _ => panic("FlowIR: instruction is not Call")
     }
 }
-pub fn flow_call_handled_evidence(
+pub fn flow_call_effect_ctx(
     value: FlowInstruction
-) -> List<FlowHandledEvidenceUse> {
+) -> FlowEffectCtxUse {
     match value.value {
-        FlowInstructionValue::CallValue { handled_evidence, .. } =>
-            copy_flow_handled_evidence_uses(handled_evidence),
+        FlowInstructionValue::CallValue { effect_ctx, .. } => effect_ctx,
         _ => panic("FlowIR: instruction is not Call")
     }
 }
@@ -2042,6 +2101,16 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
                     operation.input_roles.get(index).unwrap()))
                 index = index + 1
             }
+            if flow_operation_contract_kind_tag(operation) == 6 {
+                let argument = flow_operation_contract_constructor_effect_ctx(
+                    operation)
+                if core_effect_ctx_argument_kind_tag(argument) != 0 {
+                    result.push(make_instruction_operand(
+                        value, index, effect_ctx_slot(
+                            core_effect_ctx_argument_context(argument)),
+                        flow_semantic_role_read()))
+                }
+            }
         },
         FlowInstructionValue::ReadValue { source, .. } =>
             result.push(make_instruction_operand(
@@ -2081,7 +2150,7 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
                 else { flow_place_base(source) },
                 flow_semantic_role_consume())),
         FlowInstructionValue::CallValue {
-            target, arguments, handled_evidence, ..
+            target, arguments, effect_ctx, ..
         } => {
             let roles = flow_call_contract_parameter_roles(target.contract)
             let mut index = 0
@@ -2091,11 +2160,14 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
                     roles.get(index).unwrap()))
                 index = index + 1
             }
-            for evidence in handled_evidence {
+            match flow_effect_ctx_use_borrowed_slot(effect_ctx) {
+                some(context) => {
                 result.push(make_instruction_operand(
-                    value, index, flow_handled_use_slot(evidence),
+                    value, index, context,
                     flow_semantic_role_read()))
                 index = index + 1
+                },
+                none => {}
             }
         },
         FlowInstructionValue::ProjectValue { contract, base, .. } =>
@@ -2555,18 +2627,19 @@ fn copy_handler_bindings(values: List<FlowHandlerBinding>) -> List<FlowHandlerBi
     result
 }
 
-pub struct FlowHandlerInstallation {
-    evidence: FlowHandledEvidenceBinding,
+pub struct FlowEffectCtxEntry {
+    token: CoreEffectCtxTokenRef,
     handlers: List<FlowHandlerBinding>
 }
-pub fn make_flow_handler_installation(
-    evidence: FlowHandledEvidenceBinding,
+pub fn make_flow_effect_ctx_entry(
+    token: CoreEffectCtxTokenRef,
     handlers: List<FlowHandlerBinding>
-) -> FlowHandlerInstallation {
+) -> FlowEffectCtxEntry {
     if handlers.len() == 0 {
         panic("FlowIR: handled installation has no handlers")
     }
-    let requirement = flow_handled_evidence_requirement(evidence)
+    let requirement = core_effect_atom_handled_ref(
+        core_effect_ctx_token_instance(token))
     let mut index = 0
     while index < handlers.len() {
         let handler = handlers.get(index).unwrap()
@@ -2577,23 +2650,50 @@ pub fn make_flow_handler_installation(
         }
         index = index + 1
     }
-    FlowHandlerInstallation {
-        evidence: evidence, handlers: copy_handler_bindings(handlers)
+    FlowEffectCtxEntry {
+        token: token, handlers: copy_handler_bindings(handlers)
     }
 }
-pub fn flow_handler_installation_evidence(
-    value: FlowHandlerInstallation
-) -> FlowHandledEvidenceBinding { value.evidence }
-pub fn flow_handler_installation_handlers(
-    value: FlowHandlerInstallation
+pub fn flow_effect_ctx_entry_token(
+    value: FlowEffectCtxEntry
+) -> CoreEffectCtxTokenRef { value.token }
+pub fn flow_effect_ctx_entry_handlers(
+    value: FlowEffectCtxEntry
 ) -> List<FlowHandlerBinding> { copy_handler_bindings(value.handlers) }
-fn copy_handler_installations(
-    values: List<FlowHandlerInstallation>
-) -> List<FlowHandlerInstallation> {
+fn copy_effect_ctx_entries(
+    values: List<FlowEffectCtxEntry>
+) -> List<FlowEffectCtxEntry> {
     values.map(fn(value) {
-        make_flow_handler_installation(value.evidence, value.handlers)
+        make_flow_effect_ctx_entry(value.token, value.handlers)
     })
 }
+
+pub struct FlowEffectCtxInstall {
+    parent: EffectCtxRef,
+    child: EffectCtxRef,
+    entries: List<FlowEffectCtxEntry>
+}
+pub fn make_flow_effect_ctx_install(
+    parent: EffectCtxRef, child: EffectCtxRef,
+    entries: List<FlowEffectCtxEntry>
+) -> FlowEffectCtxInstall {
+    if effect_ctx_ref_same(parent, child) || entries.len() == 0 {
+        panic("FlowIR: invalid EffectCtx install")
+    }
+    FlowEffectCtxInstall {
+        parent: parent, child: child,
+        entries: copy_effect_ctx_entries(entries)
+    }
+}
+pub fn flow_effect_ctx_install_parent(
+    value: FlowEffectCtxInstall
+) -> EffectCtxRef { value.parent }
+pub fn flow_effect_ctx_install_child(
+    value: FlowEffectCtxInstall
+) -> EffectCtxRef { value.child }
+pub fn flow_effect_ctx_install_entries(
+    value: FlowEffectCtxInstall
+) -> List<FlowEffectCtxEntry> { copy_effect_ctx_entries(value.entries) }
 
 enum FlowTerminatorValue {
     GotoValue(FlowSuccessor),
@@ -2633,7 +2733,7 @@ enum FlowTerminatorValue {
     },
     HandleInstallValue {
         body: FlowSuccessor,
-        installations: List<FlowHandlerInstallation>
+        installation: FlowEffectCtxInstall
     },
     UnreachableValue { exited_scopes: List<FlowScopeRef> },
     DivergeValue { exited_scopes: List<FlowScopeRef> }
@@ -2749,15 +2849,22 @@ pub fn make_flow_try(
 }
 pub fn make_flow_handle_install(
     origin: OriginRef, body: FlowSuccessor,
-    installations: List<FlowHandlerInstallation>
+    installation: FlowEffectCtxInstall
 ) -> FlowTerminator {
-    if installations.len() == 0 {
-        panic("FlowIR: handle has no exact installations")
-    }
     FlowTerminator { origin: origin,
         value: FlowTerminatorValue::HandleInstallValue {
-            body: body,
-            installations: copy_handler_installations(installations) } }
+            body: body, installation: installation } }
+}
+pub fn flow_handle_effect_ctx_install(
+    value: FlowTerminator
+) -> FlowEffectCtxInstall {
+    match value.value {
+        FlowTerminatorValue::HandleInstallValue { installation, .. } =>
+            make_flow_effect_ctx_install(
+                installation.parent, installation.child,
+                installation.entries),
+        _ => panic("FlowIR: terminator is not HandleInstall")
+    }
 }
 
 pub fn make_flow_unreachable(
@@ -2851,10 +2958,8 @@ pub fn flow_terminator_read_slots(value: FlowTerminator) -> List<SlotRef> {
         FlowTerminatorValue::HandlerValue { operation, .. } => [operation],
         FlowTerminatorValue::PatternValue { scrutinee, .. } => [scrutinee],
         FlowTerminatorValue::TryValue { error, .. } => [error],
-        FlowTerminatorValue::HandleInstallValue { installations, .. } =>
-            installations.map(fn(installation) {
-                flow_handled_evidence_slot(installation.evidence)
-            }),
+        FlowTerminatorValue::HandleInstallValue { installation, .. } =>
+            [effect_ctx_slot(installation.child)],
         _ => []
     }
 }
@@ -2914,9 +3019,9 @@ fn copy_terminator(value: FlowTerminator) -> FlowTerminator {
         } => make_flow_try(
             value.origin, error,
             copy_successor(protected), copy_successor(caught)),
-        FlowTerminatorValue::HandleInstallValue { body, installations } =>
+        FlowTerminatorValue::HandleInstallValue { body, installation } =>
             make_flow_handle_install(
-                value.origin, copy_successor(body), installations),
+                value.origin, copy_successor(body), installation),
         FlowTerminatorValue::UnreachableValue { exited_scopes } =>
             make_flow_unreachable(value.origin, exited_scopes),
         FlowTerminatorValue::DivergeValue { exited_scopes } =>
@@ -2975,11 +3080,11 @@ fn copy_instructions(values: List<FlowInstruction>) -> List<FlowInstruction> {
                 make_flow_move_place(
                     value.reference, value.origin, source, target),
             FlowInstructionValue::CallValue {
-                target, arguments, evidence, handled_evidence, result
+                target, arguments, evidence, effect_ctx, result
             } =>
                 make_flow_call(
                     value.reference, value.origin, target, arguments,
-                    evidence, handled_evidence, result),
+                    evidence, effect_ctx, result),
             FlowInstructionValue::ProjectValue {
                 contract, base, result: projected
             } => make_flow_project(
@@ -3067,19 +3172,12 @@ pub fn flow_block_terminator_operands(value: FlowBlock) -> List<FlowOperandRef> 
             step: step, ordinal: 0, slot: scrutinee,
             role: flow_semantic_role_read()
         }],
-        FlowTerminatorValue::HandleInstallValue { installations, .. } => {
-            let mut result: List<FlowOperandRef> = []
-            let mut ordinal = 0
-            for installation in installations {
-                result.push(FlowOperandRef {
-                    step: step, ordinal: ordinal,
-                    slot: flow_handled_evidence_slot(installation.evidence),
-                    role: flow_semantic_role_read()
-                })
-                ordinal = ordinal + 1
-            }
-            result
-        },
+        FlowTerminatorValue::HandleInstallValue { installation, .. } =>
+            [FlowOperandRef {
+                step: step, ordinal: 0,
+                slot: effect_ctx_slot(installation.child),
+                role: flow_semantic_role_read()
+            }],
         _ => []
     }
 }
@@ -3358,11 +3456,18 @@ fn validate_callables(
         }
         let _ = flow_semantic_role_tag(
             flow_call_contract_result_role(left.semantic_contract))
-        for binding in left.handled_evidence {
-            if !type_ref_exists(
-                    type_nodes, flow_handled_evidence_type(binding)) {
-                panic("FlowIR: callable handled evidence type is absent")
-            }
+        match left.effect_ctx {
+            some(context) => {
+                if !type_ref_exists(
+                        type_nodes, core_callable_effect_ctx_type(context)) ||
+                   !executable_ref_same(
+                        effect_ctx_contract_owner(
+                            core_callable_effect_ctx_reference(context)),
+                        left.reference) {
+                    panic("FlowIR: callable EffectCtx type/owner differs")
+                }
+            },
+            none => {}
         }
         let mut right_index = left_index + 1
         while right_index < values.len() {
@@ -3566,28 +3671,29 @@ fn validate_body_callable_parameters(body: FlowBody, callable: FlowCallable) {
         }
         ordinal = ordinal + 1
     }
-    for evidence in callable.handled_evidence {
-        let mut matches = 0
-        for slot in body.slots {
-            if flow_storage_class_same(
-                    slot.storage, flow_storage_parameter()) &&
-               slot.parameter_ordinal.is_none() &&
-               slot_ref_same(
-                    slot.reference,
-                    flow_handled_evidence_slot(evidence)) {
-                if !core_type_ref_same(
-                        slot.ty, flow_handled_evidence_type(evidence)) ||
-                   slot.initial_state.tag != FLOW_SLOT_LIVE ||
-                   flow_storage_contract_tag(slot.storage_contract) !=
-                        flow_storage_contract_tag(flow_borrow_storage()) {
-                    panic("FlowIR: handled evidence parameter contract differs")
+    match callable.effect_ctx {
+        some(context) => {
+            let mut matches = 0
+            for slot in body.slots {
+                if slot.parameter_ordinal.is_none() &&
+                   slot_ref_same(slot.reference,
+                        effect_ctx_slot(
+                            core_callable_effect_ctx_reference(context))) {
+                    if !core_type_ref_same(
+                            slot.ty, core_callable_effect_ctx_type(context)) ||
+                       slot.initial_state.tag != FLOW_SLOT_LIVE ||
+                       flow_storage_contract_tag(slot.storage_contract) !=
+                            flow_storage_contract_tag(flow_borrow_storage()) {
+                        panic("FlowIR: callable EffectCtx slot differs")
+                    }
+                    matches = matches + 1
                 }
-                matches = matches + 1
             }
-        }
-        if matches != 1 {
-            panic("FlowIR: handled evidence parameter is missing/duplicated")
-        }
+            if matches != 1 {
+                panic("FlowIR: callable EffectCtx slot is missing/duplicated")
+            }
+        },
+        none => {}
     }
     for slot in body.slots {
         if flow_storage_class_same(slot.storage, flow_storage_parameter()) {
@@ -3598,15 +3704,17 @@ fn validate_body_callable_parameters(body: FlowBody, callable: FlowCallable) {
                 },
                 none => {
                     let mut matches = 0
-                    for evidence in callable.handled_evidence {
-                        if slot_ref_same(
-                                slot.reference,
-                                flow_handled_evidence_slot(evidence)) {
+                    match callable.effect_ctx {
+                        some(context) => if slot_ref_same(
+                                slot.reference, effect_ctx_slot(
+                                    core_callable_effect_ctx_reference(
+                                        context))) {
                             matches = matches + 1
-                        }
+                        },
+                        none => {}
                     }
                     if matches != 1 {
-                        panic("FlowIR: hidden parameter lacks exact evidence")
+                        panic("FlowIR: hidden parameter lacks exact EffectCtx")
                     }
                 }
             }
@@ -3748,18 +3856,21 @@ fn validate_typed_terminators(
             } => validate_typed_flow_pattern(
                 pattern, slot_type_for(body, scrutinee), body, type_nodes),
             FlowTerminatorValue::HandleInstallValue {
-                installations, ..
+                installation, ..
             } => {
-                for installation in installations {
-                    let evidence = installation.evidence
-                    let evidence_slot = slot_for_ref(
-                        body.slots,
-                        flow_handled_evidence_slot(evidence))
-                    require_same_flow_type(
-                        evidence_slot.ty,
-                        flow_handled_evidence_type(evidence),
-                        "FlowIR: handled installation evidence type differs")
-                    for binding in installation.handlers {
+                let parent = slot_for_ref(
+                    body.slots, effect_ctx_slot(installation.parent))
+                let child = slot_for_ref(
+                    body.slots, effect_ctx_slot(installation.child))
+                require_same_flow_type(
+                    parent.ty, child.ty,
+                    "FlowIR: EffectCtx parent/child type differs")
+                if flow_storage_contract_tag(child.storage_contract) !=
+                        flow_storage_contract_tag(flow_own_storage()) {
+                    panic("FlowIR: EffectCtx child is not owned")
+                }
+                for entry in installation.entries {
+                    for binding in entry.handlers {
                         let _ = callable_for_ref(
                             callables, effect_operation_ref_callable(
                                 binding.operation))
@@ -3923,7 +4034,7 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
             }
         },
         FlowInstructionValue::CallValue {
-            target, arguments, evidence, handled_evidence, result
+            target, arguments, evidence, effect_ctx, result
         } => {
             for argument in arguments {
                 let _ = slot_for_ref(body.slots, argument)
@@ -3935,9 +4046,9 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
             for item in evidence {
                 let _ = flow_evidence_dict(item)
             }
-            for item in handled_evidence {
-                let _ = slot_for_ref(
-                    body.slots, flow_handled_use_slot(item))
+            match flow_effect_ctx_use_borrowed_slot(effect_ctx) {
+                some(context) => { let _ = slot_for_ref(body.slots, context) },
+                none => {}
             }
             if flow_call_target_is_local(target) {
                 let _ = slot_for_ref(body.slots, flow_call_target_local(target))
@@ -4214,7 +4325,7 @@ fn validate_direct_calls(
             for instruction in block.instructions {
                 match instruction.value {
                     FlowInstructionValue::CallValue {
-                        target, arguments, handled_evidence, ..
+                        target, arguments, effect_ctx, ..
                     } => {
                         let contract = target.contract
                         if arguments.len() !=
@@ -4253,23 +4364,9 @@ fn validate_direct_calls(
                                     substitutions) {
                                 panic("FlowIR: direct callable effect source differs")
                             }
-                            let requirements =
-                                core_effect_contract_handled_requirements(
-                                    core_effect_instantiation_result(
-                                        target.effects))
-                            if requirements.len() != handled_evidence.len() {
-                                panic("FlowIR: direct handled-evidence census differs")
-                            }
-                            let mut handled_index = 0
-                            while handled_index < handled_evidence.len() {
-                                let actual = handled_evidence.get(
-                                    handled_index).unwrap()
-                                if !handled_effect_ref_same(
-                                        flow_handled_use_requirement(actual),
-                                        requirements.get(handled_index).unwrap()) {
-                                    panic("FlowIR: direct handled-evidence contract differs")
-                                }
-                                handled_index = handled_index + 1
+                            if candidate.effect_ctx.is_some() ==
+                                    (flow_effect_ctx_use_kind_tag(effect_ctx) == 0) {
+                                panic("FlowIR: direct EffectCtx/foreign boundary differs")
                             }
                         }
                     }
@@ -4738,12 +4835,31 @@ fn validate_typed_instructions(
                         validate_literal_or_primitive_contract(
                             operation, type_nodes)
                         match operation.value {
-                            FlowOperationValue::ConstructorOperationValue(
-                                executable) => {
+                            FlowOperationValue::ConstructorOperationValue {
+                                executable, effect_ctx
+                            } => {
                                 let callable = callable_for_ref(
                                     callables, executable)
                                 validate_operation_callable_contract(
                                     operation, callable)
+                                if !core_effect_contract_same(
+                                        core_effect_instantiation_result(
+                                            core_effect_ctx_argument_receipt(
+                                                effect_ctx)),
+                                        callable.effects) {
+                                    panic("FlowIR: constructor EffectCtx differs")
+                                }
+                            },
+                            FlowOperationValue::EffectCtxOverlayOperationValue {
+                                parent, child, entries
+                            } => {
+                                if entries.len() == 0 || inputs.len() == 0 ||
+                                   !slot_ref_same(
+                                        inputs.get(0).unwrap(),
+                                        effect_ctx_slot(parent)) ||
+                                   !slot_ref_same(target, effect_ctx_slot(child)) {
+                                    panic("FlowIR: EffectCtx overlay slot relation differs")
+                                }
                             },
                             FlowOperationValue::ClosureOperationValue {
                                 executable, capture_targets
@@ -4840,7 +4956,7 @@ fn validate_typed_instructions(
                         slot_type_for(body, target),
                         "FlowIR: Capture source/target type differs"),
                     FlowInstructionValue::CallValue {
-                        target, arguments, handled_evidence, result, ..
+                        target, arguments, effect_ctx, result, ..
                     } => {
                         let contract = target.contract
                         let parameter_types = flow_call_contract_parameter_types(
@@ -4917,48 +5033,15 @@ fn validate_typed_instructions(
                                 panic("FlowIR: indirect callee effect source differs")
                             }
                         }
-                        let result_effects =
-                            core_effect_instantiation_result(target.effects)
-                        let expected_handled =
-                            core_effect_contract_handled_requirements(
-                                result_effects)
-                        if expected_handled.len() != handled_evidence.len() {
-                            panic("FlowIR: call handled evidence/effect census differs")
-                        }
-                        let mut handled_index = 0
-                        while handled_index < handled_evidence.len() {
-                            let use_ref = handled_evidence.get(
-                                handled_index).unwrap()
-                            if !handled_effect_ref_same(
-                                    flow_handled_use_requirement(use_ref),
-                                    expected_handled.get(
-                                        handled_index).unwrap()) {
-                                panic("FlowIR: call handled evidence/effect order differs")
-                            }
-                            if !executable_ref_same(
-                                    flow_handled_use_owner(use_ref),
-                                    body.reference) {
-                                panic("FlowIR: handled evidence use crosses caller")
-                            }
-                            require_same_flow_type(
-                                slot_type_for(
-                                    body, flow_handled_use_slot(use_ref)),
-                                flow_handled_use_type(use_ref),
-                                "FlowIR: handled evidence use type differs")
-                            let mut right = handled_index + 1
-                            while right < handled_evidence.len() {
-                                let other = handled_evidence.get(right).unwrap()
-                                if handled_effect_ref_same(
-                                        flow_handled_use_requirement(use_ref),
-                                        flow_handled_use_requirement(other)) ||
-                                   slot_ref_same(
-                                        flow_handled_use_slot(use_ref),
-                                        flow_handled_use_slot(other)) {
-                                    panic("FlowIR: call repeats handled evidence")
-                                }
-                                right = right + 1
-                            }
-                            handled_index = handled_index + 1
+                        if flow_effect_ctx_use_kind_tag(effect_ctx) == 1 &&
+                           !core_effect_contract_same(
+                                core_effect_instantiation_result(
+                                    core_effect_ctx_argument_receipt(
+                                        flow_effect_ctx_use_argument(
+                                            effect_ctx))),
+                                core_effect_instantiation_result(
+                                    target.effects)) {
+                            panic("FlowIR: call EffectCtx receipt differs")
                         }
                     },
                     FlowInstructionValue::ProjectValue {
@@ -5171,6 +5254,62 @@ fn encode_call_target(value: FlowCallTarget) -> Str {
     parts.join("/")
 }
 
+fn encode_effect_ctx_ref(value: EffectCtxRef) -> Str {
+    [encode_executable(effect_ctx_contract_owner(value)),
+     encode_slot(effect_ctx_slot(value))].join("/")
+}
+fn encode_effect_ctx_token(value: CoreEffectCtxTokenRef) -> Str {
+    let atom = core_effect_ctx_token_instance(value)
+    let mut parts: List<Str> = [
+        encode_symbol(handled_effect_ref_symbol(
+            core_effect_atom_handled_ref(atom)))
+    ]
+    for ty in core_effect_atom_type_arguments(atom) {
+        parts.push(encode_type_ref(ty))
+    }
+    parts.join("/")
+}
+fn encode_effect_ctx_layout(value: CoreEffectCtxLayout) -> Str {
+    let mut parts: List<Str> = []
+    for entry in core_effect_ctx_layout_entries(value) {
+        parts.push(encode_effect_ctx_token(entry))
+    }
+    match core_effect_ctx_layout_formal(value) {
+        some(formal) => parts.push("F/${encode_origin(
+            effect_param_owner(formal))}/${effect_param_ordinal(formal).to_str()}"),
+        none => parts.push("C")
+    }
+    parts.join("|")
+}
+fn encode_effect_ctx_argument(value: CoreEffectCtxArgument) -> Str {
+    let kind = core_effect_ctx_argument_kind_tag(value)
+    let mut parts: List<Str> = ["A${kind.to_str()}"]
+    if kind != 0 {
+        parts.push(encode_effect_ctx_ref(
+            core_effect_ctx_argument_context(value)))
+        parts.push(encode_effect_ctx_layout(
+            core_effect_ctx_argument_source_layout(value)))
+    }
+    parts.push(encode_effect_ctx_layout(
+        core_effect_ctx_argument_target_layout(value)))
+    parts.push(encode_effect_instantiation(
+        core_effect_ctx_argument_receipt(value)))
+    parts.join("/")
+}
+fn encode_flow_effect_ctx_use(value: FlowEffectCtxUse) -> Str {
+    let kind = flow_effect_ctx_use_kind_tag(value)
+    if kind == 0 { return "foreign" }
+    if kind == 1 {
+        return encode_effect_ctx_argument(
+            flow_effect_ctx_use_argument(value))
+    }
+    let lookup = flow_effect_ctx_use_lookup(value)
+    ["lookup", encode_effect_ctx_ref(
+        core_effect_ctx_lookup_context(lookup)),
+     encode_effect_ctx_layout(core_effect_ctx_lookup_layout(lookup)),
+     encode_effect_ctx_token(core_effect_ctx_lookup_token(lookup))].join("/")
+}
+
 fn encode_operation(value: FlowOperationContract) -> Str {
     let mut parts: List<Str> = [
         "O${flow_operation_contract_kind_tag(value).to_str()}"
@@ -5187,8 +5326,21 @@ fn encode_operation(value: FlowOperationContract) -> Str {
         FlowOperationValue::UnitLiteralOperationValue => parts.push("unit"),
         FlowOperationValue::PrimitiveOperationValue(operation) =>
             parts.push(flow_primitive_op_tag(operation).to_str()),
-        FlowOperationValue::ConstructorOperationValue(executable) =>
-            parts.push(encode_executable(executable)),
+        FlowOperationValue::ConstructorOperationValue {
+            executable, effect_ctx
+        } => {
+            parts.push(encode_executable(executable))
+            parts.push(encode_effect_ctx_argument(effect_ctx))
+        },
+        FlowOperationValue::EffectCtxOverlayOperationValue {
+            parent, child, entries
+        } => {
+            parts.push("parent:${encode_effect_ctx_ref(parent)}")
+            parts.push("child:${encode_effect_ctx_ref(child)}")
+            for entry in entries {
+                parts.push("entry:${encode_effect_ctx_token(entry)}")
+            }
+        },
         FlowOperationValue::TupleAggregateOperationValue(arity) =>
             parts.push("tuple:${arity.to_str()}"),
         FlowOperationValue::RecordAggregateOperationValue(arity) =>
@@ -5361,22 +5513,14 @@ fn encode_instruction(value: FlowInstruction) -> Str {
             parts.push(encode_flow_place(source)); parts.push(encode_slot(target))
         },
         FlowInstructionValue::CallValue {
-            target, arguments, evidence, handled_evidence, result
+            target, arguments, evidence, effect_ctx, result
         } => {
             parts.push(encode_call_target(target))
             for argument in arguments { parts.push(encode_slot(argument)) }
             for item in evidence {
                 parts.push("ED${encode_dict_evidence(flow_evidence_dict(item))}")
             }
-            for item in handled_evidence {
-                parts.push("EH${encode_executable(
-                    flow_handled_use_owner(item))}/${
-                    flow_handled_use_ordinal(item).to_str()}/${
-                    encode_symbol(handled_effect_ref_symbol(
-                        flow_handled_use_requirement(item)))}/${
-                    encode_slot(flow_handled_use_slot(item))}/${
-                    encode_type_ref(flow_handled_use_type(item))}")
-            }
+            parts.push("EC${encode_flow_effect_ctx_use(effect_ctx)}")
             match result {
                 some(slot) => parts.push(encode_slot(slot)),
                 none => parts.push("void")
@@ -5504,19 +5648,14 @@ fn encode_terminator(value: FlowTerminator) -> Str {
             parts.push(encode_successor(caught))
         },
         FlowTerminatorValue::HandleInstallValue {
-            body, installations
+            body, installation
         } => {
             parts.push(encode_successor(body))
-            for installation in installations {
-                let evidence = installation.evidence
-                parts.push("I${encode_executable(
-                    flow_handled_evidence_owner(evidence))}/${
-                    flow_handled_evidence_ordinal(evidence).to_str()}/${
-                    encode_symbol(handled_effect_ref_symbol(
-                        flow_handled_evidence_requirement(evidence)))}/${
-                    encode_slot(flow_handled_evidence_slot(evidence))}/${
-                    encode_type_ref(flow_handled_evidence_type(evidence))}")
-                for handler in installation.handlers {
+            parts.push("P${encode_effect_ctx_ref(installation.parent)}")
+            parts.push("C${encode_effect_ctx_ref(installation.child)}")
+            for entry in installation.entries {
+                parts.push("I${encode_effect_ctx_token(entry.token)}")
+                for handler in entry.handlers {
                     parts.push("H${encode_symbol(
                         effect_operation_ref_member(handler.operation))}/${
                         encode_executable(handler.handler)}/${
@@ -5629,14 +5768,16 @@ fn compute_topology_encoding(
         item.push("G${encode_value_origin(flow_call_contract_result_origin(
             callable.semantic_contract))}")
         item.push("CE${encode_effect_contract(callable.effects)}")
-        for binding in callable.handled_evidence {
-            item.push("E${encode_executable(
-                flow_handled_evidence_owner(binding))}/${
-                flow_handled_evidence_ordinal(binding).to_str()}/${
-                encode_symbol(handled_effect_ref_symbol(
-                    flow_handled_evidence_requirement(binding)))}/${
-                encode_slot(flow_handled_evidence_slot(binding))}/${
-                encode_type_ref(flow_handled_evidence_type(binding))}")
+        match callable.effect_ctx {
+            some(context) => {
+                item.push("XC${encode_effect_ctx_ref(
+                    core_callable_effect_ctx_reference(context))}")
+                item.push("XL${encode_effect_ctx_layout(
+                    core_callable_effect_ctx_layout(context))}")
+                item.push("XT${encode_type_ref(
+                    core_callable_effect_ctx_type(context))}")
+            },
+            none => item.push("XF")
         }
         parts.push(item.join(";"))
     }
@@ -5704,9 +5845,7 @@ fn copy_flow_callables(callables: List<FlowCallable>) -> List<FlowCallable> {
             mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
             effects: copy_core_effect_contract(callable.effects),
-            handled_evidence:
-                copy_flow_handled_evidence_bindings(
-                    callable.handled_evidence)
+            effect_ctx: callable.effect_ctx
         })
     }
     result
@@ -5750,9 +5889,7 @@ pub fn flow_program_callables(value: FlowProgram) -> List<FlowCallable> {
             mode: callable.mode,
             semantic_contract: copy_call_contract(callable.semantic_contract),
             effects: copy_core_effect_contract(callable.effects),
-            handled_evidence:
-                copy_flow_handled_evidence_bindings(
-                    callable.handled_evidence)
+            effect_ctx: callable.effect_ctx
         })
     }
     result
@@ -5775,7 +5912,7 @@ pub fn validate_flow_program(value: FlowProgram) {
                 callable.effect_formals,
                 callable.parameter_slots, callable.mode,
                 callable.semantic_contract, callable.effects,
-                callable.handled_evidence)
+                callable.effect_ctx)
         }), value.bodies)
     if !flow_topology_fingerprint_same(
             rebuilt.topology_fingerprint, value.topology_fingerprint) {

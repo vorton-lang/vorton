@@ -650,8 +650,10 @@ fn body_entry_slot_state(
                     solved.logical_shapes.get(slot.type_index).unwrap(),
                     solved.physical_shapes.get(slot.type_index).unwrap())
         },
-        // Captures/evidence are environment-owned. A call observes them but
-        // must never clean them up as if they were per-call parameters.
+        // Closure captures and borrowed EffectCtx carriers are environment-
+        // owned. A call observes them but never cleans them as per-call args;
+        // owned child overlays are ordinary local slots and follow all-exit
+        // cleanup below.
         none => false
     }
     slot_flow_live_owner(owner)

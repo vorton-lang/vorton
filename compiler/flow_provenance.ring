@@ -100,6 +100,9 @@ pub fn flow_instruction_callable_provenance(
     let kind = flow_instruction_kind_tag(instruction)
     if kind == 0 {
         let operation = flow_initialize_operation(instruction)
+        if flow_operation_contract_kind_tag(operation) == 13 {
+            return []
+        }
         let target = flow_initialize_target(instruction)
         if slot_is_callable(slots, types, target) {
             let operation_kind = flow_operation_contract_kind_tag(operation)

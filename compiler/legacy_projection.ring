@@ -38,10 +38,13 @@ use ir_inventory::{
 use hir::{DictRef}
 use hir_exact::{dict_ref_exact, dict_ref_physical_same}
 use effect_contract::{
-    CoreEffectAtom, CoreEffectSet,
+    CoreEffectAtom, CoreEffectSet, TypedHandledEffectInstance,
+    make_typed_handled_effect_instance,
+    typed_handled_effect_instance_same,
     make_core_effect_set, core_effect_set_atoms,
     core_effect_atom_kind_tag, core_effect_atom_type,
-    core_effect_atom_handled_ref, core_effect_atom_system_ref
+    core_effect_atom_handled_ref, core_effect_atom_type_arguments,
+    core_effect_atom_system_ref
 }
 use core_hir::{core_program_type_graph, core_program_inventory}
 use core_type_source::{
@@ -50,12 +53,16 @@ use core_type_source::{
 }
 use core_from_hir::{
     CoreEffectSetFact, CoreAssemblyResult,
-    CoreAssemblyTypeRemap,
+    CoreAssemblyTypeRemap, CoreEffectCtxTokenBinding,
     core_effect_set_fact_local_set,
     core_assembly_result_program,
     core_assembly_result_type_remap,
     core_assembly_result_effect_remap,
+    core_assembly_result_effect_ctx_tokens,
+    core_effect_ctx_token_binding_ordinal,
+    core_effect_ctx_token_binding_token,
     core_assembly_remap_type, core_assembly_remap_effect}
+use core_expr::{core_effect_ctx_token_instance}
 use flow_ir::{
     FlowProgram, flow_program_bodies, flow_body_slots,
     flow_slot_reference, flow_slot_type
@@ -1487,6 +1494,30 @@ fn binder_projection_for(
     panic("legacy projection: binder SlotRef is absent")
 }
 
+pub struct LegacyEffectCtxToken {
+    ordinal: Int,
+    instance: TypedHandledEffectInstance
+}
+pub fn make_legacy_effect_ctx_token(
+    ordinal: Int, instance: TypedHandledEffectInstance
+) -> LegacyEffectCtxToken {
+    if ordinal < 0 { panic("legacy projection: negative EffectCtx token") }
+    LegacyEffectCtxToken { ordinal: ordinal, instance: instance }
+}
+pub fn legacy_effect_ctx_token_ordinal(
+    value: LegacyEffectCtxToken
+) -> Int { value.ordinal }
+pub fn legacy_effect_ctx_token_instance(
+    value: LegacyEffectCtxToken
+) -> TypedHandledEffectInstance { value.instance }
+fn copy_effect_ctx_tokens(
+    values: List<LegacyEffectCtxToken>
+) -> List<LegacyEffectCtxToken> {
+    values.map(fn(value) {
+        make_legacy_effect_ctx_token(value.ordinal, value.instance)
+    })
+}
+
 pub struct LegacyProjectionTable {
     core_type_count: Int,
     types: List<LegacyTypeProjection>,
@@ -1496,6 +1527,7 @@ pub struct LegacyProjectionTable {
     impls: List<LegacyImplProjection>,
     dictionaries: List<LegacyDictionaryProjection>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
+    effect_ctx_tokens: List<LegacyEffectCtxToken>,
     shells: LegacyExecutableShellMap
 }
 
@@ -1507,10 +1539,28 @@ pub fn make_legacy_projection_table(
     impls: List<LegacyImplProjection>,
     dictionaries: List<LegacyDictionaryProjection>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
+    effect_ctx_tokens: List<LegacyEffectCtxToken>,
     shells: LegacyExecutableShellMap
 ) -> LegacyProjectionTable {
     if core_type_count <= 0 || types.len() != core_type_count {
         panic("legacy projection: Core type projection is not total")
+    }
+    let mut token_index = 0
+    while token_index < effect_ctx_tokens.len() {
+        let token = effect_ctx_tokens.get(token_index).unwrap()
+        if token.ordinal != token_index {
+            panic("legacy projection: EffectCtx token order is not dense")
+        }
+        let mut right = token_index + 1
+        while right < effect_ctx_tokens.len() {
+            if typed_handled_effect_instance_same(
+                    token.instance,
+                    effect_ctx_tokens.get(right).unwrap().instance) {
+                panic("legacy projection: EffectCtx token repeats")
+            }
+            right = right + 1
+        }
+        token_index = token_index + 1
     }
     let mut dictionary_index = 0
     while dictionary_index < dictionaries.len() {
@@ -1669,9 +1719,15 @@ pub fn make_legacy_projection_table(
             make_legacy_executable_physical_identity(
                 value.reference, value.identity)
         }),
+        effect_ctx_tokens: copy_effect_ctx_tokens(effect_ctx_tokens),
         shells: make_legacy_executable_shell_map(
             legacy_executable_shell_entries(shells))
     }
+}
+pub fn legacy_projection_effect_ctx_tokens(
+    value: LegacyProjectionTable
+) -> List<LegacyEffectCtxToken> {
+    copy_effect_ctx_tokens(value.effect_ctx_tokens)
 }
 
 pub fn legacy_projection_core_type_count(
@@ -2110,6 +2166,18 @@ pub fn assemble_legacy_projection(
     }
     let ordered_types = order_assembled_type_projections(
         projected_types, project_type_count)
+    let mut effect_ctx_tokens: List<LegacyEffectCtxToken> = []
+    for binding in core_assembly_result_effect_ctx_tokens(assembly) {
+        let token = core_effect_ctx_token_binding_token(binding)
+        let atom = core_effect_ctx_token_instance(token)
+        effect_ctx_tokens.push(make_legacy_effect_ctx_token(
+            core_effect_ctx_token_binding_ordinal(binding),
+            make_typed_handled_effect_instance(
+                core_effect_atom_handled_ref(atom),
+                core_effect_atom_type_arguments(atom).map(fn(ty) {
+                    projected_type_for(ordered_types, ty)
+                }))))
+    }
     append_flow_synthetic_binders(
         flow, ordered_types, projected_binders)
     let shell_map = make_legacy_executable_shell_map(projected_shells)
@@ -2118,5 +2186,5 @@ pub fn assemble_legacy_projection(
         project_type_count, ordered_types, projected_effects,
         projected_binders, projected_callables,
         projected_impls, projected_dictionaries,
-        projected_physical, shell_map)
+        projected_physical, effect_ctx_tokens, shell_map)
 }
