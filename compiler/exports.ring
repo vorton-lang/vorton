@@ -6,7 +6,8 @@ use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef, ImplEntr
     TypeAliasDef, EffectAliasDef,
     find_impl_by_provider,
     impl_entry_exact_key_same, impl_entry_final_same,
-    optional_symbol_ref_same, ordered_effect_tail_vars}
+    optional_symbol_ref_same, ordered_effect_tail_vars,
+    enum_variant_constructor_effect_schema}
 use ir_identity::{SymbolRef, ImplMethodRef,
     impl_provider_ref_same, impl_owner_ref_same,
     impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
@@ -157,11 +158,16 @@ fn variant_ctor_scheme(def: EnumDef, variant: EnumVariant) -> TypeScheme {
     for tail in ordered_effect_tail_vars(ctor_type) {
         if !type_vars.contains(tail) { type_vars.push(tail) }
     }
+    let effect_schema = if variant.field_names.is_none() &&
+                               variant.fields.len() > 0 {
+        enum_variant_constructor_effect_schema(
+            def, def.variant_index.get(variant.name).unwrap())
+    } else { empty_typed_effect_header_schema() }
     TypeScheme {
         ty: ctor_type,
         type_vars: type_vars,
         bounds: [],
-        effect_schema: empty_typed_effect_header_schema(),
+        effect_schema: effect_schema,
         def_id: none
     }
 }

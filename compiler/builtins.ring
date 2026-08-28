@@ -17,7 +17,9 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     FrozenImplPredicateSet,
     mono, add_impl, install_method_core,
     make_impl_method_scheme_core, make_typed_impl_predicate,
-    impl_method_core_as_scheme,
+    impl_method_core_as_scheme, impl_method_core_type,
+    impl_method_core_type_vars, impl_method_core_def_id,
+    ordered_effect_tail_vars, build_definition_effect_header_schema,
     direct_impl_predicate_provenance, freeze_impl_predicate_set,
     frozen_impl_predicates, impl_predicate_subject_type_var,
     impl_predicate_trait_name,
@@ -48,7 +50,8 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     impl_provider_kind_builtin, registered_trait_ref_symbol,
     builtin_method_site_from_tag, builtin_method_site_tag,
     make_builtin_method_intrinsic_ref, intrinsic_ref_same,
-    intrinsic_ref_symbol, intrinsic_ref_site,
+    intrinsic_ref_site,
+    impl_method_ref_member, make_symbol_origin_ref,
     BUILTIN_METHOD_SITE_COUNT,
     BUILTIN_METHOD_STR_LEN, BUILTIN_METHOD_STR_CONTAINS,
     BUILTIN_METHOD_STR_STARTS_WITH, BUILTIN_METHOD_STR_ENDS_WITH,
@@ -439,6 +442,29 @@ fn install_builtin_method_owner(
         env, target_type_name, provider_ref, trait_ref, cores)
     let owner_ref = identity.0
     let method_refs = identity.1
+    let mut finalized_cores: Map<Str, ImplMethodSchemeCore> = map_new()
+    let mut final_entries = cores.entries()
+    final_entries.sort_by(compare_by_first)
+    for entry in final_entries {
+        let (method_name, core) = entry
+        let method_type = impl_method_core_type(core)
+        let mut quantified: List<Int> = []
+        for tail in ordered_effect_tail_vars(method_type) {
+            if impl_method_core_type_vars(core).contains(tail) &&
+               !owner_type_vars.contains(tail) {
+                quantified.push(tail)
+            }
+        }
+        let owner_symbol = impl_method_ref_member(
+            method_refs.get(method_name).unwrap())
+        let schema = build_definition_effect_header_schema(
+            make_symbol_origin_ref(owner_symbol), [method_type],
+            quantified)
+        finalized_cores.insert(method_name, make_impl_method_scheme_core(
+            method_type, impl_method_core_type_vars(core), schema,
+            impl_method_core_def_id(core)))
+    }
+    cores = finalized_cores
     let owner = ImplEntry {
         trait_name: trait_name,
         target_type_name: target_type_name,

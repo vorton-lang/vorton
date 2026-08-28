@@ -934,8 +934,7 @@ pub fn freeze_core_and_legacy_facts(
     physical_module_prefix: Str
 ) -> FrozenCoreAndLegacyFacts {
     let closed = close_hir_surface(program, env)
-    let effect_freeze = freeze_typed_effect_formals(
-        closed, env, module_order)
+    let effect_freeze = freeze_typed_effect_formals(env)
     let core = produce_closed_core_assembly_facts(
         module_key, module_order, closed, env,
         typed_effect_freeze_formals(effect_freeze),
