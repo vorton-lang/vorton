@@ -2498,6 +2498,25 @@ fn reject_unsupported_protocol_impl_bounds(
     }
 }
 
+fn reject_unsupported_drop_impl_bounds(
+    mut ctx: InferCtx, trait_name: Str?, type_params: List<TypeParam>
+) {
+    match trait_name {
+        some(name) => if name != "Drop" { return },
+        none => { return }
+    }
+    for tp in type_params {
+        for bound in tp.bounds {
+            let _ = type_error(ctx.sink, E0503,
+                "Drop impl type parameter '${tp.name}' cannot carry trait bounds in Ring 0.1 because drop glue has no runtime evidence",
+                bound.span, DiagnosticContext::TraitError {
+                    detail: "bounded generic Drop has no runtime evidence contract"
+                })
+            fail.raise(CompileError {})
+        }
+    }
+}
+
 fn exact_trait_ref(ctx: InferCtx, trait_name: Str?) -> SymbolRef? {
     match trait_name {
         some(name) => match ctx.env.trait_reg.traits.get(name) {
@@ -2595,6 +2614,7 @@ fn register_impl_canonical(
     }
     let resolved_trait_ref = exact_trait_ref(ctx, resolved_trait_name)
     reject_unsupported_protocol_impl_bounds(ctx, resolved_trait_name, type_params)
+    reject_unsupported_drop_impl_bounds(ctx, resolved_trait_name, type_params)
 
     let saved = map_clone(ctx.type_param_scope)
     let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
