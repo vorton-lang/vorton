@@ -2753,16 +2753,39 @@ fn empty_effect_fact_batch() -> EffectFactBatch {
     EffectFactBatch { effect_formals: [], callable_effects: [] }
 }
 
-pub fn filter_effect_fact_batch_for_owners(
+pub fn filter_effect_fact_batch_for_owner_scope(
     batch: EffectFactBatch, formal_owners: List<OriginRef>,
+    local_definition_raw_tails: List<Int>,
     callable_owners: List<ExecutableRef>
 ) -> EffectFactBatch {
+    let mut index = 0
+    while index < local_definition_raw_tails.len() {
+        let raw_tail = local_definition_raw_tails.get(index).unwrap()
+        let mut earlier = 0
+        while earlier < index {
+            if local_definition_raw_tails.get(earlier).unwrap() == raw_tail {
+                panic("effect fact batch: local definition tail repeats")
+            }
+            earlier = earlier + 1
+        }
+        let mut matches = 0
+        for fact in batch.effect_formals {
+            if typed_effect_formal_raw_tail(fact) == raw_tail {
+                matches = matches + 1
+            }
+        }
+        if matches != 1 {
+            panic("effect fact batch: local definition tail is not exact")
+        }
+        index = index + 1
+    }
     let mut result = empty_effect_fact_batch()
     for fact in batch.effect_formals {
         let parameter = typed_effect_formal_parameter(fact)
         if formal_owners.any(fn(owner) {
                 origin_ref_same(owner, effect_param_owner(parameter))
-            }) {
+            }) || local_definition_raw_tails.contains(
+                typed_effect_formal_raw_tail(fact)) {
             result.effect_formals.push(fact)
         }
     }

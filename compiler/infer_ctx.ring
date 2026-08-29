@@ -30,11 +30,10 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
     new_type_env, mono,
     apply_subst, apply_subst_row, apply_subst_map,
     instantiate_effect_header_schema,
-    apply_effect_header_schema_subst,
     define_effect_header_schema, publish_effect_header_schema,
     validate_effect_header_schema,
     effect_fact_checkpoint, rollback_effect_facts,
-    detach_effect_fact_suffix, filter_effect_fact_batch_for_owners,
+    detach_effect_fact_suffix, filter_effect_fact_batch_for_owner_scope,
     remap_effect_fact_batch,
     remap_type_to_canonical_ids,
     stage_effect_header_in_batch, stage_callable_effect_in_batch,
@@ -277,6 +276,7 @@ pub struct OwnerBatchCheckpoint {
     pending_dict_len: Int,
     pending_anonymous_len: Int,
     pending_projection_len: Int,
+    local_definition_effect_raw_tail_len: Int,
     effect_facts: EffectFactCheckpoint
 }
 
@@ -284,6 +284,7 @@ pub struct OwnerInferenceBatch {
     pending_dicts: List<PendingDictObligation>,
     pending_anonymous: List<PendingAnonymousCallableHeader>,
     pending_projections: List<PendingCallableProjection>,
+    local_definition_effect_raw_tails: List<Int>,
     effect_facts: EffectFactBatch
 }
 
@@ -354,6 +355,10 @@ pub struct InferCtx {
     h0_closed_registration_defs: Set<Int>,
     pending_anonymous_callable_headers:
         List<PendingAnonymousCallableHeader>,
+    // Transaction-local provenance for definition schemas created by local
+    // lets.  It is consumed by OwnerInferenceBatch filtering and is never a
+    // lookup authority or a TypedHIR carrier.
+    local_definition_effect_raw_tails: List<Int>,
     // B-125: whether the current module context allows unsafe blocks
     pub mod_unsafe_allowed: Bool,
     // B-002p1: types with user `impl Drop` — collected during impl checking
@@ -431,6 +436,7 @@ pub fn new_infer_ctx(
         closed_recursive_callables: [],
         h0_closed_registration_defs: set_new(),
         pending_anonymous_callable_headers: [],
+        local_definition_effect_raw_tails: [],
         mod_unsafe_allowed: false,
         drop_types: set_new(),
         project_namespace_file_key: none,
@@ -792,6 +798,8 @@ pub fn owner_batch_checkpoint(ctx: InferCtx) -> OwnerBatchCheckpoint {
             ctx.pending_anonymous_callable_headers.len(),
         pending_projection_len:
             ctx.pending_callable_projections.len(),
+        local_definition_effect_raw_tail_len:
+            ctx.local_definition_effect_raw_tails.len(),
         effect_facts: effect_fact_checkpoint(ctx.env)
     }
 }
@@ -803,7 +811,9 @@ pub fn rollback_owner_batch(
        checkpoint.pending_anonymous_len >
             ctx.pending_anonymous_callable_headers.len() ||
        checkpoint.pending_projection_len >
-            ctx.pending_callable_projections.len() {
+            ctx.pending_callable_projections.len() ||
+       checkpoint.local_definition_effect_raw_tail_len >
+            ctx.local_definition_effect_raw_tails.len() {
         panic("owner batch rollback: checkpoint exceeds pending state")
     }
     ctx.pending_dict_obligations = ctx.pending_dict_obligations.slice(
@@ -814,6 +824,9 @@ pub fn rollback_owner_batch(
     ctx.pending_callable_projections =
         ctx.pending_callable_projections.slice(
             0, checkpoint.pending_projection_len)
+    ctx.local_definition_effect_raw_tails =
+        ctx.local_definition_effect_raw_tails.slice(
+            0, checkpoint.local_definition_effect_raw_tail_len)
     rollback_effect_facts(ctx.env, checkpoint.effect_facts)
 }
 
@@ -824,7 +837,9 @@ pub fn detach_owner_batch(
        checkpoint.pending_anonymous_len >
             ctx.pending_anonymous_callable_headers.len() ||
        checkpoint.pending_projection_len >
-            ctx.pending_callable_projections.len() {
+            ctx.pending_callable_projections.len() ||
+       checkpoint.local_definition_effect_raw_tail_len >
+            ctx.local_definition_effect_raw_tails.len() {
         panic("owner batch detach: checkpoint exceeds pending state")
     }
     let effect_facts = detach_effect_fact_suffix(
@@ -840,6 +855,10 @@ pub fn detach_owner_batch(
         pending_projections: ctx.pending_callable_projections.slice(
             checkpoint.pending_projection_len,
             ctx.pending_callable_projections.len()),
+        local_definition_effect_raw_tails:
+            ctx.local_definition_effect_raw_tails.slice(
+                checkpoint.local_definition_effect_raw_tail_len,
+                ctx.local_definition_effect_raw_tails.len()),
         effect_facts: effect_facts
     }
     ctx.pending_dict_obligations = ctx.pending_dict_obligations.slice(
@@ -850,6 +869,9 @@ pub fn detach_owner_batch(
     ctx.pending_callable_projections =
         ctx.pending_callable_projections.slice(
             0, checkpoint.pending_projection_len)
+    ctx.local_definition_effect_raw_tails =
+        ctx.local_definition_effect_raw_tails.slice(
+            0, checkpoint.local_definition_effect_raw_tail_len)
     batch
 }
 
@@ -1227,11 +1249,7 @@ fn instantiate_scheme_with_receipt_mapping(
                 "callable instantiation: bound subject is not quantified")
         }
     }
-    let instantiated = apply_subst_map(mapping, scheme.ty)
-    let schema = apply_effect_header_schema_subst(
-        mapping, scheme.effect_schema)
-    publish_effect_header_schema(ctx.env, schema)
-    (instantiated, mapping)
+    (apply_subst_map(mapping, scheme.ty), mapping)
 }
 
 pub fn instantiate_callable_scheme(
@@ -1314,12 +1332,8 @@ fn instantiate_impl_with_receipt_mapping(
                 "impl method instantiation: predicate subject is not quantified")
         }
     }
-    let instantiated = apply_subst_map(
-        mapping, impl_method_core_type(core))
-    let schema = apply_effect_header_schema_subst(
-        mapping, impl_method_core_effect_schema(core))
-    publish_effect_header_schema(ctx.env, schema)
-    (instantiated, mapping)
+    (apply_subst_map(
+        mapping, impl_method_core_type(core)), mapping)
 }
 
 pub fn instantiate_callable_impl_method(
@@ -2652,7 +2666,16 @@ pub fn define_exact_effect_header(
     mut ctx: InferCtx, owner: OriginRef, headers: List<Type>,
     quantified: List<Int>
 ) -> TypedEffectHeaderSchema {
-    define_effect_header_schema(ctx.env, owner, headers, quantified)
+    let schema = define_effect_header_schema(
+        ctx.env, owner, headers, quantified)
+    for binding in typed_effect_header_schema_bindings(schema) {
+        let raw_tail = typed_effect_header_binding_raw_tail(binding)
+        if ctx.local_definition_effect_raw_tails.contains(raw_tail) {
+            panic("local effect header: raw tail was defined twice")
+        }
+        ctx.local_definition_effect_raw_tails.push(raw_tail)
+    }
+    schema
 }
 
 pub fn publish_exact_callable_effect_header(
@@ -3747,8 +3770,10 @@ pub fn stage_owner_batch_facts(
         formal_owners.push(executable_effect_origin(pending.executable))
         callable_owners.push(pending.executable)
     }
-    batch.effect_facts = filter_effect_fact_batch_for_owners(
-        batch.effect_facts, formal_owners, callable_owners)
+    batch.effect_facts = filter_effect_fact_batch_for_owner_scope(
+        batch.effect_facts, formal_owners,
+        batch.local_definition_effect_raw_tails, callable_owners)
+    batch.local_definition_effect_raw_tails = []
     let mut facts = remap_effect_fact_batch(
         batch.effect_facts, frozen_subst, canonical_ids)
     facts = stage_effect_header_in_batch(ctx.env, facts, owner_schema)
@@ -3795,7 +3820,8 @@ pub fn preflight_owner_batches(
     for batch in batches {
         if batch.pending_dicts.len() != 0 ||
            batch.pending_anonymous.len() != 0 ||
-           batch.pending_projections.len() != 0 {
+           batch.pending_projections.len() != 0 ||
+           batch.local_definition_effect_raw_tails.len() != 0 {
             panic("owner batch preflight: batch is not finalized")
         }
         facts.push(batch.effect_facts)
