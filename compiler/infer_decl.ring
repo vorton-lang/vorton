@@ -3991,20 +3991,25 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
     }
     let mut system_count = 0
     let mut system_contract_invalid = extern_effects.tail.is_some()
+    let mut custom_effect_present = false
     for atom in extern_effects.effects {
         match atom {
             Effect::SystemEffect { .. } => {
                 system_count = system_count + 1
             },
             Effect::FailEffect { .. } => {},
-            Effect::CustomEffect { .. } | Effect::MutEffect { .. } |
-            Effect::UnsafeEffect => {
+            Effect::CustomEffect { .. } => {
+                custom_effect_present = true
+                system_contract_invalid = true
+            },
+            Effect::MutEffect { .. } | Effect::UnsafeEffect => {
                 system_contract_invalid = true
             }
         }
     }
-    if system_count > 0 &&
-       (system_count != 1 || system_contract_invalid) {
+    if custom_effect_present ||
+       (system_count > 0 &&
+        (system_count != 1 || system_contract_invalid)) {
         let _ = type_error(ctx.sink, E0407,
             "Host extern '${name}' must declare exactly one system capability and may combine it only with fail",
             span, DiagnosticContext::OtherContext { detail: some(

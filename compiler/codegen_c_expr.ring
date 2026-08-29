@@ -3289,7 +3289,6 @@ fn extern_fn_to_runtime_c(name: Str) -> Str? {
         none => {},
     }
     if name == "panic" { return some("ring_panic") }
-    if name == "exit" { return some("ring_exit") }
     if name == "path_join" { return some("ring_path_join") }
     if name == "path_dirname" { return some("ring_path_dirname") }
     if name == "path_basename" { return some("ring_path_basename") }
@@ -3365,8 +3364,12 @@ fn gen_c_host_import_call(
         }
         let value = arg_vals.get(0).unwrap()
         let value_type = hexpr_type(args.get(0).unwrap())
-        return gen_c_runtime_call(
-            ctx, target, [convert_c_to_str(ctx, value, value_type)])
+        let converted = convert_c_to_str(ctx, value, value_type)
+        let result = gen_c_runtime_call(ctx, target, [converted])
+        if !is_str_type(value_type) {
+            c_emit(ctx, "ring_drop(${converted});")
+        }
+        return result
     }
     if tag == HOST_IMPORT_ASSERT_CONDITION {
         if arity != 2 {
