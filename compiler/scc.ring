@@ -1,12 +1,14 @@
 // scc.ring — Call graph construction + Tarjan SCC for B-122 checker pass ordering
 //
 // build_call_graph: traverses AST bodies of all Decl::Fn and Decl::Impl methods,
-// collecting edges to registered top-level fn names.
+// collecting exact dependencies on registered top-level fn names.  A named
+// callable used as a value is a definition dependency just like a direct call:
+// its finalized type/effect header must exist before the consumer is checked.
 //
 // tarjan_scc: standard Tarjan algorithm, returns SCCs in reverse topological order
 // (dependencies before dependents — leaf callees first, top-level callers last).
 
-use ast::{Decl, Expr, Stmt, StringInterpPart}
+use ast::{Decl, Expr, Stmt, Pattern, StringInterpPart}
 use hir::{compare_by_first}
 
 // ============================================================
@@ -44,7 +46,8 @@ fn collect_fn_names_from_decls(decls: List<Decl>, mut names: Set<Str>, mod_prefi
 
 // Build a call graph over top-level function names.
 // Nodes: every fn name in registered_fns.
-// Edges: caller -> callee, where callee is an Ident in a Call expr that appears in registered_fns.
+// Edges: caller -> provider, where an unshadowed Ident denotes a definition in
+// registered_fns, whether it is called directly or transported as a value.
 //
 // For impl blocks, all methods share a single node "impl::TypeName" (or "impl::TypeName::TraitName").
 // Self.method() calls within the same impl produce no external edge.
@@ -99,7 +102,7 @@ fn collect_decl_edges(
     explicit_lexical_root: Str?
 ) {
     match decl {
-        Decl::Fn { name, body, .. } => {
+        Decl::Fn { name, params, body, .. } => {
             let caller = match impl_node { some(inode) => inode, none => name }
             if !graph.contains_key(caller) {
                 graph.insert(caller, [])
@@ -112,7 +115,10 @@ fn collect_decl_edges(
                     none => fn_scope_prefix(caller)
                 }
             }
-            collect_expr_callees(body, registered_fns, scope, edges)
+            let mut shadowed: Set<Str> = set_new()
+            for parameter in params { shadowed.insert(parameter.name) }
+            collect_expr_callees(
+                body, registered_fns, scope, shadowed, edges)
             let mut sorted_edges: List<Str> = []
             for e in edges {
                 // Keep self edges: a singleton SCC is recursive only when its
@@ -192,15 +198,71 @@ fn prefix_mod_decl(mod_name: Str, decl: Decl) -> Decl {
 // AST expression/statement traversal — collect callee names
 // ============================================================
 // Unified walker for two modes (#193):
-//   TopLevel:    collect Ident callees from Call exprs matching registered_fns
+//   TopLevel:    collect unshadowed Ident dependencies matching registered_fns
 //   SelfMethod:  collect self.method() callees matching impl method_names
 //
 // The mode enum selects which Call/MethodCall logic fires; all other AST
 // traversal is shared.
 
 enum CalleeMode {
-    TopLevel { registered_fns: Set<Str>, scope_prefix: Str },
+    TopLevel {
+        registered_fns: Set<Str>, scope_prefix: Str,
+        shadowed: Set<Str>
+    },
     SelfMethod { method_names: Set<Str> }
+}
+
+fn callee_mode_with_names(
+    mode: CalleeMode, names: List<Str>
+) -> CalleeMode {
+    match mode {
+        CalleeMode::TopLevel {
+            registered_fns, scope_prefix, shadowed
+        } => {
+            let mut extended = set_from(shadowed.to_list())
+            for name in names { extended.insert(name) }
+            CalleeMode::TopLevel {
+                registered_fns: registered_fns,
+                scope_prefix: scope_prefix,
+                shadowed: extended
+            }
+        },
+        CalleeMode::SelfMethod { method_names } =>
+            CalleeMode::SelfMethod { method_names: method_names }
+    }
+}
+
+fn append_pattern_binding_names(
+    pattern: Pattern, mut names: List<Str>
+) {
+    match pattern {
+        Pattern::Binding { name, .. } => names.push(name),
+        Pattern::Constructor { fields, .. } => {
+            for field in fields {
+                append_pattern_binding_names(field, names)
+            }
+        },
+        Pattern::NamedConstructor { fields, .. } => {
+            for field in fields {
+                append_pattern_binding_names(field.pattern, names)
+            }
+        },
+        Pattern::TuplePattern { elements, .. } |
+        Pattern::OrPattern { patterns: elements, .. } => {
+            for element in elements {
+                append_pattern_binding_names(element, names)
+            }
+        },
+        Pattern::Wildcard { .. } | Pattern::Literal { .. } => {}
+    }
+}
+
+fn callee_mode_with_pattern(
+    mode: CalleeMode, pattern: Pattern
+) -> CalleeMode {
+    let names: List<Str> = []
+    append_pattern_binding_names(pattern, names)
+    callee_mode_with_names(mode, names)
 }
 
 fn scc_file_root(scope_prefix: Str) -> Str {
@@ -248,54 +310,70 @@ fn resolve_relative_callee(scope_prefix: Str, qualifier: Str, name: Str) -> Str?
     some(scc_join_name(root, inline_parts, name))
 }
 
+fn record_named_callable_dependency(
+    name: Str, qualifier: Str?, mode: CalleeMode,
+    mut callees: Set<Str>
+) {
+    match mode {
+        CalleeMode::TopLevel {
+            registered_fns, scope_prefix, shadowed
+        } => {
+            match qualifier {
+                some(q) => {
+                    if q == "self" || q.starts_with("self::") ||
+                       q == "super" || q.starts_with("super::") {
+                        match resolve_relative_callee(
+                                scope_prefix, q, name) {
+                            some(exact_name) => {
+                                if registered_fns.contains(exact_name) {
+                                    callees.insert(exact_name)
+                                }
+                            },
+                            none => {}
+                        }
+                    } else {
+                        let root = scc_file_root(scope_prefix)
+                        let root_candidate = scc_join_name(
+                            root, q.split("::"), name)
+                        if registered_fns.contains(root_candidate) {
+                            callees.insert(root_candidate)
+                        } else {
+                            let mut current_parts =
+                                scc_inline_scope(scope_prefix)
+                            current_parts.extend(q.split("::"))
+                            let current_candidate = scc_join_name(
+                                root, current_parts, name)
+                            if registered_fns.contains(current_candidate) {
+                                callees.insert(current_candidate)
+                            }
+                        }
+                    }
+                },
+                none => if !shadowed.contains(name) {
+                    let root = scc_file_root(scope_prefix)
+                    let scoped_name = scc_join_name(
+                        root, scc_inline_scope(scope_prefix), name)
+                    if registered_fns.contains(scoped_name) {
+                        callees.insert(scoped_name)
+                    } else {
+                        let root_name = "${root}${name}"
+                        if registered_fns.contains(root_name) {
+                            callees.insert(root_name)
+                        }
+                    }
+                }
+            }
+        },
+        CalleeMode::SelfMethod { .. } => {}
+    }
+}
+
 fn walk_expr_callees(expr: Expr, mode: CalleeMode, mut callees: Set<Str>) {
     match expr {
         Expr::Call { callee, args, .. } => {
-            // TopLevel: check if callee is a direct Ident referencing a registered fn
-            match mode {
-                CalleeMode::TopLevel { registered_fns, scope_prefix } => {
-                    match callee {
-                        Expr::Ident { name, qualifier, .. } => {
-                            match qualifier {
-                                some(q) => {
-                                    if q == "self" || q.starts_with("self::") || q == "super" || q.starts_with("super::") {
-                                        match resolve_relative_callee(scope_prefix, q, name) {
-                                            some(exact_name) => {
-                                                if registered_fns.contains(exact_name) { callees.insert(exact_name) }
-                                            },
-                                            none => {}
-                                        }
-                                    } else {
-                                        let root = scc_file_root(scope_prefix)
-                                        let root_candidate = scc_join_name(root, q.split("::"), name)
-                                        if registered_fns.contains(root_candidate) {
-                                            callees.insert(root_candidate)
-                                        } else {
-                                            let mut current_parts = scc_inline_scope(scope_prefix)
-                                            current_parts.extend(q.split("::"))
-                                            let current_candidate = scc_join_name(root, current_parts, name)
-                                            if registered_fns.contains(current_candidate) { callees.insert(current_candidate) }
-                                        }
-                                    }
-                                },
-                                none => {
-                                    let root = scc_file_root(scope_prefix)
-                                    let scoped_name = scc_join_name(root, scc_inline_scope(scope_prefix), name)
-                                    if registered_fns.contains(scoped_name) {
-                                        callees.insert(scoped_name)
-                                    } else {
-                                        let root_name = "${root}${name}"
-                                        if registered_fns.contains(root_name) { callees.insert(root_name) }
-                                    }
-                                }
-                            }
-                        },
-                        _ => {}
-                    }
-                },
-                CalleeMode::SelfMethod { .. } => {}
-            }
-            // Recurse into callee expr and args
+            // A direct call and a first-class callable value use the same
+            // exact registered-definition dependency rule.  The Ident arm
+            // below is therefore the sole name-resolution path.
             walk_expr_callees(callee, mode, callees)
             for arg in args {
                 walk_expr_callees(arg, mode, callees)
@@ -316,20 +394,30 @@ fn walk_expr_callees(expr: Expr, mode: CalleeMode, mut callees: Set<Str>) {
                 },
                 CalleeMode::TopLevel { .. } => {}
             }
-            walk_expr_callees(receiver, mode, callees)
+            // A direct method receiver is resolved in the effect/type/value
+            // member namespaces, not as a first-class callable value.  In
+            // particular `Port.ping()` must not acquire an edge to a
+            // same-spelled value function.  Compound receivers still contain
+            // ordinary expressions whose real dependencies must be walked.
+            match receiver {
+                Expr::Ident { .. } => {},
+                _ => walk_expr_callees(receiver, mode, callees)
+            }
             for arg in args {
                 walk_expr_callees(arg, mode, callees)
             }
         },
-        Expr::Ident { .. } => {
-            // Bare ident (not in Call position) — not a call, skip
-        },
+        Expr::Ident { name, qualifier, .. } =>
+            record_named_callable_dependency(
+                name, qualifier, mode, callees),
         Expr::Block { stmts, tail, .. } => {
+            let mut block_mode = mode
             for stmt in stmts {
-                walk_stmt_callees(stmt, mode, callees)
+                block_mode = walk_stmt_callees(
+                    stmt, block_mode, callees)
             }
             match tail {
-                some(t) => walk_expr_callees(t, mode, callees),
+                some(t) => walk_expr_callees(t, block_mode, callees),
                 none => {}
             }
         },
@@ -344,15 +432,20 @@ fn walk_expr_callees(expr: Expr, mode: CalleeMode, mut callees: Set<Str>) {
         Expr::MatchExpr { scrutinee, arms, .. } => {
             walk_expr_callees(scrutinee, mode, callees)
             for arm in arms {
+                let arm_mode = callee_mode_with_pattern(
+                    mode, arm.pattern)
                 match arm.guard {
-                    some(g) => walk_expr_callees(g, mode, callees),
+                    some(g) => walk_expr_callees(
+                        g, arm_mode, callees),
                     none => {}
                 }
-                walk_expr_callees(arm.body, mode, callees)
+                walk_expr_callees(arm.body, arm_mode, callees)
             }
         },
-        Expr::Lambda { body, .. } => {
-            walk_expr_callees(body, mode, callees)
+        Expr::Lambda { params, body, .. } => {
+            let lambda_mode = callee_mode_with_names(
+                mode, params.map(fn(parameter) { parameter.name }))
+            walk_expr_callees(body, lambda_mode, callees)
         },
         Expr::BinOp { left, right, .. } => {
             walk_expr_callees(left, mode, callees)
@@ -380,17 +473,28 @@ fn walk_expr_callees(expr: Expr, mode: CalleeMode, mut callees: Set<Str>) {
         Expr::CatchExpr { expr: inner, arms, .. } => {
             walk_expr_callees(inner, mode, callees)
             for arm in arms {
+                let arm_mode = callee_mode_with_pattern(
+                    mode, arm.pattern)
                 match arm.guard {
-                    some(g) => walk_expr_callees(g, mode, callees),
+                    some(g) => walk_expr_callees(
+                        g, arm_mode, callees),
                     none => {}
                 }
-                walk_expr_callees(arm.body, mode, callees)
+                walk_expr_callees(arm.body, arm_mode, callees)
             }
         },
         Expr::HandleExpr { body, handlers, .. } => {
             walk_expr_callees(body, mode, callees)
             for handler in handlers {
-                walk_expr_callees(handler.body, mode, callees)
+                let mut names = handler.params.map(
+                    fn(parameter) { parameter.name })
+                match handler.resume_name {
+                    some(name) => names.push(name),
+                    none => {}
+                }
+                walk_expr_callees(
+                    handler.body,
+                    callee_mode_with_names(mode, names), callees)
             }
         },
         Expr::StringInterp { parts, .. } => {
@@ -430,38 +534,69 @@ fn walk_expr_callees(expr: Expr, mode: CalleeMode, mut callees: Set<Str>) {
     }
 }
 
-fn walk_stmt_callees(stmt: Stmt, mode: CalleeMode, mut callees: Set<Str>) {
+fn walk_stmt_callees(
+    stmt: Stmt, mode: CalleeMode, mut callees: Set<Str>
+) -> CalleeMode {
     match stmt {
-        Stmt::Let { init, .. } => walk_expr_callees(init, mode, callees),
-        Stmt::Var { init, .. } => walk_expr_callees(init, mode, callees),
+        Stmt::Let { name, init, .. } |
+        Stmt::Var { name, init, .. } => {
+            walk_expr_callees(init, mode, callees)
+            callee_mode_with_names(mode, [name])
+        },
         Stmt::Assign { target, value, .. } => {
             walk_expr_callees(target, mode, callees)
             walk_expr_callees(value, mode, callees)
+            mode
         },
-        Stmt::ExprStmt { expr, .. } => walk_expr_callees(expr, mode, callees),
+        Stmt::ExprStmt { expr, .. } => {
+            walk_expr_callees(expr, mode, callees)
+            mode
+        },
         Stmt::Return { value, .. } => match value {
-            some(v) => walk_expr_callees(v, mode, callees),
-            none => {}
+            some(v) => {
+                walk_expr_callees(v, mode, callees)
+                mode
+            },
+            none => mode
         },
         Stmt::While { condition, body, .. } => {
             walk_expr_callees(condition, mode, callees)
             walk_expr_callees(body, mode, callees)
+            mode
         },
-        Stmt::ForIn { iterable, body, .. } => {
+        Stmt::ForIn {
+            binding, destructure, iterable, body, ..
+        } => {
             walk_expr_callees(iterable, mode, callees)
-            walk_expr_callees(body, mode, callees)
+            let mut names = [binding]
+            match destructure {
+                some(value) => {
+                    for name in value.names { names.push(name) }
+                },
+                none => {}
+            }
+            walk_expr_callees(
+                body, callee_mode_with_names(mode, names), callees)
+            mode
         },
-        Stmt::LetDestructure { init, .. } => walk_expr_callees(init, mode, callees),
-        Stmt::IfLet { expr, then_block, else_block, .. } => {
+        Stmt::LetDestructure { pattern, init, .. } => {
+            walk_expr_callees(init, mode, callees)
+            callee_mode_with_pattern(mode, pattern)
+        },
+        Stmt::IfLet {
+            pattern, expr, then_block, else_block, ..
+        } => {
             walk_expr_callees(expr, mode, callees)
-            walk_expr_callees(then_block, mode, callees)
+            walk_expr_callees(
+                then_block,
+                callee_mode_with_pattern(mode, pattern), callees)
             match else_block {
                 some(eb) => walk_expr_callees(eb, mode, callees),
                 none => {}
             }
+            mode
         },
-        Stmt::Break { .. } => {},
-        Stmt::Continue { .. } => {}
+        Stmt::Break { .. } | Stmt::Continue { .. } => mode
     }
 }
 
@@ -484,11 +619,13 @@ fn fn_scope_prefix(fn_name: Str) -> Str {
 
 fn collect_expr_callees(
     expr: Expr, registered_fns: Set<Str>, scope_prefix: Str,
+    shadowed: Set<Str>,
     mut callees: Set<Str>
 ) {
     walk_expr_callees(expr, CalleeMode::TopLevel {
         registered_fns: registered_fns,
-        scope_prefix: scope_prefix
+        scope_prefix: scope_prefix,
+        shadowed: shadowed
     }, callees)
 }
 
