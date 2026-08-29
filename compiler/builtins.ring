@@ -515,14 +515,16 @@ fn install_builtin_method_owner(
 fn builtin_impl_self_type(
     target_type_name: Str, type_args: List<Type>
 ) -> Type {
+    if target_type_name == BUILTIN_OPTION {
+        return Type::EnumType {
+            name: BUILTIN_OPTION, type_params: type_args
+        }
+    }
     match target_type_name {
         "Int" => INT,
         "Float" => FLOAT,
         "Str" => STR,
         "Bool" => BOOL,
-        BUILTIN_OPTION => Type::EnumType {
-            name: BUILTIN_OPTION, type_params: type_args
-        },
         _ => Type::StructType {
             name: target_type_name, type_params: type_args
         }
