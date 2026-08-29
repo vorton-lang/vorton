@@ -320,7 +320,7 @@ use core_expr::{
     core_effect_ctx_layout_same,
     core_effect_ctx_token_instance, core_effect_ctx_token_same,
     core_callee_effect_instantiation,
-    core_field_ref_same,
+    core_field_ref_same, core_field_type_from_type_node,
     core_handler_operation_ref
 }
 use core_hir::{
@@ -3527,7 +3527,8 @@ fn lower_pattern(
         make_core_pattern_field(core,
             lower_pattern(ctx, Pattern::Wildcard { span: span_zero() },
                 h_pattern_field_pattern(field),
-                move_update_field_type(ctx, expected_type, core),
+                core_field_type_from_type_node(
+                    lower_type_node(ctx, expected_type), core),
                 binding_kind))
     })
     if kind == 4 { make_core_struct_pattern(expected_type,

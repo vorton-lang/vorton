@@ -4725,6 +4725,30 @@ fn core_field_matches_fact(
     true
 }
 
+pub fn core_field_type_from_type_node(
+    node: FlowTypeNode, field: CoreFieldRef
+) -> CoreTypeRef {
+    if core_field_ref_kind_tag(field) == 1 {
+        return flow_type_node_children(node).get(
+            core_field_ref_tuple_index(field)).unwrap_or_else(fn() {
+                panic("CoreHIR: tuple field is absent from type graph")
+            })
+    }
+    let mut found: CoreTypeRef? = none
+    for fact in flow_type_node_nominal_fields(node) {
+        if core_field_matches_fact(field, fact) {
+            if found.is_some() {
+                panic("CoreHIR: field fact repeats in type graph")
+            }
+            found = some(flow_nominal_field_type(fact))
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("CoreHIR: field is absent from type graph")
+    }
+}
+
 fn validate_core_literal_type(
     literal: CoreLiteral, ty: CoreTypeRef, graph: CoreTypeGraph
 ) {

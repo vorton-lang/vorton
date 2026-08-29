@@ -67,6 +67,7 @@ use core_expr::{
     core_stmt_destructure_scrutinee, core_stmt_destructure_pattern,
     core_place_is_slot, core_place_slot, core_place_base,
     core_place_field,
+    core_field_type_from_type_node,
     core_place_value_type,
     core_expr_kind_tag, core_expr_type,
     core_expr_origin, core_expr_literal, core_literal_kind_tag,
@@ -134,9 +135,7 @@ use effect_contract::{
 use core_type_source::{
     core_type_graph_nodes,
     FlowTypeNode, FlowFieldIdentity,
-    flow_type_node_children, copy_flow_type_graph_nodes,
-    flow_type_node_nominal_fields, flow_nominal_field_identity,
-    flow_nominal_field_type, flow_field_identity_same,
+    copy_flow_type_graph_nodes,
     make_nominal_flow_field_identity, make_variant_flow_field_identity,
     make_path_flow_field_identity
 }
@@ -910,34 +909,6 @@ fn flow_aggregate_input(field: CoreFieldRef) -> FlowAggregateInputRef {
     make_variant_flow_aggregate_input(core_field_ref_variant(field))
 }
 
-fn move_update_field_type(
-    ctx: FlowLowerCtx, base_type: CoreTypeRef, field: CoreFieldRef
-) -> CoreTypeRef {
-    let node = ctx.type_nodes.get(core_type_ref_index(base_type)).unwrap_or_else(fn() {
-        panic("Flow lowering: move update base type is absent")
-    })
-    if core_field_ref_kind_tag(field) == 1 {
-        return flow_type_node_children(node).get(
-            core_field_ref_tuple_index(field)).unwrap_or_else(fn() {
-                panic("Flow lowering: move update tuple field is absent")
-            })
-    }
-    let identity = flow_field(field)
-    let mut found: CoreTypeRef? = none
-    for fact in flow_type_node_nominal_fields(node) {
-        if flow_field_identity_same(flow_nominal_field_identity(fact), identity) {
-            if found.is_some() {
-                panic("Flow lowering: move update field fact repeats")
-            }
-            found = some(flow_nominal_field_type(fact))
-        }
-    }
-    match found {
-        some(value) => value,
-        none => panic("Flow lowering: move update field is absent")
-    }
-}
-
 fn partial_projection_contract(
     field: CoreFieldRef, base_type: CoreTypeRef,
     value_type: CoreTypeRef, role: FlowSemanticRole
@@ -1376,7 +1347,10 @@ fn emit_simple_expr(
         let mut inputs: List<SlotRef> = []
         let mut input_locations: List<FlowAggregateInputRef?> = []
         for field in schema {
-            let field_type = move_update_field_type(ctx, result_type, field)
+            let field_type = core_field_type_from_type_node(
+                ctx.type_nodes.get(core_type_ref_index(result_type)).unwrap_or_else(fn() {
+                    panic("Flow lowering: move update base type is absent")
+                }), field)
             let mut override_slot: SlotRef? = none
             let mut index = 0
             while index < override_fields.len() {
