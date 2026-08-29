@@ -36,14 +36,14 @@ use ir_identity::{
     SymbolRef, ModuleBodyRef, SlotRef, OriginRef, ImplOwnerRef, ImplMethodRef,
     make_module_body_ref, make_source_slot_ref, slot_domain_lexical,
     make_synthetic_slot_ref, make_path_ref, path_role_parameter,
-    path_owner_for_symbol, path_ref_owner,
-    path_ref_normalized_child_path, make_path_origin_ref,
+    path_owner_for_symbol, path_ref_owner, make_path_origin_ref,
     make_symbol_origin_ref, symbol_ref_same,
     symbol_ref_origin_module_key, symbol_ref_canonical_payload,
     impl_method_ref_owner, impl_method_ref_member, impl_method_ref_name,
     impl_method_ref_callable_slot_index,
     impl_owner_ref_target, impl_owner_ref_trait,
     intrinsic_ref_symbol, slot_ref_same, slot_ref_is_source,
+    slot_ref_stable_key,
     slot_ref_source_def_id
 }
 use ir_inventory::{
@@ -232,10 +232,12 @@ fn add_physical_identity(
                 executable_ref_named_symbol(reference))
         }
     } else {
-        module_item_identity(
-            builder.module_key,
-            path_ref_normalized_child_path(
-                executable_ref_anonymous_path(reference)).join("$"))
+        // Anonymous child paths are only unique together with their exact
+        // PathOwnerRef.  Reusing the existing stable synthetic-slot key keeps
+        // lambdas/handlers below different callables disjoint without adding
+        // a second executable naming authority.
+        slot_ref_stable_key(make_synthetic_slot_ref(
+            executable_ref_anonymous_path(reference)))
         }
     }
     builder.physical_identities.push(
