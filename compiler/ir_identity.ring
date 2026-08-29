@@ -1411,7 +1411,7 @@ fn identity_key_atom(value: Str) -> Str {
     "${value.len().to_str()}:${value}"
 }
 
-fn symbol_ref_stable_key(value: SymbolRef) -> Str {
+pub fn symbol_ref_stable_key(value: SymbolRef) -> Str {
     ["symbol", identity_key_atom(symbol_ref_origin_module_key(value)),
      namespace_kind_tag(symbol_ref_namespace_kind(value)).to_str(),
      identity_key_atom(symbol_ref_canonical_payload(value)),

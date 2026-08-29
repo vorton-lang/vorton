@@ -63,7 +63,7 @@ use ir_identity::{SymbolRef, ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     registered_trait_ref_symbol, registered_nominal_ref_symbol,
     impl_owner_ref_target, impl_method_ref_owner, impl_method_ref_member,
     impl_method_ref_name,
-    symbol_ref_origin_module_key}
+    symbol_ref_origin_module_key, symbol_ref_stable_key}
 use ir_identity::{builtin_value_site_from_tag, builtin_value_symbol,
     BUILTIN_VALUE_HASH_COMBINE}
 use ir_inventory::{ExecutableRef, BinderEntry,
@@ -2622,6 +2622,7 @@ fn derived_impl_method_refs_from_names(
         target_ref, provider_ref, some(trait_ref))
     let provider_path = path_ref_normalized_child_path(
         impl_provider_ref_site(provider_ref)).join("/")
+    let trait_key = symbol_ref_stable_key(trait_ref)
     let module_key = module_body_ref_origin_module_key(
         path_owner_ref_module_body(path_ref_owner(
             impl_provider_ref_site(provider_ref))))
@@ -2632,8 +2633,8 @@ fn derived_impl_method_refs_from_names(
     for method_name in sorted_names {
         let member = make_symbol_ref(
             module_key, namespace_member(),
-            "derived-impl-member:${provider_path}:${callable_slot}",
-            "provider:${provider_path}|method:${callable_slot}")
+            "derived-impl-member:${provider_path}:${trait_key}:${callable_slot}",
+            "provider:${provider_path}|trait:${trait_key}|method:${callable_slot}")
         refs.insert(method_name, make_impl_method_ref(
             owner_ref, member, callable_slot, callable_slot, method_name))
         callable_slot = callable_slot + 1
