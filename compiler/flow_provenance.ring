@@ -24,6 +24,7 @@ use flow_ir::{
     flow_operation_contract_callable_executable,
     flow_operation_contract_input_locations,
     flow_read_source, flow_read_target,
+    flow_fail_raise_payload, flow_fail_raise_sink,
     flow_assign_rhs_temp, flow_assign_target,
     flow_move_place_source, flow_move_place_target,
     flow_place_is_slot, flow_place_slot, flow_place_base,
@@ -215,6 +216,15 @@ pub fn flow_instruction_callable_provenance(
             }
             result.push(make_flow_callable_provenance_fact(
                 step, make_flow_callable_slot_location(target), origin))
+        }
+    }
+    if kind == 11 {
+        let target = flow_fail_raise_sink(instruction)
+        if slot_is_callable(slots, types, target) {
+            result.push(make_flow_callable_provenance_fact(
+                step, make_flow_callable_slot_location(target),
+                make_flow_slots_callable_origin([
+                    flow_fail_raise_payload(instruction)])))
         }
     }
     result

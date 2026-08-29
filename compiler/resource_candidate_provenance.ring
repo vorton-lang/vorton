@@ -209,6 +209,9 @@ fn event_candidate_location_overwritten(
             rhs_temp == base_slot ||
             (planner_place_is_slot(target) &&
              planner_place_slot(target) == base_slot),
+        PlannerEventValue::MovePlaceValue { source, .. } =>
+            planner_place_is_slot(source) &&
+            planner_place_slot(source) == base_slot,
         _ => false
     }
 }

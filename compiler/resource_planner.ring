@@ -55,7 +55,6 @@ use flow_ir::{
     flow_storage_class_tag,
     flow_block_reference, flow_block_instructions,
     flow_block_terminator, flow_block_terminator_operands,
-    flow_block_terminator_results, flow_result_slot, flow_result_origin,
     flow_block_ref_ordinal,
     flow_instruction_reference, flow_instruction_operands,
     make_flow_instruction_step_ref,
@@ -702,29 +701,15 @@ fn planner_edges_from_flow(
     let mut result: List<PlannerEdge> = []
     let terminator = flow_block_terminator(block)
     let tag = flow_terminator_kind_tag(terminator)
-    let terminator_results = flow_block_terminator_results(block)
-    if tag == 11 {
-        if terminator_results.len() != 1 ||
-           !flow_value_origin_is_fresh(
-                flow_result_origin(terminator_results.get(0).unwrap())) {
-            panic("ResourcePlanner: Try lacks one fresh caught result")
-        }
-    } else if terminator_results.len() != 0 {
-        panic("ResourcePlanner: non-Try terminator has edge results")
-    }
     let successors = flow_terminator_successors(terminator)
-    let mut edge_index = 0
+    if tag == 11 && successors.len() != 1 {
+        panic("ResourcePlanner: Raise successor census differs")
+    }
     for successor in successors {
-        let fresh_results = if tag == 11 && edge_index == 1 {
-            [flow_slot_index(
-                slots,
-                flow_result_slot(terminator_results.get(0).unwrap()))]
-        } else { [] }
         result.push(make_planner_edge(
             some(flow_block_ref_ordinal(flow_successor_target(successor))),
             exited_scope_ids(flow_successor_exited_scopes(successor)),
-            fresh_results))
-        edge_index = edge_index + 1
+            []))
     }
     if result.len() == 0 {
         if tag != 3 && tag != 8 && tag != 9 {

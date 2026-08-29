@@ -3724,10 +3724,7 @@ pub fn verify_rc_topology_contract(
                         expected_edge.target_block {
                     panic("ResourcePlanner verifier: successor endpoint drifted")
                 }
-                let expects_fresh = expected_block.terminator_kind == 11 &&
-                    edge_index == 1
-                if expected_edge.fresh_result_slots.len() !=
-                        if expects_fresh { 1 } else { 0 } {
+                if expected_edge.fresh_result_slots.len() != 0 {
                     panic("ResourcePlanner verifier: edge result census drifted")
                 }
                 let edge_transitions =

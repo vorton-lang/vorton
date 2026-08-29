@@ -1801,6 +1801,43 @@ fn planner_scope_depth(
     result
 }
 
+fn validate_raise_planner_block(body: PlannerBody, block: PlannerBlock) {
+    if block.terminator_kind != 11 { return }
+    if block.events.len() < 2 || block.terminator_uses.len() != 1 ||
+       block.edges.len() != 1 {
+        panic("ResourcePlanner: Raise contract census differs")
+    }
+    let consume = block.events.get(block.events.len() - 2).unwrap()
+    let moved = block.events.get(block.events.len() - 1).unwrap()
+    let (failure_sink, caught_error) = match (consume.value, moved.value) {
+        (PlannerEventValue::ConsumeValue(_, true, some(sink)),
+         PlannerEventValue::MovePlaceValue { source, target }) => {
+            if !planner_place_is_slot(source) ||
+               planner_place_slot(source) != sink {
+                panic("ResourcePlanner: Raise failure sink transfer differs")
+            }
+            (sink, target)
+        },
+        _ => panic("ResourcePlanner: Raise event sequence differs")
+    }
+    let usage = block.terminator_uses.get(0).unwrap()
+    let edge = block.edges.get(0).unwrap()
+    if usage.slot != caught_error || edge.target_block.is_none() ||
+       !param_mode_same(
+            transfer_demand_mode(usage.demand), param_mode_borrow()) ||
+       transfer_demand_force(usage.demand) ||
+       !body.slots.get(caught_error).unwrap().owns_storage ||
+       body.slots.get(caught_error).unwrap().initially_live ||
+       !int_list_contains(
+            edge.exited_scope_ids,
+            body.slots.get(failure_sink).unwrap().scope_id) ||
+       int_list_contains(
+            edge.exited_scope_ids,
+            body.slots.get(caught_error).unwrap().scope_id) {
+        panic("ResourcePlanner: Raise state/cleanup boundary differs")
+    }
+}
+
 fn validate_body(
     body: PlannerBody, type_nodes: List<PlannerTypeNode>,
     callables: List<PlannerCallable>
@@ -1857,6 +1894,7 @@ fn validate_body(
                 event, body.slots, body.scopes, callables, type_nodes,
                 reachable.get(block_index).unwrap())
         }
+        validate_raise_planner_block(body, block)
         let mut terminator_ordinal = 0
         for usage in block.terminator_uses {
             validate_slot_index(usage.slot, body.slots)
@@ -1873,10 +1911,9 @@ fn validate_body(
             terminator_ordinal = terminator_ordinal + 1
         }
         let mut previous_depth: Int? = none
-        if block.terminator_kind == 11 && block.edges.len() != 2 {
-            panic("ResourcePlanner: Try successor census differs")
+        if block.terminator_kind == 11 && block.edges.len() != 1 {
+            panic("ResourcePlanner: Raise successor census differs")
         }
-        let mut edge_ordinal = 0
         for edge in block.edges {
             match edge.target_block {
                 some(target) => if target < 0 || target >= body.blocks.len() {
@@ -1910,12 +1947,9 @@ fn validate_body(
                     panic("ResourcePlanner: fresh edge result exits its scope")
                 }
             }
-            let expects_fresh = block.terminator_kind == 11 &&
-                edge_ordinal == 1
-            if edge.fresh_result_slots.len() != if expects_fresh { 1 } else { 0 } {
+            if edge.fresh_result_slots.len() != 0 {
                 panic("ResourcePlanner: terminator edge result census differs")
             }
-            edge_ordinal = edge_ordinal + 1
         }
         block_index = block_index + 1
     }

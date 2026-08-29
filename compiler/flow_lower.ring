@@ -131,7 +131,9 @@ use core_expr::{
 }
 use effect_contract::{
     CoreEffectContract, CoreEffectInstantiation,
-    make_explicit_core_effect_instantiation
+    make_explicit_core_effect_instantiation,
+    core_effect_contract_exact, core_effect_set_atoms,
+    core_effect_atom_kind_tag, core_effect_instantiation_result
 }
 use core_type_source::{
     core_type_graph_nodes,
@@ -171,7 +173,7 @@ use flow_ir::{
     make_flow_goto, make_flow_branch, make_flow_loop,
     make_flow_return, make_flow_continue,
     make_flow_unreachable, make_flow_diverge,
-    make_flow_pattern_branch, make_flow_try,
+    make_flow_pattern_branch, make_flow_raise,
     make_flow_handler_binding, make_flow_effect_ctx_entry,
     make_flow_effect_ctx_install,
     flow_effect_ctx_entry_token,
@@ -216,7 +218,8 @@ use flow_ir::{
     flow_primitive_gt, flow_primitive_ge,
     flow_scope_reference, flow_scope_has_parent, flow_scope_parent,
     flow_scope_ref_same,
-    flow_block_reference, flow_block_scope, flow_block_ref_ordinal,
+    flow_block_reference, flow_block_scope,
+    flow_block_ref_ordinal, flow_block_ref_same,
     flow_instruction_reference,
     make_flow_instruction_step_ref, make_flow_terminator_step_ref,
     flow_semantic_step_owner, flow_semantic_step_same,
@@ -507,6 +510,11 @@ struct FlowBlockDraft {
     terminator: FlowTerminator?
 }
 
+struct SameFrameCatchTarget {
+    error: SlotRef,
+    caught: FlowBlockRef
+}
+
 struct FlowLowerCtx {
     owner: ExecutableRef,
     type_nodes: List<FlowTypeNode>,
@@ -520,7 +528,38 @@ struct FlowLowerCtx {
     active_node: CoreFlowNodeRef?,
     next_node_ordinal: Int,
     nodes: List<CoreFlowNodeRef>,
-    step_relations: List<CoreFlowStepRelation>
+    step_relations: List<CoreFlowStepRelation>,
+    catch_targets: List<SameFrameCatchTarget>
+}
+
+fn push_same_frame_catch(
+    mut ctx: FlowLowerCtx, error: SlotRef, caught: FlowBlockRef
+) {
+    ctx.catch_targets.push(SameFrameCatchTarget {
+        error: error, caught: caught
+    })
+}
+
+fn pop_same_frame_catch(
+    mut ctx: FlowLowerCtx, error: SlotRef, caught: FlowBlockRef
+) {
+    let removed = ctx.catch_targets.pop().unwrap_or_else(fn() {
+        panic("Flow lowering: same-frame catch stack underflow")
+    })
+    if !slot_ref_same(removed.error, error) ||
+       !flow_block_ref_same(removed.caught, caught) {
+        panic("Flow lowering: same-frame catch stack drifted")
+    }
+}
+
+fn current_same_frame_catch(ctx: FlowLowerCtx) -> SameFrameCatchTarget {
+    if ctx.catch_targets.len() == 0 {
+        panic("Flow lowering: fail.raise requires a direct same-frame catch")
+    }
+    match ctx.catch_targets.get(ctx.catch_targets.len() - 1) {
+        some(value) => value,
+        none => panic("Flow lowering: same-frame catch stack is inconsistent")
+    }
 }
 
 fn enter_core_node(
@@ -1177,6 +1216,17 @@ fn repeated_role(count: Int, role: FlowSemanticRole) -> List<FlowSemanticRole> {
     result
 }
 
+fn reject_cross_frame_fail_call(callee: CoreCalleeRef) {
+    let effects = core_effect_contract_exact(
+        core_effect_instantiation_result(
+            core_callee_effect_instantiation(callee)))
+    if core_effect_set_atoms(effects).any(fn(atom) {
+            core_effect_atom_kind_tag(atom) == 0
+        }) {
+        panic("Flow lowering: fail-capable call requires cross-frame unwind")
+    }
+}
+
 fn emit_simple_expr(
     mut ctx: FlowLowerCtx, expr: CoreExpr, result: SlotRef,
     continue_target: FlowBlockRef?, break_target: FlowBlockRef?
@@ -1248,6 +1298,7 @@ fn emit_simple_expr(
             if is_terminated(ctx) { return true }
         }
         if is_terminated(ctx) { return true }
+        reject_cross_frame_fail_call(callee)
         let evidence = flow_evidence(core_expr_call_evidence(expr))
         let effect_ctx = if core_callee_kind_tag(callee) == 0 &&
                 core_callable_effect_ctx(callable_for(
@@ -1718,13 +1769,13 @@ fn lower_try_expression(
     let caught_entry = new_draft(ctx, origin, caught_scope)
     let join = new_draft(ctx, origin, parent_scope)
     activate_core_binder(ctx, core_expr_error_slot(expr), caught_scope)
-    terminate(ctx, make_flow_try(
-        origin, core_expr_error_slot(expr),
-        successor_to(ctx, protected_entry), successor_to(ctx, caught_entry)),
+    terminate(ctx, make_flow_goto(origin, successor_to(ctx, protected_entry)),
         core_flow_role_control_dispatch(0))
     set_current(ctx, protected_entry)
+    push_same_frame_catch(ctx, core_expr_error_slot(expr), caught_entry)
     let protected_tail = lower_core_block(
         ctx, protected, continue_target, break_target)
+    pop_same_frame_catch(ctx, core_expr_error_slot(expr), caught_entry)
     if !is_terminated(ctx) {
         merge_block_tail(ctx, protected_tail, result, origin, 0)
         terminate_goto(ctx, join, origin, core_flow_role_control_exit(0))
@@ -1887,6 +1938,7 @@ fn lower_expr(
         ctx, CORE_FLOW_NODE_EXPR, kind,
         core_expr_origin(expr), some(result))
     if kind == 18 {
+        let catch_target = current_same_frame_catch(ctx)
         let payload = lower_expr(
             ctx, core_expr_fail_payload(expr),
             continue_target, break_target)
@@ -1894,15 +1946,25 @@ fn lower_expr(
             let sink = new_admin_slot(
                 ctx, frozen_slot_type_at(ctx, payload),
                 current_draft(ctx).scope, binder_kind_pre_anf(),
-                "fail-payload", 3,
+                "failure-sink", 3,
                 flow_storage_temp(), flow_initial_slot_empty(),
                 flow_own_storage())
+            if !core_type_ref_same(
+                    frozen_slot_type_at(ctx, payload),
+                    frozen_slot_type_at(ctx, catch_target.error)) {
+                panic("Flow lowering: fail payload/catch type differs")
+            }
             emit_instruction(ctx, make_flow_fail_raise(
                 next_instruction_ref(ctx), core_expr_origin(expr),
                 payload, sink),
                 core_flow_role_expr_primary())
-            terminate(ctx, make_flow_diverge(
-                core_expr_origin(expr), all_exited_scopes(ctx)),
+            emit_instruction(ctx, make_flow_move_place(
+                next_instruction_ref(ctx), core_expr_origin(expr),
+                make_flow_slot_place(sink), catch_target.error),
+                core_flow_role_control_dispatch(0))
+            terminate(ctx, make_flow_raise(
+                core_expr_origin(expr), catch_target.error,
+                successor_to(ctx, catch_target.caught)),
                 core_flow_role_control_exit(0))
         }
         restore_core_node(ctx, previous)
@@ -2150,7 +2212,7 @@ fn lower_core_body(
         binders: [], slots: [], drafts: [], current: 0,
         callables: callables, core_body: body,
         active_node: none, next_node_ordinal: first_node_ordinal,
-        nodes: [], step_relations: []
+        nodes: [], step_relations: [], catch_targets: []
     }
     let _ = enter_core_node(
         ctx, CORE_FLOW_NODE_BODY, 0, core_body_origin(body), none)
@@ -2180,6 +2242,9 @@ fn lower_core_body(
         if !flow_slot_exists(ctx, core_binder_reference(binder)) {
             activate_core_binder(ctx, core_binder_reference(binder), root_scope)
         }
+    }
+    if ctx.catch_targets.len() != 0 {
+        panic("Flow lowering: same-frame catch stack leaked across body")
     }
     let lowered = make_flow_body(
         owner, core_body_origin(body),

@@ -87,7 +87,8 @@ use hir::{
     h_resource_reason_cleanup, h_resource_reason_drop_projected_old
 }
 use flow_ir::{
-    FlowProgram, FlowBody, FlowInstruction, FlowSemanticStepRef,
+    FlowProgram, FlowBody, FlowInstruction, FlowTerminator,
+    FlowSemanticStepRef,
     FlowProjectionContract,
     make_flow_instruction_step_ref, make_flow_terminator_step_ref,
     flow_semantic_step_same, flow_semantic_step_is_instruction,
@@ -99,7 +100,8 @@ use flow_ir::{
     flow_program_bodies, flow_program_topology_fingerprint,
     flow_topology_fingerprint_canonical,
     flow_body_reference, flow_body_slots, flow_body_blocks,
-    flow_block_instructions,
+    flow_block_reference, flow_block_instructions, flow_block_terminator,
+    flow_block_ref_same,
     flow_instruction_reference, flow_instruction_kind_tag,
     flow_assign_rhs_temp, flow_assign_target,
     flow_move_place_source, flow_move_place_target,
@@ -113,6 +115,7 @@ use flow_ir::{
     flow_operation_contract_dict_construct_dictionary,
     flow_operation_contract_dict_construct_result,
     flow_fail_raise_sink,
+    flow_terminator_kind_tag, flow_raise_error,
     flow_slot_reference, flow_slot_type
 }
 use core_hir::{
@@ -1162,6 +1165,49 @@ fn instruction_for_node_role(
     instruction
 }
 
+fn terminator_for_node_role(
+    ctx: HirBridgeCtx, ordinal: Int,
+    selector: Int, role_ordinal: Int, expected_kind: Int
+) -> FlowTerminator {
+    let mut target_step: FlowSemanticStepRef? = none
+    for relation in core_flow_step_map_relations(ctx.stages.step_map) {
+        if core_flow_node_ordinal(core_flow_step_node(relation)) == ordinal &&
+           role_matches(core_flow_step_role(relation), selector, role_ordinal) {
+            if target_step.is_some() {
+                panic("RcHIR bridge: Core node role has multiple Flow terminators")
+            }
+            target_step = some(core_flow_step(relation))
+        }
+    }
+    let step = match target_step {
+        some(value) => value,
+        none => panic("RcHIR bridge: Core node role lacks Flow terminator")
+    }
+    if flow_semantic_step_is_instruction(step) {
+        panic("RcHIR bridge: Core node control role is not a terminator")
+    }
+    let reference = flow_semantic_step_terminator(step)
+    let mut found: FlowTerminator? = none
+    for body in flow_program_bodies(ctx.stages.flow) {
+        for block in flow_body_blocks(body) {
+            if flow_block_ref_same(flow_block_reference(block), reference) {
+                if found.is_some() {
+                    panic("RcHIR bridge: Flow terminator block repeats")
+                }
+                found = some(flow_block_terminator(block))
+            }
+        }
+    }
+    let terminator = match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: Core node Flow terminator is absent")
+    }
+    if flow_terminator_kind_tag(terminator) != expected_kind {
+        panic("RcHIR bridge: Core node Flow terminator kind differs")
+    }
+    terminator
+}
+
 fn validate_flow_variant_initialize(
     instruction: FlowInstruction, variant: VariantRef
 ) {
@@ -1763,8 +1809,19 @@ fn serialize_core_expr(
         let payload = serialize_nested_operand(
             ctx, owner, core_expr_fail_payload(expr), node_ordinal, 0,
             BRIDGE_ROLE_EXPR_PRIMARY, 0)
-        let sink = flow_fail_raise_sink(
-            fail_instruction_for_node(ctx, node_ordinal))
+        let fail_instruction = fail_instruction_for_node(ctx, node_ordinal)
+        let sink = flow_fail_raise_sink(fail_instruction)
+        let move_instruction = instruction_for_node_role(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 12)
+        let moved_source = flow_move_place_source(move_instruction)
+        let caught_error = flow_move_place_target(move_instruction)
+        let raise = terminator_for_node_role(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 11)
+        if !flow_place_is_slot(moved_source) ||
+           !slot_ref_same(flow_place_slot(moved_source), sink) ||
+           !slot_ref_same(flow_raise_error(raise), caught_error) {
+            panic("RcHIR bridge: failure sink/caught error relation differs")
+        }
         let sink_binder = bridge_binder_for(ctx, sink)
         let mut prefix = payload.prefix
         prefix.push(HStmt::Let {
@@ -1776,15 +1833,25 @@ fn serialize_core_expr(
         })
         append_all(prefix, before_drop_statements(
             ctx, node_ordinal, none, BRIDGE_ROLE_EXPR_PRIMARY, 0))
+        append_all(prefix, before_drop_statements(
+            ctx, node_ordinal, none, BRIDGE_ROLE_CONTROL_DISPATCH, 0))
+        let moved = wrap_resource_operand(
+            ctx, node_ordinal, 0, sink,
+            BRIDGE_ROLE_CONTROL_DISPATCH, 0)
         append_all(prefix, before_terminator_drops(
             ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0))
+        // The physical sink remains the sole owner while descendant cleanup
+        // runs; the Take below only renames that owner to the implicit runtime
+        // catch payload immediately before fail.raise transfers control.
+        append_all(prefix, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
         return SerializedExpr {
             node_ordinal: node_ordinal, prefix: prefix,
             value: HExpr::EffectOp {
                 effect_name: "fail", op_name: "raise",
                 operation_ref: none, fail_ref: some(h_fail_raise_ref()),
                 effect_ctx_lookup: none,
-                args: [bridge_binder_ident(ctx, sink)],
+                args: [moved],
                 ty: legacy_type_for(ctx.projection, core_expr_type(expr)),
                 effects: legacy_effects_for(
                     ctx.projection, core_expr_effects(expr)),
@@ -3638,15 +3705,13 @@ fn serialize_structured_core_expr(
         if arms.len() == 0 {
             panic("RcHIR bridge: TryCatch has no exact catch arms")
         }
-        let caught_entry_cleanup = edge_cleanup_statements(
-            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0, 1)
         let mut serialized_arms: List<HMatchArm> = []
         let mut index = 0
         for arm in arms {
             serialized_arms.push(serialize_match_arm(
                 ctx, owner, arm, node_ordinal,
                 index + 1, 1 + index * 2, ty, effects,
-                caught_entry_cleanup))
+                []))
             index = index + 1
         }
         return SerializedExpr {

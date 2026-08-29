@@ -2754,11 +2754,6 @@ enum FlowTerminatorValue {
     ReturnValue { value: SlotRef?, exited_scopes: List<FlowScopeRef> },
     BreakValue(FlowSuccessor),
     ContinueValue(FlowSuccessor),
-    CatchValue {
-        error: SlotRef,
-        handled: FlowSuccessor,
-        propagate: FlowSuccessor
-    },
     HandlerValue {
         operation: SlotRef,
         handled: FlowSuccessor,
@@ -2770,11 +2765,7 @@ enum FlowTerminatorValue {
         matched: FlowSuccessor,
         unmatched: FlowSuccessor
     },
-    TryValue {
-        error: SlotRef,
-        protected: FlowSuccessor,
-        caught: FlowSuccessor
-    },
+    RaiseValue { error: SlotRef, caught: FlowSuccessor },
     HandleInstallValue {
         body: FlowSuccessor,
         installation: FlowEffectCtxInstall
@@ -2850,18 +2841,6 @@ pub fn make_flow_continue(
     }
 }
 
-pub fn make_flow_catch(
-    origin: OriginRef, error: SlotRef,
-    handled: FlowSuccessor, propagate: FlowSuccessor
-) -> FlowTerminator {
-    FlowTerminator {
-        origin: origin,
-        value: FlowTerminatorValue::CatchValue {
-            error: error, handled: handled, propagate: propagate
-        }
-    }
-}
-
 pub fn make_flow_handler(
     origin: OriginRef, operation: SlotRef,
     handled: FlowSuccessor, unhandled: FlowSuccessor
@@ -2883,13 +2862,24 @@ pub fn make_flow_pattern_branch(
             scrutinee: scrutinee, pattern: pattern,
             matched: matched, unmatched: unmatched } }
 }
-pub fn make_flow_try(
-    origin: OriginRef, error: SlotRef,
-    protected: FlowSuccessor, caught: FlowSuccessor
+pub fn make_flow_raise(
+    origin: OriginRef, error: SlotRef, caught: FlowSuccessor
 ) -> FlowTerminator {
     FlowTerminator { origin: origin,
-        value: FlowTerminatorValue::TryValue {
-            error: error, protected: protected, caught: caught } }
+        value: FlowTerminatorValue::RaiseValue {
+            error: error, caught: copy_successor(caught) } }
+}
+pub fn flow_raise_error(value: FlowTerminator) -> SlotRef {
+    match value.value {
+        FlowTerminatorValue::RaiseValue { error, .. } => error,
+        _ => panic("FlowIR: terminator is not Raise")
+    }
+}
+pub fn flow_raise_caught(value: FlowTerminator) -> FlowSuccessor {
+    match value.value {
+        FlowTerminatorValue::RaiseValue { caught, .. } => copy_successor(caught),
+        _ => panic("FlowIR: terminator is not Raise")
+    }
 }
 pub fn make_flow_handle_install(
     origin: OriginRef, body: FlowSuccessor,
@@ -2945,12 +2935,11 @@ pub fn flow_terminator_kind_tag(value: FlowTerminator) -> Int {
         FlowTerminatorValue::ReturnValue { .. } => 3,
         FlowTerminatorValue::BreakValue(_) => 4,
         FlowTerminatorValue::ContinueValue(_) => 5,
-        FlowTerminatorValue::CatchValue { .. } => 6,
         FlowTerminatorValue::HandlerValue { .. } => 7,
         FlowTerminatorValue::UnreachableValue { .. } => 8,
         FlowTerminatorValue::DivergeValue { .. } => 9,
         FlowTerminatorValue::PatternValue { .. } => 10,
-        FlowTerminatorValue::TryValue { .. } => 11,
+        FlowTerminatorValue::RaiseValue { .. } => 11,
         FlowTerminatorValue::HandleInstallValue { .. } => 12
     }
 }
@@ -2963,14 +2952,11 @@ fn terminator_successors(value: FlowTerminator) -> List<FlowSuccessor> {
         FlowTerminatorValue::LoopValue { body, exit, .. } => [body, exit],
         FlowTerminatorValue::BreakValue(edge) => [edge],
         FlowTerminatorValue::ContinueValue(edge) => [edge],
-        FlowTerminatorValue::CatchValue { handled, propagate, .. } =>
-            [handled, propagate],
         FlowTerminatorValue::HandlerValue { handled, unhandled, .. } =>
             [handled, unhandled],
         FlowTerminatorValue::PatternValue { matched, unmatched, .. } =>
             [matched, unmatched],
-        FlowTerminatorValue::TryValue { protected, caught, .. } =>
-            [protected, caught],
+        FlowTerminatorValue::RaiseValue { caught, .. } => [caught],
         FlowTerminatorValue::HandleInstallValue { body, .. } => [body],
         FlowTerminatorValue::ReturnValue { .. } |
         FlowTerminatorValue::UnreachableValue { .. } |
@@ -2998,10 +2984,9 @@ pub fn flow_terminator_read_slots(value: FlowTerminator) -> List<SlotRef> {
         FlowTerminatorValue::LoopValue { condition, .. } => [condition],
         FlowTerminatorValue::ReturnValue { value: returned, .. } =>
             match returned { some(slot) => [slot], none => [] },
-        FlowTerminatorValue::CatchValue { error, .. } => [error],
         FlowTerminatorValue::HandlerValue { operation, .. } => [operation],
         FlowTerminatorValue::PatternValue { scrutinee, .. } => [scrutinee],
-        FlowTerminatorValue::TryValue { error, .. } => [error],
+        FlowTerminatorValue::RaiseValue { error, .. } => [error],
         FlowTerminatorValue::HandleInstallValue { installation, .. } =>
             [effect_ctx_slot(installation.child)],
         _ => []
@@ -3044,10 +3029,6 @@ fn copy_terminator(value: FlowTerminator) -> FlowTerminator {
             make_flow_break(value.origin, copy_successor(edge)),
         FlowTerminatorValue::ContinueValue(edge) =>
             make_flow_continue(value.origin, copy_successor(edge)),
-        FlowTerminatorValue::CatchValue { error, handled, propagate } =>
-            make_flow_catch(
-                value.origin, error,
-                copy_successor(handled), copy_successor(propagate)),
         FlowTerminatorValue::HandlerValue {
             operation, handled, unhandled
         } => make_flow_handler(
@@ -3058,11 +3039,8 @@ fn copy_terminator(value: FlowTerminator) -> FlowTerminator {
         } => make_flow_pattern_branch(
             value.origin, scrutinee, pattern,
             copy_successor(matched), copy_successor(unmatched)),
-        FlowTerminatorValue::TryValue {
-            error, protected, caught
-        } => make_flow_try(
-            value.origin, error,
-            copy_successor(protected), copy_successor(caught)),
+        FlowTerminatorValue::RaiseValue { error, caught } =>
+            make_flow_raise(value.origin, error, copy_successor(caught)),
         FlowTerminatorValue::HandleInstallValue { body, installation } =>
             make_flow_handle_install(
                 value.origin, copy_successor(body), installation),
@@ -3204,7 +3182,7 @@ pub fn flow_block_terminator_operands(value: FlowBlock) -> List<FlowOperandRef> 
                 }],
                 none => []
             },
-        FlowTerminatorValue::CatchValue { error, .. } => [FlowOperandRef {
+        FlowTerminatorValue::RaiseValue { error, .. } => [FlowOperandRef {
             step: step, ordinal: 0, slot: error,
             role: flow_semantic_role_read()
         }],
@@ -3224,20 +3202,6 @@ pub fn flow_block_terminator_operands(value: FlowBlock) -> List<FlowOperandRef> 
             }],
         _ => []
     }
-}
-
-pub fn flow_block_terminator_results(value: FlowBlock) -> List<FlowResultRef> {
-    let step = make_flow_terminator_step_ref(value.reference)
-    let mut result: List<FlowResultRef> = []
-    match value.terminator.value {
-        FlowTerminatorValue::TryValue { error, .. } => result.push(
-            FlowResultRef {
-                step: step, ordinal: 0, slot: error,
-                origin: make_fresh_flow_value_origin()
-            }),
-        _ => {}
-    }
-    result
 }
 
 fn copy_blocks(values: List<FlowBlock>) -> List<FlowBlock> {
@@ -4223,10 +4187,15 @@ fn validate_instruction_slots(body: FlowBody, instruction: FlowInstruction) {
                 let _ = slot_for_ref(body.slots, flow_place_base(source))
             }
             let target_slot = slot_for_ref(body.slots, target)
-            if !flow_storage_class_same(
-                    target_slot.storage, flow_storage_temp()) ||
-               target_slot.initial_state.tag != FLOW_SLOT_EMPTY {
-                panic("FlowIR: MovePlace target is not an empty temp")
+            let target_storage_ok = flow_storage_class_same(
+                target_slot.storage, flow_storage_temp()) ||
+                flow_storage_class_same(
+                    target_slot.storage, flow_storage_local())
+            if !target_storage_ok ||
+               target_slot.initial_state.tag != FLOW_SLOT_EMPTY ||
+               flow_storage_contract_tag(target_slot.storage_contract) !=
+                    flow_storage_contract_tag(flow_own_storage()) {
+                panic("FlowIR: MovePlace target is not empty owned storage")
             }
         },
         FlowInstructionValue::CallValue {
@@ -4354,9 +4323,6 @@ fn validate_terminator_slots(body: FlowBody, terminator: FlowTerminator) {
             some(slot) => { let _ = slot_for_ref(body.slots, slot) },
             none => {}
         },
-        FlowTerminatorValue::CatchValue { error, .. } => {
-            let _ = slot_for_ref(body.slots, error)
-        },
         FlowTerminatorValue::HandlerValue { operation, .. } => {
             let _ = slot_for_ref(body.slots, operation)
         },
@@ -4366,10 +4332,72 @@ fn validate_terminator_slots(body: FlowBody, terminator: FlowTerminator) {
             let _ = slot_for_ref(body.slots, scrutinee)
             validate_flow_pattern_slots(body, pattern)
         },
-        FlowTerminatorValue::TryValue { error, .. } => {
+        FlowTerminatorValue::RaiseValue { error, .. } => {
             let _ = slot_for_ref(body.slots, error)
         },
         _ => {}
+    }
+}
+
+fn validate_raise_block_contract(body: FlowBody, block: FlowBlock) {
+    let is_raise = flow_terminator_kind_tag(block.terminator) == 11
+    let mut fail_count = 0
+    let mut fail_sink: SlotRef? = none
+    let mut instruction_index = 0
+    while instruction_index < block.instructions.len() {
+        let instruction = block.instructions.get(instruction_index).unwrap()
+        if flow_instruction_kind_tag(instruction) == 11 {
+            fail_count = fail_count + 1
+            fail_sink = some(flow_fail_raise_sink(instruction))
+        }
+        instruction_index = instruction_index + 1
+    }
+    if !is_raise {
+        if fail_count != 0 {
+            panic("FlowIR: FailRaise lacks an exact Raise edge")
+        }
+        return
+    }
+    let error = flow_raise_error(block.terminator)
+    if fail_count != 1 || block.instructions.len() < 2 {
+        panic("FlowIR: Raise edge lacks one failure sink transfer")
+    }
+    let fail_instruction = block.instructions.get(
+        block.instructions.len() - 2).unwrap()
+    let move_instruction = block.instructions.get(
+        block.instructions.len() - 1).unwrap()
+    if flow_instruction_kind_tag(fail_instruction) != 11 ||
+       flow_instruction_kind_tag(move_instruction) != 12 ||
+       !slot_ref_same(
+            flow_fail_raise_sink(fail_instruction), fail_sink.unwrap()) {
+        panic("FlowIR: Raise edge failure sequence differs")
+    }
+    let moved = flow_move_place_source(move_instruction)
+    if !flow_place_is_slot(moved) ||
+       !slot_ref_same(flow_place_slot(moved), fail_sink.unwrap()) ||
+       !slot_ref_same(flow_move_place_target(move_instruction), error) {
+        panic("FlowIR: failure sink/caught error transfer differs")
+    }
+    let caught = flow_raise_caught(block.terminator)
+    let error_slot = slot_for_ref(body.slots, error)
+    let error_scope = error_slot.scope
+    let failure_scope = slot_for_ref(body.slots, fail_sink.unwrap()).scope
+    let caught_scope = block_for_ref(body.blocks, caught.target).scope
+    if !flow_storage_class_same(error_slot.storage, flow_storage_local()) ||
+       error_slot.initial_state.tag != FLOW_SLOT_EMPTY ||
+       flow_storage_contract_tag(error_slot.storage_contract) !=
+            flow_storage_contract_tag(flow_own_storage()) ||
+       !flow_scope_ref_same(error_scope, caught_scope) ||
+       caught.entered_scopes.len() != 1 ||
+       !flow_scope_ref_same(
+            caught.entered_scopes.get(0).unwrap(), error_scope) ||
+       !caught.exited_scopes.any(fn(scope) {
+            flow_scope_ref_same(scope, failure_scope)
+       }) ||
+       caught.exited_scopes.any(fn(scope) {
+            flow_scope_ref_same(scope, error_scope)
+       }) {
+        panic("FlowIR: Raise edge does not enter its exact catch scope")
     }
 }
 
@@ -4406,6 +4434,7 @@ fn validate_body_blocks(body: FlowBody) {
             instruction_ordinal = instruction_ordinal + 1
         }
         validate_terminator_slots(body, block.terminator)
+        validate_raise_block_contract(body, block)
         for successor in terminator_successors(block.terminator) {
             validate_successor(body, active_scope, successor)
         }
@@ -5866,10 +5895,6 @@ fn encode_terminator(value: FlowTerminator) -> Str {
             }
             parts.push(encode_scope_refs(exited_scopes))
         },
-        FlowTerminatorValue::CatchValue { error, handled, propagate } => {
-            parts.push(encode_slot(error)); parts.push(encode_successor(handled))
-            parts.push(encode_successor(propagate))
-        },
         FlowTerminatorValue::HandlerValue {
             operation, handled, unhandled
         } => {
@@ -5885,9 +5910,8 @@ fn encode_terminator(value: FlowTerminator) -> Str {
             parts.push(encode_successor(matched))
             parts.push(encode_successor(unmatched))
         },
-        FlowTerminatorValue::TryValue { error, protected, caught } => {
+        FlowTerminatorValue::RaiseValue { error, caught } => {
             parts.push(encode_slot(error))
-            parts.push(encode_successor(protected))
             parts.push(encode_successor(caught))
         },
         FlowTerminatorValue::HandleInstallValue {
