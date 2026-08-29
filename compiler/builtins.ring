@@ -89,6 +89,9 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     BUILTIN_METHOD_STR_DEBUG, BUILTIN_METHOD_BOOL_DEBUG,
     BUILTIN_METHOD_INT_HASH, BUILTIN_METHOD_STR_HASH,
     BUILTIN_METHOD_BOOL_HASH,
+    BUILTIN_METHOD_PTR_ADDR, BUILTIN_METHOD_PTR_CAST,
+    BUILTIN_METHOD_PTR_OFFSET, BUILTIN_METHOD_PTR_READ,
+    BUILTIN_METHOD_PTR_TAKE, BUILTIN_METHOD_PTR_WRITE,
     builtin_value_site_from_tag, builtin_value_site_tag,
     builtin_value_symbol,
     BUILTIN_VALUE_CELL_CONSTRUCTOR, BUILTIN_VALUE_ALLOC,
@@ -2762,8 +2765,34 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
         effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
+    let mut intrinsics: Map<Str, IntrinsicRef> = map_new()
+    let mut resources: Map<Str, CallableResourceContractFact> = map_new()
+    install_intrinsic_contract(intrinsics, resources, "addr",
+        BUILTIN_METHOD_PTR_ADDR, builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_read(), []))
+    install_intrinsic_contract(intrinsics, resources, "cast",
+        BUILTIN_METHOD_PTR_CAST, builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_read(), [0]))
+    install_intrinsic_contract(intrinsics, resources, "offset",
+        BUILTIN_METHOD_PTR_OFFSET, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_read(), [0]))
+    install_intrinsic_contract(intrinsics, resources, "read",
+        BUILTIN_METHOD_PTR_READ, builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(intrinsics, resources, "take",
+        BUILTIN_METHOD_PTR_TAKE, builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_consume(), []))
+    install_intrinsic_contract(intrinsics, resources, "write",
+        BUILTIN_METHOD_PTR_WRITE, builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_consume()],
+            callable_resource_role_read(), []))
     install_builtin_method_owner(
         env, sink, "Ptr",
-        none, [], [], [], methods, map_new(), map_new(),
+        none, [], [], [], methods, intrinsics, resources,
         builtin_impl_provider_site_from_tag(BUILTIN_PROVIDER_PTR_CORE))
 }

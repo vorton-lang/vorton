@@ -7835,25 +7835,25 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         2, 2,
     ]
     expected_ref_forms = [
-        0, 0, 0, 1, 0, 1, 1, 1, 1,
+        0, 0, 0, 1, 0, 1, 1, 1, 0,
         0, 1, 0, 0,
         0, 0, 0, 0,
         0, 0,
     ]
     expected_namespaces = [
-        0, 4, 4, 5, 0, 5, 5, 5, 5,
+        0, 4, 4, 5, 0, 5, 5, 5, 4,
         4, 5, 0, 4,
         4, 4, 4, 0,
         0, 0,
     ]
     expected_executable_roles = [
-        7, 7, 7, 0, 7, 0, 1, 5, 1,
+        7, 7, 7, 0, 7, 0, 1, 5, 7,
         7, 6, 7, 7,
         7, 7, 7, 7,
         7, 7,
     ]
     expected_parent_forms = [
-        0, 0, 0, 0, 0, 0, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 1, 1, 0,
         0, 2, 0, 0,
         0, 0, 0, 0,
         0, 0,
@@ -8833,8 +8833,14 @@ B201_BUILTIN_METHODS = (
     ("BUILTIN_METHOD_INT_HASH", "Int", "hash", "ring_cl_hash_int_export", "register_hash_trait", ""),
     ("BUILTIN_METHOD_STR_HASH", "Str", "hash", "ring_cl_hash_str_export", "register_hash_trait", ""),
     ("BUILTIN_METHOD_BOOL_HASH", "Bool", "hash", "ring_cl_hash_bool_export", "register_hash_trait", ""),
+    ("BUILTIN_METHOD_PTR_ADDR", "Ptr", "addr", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_CAST", "Ptr", "cast", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_OFFSET", "Ptr", "offset", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_READ", "Ptr", "read", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_TAKE", "Ptr", "take", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_WRITE", "Ptr", "write", "", "register_ptr_builtins", "intrinsics"),
 )
-B201_BUILTIN_METHOD_MUTATION_COUNT = 20
+B201_BUILTIN_METHOD_MUTATION_COUNT = 23
 
 
 def _b201_function_body(
@@ -8888,8 +8894,8 @@ def builtin_method_intrinsic_contract_errors(
     codegen = compiler_sources["codegen_c_expr.ring"]
     runtime = compiler_sources["ring_runtime.cpp"]
 
-    if len(B201_BUILTIN_METHODS) != 56:
-        errors.append("B-201 test census is not exact56")
+    if len(B201_BUILTIN_METHODS) != 62:
+        errors.append("B-201 test census is not exact62")
     for tag, method in enumerate(B201_BUILTIN_METHODS):
         constant_name, _, method_name, _, producer, map_name = method
         declaration = f"pub const {constant_name}: Int = {tag}"
@@ -8904,14 +8910,42 @@ def builtin_method_intrinsic_contract_errors(
         relation = re.sub(r"\s+", "", (
             f'install_intrinsic_contract({map_name}, {resource_map}, '
             f'"{method_name}", {constant_name},'
-            if tag < 33 else
+            if map_name else
             f'builtin_intrinsic_method("{method_name}", {constant_name},'
         ))
         if relation not in normalized:
             errors.append(
                 f"B-201 producer {producer} misses {constant_name}/{method_name}")
-    if "pub const BUILTIN_METHOD_SITE_COUNT: Int = 56" not in identity:
+    if "pub const BUILTIN_METHOD_SITE_COUNT: Int = 62" not in identity:
         errors.append("B-201 identity site census drifted")
+    ptr_producer = re.sub(r"\s+", "", _b201_function_body(
+        builtins, "register_ptr_builtins", errors))
+    ptr_resource_relations = (
+        'install_intrinsic_contract(intrinsics,resources,"addr",'
+        'BUILTIN_METHOD_PTR_ADDR,builtin_resource_contract('
+        '[callable_resource_role_read()],callable_resource_role_read(),[]))',
+        'install_intrinsic_contract(intrinsics,resources,"cast",'
+        'BUILTIN_METHOD_PTR_CAST,builtin_resource_contract('
+        '[callable_resource_role_read()],callable_resource_role_read(),[0]))',
+        'install_intrinsic_contract(intrinsics,resources,"offset",'
+        'BUILTIN_METHOD_PTR_OFFSET,builtin_resource_contract('
+        '[callable_resource_role_read(),callable_resource_role_read()],'
+        'callable_resource_role_read(),[0]))',
+        'install_intrinsic_contract(intrinsics,resources,"read",'
+        'BUILTIN_METHOD_PTR_READ,builtin_resource_contract('
+        '[callable_resource_role_read()],callable_resource_role_consume(),[]))',
+        'install_intrinsic_contract(intrinsics,resources,"take",'
+        'BUILTIN_METHOD_PTR_TAKE,builtin_resource_contract('
+        '[callable_resource_role_read()],callable_resource_role_consume(),[]))',
+        'install_intrinsic_contract(intrinsics,resources,"write",'
+        'BUILTIN_METHOD_PTR_WRITE,builtin_resource_contract('
+        '[callable_resource_role_read(),callable_resource_role_consume()],'
+        'callable_resource_role_read(),[]))',
+    )
+    for relation in ptr_resource_relations:
+        if relation not in ptr_producer:
+            errors.append(
+                f"B-201 Ptr resource relation misses {relation!r}")
     if "scalar_trait_intrinsic_tag" in mask_ring_strings_and_comments(builtins):
         errors.append("B-201 scalar intrinsic identity is reconstructed by names")
     if "struct BuiltinImplMethodSpec" not in builtins or not all(
@@ -9128,6 +9162,23 @@ def builtin_method_intrinsic_contract_errors(
         if forbidden in intrinsic_codegen:
             errors.append(
                 f"B-201 exact C projection reinterprets {forbidden}")
+    if "gen_c_ptr_intrinsic(" not in intrinsic_codegen:
+        errors.append("B-201 exact C projection drops Ptr inline sites")
+    ptr_codegen = _b201_function_body(
+        codegen, "gen_c_ptr_intrinsic", errors)
+    for constant_name in (
+        "BUILTIN_METHOD_PTR_ADDR", "BUILTIN_METHOD_PTR_CAST",
+        "BUILTIN_METHOD_PTR_OFFSET", "BUILTIN_METHOD_PTR_READ",
+        "BUILTIN_METHOD_PTR_TAKE", "BUILTIN_METHOD_PTR_WRITE",
+    ):
+        if f"tag == {constant_name}" not in ptr_codegen:
+            errors.append(
+                f"B-201 Ptr inline projection misses {constant_name}")
+    masked_codegen = mask_ring_strings_and_comments(codegen)
+    for forbidden in ('type_name == "Ptr"', "gen_c_ptr_method"):
+        if forbidden in masked_codegen:
+            errors.append(
+                f"B-201 Ptr inline projection retains {forbidden}")
     gen_call = _b201_function_body(codegen, "gen_c_call", errors)
     exact_pos = gen_call.find("match method_ref")
     fallback_pos = gen_call.find("let raw = match callee")
@@ -9162,8 +9213,8 @@ def builtin_method_intrinsic_mutation_errors(
     errors: List[str] = []
     mutations = (
         ("site count", "ir_identity.ring", None,
-         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 56",
-         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 55"),
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 62",
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 61"),
         ("tag duplicate", "ir_identity.ring", None,
          "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 1",
          "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 0"),
@@ -9179,6 +9230,14 @@ def builtin_method_intrinsic_mutation_errors(
         ("cell producer", "builtins.ring", "register_cell",
          "BUILTIN_METHOD_CELL_SET, builtin_resource_contract(",
          "BUILTIN_METHOD_CELL_GET, builtin_resource_contract("),
+        ("Ptr producer", "builtins.ring", "register_ptr_builtins",
+         "BUILTIN_METHOD_PTR_ADDR, builtin_resource_contract(",
+         "BUILTIN_METHOD_PTR_CAST, builtin_resource_contract("),
+        ("Ptr resource", "builtins.ring", "register_ptr_builtins",
+         "BUILTIN_METHOD_PTR_WRITE, builtin_resource_contract(\n"
+         "            [callable_resource_role_read(), callable_resource_role_consume()],",
+         "BUILTIN_METHOD_PTR_WRITE, builtin_resource_contract(\n"
+         "            [callable_resource_role_read(), callable_resource_role_read()],"),
         ("owner scheme relation", "env.ring", "validate_impl_entry",
          "for intrinsic_entry in entry.method_intrinsics.entries()",
          "for intrinsic_entry in []"),
@@ -9209,6 +9268,9 @@ def builtin_method_intrinsic_mutation_errors(
         ("ABI order", "codegen_c_expr.ring", None,
          '"ring_str_len", "ring_str_contains"',
          '"ring_str_contains", "ring_str_len"'),
+        ("Ptr inline", "codegen_c_expr.ring", "gen_c_ptr_intrinsic",
+         "tag == BUILTIN_METHOD_PTR_ADDR",
+         "tag == BUILTIN_METHOD_PTR_CAST"),
         ("name fallback", "codegen_c_expr.ring", None,
          "fn intrinsic_runtime_name(tag: Int) -> Str {",
          "fn method_to_runtime_c(type_name: Str, method: Str) -> Str? { none }\n\nfn intrinsic_runtime_name(tag: Int) -> Str {"),

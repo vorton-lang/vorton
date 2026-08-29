@@ -93,11 +93,9 @@ use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     builtin_method_site_tag, intrinsic_ref_site,
     slot_ref_is_source, slot_ref_source_def_id, slot_ref_same,
     handled_effect_ref_same,
-    impl_method_ref_owner, impl_method_ref_name,
     impl_method_ref_stable_key,
     trait_method_ref_callable_slot_index,
-    impl_owner_ref_target, impl_owner_ref_provider,
-    impl_owner_ref_same,
+    impl_owner_ref_same, impl_owner_ref_provider,
     impl_provider_ref_kind, impl_provider_kind_builtin,
     impl_provider_kind_same,
     symbol_ref_origin_module_key, symbol_ref_canonical_payload,
@@ -135,7 +133,11 @@ use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     BUILTIN_METHOD_INT_DEBUG, BUILTIN_METHOD_FLOAT_DEBUG,
     BUILTIN_METHOD_STR_DEBUG, BUILTIN_METHOD_BOOL_DEBUG,
     BUILTIN_METHOD_INT_HASH, BUILTIN_METHOD_STR_HASH,
-    BUILTIN_METHOD_BOOL_HASH, BUILTIN_METHOD_SITE_COUNT,
+    BUILTIN_METHOD_BOOL_HASH,
+    BUILTIN_METHOD_PTR_ADDR, BUILTIN_METHOD_PTR_CAST,
+    BUILTIN_METHOD_PTR_OFFSET, BUILTIN_METHOD_PTR_READ,
+    BUILTIN_METHOD_PTR_TAKE, BUILTIN_METHOD_PTR_WRITE,
+    BUILTIN_METHOD_SITE_COUNT,
     builtin_value_site_tag,
     BUILTIN_VALUE_CELL_CONSTRUCTOR, BUILTIN_VALUE_ALLOC,
     BUILTIN_VALUE_DEALLOC, BUILTIN_VALUE_PTR_COPY,
@@ -2885,6 +2887,8 @@ fn gen_c_effect_op(
     }
 }
 
+// Empty entries are exact inline-only sites; every non-empty entry names the
+// sole runtime ABI target for its BuiltinMethodSite.
 const INTRINSIC_RUNTIME_NAMES: List<Str> = [
     "ring_str_len", "ring_str_contains", "ring_str_starts_with",
     "ring_str_ends_with", "ring_str_slice", "ring_str_trim",
@@ -2908,7 +2912,8 @@ const INTRINSIC_RUNTIME_NAMES: List<Str> = [
     "ring_cl_debug_int", "ring_cl_debug_float",
     "ring_cl_debug_str", "ring_cl_debug_bool",
     "ring_cl_hash_int_export", "ring_cl_hash_str_export",
-    "ring_cl_hash_bool_export"
+    "ring_cl_hash_bool_export",
+    "", "", "", "", "", ""
 ]
 
 fn validate_c_callback_intrinsic_census() {
@@ -2977,6 +2982,10 @@ fn intrinsic_is_callback_leaf(tag: Int) -> Bool {
     tag == BUILTIN_METHOD_CELL_UPDATE
 }
 
+fn intrinsic_is_ptr(tag: Int) -> Bool {
+    tag >= BUILTIN_METHOD_PTR_ADDR && tag <= BUILTIN_METHOD_PTR_WRITE
+}
+
 fn intrinsic_returns_raw_i64(tag: Int) -> Bool {
     tag == BUILTIN_METHOD_STR_LEN ||
     tag == BUILTIN_METHOD_STR_CONTAINS ||
@@ -3007,7 +3016,7 @@ fn intrinsic_int_arg_count(tag: Int) -> Int {
 }
 
 fn gen_c_intrinsic_method_call(
-    mut ctx: CCtx, callee: HExpr, receiver: Str,
+    mut ctx: CCtx, callee: HExpr, receiver: Str, receiver_type: Type,
     method_ref: MethodCallRef,
     arg_vals: List<Str>, effect_ctx: TypedEffectCtxSource
 ) -> Str {
@@ -3016,6 +3025,13 @@ fn gen_c_intrinsic_method_call(
     }
     let tag = builtin_method_site_tag(intrinsic_ref_site(
         method_call_ref_intrinsic(method_ref)))
+    if INTRINSIC_RUNTIME_NAMES.len() != BUILTIN_METHOD_SITE_COUNT {
+        panic("C codegen: builtin method intrinsic census drifted")
+    }
+    if intrinsic_is_ptr(tag) {
+        return gen_c_ptr_intrinsic(
+            ctx, receiver, receiver_type, tag, arg_vals)
+    }
     if intrinsic_is_scalar_clone(tag) {
         rt_use(ctx, "ring_dup", 1)
         c_emit(ctx, "ring_dup(${receiver});")
@@ -3130,14 +3146,15 @@ fn gen_c_call(
     match method_ref {
         some(exact_method) => {
             let raw = if method_call_ref_is_intrinsic(exact_method) {
+                let receiver = method_receiver.unwrap()
                 gen_c_intrinsic_method_call(
-                    ctx, callee, method_receiver.unwrap().0,
+                    ctx, callee, receiver.0, receiver.1,
                     exact_method, arg_vals, effect_ctx)
             } else if method_call_ref_is_concrete(exact_method) {
                 let receiver = method_receiver.unwrap()
                 let method_identity = method_call_ref_impl(exact_method)
                 gen_c_method_call(
-                    ctx, receiver.0, receiver.1, method_identity,
+                    ctx, receiver.0, method_identity,
                     arg_vals, dict_vals, effect_ctx)
             } else {
                 panic("C codegen: unknown method identity domain")
@@ -3659,9 +3676,12 @@ fn gen_c_direct_call(
     }
 }
 
-// B-125 Ptr<T> methods — inline C (no runtime call), port of gen_ptr_method.
-fn gen_c_ptr_method(mut ctx: CCtx, recv: Str, recv_type: Type, method: Str, args: List<Str>) -> Str {
-    if method == "read" {
+// B-125 Ptr<T> methods are exact builtin intrinsic sites with inline C
+// lowering. No runtime ABI symbol or type/name fallback participates.
+fn gen_c_ptr_intrinsic(
+    mut ctx: CCtx, recv: Str, recv_type: Type, tag: Int, args: List<Str>
+) -> Str {
+    if tag == BUILTIN_METHOD_PTR_READ {
         let t = fresh_tmp(ctx)
         c_emit(ctx, "${t} = *(void**)${recv};")
         let pointee_ty = match recv_type {
@@ -3682,46 +3702,38 @@ fn gen_c_ptr_method(mut ctx: CCtx, recv: Str, recv_type: Type, method: Str, args
         }
         return t
     }
-    if method == "take" {
+    if tag == BUILTIN_METHOD_PTR_TAKE {
         let t = fresh_tmp(ctx)
         c_emit(ctx, "${t} = *(void**)${recv};")
         return t
     }
-    if method == "write" {
+    if tag == BUILTIN_METHOD_PTR_WRITE {
         let v = match args.get(0) { some(a) => a, none => panic("Ptr.write: missing arg") }
         c_emit(ctx, "*(void**)${recv} = ${v};")
         return "RING_UNIT"
     }
-    if method == "offset" {
+    if tag == BUILTIN_METHOD_PTR_OFFSET {
         let i = match args.get(0) { some(a) => a, none => panic("Ptr.offset: missing arg") }
         let t = fresh_tmp(ctx)
         c_emit(ctx, "${t} = (void*)((void**)${recv} + RING_UNTAG(${i}));")
         return t
     }
-    if method == "cast" {
+    if tag == BUILTIN_METHOD_PTR_CAST {
         return recv
     }
-    if method == "addr" {
+    if tag == BUILTIN_METHOD_PTR_ADDR {
         let t = fresh_tmp(ctx)
         c_emit(ctx, "${t} = RING_INT((int64_t)(intptr_t)${recv});")
         return t
     }
-    eprintln("C codegen warning: unknown Ptr method '${method}', generating panic")
-    c_stub_expr(ctx, "Ptr method (${method})")
+    panic("C codegen: unknown Ptr intrinsic site")
 }
 
 fn gen_c_method_call(
-    mut ctx: CCtx, recv: Str, recv_type: Type,
-    method_ref: ImplMethodRef,
+    mut ctx: CCtx, recv: Str, method_ref: ImplMethodRef,
     args: List<Str>, dict_vals: List<Str>,
     effect_ctx: TypedEffectCtxSource
 ) -> Str {
-    let type_name = symbol_ref_canonical_payload(impl_owner_ref_target(
-        impl_method_ref_owner(method_ref)))
-    let method = impl_method_ref_name(method_ref)
-    if type_name == "Ptr" {
-        return gen_c_ptr_method(ctx, recv, recv_type, method, args)
-    }
     // Ordinary Ring method.  Every runtime-backed 0.1 method has already
     // returned through its exact MethodCallRef above.
     let fi = c_method_info_fn(c_exact_method_info(ctx, method_ref))

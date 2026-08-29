@@ -989,7 +989,13 @@ pub const BUILTIN_METHOD_BOOL_DEBUG: Int = 52
 pub const BUILTIN_METHOD_INT_HASH: Int = 53
 pub const BUILTIN_METHOD_STR_HASH: Int = 54
 pub const BUILTIN_METHOD_BOOL_HASH: Int = 55
-pub const BUILTIN_METHOD_SITE_COUNT: Int = 56
+pub const BUILTIN_METHOD_PTR_ADDR: Int = 56
+pub const BUILTIN_METHOD_PTR_CAST: Int = 57
+pub const BUILTIN_METHOD_PTR_OFFSET: Int = 58
+pub const BUILTIN_METHOD_PTR_READ: Int = 59
+pub const BUILTIN_METHOD_PTR_TAKE: Int = 60
+pub const BUILTIN_METHOD_PTR_WRITE: Int = 61
+pub const BUILTIN_METHOD_SITE_COUNT: Int = 62
 
 pub struct BuiltinMethodSite {
     tag: Int
