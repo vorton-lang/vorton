@@ -109,6 +109,7 @@ fn al_decl(d: HDecl) -> HDecl {
                     has_default: tm.has_default,
                     executable_ref: tm.executable_ref,
                     effect_ctx: tm.effect_ctx,
+                    trait_bounds: tm.trait_bounds,
                     body: new_body })
             }
             HDecl::Trait { name: name, owner_ref: trait_owner_ref,

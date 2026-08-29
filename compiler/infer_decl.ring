@@ -3551,24 +3551,18 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
         ctx, registered_trait_ref_symbol(trait_def.owner_ref),
         type_params, trait_def.type_param_vars)
 
-    let mut self_var: Type = ctx.env.fresh_var()
-    if trait_def.methods.len() > 0 {
-        match trait_def.methods.first() {
-            some(first_method) => match first_method.ty {
-                Type::FnType { params: fps, .. } => {
-                    if fps.len() > 0 {
-                        match fps.first() { some(fp) => { self_var = fp }, none => {} }
-                    }
-                },
-                _ => {}
-            },
-            none => {}
-        }
+    let self_var = Type::TypeVar {
+        id: trait_def.self_type_var_id, name: none
     }
 
     let mut hmethods: List<HTraitMethod> = []
     for method_index in 0..trait_def.methods.len() {
         let m = trait_def.methods.get(method_index).unwrap()
+        for method_type_param in m.method_type_params {
+            if method_type_param.bounds.len() != 0 {
+                panic("trait HIR: method type parameter bounds survived 0.1 registration")
+            }
+        }
         let source_member_index =
             trait_method_ref_source_member_index(m.method_ref)
         if !symbol_ref_same(
@@ -3628,6 +3622,7 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
 
         let mut method_body: HExpr? = none
         let mut method_body_effect_ctx: TypedCallableEffectCtx? = none
+        let mut method_trait_bounds: List<TraitBound> = []
         if m.has_default {
             match ast_method {
                 Decl::Fn { body: abody, span: method_span, .. } => {
@@ -3646,6 +3641,7 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
                         method_body = checked_default.body
                         method_body_effect_ctx = some(
                             checked_default.effect_ctx)
+                        method_trait_bounds = checked_default.trait_bounds
                     }
                 },
                 _ => panic("trait HIR: exact default method changed kind")
@@ -3664,12 +3660,17 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
                 values
             }
         }
+        if (method_body.is_some() && method_trait_bounds.len() == 0) ||
+           (method_body.is_none() && method_trait_bounds.len() != 0) {
+            panic("trait HIR: default body/bound relation differs")
+        }
         hmethods.push(HTraitMethod {
             name: m.name, method_ref: m.method_ref,
             params: hparams, return_type: fn_ret,
             effects: fn_effects, has_default: m.has_default,
             executable_ref: method_executable,
             effect_ctx: effect_ctx,
+            trait_bounds: method_trait_bounds,
             body: method_body
         })
     }
@@ -3691,9 +3692,45 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
     }
 }
 
+fn exact_trait_default_bounds(
+    ctx: InferCtx, trait_name: Str, self_var: Type
+) -> List<TraitBound> {
+    let self_id = match self_var {
+        Type::TypeVar { id, .. } => id,
+        _ => panic("trait default bounds: Self is not an exact type variable")
+    }
+    let mut names: List<Str> = [trait_name]
+    for supertrait in collect_all_supertraits(ctx, trait_name) {
+        names.push(supertrait)
+    }
+    let mut result: List<TraitBound> = []
+    for bound_name in names {
+        let def = ctx.env.trait_reg.traits.get(
+            bound_name).unwrap_or_else(fn() {
+                panic("trait default bounds: exact trait is absent")
+            })
+        let trait_ref = registered_trait_ref_symbol(def.owner_ref)
+        for existing in result {
+            if symbol_ref_same(existing.trait_ref, trait_ref) {
+                panic("trait default bounds: exact trait repeats")
+            }
+        }
+        result.push(TraitBound {
+            type_param: "self", type_var_id: self_id,
+            trait_name: def.name, trait_ref: trait_ref,
+            dict_ordinal: result.len()
+        })
+    }
+    if result.len() == 0 || result.get(0).unwrap().dict_ordinal != 0 {
+        panic("trait default bounds: current trait is absent")
+    }
+    result
+}
+
 struct TraitDefaultBodyResult {
     body: HExpr?,
-    effect_ctx: TypedCallableEffectCtx
+    effect_ctx: TypedCallableEffectCtx,
+    trait_bounds: List<TraitBound>
 }
 
 fn check_trait_default_body(
@@ -3717,26 +3754,16 @@ fn check_trait_default_body(
     ctx.fn_bounds_stack.push(ctx.current_fn_bounds)
     ctx.current_fn_bounds = []
 
-    match self_var {
-        Type::TypeVar { id, .. } => {
-            ctx.current_fn_bounds.push(FnBoundsEntry {
-                type_param_var_id: id, trait_name: trait_name,
-                type_param_name: "self",
-                dict_ordinal: ctx.current_fn_bounds.len(),
-                assoc_constraints: []
-            })
-            // Expand supertrait bounds for trait default body
-            let supers = collect_all_supertraits(ctx, trait_name)
-            for st_name in supers {
-                ctx.current_fn_bounds.push(FnBoundsEntry {
-                    type_param_var_id: id, trait_name: st_name,
-                    type_param_name: "self",
-                    dict_ordinal: ctx.current_fn_bounds.len(),
-                    assoc_constraints: []
-                })
-            }
-        },
-        _ => {}
+    let trait_bounds = exact_trait_default_bounds(
+        ctx, trait_name, self_var)
+    for bound in trait_bounds {
+        ctx.current_fn_bounds.push(FnBoundsEntry {
+            type_param_var_id: bound.type_var_id,
+            trait_name: bound.trait_name,
+            type_param_name: bound.type_param,
+            dict_ordinal: bound.dict_ordinal,
+            assoc_constraints: []
+        })
     }
     validate_fn_bound_order(ctx.current_fn_bounds)
 
@@ -3893,7 +3920,8 @@ fn check_trait_default_body(
     exit_executable_owner(ctx)
     TraitDefaultBodyResult {
         body: final_body,
-        effect_ctx: effect_ctx
+        effect_ctx: effect_ctx,
+        trait_bounds: trait_bounds
     }
 }
 

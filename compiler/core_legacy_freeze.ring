@@ -333,7 +333,34 @@ fn callable_type_parameters(
             h_type_param_name(value),
             value.type_var_id, value.bound_refs))
     }
-    let _ = bounds
+    let mut bound_index = 0
+    for bound in bounds {
+        if bound.dict_ordinal != bound_index {
+            panic("Core/legacy freeze: callable bound order is not dense")
+        }
+        let mut matches = 0
+        for parameter in result {
+            if legacy_type_parameter_var_id(parameter) ==
+                    bound.type_var_id {
+                if legacy_type_parameter_name(parameter) !=
+                        bound.type_param {
+                    panic("Core/legacy freeze: bound parameter name differs")
+                }
+                matches = matches + 1
+            }
+        }
+        if matches > 1 {
+            panic("Core/legacy freeze: bound TypeVar repeats")
+        }
+        if matches == 0 {
+            if bound.type_param != "self" {
+                panic("Core/legacy freeze: method type-parameter bound escaped 0.1")
+            }
+            result.push(make_legacy_type_parameter_projection(
+                bound.type_param, bound.type_var_id, []))
+        }
+        bound_index = bound_index + 1
+    }
     result
 }
 
@@ -1072,19 +1099,24 @@ fn scan_decls(
                 let callable_type_params = merge_callable_type_parameters(
                     inherited_type_params, type_params)
                 for method in methods {
+                    if method.body.is_none() &&
+                       method.trait_bounds.len() != 0 {
+                        panic("Core/legacy freeze: bodyless trait method carries bounds")
+                    }
                     add_callable_fact(
                         builder, method.executable_ref,
                         if method.body.is_some() {
                             executable_kind_trait_default()
                         } else { executable_kind_bodyless_trait_member() },
-                        module_container, callable_type_params, [], method.params,
+                        module_container, callable_type_params,
+                        method.trait_bounds, method.params,
                         method.return_type, method.effects,
                         method.body.is_some(), false,
                         none, some("__${name}_${method.name}"))
                     match method.body {
                         some(body) => scan_expr(
                             builder, method.executable_ref, body,
-                            callable_type_params, []),
+                            callable_type_params, method.trait_bounds),
                         none => {}
                     }
                 }
@@ -1201,9 +1233,6 @@ fn add_builtin_value_facts(mut builder: LegacyFactBuilder) {
                 exact_type_fact(
                     builder.type_sources, result, builder.module_key),
                 result, effects, false))
-        builder.shells.push(make_legacy_prelude_executable_shell(
-            reference, origin, executable_kind_builtin_intrinsic(),
-            builder.module_body, container))
         add_effect_row(builder, effects)
         add_physical_identity(builder, reference, none, none)
     }

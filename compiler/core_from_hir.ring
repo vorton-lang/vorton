@@ -1835,15 +1835,37 @@ fn producer_record_declared_type_formals(
     }
 }
 
+fn producer_record_callable_bounds(
+    mut producer: ClosedCoreProducer, owner: ExecutableRef,
+    values: List<TraitBound>
+) {
+    let mut index = 0
+    while index < values.len() {
+        let value = values.get(index).unwrap()
+        if value.dict_ordinal != index ||
+           !producer.parameter_facts.contains_key(value.type_var_id) {
+            panic("Core producer: callable dictionary bound differs")
+        }
+        index = index + 1
+    }
+    if values.len() != 0 {
+        let _ = producer_record_type(
+            producer, Type::TupleType { elements: [] },
+            some(executable_origin(owner)))
+    }
+}
+
 fn producer_record_decls(
     mut producer: ClosedCoreProducer, decls: List<HDecl>
 ) {
     for decl in decls {
         match decl {
-            HDecl::Fn { executable_ref, type_params, params,
+            HDecl::Fn { executable_ref, type_params, trait_bounds, params,
                         return_type, effects, body, .. } => {
                 producer_record_declared_type_formals(
                     producer, executable_ref, type_params)
+                producer_record_callable_bounds(
+                    producer, executable_ref, trait_bounds)
                 producer_record_callable(
                     producer, executable_ref, params, return_type, effects,
                     some(body))
@@ -1966,6 +1988,13 @@ fn producer_record_decls(
                     hexpr_effects(body), some(body)),
             HDecl::Trait { methods, .. } => {
                 for method in methods {
+                    if method.body.is_none() &&
+                       method.trait_bounds.len() != 0 {
+                        panic("Core producer: bodyless trait method carries bounds")
+                    }
+                    producer_record_callable_bounds(
+                        producer, method.executable_ref,
+                        method.trait_bounds)
                     producer_record_callable(
                         producer, method.executable_ref, method.params,
                         method.return_type, method.effects, method.body)
@@ -6444,14 +6473,22 @@ fn assemble_decls(
                     match method.body {
                         some(body) => add_executable_body(
                             facts, source_parent(module_body, reference), reference,
-                            executable_kind_trait_default(), [], [], method.params,
+                            executable_kind_trait_default(), [],
+                            method.trait_bounds, method.params,
                             method.return_type, method.effects, body,
                             method.effect_ctx, [], assembly),
-                        none => add_contract_only(
-                            facts, source_parent(module_body, reference),
-                            reference, executable_kind_bodyless_trait_member(),
-                            [], method.params, method.return_type, method.effects,
-                            some(method.effect_ctx), none, assembly)
+                        none => {
+                            if method.trait_bounds.len() != 0 {
+                                panic("Core assembly: bodyless trait method carries bounds")
+                            }
+                            add_contract_only(
+                                facts, source_parent(module_body, reference),
+                                reference,
+                                executable_kind_bodyless_trait_member(),
+                                [], method.params, method.return_type,
+                                method.effects, some(method.effect_ctx),
+                                none, assembly)
+                        }
                     }
                 }
             },

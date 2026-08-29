@@ -970,6 +970,23 @@ fn exact_trait_bounds(values: List<TraitBound>) -> List<TraitBound> {
     result
 }
 
+fn close_trait_method(value: HTraitMethod) -> HTraitMethod {
+    let bounds = exact_trait_bounds(value.trait_bounds)
+    let body = close_optional_expr(value.body)
+    if (body.is_some() && bounds.len() == 0) ||
+       (body.is_none() && bounds.len() != 0) {
+        panic("PreCore closure: trait default body/bound relation differs")
+    }
+    HTraitMethod {
+        name: value.name, method_ref: value.method_ref,
+        params: value.params, return_type: value.return_type,
+        effects: value.effects, has_default: value.has_default,
+        executable_ref: value.executable_ref,
+        effect_ctx: value.effect_ctx,
+        trait_bounds: bounds, body: body
+    }
+}
+
 fn exact_h_type_params(values: List<HTypeParam>) -> List<HTypeParam> {
     let mut result: List<HTypeParam> = []
     for value in values {
@@ -1631,14 +1648,9 @@ fn close_decl(value: HDecl) -> HDecl {
         } => HDecl::Trait {
             name: name, owner_ref: owner_ref,
             type_params: exact_h_type_params(type_params),
-            methods: methods.map(fn(method) { HTraitMethod {
-                name: method.name, method_ref: method.method_ref,
-                params: method.params, return_type: method.return_type,
-                effects: method.effects, has_default: method.has_default,
-                executable_ref: method.executable_ref,
-                effect_ctx: method.effect_ctx,
-                body: close_optional_expr(method.body)
-            } }),
+            methods: methods.map(fn(method) {
+                close_trait_method(method)
+            }),
             supertraits: supertraits, assoc_types: assoc_types,
             is_pub: is_pub, span: span
         },

@@ -657,6 +657,7 @@ pub struct HTraitMethod {
     pub has_default: Bool,
     pub executable_ref: ExecutableRef,
     pub effect_ctx: TypedCallableEffectCtx,
+    pub trait_bounds: List<TraitBound>,
     pub body: HExpr?
 }
 
