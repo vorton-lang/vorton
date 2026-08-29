@@ -65,7 +65,7 @@ use ir_identity::{
     symbol_ref_origin_module_key, symbol_ref_namespace_kind,
     symbol_ref_canonical_payload, symbol_ref_declaration_site_path,
     namespace_kind_tag,
-    symbol_ref_same,
+    symbol_ref_same, symbol_ref_is_prelude,
     origin_ref_same, origin_ref_is_symbol, origin_ref_symbol, origin_ref_path,
     path_owner_for_symbol, path_owner_for_module_body,
     path_ref_owner, path_ref_normalized_child_path, path_ref_role,
@@ -2335,6 +2335,35 @@ fn diagnostic_nominal_span(
     found
 }
 
+fn physical_derived_impls(
+    module_key: Str, module_order: Int,
+    decls: List<HDecl>, values: List<DerivedImpl>
+) -> List<DerivedImpl> {
+    let mut result: List<DerivedImpl> = []
+    for value in values {
+        let target = registered_nominal_ref_symbol(value.target_owner)
+        match diagnostic_nominal_span(decls, target) {
+            some(_) => result.push(value),
+            none => {
+                let origin_module = symbol_ref_origin_module_key(target)
+                if origin_module == "$builtin" {
+                    if module_order != 0 {
+                        panic("Core producer: builtin derived impl crossed physical root")
+                    }
+                    result.push(value)
+                } else if symbol_ref_is_prelude(target) {
+                    if module_order == 0 {
+                        panic("Core producer: prelude derived source is absent")
+                    }
+                } else if origin_module == module_key {
+                    panic("Core producer: local derived source is absent")
+                }
+            }
+        }
+    }
+    result
+}
+
 fn seed_diagnostic_derived(
     mut seed: CoreDiagnosticSeed, module_key: Str,
     decls: List<HDecl>, values: List<DerivedImpl>
@@ -2515,24 +2544,35 @@ pub fn produce_closed_core_assembly_facts(
     effect_parameters: List<TypedEffectFormalFact>,
     callable_effect_rows: List<TypedCallableEffectFact>
 ) -> FrozenCoreAssemblyFacts {
+    let derived_impls = physical_derived_impls(
+        module_key, module_order,
+        closed_program.decls, closed_program.derived_impls)
+    let physical_program = HProgram {
+        decls: closed_program.decls,
+        derived_impls: derived_impls,
+        boxed_vars: closed_program.boxed_vars,
+        static_dicts: closed_program.static_dicts,
+        extern_type_names: closed_program.extern_type_names,
+        drop_types: closed_program.drop_types
+    }
     let producer = new_closed_core_producer(
         module_key, module_order, env, effect_parameters)
-    producer_register_decl_parameters(producer, closed_program.decls)
+    producer_register_decl_parameters(producer, physical_program.decls)
     producer_register_environment_effect_parameters(producer)
-    producer_record_decls(producer, closed_program.decls)
-    producer_record_derived(producer, closed_program.derived_impls)
+    producer_record_decls(producer, physical_program.decls)
+    producer_record_derived(producer, physical_program.derived_impls)
     producer_record_builtin_methods(producer)
     let effect_ctx_type = make_core_effect_ctx_type_source(
         producer_effect_ctx_type(producer))
     validate_producer_bijection(producer)
     let diagnostic_seed = CoreDiagnosticSeed { owners: [], slots: [] }
     seed_diagnostic_decls(
-        diagnostic_seed, module_key, closed_program.decls)
+        diagnostic_seed, module_key, physical_program.decls)
     seed_diagnostic_derived(
         diagnostic_seed, module_key,
-        closed_program.decls, closed_program.derived_impls)
+        physical_program.decls, physical_program.derived_impls)
     freeze_closed_core_assembly_facts(
-        producer.recorder, closed_program, env,
+        producer.recorder, physical_program, env,
         producer.type_sources, effect_ctx_type,
         producer.effect_parameters, callable_effect_rows,
         diagnostic_seed)
