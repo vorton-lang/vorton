@@ -2,18 +2,22 @@
 // This component rebuilds candidate/type rule graphs and validates exact CFG/RcIR
 // event, phase, slot, edge, and operation contracts without rerunning a solver.
 
-use ir_identity::{SlotRef, slot_ref_same, symbol_ref_same}
+use ir_identity::{core_type_ref_index, SlotRef, slot_ref_same, symbol_ref_same}
 use ir_inventory::{executable_ref_same}
 use core_type_source::{
-    FlowGenericParamFact, flow_generic_param_owner,
+    FlowGenericParamFact, flow_generic_param_fact_same,
+    flow_generic_param_owner,
     flow_generic_param_index, flow_generic_param_arity,
-    flow_generic_param_bounds}
+    flow_generic_param_bounds,
+    flow_type_substitution_parameter,
+    flow_type_substitution_replacement}
 use flow_ir::{
     flow_block_ref_same, flow_instruction_ref_same,
     make_flow_instruction_ref, make_flow_block_ref,
     flow_semantic_step_is_instruction,
     flow_semantic_step_instruction, flow_semantic_step_terminator,
-    flow_projection_contract_same}
+    flow_projection_contract_same,
+    flow_projection_contract_result_type}
 use resource_model::{
     TransferDemand, LogicalOwnershipShape, PhysicalRcShape, SlotFlow,
     param_mode_from_tag, param_mode_tag, param_mode_same,
@@ -142,7 +146,7 @@ use resource_certificate::{
 use resource_type_lfp::{
     FrozenPlannerInput, PlannerTypeNode, PlannerCallable, PlannerBody,
     PlannerBlock, PlannerEvent, PlannerEventValue, PlannerEdge,
-    PlannerSlot, PlannerCallableOriginValue,
+    PlannerSlot, PlannerCallableOriginValue, PlannerPlace, PlannerCallTarget,
     PlannerCallableLocation, TransferDecision, EventDecision,
     SolvedResourceGraph, planner_event_operand,
     make_transfer_decision, make_event_decision,
@@ -151,9 +155,12 @@ use resource_type_lfp::{
     planner_place_is_slot, planner_place_slot, planner_place_base,
     planner_place_projection, planner_place_value_type,
     planner_call_target_is_direct, planner_call_target_direct,
-    planner_call_target_slot, make_planner_callable_slot_location,
+    planner_call_target_slot, planner_call_target_type_substitutions,
+    make_planner_callable_slot_location,
+    make_planner_callable_projection_location,
     planner_callable_location_is_slot, planner_callable_location_slot,
-    planner_callable_location_base, planner_callable_location_same,
+    planner_callable_location_base, planner_callable_location_projection,
+    planner_callable_location_same,
     copy_planner_callable_location, flow_callable_index_for_planner,
     planner_body_reachable_blocks, int_list_contains, int_lists_same}
 
@@ -1816,14 +1823,209 @@ fn verifier_append_callable_location(
     }
 }
 
+fn verifier_candidate_formal_contains(
+    values: List<FlowGenericParamFact>, target: FlowGenericParamFact
+) -> Bool {
+    values.any(fn(value) { flow_generic_param_fact_same(value, target) })
+}
+
+fn verifier_append_candidate_formal(
+    mut values: List<FlowGenericParamFact>, value: FlowGenericParamFact
+) -> Bool {
+    if verifier_candidate_formal_contains(values, value) { return false }
+    values.push(value)
+    true
+}
+
+fn verifier_type_accepts_candidates(
+    type_nodes: List<PlannerTypeNode>, type_index: Int,
+    active_formals: List<FlowGenericParamFact>
+) -> Bool {
+    if type_index < 0 || type_index >= type_nodes.len() {
+        panic("ResourcePlanner verifier: candidate type is outside frozen graph")
+    }
+    if planner_type_is_callable(type_nodes, type_index) { return true }
+    match type_nodes.get(type_index).unwrap().parameter_fact {
+        some(parameter) => verifier_candidate_formal_contains(
+            active_formals, parameter),
+        none => false
+    }
+}
+
+fn verifier_type_is_active_formal(
+    type_nodes: List<PlannerTypeNode>, type_index: Int,
+    active_formals: List<FlowGenericParamFact>
+) -> Bool {
+    if type_index < 0 || type_index >= type_nodes.len() { return false }
+    match type_nodes.get(type_index).unwrap().parameter_fact {
+        some(parameter) => verifier_candidate_formal_contains(
+            active_formals, parameter),
+        none => false
+    }
+}
+
+fn verifier_direct_actual_for_formal(
+    target: PlannerCallTarget, formal: FlowGenericParamFact
+) -> Int? {
+    if !planner_call_target_is_direct(target) { return none }
+    let mut found: Int? = none
+    for substitution in planner_call_target_type_substitutions(target) {
+        if flow_generic_param_fact_same(
+                flow_type_substitution_parameter(substitution), formal) {
+            if found.is_some() {
+                panic("ResourcePlanner verifier: direct substitution repeats a formal")
+            }
+            found = some(core_type_ref_index(
+                flow_type_substitution_replacement(substitution)))
+        }
+    }
+    found
+}
+
+fn verifier_collect_active_candidate_formals(
+    type_nodes: List<PlannerTypeNode>, bodies: List<PlannerBody>
+) -> List<FlowGenericParamFact> {
+    let mut active: List<FlowGenericParamFact> = []
+    let mut forwards: List<(FlowGenericParamFact, FlowGenericParamFact)> = []
+    for body in bodies {
+        let reachable = planner_body_reachable_blocks(body)
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            if reachable.get(block_index).unwrap() {
+                for event in body.blocks.get(block_index).unwrap().events {
+                    match event.value {
+                        PlannerEventValue::CallValue { call_target, .. } => if
+                                planner_call_target_is_direct(call_target) {
+                            for substitution in
+                                    planner_call_target_type_substitutions(
+                                        call_target) {
+                                let formal = flow_type_substitution_parameter(
+                                    substitution)
+                                let actual = core_type_ref_index(
+                                    flow_type_substitution_replacement(
+                                        substitution))
+                                if actual < 0 || actual >= type_nodes.len() {
+                                    panic("ResourcePlanner verifier: direct substitution actual is absent")
+                                }
+                                if planner_type_is_callable(
+                                        type_nodes, actual) {
+                                    let _ = verifier_append_candidate_formal(
+                                        active, formal)
+                                } else {
+                                    match type_nodes.get(actual).unwrap()
+                                            .parameter_fact {
+                                        some(source) => {
+                                            if !forwards.any(fn(edge) {
+                                                    flow_generic_param_fact_same(
+                                                        edge.0, formal) &&
+                                                    flow_generic_param_fact_same(
+                                                        edge.1, source)
+                                                }) {
+                                                forwards.push((formal, source))
+                                            }
+                                        },
+                                        none => {}
+                                    }
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+            }
+            block_index = block_index + 1
+        }
+    }
+    let mut changed = true
+    while changed {
+        changed = false
+        for edge in forwards {
+            if verifier_candidate_formal_contains(active, edge.1) &&
+               verifier_append_candidate_formal(active, edge.0) {
+                changed = true
+            }
+        }
+    }
+    active
+}
+
+fn verifier_call_formal_accepts_candidates(
+    type_nodes: List<PlannerTypeNode>, call_target: PlannerCallTarget,
+    callee: Int, formal_type_index: Int,
+    active_formals: List<FlowGenericParamFact>
+) -> Bool {
+    if planner_type_is_callable(type_nodes, formal_type_index) { return true }
+    let formal = match type_nodes.get(formal_type_index).unwrap().parameter_fact {
+        some(value) => value,
+        none => return false
+    }
+    if !planner_call_target_is_direct(call_target) ||
+       planner_call_target_direct(call_target) != callee {
+        return false
+    }
+    match verifier_direct_actual_for_formal(call_target, formal) {
+        some(actual) => verifier_type_accepts_candidates(
+            type_nodes, actual, active_formals),
+        none => false
+    }
+}
+
+fn verifier_location_type_index(
+    body: PlannerBody, location: PlannerCallableLocation
+) -> Int {
+    if planner_callable_location_is_slot(location) {
+        return body.slots.get(
+            planner_callable_location_slot(location)).unwrap().type_index
+    }
+    core_type_ref_index(flow_projection_contract_result_type(
+        planner_callable_location_projection(location)))
+}
+
+fn verifier_location_is_active_formal(
+    body: PlannerBody, location: PlannerCallableLocation,
+    type_nodes: List<PlannerTypeNode>,
+    active_formals: List<FlowGenericParamFact>
+) -> Bool {
+    verifier_type_is_active_formal(
+        type_nodes, verifier_location_type_index(body, location),
+        active_formals)
+}
+
+fn verifier_callable_location_for_place(
+    value: PlannerPlace
+) -> PlannerCallableLocation {
+    if planner_place_is_slot(value) {
+        make_planner_callable_slot_location(planner_place_slot(value))
+    } else {
+        make_planner_callable_projection_location(
+            planner_place_base(value), planner_place_projection(value))
+    }
+}
+
+fn verifier_location_overwritten_by_place(
+    location: PlannerCallableLocation, value: PlannerPlace
+) -> Bool {
+    if planner_place_is_slot(value) {
+        let base = if planner_callable_location_is_slot(location) {
+            planner_callable_location_slot(location)
+        } else { planner_callable_location_base(location) }
+        planner_place_slot(value) == base
+    } else {
+        planner_callable_location_same(
+            location, verifier_callable_location_for_place(value))
+    }
+}
+
 fn verifier_body_callable_locations(
-    body: PlannerBody, type_nodes: List<PlannerTypeNode>
+    body: PlannerBody, type_nodes: List<PlannerTypeNode>,
+    active_formals: List<FlowGenericParamFact>
 ) -> List<PlannerCallableLocation> {
     let mut result: List<PlannerCallableLocation> = []
     let mut slot = 0
     while slot < body.slots.len() {
-        if planner_type_is_callable(
-                type_nodes, body.slots.get(slot).unwrap().type_index) {
+        if verifier_type_accepts_candidates(
+                type_nodes, body.slots.get(slot).unwrap().type_index,
+                active_formals) {
             verifier_append_callable_location(
                 result, make_planner_callable_slot_location(slot))
         }
@@ -1831,6 +2033,33 @@ fn verifier_body_callable_locations(
     }
     for block in body.blocks {
         for event in block.events {
+            match event.value {
+                PlannerEventValue::AssignValue { target, .. } => if
+                        !planner_place_is_slot(target) {
+                    let location = verifier_callable_location_for_place(target)
+                    if verifier_location_is_active_formal(
+                            body, location, type_nodes, active_formals) {
+                        verifier_append_callable_location(result, location)
+                    }
+                },
+                PlannerEventValue::MovePlaceValue { source, .. } => if
+                        !planner_place_is_slot(source) {
+                    let location = verifier_callable_location_for_place(source)
+                    if verifier_location_is_active_formal(
+                            body, location, type_nodes, active_formals) {
+                        verifier_append_callable_location(result, location)
+                    }
+                },
+                PlannerEventValue::ProjectValue {
+                    source, projection, value_type_index, ..
+                } => if verifier_type_is_active_formal(
+                        type_nodes, value_type_index, active_formals) {
+                    verifier_append_callable_location(result,
+                        make_planner_callable_projection_location(
+                            source, projection))
+                },
+                _ => {}
+            }
             for fact in event.callable_provenance {
                 verifier_append_callable_location(result, fact.target)
                 match fact.origin {
@@ -1850,9 +2079,11 @@ fn verifier_body_callable_locations(
 
 fn verifier_callable_location_index(
     body: PlannerBody, type_nodes: List<PlannerTypeNode>,
+    active_formals: List<FlowGenericParamFact>,
     target: PlannerCallableLocation
 ) -> Int {
-    let locations = verifier_body_callable_locations(body, type_nodes)
+    let locations = verifier_body_callable_locations(
+        body, type_nodes, active_formals)
     let mut index = 0
     while index < locations.len() {
         if planner_callable_location_same(
@@ -1864,7 +2095,9 @@ fn verifier_callable_location_index(
 
 fn verifier_candidate_location_overwritten(
     event: PlannerEvent, body: PlannerBody,
-    location: PlannerCallableLocation
+    location: PlannerCallableLocation,
+    type_nodes: List<PlannerTypeNode>,
+    active_formals: List<FlowGenericParamFact>
 ) -> Bool {
     for fact in event.callable_provenance {
         if planner_callable_location_same(fact.target, location) { return true }
@@ -1874,16 +2107,193 @@ fn verifier_candidate_location_overwritten(
     } else {
         planner_callable_location_base(location)
     }
+    let active_formal = verifier_location_is_active_formal(
+        body, location, type_nodes, active_formals)
     match event.value {
-        PlannerEventValue::ConsumeValue(target, _, _) => target == base_slot,
+        PlannerEventValue::InitializeValue { target, .. } =>
+            active_formal && target == base_slot,
+        PlannerEventValue::ReadValue { target, .. } =>
+            active_formal && target == base_slot,
+        PlannerEventValue::ConsumeValue(source, _, target) =>
+            source == base_slot || match target {
+                some(value) => active_formal && value == base_slot,
+                none => false
+            },
         PlannerEventValue::DiscardValue(target) => target == base_slot,
         PlannerEventValue::ScopeExitValue(scope_id) =>
             body.slots.get(base_slot).unwrap().scope_id == scope_id,
         PlannerEventValue::AssignValue { rhs_temp, target } =>
             rhs_temp == base_slot ||
-            (planner_place_is_slot(target) &&
-             planner_place_slot(target) == base_slot),
+            (active_formal && verifier_location_overwritten_by_place(
+                location, target)),
+        PlannerEventValue::MovePlaceValue { source, target } =>
+            verifier_location_overwritten_by_place(location, source) ||
+                (active_formal && target == base_slot),
+        PlannerEventValue::CallValue { result_slot, .. } => match result_slot {
+            some(target) => active_formal && target == base_slot,
+            none => false
+        },
+        PlannerEventValue::ProjectValue { target, .. } =>
+            active_formal && target == base_slot,
+        PlannerEventValue::CaptureValue { target, .. } =>
+            active_formal && target == base_slot,
         _ => false
+    }
+}
+
+fn verifier_add_location_transfer_rules(
+    graph: VerifierCandidateGraph, body_index: Int, block_index: Int,
+    boundary: Int, event: PlannerEvent,
+    target: PlannerCallableLocation,
+    sources: List<PlannerCallableLocation>,
+    type_nodes: List<PlannerTypeNode>, bodies: List<PlannerBody>,
+    active_formals: List<FlowGenericParamFact>
+) {
+    let body = bodies.get(body_index).unwrap()
+    if !verifier_location_is_active_formal(
+            body, target, type_nodes, active_formals) {
+        return
+    }
+    let site = make_instruction_candidate_rule_site(
+        make_flow_instruction_ref(
+            body.reference, block_index, boundary))
+    for source in sources {
+        if !verifier_type_accepts_candidates(
+                type_nodes, verifier_location_type_index(body, source),
+                active_formals) {
+            panic("ResourcePlanner verifier: formal transfer source is not callable")
+        }
+        let mut candidate = 0
+        while candidate < graph.callable_count {
+            verifier_add_candidate_rule(
+                graph.rules, candidate_rule_copy(), site,
+                verifier_candidate_cell_index(
+                    graph.cells, candidate_cell_state(), body_index,
+                    block_index, boundary + 1,
+                    verifier_callable_location_index(
+                        body, type_nodes, active_formals, target), candidate),
+                [verifier_candidate_cell_index(
+                    graph.cells, candidate_cell_state(), body_index,
+                    block_index, boundary,
+                    verifier_callable_location_index(
+                        body, type_nodes, active_formals, source), candidate)])
+            candidate = candidate + 1
+        }
+    }
+}
+
+fn verifier_add_value_transfer_rules(
+    graph: VerifierCandidateGraph, body_index: Int, block_index: Int,
+    boundary: Int, event: PlannerEvent,
+    type_nodes: List<PlannerTypeNode>,
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>,
+    active_formals: List<FlowGenericParamFact>
+) {
+    let body = bodies.get(body_index).unwrap()
+    match event.value {
+        PlannerEventValue::InitializeValue {
+            input_slots, origin_input_ordinals, target, ..
+        } => {
+            let mut sources: List<PlannerCallableLocation> = []
+            for ordinal in origin_input_ordinals {
+                sources.push(make_planner_callable_slot_location(
+                    input_slots.get(ordinal).unwrap()))
+            }
+            verifier_add_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(target), sources,
+                type_nodes, bodies, active_formals)
+        },
+        PlannerEventValue::ReadValue { source, target } =>
+            verifier_add_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(target),
+                [make_planner_callable_slot_location(source)],
+                type_nodes, bodies, active_formals),
+        PlannerEventValue::ConsumeValue(source, _, target) => match target {
+            some(sink) => verifier_add_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(sink),
+                [make_planner_callable_slot_location(source)],
+                type_nodes, bodies, active_formals),
+            none => {}
+        },
+        PlannerEventValue::AssignValue { rhs_temp, target } =>
+            verifier_add_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                verifier_callable_location_for_place(target),
+                [make_planner_callable_slot_location(rhs_temp)],
+                type_nodes, bodies, active_formals),
+        PlannerEventValue::MovePlaceValue { source, target } =>
+            verifier_add_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(target),
+                [verifier_callable_location_for_place(source)],
+                type_nodes, bodies, active_formals),
+        PlannerEventValue::ProjectValue {
+            source, target, projection, ..
+        } => verifier_add_location_transfer_rules(
+            graph, body_index, block_index, boundary, event,
+            make_planner_callable_slot_location(target),
+            [make_planner_callable_projection_location(source, projection)],
+            type_nodes, bodies, active_formals),
+        PlannerEventValue::CaptureValue { source, target, .. } =>
+            verifier_add_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(target),
+                [make_planner_callable_slot_location(source)],
+                type_nodes, bodies, active_formals),
+        PlannerEventValue::CallValue {
+            call_target, argument_slots,
+            result_origin_argument_ordinals, result_slot, ..
+        } => match result_slot {
+            some(result) => {
+                let target = make_planner_callable_slot_location(result)
+                if verifier_location_is_active_formal(
+                        body, target, type_nodes, active_formals) {
+                    let site = make_instruction_candidate_rule_site(
+                        make_flow_instruction_ref(
+                            body.reference, block_index, boundary))
+                    let mut callee = 0
+                    while callee < graph.callable_count {
+                        if planner_call_target_is_direct(call_target) &&
+                           planner_call_target_direct(call_target) == callee &&
+                           verifier_call_formal_accepts_candidates(
+                                type_nodes, call_target, callee,
+                                callables.get(callee).unwrap().result_type_index,
+                                active_formals) {
+                            let mut candidate = 0
+                            while candidate < graph.callable_count {
+                                verifier_add_candidate_rule(
+                                    graph.rules, candidate_rule_copy(), site,
+                                    verifier_candidate_cell_index(
+                                        graph.cells, candidate_cell_state(),
+                                        body_index, block_index, boundary + 1,
+                                        verifier_callable_location_index(
+                                            body, type_nodes, active_formals,
+                                            target), candidate),
+                                    [verifier_candidate_cell_index(
+                                        graph.cells, candidate_cell_result(),
+                                        callee, 0, 0, 0, candidate)])
+                                candidate = candidate + 1
+                            }
+                        }
+                        callee = callee + 1
+                    }
+                    let mut alias_sources: List<PlannerCallableLocation> = []
+                    for ordinal in result_origin_argument_ordinals {
+                        alias_sources.push(make_planner_callable_slot_location(
+                            argument_slots.get(ordinal).unwrap()))
+                    }
+                    verifier_add_location_transfer_rules(
+                        graph, body_index, block_index, boundary, event,
+                        target, alias_sources, type_nodes, bodies,
+                        active_formals)
+                }
+            },
+            none => {}
+        },
+        _ => {}
     }
 }
 
@@ -1891,7 +2301,8 @@ fn verifier_add_candidate_provenance_rules(
     graph: VerifierCandidateGraph, body_index: Int, block_index: Int,
     boundary: Int, event: PlannerEvent,
     type_nodes: List<PlannerTypeNode>,
-    callables: List<PlannerCallable>, bodies: List<PlannerBody>
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>,
+    active_formals: List<FlowGenericParamFact>
 ) {
     let body = bodies.get(body_index).unwrap()
     let site = make_instruction_candidate_rule_site(
@@ -1904,7 +2315,8 @@ fn verifier_add_candidate_provenance_rules(
             let target = verifier_candidate_cell_index(
                 graph.cells, candidate_cell_state(), body_index,
                 block_index, boundary + 1,
-                verifier_callable_location_index(body, type_nodes, fact.target),
+                verifier_callable_location_index(
+                    body, type_nodes, active_formals, fact.target),
                 candidate)
             match fact.origin {
                 PlannerCallableOriginValue::DirectCallableOriginValue(direct) =>
@@ -1921,16 +2333,28 @@ fn verifier_add_candidate_provenance_rules(
                                 graph.cells, candidate_cell_state(), body_index,
                                 block_index, boundary,
                                 verifier_callable_location_index(
-                                    body, type_nodes, source), candidate)])
+                                    body, type_nodes, active_formals,
+                                    source), candidate)])
                     } },
                 PlannerCallableOriginValue::CallCallableOriginValue {
                     target: call_target, arguments: _
                 } => {
                     let mut callee = 0
                     while callee < graph.callable_count {
-                        if !planner_type_is_callable(
+                        let supports_result = if
+                                planner_call_target_is_direct(call_target) {
+                            planner_call_target_direct(call_target) == callee &&
+                                verifier_call_formal_accepts_candidates(
+                                    type_nodes, call_target, callee,
+                                    callables.get(callee).unwrap()
+                                        .result_type_index,
+                                    active_formals)
+                        } else {
+                            planner_type_is_callable(
                                 type_nodes, callables.get(
-                                    callee).unwrap().result_type_index) {
+                                    callee).unwrap().result_type_index)
+                        }
+                        if !supports_result {
                             callee = callee + 1
                             continue
                         }
@@ -1950,7 +2374,7 @@ fn verifier_add_candidate_provenance_rules(
                                     graph.cells, candidate_cell_state(),
                                     body_index, block_index, boundary,
                                     verifier_callable_location_index(
-                                        body, type_nodes,
+                                        body, type_nodes, active_formals,
                                         make_planner_callable_slot_location(
                                             planner_call_target_slot(call_target))),
                                     callee),
@@ -1965,9 +2389,10 @@ fn verifier_add_candidate_provenance_rules(
                     argument_slots, result_origin_argument_ordinals, ..
                 } => { for ordinal in result_origin_argument_ordinals {
                     let argument_slot = argument_slots.get(ordinal).unwrap()
-                    if !planner_type_is_callable(
+                    if !verifier_type_accepts_candidates(
                             type_nodes,
-                            body.slots.get(argument_slot).unwrap().type_index) {
+                            body.slots.get(argument_slot).unwrap().type_index,
+                            active_formals) {
                         panic("ResourcePlanner: callable result aliases non-callable argument")
                     }
                     verifier_add_candidate_rule(
@@ -1976,7 +2401,7 @@ fn verifier_add_candidate_provenance_rules(
                             graph.cells, candidate_cell_state(), body_index,
                             block_index, boundary,
                             verifier_callable_location_index(
-                                body, type_nodes,
+                                body, type_nodes, active_formals,
                                 make_planner_callable_slot_location(
                                     argument_slot)), candidate)])
                 } },
@@ -1991,7 +2416,8 @@ fn verifier_add_candidate_call_argument_rules(
     graph: VerifierCandidateGraph, body_index: Int, block_index: Int,
     boundary: Int, event: PlannerEvent,
     type_nodes: List<PlannerTypeNode>,
-    callables: List<PlannerCallable>, bodies: List<PlannerBody>
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>,
+    active_formals: List<FlowGenericParamFact>
 ) {
     match event.value {
         PlannerEventValue::CallValue {
@@ -2012,16 +2438,26 @@ fn verifier_add_candidate_call_argument_rules(
                 }
                 let mut parameter = 0
                 while parameter < parameter_count {
-                    if !planner_type_is_callable(
-                            type_nodes, callables.get(callee).unwrap()
-                                .parameter_type_indices.get(parameter).unwrap()) {
+                    let formal_type = callables.get(callee).unwrap()
+                        .parameter_type_indices.get(parameter).unwrap()
+                    let supports_parameter = if
+                            planner_call_target_is_direct(call_target) {
+                        planner_call_target_direct(call_target) == callee &&
+                            verifier_call_formal_accepts_candidates(
+                                type_nodes, call_target, callee,
+                                formal_type, active_formals)
+                    } else {
+                        planner_type_is_callable(type_nodes, formal_type)
+                    }
+                    if !supports_parameter {
                         parameter = parameter + 1
                         continue
                     }
                     let argument_slot = argument_slots.get(parameter).unwrap()
-                    if !planner_type_is_callable(
+                    if !verifier_type_accepts_candidates(
                             type_nodes,
-                            body.slots.get(argument_slot).unwrap().type_index) {
+                            body.slots.get(argument_slot).unwrap().type_index,
+                            active_formals) {
                         panic("ResourcePlanner: callable parameter receives non-callable slot")
                     }
                     let mut candidate = 0
@@ -2033,7 +2469,7 @@ fn verifier_add_candidate_call_argument_rules(
                             graph.cells, candidate_cell_state(), body_index,
                             block_index, boundary,
                             verifier_callable_location_index(
-                                body, type_nodes,
+                                body, type_nodes, active_formals,
                                 make_planner_callable_slot_location(
                                     argument_slot)), candidate)
                         if planner_call_target_is_direct(call_target) {
@@ -2049,7 +2485,7 @@ fn verifier_add_candidate_call_argument_rules(
                                     graph.cells, candidate_cell_state(),
                                     body_index, block_index, boundary,
                                     verifier_callable_location_index(
-                                        body, type_nodes,
+                                        body, type_nodes, active_formals,
                                         make_planner_callable_slot_location(
                                             planner_call_target_slot(call_target))),
                                     callee),
@@ -2073,14 +2509,17 @@ fn build_verifier_candidate_graph(
     let mut cells: List<CandidateCellSpec> = []
     let rules: List<CandidateRule> = []
     let callable_count = callables.len()
+    let active_formals = verifier_collect_active_candidate_formals(
+        type_nodes, bodies)
     let mut callable_index = 0
     while callable_index < callable_count {
         let callable = callables.get(callable_index).unwrap()
         let mut parameter = 0
         while parameter < callable.parameter_type_indices.len() {
-            if planner_type_is_callable(
+            if verifier_type_accepts_candidates(
                     type_nodes,
-                    callable.parameter_type_indices.get(parameter).unwrap()) {
+                    callable.parameter_type_indices.get(parameter).unwrap(),
+                    active_formals) {
                 let mut candidate = 0
                 while candidate < callable_count {
                     cells.push(make_candidate_cell_spec(
@@ -2091,7 +2530,8 @@ fn build_verifier_candidate_graph(
             }
             parameter = parameter + 1
         }
-        if planner_type_is_callable(type_nodes, callable.result_type_index) {
+        if verifier_type_accepts_candidates(
+                type_nodes, callable.result_type_index, active_formals) {
             let mut candidate = 0
             while candidate < callable_count {
                 cells.push(make_candidate_cell_spec(
@@ -2105,7 +2545,8 @@ fn build_verifier_candidate_graph(
     let mut body_index = 0
     while body_index < bodies.len() {
         let body = bodies.get(body_index).unwrap()
-        let locations = verifier_body_callable_locations(body, type_nodes)
+        let locations = verifier_body_callable_locations(
+            body, type_nodes, active_formals)
         let mut block_index = 0
         while block_index < body.blocks.len() {
             let block = body.blocks.get(block_index).unwrap()
@@ -2135,12 +2576,13 @@ fn build_verifier_candidate_graph(
     callable_index = 0
     while callable_index < callable_count {
         let callable = callables.get(callable_index).unwrap()
-        if !callable.has_body &&
-           planner_type_is_callable(type_nodes, callable.result_type_index) {
+        if !callable.has_body && verifier_type_accepts_candidates(
+                type_nodes, callable.result_type_index, active_formals) {
             for parameter in callable.result_origin_parameter_ordinals {
-                if !planner_type_is_callable(
+                if !verifier_type_accepts_candidates(
                         type_nodes,
-                        callable.parameter_type_indices.get(parameter).unwrap()) {
+                        callable.parameter_type_indices.get(parameter).unwrap(),
+                        active_formals) {
                     panic("ResourcePlanner: callable result aliases non-callable parameter")
                 }
                 let mut candidate = 0
@@ -2163,7 +2605,8 @@ fn build_verifier_candidate_graph(
     body_index = 0
     while body_index < bodies.len() {
         let body = bodies.get(body_index).unwrap()
-        let locations = verifier_body_callable_locations(body, type_nodes)
+        let locations = verifier_body_callable_locations(
+            body, type_nodes, active_formals)
         let reachable = planner_body_reachable_blocks(body)
         let callable = flow_callable_index_for_planner(
             callables, body.reference)
@@ -2172,9 +2615,10 @@ fn build_verifier_candidate_graph(
         while slot_index < body.slots.len() {
             match body.slots.get(slot_index).unwrap().parameter_ordinal {
                 some(parameter) => {
-                    if !planner_type_is_callable(
+                    if !verifier_type_accepts_candidates(
                             type_nodes,
-                            body.slots.get(slot_index).unwrap().type_index) {
+                            body.slots.get(slot_index).unwrap().type_index,
+                            active_formals) {
                         slot_index = slot_index + 1
                         continue
                     }
@@ -2187,7 +2631,7 @@ fn build_verifier_candidate_graph(
                                 graph.cells, candidate_cell_state(), body_index,
                                 body.entry_block, 0,
                                 verifier_callable_location_index(
-                                    body, type_nodes,
+                                    body, type_nodes, active_formals,
                                     make_planner_callable_slot_location(
                                         slot_index)), candidate),
                             [verifier_candidate_cell_index(
@@ -2216,7 +2660,8 @@ fn build_verifier_candidate_graph(
                 let mut location = 0
                 while location < locations.len() {
                     if !verifier_candidate_location_overwritten(
-                            event, body, locations.get(location).unwrap()) {
+                            event, body, locations.get(location).unwrap(),
+                            type_nodes, active_formals) {
                         let mut candidate = 0
                         while candidate < callable_count {
                             verifier_add_candidate_rule(
@@ -2236,21 +2681,26 @@ fn build_verifier_candidate_graph(
                 }
                 verifier_add_candidate_provenance_rules(
                     graph, body_index, block_index, boundary,
-                    event, type_nodes, callables, bodies)
+                    event, type_nodes, callables, bodies, active_formals)
+                verifier_add_value_transfer_rules(
+                    graph, body_index, block_index, boundary,
+                    event, type_nodes, callables, bodies, active_formals)
                 verifier_add_candidate_call_argument_rules(
                     graph, body_index, block_index, boundary,
-                    event, type_nodes, callables, bodies)
+                    event, type_nodes, callables, bodies, active_formals)
                 boundary = boundary + 1
             }
             let end_boundary = block.events.len()
             if block.terminator_kind == 3 &&
-               planner_type_is_callable(
+               verifier_type_accepts_candidates(
                     type_nodes,
-                    callables.get(callable).unwrap().result_type_index) {
+                    callables.get(callable).unwrap().result_type_index,
+                    active_formals) {
                 for usage in block.terminator_uses {
-                    if !planner_type_is_callable(
+                    if !verifier_type_accepts_candidates(
                             type_nodes,
-                            body.slots.get(usage.slot).unwrap().type_index) {
+                            body.slots.get(usage.slot).unwrap().type_index,
+                            active_formals) {
                         panic("ResourcePlanner: callable return uses non-callable slot")
                     }
                     let mut candidate = 0
@@ -2266,7 +2716,7 @@ fn build_verifier_candidate_graph(
                                 graph.cells, candidate_cell_state(), body_index,
                                 block_index, end_boundary,
                                 verifier_callable_location_index(
-                                    body, type_nodes,
+                                    body, type_nodes, active_formals,
                                     make_planner_callable_slot_location(
                                         usage.slot)), candidate)])
                         candidate = candidate + 1
@@ -2403,6 +2853,8 @@ fn proof_call_selections_from_cells(
     let values = callable_candidate_proof_final_values(proof)
     let callable_count = callable_candidate_proof_callable_count(proof)
     let mut result: List<CandidateSelection> = []
+    let active_formals = verifier_collect_active_candidate_formals(
+        type_nodes, bodies)
     let mut body_index = 0
     while body_index < bodies.len() {
         let body = bodies.get(body_index).unwrap()
@@ -2420,7 +2872,7 @@ fn proof_call_selections_from_cells(
                     PlannerEventValue::CallValue { call_target, .. } =>
                         if !planner_call_target_is_direct(call_target) {
                             let location = verifier_callable_location_index(
-                                body, type_nodes,
+                                body, type_nodes, active_formals,
                                 make_planner_callable_slot_location(
                                     planner_call_target_slot(call_target)))
                             let mut candidates: List<Int> = []

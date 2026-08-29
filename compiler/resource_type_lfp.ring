@@ -939,7 +939,7 @@ pub fn planner_callable_location_base(value: PlannerCallableLocation) -> Int {
     }
 }
 
-fn planner_callable_location_projection(
+pub fn planner_callable_location_projection(
     value: PlannerCallableLocation
 ) -> FlowProjectionContract {
     match value.value {
