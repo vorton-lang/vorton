@@ -34,9 +34,11 @@ use rc_ir::{
     rc_site_before_instruction, rc_site_after_instruction}
 use resource_certificate::{
     CfgBodyCertificate, CfgBlockCertificate, CfgStepCertificate,
+    CfgEntryPromotion,
     CfgEdgeCertificate, SlotTransitionReason, SlotTransitionWitness,
     make_cfg_body_certificate, make_cfg_block_certificate,
     make_cfg_step_certificate, make_cfg_edge_certificate,
+    make_cfg_entry_promotion,
     make_slot_transition_witness,
     slot_reason_init_live,
     slot_reason_borrow, slot_reason_mutate,
@@ -624,7 +626,49 @@ fn apply_edge_cleanup_abstract(
 struct BodyEntrySolution {
     reachable: List<Bool>,
     entry_states: List<List<SlotFlow>>,
+    promotions: List<CfgEntryPromotion>,
     findings: List<ResourceDiagnostic>
+}
+
+fn cfg_slot_state_rank(value: SlotFlow) -> Int {
+    if slot_flow_is_unreachable(value) { return 0 }
+    if slot_flow_is_maybe_moved(value) { return 2 }
+    1
+}
+
+fn append_cfg_reach_promotion(
+    mut promotions: List<CfgEntryPromotion>, target_block: Int,
+    predecessor_block: Int?, predecessor_edge: Int?,
+    rank_total: Int, rank_budget: Int
+) -> Int {
+    promotions.push(make_cfg_entry_promotion(
+        promotions.len(), target_block, none,
+        predecessor_block, predecessor_edge,
+        none, none, 0, 1))
+    let next = rank_total + 1
+    if next > rank_budget {
+        panic("ResourcePlanner: CFG promotion rank budget exceeded")
+    }
+    next
+}
+
+fn append_cfg_slot_promotion(
+    mut promotions: List<CfgEntryPromotion>, target_block: Int,
+    slot_index: Int, predecessor_block: Int?, predecessor_edge: Int?,
+    before: SlotFlow, after: SlotFlow,
+    rank_total: Int, rank_budget: Int
+) -> Int {
+    let from_rank = cfg_slot_state_rank(before)
+    let to_rank = cfg_slot_state_rank(after)
+    promotions.push(make_cfg_entry_promotion(
+        promotions.len(), target_block, some(slot_index),
+        predecessor_block, predecessor_edge,
+        some(before), some(after), from_rank, to_rank))
+    let next = rank_total + (to_rank - from_rank)
+    if next > rank_budget {
+        panic("ResourcePlanner: CFG promotion rank budget exceeded")
+    }
+    next
 }
 
 fn body_entry_slot_state(
@@ -675,14 +719,24 @@ fn solve_body_entry_states(
             body, callable_index, slot_index, solved))
         slot_index = slot_index + 1
     }
+    // Reachability contributes one rank per block; each SlotFlow cell has
+    // finite height two.  The log below records every strict promotion.
+    let exact_rank_budget = body.blocks.len() *
+        (body.slots.len() * 2 + 1)
+    let mut promotions: List<CfgEntryPromotion> = []
+    let mut promotion_rank = append_cfg_reach_promotion(
+        promotions, body.entry_block, none, none, 0, exact_rank_budget)
+    slot_index = 0
+    while slot_index < seed.len() {
+        promotion_rank = append_cfg_slot_promotion(
+            promotions, body.entry_block, slot_index, none, none,
+            slot_flow_unreachable(), seed.get(slot_index).unwrap(),
+            promotion_rank, exact_rank_budget)
+        slot_index = slot_index + 1
+    }
     reachable.set(body.entry_block, true)
     entry_states.set(body.entry_block, seed)
 
-    // Entry states only change by finite joins.  Every SlotFlow cell has rank
-    // at most two; block reachability contributes one additional bit.
-    let exact_rank_budget = body.blocks.len() *
-        (body.slots.len() * 2 + 1)
-    let mut promotion_count = 1
     let mut changed = true
     while changed {
         changed = false
@@ -705,32 +759,57 @@ fn solve_body_entry_states(
                     apply_terminator_use_abstract(
                         body, usage, states, false, ignored)
                 }
-                for edge in block.edges {
+                let mut edge_index = 0
+                while edge_index < block.edges.len() {
+                    let edge = block.edges.get(edge_index).unwrap()
                     match edge.target_block {
                         some(target) => {
                             let edge_states = copy_slot_states(states)
                             apply_edge_cleanup_abstract(
                                 edge, body, solved, edge_states)
                             if !reachable.get(target).unwrap() {
+                                promotion_rank = append_cfg_reach_promotion(
+                                    promotions, target,
+                                    some(block_index), some(edge_index),
+                                    promotion_rank, exact_rank_budget)
+                                slot_index = 0
+                                while slot_index < edge_states.len() {
+                                    promotion_rank = append_cfg_slot_promotion(
+                                        promotions, target, slot_index,
+                                        some(block_index), some(edge_index),
+                                        slot_flow_unreachable(),
+                                        edge_states.get(slot_index).unwrap(),
+                                        promotion_rank, exact_rank_budget)
+                                    slot_index = slot_index + 1
+                                }
                                 reachable.set(target, true)
                                 entry_states.set(target, edge_states)
-                                promotion_count = promotion_count + 1
                                 changed = true
                             } else {
                                 let previous = entry_states.get(target).unwrap()
                                 let joined = join_slot_states(previous, edge_states)
                                 if !slot_states_same(previous, joined) {
+                                    slot_index = 0
+                                    while slot_index < joined.len() {
+                                        let before = previous.get(slot_index).unwrap()
+                                        let after = joined.get(slot_index).unwrap()
+                                        if !slot_flow_same(before, after) {
+                                            promotion_rank = append_cfg_slot_promotion(
+                                                promotions, target, slot_index,
+                                                some(block_index), some(edge_index),
+                                                before, after,
+                                                promotion_rank, exact_rank_budget)
+                                        }
+                                        slot_index = slot_index + 1
+                                    }
                                     entry_states.set(target, joined)
-                                    promotion_count = promotion_count + 1
                                     changed = true
                                 }
-                            }
-                            if promotion_count > exact_rank_budget {
-                                panic("ResourcePlanner: CFG worklist rank budget exceeded")
                             }
                         },
                         none => {}
                     }
+                    edge_index = edge_index + 1
                 }
             }
             block_index = block_index + 1
@@ -759,6 +838,7 @@ fn solve_body_entry_states(
     BodyEntrySolution {
         reachable: reachable,
         entry_states: entry_states,
+        promotions: promotions,
         findings: findings
     }
 }
@@ -1556,6 +1636,7 @@ pub fn plan_body(
         rc_body: make_rc_body(
             body.reference, rc_slots, body.entry_block, rc_blocks),
         certificate: make_cfg_body_certificate(
-            body.entry_block, entry_seed, block_certificates)
+            body.entry_block, entry_seed,
+            entry_solution.promotions, block_certificates)
     }
 }
