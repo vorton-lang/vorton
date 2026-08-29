@@ -629,7 +629,7 @@ fn public_types_contain_enum_owner(
 
 fn validate_constructor_export_closure(
     env: TypeEnv, value_symbols: Map<Str, SymbolRef>,
-    types: Map<Str, TypeDef>, sink: CollectingSink, program: Program
+    types: Map<Str, TypeDef>, mut sink: CollectingSink, program: Program
 ) -> Bool {
     let mut entries = value_symbols.entries()
     entries.sort_by(compare_by_first)
@@ -638,7 +638,8 @@ fn validate_constructor_export_closure(
         let export_name = entry.0
         match exact_constructor_owner_for_symbol(env, entry.1) {
             some(owner) => if !public_types_contain_enum_owner(types, owner) {
-                let owner_name = registered_nominal_ref_display_name(owner)
+                let owner_name = export_display_name(
+                    registered_nominal_ref_display_name(owner))
                 sink.report(make_diag(
                     E0703, Severity::SevError,
                     "Public constructor export '${export_name}' requires its owner enum '${owner_name}' to be publicly re-exported; re-export the enum in this facade",

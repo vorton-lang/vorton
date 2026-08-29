@@ -7672,7 +7672,7 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
 IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
 F1_EXECUTABLE_KIND_COUNT = 19
 F1_BINDER_KIND_COUNT = 25
-F1_SEMANTIC_MUTATION_COUNT = 73
+F1_SEMANTIC_MUTATION_COUNT = 72
 F1_SCOPE_GUARD_COUNT = 13
 
 F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
