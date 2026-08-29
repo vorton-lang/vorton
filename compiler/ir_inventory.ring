@@ -671,7 +671,7 @@ const EXECUTABLE_KIND_ALLOWED_MODE_TAGS: List<Int> = [
 const REF_FORM_NAMED: Int = 0
 const REF_FORM_ANONYMOUS: Int = 1
 const EXECUTABLE_KIND_REF_FORM_TAGS: List<Int> = [
-    0, 0, 0, 1, 0, 1, 1, 1, 1,
+    0, 0, 0, 1, 0, 1, 1, 1, 0,
     0, 1, 0, 0,
     0, 0, 0, 0,
     0, 0
@@ -680,19 +680,19 @@ const EXECUTABLE_KIND_REF_FORM_TAGS: List<Int> = [
 // Namespace tag 5 and path-role tag 7 are table-local sentinels for the
 // opposite ref form; they are never converted to a typed identity tag.
 const EXECUTABLE_KIND_NAMESPACE_TAGS: List<Int> = [
-    0, 4, 4, 5, 0, 5, 5, 5, 5,
+    0, 4, 4, 5, 0, 5, 5, 5, 4,
     4, 5, 0, 4,
     4, 4, 4, 0,
     0, 0
 ]
 const EXECUTABLE_KIND_PATH_ROLE_TAGS: List<Int> = [
-    7, 7, 7, 0, 7, 0, 1, 5, 1,
+    7, 7, 7, 0, 7, 0, 1, 5, 7,
     7, 6, 7, 7,
     7, 7, 7, 7,
     7, 7
 ]
 const EXECUTABLE_KIND_PARENT_FORM_TAGS: List<Int> = [
-    0, 0, 0, 0, 0, 0, 1, 1, 1,
+    0, 0, 0, 0, 0, 0, 1, 1, 0,
     0, 2, 0, 0,
     0, 0, 0, 0,
     0, 0
