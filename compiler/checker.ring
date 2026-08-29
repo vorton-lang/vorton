@@ -625,7 +625,7 @@ fn new_infer_ctx(
             }
         }
     }
-    for fact in builtin_value_contract_facts(ctx.env) {
+    for fact in builtin_value_contract_facts() {
         let executable = builtin_value_contract_executable(fact)
         let scheme = builtin_value_contract_scheme(fact)
         publish_effect_header_schema(ctx.env, scheme.effect_schema)

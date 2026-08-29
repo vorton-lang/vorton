@@ -20,6 +20,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     make_impl_method_scheme_core, make_typed_impl_predicate,
     impl_method_core_as_scheme, impl_method_core_type,
     impl_method_core_type_vars, impl_method_core_def_id,
+    apply_subst_map,
     ordered_effect_tail_vars, build_definition_effect_header_schema,
     direct_impl_predicate_provenance, freeze_impl_predicate_set,
     frozen_impl_predicates, impl_predicate_subject_type_var,
@@ -309,8 +310,6 @@ pub struct CheckerBuiltinValue {
     name: Str,
     symbol: SymbolRef
 }
-
-const REGISTERED_BUILTIN_VALUE_SITE_COUNT: Int = BUILTIN_VALUE_HASH_COMBINE
 
 fn registered_builtin_value_name(site: BuiltinValueSite) -> Str {
     let tag = builtin_value_site_tag(site)
@@ -1383,13 +1382,74 @@ fn builtin_value_physical_lowering(
     panic("builtin value contract: physical lowering census is incomplete")
 }
 
-// Compiler-only schemes use a stable normalized formal domain.  The raw id
-// never enters inference: it is owned by the exact list.index symbol and is
-// projected to the downstream typed formal relation by the manifest consumer.
-const BUILTIN_VALUE_LIST_INDEX_TYPE_VAR_ID: Int = 0 - 1
-
-fn explicit_builtin_value_scheme(site: BuiltinValueSite) -> TypeScheme {
+// Manifest schemes use one stable normalized formal per generic site.  Raw
+// ids are disjoint across the ten-site manifest but never enter inference:
+// public Cell/Ptr bindings fresh-localize them through the existing env API.
+fn deterministic_builtin_value_scheme(
+    site: BuiltinValueSite
+) -> TypeScheme {
     let tag = builtin_value_site_tag(site)
+    let type_var_id = 0 - 1 - tag
+    let type_var = Type::TypeVar { id: type_var_id, name: none }
+    let unsafe_row = EffectRow {
+        effects: [Effect::UnsafeEffect], tail: none
+    }
+    if tag == BUILTIN_VALUE_CELL_CONSTRUCTOR {
+        return TypeScheme {
+            ty: Type::FnType {
+                params: [type_var],
+                return_type: Type::StructType {
+                    name: BUILTIN_CELL, type_params: [type_var]
+                },
+                effects: EMPTY_ROW
+            },
+            type_vars: [type_var_id], bounds: [],
+            effect_schema: empty_typed_effect_header_schema(), def_id: none
+        }
+    }
+    if tag == BUILTIN_VALUE_ALLOC {
+        return TypeScheme {
+            ty: Type::FnType {
+                params: [INT],
+                return_type: Type::PtrType { pointee: type_var },
+                effects: unsafe_row
+            },
+            type_vars: [type_var_id], bounds: [],
+            effect_schema: empty_typed_effect_header_schema(), def_id: none
+        }
+    }
+    if tag == BUILTIN_VALUE_DEALLOC {
+        return TypeScheme {
+            ty: Type::FnType {
+                params: [Type::PtrType { pointee: type_var }, INT],
+                return_type: UNIT, effects: unsafe_row
+            },
+            type_vars: [type_var_id], bounds: [],
+            effect_schema: empty_typed_effect_header_schema(), def_id: none
+        }
+    }
+    if tag == BUILTIN_VALUE_PTR_COPY {
+        let pointer = Type::PtrType { pointee: type_var }
+        return TypeScheme {
+            ty: Type::FnType {
+                params: [pointer, pointer, INT],
+                return_type: UNIT, effects: unsafe_row
+            },
+            type_vars: [type_var_id], bounds: [],
+            effect_schema: empty_typed_effect_header_schema(), def_id: none
+        }
+    }
+    if tag == BUILTIN_VALUE_PTR_FROM_ADDR {
+        return TypeScheme {
+            ty: Type::FnType {
+                params: [INT],
+                return_type: Type::PtrType { pointee: type_var },
+                effects: EMPTY_ROW
+            },
+            type_vars: [type_var_id], bounds: [],
+            effect_schema: empty_typed_effect_header_schema(), def_id: none
+        }
+    }
     if tag == BUILTIN_VALUE_HASH_COMBINE {
         return mono(Type::FnType {
             params: [INT, INT], return_type: INT, effects: EMPTY_ROW
@@ -1406,15 +1466,12 @@ fn explicit_builtin_value_scheme(site: BuiltinValueSite) -> TypeScheme {
         })
     }
     if tag == BUILTIN_VALUE_LIST_INDEX {
-        let element = Type::TypeVar {
-            id: BUILTIN_VALUE_LIST_INDEX_TYPE_VAR_ID, name: none
-        }
         return TypeScheme {
             ty: Type::FnType {
-                params: [make_list_struct(element), INT],
-                return_type: element, effects: EMPTY_ROW
+                params: [make_list_struct(type_var), INT],
+                return_type: type_var, effects: EMPTY_ROW
             },
-            type_vars: [BUILTIN_VALUE_LIST_INDEX_TYPE_VAR_ID],
+            type_vars: [type_var_id],
             bounds: [], effect_schema: empty_typed_effect_header_schema(),
             def_id: none
         }
@@ -1424,25 +1481,60 @@ fn explicit_builtin_value_scheme(site: BuiltinValueSite) -> TypeScheme {
             params: [STR, INT], return_type: STR, effects: EMPTY_ROW
         })
     }
-    panic("builtin value contract: explicit scheme census is incomplete")
+    panic("builtin value contract: scheme census is incomplete")
 }
 
-fn builtin_value_scheme_for_site(
-    env: TypeEnv, site: BuiltinValueSite
-) -> TypeScheme {
+fn builtin_value_scheme_for_site(site: BuiltinValueSite) -> TypeScheme {
     let tag = builtin_value_site_tag(site)
-    if tag < REGISTERED_BUILTIN_VALUE_SITE_COUNT {
-        let scheme = match env.lookup(registered_builtin_value_name(site)) {
-            some(value) => value,
-            none => panic(
-                "builtin value contract: registered TypeScheme is absent")
-        }
-        if scheme.def_id.is_none() {
-            panic("builtin value contract: registered TypeScheme has no DefId")
-        }
-        return scheme
+    let scheme = deterministic_builtin_value_scheme(site)
+    let mut value_vars: List<Int> = []
+    let mut row_tails: List<Int> = []
+    collect_builtin_type_formals(scheme.ty, value_vars, row_tails)
+    let should_be_generic =
+        tag == BUILTIN_VALUE_CELL_CONSTRUCTOR ||
+        tag == BUILTIN_VALUE_ALLOC ||
+        tag == BUILTIN_VALUE_DEALLOC ||
+        tag == BUILTIN_VALUE_PTR_COPY ||
+        tag == BUILTIN_VALUE_PTR_FROM_ADDR ||
+        tag == BUILTIN_VALUE_LIST_INDEX
+    if scheme.bounds.len() != 0 || scheme.def_id.is_some() ||
+       row_tails.len() != 0 ||
+       value_vars.len() != scheme.type_vars.len() ||
+       (scheme.type_vars.len() == 1) != should_be_generic {
+        panic("builtin value contract: normalized scheme is invalid")
     }
-    explicit_builtin_value_scheme(site)
+    let mut index = 0
+    while index < scheme.type_vars.len() {
+        let value = scheme.type_vars.get(index).unwrap()
+        if value >= 0 || value_vars.get(index).unwrap() != value {
+            panic("builtin value contract: normalized formal differs")
+        }
+        index = index + 1
+    }
+    scheme
+}
+
+fn bind_registered_builtin_value(
+    mut env: TypeEnv, name: Str, site: BuiltinValueSite
+) {
+    if registered_builtin_value_name(site) != name {
+        panic("builtin value contract: public binding relation differs")
+    }
+    let normalized = builtin_value_scheme_for_site(site)
+    let mut substitution: Map<Int, Type> = map_new()
+    let mut type_vars: List<Int> = []
+    for source in normalized.type_vars {
+        let target = env.fresh_var_id()
+        substitution.insert(source, Type::TypeVar {
+            id: target, name: none
+        })
+        type_vars.push(target)
+    }
+    env.bind(name, TypeScheme {
+        ty: apply_subst_map(substitution, normalized.ty),
+        type_vars: type_vars, bounds: [],
+        effect_schema: normalized.effect_schema, def_id: none
+    })
 }
 
 fn builtin_value_resource_contract(
@@ -1513,11 +1605,11 @@ pub struct BuiltinValueContractFact {
 }
 
 fn make_builtin_value_contract_fact(
-    env: TypeEnv, site: BuiltinValueSite
+    site: BuiltinValueSite
 ) -> BuiltinValueContractFact {
     let symbol = builtin_value_symbol(site)
     let executable = make_named_executable_ref(symbol)
-    let scheme = builtin_value_scheme_for_site(env, site)
+    let scheme = builtin_value_scheme_for_site(site)
     let resource = builtin_value_resource_contract(site)
     let arity = match scheme.ty {
         Type::FnType { params, .. } => params.len(),
@@ -1564,12 +1656,11 @@ pub fn builtin_value_contract_physical(
 // valid BuiltinValueSite produces exactly one relation, and exact executable
 // identity is independently unique across the closed ten-site domain.
 pub fn builtin_value_contract_facts(
-    env: TypeEnv
 ) -> List<BuiltinValueContractFact> {
     let mut result: List<BuiltinValueContractFact> = []
     for tag in 0..BUILTIN_VALUE_SITE_COUNT {
         let fact = make_builtin_value_contract_fact(
-            env, builtin_value_site_from_tag(tag))
+            builtin_value_site_from_tag(tag))
         if builtin_value_site_tag(fact.site) != tag {
             panic("builtin value contract: site order drifted")
         }
@@ -1652,19 +1743,9 @@ fn register_cell(mut env: TypeEnv, sink: CollectingSink) {
     })
 
     // Register Cell constructor function
-    let ctor_t_id = env.fresh_var_id()
-    let ctor_t = Type::TypeVar { id: ctor_t_id, name: none }
-    let ctor_ret = Type::StructType {
-        name: BUILTIN_CELL,
-        type_params: [ctor_t]
-    }
-    env.bind(BUILTIN_CELL, TypeScheme {
-        ty: Type::FnType { params: [ctor_t], return_type: ctor_ret, effects: EMPTY_ROW },
-        type_vars: [ctor_t_id],
-        bounds: [],
-        effect_schema: empty_typed_effect_header_schema(),
-        def_id: none
-    })
+    bind_registered_builtin_value(
+        env, BUILTIN_CELL, builtin_value_site_from_tag(
+            BUILTIN_VALUE_CELL_CONSTRUCTOR))
 
     // Methods: get, set, update
     let m_t_id = env.fresh_var_id()
@@ -2553,52 +2634,23 @@ fn register_ptr_builtins(mut env: TypeEnv, sink: CollectingSink) {
     // ---- Top-level builtin functions ----
 
     // alloc(count: Int) -> Ptr<T> / unsafe
-    let alloc_t_id = env.fresh_var_id()
-    let alloc_t = Type::TypeVar { id: alloc_t_id, name: none }
-    let alloc_ptr = Type::PtrType { pointee: alloc_t }
-    env.bind("alloc", TypeScheme {
-        ty: Type::FnType { params: [INT], return_type: alloc_ptr, effects: unsafe_row },
-        type_vars: [alloc_t_id],
-        bounds: [],
-        effect_schema: empty_typed_effect_header_schema(),
-        def_id: none
-    })
+    bind_registered_builtin_value(
+        env, "alloc", builtin_value_site_from_tag(BUILTIN_VALUE_ALLOC))
 
     // dealloc(p: Ptr<T>, count: Int) -> () / unsafe
-    let dealloc_t_id = env.fresh_var_id()
-    let dealloc_t = Type::TypeVar { id: dealloc_t_id, name: none }
-    let dealloc_ptr = Type::PtrType { pointee: dealloc_t }
-    env.bind("dealloc", TypeScheme {
-        ty: Type::FnType { params: [dealloc_ptr, INT], return_type: UNIT, effects: unsafe_row },
-        type_vars: [dealloc_t_id],
-        bounds: [],
-        effect_schema: empty_typed_effect_header_schema(),
-        def_id: none
-    })
+    bind_registered_builtin_value(
+        env, "dealloc", builtin_value_site_from_tag(
+            BUILTIN_VALUE_DEALLOC))
 
     // ptr_copy(src: Ptr<T>, dst: Ptr<T>, count: Int) -> () / unsafe
-    let copy_t_id = env.fresh_var_id()
-    let copy_t = Type::TypeVar { id: copy_t_id, name: none }
-    let copy_ptr = Type::PtrType { pointee: copy_t }
-    env.bind("ptr_copy", TypeScheme {
-        ty: Type::FnType { params: [copy_ptr, copy_ptr, INT], return_type: UNIT, effects: unsafe_row },
-        type_vars: [copy_t_id],
-        bounds: [],
-        effect_schema: empty_typed_effect_header_schema(),
-        def_id: none
-    })
+    bind_registered_builtin_value(
+        env, "ptr_copy", builtin_value_site_from_tag(
+            BUILTIN_VALUE_PTR_COPY))
 
     // ptr_from_addr(a: Int) -> Ptr<T> (safe)
-    let from_t_id = env.fresh_var_id()
-    let from_t = Type::TypeVar { id: from_t_id, name: none }
-    let from_ptr = Type::PtrType { pointee: from_t }
-    env.bind("ptr_from_addr", TypeScheme {
-        ty: Type::FnType { params: [INT], return_type: from_ptr, effects: EMPTY_ROW },
-        type_vars: [from_t_id],
-        bounds: [],
-        effect_schema: empty_typed_effect_header_schema(),
-        def_id: none
-    })
+    bind_registered_builtin_value(
+        env, "ptr_from_addr", builtin_value_site_from_tag(
+            BUILTIN_VALUE_PTR_FROM_ADDR))
 
     // ---- Ptr<T> methods ----
 
