@@ -17,6 +17,7 @@ use ir_identity::{
     nominal_field_ref_name, nominal_field_ref_index,
     variant_ref_owner, variant_ref_member,
     variant_ref_same,
+    builtin_option_some_variant_ref, builtin_option_none_variant_ref,
     variant_field_ref_member, variant_field_ref_index,
     impl_owner_ref_provider, impl_owner_ref_target,
     impl_method_ref_member, impl_method_ref_name,
@@ -60,7 +61,7 @@ use ast::{
 use types::{Type, Effect, EffectRow, EMPTY_ROW, types_equal}
 use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HPatternBinding,
-    HEffectHandler, HLambdaCapture, HAssocType, HEnumVariant, HTypeParam,
+    HEffectHandler, HLambdaCapture, HAssocType, HTypeParam,
     HEffectOp, HTraitMethod, TraitBound, HPatternPlan, HProjectionRef,
     h_fail_raise_ref,
     h_nominal_projection, h_variant_projection,
@@ -1567,12 +1568,9 @@ fn simple_core_expr(
             let variant = core_constructor_variant(constructor)
             validate_flow_variant_initialize(instruction_for_node_role(
                 ctx, node_ordinal, BRIDGE_ROLE_EXPR_PRIMARY, 0, 0), variant)
-            let variant_shell = match enum_variant_in_decls_opt(
-                    ctx.shell.decls, variant) {
-                some(found) => found,
-                none => panic("RcHIR bridge: exact variant shell is absent")
-            }
-            if variant_shell.fields.len() != fields.len() {
+            let variant_shell = exact_legacy_variant_shape(
+                ctx.shell.decls, variant)
+            if variant_shell.field_count != fields.len() {
                 panic("RcHIR bridge: variant constructor field census differs")
             }
             let values = fields.map(fn(field) {
@@ -1596,9 +1594,8 @@ fn simple_core_expr(
             })
             return SerializedOperand { prefix: prefix,
                 value: HExpr::NamedVariantConstruct {
-                enum_name: registered_nominal_ref_display_name(
-                    variant_ref_owner(variant)),
-                variant_name: variant_shell.name,
+                enum_name: variant_shell.enum_name,
+                variant_name: variant_shell.variant_name,
                 variant_ref: variant,
                 fields: values,
                 spread: none,
@@ -2878,24 +2875,55 @@ pub fn materialize_verified_hir(
     }
 }
 
-fn enum_variant_in_decls_opt(
+struct LegacyVariantShape {
+    enum_name: Str,
+    variant_name: Str,
+    field_names: List<Str>?,
+    field_count: Int
+}
+
+fn make_legacy_variant_shape(
+    enum_name: Str, variant_name: Str,
+    field_names: List<Str>?, field_count: Int
+) -> LegacyVariantShape {
+    if enum_name == "" || variant_name == "" || field_count < 0 {
+        panic("RcHIR bridge: invalid legacy variant shape")
+    }
+    match field_names {
+        some(names) => if names.len() != field_count {
+            panic("RcHIR bridge: legacy variant field-name census differs")
+        },
+        none => {}
+    }
+    LegacyVariantShape {
+        enum_name: enum_name, variant_name: variant_name,
+        field_names: field_names.map(fn(names) {
+            names.map(fn(name) { name })
+        }),
+        field_count: field_count
+    }
+}
+
+fn legacy_variant_shape_in_decls_opt(
     decls: List<HDecl>, variant: VariantRef
-) -> HEnumVariant? {
-    let mut found: HEnumVariant? = none
+) -> LegacyVariantShape? {
+    let mut found: LegacyVariantShape? = none
     for decl in decls {
         match decl {
-            HDecl::Enum { variants, .. } => {
+            HDecl::Enum { name, variants, .. } => {
                 for candidate in variants {
                     if variant_ref_same(candidate.variant_ref, variant) {
                         if found.is_some() {
                             panic("RcHIR bridge: exact enum variant shell repeats")
                         }
-                        found = some(candidate)
+                        found = some(make_legacy_variant_shape(
+                            name, candidate.name, candidate.field_names,
+                            candidate.fields.len()))
                     }
                 }
             },
             HDecl::ModBlock { decls: nested, .. } => match
-                    enum_variant_in_decls_opt(nested, variant) {
+                    legacy_variant_shape_in_decls_opt(nested, variant) {
                 some(candidate) => {
                     if found.is_some() {
                         panic("RcHIR bridge: exact enum variant shell repeats")
@@ -2908,6 +2936,29 @@ fn enum_variant_in_decls_opt(
         }
     }
     found
+}
+
+fn exact_legacy_variant_shape(
+    decls: List<HDecl>, variant: VariantRef
+) -> LegacyVariantShape {
+    match legacy_variant_shape_in_decls_opt(decls, variant) {
+        some(value) => value,
+        none => {
+            let enum_name = registered_nominal_ref_display_name(
+                variant_ref_owner(variant))
+            if variant_ref_same(
+                    variant, builtin_option_some_variant_ref()) {
+                return make_legacy_variant_shape(
+                    enum_name, "some", none, 1)
+            }
+            if variant_ref_same(
+                    variant, builtin_option_none_variant_ref()) {
+                return make_legacy_variant_shape(
+                    enum_name, "none", none, 0)
+            }
+            panic("RcHIR bridge: exact variant shell is absent")
+        }
+    }
 }
 
 fn core_pattern_bindings(
@@ -2996,12 +3047,12 @@ fn serialize_pattern(
     }
     if kind == 5 {
         let variant = core_pattern_variant(value)
-        let shell = match enum_variant_in_decls_opt(ctx.shell.decls, variant) {
-            some(found) => found,
-            none => panic("RcHIR bridge: exact variant shell is absent")
-        }
+        let shell = exact_legacy_variant_shape(ctx.shell.decls, variant)
         let fields = core_pattern_fields(value)
-        let name = shell.name
+        if shell.field_count != fields.len() {
+            panic("RcHIR bridge: variant pattern field census differs")
+        }
+        let name = shell.variant_name
         match shell.field_names {
             some(names) => {
                 if names.len() != fields.len() {
@@ -3009,7 +3060,7 @@ fn serialize_pattern(
                 }
                 let mut index = 0
                 return Pattern::NamedConstructor {
-                    name: name, qualifier: none,
+                    name: name, qualifier: some(shell.enum_name),
                     fields: fields.map(fn(field) {
                         let result = NamedPatternField {
                             name: names.get(index).unwrap(),
@@ -3024,7 +3075,7 @@ fn serialize_pattern(
                 }
             },
             none => return Pattern::Constructor {
-                name: name, qualifier: none,
+                name: name, qualifier: some(shell.enum_name),
                 fields: fields.map(fn(field) {
                     serialize_pattern(ctx, core_pattern_field_pattern(field))
                 }),
@@ -3327,10 +3378,10 @@ fn serialize_move_update_expr(
     } else if constructor_kind == 1 {
         let variant = core_constructor_variant(constructor)
         validate_flow_variant_initialize(initialize, variant)
-        let variant_shell = match enum_variant_in_decls_opt(
-                ctx.shell.decls, variant) {
-            some(value) => value,
-            none => panic("RcHIR bridge: MoveUpdate variant shell is absent")
+        let variant_shell = exact_legacy_variant_shape(
+            ctx.shell.decls, variant)
+        if variant_shell.field_count != schema.len() {
+            panic("RcHIR bridge: MoveUpdate variant field census differs")
         }
         let mut field_index = 0
         let fields = schema.map(fn(field) {
@@ -3346,9 +3397,8 @@ fn serialize_move_update_expr(
             result
         })
         HExpr::NamedVariantConstruct {
-            enum_name: registered_nominal_ref_display_name(
-                variant_ref_owner(variant)),
-            variant_name: variant_shell.name, variant_ref: variant,
+            enum_name: variant_shell.enum_name,
+            variant_name: variant_shell.variant_name, variant_ref: variant,
             fields: fields, spread: none,
             constructor: some(make_h_variant_constructor_plan(
                 schema.map(fn(field) { hir_projection(field) }))),

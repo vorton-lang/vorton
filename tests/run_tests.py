@@ -7671,8 +7671,8 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
 
 IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
 F1_EXECUTABLE_KIND_COUNT = 19
-F1_BINDER_KIND_COUNT = 24
-F1_SEMANTIC_MUTATION_COUNT = 72
+F1_BINDER_KIND_COUNT = 25
+F1_SEMANTIC_MUTATION_COUNT = 73
 F1_SCOPE_GUARD_COUNT = 13
 
 F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
@@ -7727,9 +7727,10 @@ F1_BINDER_KINDS = (
     ("scope_result", "BINDER_SCOPE_RESULT"),
     ("control_result", "BINDER_CONTROL_RESULT"),
     ("assign_temp", "BINDER_ASSIGN_TEMP"),
-    ("handled_evidence_param", "BINDER_HANDLED_EVIDENCE_PARAM"),
-    ("handled_evidence_local", "BINDER_HANDLED_EVIDENCE_LOCAL"),
-    ("handled_evidence_capture", "BINDER_HANDLED_EVIDENCE_CAPTURE"),
+    ("effect_ctx_param", "BINDER_EFFECT_CTX_PARAM"),
+    ("effect_ctx_local", "BINDER_EFFECT_CTX_LOCAL"),
+    ("effect_ctx_parent_capture", "BINDER_EFFECT_CTX_PARENT_CAPTURE"),
+    ("dictionary_evidence_param", "BINDER_DICTIONARY_EVIDENCE_PARAM"),
 )
 
 
@@ -7829,31 +7830,31 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         errors.append(parent_form_error)
     expected_modes = [
         0, 0, 0, 0, 0, 0, 0, 0, 0,
-        2, 2, 0, 2, 2,
+        2, 0, 2, 2,
         1, 1, 1, 1,
         2, 2,
     ]
     expected_ref_forms = [
         0, 0, 0, 1, 0, 1, 1, 1, 1,
-        0, 0, 1, 0, 0,
+        0, 1, 0, 0,
         0, 0, 0, 0,
         0, 0,
     ]
     expected_namespaces = [
         0, 4, 4, 5, 0, 5, 5, 5, 5,
-        4, 0, 5, 0, 4,
+        4, 5, 0, 4,
         4, 4, 4, 0,
         0, 0,
     ]
     expected_executable_roles = [
         7, 7, 7, 0, 7, 0, 1, 5, 1,
-        7, 7, 6, 7, 7,
+        7, 6, 7, 7,
         7, 7, 7, 7,
         7, 7,
     ]
     expected_parent_forms = [
         0, 0, 0, 0, 0, 0, 1, 1, 1,
-        0, 0, 2, 0, 0,
+        0, 2, 0, 0,
         0, 0, 0, 0,
         0, 0,
     ]
@@ -7921,7 +7922,7 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         ), errors)
     if len(F1_BINDER_KINDS) != F1_BINDER_KIND_COUNT:
         errors.append("F1 binder kind test census is incomplete")
-    if "const BINDER_KIND_COUNT: Int = 24" not in source:
+    if "const BINDER_KIND_COUNT: Int = 25" not in source:
         errors.append("F1 binder kind count drifted")
     binder_roles, binder_role_error = _f0_int_list(
         source, "BINDER_KIND_PATH_ROLE_TAGS")
@@ -7930,7 +7931,7 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     expected_binder_roles = [
         2, 0, 0, 0, 0, 0, 0, 0, 2, 5, 5,
         4, 0, 2, 1, 3, 6, 1, 3, 3, 6,
-        2, 5, 4,
+        2, 5, 4, 2,
     ]
     if binder_roles is not None and binder_roles != expected_binder_roles:
         errors.append("F1 binder kind/path-role matrix drifted")

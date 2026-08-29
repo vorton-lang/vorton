@@ -1,15 +1,20 @@
 use types::{Type}
 use ast::{Program, Decl, UseDecl, UseImport, NamedImport}
 use hir::{HProgram, HDecl, ValueBindingKind, ModuleImplFact, compare_by_first}
+use diagnostics::{CollectingSink, DiagnosticContext, Severity, make_diag}
+use codes::{E0703}
 use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef, ImplEntry,
     TypeAliasDef, EffectAliasDef,
     find_impl_by_provider,
     impl_entry_exact_key_same, impl_entry_final_same,
     optional_symbol_ref_same}
-use ir_identity::{SymbolRef, ImplMethodRef,
+use ir_identity::{SymbolRef, ImplMethodRef, RegisteredNominalRef,
     impl_provider_ref_same, impl_owner_ref_same,
     impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
-    variant_ref_member, symbol_ref_canonical_payload}
+    variant_ref_owner, variant_ref_member,
+    registered_nominal_ref_same,
+    registered_nominal_ref_display_name,
+    symbol_ref_same, symbol_ref_canonical_payload}
 use infer_register::{prefix_decl_name, module_prefix_decl_name}
 use effect_contract::{empty_typed_effect_header_schema}
 
@@ -585,6 +590,70 @@ fn copy_exported_name(
     }
 }
 
+fn exact_constructor_owner_for_symbol(
+    env: TypeEnv, symbol: SymbolRef
+) -> RegisteredNominalRef? {
+    let mut found: RegisteredNominalRef? = none
+    for entry in env.types.enums.entries() {
+        let def = entry.1
+        for variant in def.variant_refs {
+            if symbol_ref_same(variant_ref_member(variant), symbol) {
+                let owner = variant_ref_owner(variant)
+                match found {
+                    some(existing) => if !registered_nominal_ref_same(
+                            existing, owner) {
+                        panic("module export: constructor member names multiple enum owners")
+                    },
+                    none => { found = some(owner) }
+                }
+            }
+        }
+    }
+    found
+}
+
+fn public_types_contain_enum_owner(
+    values: Map<Str, TypeDef>, owner: RegisteredNominalRef
+) -> Bool {
+    for entry in values.entries() {
+        match entry.1 {
+            TypeDef::EnumDef_(def) => if registered_nominal_ref_same(
+                    def.owner_ref, owner) {
+                return true
+            },
+            TypeDef::StructDef_(_) => {}
+        }
+    }
+    false
+}
+
+fn validate_constructor_export_closure(
+    env: TypeEnv, value_symbols: Map<Str, SymbolRef>,
+    types: Map<Str, TypeDef>, sink: CollectingSink, program: Program
+) -> Bool {
+    let mut entries = value_symbols.entries()
+    entries.sort_by(compare_by_first)
+    let mut valid = true
+    for entry in entries {
+        let export_name = entry.0
+        match exact_constructor_owner_for_symbol(env, entry.1) {
+            some(owner) => if !public_types_contain_enum_owner(types, owner) {
+                let owner_name = registered_nominal_ref_display_name(owner)
+                sink.report(make_diag(
+                    E0703, Severity::SevError,
+                    "Public constructor export '${export_name}' requires its owner enum '${owner_name}' to be publicly re-exported; re-export the enum in this facade",
+                    program.span,
+                    DiagnosticContext::OtherContext { detail: some(
+                        "re-export the constructor owner enum in this facade")
+                    }))
+                valid = false
+            },
+            none => {}
+        }
+    }
+    valid
+}
+
 // Export the methods of every user-declared impl block. The canonical target
 // in each ModuleImplFact was resolved by the checker while the module's
 // namespace frames were live (check_impl_decl -> resolve_nominal_identity),
@@ -828,8 +897,9 @@ pub fn extract_exports(
     exact_value_symbols: Map<Int, SymbolRef>,
     exact_value_binding_kinds: Map<Int, ValueBindingKind>,
     impl_facts: List<ModuleImplFact>,
-    available_modules: List<ModuleExports>
-) -> ModuleExports {
+    available_modules: List<ModuleExports>,
+    sink: CollectingSink
+) -> ModuleExports? {
     let mut values: Map<Str, TypeScheme> = map_new()
     let mut value_symbols: Map<Str, SymbolRef> = map_new()
     let mut value_binding_kinds: Map<Str, ValueBindingKind> = map_new()
@@ -913,6 +983,11 @@ pub fn extract_exports(
         }
     }
 
+    if !validate_constructor_export_closure(
+            env, value_symbols, types, sink, program) {
+        return none
+    }
+
     // Filter by canonical payload identity after re-exports have been applied.
     // A facade may rename Foo to Bar, but its ImplEntry must still travel with
     // StructDef.name/EnumDef.name rather than the display spelling.
@@ -969,7 +1044,7 @@ pub fn extract_exports(
     validate_impl_export_closure(
         trait_impls, method_index, inherent_methods)
 
-    ModuleExports {
+    some(ModuleExports {
         module_key: module_key,
         module_prefix: module_prefix,
         values: values,
@@ -987,6 +1062,6 @@ pub fn extract_exports(
         extern_values: extern_values,
         mut_methods: mut_methods,
         fn_mut_params: fn_mut_params
-    }
+    })
 }
 

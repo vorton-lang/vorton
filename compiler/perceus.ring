@@ -495,11 +495,9 @@ fn anf_should_materialize(expr: HExpr, externs: Set<Str>) -> Bool {
         HExpr::FloatLit { .. } => true,
         HExpr::StrLit { .. } => true,
         HExpr::BoolLit { .. } => true,
-        // A fieldless variant has Ident syntax in HIR, but codegen invokes its
-        // zero-argument constructor and returns a FRESH enum box.  In operand
-        // position it therefore needs the same ANF binding + scope-end Drop as
-        // every other fresh constructor.
-        HExpr::Ident { .. } => nullary_variant_ctor,
+        // Enum constructors no longer cross TypedHIR as Ident nodes.
+        // Every remaining Ident is a read of an existing binding.
+        HExpr::Ident { .. } => false,
         // B-104 D1 rule ③: IndexExpr refined by RECEIVER type.  `s[i]` on a Str
         // lowers to ring_str_get, which allocates a NEW 1-char string
         // (ring_runtime.cpp: ring_alloc + placement-new — verified) — a FRESH

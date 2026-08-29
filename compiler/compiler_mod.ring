@@ -490,38 +490,68 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                                         prelude_physical_owner_module_key {
                                     panic("project checker: module prelude owner drifted")
                                 }
-                                // Surface check warnings (non-error diagnostics) without failing the build
-                                if sink.items.len() > 0 {
-                                    let mod_file = match graph.modules.get(key) { some(m) => m.file_path, none => "" }
-                                    if error_format == "llm" {
-                                        eprintln(format_llm(sink.diagnostics(), mod_file))
-                                    } else {
-                                        let src = read_file(mod_file)
-                                        eprintln(format_human(sink.diagnostics(), src))
-                                    }
-                                }
-                                module_hirs.insert(key, result.program)
-                                module_core_facts.insert(key, match result.core_facts {
-                                    some(value) => value,
-                                    none => panic(
-                                        "project ownership: successful module lacks Core facts")
-                                })
-                                module_legacy_facts.insert(key, match result.legacy_facts {
-                                    some(value) => value,
-                                    none => panic(
-                                        "project ownership: successful module lacks legacy facts")
-                                })
-                                module_envs.insert(key, result.env)
-                                match graph.modules.get(key) {
+                                let exported = match graph.modules.get(key) {
                                     some(mod_) => {
                                         let prefix = module_prefix(mod_.path_segments)
-                                        let exp = extract_exports(key, prefix, ast, result.program, result.env,
-                                            result.fn_mut_params, result.value_symbols,
+                                        extract_exports(
+                                            key, prefix, ast, result.program,
+                                            result.env, result.fn_mut_params,
+                                            result.value_symbols,
                                             result.value_binding_kinds,
-                                            result.impl_facts, dep_exports)
-                                        module_exports_map.insert(key, exp)
+                                            result.impl_facts, dep_exports, sink)
                                     },
-                                    none => {},
+                                    none => panic(
+                                        "project checker: checked module metadata is absent")
+                                }
+                                match exported {
+                                    none => {
+                                        let mod_file = match graph.modules.get(key) {
+                                            some(m) => m.file_path,
+                                            none => ""
+                                        }
+                                        if error_format == "llm" {
+                                            eprintln(format_llm(
+                                                sink.diagnostics(), mod_file))
+                                        } else {
+                                            let src = read_file(mod_file)
+                                            eprintln(format_human(
+                                                sink.diagnostics(), src))
+                                        }
+                                        check_ok = false
+                                    },
+                                    some(exp) => {
+                                        // Surface check warnings (non-error
+                                        // diagnostics) without failing build.
+                                        if sink.items.len() > 0 {
+                                            let mod_file = match graph.modules.get(key) {
+                                                some(m) => m.file_path,
+                                                none => ""
+                                            }
+                                            if error_format == "llm" {
+                                                eprintln(format_llm(
+                                                    sink.diagnostics(), mod_file))
+                                            } else {
+                                                let src = read_file(mod_file)
+                                                eprintln(format_human(
+                                                    sink.diagnostics(), src))
+                                            }
+                                        }
+                                        module_hirs.insert(key, result.program)
+                                        module_core_facts.insert(key,
+                                            match result.core_facts {
+                                                some(value) => value,
+                                                none => panic(
+                                                    "project ownership: successful module lacks Core facts")
+                                            })
+                                        module_legacy_facts.insert(key,
+                                            match result.legacy_facts {
+                                                some(value) => value,
+                                                none => panic(
+                                                    "project ownership: successful module lacks legacy facts")
+                                            })
+                                        module_envs.insert(key, result.env)
+                                        module_exports_map.insert(key, exp)
+                                    }
                                 }
                             }
                         },
