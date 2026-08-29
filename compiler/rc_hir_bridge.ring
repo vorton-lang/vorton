@@ -131,6 +131,7 @@ use core_expr::{
     core_stmt_bind_is_mutable,
     core_stmt_while_condition, core_stmt_while_body,
     core_stmt_return_value,
+    core_stmt_destructure_scrutinee, core_stmt_destructure_pattern,
     core_expr_kind_tag, core_expr_origin,
     core_expr_type, core_expr_effects,
     core_expr_literal, core_literal_kind_tag, core_literal_int,
@@ -165,6 +166,7 @@ use core_expr::{
     core_field_ref_variant, core_field_ref_tuple_index,
     core_field_ref_record_path, core_field_ref_record_name,
     core_field_ref_same,
+    make_core_tuple_field,
     core_field_value_field, core_field_value_expr,
     core_place_is_slot, core_place_slot, core_place_base,
     core_place_field,
@@ -1845,6 +1847,55 @@ fn serialized_expr_block(
     }
 }
 
+fn serialize_destructure_statement(
+    mut ctx: HirBridgeCtx, owner: ExecutableRef,
+    statement: CoreStmt, node_ordinal: Int
+) -> List<HStmt> {
+    let source = serialize_child_reference(
+        ctx, owner, core_stmt_destructure_scrutinee(statement))
+    let pattern = core_stmt_destructure_pattern(statement)
+    if core_pattern_kind_tag(pattern) != 3 {
+        panic("RcHIR bridge: destructure pattern is not tuple")
+    }
+    let mut result = source.prefix
+    let mut dispatch_ordinal = 0
+    let mut field_index = 0
+    for element in core_pattern_elements(pattern) {
+        let kind = core_pattern_kind_tag(element)
+        if kind == 1 {
+            let target = core_pattern_binding(element)
+            let project = instruction_for_node_role(
+                ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH,
+                dispatch_ordinal, 7)
+            if !slot_ref_same(flow_project_base(project), source.slot) ||
+               !slot_ref_same(flow_project_result(project), target) {
+                panic("RcHIR bridge: destructure projection relation differs")
+            }
+            let contract = flow_project_contract(project)
+            let binder = bridge_binder_for(ctx, target)
+            let projected = projected_field_access(
+                ctx, source.value, make_core_tuple_field(field_index),
+                legacy_binder_projection_type(binder), EMPTY_ROW)
+            append_all(result, before_drop_statements(
+                ctx, node_ordinal, none,
+                BRIDGE_ROLE_CONTROL_DISPATCH, dispatch_ordinal))
+            result.push(bridge_let_for_slot(
+                ctx, target, wrap_exact_place_take(
+                    ctx, node_ordinal, source.slot, target, projected,
+                    some(contract), false,
+                    BRIDGE_ROLE_CONTROL_DISPATCH, dispatch_ordinal)))
+            append_all(result, after_resource_statements(
+                ctx, node_ordinal,
+                BRIDGE_ROLE_CONTROL_DISPATCH, dispatch_ordinal))
+            dispatch_ordinal = dispatch_ordinal + 1
+        } else if kind != 0 {
+            panic("RcHIR bridge: destructure element is not binding/wildcard")
+        }
+        field_index = field_index + 1
+    }
+    result
+}
+
 fn serialize_core_statement(
     mut ctx: HirBridgeCtx, owner: ExecutableRef, statement: CoreStmt
 ) -> List<HStmt> {
@@ -2006,6 +2057,10 @@ fn serialize_core_statement(
             span: span_zero()
         })
         return result
+    }
+    if kind == 7 {
+        return serialize_destructure_statement(
+            ctx, owner, statement, node_ordinal)
     }
     panic("RcHIR bridge: unknown Core statement kind")
 }
@@ -3605,6 +3660,9 @@ fn validate_core_stmt_nodes(
             some(expr) => validate_core_expr_nodes(cursor, owner, expr),
             none => {}
         }
+    } else if kind == 7 {
+        validate_core_expr_nodes(
+            cursor, owner, core_stmt_destructure_scrutinee(statement))
     }
 }
 

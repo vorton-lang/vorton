@@ -1676,6 +1676,9 @@ enum CoreStmtValue {
     While {
         condition: CoreExpr, body: CoreBlock, origin: OriginRef
     },
+    Destructure {
+        scrutinee: CoreExpr, pattern: CorePattern, origin: OriginRef
+    },
     Break { origin: OriginRef },
     Continue { origin: OriginRef },
     Return { value: CoreExpr?, origin: OriginRef }
@@ -2105,6 +2108,13 @@ pub fn make_core_while_stmt(
         condition: condition, body: body, origin: origin
     } }
 }
+pub fn make_core_destructure_stmt(
+    scrutinee: CoreExpr, pattern: CorePattern, origin: OriginRef
+) -> CoreStmt {
+    CoreStmt { value: CoreStmtValue::Destructure {
+        scrutinee: scrutinee, pattern: pattern, origin: origin
+    } }
+}
 pub fn make_core_break_stmt(origin: OriginRef) -> CoreStmt {
     CoreStmt { value: CoreStmtValue::Break { origin: origin } }
 }
@@ -2125,7 +2135,8 @@ pub fn core_stmt_kind_tag(value: CoreStmt) -> Int {
         CoreStmtValue::While { .. } => 3,
         CoreStmtValue::Break { .. } => 4,
         CoreStmtValue::Continue { .. } => 5,
-        CoreStmtValue::Return { .. } => 6
+        CoreStmtValue::Return { .. } => 6,
+        CoreStmtValue::Destructure { .. } => 7
     }
 }
 pub fn core_stmt_origin(value: CoreStmt) -> OriginRef {
@@ -2136,7 +2147,8 @@ pub fn core_stmt_origin(value: CoreStmt) -> OriginRef {
         CoreStmtValue::While { origin, .. } => origin,
         CoreStmtValue::Break { origin } => origin,
         CoreStmtValue::Continue { origin } => origin,
-        CoreStmtValue::Return { origin, .. } => origin
+        CoreStmtValue::Return { origin, .. } => origin,
+        CoreStmtValue::Destructure { origin, .. } => origin
     }
 }
 pub fn core_stmt_target(value: CoreStmt) -> CorePlaceRef {
@@ -2176,6 +2188,18 @@ pub fn core_stmt_return_value(value: CoreStmt) -> CoreExpr? {
     match value.value {
         CoreStmtValue::Return { value: returned, .. } => returned,
         _ => panic("CoreHIR: statement is not Return")
+    }
+}
+pub fn core_stmt_destructure_scrutinee(value: CoreStmt) -> CoreExpr {
+    match value.value {
+        CoreStmtValue::Destructure { scrutinee, .. } => scrutinee,
+        _ => panic("CoreHIR: statement is not Destructure")
+    }
+}
+pub fn core_stmt_destructure_pattern(value: CoreStmt) -> CorePattern {
+    match value.value {
+        CoreStmtValue::Destructure { pattern, .. } => pattern,
+        _ => panic("CoreHIR: statement is not Destructure")
     }
 }
 
@@ -3165,6 +3189,18 @@ fn validate_match_arm(
     validate_block_with_loop_depth(value.body, body, loop_depth)
 }
 
+fn validate_destructure_pattern_shape(value: CorePattern) {
+    if core_pattern_kind_tag(value) != 3 {
+        panic("CoreHIR: 0.1 destructure pattern is not tuple")
+    }
+    for element in core_pattern_elements(value) {
+        let kind = core_pattern_kind_tag(element)
+        if kind != 0 && kind != 1 {
+            panic("CoreHIR: 0.1 destructure element is not binding/wildcard")
+        }
+    }
+}
+
 fn validate_statement(value: CoreStmt, body: CoreBody, loop_depth: Int) {
     match value.value {
         CoreStmtValue::Bind { target, value: expr, origin, .. } => {
@@ -3185,6 +3221,12 @@ fn validate_statement(value: CoreStmt, body: CoreBody, loop_depth: Int) {
         CoreStmtValue::ExprStmt { value: expr, origin } => {
             validate_origin(origin, body.reference)
             validate_expr_with_loop_depth(expr, body, loop_depth)
+        },
+        CoreStmtValue::Destructure { scrutinee, pattern, origin } => {
+            validate_origin(origin, body.reference)
+            validate_expr_with_loop_depth(scrutinee, body, loop_depth)
+            validate_destructure_pattern_shape(pattern)
+            let _ = validate_pattern(pattern, body.binders, [])
         },
         CoreStmtValue::While { condition, body: loop_body, origin } => {
             validate_origin(origin, body.reference)
@@ -3388,6 +3430,8 @@ fn collect_statement_effect_sets(
             }
             collect_expr_effect_sets(expr, result)
         },
+        CoreStmtValue::Destructure { scrutinee, .. } =>
+            collect_expr_effect_sets(scrutinee, result),
         CoreStmtValue::While { condition, body, .. } => {
             collect_expr_effect_sets(condition, result)
             collect_block_effect_sets(body, result)
@@ -3534,6 +3578,8 @@ fn collect_stmt_effect_ctx_tokens(
             }
             collect_expr_effect_ctx_tokens(expr, result)
         },
+        CoreStmtValue::Destructure { scrutinee, .. } =>
+            collect_expr_effect_ctx_tokens(scrutinee, result),
         CoreStmtValue::While { condition, body, .. } => {
             collect_expr_effect_ctx_tokens(condition, result)
             collect_block_effect_ctx_tokens(body, result)
@@ -3644,7 +3690,7 @@ fn collect_core_stmt_origins(value: CoreStmt, mut result: List<OriginRef>) {
     result.push(core_stmt_origin(value))
     match value.value {
         CoreStmtValue::Bind { value: expr, .. } |
-        CoreStmtValue::Expr { value: expr, .. } =>
+        CoreStmtValue::ExprStmt { value: expr, .. } =>
             collect_core_expr_origins(expr, result),
         CoreStmtValue::Assign { target, value: expr, .. } => {
             match target.value {
@@ -3654,6 +3700,8 @@ fn collect_core_stmt_origins(value: CoreStmt, mut result: List<OriginRef>) {
             }
             collect_core_expr_origins(expr, result)
         },
+        CoreStmtValue::Destructure { scrutinee, .. } =>
+            collect_core_expr_origins(scrutinee, result),
         CoreStmtValue::While { condition, body, .. } => {
             collect_core_expr_origins(condition, result)
             collect_core_block_origins(body, result)
@@ -4248,6 +4296,10 @@ fn remap_core_statement_types(
             make_core_while_stmt(
                 remap_core_expr_types(condition, ctx),
                 remap_core_block_types(body, ctx), origin),
+        CoreStmtValue::Destructure { scrutinee, pattern, origin } =>
+            make_core_destructure_stmt(
+                remap_core_expr_types(scrutinee, ctx),
+                remap_core_pattern(pattern, ctx), origin),
         CoreStmtValue::Break { origin } => make_core_break_stmt(origin),
         CoreStmtValue::Continue { origin } => make_core_continue_stmt(origin),
         CoreStmtValue::Return { value: returned, origin } =>
@@ -5675,6 +5727,13 @@ fn validate_statement_with_program(
             validate_expr_with_program(
                 expr, body, graph, callables, impls,
                 current_callable, loop_depth),
+        CoreStmtValue::Destructure { scrutinee, pattern, .. } => {
+            validate_expr_with_program(
+                scrutinee, body, graph, callables, impls,
+                current_callable, loop_depth)
+            validate_pattern_with_graph(
+                pattern, core_expr_type(scrutinee), body, graph)
+        },
         CoreStmtValue::While { condition, body: loop_body, .. } => {
             validate_expr_with_program(
                 condition, body, graph, callables,

@@ -64,6 +64,7 @@ use core_expr::{
     core_stmt_kind_tag, core_stmt_origin, core_stmt_target,
     core_stmt_value, core_stmt_while_condition, core_stmt_while_body,
     core_stmt_return_value, core_stmt_bind_is_mutable,
+    core_stmt_destructure_scrutinee, core_stmt_destructure_pattern,
     core_place_is_slot, core_place_slot, core_place_base,
     core_place_field,
     core_place_value_type,
@@ -440,6 +441,8 @@ fn validate_core_flow_step_map(
             } else if relation.node.kind_tag == 3 {
                 role_tag == CORE_FLOW_ROLE_CONTROL_DISPATCH ||
                 role_tag == CORE_FLOW_ROLE_CONTROL_EXIT
+            } else if relation.node.kind_tag == 7 {
+                role_tag == CORE_FLOW_ROLE_CONTROL_DISPATCH
             } else if relation.node.kind_tag == 4 ||
                       relation.node.kind_tag == 5 ||
                       relation.node.kind_tag == 6 {
@@ -2051,6 +2054,19 @@ fn lower_statement(
         terminate(ctx, make_flow_return(
             origin, returned_slot, all_exited_scopes(ctx)),
             core_flow_role_control_exit(0))
+    } else if kind == 7 {
+        let source = lower_expr(
+            ctx, core_stmt_destructure_scrutinee(statement),
+            continue_target, break_target)
+        if is_terminated(ctx) {
+            restore_core_node(ctx, previous)
+            return
+        }
+        let pattern = core_stmt_destructure_pattern(statement)
+        let scope = current_draft(ctx).scope
+        activate_pattern_binders(ctx, pattern, scope)
+        let _ = lower_pattern_projection(
+            ctx, source, pattern, scope, origin, 0)
     } else {
         panic("Flow lowering: unknown Core statement")
     }

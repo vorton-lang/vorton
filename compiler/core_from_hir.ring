@@ -137,7 +137,6 @@ use ir_inventory::{
     binder_kind_match_pattern, binder_kind_catch_pattern,
     binder_kind_lambda_param, binder_kind_handler_param,
     binder_kind_handler_resume, binder_kind_lambda_capture,
-    binder_kind_pre_anf,
     binder_kind_generated_synthetic_parameter,
     binder_kind_effect_ctx_local,
     binder_kind_effect_ctx_param,
@@ -253,6 +252,7 @@ use core_type_source::{
     flow_type_node_reference, flow_type_node_kind,
     flow_type_node_callable_effects,
     flow_type_node_generic_param,
+    flow_type_node_children,
     flow_type_kind_parameter,
     flow_type_node_nominal_fields,
     flow_nominal_field_identity, flow_nominal_field_type,
@@ -277,6 +277,7 @@ use core_expr::{
     make_core_block, make_core_bind_stmt, make_core_assign_stmt,
     make_core_expr_stmt, make_core_while_stmt, make_core_break_stmt,
     make_core_continue_stmt, make_core_return_stmt,
+    make_core_destructure_stmt,
     make_core_literal_expr, make_core_int_literal, make_core_float_literal,
     make_core_str_literal, make_core_bool_literal, make_core_unit_literal,
     make_core_read_expr, make_core_callable_value_expr,
@@ -3479,16 +3480,17 @@ fn primitive_tag(op: BinOp) -> Int {
     }
 }
 
-fn lower_pattern(ctx: LowerCtx, ast: Pattern, plan: HPatternPlan) -> CorePattern {
+fn lower_pattern(
+    ctx: LowerCtx, ast: Pattern, plan: HPatternPlan,
+    expected_type: CoreTypeRef, binding_kind: BinderKind
+) -> CorePattern {
     let kind = h_pattern_kind(plan)
-    if kind == 0 { return make_core_wildcard_pattern(type_fact_for(
-        ctx.types, Type::UnitType, ctx.module_key)) }
+    if kind == 0 { return make_core_wildcard_pattern(expected_type) }
     if kind == 1 {
         let binding = h_pattern_plan_binding(plan)
         let slot = ensure_binder(ctx, binding.slot, binding.ty,
-            binder_kind_match_pattern(), false)
-        return make_core_binding_pattern(
-            type_fact_for(ctx.types, binding.ty, ctx.module_key), slot)
+            binding_kind, false)
+        return make_core_binding_pattern(expected_type, slot)
     }
     if kind == 2 {
         let literal = match ast { Pattern::Literal { value, .. } => value,
@@ -3499,33 +3501,38 @@ fn lower_pattern(ctx: LowerCtx, ast: Pattern, plan: HPatternPlan) -> CorePattern
             LiteralValue::StrVal(v) => make_core_str_literal(v),
             LiteralValue::BoolVal(v) => make_core_bool_literal(v)
         }
-        return make_core_literal_pattern(
-            type_fact_for(ctx.types, Type::UnitType, ctx.module_key), core)
+        return make_core_literal_pattern(expected_type, core)
     }
     if kind == 3 {
         let children = h_pattern_plan_children(plan)
         let ast_children = match ast { Pattern::TuplePattern { elements, .. } => elements,
             _ => panic("Core assembly: tuple pattern/plan drifted") }
         let mut result: List<CorePattern> = []
+        let child_types = flow_type_node_children(
+            lower_type_node(ctx, expected_type))
+        if child_types.len() != children.len() {
+            panic("Core assembly: tuple pattern type arity differs")
+        }
         let mut index = 0
         while index < children.len() {
             result.push(lower_pattern(ctx, ast_children.get(index).unwrap(),
-                children.get(index).unwrap()))
+                children.get(index).unwrap(),
+                child_types.get(index).unwrap(), binding_kind))
             index = index + 1
         }
-        return make_core_tuple_pattern(type_fact_for(
-            ctx.types, Type::UnitType, ctx.module_key), result)
+        return make_core_tuple_pattern(expected_type, result)
     }
     let fields = h_pattern_plan_fields(plan).map(fn(field) {
-        make_core_pattern_field(core_field(h_pattern_field_projection(field)),
+        let core = core_field(h_pattern_field_projection(field))
+        make_core_pattern_field(core,
             lower_pattern(ctx, Pattern::Wildcard { span: span_zero() },
-                h_pattern_field_pattern(field)))
+                h_pattern_field_pattern(field),
+                move_update_field_type(ctx, expected_type, core),
+                binding_kind))
     })
-    if kind == 4 { make_core_struct_pattern(type_fact_for(
-        ctx.types, Type::UnitType, ctx.module_key),
+    if kind == 4 { make_core_struct_pattern(expected_type,
         h_pattern_plan_struct_owner(plan), fields) }
-    else if kind == 5 { make_core_variant_pattern(type_fact_for(
-        ctx.types, Type::UnitType, ctx.module_key),
+    else if kind == 5 { make_core_variant_pattern(expected_type,
         h_pattern_plan_variant(plan), fields) }
     else { panic("Core assembly: OrPattern crossed PreCore") }
 }
@@ -3819,9 +3826,17 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                 lower_expr(ctx, condition), block_from_expr(ctx, then_branch),
                 block_from_expr(ctx, match else_branch { some(v) => v,
                     none => panic("Core assembly: If lacks else after PreCore") })),
-        HExpr::MatchExpr { scrutinee, arms, .. } => make_core_match_expr(
-            ty, effects, origin, lower_expr(ctx, scrutinee),
-            arms.map(fn(arm) { lower_arm(ctx, arm, false) })),
+        HExpr::MatchExpr { scrutinee, arms, .. } => {
+            let pattern_type = type_fact_for(
+                ctx.types, hexpr_type(scrutinee), ctx.module_key)
+            make_core_match_expr(
+                ty, effects, origin, lower_expr(ctx, scrutinee),
+                arms.map(fn(arm) {
+                    lower_arm(
+                        ctx, arm, false, pattern_type,
+                        binder_kind_match_pattern())
+                }))
+        },
         HExpr::TryCatch { body, arms, .. } => {
             let error = match arms.get(0) {
                 some(arm) => match arm.bindings.get(0) {
@@ -3830,9 +3845,18 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                 },
                 none => panic("Core assembly: catch has no arms")
             }
+            let pattern_type = type_fact_for(
+                ctx.types, match arms.get(0).unwrap().bindings.get(0) {
+                    some(binding) => binding.ty,
+                    none => panic("Core assembly: catch pattern type is absent")
+                }, ctx.module_key)
             make_core_try_catch_expr(ty, effects, origin,
                 block_from_expr(ctx, body), error,
-                arms.map(fn(arm) { lower_arm(ctx, arm, true) }))
+                arms.map(fn(arm) {
+                    lower_arm(
+                        ctx, arm, true, pattern_type,
+                        binder_kind_catch_pattern())
+                }))
         },
         HExpr::HandleExpr {
             body, handlers, effect_ctx_install, span
@@ -3894,7 +3918,10 @@ fn block_from_expr(ctx: LowerCtx, value: HExpr) -> CoreBlock {
     }
 }
 
-fn lower_arm(ctx: LowerCtx, value: HMatchArm, is_catch: Bool) -> CoreMatchArm {
+fn lower_arm(
+    ctx: LowerCtx, value: HMatchArm, is_catch: Bool,
+    expected_type: CoreTypeRef, binding_kind: BinderKind
+) -> CoreMatchArm {
     let span = value.span
     let plan = match value.pattern_plan { some(v) => v,
         none => panic("Core assembly: match arm lacks exact pattern") }
@@ -3903,12 +3930,9 @@ fn lower_arm(ctx: LowerCtx, value: HMatchArm, is_catch: Bool) -> CoreMatchArm {
             if is_catch { binder_kind_catch_pattern() }
             else { binder_kind_match_pattern() }, false)
     }
-    let expected = match value.bindings.get(0) {
-        some(binding) => binding.ty,
-        none => Type::UnitType
-    }
     make_core_match_arm(
-        lower_pattern(ctx, value.pattern, plan),
+        lower_pattern(
+            ctx, value.pattern, plan, expected_type, binding_kind),
         value.guard.map(fn(v) { lower_expr(ctx, v) }),
         block_from_expr(ctx, value.body), fresh_origin(ctx, "arm", span))
 }
@@ -4007,7 +4031,7 @@ fn lower_place(ctx: LowerCtx, value: HExpr) -> CorePlaceRef {
     }
 }
 
-fn lower_stmt(ctx: LowerCtx, value: HStmt) -> List<CoreStmt> {
+fn lower_stmt(ctx: LowerCtx, value: HStmt) -> CoreStmt {
     let origin = fresh_origin(ctx, "stmt", hstmt_source_span(value))
     match value {
         HStmt::Let { def_id: some(id), ty, init, .. } => {
@@ -4016,71 +4040,43 @@ fn lower_stmt(ctx: LowerCtx, value: HStmt) -> List<CoreStmt> {
                 ctx, slot, ty,
                 if id < 0 { binder_kind_dictionary_evidence_local() }
                 else { binder_kind_let() }, false)
-            [make_core_bind_stmt(
-                exact_slot, lower_expr(ctx, init), false, origin)]
+            make_core_bind_stmt(
+                exact_slot, lower_expr(ctx, init), false, origin)
         },
         HStmt::Var { def_id: some(id), ty, init, .. } => {
             let slot = source_slot(ctx.module_key, id)
             let exact_slot = ensure_binder(
                 ctx, slot, ty, binder_kind_var(), true)
-            [make_core_bind_stmt(
-                exact_slot, lower_expr(ctx, init), true, origin)]
+            make_core_bind_stmt(
+                exact_slot, lower_expr(ctx, init), true, origin)
         },
         HStmt::Assign { target, value, .. } =>
-            [make_core_assign_stmt(
-                lower_place(ctx, target), lower_expr(ctx, value), origin)],
+            make_core_assign_stmt(
+                lower_place(ctx, target), lower_expr(ctx, value), origin),
         HStmt::ExprStmt { expr, .. } =>
-            [make_core_expr_stmt(lower_expr(ctx, expr), origin)],
+            make_core_expr_stmt(lower_expr(ctx, expr), origin),
         HStmt::Return { value, .. } =>
-            [make_core_return_stmt(
-                value.map(fn(v) { lower_expr(ctx, v) }), origin)],
+            make_core_return_stmt(
+                value.map(fn(v) { lower_expr(ctx, v) }), origin),
         HStmt::While { condition, body, .. } =>
-            [make_core_while_stmt(
-                lower_expr(ctx, condition), block_from_expr(ctx, body), origin)],
-        HStmt::Break { .. } => [make_core_break_stmt(origin)],
-        HStmt::Continue { .. } => [make_core_continue_stmt(origin)],
-        HStmt::LetDestructure { bindings, init, span, .. } => {
-            let init_type = type_fact_for(
+            make_core_while_stmt(
+                lower_expr(ctx, condition), block_from_expr(ctx, body), origin),
+        HStmt::Break { .. } => make_core_break_stmt(origin),
+        HStmt::Continue { .. } => make_core_continue_stmt(origin),
+        HStmt::LetDestructure {
+            pattern, pattern_plan, init, ..
+        } => {
+            let plan = pattern_plan.unwrap_or_else(fn() {
+                panic("Core assembly: destructure pattern plan is absent")
+            })
+            let pattern_type = type_fact_for(
                 ctx.types, hexpr_type(init), ctx.module_key)
-            let temp_site = make_path_ref(
-                executable_owner(ctx.owner),
-                ["core", "destructure-temp", ctx.next_origin.to_str()],
-                path_role_synthetic())
-            let temp_slot = make_synthetic_slot_ref(temp_site)
-            append_unique_core_binder(ctx.binders, make_core_binder(
-                temp_slot, init_type, binder_kind_pre_anf(), temp_site,
-                flow_own_storage(), false))
-            let mut result = [make_core_bind_stmt(
-                temp_slot, lower_expr(ctx, init), false, origin)]
-            for binding in bindings {
-                if binding.name != "_" {
-                    let source_slot = binding.slot.unwrap_or_else(fn() {
-                        panic("Core assembly: destructure binding slot is absent")
-                    })
-                    let projection = binding.projection.unwrap_or_else(fn() {
-                        panic("Core assembly: destructure projection is absent")
-                    })
-                    if h_projection_kind(projection) != 3 {
-                        panic("Core assembly: destructure projection is not tuple")
-                    }
-                    let target = ensure_binder(
-                        ctx, source_slot, binding.ty,
-                        binder_kind_let(), false)
-                    let read = make_core_read_expr(
-                        init_type, make_core_effect_set([]),
-                        fresh_origin(ctx, "destructure-source", span), temp_slot)
-                    let projected = make_core_project_expr(
-                        type_fact_for(
-                            ctx.types, binding.ty, ctx.module_key),
-                        make_core_effect_set([]),
-                        fresh_origin(ctx, "destructure-project", span),
-                        read, core_field(projection), false)
-                    result.push(make_core_bind_stmt(
-                        target, projected, false,
-                        fresh_origin(ctx, "destructure-binding", span)))
-                }
-            }
-            result
+            make_core_destructure_stmt(
+                lower_expr(ctx, init),
+                lower_pattern(
+                    ctx, pattern, plan, pattern_type,
+                    binder_kind_let()),
+                origin)
         },
         HStmt::ForIn { .. } | HStmt::IfLet { .. } | HStmt::Drop { .. } =>
             panic("Core assembly: surface/resource HStmt crossed PreCore"),
@@ -4091,11 +4087,7 @@ fn lower_stmt(ctx: LowerCtx, value: HStmt) -> List<CoreStmt> {
 fn lower_block(
     ctx: LowerCtx, stmts: List<HStmt>, tail: HExpr?, source_span: Span
 ) -> CoreBlock {
-    let mut lowered: List<CoreStmt> = []
-    for stmt in stmts {
-        for item in lower_stmt(ctx, stmt) { lowered.push(item) }
-    }
-    make_core_block(lowered,
+    make_core_block(stmts.map(fn(stmt) { lower_stmt(ctx, stmt) }),
         tail.map(fn(v) { lower_expr(ctx, v) }),
         fresh_origin(ctx, "block", source_span))
 }
