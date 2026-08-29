@@ -146,6 +146,10 @@ instantiate(∀α₁..αₙ. τ [bounds]):
 
 上述实例化只适用于已经闭合并发布的 type scheme。递归组的 provisional scheme 以及尚未完成 final-zonk/generalize 的 callable 不得走该规则。
 
+0.1只有一个窄例外：同一尚未闭合的A1检查单元内，具名callable作为first-class value使用时，若其registration header（包括nested callable effect部分）已递归closed，则可从该closed header建立当前使用点的callable实例；provider body仍只推断一次，且不得因此提前generalize或publish provider。Header仍开放时必须稳定报错并要求显式完整`with { ... }`或lambda wrapper，不能由SCC扫描名字、动态扩组或post-HIR patch补救。Direct call继续服从真实递归组规则；import/re-export provider使用已经发布的scheme，不属于该例外。
+
+Post-0.1的B-204会把函数体中的callable occurrence交由sole resolver固定exact provider，再让Tarjan与inference共同消费同一dependency事实；完成后撤销上述显式closed-header限制。0.1实现不得提前加入空ResolvedAST carrier、双路径或名字fallback。
+
 一次实例化的 `mapping` 是唯一替换真值：普通类型实参、effect参数实例和trait dictionary/evidence选择必须使用同一份结果。它们不得分别从最终类型结构重新推导替换关系。
 
 每个使用点获得 fresh 类型变量，实现多态复用。
