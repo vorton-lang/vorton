@@ -45,6 +45,7 @@ use ir_inventory::{ExactDictRef,
     dict_ref_same, make_exact_wrapped_dict_ref,
     EffectCtxRef, EffectCtxParentCapture,
     EffectOperationRef, make_named_executable_ref,
+    executable_ref_same,
     effect_ctx_slot,
     effect_ctx_parent_capture_source, effect_ctx_parent_capture_target,
     effect_operation_ref_effect,
@@ -63,6 +64,18 @@ use effect_contract::{TypedHandledEffectInstance,
 use legacy_projection::{
     legacy_effect_ctx_token_ordinal, legacy_effect_ctx_token_instance}
 use extern_manifest::{compiler_extern_ref_for_executable}
+use builtins::{BuiltinValueContractFact,
+    builtin_value_contract_facts, builtin_value_contract_site,
+    builtin_value_contract_executable, builtin_value_contract_symbol,
+    builtin_value_contract_scheme, builtin_value_contract_physical,
+    builtin_value_physical_lowering_tag,
+    builtin_value_physical_lowering_data,
+    BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME,
+    BUILTIN_VALUE_PHYSICAL_PTR_FROM_ADDR,
+    BUILTIN_VALUE_PHYSICAL_HASH_COMBINE,
+    BUILTIN_VALUE_PHYSICAL_STR_IDENTITY,
+    BUILTIN_VALUE_PHYSICAL_BOOL_TO_STR,
+    BUILTIN_VALUE_PHYSICAL_INDEX}
 use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     VariantRef,
     callee_ref_is_named, callee_ref_named_symbol,
@@ -78,7 +91,9 @@ use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     impl_owner_ref_target, impl_owner_ref_provider,
     impl_owner_ref_same,
     impl_provider_ref_kind, impl_provider_kind_builtin,
-    impl_provider_kind_same, symbol_ref_canonical_payload,
+    impl_provider_kind_same,
+    symbol_ref_origin_module_key, symbol_ref_canonical_payload,
+    symbol_ref_same,
     variant_ref_owner, variant_ref_source_index, variant_ref_same,
     variant_field_ref_variant, variant_field_ref_index,
     variant_field_ref_same,
@@ -112,7 +127,14 @@ use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     BUILTIN_METHOD_INT_DEBUG, BUILTIN_METHOD_FLOAT_DEBUG,
     BUILTIN_METHOD_STR_DEBUG, BUILTIN_METHOD_BOOL_DEBUG,
     BUILTIN_METHOD_INT_HASH, BUILTIN_METHOD_STR_HASH,
-    BUILTIN_METHOD_BOOL_HASH, BUILTIN_METHOD_SITE_COUNT}
+    BUILTIN_METHOD_BOOL_HASH, BUILTIN_METHOD_SITE_COUNT,
+    builtin_value_site_tag,
+    BUILTIN_VALUE_CELL_CONSTRUCTOR, BUILTIN_VALUE_ALLOC,
+    BUILTIN_VALUE_DEALLOC, BUILTIN_VALUE_PTR_COPY,
+    BUILTIN_VALUE_PTR_FROM_ADDR, BUILTIN_VALUE_HASH_COMBINE,
+    BUILTIN_VALUE_STR_IDENTITY, BUILTIN_VALUE_BOOL_TO_STR,
+    BUILTIN_VALUE_LIST_INDEX, BUILTIN_VALUE_STR_INDEX,
+    BUILTIN_VALUE_SITE_COUNT}
 use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo,
     CEmitState, CHandleCleanup,
     CNameOnlySlotRef, CTypedRef, CClosureEdge,
@@ -3243,11 +3265,6 @@ fn extern_fn_to_runtime_c(name: Str) -> Str? {
     if name == "parse_int" { return some("ring_parse_int") }
     if name == "parse_float" { return some("ring_parse_float") }
     if name == "__ring_raise_fail" { return some("__ring_raise_fail") }
-    if name == "Cell" { return some("ring_Cell_new") }
-    // B-125: Ptr<T> builtins
-    if name == "alloc" { return some("ring_raw_alloc") }
-    if name == "dealloc" { return some("ring_raw_dealloc") }
-    if name == "ptr_copy" { return some("ring_ptr_copy") }
     // B-152: StringBuilder RIIR bridge functions
     if name == "ring_str_as_ptr" { return some("ring_str_as_ptr") }
     if name == "ring_str_from_ptr" { return some("ring_str_from_ptr") }
@@ -3285,6 +3302,204 @@ fn gen_c_runtime_call(mut ctx: CCtx, name: Str, args: List<Str>) -> Str {
     }
 }
 
+fn builtin_value_fact_for_callee(
+    callee_ref: CalleeRef?
+) -> BuiltinValueContractFact? {
+    let symbol = match callee_ref {
+        some(value) => if callee_ref_is_named(value) {
+            callee_ref_named_symbol(value)
+        } else { return none },
+        none => return none
+    }
+    if symbol_ref_origin_module_key(symbol) != "$builtin" { return none }
+    let executable = make_named_executable_ref(symbol)
+    let facts = builtin_value_contract_facts()
+    if facts.len() != BUILTIN_VALUE_SITE_COUNT {
+        panic("C codegen: builtin value manifest census differs")
+    }
+    let mut found: BuiltinValueContractFact? = none
+    let mut index = 0
+    while index < facts.len() {
+        let fact = facts.get(index).unwrap()
+        let fact_symbol = builtin_value_contract_symbol(fact)
+        if builtin_value_site_tag(builtin_value_contract_site(fact)) != index ||
+           !executable_ref_same(
+                builtin_value_contract_executable(fact),
+                make_named_executable_ref(fact_symbol)) {
+            panic("C codegen: builtin value exact relation differs")
+        }
+        if symbol_ref_same(symbol, fact_symbol) {
+            if found.is_some() || !executable_ref_same(
+                    executable, builtin_value_contract_executable(fact)) {
+                panic("C codegen: builtin value exact match is not unique")
+            }
+            found = some(fact)
+        }
+        index = index + 1
+    }
+    found
+}
+
+fn require_builtin_value_arity(
+    fact: BuiltinValueContractFact, args: List<Str>, expected: Int
+) {
+    let declared = match builtin_value_contract_scheme(fact).ty {
+        Type::FnType { params, .. } => params.len(),
+        _ => panic("C codegen: builtin value scheme is not callable")
+    }
+    if declared != expected || args.len() != expected {
+        panic("C codegen: builtin value call arity differs")
+    }
+}
+
+fn validated_builtin_value_physical_data(
+    fact: BuiltinValueContractFact, expected_tag: Int,
+    expected_data: Str?
+) -> Str? {
+    let physical = builtin_value_contract_physical(fact)
+    if builtin_value_physical_lowering_tag(physical) != expected_tag {
+        panic("C codegen: builtin value physical tag differs")
+    }
+    let actual = builtin_value_physical_lowering_data(physical)
+    match (actual, expected_data) {
+        (some(value), some(expected)) => {
+            if value != expected {
+                panic("C codegen: builtin value physical data differs")
+            }
+            some(value)
+        },
+        (none, none) => none,
+        _ => panic("C codegen: builtin value physical data shape differs")
+    }
+}
+
+fn builtin_value_runtime_leaf(
+    fact: BuiltinValueContractFact, physical_tag: Int,
+    expected_name: Str, expected_arity: Int
+) -> Str {
+    let name = match validated_builtin_value_physical_data(
+            fact, physical_tag, some(expected_name)) {
+        some(value) => value,
+        none => panic("C codegen: builtin value runtime leaf is absent")
+    }
+    match rt_known_arity(name) {
+        some(value) => if value != expected_arity {
+            panic("C codegen: builtin value runtime ABI arity differs")
+        },
+        none => panic("C codegen: builtin value runtime leaf is unknown")
+    }
+    name
+}
+
+fn require_inline_builtin_value_tag(
+    fact: BuiltinValueContractFact, expected_tag: Int
+) {
+    let _ = validated_builtin_value_physical_data(
+        fact, expected_tag, none)
+}
+
+fn gen_c_builtin_value_call(
+    mut ctx: CCtx, arg_vals: List<Str>, dict_vals: List<Str>,
+    callee_ref: CalleeRef?
+) -> Str? {
+    let fact = match builtin_value_fact_for_callee(callee_ref) {
+        some(value) => value,
+        none => return none
+    }
+    if dict_vals.len() != 0 {
+        panic("C codegen: builtin value call carries dictionary arguments")
+    }
+    let site = builtin_value_site_tag(builtin_value_contract_site(fact))
+    if site == BUILTIN_VALUE_CELL_CONSTRUCTOR {
+        require_builtin_value_arity(fact, arg_vals, 1)
+        let runtime = builtin_value_runtime_leaf(
+            fact, BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME,
+            "ring_Cell_new", 1)
+        return some(gen_c_runtime_call(ctx, runtime, arg_vals))
+    }
+    if site == BUILTIN_VALUE_ALLOC {
+        require_builtin_value_arity(fact, arg_vals, 1)
+        let runtime = builtin_value_runtime_leaf(
+            fact, BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME,
+            "ring_raw_alloc", 1)
+        // Current raw-memory ABI receives the tagged Ring Int count.
+        return some(gen_c_runtime_call(ctx, runtime, arg_vals))
+    }
+    if site == BUILTIN_VALUE_DEALLOC {
+        require_builtin_value_arity(fact, arg_vals, 2)
+        let runtime = builtin_value_runtime_leaf(
+            fact, BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME,
+            "ring_raw_dealloc", 2)
+        // Current raw-memory ABI receives the tagged Ring Int count.
+        return some(gen_c_runtime_call(ctx, runtime, arg_vals))
+    }
+    if site == BUILTIN_VALUE_PTR_COPY {
+        require_builtin_value_arity(fact, arg_vals, 3)
+        let runtime = builtin_value_runtime_leaf(
+            fact, BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME,
+            "ring_ptr_copy", 3)
+        // Current raw-memory ABI receives the tagged Ring Int count.
+        return some(gen_c_runtime_call(ctx, runtime, arg_vals))
+    }
+    if site == BUILTIN_VALUE_PTR_FROM_ADDR {
+        require_builtin_value_arity(fact, arg_vals, 1)
+        require_inline_builtin_value_tag(
+            fact, BUILTIN_VALUE_PHYSICAL_PTR_FROM_ADDR)
+        let address = arg_vals.get(0).unwrap()
+        let result = fresh_tmp(ctx)
+        c_emit(ctx,
+            "${result} = (void*)(intptr_t)RING_UNTAG(${address});")
+        return some(result)
+    }
+    if site == BUILTIN_VALUE_HASH_COMBINE {
+        require_builtin_value_arity(fact, arg_vals, 2)
+        let runtime = builtin_value_runtime_leaf(
+            fact, BUILTIN_VALUE_PHYSICAL_HASH_COMBINE,
+            "ring_hash_combine", 2)
+        let left = arg_vals.get(0).unwrap()
+        let right = arg_vals.get(1).unwrap()
+        rt_use(ctx, runtime, 2)
+        let result = fresh_tmp(ctx)
+        c_emit(ctx,
+            "${result} = RING_INT(${runtime}(RING_UNTAG(${left}), RING_UNTAG(${right})));")
+        return some(result)
+    }
+    if site == BUILTIN_VALUE_STR_IDENTITY {
+        require_builtin_value_arity(fact, arg_vals, 1)
+        require_inline_builtin_value_tag(
+            fact, BUILTIN_VALUE_PHYSICAL_STR_IDENTITY)
+        return some(arg_vals.get(0).unwrap())
+    }
+    if site == BUILTIN_VALUE_BOOL_TO_STR {
+        require_builtin_value_arity(fact, arg_vals, 1)
+        let runtime = builtin_value_runtime_leaf(
+            fact, BUILTIN_VALUE_PHYSICAL_BOOL_TO_STR,
+            "ring_bool_to_str", 1)
+        let value = arg_vals.get(0).unwrap()
+        return some(gen_c_runtime_call(
+            ctx, runtime, ["RING_UNTAG(${value})"]))
+    }
+    if site == BUILTIN_VALUE_LIST_INDEX {
+        require_builtin_value_arity(fact, arg_vals, 2)
+        let runtime = builtin_value_runtime_leaf(
+            fact, BUILTIN_VALUE_PHYSICAL_INDEX, "ring_list_get", 2)
+        let receiver = arg_vals.get(0).unwrap()
+        let index = arg_vals.get(1).unwrap()
+        return some(gen_c_runtime_call(
+            ctx, runtime, [receiver, "RING_UNTAG(${index})"]))
+    }
+    if site == BUILTIN_VALUE_STR_INDEX {
+        require_builtin_value_arity(fact, arg_vals, 2)
+        let runtime = builtin_value_runtime_leaf(
+            fact, BUILTIN_VALUE_PHYSICAL_INDEX, "ring_str_get", 2)
+        let receiver = arg_vals.get(0).unwrap()
+        let index = arg_vals.get(1).unwrap()
+        return some(gen_c_runtime_call(
+            ctx, runtime, [receiver, "RING_UNTAG(${index})"]))
+    }
+    panic("C codegen: builtin value site census is incomplete")
+}
+
 // Send a proven extern ABI leaf through the complete legacy direct-call
 // pipeline. Many std extern spellings map implicitly to `ring_<leaf>` rather
 // than appearing in extern_fn_to_runtime_c (notably assert).
@@ -3318,12 +3533,10 @@ fn gen_c_direct_call(
     dict_vals: List<Str>, effect_ctx_value: Str,
     callee_ref: CalleeRef?
 ) -> Str {
-    // B-125: ptr_from_addr — pure codegen identity (untag Int → raw address).
-    if name == "ptr_from_addr" {
-        let a = match arg_vals.get(0) { some(v) => v, none => panic("ptr_from_addr: missing arg") }
-        let t = fresh_tmp(ctx)
-        c_emit(ctx, "${t} = (void*)(intptr_t)RING_UNTAG(${a});")
-        return t
+    match gen_c_builtin_value_call(
+            ctx, arg_vals, dict_vals, callee_ref) {
+        some(value) => return value,
+        none => {}
     }
 
     let resolved_key = c_resolve_fn(ctx, name)
@@ -3345,8 +3558,9 @@ fn gen_c_direct_call(
             },
             none => {},
         }
-        // Backward-compatible raw builtin path for compiler-synthesised calls
-        // that have no HDecl registration. Exact Ring declarations always win.
+        // Raw ABI fallback for non-manifest compiler externs without an HDecl.
+        // BuiltinValue leaves were already selected by exact SymbolRef above;
+        // exact Ring declarations continue to win over this spelling path.
         match extern_fn_to_runtime_c(name) {
             some(rtn) => {
                 if forwards_ctx {
