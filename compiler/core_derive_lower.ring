@@ -24,7 +24,6 @@ use core_expr::{
     make_core_read_expr, make_core_project_expr,
     make_core_call_expr, make_core_method_call_expr,
     make_core_construct_expr, make_core_if_expr, make_core_match_expr,
-    make_core_block_expr,
     make_core_primitive_expr, make_core_primitive_op,
     make_core_literal_expr, make_core_int_literal,
     make_core_str_literal, make_core_bool_literal,
@@ -973,8 +972,6 @@ fn ord_fields(
         _ => panic("Core derive Ord: unflattened tuple reached leaf fold")
     }
     let compared = field_binary_call(field)
-    let bind = make_core_bind_stmt(
-        result_slot, compared, false, operation.origin)
     let read_for_lt = make_core_read_expr(
         plan.int_type, make_core_effect_set([]), origin, result_slot)
     let is_negative = make_core_primitive_expr(
@@ -1002,9 +999,13 @@ fn ord_fields(
         plan.int_type, plan.header.result_effects, origin, is_negative,
         make_core_block([], some(negative_value), origin),
         make_core_block([], some(non_negative), origin))
-    make_core_block_expr(
-        plan.int_type, plan.header.result_effects, origin,
-        make_core_block([bind], some(selected), origin))
+    make_core_match_expr(
+        plan.int_type, plan.header.result_effects, origin, compared, [
+            make_core_match_arm(
+                make_core_binding_pattern(plan.int_type, result_slot), none,
+                make_core_block([], some(selected), operation.origin),
+                operation.origin)
+        ])
 }
 
 fn discriminator_compare(

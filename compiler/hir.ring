@@ -765,9 +765,9 @@ pub struct DerivedField {
     pub field_ref: DerivedFieldRef,
     pub ty: Type,
     pub action: FieldAction,
-    // Ord comparison results are semantic generated lets: the same exact
-    // value feeds both the zero test and early return, so Core must never
-    // duplicate the method call while lowering structured control.
+    // Ord comparison results are semantic match bindings: the same exact
+    // value feeds both sign tests, while Flow alone materializes the call
+    // result and operational control.
     pub ord_result_binder: BinderEntry?
 }
 

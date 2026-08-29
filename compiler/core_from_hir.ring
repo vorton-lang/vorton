@@ -4728,16 +4728,16 @@ fn append_unique_core_binder(
     values.push(value)
 }
 
-fn derived_generated_result_slot(
-    facts: FrozenCoreAssemblyFacts, owner: ExecutableRef,
-    ty: CoreTypeRef, path: List<Str>, mut binders: List<CoreBinder>
+fn derived_ord_pattern_slot(
+    owner: ExecutableRef, ty: CoreTypeRef,
+    path: List<Str>, mut binders: List<CoreBinder>
 ) -> SlotRef {
     let site = make_path_ref(
         executable_owner(owner), path, path_role_parameter())
     let slot = make_synthetic_slot_ref(site)
     append_unique_core_binder(binders, make_core_binder(
-        slot, ty, binder_kind_generated_synthetic_parameter(), site,
-        flow_own_storage(), false))
+        slot, ty, binder_kind_match_pattern(), site,
+        flow_borrow_storage(), false))
     slot
 }
 
@@ -4774,13 +4774,20 @@ fn build_derived_field_plan(
                 }
                 match exact_ord_binder {
                     some(entry) => {
+                        if binder_kind_tag(binder_entry_kind(entry)) !=
+                           binder_kind_tag(binder_kind_match_pattern()) {
+                            panic("Core assembly: Ord result is not a match binder")
+                        }
                         append_unique_core_binder(
-                            binders, core_binder_from_entry(
-                                facts, entry, result_type))
+                            binders, make_core_binder(
+                                binder_entry_slot(entry), result_type,
+                                binder_kind_match_pattern(),
+                                binder_entry_site(entry),
+                                flow_borrow_storage(), false))
                         some(binder_entry_slot(entry))
                     },
-                    none => some(derived_generated_result_slot(
-                        facts, owner, result_type, path, binders))
+                    none => some(derived_ord_pattern_slot(
+                        owner, result_type, path, binders))
                 }
             } else { none }
             make_core_derived_field_plan(

@@ -72,6 +72,7 @@ use ir_inventory::{ExecutableRef, BinderEntry,
     make_named_executable_ref, executable_ref_is_named,
     executable_ref_named_symbol,
     make_source_binder_entry, binder_kind_let,
+    binder_kind_match_pattern,
     binder_kind_source_param,
     make_effect_ctx_parameter_ref}
 use infer_ctx::{InferCtx, value_symbol_ref}
@@ -1421,7 +1422,7 @@ fn finalize_derived_field(
                 make_source_slot_ref(
                     symbol_ref_origin_module_key(symbol),
                     slot_domain_lexical(), def_id),
-                executable, binder_kind_let(),
+                executable, binder_kind_match_pattern(),
                 make_path_ref(
                     path_owner_for_symbol(symbol),
                     ["derived-ord-result:${ordinal.to_str()}"],
