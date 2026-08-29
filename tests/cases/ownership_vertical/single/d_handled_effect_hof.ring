@@ -6,6 +6,11 @@ effect Scale {
     fn adjust(value: Int) -> Int
 }
 
+// A declaration without any runtime use must not allocate an EffectCtx token.
+effect DormantBodyless {
+    fn inspect(value: Int) -> Int
+}
+
 fn apply_polymorphic(
     callback: fn(Int) -> Int,
     value: Int

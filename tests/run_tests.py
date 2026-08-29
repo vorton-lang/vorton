@@ -2078,7 +2078,8 @@ def ring_build(ring_exe: str, ring_file: str, *,
                extra_args: Optional[List[str]] = None,
                timeout: int = TIMEOUT_COMPILE,
                phase_suite: Optional[str] = None,
-               phase_case: Optional[str] = None) -> subprocess.CompletedProcess:
+               phase_case: Optional[str] = None,
+               cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
     """Run the C-only ring.exe build with optional extra flags."""
     cmd = [ring_exe, "build", ring_file, "--target=c"]
     if out_dir:
@@ -2093,7 +2094,7 @@ def ring_build(ring_exe: str, ring_file: str, *,
         "ring_build", cmd,
         phase_suite=phase_suite, phase_case=phase_case,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout, cwd=str(REPO),
+        timeout=timeout, cwd=str(cwd or REPO),
     )
 
 
@@ -2101,7 +2102,8 @@ def ring_check(ring_exe: str, ring_file: str, *,
                extra_args: Optional[List[str]] = None,
                timeout: int = TIMEOUT_COMPILE,
                phase_suite: Optional[str] = None,
-               phase_case: Optional[str] = None) -> subprocess.CompletedProcess:
+               phase_case: Optional[str] = None,
+               cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
     """Run ring.exe check <file> [extra_args...]."""
     cmd = [ring_exe, "check", ring_file]
     if extra_args:
@@ -2111,7 +2113,7 @@ def ring_check(ring_exe: str, ring_file: str, *,
     return _run_subprocess(
         "ring_check", cmd, phase_suite=phase_suite, phase_case=phase_case,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout, cwd=str(REPO),
+        timeout=timeout, cwd=str(cwd or REPO),
     )
 
 
@@ -2146,7 +2148,8 @@ def compile_link_run(ring_exe: str, clang_path: str, ring_file: str,
                      tmpdir: str, *,
                      expect_panic: bool = False,
                      phase_suite: Optional[str] = None,
-                     phase_case: Optional[str] = None) -> Tuple[bool, str, str]:
+                     phase_case: Optional[str] = None,
+                     cwd: Optional[Path] = None) -> Tuple[bool, str, str]:
     """Compile a .ring file, link, run, return (ok, stdout, error_detail).
 
     On success, ok=True and stdout contains the program output.
@@ -2165,6 +2168,7 @@ def compile_link_run(ring_exe: str, clang_path: str, ring_file: str,
         r = ring_build(
             ring_exe, ring_file, out_dir=out_dir,
             phase_suite=phase_suite, phase_case=phase_case,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         return False, "", "compile timed out"
@@ -3275,6 +3279,82 @@ def run_normal_diagnostic_exit_contract(
     ))
 
 
+def run_prelude_a1_oracles(
+    ring_exe: str, clang_path: str, collector: ResultCollector, *,
+    name_filter: Optional[str] = None,
+) -> None:
+    """Run the four prelude-only A1 acceptance canaries."""
+    suite, group = "ownership-vertical", "P-prelude-A1"
+    labels = (
+        "P1:prelude-self-first", "P2:prelude-mutual-first",
+        "P3:prelude-reverse-edge", "P4:prelude-cycle",
+    )
+    if not any(matches_filter(value, name_filter) for value in (group, *labels)):
+        return
+    case_dir = CASES_DIR / "prelude_a1"
+    probe = case_dir / "probe.ring"
+
+    def overlay(root: Path, name: str, fragments) -> Path:
+        cwd, std = root / name, root / name / "std"
+        shutil.copytree(REPO / "std", std)
+        for target_name, fragment_name in fragments:
+            target = std / target_name
+            target.write_text(
+                target.read_text(encoding="utf-8") + "\n" +
+                (case_dir / fragment_name).read_text(encoding="utf-8"),
+                encoding="utf-8", newline="\n")
+        return cwd
+
+    observed: List[str] = []
+    with tempfile.TemporaryDirectory(prefix="ring_prelude_a1_") as tmpdir:
+        root = Path(tmpdir)
+        for label, fragment in zip(labels[:2], ("self_first.ring", "mutual_first.ring")):
+            try:
+                cwd = overlay(root, label[:2], (("str.ring", fragment),))
+                output = root / f"{label[:2]}-out"
+                output.mkdir()
+                ok, stdout, detail = compile_link_run(
+                    ring_exe, clang_path, str(probe), str(output), cwd=cwd,
+                    phase_suite=suite, phase_case=label)
+            except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+                ok, stdout, detail = False, "", str(exc)
+            if ok and norm(stdout) == "P_PRELUDE_A1_OK:3/ring/10\n":
+                observed.append(norm(stdout))
+                collector.add(TestResult(TestResult.PASS, suite, label))
+            else:
+                collector.add(TestResult(
+                    TestResult.FAIL, suite, label,
+                    detail or f"unexpected stdout {stdout!r}"))
+        collector.add(TestResult(
+            TestResult.PASS if len(observed) == 2 and len(set(observed)) == 1
+            else TestResult.FAIL,
+            suite, "parity:P-prelude-A1-source-order"))
+
+        negatives = (
+            (labels[2], "reverse_early.ring", "reverse_late.ring",
+             "prelude_reverse_early' -> 'prelude_reverse_late"),
+            (labels[3], "cycle_early.ring", "cycle_late.ring",
+             "prelude_cycle_early' -> 'prelude_cycle_late"),
+        )
+        for label, early, late, expected in negatives:
+            try:
+                cwd = overlay(root, label[:2], (
+                    ("str.ring", early), ("io.ring", late)))
+                result = ring_check(
+                    ring_exe, str(probe), cwd=cwd,
+                    phase_suite=suite, phase_case=label)
+                output = process_output(result)
+            except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+                result, output = None, str(exc)
+            passed = (
+                result is not None and result.returncode != 0
+                and "ring panic: prelude file DAG: reverse edge" in output
+                and expected in output and "'$prelude$::str'" in output
+            )
+            collector.add(TestResult(
+                TestResult.PASS if passed else TestResult.FAIL,
+                suite, label, "" if passed else output[:300]))
+
 def run_ownership_vertical_suite(
     ring_exe: str,
     clang_path: str,
@@ -3287,6 +3367,8 @@ def run_ownership_vertical_suite(
 
     run_normal_diagnostic_exit_contract(
         collector, name_filter=name_filter)
+    run_prelude_a1_oracles(
+        ring_exe, clang_path, collector, name_filter=name_filter)
 
     def add_result(status: str, name: str, detail: str) -> None:
         collector.add(TestResult(status, suite, name, detail))
@@ -3693,7 +3775,7 @@ def extract_c_function_body(c_source: str, symbol: str) -> Tuple[Optional[str], 
     """Extract one exact generated C function body using its definition symbol."""
     masked = mask_c_strings_and_comments(c_source)
     pattern = re.compile(
-        rf"(?m)^[ \t]*(?:static[ \t]+)?void[ \t]*\*?[ \t]+"
+        rf"(?m)^[ \t]*(?:(?:static|extern)[ \t]+)?void[ \t]*\*?[ \t]+"
         rf"{re.escape(symbol)}[ \t]*\([^;{{}}\n]*\)[ \t]*\{{")
     matches = list(pattern.finditer(masked))
     if len(matches) != 1:
@@ -8896,7 +8978,7 @@ B201_BUILTIN_METHODS = (
     ("BUILTIN_METHOD_STR_HASH", "Str", "hash", "ring_cl_hash_str_export", "register_hash_trait", ""),
     ("BUILTIN_METHOD_BOOL_HASH", "Bool", "hash", "ring_cl_hash_bool_export", "register_hash_trait", ""),
 )
-B201_BUILTIN_METHOD_MUTATION_COUNT = 19
+B201_BUILTIN_METHOD_MUTATION_COUNT = 20
 
 
 def _b201_function_body(
@@ -8948,6 +9030,7 @@ def builtin_method_intrinsic_contract_errors(
     core_expr = compiler_sources["core_expr.ring"]
     flow_lower = compiler_sources["flow_lower.ring"]
     codegen = compiler_sources["codegen_c_expr.ring"]
+    runtime = compiler_sources["ring_runtime.cpp"]
 
     if len(B201_BUILTIN_METHODS) != 56:
         errors.append("B-201 test census is not exact56")
@@ -9195,6 +9278,25 @@ def builtin_method_intrinsic_contract_errors(
     if exact_pos < 0 or fallback_pos < 0 or exact_pos >= fallback_pos:
         errors.append("B-201 exact method consumer does not precede fallback")
 
+    cell_update, cell_update_error = extract_c_function_body(
+        runtime, "ring_Cell_update")
+    if cell_update_error:
+        errors.append(cell_update_error)
+    elif cell_update is not None:
+        cell_tokens = (
+            "*(void**)cell = nullptr", "ring_dup(old_val)",
+            "cl->env_ptr, old_val, ring_effect_ctx_empty())",
+            "void* interim = *(void**)cell", "*(void**)cell = new_val",
+            "if (interim) ring_drop(interim)", "ring_drop(old_val)",
+        )
+        positions = [cell_update.find(token) for token in cell_tokens]
+        if (
+            any(position < 0 for position in positions)
+            or positions != sorted(positions)
+            or cell_update.count("ring_effect_ctx_empty()") != 1
+        ):
+            errors.append("Cell.update reentrant/immortal-empty context path drifted")
+
     return errors
 
 
@@ -9254,6 +9356,9 @@ def builtin_method_intrinsic_mutation_errors(
         ("name fallback", "codegen_c_expr.ring", None,
          "fn intrinsic_runtime_name(tag: Int) -> Str {",
          "fn method_to_runtime_c(type_name: Str, method: Str) -> Str? { none }\n\nfn intrinsic_runtime_name(tag: Int) -> Str {"),
+        ("Cell.update context fallback", "ring_runtime.cpp", None,
+         "cl->env_ptr, old_val, ring_effect_ctx_empty());",
+         "cl->env_ptr, old_val, effect_ctx);"),
     )
     killed = 0
     for label, file_name, function_name, anchor, replacement in mutations:
@@ -9291,6 +9396,7 @@ def builtin_method_intrinsic_source_errors() -> List[str]:
             path.name: path.read_text(encoding="utf-8")
             for path in (REPO / "compiler").glob("*.ring")
         }
+        compiler_sources[RUNTIME_CPP.name] = RUNTIME_CPP.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         return [f"cannot read B-201 sources: {exc}"]
     errors = builtin_method_intrinsic_contract_errors(compiler_sources)
@@ -13456,14 +13562,95 @@ def identity_checkpoint_source_errors() -> List[str]:
     return errors
 
 
+def preacceptance_source_contract_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    """Cheap A1 receipt-atomicity and Core-to-Flow temp authority guard."""
+    errors: List[str] = []
+    specs = (
+        ("transaction", "infer_decl", "infer_and_commit_value_draft_group", (
+            "begin_infer_mutation_journal(ctx)",
+            "preflight_value_draft_group(ctx, prepared)",
+            "let declarations = commit_value_draft_group(ctx, prepared)",
+            "commit_infer_mutation_journal(ctx, mutation_checkpoint)",
+            "rollback_infer_mutation_journal(ctx, mutation_checkpoint)",
+        )),
+        ("prepare", "infer_decl", "prepare_fn_draft_group", (
+            "preflight_owner_batches(ctx, batches)",)),
+        ("publish", "infer_ctx", "publish_owner_batches", (
+            "preflight_owner_batches(ctx, batches)",
+            "publish_effect_fact_batches(ctx.env, facts)")),
+        ("projection", "infer_ctx", "project_owner_batch_receipts", (
+            "headers, pending.target",
+            "pending.receipt.source_to_actual.get(source)",
+            "for projection in finalized",
+            "batch.pending_projections = []")),
+        ("call", "infer", "infer_call", (
+            "false, callee_receipts", "if callee_receipts.len() != 1",
+            "let receipt = callee_receipt.unwrap_or_else",
+            "metadata.live_scheme, receipt, s, span")),
+        ("assoc", "infer", "for_protocol_assoc_type", (
+            "instantiate_assoc_type_from_callable_receipt(\n"
+            "        receipt, localized_assoc, subst)",)),
+        ("admin-site", "flow", "admin_site", (
+            'path.push("$flow")', "path.push(label)", "path.push(ordinal.to_str())",
+            "make_path_ref(executable_path_owner(ctx.owner), path, role)")),
+        ("admin-slot", "flow", "new_admin_slot", (
+            "admin_site(ctx, label, ctx.slots.len(), role_tag)",
+            "make_synthetic_slot_ref(site)",
+            "reference, ctx.owner, kind, site",
+            "scope_slot_count(ctx, scope)")),
+        ("manifest", "inventory", "make_binder_manifest", (
+            "if slot_ref_same(left.slot, right.slot)",)),
+    )
+    bodies: Dict[str, str] = {}
+    for key, source_name, function_name, tokens in specs:
+        body, error = extract_ring_function_body(sources[source_name], function_name)
+        if error:
+            errors.append(error)
+            continue
+        assert body is not None
+        bodies[key] = body
+        if any(token not in body for token in tokens):
+            errors.append(f"preacceptance {key} contract drifted")
+    transaction = bodies.get("transaction", "")
+    if not (
+        transaction.find("preflight_value_draft_group(ctx, prepared)")
+        < transaction.find("let declarations = commit_value_draft_group(ctx, prepared)")
+        < transaction.find("commit_infer_mutation_journal(ctx, mutation_checkpoint)")
+    ):
+        errors.append("A1 group publish order drifted")
+    publish = bodies.get("publish", "")
+    if publish.find("preflight_owner_batches(ctx, batches)") > publish.find(
+            "publish_effect_fact_batches(ctx.env, facts)"):
+        errors.append("A1 owner facts publish before group preflight")
+    if (
+        "pub struct CallableInstantiationReceipt {\n"
+        "    ty: Type,\n    source_to_actual: Map<Int, Type>," not in
+        sources["infer_ctx"]
+        or "source: PendingEvidenceSource,\n"
+        "    receipt: CallableInstantiationReceipt,\n"
+        "    fn_bounds: List<FnBoundsEntry>," not in sources["infer_ctx"]
+    ):
+        errors.append("A1 unique CallableInstantiationReceipt carrier drifted")
+    core = mask_ring_strings_and_comments(sources["core"])
+    for kind in ("pre_anf", "scope_result", "control_result", "assign_temp"):
+        if f"binder_kind_{kind}()" in core:
+            errors.append(f"Core prebuilt Flow administrative temp {kind}")
+    return errors
+
 OWNERSHIP_CUTOVER_PATHS = {
     "checker": REPO / "compiler" / "checker.ring",
     "cli": REPO / "compiler" / "cli.ring",
     "project": REPO / "compiler" / "compiler_mod.ring",
     "pipeline": REPO / "compiler" / "ownership_pipeline.ring",
     "hir_exact": REPO / "compiler" / "hir_exact.ring",
+    "infer": REPO / "compiler" / "infer.ring",
     "infer_decl": REPO / "compiler" / "infer_decl.ring",
+    "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
     "core": REPO / "compiler" / "core_from_hir.ring",
+    "flow": REPO / "compiler" / "flow_lower.ring",
+    "inventory": REPO / "compiler" / "ir_inventory.ring",
 }
 
 
@@ -13486,7 +13673,7 @@ def ownership_cutover_source_errors() -> List[str]:
             errors.append(f"{label}: direct Perceus call survived Core cutover")
 
     error_result, error_result_error = extract_ring_function_body(
-        sources["checker"], "duplicate_direct_declaration_error_result")
+        sources["checker"], "failed_check_result")
     if error_result_error:
         errors.append(error_result_error)
     elif not all(token in error_result for token in (
@@ -13659,6 +13846,55 @@ def ownership_cutover_source_errors() -> List[str]:
     if "h_default_specialization_parameter_mutabilities(plan)" not in (
             sources["core"]):
         errors.append("Core default elaboration guessed parameter mutability")
+
+    guard_errors = preacceptance_source_contract_errors(sources)
+    errors.extend(guard_errors)
+    if not guard_errors:
+        mutations = (
+            ("group-preflight", "infer_decl", "infer_and_commit_value_draft_group",
+             "preflight_value_draft_group(ctx, prepared)", "{}"),
+            ("publish-preflight", "infer_ctx", "publish_owner_batches",
+             "preflight_owner_batches(ctx, batches)", "{}"),
+            ("failure-rollback", "infer_decl", "infer_and_commit_value_draft_group",
+             "rollback_infer_mutation_journal(ctx, mutation_checkpoint)", "{}"),
+            ("receipt-missing", "infer", "infer_call",
+             "false, callee_receipts", "false, []"),
+            ("receipt-delete", "infer_ctx", None,
+             "source: PendingEvidenceSource,\n    receipt: CallableInstantiationReceipt,",
+             "source: PendingEvidenceSource,"),
+            ("receipt-swap", "infer_ctx", "project_owner_batch_receipts",
+             "headers, pending.target", "headers, headers.first().unwrap().executable"),
+            ("consumer-rebuild", "infer", "for_protocol_assoc_type",
+             "instantiate_assoc_type_from_callable_receipt(\n"
+             "        receipt, localized_assoc, subst)", "localized_assoc"),
+            ("Core-prebuild", "core", "body_anchor",
+             "let mut path = executable_prefix(value)",
+             "let _ = binder_kind_pre_anf()\n    let mut path = executable_prefix(value)"),
+            ("scope-ordinal", "flow", "new_admin_slot",
+             "admin_site(ctx, label, ctx.slots.len(), role_tag)",
+             "admin_site(ctx, label, scope_slot_count(ctx, scope), role_tag)"),
+            ("duplicate-PathRef", "flow", "new_admin_slot",
+             "admin_site(ctx, label, ctx.slots.len(), role_tag)",
+             "admin_site(ctx, label, 0, role_tag)"),
+        )
+        for label, source_name, function_name, anchor, replacement in mutations:
+            mutated = dict(sources)
+            if function_name is None:
+                if sources[source_name].count(anchor) != 1:
+                    errors.append(f"preacceptance mutation anchor drifted: {label}")
+                    continue
+                mutated[source_name] = sources[source_name].replace(
+                    anchor, replacement, 1)
+            else:
+                value, mutation_error = _f0_mutate_function_once(
+                    sources[source_name], function_name, anchor, replacement)
+                if mutation_error:
+                    errors.append(f"preacceptance mutation {label}: {mutation_error}")
+                    continue
+                assert value is not None
+                mutated[source_name] = value
+            if not preacceptance_source_contract_errors(mutated):
+                errors.append(f"preacceptance mutation escaped: {label}")
     return errors
 
 

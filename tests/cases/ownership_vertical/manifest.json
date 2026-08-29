@@ -239,13 +239,28 @@
       }
     },
     {
+      "id": "C3",
+      "path": "single/c_cell_update_reentrant.ring",
+      "covers": [
+        "Cell.update callback calls set on the same Cell",
+        "the detached old Str remains live after the reentrant set",
+        "the callback result replaces and drops the interim Cell value"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "C_CELL_UPDATE_REENTRANT_OK:seed-final\n"
+      }
+    },
+    {
       "id": "D1",
       "path": "single/d_handled_effect_hof.ring",
       "covers": [
         "polymorphic HOF effect formal",
         "effect substitution",
         "two distinct HandledEffectRef values with one operation signature",
-        "single-boundary evidence-order swaps change the native result"
+        "single-boundary evidence-order swaps change the native result",
+        "an unused bodyless effect declaration contributes no runtime token"
       ],
       "expected": {
         "phase": "native",

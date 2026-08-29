@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -405,6 +406,35 @@ def _selected(
     return any(matches(identity, name_filter) for identity in identities)
 
 
+_EFFECT_CTX_TOKEN_DEFINITION_RE = re.compile(
+    r"(?m)^static unsigned char __ring_effect_ctx_token_([0-9]+);$"
+)
+
+
+def _d1_effect_ctx_token_census_failure(output_dir: Path) -> Optional[str]:
+    generated = sorted(output_dir.glob("*.c"))
+    if len(generated) != 1:
+        return (
+            "effect token census requires exactly one generated C file, got "
+            f"{len(generated)}"
+        )
+    try:
+        source = generated[0].read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return f"cannot read generated C for effect token census: {exc}"
+    ordinals = [
+        int(match.group(1))
+        for match in _EFFECT_CTX_TOKEN_DEFINITION_RE.finditer(source)
+    ]
+    expected_ordinals = [0, 1]
+    if ordinals != expected_ordinals:
+        return (
+            "generated C EffectCtx token definitions differ: "
+            f"expected {expected_ordinals}, got {ordinals}"
+        )
+    return None
+
+
 def _run_fixture(
     context: RunnerContext,
     fixture: Fixture,
@@ -486,14 +516,23 @@ def _run_fixture(
     actual = _normalized(stdout)
     assert fixture.stdout is not None
     expected = _normalized(fixture.stdout)
+    token_failure = (
+        _d1_effect_ctx_token_census_failure(case_output)
+        if fixture.id == "D1" else None
+    )
     if actual != expected:
         context.add_result(
             "FAIL", label,
             f"expected literal stdout {expected!r}, got {actual!r}",
         )
+    elif token_failure is not None:
+        context.add_result("FAIL", label, token_failure)
     else:
         lane = "project" if fixture.is_project else "single"
-        context.add_result("PASS", label, f"{lane} check/build/link/run")
+        detail = f"{lane} check/build/link/run"
+        if fixture.id == "D1":
+            detail += "; generated-C EffectCtx token definitions=2"
+        context.add_result("PASS", label, detail)
     return actual
 
 
