@@ -487,11 +487,13 @@ fn make_legacy_callable_projection_with_domain(
 ) -> LegacyCallableProjection {
     let module_key = module_body_ref_origin_module_key(module_body)
     let identity_valid = if prelude_physical {
+        let container_key = legacy_container_module_key(container)
         legacy_physical_semantic_module(
             executable_ref_origin_module_key(reference)) &&
             legacy_physical_semantic_module(origin_module_key(origin)) &&
             !origin_module_key_is_prelude(module_key) &&
-            legacy_container_module_key(container) == module_key
+            (container_key == module_key ||
+             legacy_physical_semantic_module(container_key))
     } else {
         executable_ref_origin_module_key(reference) == module_key &&
             origin_module_key(origin) == module_key &&
@@ -697,9 +699,17 @@ pub fn make_legacy_impl_projection(
     let module_key = module_body_ref_origin_module_key(module_body)
     let provider_owner = path_ref_owner(impl_provider_ref_site(
         impl_owner_ref_provider(owner)))
-    if path_owner_ref_is_symbol(provider_owner) ||
-       module_body_ref_origin_module_key(
-            path_owner_ref_module_body(provider_owner)) != module_key ||
+    let provider_module = if path_owner_ref_is_symbol(provider_owner) {
+        symbol_ref_origin_module_key(path_owner_ref_symbol(provider_owner))
+    } else {
+        module_body_ref_origin_module_key(
+            path_owner_ref_module_body(provider_owner))
+    }
+    let target_module = symbol_ref_origin_module_key(target_nominal)
+    let semantic_identity_valid = provider_module == module_key ||
+        (legacy_physical_semantic_module(target_module) &&
+         legacy_physical_semantic_module(provider_module))
+    if !semantic_identity_valid ||
        legacy_container_module_key(container) != module_key {
         panic("legacy projection: impl module/container identity differs")
     }
@@ -818,11 +828,13 @@ fn make_legacy_executable_shell_with_domain(
 ) -> LegacyExecutableShell {
     let module_key = module_body_ref_origin_module_key(module_body)
     let identity_valid = if prelude_physical {
+        let container_key = legacy_container_module_key(container)
         legacy_physical_semantic_module(
             executable_ref_origin_module_key(reference)) &&
             legacy_physical_semantic_module(origin_module_key(origin)) &&
             !origin_module_key_is_prelude(module_key) &&
-            legacy_container_module_key(container) == module_key
+            (container_key == module_key ||
+             legacy_physical_semantic_module(container_key))
     } else {
         executable_ref_origin_module_key(reference) == module_key &&
             origin_module_key(origin) == module_key &&
@@ -1374,7 +1386,7 @@ pub fn make_legacy_projection_facts(
         let slot_module = slot_projection_module_key(left.slot)
         if (slot_module != module_key &&
             !(module_order == 0 &&
-              origin_module_key_is_prelude(slot_module))) ||
+              legacy_physical_semantic_module(slot_module))) ||
            core_type_fact_module_key(left.type_fact) != module_key {
             panic("legacy projection: module binder fact crosses module")
         }

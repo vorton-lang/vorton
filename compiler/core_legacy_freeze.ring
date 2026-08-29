@@ -383,30 +383,51 @@ fn add_callable_fact(
 }
 
 fn scan_stmt(
-    mut builder: LegacyFactBuilder, owner: ExecutableRef, value: HStmt
+    mut builder: LegacyFactBuilder, owner: ExecutableRef, value: HStmt,
+    type_params: List<HTypeParam>, trait_bounds: List<TraitBound>
 ) {
     match value {
         HStmt::Let { name, def_id: some(id), ty, init, .. } => {
             add_binder_fact(builder, make_source_slot_ref(
                 builder.module_key, slot_domain_lexical(), id),
                 name, id, ty, false)
-            scan_expr(builder, owner, init)
+            scan_expr(builder, owner, init, type_params, trait_bounds)
         },
         HStmt::Var { name, def_id: some(id), ty, init, .. } => {
             add_binder_fact(builder, make_source_slot_ref(
                 builder.module_key, slot_domain_lexical(), id),
                 name, id, ty, true)
-            scan_expr(builder, owner, init)
+            scan_expr(builder, owner, init, type_params, trait_bounds)
         },
         HStmt::Assign { target, value, .. } => {
-            scan_expr(builder, owner, target); scan_expr(builder, owner, value)
+            scan_expr(builder, owner, target, type_params, trait_bounds)
+            scan_expr(builder, owner, value, type_params, trait_bounds)
         },
-        HStmt::ExprStmt { expr, .. } => scan_expr(builder, owner, expr),
+        HStmt::ExprStmt { expr, .. } =>
+            scan_expr(builder, owner, expr, type_params, trait_bounds),
         HStmt::Return { value, .. } => match value {
-            some(expr) => scan_expr(builder, owner, expr), none => {}
+            some(expr) => scan_expr(
+                builder, owner, expr, type_params, trait_bounds), none => {}
         },
         HStmt::While { condition, body, .. } => {
-            scan_expr(builder, owner, condition); scan_expr(builder, owner, body)
+            scan_expr(builder, owner, condition, type_params, trait_bounds)
+            scan_expr(builder, owner, body, type_params, trait_bounds)
+        },
+        HStmt::LetDestructure { bindings, init, .. } => {
+            for binding in bindings {
+                if binding.name != "_" {
+                    let slot = binding.slot.unwrap_or_else(fn() {
+                        panic("Core/legacy freeze: destructure slot is absent")
+                    })
+                    let def_id = binding.def_id.unwrap_or_else(fn() {
+                        panic("Core/legacy freeze: destructure DefId is absent")
+                    })
+                    add_binder_fact(
+                        builder, slot, binding.name, def_id,
+                        binding.ty, false)
+                }
+            }
+            scan_expr(builder, owner, init, type_params, trait_bounds)
         },
         HStmt::Break { .. } | HStmt::Continue { .. } => {},
         _ => panic("Core/legacy freeze: surface/resource stmt crossed PreCore")
@@ -493,22 +514,26 @@ fn add_delegate_dictionaries(
 }
 
 fn scan_expr(
-    mut builder: LegacyFactBuilder, owner: ExecutableRef, value: HExpr
+    mut builder: LegacyFactBuilder, owner: ExecutableRef, value: HExpr,
+    type_params: List<HTypeParam>, trait_bounds: List<TraitBound>
 ) {
     add_effect_row(builder, hexpr_effects(value))
     match value {
         HExpr::Call {
             callee, args, resolved_dicts, method_ref, ..
         } => {
-            scan_expr(builder, owner, callee)
-            for arg in args { scan_expr(builder, owner, arg) }
+            scan_expr(builder, owner, callee, type_params, trait_bounds)
+            for arg in args {
+                scan_expr(builder, owner, arg, type_params, trait_bounds)
+            }
             for item in resolved_dicts { add_dictionary_fact(builder, item) }
             match method_ref {
                 some(method) => add_method_dictionary(builder, method), none => {}
             }
         },
         HExpr::BinOp { left, right, eq_plan, ord_plan, .. } => {
-            scan_expr(builder, owner, left); scan_expr(builder, owner, right)
+            scan_expr(builder, owner, left, type_params, trait_bounds)
+            scan_expr(builder, owner, right, type_params, trait_bounds)
             match eq_plan {
                 some(plan) => add_operator_dictionaries(builder, plan), none => {}
             }
@@ -517,53 +542,77 @@ fn scan_expr(
             }
         },
         HExpr::UnaryOp { operand, .. } =>
-            scan_expr(builder, owner, operand),
+            scan_expr(builder, owner, operand, type_params, trait_bounds),
         HExpr::FieldAccess { receiver: operand, .. } =>
-            scan_expr(builder, owner, operand),
+            scan_expr(builder, owner, operand, type_params, trait_bounds),
         HExpr::UnsafeBlock { body: operand, .. } =>
-            scan_expr(builder, owner, operand),
+            scan_expr(builder, owner, operand, type_params, trait_bounds),
         HExpr::StructLit { fields, .. } => {
-            for field in fields { scan_expr(builder, owner, field.value) }
+            for field in fields {
+                scan_expr(
+                    builder, owner, field.value, type_params, trait_bounds)
+            }
         },
         HExpr::NamedVariantConstruct { fields, .. } => {
-            for field in fields { scan_expr(builder, owner, field.value) }
+            for field in fields {
+                scan_expr(
+                    builder, owner, field.value, type_params, trait_bounds)
+            }
         },
         HExpr::TupleLit { elements, .. } => {
-            for element in elements { scan_expr(builder, owner, element) }
+            for element in elements {
+                scan_expr(
+                    builder, owner, element, type_params, trait_bounds)
+            }
         },
         HExpr::Block { stmts, tail, .. } => {
-            for stmt in stmts { scan_stmt(builder, owner, stmt) }
-            match tail { some(expr) => scan_expr(builder, owner, expr), none => {} }
+            for stmt in stmts {
+                scan_stmt(
+                    builder, owner, stmt, type_params, trait_bounds)
+            }
+            match tail {
+                some(expr) => scan_expr(
+                    builder, owner, expr, type_params, trait_bounds),
+                none => {}
+            }
         },
         HExpr::IfExpr { condition, then_branch, else_branch, .. } => {
-            scan_expr(builder, owner, condition)
-            scan_expr(builder, owner, then_branch)
+            scan_expr(builder, owner, condition, type_params, trait_bounds)
+            scan_expr(builder, owner, then_branch, type_params, trait_bounds)
             match else_branch {
-                some(expr) => scan_expr(builder, owner, expr), none => {}
+                some(expr) => scan_expr(
+                    builder, owner, expr, type_params, trait_bounds),
+                none => {}
             }
         },
         HExpr::MatchExpr { scrutinee, arms, .. } => {
-            scan_expr(builder, owner, scrutinee)
+            scan_expr(builder, owner, scrutinee, type_params, trait_bounds)
             for arm in arms {
                 add_match_binders(builder, arm)
                 match arm.guard {
-                    some(expr) => scan_expr(builder, owner, expr), none => {}
+                    some(expr) => scan_expr(
+                        builder, owner, expr, type_params, trait_bounds),
+                    none => {}
                 }
-                scan_expr(builder, owner, arm.body)
+                scan_expr(
+                    builder, owner, arm.body, type_params, trait_bounds)
             }
         },
         HExpr::TryCatch { body: scrutinee, arms, .. } => {
-            scan_expr(builder, owner, scrutinee)
+            scan_expr(builder, owner, scrutinee, type_params, trait_bounds)
             for arm in arms {
                 add_match_binders(builder, arm)
                 match arm.guard {
-                    some(expr) => scan_expr(builder, owner, expr), none => {}
+                    some(expr) => scan_expr(
+                        builder, owner, expr, type_params, trait_bounds),
+                    none => {}
                 }
-                scan_expr(builder, owner, arm.body)
+                scan_expr(
+                    builder, owner, arm.body, type_params, trait_bounds)
             }
         },
         HExpr::HandleExpr { body, handlers, .. } => {
-            scan_expr(builder, owner, body)
+            scan_expr(builder, owner, body, type_params, trait_bounds)
             for handler in handlers {
                 let mut params = handler.params
                 match handler.resume_binding {
@@ -575,10 +624,13 @@ fn scan_expr(
                 }
                 add_callable_fact(
                     builder, handler.executable_ref, executable_kind_handler(),
-                    make_legacy_executable_container(owner), [], [], params,
+                    make_legacy_executable_container(owner),
+                    type_params, trait_bounds, params,
                     hexpr_type(handler.body), hexpr_effects(handler.body),
                     true, false, none)
-                scan_expr(builder, handler.executable_ref, handler.body)
+                scan_expr(
+                    builder, handler.executable_ref, handler.body,
+                    type_params, trait_bounds)
             }
         },
         HExpr::Lambda {
@@ -586,15 +638,21 @@ fn scan_expr(
         } => {
             add_callable_fact(
                 builder, executable_ref, executable_kind_lambda(),
-                make_legacy_executable_container(owner), [], [], params,
+                make_legacy_executable_container(owner),
+                type_params, trait_bounds, params,
                 return_type, hexpr_effects(body), true, false, none)
-            scan_expr(builder, executable_ref, body)
+            scan_expr(
+                builder, executable_ref, body, type_params, trait_bounds)
         },
         HExpr::EffectOp { args, .. } => {
-            for arg in args { scan_expr(builder, owner, arg) }
+            for arg in args {
+                scan_expr(builder, owner, arg, type_params, trait_bounds)
+            }
         },
         HExpr::ReturnExpr { value, .. } => match value {
-            some(expr) => scan_expr(builder, owner, expr), none => {}
+            some(expr) => scan_expr(
+                builder, owner, expr, type_params, trait_bounds),
+            none => {}
         },
         HExpr::Ident { dict_closure_dicts, .. } => match dict_closure_dicts {
             some(values) => {
@@ -624,7 +682,8 @@ const LEGACY_GENERATED_DEF_ID_BASE: Int = 0 - 8500000000
 
 fn add_generated_callable_fact(
     mut builder: LegacyFactBuilder, reference: ExecutableRef,
-    kind: ExecutableKind, entries: List<BinderEntry>,
+    kind: ExecutableKind, type_params: List<HTypeParam>,
+    trait_bounds: List<TraitBound>, entries: List<BinderEntry>,
     parameter_types: List<Type>, parameter_mutabilities: List<Bool>,
     result_type: Type, effects: EffectRow
 ) {
@@ -649,20 +708,22 @@ fn add_generated_callable_fact(
     }
     let origin = executable_origin(reference)
     let container = make_legacy_module_container(builder.module_body)
+    let type_parameters = callable_type_parameters(type_params, trait_bounds)
+    let bounds = callable_trait_bounds(type_parameters, trait_bounds)
     let result_fact = exact_type_fact(
         builder.type_sources, result_type, builder.module_key)
     if executable_uses_physical_owner(builder, reference) {
         builder.prelude_callables.push(
             make_legacy_prelude_callable_fact_projection(
                 reference, origin, builder.module_body, kind,
-                [], [], parameters, result_fact,
+                type_parameters, bounds, parameters, result_fact,
                 result_type, effects, false))
         builder.shells.push(make_legacy_prelude_executable_shell(
             reference, origin, kind, builder.module_body, container))
     } else {
         builder.callables.push(make_legacy_callable_fact_projection(
             reference, origin, builder.module_body, container, kind,
-            [], [], parameters, result_fact,
+            type_parameters, bounds, parameters, result_fact,
             result_type, effects, false))
         builder.shells.push(make_legacy_executable_shell(
             reference, origin, kind, builder.module_body, container))
@@ -674,13 +735,14 @@ fn add_generated_callable_fact(
 fn add_default_specialization_facts(
     mut builder: LegacyFactBuilder,
     values: List<HDefaultSpecializationPlan>,
-    mut methods: List<ImplMethodRef>
+    mut methods: List<ImplMethodRef>, type_params: List<HTypeParam>
 ) {
     for value in values {
         add_generated_callable_fact(
             builder,
             h_default_specialization_generated_executable(value),
             executable_kind_default_specialization(),
+            type_params, [],
             h_default_specialization_binders(value),
             h_default_specialization_parameter_types(value),
             h_default_specialization_parameter_mutabilities(value),
@@ -731,6 +793,7 @@ fn add_derived_impl_facts(
             }
             add_generated_callable_fact(
                 builder, method.executable_ref, executable_kind_derived_impl(),
+                derived.type_params, derived.bounds,
                 method.binders, params, params.map(fn(_) { false }),
                 result, effects)
             method_refs.push(method.method_ref)
@@ -801,31 +864,34 @@ fn scan_decls(
                 name, executable_ref, impl_method_ref, type_params, params,
                 return_type, effects, body, is_pub, trait_bounds, ..
             } => {
+                let callable_type_params = merge_callable_type_parameters(
+                    inherited_type_params, type_params)
                 add_callable_fact(
                     builder, executable_ref,
                     if impl_method_ref.is_some() {
                         executable_kind_impl_method()
                     } else { executable_kind_fn() },
                     module_container,
-                    merge_callable_type_parameters(
-                        inherited_type_params, type_params),
+                    callable_type_params,
                     trait_bounds, params,
                     return_type, effects, true, is_pub, some(name))
-                scan_expr(builder, executable_ref, body)
+                scan_expr(
+                    builder, executable_ref, body,
+                    callable_type_params, trait_bounds)
             },
             HDecl::Test { description, executable_ref, body, .. } => {
                 add_callable_fact(
                     builder, executable_ref, executable_kind_test(),
                     module_container, [], [], [], hexpr_type(body),
                     hexpr_effects(body), true, false, some(description))
-                scan_expr(builder, executable_ref, body)
+                scan_expr(builder, executable_ref, body, [], [])
             },
             HDecl::Const { name, executable_ref, ty, init, .. } => {
                 add_callable_fact(
                     builder, executable_ref,
                     executable_kind_const_getter(), module_container,
                     [], [], [], ty, hexpr_effects(init), true, false, some(name))
-                scan_expr(builder, executable_ref, init)
+                scan_expr(builder, executable_ref, init, [], [])
             },
             HDecl::ExternFn {
                 name, executable_ref, type_params, params, return_type, effects,
@@ -849,7 +915,8 @@ fn scan_decls(
                         some("__${name}_${method.name}"))
                     match method.body {
                         some(body) => scan_expr(
-                            builder, method.executable_ref, body),
+                            builder, method.executable_ref, body,
+                            callable_type_params, []),
                         none => {}
                     }
                 }
@@ -884,7 +951,8 @@ fn scan_decls(
                 scan_decls(builder, methods, impl_type_params)
                 let mut method_refs = impl_method_refs(methods)
                 add_default_specialization_facts(
-                    builder, default_specializations, method_refs)
+                    builder, default_specializations, method_refs,
+                    impl_type_params)
                 method_refs.sort_by(fn(left, right) {
                     impl_method_ref_callable_slot_index(left) -
                         impl_method_ref_callable_slot_index(right)
@@ -944,11 +1012,10 @@ fn add_builtin_facts(mut builder: LegacyFactBuilder, env: TypeEnv) {
             let site = make_path_ref(
                 owner, ["legacy-builtin-param", index.to_str()],
                 path_role_parameter())
-            parameter_facts.push(make_legacy_binder_fact_projection(
-                make_synthetic_slot_ref(site), "__builtin_p${index}",
+            parameter_facts.push(add_binder_fact(
+                builder, make_synthetic_slot_ref(site),
+                "__builtin_p${index}",
                 LEGACY_BUILTIN_PARAM_DEF_ID_BASE - global_param_ordinal,
-                exact_type_fact(
-                    builder.type_sources, ty, builder.module_key),
                 ty, false))
             index = index + 1
             global_param_ordinal = global_param_ordinal + 1

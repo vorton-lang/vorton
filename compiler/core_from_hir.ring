@@ -2905,6 +2905,7 @@ fn hstmt_source_span(value: HStmt) -> Span {
         HStmt::ExprStmt { span, .. } => span,
         HStmt::Return { span, .. } => span,
         HStmt::While { span, .. } => span,
+        HStmt::LetDestructure { span, .. } => span,
         HStmt::Break { span } => span,
         HStmt::Continue { span } => span,
         _ => panic("Core diagnostic projection: surface statement survived")
@@ -4006,7 +4007,7 @@ fn lower_place(ctx: LowerCtx, value: HExpr) -> CorePlaceRef {
     }
 }
 
-fn lower_stmt(ctx: LowerCtx, value: HStmt) -> CoreStmt {
+fn lower_stmt(ctx: LowerCtx, value: HStmt) -> List<CoreStmt> {
     let origin = fresh_origin(ctx, "stmt", hstmt_source_span(value))
     match value {
         HStmt::Let { def_id: some(id), ty, init, .. } => {
@@ -4015,27 +4016,73 @@ fn lower_stmt(ctx: LowerCtx, value: HStmt) -> CoreStmt {
                 ctx, slot, ty,
                 if id < 0 { binder_kind_dictionary_evidence_local() }
                 else { binder_kind_let() }, false)
-            make_core_bind_stmt(
-                exact_slot, lower_expr(ctx, init), false, origin)
+            [make_core_bind_stmt(
+                exact_slot, lower_expr(ctx, init), false, origin)]
         },
         HStmt::Var { def_id: some(id), ty, init, .. } => {
             let slot = source_slot(ctx.module_key, id)
             let exact_slot = ensure_binder(
                 ctx, slot, ty, binder_kind_var(), true)
-            make_core_bind_stmt(
-                exact_slot, lower_expr(ctx, init), true, origin)
+            [make_core_bind_stmt(
+                exact_slot, lower_expr(ctx, init), true, origin)]
         },
         HStmt::Assign { target, value, .. } =>
-            make_core_assign_stmt(lower_place(ctx, target), lower_expr(ctx, value), origin),
-        HStmt::ExprStmt { expr, .. } => make_core_expr_stmt(lower_expr(ctx, expr), origin),
+            [make_core_assign_stmt(
+                lower_place(ctx, target), lower_expr(ctx, value), origin)],
+        HStmt::ExprStmt { expr, .. } =>
+            [make_core_expr_stmt(lower_expr(ctx, expr), origin)],
         HStmt::Return { value, .. } =>
-            make_core_return_stmt(value.map(fn(v) { lower_expr(ctx, v) }), origin),
+            [make_core_return_stmt(
+                value.map(fn(v) { lower_expr(ctx, v) }), origin)],
         HStmt::While { condition, body, .. } =>
-            make_core_while_stmt(lower_expr(ctx, condition), block_from_expr(ctx, body), origin),
-        HStmt::Break { .. } => make_core_break_stmt(origin),
-        HStmt::Continue { .. } => make_core_continue_stmt(origin),
-        HStmt::ForIn { .. } | HStmt::LetDestructure { .. } |
-        HStmt::IfLet { .. } | HStmt::Drop { .. } =>
+            [make_core_while_stmt(
+                lower_expr(ctx, condition), block_from_expr(ctx, body), origin)],
+        HStmt::Break { .. } => [make_core_break_stmt(origin)],
+        HStmt::Continue { .. } => [make_core_continue_stmt(origin)],
+        HStmt::LetDestructure { bindings, init, span, .. } => {
+            let init_type = type_fact_for(
+                ctx.types, hexpr_type(init), ctx.module_key)
+            let temp_site = make_path_ref(
+                executable_owner(ctx.owner),
+                ["core", "destructure-temp", ctx.next_origin.to_str()],
+                path_role_synthetic())
+            let temp_slot = make_synthetic_slot_ref(temp_site)
+            append_unique_core_binder(ctx.binders, make_core_binder(
+                temp_slot, init_type, binder_kind_pre_anf(), temp_site,
+                flow_own_storage(), false))
+            let mut result = [make_core_bind_stmt(
+                temp_slot, lower_expr(ctx, init), false, origin)]
+            for binding in bindings {
+                if binding.name != "_" {
+                    let source_slot = binding.slot.unwrap_or_else(fn() {
+                        panic("Core assembly: destructure binding slot is absent")
+                    })
+                    let projection = binding.projection.unwrap_or_else(fn() {
+                        panic("Core assembly: destructure projection is absent")
+                    })
+                    if h_projection_kind(projection) != 3 {
+                        panic("Core assembly: destructure projection is not tuple")
+                    }
+                    let target = ensure_binder(
+                        ctx, source_slot, binding.ty,
+                        binder_kind_let(), false)
+                    let read = make_core_read_expr(
+                        init_type, make_core_effect_set([]),
+                        fresh_origin(ctx, "destructure-source", span), temp_slot)
+                    let projected = make_core_project_expr(
+                        type_fact_for(
+                            ctx.types, binding.ty, ctx.module_key),
+                        make_core_effect_set([]),
+                        fresh_origin(ctx, "destructure-project", span),
+                        read, core_field(projection), false)
+                    result.push(make_core_bind_stmt(
+                        target, projected, false,
+                        fresh_origin(ctx, "destructure-binding", span)))
+                }
+            }
+            result
+        },
+        HStmt::ForIn { .. } | HStmt::IfLet { .. } | HStmt::Drop { .. } =>
             panic("Core assembly: surface/resource HStmt crossed PreCore"),
         _ => panic("Core assembly: binding lacks DefId")
     }
@@ -4044,7 +4091,11 @@ fn lower_stmt(ctx: LowerCtx, value: HStmt) -> CoreStmt {
 fn lower_block(
     ctx: LowerCtx, stmts: List<HStmt>, tail: HExpr?, source_span: Span
 ) -> CoreBlock {
-    make_core_block(stmts.map(fn(s) { lower_stmt(ctx, s) }),
+    let mut lowered: List<CoreStmt> = []
+    for stmt in stmts {
+        for item in lower_stmt(ctx, stmt) { lowered.push(item) }
+    }
+    make_core_block(lowered,
         tail.map(fn(v) { lower_expr(ctx, v) }),
         fresh_origin(ctx, "block", source_span))
 }
