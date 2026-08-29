@@ -21,19 +21,23 @@ use ir_identity::{
     path_owner_ref_is_symbol,
     path_owner_ref_symbol, path_owner_ref_module_body,
     slot_ref_is_source, slot_ref_source_origin_module_key,
-    slot_ref_source_def_id, slot_ref_synthetic_path, slot_ref_same,
+    slot_ref_source_def_id, slot_ref_source_domain,
+    slot_ref_synthetic_path, slot_ref_same,
+    make_source_slot_ref, slot_domain_same,
+    slot_domain_lexical, slot_domain_dictionary,
     impl_owner_ref_target, impl_owner_ref_trait, impl_owner_ref_same,
     impl_owner_ref_provider, impl_provider_ref_site,
     impl_method_ref_owner, impl_method_ref_member, impl_method_ref_same,
     make_module_body_ref, make_symbol_origin_ref}
 use ir_inventory::{
     ExecutableRef, ExecutableKind, ExactDictRef, dict_ref_same,
-    make_named_executable_ref,
+    dict_ref_local, make_named_executable_ref,
+    make_dictionary_local_dict_ref,
     executable_inventory_entries, executable_entry_reference,
     executable_entry_kind,
     executable_ref_same, executable_ref_origin_module_key,
     executable_kind_same, executable_kind_builtin_intrinsic}
-use hir::{DictRef}
+use hir::{DictRef, is_synthetic_dict_def_id}
 use hir_exact::{dict_ref_exact, dict_ref_physical_same}
 use effect_contract::{
     CoreEffectSet, TypedHandledEffectInstance,
@@ -226,6 +230,42 @@ fn copy_legacy_effects(
 // Binder and generic contracts
 // ============================================================
 
+pub fn make_legacy_source_binder_slot(
+    owner: ExecutableRef, def_id: Int
+) -> SlotRef {
+    if def_id >= 0 {
+        return make_source_slot_ref(
+            executable_ref_origin_module_key(owner),
+            slot_domain_lexical(), def_id)
+    }
+    if is_synthetic_dict_def_id(def_id) {
+        return dict_ref_local(make_dictionary_local_dict_ref(owner, def_id))
+    }
+    panic("legacy projection: source binder has unknown synthetic domain")
+}
+
+fn validate_legacy_binder_identity(slot: SlotRef, def_id: Int) {
+    if slot_ref_is_source(slot) {
+        if def_id != slot_ref_source_def_id(slot) {
+            panic("legacy projection: source binder DefId differs from SlotRef")
+        }
+        let domain = slot_ref_source_domain(slot)
+        if slot_domain_same(domain, slot_domain_lexical()) {
+            if def_id < 0 {
+                panic("legacy projection: lexical source binder is synthetic")
+            }
+        } else if slot_domain_same(domain, slot_domain_dictionary()) {
+            if !is_synthetic_dict_def_id(def_id) {
+                panic("legacy projection: dictionary source binder DefId differs")
+            }
+        } else {
+            panic("legacy projection: source binder domain is unsupported")
+        }
+    } else if def_id >= 0 {
+        panic("legacy projection: synthetic binder DefId is not negative")
+    }
+}
+
 pub struct LegacyBinderProjection {
     slot: SlotRef,
     name: Str,
@@ -242,13 +282,7 @@ pub fn make_legacy_binder_projection(
     if name.len() == 0 {
         panic("legacy projection: binder physical name is empty")
     }
-    if slot_ref_is_source(slot) {
-        if def_id < 0 || def_id != slot_ref_source_def_id(slot) {
-            panic("legacy projection: source binder DefId differs from SlotRef")
-        }
-    } else if def_id >= 0 {
-        panic("legacy projection: synthetic binder DefId is not negative")
-    }
+    validate_legacy_binder_identity(slot, def_id)
     LegacyBinderProjection {
         slot: slot, name: name, def_id: def_id,
         core_type: core_type, ty: ty, is_mutable: is_mutable
@@ -983,13 +1017,7 @@ pub fn make_legacy_binder_fact_projection(
     if name.len() == 0 {
         panic("legacy projection: module binder physical name is empty")
     }
-    if slot_ref_is_source(slot) {
-        if def_id < 0 || def_id != slot_ref_source_def_id(slot) {
-            panic("legacy projection: module source binder DefId differs")
-        }
-    } else if def_id >= 0 {
-        panic("legacy projection: module synthetic binder DefId is not negative")
-    }
+    validate_legacy_binder_identity(slot, def_id)
     LegacyBinderFactProjection {
         slot: slot, name: name, def_id: def_id,
         type_fact: type_fact, ty: ty, is_mutable: is_mutable

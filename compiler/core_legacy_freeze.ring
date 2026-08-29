@@ -98,6 +98,7 @@ use legacy_projection::{
     LegacyTypeParameterProjection, LegacyTraitBoundProjection,
     LegacyDictionaryProjection,
     make_legacy_effect_fact_projection,
+    make_legacy_source_binder_slot,
     make_legacy_binder_fact_projection,
     make_legacy_callable_fact_projection,
     make_legacy_builtin_callable_fact_projection,
@@ -293,11 +294,12 @@ fn source_parameter_fact(
         some(id) => id,
         none => panic("Core/legacy freeze: callable parameter lacks DefId")
     }
+    if def_id < 0 {
+        panic("Core/legacy freeze: callable parameter is synthetic")
+    }
     add_binder_fact(
         builder,
-        make_source_slot_ref(
-            executable_ref_origin_module_key(owner),
-            slot_domain_lexical(), def_id),
+        make_legacy_source_binder_slot(owner, def_id),
         value.name, def_id, value.ty, value.is_mutable)
 }
 
@@ -426,16 +428,17 @@ fn scan_stmt(
 ) {
     match value {
         HStmt::Let { name, def_id: some(id), ty, init, .. } => {
-            add_binder_fact(builder, make_source_slot_ref(
-                executable_ref_origin_module_key(owner),
-                slot_domain_lexical(), id),
+            add_binder_fact(
+                builder, make_legacy_source_binder_slot(owner, id),
                 name, id, ty, false)
             scan_expr(builder, owner, init, type_params, trait_bounds)
         },
         HStmt::Var { name, def_id: some(id), ty, init, .. } => {
-            add_binder_fact(builder, make_source_slot_ref(
-                executable_ref_origin_module_key(owner),
-                slot_domain_lexical(), id),
+            if id < 0 {
+                panic("Core/legacy freeze: mutable binder is synthetic")
+            }
+            add_binder_fact(
+                builder, make_legacy_source_binder_slot(owner, id),
                 name, id, ty, true)
             scan_expr(builder, owner, init, type_params, trait_bounds)
         },
