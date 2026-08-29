@@ -1146,14 +1146,14 @@ pub struct LegacyImplFactProjection {
     module_body: ModuleBodyRef,
     container: LegacyContainerRef
 }
-pub fn make_legacy_impl_fact_projection(
+fn make_legacy_impl_fact_projection_with_domain(
     owner: ImplOwnerRef,
     target_type_fact: CoreTypeFactRef, target_type: Type,
     target_nominal: SymbolRef, trait_ref: SymbolRef?,
     type_parameters: List<LegacyTypeParameterProjection>,
     assoc_bindings: List<LegacyAssocBindingFactProjection>,
     methods: List<ImplMethodRef>, module_body: ModuleBodyRef,
-    container: LegacyContainerRef
+    container: LegacyContainerRef, physical_owner: Bool
 ) -> LegacyImplFactProjection {
     let module_key = module_body_ref_origin_module_key(module_body)
     let provider_owner = path_ref_owner(
@@ -1164,10 +1164,22 @@ pub fn make_legacy_impl_fact_projection(
         module_body_ref_origin_module_key(
             path_owner_ref_module_body(provider_owner))
     }
+    let target_module = symbol_ref_origin_module_key(target_nominal)
+    let physical_domain_valid = if physical_owner {
+        let target_is_physical =
+            origin_module_key_is_prelude(target_module) ||
+            target_module == "$builtin"
+        let provider_is_physical =
+            origin_module_key_is_prelude(provider_module) ||
+            provider_module == "$builtin"
+        target_is_physical && provider_is_physical
+    } else {
+        provider_module == module_key
+    }
     if core_type_fact_module_key(target_type_fact) != module_key ||
        !symbol_ref_same(impl_owner_ref_target(owner), target_nominal) ||
        legacy_container_module_key(container) != module_key ||
-       provider_module != module_key {
+       !physical_domain_valid {
         panic("legacy projection: module impl identity/type domain differs")
     }
     match (impl_owner_ref_trait(owner), trait_ref) {
@@ -1195,6 +1207,36 @@ pub fn make_legacy_impl_fact_projection(
         assoc_bindings: assoc_bindings, methods: methods,
         module_body: module_body, container: container
     }
+}
+
+pub fn make_legacy_impl_fact_projection(
+    owner: ImplOwnerRef,
+    target_type_fact: CoreTypeFactRef, target_type: Type,
+    target_nominal: SymbolRef, trait_ref: SymbolRef?,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    assoc_bindings: List<LegacyAssocBindingFactProjection>,
+    methods: List<ImplMethodRef>, module_body: ModuleBodyRef,
+    container: LegacyContainerRef
+) -> LegacyImplFactProjection {
+    make_legacy_impl_fact_projection_with_domain(
+        owner, target_type_fact, target_type, target_nominal, trait_ref,
+        type_parameters, assoc_bindings, methods, module_body, container,
+        false)
+}
+
+pub fn make_legacy_physical_impl_fact_projection(
+    owner: ImplOwnerRef,
+    target_type_fact: CoreTypeFactRef, target_type: Type,
+    target_nominal: SymbolRef, trait_ref: SymbolRef?,
+    type_parameters: List<LegacyTypeParameterProjection>,
+    assoc_bindings: List<LegacyAssocBindingFactProjection>,
+    methods: List<ImplMethodRef>, module_body: ModuleBodyRef,
+    container: LegacyContainerRef
+) -> LegacyImplFactProjection {
+    make_legacy_impl_fact_projection_with_domain(
+        owner, target_type_fact, target_type, target_nominal, trait_ref,
+        type_parameters, assoc_bindings, methods, module_body, container,
+        true)
 }
 
 fn slot_projection_module_key(value: SlotRef) -> Str {

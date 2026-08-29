@@ -34,13 +34,14 @@ use hir_exact::{
 }
 use ir_identity::{
     CoreTypeFactRef, core_type_fact_same, core_type_fact_module_key,
-    SymbolRef, ModuleBodyRef, SlotRef, OriginRef, ImplMethodRef,
+    SymbolRef, ModuleBodyRef, SlotRef, OriginRef, ImplOwnerRef, ImplMethodRef,
     make_module_body_ref, make_source_slot_ref, slot_domain_lexical,
     make_synthetic_slot_ref, make_path_ref, path_role_parameter,
     path_owner_for_symbol, path_ref_owner,
     path_ref_normalized_child_path, make_path_origin_ref,
     make_symbol_origin_ref, symbol_ref_same,
-    symbol_ref_canonical_payload,
+    symbol_ref_origin_module_key, symbol_ref_canonical_payload,
+    origin_module_key_is_prelude,
     impl_method_ref_owner, impl_method_ref_callable_slot_index,
     impl_owner_ref_target, impl_owner_ref_trait,
     intrinsic_ref_symbol, slot_ref_same, slot_ref_is_source,
@@ -115,6 +116,7 @@ use legacy_projection::{
     legacy_dictionary_projection_physical,
     make_legacy_trait_bound_projection,
     make_legacy_impl_fact_projection,
+    make_legacy_physical_impl_fact_projection,
     make_legacy_internal_type_fact_projection,
     legacy_internal_effect_ctx_opaque,
     legacy_effect_fact_projection_row,
@@ -176,6 +178,15 @@ struct LegacyFactBuilder {
     dictionaries: List<LegacyDictionaryProjection>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: List<LegacyExecutableShell>
+}
+
+fn impl_uses_physical_owner(
+    builder: LegacyFactBuilder, owner: ImplOwnerRef
+) -> Bool {
+    if !builder.owns_prelude { return false }
+    let module_key = symbol_ref_origin_module_key(
+        impl_owner_ref_target(owner))
+    origin_module_key_is_prelude(module_key) || module_key == "$builtin"
 }
 
 fn executable_origin(value: ExecutableRef) -> OriginRef {
@@ -723,15 +734,27 @@ fn add_derived_impl_facts(
             impl_method_ref_callable_slot_index(left) -
                 impl_method_ref_callable_slot_index(right)
         })
-        builder.impls.push(make_legacy_impl_fact_projection(
-            derived.owner_ref,
-            exact_type_fact(
-                builder.type_sources, derived.target_type,
-                builder.module_key),
-            derived.target_type, impl_owner_ref_target(derived.owner_ref),
-            some(derived.trait_ref),
-            callable_type_parameters(derived.type_params, derived.bounds),
-            [], method_refs, builder.module_body, module_container))
+        let target_fact = exact_type_fact(
+            builder.type_sources, derived.target_type, builder.module_key)
+        let projection = if impl_uses_physical_owner(
+                builder, derived.owner_ref) {
+            make_legacy_physical_impl_fact_projection(
+                derived.owner_ref, target_fact, derived.target_type,
+                impl_owner_ref_target(derived.owner_ref),
+                some(derived.trait_ref),
+                callable_type_parameters(
+                    derived.type_params, derived.bounds),
+                [], method_refs, builder.module_body, module_container)
+        } else {
+            make_legacy_impl_fact_projection(
+                derived.owner_ref, target_fact, derived.target_type,
+                impl_owner_ref_target(derived.owner_ref),
+                some(derived.trait_ref),
+                callable_type_parameters(
+                    derived.type_params, derived.bounds),
+                [], method_refs, builder.module_body, module_container)
+        }
+        builder.impls.push(projection)
     }
 }
 
@@ -831,14 +854,23 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
                         exact_type_fact(
                             builder.type_sources, ty, builder.module_key), ty)
                 })
-                builder.impls.push(make_legacy_impl_fact_projection(
-                    owner_ref,
-                    exact_type_fact(
-                        builder.type_sources, target_ty, builder.module_key),
-                    target_ty, impl_owner_ref_target(owner_ref), trait_ref,
-                    callable_type_parameters(type_params, []), assoc,
-                    method_refs, builder.module_body,
-                    module_container))
+                let target_fact = exact_type_fact(
+                    builder.type_sources, target_ty, builder.module_key)
+                let projection = if impl_uses_physical_owner(
+                        builder, owner_ref) {
+                    make_legacy_physical_impl_fact_projection(
+                        owner_ref, target_fact, target_ty,
+                        impl_owner_ref_target(owner_ref), trait_ref,
+                        callable_type_parameters(type_params, []), assoc,
+                        method_refs, builder.module_body, module_container)
+                } else {
+                    make_legacy_impl_fact_projection(
+                        owner_ref, target_fact, target_ty,
+                        impl_owner_ref_target(owner_ref), trait_ref,
+                        callable_type_parameters(type_params, []), assoc,
+                        method_refs, builder.module_body, module_container)
+                }
+                builder.impls.push(projection)
             },
             HDecl::ModBlock { decls, .. } => scan_decls(builder, decls),
             HDecl::Struct { .. } | HDecl::Enum { .. } |
