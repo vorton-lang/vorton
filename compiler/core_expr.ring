@@ -53,6 +53,7 @@ use ir_inventory::{
     executable_ref_same, executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_origin_module_key,
     make_source_binder_entry, make_synthetic_binder_entry,
+    make_semantic_effect_ctx_binder,
     binder_kind_tag, binder_kind_effect_ctx_local,
     binder_entry_slot, binder_entry_owner, binder_entry_kind, binder_entry_site,
     effect_ctx_binding, effect_ctx_slot, effect_ctx_contract_owner,
@@ -3280,7 +3281,16 @@ pub fn validate_core_body(value: CoreBody) {
         if core_type_ref_index(binder.ty) < 0 {
             panic("CoreHIR: binder has an invalid type")
         }
-        let entry = if slot_ref_is_source(binder.reference) {
+        let kind_tag = binder_kind_tag(binder.kind)
+        let effect_ctx =
+            kind_tag == binder_kind_tag(binder_kind_effect_ctx_param()) ||
+            kind_tag == binder_kind_tag(binder_kind_effect_ctx_local()) ||
+            kind_tag == binder_kind_tag(
+                binder_kind_effect_ctx_parent_capture())
+        let entry = if effect_ctx {
+            make_semantic_effect_ctx_binder(
+                binder.reference, value.reference, binder.kind, binder.site)
+        } else if slot_ref_is_source(binder.reference) {
             make_source_binder_entry(
                 binder.reference, value.reference, binder.kind, binder.site)
         } else {
