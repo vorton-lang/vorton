@@ -4,6 +4,7 @@
 
 use ir_identity::{SlotRef, slot_ref_same}
 use flow_ir::{
+    FlowInstructionRef,
     make_flow_instruction_ref, make_flow_block_ref,
     make_flow_project_place, flow_projection_contract_result_type,
     flow_semantic_step_is_instruction, flow_semantic_step_instruction,
@@ -206,6 +207,22 @@ fn require_writable_state(state: SlotFlow, operation: Str) {
     }
 }
 
+fn normalize_reusable_target_abstract(
+    mut states: List<SlotFlow>, target: Int, operation: Str
+) {
+    let before = states.get(target).unwrap()
+    if slot_flow_is_unreachable(before) {
+        panic("ResourcePlanner: ${operation} targets unreachable storage")
+    }
+    if slot_flow_is_live(before) {
+        panic("ResourcePlanner: ${operation} overwrites live storage")
+    }
+    if slot_flow_is_maybe_moved(before) &&
+       slot_flow_cleanup_owner(before) {
+        states.set(target, slot_flow_empty())
+    }
+}
+
 fn apply_demand_abstract(
     body: PlannerBody, event: PlannerEvent, operand_ordinal: Int,
     slot: Int, demand: TransferDemand,
@@ -265,6 +282,8 @@ fn apply_event_abstract(
         PlannerEventValue::InitializeValue {
             input_slots, input_demands, target, ..
         } => {
+            normalize_reusable_target_abstract(
+                states, target, "Initialize")
             let mut input_index = 0
             while input_index < input_slots.len() {
                 apply_demand_abstract(
@@ -274,11 +293,6 @@ fn apply_event_abstract(
                     logical_shapes, states, collect, findings)
                 input_index = input_index + 1
             }
-            let before = states.get(target).unwrap()
-            if slot_flow_is_live(before) ||
-               slot_flow_is_unreachable(before) {
-                panic("ResourcePlanner: initialize overwrites live storage")
-            }
             let target_type = body.slots.get(target).unwrap().type_index
             states.set(target, slot_flow_live_owner(
                 body.slots.get(target).unwrap().owns_storage &&
@@ -287,11 +301,7 @@ fn apply_event_abstract(
                     physical_shapes.get(target_type).unwrap())))
         },
         PlannerEventValue::ReadValue { source, target } => {
-            let before = states.get(target).unwrap()
-            if slot_flow_is_live(before) ||
-               slot_flow_is_unreachable(before) {
-                panic("ResourcePlanner: Read overwrites live storage")
-            }
+            normalize_reusable_target_abstract(states, target, "Read")
             let demand = decided_transfer(body, event, 0).demand
             apply_demand_abstract(
                 body, event, 0, source, demand,
@@ -314,13 +324,8 @@ fn apply_event_abstract(
         },
         PlannerEventValue::ConsumeValue(slot, force, target) => {
             match target {
-                some(value) => {
-                    let sink_state = states.get(value).unwrap()
-                    if slot_flow_is_live(sink_state) ||
-                       slot_flow_is_unreachable(sink_state) {
-                        panic("ResourcePlanner: abstract Consume sink is not empty")
-                    }
-                },
+                some(value) => normalize_reusable_target_abstract(
+                    states, value, "Consume sink"),
                 none => {}
             }
             apply_demand_abstract(
@@ -373,11 +378,8 @@ fn apply_event_abstract(
             states.set(rhs_temp, slot_flow_moved())
         },
         PlannerEventValue::MovePlaceValue { source, target } => {
-            let target_before = states.get(target).unwrap()
-            if slot_flow_is_live(target_before) ||
-               slot_flow_is_unreachable(target_before) {
-                panic("ResourcePlanner: MovePlace target is not empty")
-            }
+            normalize_reusable_target_abstract(
+                states, target, "MovePlace")
             let source_slot = if planner_place_is_slot(source) {
                 planner_place_slot(source)
             } else { planner_place_base(source) }
@@ -412,6 +414,11 @@ fn apply_event_abstract(
             argument_slots, result_slot, ..
         } => {
             let effective_result_owned = event.decision.result_owned
+            match result_slot {
+                some(slot) => normalize_reusable_target_abstract(
+                    states, slot, "Call result"),
+                none => {}
+            }
             let mut argument = 0
             while argument < argument_slots.len() {
                 apply_demand_abstract(
@@ -423,11 +430,6 @@ fn apply_event_abstract(
             }
             match result_slot {
                 some(slot) => {
-                    let before = states.get(slot).unwrap()
-                    if slot_flow_is_live(before) ||
-                       slot_flow_is_unreachable(before) {
-                        panic("ResourcePlanner: call result overwrites live storage")
-                    }
                     let result_logical = logical_shapes.get(
                         result_type_index).unwrap()
                     let result_physical = physical_shapes.get(
@@ -455,11 +457,8 @@ fn apply_event_abstract(
         PlannerEventValue::ProjectValue {
             source, target, projection, value_type_index, partial
         } => {
-            let before_target = states.get(target).unwrap()
-            if slot_flow_is_live(before_target) ||
-               slot_flow_is_unreachable(before_target) {
-                panic("ResourcePlanner: projection overwrites live storage")
-            }
+            normalize_reusable_target_abstract(
+                states, target, "Project")
             let demand = decided_transfer(body, event, 0).demand
             let source_live = preflight_live_slot(
                 body, event, 0, source, states.get(source).unwrap(),
@@ -510,11 +509,8 @@ fn apply_event_abstract(
             }
         },
         PlannerEventValue::CaptureValue { source, target, demand } => {
-            let before_target = states.get(target).unwrap()
-            if slot_flow_is_live(before_target) ||
-               slot_flow_is_unreachable(before_target) {
-                panic("ResourcePlanner: capture overwrites live storage")
-            }
+            normalize_reusable_target_abstract(
+                states, target, "Capture")
             apply_demand_abstract(
                 body, event, 0, source,
                 decided_transfer(body, event, 0).demand,
@@ -847,6 +843,41 @@ fn apply_demand_materialized(
     }
 }
 
+fn normalize_reusable_target_materialized(
+    body: PlannerBody, event: PlannerEvent,
+    instruction: FlowInstructionRef,
+    target: Int, operation: Str,
+    solved: SolvedResourceGraph, mut states: List<SlotFlow>,
+    mut operations: List<RcOperation>,
+    mut transitions: List<SlotTransitionWitness>
+) {
+    let before = states.get(target).unwrap()
+    if slot_flow_is_unreachable(before) {
+        panic("ResourcePlanner: ${operation} targets unreachable storage")
+    }
+    if slot_flow_is_live(before) {
+        panic("ResourcePlanner: ${operation} overwrites live storage")
+    }
+    if slot_flow_is_maybe_moved(before) &&
+       slot_flow_cleanup_owner(before) {
+        let slot = body.slots.get(target).unwrap()
+        if !type_requires_cleanup(
+                solved.logical_shapes.get(slot.type_index).unwrap(),
+                solved.physical_shapes.get(slot.type_index).unwrap()) {
+            panic("ResourcePlanner: reusable target owner lacks cleanup shape")
+        }
+        operations.push(make_rc_drop_at(
+            make_rc_instruction_site(
+                instruction, rc_site_before_instruction(),
+                event.operands.len()),
+            rc_slot_for(body, target)))
+        states.set(target, slot_flow_empty())
+        push_transition(
+            transitions, target, before,
+            slot_flow_empty(), slot_reason_drop())
+    }
+}
+
 struct MaterializedStep {
     step: RcStep,
     certificate: CfgStepCertificate
@@ -900,6 +931,9 @@ fn materialize_event(
         PlannerEventValue::InitializeValue {
             input_slots, input_demands, target, ..
         } => {
+            normalize_reusable_target_materialized(
+                body, event, instruction, target, "Initialize",
+                solved, states, before_ops, before_transitions)
             let mut input_index = 0
             while input_index < input_slots.len() {
                 apply_demand_materialized(
@@ -911,10 +945,6 @@ fn materialize_event(
                 input_index = input_index + 1
             }
             let before = states.get(target).unwrap()
-            if slot_flow_is_live(before) ||
-               slot_flow_is_unreachable(before) {
-                panic("ResourcePlanner: initialize overwrites live storage")
-            }
             let target_type = body.slots.get(target).unwrap().type_index
             let target_state = slot_flow_live_owner(
                 body.slots.get(target).unwrap().owns_storage &&
@@ -926,13 +956,12 @@ fn materialize_event(
                 target_state, slot_reason_init_live())
         },
         PlannerEventValue::ReadValue { source, target } => {
+            normalize_reusable_target_materialized(
+                body, event, instruction, target, "Read",
+                solved, states, before_ops, before_transitions)
             let source_before = states.get(source).unwrap()
             let target_before = states.get(target).unwrap()
             require_live_state(source_before, "read")
-            if slot_flow_is_live(target_before) ||
-               slot_flow_is_unreachable(target_before) {
-                panic("ResourcePlanner: Read overwrites live storage")
-            }
             let demand = decided_transfer(body, event, 0).demand
             apply_demand_materialized(
                 body, source, demand,
@@ -975,15 +1004,14 @@ fn materialize_event(
                 states, before_ops, before_transitions)
         },
         PlannerEventValue::ConsumeValue(slot, force, target) => {
+            match target {
+                some(value) => normalize_reusable_target_materialized(
+                    body, event, instruction, value, "Consume sink",
+                    solved, states, before_ops, before_transitions),
+                none => {}
+            }
             let sink_before: SlotFlow? = match target {
-                some(value) => {
-                    let sink_state = states.get(value).unwrap()
-                    if slot_flow_is_live(sink_state) ||
-                       slot_flow_is_unreachable(sink_state) {
-                        panic("ResourcePlanner: Consume sink is not empty")
-                    }
-                    some(sink_state)
-                },
+                some(value) => some(states.get(value).unwrap()),
                 none => none
             }
             apply_demand_materialized(
@@ -1099,11 +1127,10 @@ fn materialize_event(
             }
         },
         PlannerEventValue::MovePlaceValue { source, target } => {
+            normalize_reusable_target_materialized(
+                body, event, instruction, target, "MovePlace",
+                solved, states, before_ops, before_transitions)
             let target_before = states.get(target).unwrap()
-            if slot_flow_is_live(target_before) ||
-               slot_flow_is_unreachable(target_before) {
-                panic("ResourcePlanner: MovePlace target is not empty")
-            }
             let source_slot = if planner_place_is_slot(source) {
                 planner_place_slot(source)
             } else { planner_place_base(source) }
@@ -1139,6 +1166,12 @@ fn materialize_event(
             argument_slots, result_slot, ..
         } => {
             let effective_result_owned = event.decision.result_owned
+            match result_slot {
+                some(slot) => normalize_reusable_target_materialized(
+                    body, event, instruction, slot, "Call result",
+                    solved, states, before_ops, before_transitions),
+                none => {}
+            }
             let mut argument = 0
             while argument < argument_slots.len() {
                 apply_demand_materialized(
@@ -1153,10 +1186,6 @@ fn materialize_event(
             match result_slot {
                 some(slot) => {
                     let before = states.get(slot).unwrap()
-                    if slot_flow_is_live(before) ||
-                       slot_flow_is_unreachable(before) {
-                        panic("ResourcePlanner: call result overwrites live storage")
-                    }
                     let result_logical = solved.logical_shapes.get(
                         result_type_index).unwrap()
                     let result_physical = solved.physical_shapes.get(
@@ -1208,13 +1237,12 @@ fn materialize_event(
         PlannerEventValue::ProjectValue {
             source, target, projection, value_type_index, partial
         } => {
+            normalize_reusable_target_materialized(
+                body, event, instruction, target, "Project",
+                solved, states, before_ops, before_transitions)
             let source_before = states.get(source).unwrap()
             let target_before = states.get(target).unwrap()
             require_live_state(source_before, "projection")
-            if slot_flow_is_live(target_before) ||
-               slot_flow_is_unreachable(target_before) {
-                panic("ResourcePlanner: projection overwrites live storage")
-            }
             let demand = decided_transfer(body, event, 0).demand
             let logical = solved.logical_shapes.get(value_type_index).unwrap()
             let physical = solved.physical_shapes.get(value_type_index).unwrap()
@@ -1297,11 +1325,10 @@ fn materialize_event(
             }
         },
         PlannerEventValue::CaptureValue { source, target, demand } => {
+            normalize_reusable_target_materialized(
+                body, event, instruction, target, "Capture",
+                solved, states, before_ops, before_transitions)
             let target_before = states.get(target).unwrap()
-            if slot_flow_is_live(target_before) ||
-               slot_flow_is_unreachable(target_before) {
-                panic("ResourcePlanner: capture overwrites live storage")
-            }
             let exact_demand = decided_transfer(body, event, 0).demand
             apply_demand_materialized(
                 body, source, exact_demand,

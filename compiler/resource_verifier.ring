@@ -26,7 +26,8 @@ use resource_model::{
     physical_rc_shape_physical_rc, physical_rc_shape_drop_glue,
     physical_rc_shape_foreign_containment, physical_rc_shape_param_deps,
     slot_flow_same, slot_flow_empty, slot_flow_live_owner,
-    slot_flow_cleanup_owner, slot_flow_is_unreachable, slot_flow_is_live}
+    slot_flow_cleanup_owner, slot_flow_is_unreachable, slot_flow_is_live,
+    slot_flow_is_maybe_moved}
 use rc_ir::{
     RcProgram, RcOperation, rc_program_flow_fingerprint,
     rc_program_type_count, rc_program_callable_count, rc_program_bodies,
@@ -2744,6 +2745,31 @@ fn verify_scope_transitions(
     }
 }
 
+fn reusable_target_drop_required(state: SlotFlow) -> Bool {
+    slot_flow_is_maybe_moved(state) && slot_flow_cleanup_owner(state)
+}
+
+fn verify_reusable_target_transition(
+    states: List<SlotFlow>, target: Int,
+    before: List<SlotTransitionWitness>, context: Str
+) -> Int {
+    let state = states.get(target).unwrap()
+    if slot_flow_is_unreachable(state) {
+        panic("ResourcePlanner verifier: ${context} targets unreachable storage")
+    }
+    if slot_flow_is_live(state) {
+        panic("ResourcePlanner verifier: ${context} overwrites live storage")
+    }
+    if !reusable_target_drop_required(state) { return 0 }
+    let transition = before.get(0).unwrap_or_else(fn() {
+        panic("ResourcePlanner verifier: ${context} target Drop is absent")
+    })
+    require_transition(transition, target, slot_reason_drop(), context)
+    require_transition_after_state(
+        transition, slot_flow_empty(), context)
+    1
+}
+
 fn verify_event_transition_contract(
     body: PlannerBody, event: PlannerEvent,
     solved: SolvedResourceGraph, states: List<SlotFlow>,
@@ -2766,13 +2792,15 @@ fn verify_event_transition_contract(
         PlannerEventValue::InitializeValue {
             input_slots, input_demands, target, ..
         } => {
+            let before_offset = verify_reusable_target_transition(
+                states, target, before, "Initialize")
             require_transition_count(
-                before, input_slots.len(), "Initialize input")
+                before, before_offset + input_slots.len(), "Initialize input")
             let mut index = 0
             while index < input_slots.len() {
                 let slot = input_slots.get(index).unwrap()
                 require_transition(
-                    before.get(index).unwrap(), slot,
+                    before.get(before_offset + index).unwrap(), slot,
                     demand_source_transition_reason(
                         body, solved, slot,
                         verifier_decided_transfer(
@@ -2799,9 +2827,12 @@ fn verify_event_transition_contract(
         },
         PlannerEventValue::ReadValue { source, target } => {
             let demand = verifier_decided_transfer(body, event, 0).demand
-            require_transition_count(before, 1, "Read source")
+            let before_offset = verify_reusable_target_transition(
+                states, target, before, "Read")
+            require_transition_count(
+                before, before_offset + 1, "Read source")
             require_transition(
-                before.get(0).unwrap(), source,
+                before.get(before_offset).unwrap(), source,
                 demand_source_transition_reason(body, solved, source, demand),
                 "Read source")
             require_transition_count(semantic, 1, "Read target")
@@ -2828,14 +2859,40 @@ fn verify_event_transition_contract(
                 slot_reason_mutate(), "Mutate target")
             require_transition_count(after, 0, "Mutate after")
         },
-        PlannerEventValue::ConsumeValue(slot, force, _) => {
+        PlannerEventValue::ConsumeValue(slot, _, target) => {
             let demand = verifier_decided_transfer(body, event, 0).demand
-            require_transition_count(before, 1, "Consume source")
+            let before_offset = match target {
+                some(value) => verify_reusable_target_transition(
+                    states, value, before, "Consume sink"),
+                none => 0
+            }
+            require_transition_count(
+                before, before_offset + 1, "Consume source")
             require_transition(
-                before.get(0).unwrap(), slot,
+                before.get(before_offset).unwrap(), slot,
                 demand_source_transition_reason(body, solved, slot, demand),
                 "Consume source")
-            require_transition_count(semantic, 0, "Consume semantic")
+            match target {
+                some(value) => {
+                    require_transition_count(
+                        semantic, 1, "Consume sink semantic")
+                    require_transition(
+                        semantic.get(0).unwrap(), value,
+                        slot_reason_take_target(), "Consume sink semantic")
+                    let type_index = body.slots.get(slot).unwrap().type_index
+                    let owner = param_mode_same(
+                            transfer_demand_mode(demand), param_mode_own()) &&
+                        (transfer_demand_force(demand) ||
+                         verifier_type_requires_cleanup(
+                            solved.logical_shapes.get(type_index).unwrap(),
+                            solved.physical_shapes.get(type_index).unwrap()))
+                    require_transition_after_state(
+                        semantic.get(0).unwrap(),
+                        slot_flow_live_owner(owner), "Consume sink semantic")
+                },
+                none => require_transition_count(
+                    semantic, 0, "Consume semantic")
+            }
             require_transition_count(after, 0, "Consume after")
         },
         PlannerEventValue::DiscardValue(slot) => {
@@ -2909,9 +2966,12 @@ fn verify_event_transition_contract(
             let source_slot = if planner_place_is_slot(source) {
                 planner_place_slot(source)
             } else { planner_place_base(source) }
-            require_transition_count(before, 1, "MovePlace source")
+            let before_offset = verify_reusable_target_transition(
+                states, target, before, "MovePlace")
+            require_transition_count(
+                before, before_offset + 1, "MovePlace source")
             require_transition(
-                before.get(0).unwrap(), source_slot,
+                before.get(before_offset).unwrap(), source_slot,
                 if planner_place_is_slot(source) {
                     demand_source_transition_reason(
                         body, solved, source_slot,
@@ -2936,13 +2996,18 @@ fn verify_event_transition_contract(
             callable_indices, argument_demands, result_owned,
             argument_slots, result_slot, ..
         } => {
+            let before_offset = match result_slot {
+                some(slot) => verify_reusable_target_transition(
+                    states, slot, before, "Call result"),
+                none => 0
+            }
             require_transition_count(
-                before, argument_slots.len(), "Call arguments")
+                before, before_offset + argument_slots.len(), "Call arguments")
             let mut index = 0
             while index < argument_slots.len() {
                 let slot = argument_slots.get(index).unwrap()
                 require_transition(
-                    before.get(index).unwrap(), slot,
+                    before.get(before_offset + index).unwrap(), slot,
                     demand_source_transition_reason(
                         body, solved, slot,
                         verifier_decided_transfer(
@@ -2999,6 +3064,8 @@ fn verify_event_transition_contract(
         PlannerEventValue::ProjectValue {
             source, target, value_type_index, partial, ..
         } => {
+            let before_offset = verify_reusable_target_transition(
+                states, target, before, "Project")
             let demand = verifier_decided_transfer(body, event, 0).demand
             let mode = transfer_demand_mode(demand)
             let needs_cleanup = verifier_logical_shape_may_take(
@@ -3018,19 +3085,20 @@ fn verify_event_transition_contract(
                 if takes_place && !body.slots.get(target).unwrap().owns_storage {
                     panic("ResourcePlanner verifier: owning partial Project target is borrowed")
                 }
-                require_transition_count(before, 1, "partial Project source")
+                require_transition_count(
+                    before, before_offset + 1, "partial Project source")
                 if takes_place {
                     require_transition(
-                        before.get(0).unwrap(), source,
+                        before.get(before_offset).unwrap(), source,
                         slot_reason_take_projected_source(),
                         "partial Project source")
                 } else {
                     require_transition(
-                        before.get(0).unwrap(), source,
+                        before.get(before_offset).unwrap(), source,
                         slot_reason_borrow(), "partial Project source")
                 }
                 require_transition_after_state(
-                    before.get(0).unwrap(), source_state,
+                    before.get(before_offset).unwrap(), source_state,
                     "partial Project source")
             } else {
                 if param_mode_same(mode, param_mode_own()) &&
@@ -3038,9 +3106,10 @@ fn verify_event_transition_contract(
                         solved.logical_shapes.get(value_type_index).unwrap()) {
                     panic("ResourcePlanner verifier: owning field projection crossed diagnostics")
                 }
-                require_transition_count(before, 1, "Project source")
+                require_transition_count(
+                    before, before_offset + 1, "Project source")
                 require_transition(
-                    before.get(0).unwrap(), source,
+                    before.get(before_offset).unwrap(), source,
                     slot_reason_borrow(), "Project source")
             }
             let needs_clone = !partial &&
@@ -3078,9 +3147,12 @@ fn verify_event_transition_contract(
         PlannerEventValue::CaptureValue { source, target, demand } => {
             let exact_demand = verifier_decided_transfer(
                 body, event, 0).demand
-            require_transition_count(before, 1, "Capture source")
+            let before_offset = verify_reusable_target_transition(
+                states, target, before, "Capture")
+            require_transition_count(
+                before, before_offset + 1, "Capture source")
             require_transition(
-                before.get(0).unwrap(), source,
+                before.get(before_offset).unwrap(), source,
                 demand_source_transition_reason(
                     body, solved, source, exact_demand),
                 "Capture source")
@@ -3158,8 +3230,39 @@ fn verify_operation_slots_exact(
     }
 }
 
+fn verify_reusable_target_drop_operation(
+    body: PlannerBody, event: PlannerEvent, target: Int,
+    solved: SolvedResourceGraph, states: List<SlotFlow>,
+    before: List<RcOperation>, context: Str
+) -> Int {
+    let state = states.get(target).unwrap()
+    if slot_flow_is_unreachable(state) || slot_flow_is_live(state) {
+        panic("ResourcePlanner verifier: ${context} target is not reusable")
+    }
+    if !reusable_target_drop_required(state) { return 0 }
+    let target_value = body.slots.get(target).unwrap()
+    if !verifier_type_requires_cleanup(
+            solved.logical_shapes.get(target_value.type_index).unwrap(),
+            solved.physical_shapes.get(target_value.type_index).unwrap()) {
+        panic("ResourcePlanner verifier: reusable target owner lacks cleanup shape")
+    }
+    let operation = before.get(0).unwrap_or_else(fn() {
+        panic("ResourcePlanner verifier: ${context} target Drop is absent")
+    })
+    if rc_semantic_site_operand_ordinal(rc_operation_site(operation)) !=
+            event.operands.len() ||
+       !rc_op_kind_same(rc_operation_kind(operation), rc_op_kind_drop()) ||
+       rc_operation_place_projection(operation).is_some() {
+        panic("ResourcePlanner verifier: ${context} target Drop differs")
+    }
+    verify_operation_slots_exact(
+        operation, body.slots.get(target).unwrap().reference, none)
+    1
+}
+
 fn verify_event_operation_contract(
     body: PlannerBody, event: PlannerEvent, solved: SolvedResourceGraph,
+    states: List<SlotFlow>,
     before: List<RcOperation>, after: List<RcOperation>
 ) {
     match event.value {
@@ -3185,11 +3288,14 @@ fn verify_event_operation_contract(
                     operation, body.slots.get(slot_index).unwrap().reference, none)
             }
         },
-        PlannerEventValue::InitializeValue { input_slots, .. } => {
+        PlannerEventValue::InitializeValue { input_slots, target, .. } => {
             if after.len() != 0 {
                 panic("ResourcePlanner verifier: Initialize has after-resource op")
             }
-            for operation in before {
+            let mut operation_index = verify_reusable_target_drop_operation(
+                body, event, target, solved, states, before, "Initialize")
+            while operation_index < before.len() {
+                let operation = before.get(operation_index).unwrap()
                 let operand = rc_semantic_site_operand_ordinal(
                     rc_operation_site(operation))
                 if operand < 0 || operand >= input_slots.len() {
@@ -3199,13 +3305,17 @@ fn verify_event_operation_contract(
                     operation,
                     body.slots.get(input_slots.get(operand).unwrap()).unwrap().reference,
                     none)
+                operation_index = operation_index + 1
             }
         },
         PlannerEventValue::ReadValue { source, target } => {
             if after.len() != 0 {
                 panic("ResourcePlanner verifier: Read has after-resource op")
             }
-            for operation in before {
+            let mut operation_index = verify_reusable_target_drop_operation(
+                body, event, target, solved, states, before, "Read")
+            while operation_index < before.len() {
+                let operation = before.get(operation_index).unwrap()
                 if rc_semantic_site_operand_ordinal(
                         rc_operation_site(operation)) != 0 {
                     panic("ResourcePlanner verifier: Read operand ordinal drifted")
@@ -3213,6 +3323,7 @@ fn verify_event_operation_contract(
                 verify_operation_slots_exact(
                     operation, body.slots.get(source).unwrap().reference,
                     some(body.slots.get(target).unwrap().reference))
+                operation_index = operation_index + 1
             }
         },
         PlannerEventValue::MutateValue { value: input, .. } => {
@@ -3232,7 +3343,13 @@ fn verify_event_operation_contract(
             if after.len() != 0 {
                 panic("ResourcePlanner verifier: consume has after-resource op")
             }
-            for operation in before {
+            let mut operation_index = match target {
+                some(value) => verify_reusable_target_drop_operation(
+                    body, event, value, solved, states, before, "Consume sink"),
+                none => 0
+            }
+            while operation_index < before.len() {
+                let operation = before.get(operation_index).unwrap()
                 if rc_semantic_site_operand_ordinal(
                         rc_operation_site(operation)) != 0 {
                     panic("ResourcePlanner verifier: consume ordinal drifted")
@@ -3242,6 +3359,7 @@ fn verify_event_operation_contract(
                     target.map(fn(value) {
                         body.slots.get(value).unwrap().reference
                     }))
+                operation_index = operation_index + 1
             }
         },
         PlannerEventValue::DiscardValue(slot) => {
@@ -3314,10 +3432,12 @@ fn verify_event_operation_contract(
             }
         },
         PlannerEventValue::MovePlaceValue { source, target } => {
-            if after.len() != 0 || before.len() != 1 {
+            let operation_index = verify_reusable_target_drop_operation(
+                body, event, target, solved, states, before, "MovePlace")
+            if after.len() != 0 || before.len() != operation_index + 1 {
                 panic("ResourcePlanner verifier: MovePlace Take is absent")
             }
-            let operation = before.get(0).unwrap()
+            let operation = before.get(operation_index).unwrap()
             if rc_semantic_site_operand_ordinal(
                     rc_operation_site(operation)) != 0 ||
                !rc_op_kind_same(
@@ -3348,7 +3468,13 @@ fn verify_event_operation_contract(
         PlannerEventValue::CallValue {
             argument_slots, result_slot, ..
         } => {
-            for operation in before {
+            let mut operation_index = match result_slot {
+                some(slot) => verify_reusable_target_drop_operation(
+                    body, event, slot, solved, states, before, "Call result"),
+                none => 0
+            }
+            while operation_index < before.len() {
+                let operation = before.get(operation_index).unwrap()
                 let operand = rc_semantic_site_operand_ordinal(
                     rc_operation_site(operation))
                 if operand < 0 || operand >= argument_slots.len() {
@@ -3358,6 +3484,7 @@ fn verify_event_operation_contract(
                     operation,
                     body.slots.get(argument_slots.get(operand).unwrap()).unwrap().reference,
                     none)
+                operation_index = operation_index + 1
             }
             for operation in after {
                 if rc_semantic_site_operand_ordinal(
@@ -3374,6 +3501,8 @@ fn verify_event_operation_contract(
         PlannerEventValue::ProjectValue {
             source, target, projection, value_type_index, partial
         } => {
+            let operation_index = verify_reusable_target_drop_operation(
+                body, event, target, solved, states, before, "Project")
             if partial {
                 if after.len() != 0 {
                     panic("ResourcePlanner verifier: partial Project has after-resource op")
@@ -3385,10 +3514,12 @@ fn verify_event_operation_contract(
                         solved.logical_shapes.get(value_type_index).unwrap()) ||
                      verifier_physical_shape_may_drop(
                         solved.physical_shapes.get(value_type_index).unwrap()))
-                if before.len() != if needs_take { 1 } else { 0 } {
+                let take_count = if needs_take { 1 } else { 0 }
+                if before.len() != operation_index + take_count {
                     panic("ResourcePlanner verifier: partial Project Take census drifted")
                 }
-                for operation in before {
+                if needs_take {
+                    let operation = before.get(operation_index).unwrap()
                     if rc_semantic_site_operand_ordinal(
                             rc_operation_site(operation)) != 0 ||
                        !rc_op_kind_same(
@@ -3407,7 +3538,7 @@ fn verify_event_operation_contract(
                     }
                 }
             } else {
-                if before.len() != 0 {
+                if before.len() != operation_index {
                     panic("ResourcePlanner verifier: ordinary Project touches aggregate base")
                 }
                 let demand = verifier_decided_transfer(body, event, 0).demand
@@ -3437,7 +3568,10 @@ fn verify_event_operation_contract(
             if after.len() != 0 {
                 panic("ResourcePlanner verifier: projection/capture has after-resource op")
             }
-            for operation in before {
+            let mut operation_index = verify_reusable_target_drop_operation(
+                body, event, target, solved, states, before, "Capture")
+            while operation_index < before.len() {
+                let operation = before.get(operation_index).unwrap()
                 if rc_semantic_site_operand_ordinal(
                         rc_operation_site(operation)) != 0 {
                     panic("ResourcePlanner verifier: projection/capture ordinal drifted")
@@ -3445,6 +3579,7 @@ fn verify_event_operation_contract(
                 verify_operation_slots_exact(
                     operation, body.slots.get(source).unwrap().reference,
                     some(body.slots.get(target).unwrap().reference))
+                operation_index = operation_index + 1
             }
         }
     }
@@ -3664,6 +3799,7 @@ pub fn verify_rc_topology_contract(
                         expected_body,
                         expected_event,
                         solved,
+                        topology_states,
                         rc_step_before(rc_step), rc_step_after(rc_step))
                     apply_topology_transitions(
                         topology_states, before_transitions)
