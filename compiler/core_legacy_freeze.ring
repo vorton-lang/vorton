@@ -52,7 +52,7 @@ use ir_inventory::{
     make_named_executable_ref,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_anonymous_path, executable_ref_same,
-    executable_ref_origin_module_key, executable_ref_is_prelude,
+    executable_ref_origin_module_key,
     executable_kind_fn, executable_kind_impl_method,
     executable_kind_test, executable_kind_const_getter,
     executable_kind_extern_fn, executable_kind_trait_default,
@@ -189,6 +189,14 @@ fn impl_uses_physical_owner(
     origin_module_key_is_prelude(module_key) || module_key == "$builtin"
 }
 
+fn executable_uses_physical_owner(
+    builder: LegacyFactBuilder, reference: ExecutableRef
+) -> Bool {
+    if !builder.owns_prelude { return false }
+    let module_key = executable_ref_origin_module_key(reference)
+    origin_module_key_is_prelude(module_key) || module_key == "$builtin"
+}
+
 fn executable_origin(value: ExecutableRef) -> OriginRef {
     if executable_ref_is_named(value) {
         make_symbol_origin_ref(executable_ref_named_symbol(value))
@@ -202,12 +210,9 @@ fn add_physical_identity(
     source_name: Str?
 ) {
     let identity = if executable_ref_is_named(reference) {
-        if executable_ref_is_prelude(reference) {
-            let name = match source_name {
-                some(value) => value,
-                none => panic(
-                    "Core/legacy freeze: prelude physical name is absent")
-            }
+        if executable_uses_physical_owner(builder, reference) &&
+           source_name.is_some() {
+            let name = source_name.unwrap()
             if builder.physical_module_prefix == "" { name }
             else { module_item_identity(
                 builder.physical_module_prefix, name) }
@@ -334,7 +339,7 @@ fn add_callable_fact(
         params.map(fn(param) { source_parameter_fact(builder, param) })
     } else { [] }
     let origin = executable_origin(reference)
-    if executable_ref_is_prelude(reference) {
+    if executable_uses_physical_owner(builder, reference) {
         if !builder.owns_prelude {
             panic("Core/legacy freeze: prelude callable escaped owner module")
         }
@@ -628,13 +633,24 @@ fn add_generated_callable_fact(
     }
     let origin = executable_origin(reference)
     let container = make_legacy_module_container(builder.module_body)
-    builder.callables.push(make_legacy_callable_fact_projection(
-        reference, origin, builder.module_body, container, kind,
-        [], [], parameters,
-        exact_type_fact(builder.type_sources, result_type, builder.module_key),
-        result_type, effects, false))
-    builder.shells.push(make_legacy_executable_shell(
-        reference, origin, kind, builder.module_body, container))
+    let result_fact = exact_type_fact(
+        builder.type_sources, result_type, builder.module_key)
+    if executable_uses_physical_owner(builder, reference) {
+        builder.prelude_callables.push(
+            make_legacy_prelude_callable_fact_projection(
+                reference, origin, builder.module_body, kind,
+                [], [], parameters, result_fact,
+                result_type, effects, false))
+        builder.shells.push(make_legacy_prelude_executable_shell(
+            reference, origin, kind, builder.module_body, container))
+    } else {
+        builder.callables.push(make_legacy_callable_fact_projection(
+            reference, origin, builder.module_body, container, kind,
+            [], [], parameters, result_fact,
+            result_type, effects, false))
+        builder.shells.push(make_legacy_executable_shell(
+            reference, origin, kind, builder.module_body, container))
+    }
     add_effect_row(builder, effects)
     add_physical_identity(builder, reference, none)
 }

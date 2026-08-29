@@ -32,7 +32,6 @@ use ir_inventory::{
     executable_inventory_entries, executable_entry_reference,
     executable_entry_kind,
     executable_ref_same, executable_ref_origin_module_key,
-    executable_ref_is_prelude,
     executable_kind_same, executable_kind_builtin_intrinsic}
 use hir::{DictRef}
 use hir_exact::{dict_ref_exact, dict_ref_physical_same}
@@ -63,6 +62,10 @@ use core_expr::{core_effect_ctx_token_instance}
 use flow_ir::{
     FlowProgram, flow_program_bodies, flow_body_slots,
     flow_slot_reference, flow_slot_type
+}
+
+fn legacy_physical_semantic_module(value: Str) -> Bool {
+    origin_module_key_is_prelude(value) || value == "$builtin"
 }
 
 // ============================================================
@@ -484,8 +487,9 @@ fn make_legacy_callable_projection_with_domain(
 ) -> LegacyCallableProjection {
     let module_key = module_body_ref_origin_module_key(module_body)
     let identity_valid = if prelude_physical {
-        executable_ref_is_prelude(reference) &&
-            origin_module_key_is_prelude(origin_module_key(origin)) &&
+        legacy_physical_semantic_module(
+            executable_ref_origin_module_key(reference)) &&
+            legacy_physical_semantic_module(origin_module_key(origin)) &&
             !origin_module_key_is_prelude(module_key) &&
             legacy_container_module_key(container) == module_key
     } else {
@@ -814,8 +818,9 @@ fn make_legacy_executable_shell_with_domain(
 ) -> LegacyExecutableShell {
     let module_key = module_body_ref_origin_module_key(module_body)
     let identity_valid = if prelude_physical {
-        executable_ref_is_prelude(reference) &&
-            origin_module_key_is_prelude(origin_module_key(origin)) &&
+        legacy_physical_semantic_module(
+            executable_ref_origin_module_key(reference)) &&
+            legacy_physical_semantic_module(origin_module_key(origin)) &&
             !origin_module_key_is_prelude(module_key) &&
             legacy_container_module_key(container) == module_key
     } else {
@@ -1047,8 +1052,9 @@ pub fn make_legacy_prelude_callable_fact_projection(
     effects: EffectRow, is_public: Bool
 ) -> LegacyPreludeCallableFactProjection {
     let physical_key = module_body_ref_origin_module_key(module_body)
-    if !executable_ref_is_prelude(reference) ||
-       !origin_module_key_is_prelude(origin_module_key(origin)) ||
+    if !legacy_physical_semantic_module(
+            executable_ref_origin_module_key(reference)) ||
+       !legacy_physical_semantic_module(origin_module_key(origin)) ||
        origin_module_key_is_prelude(physical_key) ||
        core_type_fact_module_key(result_type_fact) != physical_key {
         panic("legacy projection: prelude physical owner contract differs")
@@ -1167,11 +1173,9 @@ fn make_legacy_impl_fact_projection_with_domain(
     let target_module = symbol_ref_origin_module_key(target_nominal)
     let physical_domain_valid = if physical_owner {
         let target_is_physical =
-            origin_module_key_is_prelude(target_module) ||
-            target_module == "$builtin"
+            legacy_physical_semantic_module(target_module)
         let provider_is_physical =
-            origin_module_key_is_prelude(provider_module) ||
-            provider_module == "$builtin"
+            legacy_physical_semantic_module(provider_module)
         target_is_physical && provider_is_physical
     } else {
         provider_module == module_key
