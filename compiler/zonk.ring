@@ -797,7 +797,9 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 constructor: constructor, ty: z_ty, effects: z_eff, span: z_span },
         HExpr::IndexExpr { receiver, index, call_plan, projection, .. } =>
             HExpr::IndexExpr { receiver: zonk_expr(ctx, receiver),
-                index: zonk_expr(ctx, index), call_plan: call_plan,
+                index: zonk_expr(ctx, index),
+                call_plan: call_plan.map(fn(plan) {
+                    zonk_exact_call_plan(ctx, plan) }),
                 projection: projection, ty: z_ty, effects: z_eff, span: z_span },
         // B-098: Clone is inserted by the Perceus pass (post-zonk), so it never
         // reaches zonk in practice; the arm exists only for match exhaustiveness.
