@@ -2281,6 +2281,18 @@ fn seed_diagnostic_decls(
                     }
                 }
             },
+            HDecl::Effect { ops, span, .. } => {
+                for op in ops {
+                    let operation = match op.operation_ref {
+                        some(value) => value,
+                        none => panic(
+                            "Core diagnostic projection: effect op identity is absent")
+                    }
+                    add_diagnostic_owner_seed(
+                        seed, effect_operation_ref_callable(operation),
+                        module_key, span)
+                }
+            },
             HDecl::Impl {
                 methods, default_specializations, delegate_plan, span, ..
             } => {
@@ -2543,16 +2555,16 @@ struct ProjectCallableTypeFormalSource {
 }
 
 fn physical_callable_effect_rows(
-    module_key: Str, module_order: Int,
-    values: List<TypedCallableEffectFact>
+    module_order: Int, values: List<TypedCallableEffectFact>,
+    owners: List<CoreDiagnosticOwnerSeed>
 ) -> List<TypedCallableEffectFact> {
     let mut result: List<TypedCallableEffectFact> = []
     for value in values {
         let reference = typed_callable_effect_reference(value)
         let origin = executable_ref_origin_module_key(reference)
-        if origin == module_key ||
-           (module_order == 0 &&
-            (executable_ref_is_prelude(reference) || origin == "$builtin")) {
+        if owners.any(fn(owner) {
+                executable_ref_same(owner.owner, reference)
+            }) || (module_order == 0 && origin == "$builtin") {
             result.push(value)
         }
     }
@@ -2565,8 +2577,6 @@ pub fn produce_closed_core_assembly_facts(
     effect_parameters: List<TypedEffectFormalFact>,
     callable_effect_rows: List<TypedCallableEffectFact>
 ) -> FrozenCoreAssemblyFacts {
-    let physical_effect_rows = physical_callable_effect_rows(
-        module_key, module_order, callable_effect_rows)
     let derived_impls = physical_derived_impls(
         module_key, module_order,
         closed_program.decls, closed_program.derived_impls)
@@ -2594,6 +2604,8 @@ pub fn produce_closed_core_assembly_facts(
     seed_diagnostic_derived(
         diagnostic_seed, module_key,
         physical_program.decls, physical_program.derived_impls)
+    let physical_effect_rows = physical_callable_effect_rows(
+        module_order, callable_effect_rows, diagnostic_seed.owners)
     freeze_closed_core_assembly_facts(
         producer.recorder, physical_program, env,
         producer.type_sources, effect_ctx_type,
