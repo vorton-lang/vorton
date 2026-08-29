@@ -4,7 +4,7 @@
 // relations are passed as an immutable checker snapshot; expression, binder,
 // callable, impl and executable facts are derived once from canonical HIR.
 
-use ast::{Span, Pattern, LiteralValue, BinOp, UnaryOp, span_zero}
+use ast::{Span, Position, Pattern, LiteralValue, BinOp, UnaryOp, span_zero}
 use types::{Type, Effect, EffectRow, types_equal, EMPTY_ROW}
 use env::{
     TypeEnv, TraitDef, AssocTypeDef,
@@ -2077,6 +2077,20 @@ fn seed_diagnostic_stmt(
             seed_diagnostic_expr(seed, module_key, owner_span, condition)
             seed_diagnostic_expr(seed, module_key, owner_span, body)
         },
+        HStmt::LetDestructure { bindings, init, span, .. } => {
+            seed_diagnostic_expr(seed, module_key, owner_span, init)
+            for binding in bindings {
+                if binding.name != "_" {
+                    let slot = match binding.slot {
+                        some(value) => value,
+                        none => panic(
+                            "Core diagnostic projection: destructure binding lacks slot")
+                    }
+                    add_diagnostic_slot_seed(
+                        seed, slot, module_key, span, binding.name)
+                }
+            }
+        },
         HStmt::Break { .. } | HStmt::Continue { .. } => {},
         _ => panic("Core diagnostic projection: surface statement survived")
     }
@@ -2291,10 +2305,20 @@ fn seed_diagnostic_derived(
     decls: List<HDecl>, values: List<DerivedImpl>
 ) {
     for value in values {
+        let target = registered_nominal_ref_symbol(value.target_owner)
         let span = match diagnostic_nominal_span(
-                decls, registered_nominal_ref_symbol(value.target_owner)) {
+                decls, target) {
             some(found) => found,
-            none => panic("Core diagnostic projection: derived source is absent")
+            none => {
+                if symbol_ref_origin_module_key(target) != "$builtin" {
+                    panic("Core diagnostic projection: derived source is absent")
+                }
+                let position = Position { line: 1, column: 0, offset: 0 }
+                Span {
+                    file: "<builtin:${symbol_ref_canonical_payload(target)}>",
+                    start: position, end: position
+                }
+            }
         }
         for method in value.methods {
             add_diagnostic_owner_seed(
