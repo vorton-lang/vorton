@@ -7,8 +7,8 @@ effect Scale {
 }
 
 // A declaration without any runtime use must not allocate an EffectCtx token.
-effect DormantBodyless {
-    fn inspect(value: Int) -> Int
+effect DormantBodyless<T> {
+    fn inspect(value: T) -> T
 }
 
 fn apply_polymorphic(

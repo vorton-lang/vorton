@@ -13575,6 +13575,13 @@ def preacceptance_source_contract_errors(
             "commit_infer_mutation_journal(ctx, mutation_checkpoint)",
             "rollback_infer_mutation_journal(ctx, mutation_checkpoint)",
         )),
+        ("impl-transaction", "infer_decl", "infer_and_commit_impl_draft_group", (
+            "begin_infer_mutation_journal(ctx)",
+            "preflight_impl_draft_group(",
+            "let declarations = commit_impl_draft_group(",
+            "commit_infer_mutation_journal(ctx, mutation_checkpoint)",
+            "rollback_infer_mutation_journal(ctx, mutation_checkpoint)",
+        )),
         ("prepare", "infer_decl", "prepare_fn_draft_group", (
             "preflight_owner_batches(ctx, batches)",)),
         ("publish", "infer_ctx", "publish_owner_batches", (
@@ -13620,6 +13627,14 @@ def preacceptance_source_contract_errors(
         < transaction.find("commit_infer_mutation_journal(ctx, mutation_checkpoint)")
     ):
         errors.append("A1 group publish order drifted")
+    impl_transaction = bodies.get("impl-transaction", "")
+    if not (
+        impl_transaction.find("preflight_impl_draft_group(")
+        < impl_transaction.find("let declarations = commit_impl_draft_group(")
+        < impl_transaction.find(
+            "commit_infer_mutation_journal(ctx, mutation_checkpoint)")
+    ):
+        errors.append("A1 impl group publish order drifted")
     publish = bodies.get("publish", "")
     if publish.find("preflight_owner_batches(ctx, batches)") > publish.find(
             "publish_effect_fact_batches(ctx.env, facts)"):
@@ -13857,11 +13872,20 @@ def ownership_cutover_source_errors() -> List[str]:
              "preflight_owner_batches(ctx, batches)", "{}"),
             ("failure-rollback", "infer_decl", "infer_and_commit_value_draft_group",
              "rollback_infer_mutation_journal(ctx, mutation_checkpoint)", "{}"),
+            ("impl-preflight", "infer_decl", "infer_and_commit_impl_draft_group",
+             "preflight_impl_draft_group(", "discard_impl_preflight("),
+            ("impl-commit-journal", "infer_decl", "infer_and_commit_impl_draft_group",
+             "commit_infer_mutation_journal(ctx, mutation_checkpoint)", "{}"),
+            ("impl-failure-rollback", "infer_decl", "infer_and_commit_impl_draft_group",
+             "rollback_infer_mutation_journal(ctx, mutation_checkpoint)", "{}"),
             ("receipt-missing", "infer", "infer_call",
              "false, callee_receipts", "false, []"),
             ("receipt-delete", "infer_ctx", None,
-             "source: PendingEvidenceSource,\n    receipt: CallableInstantiationReceipt,",
-             "source: PendingEvidenceSource,"),
+             "runtime_owner: ExecutableRef,\n"
+             "    source: PendingEvidenceSource,\n"
+             "    receipt: CallableInstantiationReceipt,",
+             "runtime_owner: ExecutableRef,\n"
+             "    source: PendingEvidenceSource,"),
             ("receipt-swap", "infer_ctx", "project_owner_batch_receipts",
              "headers, pending.target", "headers, headers.first().unwrap().executable"),
             ("consumer-rebuild", "infer", "for_protocol_assoc_type",
