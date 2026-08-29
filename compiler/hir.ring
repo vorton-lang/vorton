@@ -28,6 +28,7 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     variant_field_ref_same,
     variant_ref_same,
     handled_effect_ref_same, system_effect_ref_same,
+    prelude_extern_canonical_payload,
     impl_provider_ref_same, impl_provider_ref_kind,
     impl_provider_kind_tag}
 use ir_inventory::{ExecutableRef, EffectOperationRef, SystemHostCallableRef,
@@ -285,7 +286,7 @@ pub fn prelude_extern_identity(source_name: Str) -> Str {
     if source_name == list_sort_bridge_source_name() {
         return list_sort_bridge_identity()
     }
-    compiler_intrinsic_identity("prelude$extern", source_name)
+    prelude_extern_canonical_payload(source_name)
 }
 
 // Convert only a proven prelude slot identity back to its C ABI symbol.

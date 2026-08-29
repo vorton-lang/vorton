@@ -79,7 +79,8 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     validate_effect_header_schema,
     instantiate_effect_header_schema}
 use extern_manifest::{compiler_extern_manifest_entry_executable,
-    compiler_extern_manifest_entry_resource}
+    compiler_extern_manifest_entry_resource,
+    host_import_fact_for_declaration}
 use union_find::{UnionFind}
 use unify::{empty_subst}
 use diagnostics::{DiagnosticContext, DiagnosticNote, Severity}
@@ -3626,23 +3627,17 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
         if m.has_default {
             match ast_method {
                 Decl::Fn { body: abody, span: method_span, .. } => {
-                    let has_body = match abody {
-                        Expr::Block { stmts, tail, .. } => stmts.len() > 0 || tail.is_some(),
-                        _ => true
-                    }
-                    if has_body {
-                        let method_identity = "${name}::${m.name}"
-                        let checked_default = check_trait_default_body(
-                            ctx, name, method_identity,
-                            make_named_executable_ref(
-                                trait_method_ref_member(m.method_ref)),
-                            self_var, hparams, fn_ret, fn_effects,
-                            m.effect_schema, method_span, abody)
-                        method_body = checked_default.body
-                        method_body_effect_ctx = some(
-                            checked_default.effect_ctx)
-                        method_trait_bounds = checked_default.trait_bounds
-                    }
+                    let method_identity = "${name}::${m.name}"
+                    let checked_default = check_trait_default_body(
+                        ctx, name, method_identity,
+                        make_named_executable_ref(
+                            trait_method_ref_member(m.method_ref)),
+                        self_var, hparams, fn_ret, fn_effects,
+                        m.effect_schema, method_span, abody)
+                    method_body = checked_default.body
+                    method_body_effect_ctx = some(
+                        checked_default.effect_ctx)
+                    method_trait_bounds = checked_default.trait_bounds
                 },
                 _ => panic("trait HIR: exact default method changed kind")
             }
@@ -4019,6 +4014,14 @@ fn check_extern_fn_decl(mut ctx: InferCtx, name: Str, type_params: List<TypePara
     let executable_ref = match compiler_owned {
         some(entry) => compiler_extern_manifest_entry_executable(entry),
         none => make_named_executable_ref(source_symbol)
+    }
+    let host_import = host_import_fact_for_declaration(
+        executable_ref, abi_name, Type::FnType {
+            params: hparams.map(fn(param) { param.ty }),
+            return_type: fn_ret, effects: extern_effects
+        })
+    if (system_count == 1) != host_import.is_some() {
+        panic("extern HIR: HostImport declaration relation differs")
     }
     let _ = publish_final_value_effect_schema(
         ctx, name, executable_ref, Type::FnType {

@@ -313,6 +313,23 @@ pub fn symbol_ref_same(left: SymbolRef, right: SymbolRef) -> Bool {
         left.declaration_site_path == right.declaration_site_path
 }
 
+// Final prelude extern identities are resolver-independent compiler symbols.
+// HostImport and checker canonicalization share this exact payload relation;
+// neither backend nor manifest may recreate it from a leaf-name heuristic.
+pub fn prelude_extern_canonical_payload(source_name: Str) -> Str {
+    if source_name == "" {
+        panic("IR identity: prelude extern source name is empty")
+    }
+    "/$compiler_intrinsic$prelude$extern$$_${source_name}"
+}
+
+pub fn prelude_extern_symbol(source_name: Str) -> SymbolRef {
+    make_symbol_ref(
+        "$prelude$::extern", namespace_value(),
+        prelude_extern_canonical_payload(source_name),
+        "prelude-extern:${source_name}")
+}
+
 pub fn builtin_dict_constructor_symbol() -> SymbolRef {
     make_symbol_ref(
         "$builtin", namespace_value(), "dict.wrap",
