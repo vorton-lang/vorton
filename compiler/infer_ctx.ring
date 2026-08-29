@@ -2881,8 +2881,10 @@ pub fn uninstall_effect_ctx(mut ctx: InferCtx) {
     }
     let _ = ctx.effect_ctx_active_stack.pop()
 }
-pub fn fresh_child_executable(mut ctx: InferCtx, role: Str) -> ExecutableRef {
-    if role.len() == 0 { panic("executable identity: empty child role") }
+pub fn fresh_child_executable(
+    mut ctx: InferCtx, label: Str, role: PathRole
+) -> ExecutableRef {
+    if label.len() == 0 { panic("executable identity: empty child label") }
     let parent = current_executable_owner(ctx)
     let counter_index = ctx.anonymous_child_counters.len() - 1
     let ordinal = ctx.anonymous_child_counters.get(
@@ -2895,9 +2897,9 @@ pub fn fresh_child_executable(mut ctx: InferCtx, role: Str) -> ExecutableRef {
         (path_ref_owner(path), path_ref_normalized_child_path(path))
     }
     let mut child_path = prefix.map(fn(value) { value })
-    child_path.push("${role}:${ordinal}")
+    child_path.push("${label}:${ordinal}")
     make_anonymous_executable_ref(make_path_ref(
-        owner, child_path, path_role_child()))
+        owner, child_path, role))
 }
 
 pub fn executable_capture_slot(

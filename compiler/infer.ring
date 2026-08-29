@@ -115,6 +115,7 @@ use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
     callee_ref_is_named, callee_ref_named_symbol,
     slot_domain_lexical, slot_ref_same,
     path_owner_for_symbol, make_path_ref, path_role_synthetic,
+    path_role_handler, path_role_child,
     variant_ref_member}
 use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
     ExactDictRef, dict_ref_is_local, dict_ref_is_wrapped,
@@ -3877,7 +3878,8 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
     let mut handler_inst_type_args_by_effect: Map<Str, List<Type>> = map_new()
 
     for handler in handlers {
-        let handler_executable = fresh_child_executable(ctx, "handler")
+        let handler_executable = fresh_child_executable(
+            ctx, "handler", path_role_handler())
         enter_handler_executable_owner(
             ctx, handler_executable, current_effect_ctx(ctx))
         ctx.env.push_scope()
@@ -4688,7 +4690,8 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
     let saved_executable_depth = ctx.executable_stack.len()
     let saved_executable = current_executable_owner(ctx)
     let dictionary_owner = current_dictionary_evidence_owner(ctx)
-    let lambda_executable = fresh_child_executable(ctx, "lambda")
+    let lambda_executable = fresh_child_executable(
+        ctx, "lambda", path_role_child())
     let mut entered_owner = false
     let lambda_result: InferResult? = some({
         enter_executable_owner(ctx, lambda_executable)
