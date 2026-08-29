@@ -3,7 +3,7 @@ use forward::{BridgeCtx, BridgeResource, Token, marker}
 pub fn bridge(value: Int) -> Int { value + 1 }
 pub fn bridge_ctx(mut ctx: BridgeCtx) -> Int { ctx.value }
 
-fn compare_ints(a: Int, b: Int) -> Int { a - b }
+fn compare_ints(a: Int, b: Int) -> Int with {} { a - b }
 
 pub fn bridge_effect_contract() -> Int with {} {
     let mut values = [3, 1, 2]

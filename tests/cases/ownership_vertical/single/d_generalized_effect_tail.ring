@@ -29,7 +29,7 @@ fn apply_with_fixed(
     callback(adjusted)
 }
 
-fn pure_value(value: Int) -> Int { value + 1 }
+fn pure_value(value: Int) -> Int with {} { value + 1 }
 
 fn measured(value: Int) -> Int with {Meter} {
     Meter.adjust(value)

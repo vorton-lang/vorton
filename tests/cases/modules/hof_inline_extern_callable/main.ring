@@ -1,7 +1,7 @@
 use defs
 
 pub mod ffi {
-    pub extern fn parse_int(value: Str) -> Option<Int>
+    pub extern fn parse_int(value: Str) -> Option<Int> with {}
 }
 
 fn apply_parse(

@@ -4,8 +4,8 @@ use defs::{Raw, keep_before, keep_after}
 // Direct calls lock both explicitly annotated functions to the raw nominal.
 // They are type-checked but deliberately not executed: no raw allocator or
 // runtime representation is needed for this namespace regression.
-fn direct_before(value: Raw) -> Raw { keep_before(value) }
-fn direct_after(value: Raw) -> Raw { keep_after(value) }
+fn direct_before(value: Raw) -> Raw with {} { keep_before(value) }
+fn direct_after(value: Raw) -> Raw with {} { keep_after(value) }
 
 fn keep_callback(callback: fn(Raw) -> Raw) -> fn(Raw) -> Raw {
     callback

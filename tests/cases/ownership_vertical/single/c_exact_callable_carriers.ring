@@ -21,10 +21,10 @@ enum ReaderChoice {
     Alternate(fn(Resource) -> Int)
 }
 
-fn borrow_id(value: Resource) -> Int { value.id }
-fn borrow_plus_three(value: Resource) -> Int { value.id + 3 }
-fn borrow_plus_four(value: Resource) -> Int { value.id + 4 }
-fn borrow_plus_five(value: Resource) -> Int { value.id + 5 }
+fn borrow_id(value: Resource) -> Int with {} { value.id }
+fn borrow_plus_three(value: Resource) -> Int with {} { value.id + 3 }
+fn borrow_plus_four(value: Resource) -> Int with {} { value.id + 4 }
+fn borrow_plus_five(value: Resource) -> Int with {} { value.id + 5 }
 
 // Same surface function type, but a different ownership mode. It is never a
 // candidate at the borrowing call sites below and therefore must not widen

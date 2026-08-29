@@ -9,7 +9,7 @@ pub struct Token { value: Int }
 extern fn bridge(value: Int) -> Int
 extern fn bridge_ctx(mut ctx: BridgeCtx) -> Int
 extern fn bridge_effect_contract() -> Int with {}
-extern fn borrow_resource(value: BridgeResource) -> Int
+extern fn borrow_resource(value: BridgeResource) -> Int with {}
 extern fn token_bridge(value: Token) -> Int
 extern fn generic_bridge<T>(value: T) -> T
 extern fn generic_hof<T>(callback: fn(T) -> T, value: T) -> T
@@ -31,8 +31,8 @@ pub fn call_borrow_resource() -> Int {
 pub fn call_token_bridge() -> Int {
     token_bridge(Token { value: 6 })
 }
-fn increment(value: Int) -> Int { value + 1 }
-fn suffix(value: Str) -> Str { "${value}!" }
+fn increment(value: Int) -> Int with {} { value + 1 }
+fn suffix(value: Str) -> Str with {} { "${value}!" }
 pub fn call_generic_bridge_int() -> Int { generic_bridge(8) }
 pub fn call_generic_bridge_str() -> Str { generic_bridge("stable") }
 pub fn call_generic_hof_int() -> Int { generic_hof(increment, 8) }

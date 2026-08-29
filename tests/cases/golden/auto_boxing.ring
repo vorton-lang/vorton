@@ -1,7 +1,7 @@
 // B-100 P1.1: auto-boxing parity — Int through generic function (heap boxing),
 // closure capture of mut variable (cell boxing), and nested closure auto-boxing.
 
-fn identity<T>(x: T) -> T { x }
+fn identity<T>(x: T) -> T with {} { x }
 
 fn apply<T>(f: fn(T) -> T, x: T) -> T { f(x) }
 

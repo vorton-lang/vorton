@@ -28,7 +28,7 @@ mod recursive_module {
     }
 }
 
-fn increment(value: Int) -> Int { value + 1 }
+fn increment(value: Int) -> Int with {} { value + 1 }
 
 fn module_step(value: Int) -> Int with {ModuleStep} {
     ModuleStep.apply(value)

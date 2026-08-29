@@ -15,7 +15,7 @@ fn consume(factory) -> Int {
     }
 }
 
-fn make_pair() {
+fn make_pair() with {} {
     (20, 22)
 }
 

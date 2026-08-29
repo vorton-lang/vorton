@@ -11,10 +11,10 @@ struct OwnedSink {
     value: Resource
 }
 
-fn borrow_id(value: Resource) -> Int { value.id }
-fn borrow_plus_one(value: Resource) -> Int { value.id + 1 }
+fn borrow_id(value: Resource) -> Int with {} { value.id }
+fn borrow_plus_one(value: Resource) -> Int with {} { value.id + 1 }
 
-fn consume_same_signature(value: Resource) -> Int {
+fn consume_same_signature(value: Resource) -> Int with {} {
     let sink = OwnedSink { value: value }
     sink.value.id
 }

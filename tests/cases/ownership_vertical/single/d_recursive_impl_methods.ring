@@ -47,7 +47,7 @@ impl RecursiveWalker {
     }
 }
 
-fn increment(value: Int) -> Int { value + 1 }
+fn increment(value: Int) -> Int with {} { value + 1 }
 
 fn impl_step(value: Int) -> Int with {ImplStep} {
     ImplStep.apply(value)

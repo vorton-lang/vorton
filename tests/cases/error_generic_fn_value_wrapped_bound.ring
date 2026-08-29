@@ -12,7 +12,7 @@ impl<T: Hash> Hash for Wrap<T> {
     }
 }
 
-fn hash_one<T: Hash>(value: T) -> Int {
+fn hash_one<T: Hash>(value: T) -> Int with {} {
     value.hash()
 }
 

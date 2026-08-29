@@ -47,7 +47,7 @@ fn unknown<T>() -> T {
 
 fn hash_identity<T: Hash>(value: T) -> T { value }
 
-fn hash_value<T: Hash>(value: T) -> Int { value.hash() }
+fn hash_value<T: Hash>(value: T) -> Int with {} { value.hash() }
 
 fn attach_source<T, S: Source<Item = T>>(source: S, _value: T) -> S {
     source

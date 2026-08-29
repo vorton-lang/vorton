@@ -14,9 +14,9 @@ fn repeat_with<T>(
     }
 }
 
-fn increment(value: Int) -> Int { value + 1 }
+fn increment(value: Int) -> Int with {} { value + 1 }
 
-fn keep(value: Str) -> Str { value }
+fn keep(value: Str) -> Str with {} { value }
 
 fn recursive_step(value: Int) -> Int with {RecursiveStep} {
     RecursiveStep.apply(value)

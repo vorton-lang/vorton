@@ -8,7 +8,7 @@ impl Show for Num {
     fn show(self) -> Str { "num" }
 }
 
-fn display<T: Show>(item: T) -> Str {
+fn display<T: Show>(item: T) -> Str with {} {
     item.show()
 }
 

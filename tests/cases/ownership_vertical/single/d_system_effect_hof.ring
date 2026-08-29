@@ -19,7 +19,7 @@ fn call_system_extern(
     callback(value)
 }
 
-fn pure_value(value: Int) -> Int { value + 1 }
+fn pure_value(value: Int) -> Int with {} { value + 1 }
 
 fn console_value(value: Int) -> Int with {console} {
     print("console:${value}")

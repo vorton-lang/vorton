@@ -1,4 +1,4 @@
-fn ascending(left: Int, right: Int) -> Int {
+fn ascending(left: Int, right: Int) -> Int with {} {
     left - right
 }
 

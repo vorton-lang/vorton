@@ -1883,7 +1883,7 @@ fn namespace_registration_rank(namespace: NamespaceKind) -> Int {
     }
 }
 
-fn compare_import_issues(left: ImportIssue, right: ImportIssue) -> Int {
+fn compare_import_issues(left: ImportIssue, right: ImportIssue) -> Int with {} {
     if left.site.file_key < right.site.file_key { return -1 }
     if left.site.file_key > right.site.file_key { return 1 }
     if left.site.frame_index < right.site.frame_index { return -1 }

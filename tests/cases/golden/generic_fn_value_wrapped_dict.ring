@@ -16,7 +16,7 @@ impl<T: Hash> Hash for Wrap<T> {
     }
 }
 
-fn hash_one<T: Hash>(value: T) -> Int {
+fn hash_one<T: Hash>(value: T) -> Int with {} {
     value.hash()
 }
 
@@ -34,7 +34,7 @@ fn hash_later<T: Hash>(value: Wrap<T>) -> Int {
     later(value)
 }
 
-fn constant<T>(_value: T) -> Int {
+fn constant<T>(_value: T) -> Int with {} {
     107
 }
 
@@ -74,7 +74,7 @@ fn local_cell_shadow(
     apply_int(Cell, value)
 }
 
-fn plus_one(value: Int) -> Int {
+fn plus_one(value: Int) -> Int with {} {
     value + 1
 }
 
@@ -144,7 +144,7 @@ fn dynamic_wrapper_callee<T: Hash>(value: Wrap<T>) -> Int {
     ({ hash_one })(value)
 }
 
-fn identity<Renamed>(value: Renamed) -> Renamed {
+fn identity<Renamed>(value: Renamed) -> Renamed with {} {
     value
 }
 
@@ -159,7 +159,7 @@ fn apply_generic_identity<Outer>(
     f(value)
 }
 
-fn forty_two() -> Int {
+fn forty_two() -> Int with {} {
     42
 }
 

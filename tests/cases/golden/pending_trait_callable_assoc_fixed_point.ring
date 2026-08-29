@@ -15,7 +15,7 @@ fn unknown<T>() -> T {
 
 fn hash_identity<T: Hash>(value: T) -> T { value }
 
-fn attach_source<T, S: Source<Item = T>>(source: S, _value: T) -> S {
+fn attach_source<T, S: Source<Item = T>>(source: S, _value: T) -> S with {} {
     source
 }
 

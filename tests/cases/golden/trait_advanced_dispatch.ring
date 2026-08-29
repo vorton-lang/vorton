@@ -32,7 +32,7 @@ impl Displayable for Num {
     fn display(self) -> Str { "num(${self.val})" }
 }
 
-fn render<T: Displayable>(item: T) -> Str {
+fn render<T: Displayable>(item: T) -> Str with {} {
     item.display()
 }
 

@@ -26,7 +26,7 @@ fn top_right(
     }
 }
 
-fn increment(value: Int) -> Int { value + 1 }
+fn increment(value: Int) -> Int with {} { value + 1 }
 
 fn top_step(value: Int) -> Int with {TopStep} {
     TopStep.apply(value)

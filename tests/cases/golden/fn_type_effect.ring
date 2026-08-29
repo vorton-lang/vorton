@@ -15,7 +15,7 @@ fn apply_pure(f: fn(Int) -> Int, x: Int) -> Int {
     f(x)
 }
 
-fn double(x: Int) -> Int {
+fn double(x: Int) -> Int with {} {
     x * 2
 }
 

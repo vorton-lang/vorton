@@ -67,7 +67,7 @@ fn local_shadow(fingerprint: fn(Float) -> Int) -> Int {
     fingerprint(1.5)
 }
 
-fn seven(_value: Float) -> Int {
+fn seven(_value: Float) -> Int with {} {
     7
 }
 
