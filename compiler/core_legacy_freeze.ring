@@ -40,7 +40,8 @@ use ir_identity::{
     path_ref_normalized_child_path, make_path_origin_ref,
     make_symbol_origin_ref, symbol_ref_same,
     symbol_ref_origin_module_key, symbol_ref_canonical_payload,
-    impl_method_ref_owner, impl_method_ref_callable_slot_index,
+    impl_method_ref_owner, impl_method_ref_member, impl_method_ref_name,
+    impl_method_ref_callable_slot_index,
     impl_owner_ref_target, impl_owner_ref_trait,
     intrinsic_ref_symbol, slot_ref_same, slot_ref_is_source,
     slot_ref_source_def_id
@@ -206,9 +207,20 @@ fn executable_origin(value: ExecutableRef) -> OriginRef {
 
 fn add_physical_identity(
     mut builder: LegacyFactBuilder, reference: ExecutableRef,
-    source_name: Str?
+    method: ImplMethodRef?, source_name: Str?
 ) {
-    let identity = if executable_ref_is_named(reference) {
+    let identity = match method {
+        some(exact) => {
+            if !executable_ref_is_named(reference) ||
+               !symbol_ref_same(
+                    executable_ref_named_symbol(reference),
+                    impl_method_ref_member(exact)) {
+                panic("Core/legacy freeze: impl method executable differs")
+            }
+            "${symbol_ref_canonical_payload(impl_owner_ref_target(
+                impl_method_ref_owner(exact)))}_${impl_method_ref_name(exact)}"
+        },
+        none => if executable_ref_is_named(reference) {
         if executable_uses_physical_owner(builder, reference) &&
            source_name.is_some() {
             let name = source_name.unwrap()
@@ -224,6 +236,7 @@ fn add_physical_identity(
             builder.module_key,
             path_ref_normalized_child_path(
                 executable_ref_anonymous_path(reference)).join("$"))
+        }
     }
     builder.physical_identities.push(
         make_legacy_executable_physical_identity(reference, identity))
@@ -365,7 +378,8 @@ fn add_callable_fact(
     kind: ExecutableKind, container: LegacyContainerRef,
     type_params: List<HTypeParam>, trait_bounds: List<TraitBound>,
     params: List<HParam>, result_type: Type, effects: EffectRow,
-    has_lexical_body: Bool, is_public: Bool, physical_name: Str?
+    has_lexical_body: Bool, is_public: Bool,
+    physical_method: ImplMethodRef?, physical_name: Str?
 ) {
     let type_parameters = callable_type_parameters(type_params, trait_bounds)
     let bounds = callable_trait_bounds(type_parameters, trait_bounds)
@@ -397,7 +411,8 @@ fn add_callable_fact(
             reference, origin, kind, builder.module_body, container))
     }
     add_effect_row(builder, effects)
-    add_physical_identity(builder, reference, physical_name)
+    add_physical_identity(
+        builder, reference, physical_method, physical_name)
 }
 
 fn scan_stmt(
@@ -656,7 +671,7 @@ fn scan_expr(
                     make_legacy_executable_container(owner),
                     type_params, trait_bounds, params,
                     hexpr_type(handler.body), hexpr_effects(handler.body),
-                    true, false, none)
+                    true, false, none, none)
                 scan_expr(
                     builder, handler.executable_ref, handler.body,
                     type_params, trait_bounds)
@@ -669,7 +684,7 @@ fn scan_expr(
                 builder, executable_ref, executable_kind_lambda(),
                 make_legacy_executable_container(owner),
                 type_params, trait_bounds, params,
-                return_type, hexpr_effects(body), true, false, none)
+                return_type, hexpr_effects(body), true, false, none, none)
             scan_expr(
                 builder, executable_ref, body, type_params, trait_bounds)
         },
@@ -711,6 +726,7 @@ const LEGACY_GENERATED_DEF_ID_BASE: Int = 0 - 8500000000
 
 fn add_generated_callable_fact(
     mut builder: LegacyFactBuilder, reference: ExecutableRef,
+    method: ImplMethodRef,
     kind: ExecutableKind, type_params: List<HTypeParam>,
     trait_bounds: List<TraitBound>, entries: List<BinderEntry>,
     parameter_types: List<Type>, parameter_mutabilities: List<Bool>,
@@ -758,7 +774,7 @@ fn add_generated_callable_fact(
             reference, origin, kind, builder.module_body, container))
     }
     add_effect_row(builder, effects)
-    add_physical_identity(builder, reference, none)
+    add_physical_identity(builder, reference, some(method), none)
 }
 
 fn add_default_specialization_facts(
@@ -767,9 +783,11 @@ fn add_default_specialization_facts(
     mut methods: List<ImplMethodRef>, type_params: List<HTypeParam>
 ) {
     for value in values {
+        let method = h_default_specialization_generated_method(value)
         add_generated_callable_fact(
             builder,
             h_default_specialization_generated_executable(value),
+            method,
             executable_kind_default_specialization(),
             type_params, trait_bounds_from_type_parameters(type_params),
             h_default_specialization_binders(value),
@@ -777,7 +795,7 @@ fn add_default_specialization_facts(
             h_default_specialization_parameter_mutabilities(value),
             h_default_specialization_result_type(value),
             h_default_specialization_effects(value))
-        methods.push(h_default_specialization_generated_method(value))
+        methods.push(method)
         let exact = h_default_specialization_forward_call(value)
         for item in h_exact_call_evidence(exact) {
             add_dictionary_fact(builder, item)
@@ -818,7 +836,8 @@ fn add_derived_impl_facts(
                 _ => panic("Core/legacy freeze: derived method is not callable")
             }
             add_generated_callable_fact(
-                builder, method.executable_ref, executable_kind_derived_impl(),
+                builder, method.executable_ref, method.method_ref,
+                executable_kind_derived_impl(),
                 derived.type_params, derived.bounds,
                 method.binders, params, params.map(fn(_) { false }),
                 result, effects)
@@ -900,7 +919,8 @@ fn scan_decls(
                     module_container,
                     callable_type_params,
                     trait_bounds, params,
-                    return_type, effects, true, is_pub, some(name))
+                    return_type, effects, true, is_pub,
+                    impl_method_ref, some(name))
                 scan_expr(
                     builder, executable_ref, body,
                     callable_type_params, trait_bounds)
@@ -909,14 +929,15 @@ fn scan_decls(
                 add_callable_fact(
                     builder, executable_ref, executable_kind_test(),
                     module_container, [], [], [], hexpr_type(body),
-                    hexpr_effects(body), true, false, some(description))
+                    hexpr_effects(body), true, false, none, some(description))
                 scan_expr(builder, executable_ref, body, [], [])
             },
             HDecl::Const { name, executable_ref, ty, init, .. } => {
                 add_callable_fact(
                     builder, executable_ref,
                     executable_kind_const_getter(), module_container,
-                    [], [], [], ty, hexpr_effects(init), true, false, some(name))
+                    [], [], [], ty, hexpr_effects(init), true, false,
+                    none, some(name))
                 scan_expr(builder, executable_ref, init, [], [])
             },
             HDecl::ExternFn {
@@ -925,7 +946,7 @@ fn scan_decls(
             } => add_callable_fact(
                 builder, executable_ref, executable_kind_extern_fn(),
                 module_container, type_params, trait_bounds, params,
-                return_type, effects, false, is_pub, some(name)),
+                return_type, effects, false, is_pub, none, some(name)),
             HDecl::Trait { name, type_params, methods, .. } => {
                 let callable_type_params = merge_callable_type_parameters(
                     inherited_type_params, type_params)
@@ -938,7 +959,7 @@ fn scan_decls(
                         module_container, callable_type_params, [], method.params,
                         method.return_type, method.effects,
                         method.body.is_some(), false,
-                        some("__${name}_${method.name}"))
+                        none, some("__${name}_${method.name}"))
                     match method.body {
                         some(body) => scan_expr(
                             builder, method.executable_ref, body,
@@ -958,7 +979,7 @@ fn scan_decls(
                             module_container, callable_type_params, [], op.params,
                             op.return_type,
                             EffectRow { effects: [], tail: none }, false, false,
-                            some("__${name}_${op.name}")),
+                            none, some("__${name}_${op.name}")),
                         none => {}
                     }
                 }
@@ -1052,7 +1073,7 @@ fn add_builtin_facts(mut builder: LegacyFactBuilder, env: TypeEnv) {
                 exact_type_fact(
                     builder.type_sources, result, builder.module_key),
                 result, effects))
-        add_physical_identity(builder, executable, none)
+        add_physical_identity(builder, executable, none, none)
     }
 }
 

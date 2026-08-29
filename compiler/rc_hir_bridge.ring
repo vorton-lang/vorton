@@ -18,7 +18,8 @@ use ir_identity::{
     variant_ref_owner, variant_ref_member,
     variant_ref_same,
     variant_field_ref_member, variant_field_ref_index,
-    impl_owner_ref_provider, impl_method_ref_member, impl_method_ref_name,
+    impl_owner_ref_provider, impl_owner_ref_target,
+    impl_method_ref_member, impl_method_ref_name,
     impl_owner_ref_same, impl_method_ref_same,
     trait_method_ref_name, intrinsic_ref_symbol,
     make_named_callee_ref,
@@ -56,7 +57,7 @@ use ast::{
     Span, Pattern, LiteralValue, BinOp, UnaryOp,
     TypeParam, TypeBound, NamedPatternField, span_zero
 }
-use types::{Type, Effect, EffectRow, EMPTY_ROW, nominal_display_name, types_equal}
+use types::{Type, Effect, EffectRow, EMPTY_ROW, types_equal}
 use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HPatternBinding,
     HEffectHandler, HLambdaCapture, HAssocType, HEnumVariant, HTypeParam,
@@ -2419,21 +2420,16 @@ fn legacy_impl_assoc_types(
     })
 }
 
-fn legacy_impl_target_name(value: Type) -> Str {
-    match value {
-        Type::StructType { name, .. } => nominal_display_name(name),
-        Type::EnumType { name, .. } =>
-            nominal_display_name(name),
-        Type::GenericType { base, .. } => legacy_impl_target_name(base),
-        _ => panic("RcHIR bridge: impl target is not nominal")
-    }
-}
-
 fn generated_impl_decl(
     mut ctx: HirBridgeCtx, metadata: CoreImplMetadata
 ) -> HDecl {
     let owner = core_impl_owner(metadata)
     let projection = legacy_projection_impl_for(ctx.projection, owner)
+    let exact_target = impl_owner_ref_target(owner)
+    if !symbol_ref_same(
+            legacy_impl_target_nominal(projection), exact_target) {
+        panic("RcHIR bridge: generated impl target identity differs")
+    }
     let mut methods: List<HDecl> = []
     for method in core_impl_methods(metadata) {
         let executable = make_named_executable_ref(impl_method_ref_member(method))
@@ -2442,8 +2438,7 @@ fn generated_impl_decl(
         }
     }
     HDecl::Impl {
-        target_type: legacy_impl_target_name(
-            legacy_impl_target_type(projection)),
+        target_type: symbol_ref_canonical_payload(exact_target),
         target_ty: legacy_impl_target_type(projection),
         owner_ref: owner, provider_ref: impl_owner_ref_provider(owner),
         trait_ref: legacy_impl_trait(projection),
