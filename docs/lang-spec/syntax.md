@@ -334,6 +334,8 @@ QualifiedVariant ::= UpperIdent '::' Ident ArgList?
                    | UpperIdent '::' UpperIdent '{' FieldInit (',' FieldInit)* ','? '}'
 ```
 
+0.1只允许带payload的enum constructor出现在直接构造语法中，例如`some(value)`或`Payload::Value(value)`。constructor标识符不能单独作为函数值传参、返回或存储；`apply(some, value)`稳定报错并建议写`apply(fn(x) { some(x) }, value)`。这不影响named-field constructor、用户nullary variant或builtin `none`；编译器不提供隐式constructor-to-lambda转换。
+
 ### Struct 字面量
 
 ```ebnf
