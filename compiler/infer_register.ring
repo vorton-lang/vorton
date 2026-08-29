@@ -96,6 +96,7 @@ use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
     make_symbol_ref, namespace_member,
     impl_provider_ref_same,
     registered_trait_ref_symbol, symbol_ref_canonical_payload,
+    symbol_ref_stable_key, impl_owner_ref_target, impl_owner_ref_trait,
     make_symbol_origin_ref, OriginRef, make_path_origin_ref,
     make_path_ref, path_role_declaration}
 
@@ -2540,15 +2541,20 @@ fn impl_provider_module_key(provider: ImplProviderRef) -> Str {
 }
 
 fn generated_impl_method_member(
-    provider: ImplProviderRef, discriminator: Str
+    provider: ImplProviderRef, owner: ImplOwnerRef, discriminator: Str
 ) -> SymbolRef {
     let module_key = impl_provider_module_key(provider)
     let provider_path = path_ref_normalized_child_path(
         impl_provider_ref_site(provider)).join("/")
+    let target_key = symbol_ref_stable_key(impl_owner_ref_target(owner))
+    let trait_key = match impl_owner_ref_trait(owner) {
+        some(value) => symbol_ref_stable_key(value),
+        none => "inherent"
+    }
     make_symbol_ref(
         module_key, namespace_member(),
-        "impl-generated-member:${provider_path}:${discriminator}",
-        "provider:${provider_path}|${discriminator}")
+        "impl-generated-member:${provider_path}:${target_key}:${trait_key}:${discriminator}",
+        "provider:${provider_path}|target:${target_key}|trait:${trait_key}|${discriminator}")
 }
 
 fn register_impl(
@@ -2925,7 +2931,8 @@ fn register_impl_canonical(
                 let callable_index = method_identity_facts.len() + generated_index
                 exact_method_refs.insert(method_name, make_impl_method_ref(
                     owner_ref,
-                    generated_impl_method_member(provider_ref, discriminator),
+                    generated_impl_method_member(
+                        provider_ref, owner_ref, discriminator),
                     methods.len() + generated_index,
                     callable_index, method_name))
                 generated_index = generated_index + 1
@@ -3594,6 +3601,7 @@ fn register_delegate_traits(
                                                 delegate_owner_ref,
                                                 generated_impl_method_member(
                                                     provider_ref,
+                                                    delegate_owner_ref,
                                                     "delegate:${source_index}:${callable_index}"),
                                                 source_index, callable_index,
                                                 tm.name))

@@ -338,6 +338,7 @@ fn builtin_impl_identity(
         target_ref, provider_ref, trait_ref)
     let provider_path = path_ref_normalized_child_path(
         impl_provider_ref_site(provider_ref)).join("/")
+    let target_key = symbol_ref_stable_key(target_ref)
     let trait_key = match trait_ref {
         some(value) => symbol_ref_stable_key(value),
         none => "inherent"
@@ -350,8 +351,8 @@ fn builtin_impl_identity(
         let (method_name, _) = entry
         let member = make_symbol_ref(
             "$builtin", namespace_member(),
-            "builtin-impl-member:${provider_path}:${trait_key}:${callable_slot}",
-            "provider:${provider_path}|trait:${trait_key}|method:${callable_slot}")
+            "builtin-impl-member:${provider_path}:${target_key}:${trait_key}:${callable_slot}",
+            "provider:${provider_path}|target:${target_key}|trait:${trait_key}|method:${callable_slot}")
         refs.insert(method_name, make_impl_method_ref(
             owner_ref, member, callable_slot, callable_slot, method_name))
         callable_slot = callable_slot + 1
