@@ -22,7 +22,6 @@ use hir::{
     h_default_specialization_effects,
     h_default_specialization_forward_call, h_exact_call_evidence,
     h_exact_call_signature,
-    h_exact_call_method,
     h_delegate_methods, h_delegate_method_evidence,
     h_delegate_dict_evidence,
     derived_semantic_kind_tag,
@@ -504,8 +503,7 @@ fn add_field_action_dictionaries(
     mut builder: LegacyFactBuilder, value: FieldAction
 ) {
     match value {
-        FieldAction::Call { method_ref, base_dict, extra_dicts } => {
-            add_method_dictionary(builder, method_ref)
+        FieldAction::Call { base_dict, extra_dicts, .. } => {
             add_dictionary_fact(builder, base_dict)
             for item in extra_dicts { add_dictionary_fact(builder, item) }
         },
@@ -545,9 +543,19 @@ fn scan_expr(
             for arg in args {
                 scan_expr(builder, owner, arg, type_params, trait_bounds)
             }
-            for item in resolved_dicts { add_dictionary_fact(builder, item) }
             match method_ref {
-                some(method) => add_method_dictionary(builder, method), none => {}
+                some(method) => {
+                    if method_call_ref_is_bound(method) {
+                        add_method_dictionary(builder, method)
+                    } else {
+                        for item in resolved_dicts {
+                            add_dictionary_fact(builder, item)
+                        }
+                    }
+                },
+                none => for item in resolved_dicts {
+                    add_dictionary_fact(builder, item)
+                }
             }
         },
         HExpr::BinOp { left, right, eq_plan, ord_plan, .. } => {
@@ -771,9 +779,6 @@ fn add_default_specialization_facts(
         let exact = h_default_specialization_forward_call(value)
         for item in h_exact_call_evidence(exact) {
             add_dictionary_fact(builder, item)
-        }
-        match h_exact_call_method(exact) {
-            some(method) => add_method_dictionary(builder, method), none => {}
         }
     }
 }
