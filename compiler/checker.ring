@@ -797,15 +797,13 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         ctx, file_key,
         resolve_single_namespace_plan(program))
     let inferred = some(infer_check(ctx, program)) catch { _ => none }
-    let hprogram = match inferred {
-        some(value) => value,
-        none => {
-            if !ctx.sink.has_errors() {
-                panic("checker: inference failed without a diagnostic")
-            }
-            return failed_check_result(ctx, file_key)
+    if inferred.is_none() {
+        if !ctx.sink.has_errors() {
+            panic("checker: inference failed without a diagnostic")
         }
+        return failed_check_result(ctx, file_key)
     }
+    let hprogram = inferred.unwrap()
     let mut impl_facts: List<ModuleImplFact> = []
     validate_impl_carriers(ctx.env, hprogram.decls)
     collect_module_impl_facts(
@@ -1079,16 +1077,14 @@ pub fn check_module(
     report_namespace_plan_issues(ctx, module_key, program, namespace_plan)
     let inferred = some(check_module_identity(
         ctx, program, module_prefix, module_key)) catch { _ => none }
-    let hprogram = match inferred {
-        some(value) => value,
-        none => {
-            if !ctx.sink.has_errors() {
-                panic("project checker: inference failed without a diagnostic")
-            }
-            return failed_check_result(
-                ctx, prelude_physical_owner_module_key)
+    if inferred.is_none() {
+        if !ctx.sink.has_errors() {
+            panic("project checker: inference failed without a diagnostic")
         }
+        return failed_check_result(
+            ctx, prelude_physical_owner_module_key)
     }
+    let hprogram = inferred.unwrap()
     // Project-wide builtin derived descriptors have one physical carrier and
     // are assembled by compiler_mod only after every module has crossed the
     // dictionary-lowering boundary.  Per-module checking validates user
