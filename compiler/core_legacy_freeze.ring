@@ -164,8 +164,17 @@ fn exact_type_fact(
             }
             value
         },
-        none => panic(
-            "Core/legacy freeze: exact Type fact is absent: module=${module_key}, type=${type_to_string(ty)}")
+        none => {
+            let display = type_to_string(ty)
+            let mut same_display = 0
+            for relation in values {
+                if type_to_string(core_type_source_type(relation)) == display {
+                    same_display = same_display + 1
+                }
+            }
+            panic(
+                "Core/legacy freeze: exact Type fact is absent: module=${module_key}, type=${display}, same_display=${same_display.to_str()}, sources=${values.len().to_str()}")
+        }
     }
 }
 
