@@ -2880,12 +2880,10 @@ fn verify_event_transition_contract(
             } else {
                 let base = planner_place_base(target)
                 let value_type = planner_place_value_type(target)
-                let needs_drop = slot_flow_cleanup_owner(
-                    states.get(base).unwrap()) &&
-                    (verifier_logical_shape_may_take(
+                let needs_drop = verifier_logical_shape_may_take(
                         solved.logical_shapes.get(value_type).unwrap()) ||
-                     verifier_physical_shape_may_drop(
-                        solved.physical_shapes.get(value_type).unwrap()))
+                    verifier_physical_shape_may_drop(
+                        solved.physical_shapes.get(value_type).unwrap())
                 require_transition_count(
                     before, if needs_drop { 2 } else { 1 },
                     "projected Assign before")
