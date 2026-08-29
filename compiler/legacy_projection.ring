@@ -1705,9 +1705,8 @@ pub fn make_legacy_projection_table(
         let mut other = index + 1
         while other < binders.len() {
             let right = binders.get(other).unwrap()
-            if slot_ref_same(left.slot, right.slot) ||
-               left.def_id == right.def_id {
-                panic("legacy projection: duplicate binder SlotRef/DefId")
+            if slot_ref_same(left.slot, right.slot) {
+                panic("legacy projection: duplicate binder SlotRef")
             }
             other = other + 1
         }
