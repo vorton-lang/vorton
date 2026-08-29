@@ -170,7 +170,7 @@ use ir_inventory::{
     callable_resource_contract_result_alias_ordinals
 }
 use hir::{
-    HProgram, HDecl, HExpr, HStmt, HParam, HTypeParam,
+    HProgram, HDecl, HExpr, HStmt, HParam, HTypeParam, TraitBound,
     HCallableTypeActual, HCallableEffectInstantiation,
     HMatchArm, HEffectHandler,
     HLambdaCapture, HStringInterpPart,
