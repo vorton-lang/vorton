@@ -553,8 +553,10 @@ fn scan_expr(
                         }
                     }
                 },
-                none => for item in resolved_dicts {
-                    add_dictionary_fact(builder, item)
+                none => {
+                    for item in resolved_dicts {
+                        add_dictionary_fact(builder, item)
+                    }
                 }
             }
         },
