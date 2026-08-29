@@ -26,7 +26,9 @@ use builtins::{register_builtins, register_hof_intrinsics,
     checker_only_builtin_values, checker_builtin_value_name,
     checker_builtin_value_symbol,
     builtin_method_contract_facts, builtin_method_contract_intrinsic,
-    builtin_method_contract_scheme}
+    builtin_method_contract_scheme,
+    builtin_value_contract_facts, builtin_value_contract_executable,
+    builtin_value_contract_scheme}
 use derive::{validate_derived_impls}
 use infer_decl::{check as infer_check, check_module_identity,
     check_prelude_decl, check_registered_prelude_file}
@@ -620,6 +622,20 @@ fn new_infer_ctx(
                         ctx.env, executable, effects),
                 _ => panic(
                     "effect header registry: builtin method is not callable")
+            }
+        }
+    }
+    for fact in builtin_value_contract_facts(ctx.env) {
+        let executable = builtin_value_contract_executable(fact)
+        let scheme = builtin_value_contract_scheme(fact)
+        publish_effect_header_schema(ctx.env, scheme.effect_schema)
+        if module_order == 0 {
+            match scheme.ty {
+                Type::FnType { effects, .. } =>
+                    register_callable_effect_header(
+                        ctx.env, executable, effects),
+                _ => panic(
+                    "effect header registry: builtin value is not callable")
             }
         }
     }

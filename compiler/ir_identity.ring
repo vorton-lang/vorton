@@ -1123,7 +1123,11 @@ pub const BUILTIN_VALUE_PTR_FROM_ADDR: Int = 4
 // Compiler-only Hash derive atom.  It is intentionally absent from
 // checker_only_builtin_values: no Ring source spelling can name it.
 pub const BUILTIN_VALUE_HASH_COMBINE: Int = 5
-pub const BUILTIN_VALUE_SITE_COUNT: Int = 6
+pub const BUILTIN_VALUE_STR_IDENTITY: Int = 6
+pub const BUILTIN_VALUE_BOOL_TO_STR: Int = 7
+pub const BUILTIN_VALUE_LIST_INDEX: Int = 8
+pub const BUILTIN_VALUE_STR_INDEX: Int = 9
+pub const BUILTIN_VALUE_SITE_COUNT: Int = 10
 
 pub struct BuiltinValueSite { tag: Int }
 
@@ -1140,6 +1144,18 @@ pub fn builtin_value_site_tag(value: BuiltinValueSite) -> Int {
 
 pub fn builtin_value_symbol(value: BuiltinValueSite) -> SymbolRef {
     let tag = builtin_value_site_tag(value)
+    if tag == BUILTIN_VALUE_STR_IDENTITY {
+        return builtin_str_identity_symbol()
+    }
+    if tag == BUILTIN_VALUE_BOOL_TO_STR {
+        return builtin_bool_to_str_symbol()
+    }
+    if tag == BUILTIN_VALUE_LIST_INDEX {
+        return builtin_list_index_symbol()
+    }
+    if tag == BUILTIN_VALUE_STR_INDEX {
+        return builtin_str_index_symbol()
+    }
     make_symbol_ref(
         "$builtin", namespace_value(),
         "builtin-value:${tag.to_str()}",

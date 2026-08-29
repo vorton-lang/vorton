@@ -31,9 +31,10 @@ use effect_contract::{empty_typed_effect_header_schema}
 use hir::{HDecl, HStructField, HTypeParam,
     compare_by_first}
 use diagnostics::{CollectingSink}
-use ir_inventory::{CallableResourceContractFact,
+use ir_inventory::{ExecutableRef, CallableResourceContractFact,
     CallableResourceRoleFact,
     make_named_executable_ref,
+    executable_ref_is_named, executable_ref_named_symbol,
     make_callable_resource_contract_fact,
     callable_resource_contract_parameter_roles,
     callable_resource_role_read, callable_resource_role_mutate,
@@ -87,10 +88,14 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     BUILTIN_METHOD_STR_DEBUG, BUILTIN_METHOD_BOOL_DEBUG,
     BUILTIN_METHOD_INT_HASH, BUILTIN_METHOD_STR_HASH,
     BUILTIN_METHOD_BOOL_HASH,
-    builtin_value_site_from_tag, builtin_value_symbol,
+    builtin_value_site_from_tag, builtin_value_site_tag,
+    builtin_value_symbol,
     BUILTIN_VALUE_CELL_CONSTRUCTOR, BUILTIN_VALUE_ALLOC,
     BUILTIN_VALUE_DEALLOC, BUILTIN_VALUE_PTR_COPY,
-    BUILTIN_VALUE_PTR_FROM_ADDR,
+    BUILTIN_VALUE_PTR_FROM_ADDR, BUILTIN_VALUE_HASH_COMBINE,
+    BUILTIN_VALUE_STR_IDENTITY, BUILTIN_VALUE_BOOL_TO_STR,
+    BUILTIN_VALUE_LIST_INDEX, BUILTIN_VALUE_STR_INDEX,
+    BUILTIN_VALUE_SITE_COUNT,
     namespace_value, namespace_nominal, namespace_trait, namespace_member}
 
 // ============================================================
@@ -303,6 +308,18 @@ fn install_intrinsic_contract(
 pub struct CheckerBuiltinValue {
     name: Str,
     symbol: SymbolRef
+}
+
+const REGISTERED_BUILTIN_VALUE_SITE_COUNT: Int = BUILTIN_VALUE_HASH_COMBINE
+
+fn registered_builtin_value_name(site: BuiltinValueSite) -> Str {
+    let tag = builtin_value_site_tag(site)
+    if tag == BUILTIN_VALUE_CELL_CONSTRUCTOR { return "Cell" }
+    if tag == BUILTIN_VALUE_ALLOC { return "alloc" }
+    if tag == BUILTIN_VALUE_DEALLOC { return "dealloc" }
+    if tag == BUILTIN_VALUE_PTR_COPY { return "ptr_copy" }
+    if tag == BUILTIN_VALUE_PTR_FROM_ADDR { return "ptr_from_addr" }
+    panic("builtin value contract: site has no registered TypeScheme")
 }
 
 fn make_checker_builtin_value(
@@ -1263,6 +1280,313 @@ pub fn builtin_method_contract_facts(
     }
     result
 }
+
+// Physical lowering is a closed 0.1 relation, not a backend name lookup.
+// `data` is present exactly when the selected lowering invokes one fixed C
+// runtime leaf.  The remaining tags describe the two inline lowerings whose
+// behavior cannot be represented by a runtime symbol alone.
+pub const BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME: Int = 0
+pub const BUILTIN_VALUE_PHYSICAL_PTR_FROM_ADDR: Int = 1
+pub const BUILTIN_VALUE_PHYSICAL_HASH_COMBINE: Int = 2
+pub const BUILTIN_VALUE_PHYSICAL_STR_IDENTITY: Int = 3
+pub const BUILTIN_VALUE_PHYSICAL_BOOL_TO_STR: Int = 4
+pub const BUILTIN_VALUE_PHYSICAL_INDEX: Int = 5
+const BUILTIN_VALUE_PHYSICAL_COUNT: Int = 6
+
+pub struct BuiltinValuePhysicalLoweringFact {
+    tag: Int,
+    data: Str?
+}
+
+fn make_builtin_value_physical_lowering_fact(
+    tag: Int, data: Str?
+) -> BuiltinValuePhysicalLoweringFact {
+    if tag < 0 || tag >= BUILTIN_VALUE_PHYSICAL_COUNT {
+        panic("builtin value contract: physical lowering tag is invalid")
+    }
+    let requires_data =
+        tag == BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME ||
+        tag == BUILTIN_VALUE_PHYSICAL_HASH_COMBINE ||
+        tag == BUILTIN_VALUE_PHYSICAL_BOOL_TO_STR ||
+        tag == BUILTIN_VALUE_PHYSICAL_INDEX
+    match data {
+        some(value) => if !requires_data || value == "" {
+            panic("builtin value contract: physical lowering data differs")
+        },
+        none => if requires_data {
+            panic("builtin value contract: physical lowering data is absent")
+        }
+    }
+    BuiltinValuePhysicalLoweringFact { tag: tag, data: data }
+}
+
+pub fn builtin_value_physical_lowering_tag(
+    value: BuiltinValuePhysicalLoweringFact
+) -> Int {
+    make_builtin_value_physical_lowering_fact(
+        value.tag, value.data).tag
+}
+
+pub fn builtin_value_physical_lowering_data(
+    value: BuiltinValuePhysicalLoweringFact
+) -> Str? {
+    make_builtin_value_physical_lowering_fact(
+        value.tag, value.data).data
+}
+
+fn builtin_value_physical_lowering(
+    site: BuiltinValueSite
+) -> BuiltinValuePhysicalLoweringFact {
+    let tag = builtin_value_site_tag(site)
+    if tag == BUILTIN_VALUE_CELL_CONSTRUCTOR {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME, some("ring_Cell_new"))
+    }
+    if tag == BUILTIN_VALUE_ALLOC {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME, some("ring_raw_alloc"))
+    }
+    if tag == BUILTIN_VALUE_DEALLOC {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME, some("ring_raw_dealloc"))
+    }
+    if tag == BUILTIN_VALUE_PTR_COPY {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_DIRECT_RUNTIME, some("ring_ptr_copy"))
+    }
+    if tag == BUILTIN_VALUE_PTR_FROM_ADDR {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_PTR_FROM_ADDR, none)
+    }
+    if tag == BUILTIN_VALUE_HASH_COMBINE {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_HASH_COMBINE,
+            some("ring_hash_combine"))
+    }
+    if tag == BUILTIN_VALUE_STR_IDENTITY {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_STR_IDENTITY, none)
+    }
+    if tag == BUILTIN_VALUE_BOOL_TO_STR {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_BOOL_TO_STR,
+            some("ring_bool_to_str"))
+    }
+    if tag == BUILTIN_VALUE_LIST_INDEX {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_INDEX, some("ring_list_get"))
+    }
+    if tag == BUILTIN_VALUE_STR_INDEX {
+        return make_builtin_value_physical_lowering_fact(
+            BUILTIN_VALUE_PHYSICAL_INDEX, some("ring_str_get"))
+    }
+    panic("builtin value contract: physical lowering census is incomplete")
+}
+
+// Compiler-only schemes use a stable normalized formal domain.  The raw id
+// never enters inference: it is owned by the exact list.index symbol and is
+// projected to the downstream typed formal relation by the manifest consumer.
+const BUILTIN_VALUE_LIST_INDEX_TYPE_VAR_ID: Int = 0 - 1
+
+fn explicit_builtin_value_scheme(site: BuiltinValueSite) -> TypeScheme {
+    let tag = builtin_value_site_tag(site)
+    if tag == BUILTIN_VALUE_HASH_COMBINE {
+        return mono(Type::FnType {
+            params: [INT, INT], return_type: INT, effects: EMPTY_ROW
+        })
+    }
+    if tag == BUILTIN_VALUE_STR_IDENTITY {
+        return mono(Type::FnType {
+            params: [STR], return_type: STR, effects: EMPTY_ROW
+        })
+    }
+    if tag == BUILTIN_VALUE_BOOL_TO_STR {
+        return mono(Type::FnType {
+            params: [BOOL], return_type: STR, effects: EMPTY_ROW
+        })
+    }
+    if tag == BUILTIN_VALUE_LIST_INDEX {
+        let element = Type::TypeVar {
+            id: BUILTIN_VALUE_LIST_INDEX_TYPE_VAR_ID, name: none
+        }
+        return TypeScheme {
+            ty: Type::FnType {
+                params: [make_list_struct(element), INT],
+                return_type: element, effects: EMPTY_ROW
+            },
+            type_vars: [BUILTIN_VALUE_LIST_INDEX_TYPE_VAR_ID],
+            bounds: [], effect_schema: empty_typed_effect_header_schema(),
+            def_id: none
+        }
+    }
+    if tag == BUILTIN_VALUE_STR_INDEX {
+        return mono(Type::FnType {
+            params: [STR, INT], return_type: STR, effects: EMPTY_ROW
+        })
+    }
+    panic("builtin value contract: explicit scheme census is incomplete")
+}
+
+fn builtin_value_scheme_for_site(
+    env: TypeEnv, site: BuiltinValueSite
+) -> TypeScheme {
+    let tag = builtin_value_site_tag(site)
+    if tag < REGISTERED_BUILTIN_VALUE_SITE_COUNT {
+        let scheme = match env.lookup(registered_builtin_value_name(site)) {
+            some(value) => value,
+            none => panic(
+                "builtin value contract: registered TypeScheme is absent")
+        }
+        if scheme.def_id.is_none() {
+            panic("builtin value contract: registered TypeScheme has no DefId")
+        }
+        return scheme
+    }
+    explicit_builtin_value_scheme(site)
+}
+
+fn builtin_value_resource_contract(
+    site: BuiltinValueSite
+) -> CallableResourceContractFact {
+    let tag = builtin_value_site_tag(site)
+    if tag == BUILTIN_VALUE_CELL_CONSTRUCTOR {
+        return builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_consume(), [])
+    }
+    if tag == BUILTIN_VALUE_ALLOC {
+        return builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_read(), [])
+    }
+    if tag == BUILTIN_VALUE_DEALLOC {
+        return builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_read(), [])
+    }
+    if tag == BUILTIN_VALUE_PTR_COPY {
+        return builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read(),
+             callable_resource_role_read()],
+            callable_resource_role_read(), [])
+    }
+    if tag == BUILTIN_VALUE_PTR_FROM_ADDR {
+        return builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_read(), [])
+    }
+    if tag == BUILTIN_VALUE_HASH_COMBINE {
+        return builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_read(), [])
+    }
+    if tag == BUILTIN_VALUE_STR_IDENTITY {
+        return builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_read(), [0])
+    }
+    if tag == BUILTIN_VALUE_BOOL_TO_STR {
+        return builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_consume(), [])
+    }
+    if tag == BUILTIN_VALUE_LIST_INDEX {
+        return builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_read(), [0])
+    }
+    if tag == BUILTIN_VALUE_STR_INDEX {
+        return builtin_resource_contract(
+            [callable_resource_role_read(), callable_resource_role_read()],
+            callable_resource_role_consume(), [])
+    }
+    panic("builtin value contract: resource census is incomplete")
+}
+
+pub struct BuiltinValueContractFact {
+    site: BuiltinValueSite,
+    executable: ExecutableRef,
+    symbol: SymbolRef,
+    scheme: TypeScheme,
+    resource: CallableResourceContractFact,
+    physical: BuiltinValuePhysicalLoweringFact
+}
+
+fn make_builtin_value_contract_fact(
+    env: TypeEnv, site: BuiltinValueSite
+) -> BuiltinValueContractFact {
+    let symbol = builtin_value_symbol(site)
+    let executable = make_named_executable_ref(symbol)
+    let scheme = builtin_value_scheme_for_site(env, site)
+    let resource = builtin_value_resource_contract(site)
+    let arity = match scheme.ty {
+        Type::FnType { params, .. } => params.len(),
+        _ => panic("builtin value contract: scheme is not callable")
+    }
+    if scheme.bounds.len() != 0 ||
+       callable_resource_contract_parameter_roles(resource).len() != arity ||
+       !executable_ref_is_named(executable) ||
+       !symbol_ref_same(executable_ref_named_symbol(executable), symbol) {
+        panic("builtin value contract: typed relation is incomplete")
+    }
+    BuiltinValueContractFact {
+        site: site, executable: executable, symbol: symbol,
+        scheme: scheme, resource: resource,
+        physical: builtin_value_physical_lowering(site)
+    }
+}
+
+pub fn builtin_value_contract_site(
+    value: BuiltinValueContractFact
+) -> BuiltinValueSite { value.site }
+
+pub fn builtin_value_contract_executable(
+    value: BuiltinValueContractFact
+) -> ExecutableRef { value.executable }
+
+pub fn builtin_value_contract_symbol(
+    value: BuiltinValueContractFact
+) -> SymbolRef { value.symbol }
+
+pub fn builtin_value_contract_scheme(
+    value: BuiltinValueContractFact
+) -> TypeScheme { value.scheme }
+
+pub fn builtin_value_contract_resource(
+    value: BuiltinValueContractFact
+) -> CallableResourceContractFact { value.resource }
+
+pub fn builtin_value_contract_physical(
+    value: BuiltinValueContractFact
+) -> BuiltinValuePhysicalLoweringFact { value.physical }
+
+// Sole typed manifest for ordinary compiler-owned direct-call leaves.  Every
+// valid BuiltinValueSite produces exactly one relation, and exact executable
+// identity is independently unique across the closed ten-site domain.
+pub fn builtin_value_contract_facts(
+    env: TypeEnv
+) -> List<BuiltinValueContractFact> {
+    let mut result: List<BuiltinValueContractFact> = []
+    for tag in 0..BUILTIN_VALUE_SITE_COUNT {
+        let fact = make_builtin_value_contract_fact(
+            env, builtin_value_site_from_tag(tag))
+        if builtin_value_site_tag(fact.site) != tag {
+            panic("builtin value contract: site order drifted")
+        }
+        for existing in result {
+            if builtin_value_site_tag(existing.site) == tag ||
+               symbol_ref_same(existing.symbol, fact.symbol) {
+                panic("builtin value contract: exact relation is not unique")
+            }
+        }
+        result.push(fact)
+    }
+    if result.len() != BUILTIN_VALUE_SITE_COUNT {
+        panic("builtin value contract: exact site census drifted")
+    }
+    result
+}
+
 // Only checker.load_prelude's no-std branch may consume this fallback.
 pub fn finalize_std_hof_fallbacks(
     mut env: TypeEnv, sink: CollectingSink
