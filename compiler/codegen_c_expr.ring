@@ -2952,15 +2952,12 @@ fn intrinsic_int_arg_count(tag: Int) -> Int {
 }
 
 fn gen_c_intrinsic_method_call(
-    mut ctx: CCtx, callee: HExpr, method_ref: MethodCallRef,
+    mut ctx: CCtx, callee: HExpr, receiver: Str,
+    method_ref: MethodCallRef,
     arg_vals: List<Str>, effect_ctx: TypedEffectCtxSource
 ) -> Str {
     if !types_equal(method_call_ref_signature(method_ref), hexpr_type(callee)) {
         panic("C codegen: intrinsic method signature drifted")
-    }
-    let receiver = match callee {
-        HExpr::FieldAccess { receiver, .. } => gen_c_expr(ctx, receiver),
-        _ => panic("C codegen: intrinsic MethodCallRef has no receiver")
     }
     let tag = builtin_method_site_tag(intrinsic_ref_site(
         method_call_ref_intrinsic(method_ref)))
@@ -3039,7 +3036,21 @@ fn gen_c_call(
     let mut_flags = c_lookup_call_mut_flags(
         ctx, callee, callee_ref, method_ref)
 
-    // Evaluate all args first (mut value-type positions box into cells).
+    // The public evaluation order is receiver before arguments.  Materialize
+    // its Rc wrapper now so later argument Take/Drop cannot invalidate it.
+    let method_receiver = match method_ref {
+        some(exact) => if method_call_ref_is_intrinsic(exact) ||
+                           method_call_ref_is_concrete(exact) {
+            match callee {
+                HExpr::FieldAccess { receiver, .. } =>
+                    some((gen_c_expr(ctx, receiver), hexpr_type(receiver))),
+                _ => panic("C codegen: exact method has no receiver")
+            }
+        } else { none },
+        none => none
+    }
+
+    // Then evaluate arguments left-to-right (mut value positions box cells).
     let mut arg_vals: List<Str> = []
     let mut argi = 0
     for a in args {
@@ -3064,18 +3075,13 @@ fn gen_c_call(
         some(exact_method) => {
             let raw = if method_call_ref_is_intrinsic(exact_method) {
                 gen_c_intrinsic_method_call(
-                    ctx, callee, exact_method, arg_vals, effect_ctx)
+                    ctx, callee, method_receiver.unwrap().0,
+                    exact_method, arg_vals, effect_ctx)
             } else if method_call_ref_is_concrete(exact_method) {
-                let (receiver_expr, receiver_type) = match callee {
-                    HExpr::FieldAccess { receiver, .. } =>
-                        (receiver, hexpr_type(receiver)),
-                    _ => panic(
-                        "C codegen: concrete method has no receiver")
-                }
-                let receiver = gen_c_expr(ctx, receiver_expr)
+                let receiver = method_receiver.unwrap()
                 let method_identity = method_call_ref_impl(exact_method)
                 gen_c_method_call(
-                    ctx, receiver, receiver_type, method_identity,
+                    ctx, receiver.0, receiver.1, method_identity,
                     arg_vals, dict_vals, effect_ctx)
             } else {
                 panic("C codegen: unknown method identity domain")
