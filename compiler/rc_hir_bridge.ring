@@ -2470,7 +2470,8 @@ fn serialize_trait_method(
     } else { none }
     HTraitMethod {
         name: value.name, method_ref: value.method_ref,
-        params: value.params, return_type: value.return_type,
+        params: value.params, trait_bounds: value.trait_bounds,
+        return_type: value.return_type,
         effects: validate_legacy_effect_row(value.effects),
         has_default: value.has_default,
         executable_ref: value.executable_ref,
