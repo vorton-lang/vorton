@@ -10,13 +10,17 @@
 
 use types::{Type}
 use ast::{Span}
-use hir::{HDictDef, TraitBound}
+use hir::{TraitBound, trait_dict_name}
+use hir_exact::{exact_dict_physical_key}
 use ir_identity::{
     SlotRef, ImplOwnerRef, ImplMethodRef,
     slot_ref_stable_key, impl_owner_ref_same, impl_method_ref_same,
+    impl_owner_ref_target, impl_owner_ref_provider, impl_owner_ref_trait,
+    impl_provider_ref_kind, impl_provider_kind_builtin,
+    impl_provider_kind_same, symbol_ref_canonical_payload,
     impl_method_ref_owner, impl_method_ref_callable_slot_index,
     impl_method_ref_stable_key}
-use ir_inventory::{ExactDictRef}
+use ir_inventory::{ExactDictRef, make_exact_static_dict_ref}
 use legacy_projection::{LegacyEffectCtxToken}
 
 // Per-function registration info (forward-declare pass).
@@ -209,16 +213,12 @@ pub struct CCtx {
     // per-backend registry).
     pub trait_method_order: Map<Str, List<Str>>,
     pub trait_supertraits: Map<Str, List<Str>>,
-    // B-104 D4 static dict singleton definitions (HProgram.static_dicts).
-    pub static_dict_defs: Map<Str, HDictDef>,
-    // Dict names whose ring_dict_build_<name> build fn exists (impl trait
-    // dicts pre-registered in the forward pass + derived trait dicts) — the
-    // memoised getter routes through the build fn instead of the runtime
-    // builtin fallback.  Pre-registration makes getter contents independent
-    // of decl order (the LLVM backend's lazy variant is order-sensitive).
+    // Exact physical keys whose trait-dictionary build fn exists. Impl trait
+    // dictionaries are pre-registered in the forward pass so a memoised
+    // getter is independent of declaration order.
     pub dict_build_fns: Set<Str>,
-    // Physical build/getter names remain emission payload only; the exact
-    // owner/tree beside each entry is mandatory for every lookup.
+    // The exact owner/tree beside every backend key remains mandatory for
+    // lookup validation; no target/trait spelling is a non-builtin authority.
     pub dict_build_owners: Map<Str, ImplOwnerRef>,
     pub dict_getters: Map<Str, ExactDictRef>,
     // Function-value dict ABI invariant: the checker must attach exactly one
@@ -320,7 +320,6 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         drop_registrations: [],
         trait_method_order: map_new(),
         trait_supertraits: map_new(),
-        static_dict_defs: map_new(),
         dict_build_fns: set_new(),
         dict_build_owners: map_new(),
         dict_getters: map_new(),
@@ -418,6 +417,58 @@ pub fn c_symbol_for_fn_key(registry_key: Str) -> Str {
 // same injective encoder as function symbols.
 pub fn c_symbol_fragment(name: Str) -> Str {
     if name.index_of("$$_").is_some() { c_module_symbol(name) } else { c_sanitize(name) }
+}
+
+fn c_impl_owner_is_builtin(value: ImplOwnerRef) -> Bool {
+    impl_provider_kind_same(
+        impl_provider_ref_kind(impl_owner_ref_provider(value)),
+        impl_provider_kind_builtin())
+}
+
+// Builtin providers alone retain the fixed runtime dictionary ABI spelling.
+// Non-builtin code must not call this adapter or reconstruct a name from
+// target/trait payloads.
+pub fn c_builtin_trait_dict_abi_name(value: ImplOwnerRef) -> Str {
+    if !c_impl_owner_is_builtin(value) {
+        panic("C dictionary key: non-builtin owner requested a runtime ABI name")
+    }
+    let trait_ref = match impl_owner_ref_trait(value) {
+        some(reference) => reference,
+        none => panic("C dictionary key: builtin dictionary owner has no trait")
+    }
+    trait_dict_name(
+        symbol_ref_canonical_payload(impl_owner_ref_target(value)),
+        symbol_ref_canonical_payload(trait_ref))
+}
+
+// One physical registry key per exact trait impl owner. Runtime ABI spelling
+// remains a separate builtin-only leaf adapter above.
+pub fn c_trait_dict_physical_key(value: ImplOwnerRef) -> Str {
+    match impl_owner_ref_trait(value) {
+        some(_) => {},
+        none => panic("C dictionary key: dictionary owner has no trait")
+    }
+    exact_dict_physical_key(make_exact_static_dict_ref(value))
+}
+
+// Backend alias for the neutral HIR exact-tree projector.
+pub fn c_static_dict_physical_key(value: ExactDictRef) -> Str {
+    exact_dict_physical_key(value)
+}
+
+pub fn c_trait_dict_build_symbol(value: ImplOwnerRef) -> Str {
+    let key = c_trait_dict_physical_key(value)
+    c_module_symbol("ring-dict-build/${key}")
+}
+
+pub fn c_static_dict_getter_symbol(value: ExactDictRef) -> Str {
+    let key = c_static_dict_physical_key(value)
+    c_module_symbol("ring-dict-init/${key}")
+}
+
+pub fn c_static_dict_global_symbol(value: ExactDictRef) -> Str {
+    let key = c_static_dict_physical_key(value)
+    c_module_symbol("ring-dict-global/${key}")
 }
 
 pub fn c_effect_ctx_token_symbol(ordinal: Int) -> Str {

@@ -3,7 +3,7 @@
 // traversal emits both immutable products.  Neither product exposes HProgram
 // and no downstream consumer may replay resolver/type/effect selection.
 
-use types::{Type, EffectRow, types_equal, effects_equal}
+use types::{Type, EffectRow, types_equal, effects_equal, type_to_string}
 use env::{TypeEnv}
 use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
@@ -164,7 +164,8 @@ fn exact_type_fact(
             }
             value
         },
-        none => panic("Core/legacy freeze: exact Type fact is absent")
+        none => panic(
+            "Core/legacy freeze: exact Type fact is absent: module=${module_key}, type=${type_to_string(ty)}")
     }
 }
 

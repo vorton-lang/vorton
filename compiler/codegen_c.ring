@@ -13,7 +13,7 @@ use types::{Type}
 use ast::{Span, UseDecl, UseImport}
 use hir::{HExpr, HStmt, HDecl, HParam, HProgram, HStructField, HEnumVariant,
     TraitBound, trait_bound_param_name,
-    variant_ctor_name, compare_by_first, hexpr_type, trait_dict_name,
+    variant_ctor_name, compare_by_first, hexpr_type,
     scan_trait_method_order, type_contains_extern_handle}
 use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTypedRef,
     CEmitState, new_c_ctx, c_emit, c_raw, c_param, c_param_def,
@@ -25,6 +25,7 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTy
     c_exact_method_for_owner_slot,
     c_method_info_fn, c_method_info_physical_identity,
     c_mark_exact_method_emitted,
+    c_trait_dict_physical_key, c_trait_dict_build_symbol,
     c_effect_ctx_token_symbol,
     c_line_directive,
     rt_use, rt_use_raw,
@@ -104,10 +105,6 @@ pub fn generate_c(
     // user drop body before the recursive field drops).
     for dt in program.drop_types { ctx.drop_types.insert(dt) }
 
-    // B-104 D4: static dict singleton definitions (dict_lower) — the memoised
-    // getters build wrapped instances from these.
-    for sd in program.static_dicts { ctx.static_dict_defs.insert(sd.name, sd) }
-
     // Trait method slot order + supertrait edges — SHARED hir.ring scan
     // (plan §2.5 #2: single source; no codegen-local trait registry).
     scan_trait_method_order(program.decls, ctx.trait_method_order, ctx.trait_supertraits)
@@ -184,9 +181,6 @@ pub fn generate_c_project(
         for en in program.extern_type_names { ctx.extern_types.insert(en) }
         // B-002p1: types with user impl Drop (union across modules).
         for dt in program.drop_types { ctx.drop_types.insert(dt) }
-        // B-104 D4: static dict singletons — instance names deterministically
-        // encode their structure, same-name entries are identical (dedupe).
-        for sd in program.static_dicts { ctx.static_dict_defs.insert(sd.name, sd) }
         // Trait method slot order + supertraits (hir.ring single source).
         scan_trait_method_order(program.decls, ctx.trait_method_order, ctx.trait_supertraits)
         scan_fn_mut_params_with_prefix_c(
@@ -514,9 +508,7 @@ fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?
                 ctx.ring_callable_names.insert(mangled)
                 c_declare_fn(ctx, mangled, params, trait_bounds, effect_ctx)
             },
-            HDecl::Impl {
-                target_type, owner_ref, trait_name, methods, ..
-            } => {
+            HDecl::Impl { owner_ref, trait_name, methods, .. } => {
                 for m in methods {
                     match m {
                         HDecl::Fn { name: mn, params: mp,
@@ -549,20 +541,21 @@ fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?
                             none => panic(
                                 "C method index: trait impl lacks exact trait")
                         }
-                        let dict_name = trait_dict_name(target_type, tn)
+                        let dict_key = c_trait_dict_physical_key(owner_ref)
                         let has_methods = methods.len() > 0
                         if has_methods {
-                            match ctx.dict_build_owners.get(dict_name) {
+                            match ctx.dict_build_owners.get(dict_key) {
                                 some(existing) => if !impl_owner_ref_same(
                                         existing, owner_ref) {
-                                    panic("C ABI dict: physical build name has multiple exact owners")
+                                    panic("C ABI dict: physical build key has multiple exact owners")
                                 },
                                 none => ctx.dict_build_owners.insert(
-                                    dict_name, owner_ref)
+                                    dict_key, owner_ref)
                             }
-                            if !ctx.dict_build_fns.contains(dict_name) {
-                                ctx.dict_build_fns.insert(dict_name)
-                                ctx.fn_protos.push("void* ring_dict_build_${c_symbol_fragment(dict_name)}(void);")
+                            if !ctx.dict_build_fns.contains(dict_key) {
+                                ctx.dict_build_fns.insert(dict_key)
+                                ctx.fn_protos.push(
+                                    "void* ${c_trait_dict_build_symbol(owner_ref)}(void);")
                             }
                         }
                         if tn == "Drop" {
@@ -891,9 +884,7 @@ fn emit_c_decl(mut ctx: CCtx, decl: HDecl) {
             emit_c_fn_body(ctx, name, params, body, trait_bounds,
                 effect_ctx, span)
         },
-        HDecl::Impl {
-            target_type, owner_ref, trait_name, methods, ..
-        } => {
+        HDecl::Impl { owner_ref, trait_name, methods, .. } => {
             for m in methods {
                 match m {
                     HDecl::Fn { name: mn, params: mp, body: mb,
@@ -914,10 +905,7 @@ fn emit_c_decl(mut ctx: CCtx, decl: HDecl) {
             // Core has already elaborated every trait/default/derived method
             // into an ordinary exact HDecl::Fn.  C only assembles the ABI dict.
             match trait_name {
-                some(tn) => {
-                    emit_c_trait_dict(
-                        ctx, target_type, tn, owner_ref, methods)
-                },
+                some(_) => emit_c_trait_dict(ctx, owner_ref, methods),
                 none => {},
             }
         },
@@ -1575,10 +1563,9 @@ fn scan_fn_mut_params_with_prefix_c(
 // ============================================================
 
 fn emit_c_trait_dict(
-    mut ctx: CCtx, target_type: Str, trait_name: Str,
-    owner: ImplOwnerRef, methods: List<HDecl>
+    mut ctx: CCtx, owner: ImplOwnerRef, methods: List<HDecl>
 ) {
-    let dict_name = trait_dict_name(target_type, trait_name)
+    let dict_key = c_trait_dict_physical_key(owner)
 
     let mut method_order: List<ImplMethodRef> = []
     for m in methods {
@@ -1613,12 +1600,12 @@ fn emit_c_trait_dict(
     let method_count = method_order.len()
     if method_count == 0 { return }
 
-    let build_fn_name = "ring_dict_build_${c_symbol_fragment(dict_name)}"
+    let build_fn_name = c_trait_dict_build_symbol(owner)
     if ctx.emitted_fns.contains(build_fn_name) { return }
     ctx.emitted_fns.insert(build_fn_name)
     // Defensive ABI registration if the forward pass did not predeclare it.
-    if ctx.dict_build_fns.contains(dict_name) == false {
-        ctx.dict_build_fns.insert(dict_name)
+    if ctx.dict_build_fns.contains(dict_key) == false {
+        ctx.dict_build_fns.insert(dict_key)
         ctx.fn_protos.push("void* ${build_fn_name}(void);")
     }
 
@@ -1640,7 +1627,7 @@ fn emit_c_trait_dict(
 
     // Memoised getter (routes through the build fn — dict_build_fns entry).
     let _g = ensure_c_dict_getter(
-        ctx, dict_name, make_exact_static_dict_ref(owner))
+        ctx, make_exact_static_dict_ref(owner))
 }
 
 fn emit_c_dict_method_slot(

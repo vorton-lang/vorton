@@ -7,15 +7,16 @@
 // pass / verifier and lowered identically by codegen.
 //
 // Input invariant (established by infer / infer_ctx at DictRef creation):
-//   * DictRef::Static(name)  — a plain static dict (trait_dict_name sites).
+//   * DictRef::Static(name)  — a plain static dict whose incoming spelling is
+//     diagnostic/builtin-ABI provenance, not its final physical identity.
 //   * DictRef::Simple(name)  — a dict PARAM reference (trait_bound_param_name
 //     sites).  Borrow of a binding in scope.
 //   * DictRef::Wrapped{..}   — a parameterized type's dict resolution.
 //
 // This pass rewrites every use site (Call.resolved_dicts/bound evidence,
 // Ident.dict_closure_dicts, and BinOp eq/ord_dispatch extra_dicts):
-//   1. Static(name) plain refs  → registered in HProgram.static_dicts
-//      (footprint; LLVM memoises the singleton on first use).
+//   1. Static(name) plain refs → exact_dict_physical_key, registered in
+//      HProgram.static_dicts as a footprint.
 //   2. Wrapped with ALL-STATIC inners → ONE module-level singleton instance
 //      (HDictDef with inner != []), use site becomes Static(instance_name)
 //      — a borrow.  This kills the per-call-site fresh TUPLE+closures+STR
@@ -49,13 +50,14 @@ use hir::{HProgram, HDecl, HStmt, HExpr, HMatchArm, HStructFieldInit,
     method_call_ref_bound, method_call_ref_bound_evidence,
     method_call_ref_signature, method_call_ref_receiver_mutable,
     HDictDef, DerivedImpl, DerivedField, DerivedVariant, FieldAction,
-    dict_instance_name, hexpr_type, hexpr_effects, hexpr_span,
+    hexpr_type, hexpr_effects, hexpr_span,
     synthetic_def_id, SYNTHETIC_DICT_DEF_ID_BASE,
     make_h_dict_construct_plan,
     validate_hir_binder_def_ids}
 use hir_exact::{
     make_simple_dict_ref, make_static_dict_ref, make_wrapped_dict_ref,
-    dict_ref_exact, dict_ref_is_simple_physical,
+    dict_ref_exact, exact_dict_physical_key,
+    dict_ref_is_simple_physical,
     dict_ref_is_static_physical, dict_ref_simple_name,
     dict_ref_static_name, dict_ref_wrapped_name,
     dict_ref_wrapped_trait, dict_ref_wrapped_physical_inner
@@ -304,11 +306,13 @@ fn dl_ref_dyn(
 ) -> DictRef {
     if dict_ref_is_simple_physical(dr) { return dr }
     if dict_ref_is_static_physical(dr) {
-        let name = dict_ref_static_name(dr)
+        let payload_name = dict_ref_static_name(dr)
+        let exact = dict_ref_exact(dr)
+        let name = exact_dict_physical_key(exact)
         dl_register(defs, seen, HDictDef {
-            name: name, base_dict: name, trait_name: "", inner: []
+            name: name, base_dict: payload_name, trait_name: "", inner: []
         })
-        return dr
+        return make_static_dict_ref(name, exact)
     }
     let dict = dict_ref_wrapped_name(dr)
     let trait_ref = dict_ref_wrapped_trait(dr)
@@ -327,7 +331,7 @@ fn dl_ref_dyn(
                 } else { all_static = false }
             }
             if all_static {
-                let inst = dict_instance_name(dict, inner_names)
+                let inst = exact_dict_physical_key(dict_ref_exact(dr))
                 dl_register(defs, seen, HDictDef { name: inst, base_dict: dict, trait_name: trait_name, inner: inner_names })
                 make_static_dict_ref(inst, dict_ref_exact(dr))
             } else {
@@ -364,11 +368,13 @@ fn dl_ref_dyn(
 fn dl_ref_static_only(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>) -> DictRef {
     if dict_ref_is_simple_physical(dr) { return dr }
     if dict_ref_is_static_physical(dr) {
-        let name = dict_ref_static_name(dr)
+        let payload_name = dict_ref_static_name(dr)
+        let exact = dict_ref_exact(dr)
+        let name = exact_dict_physical_key(exact)
         dl_register(defs, seen, HDictDef {
-            name: name, base_dict: name, trait_name: "", inner: []
+            name: name, base_dict: payload_name, trait_name: "", inner: []
         })
-        return dr
+        return make_static_dict_ref(name, exact)
     }
     let dict = dict_ref_wrapped_name(dr)
     let trait_ref = dict_ref_wrapped_trait(dr)
@@ -386,7 +392,7 @@ fn dl_ref_static_only(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>)
                 } else { all_static = false }
             }
             if all_static {
-                let inst = dict_instance_name(dict, inner_names)
+                let inst = exact_dict_physical_key(dict_ref_exact(dr))
                 dl_register(defs, seen, HDictDef { name: inst, base_dict: dict, trait_name: trait_name, inner: inner_names })
                 make_static_dict_ref(inst, dict_ref_exact(dr))
             } else {
@@ -399,7 +405,6 @@ fn dl_dispatch(d: TraitDispatch?, mut defs: List<HDictDef>, mut seen: Set<Str>) 
     match d {
         some(td) => match td {
             TraitDispatch::Direct { dict, extra_dicts } => {
-                dl_register(defs, seen, HDictDef { name: dict, base_dict: dict, trait_name: "", inner: [] })
                 let mut new_extra: List<DictRef> = []
                 for ed in extra_dicts { new_extra.push(dl_ref_static_only(ed, defs, seen)) }
                 some(TraitDispatch::Direct { dict: dict, extra_dicts: new_extra })

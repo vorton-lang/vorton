@@ -319,18 +319,6 @@ pub struct HDictDef {
     pub inner: List<Str>
 }
 
-// Naming convention for a fully-static wrapped dict instance (cross-stage
-// contract: dict_lower mints it, codegen defines/references it).  `$` is
-// legal in LLVM symbols (and JS identifiers in dist/), and cannot appear in user type
-// names, so the encoding is collision-free and deterministic.
-pub fn dict_instance_name(base_dict: Str, inner: List<Str>) -> Str {
-    if inner.len() == 0 {
-        base_dict
-    } else {
-        "${base_dict}$${inner.join("$")}"
-    }
-}
-
 pub enum TraitDispatch {
     Builtin,
     Direct { dict: Str, extra_dicts: List<DictRef> },
@@ -2412,6 +2400,9 @@ pub fn is_materialized_fn_value(expr: HExpr) -> Bool {
 }
 
 pub fn trait_dict_name(type_name: Str, trait_name: Str) -> Str {
+    // Source/diagnostic provenance and the fixed builtin runtime ABI leaf.
+    // dict_lower replaces every non-local static identity with the exact
+    // dictionary-tree physical key before Core/backend consumption.
     let safe_type = if type_name.contains("::") { type_name.replace("::", "$") } else { type_name }
     let safe_trait = if trait_name.contains("::") { trait_name.replace("::", "$") } else { trait_name }
     "__${safe_type}_${safe_trait}"

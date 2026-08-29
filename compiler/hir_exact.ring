@@ -15,13 +15,15 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     nominal_field_ref_same,
     trait_method_ref_trait, trait_method_ref_member,
     impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_target,
+    impl_owner_ref_stable_key,
     impl_owner_ref_same, impl_method_ref_member, impl_method_ref_owner,
     variant_ref_member, impl_provider_ref_same,
-    slot_ref_is_source, slot_ref_source_domain,
+    slot_ref_is_source, slot_ref_source_domain, slot_ref_stable_key,
     slot_domain_dictionary, slot_domain_same}
 use ir_inventory::{ExecutableRef, BinderEntry, EffectCtxRef,
     ExactDictRef, dict_ref_same, dict_ref_is_local, dict_ref_is_static,
-    dict_ref_is_wrapped, dict_ref_wrapped_inner,
+    dict_ref_is_wrapped, dict_ref_local, dict_ref_static,
+    dict_ref_wrapped_base, dict_ref_wrapped_inner,
     executable_ref_is_named, executable_ref_named_symbol,
     effect_ctx_ref_same}
 use effect_contract::{
@@ -43,7 +45,7 @@ use env::{RegisteredTraitContract,
 //   Static(name)  — a MODULE-LEVEL STATIC dict singleton reference (borrow):
 //                   either a plain dict (`__Type_Trait` impl dict / builtin
 //                   primitive dict) or a fully-static wrapped INSTANCE
-//                   (dict_instance_name).  Singletons live for the program
+//                   (exact_dict_physical_key).  Singletons live for the program
 //                   lifetime — never Clone'd, never Drop'ed, never owned.
 //                   Produced by infer (plain) / dict_lower (instances).
 //   Wrapped{..}   — the infer-side RESOLUTION form for a parameterized type's
@@ -114,6 +116,50 @@ pub fn make_wrapped_dict_ref(
 }
 
 pub fn dict_ref_exact(value: DictRef) -> ExactDictRef { value.exact }
+
+fn exact_dict_key_atom(value: Str) -> Str {
+    "${value.len().to_str()}:${value}"
+}
+
+// Complete physical adapter key for one exact dictionary tree. Every node
+// records its tag and arity; owner/slot identities and recursively ordered
+// children are length-prefixed before composition. Physical backends may
+// encode this key, but must not reconstruct it from HIR spellings.
+pub fn exact_dict_physical_key(value: ExactDictRef) -> Str {
+    if dict_ref_is_local(value) {
+        return [
+            exact_dict_key_atom("local-dict-v1"),
+            exact_dict_key_atom("0"),
+            exact_dict_key_atom(slot_ref_stable_key(dict_ref_local(value)))
+        ].join("/")
+    }
+    if dict_ref_is_static(value) {
+        return [
+            exact_dict_key_atom("static-dict-v1"),
+            exact_dict_key_atom("0"),
+            exact_dict_key_atom(impl_owner_ref_stable_key(
+                dict_ref_static(value)))
+        ].join("/")
+    }
+    if !dict_ref_is_wrapped(value) {
+        panic("HIR dictionary key: unknown exact dictionary evidence")
+    }
+    let inner = dict_ref_wrapped_inner(value)
+    let mut parts = [
+        exact_dict_key_atom("wrapped-dict-v1"),
+        exact_dict_key_atom(inner.len().to_str()),
+        exact_dict_key_atom(impl_owner_ref_stable_key(
+            dict_ref_wrapped_base(value)))
+    ]
+    let mut child_index = 0
+    for child in inner {
+        parts.push(exact_dict_key_atom(child_index.to_str()))
+        parts.push(exact_dict_key_atom(exact_dict_physical_key(child)))
+        child_index = child_index + 1
+    }
+    parts.join("/")
+}
+
 pub fn dict_ref_is_simple_physical(value: DictRef) -> Bool {
     match value.physical {
         PhysicalDictRefValue::SimplePhysicalValue(_) => true,
