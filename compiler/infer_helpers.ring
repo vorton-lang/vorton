@@ -153,7 +153,7 @@ fn instantiate_named_value_scheme(
                        !h0_registration_header_is_closed(ctx, provider) {
                         let _ = type_error(
                             ctx.sink, E0404,
-                            "Named callable '${name}' used as a first-class value requires a recursively closed registration header",
+                            "Named callable '${name}' used as a first-class value requires a recursively closed registration header; add an explicit complete 'with { ... }' clause or use a lambda wrapper",
                             span, DiagnosticContext::OtherContext {
                                 detail: some(
                                     "add an explicit complete 'with { ... }' clause or use a lambda wrapper")
