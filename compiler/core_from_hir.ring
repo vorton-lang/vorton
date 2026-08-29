@@ -15,6 +15,7 @@ use env::{
     registered_trait_contract_dict_obligations,
     registered_trait_assoc_member, registered_trait_assoc_type,
     registered_trait_assoc_default, registered_trait_assoc_bounds,
+    registered_trait_method_ref,
     registered_trait_method_signature,
     registered_trait_method_mutabilities, apply_subst_map, find_impl,
     ordered_effect_tail_vars
@@ -2013,6 +2014,20 @@ fn producer_record_derived(
             let _ = producer_record_type(
                 producer, method.signature,
                 some(executable_origin(method.executable_ref)))
+        }
+        match derived.text_plan {
+            some(plan) => {
+                let _ = producer_record_type(
+                    producer, h_exact_call_signature(plan.builder),
+                    some(derived_origin))
+                let _ = producer_record_type(
+                    producer, h_exact_call_signature(plan.append),
+                    some(derived_origin))
+                let _ = producer_record_type(
+                    producer, h_exact_call_signature(plan.finish),
+                    some(derived_origin))
+            },
+            none => {}
         }
     }
 }
@@ -4384,6 +4399,70 @@ fn flow_contract_from_resource_fact(
         if aliases.len() == 0 { make_fresh_flow_value_origin() }
         else { make_aliasing_flow_value_origin(aliases) })
 }
+
+fn add_builtin_trait_contracts(
+    facts: FrozenCoreAssemblyFacts, mut assembly: ModuleAssembly
+) {
+    if facts.module_order != 0 { return }
+    let mut entries = facts.env.trait_reg.traits.entries()
+    entries.sort_by(compare_by_first)
+    let parent = make_module_body_parent(make_module_body_ref(
+        "$builtin", "builtin-trait-members"))
+    for entry in entries {
+        let def = entry.1
+        let owner = registered_trait_ref_symbol(def.owner_ref)
+        if symbol_ref_origin_module_key(owner) != "$builtin" { continue }
+        for method in registered_trait_contract_methods(def.contract) {
+            let method_ref = registered_trait_method_ref(method)
+            let reference = make_named_executable_ref(
+                trait_method_ref_member(method_ref))
+            let signature = registered_trait_method_signature(method)
+            let (params, result, effects) = match signature {
+                Type::FnType { params, return_type, effects } =>
+                    (params, return_type, effects),
+                _ => panic(
+                    "Core assembly: builtin trait method is not callable")
+            }
+            let mutabilities = registered_trait_method_mutabilities(method)
+            if params.len() != mutabilities.len() {
+                panic(
+                    "Core assembly: builtin trait method mutability arity differs")
+            }
+            let parameter_types = params.map(fn(ty) {
+                type_fact_for(facts.type_sources, ty, facts.module_key)
+            })
+            let result_type = type_fact_for(
+                facts.type_sources, result, facts.module_key)
+            let header = final_callable_header(params, result, effects)
+            let core_effects = core_effect_contract_from_row(
+                facts.type_sources, effects, facts.module_key,
+                facts.effect_parameters)
+            assembly.entries.push(make_executable_entry(
+                reference, parent, executable_kind_bodyless_trait_member(),
+                make_contract_only()))
+            assembly.callables.push(make_core_callable_contract(
+                reference, make_symbol_origin_ref(
+                    trait_method_ref_member(method_ref)),
+                type_fact_for(
+                    facts.type_sources, header, facts.module_key),
+                [], callable_owned_effect_formals(
+                    facts, reference, header), [],
+                executable_contract_mode_contract_only(),
+                make_module_flow_call_contract(
+                    facts.module_key,
+                    parameter_types.map(fn(ty) { make_core_type_ref(
+                        core_type_ref_index(ty)) }),
+                    parameter_roles_from_mutabilities(mutabilities),
+                    make_core_type_ref(core_type_ref_index(result_type)),
+                    flow_semantic_role_read(),
+                    make_fresh_flow_value_origin()),
+                core_effects,
+                some(generated_callable_effect_ctx(
+                    facts, reference, core_effects))))
+        }
+    }
+}
+
 fn final_callable_header(
     parameter_types: List<Type>, result: Type, effects: EffectRow
 ) -> Type {
@@ -6813,6 +6892,7 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
             project_type_formal_sources, mapping)
         let module_body = make_module_body_ref(facts.module_key, "module-body")
         let assembly = empty_module_assembly()
+        add_builtin_trait_contracts(facts, assembly)
         add_builtin_method_contracts(facts, assembly)
         assemble_decls(facts, module_body, facts.program.decls, assembly)
         append_derived_impls(

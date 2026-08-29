@@ -13,6 +13,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     make_registered_trait_method_contract,
     make_registered_trait_assoc_contract,
     make_registered_trait_contract,
+    register_callable_effect_header,
     ImplEntry, ImplMethodSchemeCore, TypedImplPredicate,
     FrozenImplPredicateSet,
     mono, add_impl, install_method_core,
@@ -32,6 +33,7 @@ use hir::{HDecl, HStructField, HTypeParam,
 use diagnostics::{CollectingSink}
 use ir_inventory::{CallableResourceContractFact,
     CallableResourceRoleFact,
+    make_named_executable_ref,
     make_callable_resource_contract_fact,
     callable_resource_contract_parameter_roles,
     callable_resource_role_read, callable_resource_role_mutate,
@@ -40,6 +42,7 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     IntrinsicRef, BuiltinMethodSite, BuiltinValueSite,
     make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
+    trait_method_ref_member,
     make_variant_field_ref,
     make_registered_nominal_ref, make_registered_trait_ref,
     builtin_option_some_variant_ref, builtin_option_none_variant_ref,
@@ -154,6 +157,12 @@ fn install_builtin_trait_contract(
     let owner_ref = make_registered_trait_ref(owner_symbol, name)
     let mut method_contracts: List<RegisteredTraitMethodContract> = []
     for method in methods {
+        match method.ty {
+            Type::FnType { effects, .. } => register_callable_effect_header(
+                env, make_named_executable_ref(
+                    trait_method_ref_member(method.method_ref)), effects),
+            _ => panic("builtin trait method: signature is not callable")
+        }
         method_contracts.push(make_registered_trait_method_contract(
             method.method_ref, method.ty, method.has_default,
             method.param_mutabilities))
