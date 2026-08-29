@@ -75,6 +75,8 @@ use ir_inventory::{
     effect_operation_ref_callable
 }
 use builtins::{
+    builtin_value_contract_facts,
+    builtin_value_contract_executable, builtin_value_contract_scheme,
     builtin_method_contract_facts,
     builtin_method_contract_intrinsic, builtin_method_contract_scheme
 }
@@ -1158,6 +1160,54 @@ fn scan_decls(
 }
 
 const LEGACY_BUILTIN_PARAM_DEF_ID_BASE: Int = 0 - 8000000000
+const LEGACY_BUILTIN_VALUE_PARAM_DEF_ID_BASE: Int = 0 - 8100000000
+
+fn add_builtin_value_facts(mut builder: LegacyFactBuilder) {
+    if !builder.owns_prelude {
+        panic("Core/legacy freeze: builtin value facts escaped root")
+    }
+    let container = make_legacy_module_container(builder.module_body)
+    let mut global_param_ordinal = 0
+    for fact in builtin_value_contract_facts() {
+        let reference = builtin_value_contract_executable(fact)
+        let scheme = builtin_value_contract_scheme(fact)
+        let (params, result, effects) = match scheme.ty {
+            Type::FnType { params, return_type, effects } =>
+                (params, return_type, effects),
+            _ => panic("Core/legacy freeze: builtin value is not callable")
+        }
+        let owner = path_owner_for_symbol(
+            executable_ref_named_symbol(reference))
+        let mut parameter_facts: List<LegacyBinderFactProjection> = []
+        let mut index = 0
+        for ty in params {
+            let site = make_path_ref(
+                owner, ["legacy-builtin-value-param", index.to_str()],
+                path_role_parameter())
+            parameter_facts.push(add_binder_fact(
+                builder, make_synthetic_slot_ref(site),
+                "__builtin_value_p${index}",
+                LEGACY_BUILTIN_VALUE_PARAM_DEF_ID_BASE -
+                    global_param_ordinal,
+                ty, false))
+            index = index + 1
+            global_param_ordinal = global_param_ordinal + 1
+        }
+        let origin = executable_origin(reference)
+        builder.prelude_callables.push(
+            make_legacy_prelude_callable_fact_projection(
+                reference, origin, builder.module_body, container,
+                executable_kind_builtin_intrinsic(), [], [], parameter_facts,
+                exact_type_fact(
+                    builder.type_sources, result, builder.module_key),
+                result, effects, false))
+        builder.shells.push(make_legacy_prelude_executable_shell(
+            reference, origin, executable_kind_builtin_intrinsic(),
+            builder.module_body, container))
+        add_effect_row(builder, effects)
+        add_physical_identity(builder, reference, none, none)
+    }
+}
 
 fn add_builtin_facts(mut builder: LegacyFactBuilder, env: TypeEnv) {
     let mut global_param_ordinal = 0
@@ -1253,6 +1303,7 @@ fn freeze_legacy_semantic_facts(
     add_derived_impl_facts(builder, closed.derived_impls)
     if module_order == 0 {
         add_builtin_trait_facts(builder, env)
+        add_builtin_value_facts(builder)
         add_builtin_facts(builder, env)
     }
     let mut internal_types = [make_legacy_internal_type_fact_projection(
