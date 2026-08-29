@@ -30,7 +30,11 @@ use builtins::{
     BuiltinValueContractFact, builtin_value_contract_facts,
     builtin_value_contract_site, builtin_value_contract_executable,
     builtin_value_contract_symbol, builtin_value_contract_scheme,
-    builtin_value_contract_resource
+    builtin_value_contract_resource,
+    BuiltinTraitMemberResourceFact,
+    builtin_trait_member_resource_facts,
+    builtin_trait_member_resource_method,
+    builtin_trait_member_resource_contract
 }
 use precore_lower::{close_hir_surface}
 use core_type_source::{
@@ -48,7 +52,7 @@ use resource_model::{
     FlowTypeSemanticSeed,
     flow_type_seed_shareable, flow_type_seed_unique,
     FlowSemanticRole, FlowCallContract, FlowStorageContract,
-    make_flow_call_contract, make_module_flow_call_contract,
+    make_module_flow_call_contract,
     flow_semantic_role_read, flow_semantic_role_mutate,
     flow_semantic_role_consume, flow_semantic_role_force,
     flow_semantic_role_tag,
@@ -61,7 +65,7 @@ use ir_identity::{
     core_type_fact_module_key, core_type_fact_ordinal,
     core_type_fact_same, core_type_fact_local_ref,
     make_core_type_ref, make_module_core_type_ref,
-    core_type_ref_index,
+    core_type_ref_index, core_type_ref_same,
     SymbolRef, PathRef, PathOwnerRef, PathRole, SlotRef, CalleeRef,
     NominalFieldRef,
     ModuleBodyRef, make_module_body_ref,
@@ -94,7 +98,7 @@ use ir_identity::{
     impl_method_ref_member,
     impl_method_ref_callable_slot_index,
     intrinsic_ref_symbol, trait_method_ref_member,
-    intrinsic_ref_same,
+    intrinsic_ref_same, trait_method_ref_same,
     BUILTIN_METHOD_SITE_COUNT,
     builtin_value_site_tag, BUILTIN_VALUE_SITE_COUNT,
     registered_nominal_ref_symbol,
@@ -161,6 +165,7 @@ use ir_inventory::{
     effect_ctx_parent_capture_source, effect_ctx_parent_capture_target,
     effect_operation_ref_callable, effect_operation_ref_source_index,
     effect_operation_ref_effect,
+    system_host_callable_same,
     ExactMethodRef, make_exact_intrinsic_method_ref,
     make_exact_impl_method_ref, make_exact_trait_method_ref,
     CallableResourceContractFact, CallableResourceRoleFact,
@@ -320,11 +325,13 @@ use core_expr::{
     make_core_handler_operation, make_core_handler_installation,
     remap_core_callable_types, remap_core_impl_types,
     remap_core_body_types, remap_core_effect_contract_types,
+    project_core_body_callable_semantics,
     core_body_effect_sets,
     core_body_reference, core_body_origin, core_body_binders,
     core_body_origins,
     core_binder_reference, core_binder_type, core_binder_kind,
     core_binder_site,
+    core_callable_reference, core_callable_header_type,
     core_callable_semantic_contract, core_callable_effect_contract,
     core_callable_effect_ctx,
     core_body_effect_ctx_tokens,
@@ -384,7 +391,11 @@ use typed_effect_freeze::{
     TypedCallableEffectFact, typed_callable_effect_reference,
     typed_callable_effect_row
 }
-use extern_manifest::{compiler_extern_ref_for_executable}
+use extern_manifest::{HostImportFact,
+    host_import_fact_for_declaration,
+    host_import_fact_host, host_import_fact_executable,
+    host_import_fact_callable_signature, host_import_fact_same,
+    compiler_extern_ref_for_executable}
 use delegate_plan::{
     DelegateMethodPlan, DelegateEvidenceBinding,
     make_delegate_method_body_plan, make_delegate_method_plan,
@@ -2781,6 +2792,45 @@ pub fn core_diagnostic_projection_slot_display_label(
     }
 }
 
+fn append_host_import_fact(
+    mut values: List<HostImportFact>, value: HostImportFact
+) {
+    for existing in values {
+        if executable_ref_same(
+                host_import_fact_executable(existing),
+                host_import_fact_executable(value)) {
+            if !host_import_fact_same(existing, value) {
+                panic("Core producer: HostImport relation differs")
+            }
+            return
+        }
+    }
+    values.push(value)
+}
+
+fn collect_host_import_facts(
+    decls: List<HDecl>, mut values: List<HostImportFact>
+) {
+    for decl in decls {
+        match decl {
+            HDecl::ExternFn {
+                executable_ref, abi_name, params,
+                return_type, effects, ..
+            } => match host_import_fact_for_declaration(
+                    executable_ref, abi_name, Type::FnType {
+                        params: params.map(fn(param) { param.ty }),
+                        return_type: return_type, effects: effects
+                    }) {
+                some(fact) => append_host_import_fact(values, fact),
+                none => {}
+            },
+            HDecl::ModBlock { decls: nested, .. } =>
+                collect_host_import_facts(nested, values),
+            _ => {}
+        }
+    }
+}
+
 pub struct FrozenCoreAssemblyFacts {
     module_key: Str, module_order: Int,
     type_refs: List<CoreTypeFactRef>, type_nodes: List<FlowTypeNode>,
@@ -2789,11 +2839,13 @@ pub struct FrozenCoreAssemblyFacts {
     callable_effect_rows: List<TypedCallableEffectFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
     project_callable_type_formals: List<ProjectCallableTypeFormalSource>,
+    project_host_imports: List<HostImportFact>,
     project_type_mapping: List<Int>,
     effect_ctx_type: CoreEffectCtxTypeSource,
     builtin_trait_methods: List<RegisteredTraitMethodContract>,
     builtin_methods: List<BuiltinMethodContractFact>,
     builtin_values: List<BuiltinValueContractFact>,
+    host_imports: List<HostImportFact>,
     diagnostic_seed: CoreDiagnosticSeed,
     program: HProgram
 }
@@ -2899,12 +2951,14 @@ pub fn mutate_core_unowned_effect_tail(
         type_sources: value.type_sources, effect_parameters: retained,
         callable_effect_rows: value.callable_effect_rows,
         project_callable_effects: [], project_callable_type_formals: [],
+        project_host_imports: [],
         project_type_mapping: [],
         effect_ctx_type: value.effect_ctx_type,
         diagnostic_seed: value.diagnostic_seed,
         builtin_trait_methods: value.builtin_trait_methods,
         builtin_methods: value.builtin_methods,
-        builtin_values: value.builtin_values, program: value.program
+        builtin_values: value.builtin_values,
+        host_imports: value.host_imports, program: value.program
     }
     let _ = assemble_single_core(mutated)
     panic("Core mutation: unowned effect tail survived Core assembly")
@@ -2963,6 +3017,8 @@ fn freeze_closed_core_assembly_facts(
        core_type_fact_ordinal(aggregate) >= recorder.refs.len() {
         panic("Core assembly: EffectCtx physical type is outside recorder")
     }
+    let host_imports: List<HostImportFact> = []
+    collect_host_import_facts(closed_program.decls, host_imports)
     FrozenCoreAssemblyFacts {
         module_key: recorder.module_key, module_order: recorder.module_order,
         type_refs: recorder.refs, type_nodes: nodes,
@@ -2970,6 +3026,7 @@ fn freeze_closed_core_assembly_facts(
         effect_parameters: effect_parameters,
         callable_effect_rows: callable_effect_rows,
         project_callable_effects: [], project_callable_type_formals: [],
+        project_host_imports: [],
         project_type_mapping: [],
         effect_ctx_type: effect_ctx_type,
         diagnostic_seed: diagnostic_seed,
@@ -2982,6 +3039,7 @@ fn freeze_closed_core_assembly_facts(
         builtin_values: if recorder.module_order == 0 {
             builtin_value_contract_facts()
         } else { [] },
+        host_imports: host_imports,
         program: closed_program
     }
 }
@@ -3232,6 +3290,7 @@ struct LowerCtx {
     effect_parameters: List<TypedEffectFormalFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
     project_callable_type_formals: List<ProjectCallableTypeFormalSource>,
+    project_host_imports: List<HostImportFact>,
     project_type_mapping: List<Int>,
     types: List<CoreTypeSourceFact>,
     type_nodes: List<FlowTypeNode>,
@@ -3532,6 +3591,24 @@ fn callable_effect_source(
     }
     found
 }
+fn host_import_for(
+    ctx: LowerCtx, host: SystemHostCallableRef
+) -> HostImportFact {
+    let mut found: HostImportFact? = none
+    for fact in ctx.project_host_imports {
+        if system_host_callable_same(
+                host_import_fact_host(fact), host) {
+            if found.is_some() {
+                panic("Core assembly: HostImport source repeats")
+            }
+            found = some(fact)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("Core assembly: exact HostImport source is absent")
+    }
+}
 fn local_callable_effect_source(
     ctx: LowerCtx, slot: SlotRef
 ) -> CoreEffectContract {
@@ -3620,7 +3697,7 @@ fn named_callable_effect_instantiation(
 ) -> CoreEffectInstantiation {
     match core_effect_contract_parameter(source) {
         none => make_explicit_core_effect_instantiation(
-            source, result, result),
+            source, source, source),
         some(parameter) => {
             if !provenance_present {
                 panic("Core assembly: open callable effect provenance is absent")
@@ -3652,7 +3729,6 @@ fn core_callee(
     type_args: List<HCallableTypeActual>,
     effect_instantiation: HCallableEffectInstantiation?
 ) -> CoreCalleeRef {
-    let contract = call_contract(ctx, signature, false)
     let actual_row = match signature {
         Type::FnType { effects, .. } => effects,
         _ => panic("Core assembly: callee signature is not callable")
@@ -3662,6 +3738,10 @@ fn core_callee(
     if callee_ref_is_named(value) {
         let executable = make_named_executable_ref(
             callee_ref_named_symbol(value))
+        // This local typed shape is provisional.  Once every module has
+        // emitted its exact CoreCallable inventory, CoreHIR replaces only
+        // its semantic roles/result origin from that inventory.
+        let contract = call_contract(ctx, signature, false)
         let source_effects = match callable_effect_source(ctx, executable) {
             some(contract) => contract,
             none => panic(
@@ -3680,6 +3760,7 @@ fn core_callee(
                 instantiated_source, actual_effects, effect_substitutions,
                 effect_instantiation.is_some()))
     } else if callee_ref_is_local(value) {
+        let contract = call_contract(ctx, signature, false)
         if type_args.len() != 0 {
             panic("Core assembly: local callable carries declaration type arguments")
         }
@@ -3690,6 +3771,7 @@ fn core_callee(
             make_explicit_core_effect_instantiation(
                 source_effects, actual_effects, actual_effects))
     } else {
+        let contract = call_contract(ctx, signature, false)
         if type_args.len() != 0 {
             panic("Core assembly: dynamic callable carries declaration type arguments")
         }
@@ -4039,9 +4121,18 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
             resolved_dicts, effect_ctx, callee_ref,
             method_ref, system_host, ..
         } => match system_host {
-            some(host) => make_core_system_call_expr(
-                ty, effects, origin, host,
-                args.map(fn(v) { lower_expr(ctx, v) })),
+            some(host) => {
+                let exact = match callee_ref {
+                    some(value) => value,
+                    none => panic("Core assembly: HostImport call lacks CalleeRef")
+                }
+                let target = core_callee(
+                    ctx, exact, hexpr_type(callee), type_args,
+                    effect_instantiation)
+                make_core_system_call_expr(
+                    ty, effects, origin, host_import_for(ctx, host), target,
+                    args.map(fn(v) { lower_expr(ctx, v) }))
+            },
             none => match method_ref {
                 some(method) => {
                     let receiver = match callee {
@@ -4565,6 +4656,23 @@ fn flow_contract_from_resource_fact(
         else { make_aliasing_flow_value_origin(aliases) })
 }
 
+fn builtin_trait_member_resource_for(
+    method: TraitMethodRef,
+    values: List<BuiltinTraitMemberResourceFact>
+) -> CallableResourceContractFact? {
+    let mut found: CallableResourceContractFact? = none
+    for value in values {
+        if trait_method_ref_same(
+                builtin_trait_member_resource_method(value), method) {
+            if found.is_some() {
+                panic("Core assembly: builtin trait resource repeats")
+            }
+            found = some(builtin_trait_member_resource_contract(value))
+        }
+    }
+    found
+}
+
 fn add_builtin_trait_contracts(
     facts: FrozenCoreAssemblyFacts, mut assembly: ModuleAssembly
 ) {
@@ -4576,6 +4684,11 @@ fn add_builtin_trait_contracts(
     }
     let parent = make_module_body_parent(make_module_body_ref(
         "$builtin", "builtin-trait-members"))
+    let trait_resources = builtin_trait_member_resource_facts()
+    if trait_resources.len() != 1 {
+        panic("Core assembly: builtin trait resource census differs")
+    }
+    let mut trait_resource_matches = 0
     for method in facts.builtin_trait_methods {
         let method_ref = registered_trait_method_ref(method)
         let reference = make_named_executable_ref(
@@ -4604,6 +4717,21 @@ fn add_builtin_trait_contracts(
         assembly.entries.push(make_executable_entry(
             reference, parent, executable_kind_bodyless_trait_member(),
             make_contract_only()))
+        let semantic_contract = match builtin_trait_member_resource_for(
+                method_ref, trait_resources) {
+            some(resource) => {
+                trait_resource_matches = trait_resource_matches + 1
+                flow_contract_from_resource_fact(
+                    facts.module_key, parameter_types, result_type, resource)
+            },
+            none => make_module_flow_call_contract(
+                facts.module_key,
+                parameter_types.map(fn(ty) { make_core_type_ref(
+                    core_type_ref_index(ty)) }),
+                parameter_roles_from_mutabilities(mutabilities),
+                make_core_type_ref(core_type_ref_index(result_type)),
+                flow_semantic_role_read(), make_fresh_flow_value_origin())
+        }
         assembly.callables.push(make_core_callable_contract(
             reference, make_symbol_origin_ref(
                 trait_method_ref_member(method_ref)),
@@ -4612,17 +4740,13 @@ fn add_builtin_trait_contracts(
             [], callable_owned_effect_formals(
                 facts, reference, header), [],
             executable_contract_mode_contract_only(),
-            make_module_flow_call_contract(
-                facts.module_key,
-                parameter_types.map(fn(ty) { make_core_type_ref(
-                    core_type_ref_index(ty)) }),
-                parameter_roles_from_mutabilities(mutabilities),
-                make_core_type_ref(core_type_ref_index(result_type)),
-                flow_semantic_role_read(),
-                make_fresh_flow_value_origin()),
+            semantic_contract,
             core_effects,
             some(generated_callable_effect_ctx(
                 facts, reference, core_effects))))
+    }
+    if trait_resource_matches != 1 {
+        panic("Core assembly: Clone trait resource contract is absent")
     }
 }
 
@@ -4665,6 +4789,23 @@ fn callable_owned_effect_formals(
     }
     result
 }
+fn ordinary_callable_semantic_contract(
+    facts: FrozenCoreAssemblyFacts, params: List<HParam>, result: Type
+) -> FlowCallContract {
+    let parameter_types = params.map(fn(param) {
+        type_fact_for(facts.type_sources, param.ty, facts.module_key)
+    })
+    let result_type = type_fact_for(
+        facts.type_sources, result, facts.module_key)
+    make_module_flow_call_contract(
+        facts.module_key,
+        parameter_types.map(fn(ty) {
+            make_core_type_ref(core_type_ref_index(ty))
+        }),
+        parameter_roles(params),
+        make_core_type_ref(core_type_ref_index(result_type)),
+        flow_semantic_role_read(), make_fresh_flow_value_origin())
+}
 fn callable_contract(
     facts: FrozenCoreAssemblyFacts, reference: ExecutableRef,
     type_params: List<HTypeParam>, params: List<HParam>,
@@ -4674,10 +4815,6 @@ fn callable_contract(
 ) -> CoreCallableContract {
     let header = final_callable_header(
         params.map(fn(param) { param.ty }), result, effects)
-    let parameter_types = params.map(fn(p) {
-        type_fact_for(facts.type_sources, p.ty, facts.module_key)
-    })
-    let result_type = type_fact_for(facts.type_sources, result, facts.module_key)
     let slots: List<SlotRef> = if executable_contract_mode_same(
             mode, executable_contract_mode_concrete_body()) {
         params.map(fn(p) { source_slot(reference,
@@ -4689,10 +4826,7 @@ fn callable_contract(
         declared_callable_type_formals(facts, reference, type_params),
         callable_owned_effect_formals(facts, reference, header),
         slots, mode,
-        make_module_flow_call_contract(facts.module_key,
-            parameter_types.map(fn(t) { make_core_type_ref(core_type_ref_index(t)) }),
-            parameter_roles(params), make_core_type_ref(core_type_ref_index(result_type)),
-            flow_semantic_role_read(), make_fresh_flow_value_origin()),
+        ordinary_callable_semantic_contract(facts, params, result),
         core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
             facts.effect_parameters),
@@ -5014,6 +5148,7 @@ fn append_default_specialization(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_callable_type_formals: facts.project_callable_type_formals,
+        project_host_imports: facts.project_host_imports,
         project_type_mapping: facts.project_type_mapping,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         effect_ctx_type: facts.effect_ctx_type,
@@ -5123,6 +5258,7 @@ fn derived_call_plan_from_method(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_callable_type_formals: facts.project_callable_type_formals,
+        project_host_imports: facts.project_host_imports,
         project_type_mapping: facts.project_type_mapping,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         effect_ctx_type: facts.effect_ctx_type,
@@ -5167,6 +5303,7 @@ fn derived_call_plan_from_exact(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_callable_type_formals: facts.project_callable_type_formals,
+        project_host_imports: facts.project_host_imports,
         project_type_mapping: facts.project_type_mapping,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         effect_ctx_type: facts.effect_ctx_type,
@@ -6043,6 +6180,7 @@ fn append_delegate_impl(
             effect_parameters: facts.effect_parameters,
             project_callable_effects: facts.project_callable_effects,
             project_callable_type_formals: facts.project_callable_type_formals,
+            project_host_imports: facts.project_host_imports,
             project_type_mapping: facts.project_type_mapping,
             types: facts.type_sources, type_nodes: facts.type_nodes,
             effect_ctx_type: facts.effect_ctx_type,
@@ -6180,6 +6318,7 @@ fn add_executable_body(
         effect_parameters: facts.effect_parameters,
         project_callable_effects: facts.project_callable_effects,
         project_callable_type_formals: facts.project_callable_type_formals,
+        project_host_imports: facts.project_host_imports,
         project_type_mapping: facts.project_type_mapping,
         types: facts.type_sources, type_nodes: facts.type_nodes,
         effect_ctx_type: facts.effect_ctx_type,
@@ -6886,10 +7025,50 @@ fn project_effect_contract_to_module(
         core_effect_contract_parameter(value))
 }
 
+fn close_project_host_imports(
+    values: List<FrozenCoreAssemblyFacts>
+) -> List<HostImportFact> {
+    let result: List<HostImportFact> = []
+    for facts in values {
+        for host_import in facts.host_imports {
+            append_host_import_fact(result, host_import)
+        }
+    }
+    result
+}
+
+fn validate_local_host_import_callables(
+    facts: FrozenCoreAssemblyFacts, assembly: ModuleAssembly
+) {
+    for host_import in facts.host_imports {
+        let executable = host_import_fact_executable(host_import)
+        let expected_header = type_fact_for(
+            facts.type_sources,
+            host_import_fact_callable_signature(host_import),
+            facts.module_key)
+        let mut matches = 0
+        for callable in assembly.callables {
+            if executable_ref_same(
+                    core_callable_reference(callable), executable) {
+                if !core_type_ref_same(
+                        core_callable_header_type(callable),
+                        expected_header) {
+                    panic("Core assembly: HostImport callable header differs")
+                }
+                matches = matches + 1
+            }
+        }
+        if matches != 1 {
+            panic("Core assembly: HostImport callable identity is not exact")
+        }
+    }
+}
+
 fn with_project_effect_sources(
     facts: FrozenCoreAssemblyFacts,
     sources: List<ProjectCallableEffectSource>,
     type_formals: List<ProjectCallableTypeFormalSource>,
+    host_imports: List<HostImportFact>,
     mapping: List<Int>
 ) -> FrozenCoreAssemblyFacts {
     FrozenCoreAssemblyFacts {
@@ -6900,12 +7079,14 @@ fn with_project_effect_sources(
         callable_effect_rows: facts.callable_effect_rows,
         project_callable_effects: sources.map(fn(item) { item }),
         project_callable_type_formals: type_formals.map(fn(item) { item }),
+        project_host_imports: host_imports.map(fn(item) { item }),
         project_type_mapping: mapping.map(fn(item) { item }),
         effect_ctx_type: facts.effect_ctx_type,
         diagnostic_seed: facts.diagnostic_seed,
         builtin_trait_methods: facts.builtin_trait_methods,
         builtin_methods: facts.builtin_methods,
-        builtin_values: facts.builtin_values, program: facts.program
+        builtin_values: facts.builtin_values,
+        host_imports: facts.host_imports, program: facts.program
     }
 }
 
@@ -7153,6 +7334,7 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
         values, project.mappings)
     let project_type_formal_sources =
         close_project_callable_type_formal_sources(values)
+    let project_host_imports = close_project_host_imports(values)
     let mut callables: List<CoreCallableContract> = []
     let mut impls: List<CoreImplMetadata> = []
     let mut entries: List<ExecutableEntry> = []
@@ -7166,7 +7348,7 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
         let mapping = project.mappings.get(module_index).unwrap()
         let facts = with_project_effect_sources(
             frozen_facts, project_effect_sources,
-            project_type_formal_sources, mapping)
+            project_type_formal_sources, project_host_imports, mapping)
         let module_body = make_module_body_ref(facts.module_key, "module-body")
         let assembly = empty_module_assembly()
         add_builtin_trait_contracts(facts, assembly)
@@ -7175,6 +7357,7 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
         assemble_decls(facts, module_body, facts.program.decls, assembly)
         append_derived_impls(
             facts, module_body, facts.program.derived_impls, assembly)
+        validate_local_host_import_callables(facts, assembly)
         for value in assembly.callables {
             callables.push(remap_core_callable_types(
                 value, mapping, facts.module_key))
@@ -7213,11 +7396,19 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
         }
         module_index = module_index + 1
     }
+    let projected_bodies = bodies.map(fn(entry) {
+        make_core_body_entry(
+            core_body_entry_reference(entry), core_body_entry_origin(entry),
+            core_body_entry_anchor(entry),
+            project_core_body_callable_semantics(
+                core_body_entry_body(entry), callables))
+    })
     let diagnostic_projection = build_core_diagnostic_projection(
-        values, bodies, diagnostic_origins)
+        values, projected_bodies, diagnostic_origins)
     let effect_ctx_tokens = freeze_project_effect_ctx_tokens(
-        project.graph, bodies)
-    let program = make_core_program(project.graph, callables, impls, bodies,
+        project.graph, projected_bodies)
+    let program = make_core_program(
+        project.graph, callables, impls, projected_bodies,
         make_executable_inventory(entries))
     CoreAssemblyResult {
         program: program,

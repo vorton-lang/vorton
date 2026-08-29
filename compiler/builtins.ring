@@ -1280,6 +1280,38 @@ pub fn builtin_method_contract_facts(
     result
 }
 
+// The sole 0.1 bodyless trait-member resource override. Clone.clone promises
+// an owned fresh result; all other trait members retain their ordinary
+// read/fresh contract. Exact TraitMethodRef identity prevents a same-spelled
+// source trait or method from inheriting this guarantee.
+pub struct BuiltinTraitMemberResourceFact {
+    method_ref: TraitMethodRef,
+    resource: CallableResourceContractFact
+}
+
+pub fn builtin_trait_member_resource_method(
+    value: BuiltinTraitMemberResourceFact
+) -> TraitMethodRef { value.method_ref }
+
+pub fn builtin_trait_member_resource_contract(
+    value: BuiltinTraitMemberResourceFact
+) -> CallableResourceContractFact { value.resource }
+
+pub fn builtin_trait_member_resource_facts(
+) -> List<BuiltinTraitMemberResourceFact> {
+    let owner = builtin_trait_symbol("Clone")
+    let result = [BuiltinTraitMemberResourceFact {
+        method_ref: builtin_trait_method(owner, 0, 0, "clone"),
+        resource: builtin_resource_contract(
+            [callable_resource_role_read()],
+            callable_resource_role_consume(), [])
+    }]
+    if result.len() != 1 {
+        panic("builtin trait resource: exact census differs")
+    }
+    result
+}
+
 // Physical lowering is a closed 0.1 relation, not a backend name lookup.
 // `data` is present exactly when the selected lowering invokes one fixed C
 // runtime leaf.  The remaining tags describe the two inline lowerings whose

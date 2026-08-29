@@ -72,6 +72,9 @@ use ir_inventory::{
     binder_kind_dictionary_evidence_param, binder_kind_lambda_capture,
     binder_kind_effect_ctx_param, binder_kind_effect_ctx_parent_capture
 }
+use extern_manifest::{HostImportFact,
+    host_import_fact_host, host_import_fact_executable,
+    host_import_fact_system_effect}
 use effect_contract::{
     EffectParamRef, effect_param_owner, effect_param_ordinal,
     effect_param_ref_same,
@@ -100,7 +103,8 @@ use core_type_source::{
     new_core_type_fact_allocator, reserve_core_type_fact_ref,
 }
 use resource_model::{
-    FlowCallContract, flow_call_contract_module_key,
+    FlowCallContract, make_flow_call_contract,
+    flow_call_contract_module_key,
     flow_call_contract_parameter_types, flow_call_contract_parameter_roles,
     flow_call_contract_result_type, flow_call_contract_result_role,
     flow_call_contract_result_origin, flow_semantic_role_tag,
@@ -1603,7 +1607,8 @@ enum CoreExprValue {
         effect_ctx_lookup: CoreEffectCtxLookup
     },
     SystemCallExprValue {
-        host: SystemHostCallableRef,
+        host_import: HostImportFact,
+        callee: CoreCalleeRef,
         arguments: List<CoreExpr>
     },
     FailRaiseExprValue { payload: CoreExpr },
@@ -1913,11 +1918,19 @@ pub fn make_core_effect_call_expr(
 }
 pub fn make_core_system_call_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
-    host: SystemHostCallableRef, arguments: List<CoreExpr>
+    host_import: HostImportFact, callee: CoreCalleeRef,
+    arguments: List<CoreExpr>
 ) -> CoreExpr {
+    if core_callee_kind_tag(callee) != CORE_CALLEE_DIRECT ||
+       !executable_ref_same(
+            core_callee_direct(callee),
+            host_import_fact_executable(host_import)) {
+        panic("CoreHIR: HostImport callee receipt differs")
+    }
     make_core_expr(ty, effects, origin,
         CoreExprValue::SystemCallExprValue {
-            host: host, arguments: copy_core_exprs(arguments)
+            host_import: host_import, callee: callee,
+            arguments: copy_core_exprs(arguments)
         })
 }
 pub fn make_core_fail_raise_expr(
@@ -2337,6 +2350,7 @@ pub fn core_expr_call_callee(value: CoreExpr) -> CoreCalleeRef {
     match value.value {
         CoreExprValue::CallExprValue { callee, .. } => callee,
         CoreExprValue::MethodCallExprValue { callee, .. } => callee,
+        CoreExprValue::SystemCallExprValue { callee, .. } => callee,
         _ => panic("CoreHIR: expression has no callee")
     }
 }
@@ -2400,7 +2414,14 @@ pub fn core_expr_effect_operation(value: CoreExpr) -> EffectOperationRef {
 }
 pub fn core_expr_system_host(value: CoreExpr) -> SystemHostCallableRef {
     match value.value {
-        CoreExprValue::SystemCallExprValue { host, .. } => host,
+        CoreExprValue::SystemCallExprValue { host_import, .. } =>
+            host_import_fact_host(host_import),
+        _ => panic("CoreHIR: expression is not SystemCall")
+    }
+}
+pub fn core_expr_host_import(value: CoreExpr) -> HostImportFact {
+    match value.value {
+        CoreExprValue::SystemCallExprValue { host_import, .. } => host_import,
         _ => panic("CoreHIR: expression is not SystemCall")
     }
 }
@@ -3077,7 +3098,8 @@ fn validate_expr_with_loop_depth(
                 panic("CoreHIR: effect call lookup differs")
             }
         },
-        CoreExprValue::SystemCallExprValue { arguments, .. } => {
+        CoreExprValue::SystemCallExprValue { callee, arguments, .. } => {
+            validate_callee(callee, body)
             for argument in arguments {
                 validate_expr_with_loop_depth(argument, body, loop_depth)
             }
@@ -3768,14 +3790,17 @@ struct CoreRewriteContext {
     module_key: Str?,
     redirects: List<CoreExecutableRedirect>,
     redirect_graph: CoreTypeGraph?,
-    redirect_callables: List<CoreCallableContract>
+    redirect_callables: List<CoreCallableContract>,
+    project_direct_semantics: Bool,
+    semantic_callables: List<CoreCallableContract>
 }
 fn core_type_rewrite_context(
     mapping: List<Int>, module_key: Str
 ) -> CoreRewriteContext {
     CoreRewriteContext {
         mapping: some(mapping), module_key: some(module_key), redirects: [],
-        redirect_graph: none, redirect_callables: []
+        redirect_graph: none, redirect_callables: [],
+        project_direct_semantics: false, semantic_callables: []
     }
 }
 fn core_executable_rewrite_context(
@@ -3786,7 +3811,18 @@ fn core_executable_rewrite_context(
         mapping: none, module_key: none,
         redirects: copy_core_executable_redirects(redirects),
         redirect_graph: some(graph),
-        redirect_callables: copy_core_callables(callables)
+        redirect_callables: copy_core_callables(callables),
+        project_direct_semantics: false, semantic_callables: []
+    }
+}
+fn core_callable_semantic_projection_context(
+    callables: List<CoreCallableContract>
+) -> CoreRewriteContext {
+    CoreRewriteContext {
+        mapping: none, module_key: none, redirects: [],
+        redirect_graph: none, redirect_callables: [],
+        project_direct_semantics: true,
+        semantic_callables: copy_core_callables(callables)
     }
 }
 fn remap_core_type_reference(
@@ -4047,6 +4083,41 @@ fn remap_callable_effect_substitutions(
     }})
 }
 
+fn project_direct_callee_semantic_contract(
+    actual: FlowCallContract, executable: ExecutableRef,
+    callables: List<CoreCallableContract>
+) -> FlowCallContract {
+    if flow_call_contract_module_key(actual).is_some() {
+        panic("CoreHIR: projected direct call retained a module-local type domain")
+    }
+    let mut source: FlowCallContract? = none
+    for callable in callables {
+        if executable_ref_same(callable.reference, executable) {
+            if source.is_some() {
+                panic("CoreHIR: direct callable inventory entry repeats")
+            }
+            source = some(callable.semantic_contract)
+        }
+    }
+    let semantic = match source {
+        some(value) => value,
+        none => panic("CoreHIR: direct callable semantic contract is absent")
+    }
+    if flow_call_contract_module_key(semantic).is_some() {
+        panic("CoreHIR: callable inventory retained a module-local type domain")
+    }
+    let parameter_types = flow_call_contract_parameter_types(actual)
+    let parameter_roles = flow_call_contract_parameter_roles(semantic)
+    if parameter_types.len() != parameter_roles.len() {
+        panic("CoreHIR: direct callable semantic arity differs")
+    }
+    make_flow_call_contract(
+        parameter_types, parameter_roles,
+        flow_call_contract_result_type(actual),
+        flow_call_contract_result_role(semantic),
+        flow_call_contract_result_origin(semantic))
+}
+
 fn remap_core_callee(
     value: CoreCalleeRef, ctx: CoreRewriteContext
 ) -> CoreCalleeRef {
@@ -4060,8 +4131,13 @@ fn remap_core_callee(
         let remapped = remap_direct_callable_instantiation(
             value.direct.unwrap(), value.type_substitutions,
             value.effect_substitutions, value.effects, ctx)
+        let semantic_contract = if ctx.project_direct_semantics {
+            project_direct_callee_semantic_contract(
+                contract, remapped.0, ctx.semantic_callables)
+        } else { contract }
         make_core_direct_callee(
-            remapped.0, contract, remapped.1, remapped.2, remapped.3)
+            remapped.0, semantic_contract,
+            remapped.1, remapped.2, remapped.3)
     } else if value.kind == CORE_CALLEE_LOCAL {
         make_core_local_callee(
             value.local.unwrap(), contract,
@@ -4206,9 +4282,13 @@ fn remap_core_expr_types(
             evidence: copy_evidence(evidence),
             effect_ctx_lookup: remap_effect_ctx_lookup(effect_ctx_lookup, ctx)
         },
-        CoreExprValue::SystemCallExprValue { host, arguments } =>
+        CoreExprValue::SystemCallExprValue {
+            host_import, callee, arguments
+        } =>
             CoreExprValue::SystemCallExprValue {
-                host: host, arguments: arguments.map(fn(argument) {
+                host_import: host_import,
+                callee: remap_core_callee(callee, ctx),
+                arguments: arguments.map(fn(argument) {
                     remap_core_expr_types(argument, ctx)
                 })
             },
@@ -4389,6 +4469,20 @@ pub fn remap_core_body_types(
         value.parameter_slots,
         remap_core_type_reference(value.result_type, ctx),
         remap_core_block_types(value.body, ctx))
+}
+
+// Direct-call resource semantics are projected only after the complete Core
+// callable inventory exists.  The callsite already carries its exact
+// instantiated parameter/result types and substitutions; the inventory is
+// the sole authority for roles and result origin.  Local/dynamic candidates
+// retain the proof supplied by their own lowering path.
+pub fn project_core_body_callable_semantics(
+    value: CoreBody, callables: List<CoreCallableContract>
+) -> CoreBody {
+    let ctx = core_callable_semantic_projection_context(callables)
+    make_core_body(
+        value.reference, value.origin, value.binders, value.parameter_slots,
+        value.result_type, remap_core_block_types(value.body, ctx))
 }
 
 pub fn redirect_core_body_executables(
@@ -5551,11 +5645,23 @@ fn validate_expr_with_program(
                 panic("CoreHIR: handled operation is absent from effect set")
             }
         },
-        CoreExprValue::SystemCallExprValue { host, arguments } => {
+        CoreExprValue::SystemCallExprValue {
+            host_import, callee, arguments
+        } => {
             for argument in arguments {
                 validate_expr_with_program(
                     argument, body, graph, callables,
                     impls, current_callable, loop_depth)
+            }
+            let host = host_import_fact_host(host_import)
+            if core_callee_kind_tag(callee) != CORE_CALLEE_DIRECT ||
+               !executable_ref_same(
+                    core_callee_direct(callee),
+                    host_import_fact_executable(host_import)) ||
+               !system_effect_ref_same(
+                    system_host_callable_effect(host),
+                    host_import_fact_system_effect(host_import)) {
+                panic("CoreHIR: system HostImport receipt differs")
             }
             let callable = core_callable_for(
                 callables, system_host_callable_executable(host))
@@ -5576,16 +5682,10 @@ fn validate_expr_with_program(
                 panic("CoreHIR: system host callable lacks exact capability")
             }
             validate_call_signature(
-                make_core_direct_callee(
-                    callable.reference, callable.semantic_contract,
-                    [], [],
-                    make_explicit_core_effect_instantiation(
-                        callable.effects, callable.effects,
-                        callable.effects)),
+                callee,
                 arguments, value.ty, value.effects,
                 [], make_empty_core_effect_ctx_argument(
-                    make_explicit_core_effect_instantiation(
-                        callable.effects, callable.effects, callable.effects)),
+                    core_callee_effect_instantiation(callee)),
                 body, graph, callables)
             let mut present = false
             for atom in core_effect_set_atoms(value.effects) {

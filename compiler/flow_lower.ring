@@ -36,7 +36,6 @@ use ir_inventory::{
     binder_kind_effect_ctx_parent_capture,
     binder_kind_dictionary_evidence_param,
     effect_operation_ref_callable,
-    system_host_callable_executable,
     dict_ref_is_local, dict_ref_local, dict_ref_wrapped_inner
 }
 use core_hir::{
@@ -83,7 +82,7 @@ use core_expr::{
     core_expr_call_callee, core_expr_call_arguments,
     core_expr_call_evidence, core_expr_call_effect_ctx_argument,
     core_expr_method_receiver, core_expr_effect_ctx_lookup,
-    core_expr_effect_operation, core_expr_system_host,
+    core_expr_effect_operation,
     core_expr_fail_payload,
     core_expr_project_base, core_expr_project_field,
     core_expr_project_is_partial,
@@ -1343,6 +1342,7 @@ fn emit_simple_expr(
         return true
     }
     if kind == 6 {
+        let callee = core_expr_call_callee(expr)
         let mut arguments: List<SlotRef> = []
         for argument in core_expr_call_arguments(expr) {
             arguments.push(lower_expr(
@@ -1350,15 +1350,9 @@ fn emit_simple_expr(
             if is_terminated(ctx) { return true }
         }
         if is_terminated(ctx) { return true }
-        let callable = callable_for(
-            ctx, system_host_callable_executable(core_expr_system_host(expr)))
         emit_instruction(ctx, make_flow_call(
             next_instruction_ref(ctx), origin,
-            make_direct_flow_call_target(
-                core_callable_reference(callable),
-                core_callable_semantic_contract(callable),
-                [], [],
-                callable_identity_effects(callable)),
+            flow_call_target(callee),
             arguments, [], make_foreign_leaf_flow_effect_ctx_use(),
             some(result)),
             core_flow_role_expr_primary())
