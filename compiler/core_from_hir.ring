@@ -1958,6 +1958,32 @@ fn producer_record_decls(
     }
 }
 
+fn producer_record_derived_action(
+    mut producer: ClosedCoreProducer, origin: OriginRef, action: FieldAction
+) {
+    match action {
+        FieldAction::Call { method_ref, .. } => {
+            let _ = producer_record_type(
+                producer, method_call_ref_signature(method_ref), some(origin))
+        },
+        FieldAction::Tuple { element_types, element_actions, .. } => {
+            if element_types.len() != element_actions.len() {
+                panic("Core producer: derived tuple action census differs")
+            }
+            let mut index = 0
+            while index < element_types.len() {
+                let _ = producer_record_type(
+                    producer, element_types.get(index).unwrap(), some(origin))
+                producer_record_derived_action(
+                    producer, origin, element_actions.get(index).unwrap())
+                index = index + 1
+            }
+        },
+        FieldAction::Identity | FieldAction::FloatIdentity |
+        FieldAction::BoolIdentity | FieldAction::FnLiteral => {}
+    }
+}
+
 fn producer_record_derived(
     mut producer: ClosedCoreProducer, values: List<DerivedImpl>
 ) {
@@ -1987,6 +2013,8 @@ fn producer_record_derived(
                     }
                     let _ = producer_record_type(
                         producer, field.ty, some(field_origin))
+                    producer_record_derived_action(
+                        producer, field_origin, field.action)
                 }
             },
             none => {}
@@ -2005,6 +2033,8 @@ fn producer_record_derived(
                         }
                         let _ = producer_record_type(
                             producer, field.ty, some(field_origin))
+                        producer_record_derived_action(
+                            producer, field_origin, field.action)
                     }
                 }
             },
@@ -2014,6 +2044,14 @@ fn producer_record_derived(
             let _ = producer_record_type(
                 producer, method.signature,
                 some(executable_origin(method.executable_ref)))
+        }
+        match derived.hash_mix {
+            some(call) => {
+                let _ = producer_record_type(
+                    producer, h_exact_call_signature(call.plan),
+                    some(derived_origin))
+            },
+            none => {}
         }
         match derived.text_plan {
             some(plan) => {
