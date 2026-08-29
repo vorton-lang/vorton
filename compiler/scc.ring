@@ -55,7 +55,10 @@ fn impl_scc_node(target_type: Str, trait_name: Str?) -> Str {
     }
 }
 
-pub fn build_call_graph(decls: List<Decl>, registered_fns: Set<Str>) -> Map<Str, List<Str>> {
+pub fn build_call_graph(
+    decls: List<Decl>, registered_fns: Set<Str>,
+    explicit_lexical_root: Str?
+) -> Map<Str, List<Str>> {
     let mut graph: Map<Str, List<Str>> = map_new()
 
     // Ensure every registered fn has an entry (even if no outgoing edges).
@@ -76,9 +79,14 @@ pub fn build_call_graph(decls: List<Decl>, registered_fns: Set<Str>) -> Map<Str,
             root_scope = "${parts.get(0).unwrap_or("")}$$_"
         }
     }
+    let root_lexical_scope = match explicit_lexical_root {
+        some(root) => root,
+        none => root_scope
+    }
     for decl in decls {
         collect_decl_edges(
-            decl, registered_fns, graph, none, root_scope)
+            decl, registered_fns, graph, none, root_lexical_scope,
+            explicit_lexical_root)
     }
     graph
 }
@@ -87,7 +95,8 @@ pub fn build_call_graph(decls: List<Decl>, registered_fns: Set<Str>) -> Map<Str,
 // impl_node: if set, we are inside an impl block and edges go from this node.
 fn collect_decl_edges(
     decl: Decl, registered_fns: Set<Str>,
-    mut graph: Map<Str, List<Str>>, impl_node: Str?, lexical_scope: Str
+    mut graph: Map<Str, List<Str>>, impl_node: Str?, lexical_scope: Str,
+    explicit_lexical_root: Str?
 ) {
     match decl {
         Decl::Fn { name, body, .. } => {
@@ -98,7 +107,10 @@ fn collect_decl_edges(
             let mut edges: Set<Str> = set_new()
             let scope = match impl_node {
                 some(_) => lexical_scope,
-                none => fn_scope_prefix(caller)
+                none => match explicit_lexical_root {
+                    some(_) => lexical_scope,
+                    none => fn_scope_prefix(caller)
+                }
             }
             collect_expr_callees(body, registered_fns, scope, edges)
             let mut sorted_edges: List<Str> = []
@@ -125,10 +137,14 @@ fn collect_decl_edges(
             for method in methods {
                 collect_decl_edges(
                     method, registered_fns, graph,
-                    some(inode), lexical_scope)
+                    some(inode), lexical_scope, explicit_lexical_root)
             }
         },
         Decl::ModBlock { name, decls, .. } => {
+            let nested_lexical_scope = match explicit_lexical_root {
+                some(root) => "${root}${name}::",
+                none => "${name}::"
+            }
             for d in decls {
                 // ModBlock fns are prefixed with "mod_name::" by prefix_decl_name,
                 // but at call-graph time we see the raw AST before prefixing.
@@ -137,7 +153,8 @@ fn collect_decl_edges(
                 let prefixed = prefix_mod_decl(name, d)
                 collect_decl_edges(
                     prefixed, registered_fns, graph,
-                    impl_node, "${name}::")
+                    impl_node, nested_lexical_scope,
+                    explicit_lexical_root)
             }
         },
         // Test, Struct, Enum, Effect, Trait, ExternFn, ExternType, TypeAlias, Const,

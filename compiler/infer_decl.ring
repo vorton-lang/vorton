@@ -661,12 +661,15 @@ fn cache_inline_impls_in_mod(
 
 fn prepare_impl_close_cache(
     mut ctx: InferCtx, decls: List<Decl>,
+    decl_site_indices: List<Int>,
     mut cached_impls: List<CachedImplClose>
 ) {
     for decl_index in 0..decls.len() {
+        let decl_site_index = decl_site_indices.get(decl_index).unwrap_or_else(
+            fn() { panic("registered body: declaration site is missing") })
         match decls.get(decl_index).unwrap() {
             Decl::Impl { .. } => cache_checked_impl_decl(
-                ctx, decls.get(decl_index).unwrap(), decl_index,
+                ctx, decls.get(decl_index).unwrap(), decl_site_index,
                 cached_impls, FnValidationContext {
                     capability: none, capability_span: none
                 }),
@@ -675,7 +678,7 @@ fn prepare_impl_close_cache(
                 required_effects, span, ..
             } => cache_inline_impls_in_mod(
                 ctx, name, uses, mod_decls, required_effects,
-                span, decl_index, cached_impls),
+                span, decl_site_index, cached_impls),
             _ => {}
         }
     }
@@ -5182,8 +5185,12 @@ fn check_registered(
             panic("unreachable: resolver plan missing file root check frame")
         }
     }
+    let mut decl_site_indices: List<Int> = []
+    for decl_index in 0..program.decls.len() {
+        decl_site_indices.push(decl_index)
+    }
     let result = check_registered_body(
-        ctx, program, derived_impls) catch { _ => {
+        ctx, program, derived_impls, decl_site_indices, none) catch { _ => {
         if entered_project_frame {
             let _ = exit_project_namespace_frame(ctx)
         }
@@ -5199,13 +5206,18 @@ fn check_registered(
 
 fn check_registered_body(
     mut ctx: InferCtx, program: Program,
-    derived_impls: List<DerivedImpl>
+    derived_impls: List<DerivedImpl>, decl_site_indices: List<Int>,
+    explicit_lexical_root: Str?
 ) -> HProgram {
+    if decl_site_indices.len() != program.decls.len() {
+        panic("registered body: declaration site count differs")
+    }
     // B-122: Build SCC for fn/impl declaration ordering.
     // Callees are checked before callers so that rebinding makes resolved
     // return types visible to callers (fixing the #149 unsound ret-var hole).
     let registered_fns = collect_registered_fn_names(program.decls)
-    let call_graph = build_call_graph(program.decls, registered_fns)
+    let call_graph = build_call_graph(
+        program.decls, registered_fns, explicit_lexical_root)
     let scc_groups = tarjan_scc(call_graph)
 
     let mut fn_name_to_idx: Map<Str, Int> = map_new()
@@ -5249,7 +5261,8 @@ fn check_registered_body(
         }
     }
 
-    prepare_impl_close_cache(ctx, program.decls, cached_impls)
+    prepare_impl_close_cache(
+        ctx, program.decls, decl_site_indices, cached_impls)
 
     for group in scc_groups {
         let mut pending = false
@@ -5283,7 +5296,7 @@ fn check_registered_body(
             Decl::Impl { .. } => {},
             _ => {
                 let result = some(emit_checked_decl(
-                    ctx, decl, some(di), hdecls,
+                    ctx, decl, some(decl_site_indices.get(di).unwrap()), hdecls,
                     cached_impls, cached_values)) catch { _ => none }
                 checked.insert(di)
             }
@@ -5299,7 +5312,8 @@ fn check_registered_body(
         match decl {
             Decl::Impl { .. } => {
                 if !checked.contains(ii) {
-                    let owner_ref = impl_check_owner(ctx, ii)
+                    let owner_ref = impl_check_owner(
+                        ctx, decl_site_indices.get(ii).unwrap())
                     let cached = cached_impl_declarations(
                         cached_impls, owner_ref).unwrap_or_else(fn() {
                         panic("impl close cache: root owner is absent")
@@ -5347,7 +5361,7 @@ fn check_registered_body(
     for decl in program.decls {
         if !checked.contains(ri) {
             let result = some(emit_checked_decl(
-                ctx, decl, some(ri), hdecls,
+                ctx, decl, some(decl_site_indices.get(ri).unwrap()), hdecls,
                 cached_impls, cached_values)) catch { _ => none }
         }
         ri = ri + 1
@@ -5369,6 +5383,20 @@ fn check_registered_body(
         }
     }
     HProgram { decls: hdecls, derived_impls: derived_impls, boxed_vars: ctx.boxed_vars, static_dicts: [], extern_type_names: extern_names, drop_types: ctx.drop_types }
+}
+
+pub fn check_registered_prelude_file(
+    mut ctx: InferCtx, program: Program, file_key: Str,
+    decl_site_indices: List<Int>
+) -> List<HDecl> {
+    enter_impl_check_root_frame(ctx, file_key)
+    let result = check_registered_body(
+        ctx, program, [], decl_site_indices, some("")) catch { _ => {
+        exit_impl_check_frame(ctx)
+        fail.raise(CompileError {})
+    } }
+    exit_impl_check_frame(ctx)
+    result.decls
 }
 
 pub fn resolve_type_expr_public(mut ctx: InferCtx, texpr: TypeExpr) -> Type {

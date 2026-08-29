@@ -28,7 +28,8 @@ use builtins::{register_builtins, register_hof_intrinsics,
     builtin_method_contract_facts, builtin_method_contract_intrinsic,
     builtin_method_contract_scheme}
 use derive::{validate_derived_impls}
-use infer_decl::{check as infer_check, check_module_identity, check_prelude_decl}
+use infer_decl::{check as infer_check, check_module_identity,
+    check_prelude_decl, check_registered_prelude_file}
 use dict_lower::{lower_dicts}
 use andor_lower::{lower_andor}
 use infer_ctx::{InferCtx, new_infer_ctx as new_base_infer_ctx,
@@ -67,6 +68,7 @@ use core_from_hir::{FrozenCoreAssemblyFacts}
 use legacy_projection::{LegacyProjectionFacts}
 use core_legacy_freeze::{freeze_core_and_legacy_facts,
     frozen_core_and_legacy_core, frozen_core_and_legacy_legacy}
+use scc::{build_call_graph, collect_registered_fn_names}
 
 pub struct CheckResult {
     pub program: HProgram,
@@ -168,6 +170,79 @@ struct PreludeDeclSite {
     file_key: Str,
     decl_index: Int,
     source_symbol: SymbolRef?
+}
+
+fn prelude_callable_decl(decl: Decl) -> Decl? {
+    match decl {
+        Decl::Fn { .. } => some(decl),
+        Decl::Impl {
+            target_type, type_params, trait_name, methods, span
+        } => {
+            // Compiler-owned impl externs are runtime leaves.  Keep the
+            // ordinary methods on the registered source owner, but never add
+            // those extern members to the A1 body program.
+            let mut fn_methods: List<Decl> = []
+            for method in methods {
+                match method {
+                    Decl::Fn { .. } => fn_methods.push(method),
+                    _ => {}
+                }
+            }
+            if fn_methods.len() == 0 {
+                none
+            } else {
+                some(Decl::Impl {
+                    target_type: target_type,
+                    type_params: type_params,
+                    trait_name: trait_name,
+                    methods: fn_methods,
+                    span: span
+                })
+            }
+        },
+        _ => none
+    }
+}
+
+fn prelude_callable_program(
+    sites: List<PreludeDeclSite>, file_key: Str
+) -> (Program, List<Int>) {
+    let mut decls: List<Decl> = []
+    let mut decl_site_indices: List<Int> = []
+    for site in sites {
+        if site.file_key == file_key {
+            match prelude_callable_decl(site.decl) {
+                some(decl) => {
+                    decls.push(decl)
+                    decl_site_indices.push(site.decl_index)
+                },
+                none => {}
+            }
+        }
+    }
+    (Program { uses: [], decls: decls, span: span_zero() },
+        decl_site_indices)
+}
+
+fn preflight_prelude_file_dag(
+    program: Program, all_registered_fns: Set<Str>,
+    future_registered_fns: Set<Str>, file_key: Str
+) {
+    // This graph is validation-only.  STD_FILES remains the sole cross-file
+    // scheduler; the ordinary per-file graph below remains the sole SCC
+    // authority.  Any cross-file cycle necessarily contains an edge against
+    // the fixed total order, so rejecting future targets also rejects cycles.
+    let graph = build_call_graph(program.decls, all_registered_fns, some(""))
+    let mut entries = graph.entries()
+    entries.sort_by(compare_by_first)
+    for entry in entries {
+        let (caller, callees) = entry
+        for callee in callees {
+            if future_registered_fns.contains(callee) {
+                panic("prelude file DAG: reverse edge '${caller}' -> '${callee}' in '${file_key}'")
+            }
+        }
+    }
 }
 
 fn prelude_struct_storage_parameter_ordinals(
@@ -345,124 +420,159 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                     _ => {}
                 }
             }
-            // Phase 2: compile declarations needed by native codegen. Top-level
-            // ExternFn declarations also become HDecl metadata: unlike impl
-            // extern methods, their first-class values need an exact
-            // declaration identity -> ABI leaf mapping in both backends.
+            // Phase 2 follows the fixed file DAG.  The global name set is used
+            // only to reject edges against that order; each file still builds
+            // and closes its own ordinary A1 call graph.
+            let mut all_callable_decls: List<Decl> = []
             for site in all_prelude_decls {
-                let decl = site.decl
-                match decl {
-                    Decl::Struct { .. } => {
-                        let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index, none)) catch { _ => none }
-                        match result {
-                            some(hd) => {
-                                match prelude_struct_storage_parameter_ordinals(
-                                        site, hd) {
-                                    some((owner, ordinals)) =>
-                                        commit_struct_resource_storage_parameter_ordinals(
-                                            ctx.env, owner, ordinals),
-                                    none => {}
+                match prelude_callable_decl(site.decl) {
+                    some(decl) => all_callable_decls.push(decl),
+                    none => {}
+                }
+            }
+            let all_registered_fns = collect_registered_fn_names(
+                all_callable_decls)
+            let mut future_registered_fns: Set<Str> = set_new()
+            for name in all_registered_fns {
+                future_registered_fns.insert(name)
+            }
+
+            // Validate the entire fixed DAG before Phase 2 publishes any HIR.
+            for file in (STD_FILES) {
+                let file_path = path_join(std_dir, file)
+                if file_exists(file_path) {
+                    let file_key = prelude_namespace_file_key(file_path)
+                    let (callable_program, _) = prelude_callable_program(
+                        all_prelude_decls, file_key)
+                    let file_registered_fns = collect_registered_fn_names(
+                        callable_program.decls)
+                    for name in file_registered_fns {
+                        future_registered_fns.remove(name)
+                    }
+                    if callable_program.decls.len() > 0 {
+                        preflight_prelude_file_dag(
+                            callable_program, all_registered_fns,
+                            future_registered_fns, file_key)
+                    }
+                }
+            }
+
+            for file in (STD_FILES) {
+                let file_path = path_join(std_dir, file)
+                if file_exists(file_path) {
+                    let file_key = prelude_namespace_file_key(file_path)
+
+                    // Non-callable declarations retain their existing exact
+                    // single-decl path.  In particular, every duplicate extern
+                    // is finalized before its publish filter is applied and is
+                    // never inserted into the per-file A1 Program.
+                    for site in all_prelude_decls {
+                        if site.file_key == file_key {
+                            let decl = site.decl
+                            match prelude_callable_decl(decl) {
+                                some(_) => {},
+                                none => match decl {
+                                    Decl::Struct { .. } => {
+                                        let result = some(check_prelude_decl(
+                                            ctx, decl, site.file_key,
+                                            site.decl_index, none)) catch {
+                                            _ => none
+                                        }
+                                        match result {
+                                            some(hd) => {
+                                                match prelude_struct_storage_parameter_ordinals(
+                                                        site, hd) {
+                                                    some((owner, ordinals)) =>
+                                                        commit_struct_resource_storage_parameter_ordinals(
+                                                            ctx.env, owner, ordinals),
+                                                    none => {}
+                                                }
+                                                prelude_hdecls.push(hd)
+                                            },
+                                            none => {}
+                                        }
+                                    },
+                                    Decl::ExternFn { name, .. } => {
+                                        let source = match site.source_symbol {
+                                            some(symbol) => symbol,
+                                            none => panic(
+                                                "compiler extern manifest: Phase 2 source symbol is absent")
+                                        }
+                                        let publish = match
+                                                compiler_owned_extern_should_publish_hdecl(
+                                                    ctx.env, source) {
+                                            some(value) => value,
+                                            none => true
+                                        }
+                                        let result = some(check_prelude_decl(
+                                            ctx, decl, site.file_key,
+                                            site.decl_index,
+                                            some(canonical_prelude_extern_symbol(
+                                                ctx.env, source, name)))) catch {
+                                            _ => none
+                                        }
+                                        match result {
+                                            some(HDecl::ExternFn {
+                                                name, abi_name, def_id,
+                                                executable_ref, type_params,
+                                                params, return_type, effects,
+                                                resource_contract, trait_bounds,
+                                                is_pub, span
+                                            }) => {
+                                                if publish {
+                                                    // The source spelling is
+                                                    // diagnostic/ABI metadata
+                                                    // only. ExecutableRef is
+                                                    // the downstream identity.
+                                                    prelude_hdecls.push(
+                                                        HDecl::ExternFn {
+                                                        name: name,
+                                                        abi_name: abi_name,
+                                                        def_id: def_id,
+                                                        executable_ref:
+                                                            executable_ref,
+                                                        type_params: type_params,
+                                                        params: params,
+                                                        return_type: return_type,
+                                                        effects: effects,
+                                                        resource_contract:
+                                                            resource_contract,
+                                                        trait_bounds: trait_bounds,
+                                                        is_pub: is_pub,
+                                                        span: span
+                                                    })
+                                                }
+                                            },
+                                            some(_) => {},
+                                            none => {}
+                                        }
+                                    },
+                                    Decl::Impl { .. } => {},
+                                    _ => {
+                                        let result = some(check_prelude_decl(
+                                            ctx, decl, site.file_key,
+                                            site.decl_index, none)) catch {
+                                            _ => none
+                                        }
+                                        match result {
+                                            some(hd) => prelude_hdecls.push(hd),
+                                            none => {}
+                                        }
+                                    }
                                 }
-                                prelude_hdecls.push(hd)
-                            },
-                            none => {}
-                        }
-                    },
-                    Decl::Enum { .. } => {
-                        let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index, none)) catch { _ => none }
-                        match result {
-                            some(hd) => { prelude_hdecls.push(hd) },
-                            none => {}
-                        }
-                    },
-                    Decl::Trait { .. } => {
-                        let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index, none)) catch { _ => none }
-                        match result {
-                            some(hd) => { prelude_hdecls.push(hd) },
-                            none => {}
-                        }
-                    },
-                    Decl::Impl { target_type, type_params, trait_name, methods, span } => {
-                        // Filter to only Fn methods — ExternFn methods are already handled
-                        // by the runtime and cannot be looked up via check_extern_fn_decl
-                        // because they are registered on impl owners, not the main scope.
-                        let mut fn_methods: List<Decl> = []
-                        for m in methods {
-                            match m { Decl::Fn { .. } => { fn_methods.push(m) }, _ => {} }
-                        }
-                        if fn_methods.len() > 0 {
-                            let filtered_decl = Decl::Impl {
-                                target_type: target_type,
-                                type_params: type_params,
-                                trait_name: trait_name,
-                                methods: fn_methods,
-                                span: span
-                            }
-                            let result = some(check_prelude_decl(
-                                ctx, filtered_decl,
-                                site.file_key, site.decl_index, none)) catch { _ => none }
-                            match result {
-                                some(hd) => { prelude_hdecls.push(hd) },
-                                none => {}
                             }
                         }
-                    },
-                    Decl::Fn { .. } => {
-                        let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index, none)) catch { _ => none }
-                        match result {
-                            some(hd) => { prelude_hdecls.push(hd) },
-                            none => {}
+                    }
+
+                    let (callable_program, callable_sites) =
+                        prelude_callable_program(all_prelude_decls, file_key)
+                    if callable_program.decls.len() > 0 {
+                        let checked = check_registered_prelude_file(
+                            ctx, callable_program, file_key, callable_sites)
+                        for hdecl in checked {
+                            prelude_hdecls.push(hdecl)
                         }
-                    },
-                    Decl::ExternFn { name, .. } => {
-                        let source = match site.source_symbol {
-                            some(symbol) => symbol,
-                            none => panic(
-                                "compiler extern manifest: Phase 2 source symbol is absent")
-                        }
-                        let publish = match
-                                compiler_owned_extern_should_publish_hdecl(
-                                    ctx.env, source) {
-                            some(value) => value,
-                            none => true
-                        }
-                        let result = some(check_prelude_decl(
-                            ctx, decl, site.file_key, site.decl_index,
-                            some(canonical_prelude_extern_symbol(
-                                ctx.env, source, name)))) catch { _ => none }
-                        match result {
-                            some(HDecl::ExternFn {
-                                name, abi_name, def_id, executable_ref,
-                                type_params, params,
-                                return_type, effects, resource_contract,
-                                trait_bounds, is_pub, span
-                            }) => {
-                                if publish {
-                                    // The source spelling is diagnostic/ABI
-                                    // metadata only. ExecutableRef is the sole
-                                    // callable identity transported downstream.
-                                    prelude_hdecls.push(HDecl::ExternFn {
-                                        name: name, abi_name: abi_name,
-                                        def_id: def_id,
-                                        executable_ref: executable_ref,
-                                        type_params: type_params,
-                                        params: params, return_type: return_type,
-                                        effects: effects,
-                                        resource_contract: resource_contract,
-                                        trait_bounds: trait_bounds,
-                                        is_pub: is_pub, span: span
-                                    })
-                                }
-                            },
-                            some(_) => {},
-                            none => {}
-                        }
-                    },
-                    _ => {}
+                    }
                 }
             }
         },
