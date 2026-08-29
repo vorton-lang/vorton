@@ -1347,21 +1347,21 @@ fn producer_record_builtin_trait_types(
         let owner = registered_trait_ref_symbol(def.owner_ref)
         if symbol_ref_origin_module_key(owner) != "$builtin" { continue }
         let assoc = registered_trait_contract_assoc_items(def.contract)
-        let arity = def.type_param_vars.len() + 1 + assoc.len()
+        if def.type_params.len() != 0 || def.type_param_vars.len() != 1 ||
+           def.type_param_vars.get(0).unwrap() != def.self_type_var_id ||
+           def.assoc_types.len() != assoc.len() {
+            panic("Core producer: builtin trait formal convention differs")
+        }
+        let arity = 1 + assoc.len()
         let origin = some(make_symbol_origin_ref(owner))
-        let mut index = 0
-        while index < def.type_param_vars.len() {
-            let id = def.type_param_vars.get(index).unwrap()
-            producer_register_parameter(
-                producer, id, owner, index, arity, [])
-            let _ = producer_record_type(
-                producer, Type::TypeVar { id: id, name: none }, origin)
-            index = index + 1
+        let mut self_bounds: List<SymbolRef> = []
+        producer_append_unique_symbol(self_bounds, owner)
+        for obligation in registered_trait_contract_dict_obligations(
+                def.contract) {
+            producer_append_unique_symbol(self_bounds, obligation)
         }
         producer_register_parameter(
-            producer, def.self_type_var_id, owner,
-            def.type_param_vars.len(), arity,
-            registered_trait_contract_dict_obligations(def.contract))
+            producer, def.self_type_var_id, owner, 0, arity, self_bounds)
         let _ = producer_record_type(
             producer, Type::TypeVar {
                 id: def.self_type_var_id, name: some("Self")
@@ -1369,16 +1369,24 @@ fn producer_record_builtin_trait_types(
         let mut assoc_index = 0
         while assoc_index < assoc.len() {
             let item = assoc.get(assoc_index).unwrap()
+            let def_assoc = def.assoc_types.get(assoc_index).unwrap()
             let assoc_type = registered_trait_assoc_type(item)
             let id = match assoc_type {
                 Type::TypeVar { id, .. } => id,
                 _ => panic(
                     "Core producer: builtin trait assoc type is concrete")
             }
+            if id != def_assoc.var_id || !symbol_ref_same(
+                    registered_trait_assoc_member(item),
+                    def_assoc.member_ref) ||
+               !producer_optional_types_same(
+                    registered_trait_assoc_default(item),
+                    def_assoc.default_type) {
+                panic("Core producer: builtin trait assoc contract differs")
+            }
             producer_register_parameter(
-                producer, id, owner,
-                def.type_param_vars.len() + 1 + assoc_index,
-                arity, registered_trait_assoc_bounds(item))
+                producer, id, owner, 1 + assoc_index, arity,
+                registered_trait_assoc_bounds(item))
             let _ = producer_record_type(producer, assoc_type, origin)
             assoc_index = assoc_index + 1
         }
