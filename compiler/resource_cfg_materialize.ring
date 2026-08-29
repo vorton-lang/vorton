@@ -34,11 +34,12 @@ use rc_ir::{
     rc_site_before_instruction, rc_site_after_instruction}
 use resource_certificate::{
     CfgBodyCertificate, CfgBlockCertificate, CfgStepCertificate,
-    CfgEntryPromotion,
+    CfgEntryPromotion, CfgEntryEdgeDerivation,
     CfgEdgeCertificate, SlotTransitionReason, SlotTransitionWitness,
     make_cfg_body_certificate, make_cfg_block_certificate,
     make_cfg_step_certificate, make_cfg_edge_certificate,
-    make_cfg_entry_promotion,
+    make_cfg_entry_promotion, make_cfg_entry_edge_derivation,
+    cfg_edge_certificate_transitions,
     make_slot_transition_witness,
     slot_reason_init_live,
     slot_reason_borrow, slot_reason_mutate,
@@ -623,10 +624,18 @@ fn apply_edge_cleanup_abstract(
 // Finite body slot-state dataflow
 // ============================================================
 
+struct CfgEntryDerivationSeed {
+    predecessor_block: Int,
+    predecessor_edge: Int,
+    predecessor_version: Int,
+    entry_states: List<SlotFlow>
+}
+
 struct BodyEntrySolution {
     reachable: List<Bool>,
     entry_states: List<List<SlotFlow>>,
     promotions: List<CfgEntryPromotion>,
+    derivation_seeds: List<CfgEntryDerivationSeed>,
     findings: List<ResourceDiagnostic>
 }
 
@@ -637,13 +646,16 @@ fn cfg_slot_state_rank(value: SlotFlow) -> Int {
 }
 
 fn append_cfg_reach_promotion(
-    mut promotions: List<CfgEntryPromotion>, target_block: Int,
+    mut promotions: List<CfgEntryPromotion>, update_id: Int,
+    target_block: Int,
     predecessor_block: Int?, predecessor_edge: Int?,
+    predecessor_version: Int?, derivation_index: Int?,
     rank_total: Int, rank_budget: Int
 ) -> Int {
     promotions.push(make_cfg_entry_promotion(
-        promotions.len(), target_block, none,
+        promotions.len(), update_id, target_block, none,
         predecessor_block, predecessor_edge,
+        predecessor_version, derivation_index,
         none, none, 0, 1))
     let next = rank_total + 1
     if next > rank_budget {
@@ -653,22 +665,40 @@ fn append_cfg_reach_promotion(
 }
 
 fn append_cfg_slot_promotion(
-    mut promotions: List<CfgEntryPromotion>, target_block: Int,
+    mut promotions: List<CfgEntryPromotion>, update_id: Int,
+    target_block: Int,
     slot_index: Int, predecessor_block: Int?, predecessor_edge: Int?,
+    predecessor_version: Int?, derivation_index: Int?,
     before: SlotFlow, after: SlotFlow,
     rank_total: Int, rank_budget: Int
 ) -> Int {
     let from_rank = cfg_slot_state_rank(before)
     let to_rank = cfg_slot_state_rank(after)
     promotions.push(make_cfg_entry_promotion(
-        promotions.len(), target_block, some(slot_index),
+        promotions.len(), update_id, target_block, some(slot_index),
         predecessor_block, predecessor_edge,
+        predecessor_version, derivation_index,
         some(before), some(after), from_rank, to_rank))
     let next = rank_total + (to_rank - from_rank)
     if next > rank_budget {
         panic("ResourcePlanner: CFG promotion rank budget exceeded")
     }
     next
+}
+
+fn append_cfg_derivation_seed(
+    mut seeds: List<CfgEntryDerivationSeed>,
+    predecessor_block: Int, predecessor_edge: Int,
+    predecessor_version: Int, entry_states: List<SlotFlow>
+) -> Int {
+    let index = seeds.len()
+    seeds.push(CfgEntryDerivationSeed {
+        predecessor_block: predecessor_block,
+        predecessor_edge: predecessor_edge,
+        predecessor_version: predecessor_version,
+        entry_states: copy_slot_states(entry_states)
+    })
+    index
 }
 
 fn body_entry_slot_state(
@@ -704,9 +734,11 @@ fn solve_body_entry_states(
 ) -> BodyEntrySolution {
     let mut reachable: List<Bool> = []
     let mut entry_states: List<List<SlotFlow>> = []
+    let mut versions: List<Int> = []
     let mut block_index = 0
     while block_index < body.blocks.len() {
         reachable.push(false)
+        versions.push(0)
         let mut states: List<SlotFlow> = []
         for _ in body.slots { states.push(slot_flow_unreachable()) }
         entry_states.push(states)
@@ -720,22 +752,27 @@ fn solve_body_entry_states(
         slot_index = slot_index + 1
     }
     // Reachability contributes one rank per block; each SlotFlow cell has
-    // finite height two.  The log below records every strict promotion.
+    // finite height two. One edge evaluation is one atomic update group, so
+    // every changed target slot is justified by the same predecessor version.
     let exact_rank_budget = body.blocks.len() *
         (body.slots.len() * 2 + 1)
     let mut promotions: List<CfgEntryPromotion> = []
+    let mut derivation_seeds: List<CfgEntryDerivationSeed> = []
     let mut promotion_rank = append_cfg_reach_promotion(
-        promotions, body.entry_block, none, none, 0, exact_rank_budget)
+        promotions, 0, body.entry_block,
+        none, none, none, none, 0, exact_rank_budget)
     slot_index = 0
     while slot_index < seed.len() {
         promotion_rank = append_cfg_slot_promotion(
-            promotions, body.entry_block, slot_index, none, none,
+            promotions, 0, body.entry_block, slot_index,
+            none, none, none, none,
             slot_flow_unreachable(), seed.get(slot_index).unwrap(),
             promotion_rank, exact_rank_budget)
         slot_index = slot_index + 1
     }
     reachable.set(body.entry_block, true)
     entry_states.set(body.entry_block, seed)
+    versions.set(body.entry_block, 1)
 
     let mut changed = true
     while changed {
@@ -744,39 +781,55 @@ fn solve_body_entry_states(
         while block_index < body.blocks.len() {
             if reachable.get(block_index).unwrap() {
                 let block = body.blocks.get(block_index).unwrap()
-                let states = copy_slot_states(
-                    entry_states.get(block_index).unwrap())
-                let mut ignored: List<ResourceDiagnostic> = []
-                for event in block.events {
-                    apply_event_abstract(
-                        event, body, solved.logical_shapes,
-                        solved.physical_shapes,
-                        solved.callable_demands,
-                        solved.callable_results_owned, states,
-                        false, ignored)
-                }
-                for usage in block.terminator_uses {
-                    apply_terminator_use_abstract(
-                        body, usage, states, false, ignored)
-                }
                 let mut edge_index = 0
                 while edge_index < block.edges.len() {
                     let edge = block.edges.get(edge_index).unwrap()
                     match edge.target_block {
                         some(target) => {
-                            let edge_states = copy_slot_states(states)
+                            // A self-edge may promote this block before its
+                            // next outgoing edge. Derive every edge from the
+                            // exact current entry revision claimed below.
+                            let source_version = versions.get(
+                                block_index).unwrap()
+                            let source_entry_states = copy_slot_states(
+                                entry_states.get(block_index).unwrap())
+                            let edge_states = copy_slot_states(
+                                source_entry_states)
+                            let mut ignored: List<ResourceDiagnostic> = []
+                            for event in block.events {
+                                apply_event_abstract(
+                                    event, body, solved.logical_shapes,
+                                    solved.physical_shapes,
+                                    solved.callable_demands,
+                                    solved.callable_results_owned,
+                                    edge_states, false, ignored)
+                            }
+                            for usage in block.terminator_uses {
+                                apply_terminator_use_abstract(
+                                    body, usage, edge_states,
+                                    false, ignored)
+                            }
                             apply_edge_cleanup_abstract(
                                 edge, body, solved, edge_states)
                             if !reachable.get(target).unwrap() {
+                                let derivation_index = append_cfg_derivation_seed(
+                                    derivation_seeds, block_index, edge_index,
+                                    source_version, source_entry_states)
+                                let update_id = derivation_index + 1
                                 promotion_rank = append_cfg_reach_promotion(
-                                    promotions, target,
+                                    promotions, update_id, target,
                                     some(block_index), some(edge_index),
+                                    some(source_version),
+                                    some(derivation_index),
                                     promotion_rank, exact_rank_budget)
                                 slot_index = 0
                                 while slot_index < edge_states.len() {
                                     promotion_rank = append_cfg_slot_promotion(
-                                        promotions, target, slot_index,
+                                        promotions, update_id,
+                                        target, slot_index,
                                         some(block_index), some(edge_index),
+                                        some(source_version),
+                                        some(derivation_index),
                                         slot_flow_unreachable(),
                                         edge_states.get(slot_index).unwrap(),
                                         promotion_rank, exact_rank_budget)
@@ -784,25 +837,41 @@ fn solve_body_entry_states(
                                 }
                                 reachable.set(target, true)
                                 entry_states.set(target, edge_states)
+                                versions.set(
+                                    target,
+                                    versions.get(target).unwrap() + 1)
                                 changed = true
                             } else {
                                 let previous = entry_states.get(target).unwrap()
                                 let joined = join_slot_states(previous, edge_states)
                                 if !slot_states_same(previous, joined) {
+                                    let derivation_index =
+                                        append_cfg_derivation_seed(
+                                            derivation_seeds,
+                                            block_index, edge_index,
+                                            source_version,
+                                            source_entry_states)
+                                    let update_id = derivation_index + 1
                                     slot_index = 0
                                     while slot_index < joined.len() {
                                         let before = previous.get(slot_index).unwrap()
                                         let after = joined.get(slot_index).unwrap()
                                         if !slot_flow_same(before, after) {
                                             promotion_rank = append_cfg_slot_promotion(
-                                                promotions, target, slot_index,
+                                                promotions, update_id,
+                                                target, slot_index,
                                                 some(block_index), some(edge_index),
+                                                some(source_version),
+                                                some(derivation_index),
                                                 before, after,
                                                 promotion_rank, exact_rank_budget)
                                         }
                                         slot_index = slot_index + 1
                                     }
                                     entry_states.set(target, joined)
+                                    versions.set(
+                                        target,
+                                        versions.get(target).unwrap() + 1)
                                     changed = true
                                 }
                             }
@@ -839,6 +908,7 @@ fn solve_body_entry_states(
         reachable: reachable,
         entry_states: entry_states,
         promotions: promotions,
+        derivation_seeds: derivation_seeds,
         findings: findings
     }
 }
@@ -1508,6 +1578,54 @@ fn materialize_edge(
     }
 }
 
+fn materialize_cfg_entry_derivation(
+    body: PlannerBody, solved: SolvedResourceGraph,
+    seed: CfgEntryDerivationSeed
+) -> CfgEntryEdgeDerivation {
+    let block = body.blocks.get(seed.predecessor_block).unwrap()
+    let states = copy_slot_states(seed.entry_states)
+    let mut steps: List<CfgStepCertificate> = []
+    let mut event_index = 0
+    while event_index < block.events.len() {
+        let materialized = materialize_event(
+            body, seed.predecessor_block,
+            block.events.get(event_index).unwrap(),
+            event_index, solved, states)
+        steps.push(materialized.certificate)
+        event_index = event_index + 1
+    }
+    let mut ignored_terminator_ops: List<RcOperation> = []
+    let terminator_transitions: List<SlotTransitionWitness> = []
+    let mut terminator_operand = 0
+    for usage in block.terminator_uses {
+        apply_demand_materialized(
+            body, usage.slot, usage.demand,
+            make_rc_terminator_site(
+                make_flow_block_ref(body.reference, seed.predecessor_block),
+                block.terminator_kind, terminator_operand),
+            solved, none, states,
+            ignored_terminator_ops, terminator_transitions)
+        terminator_operand = terminator_operand + 1
+    }
+    let exact_edge = block.edges.get(seed.predecessor_edge).unwrap()
+    let materialized_edge = materialize_edge(
+        body, seed.predecessor_block, block.terminator_kind,
+        exact_edge, seed.predecessor_edge, solved, states)
+    make_cfg_entry_edge_derivation(
+        seed.predecessor_block, seed.predecessor_edge,
+        seed.predecessor_version, steps, terminator_transitions,
+        cfg_edge_certificate_transitions(materialized_edge.certificate))
+}
+
+fn materialize_cfg_entry_derivations(
+    body: PlannerBody, solved: SolvedResourceGraph,
+    seeds: List<CfgEntryDerivationSeed>
+) -> List<CfgEntryEdgeDerivation> {
+    seeds.map(fn(seed) {
+        materialize_cfg_entry_derivation(body, solved, seed)
+    })
+}
+
 pub struct PlannedBody {
     pub rc_body: RcBody,
     pub certificate: CfgBodyCertificate
@@ -1521,6 +1639,8 @@ pub fn plan_body(
     if entry_solution.findings.len() != 0 {
         panic("ResourcePlanner: materialization received failed preflight")
     }
+    let entry_derivations = materialize_cfg_entry_derivations(
+        body, solved, entry_solution.derivation_seeds)
     let mut entry_seed: List<SlotFlow> = []
     let mut entry_slot = 0
     while entry_slot < body.slots.len() {
@@ -1637,6 +1757,7 @@ pub fn plan_body(
             body.reference, rc_slots, body.entry_block, rc_blocks),
         certificate: make_cfg_body_certificate(
             body.entry_block, entry_seed,
-            entry_solution.promotions, block_certificates)
+            entry_solution.promotions, entry_derivations,
+            block_certificates)
     }
 }

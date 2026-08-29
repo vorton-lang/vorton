@@ -27,7 +27,7 @@ use resource_model::{
     physical_rc_shape_foreign_containment, physical_rc_shape_param_deps,
     slot_flow_same, slot_flow_empty, slot_flow_live_owner,
     slot_flow_cleanup_owner, slot_flow_is_unreachable, slot_flow_is_live,
-    slot_flow_is_maybe_moved, slot_flow_join}
+    slot_flow_is_maybe_moved, slot_flow_unreachable, slot_flow_join}
 use rc_ir::{
     RcProgram, RcOperation, rc_program_flow_fingerprint,
     rc_program_type_count, rc_program_callable_count, rc_program_bodies,
@@ -49,7 +49,7 @@ use resource_certificate::{
     ResourceCellKind, ResourceCellSource, ResourceRuleSource,
     ResourceCellSpec, ResourceConstraint, ResourceFixedPointProof,
     ResourceCertificate, CallableCandidateProof,
-    CfgBodyCertificate, CfgBlockCertificate,
+    CfgBodyCertificate, CfgBlockCertificate, CfgEntryEdgeDerivation,
     CandidateCellKind, CandidateCellSpec,
     CandidateRuleSite, CandidateRuleKind, CandidateRule,
     CandidateSelection, SlotTransitionReason, SlotTransitionWitness,
@@ -91,6 +91,7 @@ use resource_certificate::{
     resource_certificate_cfg_bodies, cfg_body_certificate_blocks,
     cfg_body_certificate_entry_block, cfg_body_certificate_entry_seed,
     cfg_body_certificate_entry_promotions,
+    cfg_body_certificate_entry_derivations,
     cfg_block_certificate_index,
     cfg_block_certificate_source_block,
     cfg_block_certificate_terminator_kind,
@@ -99,13 +100,22 @@ use resource_certificate::{
     cfg_block_certificate_edges, cfg_step_certificate_instruction,
     cfg_step_certificate_before, cfg_step_certificate_semantic,
     cfg_step_certificate_after, cfg_edge_certificate_successor_ordinal,
-    cfg_edge_certificate_target, cfg_edge_certificate_exit_states,
-    cfg_edge_certificate_transitions,
-    cfg_entry_promotion_order, cfg_entry_promotion_target_block,
+    cfg_edge_certificate_target, cfg_edge_certificate_transitions,
+    cfg_entry_promotion_order, cfg_entry_promotion_update_id,
+    cfg_entry_promotion_target_block,
     cfg_entry_promotion_slot, cfg_entry_promotion_predecessor_block,
     cfg_entry_promotion_predecessor_edge,
+    cfg_entry_promotion_predecessor_version,
+    cfg_entry_promotion_derivation_index,
     cfg_entry_promotion_before, cfg_entry_promotion_after,
     cfg_entry_promotion_from_rank, cfg_entry_promotion_to_rank,
+    cfg_entry_derivation_predecessor_block,
+    cfg_entry_derivation_predecessor_edge,
+    cfg_entry_derivation_predecessor_version,
+    cfg_entry_derivation_steps,
+    cfg_entry_derivation_terminator_transitions,
+    cfg_entry_derivation_edge_transitions,
+    verify_slot_transition_witness,
     callable_candidate_proof_callable_count,
     callable_candidate_proof_cells, callable_candidate_proof_rules,
     callable_candidate_proof_final_values,
@@ -2568,6 +2578,7 @@ fn apply_topology_transitions(
                 slot_transition_witness_before(transition)) {
             panic("ResourcePlanner verifier: transition state/source drifted")
         }
+        verify_slot_transition_witness(transition)
         states.set(slot, slot_transition_witness_after(transition))
     }
 }
@@ -3637,16 +3648,86 @@ fn verifier_cfg_state_rank(value: SlotFlow) -> Int {
     1
 }
 
+fn copy_verifier_slot_states(
+    values: List<SlotFlow>
+) -> List<SlotFlow> {
+    let mut result: List<SlotFlow> = []
+    for value in values { result.push(value) }
+    result
+}
+
+fn verify_cfg_entry_derivation_exit(
+    body: PlannerBody, solved: SolvedResourceGraph,
+    derivation: CfgEntryEdgeDerivation,
+    source_states: List<SlotFlow>
+) -> List<SlotFlow> {
+    // Reuse the ordinary event/terminator/edge contracts for one claimed
+    // source revision; this is not a worklist or a second fixed-point solve.
+    let source = cfg_entry_derivation_predecessor_block(derivation)
+    let edge_index = cfg_entry_derivation_predecessor_edge(derivation)
+    if source < 0 || source >= body.blocks.len() || edge_index < 0 ||
+       edge_index >= body.blocks.get(source).unwrap().edges.len() ||
+       source_states.len() != body.slots.len() {
+        panic("ResourcePlanner verifier: CFG entry derivation is absent")
+    }
+    let block = body.blocks.get(source).unwrap()
+    let steps = cfg_entry_derivation_steps(derivation)
+    if steps.len() != block.events.len() {
+        panic("ResourcePlanner verifier: CFG entry derivation step census differs")
+    }
+    let mut current = copy_verifier_slot_states(source_states)
+    let mut step_index = 0
+    while step_index < steps.len() {
+        let event = block.events.get(step_index).unwrap()
+        let step = steps.get(step_index).unwrap()
+        let exact_instruction = make_flow_instruction_ref(
+            body.reference, source, step_index)
+        if !flow_semantic_step_is_instruction(event.step) ||
+           !flow_instruction_ref_same(
+                flow_semantic_step_instruction(event.step),
+                exact_instruction) ||
+           !flow_instruction_ref_same(
+                cfg_step_certificate_instruction(step),
+                exact_instruction) {
+            panic("ResourcePlanner verifier: CFG entry derivation step differs")
+        }
+        let before = cfg_step_certificate_before(step)
+        let semantic = cfg_step_certificate_semantic(step)
+        let after = cfg_step_certificate_after(step)
+        verify_event_transition_contract(
+            body, event, solved, current, before, semantic, after)
+        apply_topology_transitions(current, before)
+        apply_topology_transitions(current, semantic)
+        apply_topology_transitions(current, after)
+        step_index = step_index + 1
+    }
+    let terminator = cfg_entry_derivation_terminator_transitions(
+        derivation)
+    verify_terminator_transition_contract(
+        body, block, solved, terminator)
+    apply_topology_transitions(current, terminator)
+    let edge = block.edges.get(edge_index).unwrap()
+    let edge_transitions = cfg_entry_derivation_edge_transitions(
+        derivation)
+    verify_edge_transition_contract(
+        body, edge, solved, current, edge_transitions)
+    apply_topology_transitions(current, edge_transitions)
+    current
+}
+
 fn verify_cfg_entry_promotion_log(
     body: PlannerBody, entry_seed: List<SlotFlow>,
     cfg_body: CfgBodyCertificate,
     blocks: List<CfgBlockCertificate>
 ) {
     let promotions = cfg_body_certificate_entry_promotions(cfg_body)
+    let derivations = cfg_body_certificate_entry_derivations(cfg_body)
     let mut reachable: List<Bool> = []
     let mut states: List<List<SlotFlow>> = []
+    let mut versions: List<Int> = []
     for _ in body.blocks {
         reachable.push(false)
+        versions.push(0)
         let mut bottom: List<SlotFlow> = []
         for _ in body.slots { bottom.push(slot_flow_unreachable()) }
         states.push(bottom)
@@ -3654,97 +3735,124 @@ fn verify_cfg_entry_promotion_log(
     let rank_budget = body.blocks.len() * (body.slots.len() * 2 + 1)
     let mut rank_total = 0
     let mut order = 0
-    for promotion in promotions {
-        if cfg_entry_promotion_order(promotion) != order {
+    let mut update_id = 0
+    while order < promotions.len() {
+        let first = promotions.get(order).unwrap()
+        if cfg_entry_promotion_order(first) != order ||
+           cfg_entry_promotion_update_id(first) != update_id {
             panic("ResourcePlanner verifier: CFG promotion order is not dense")
         }
-        let target = cfg_entry_promotion_target_block(promotion)
+        let target = cfg_entry_promotion_target_block(first)
         if target < 0 || target >= body.blocks.len() {
             panic("ResourcePlanner verifier: CFG promotion target is absent")
         }
-        let predecessor_states: List<SlotFlow>? = match (
-                cfg_entry_promotion_predecessor_block(promotion),
-                cfg_entry_promotion_predecessor_edge(promotion)) {
-            (some(block), some(edge)) => {
-                if block < 0 || block >= body.blocks.len() || edge < 0 {
-                    panic("ResourcePlanner verifier: CFG predecessor is absent")
-                }
-                let certified_edges = cfg_block_certificate_edges(
-                    blocks.get(block).unwrap())
-                if block == target || !reachable.get(block).unwrap() ||
-                   edge >= body.blocks.get(block).unwrap().edges.len() ||
-                   edge >= certified_edges.len() ||
-                   body.blocks.get(block).unwrap().edges.get(
-                        edge).unwrap().target_block != some(target) ||
-                   cfg_edge_certificate_target(
-                        certified_edges.get(edge).unwrap()) !=
-                        some(target) {
-                    panic("ResourcePlanner verifier: CFG promotion predecessor is false")
-                }
-                let exact = cfg_edge_certificate_exit_states(
-                    certified_edges.get(edge).unwrap())
-                if exact.len() != body.slots.len() {
-                    panic("ResourcePlanner verifier: CFG promotion edge state differs")
-                }
-                some(exact)
-            },
-            (none, none) => {
-                if target != body.entry_block {
-                    panic("ResourcePlanner verifier: CFG seed targets non-entry block")
-                }
-                none
-            },
-            _ => panic("ResourcePlanner verifier: CFG predecessor is partial")
-        }
-        match cfg_entry_promotion_slot(promotion) {
-            none => {
-                if reachable.get(target).unwrap() ||
-                   cfg_entry_promotion_before(promotion).is_some() ||
-                   cfg_entry_promotion_after(promotion).is_some() ||
-                   cfg_entry_promotion_from_rank(promotion) != 0 ||
-                   cfg_entry_promotion_to_rank(promotion) != 1 {
-                    panic("ResourcePlanner verifier: CFG reach promotion repeats")
-                }
-                reachable.set(target, true)
-            },
-            some(slot) => {
-                if slot < 0 || slot >= body.slots.len() ||
-                   !reachable.get(target).unwrap() {
-                    panic("ResourcePlanner verifier: CFG slot promotion is invalid")
-                }
-                let before = states.get(target).unwrap().get(slot).unwrap()
-                let incoming = match predecessor_states {
-                    some(values) => values.get(slot).unwrap(),
-                    none => entry_seed.get(slot).unwrap()
-                }
-                let joined = slot_flow_join(before, incoming)
-                let claimed_before = cfg_entry_promotion_before(
-                    promotion).unwrap()
-                let claimed_after = cfg_entry_promotion_after(
-                    promotion).unwrap()
-                if !slot_flow_same(before, claimed_before) ||
-                   slot_flow_same(before, joined) ||
-                   !slot_flow_same(joined, claimed_after) ||
-                   cfg_entry_promotion_from_rank(promotion) !=
-                        verifier_cfg_state_rank(before) ||
-                   cfg_entry_promotion_to_rank(promotion) !=
-                        verifier_cfg_state_rank(joined) ||
-                   cfg_entry_promotion_to_rank(promotion) <=
-                        cfg_entry_promotion_from_rank(promotion) {
-                    panic("ResourcePlanner verifier: CFG slot promotion is not exact")
-                }
-                let mut target_states = states.get(target).unwrap()
-                target_states.set(slot, joined)
-                states.set(target, target_states)
+        let incoming = if update_id == 0 {
+            if target != body.entry_block ||
+               cfg_entry_promotion_predecessor_block(first).is_some() ||
+               cfg_entry_promotion_predecessor_edge(first).is_some() ||
+               cfg_entry_promotion_predecessor_version(first).is_some() ||
+               cfg_entry_promotion_derivation_index(first).is_some() {
+                panic("ResourcePlanner verifier: CFG entry seed update differs")
             }
+            entry_seed
+        } else {
+            let source = cfg_entry_promotion_predecessor_block(
+                first).unwrap()
+            let edge = cfg_entry_promotion_predecessor_edge(first).unwrap()
+            let version = cfg_entry_promotion_predecessor_version(
+                first).unwrap()
+            let derivation_index = cfg_entry_promotion_derivation_index(
+                first).unwrap()
+            if source < 0 || source >= body.blocks.len() || edge < 0 ||
+               edge >= body.blocks.get(source).unwrap().edges.len() ||
+               !reachable.get(source).unwrap() ||
+               versions.get(source).unwrap() != version ||
+               derivation_index != update_id - 1 ||
+               derivation_index >= derivations.len() ||
+               body.blocks.get(source).unwrap().edges.get(
+                    edge).unwrap().target_block != some(target) {
+                panic("ResourcePlanner verifier: CFG predecessor version differs")
+            }
+            let derivation = derivations.get(derivation_index).unwrap()
+            if cfg_entry_derivation_predecessor_block(derivation) != source ||
+               cfg_entry_derivation_predecessor_edge(derivation) != edge ||
+               cfg_entry_derivation_predecessor_version(derivation) !=
+                    version {
+                panic("ResourcePlanner verifier: CFG predecessor derivation differs")
+            }
+            verify_cfg_entry_derivation_exit(
+                body, solved, derivation, states.get(source).unwrap())
         }
-        rank_total = rank_total + (
-            cfg_entry_promotion_to_rank(promotion) -
-            cfg_entry_promotion_from_rank(promotion))
-        if rank_total > rank_budget {
-            panic("ResourcePlanner verifier: CFG promotion rank budget exceeded")
+        let mut saw_reach = false
+        while order < promotions.len() &&
+              cfg_entry_promotion_update_id(
+                promotions.get(order).unwrap()) == update_id {
+            let promotion = promotions.get(order).unwrap()
+            if cfg_entry_promotion_order(promotion) != order ||
+               cfg_entry_promotion_target_block(promotion) != target ||
+               cfg_entry_promotion_predecessor_block(promotion) !=
+                    cfg_entry_promotion_predecessor_block(first) ||
+               cfg_entry_promotion_predecessor_edge(promotion) !=
+                    cfg_entry_promotion_predecessor_edge(first) ||
+               cfg_entry_promotion_predecessor_version(promotion) !=
+                    cfg_entry_promotion_predecessor_version(first) ||
+               cfg_entry_promotion_derivation_index(promotion) !=
+                    cfg_entry_promotion_derivation_index(first) {
+                panic("ResourcePlanner verifier: CFG promotion update differs")
+            }
+            match cfg_entry_promotion_slot(promotion) {
+                none => {
+                    if saw_reach || reachable.get(target).unwrap() ||
+                       cfg_entry_promotion_before(promotion).is_some() ||
+                       cfg_entry_promotion_after(promotion).is_some() ||
+                       cfg_entry_promotion_from_rank(promotion) != 0 ||
+                       cfg_entry_promotion_to_rank(promotion) != 1 {
+                        panic("ResourcePlanner verifier: CFG reach promotion repeats")
+                    }
+                    reachable.set(target, true)
+                    saw_reach = true
+                },
+                some(slot) => {
+                    if slot < 0 || slot >= body.slots.len() ||
+                       !reachable.get(target).unwrap() {
+                        panic("ResourcePlanner verifier: CFG slot promotion is invalid")
+                    }
+                    let before = states.get(target).unwrap().get(slot).unwrap()
+                    let joined = slot_flow_join(
+                        before, incoming.get(slot).unwrap())
+                    let claimed_before = cfg_entry_promotion_before(
+                        promotion).unwrap()
+                    let claimed_after = cfg_entry_promotion_after(
+                        promotion).unwrap()
+                    if !slot_flow_same(before, claimed_before) ||
+                       slot_flow_same(before, joined) ||
+                       !slot_flow_same(joined, claimed_after) ||
+                       cfg_entry_promotion_from_rank(promotion) !=
+                            verifier_cfg_state_rank(before) ||
+                       cfg_entry_promotion_to_rank(promotion) !=
+                            verifier_cfg_state_rank(joined) ||
+                       cfg_entry_promotion_to_rank(promotion) <=
+                            cfg_entry_promotion_from_rank(promotion) {
+                        panic("ResourcePlanner verifier: CFG slot promotion is not exact")
+                    }
+                    let mut target_states = states.get(target).unwrap()
+                    target_states.set(slot, joined)
+                    states.set(target, target_states)
+                }
+            }
+            rank_total = rank_total + (
+                cfg_entry_promotion_to_rank(promotion) -
+                cfg_entry_promotion_from_rank(promotion))
+            if rank_total > rank_budget {
+                panic("ResourcePlanner verifier: CFG promotion rank budget exceeded")
+            }
+            order = order + 1
         }
-        order = order + 1
+        versions.set(target, versions.get(target).unwrap() + 1)
+        update_id = update_id + 1
+    }
+    if update_id != derivations.len() + 1 {
+        panic("ResourcePlanner verifier: CFG entry derivation census differs")
     }
     let mut block = 0
     while block < body.blocks.len() {
