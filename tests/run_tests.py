@@ -5599,7 +5599,7 @@ def identity_checkpoint_contract_errors(
     errors.extend(identity_ledger_contract_errors(sources))
     required_tokens = {
         "identity": (
-            "pub const BUILTIN_VALUE_SITE_COUNT: Int = 6",
+            "pub const BUILTIN_VALUE_SITE_COUNT: Int = 10",
             "pub const BUILTIN_VALUE_HASH_COMBINE: Int = 5",
             "pub struct BuiltinValueSite",
             "pub fn builtin_value_symbol(",
@@ -13080,8 +13080,8 @@ def identity_checkpoint_source_errors() -> List[str]:
          "Fn { name: Str, def_id: Int?, executable_ref: ExecutableRef,",
          "Fn { name: Str, def_id: Int?,"),
         ("builtin value site census", "identity",
-         "pub const BUILTIN_VALUE_SITE_COUNT: Int = 6",
-         "pub const BUILTIN_VALUE_SITE_COUNT: Int = 5"),
+         "pub const BUILTIN_VALUE_SITE_COUNT: Int = 10",
+         "pub const BUILTIN_VALUE_SITE_COUNT: Int = 9"),
         ("builtin value fixed relation", "builtins",
          '"ptr_copy", builtin_value_site_from_tag(BUILTIN_VALUE_PTR_COPY)',
          '"ptr_copy", builtin_value_site_from_tag(BUILTIN_VALUE_DEALLOC)'),
