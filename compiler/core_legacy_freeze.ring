@@ -41,7 +41,6 @@ use ir_identity::{
     path_ref_normalized_child_path, make_path_origin_ref,
     make_symbol_origin_ref, symbol_ref_same,
     symbol_ref_origin_module_key, symbol_ref_canonical_payload,
-    origin_module_key_is_prelude,
     impl_method_ref_owner, impl_method_ref_callable_slot_index,
     impl_owner_ref_target, impl_owner_ref_trait,
     intrinsic_ref_symbol, slot_ref_same, slot_ref_is_source,
@@ -114,6 +113,7 @@ use legacy_projection::{
     make_legacy_dictionary_projection,
     legacy_dictionary_projection_exact,
     legacy_dictionary_projection_physical,
+    legacy_physical_semantic_module,
     make_legacy_trait_bound_projection,
     make_legacy_impl_fact_projection,
     make_legacy_physical_impl_fact_projection,
@@ -186,7 +186,7 @@ fn impl_uses_physical_owner(
     if !builder.owns_prelude { return false }
     let module_key = symbol_ref_origin_module_key(
         impl_owner_ref_target(owner))
-    origin_module_key_is_prelude(module_key) || module_key == "$builtin"
+    legacy_physical_semantic_module(module_key)
 }
 
 fn executable_uses_physical_owner(
@@ -194,7 +194,7 @@ fn executable_uses_physical_owner(
 ) -> Bool {
     if !builder.owns_prelude { return false }
     let module_key = executable_ref_origin_module_key(reference)
-    origin_module_key_is_prelude(module_key) || module_key == "$builtin"
+    legacy_physical_semantic_module(module_key)
 }
 
 fn executable_origin(value: ExecutableRef) -> OriginRef {
@@ -315,6 +315,25 @@ fn merge_callable_type_parameters(
     result
 }
 
+fn trait_bounds_from_type_parameters(
+    values: List<HTypeParam>
+) -> List<TraitBound> {
+    let mut result: List<TraitBound> = []
+    let mut ordinal = 0
+    for value in values {
+        for trait_ref in value.bound_refs {
+            result.push(TraitBound {
+                type_param: h_type_param_name(value),
+                type_var_id: value.type_var_id,
+                trait_name: symbol_ref_canonical_payload(trait_ref),
+                trait_ref: trait_ref, dict_ordinal: ordinal
+            })
+            ordinal = ordinal + 1
+        }
+    }
+    result
+}
+
 fn callable_trait_bounds(
     parameters: List<LegacyTypeParameterProjection>,
     bounds: List<TraitBound>
@@ -361,7 +380,7 @@ fn add_callable_fact(
         }
         builder.prelude_callables.push(
             make_legacy_prelude_callable_fact_projection(
-                reference, origin, builder.module_body, kind,
+                reference, origin, builder.module_body, container, kind,
                 type_parameters, bounds, parameter_facts,
                 exact_type_fact(
                     builder.type_sources, result_type, builder.module_key),
@@ -715,7 +734,7 @@ fn add_generated_callable_fact(
     if executable_uses_physical_owner(builder, reference) {
         builder.prelude_callables.push(
             make_legacy_prelude_callable_fact_projection(
-                reference, origin, builder.module_body, kind,
+                reference, origin, builder.module_body, container, kind,
                 type_parameters, bounds, parameters, result_fact,
                 result_type, effects, false))
         builder.shells.push(make_legacy_prelude_executable_shell(
@@ -742,7 +761,7 @@ fn add_default_specialization_facts(
             builder,
             h_default_specialization_generated_executable(value),
             executable_kind_default_specialization(),
-            type_params, [],
+            type_params, trait_bounds_from_type_parameters(type_params),
             h_default_specialization_binders(value),
             h_default_specialization_parameter_types(value),
             h_default_specialization_parameter_mutabilities(value),

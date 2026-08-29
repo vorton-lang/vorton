@@ -64,7 +64,7 @@ use flow_ir::{
     flow_slot_reference, flow_slot_type
 }
 
-fn legacy_physical_semantic_module(value: Str) -> Bool {
+pub fn legacy_physical_semantic_module(value: Str) -> Bool {
     origin_module_key_is_prelude(value) || value == "$builtin"
 }
 
@@ -1045,6 +1045,7 @@ pub struct LegacyPreludeCallableFactProjection {
     reference: ExecutableRef,
     origin: OriginRef,
     module_body: ModuleBodyRef,
+    container: LegacyContainerRef,
     kind: ExecutableKind,
     type_parameters: List<LegacyTypeParameterProjection>,
     bounds: List<LegacyTraitBoundProjection>,
@@ -1056,7 +1057,8 @@ pub struct LegacyPreludeCallableFactProjection {
 }
 pub fn make_legacy_prelude_callable_fact_projection(
     reference: ExecutableRef, origin: OriginRef,
-    module_body: ModuleBodyRef, kind: ExecutableKind,
+    module_body: ModuleBodyRef, container: LegacyContainerRef,
+    kind: ExecutableKind,
     type_parameters: List<LegacyTypeParameterProjection>,
     bounds: List<LegacyTraitBoundProjection>,
     parameters: List<LegacyBinderFactProjection>,
@@ -1064,10 +1066,13 @@ pub fn make_legacy_prelude_callable_fact_projection(
     effects: EffectRow, is_public: Bool
 ) -> LegacyPreludeCallableFactProjection {
     let physical_key = module_body_ref_origin_module_key(module_body)
+    let container_key = legacy_container_module_key(container)
     if !legacy_physical_semantic_module(
             executable_ref_origin_module_key(reference)) ||
        !legacy_physical_semantic_module(origin_module_key(origin)) ||
        origin_module_key_is_prelude(physical_key) ||
+       (container_key != physical_key &&
+        !legacy_physical_semantic_module(container_key)) ||
        core_type_fact_module_key(result_type_fact) != physical_key {
         panic("legacy projection: prelude physical owner contract differs")
     }
@@ -1078,6 +1083,7 @@ pub fn make_legacy_prelude_callable_fact_projection(
     }
     LegacyPreludeCallableFactProjection {
         reference: reference, origin: origin, module_body: module_body,
+        container: container,
         kind: kind, type_parameters: copy_type_parameters(type_parameters),
         bounds: copy_trait_bounds(bounds), parameters: parameters,
         result_type_fact: result_type_fact, result_type: result_type,
@@ -2013,7 +2019,7 @@ fn assemble_prelude_fact_callable(
     }
     make_legacy_prelude_callable_projection(
         value.reference, value.origin, value.module_body,
-        make_legacy_module_container(value.module_body), value.kind,
+        value.container, value.kind,
         value.type_parameters, value.bounds, parameters,
         core_assembly_remap_type(type_remap, value.result_type_fact),
         value.result_type, value.effects, value.is_public)
