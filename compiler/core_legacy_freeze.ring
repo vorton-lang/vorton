@@ -6,8 +6,7 @@
 use types::{Type, EffectRow, types_equal, effects_equal, type_to_string}
 use env::{
     TypeEnv, registered_trait_contract_methods,
-    registered_trait_method_ref, registered_trait_method_signature,
-    registered_trait_method_mutabilities
+    registered_trait_method_ref, registered_trait_method_signature
 }
 use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
@@ -26,11 +25,7 @@ use hir::{
     h_default_specialization_effects,
     h_default_specialization_forward_call, h_exact_call_evidence,
     h_exact_call_signature,
-    h_delegate_contract, h_delegate_methods,
-    h_delegate_method_generated, h_delegate_method_executable,
-    h_delegate_method_binders, h_delegate_method_parameter_types,
-    h_delegate_method_result_type, h_delegate_method_effects,
-    h_delegate_method_evidence,
+    h_delegate_methods, h_delegate_method_evidence,
     h_delegate_dict_evidence,
     derived_semantic_kind_tag, compare_by_first,
     module_item_identity, hexpr_type, hexpr_effects
@@ -1083,45 +1078,14 @@ fn scan_decls(
                 delegate_plan, methods, default_specializations,
                 assoc_types, ..
             } => {
-                let impl_type_params = merge_callable_type_parameters(
-                    inherited_type_params, type_params)
-                let mut delegate_method_refs: List<ImplMethodRef> = []
                 match delegate_plan {
-                    some(plan) => {
-                        add_delegate_dictionaries(builder, plan)
-                        let planned = h_delegate_methods(plan)
-                        let contracts = registered_trait_contract_methods(
-                            h_delegate_contract(plan))
-                        if planned.len() != contracts.len() {
-                            panic(
-                                "Core/legacy freeze: delegate method census differs")
-                        }
-                        let mut index = 0
-                        while index < planned.len() {
-                            let method = planned.get(index).unwrap()
-                            let generated = h_delegate_method_generated(method)
-                            add_generated_callable_fact(
-                                builder,
-                                h_delegate_method_executable(method), generated,
-                                executable_kind_impl_method(),
-                                impl_type_params, [],
-                                h_delegate_method_binders(method),
-                                h_delegate_method_parameter_types(method),
-                                registered_trait_method_mutabilities(
-                                    contracts.get(index).unwrap()),
-                                h_delegate_method_result_type(method),
-                                h_delegate_method_effects(method))
-                            delegate_method_refs.push(generated)
-                            index = index + 1
-                        }
-                    },
+                    some(plan) => add_delegate_dictionaries(builder, plan),
                     none => {}
                 }
+                let impl_type_params = merge_callable_type_parameters(
+                    inherited_type_params, type_params)
                 scan_decls(builder, methods, impl_type_params)
                 let mut method_refs = impl_method_refs(methods)
-                for method in delegate_method_refs {
-                    method_refs.push(method)
-                }
                 add_default_specialization_facts(
                     builder, default_specializations, method_refs,
                     impl_type_params)
