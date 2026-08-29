@@ -307,10 +307,10 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
             gen_c_binop(ctx, op, left, right, eq_dispatch, ord_dispatch, ty),
         HExpr::UnaryOp { op, operand, ty, .. } => gen_c_unaryop(ctx, op, operand, ty),
         HExpr::Call { callee, args, resolved_dicts, effect_ctx,
-                      callee_ref, method_ref, ty, .. } =>
+                      callee_ref, method_ref, system_host, ty, .. } =>
             gen_c_call(
                 ctx, callee, args, resolved_dicts,
-                effect_ctx, callee_ref, method_ref, ty),
+                effect_ctx, callee_ref, method_ref, system_host, ty),
         HExpr::FieldAccess { receiver, field, access_kind, ty, .. } =>
             gen_c_field_access(ctx, receiver, field, access_kind, ty),
         HExpr::StructLit { name, fields, spread, constructor, .. } =>
@@ -3071,6 +3071,7 @@ fn gen_c_call(
     resolved_dicts: List<DictRef>,
     effect_ctx: TypedEffectCtxSource, callee_ref: CalleeRef?,
     method_ref: MethodCallRef?,
+    system_host: SystemHostCallableRef?,
     result_ty: Type
 ) -> Str {
     // Bound dispatch consumes the exact TraitMethodRef slot and DictRef
