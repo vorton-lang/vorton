@@ -15,6 +15,7 @@ use env::{
     registered_trait_contract_dict_obligations,
     registered_trait_assoc_member, registered_trait_assoc_type,
     registered_trait_assoc_default, registered_trait_assoc_bounds,
+    registered_trait_method_signature,
     registered_trait_method_mutabilities, apply_subst_map, find_impl,
     ordered_effect_tail_vars
 }
@@ -175,7 +176,7 @@ use hir::{
     DerivedImpl, DerivedMethod, DerivedField, DerivedVariant,
     DerivedFieldRef, FieldAction, DerivedTextPlan, DerivedTextPiece,
     DerivedTextSequence,
-    TypeKind,
+    TypeKind, compare_by_first,
     hexpr_type, hexpr_effects, hexpr_span,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_is_bound,
@@ -1330,6 +1331,64 @@ fn producer_register_environment_effect_parameters(
     }
 }
 
+// Builtin traits live only in TypeEnv; unlike source traits they have no
+// physical HDecl header for the ordinary declaration census to visit. Their
+// exact Self/associated formals are nevertheless consumed by derived and
+// dictionary Core plans, so publish those current 0.1 formals once from the
+// registered trait contract before any generated plan asks for a type fact.
+fn producer_record_builtin_trait_types(
+    mut producer: ClosedCoreProducer
+) {
+    if core_assembly_recorder_module_order(producer.recorder) != 0 { return }
+    let mut entries = producer.env.trait_reg.traits.entries()
+    entries.sort_by(compare_by_first)
+    for entry in entries {
+        let def = entry.1
+        let owner = registered_trait_ref_symbol(def.owner_ref)
+        if symbol_ref_origin_module_key(owner) != "$builtin" { continue }
+        let assoc = registered_trait_contract_assoc_items(def.contract)
+        let arity = def.type_param_vars.len() + 1 + assoc.len()
+        let origin = some(make_symbol_origin_ref(owner))
+        let mut index = 0
+        while index < def.type_param_vars.len() {
+            let id = def.type_param_vars.get(index).unwrap()
+            producer_register_parameter(
+                producer, id, owner, index, arity, [])
+            let _ = producer_record_type(
+                producer, Type::TypeVar { id: id, name: none }, origin)
+            index = index + 1
+        }
+        producer_register_parameter(
+            producer, def.self_type_var_id, owner,
+            def.type_param_vars.len(), arity,
+            registered_trait_contract_dict_obligations(def.contract))
+        let _ = producer_record_type(
+            producer, Type::TypeVar {
+                id: def.self_type_var_id, name: some("Self")
+            }, origin)
+        let mut assoc_index = 0
+        while assoc_index < assoc.len() {
+            let item = assoc.get(assoc_index).unwrap()
+            let assoc_type = registered_trait_assoc_type(item)
+            let id = match assoc_type {
+                Type::TypeVar { id, .. } => id,
+                _ => panic(
+                    "Core producer: builtin trait assoc type is concrete")
+            }
+            producer_register_parameter(
+                producer, id, owner,
+                def.type_param_vars.len() + 1 + assoc_index,
+                arity, registered_trait_assoc_bounds(item))
+            let _ = producer_record_type(producer, assoc_type, origin)
+            assoc_index = assoc_index + 1
+        }
+        for method in registered_trait_contract_methods(def.contract) {
+            let _ = producer_record_type(
+                producer, registered_trait_method_signature(method), origin)
+        }
+    }
+}
+
 fn producer_record_row(
     mut producer: ClosedCoreProducer, owner: ExecutableRef,
     row: EffectRow
@@ -1741,14 +1800,40 @@ fn producer_record_decls(
                     producer, executable_ref, params, return_type, effects,
                     some(body))
             },
-            HDecl::Struct { fields, .. } => {
+            HDecl::Struct {
+                name, owner_ref, type_params, fields, ..
+            } => {
+                let owner = registered_nominal_ref_symbol(owner_ref)
+                let _ = producer_record_type(
+                    producer, Type::StructType {
+                        name: name,
+                        type_params: type_params.map(fn(parameter) {
+                            Type::TypeVar {
+                                id: parameter.type_var_id,
+                                name: some(parameter.source.name)
+                            }
+                        })
+                    }, some(make_symbol_origin_ref(owner)))
                 for field in fields {
                     let _ = producer_record_type(
                         producer, field.ty, some(make_symbol_origin_ref(
                             nominal_field_ref_member(field.field_ref))))
                 }
             },
-            HDecl::Enum { variants, .. } => {
+            HDecl::Enum {
+                name, owner_ref, type_params, variants, ..
+            } => {
+                let owner = registered_nominal_ref_symbol(owner_ref)
+                let _ = producer_record_type(
+                    producer, Type::EnumType {
+                        name: name,
+                        type_params: type_params.map(fn(parameter) {
+                            Type::TypeVar {
+                                id: parameter.type_var_id,
+                                name: some(parameter.source.name)
+                            }
+                        })
+                    }, some(make_symbol_origin_ref(owner)))
                 for variant in variants {
                     if variant.fields.len() != variant.field_refs.len() {
                         panic("Core producer: enum field identity census differs")
@@ -2591,6 +2676,7 @@ pub fn produce_closed_core_assembly_facts(
         module_key, module_order, env, effect_parameters)
     producer_register_decl_parameters(producer, physical_program.decls)
     producer_register_environment_effect_parameters(producer)
+    producer_record_builtin_trait_types(producer)
     producer_record_decls(producer, physical_program.decls)
     producer_record_derived(producer, physical_program.derived_impls)
     producer_record_builtin_methods(producer)

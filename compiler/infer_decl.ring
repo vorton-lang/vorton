@@ -1778,6 +1778,10 @@ fn finalize_effect_ctx_expr(
                     report_open_runtime_handled_instance(
                         ctx, "callable value", span)
                 },
+                // ConstGetter value finalization already emits a complete
+                // pure zero-argument Call with the empty P2 context. Rewalking
+                // its callee would lower the getter Ident a second time.
+                HExpr::Call { .. } => return finalized,
                 _ => panic("effect context finalization: Ident changed kind")
             }
             finalized
