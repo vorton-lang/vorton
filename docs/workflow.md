@@ -182,6 +182,12 @@
 
 本决定不授权通用multi-error validator框架、IR snapshot/replay/cache、新artifact authority、第二验证系统或让损坏的单进程fail-late。若以后需要其中任何一项，必须先以重复实测失败证明现实收益，并按其真实架构与维护成本重新分类。
 
+**静态审查—验证班车双线（2026-08-29 用户决定）**：机器执行不得阻塞agent继续产生独立信息。Lane A持续对固定authority snapshot做只读static review、failure-class census与oracle核对；Lane B由Steward持续实现并组织validation bus。Review finding只有取得独立证据并由root读码复核后才作为confirmed blocker发给实现线；killed、重复、纯未来完整性或没有0.1 consumer的观察不打断班车。
+
+每班车固定source SHA、candidate hash、输入与命令。Source-build/gen1等candidate construction仍是single instance；candidate产生后，不共享生成物和可变状态的独立matrix validations最多四个并发，各自使用isolated output，并始终满足active process `<=5`、aggregate commit `<=12 GiB`及对应ASan/resource门。运行中的结果永远归属于其固定candidate；其间产生的新fix只进入下一班车，禁止把不同SHA的成功或失败拼成同一claim，也禁止并发两个写同一artifact的construction。
+
+Fast validation bus不因首个红项取消其他独立case；等待全部terminal后按exact failure identity去重汇总，再由confirmed结果决定下一班车。Static review在实现、construction与validation运行期间继续推进，但不得读取半写生成物或把moving WIP冒充fixed review snapshot。Fixed point、full、ASan、self-host与exact CI等存在artifact/前门依赖的sealed关键链仍按其DAG和single-artifact纪律执行；“最多四个验证”不放宽验收顺序、资源门或no-retry规则。
+
 ### 4.4 执行与并发
 
 - S 且路径唯一的工作可由 root 直接在 main 完成；
@@ -190,6 +196,7 @@
 - 并发任务不得修改同一文件；
 - implementer 只改分配范围并提交，root 独占 main、看板与治理文档；
 - 一个 agent 身份贯穿实现、review 返修和复验，不为每轮反馈重新生成。
+- 只读review lane可与isolated implementation、construction或validation并行；review固定commit/patch-id，发现confirmed blocker后送原owner返修，不接管写权限。Validation并发遵守§4.3.3班车的fixed-SHA、isolated-output与四worker资源上限。
 
 单个 agent 遇到设计问题时先向 root 给出事实、选项和证据。root 在自主授权内决定；属于用户保留决定才写 Inbox。该 agent 可以转做同 worktree 内不依赖该决定的部分，root 同时补位其他任务。
 
@@ -240,6 +247,8 @@ root 对通过 review 的工作：
 长测试、bootstrap、ASan、全量构建等命令的等待必须同时保持会话低噪声和工具调用低频；只是不向用户展示轮询结果，不算满足本节。
 
 每个新长命令或失败后的重跑还必须先满足§4.3.3“长执行信息增益门”。已按旧规则启动且输入SHA已经固定的命令不因治理规则更新而中断；新规则从其后的重跑或下一道长门生效。
+
+长命令运行期间，root与空闲agent优先继续§4.3.3双线班车中不依赖该命令结果的static review、consumer census、oracle准备或下一班车fix mapping。只有确实不存在可安全补位的独立工作时才进入dormant wait；不得为了显示活跃而读取增量日志或半成品。
 
 1. 启动前依据同类历史耗时、当前范围和机器负载形成一个单一的精确耗时点估计。首次计划等待时长必须等于该点估计，不得添加安全余量、乘系数或向上改写为“保守窗口”；预计 25 分钟就等待 25 分钟，不得给 40 分钟。需要后续分析的完整输出一次性重定向到临时文件；命令只启动一次。
 2. 预计耗时达到 **5 分钟**时，启动后不得提前用短间隔 `wait`、进程查询或日志读取反复探测。若没有可安全补位的独立工作，按精确耗时点估计进入一次可中断的 dormant wait / sleep；首次完成检查只能发生在这次精确等待结束后。不得用连续短 `wait` 模拟首次等待。
