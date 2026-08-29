@@ -26,7 +26,11 @@ use builtins::{
     builtin_method_contract_target_owner,
     builtin_method_contract_target_type_vars,
     builtin_method_contract_method_type_vars,
-    builtin_method_contract_resource
+    builtin_method_contract_resource,
+    BuiltinValueContractFact, builtin_value_contract_facts,
+    builtin_value_contract_site, builtin_value_contract_executable,
+    builtin_value_contract_symbol, builtin_value_contract_scheme,
+    builtin_value_contract_resource
 }
 use precore_lower::{close_hir_surface}
 use core_type_source::{
@@ -92,6 +96,7 @@ use ir_identity::{
     intrinsic_ref_symbol, trait_method_ref_member,
     intrinsic_ref_same,
     BUILTIN_METHOD_SITE_COUNT,
+    builtin_value_site_tag, BUILTIN_VALUE_SITE_COUNT,
     registered_nominal_ref_symbol,
     registered_trait_ref_symbol,
     impl_owner_ref_target,
@@ -226,7 +231,9 @@ use hir::{
     derived_semantic_kind_tag, DERIVED_HASH_SEED,
     validate_hir_binder_def_ids
 }
-use hir_exact::{dict_ref_exact}
+use hir_exact::{dict_ref_exact,
+    h_dict_construct_base, h_dict_construct_inner,
+    h_dict_construct_result}
 use core_type_source::{
     FlowTypeNode, FlowTypeKind,
     FlowFieldIdentity, FlowNominalFieldFact,
@@ -285,7 +292,8 @@ use core_expr::{
     make_core_literal_expr, make_core_int_literal, make_core_float_literal,
     make_core_str_literal, make_core_bool_literal, make_core_unit_literal,
     make_core_read_expr, make_core_callable_value_expr,
-    make_core_primitive_op, make_core_primitive_expr, make_core_call_expr,
+    make_core_primitive_op, make_core_primitive_expr,
+    make_core_dict_construct_expr, make_core_call_expr,
     make_core_method_call_expr, make_core_effect_call_expr,
     make_core_system_call_expr, make_core_fail_raise_expr,
     make_core_project_expr, make_core_construct_expr,
@@ -1769,7 +1777,20 @@ fn producer_record_expr(
             producer_record_expr(producer, owner, receiver)
             producer_record_expr(producer, owner, index)
         },
-        HExpr::DictConstruct { .. } => {},
+        HExpr::DictConstruct {
+            plan: some(plan), inner, ..
+        } => {
+            for value in inner {
+                producer_record_physical_dictionary(
+                    producer, owner, value)
+            }
+            producer_record_dictionary(
+                producer, owner, make_exact_wrapped_dict_ref(
+                    h_dict_construct_base(plan),
+                    h_dict_construct_inner(plan)))
+        },
+        HExpr::DictConstruct { .. } =>
+            panic("Core producer: dictionary construct plan is absent"),
         HExpr::Take { source, .. } =>
             producer_record_expr(producer, owner, source),
         HExpr::ReturnExpr { value, .. } => match value {
@@ -2115,6 +2136,43 @@ fn producer_record_builtin_methods(mut producer: ClosedCoreProducer) {
         }
         let _ = producer_record_type(
             producer, scheme.ty, some(executable_origin(reference)))
+    }
+}
+
+fn producer_record_builtin_values(mut producer: ClosedCoreProducer) {
+    if core_assembly_recorder_module_order(producer.recorder) != 0 { return }
+    let facts = builtin_value_contract_facts()
+    if facts.len() != BUILTIN_VALUE_SITE_COUNT {
+        panic("Core producer: builtin value census differs")
+    }
+    let mut fact_index = 0
+    while fact_index < facts.len() {
+        let fact = facts.get(fact_index).unwrap()
+        let site = builtin_value_contract_site(fact)
+        let symbol = builtin_value_contract_symbol(fact)
+        let reference = builtin_value_contract_executable(fact)
+        if builtin_value_site_tag(site) != fact_index ||
+           !executable_ref_is_named(reference) ||
+           !symbol_ref_same(executable_ref_named_symbol(reference), symbol) {
+            panic("Core producer: builtin value identity differs")
+        }
+        let scheme = builtin_value_contract_scheme(fact)
+        let type_vars = scheme.type_vars
+        let mut index = 0
+        while index < type_vars.len() {
+            producer_register_parameter(
+                producer, type_vars.get(index).unwrap(), symbol,
+                index, type_vars.len(), [])
+            index = index + 1
+        }
+        for id in type_vars {
+            let _ = producer_record_type(
+                producer, Type::TypeVar { id: id, name: none },
+                some(executable_origin(reference)))
+        }
+        let _ = producer_record_type(
+            producer, scheme.ty, some(executable_origin(reference)))
+        fact_index = fact_index + 1
     }
 }
 
@@ -2706,6 +2764,7 @@ pub struct FrozenCoreAssemblyFacts {
     effect_ctx_type: CoreEffectCtxTypeSource,
     builtin_trait_methods: List<RegisteredTraitMethodContract>,
     builtin_methods: List<BuiltinMethodContractFact>,
+    builtin_values: List<BuiltinValueContractFact>,
     diagnostic_seed: CoreDiagnosticSeed,
     program: HProgram
 }
@@ -2760,6 +2819,7 @@ pub fn produce_closed_core_assembly_facts(
     producer_record_decls(producer, physical_program.decls)
     producer_record_derived(producer, physical_program.derived_impls)
     producer_record_builtin_methods(producer)
+    producer_record_builtin_values(producer)
     let effect_ctx_type = make_core_effect_ctx_type_source(
         producer_effect_ctx_type(producer))
     validate_producer_bijection(producer)
@@ -2814,7 +2874,8 @@ pub fn mutate_core_unowned_effect_tail(
         effect_ctx_type: value.effect_ctx_type,
         diagnostic_seed: value.diagnostic_seed,
         builtin_trait_methods: value.builtin_trait_methods,
-        builtin_methods: value.builtin_methods, program: value.program
+        builtin_methods: value.builtin_methods,
+        builtin_values: value.builtin_values, program: value.program
     }
     let _ = assemble_single_core(mutated)
     panic("Core mutation: unowned effect tail survived Core assembly")
@@ -2888,6 +2949,9 @@ fn freeze_closed_core_assembly_facts(
         } else { [] },
         builtin_methods: if recorder.module_order == 0 {
             builtin_method_contract_facts(env)
+        } else { [] },
+        builtin_values: if recorder.module_order == 0 {
+            builtin_value_contract_facts()
         } else { [] },
         program: closed_program
     }
@@ -4173,9 +4237,21 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
             ty, effects, origin, make_core_block(
                 [make_core_return_stmt(value.map(fn(v) { lower_expr(ctx, v) }), origin)],
                 none, origin)),
+        HExpr::DictConstruct { plan: some(plan), .. } => {
+            let inner = h_dict_construct_inner(plan).map(fn(value) {
+                remap_dictionary_evidence(ctx, value)
+            })
+            make_core_dict_construct_expr(
+                ty, effects, origin,
+                make_exact_wrapped_dict_ref(
+                    h_dict_construct_base(plan), inner),
+                resolved_slot(ctx, h_dict_construct_result(plan)))
+        },
+        HExpr::DictConstruct { .. } =>
+            panic("Core assembly: dictionary construct plan is absent"),
         HExpr::StringInterp { .. } | HExpr::ListLit { .. } |
         HExpr::IndexExpr { .. } |
-        HExpr::DictConstruct { .. } | HExpr::Clone { .. } |
+        HExpr::Clone { .. } |
         HExpr::Take { .. } => panic("Core assembly: surface/resource HExpr crossed PreCore")
     }
 }
@@ -4669,6 +4745,79 @@ fn add_builtin_method_contracts(
             flow_contract_from_resource_fact(
                 facts.module_key, parameter_types, result_type,
                 builtin_method_contract_resource(fact)),
+            core_effects,
+            some(generated_callable_effect_ctx(
+                facts, reference, core_effects))))
+        index = index + 1
+    }
+}
+
+fn add_builtin_value_contracts(
+    facts: FrozenCoreAssemblyFacts, mut assembly: ModuleAssembly
+) {
+    if facts.module_order != 0 {
+        if facts.builtin_values.len() != 0 {
+            panic("Core assembly: non-root module carries builtin values")
+        }
+        return
+    }
+    if facts.builtin_values.len() != BUILTIN_VALUE_SITE_COUNT {
+        panic("Core assembly: builtin value contract census differs")
+    }
+    let parent = make_module_body_parent(make_module_body_ref(
+        "$builtin", "builtin-values"))
+    let mut index = 0
+    while index < facts.builtin_values.len() {
+        let fact = facts.builtin_values.get(index).unwrap()
+        let site = builtin_value_contract_site(fact)
+        let reference = builtin_value_contract_executable(fact)
+        let symbol = builtin_value_contract_symbol(fact)
+        if builtin_value_site_tag(site) != index ||
+           !executable_ref_is_named(reference) ||
+           !symbol_ref_same(executable_ref_named_symbol(reference), symbol) {
+            panic("Core assembly: builtin value identity/order differs")
+        }
+        let mut prior = 0
+        while prior < index {
+            if executable_ref_same(
+                    reference, builtin_value_contract_executable(
+                        facts.builtin_values.get(prior).unwrap())) {
+                panic("Core assembly: builtin value contract repeats")
+            }
+            prior = prior + 1
+        }
+        let scheme = builtin_value_contract_scheme(fact)
+        let (params, result, effects) = match scheme.ty {
+            Type::FnType { params, return_type, effects } =>
+                (params, return_type, effects),
+            _ => panic("Core assembly: builtin value scheme is not callable")
+        }
+        let parameter_types = params.map(fn(ty) {
+            type_fact_for(facts.type_sources, ty, facts.module_key)
+        })
+        let result_type = type_fact_for(
+            facts.type_sources, result, facts.module_key)
+        let header = final_callable_header(params, result, effects)
+        let type_formals = scheme.type_vars.map(fn(id) {
+            type_fact_for(
+                facts.type_sources,
+                Type::TypeVar { id: id, name: none }, facts.module_key)
+        })
+        assembly.entries.push(make_executable_entry(
+            reference, parent, executable_kind_builtin_intrinsic(),
+            make_contract_only()))
+        let core_effects = core_effect_contract_from_row(
+            facts.type_sources, effects, facts.module_key,
+            facts.effect_parameters)
+        assembly.callables.push(make_core_callable_contract(
+            reference, make_symbol_origin_ref(symbol),
+            type_fact_for(facts.type_sources, header, facts.module_key),
+            type_formals,
+            callable_owned_effect_formals(facts, reference, header),
+            [], executable_contract_mode_contract_only(),
+            flow_contract_from_resource_fact(
+                facts.module_key, parameter_types, result_type,
+                builtin_value_contract_resource(fact)),
             core_effects,
             some(generated_callable_effect_ctx(
                 facts, reference, core_effects))))
@@ -6612,6 +6761,26 @@ fn close_project_callable_type_formal_sources(
             append_exact_callable_type_formal_source(
                 result, reference, formals)
         }
+        for builtin in facts.builtin_values {
+            let reference = builtin_value_contract_executable(builtin)
+            let owner = builtin_value_contract_symbol(builtin)
+            if !executable_ref_is_named(reference) ||
+               !symbol_ref_same(
+                    executable_ref_named_symbol(reference), owner) {
+                panic("Core assembly: builtin value formal owner differs")
+            }
+            let vars = builtin_value_contract_scheme(builtin).type_vars
+            let mut formals: List<FlowGenericParamFact> = []
+            let mut index = 0
+            for id in vars {
+                let _ = id
+                formals.push(make_flow_generic_param_fact(
+                    owner, index, vars.len(), []))
+                index = index + 1
+            }
+            append_exact_callable_type_formal_source(
+                result, reference, formals)
+        }
     }
     result
 }
@@ -6687,7 +6856,8 @@ fn with_project_effect_sources(
         effect_ctx_type: facts.effect_ctx_type,
         diagnostic_seed: facts.diagnostic_seed,
         builtin_trait_methods: facts.builtin_trait_methods,
-        builtin_methods: facts.builtin_methods, program: facts.program
+        builtin_methods: facts.builtin_methods,
+        builtin_values: facts.builtin_values, program: facts.program
     }
 }
 
@@ -6953,6 +7123,7 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
         let assembly = empty_module_assembly()
         add_builtin_trait_contracts(facts, assembly)
         add_builtin_method_contracts(facts, assembly)
+        add_builtin_value_contracts(facts, assembly)
         assemble_decls(facts, module_body, facts.program.decls, assembly)
         append_derived_impls(
             facts, module_body, facts.program.derived_impls, assembly)
