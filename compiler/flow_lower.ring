@@ -135,6 +135,7 @@ use effect_contract::{
 use core_type_source::{
     core_type_graph_nodes,
     FlowTypeNode, FlowFieldIdentity,
+    flow_type_node_kind, flow_type_kind_tag, flow_type_kind_never,
     copy_flow_type_graph_nodes,
     make_nominal_flow_field_identity, make_variant_flow_field_identity,
     make_path_flow_field_identity
@@ -1864,6 +1865,20 @@ fn lower_handle_expression(
     set_current(ctx, join)
 }
 
+fn terminate_never_expr(mut ctx: FlowLowerCtx, expr: CoreExpr) {
+    if is_terminated(ctx) { return }
+    let result_node = ctx.type_nodes.get(
+        core_type_ref_index(core_expr_type(expr))).unwrap_or_else(fn() {
+            panic("Flow lowering: expression result type is absent")
+        })
+    if flow_type_kind_tag(flow_type_node_kind(result_node)) ==
+            flow_type_kind_tag(flow_type_kind_never()) {
+        terminate(ctx, make_flow_diverge(
+            core_expr_origin(expr), all_exited_scopes(ctx)),
+            core_flow_role_control_exit(0))
+    }
+}
+
 fn lower_expr(
     mut ctx: FlowLowerCtx, expr: CoreExpr,
     continue_target: FlowBlockRef?, break_target: FlowBlockRef?
@@ -1899,6 +1914,7 @@ fn lower_expr(
     }
     if emit_simple_expr(
             ctx, expr, result, continue_target, break_target) {
+        terminate_never_expr(ctx, expr)
         restore_core_node(ctx, previous)
         return result
     }
@@ -1921,6 +1937,7 @@ fn lower_expr(
     } else {
         panic("Flow lowering: Core expression is not closed")
     }
+    terminate_never_expr(ctx, expr)
     restore_core_node(ctx, previous)
     result
 }

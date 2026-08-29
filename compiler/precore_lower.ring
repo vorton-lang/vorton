@@ -735,6 +735,25 @@ fn unit_expr(span: Span) -> HExpr {
     }
 }
 
+fn close_control_branch(value: HExpr) -> HExpr {
+    match close_expr(value) {
+        HExpr::Block { stmts, tail, effects, span, .. } => {
+            let mut statements = stmts
+            match tail {
+                some(expr) => statements.push(HStmt::ExprStmt {
+                    span: hexpr_span(expr), expr: expr
+                }),
+                none => {}
+            }
+            HExpr::Block {
+                stmts: statements, tail: none, ty: Type::UnitType,
+                effects: effects, span: span
+            }
+        },
+        _ => panic("PreCore closure: control branch is not a block")
+    }
+}
+
 fn prepend_statements(
     prefix: List<HStmt>, body: HExpr, span: Span
 ) -> HExpr {
@@ -1060,9 +1079,9 @@ fn close_stmt(value: HStmt) -> List<HStmt> {
                 none => panic("PreCore closure: IfLet exact pattern is absent")
             }
             let scrutinee = close_expr(expr)
-            let then_body = close_expr(then_block)
+            let then_body = close_control_branch(then_block)
             let else_body = match else_block {
-                some(value) => close_expr(value),
+                some(value) => close_control_branch(value),
                 none => unit_expr(span)
             }
             let mut arms: List<HMatchArm> = []
@@ -1384,10 +1403,24 @@ fn close_expr(value: HExpr) -> HExpr {
         },
         HExpr::IfExpr {
             condition, then_branch, else_branch, ty, effects, span
-        } => HExpr::IfExpr {
-            condition: close_expr(condition), then_branch: close_expr(then_branch),
-            else_branch: close_optional_expr(else_branch),
-            ty: ty, effects: effects, span: span
+        } => match else_branch {
+            some(value) => HExpr::IfExpr {
+                condition: close_expr(condition),
+                then_branch: close_expr(then_branch),
+                else_branch: some(close_expr(value)),
+                ty: ty, effects: effects, span: span
+            },
+            none => {
+                if !types_equal(ty, Type::UnitType) {
+                    panic("PreCore closure: no-else If is not Unit")
+                }
+                HExpr::IfExpr {
+                    condition: close_expr(condition),
+                    then_branch: close_control_branch(then_branch),
+                    else_branch: some(unit_expr(span)),
+                    ty: Type::UnitType, effects: effects, span: span
+                }
+            }
         },
         HExpr::StringInterp { parts, plan, ty, effects, span } =>
             close_string_interp(parts, match plan {

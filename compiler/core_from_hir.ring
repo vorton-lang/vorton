@@ -5,7 +5,7 @@
 // callable, impl and executable facts are derived once from canonical HIR.
 
 use ast::{Span, Position, Pattern, LiteralValue, BinOp, UnaryOp, span_zero}
-use types::{Type, Effect, EffectRow, types_equal, EMPTY_ROW}
+use types::{Type, Effect, EffectRow, types_equal, type_to_string, EMPTY_ROW}
 use env::{
     TypeEnv, TraitDef, AssocTypeDef,
     RegisteredTraitAssocContract,
@@ -2542,12 +2542,31 @@ struct ProjectCallableTypeFormalSource {
     formals: List<FlowGenericParamFact>
 }
 
+fn physical_callable_effect_rows(
+    module_key: Str, module_order: Int,
+    values: List<TypedCallableEffectFact>
+) -> List<TypedCallableEffectFact> {
+    let mut result: List<TypedCallableEffectFact> = []
+    for value in values {
+        let reference = typed_callable_effect_reference(value)
+        let origin = executable_ref_origin_module_key(reference)
+        if origin == module_key ||
+           (module_order == 0 &&
+            (executable_ref_is_prelude(reference) || origin == "$builtin")) {
+            result.push(value)
+        }
+    }
+    result
+}
+
 pub fn produce_closed_core_assembly_facts(
     module_key: Str, module_order: Int,
     closed_program: HProgram, env: TypeEnv,
     effect_parameters: List<TypedEffectFormalFact>,
     callable_effect_rows: List<TypedCallableEffectFact>
 ) -> FrozenCoreAssemblyFacts {
+    let physical_effect_rows = physical_callable_effect_rows(
+        module_key, module_order, callable_effect_rows)
     let derived_impls = physical_derived_impls(
         module_key, module_order,
         closed_program.decls, closed_program.derived_impls)
@@ -2578,7 +2597,7 @@ pub fn produce_closed_core_assembly_facts(
     freeze_closed_core_assembly_facts(
         producer.recorder, physical_program, env,
         producer.type_sources, effect_ctx_type,
-        producer.effect_parameters, callable_effect_rows,
+        producer.effect_parameters, physical_effect_rows,
         diagnostic_seed)
 }
 
@@ -2808,7 +2827,8 @@ fn type_fact_for(
         }
     }
     let result = match found { some(v) => v,
-        none => panic("Core assembly: canonical HIR type lacks exact fact") }
+        none => panic(
+            "Core assembly: canonical HIR type lacks exact fact: module=${module_key}, type=${type_to_string(ty)}") }
     if core_type_fact_module_key(result) != module_key {
         panic("Core assembly: HIR type fact crosses module")
     }

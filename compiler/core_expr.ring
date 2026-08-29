@@ -5138,8 +5138,11 @@ fn require_block_result_type(
     value: CoreBlock, expected: CoreTypeRef, graph: CoreTypeGraph
 ) {
     match block_tail_type(value) {
-        some(actual) => require_core_type_same(
-            actual, expected, "CoreHIR: block result type differs"),
+        some(actual) => if type_kind(graph, actual) !=
+                flow_type_kind_tag(flow_type_kind_never()) {
+            require_core_type_same(
+                actual, expected, "CoreHIR: block result type differs")
+        },
         none => if type_kind(graph, expected) !=
                 flow_type_kind_tag(flow_type_kind_unit()) &&
                 type_kind(graph, expected) !=

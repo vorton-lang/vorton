@@ -3213,11 +3213,11 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
     let scrut_r = infer_expr(ctx, scrutinee, subst)
     let mut s = scrut_r.subst
     let mut effects = scrut_r.effects
-    let result_type = ctx.env.fresh_var()
+    let mut result_type: Type = NEVER
     let mut harms: List<HMatchArm> = []
-    // #180: track whether a non-Never arm has contributed to result_type.
-    // When true, subsequent Never arms skip unification to avoid poisoning
-    // the result type variable (which may chain to a polymorphic type param T).
+    // Never is bottom and never selects the value type of a match.  Keep the
+    // first live arm type as the join authority; if later constraints resolve
+    // it to Never, the next live arm replaces it rather than inheriting poison.
     let mut has_non_never_arm = false
 
     for arm in arms {
@@ -3248,26 +3248,23 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
             let me = merge_effects(ctx.sink, ctx.env, effects, body_r.effects, s, arm.span)
             effects = me.0
             s = me.1
-            // #180: skip arm-vs-result unification when the arm body is Never
-            // AND a non-Never arm has already been unified.  Never is the bottom
-            // type — compatible with any result type, but unifying it with a
-            // result_type that chains to a polymorphic type param T would bind
-            // T = Never, causing all callers to see the function as diverging.
-            // When no non-Never arm has run yet (all arms so far are Never), we
-            // allow the binding so all-diverging matches correctly have type Never.
             let arm_body_resolved = apply_subst(s, hexpr_type(body_r.hexpr))
             let arm_is_never = match arm_body_resolved { Type::NeverType => true, _ => false }
-            if arm_is_never && has_non_never_arm {
-                // A non-Never arm already determined the result type;
-                // skip to avoid poisoning the type chain.
-            } else {
-                let match_notes: List<DiagnosticNote> = [
-                    DiagnosticNote { message: "match arms must all have the same type", span: some(arm.span) },
-                    DiagnosticNote { message: "this arm has type '${type_to_string(apply_subst(s, hexpr_type(body_r.hexpr)))}'", span: some(hexpr_span(body_r.hexpr)) }
-                ]
-                s = unify_at_noted(ctx.sink, ctx.env, hexpr_type(body_r.hexpr), result_type, s, arm.span, match_notes)
-                if !arm_is_never {
+            if !arm_is_never {
+                let selected_is_never = match apply_subst(s, result_type) {
+                    Type::NeverType => true, _ => false
+                }
+                if !has_non_never_arm || selected_is_never {
+                    result_type = hexpr_type(body_r.hexpr)
                     has_non_never_arm = true
+                } else {
+                    let match_notes: List<DiagnosticNote> = [
+                        DiagnosticNote { message: "match arms must all have the same type", span: some(arm.span) },
+                        DiagnosticNote { message: "this arm has type '${type_to_string(arm_body_resolved)}'", span: some(hexpr_span(body_r.hexpr)) }
+                    ]
+                    s = unify_at_noted(
+                        ctx.sink, ctx.env, hexpr_type(body_r.hexpr),
+                        result_type, s, arm.span, match_notes)
                 }
             }
 
@@ -3300,7 +3297,9 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
         none => {}
     }
 
-    let final_type = apply_subst(s, result_type)
+    let final_type = if has_non_never_arm {
+        apply_subst(s, result_type)
+    } else { NEVER }
     InferResult {
         hexpr: HExpr::MatchExpr { scrutinee: scrut_r.hexpr, arms: harms, ty: final_type, effects: effects, span: span },
         subst: s, effects: effects
@@ -3310,6 +3309,25 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
 // ============================================================
 // infer_if
 // ============================================================
+
+fn join_branch_result_types(
+    ctx: InferCtx, left: Type, right: Type, subst: UnionFind,
+    span: Span, notes: List<DiagnosticNote>
+) -> (UnionFind, Type) {
+    let resolved_left = apply_subst(subst, left)
+    let resolved_right = apply_subst(subst, right)
+    let left_is_never = match resolved_left {
+        Type::NeverType => true, _ => false
+    }
+    let right_is_never = match resolved_right {
+        Type::NeverType => true, _ => false
+    }
+    if left_is_never { return (subst, resolved_right) }
+    if right_is_never { return (subst, resolved_left) }
+    let joined = unify_at_noted(
+        ctx.sink, ctx.env, left, right, subst, span, notes)
+    (joined, apply_subst(joined, left))
+}
 
 fn infer_if(mut ctx: InferCtx, condition: Expr, then_branch: Expr, else_branch: Expr?, span: Span, subst: UnionFind) -> InferResult {
     let cond_r = infer_expr(ctx, condition, subst)
@@ -3338,8 +3356,11 @@ fn infer_if(mut ctx: InferCtx, condition: Expr, then_branch: Expr, else_branch: 
                     DiagnosticNote { message: "then branch has type '${type_to_string(apply_subst(s, hexpr_type(then_r.hexpr)))}'", span: some(hexpr_span(then_r.hexpr)) },
                     DiagnosticNote { message: "else branch has type '${type_to_string(apply_subst(s, hexpr_type(else_r.hexpr)))}'", span: some(hexpr_span(else_r.hexpr)) }
                 ]
-                s = unify_at_noted(ctx.sink, ctx.env, hexpr_type(then_r.hexpr), hexpr_type(else_r.hexpr), s, span, if_notes)
-                result_type = apply_subst(s, hexpr_type(then_r.hexpr))
+                let joined = join_branch_result_types(
+                    ctx, hexpr_type(then_r.hexpr), hexpr_type(else_r.hexpr),
+                    s, span, if_notes)
+                s = joined.0
+                result_type = joined.1
                 else_hexpr = some(else_r.hexpr)
             },
             Expr::IfExpr { condition: ec, then_branch: etb, else_branch: eeb, span: espan } => {
@@ -3352,8 +3373,11 @@ fn infer_if(mut ctx: InferCtx, condition: Expr, then_branch: Expr, else_branch: 
                     DiagnosticNote { message: "then branch has type '${type_to_string(apply_subst(s, hexpr_type(then_r.hexpr)))}'", span: some(hexpr_span(then_r.hexpr)) },
                     DiagnosticNote { message: "else branch has type '${type_to_string(apply_subst(s, hexpr_type(else_if_r.hexpr)))}'", span: some(hexpr_span(else_if_r.hexpr)) }
                 ]
-                s = unify_at_noted(ctx.sink, ctx.env, hexpr_type(then_r.hexpr), hexpr_type(else_if_r.hexpr), s, span, elif_notes)
-                result_type = apply_subst(s, hexpr_type(then_r.hexpr))
+                let joined = join_branch_result_types(
+                    ctx, hexpr_type(then_r.hexpr),
+                    hexpr_type(else_if_r.hexpr), s, span, elif_notes)
+                s = joined.0
+                result_type = joined.1
                 else_hexpr = some(HExpr::Block {
                     stmts: [], tail: some(else_if_r.hexpr),
                     ty: hexpr_type(else_if_r.hexpr), effects: else_if_r.effects, span: espan

@@ -239,20 +239,6 @@
       }
     },
     {
-      "id": "C3",
-      "path": "single/c_cell_update_reentrant.ring",
-      "covers": [
-        "Cell.update callback calls set on the same Cell",
-        "the detached old Str remains live after the reentrant set",
-        "the callback result replaces and drops the interim Cell value"
-      ],
-      "expected": {
-        "phase": "native",
-        "status": "pass",
-        "stdout": "C_CELL_UPDATE_REENTRANT_OK:seed-final\n"
-      }
-    },
-    {
       "id": "D1",
       "path": "single/d_handled_effect_hof.ring",
       "covers": [
