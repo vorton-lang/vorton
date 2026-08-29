@@ -5901,7 +5901,8 @@ fn validate_prelude_source_parent_canary() {
     let parent = source_parent(
         make_module_body_ref("$single$::canary", "module-body"), reference)
     let _ = make_executable_entry(
-        reference, parent, executable_kind_fn(), make_contract_only())
+        reference, parent, executable_kind_fn(),
+        make_concrete_body_contract(body_anchor(reference)))
 }
 
 fn assemble_decls(
