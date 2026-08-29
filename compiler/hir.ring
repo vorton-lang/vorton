@@ -61,8 +61,10 @@ pub use hir_exact::{
     method_call_ref_callee_identity, HPatternBinding, HProjectionRef, h_nominal_projection,
     h_variant_projection, h_structural_projection, h_tuple_projection, h_intrinsic_projection,
     h_projection_kind, h_projection_nominal, h_projection_variant, h_projection_structural,
-    h_projection_structural_name, h_projection_tuple_index, h_projection_intrinsic, HExactCallPlan,
-    make_h_exact_call_plan, h_exact_call_callee, h_exact_call_signature,
+    h_projection_structural_name, h_projection_tuple_index, h_projection_intrinsic,
+    HCallableTypeActual, HExactCallPlan,
+    make_h_exact_call_plan, make_h_exact_call_plan_with_type_args,
+    h_exact_call_callee, h_exact_call_signature, h_exact_call_type_args,
     h_exact_call_method,
     h_exact_call_evidence, h_exact_call_effect_ctx,
     remap_h_effect_ctx_ref, remap_h_effect_ctx_source,
@@ -489,13 +491,6 @@ pub struct HCallableEffectActual {
 }
 pub struct HCallableEffectInstantiation {
     pub substitutions: List<HCallableEffectActual>
-}
-pub struct HCallableTypeActual {
-    pub owner: SymbolRef,
-    pub source_type_var_id: Int,
-    pub ordinal: Int,
-    pub arity: Int,
-    pub actual: Type
 }
 pub struct HCallableValueInstantiation {
     pub type_args: List<HCallableTypeActual>,
@@ -1378,7 +1373,7 @@ fn validate_callable_type_actuals(
     let mut prior = 0 - 1
     for value in values {
         if !symbol_ref_same(value.owner, owner) ||
-           value.source_type_var_id < 0 || value.ordinal <= prior ||
+           value.ordinal <= prior ||
            value.ordinal < 0 || value.ordinal >= value.arity ||
            value.arity <= 0 {
             panic("HIR callable type plan: formal identity/order differs")

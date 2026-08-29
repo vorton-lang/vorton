@@ -1033,7 +1033,6 @@ fn callable_type_actuals_from_mapping(
             }
             result.push(HCallableTypeActual {
                 owner: owner,
-                source_type_var_id: formal,
                 ordinal: match ordinal {
                     some(value) => value,
                     none => panic(

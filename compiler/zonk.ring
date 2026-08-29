@@ -15,8 +15,9 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     h_pattern_plan_binding, h_pattern_plan_children,
     h_pattern_plan_fields, h_pattern_plan_struct_owner,
     h_pattern_plan_variant,
-    HExactCallPlan, make_h_exact_call_plan,
-    h_exact_call_callee, h_exact_call_signature, h_exact_call_method,
+    HExactCallPlan, make_h_exact_call_plan_with_type_args,
+    h_exact_call_callee, h_exact_call_signature, h_exact_call_type_args,
+    h_exact_call_method,
     h_exact_call_evidence, h_exact_call_effect_ctx,
     HListLiteralPlan, make_h_list_literal_plan,
     h_list_literal_builder, h_list_literal_owner,
@@ -172,9 +173,16 @@ fn zonk_operator_plan(ctx: ZonkCtx, value: HOperatorPlan?) -> HOperatorPlan? {
 fn zonk_exact_call_plan(
     ctx: ZonkCtx, value: HExactCallPlan
 ) -> HExactCallPlan {
-    make_h_exact_call_plan(
+    make_h_exact_call_plan_with_type_args(
         h_exact_call_callee(value),
         zonk_type(ctx, h_exact_call_signature(value)),
+        h_exact_call_type_args(value).map(fn(actual) {
+            HCallableTypeActual {
+                owner: actual.owner,
+                ordinal: actual.ordinal, arity: actual.arity,
+                actual: zonk_type(ctx, actual.actual)
+            }
+        }),
         zonk_method_call_ref(ctx, h_exact_call_method(value)),
         h_exact_call_evidence(value),
         h_exact_call_effect_ctx(value))
@@ -386,7 +394,6 @@ fn zonk_callable_value_instantiation(
             type_args: instantiation.type_args.map(fn(actual) {
                 HCallableTypeActual {
                     owner: actual.owner,
-                    source_type_var_id: actual.source_type_var_id,
                     ordinal: actual.ordinal,
                     arity: actual.arity,
                     actual: zonk_type(ctx, actual.actual)
@@ -582,7 +589,6 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 type_args: type_args.map(fn(value) {
                     HCallableTypeActual {
                         owner: value.owner,
-                        source_type_var_id: value.source_type_var_id,
                         ordinal: value.ordinal, arity: value.arity,
                         actual: zonk_type(ctx, value.actual)
                     }

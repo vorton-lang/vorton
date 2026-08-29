@@ -461,15 +461,31 @@ pub fn h_projection_intrinsic(value: HProjectionRef) -> IntrinsicRef {
         _ => panic("HIR projection: not intrinsic") }
 }
 
+pub struct HCallableTypeActual {
+    pub owner: SymbolRef,
+    pub ordinal: Int,
+    pub arity: Int,
+    pub actual: Type
+}
+
 pub struct HExactCallPlan {
     callee: CalleeRef,
     signature: Type,
+    type_args: List<HCallableTypeActual>,
     method: MethodCallRef?,
     evidence: List<DictRef>,
     effect_ctx: TypedEffectCtxSource
 }
 pub fn make_h_exact_call_plan(
     callee: CalleeRef, signature: Type, method: MethodCallRef?,
+    evidence: List<DictRef>, effect_ctx: TypedEffectCtxSource
+) -> HExactCallPlan {
+    make_h_exact_call_plan_with_type_args(
+        callee, signature, [], method, evidence, effect_ctx)
+}
+pub fn make_h_exact_call_plan_with_type_args(
+    callee: CalleeRef, signature: Type,
+    type_args: List<HCallableTypeActual>, method: MethodCallRef?,
     evidence: List<DictRef>, effect_ctx: TypedEffectCtxSource
 ) -> HExactCallPlan {
     match signature {
@@ -488,7 +504,8 @@ pub fn make_h_exact_call_plan(
         },
         none => {}
     }
-    HExactCallPlan { callee: callee, signature: signature, method: method,
+    HExactCallPlan { callee: callee, signature: signature,
+        type_args: type_args.map(fn(value) { value }), method: method,
         evidence: evidence.map(fn(value) { value }),
         effect_ctx: effect_ctx }
 }
@@ -498,6 +515,9 @@ pub fn h_exact_call_callee(value: HExactCallPlan) -> CalleeRef {
 pub fn h_exact_call_signature(value: HExactCallPlan) -> Type {
     value.signature
 }
+pub fn h_exact_call_type_args(
+    value: HExactCallPlan
+) -> List<HCallableTypeActual> { value.type_args.map(fn(item) { item }) }
 pub fn h_exact_call_method(value: HExactCallPlan) -> MethodCallRef? {
     value.method
 }
@@ -539,8 +559,9 @@ pub fn remap_h_exact_call_effect_ctx(
     value: HExactCallPlan, sources: List<EffectCtxRef>,
     targets: List<EffectCtxRef>
 ) -> HExactCallPlan {
-    make_h_exact_call_plan(
-        value.callee, value.signature, value.method, value.evidence,
+    make_h_exact_call_plan_with_type_args(
+        value.callee, value.signature, value.type_args,
+        value.method, value.evidence,
         remap_h_effect_ctx_source(value.effect_ctx, sources, targets))
 }
 

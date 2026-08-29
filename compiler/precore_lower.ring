@@ -54,7 +54,7 @@ use hir::{
     HPatternPlan, HPatternFieldPlan, HForInPlan,
     HFieldAccessKind,
     make_h_exact_call_plan,
-    h_exact_call_callee, h_exact_call_signature,
+    h_exact_call_callee, h_exact_call_signature, h_exact_call_type_args,
     h_exact_call_method, h_exact_call_evidence,
     h_exact_call_effect_ctx,
     h_constructor_kind,
@@ -228,7 +228,8 @@ fn exact_call(
                 effects: hexpr_effects(receiver), span: span
             }
             HExpr::Call {
-                callee: callee, args: params, type_args: [],
+                callee: callee, args: params,
+                type_args: h_exact_call_type_args(plan),
                 effect_instantiation: none,
                 resolved_dicts: h_exact_call_evidence(plan),
                 effect_ctx: h_exact_call_effect_ctx(plan),
@@ -240,7 +241,7 @@ fn exact_call(
         none => {
             HExpr::Call {
                 callee: diagnostic_callee(callee_ref, signature, span),
-                args: arguments, type_args: [],
+                args: arguments, type_args: h_exact_call_type_args(plan),
                 effect_instantiation: none,
                 resolved_dicts: h_exact_call_evidence(plan),
                 effect_ctx: h_exact_call_effect_ctx(plan),

@@ -16,7 +16,7 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     make_h_variant_constructor_plan, make_h_tuple_constructor_plan,
     make_h_record_constructor_plan, h_variant_projection,
     HExactCallPlan, HStringInterpPlan, HListLiteralPlan,
-    make_h_exact_call_plan,
+    make_h_exact_call_plan, make_h_exact_call_plan_with_type_args,
     make_h_string_interp_plan, make_h_list_literal_plan,
     method_call_ref_callee_identity,
     make_h_range_for_in_plan,
@@ -1913,12 +1913,16 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 s = unify_at(ctx.sink, ctx.env, idx_type, INT, s, span)
                 result_ty = if type_params.len() > 0 { type_params.get(0).unwrap() } else { Type::ErrorType }
                 let symbol = builtin_list_index_symbol()
-                index_call_plan = some(make_h_exact_call_plan(
+                let actual_element = apply_subst(s, result_ty)
+                index_call_plan = some(make_h_exact_call_plan_with_type_args(
                     make_named_callee_ref(symbol), Type::FnType {
                         params: [recv_type, INT],
-                        return_type: apply_subst(s, result_ty),
+                        return_type: actual_element,
                         effects: EMPTY_ROW
-                    }, none, [], make_empty_effect_ctx_source()))
+                    }, [HCallableTypeActual {
+                        owner: symbol,
+                        ordinal: 0, arity: 1, actual: actual_element
+                    }], none, [], make_empty_effect_ctx_source()))
                 index_projection = some(h_structural_projection(make_path_ref(
                     path_owner_for_symbol(symbol), ["result"],
                     path_role_synthetic()), "result"))

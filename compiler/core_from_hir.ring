@@ -3551,7 +3551,6 @@ fn direct_type_substitutions(
     let mut prior_ordinal = 0 - 1
     for argument in type_args {
         if !symbol_ref_same(argument.owner, owner) ||
-           argument.source_type_var_id < 0 ||
            argument.ordinal <= prior_ordinal ||
            argument.ordinal < 0 || argument.ordinal >= source.formals.len() ||
            argument.arity != source.formals.len() {
