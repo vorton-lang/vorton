@@ -3716,7 +3716,8 @@ fn verify_cfg_entry_derivation_exit(
 }
 
 fn verify_cfg_entry_promotion_log(
-    body: PlannerBody, entry_seed: List<SlotFlow>,
+    body: PlannerBody, solved: SolvedResourceGraph,
+    entry_seed: List<SlotFlow>,
     cfg_body: CfgBodyCertificate,
     blocks: List<CfgBlockCertificate>
 ) {
@@ -3985,7 +3986,8 @@ pub fn verify_rc_topology_contract(
             panic("ResourcePlanner verifier: frozen block census drifted")
         }
         verify_cfg_entry_promotion_log(
-            expected_body, certified_entry_seed, cfg_body, cfg_blocks)
+            expected_body, solved,
+            certified_entry_seed, cfg_body, cfg_blocks)
         let mut block_index = 0
         while block_index < expected_body.blocks.len() {
             let expected_block = expected_body.blocks.get(block_index).unwrap()
