@@ -178,15 +178,15 @@
 
 1. 一次长执行失败后，下次重跑前必须针对该failure class完成bounded invariant-consumer closure：核对其producer、constructor、copy/rebuild、assembler、validator、lookup、legacy bridge与backend等当前真实consumer，统一重复predicate或authority，并完成一次窄review。不得只修stack顶部便立即重跑；该闭包不是全仓Audit，也不得借机扩大到无关模块或未来consumer。
 2. 长命令启动前复用现有设施形成cheap preflight packet。至少按实际diff选择changed compiler file fast checks、真实focused canary及old-authority/fallback census；彼此独立且不共享生成物的项默认并发，任一失败即阻止长门。`check compiler/main.ring`等额外步骤只有一次同机实测证明其相对完整build有显著墙钟收益时才保留，不能为流程完整性制造无收益命令。
-3. candidate一旦产生，固定matrix中的独立fast cases必须全部启动；每个case内部fail-fast，但batch不得因首个红项提前终止。等待全部case terminal后按exact failure identity去重汇总，同时保留每个case的输入、exit与首个独立失败。并发仍服从既有fast-check资源规则；source-build、fixed point、full与ASan等sealed长门的single-instance、12 GiB与process cap不变。
+3. candidate一旦产生，固定matrix中的独立fast cases必须全部启动；每个case内部fail-fast，但batch不得因首个红项提前终止。等待全部case terminal后按exact failure identity去重汇总，同时保留每个case的输入、exit与首个独立失败。并发仍服从既有fast-check资源规则；source-build、fixed point、full与ASan等sealed命令也可在不同fixed SHA班车之间并发，只要依赖DAG允许、输出隔离且不超过在途班车与既定memory/ASan资源门。同一SHA不得重复启动相同construction或让两个命令写同一artifact。
 
 本决定不授权通用multi-error validator框架、IR snapshot/replay/cache、新artifact authority、第二验证系统或让损坏的单进程fail-late。若以后需要其中任何一项，必须先以重复实测失败证明现实收益，并按其真实架构与维护成本重新分类。
 
 **静态审查—验证班车双线（2026-08-29 用户决定）**：机器执行不得阻塞agent继续产生独立信息。Lane A持续对固定authority snapshot做只读static review、failure-class census与oracle核对；Lane B由Steward持续实现并组织validation bus。Review finding只有取得独立证据并由root读码复核后才作为confirmed blocker发给实现线；killed、重复、纯未来完整性或没有0.1 consumer的观察不打断班车。
 
-每班车固定source SHA、candidate hash、输入与命令。Source-build/gen1等candidate construction仍是single instance；candidate产生后，不共享生成物和可变状态的独立matrix validations最多四个并发，各自使用isolated output，并始终满足active process `<=5`、aggregate commit `<=12 GiB`及对应ASan/resource门。运行中的结果永远归属于其固定candidate；其间产生的新fix只进入下一班车，禁止把不同SHA的成功或失败拼成同一claim，也禁止并发两个写同一artifact的construction。
+每班车固定source SHA、candidate hash、输入与命令；从该SHA的construction启动起，到其全部validation terminal为止，该fixed SHA算一辆**在途班车**。不同fixed commit/SHA同时在途的班车总数必须 `<4`，即最多3辆。不同SHA的source-build/gen1等candidate construction可以并发；同一SHA只禁止重复construction或多个命令写同一artifact。Candidate产生后，同一SHA内部同样不限制独立matrix validation数量或进程数，各任务只需使用isolated output。班车机制本身不设置全局或per-SHA进程数量门；aggregate commit `<=12 GiB`及对应ASan/resource门保持，某道sealed命令若由其active spec另有进程约束，只约束该命令，不得外推为validation bus通则。运行中的结果永远归属于其固定candidate；其间产生的新fix只进入下一班车，禁止把不同SHA的成功或失败拼成同一claim。
 
-Fast validation bus不因首个红项取消其他独立case；等待全部terminal后按exact failure identity去重汇总，再由confirmed结果决定下一班车。Static review在实现、construction与validation运行期间继续推进，但不得读取半写生成物或把moving WIP冒充fixed review snapshot。Fixed point、full、ASan、self-host与exact CI等存在artifact/前门依赖的sealed关键链仍按其DAG和single-artifact纪律执行；“最多四个验证”不放宽验收顺序、资源门或no-retry规则。
+Fast validation bus不因首个红项取消其他独立case；等待全部terminal后按exact failure identity去重汇总，再由confirmed结果决定下一班车。Static review在实现、construction与validation运行期间继续推进，但不得读取半写生成物或把moving WIP冒充fixed review snapshot。Fixed point、full、ASan、self-host与exact CI等存在artifact/前门依赖的sealed关键链仍服从各自DAG、per-SHA artifact exclusivity与no-retry纪律；不同SHA的独立节点可在最多3辆在途班车内并发。同SHA内部与全部班车汇总后均没有班车级进程数量门，只有既定memory/ASan资源门及具体sealed命令自身的active spec。
 
 ### 4.4 执行与并发
 
@@ -196,7 +196,7 @@ Fast validation bus不因首个红项取消其他独立case；等待全部termin
 - 并发任务不得修改同一文件；
 - implementer 只改分配范围并提交，root 独占 main、看板与治理文档；
 - 一个 agent 身份贯穿实现、review 返修和复验，不为每轮反馈重新生成。
-- 只读review lane可与isolated implementation、construction或validation并行；review固定commit/patch-id，发现confirmed blocker后送原owner返修，不接管写权限。Validation并发遵守§4.3.3班车的fixed-SHA、isolated-output与四worker资源上限。
+- 只读review lane可与isolated implementation、construction或validation并行；review固定commit/patch-id，发现confirmed blocker后送原owner返修，不接管写权限。Construction与validation并发遵守§4.3.3班车的fixed-SHA、跨SHA同时在途`<4`、per-SHA artifact exclusivity、isolated-output与既定memory/ASan资源门；班车不另设construction-count或process-count cap。
 
 单个 agent 遇到设计问题时先向 root 给出事实、选项和证据。root 在自主授权内决定；属于用户保留决定才写 Inbox。该 agent 可以转做同 worktree 内不依赖该决定的部分，root 同时补位其他任务。
 
