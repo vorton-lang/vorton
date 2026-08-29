@@ -25,10 +25,11 @@ use ir_identity::{
     trait_method_ref_name, intrinsic_ref_symbol,
     make_named_callee_ref,
     path_ref_normalized_child_path,
-    module_body_ref_origin_module_key
+    module_body_ref_origin_module_key,
+    builtin_dict_constructor_symbol
 }
 use ir_inventory::{
-    ExecutableRef, ExecutableKind, ExactMethodRef,
+    ExecutableRef, ExecutableKind, ExactMethodRef, ExactDictRef,
     executable_ref_same, executable_ref_is_named,
     make_named_executable_ref,
     executable_ref_named_symbol, executable_ref_anonymous_path,
@@ -45,7 +46,9 @@ use ir_inventory::{
     system_host_callable_executable,
     exact_method_ref_is_intrinsic, exact_method_ref_is_impl,
     exact_method_ref_is_trait, exact_method_ref_intrinsic,
-    exact_method_ref_impl, exact_method_ref_trait
+    exact_method_ref_impl, exact_method_ref_trait,
+    dict_ref_is_local, dict_ref_local, dict_ref_is_wrapped,
+    dict_ref_wrapped_base, dict_ref_wrapped_inner, dict_ref_same
 }
 use resource_model::{
     flow_call_contract_parameter_types,
@@ -71,6 +74,7 @@ use hir::{
     h_pattern_tuple, h_pattern_struct, h_pattern_variant,
     make_h_variant_constructor_plan, make_h_tuple_constructor_plan,
     make_h_record_constructor_plan,
+    make_h_dict_construct_plan,
     HFieldAccessKind, HNominalStructFieldInit, HStructFieldInit,
     HResourceSite,
     DictRef, MethodCallRef,
@@ -106,6 +110,8 @@ use flow_ir::{
     flow_project_contract, flow_project_base, flow_project_result,
     flow_initialize_operation, flow_initialize_inputs, flow_initialize_target,
     flow_operation_contract_kind_tag, flow_operation_contract_variant,
+    flow_operation_contract_dict_construct_dictionary,
+    flow_operation_contract_dict_construct_result,
     flow_fail_raise_sink,
     flow_slot_reference, flow_slot_type
 }
@@ -150,6 +156,7 @@ use core_expr::{
     core_expr_system_host, core_expr_fail_payload,
     core_expr_project_base, core_expr_project_field,
     core_expr_constructor, core_expr_constructor_fields,
+    core_expr_dict_construct_dictionary, core_expr_dict_construct_result,
     core_expr_move_update_base, core_expr_move_update_constructor,
     core_expr_move_update_schema, core_expr_move_update_overrides,
     core_expr_lambda_executable, core_expr_lambda_captures,
@@ -194,6 +201,10 @@ use core_expr::{
     core_effect_ctx_lookup_context, core_effect_ctx_lookup_token,
     core_impl_owner, core_impl_methods, core_impl_assoc_bindings,
     core_assoc_binding_member
+}
+use hir_exact::{
+    dict_ref_exact, dict_ref_is_wrapped_physical,
+    dict_ref_wrapped_name, dict_ref_wrapped_physical_inner
 }
 use effect_contract::{
     CoreEffectSet, TypedHandledEffectInstance,
@@ -1162,6 +1173,37 @@ fn validate_flow_variant_initialize(
     }
 }
 
+fn validate_flow_dict_initialize(
+    instruction: FlowInstruction, dictionary: ExactDictRef,
+    result: SlotRef
+) {
+    let operation = flow_initialize_operation(instruction)
+    if flow_operation_contract_kind_tag(operation) != 14 ||
+       !dict_ref_same(
+            flow_operation_contract_dict_construct_dictionary(operation),
+            dictionary) ||
+       !slot_ref_same(
+            flow_operation_contract_dict_construct_result(operation), result) ||
+       !slot_ref_same(flow_initialize_target(instruction), result) {
+        panic("RcHIR bridge: Flow/Core dictionary construct identity differs")
+    }
+    let inputs = flow_initialize_inputs(instruction)
+    let mut input_index = 0
+    for inner in dict_ref_wrapped_inner(dictionary) {
+        if dict_ref_is_local(inner) {
+            if input_index >= inputs.len() ||
+               !slot_ref_same(
+                    dict_ref_local(inner), inputs.get(input_index).unwrap()) {
+                panic("RcHIR bridge: dictionary evidence operand order differs")
+            }
+            input_index = input_index + 1
+        }
+    }
+    if input_index != inputs.len() {
+        panic("RcHIR bridge: dictionary evidence operand census differs")
+    }
+}
+
 fn primitive_bin_op(tag: Int) -> BinOp {
     if tag == 0 { return BinOp::Add }
     if tag == 1 { return BinOp::Sub }
@@ -1671,6 +1713,43 @@ fn simple_core_expr(
             ctx.projection, executable,
             legacy_type_for(ctx.projection, core_expr_type(expr))))
     }
+    if kind == 20 {
+        let dictionary = core_expr_dict_construct_dictionary(expr)
+        let result = core_expr_dict_construct_result(expr)
+        if !dict_ref_is_wrapped(dictionary) {
+            panic("RcHIR bridge: dictionary construct is not exact wrapped evidence")
+        }
+        validate_flow_dict_initialize(instruction_for_node_role(
+            ctx, node_ordinal, BRIDGE_ROLE_EXPR_PRIMARY, 0, 0),
+            dictionary, result)
+        let physical = legacy_projection_dictionary(ctx.projection, dictionary)
+        if !dict_ref_is_wrapped_physical(physical) ||
+           !dict_ref_same(dict_ref_exact(physical), dictionary) {
+            panic("RcHIR bridge: dictionary construct physical projection differs")
+        }
+        let inner = dict_ref_wrapped_physical_inner(physical)
+        let exact_inner = dict_ref_wrapped_inner(dictionary)
+        if inner.len() != exact_inner.len() {
+            panic("RcHIR bridge: dictionary construct evidence arity differs")
+        }
+        let mut index = 0
+        while index < inner.len() {
+            if !dict_ref_same(
+                    dict_ref_exact(inner.get(index).unwrap()),
+                    exact_inner.get(index).unwrap()) {
+                panic("RcHIR bridge: dictionary construct evidence order differs")
+            }
+            index = index + 1
+        }
+        return simple_operand(HExpr::DictConstruct {
+            base_dict: dict_ref_wrapped_name(physical),
+            plan: some(make_h_dict_construct_plan(
+                make_named_executable_ref(builtin_dict_constructor_symbol()),
+                dict_ref_wrapped_base(dictionary), exact_inner, result,
+                make_empty_effect_ctx_source())),
+            inner: inner, ty: ty, effects: effects, span: span_zero()
+        })
+    }
     panic("RcHIR bridge: structured Core expression used simple serializer")
 }
 
@@ -1714,7 +1793,7 @@ fn serialize_core_expr(
             after: []
         }
     }
-    if kind <= 11 || kind == 17 {
+    if kind <= 11 || kind == 17 || kind == 20 {
         let simple = simple_core_expr(ctx, owner, expr, node_ordinal)
         let mut prefix = simple.prefix
         append_all(prefix, before_drop_statements(
@@ -1913,8 +1992,38 @@ fn serialize_core_statement(
     if kind == 0 {
         let target_slot = core_place_slot(core_stmt_target(statement))
         let target = projected_binder_for(ctx.projection, target_slot)
+        let value = core_stmt_value(statement)
+        if core_expr_kind_tag(value) == 20 {
+            let serialized = serialize_core_expr(ctx, owner, value)
+            let rhs_slot = node_anchor(ctx, serialized.node_ordinal)
+            if !slot_ref_same(rhs_slot, target_slot) ||
+               !slot_ref_same(
+                    core_expr_dict_construct_result(value), target_slot) {
+                panic("RcHIR bridge: dictionary construct binding differs")
+            }
+            let mut result = serialized.prefix
+            result.push(if core_stmt_bind_is_mutable(statement) {
+                HStmt::Var {
+                    name: legacy_binder_projection_name(target),
+                    name_span: span_zero(),
+                    def_id: some(legacy_binder_projection_def_id(target)),
+                    ty: legacy_binder_projection_type(target),
+                    init: serialized.value, span: span_zero()
+                }
+            } else {
+                HStmt::Let {
+                    name: legacy_binder_projection_name(target),
+                    name_span: span_zero(),
+                    def_id: some(legacy_binder_projection_def_id(target)),
+                    ty: legacy_binder_projection_type(target),
+                    init: serialized.value, span: span_zero()
+                }
+            })
+            append_all(result, serialized.after)
+            return result
+        }
         let serialized = serialize_core_expr(
-            ctx, owner, core_stmt_value(statement))
+            ctx, owner, value)
         let rhs_slot = node_anchor(ctx, serialized.node_ordinal)
         let rhs_binder = bridge_binder_for(ctx, rhs_slot)
         let mut result = serialized.prefix

@@ -30,7 +30,7 @@ use ir_identity::{
     slot_ref_same, slot_ref_is_source,
     slot_ref_source_origin_module_key, slot_ref_source_domain,
     slot_ref_source_def_id, slot_ref_synthetic_path,
-    slot_domain_tag,
+    slot_domain_tag, slot_domain_dictionary, slot_domain_same,
     nominal_field_ref_same, nominal_field_ref_owner,
     nominal_field_ref_member, nominal_field_ref_index,
     variant_field_ref_same, variant_field_ref_variant,
@@ -46,7 +46,7 @@ use ir_identity::{
 }
 use ir_inventory::{
     ExecutableRef, ExactDictRef,
-    dict_ref_is_local, dict_ref_is_static,
+    dict_ref_is_local, dict_ref_is_static, dict_ref_is_wrapped,
     dict_ref_local, dict_ref_static,
     dict_ref_wrapped_base, dict_ref_wrapped_inner,
     executable_ref_same, executable_ref_is_named,
@@ -112,7 +112,7 @@ use core_type_source::{
     flow_generic_param_owner, flow_generic_param_index,
     flow_generic_param_arity, flow_generic_param_bounds,
     flow_generic_param_fact_same,
-    flow_type_node_generic_param,
+    flow_type_node_generic_param, flow_type_node_children,
     flow_type_actual_satisfies_substituted_formal,
     flow_effect_actual_satisfies_substituted_formal,
     core_effect_instantiation_projects_substitutions,
@@ -848,6 +848,10 @@ enum FlowOperationValue {
         type_substitutions: List<FlowTypeSubstitution>,
         effect_substitutions: List<CoreEffectSubstitution>,
         effects: CoreEffectInstantiation
+    },
+    DictConstructOperationValue {
+        dictionary: ExactDictRef,
+        result: SlotRef
     }
 }
 
@@ -1144,6 +1148,51 @@ pub fn make_flow_callable_value_contract(
         make_fresh_flow_value_origin())
 }
 
+fn exact_dictionary_contains_local(value: ExactDictRef) -> Bool {
+    if dict_ref_is_local(value) { return true }
+    if dict_ref_is_static(value) { return false }
+    for inner in dict_ref_wrapped_inner(value) {
+        if exact_dictionary_contains_local(inner) { return true }
+    }
+    false
+}
+
+pub fn make_flow_dict_construct_contract(
+    dictionary: ExactDictRef, result: SlotRef,
+    input_types: List<CoreTypeRef>, target_type: CoreTypeRef
+) -> FlowOperationContract {
+    if !dict_ref_is_wrapped(dictionary) || !slot_ref_is_source(result) ||
+       !slot_domain_same(
+            slot_ref_source_domain(result), slot_domain_dictionary()) {
+        panic("FlowIR: dictionary construct exact identity is invalid")
+    }
+    let mut local_count = 0
+    for inner in dict_ref_wrapped_inner(dictionary) {
+        if dict_ref_is_local(inner) {
+            if slot_ref_same(dict_ref_local(inner), result) {
+                panic("FlowIR: dictionary construct aliases its result")
+            }
+            local_count = local_count + 1
+        } else if exact_dictionary_contains_local(inner) {
+            panic("FlowIR: dictionary construct has an unflattened dynamic child")
+        }
+    }
+    if local_count == 0 || local_count != input_types.len() {
+        panic("FlowIR: dictionary construct dynamic evidence arity differs")
+    }
+    let mut roles: List<FlowSemanticRole> = []
+    let mut role_index = 0
+    while role_index < input_types.len() {
+        roles.push(flow_semantic_role_read())
+        role_index = role_index + 1
+    }
+    make_flow_operation_contract(
+        FlowOperationValue::DictConstructOperationValue {
+            dictionary: dictionary, result: result
+        }, input_types, roles, empty_aggregate_inputs(input_types.len()),
+        target_type, flow_semantic_role_read(), make_fresh_flow_value_origin())
+}
+
 pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
     match value.value {
         FlowOperationValue::IntLiteralOperationValue(_) => 0,
@@ -1157,7 +1206,8 @@ pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
         FlowOperationValue::RecordAggregateOperationValue(_) => 10,
         FlowOperationValue::ClosureOperationValue { .. } => 11,
         FlowOperationValue::CallableValueOperationValue { .. } => 12,
-        FlowOperationValue::EffectCtxOverlayOperationValue { .. } => 13
+        FlowOperationValue::EffectCtxOverlayOperationValue { .. } => 13,
+        FlowOperationValue::DictConstructOperationValue { .. } => 14
     }
 }
 pub fn flow_operation_contract_input_roles(
@@ -1250,6 +1300,23 @@ pub fn flow_operation_contract_callable_evidence(
         FlowOperationValue::CallableValueOperationValue { evidence, .. } =>
             copy_flow_evidence(evidence),
         _ => panic("FlowIR: operation is not a callable value")
+    }
+}
+pub fn flow_operation_contract_dict_construct_dictionary(
+    value: FlowOperationContract
+) -> ExactDictRef {
+    match value.value {
+        FlowOperationValue::DictConstructOperationValue { dictionary, .. } =>
+            dictionary,
+        _ => panic("FlowIR: operation is not DictConstruct")
+    }
+}
+pub fn flow_operation_contract_dict_construct_result(
+    value: FlowOperationContract
+) -> SlotRef {
+    match value.value {
+        FlowOperationValue::DictConstructOperationValue { result, .. } => result,
+        _ => panic("FlowIR: operation is not DictConstruct")
     }
 }
 pub fn flow_operation_contract_capture_targets(
@@ -3526,6 +3593,48 @@ fn validate_dictionary_evidence(value: ExactDictRef, body: FlowBody) {
     }
 }
 
+fn validate_dict_construct_initialize(
+    operation: FlowOperationContract, inputs: List<SlotRef>, target: SlotRef,
+    body: FlowBody, type_nodes: List<FlowTypeNode>
+) {
+    let dictionary = flow_operation_contract_dict_construct_dictionary(operation)
+    let result = flow_operation_contract_dict_construct_result(operation)
+    validate_dictionary_evidence(dictionary, body)
+    let result_slot = slot_for_ref(body.slots, result)
+    if !slot_ref_same(result, target) ||
+       flow_storage_contract_tag(result_slot.storage_contract) !=
+            flow_storage_contract_tag(flow_own_storage()) {
+        panic("FlowIR: dictionary construct result storage differs")
+    }
+    let target_node = type_node_for(type_nodes, operation.target_type)
+    if flow_type_kind_tag(target_node.kind) != FLOW_TYPE_TUPLE ||
+       flow_type_node_children(target_node).len() != 0 {
+        panic("FlowIR: dictionary construct is not the 0.1 dictionary type")
+    }
+    let mut input_index = 0
+    for inner in dict_ref_wrapped_inner(dictionary) {
+        if dict_ref_is_local(inner) {
+            if input_index >= inputs.len() ||
+               !slot_ref_same(
+                    dict_ref_local(inner), inputs.get(input_index).unwrap()) {
+                panic("FlowIR: dictionary construct operand order differs")
+            }
+            input_index = input_index + 1
+        } else if exact_dictionary_contains_local(inner) {
+            panic("FlowIR: dictionary construct has an unflattened dynamic child")
+        }
+    }
+    if input_index != inputs.len() {
+        panic("FlowIR: dictionary construct operand census differs")
+    }
+    for role in operation.input_roles {
+        if flow_semantic_role_tag(role) !=
+                flow_semantic_role_tag(flow_semantic_role_read()) {
+            panic("FlowIR: dictionary construct evidence is not borrowed")
+        }
+    }
+}
+
 fn dynamic_call_slot_for_path(
     values: List<FlowSlot>, target: PathRef
 ) -> FlowSlot {
@@ -5039,6 +5148,10 @@ fn validate_typed_instructions(
                                         flow_evidence_dict(item), body)
                                 }
                             },
+                            FlowOperationValue::DictConstructOperationValue {
+                                ..
+                            } => validate_dict_construct_initialize(
+                                operation, inputs, target, body, type_nodes),
                             _ => {}
                         }
                     },
@@ -5504,6 +5617,12 @@ fn encode_operation(value: FlowOperationContract) -> Str {
                     encode_effect_contract(
                         core_effect_substitution_replacement(substitution))}")
             }
+        },
+        FlowOperationValue::DictConstructOperationValue {
+            dictionary, result
+        } => {
+            parts.push("dictionary:${encode_dict_evidence(dictionary)}")
+            parts.push("result:${encode_slot(result)}")
         }
     }
     for ty in value.input_types {

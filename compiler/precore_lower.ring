@@ -4,6 +4,8 @@
 // lowering is driven by an exact plan attached at the first-known inference
 // site. Names and spans below are diagnostic payload only; they never select a
 // callee, method, projection, constructor, pattern, dictionary, or binder.
+// DictConstruct is already an exact generated semantic operation, so its
+// direct-let carrier is validated here and consumed by Core rather than erased.
 
 use ast::{Span, Pattern, NamedPatternField, BinOp}
 use types::{
@@ -31,7 +33,7 @@ use ir_inventory::{
     executable_ref_anonymous_path, executable_ref_origin_module_key,
     system_host_callable_effect, system_host_callable_executable,
     binder_entry_slot,
-    effect_operation_ref_effect, make_exact_wrapped_dict_ref,
+    effect_operation_ref_effect,
     dict_ref_same
 }
 use env::{TypeEnv}
@@ -63,8 +65,6 @@ use hir::{
     h_list_literal_builder, h_list_literal_owner,
     h_list_literal_constructor, h_list_literal_allocator,
     h_list_literal_push,
-    h_dict_construct_executable, h_dict_construct_trait,
-    h_dict_construct_effect_ctx,
     h_pattern_kind, h_pattern_plan_binding, h_pattern_plan_children,
     h_pattern_plan_fields, h_pattern_plan_struct_owner,
     h_pattern_plan_variant, h_pattern_field_projection,
@@ -90,8 +90,7 @@ use hir::{
     validate_hir_binder_def_ids
 }
 use hir_exact::{
-    make_wrapped_dict_ref, dict_ref_exact,
-    h_dict_construct_base, h_dict_construct_inner,
+    dict_ref_exact, h_dict_construct_inner,
     h_dict_construct_result
 }
 
@@ -995,22 +994,56 @@ fn exact_h_type_params(values: List<HTypeParam>) -> List<HTypeParam> {
     result
 }
 
+fn close_dict_construct(
+    base_dict: Str, exact: HDictConstructPlan,
+    inner: List<DictRef>, ty: Type, effects: EffectRow, span: Span
+) -> HExpr {
+    let exact_inner = h_dict_construct_inner(exact)
+    if exact_inner.len() != inner.len() {
+        panic("PreCore closure: dictionary evidence arity differs")
+    }
+    let mut index = 0
+    while index < inner.len() {
+        if !dict_ref_same(
+                exact_inner.get(index).unwrap(),
+                dict_ref_exact(inner.get(index).unwrap())) {
+            panic("PreCore closure: dictionary evidence order differs")
+        }
+        index = index + 1
+    }
+    HExpr::DictConstruct {
+        base_dict: base_dict, plan: some(exact), inner: inner,
+        ty: ty, effects: effects, span: span
+    }
+}
+
 fn close_stmt(value: HStmt) -> List<HStmt> {
     match value {
         HStmt::Let { name, name_span, def_id, ty, init, span } => {
-            match init {
-                HExpr::DictConstruct { plan: some(exact), .. } => {
+            let closed_init = match init {
+                HExpr::DictConstruct {
+                    base_dict, plan, inner, ty: init_ty,
+                    effects, span: init_span
+                } => {
+                    let exact = match plan {
+                        some(value) => value,
+                        none => panic(
+                            "PreCore closure: dictionary constructor is absent")
+                    }
                     let result = h_dict_construct_result(exact)
                     if !slot_ref_is_source(result) ||
                        def_id != some(slot_ref_source_def_id(result)) {
                         panic(
                             "PreCore closure: dictionary result binder differs")
                     }
+                    close_dict_construct(
+                        base_dict, exact, inner,
+                        init_ty, effects, init_span)
                 },
-                _ => {}
+                _ => close_expr(init)
             }
             [HStmt::Let { name: name, name_span: name_span, def_id: def_id,
-                ty: ty, init: close_expr(init), span: span }]
+                ty: ty, init: closed_init, span: span }]
         },
         HStmt::Var { name, name_span, def_id, ty, init, span } => [
             HStmt::Var { name: name, name_span: name_span, def_id: def_id,
@@ -1505,38 +1538,8 @@ fn close_expr(value: HExpr) -> HExpr {
             receiver, index, call_plan, projection, ty, effects, span
         } => close_index(
             receiver, index, call_plan, projection, ty, effects, span),
-        HExpr::DictConstruct {
-            base_dict, plan, inner, ty, effects, span
-        } => {
-            let exact = match plan {
-                some(value) => value,
-                none => panic(
-                    "PreCore closure: dictionary constructor is absent")
-            }
-            let exact_inner = h_dict_construct_inner(exact)
-            if exact_inner.len() != inner.len() {
-                panic("PreCore closure: dictionary evidence arity differs")
-            }
-            let mut index = 0
-            while index < inner.len() {
-                if !dict_ref_same(
-                        exact_inner.get(index).unwrap(),
-                        dict_ref_exact(inner.get(index).unwrap())) {
-                    panic("PreCore closure: dictionary evidence order differs")
-                }
-                index = index + 1
-            }
-            let wrapped = make_wrapped_dict_ref(
-                base_dict, h_dict_construct_trait(exact), inner,
-                make_exact_wrapped_dict_ref(
-                    h_dict_construct_base(exact), exact_inner))
-            executable_call(
-                h_dict_construct_executable(exact), Type::FnType {
-                    params: [], return_type: ty, effects: EMPTY_ROW
-                }, [], [wrapped],
-                h_dict_construct_effect_ctx(exact),
-                ty, effects, span)
-        },
+        HExpr::DictConstruct { .. } => panic(
+            "PreCore closure: dictionary construct is not a direct let initializer"),
         HExpr::Clone { .. } =>
             panic("PreCore closure: legacy resource Clone crossed semantic closure"),
         HExpr::Take { .. } =>

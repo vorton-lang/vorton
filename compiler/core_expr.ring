@@ -64,7 +64,9 @@ use ir_inventory::{
     exact_method_ref_is_intrinsic, exact_method_ref_is_impl,
     exact_method_ref_is_trait, exact_method_ref_intrinsic,
     exact_method_ref_impl, exact_method_ref_trait,
-    dict_ref_is_local, dict_ref_is_static, dict_ref_local, dict_ref_static,
+    make_exact_local_dict_ref,
+    dict_ref_is_local, dict_ref_is_static, dict_ref_is_wrapped,
+    dict_ref_local, dict_ref_static,
     dict_ref_wrapped_base, dict_ref_wrapped_inner, dict_ref_same,
     binder_kind_dictionary_evidence_local,
     binder_kind_dictionary_evidence_param, binder_kind_lambda_capture,
@@ -1614,6 +1616,10 @@ enum CoreExprValue {
         constructor: CoreConstructorRef,
         fields: List<CoreFieldValue>
     },
+    DictConstructExprValue {
+        dictionary: ExactDictRef,
+        result: SlotRef
+    },
     MoveUpdateExprValue {
         base: CoreExpr,
         constructor: CoreConstructorRef,
@@ -1816,6 +1822,47 @@ pub fn make_core_primitive_expr(
     make_core_expr(ty, effects, origin,
         CoreExprValue::PrimitiveExprValue {
             operation: operation, operands: copy_core_exprs(operands)
+        })
+}
+pub fn make_core_dict_construct_expr(
+    ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
+    dictionary: ExactDictRef, result: SlotRef
+) -> CoreExpr {
+    if core_effect_set_atoms(effects).len() != 0 ||
+       !dict_ref_is_wrapped(dictionary) ||
+       !slot_ref_is_source(result) ||
+       !slot_domain_same(
+            slot_ref_source_domain(result), slot_domain_dictionary()) {
+        panic("CoreHIR: dictionary construct exact contract is invalid")
+    }
+    let mut local_inputs = 0
+    for inner in dict_ref_wrapped_inner(dictionary) {
+        if dict_ref_is_local(inner) {
+            if slot_ref_same(dict_ref_local(inner), result) {
+                panic("CoreHIR: dictionary construct aliases its result")
+            }
+            local_inputs = local_inputs + 1
+        } else if dict_ref_is_wrapped(inner) {
+            let mut pending = dict_ref_wrapped_inner(inner)
+            while pending.len() > 0 {
+                let child = pending.pop().unwrap()
+                if dict_ref_is_local(child) {
+                    panic("CoreHIR: dictionary construct has an unflattened dynamic child")
+                }
+                if dict_ref_is_wrapped(child) {
+                    for nested in dict_ref_wrapped_inner(child) {
+                        pending.push(nested)
+                    }
+                }
+            }
+        }
+    }
+    if local_inputs == 0 {
+        panic("CoreHIR: dictionary construct has no dynamic evidence")
+    }
+    make_core_expr(ty, effects, origin,
+        CoreExprValue::DictConstructExprValue {
+            dictionary: dictionary, result: result
         })
 }
 pub fn make_core_call_expr(
@@ -2213,7 +2260,8 @@ pub fn core_expr_kind_tag(value: CoreExpr) -> Int {
         CoreExprValue::HandleExprValue { .. } => 16,
         CoreExprValue::CallableValueExprValue { .. } => 17,
         CoreExprValue::FailRaiseExprValue { .. } => 18,
-        CoreExprValue::MoveUpdateExprValue { .. } => 19
+        CoreExprValue::MoveUpdateExprValue { .. } => 19,
+        CoreExprValue::DictConstructExprValue { .. } => 20
     }
 }
 pub fn core_expr_literal(value: CoreExpr) -> CoreLiteral {
@@ -2391,6 +2439,18 @@ pub fn core_expr_constructor_fields(value: CoreExpr) -> List<CoreFieldValue> {
         CoreExprValue::ConstructExprValue { fields, .. } =>
             copy_field_values(fields),
         _ => panic("CoreHIR: expression is not Construct")
+    }
+}
+pub fn core_expr_dict_construct_dictionary(value: CoreExpr) -> ExactDictRef {
+    match value.value {
+        CoreExprValue::DictConstructExprValue { dictionary, .. } => dictionary,
+        _ => panic("CoreHIR: expression is not DictConstruct")
+    }
+}
+pub fn core_expr_dict_construct_result(value: CoreExpr) -> SlotRef {
+    match value.value {
+        CoreExprValue::DictConstructExprValue { result, .. } => result,
+        _ => panic("CoreHIR: expression is not DictConstruct")
     }
 }
 pub fn core_expr_move_update_base(value: CoreExpr) -> CoreExpr {
@@ -3029,6 +3089,11 @@ fn validate_expr_with_loop_depth(
         CoreExprValue::ConstructExprValue { constructor, fields } => {
             validate_constructor_fields(constructor, fields, body, loop_depth)
         },
+        CoreExprValue::DictConstructExprValue { dictionary, result } => {
+            validate_dictionary_binder(dictionary, body)
+            validate_dictionary_binder(
+                make_exact_local_dict_ref(result), body)
+        },
         CoreExprValue::MoveUpdateExprValue {
             base, constructor, schema, overrides
         } => {
@@ -3159,6 +3224,11 @@ fn validate_statement(value: CoreStmt, body: CoreBody, loop_depth: Int) {
         CoreStmtValue::Bind { target, value: expr, origin, .. } => {
             validate_origin(origin, body.reference)
             require_binder(body.binders, target)
+            if core_expr_kind_tag(expr) == 20 &&
+               !slot_ref_same(
+                    target, core_expr_dict_construct_result(expr)) {
+                panic("CoreHIR: dictionary construct result binder differs")
+            }
             validate_expr_with_loop_depth(expr, body, loop_depth)
         },
         CoreStmtValue::Assign { target, value: expr, origin } => {
@@ -4158,6 +4228,10 @@ fn remap_core_expr_types(
                         field.field, remap_core_expr_types(
                             field.value, ctx))
                 })
+            },
+        CoreExprValue::DictConstructExprValue { dictionary, result } =>
+            CoreExprValue::DictConstructExprValue {
+                dictionary: dictionary, result: result
             },
         CoreExprValue::MoveUpdateExprValue {
             base, constructor, schema, overrides
@@ -5507,6 +5581,20 @@ fn validate_expr_with_program(
             }
             validate_construct_with_graph(
                 constructor, fields, value.ty, graph)
+        },
+        CoreExprValue::DictConstructExprValue { dictionary, result } => {
+            validate_dictionary_provider(dictionary, body, impls)
+            validate_dictionary_provider(
+                make_exact_local_dict_ref(result), body, impls)
+            require_core_type_same(
+                core_binder_type_for(body, result), value.ty,
+                "CoreHIR: dictionary construct result type differs")
+            let result_node = core_type_graph_node(graph, value.ty)
+            if flow_type_kind_tag(flow_type_node_kind(result_node)) !=
+                    flow_type_kind_tag(flow_type_kind_tuple()) ||
+               flow_type_node_children(result_node).len() != 0 {
+                panic("CoreHIR: dictionary construct is not the 0.1 dictionary type")
+            }
         },
         CoreExprValue::MoveUpdateExprValue {
             base, constructor, schema, overrides

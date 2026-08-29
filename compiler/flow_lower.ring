@@ -36,7 +36,8 @@ use ir_inventory::{
     binder_kind_effect_ctx_parent_capture,
     binder_kind_dictionary_evidence_param,
     effect_operation_ref_callable,
-    system_host_callable_executable
+    system_host_callable_executable,
+    dict_ref_is_local, dict_ref_local, dict_ref_wrapped_inner
 }
 use core_hir::{
     CoreProgram, CoreBodyEntry,
@@ -87,6 +88,7 @@ use core_expr::{
     core_expr_project_base, core_expr_project_field,
     core_expr_project_is_partial,
     core_expr_constructor, core_expr_constructor_fields,
+    core_expr_dict_construct_dictionary, core_expr_dict_construct_result,
     core_expr_move_update_base, core_expr_move_update_constructor,
     core_expr_move_update_schema, core_expr_move_update_overrides,
     core_constructor_kind_tag, core_constructor_variant,
@@ -187,6 +189,7 @@ use flow_ir::{
     make_flow_tuple_aggregate_contract, make_flow_record_aggregate_contract,
     make_flow_closure_contract,
     make_flow_callable_value_contract,
+    make_flow_dict_construct_contract,
     FlowAggregateInputRef,
     make_nominal_flow_aggregate_input,
     make_variant_flow_aggregate_input,
@@ -1962,6 +1965,37 @@ fn lower_while_statement(
     set_current(ctx, exit)
 }
 
+fn lower_dict_construct_binding(
+    mut ctx: FlowLowerCtx, expr: CoreExpr, target: SlotRef
+) {
+    let kind = core_expr_kind_tag(expr)
+    let result = core_expr_dict_construct_result(expr)
+    if kind != 20 || !slot_ref_same(result, target) {
+        panic("Flow lowering: dictionary construct result binder differs")
+    }
+    let previous = enter_core_node(
+        ctx, CORE_FLOW_NODE_EXPR, kind,
+        core_expr_origin(expr), some(target))
+    let dictionary = core_expr_dict_construct_dictionary(expr)
+    let mut inputs: List<SlotRef> = []
+    for inner in dict_ref_wrapped_inner(dictionary) {
+        if dict_ref_is_local(inner) {
+            let input = dict_ref_local(inner)
+            let _ = frozen_slot_type_at(ctx, input)
+            inputs.push(input)
+        }
+    }
+    let input_types = inputs.map(fn(input) {
+        frozen_slot_type_at(ctx, input)
+    })
+    emit_instruction(ctx, make_flow_initialize(
+        next_instruction_ref(ctx), core_expr_origin(expr),
+        make_flow_dict_construct_contract(
+            dictionary, result, input_types, core_expr_type(expr)),
+        inputs, target), core_flow_role_expr_primary())
+    restore_core_node(ctx, previous)
+}
+
 fn lower_statement(
     mut ctx: FlowLowerCtx, statement: CoreStmt,
     continue_target: FlowBlockRef?, break_target: FlowBlockRef?
@@ -1978,8 +2012,14 @@ fn lower_statement(
     if kind == 0 {
         let target = core_place_slot(core_stmt_target(statement))
         activate_core_binder(ctx, target, current_draft(ctx).scope)
+        let value = core_stmt_value(statement)
+        if core_expr_kind_tag(value) == 20 {
+            lower_dict_construct_binding(ctx, value, target)
+            restore_core_node(ctx, previous)
+            return
+        }
         let rhs = lower_expr(
-            ctx, core_stmt_value(statement), continue_target, break_target)
+            ctx, value, continue_target, break_target)
         if is_terminated(ctx) {
             restore_core_node(ctx, previous)
             return
