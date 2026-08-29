@@ -69,7 +69,7 @@ use ir_identity::{
     SymbolRef, PathRef, PathOwnerRef, PathRole, SlotRef, CalleeRef,
     NominalFieldRef,
     ModuleBodyRef, make_module_body_ref,
-    OriginRef, ImplOwnerRef, ImplMethodRef,
+    OriginRef, ImplOwnerRef, ImplMethodRef, TraitMethodRef,
     RegisteredNominalRef, VariantRef, HandledEffectRef,
     handled_effect_ref_same, make_symbol_ref, namespace_value,
     symbol_ref_origin_module_key, symbol_ref_namespace_kind,
