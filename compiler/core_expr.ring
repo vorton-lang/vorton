@@ -4861,13 +4861,30 @@ fn validate_field_sequence(
     let mut index = 0
     while index < fields.len() {
         let actual = fields.get(index).unwrap()
-        let fact = expected.get(index).unwrap()
-        if !core_field_matches_fact(actual.field, fact) {
-            panic("CoreHIR: constructor field identity/type order differs")
+        let mut prior = 0
+        while prior < index {
+            if core_field_ref_same(
+                    fields.get(prior).unwrap().field, actual.field) {
+                panic("CoreHIR: constructor field identity repeats")
+            }
+            prior = prior + 1
+        }
+        let mut fact: FlowNominalFieldFact? = none
+        for candidate in expected {
+            if core_field_matches_fact(actual.field, candidate) {
+                if fact.is_some() {
+                    panic("CoreHIR: constructor field fact repeats")
+                }
+                fact = some(candidate)
+            }
+        }
+        let exact = match fact {
+            some(value) => value,
+            none => panic("CoreHIR: constructor field identity is absent")
         }
         require_core_type_actual_satisfies_formal(
-            core_expr_type(actual.value), flow_nominal_field_type(fact), graph,
-            "CoreHIR: constructor field identity/type order differs")
+            core_expr_type(actual.value), flow_nominal_field_type(exact), graph,
+            "CoreHIR: constructor field type differs")
         index = index + 1
     }
 }
@@ -5058,13 +5075,30 @@ fn validate_pattern_with_graph(
             }
             let mut index = 0
             for field in fields {
-                let fact = expected.get(index).unwrap()
-                if !core_field_matches_fact(field.field, fact) {
-                    panic("CoreHIR: struct pattern field order differs")
+                let mut prior = 0
+                while prior < index {
+                    if core_field_ref_same(
+                            fields.get(prior).unwrap().field, field.field) {
+                        panic("CoreHIR: struct pattern field repeats")
+                    }
+                    prior = prior + 1
+                }
+                let mut fact: FlowNominalFieldFact? = none
+                for candidate in expected {
+                    if core_field_matches_fact(field.field, candidate) {
+                        if fact.is_some() {
+                            panic("CoreHIR: struct pattern field fact repeats")
+                        }
+                        fact = some(candidate)
+                    }
+                }
+                let exact = match fact {
+                    some(value) => value,
+                    none => panic("CoreHIR: struct pattern field is absent")
                 }
                 validate_pattern_with_graph(
                     field.pattern,
-                    flow_nominal_field_type(fact),
+                    flow_nominal_field_type(exact),
                     body, graph)
                 index = index + 1
             }
@@ -5083,13 +5117,30 @@ fn validate_pattern_with_graph(
             }
             let mut index = 0
             for field in fields {
-                let fact = expected.get(index).unwrap()
-                if !core_field_matches_fact(field.field, fact) {
-                    panic("CoreHIR: variant pattern field order differs")
+                let mut prior = 0
+                while prior < index {
+                    if core_field_ref_same(
+                            fields.get(prior).unwrap().field, field.field) {
+                        panic("CoreHIR: variant pattern field repeats")
+                    }
+                    prior = prior + 1
+                }
+                let mut fact: FlowNominalFieldFact? = none
+                for candidate in expected {
+                    if core_field_matches_fact(field.field, candidate) {
+                        if fact.is_some() {
+                            panic("CoreHIR: variant pattern field fact repeats")
+                        }
+                        fact = some(candidate)
+                    }
+                }
+                let exact = match fact {
+                    some(value) => value,
+                    none => panic("CoreHIR: variant pattern field is absent")
                 }
                 validate_pattern_with_graph(
                     field.pattern,
-                    flow_nominal_field_type(fact),
+                    flow_nominal_field_type(exact),
                     body, graph)
                 index = index + 1
             }
