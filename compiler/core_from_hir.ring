@@ -2020,12 +2020,26 @@ fn add_diagnostic_owner_seed(
     })
 }
 
+fn diagnostic_slot_semantic_module_key(slot: SlotRef) -> Str {
+    if slot_ref_is_source(slot) {
+        slot_ref_source_origin_module_key(slot)
+    } else {
+        let owner = path_ref_owner(slot_ref_synthetic_path(slot))
+        if path_owner_ref_is_symbol(owner) {
+            symbol_ref_origin_module_key(path_owner_ref_symbol(owner))
+        } else {
+            module_body_ref_origin_module_key(
+                path_owner_ref_module_body(owner))
+        }
+    }
+}
+
 fn add_diagnostic_slot_seed(
-    mut seed: CoreDiagnosticSeed, slot: SlotRef, module_key: Str,
-    span: Span, label: Str
+    mut seed: CoreDiagnosticSeed, slot: SlotRef, span: Span, label: Str
 ) {
     require_diagnostic_span(span)
     if label == "" { panic("Core diagnostic projection: source label is empty") }
+    let module_key = diagnostic_slot_semantic_module_key(slot)
     for existing in seed.slots {
         if slot_ref_same(existing.slot, slot) {
             if existing.module_key != module_key || existing.display_label != label ||
@@ -2041,45 +2055,45 @@ fn add_diagnostic_slot_seed(
 }
 
 fn seed_diagnostic_params(
-    mut seed: CoreDiagnosticSeed, module_key: Str,
+    mut seed: CoreDiagnosticSeed, owner: ExecutableRef,
     params: List<HParam>, span: Span
 ) {
     for param in params {
         match param.def_id {
             some(id) => add_diagnostic_slot_seed(
-                seed, source_slot(module_key, id), module_key, span, param.name),
+                seed, source_slot(owner, id), span, param.name),
             none => panic("Core diagnostic projection: parameter lacks DefId")
         }
     }
 }
 
 fn seed_diagnostic_stmt(
-    mut seed: CoreDiagnosticSeed, module_key: Str,
+    mut seed: CoreDiagnosticSeed, module_key: Str, owner: ExecutableRef,
     owner_span: Span, value: HStmt
 ) {
     match value {
         HStmt::Let { name, name_span, def_id: some(id), init, .. } |
         HStmt::Var { name, name_span, def_id: some(id), init, .. } => {
             add_diagnostic_slot_seed(
-                seed, source_slot(module_key, id), module_key, name_span, name)
-            seed_diagnostic_expr(seed, module_key, owner_span, init)
+                seed, source_slot(owner, id), name_span, name)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, init)
         },
         HStmt::Assign { target, value, .. } => {
-            seed_diagnostic_expr(seed, module_key, owner_span, target)
-            seed_diagnostic_expr(seed, module_key, owner_span, value)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, target)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, value)
         },
         HStmt::ExprStmt { expr, .. } =>
-            seed_diagnostic_expr(seed, module_key, owner_span, expr),
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, expr),
         HStmt::Return { value, .. } => match value {
             some(expr) => seed_diagnostic_expr(
-                seed, module_key, owner_span, expr), none => {}
+                seed, module_key, owner, owner_span, expr), none => {}
         },
         HStmt::While { condition, body, .. } => {
-            seed_diagnostic_expr(seed, module_key, owner_span, condition)
-            seed_diagnostic_expr(seed, module_key, owner_span, body)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, condition)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, body)
         },
         HStmt::LetDestructure { bindings, init, span, .. } => {
-            seed_diagnostic_expr(seed, module_key, owner_span, init)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, init)
             for binding in bindings {
                 if binding.name != "_" {
                     let slot = match binding.slot {
@@ -2088,7 +2102,7 @@ fn seed_diagnostic_stmt(
                             "Core diagnostic projection: destructure binding lacks slot")
                     }
                     add_diagnostic_slot_seed(
-                        seed, slot, module_key, span, binding.name)
+                        seed, slot, span, binding.name)
                 }
             }
         },
@@ -2098,111 +2112,125 @@ fn seed_diagnostic_stmt(
 }
 
 fn seed_diagnostic_arm(
-    mut seed: CoreDiagnosticSeed, module_key: Str,
+    mut seed: CoreDiagnosticSeed, module_key: Str, owner: ExecutableRef,
     owner_span: Span, value: HMatchArm
 ) {
     for binding in value.bindings {
         add_diagnostic_slot_seed(
-            seed, binding.slot, module_key, value.span, binding.name)
+            seed, binding.slot, value.span, binding.name)
     }
     match value.guard {
         some(guard) => seed_diagnostic_expr(
-            seed, module_key, owner_span, guard), none => {}
+            seed, module_key, owner, owner_span, guard), none => {}
     }
-    seed_diagnostic_expr(seed, module_key, owner_span, value.body)
+    seed_diagnostic_expr(seed, module_key, owner, owner_span, value.body)
 }
 
 fn seed_diagnostic_expr(
-    mut seed: CoreDiagnosticSeed, module_key: Str,
+    mut seed: CoreDiagnosticSeed, module_key: Str, owner: ExecutableRef,
     owner_span: Span, value: HExpr
 ) {
     match value {
         HExpr::Call { callee, args, .. } => {
-            seed_diagnostic_expr(seed, module_key, owner_span, callee)
-            for arg in args { seed_diagnostic_expr(seed, module_key, owner_span, arg) }
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, callee)
+            for arg in args {
+                seed_diagnostic_expr(seed, module_key, owner, owner_span, arg)
+            }
         },
         HExpr::BinOp { left, right, .. } => {
-            seed_diagnostic_expr(seed, module_key, owner_span, left)
-            seed_diagnostic_expr(seed, module_key, owner_span, right)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, left)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, right)
         },
         HExpr::UnaryOp { operand, .. } |
         HExpr::FieldAccess { receiver: operand, .. } |
         HExpr::UnsafeBlock { body: operand, .. } =>
-            seed_diagnostic_expr(seed, module_key, owner_span, operand),
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, operand),
         HExpr::StructLit { fields, spread, .. } => {
             for field in fields {
-                seed_diagnostic_expr(seed, module_key, owner_span, field.value)
+                seed_diagnostic_expr(
+                    seed, module_key, owner, owner_span, field.value)
             }
             match spread {
                 some(value) => seed_diagnostic_expr(
-                    seed, module_key, owner_span, value), none => {}
+                    seed, module_key, owner, owner_span, value), none => {}
             }
         },
         HExpr::NamedVariantConstruct { fields, spread, .. } => {
             for field in fields {
-                seed_diagnostic_expr(seed, module_key, owner_span, field.value)
+                seed_diagnostic_expr(
+                    seed, module_key, owner, owner_span, field.value)
             }
             match spread {
                 some(value) => seed_diagnostic_expr(
-                    seed, module_key, owner_span, value), none => {}
+                    seed, module_key, owner, owner_span, value), none => {}
             }
         },
         HExpr::TupleLit { elements, .. } => {
             for element in elements {
-                seed_diagnostic_expr(seed, module_key, owner_span, element)
+                seed_diagnostic_expr(
+                    seed, module_key, owner, owner_span, element)
             }
         },
         HExpr::Block { stmts, tail, .. } => {
             for stmt in stmts { seed_diagnostic_stmt(
-                seed, module_key, owner_span, stmt) }
+                seed, module_key, owner, owner_span, stmt) }
             match tail {
                 some(expr) => seed_diagnostic_expr(
-                    seed, module_key, owner_span, expr), none => {}
+                    seed, module_key, owner, owner_span, expr), none => {}
             }
         },
         HExpr::IfExpr { condition, then_branch, else_branch, .. } => {
-            seed_diagnostic_expr(seed, module_key, owner_span, condition)
-            seed_diagnostic_expr(seed, module_key, owner_span, then_branch)
+            seed_diagnostic_expr(
+                seed, module_key, owner, owner_span, condition)
+            seed_diagnostic_expr(
+                seed, module_key, owner, owner_span, then_branch)
             match else_branch {
                 some(expr) => seed_diagnostic_expr(
-                    seed, module_key, owner_span, expr), none => {}
+                    seed, module_key, owner, owner_span, expr), none => {}
             }
         },
         HExpr::MatchExpr { scrutinee, arms, .. } |
         HExpr::TryCatch { body: scrutinee, arms, .. } => {
-            seed_diagnostic_expr(seed, module_key, owner_span, scrutinee)
+            seed_diagnostic_expr(
+                seed, module_key, owner, owner_span, scrutinee)
             for arm in arms { seed_diagnostic_arm(
-                seed, module_key, owner_span, arm) }
+                seed, module_key, owner, owner_span, arm) }
         },
         HExpr::HandleExpr { body, handlers, .. } => {
-            seed_diagnostic_expr(seed, module_key, owner_span, body)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, body)
             for handler in handlers {
                 let span = hexpr_span(handler.body)
                 add_diagnostic_owner_seed(
                     seed, handler.executable_ref, module_key, span)
-                seed_diagnostic_params(seed, module_key, handler.params, span)
+                seed_diagnostic_params(
+                    seed, handler.executable_ref,
+                    handler.params, span)
                 match handler.resume_binding {
                     some(binding) => add_diagnostic_slot_seed(
-                        seed, source_slot(module_key, binding.def_id),
-                        module_key, span, binding.name),
+                        seed, source_slot(
+                            handler.executable_ref, binding.def_id),
+                        span, binding.name),
                     none => {}
                 }
                 seed_diagnostic_expr(
-                    seed, module_key, span, handler.body)
+                    seed, module_key, handler.executable_ref,
+                    span, handler.body)
             }
         },
         HExpr::Lambda { executable_ref, params, body, span, .. } => {
             add_diagnostic_owner_seed(seed, executable_ref, module_key, span)
-            seed_diagnostic_params(seed, module_key, params, span)
-            seed_diagnostic_expr(seed, module_key, span, body)
+            seed_diagnostic_params(
+                seed, executable_ref, params, span)
+            seed_diagnostic_expr(
+                seed, module_key, executable_ref, span, body)
         },
         HExpr::EffectOp { args, .. } => {
             for arg in args { seed_diagnostic_expr(
-                seed, module_key, owner_span, arg) }
+                seed, module_key, owner, owner_span, arg) }
         },
         HExpr::ReturnExpr { value, .. } => match value {
             some(expr) => seed_diagnostic_expr(
-                seed, module_key, owner_span, expr), none => {}
+                seed, module_key, owner, owner_span, expr), none => {}
         },
         HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
         HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
@@ -2218,13 +2246,16 @@ fn seed_diagnostic_decls(
         match value {
             HDecl::Fn { executable_ref, params, body, span, .. } => {
                 add_diagnostic_owner_seed(seed, executable_ref, module_key, span)
-                seed_diagnostic_params(seed, module_key, params, span)
-                seed_diagnostic_expr(seed, module_key, span, body)
+                seed_diagnostic_params(
+                    seed, executable_ref, params, span)
+                seed_diagnostic_expr(
+                    seed, module_key, executable_ref, span, body)
             },
             HDecl::Test { executable_ref, body, span, .. } |
             HDecl::Const { executable_ref, init: body, span, .. } => {
                 add_diagnostic_owner_seed(seed, executable_ref, module_key, span)
-                seed_diagnostic_expr(seed, module_key, span, body)
+                seed_diagnostic_expr(
+                    seed, module_key, executable_ref, span, body)
             },
             HDecl::ExternFn { executable_ref, span, .. } => {
                 add_diagnostic_owner_seed(seed, executable_ref, module_key, span)
@@ -2236,8 +2267,11 @@ fn seed_diagnostic_decls(
                     match method.body {
                         some(body) => {
                             seed_diagnostic_params(
-                                seed, module_key, method.params, span)
-                            seed_diagnostic_expr(seed, module_key, span, body)
+                                seed, method.executable_ref,
+                                method.params, span)
+                            seed_diagnostic_expr(
+                                seed, module_key, method.executable_ref,
+                                span, body)
                         },
                         none => {}
                     }
@@ -2395,6 +2429,9 @@ pub fn validate_core_diagnostic_projection(value: CoreDiagnosticProjection) {
         if left.display_label == "" {
             panic("Core diagnostic projection: slot label is empty")
         }
+        if left.module_key != diagnostic_slot_semantic_module_key(left.slot) {
+            panic("Core diagnostic projection: slot semantic module differs")
+        }
         let mut right = slot_index + 1
         while right < value.slots.len() {
             if slot_ref_same(left.slot, value.slots.get(right).unwrap().slot) {
@@ -2428,33 +2465,17 @@ pub fn core_diagnostic_projection_origin_location(
 }
 
 pub fn core_diagnostic_projection_slot_display_label(
-    value: CoreDiagnosticProjection, slot: SlotRef,
-    expected_module_key: Str
+    value: CoreDiagnosticProjection, slot: SlotRef
 ) -> Str {
-    if expected_module_key == "" {
-        panic("Core diagnostic projection: expected module is empty")
-    }
+    let semantic_module_key = diagnostic_slot_semantic_module_key(slot)
     let mut found: Str? = none
     for fact in value.slots {
         if slot_ref_same(fact.slot, slot) {
             if found.is_some() {
                 panic("Core diagnostic projection: slot is duplicated")
             }
-            let slot_module = if slot_ref_is_source(slot) {
-                slot_ref_source_origin_module_key(slot)
-            } else {
-                let path_owner = path_ref_owner(slot_ref_synthetic_path(slot))
-                if path_owner_ref_is_symbol(path_owner) {
-                    symbol_ref_origin_module_key(
-                        path_owner_ref_symbol(path_owner))
-                } else {
-                    module_body_ref_origin_module_key(
-                        path_owner_ref_module_body(path_owner))
-                }
-            }
-            if fact.module_key != expected_module_key ||
-               fact.module_key != slot_module {
-                panic("Core diagnostic projection: slot crosses module")
+            if fact.module_key != semantic_module_key {
+                panic("Core diagnostic projection: slot semantic module differs")
             }
             found = some(fact.display_label)
         }
@@ -2912,8 +2933,8 @@ fn hstmt_source_span(value: HStmt) -> Span {
         _ => panic("Core diagnostic projection: surface statement survived")
     }
 }
-fn source_slot(module_key: Str, def_id: Int) -> SlotRef {
-    make_source_slot_ref(module_key,
+fn source_slot(owner: ExecutableRef, def_id: Int) -> SlotRef {
+    make_source_slot_ref(executable_ref_origin_module_key(owner),
         if def_id < 0 { slot_domain_dictionary() }
         else { slot_domain_lexical() }, def_id)
 }
@@ -3045,7 +3066,7 @@ fn param_slot(
 ) -> SlotRef {
     let id = match param.def_id { some(v) => v,
         none => panic("Core assembly: parameter lacks DefId") }
-    let slot = source_slot(ctx.module_key, id)
+    let slot = source_slot(ctx.owner, id)
     ensure_binder_with_storage(
         ctx, slot, param.ty, kind, parameter_storage(role), param.is_mutable)
 }
@@ -3950,7 +3971,7 @@ fn lower_handler_operation(
             none => panic("Core assembly: handler parameter lacks DefId") }
         // Handler parameters belong exclusively to the child executable.  The
         // enclosing Handle expression carries only their exact interface refs.
-        params.push(source_slot(ctx.module_key, id))
+        params.push(source_slot(value.executable_ref, id))
     }
     let resume = value.resume_binding.map(fn(binding) { binding.slot })
     make_core_handler_operation(
@@ -4036,7 +4057,7 @@ fn lower_stmt(ctx: LowerCtx, value: HStmt) -> CoreStmt {
     let origin = fresh_origin(ctx, "stmt", hstmt_source_span(value))
     match value {
         HStmt::Let { def_id: some(id), ty, init, .. } => {
-            let slot = source_slot(ctx.module_key, id)
+            let slot = source_slot(ctx.owner, id)
             let exact_slot = ensure_binder(
                 ctx, slot, ty,
                 if id < 0 { binder_kind_dictionary_evidence_local() }
@@ -4045,7 +4066,7 @@ fn lower_stmt(ctx: LowerCtx, value: HStmt) -> CoreStmt {
                 exact_slot, lower_expr(ctx, init), false, origin)
         },
         HStmt::Var { def_id: some(id), ty, init, .. } => {
-            let slot = source_slot(ctx.module_key, id)
+            let slot = source_slot(ctx.owner, id)
             let exact_slot = ensure_binder(
                 ctx, slot, ty, binder_kind_var(), true)
             make_core_bind_stmt(
@@ -4244,7 +4265,7 @@ fn callable_contract(
     let result_type = type_fact_for(facts.type_sources, result, facts.module_key)
     let slots: List<SlotRef> = if executable_contract_mode_same(
             mode, executable_contract_mode_concrete_body()) {
-        params.map(fn(p) { source_slot(facts.module_key,
+        params.map(fn(p) { source_slot(reference,
             match p.def_id { some(v) => v,
                 none => panic("Core assembly: callable parameter lacks DefId") }) })
     } else { [] }
@@ -6487,7 +6508,8 @@ fn build_core_diagnostic_projection(
                     panic("Core diagnostic projection: source binder seed is absent")
                 }
                 append_project_diagnostic_slot(slots, CoreDiagnosticSlotFact {
-                    slot: slot, module_key: source.module_key,
+                    slot: slot,
+                    module_key: diagnostic_slot_semantic_module_key(slot),
                     span: source.span,
                     display_label: "compiler binding ${binder_kind_tag(
                         core_binder_kind(binder)).to_str()}"

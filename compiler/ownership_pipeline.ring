@@ -214,7 +214,7 @@ pub fn ownership_pipeline_failure_diagnostics(
             projection, core_flow_node_owner(node), core_flow_node_origin(node))
         let module_key = core_diagnostic_location_module_key(location)
         let label = core_diagnostic_projection_slot_display_label(
-            projection, ownership_diagnostic_target_slot(finding), module_key)
+            projection, ownership_diagnostic_target_slot(finding))
         result.push((module_key, make_diag(
             E0801, Severity::SevError,
             "use of moved value: '${label}'",

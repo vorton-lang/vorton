@@ -182,13 +182,14 @@ pub fn make_parameter_dict_ref(
 }
 
 pub fn make_dictionary_local_dict_ref(
-    module_key: Str, def_id: Int
+    owner: ExecutableRef, def_id: Int
 ) -> ExactDictRef {
     if def_id >= 0 {
         panic("IR inventory: dictionary local lacks synthetic DefId")
     }
     make_exact_local_dict_ref(make_source_slot_ref(
-        module_key, slot_domain_dictionary(), def_id))
+        executable_ref_origin_module_key(owner),
+        slot_domain_dictionary(), def_id))
 }
 
 pub fn make_exact_static_dict_ref(reference: ImplOwnerRef) -> ExactDictRef {

@@ -287,7 +287,7 @@ fn add_binder_fact(
 }
 
 fn source_parameter_fact(
-    mut builder: LegacyFactBuilder, value: HParam
+    mut builder: LegacyFactBuilder, owner: ExecutableRef, value: HParam
 ) -> LegacyBinderFactProjection {
     let def_id = match value.def_id {
         some(id) => id,
@@ -296,7 +296,8 @@ fn source_parameter_fact(
     add_binder_fact(
         builder,
         make_source_slot_ref(
-            builder.module_key, slot_domain_lexical(), def_id),
+            executable_ref_origin_module_key(owner),
+            slot_domain_lexical(), def_id),
         value.name, def_id, value.ty, value.is_mutable)
 }
 
@@ -386,7 +387,9 @@ fn add_callable_fact(
     let type_parameters = callable_type_parameters(type_params, trait_bounds)
     let bounds = callable_trait_bounds(type_parameters, trait_bounds)
     let parameter_facts = if has_lexical_body {
-        params.map(fn(param) { source_parameter_fact(builder, param) })
+        params.map(fn(param) {
+            source_parameter_fact(builder, reference, param)
+        })
     } else { [] }
     let origin = executable_origin(reference)
     if executable_uses_physical_owner(builder, reference) {
@@ -424,13 +427,15 @@ fn scan_stmt(
     match value {
         HStmt::Let { name, def_id: some(id), ty, init, .. } => {
             add_binder_fact(builder, make_source_slot_ref(
-                builder.module_key, slot_domain_lexical(), id),
+                executable_ref_origin_module_key(owner),
+                slot_domain_lexical(), id),
                 name, id, ty, false)
             scan_expr(builder, owner, init, type_params, trait_bounds)
         },
         HStmt::Var { name, def_id: some(id), ty, init, .. } => {
             add_binder_fact(builder, make_source_slot_ref(
-                builder.module_key, slot_domain_lexical(), id),
+                executable_ref_origin_module_key(owner),
+                slot_domain_lexical(), id),
                 name, id, ty, true)
             scan_expr(builder, owner, init, type_params, trait_bounds)
         },
