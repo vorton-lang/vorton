@@ -993,7 +993,7 @@ fn producer_record_type(
         },
         Type::EnumType { name, type_params } => {
             let def = producer.env.types.enums.get(name).unwrap_or_else(fn() {
-                panic("Core producer: enum registry owner is absent")
+                panic("Core producer: enum registry owner is absent: ${name}")
             })
             let nominal = registered_nominal_ref_symbol(def.owner_ref)
             if def.type_param_vars.len() != type_params.len() {
