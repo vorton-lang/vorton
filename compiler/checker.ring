@@ -457,6 +457,7 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                 }
             }
 
+            let mut published_prelude_externs: List<SymbolRef> = []
             for file in (STD_FILES) {
                 let file_path = path_join(std_dir, file)
                 if file_exists(file_path) {
@@ -498,17 +499,31 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                             none => panic(
                                                 "compiler extern manifest: Phase 2 source symbol is absent")
                                         }
+                                        let final_symbol =
+                                            canonical_prelude_extern_symbol(
+                                                ctx.env, source, name)
+                                        let mut already_published = false
+                                        for existing in published_prelude_externs {
+                                            if symbol_ref_same(
+                                                    existing, final_symbol) {
+                                                already_published = true
+                                            }
+                                        }
                                         let publish = match
                                                 compiler_owned_extern_should_publish_hdecl(
                                                     ctx.env, source) {
-                                            some(value) => value,
-                                            none => true
+                                            some(value) => {
+                                                if value && already_published {
+                                                    panic("compiler extern manifest: publication owner repeats")
+                                                }
+                                                value
+                                            },
+                                            none => !already_published
                                         }
                                         let result = some(check_prelude_decl(
                                             ctx, decl, site.file_key,
                                             site.decl_index,
-                                            some(canonical_prelude_extern_symbol(
-                                                ctx.env, source, name)))) catch {
+                                            some(final_symbol))) catch {
                                             _ => none
                                         }
                                         match result {
@@ -541,6 +556,8 @@ fn load_prelude(mut ctx: InferCtx) -> List<HDecl> {
                                                         is_pub: is_pub,
                                                         span: span
                                                     })
+                                                    published_prelude_externs.push(
+                                                        final_symbol)
                                                 }
                                             },
                                             some(_) => {},

@@ -1372,14 +1372,18 @@ fn validate_effect_ctx_source_for_row(
 }
 
 fn validate_callable_type_actuals(
-    values: List<HCallableTypeActual>, callee: CalleeRef?
+    values: List<HCallableTypeActual>, callee: CalleeRef?,
+    method: MethodCallRef?
 ) {
     if values.len() == 0 { return }
-    let owner = match callee {
-        some(exact) => if callee_ref_is_named(exact) {
+    let owner = match (callee, method) {
+        (some(exact), none) => if callee_ref_is_named(exact) {
             callee_ref_named_symbol(exact)
         } else { panic("HIR callable type plan: callee is not named") },
-        none => panic("HIR callable type plan: callee is absent")
+        (none, some(exact)) => method_call_ref_named_symbol(exact),
+        (some(_), some(_)) =>
+            panic("HIR callable type plan: call identities overlap"),
+        (none, none) => panic("HIR callable type plan: callee is absent")
     }
     let mut prior = 0 - 1
     for value in values {
@@ -1471,7 +1475,7 @@ fn validate_hir_expr(
                         panic("HIR Ident: callable instantiation lacks a named materialized callable")
                     }
                     validate_callable_type_actuals(
-                        instantiation.type_args, callee_identity)
+                        instantiation.type_args, callee_identity, none)
                     validate_callable_effect_instantiation(
                         instantiation.effects)
                 },
@@ -1503,7 +1507,7 @@ fn validate_hir_expr(
             if callee_ref.is_some() && method_ref.is_some() {
                 panic("HIR call: ordinary and method identities overlap")
             }
-            validate_callable_type_actuals(type_args, callee_ref)
+            validate_callable_type_actuals(type_args, callee_ref, method_ref)
             validate_callable_effect_instantiation(effect_instantiation)
             match callee {
                 HExpr::Ident { def_id: some(_), .. } => {
