@@ -32,7 +32,9 @@ use hir::{
 }
 use hir_exact::{
     dict_ref_exact, dict_ref_physical_same,
-    dict_ref_is_wrapped_physical, dict_ref_wrapped_physical_inner
+    dict_ref_is_wrapped_physical, dict_ref_wrapped_physical_inner,
+    make_wrapped_dict_ref, h_dict_construct_base,
+    h_dict_construct_inner, h_dict_construct_trait
 }
 use ir_identity::{
     CoreTypeFactRef, core_type_fact_same, core_type_fact_module_key,
@@ -54,7 +56,7 @@ use ir_identity::{
 }
 use ir_inventory::{
     ExecutableRef, ExecutableKind, EffectOperationRef, dict_ref_same,
-    make_named_executable_ref,
+    make_named_executable_ref, make_exact_wrapped_dict_ref,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_anonymous_path, executable_ref_same,
     executable_ref_origin_module_key,
@@ -759,6 +761,34 @@ fn scan_expr(
             for arg in args {
                 scan_expr(builder, owner, arg, type_params, trait_bounds)
             }
+        },
+        HExpr::DictConstruct { base_dict, plan, inner, .. } => {
+            let exact = match plan {
+                some(value) => value,
+                none => panic(
+                    "Core/legacy freeze: dictionary construct plan is absent")
+            }
+            let exact_inner = h_dict_construct_inner(exact)
+            if exact_inner.len() != inner.len() {
+                panic(
+                    "Core/legacy freeze: dictionary construct arity differs")
+            }
+            let mut index = 0
+            while index < inner.len() {
+                let physical = inner.get(index).unwrap()
+                if !dict_ref_same(
+                        dict_ref_exact(physical),
+                        exact_inner.get(index).unwrap()) {
+                    panic(
+                        "Core/legacy freeze: dictionary construct order differs")
+                }
+                add_dictionary_fact(builder, physical)
+                index = index + 1
+            }
+            add_dictionary_fact(builder, make_wrapped_dict_ref(
+                base_dict, h_dict_construct_trait(exact), inner,
+                make_exact_wrapped_dict_ref(
+                    h_dict_construct_base(exact), exact_inner)))
         },
         HExpr::ReturnExpr { value, .. } => match value {
             some(expr) => scan_expr(
