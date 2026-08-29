@@ -114,7 +114,7 @@ use ir_inventory::{
     dict_ref_local, dict_ref_static,
     dict_ref_wrapped_base, dict_ref_wrapped_inner,
     make_exact_local_dict_ref, make_exact_static_dict_ref,
-    make_exact_wrapped_dict_ref,
+    make_exact_wrapped_dict_ref, make_parameter_dict_ref,
     ExecutableEntry, ExecutableInventory, ExecutableParentRef,
     ExecutableKind,
     BinderKind, BinderEntry, binder_kind_tag,
@@ -6130,7 +6130,8 @@ fn append_delegate_impl(
 fn add_executable_body(
     facts: FrozenCoreAssemblyFacts, parent: ExecutableParentRef,
     reference: ExecutableRef, kind: ExecutableKind,
-    type_params: List<HTypeParam>, params: List<HParam>,
+    type_params: List<HTypeParam>, trait_bounds: List<TraitBound>,
+    params: List<HParam>,
     result_type: Type, effects: EffectRow,
     body_expr: HExpr,
     effect_ctx: TypedCallableEffectCtx,
@@ -6163,6 +6164,15 @@ fn add_executable_body(
     activate_effect_ctx_binder(
         ctx, core_callable_effect_ctx_reference(frozen_ctx),
         core_callable_effect_ctx_layout(frozen_ctx))
+    let mut bound_index = 0
+    for bound in trait_bounds {
+        if bound.dict_ordinal != bound_index {
+            panic("Core assembly: dictionary parameter order differs")
+        }
+        let _ = remap_dictionary_evidence(
+            ctx, make_parameter_dict_ref(reference, bound.dict_ordinal))
+        bound_index = bound_index + 1
+    }
     let mut parameter_slots: List<SlotRef> = []
     let mut parameter_index = 0
     for param in params {
@@ -6263,7 +6273,7 @@ fn scan_nested_expr(
         HExpr::Lambda { executable_ref, params, return_type, body,
                         captures, effect_ctx, .. } => {
             add_executable_body(facts, make_executable_parent(parent),
-                executable_ref, executable_kind_lambda(), [], params,
+                executable_ref, executable_kind_lambda(), [], [], params,
                 return_type, hexpr_effects(body), body,
                 effect_ctx, capture_slot_maps(captures), assembly)
         },
@@ -6279,7 +6289,7 @@ fn scan_nested_expr(
                     none => {}
                 }
                 add_executable_body(facts, make_executable_parent(parent),
-                    handler.executable_ref, executable_kind_handler(), [], params,
+                    handler.executable_ref, executable_kind_handler(), [], [], params,
                     hexpr_type(handler.body), hexpr_effects(handler.body),
                     handler.body,
                     handler.effect_ctx,
@@ -6396,25 +6406,27 @@ fn assemble_decls(
 ) {
     for decl in decls {
         match decl {
-            HDecl::Fn { executable_ref, impl_method_ref, type_params, params,
+            HDecl::Fn { executable_ref, impl_method_ref, type_params,
+                trait_bounds, params,
                 return_type, effects,
                 effect_ctx, body, .. } =>
                 add_executable_body(
                     facts, source_parent(module_body, executable_ref), executable_ref,
                     if impl_method_ref.is_some() { executable_kind_impl_method() }
                     else { executable_kind_fn() },
-                    type_params, params, return_type, effects, body,
+                    type_params, trait_bounds, params,
+                    return_type, effects, body,
                     effect_ctx, [], assembly),
             HDecl::Test { executable_ref, effect_ctx,
                           body, .. } => add_executable_body(
                 facts, source_parent(module_body, executable_ref), executable_ref,
-                executable_kind_test(), [], [], hexpr_type(body),
+                executable_kind_test(), [], [], [], hexpr_type(body),
                 hexpr_effects(body), body,
                 effect_ctx, [], assembly),
             HDecl::Const { executable_ref, effect_ctx,
                            ty, init, .. } => add_executable_body(
                 facts, source_parent(module_body, executable_ref), executable_ref,
-                executable_kind_const_getter(), [], [], ty,
+                executable_kind_const_getter(), [], [], [], ty,
                 hexpr_effects(init), init,
                 effect_ctx, [], assembly),
             HDecl::ExternFn { executable_ref, type_params, params,
@@ -6433,7 +6445,7 @@ fn assemble_decls(
                     match method.body {
                         some(body) => add_executable_body(
                             facts, source_parent(module_body, reference), reference,
-                            executable_kind_trait_default(), [], method.params,
+                            executable_kind_trait_default(), [], [], method.params,
                             method.return_type, method.effects, body,
                             method.effect_ctx, [], assembly),
                         none => add_contract_only(
