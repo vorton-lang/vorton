@@ -4865,9 +4865,7 @@ fn append_default_specialization(
                 none => panic("Core assembly: default parameter binder absent")
             }, make_core_effect_set([]), executable_origin(reference), slot)
     })
-    let evidence = h_exact_call_evidence(forward).map(fn(value) {
-        make_core_dict_evidence(dict_ref_exact(value))
-    })
+    let evidence = evidence(call_ctx, h_exact_call_evidence(forward))
     let call_effect_ctx = core_effect_ctx_argument_from_source(
         call_ctx, h_exact_call_effect_ctx(forward),
         core_callee_effect_instantiation(callee))
@@ -4934,7 +4932,8 @@ fn derived_core_field(value: DerivedFieldRef) -> CoreFieldRef {
 fn derived_call_plan_from_method(
     facts: FrozenCoreAssemblyFacts, owner: ExecutableRef,
     method: MethodCallRef, evidence_values: List<DictRef>,
-    callable_ctx: TypedCallableEffectCtx, origin: OriginRef
+    callable_ctx: TypedCallableEffectCtx, origin: OriginRef,
+    mut binders: List<CoreBinder>
 ) -> CoreDerivedCallPlan {
     let signature = method_call_ref_signature(method)
     let (parameters, result, effects) = match signature {
@@ -4951,7 +4950,7 @@ fn derived_call_plan_from_method(
         types: facts.type_sources, type_nodes: facts.type_nodes,
         effect_ctx_type: facts.effect_ctx_type,
         effect_ctx_layouts: [],
-        binders: [], captures: [], next_origin: 0,
+        binders: binders, captures: [], next_origin: 0,
         diagnostic_origins: []
     }
     let frozen_ctx = core_callable_effect_ctx_from_typed(
@@ -4969,9 +4968,7 @@ fn derived_call_plan_from_method(
         core_effect_contract_exact(core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
             ctx.effect_parameters)),
-        evidence_values.map(fn(value) {
-            make_core_dict_evidence(dict_ref_exact(value))
-        }),
+        evidence(ctx, evidence_values),
         core_effect_ctx_argument_from_source(
             ctx, make_empty_effect_ctx_source(),
             core_callee_effect_instantiation(callee)), origin)
@@ -4980,7 +4977,7 @@ fn derived_call_plan_from_method(
 fn derived_call_plan_from_exact(
     facts: FrozenCoreAssemblyFacts, owner: ExecutableRef,
     exact: HExactCallPlan, callable_ctx: TypedCallableEffectCtx,
-    origin: OriginRef
+    origin: OriginRef, mut binders: List<CoreBinder>
 ) -> CoreDerivedCallPlan {
     let signature = h_exact_call_signature(exact)
     let (parameters, result, effects) = match signature {
@@ -4997,7 +4994,7 @@ fn derived_call_plan_from_exact(
         types: facts.type_sources, type_nodes: facts.type_nodes,
         effect_ctx_type: facts.effect_ctx_type,
         effect_ctx_layouts: [],
-        binders: [], captures: [], next_origin: 0,
+        binders: binders, captures: [], next_origin: 0,
         diagnostic_origins: []
     }
     let frozen_ctx = core_callable_effect_ctx_from_typed(
@@ -5015,9 +5012,7 @@ fn derived_call_plan_from_exact(
         core_effect_contract_exact(core_effect_contract_from_row(
             facts.type_sources, effects, facts.module_key,
             ctx.effect_parameters)),
-        h_exact_call_evidence(exact).map(fn(value) {
-            make_core_dict_evidence(dict_ref_exact(value))
-        }),
+        evidence(ctx, h_exact_call_evidence(exact)),
         core_effect_ctx_argument_from_source(
             ctx, h_exact_call_effect_ctx(exact),
             core_callee_effect_instantiation(callee)), origin)
@@ -5121,7 +5116,7 @@ fn build_derived_field_plan(
             for value in extra_dicts { evidence_values.push(value) }
             let operation = derived_call_plan_from_method(
                 facts, owner, method_ref, evidence_values, callable_ctx,
-                left.origin)
+                left.origin, binders)
             let result_slot = if semantic_tag == 4 {
                 let result_type = match method_call_ref_signature(method_ref) {
                     Type::FnType { return_type, .. } => type_fact_for(
@@ -5405,7 +5400,7 @@ fn elaborate_derived_non_text(
         let mix = match derived.hash_mix {
             some(value) => derived_call_plan_from_exact(
                 facts, method.executable_ref, value.plan,
-                method.effect_ctx, origin),
+                method.effect_ctx, origin, binders),
             none => panic("Core assembly: derived Hash mix is absent")
         }
         let shape = match derived.type_kind {
@@ -5491,7 +5486,8 @@ fn text_render_plan(
     field: CoreFieldRef, field_type: CoreTypeRef,
     value: DerivedValuePath, action: FieldAction,
     append: CoreDerivedCallPlan, string_type: CoreTypeRef,
-    semantic_tag: Int, origin: OriginRef
+    semantic_tag: Int, origin: OriginRef,
+    mut binders: List<CoreBinder>
 ) -> CoreDerivedTextRenderPlan {
     match action {
         FieldAction::Call { method_ref, base_dict, extra_dicts } => {
@@ -5501,7 +5497,7 @@ fn text_render_plan(
                 field, field_type, core_derived_value(value),
                 derived_call_plan_from_method(
                     facts, method.executable_ref, method_ref, evidence,
-                    method.effect_ctx, origin))
+                    method.effect_ctx, origin, binders))
         },
         FieldAction::Tuple {
             element_types, element_projections, element_actions
@@ -5542,7 +5538,8 @@ fn text_render_plan(
                             text_render_plan(
                                 facts, method, element_field, element_type,
                                 child_value, child_action,
-                                append, string_type, semantic_tag, origin),
+                                append, string_type, semantic_tag, origin,
+                                binders),
                             match child_action {
                                 FieldAction::Tuple { .. } => none,
                                 _ => some(append)
@@ -5568,7 +5565,7 @@ fn text_sequence_plan(
     target_type: CoreTypeRef,
     enum_slots: List<(DerivedFieldRef, SlotRef)>,
     append: CoreDerivedCallPlan, string_type: CoreTypeRef,
-    origin: OriginRef
+    origin: OriginRef, mut binders: List<CoreBinder>
 ) -> CoreDerivedTextSequence {
     let mut pieces = []
     for piece in sequence.pieces {
@@ -5618,7 +5615,8 @@ fn text_sequence_plan(
                         }
                     },
                     field.action, append, string_type,
-                    derived_semantic_kind_tag(method.semantic_kind), origin)
+                    derived_semantic_kind_tag(method.semantic_kind), origin,
+                    binders)
                 pieces.push(make_core_derived_rendered_text_piece(
                     render, match field.action {
                         FieldAction::Tuple { .. } => none,
@@ -5652,7 +5650,7 @@ fn elaborate_derived_text(
     let builder_signature = h_exact_call_signature(text.builder)
     let builder_call = derived_call_plan_from_exact(
         facts, method.executable_ref, text.builder,
-        method.effect_ctx, origin)
+        method.effect_ctx, origin, binders)
     let builder_type = match builder_signature {
         Type::FnType { return_type, .. } => type_fact_for(
             facts.type_sources, return_type, facts.module_key),
@@ -5664,7 +5662,7 @@ fn elaborate_derived_text(
     let append_signature = h_exact_call_signature(text.append)
     let append_call = derived_call_plan_from_exact(
         facts, method.executable_ref, text.append,
-        method.effect_ctx, origin)
+        method.effect_ctx, origin, binders)
     let unit_type = match append_signature {
         Type::FnType { return_type, .. } => type_fact_for(
             facts.type_sources, return_type, facts.module_key),
@@ -5672,29 +5670,31 @@ fn elaborate_derived_text(
     }
     let finish_call = derived_call_plan_from_exact(
         facts, method.executable_ref, text.finish,
-        method.effect_ctx, origin)
-    let header = make_core_derived_header(
-        method.executable_ref, origin, binders, slots, string_type,
-        slots.get(0).unwrap(), none, origin,
-        core_effects(facts.type_sources, effects, facts.module_key))
+        method.effect_ctx, origin, binders)
     let plan = match derived.type_kind {
         TypeKind::StructKind => {
             let fields = match derived.struct_fields {
                 some(value) => value,
                 none => panic("Core assembly: text struct fields are absent")
             }
+            let sequence_plan = text_sequence_plan(
+                facts, method,
+                match text.struct_sequence {
+                    some(value) => value,
+                    none => panic(
+                        "Core assembly: struct text sequence is absent")
+                }, fields, slots.get(0).unwrap(), target_type,
+                [], append_call, string_type, origin, binders)
+            let struct_header = make_core_derived_header(
+                method.executable_ref, origin, binders, slots, string_type,
+                slots.get(0).unwrap(), none, origin,
+                core_effects(
+                    facts.type_sources, effects, facts.module_key))
             make_core_derived_struct_text_plan(
-                header, derived.target_owner, target_type,
+                struct_header, derived.target_owner, target_type,
                 string_type, unit_type, binder_entry_slot(text.builder_binder),
                 builder_type, builder_call, finish_call,
-                text_sequence_plan(
-                    facts, method,
-                    match text.struct_sequence {
-                        some(value) => value,
-                        none => panic(
-                            "Core assembly: struct text sequence is absent")
-                    }, fields, slots.get(0).unwrap(), target_type,
-                    [], append_call, string_type, origin))
+                sequence_plan)
         },
         TypeKind::EnumKind => {
             let variants = match derived.enum_variants {
@@ -5746,7 +5746,8 @@ fn elaborate_derived_text(
                     text_sequence_plan(
                         facts, method, text_variant.sequence,
                         variant.fields, slots.get(0).unwrap(), target_type,
-                        field_slots, append_call, string_type, origin),
+                        field_slots, append_call, string_type, origin,
+                        binders),
                     origin))
                 index = index + 1
             }
@@ -5894,9 +5895,7 @@ fn append_delegate_impl(
             core_effects(
                 facts.type_sources, h_delegate_method_effects(method),
                 facts.module_key),
-            h_delegate_method_evidence(method).map(fn(value) {
-                make_core_dict_evidence(dict_ref_exact(value))
-            }),
+            evidence(callee_ctx, h_delegate_method_evidence(method)),
             frozen_ctx,
             core_effect_ctx_argument_from_source(
                 callee_ctx, h_delegate_method_child_effect_ctx(method),
