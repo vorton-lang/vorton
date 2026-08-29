@@ -49,6 +49,7 @@ use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_
     validate_fn_bound_order,
     record_value_origin, record_variant_ctor_origin, record_value_binding_kind,
     record_value_symbol_ref, source_value_symbol_for_decl,
+    record_h0_closed_registration_header,
     source_type_alias_symbol_for_decl,
     prove_dict_evidence_for_type, impl_predicate_constraints_satisfied,
     resolve_mod_uses, bind_exact_import_alias,
@@ -3954,7 +3955,16 @@ fn register_fn_common(
     }
     record_value_binding_kind(ctx, name, callable_kind)
     match ctx.env.lookup(name) {
-        some(s) => match s.def_id { some(did) => ctx.env.record_def_span(did, span), none => {} },
+        some(s) => match s.def_id {
+            some(did) => {
+                ctx.env.record_def_span(did, span)
+                if declared_effects.is_some() &&
+                   ordered_effect_tail_vars(fn_type).len() == 0 {
+                    record_h0_closed_registration_header(ctx, did)
+                }
+            },
+            none => {}
+        },
         none => {}
     }
 }

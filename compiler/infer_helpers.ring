@@ -19,7 +19,7 @@ use hir_exact::{
 }
 use effect_contract::{make_empty_effect_ctx_source}
 use diagnostics::{DiagnosticContext, DiagnosticNote}
-use codes::{E0201, E0205, E0208, E0303, E0307, E0308, E0504, E0705}
+use codes::{E0201, E0205, E0208, E0303, E0307, E0308, E0404, E0504, E0705}
 use union_find::{UnionFind, uf_find, uf_lookup}
 use env::{TypeEnv, TypeScheme, ImplEntry, ImplMethodSchemeCore,
     apply_subst,
@@ -32,6 +32,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     callable_receipt_type, callable_receipt_type_args,
     callable_receipt_effects, error_callable_receipt,
     instantiate_callable_scheme, instantiate_callable_impl_method,
+    h0_registration_header_is_closed,
     register_callable_value_shadow,
     resolve_or_defer_dicts_from_scheme, PendingDictPurpose,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
@@ -39,6 +40,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     current_executable_owner, current_dictionary_evidence_owner,
     journal_boxed_var_insert}
 use ir_identity::{IntrinsicRef, ImplMethodRef,
+    symbol_ref_origin_module_key,
     impl_method_ref_owner, impl_owner_ref_trait, impl_owner_ref_provider,
     make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
     slot_domain_lexical}
@@ -124,6 +126,46 @@ fn make_inferred_ident(
         dict_closure_dicts: dict_closure_dicts,
         callable_instantiation: callable_instantiation,
         ty: ty, effects: EMPTY_ROW, span: span }
+}
+
+fn instantiate_named_value_scheme(
+    mut ctx: InferCtx, name: Str, scheme: TypeScheme,
+    materialize_value: Bool, span: Span
+) -> CallableInstantiationReceipt {
+    let callable = match scheme.ty {
+        Type::FnType { .. } => true,
+        _ => false
+    }
+    if materialize_value && callable {
+        match scheme.def_id {
+            some(def_id) => {
+                let kind = value_binding_kind(ctx, some(def_id))
+                let named_provider = match kind {
+                    ValueBindingKind::DirectCallable |
+                    ValueBindingKind::ExternCallable => true,
+                    ValueBindingKind::LocalBorrow |
+                    ValueBindingKind::ConstGetter => false
+                }
+                if named_provider {
+                    let provider = value_symbol_ref(ctx, def_id)
+                    if symbol_ref_origin_module_key(provider) ==
+                           current_identity_file_key(ctx) &&
+                       !h0_registration_header_is_closed(ctx, provider) {
+                        let _ = type_error(
+                            ctx.sink, E0404,
+                            "Named callable '${name}' used as a first-class value requires a recursively closed registration header",
+                            span, DiagnosticContext::OtherContext {
+                                detail: some(
+                                    "add an explicit complete 'with { ... }' clause or use a lambda wrapper")
+                            })
+                        return error_callable_receipt()
+                    }
+                }
+            },
+            none => {}
+        }
+    }
+    instantiate_callable_scheme(ctx, scheme)
 }
 
 
@@ -412,7 +454,8 @@ pub fn infer_ident_with_receipt(
             let mod_scheme = ctx.env.lookup(qualified_name)
             match mod_scheme {
                 some(ms) => {
-                    let t = instantiate_callable_scheme(ctx, ms)
+                    let t = instantiate_named_value_scheme(
+                        ctx, qualified_name, ms, materialize_value, span)
                     receipt_output.push(t)
                     let actual_name = exact_value_origin(ctx, qualified_name, ms)
                     return InferResult {
@@ -431,7 +474,9 @@ pub fn infer_ident_with_receipt(
                         let full_scheme = ctx.env.lookup(full_qualified)
                         match full_scheme {
                             some(fs) => {
-                                let t = instantiate_callable_scheme(ctx, fs)
+                                let t = instantiate_named_value_scheme(
+                                    ctx, full_qualified, fs,
+                                    materialize_value, span)
                                 receipt_output.push(t)
                                 let actual_name = exact_value_origin(ctx, full_qualified, fs)
                                 return InferResult {
@@ -481,7 +526,8 @@ pub fn infer_ident_with_receipt(
             }
         },
         some(s) => {
-            let t = instantiate_callable_scheme(ctx, s)
+            let t = instantiate_named_value_scheme(
+                ctx, name, s, materialize_value, span)
             receipt_output.push(t)
             // Auto-boxing: mark mutable vars captured by closures
             match s.def_id {

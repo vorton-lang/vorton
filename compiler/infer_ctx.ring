@@ -348,6 +348,10 @@ pub struct InferCtx {
     // ExecutableRef membership is exact; this state never owns a scheme/schema.
     active_recursive_callables: List<ExecutableRef>,
     closed_recursive_callables: List<ExecutableRef>,
+    // H0 is a 0.1 rejection fact, not a future dependency carrier.  A local
+    // named callable may be materialized before A1 closure only when its
+    // source registration header was explicitly and recursively closed.
+    h0_closed_registration_defs: Set<Int>,
     pending_anonymous_callable_headers:
         List<PendingAnonymousCallableHeader>,
     // B-125: whether the current module context allows unsafe blocks
@@ -425,6 +429,7 @@ pub fn new_infer_ctx(
         qualified_assoc_scope: map_new(),
         active_recursive_callables: [],
         closed_recursive_callables: [],
+        h0_closed_registration_defs: set_new(),
         pending_anonymous_callable_headers: [],
         mod_unsafe_allowed: false,
         drop_types: set_new(),
@@ -759,6 +764,25 @@ pub fn recursive_callable_is_closed(
     ctx: InferCtx, executable: ExecutableRef
 ) -> Bool {
     recursive_callable_list_contains(ctx.closed_recursive_callables, executable)
+}
+
+pub fn record_h0_closed_registration_header(
+    mut ctx: InferCtx, def_id: Int
+) {
+    ctx.h0_closed_registration_defs.insert(def_id)
+}
+
+pub fn h0_registration_header_is_closed(
+    ctx: InferCtx, provider: SymbolRef
+) -> Bool {
+    for entry in ctx.value_symbols.entries() {
+        let (def_id, symbol) = entry
+        if ctx.h0_closed_registration_defs.contains(def_id) &&
+           symbol_ref_same(symbol, provider) {
+            return true
+        }
+    }
+    false
 }
 
 pub fn owner_batch_checkpoint(ctx: InferCtx) -> OwnerBatchCheckpoint {
