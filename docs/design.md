@@ -724,6 +724,10 @@ fn process(items) {
 
 `STD_FILES`只定义当前固定prelude文件inventory及跨文件无环顺序，不是函数声明依赖authority。0.1不建立跨文件recursive prelude SCC或multi-frame scheduler；发现反向跨文件edge/cycle必须在preflight稳定fail loud，禁止手工挪声明、调整文件顺序来掩盖依赖、premint schema或instantiate fallback。首次0.1发布后只有真实跨文件递归consumer出现时才重新审视完整global scheduler，不为它预留carrier或新backlog item。
 
+**0.1 同检查单元具名函数值 closed-header 边界（2026-08-29 用户批准 H0）**：在同一个尚未完成A1闭合的scheduling unit中，具名callable作为first-class value使用时，其registration header必须已经递归closed；尤其不得依赖后续body inference才能确定effect tail。源码中pure provider写显式`with {}`，effectful provider写完整封闭`with { ... }`。若provider header仍开放，唯一infer binding result在该使用点给稳定source diagnostic，并建议补完整header或使用lambda wrapper；该失败不得反向给Tarjan补edge、不得触发name/scope扫描或提前发布provider scheme。
+
+本限制不影响direct call、已经冻结header的import/re-export provider、lambda、函数参数转发、factory closure、dynamic call或HOF formal自身的open effect row。0.1迁移只给受影响provider补header，不改使用点，也不保留`e0986b7c`式SCC mini-resolver、ResolvedAST占位carrier或fallback。Post-0.1由高优先级B-204建立proper callable-occurrence ResolvedAST纵切并恢复同检查单元省略`with`的一等具名函数值；B-204完成前H0是唯一规范。
+
 一次 scheme instantiation 只产生一份完整 mapping receipt。type actual、effect formal→actual 与 trait dictionary/evidence 必须共同消费这份 receipt；禁止任何消费者再用 `build_scheme_var_map`、类型结构匹配或等价算法重建替换关系。receipt 是当前调用/函数值的 typed provenance，不是新 solver，最终随 HIR/Core 的 exact instantiation 关系运输。
 
 Ring 0.1 明确不支持 **polymorphic recursion**：递归环中的同一 callable 不能以彼此不可统一的类型实例调用自己或 peer。普通泛型递归仍支持，只要递归环内共享同一组类型参数；函数离开递归组后仍是正常泛型 scheme。Post-0.1 只有真实 consumer 证明该限制无法由普通泛型递归、显式数据建模或非递归 wrapper 表达时，才由 B-203 重新评估；0.1 不预留相关 IR、annotation 或 fallback。

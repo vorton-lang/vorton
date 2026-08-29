@@ -15,7 +15,7 @@
 
 **近期 break 审核门**：任何修改公开语法、签名、ABI 或可观察语义的 item，在实现前必须标成“已拍板 clean break”“等待 decision dossier”或“仅内部、非 breaking”之一。已拍板的 #268/#269 ownership 真值、B-167 调用点 evidence、0.1 no-index-assignment 与 B-193~B-196 surface/effect边界均采用一次性切换；旧 ownership、default evidence、宽泛`io`/host fallback、effectful Drop、index-assignment carrier与refinement placeholder必须在各自原子变更中删除，不形成双轨。B-168/B-169 的探针结论，以及 B-152、B-156、B-171、B-133 等潜在用户面变化在进入实现前仍显式核对 break 边界。每个已拍板 break 的验收都必须列出被删除的旧路径、同步迁移的仓内消费者/规范/测试，并用负例证明旧形式不会经 alias、fallback 或旧 ABI 继续生效。
 
-Canonical dependency chain：`#268/#269 -> B-176/B-180 -> B-190 -> B-193/B-194/B-195/B-196 -> remaining correctness/ABI -> B-183 -> B-191 -> B-174/B-177/B-175 -> post-0.1 B-072/B-197/B-198/B-202`。
+Canonical dependency chain：`#268/#269 -> B-176/B-180 -> B-190 -> B-193/B-194/B-195/B-196 -> remaining correctness/ABI -> B-183 -> B-191 -> B-174/B-177/B-175 -> post-0.1 B-204 -> B-072/B-197/B-198/B-202`。
 
 B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（check/test/bootstrap 全绿）完成；worktree/ref/WIP、authority、paired-session、push/CI 与 health 约束已转为 `docs/workflow.md` / `docs/repository-health.json` 的持续门，活动历史只留 Git。
 `B-176` 保持 queued；B-180 只保留 runner anchor-object cache，compiler lane 继续冻结到 #268/#269 fixed point 闭环。
@@ -79,7 +79,7 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 4. **B-190 全仓简化**：B-180完成并吸收B-187文档盘点后，以固定snapshot做一次有界过度设计复核与减法refactor；不做rewrite-for-perfection。
 5. **0.1 surface + Remaining correctness / ABI freeze**：先原子关闭 B-193/B-194/B-195/B-196；随后处理 B-162、B-164、#263、#264、#239、#244、#267、#257，再走 B-168 → B-169 → B-167 → B-152 → B-002，并完成 unsafe/Str 等 candidate gate。B-168/B-169只消费system/handled分域后的契约，不再设计root evidence。
 6. **B-183 repository identity / GitHub workflow**：放在 technical ABI/ownership/failure fixed point 之后、产品化之前；不再晚于 B-174 才处理。
-7. **Preview candidate**：B-191 clean-break 删除 `T?` → B-174 → B-177 → B-175；随后 B-181、B-178/B-016、B-111 等证据与工具面按依赖推进。B-072/B-197/B-198/B-202只在0.1后按真实consumer与既有优先级重启。
+7. **Preview candidate**：B-191 clean-break 删除 `T?` → B-174 → B-177 → B-175；随后 B-204优先恢复proper callable-occurrence ResolvedAST与同检查单元具名函数值完整推断，再由B-181、B-178/B-016、B-111等证据与工具面按依赖推进。B-072/B-197/B-198/B-202只在0.1后按真实consumer与既有优先级重启。
 
 B-180 不得以早期 developer-unblock checkpoint 绕过 #268/#269 final fixed point；其已证明的 runner anchor-object cache 可保留，所有 compiler candidates 冻结。B-176 只有在最新 main 可重放完整 baseline 后才算完成。
 
@@ -951,6 +951,16 @@ async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评�
 **进入门**：首次0.1发布后，至少一个真实程序必须证明其递归环确实需要同一函数/方法在两个不可统一的实例上调用，且普通泛型递归、显式sum/erasure、拆分非递归wrapper或数据结构重写均不足。只有用户确认该场景值得扩大类型系统后才进入planning。
 
 **届时研究范围**：比较显式完整签名下的受限polymorphic recursion与继续拒绝；核对可判定性、principal type、termination、trait/effect参数、dictionary/evidence ABI、跨模块scheme与诊断。不得以当前A+递归组实现“不够通用”为由提前启动，也不得回填0.1空carrier。
+
+### B-204 Proper callable-occurrence ResolvedAST 与恢复同检查单元具名函数值推断 [design-align] [P1] [L] [judgment] [queued] [after: B-175] [deferred: post-0.1-release]
+
+> **2026-08-29 用户决定，高优先级post-0.1恢复项**：0.1为按时闭合#268/#269采用H0：同一尚未闭合A1 scheduling unit内，named callable作为first-class value时provider registration header必须递归closed，通常由显式完整`with { ... }`保证。Direct call、import/re-export frozen provider、lambda、fn参数、factory/dynamic/HOF formal不受影响。完整能力在0.1后优先补回；当前实现不得为本项预留ResolvedAST carrier、SCC name resolver、fallback或双路径。
+
+**目标 / 唯一authority**：sole resolver遍历当前0.1所需的callable occurrences，产生`CallableOccurrenceSite { consumer exact executable, structural child path }`与`DefinitionDependency { consumer exact executable, provider exact executable, site }`并冻结进ResolvedNamespacePlan。Tarjan只消费exact dependency；inference在这些site只消费resolver已选provider及唯一instantiation receipt，不再按relative name、scope prefix或`env.lookup`重新选择。Import/re-export与same-origin diamond原样复用provider；static self/member使用既有exact member facts；receiver-type-dependent dynamic method继续由TypedHIR选择，不为“完整ResolvedAST”扩张当前范围。
+
+**删除边界**：以正常commit撤销/退休`e0986b7c`及baseline SCC中的bare-name、shadow-set、relative-string、direct-call AST name edge；删除inference对已resolved callable site的provider reselection，仅保留exact一致性验证。不得保留dependency-only mini-resolver、registration body scan、source-order规则、whole-file monomorphic group、post-HIR patch或第二lookup authority。
+
+**验收**：覆盖direct call与first-class value、forward/reverse declaration order、参数/let/var/pattern/lambda/handler shadow、inline module、prelude、project import/re-export/diamond、extern/constructor/method namespace分离及source diagnostics；mutation必须杀死错误provider、丢site、换consumer、name fallback和infer重选。固定SHA通过独立resolver/type-effect review、single/project真实matrix、source-build fixed point、standard full、targeted ASan/self-host与exact CI。完成后删除H0显式closed-header限制及对应迁移性诊断。
 
 ## 基础设施
 

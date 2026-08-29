@@ -26,6 +26,10 @@ Effect row 中的 atom 共享组合与推断机制，但并不共享同一种运
 
 递归组body只做一次effect inference；其raw effect row随内部draft等待整组求解，随后恰好一次final-zonk、evidence canonicalization与header publication。每个scheme/callable实例的effect actual必须来自该实例唯一的full mapping receipt，并与type actual、dictionary/evidence共用；禁止按已zonk类型再次结构匹配重建effect或dictionary替换。
 
+Ring 0.1对同一尚未闭合的A1检查单元采用closed-header限制：具名函数作为first-class value使用时，provider声明的完整header必须在registration时已经递归closed，不能等待provider body inference补全effect tail。Pure provider使用显式`with {}`；effectful provider使用完整封闭`with { ... }`。开放header在函数值使用点稳定报错并建议补全header或改用lambda wrapper；编译器不得为接受它而在SCC中重做名字解析、按源码顺序猜provider或提前发布scheme。
+
+该限制不影响普通direct call、header已冻结的import/re-export函数值、lambda、函数参数转发、factory/dynamic call及HOF callback formal的open row。Post-0.1的B-204将以sole resolver产生的exact callable-occurrence dependency建立proper ResolvedAST纵切，完成后恢复同检查单元省略`with`且由body推断effect的具名函数值；0.1不为此预留carrier或fallback。
+
 Generic custom effect声明仍可参数化，closed concrete实例保持不同的typed identity，例如`Reader<Int>`与`Reader<Str>`。0.1不支持runtime handled token依赖尚未闭合的generic formal：任何实际进入callable header、nested function type、body context layout、operation lookup、handler install或call/value instantiation的custom handled instance，其type arguments必须递归fully closed；不得含当前或外层callable/impl/trait/lambda的type formal、nested callable effect formal/open row、open structural row或其他仍可实例化部分。违反时在TypedHIR atomic publish前报错，不能靠runtime token remap、specialization或type erasure补救。`fail<T>`、`mut<T>`和顶层effect-row formal不受此限制；effect alias展开后再按同一规则检查。
 
 Effect declaration及其bodyless operation contract本身不产生runtime token；只有可执行body中真实lookup/install等物理consumer进入project token table。CoreHIR用已冻结type graph复核closed条件和token producer census，但不重跑类型/effect推断。
