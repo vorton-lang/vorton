@@ -174,6 +174,14 @@
 
 该减负规则不降低0.1 Deep Clone、exact identity、Core closure、RC conservation、single/project一致性、correctness、safety、ownership、current platform/ABI、bootstrap、source-build/fixed-point/full/ASan/self-host/exact CI或最终release门；它只消除未形成真实纵向价值的重复审查、验收与未来占位。Audit仍按§6处理，不因本节减少finding的独立证据要求。用户直接查看Steward过程时以原始diff、命令和证据为准，Discussion不成为中间批准者。
 
+**长执行信息增益门（2026-08-29 用户决定）**：预计耗时较长的source-build、candidate construction、fixed point、full、ASan、self-host或同类命令，单个进程内部仍保持fail-fast；不得在推断、lowering、Planner、codegen或其他已可能损坏状态的pass中吞掉首错并继续。信息增益通过长门前的共同不变量闭包与长门后的独立case并发取得：
+
+1. 一次长执行失败后，下次重跑前必须针对该failure class完成bounded invariant-consumer closure：核对其producer、constructor、copy/rebuild、assembler、validator、lookup、legacy bridge与backend等当前真实consumer，统一重复predicate或authority，并完成一次窄review。不得只修stack顶部便立即重跑；该闭包不是全仓Audit，也不得借机扩大到无关模块或未来consumer。
+2. 长命令启动前复用现有设施形成cheap preflight packet。至少按实际diff选择changed compiler file fast checks、真实focused canary及old-authority/fallback census；彼此独立且不共享生成物的项默认并发，任一失败即阻止长门。`check compiler/main.ring`等额外步骤只有一次同机实测证明其相对完整build有显著墙钟收益时才保留，不能为流程完整性制造无收益命令。
+3. candidate一旦产生，固定matrix中的独立fast cases必须全部启动；每个case内部fail-fast，但batch不得因首个红项提前终止。等待全部case terminal后按exact failure identity去重汇总，同时保留每个case的输入、exit与首个独立失败。并发仍服从既有fast-check资源规则；source-build、fixed point、full与ASan等sealed长门的single-instance、12 GiB与process cap不变。
+
+本决定不授权通用multi-error validator框架、IR snapshot/replay/cache、新artifact authority、第二验证系统或让损坏的单进程fail-late。若以后需要其中任何一项，必须先以重复实测失败证明现实收益，并按其真实架构与维护成本重新分类。
+
 ### 4.4 执行与并发
 
 - S 且路径唯一的工作可由 root 直接在 main 完成；
@@ -230,6 +238,8 @@ root 对通过 review 的工作：
 ### 4.7 长命令等待与轮询纪律
 
 长测试、bootstrap、ASan、全量构建等命令的等待必须同时保持会话低噪声和工具调用低频；只是不向用户展示轮询结果，不算满足本节。
+
+每个新长命令或失败后的重跑还必须先满足§4.3.3“长执行信息增益门”。已按旧规则启动且输入SHA已经固定的命令不因治理规则更新而中断；新规则从其后的重跑或下一道长门生效。
 
 1. 启动前依据同类历史耗时、当前范围和机器负载形成一个单一的精确耗时点估计。首次计划等待时长必须等于该点估计，不得添加安全余量、乘系数或向上改写为“保守窗口”；预计 25 分钟就等待 25 分钟，不得给 40 分钟。需要后续分析的完整输出一次性重定向到临时文件；命令只启动一次。
 2. 预计耗时达到 **5 分钟**时，启动后不得提前用短间隔 `wait`、进程查询或日志读取反复探测。若没有可安全补位的独立工作，按精确耗时点估计进入一次可中断的 dormant wait / sleep；首次完成检查只能发生在这次精确等待结束后。不得用连续短 `wait` 模拟首次等待。
