@@ -39,6 +39,8 @@ use ir_inventory::{
     executable_kind_same, executable_kind_builtin_intrinsic}
 use hir::{DictRef, is_synthetic_dict_def_id}
 use hir_exact::{dict_ref_exact, dict_ref_physical_same}
+use extern_manifest::{HostImportFact,
+    host_import_fact_executable, host_import_fact_same}
 use effect_contract::{
     CoreEffectSet, TypedHandledEffectInstance,
     make_typed_handled_effect_instance,
@@ -1315,6 +1317,7 @@ pub struct LegacyProjectionFacts {
     builtin_callables: List<LegacyBuiltinCallableFactProjection>,
     impls: List<LegacyImplFactProjection>,
     dictionaries: List<LegacyDictionaryProjection>,
+    host_imports: List<HostImportFact>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
 }
@@ -1384,6 +1387,7 @@ pub fn make_legacy_projection_facts(
     builtin_callables: List<LegacyBuiltinCallableFactProjection>,
     impls: List<LegacyImplFactProjection>,
     dictionaries: List<LegacyDictionaryProjection>,
+    host_imports: List<HostImportFact>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: LegacyExecutableShellMap
 ) -> LegacyProjectionFacts {
@@ -1465,6 +1469,39 @@ pub fn make_legacy_projection_facts(
             panic("legacy projection: impl fact crosses module")
         }
     }
+    let mut host_index = 0
+    while host_index < host_imports.len() {
+        let left = host_imports.get(host_index).unwrap()
+        let mut callable_matches = 0
+        for callable in callables {
+            if executable_ref_same(
+                    callable.reference,
+                    host_import_fact_executable(left)) {
+                callable_matches = callable_matches + 1
+            }
+        }
+        for callable in prelude_callables {
+            if executable_ref_same(
+                    callable.reference,
+                    host_import_fact_executable(left)) {
+                callable_matches = callable_matches + 1
+            }
+        }
+        if callable_matches != 1 {
+            panic("legacy projection: HostImport callable relation differs")
+        }
+        let mut right = host_index + 1
+        while right < host_imports.len() {
+            let candidate = host_imports.get(right).unwrap()
+            if executable_ref_same(
+                    host_import_fact_executable(left),
+                    host_import_fact_executable(candidate)) {
+                panic("legacy projection: HostImport executable repeats")
+            }
+            right = right + 1
+        }
+        host_index = host_index + 1
+    }
     let mut dictionary_index = 0
     while dictionary_index < dictionaries.len() {
         let left = dictionaries.get(dictionary_index).unwrap()
@@ -1503,6 +1540,7 @@ pub fn make_legacy_projection_facts(
         callables: callables, prelude_callables: prelude_callables,
         builtin_callables: builtin_callables,
         impls: impls, dictionaries: copy_dictionary_projections(dictionaries),
+        host_imports: host_imports.map(fn(item) { item }),
         physical_identities: physical_identities,
         shells: make_legacy_executable_shell_map(
             legacy_executable_shell_entries(shells))
@@ -1520,6 +1558,9 @@ pub fn legacy_projection_facts_dictionaries(
 ) -> List<LegacyDictionaryProjection> {
     copy_dictionary_projections(value.dictionaries)
 }
+pub fn legacy_projection_facts_host_imports(
+    value: LegacyProjectionFacts
+) -> List<HostImportFact> { value.host_imports.map(fn(item) { item }) }
 
 // ============================================================
 // Collection-complete immutable projection table
@@ -1595,6 +1636,7 @@ pub struct LegacyProjectionTable {
     callables: List<LegacyCallableProjection>,
     impls: List<LegacyImplProjection>,
     dictionaries: List<LegacyDictionaryProjection>,
+    host_imports: List<HostImportFact>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     effect_ctx_tokens: List<LegacyEffectCtxToken>,
     shells: LegacyExecutableShellMap
@@ -1607,6 +1649,7 @@ pub fn make_legacy_projection_table(
     callables: List<LegacyCallableProjection>,
     impls: List<LegacyImplProjection>,
     dictionaries: List<LegacyDictionaryProjection>,
+    host_imports: List<HostImportFact>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     effect_ctx_tokens: List<LegacyEffectCtxToken>,
     shells: LegacyExecutableShellMap
@@ -1645,6 +1688,32 @@ pub fn make_legacy_projection_table(
             right = right + 1
         }
         dictionary_index = dictionary_index + 1
+    }
+    let mut host_index = 0
+    while host_index < host_imports.len() {
+        let left = host_imports.get(host_index).unwrap()
+        let mut callable_matches = 0
+        for callable in callables {
+            if executable_ref_same(
+                    callable.reference,
+                    host_import_fact_executable(left)) {
+                callable_matches = callable_matches + 1
+            }
+        }
+        if callable_matches != 1 {
+            panic("legacy projection: HostImport callable is absent")
+        }
+        let mut right = host_index + 1
+        while right < host_imports.len() {
+            let candidate = host_imports.get(right).unwrap()
+            if executable_ref_same(
+                    host_import_fact_executable(left),
+                    host_import_fact_executable(candidate)) {
+                panic("legacy projection: HostImport identity repeats")
+            }
+            right = right + 1
+        }
+        host_index = host_index + 1
     }
     let mut physical_index = 0
     while physical_index < physical_identities.len() {
@@ -1799,6 +1868,7 @@ pub fn make_legacy_projection_table(
         callables: copy_callables(callables),
         impls: copy_impls(impls),
         dictionaries: copy_dictionary_projections(dictionaries),
+        host_imports: host_imports.map(fn(item) { item }),
         physical_identities: physical_identities.map(fn(value) {
             make_legacy_executable_physical_identity(
                 value.reference, value.identity)
@@ -1812,6 +1882,24 @@ pub fn legacy_projection_effect_ctx_tokens(
     value: LegacyProjectionTable
 ) -> List<LegacyEffectCtxToken> {
     copy_effect_ctx_tokens(value.effect_ctx_tokens)
+}
+pub fn legacy_projection_host_import(
+    value: LegacyProjectionTable, executable: ExecutableRef
+) -> HostImportFact {
+    let mut found: HostImportFact? = none
+    for host_import in value.host_imports {
+        if executable_ref_same(
+                host_import_fact_executable(host_import), executable) {
+            if found.is_some() {
+                panic("legacy projection: HostImport lookup repeats")
+            }
+            found = some(host_import)
+        }
+    }
+    match found {
+        some(host_import) => host_import,
+        none => panic("legacy projection: exact HostImport is absent")
+    }
 }
 
 pub fn legacy_projection_core_type_count(
@@ -2193,6 +2281,7 @@ pub fn assemble_legacy_projection(
     let mut projected_callables: List<LegacyCallableProjection> = []
     let mut projected_impls: List<LegacyImplProjection> = []
     let mut projected_dictionaries: List<LegacyDictionaryProjection> = []
+    let mut projected_host_imports: List<HostImportFact> = []
     let mut projected_physical: List<LegacyExecutablePhysicalIdentity> = []
     let mut projected_shells: List<LegacyExecutableShell> = []
     for facts in facts_in_topological_order {
@@ -2240,6 +2329,20 @@ pub fn assemble_legacy_projection(
         for value in facts.dictionaries {
             append_dictionary_projection(projected_dictionaries, value)
         }
+        for host_import in facts.host_imports {
+            let mut duplicate = false
+            for existing in projected_host_imports {
+                if executable_ref_same(
+                        host_import_fact_executable(existing),
+                        host_import_fact_executable(host_import)) {
+                    if !host_import_fact_same(existing, host_import) {
+                        panic("legacy projection: HostImport projection differs")
+                    }
+                    duplicate = true
+                }
+            }
+            if !duplicate { projected_host_imports.push(host_import) }
+        }
         for value in facts.physical_identities {
             projected_physical.push(make_legacy_executable_physical_identity(
                 value.reference, value.identity))
@@ -2270,5 +2373,6 @@ pub fn assemble_legacy_projection(
         project_type_count, ordered_types, projected_effects,
         projected_binders, projected_callables,
         projected_impls, projected_dictionaries,
+        projected_host_imports,
         projected_physical, effect_ctx_tokens, shell_map)
 }

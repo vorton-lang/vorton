@@ -44,7 +44,7 @@ use ir_inventory::{ExactDictRef,
     dict_ref_is_static, dict_ref_is_wrapped,
     dict_ref_static, dict_ref_wrapped_base, dict_ref_wrapped_inner,
     dict_ref_same, make_exact_wrapped_dict_ref,
-    EffectCtxRef, EffectCtxParentCapture,
+    EffectCtxRef, EffectCtxParentCapture, SystemHostCallableRef,
     EffectOperationRef, make_named_executable_ref,
     executable_ref_same,
     effect_ctx_slot,
@@ -64,7 +64,14 @@ use effect_contract::{TypedHandledEffectInstance,
     typed_handled_effect_instance_same}
 use legacy_projection::{
     legacy_effect_ctx_token_ordinal, legacy_effect_ctx_token_instance}
-use extern_manifest::{compiler_extern_ref_for_executable}
+use extern_manifest::{HostImportFact,
+    host_import_fact_for_extern, host_import_fact_for_declaration,
+    host_import_fact_host, host_import_fact_callable_signature,
+    host_import_fact_native_target,
+    host_import_fact_lowering, host_import_lowering_tag,
+    HOST_IMPORT_BOXED_DIRECT, HOST_IMPORT_PRINT_VALUE,
+    HOST_IMPORT_ASSERT_CONDITION,
+    compiler_extern_ref_for_executable}
 use builtins::{BuiltinValueContractFact,
     builtin_value_contract_facts, builtin_value_contract_site,
     builtin_value_contract_executable, builtin_value_contract_symbol,
@@ -485,6 +492,10 @@ fn gen_c_ident(
         some(dicts) => {
             let lk = match resolved_name { some(rn) => rn, none => name }
             let callable_key = c_resolve_fn(ctx, lk)
+            if builtin_value_fact_for_callee(callee_identity).is_some() {
+                return gen_c_extern_closure_wrapper(
+                    ctx, lk, name, callee_identity, dicts, ty, span)
+            }
             // Exact Ring function/ctor (including an extern-forward bridge)
             // wins over the extern registry. This preserves user shadowing
             // such as a Ring `fn print`/`fn Cell` and keeps bridge context on
@@ -642,6 +653,27 @@ fn gen_c_extern_closure_wrapper(
         dict_closure_dicts: none, callable_instantiation: none,
         ty: ty, effects: EMPTY_ROW, span: span
     }
+    let extern_key = c_resolve_fn(ctx, lookup_name)
+    let system_host = if ctx.extern_callable_names.contains(extern_key) {
+        match callee_identity {
+        some(identity) => {
+            if !callee_ref_is_named(identity) {
+                panic("C codegen: extern wrapper callee is not named")
+            }
+            let executable = make_named_executable_ref(
+                callee_ref_named_symbol(identity))
+            let abi_name = match ctx.extern_abi_names.get(extern_key) {
+                some(value) => value,
+                none => panic("C codegen: extern wrapper HDecl is absent")
+            }
+            host_import_fact_for_declaration(
+                executable, abi_name, ty).map(fn(fact) {
+                    host_import_fact_host(fact)
+                })
+        },
+        none => none
+        }
+    } else { none }
     let result = if c_compiler_extern_forwards_ctx(callee_identity) {
         let mut raw_args: List<Str> = []
         for index in 0..param_types.len() {
@@ -655,7 +687,7 @@ fn gen_c_extern_closure_wrapper(
             effect_instantiation: none,
             resolved_dicts: [], effect_ctx: make_empty_effect_ctx_source(),
             callee_ref: callee_identity, method_ref: none,
-            system_host: none,
+            system_host: system_host,
             ty: return_type,
             effects: fn_effects, span: span
         })
@@ -3176,41 +3208,49 @@ fn gen_c_call(
                 some(rn) => rn,
                 none => name,
             }
-            // #132 print parity applies only to the genuine extern ABI. A
-            // local callable or exact Ring declaration named `print` must win
-            // before this early-return path, just like gen_c_direct_call.
-            let print_key = c_resolve_fn(ctx, call_name)
-            let mut is_extern_print = false
-            if ctx.ring_callable_names.contains(print_key) == false {
-                if call_name == "print" {
-                    is_extern_print = true
-                } else {
-                    match ctx.extern_abi_names.get(print_key) {
-                        some(abi_name) => {
-                            if abi_name == "print" { is_extern_print = true }
-                        },
-                        none => {},
+            match system_host {
+                some(host) => {
+                    let extern_key = c_resolve_fn(ctx, call_name)
+                    if ctx.ring_callable_names.contains(extern_key) {
+                        panic("C codegen: HostImport resolved to Ring callable")
                     }
-                }
-            }
-            if is_extern_print && args.len() == 1 {
-                match args.get(0) {
-                    some(arg0) => {
-                        let arg_ty = hexpr_type(arg0)
-                        if is_int_type(arg_ty) || is_float_type(arg_ty) || is_bool_type(arg_ty) {
-                            match arg_vals.get(0) {
-                                some(av) => {
-                                    let coerced = convert_c_to_str(ctx, av, arg_ty)
-                                    rt_use(ctx, "ring_print", 1)
-                                    let t = fresh_tmp(ctx)
-                                    c_emit(ctx, "${t} = ring_print(${coerced});")
-                                    return if is_unit_type(result_ty) { "RING_UNIT" } else { t }
-                                },
-                                none => {},
-                            }
+                    let abi_name = match ctx.extern_abi_names.get(extern_key) {
+                        some(value) => value,
+                        none => panic(
+                            "C codegen: exact HostImport HDecl is absent")
+                    }
+                    let host_result = gen_c_host_import_call(
+                        ctx, host, abi_name, hexpr_type(callee),
+                        args, arg_vals, dict_vals)
+                    return if is_unit_type(result_ty) {
+                        "RING_UNIT"
+                    } else { host_result }
+                },
+                none => {
+                    let extern_key = c_resolve_fn(ctx, call_name)
+                    if ctx.extern_callable_names.contains(extern_key) {
+                        match callee_ref {
+                            some(identity) => {
+                                if !callee_ref_is_named(identity) {
+                                    panic("C codegen: extern CalleeRef is not named")
+                                }
+                                let abi_name = match
+                                        ctx.extern_abi_names.get(extern_key) {
+                                    some(value) => value,
+                                    none => panic(
+                                        "C codegen: exact extern HDecl is absent")
+                                }
+                                if host_import_fact_for_declaration(
+                                        make_named_executable_ref(
+                                            callee_ref_named_symbol(identity)),
+                                        abi_name, hexpr_type(callee)).is_some() {
+                                    panic("C codegen: HostImport call lost its exact marker")
+                                }
+                            },
+                            none => panic(
+                                "C codegen: extern call lacks exact CalleeRef")
                         }
-                    },
-                    none => {},
+                    }
                 }
             }
             gen_c_direct_call(
@@ -3248,21 +3288,12 @@ fn extern_fn_to_runtime_c(name: Str) -> Str? {
         some(runtime_name) => { return some(runtime_name) },
         none => {},
     }
-    if name == "print" { return some("ring_print") }
     if name == "panic" { return some("ring_panic") }
-    if name == "eprintln" { return some("ring_eprintln") }
-    if name == "exit" || name == "exit_process" { return some("ring_exit") }
-    if name == "argv" { return some("ring_args") }
-    if name == "read_file" { return some("ring_read_file") }
-    if name == "write_file" { return some("ring_write_file") }
-    if name == "file_exists" { return some("ring_file_exists") }
-    if name == "delete_file" { return some("ring_delete_file") }
+    if name == "exit" { return some("ring_exit") }
     if name == "path_join" { return some("ring_path_join") }
-    if name == "path_resolve" { return some("ring_path_resolve") }
     if name == "path_dirname" { return some("ring_path_dirname") }
     if name == "path_basename" { return some("ring_path_basename") }
     if name == "path_extname" { return some("ring_path_extname") }
-    if name == "cwd" { return some("ring_cwd") }
     if name == "parse_int" { return some("ring_parse_int") }
     if name == "parse_float" { return some("ring_parse_float") }
     if name == "__ring_raise_fail" { return some("__ring_raise_fail") }
@@ -3301,6 +3332,52 @@ fn gen_c_runtime_call(mut ctx: CCtx, name: Str, args: List<Str>) -> Str {
         c_emit(ctx, "${t} = ${name}(${args.join(", ")});")
         t
     }
+}
+
+fn host_import_arity(value: HostImportFact) -> Int {
+    match host_import_fact_callable_signature(value) {
+        Type::FnType { params, .. } => params.len(),
+        _ => panic("C codegen: HostImport signature is not callable")
+    }
+}
+
+fn gen_c_host_import_call(
+    mut ctx: CCtx, host: SystemHostCallableRef,
+    raw_abi_name: Str, callable_signature: Type,
+    args: List<HExpr>, arg_vals: List<Str>, dict_vals: List<Str>
+) -> Str {
+    let fact = host_import_fact_for_extern(
+        host, raw_abi_name, callable_signature)
+    let arity = host_import_arity(fact)
+    if args.len() != arity || arg_vals.len() != arity ||
+       dict_vals.len() != 0 {
+        panic("C codegen: HostImport call arity/evidence differs")
+    }
+    let target = host_import_fact_native_target(fact)
+    let tag = host_import_lowering_tag(
+        host_import_fact_lowering(fact))
+    if tag == HOST_IMPORT_BOXED_DIRECT {
+        return gen_c_runtime_call(ctx, target, arg_vals)
+    }
+    if tag == HOST_IMPORT_PRINT_VALUE {
+        if arity != 1 {
+            panic("C codegen: PRINT_VALUE HostImport arity differs")
+        }
+        let value = arg_vals.get(0).unwrap()
+        let value_type = hexpr_type(args.get(0).unwrap())
+        return gen_c_runtime_call(
+            ctx, target, [convert_c_to_str(ctx, value, value_type)])
+    }
+    if tag == HOST_IMPORT_ASSERT_CONDITION {
+        if arity != 2 {
+            panic("C codegen: ASSERT_CONDITION HostImport arity differs")
+        }
+        return gen_c_runtime_call(ctx, target, [
+            "RING_COND(${arg_vals.get(0).unwrap()})",
+            arg_vals.get(1).unwrap()
+        ])
+    }
+    panic("C codegen: HostImport lowering tag census is incomplete")
 }
 
 fn builtin_value_fact_for_callee(
@@ -3502,32 +3579,15 @@ fn gen_c_builtin_value_call(
     panic("C codegen: builtin value site census is incomplete")
 }
 
-// Send a proven extern ABI leaf through the complete legacy direct-call
-// pipeline. Many std extern spellings map implicitly to `ring_<leaf>` rather
-// than appearing in extern_fn_to_runtime_c (notably assert).
-// Only after both known runtime paths miss is the raw foreign symbol valid.
+// Only the explicit non-HostImport compatibility map may rewrite an extern
+// ABI leaf. System-capability externs have already returned through their
+// exact HostImport fact; a user extern with the same spelling must remain raw.
 fn gen_c_extern_abi_call(mut ctx: CCtx, abi_name: Str, arg_vals: List<Str>) -> Str {
     match extern_fn_to_runtime_c(abi_name) {
         some(rtn) => { return gen_c_runtime_call(ctx, rtn, arg_vals) },
         none => {},
     }
-    let rt_fallback = "ring_${abi_name}"
-    match rt_known_arity(rt_fallback) {
-        some(_) => {
-            if rt_fallback == "ring_assert" {
-                let first = match arg_vals.get(0) {
-                    some(v) => v, none => panic("ring_assert: missing arg 0")
-                }
-                let second = match arg_vals.get(1) {
-                    some(v) => v, none => panic("ring_assert: missing arg 1")
-                }
-                return gen_c_runtime_call(ctx, rt_fallback,
-                    ["RING_COND(${first})", second])
-            }
-            gen_c_runtime_call(ctx, rt_fallback, arg_vals)
-        },
-        none => gen_c_runtime_call(ctx, abi_name, arg_vals),
-    }
+    gen_c_runtime_call(ctx, abi_name, arg_vals)
 }
 
 fn gen_c_direct_call(
@@ -3590,22 +3650,7 @@ fn gen_c_direct_call(
             if forwards_ctx {
                 panic("C codegen: callback intrinsic census differs")
             }
-            // Runtime fallback: ring_<name> if it's a known runtime fn.
-            let rt_fallback = "ring_${name}"
-            match rt_known_arity(rt_fallback) {
-                some(_) => {
-                    if rt_fallback == "ring_assert" {
-                        let first = match arg_vals.get(0) { some(v) => v, none => panic("ring_assert: missing arg 0") }
-                        let second = match arg_vals.get(1) { some(v) => v, none => panic("ring_assert: missing arg 1") }
-                        return gen_c_runtime_call(ctx, "ring_assert", ["RING_COND(${first})", second])
-                    }
-                    gen_c_runtime_call(ctx, rt_fallback, arg_vals)
-                },
-                none => {
-                    // B-152: complete extern runtime/FFI fallback.
-                    gen_c_extern_abi_call(ctx, name, arg_vals)
-                },
-            }
+            gen_c_extern_abi_call(ctx, name, arg_vals)
         },
     }
 }

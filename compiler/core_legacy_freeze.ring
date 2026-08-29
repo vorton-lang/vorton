@@ -80,6 +80,9 @@ use builtins::{
     builtin_method_contract_facts,
     builtin_method_contract_intrinsic, builtin_method_contract_scheme
 }
+use extern_manifest::{HostImportFact,
+    host_import_fact_for_declaration,
+    host_import_fact_executable, host_import_fact_same}
 use precore_lower::{close_hir_surface}
 use typed_effect_freeze::{
     freeze_typed_effect_formals, typed_effect_freeze_formals,
@@ -199,8 +202,25 @@ struct LegacyFactBuilder {
     builtin_callables: List<LegacyBuiltinCallableFactProjection>,
     impls: List<LegacyImplFactProjection>,
     dictionaries: List<LegacyDictionaryProjection>,
+    host_imports: List<HostImportFact>,
     physical_identities: List<LegacyExecutablePhysicalIdentity>,
     shells: List<LegacyExecutableShell>
+}
+
+fn append_host_import(
+    mut values: List<HostImportFact>, value: HostImportFact
+) {
+    for existing in values {
+        if executable_ref_same(
+                host_import_fact_executable(existing),
+                host_import_fact_executable(value)) {
+            if !host_import_fact_same(existing, value) {
+                panic("Core/legacy freeze: HostImport relation differs")
+            }
+            return
+        }
+    }
+    values.push(value)
 }
 
 fn impl_uses_physical_owner(
@@ -1089,12 +1109,24 @@ fn scan_decls(
                 scan_expr(builder, executable_ref, init, [], [])
             },
             HDecl::ExternFn {
-                name, executable_ref, type_params, params, return_type, effects,
+                name, abi_name, executable_ref,
+                type_params, params, return_type, effects,
                 trait_bounds, is_pub, ..
-            } => add_callable_fact(
-                builder, executable_ref, executable_kind_extern_fn(),
-                module_container, type_params, trait_bounds, params,
-                return_type, effects, false, is_pub, none, some(name)),
+            } => {
+                match host_import_fact_for_declaration(
+                        executable_ref, abi_name, Type::FnType {
+                            params: params.map(fn(param) { param.ty }),
+                            return_type: return_type, effects: effects
+                        }) {
+                    some(host_import) => append_host_import(
+                        builder.host_imports, host_import),
+                    none => {}
+                }
+                add_callable_fact(
+                    builder, executable_ref, executable_kind_extern_fn(),
+                    module_container, type_params, trait_bounds, params,
+                    return_type, effects, false, is_pub, none, some(name))
+            },
             HDecl::Trait { name, type_params, methods, .. } => {
                 let callable_type_params = merge_callable_type_parameters(
                     inherited_type_params, type_params)
@@ -1326,7 +1358,8 @@ fn freeze_legacy_semantic_facts(
         module_body: module_body,
         type_sources: type_sources, effects: [], binders: [],
         callables: [], prelude_callables: [], builtin_callables: [],
-        impls: [], dictionaries: [], physical_identities: [], shells: []
+        impls: [], dictionaries: [], host_imports: [],
+        physical_identities: [], shells: []
     }
     scan_decls(builder, closed.decls, [])
     add_derived_impl_facts(builder, closed.derived_impls)
@@ -1343,7 +1376,7 @@ fn freeze_legacy_semantic_facts(
         type_sources.len() + internal_types.len(), type_sources,
         internal_types, builder.effects, builder.binders, builder.callables,
         builder.prelude_callables, builder.builtin_callables, builder.impls,
-        builder.dictionaries,
+        builder.dictionaries, builder.host_imports,
         builder.physical_identities,
         make_legacy_executable_shell_map(builder.shells))
 }

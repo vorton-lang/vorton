@@ -56,7 +56,12 @@ use resource_model::{
     flow_call_contract_result_type,
     flow_semantic_role_tag, flow_semantic_role_mutate
 }
-use core_type_source::{core_type_graph_count}
+use core_type_source::{FlowTypeSubstitution, core_type_graph_count,
+    flow_type_substitution_parameter,
+    flow_type_substitution_replacement,
+    flow_generic_param_owner, flow_generic_param_index,
+    flow_generic_param_arity,
+    core_effect_instantiation_projects_substitutions}
 use ast::{
     Span, Pattern, LiteralValue, BinOp, UnaryOp,
     TypeParam, TypeBound, NamedPatternField, span_zero
@@ -66,6 +71,8 @@ use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HPatternBinding,
     HEffectHandler, HLambdaCapture, HAssocType, HTypeParam,
     HEffectOp, HTraitMethod, TraitBound, HPatternPlan, HProjectionRef,
+    HCallableValueInstantiation, HCallableEffectInstantiation,
+    HCallableEffectActual,
     h_fail_raise_ref,
     h_nominal_projection, h_variant_projection,
     h_structural_projection, h_tuple_projection,
@@ -77,7 +84,7 @@ use hir::{
     make_h_dict_construct_plan,
     HFieldAccessKind, HNominalStructFieldInit, HStructFieldInit,
     HResourceSite,
-    DictRef, MethodCallRef,
+    DictRef, MethodCallRef, HCallableTypeActual,
     make_intrinsic_method_call_ref, make_concrete_method_call_ref,
     make_bound_method_call_ref,
     synthetic_def_id, SYNTHETIC_ANF_DEF_ID_BASE,
@@ -149,6 +156,10 @@ use core_expr::{
     core_expr_literal, core_literal_kind_tag, core_literal_int,
     core_literal_float, core_literal_str, core_literal_bool,
     core_expr_read_source, core_expr_callable_executable,
+    core_expr_callable_evidence,
+    core_expr_callable_type_substitutions,
+    core_expr_callable_effect_substitutions,
+    core_expr_callable_effect_instantiation,
     core_expr_primitive_operation, core_primitive_op_tag,
     core_expr_primitive_operands,
     core_expr_call_callee, core_expr_call_arguments,
@@ -156,7 +167,7 @@ use core_expr::{
     core_expr_effect_ctx_lookup,
     core_expr_method_ref,
     core_expr_method_receiver, core_expr_effect_operation,
-    core_expr_system_host, core_expr_fail_payload,
+    core_expr_host_import, core_expr_fail_payload,
     core_expr_project_base, core_expr_project_field,
     core_expr_constructor, core_expr_constructor_fields,
     core_expr_dict_construct_dictionary, core_expr_dict_construct_result,
@@ -186,6 +197,8 @@ use core_expr::{
     core_constructor_variant,
     core_callee_ref, core_callee_kind_tag, core_callee_direct,
     core_callee_local, core_callee_dynamic, core_callee_contract,
+    core_callee_type_substitutions,
+    core_callee_effect_substitutions,
     core_callee_effect_instantiation,
     core_evidence_dict,
     core_handler_installation_token,
@@ -210,7 +223,8 @@ use hir_exact::{
     dict_ref_wrapped_name, dict_ref_wrapped_physical_inner
 }
 use effect_contract::{
-    CoreEffectSet, TypedHandledEffectInstance,
+    CoreEffectSet, CoreEffectSubstitution, CoreEffectInstantiation,
+    TypedHandledEffectInstance,
     TypedEffectCtxLayout, TypedCallableEffectCtx,
     TypedEffectCtxSource, TypedEffectCtxLookup,
     make_typed_handled_effect_instance,
@@ -218,7 +232,9 @@ use effect_contract::{
     make_empty_effect_ctx_source, make_borrowed_effect_ctx_source,
     make_typed_effect_ctx_lookup, make_typed_effect_ctx_install,
     core_effect_atom_handled_ref, core_effect_atom_type_arguments,
-    core_effect_instantiation_result, core_effect_contract_exact
+    core_effect_instantiation_result, core_effect_contract_exact,
+    core_effect_substitution_parameter,
+    core_effect_substitution_replacement
 }
 use flow_lower::{
     CoreFlowNodeRef, CoreFlowStepMap, CoreFlowStepRelation, CoreFlowStepRole,
@@ -264,6 +280,7 @@ use legacy_projection::{
     legacy_projection_binder_for, legacy_projection_callable_for,
     legacy_projection_impl_for, legacy_projection_dictionary,
     legacy_projection_executable_physical_identity,
+    legacy_projection_host_import,
     legacy_projection_effect_ctx_tokens,
     legacy_effect_ctx_token_ordinal, legacy_effect_ctx_token_instance,
     legacy_type_projection_type, legacy_effect_projection_row,
@@ -284,6 +301,7 @@ use legacy_projection::{
     legacy_container_is_module,
     legacy_assoc_binding_member, legacy_assoc_binding_type
 }
+use extern_manifest::{host_import_fact_host, host_import_fact_same}
 use resource_planner::{
     VerifiedResourceProgram,
     verified_resource_program_flow_fingerprint,
@@ -579,6 +597,87 @@ fn executable_ident(
         dict_closure_dicts: none, callable_instantiation: none,
         ty: ty, effects: EMPTY_ROW,
         span: span_zero()
+    }
+}
+
+fn legacy_callable_type_actuals(
+    projection: LegacyProjectionTable, executable: ExecutableRef,
+    substitutions: List<FlowTypeSubstitution>
+) -> List<HCallableTypeActual> {
+    if !executable_ref_is_named(executable) {
+        panic("RcHIR bridge: callable receipt executable is not named")
+    }
+    let symbol = executable_ref_named_symbol(executable)
+    substitutions.map(
+        fn(substitution) {
+            let parameter = flow_type_substitution_parameter(substitution)
+            if !symbol_ref_same(
+                    flow_generic_param_owner(parameter), symbol) {
+                panic("RcHIR bridge: callable receipt type formal owner differs")
+            }
+            HCallableTypeActual {
+                owner: flow_generic_param_owner(parameter),
+                ordinal: flow_generic_param_index(parameter),
+                arity: flow_generic_param_arity(parameter),
+                actual: legacy_type_for(
+                    projection,
+                    flow_type_substitution_replacement(substitution))
+            }
+        })
+}
+
+fn legacy_callable_effect_receipt(
+    projection: LegacyProjectionTable,
+    substitutions: List<CoreEffectSubstitution>,
+    receipt: CoreEffectInstantiation
+) -> HCallableEffectInstantiation {
+    if !core_effect_instantiation_projects_substitutions(
+            substitutions, receipt) {
+        panic("RcHIR bridge: callable effect receipt differs")
+    }
+    HCallableEffectInstantiation {
+        substitutions: substitutions.map(fn(substitution) {
+            HCallableEffectActual {
+                source: core_effect_substitution_parameter(substitution),
+                actual: legacy_effects_for(
+                    projection, core_effect_contract_exact(
+                        core_effect_substitution_replacement(substitution)))
+            }
+        })
+    }
+}
+
+fn executable_callable_value_ident(
+    ctx: HirBridgeCtx, expr: CoreExpr, ty: Type
+) -> HExpr {
+    let executable = core_expr_callable_executable(expr)
+    let type_args = legacy_callable_type_actuals(
+        ctx.projection, executable,
+        core_expr_callable_type_substitutions(expr))
+    let effect_substitutions =
+        core_expr_callable_effect_substitutions(expr)
+    let effect_receipt = core_expr_callable_effect_instantiation(expr)
+    let effects = legacy_callable_effect_receipt(
+        ctx.projection, effect_substitutions, effect_receipt)
+    let symbol = executable_ref_named_symbol(executable)
+    let identity = executable_identity(ctx.projection, executable)
+    HExpr::Ident {
+        name: identity, resolved_name: some(identity), def_id: none,
+        source_slot: none,
+        callee_identity: some(make_named_callee_ref(symbol)),
+        // `some([])` is the exact zero-bound materialization marker; absence
+        // would make the C bridge treat the callable as an unproven name.
+        dict_closure_dicts: some(
+            core_expr_callable_evidence(expr).map(fn(value) {
+                evidence_dict(ctx.projection, value)
+            })),
+        callable_instantiation: some(HCallableValueInstantiation {
+            type_args: type_args,
+            // Present empty is the frozen receipt for a callable with no
+            // effect formal; it must not collapse back to inference absence.
+            effects: some(effects)
+        }),
+        ty: ty, effects: EMPTY_ROW, span: span_zero()
     }
 }
 
@@ -1289,6 +1388,24 @@ fn callee_expr(
     }
 }
 
+fn callee_type_actuals(
+    ctx: HirBridgeCtx, callee: CoreCalleeRef
+) -> List<HCallableTypeActual> {
+    if core_callee_kind_tag(callee) != 0 { return [] }
+    legacy_callable_type_actuals(
+        ctx.projection, core_callee_direct(callee),
+        core_callee_type_substitutions(callee))
+}
+
+fn callee_effect_receipt(
+    ctx: HirBridgeCtx, callee: CoreCalleeRef
+) -> HCallableEffectInstantiation? {
+    if core_callee_kind_tag(callee) != 0 { return none }
+    some(legacy_callable_effect_receipt(
+        ctx.projection, core_callee_effect_substitutions(callee),
+        core_callee_effect_instantiation(callee)))
+}
+
 fn method_name(projection: LegacyProjectionTable, value: ExactMethodRef) -> Str {
     if exact_method_ref_is_intrinsic(value) {
         symbol_ref_canonical_payload(intrinsic_ref_symbol(
@@ -1541,8 +1658,9 @@ fn simple_core_expr(
             absent
         }
         return SerializedOperand { prefix: prefix, value: HExpr::Call {
-            callee: call_callee, args: args, type_args: [],
-            effect_instantiation: none,
+            callee: call_callee, args: args,
+            type_args: callee_type_actuals(ctx, callee),
+            effect_instantiation: callee_effect_receipt(ctx, callee),
             resolved_dicts: evidence,
             effect_ctx: typed_effect_ctx_source(
                 core_expr_call_effect_ctx_argument(expr)),
@@ -1581,8 +1699,20 @@ fn simple_core_expr(
         } }
     }
     if kind == 6 {
-        let executable = system_host_callable_executable(
-            core_expr_system_host(expr))
+        let host_import = core_expr_host_import(expr)
+        let host = host_import_fact_host(host_import)
+        let executable = system_host_callable_executable(host)
+        let projected_host_import = legacy_projection_host_import(
+            ctx.projection, executable)
+        if !host_import_fact_same(host_import, projected_host_import) {
+            panic("RcHIR bridge: Core/legacy HostImport differs")
+        }
+        let callee = core_expr_call_callee(expr)
+        if core_callee_kind_tag(callee) != 0 ||
+           !executable_ref_same(
+                core_callee_direct(callee), executable) {
+            panic("RcHIR bridge: HostImport callee receipt differs")
+        }
         let callable = legacy_projection_callable_for(ctx.projection, executable)
         let mut index = 0
         let mut prefix: List<HStmt> = []
@@ -1598,12 +1728,13 @@ fn simple_core_expr(
             callee: executable_ident(
                 ctx.projection, executable, callable_fn_type(callable)),
             args: args,
-            type_args: [], effect_instantiation: none,
+            type_args: callee_type_actuals(ctx, callee),
+            effect_instantiation: callee_effect_receipt(ctx, callee),
             resolved_dicts: [],
             effect_ctx: make_empty_effect_ctx_source(),
             callee_ref: some(make_named_callee_ref(
                 executable_ref_named_symbol(executable))), method_ref: none,
-            system_host: some(core_expr_system_host(expr)),
+            system_host: some(host),
             ty: ty, effects: effects, span: span_zero()
         } }
     }
@@ -1754,10 +1885,7 @@ fn simple_core_expr(
         })
     }
     if kind == 17 {
-        let executable = core_expr_callable_executable(expr)
-        return simple_operand(executable_ident(
-            ctx.projection, executable,
-            legacy_type_for(ctx.projection, core_expr_type(expr))))
+        return simple_operand(executable_callable_value_ident(ctx, expr, ty))
     }
     if kind == 20 {
         let dictionary = core_expr_dict_construct_dictionary(expr)
