@@ -4,7 +4,7 @@
 // relations are passed as an immutable checker snapshot; expression, binder,
 // callable, impl and executable facts are derived once from canonical HIR.
 
-use ast::{Span, Position, Pattern, LiteralValue, BinOp, UnaryOp, span_zero}
+use ast::{Span, Position, Pattern, LiteralValue, BinOp, UnaryOp}
 use types::{Type, Effect, EffectRow, types_equal, type_to_string, EMPTY_ROW}
 use env::{
     TypeEnv, TraitDef, AssocTypeDef,
@@ -3965,20 +3965,44 @@ fn lower_pattern(
         }
         return make_core_tuple_pattern(expected_type, result)
     }
-    let fields = h_pattern_plan_fields(plan).map(fn(field) {
+    let plan_fields = h_pattern_plan_fields(plan)
+    let ast_fields = if kind == 4 {
+        match ast {
+            Pattern::NamedConstructor { fields, .. } =>
+                fields.map(fn(field) { field.pattern }),
+            _ => panic("Core assembly: struct pattern/plan drifted")
+        }
+    } else if kind == 5 {
+        match ast {
+            Pattern::Constructor { fields, .. } => fields,
+            Pattern::NamedConstructor { fields, .. } =>
+                fields.map(fn(field) { field.pattern }),
+            _ => panic("Core assembly: variant pattern/plan drifted")
+        }
+    } else {
+        panic("Core assembly: OrPattern crossed PreCore")
+    }
+    if ast_fields.len() != plan_fields.len() {
+        panic("Core assembly: nominal pattern field census drifted")
+    }
+    let mut fields: List<CorePatternField> = []
+    let mut field_index = 0
+    while field_index < plan_fields.len() {
+        let field = plan_fields.get(field_index).unwrap()
         let core = core_field(h_pattern_field_projection(field))
-        make_core_pattern_field(core,
-            lower_pattern(ctx, Pattern::Wildcard { span: span_zero() },
+        fields.push(make_core_pattern_field(core,
+            lower_pattern(ctx, ast_fields.get(field_index).unwrap(),
                 h_pattern_field_pattern(field),
                 core_field_type_from_type_node(
                     lower_type_node(ctx, expected_type), core),
-                binding_kind))
-    })
+                binding_kind)))
+        field_index = field_index + 1
+    }
     if kind == 4 { make_core_struct_pattern(expected_type,
         h_pattern_plan_struct_owner(plan), fields) }
     else if kind == 5 { make_core_variant_pattern(expected_type,
         h_pattern_plan_variant(plan), fields) }
-    else { panic("Core assembly: OrPattern crossed PreCore") }
+    else { panic("unreachable: nominal pattern kind changed") }
 }
 
 fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
