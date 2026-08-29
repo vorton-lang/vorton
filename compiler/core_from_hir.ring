@@ -337,7 +337,7 @@ use core_expr::{
     core_body_effect_ctx_tokens,
     core_callable_effect_ctx_reference, core_callable_effect_ctx_layout,
     core_effect_ctx_layout_entries, core_effect_ctx_layout_formal,
-    core_effect_ctx_layout_same,
+    core_effect_ctx_layout_same, core_effect_ctx_layout_is_empty,
     core_effect_ctx_token_instance, core_effect_ctx_token_same,
     core_callee_effect_instantiation,
     core_field_ref_same, core_field_type_from_type_node,
@@ -3527,6 +3527,9 @@ fn core_effect_ctx_argument_from_source(
 ) -> CoreEffectCtxArgument {
     let target = effect_ctx_layout_from_contract(
         core_effect_instantiation_result(receipt))
+    if core_effect_ctx_layout_is_empty(target) {
+        return make_empty_core_effect_ctx_argument(receipt)
+    }
     if typed_effect_ctx_source_is_empty(source) {
         return make_empty_core_effect_ctx_argument(receipt)
     }
