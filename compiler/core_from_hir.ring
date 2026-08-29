@@ -3391,7 +3391,8 @@ fn core_callee(
             callee_ref_named_symbol(value))
         let source_effects = match callable_effect_source(ctx, executable) {
             some(contract) => contract,
-            none => panic("Core assembly: exact callable effect source is absent")
+            none => panic(
+                "Core assembly: exact callable effect source is absent: caller=${ctx.module_key}, callee_origin=${executable_ref_origin_module_key(executable)}, callee=${symbol_ref_canonical_payload(callee_ref_named_symbol(value))}")
         }
         let effect_substitutions = lower_callable_effect_substitutions(
             ctx, effect_instantiation)
