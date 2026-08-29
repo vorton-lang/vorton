@@ -128,6 +128,21 @@ pub use inner::greet
 
 将依赖模块的导出提升为当前模块的公开接口。支持模块门面模式。
 
+0.1的public export必须对enum constructor保持owner closure：一个facade若单独公开或重命名constructor，其最终public type exports中也必须包含该constructor的exact owner enum；不要求两者来自同一条`pub use`。
+
+```ring
+// 合法：owner enum 与constructor同时公开
+pub use leaf::{Token, Wrap}
+
+// 合法：两者都可重命名
+pub use leaf::{Token as PublicToken, Wrap as Make}
+
+// 非法：facade只公开constructor，缺少owner enum
+pub use leaf::Wrap
+```
+
+最后一种写法在re-export处稳定报错并建议同时公开owner enum。直接`pub use`一个enum仍自动携带其constructors；private/local `use`不受该public closure规则影响。实现按exact `VariantRef.owner`核对，不能从constructor leaf、alias spelling或唯一名字猜owner，也不能为接受constructor-only facade而隐式扩大type/impl可见性。
+
 ## Inline `mod` 块
 
 除了基于文件的模块外，Ring 支持在同一文件内定义 inline 模块块。

@@ -732,6 +732,10 @@ fn process(items) {
 
 TypedHIR/PreCore必须把直接constructor语法按resolver/registry已选定的exact `VariantRef`与field refs降低为显式Core construct；constructor不产生callable effect row、generic callable schema或`ExecutableInventory`条目，也不进入dynamic callable candidate。只有源码显式lambda才作为普通callable进入后续管线。`compiler/`、`std/`与`examples/`当前没有constructor函数值consumer，0.1不为其保留implicit-wrapper、旧C constructor-callable shell、fallback、IR hook或post-0.1 backlog；首次发布后只有真实consumer与新的用户决定才能重开。
 
+**0.1 public constructor re-export closure（2026-08-30 用户批准 B）**：一个facade的最终public exports中，每个单独公开或重命名的enum constructor都必须同时存在其exact `VariantRef.owner`对应的public enum type；两者不要求写在同一条`pub use`。因此`pub use leaf::{Token, Wrap}`及`pub use leaf::{Token as PublicToken, Wrap as Make}`合法，而只写`pub use leaf::Wrap`必须在re-export处稳定报source diagnostic并建议同时公开owner enum。直接公开enum仍自动携带其constructors；private/local import不受此public closure约束。
+
+该规则由ModuleExports最终closure按exact owner验证，失败不得发布部分facade。0.1不新增constructor-owner transport、importer private registry、隐式公开owner、名字推断或future hook；constructor的字段类型、generic schema与physical identity始终只来自已公开owner enum的唯一definition/import contract。
+
 一次 scheme instantiation 只产生一份完整 mapping receipt。type actual、effect formal→actual 与 trait dictionary/evidence 必须共同消费这份 receipt；禁止任何消费者再用 `build_scheme_var_map`、类型结构匹配或等价算法重建替换关系。receipt 是当前调用/函数值的 typed provenance，不是新 solver，最终随 HIR/Core 的 exact instantiation 关系运输。
 
 Ring 0.1 明确不支持 **polymorphic recursion**：递归环中的同一 callable 不能以彼此不可统一的类型实例调用自己或 peer。普通泛型递归仍支持，只要递归环内共享同一组类型参数；函数离开递归组后仍是正常泛型 scheme。Post-0.1 只有真实 consumer 证明该限制无法由普通泛型递归、显式数据建模或非递归 wrapper 表达时，才由 B-203 重新评估；0.1 不预留相关 IR、annotation 或 fallback。
