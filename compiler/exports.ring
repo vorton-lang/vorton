@@ -735,12 +735,10 @@ fn insert_exact_method_ref(
 fn export_impl_facts(
     impl_facts: List<ModuleImplFact>,
     env: TypeEnv,
-    fn_mut_params_map: Map<Str, List<Bool>>,
     program: Program,
     mut fact_owners: List<ImplEntry>,
     mut inherent_methods: Map<Str, List<Str>>,
-    mut mut_methods: Map<Str, Set<Str>>,
-    mut fn_mut_params: Map<Str, List<Bool>>
+    mut mut_methods: Map<Str, Set<Str>>
 ) {
     let mut seen_fact_owners: List<ImplEntry> = []
     for fact in impl_facts {
@@ -793,13 +791,6 @@ fn export_impl_facts(
         match env.trait_reg.mut_methods.get(fact.target) {
             some(ms) => { mut_methods.insert(fact.target, ms) },
             none => {}
-        }
-        for mname in fact.method_names {
-            let full_name = "${fact.target}_${mname}"
-            match fn_mut_params_map.get(full_name) {
-                some(flags) => { fn_mut_params.insert(full_name, flags) },
-                none => {}
-            }
         }
         // Inherent-method name lists — only for top-level impls of pub types
         // (mod-block nested impls never did the pub-type scan; preserved).
@@ -912,9 +903,8 @@ pub fn extract_exports(
             inherent_methods, struct_field_orders,
             extern_values, mut_methods, fn_mut_params, true)
     }
-    export_impl_facts(impl_facts, env, fn_mut_params_map, program,
-        fact_owners, inherent_methods, mut_methods,
-        fn_mut_params)
+    export_impl_facts(impl_facts, env, program,
+        fact_owners, inherent_methods, mut_methods)
 
     // Handle pub use re-exports from the dependency export objects themselves.
     // Payloads and origins are forwarded verbatim; only the facade lookup key

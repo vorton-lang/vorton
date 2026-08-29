@@ -19,7 +19,12 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTy
     CEmitState, new_c_ctx, c_emit, c_raw, c_param, c_param_def,
     c_param_effect_ctx_slot, c_exact_slot_c_name,
     c_local, c_mangle_fn,
-    c_mangle_fn_with_prefix, c_mangle_method, c_sanitize, c_symbol_for_fn_key, c_symbol_fragment,
+    c_mangle_fn_with_prefix, c_sanitize, c_symbol_for_fn_key,
+    c_symbol_fragment, c_module_symbol,
+    c_register_exact_method, c_exact_method_info,
+    c_exact_method_for_owner_slot,
+    c_method_info_fn, c_method_info_physical_identity,
+    c_mark_exact_method_emitted,
     c_effect_ctx_token_symbol,
     c_line_directive,
     rt_use, rt_use_raw,
@@ -28,10 +33,18 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo, CTy
     c_enable_identity_ledger, c_identity_ledger_text}
 use codegen_c_expr::{gen_c_expr, emit_c_stmt, ensure_c_dict_getter,
     c_exact_mut_symbol_key}
-use ir_identity::{impl_method_ref_callable_slot_index}
+use ir_identity::{
+    ImplOwnerRef, ImplMethodRef,
+    impl_owner_ref_same,
+    impl_owner_ref_target, impl_owner_ref_trait,
+    impl_method_ref_owner, impl_method_ref_name,
+    impl_method_ref_same, impl_method_ref_callable_slot_index,
+    impl_method_ref_stable_key,
+    registered_nominal_ref_symbol, symbol_ref_stable_key,
+    symbol_ref_canonical_payload}
 use ir_inventory::{ExecutableRef,
     executable_ref_is_named, executable_ref_named_symbol,
-    effect_ctx_slot}
+    effect_ctx_slot, make_exact_static_dict_ref}
 use effect_contract::{TypedCallableEffectCtx,
     typed_callable_effect_ctx_binding,
     typed_handled_effect_instance_same}
@@ -306,12 +319,11 @@ fn collect_c_module_names_rec(decls: List<HDecl>, mut names: Set<Str>) {
             HDecl::ExternFn { name, .. } => { names.insert(name) },
             HDecl::ExternType { name, .. } => { names.insert(name) },
             HDecl::TypeAlias { name, .. } => { names.insert(name) },
-            HDecl::Impl { target_type, methods, .. } => {
+            HDecl::Impl { methods, .. } => {
                 for m in methods {
                     match m {
                         HDecl::Fn { name: mn, .. } => {
-                            // Impl methods use the shared qualified callable key.
-                            names.insert("${target_type}_${mn}")
+                            names.insert(mn)
                         },
                         _ => {},
                     }
@@ -502,16 +514,22 @@ fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?
                 ctx.ring_callable_names.insert(mangled)
                 c_declare_fn(ctx, mangled, params, trait_bounds, effect_ctx)
             },
-            HDecl::Impl { target_type, trait_name, methods, .. } => {
+            HDecl::Impl {
+                target_type, owner_ref, trait_name, methods, ..
+            } => {
                 for m in methods {
                     match m {
                         HDecl::Fn { name: mn, params: mp,
                                     trait_bounds: mtb,
-                                    effect_ctx: method_ctx, .. } => {
-                            let method_key = c_mangle_method(target_type, mn)
-                            ctx.ring_callable_names.insert(method_key)
-                            c_declare_fn(
-                                ctx, method_key, mp, mtb, method_ctx)
+                                    effect_ctx: method_ctx,
+                                    impl_method_ref, .. } => {
+                            let exact = match impl_method_ref {
+                                some(value) => value,
+                                none => panic(
+                                    "C method index: declaration lacks exact identity")
+                            }
+                            c_declare_exact_method(
+                                ctx, exact, mn, mp, mtb, method_ctx)
                         },
                         _ => {},
                     }
@@ -523,18 +541,69 @@ fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?
                 // when a use site precedes the impl in decl order.
                 match trait_name {
                     some(tn) => {
+                        match impl_owner_ref_trait(owner_ref) {
+                            some(trait_ref) => if
+                                    symbol_ref_canonical_payload(trait_ref) != tn {
+                                panic("C method index: impl trait projection differs")
+                            },
+                            none => panic(
+                                "C method index: trait impl lacks exact trait")
+                        }
                         let dict_name = trait_dict_name(target_type, tn)
                         let has_methods = methods.len() > 0
-                        if has_methods && ctx.dict_build_fns.contains(dict_name) == false {
-                            ctx.dict_build_fns.insert(dict_name)
-                            ctx.fn_protos.push("void* ring_dict_build_${c_symbol_fragment(dict_name)}(void);")
+                        if has_methods {
+                            match ctx.dict_build_owners.get(dict_name) {
+                                some(existing) => if !impl_owner_ref_same(
+                                        existing, owner_ref) {
+                                    panic("C ABI dict: physical build name has multiple exact owners")
+                                },
+                                none => ctx.dict_build_owners.insert(
+                                    dict_name, owner_ref)
+                            }
+                            if !ctx.dict_build_fns.contains(dict_name) {
+                                ctx.dict_build_fns.insert(dict_name)
+                                ctx.fn_protos.push("void* ring_dict_build_${c_symbol_fragment(dict_name)}(void);")
+                            }
+                        }
+                        if tn == "Drop" {
+                            let target_key = symbol_ref_stable_key(
+                                impl_owner_ref_target(owner_ref))
+                            let mut drop_method: ImplMethodRef? = none
+                            for method_decl in methods {
+                                match method_decl {
+                                    HDecl::Fn {
+                                        impl_method_ref: some(exact), ..
+                                    } => if impl_method_ref_name(exact) == "drop" {
+                                        if drop_method.is_some() {
+                                            panic("C Drop index: exact drop method repeats")
+                                        }
+                                        drop_method = some(exact)
+                                    },
+                                    _ => {}
+                                }
+                            }
+                            let exact_drop = match drop_method {
+                                some(value) => value,
+                                none => panic("C Drop index: Drop impl has no exact drop method")
+                            }
+                            match ctx.drop_method_by_nominal_exact.get(target_key) {
+                                some(existing) => if !impl_method_ref_same(
+                                        existing, exact_drop) {
+                                    panic("C Drop index: nominal has multiple exact drop methods")
+                                },
+                                none => ctx.drop_method_by_nominal_exact.insert(
+                                    target_key, exact_drop)
+                            }
                         }
                     },
                     none => {},
                 }
             },
             HDecl::Trait { .. } => {},
-            HDecl::Struct { name, fields, .. } => {
+            HDecl::Struct { name, owner_ref, fields, .. } => {
+                register_c_nominal_physical(ctx, name,
+                    symbol_ref_stable_key(
+                        registered_nominal_ref_symbol(owner_ref)))
                 let mut fnames: List<Str> = []
                 // B-104 D1 rule ① (audit #139): mark fields whose Ring type
                 // is (or transitively contains) an extern handle — the drop
@@ -548,7 +617,10 @@ fn c_forward_declare_with_prefix(mut ctx: CCtx, decls: List<HDecl>, prefix: Str?
                 // The ring_<Name> constructor fn is declared AFTER the whole
                 // forward pass (c_declare_struct_ctors) — fns win collisions.
             },
-            HDecl::Enum { name, variants, .. } => {
+            HDecl::Enum { name, owner_ref, variants, .. } => {
+                register_c_nominal_physical(ctx, name,
+                    symbol_ref_stable_key(
+                        registered_nominal_ref_symbol(owner_ref)))
                 register_c_enum_info(ctx, name, variants)
                 c_emit_enum_ctors(ctx, name, variants)
             },
@@ -774,6 +846,40 @@ fn c_declare_fn(
     ctx.fn_protos.push("void* ${c_name}(${params_str});")
 }
 
+fn register_c_nominal_physical(
+    mut ctx: CCtx, physical_name: Str, exact_key: Str
+) {
+    match ctx.nominal_exact_by_physical.get(physical_name) {
+        some(existing) => if existing != exact_key {
+            panic("C nominal index: physical type names multiple exact nominals")
+        },
+        none => ctx.nominal_exact_by_physical.insert(physical_name, exact_key)
+    }
+}
+
+fn c_declare_exact_method(
+    mut ctx: CCtx, method: ImplMethodRef,
+    physical_identity: Str, params: List<HParam>,
+    trait_bounds: List<TraitBound>, effect_ctx: TypedCallableEffectCtx
+) {
+    let _ = effect_ctx
+    let expected = "impl-method/${impl_method_ref_stable_key(method)}"
+    if physical_identity != expected {
+        panic("C method index: HDecl physical identity differs from exact method")
+    }
+    let total = params.len() + trait_bounds.len() + 1
+    let c_name = c_module_symbol("ring-method/${physical_identity}")
+    let before = ctx.method_index.len()
+    let _ = c_register_exact_method(
+        ctx, method, physical_identity, c_name, total)
+    if ctx.method_index.len() == before { return }
+    let mut ps: List<Str> = []
+    for _p in params { ps.push("void*") }
+    for _b in trait_bounds { ps.push("void*") }
+    ps.push("EffectCtx*")
+    ctx.fn_protos.push("void* ${c_name}(${ps.join(", ")});")
+}
+
 // ============================================================
 // Declaration body emission
 // ============================================================
@@ -783,17 +889,24 @@ fn emit_c_decl(mut ctx: CCtx, decl: HDecl) {
         HDecl::Fn { name, params, body, trait_bounds,
                     effect_ctx, span, .. } => {
             emit_c_fn_body(ctx, name, params, body, trait_bounds,
-                effect_ctx, none, span)
+                effect_ctx, span)
         },
-        HDecl::Impl { target_type, trait_name, methods, .. } => {
+        HDecl::Impl {
+            target_type, owner_ref, trait_name, methods, ..
+        } => {
             for m in methods {
                 match m {
                     HDecl::Fn { name: mn, params: mp, body: mb,
                                 trait_bounds: mtb,
                                 effect_ctx: method_ctx,
-                                span: msp, .. } => {
-                        emit_c_fn_body(ctx, mn, mp, mb, mtb, method_ctx,
-                            some(target_type), msp)
+                                impl_method_ref, span: msp, .. } => {
+                        let exact = match impl_method_ref {
+                            some(value) => value,
+                            none => panic(
+                                "C method index: body lacks exact identity")
+                        }
+                        emit_c_method_body(
+                            ctx, exact, mn, mp, mb, mtb, method_ctx, msp)
                     },
                     _ => {},
                 }
@@ -802,7 +915,8 @@ fn emit_c_decl(mut ctx: CCtx, decl: HDecl) {
             // into an ordinary exact HDecl::Fn.  C only assembles the ABI dict.
             match trait_name {
                 some(tn) => {
-                    emit_c_trait_dict(ctx, target_type, tn, methods)
+                    emit_c_trait_dict(
+                        ctx, target_type, tn, owner_ref, methods)
                 },
                 none => {},
             }
@@ -866,17 +980,12 @@ fn emit_c_fn_body(
     mut ctx: CCtx, name: Str, params: List<HParam>, body: HExpr,
     trait_bounds: List<TraitBound>,
     effect_ctx: TypedCallableEffectCtx,
-    impl_type: Str?, span: Span
+    span: Span
 ) {
-    let mangled = match impl_type {
-        some(t) => c_mangle_method(t, name),
-        none => {
-            // Step 8: module-qualified key in project mode (emit_fn_body parity).
-            match ctx.module_prefix {
-                some(prefix) => c_mangle_fn_with_prefix(prefix, name),
-                none => c_mangle_fn(name),
-            }
-        },
+    // Step 8: module-qualified key in project mode (emit_fn_body parity).
+    let mangled = match ctx.module_prefix {
+        some(prefix) => c_mangle_fn_with_prefix(prefix, name),
+        none => c_mangle_fn(name),
     }
     // Definition symbol = CFnInfo.c_name (collision-renamed when needed).
     let c_name = match ctx.functions.get(mangled) {
@@ -884,14 +993,47 @@ fn emit_c_fn_body(
         none => panic("C codegen: function '${mangled}' not forward-declared"),
     }
 
-    // First definition wins (see CCtx.emitted_fns): a later decl with the
-    // same mangled name (user enum shadowing a prelude type's impl) would be
-    // a C redefinition error; call sites all resolve to the first symbol,
-    // matching the LLVM backend's effective behaviour.
+    // Ordinary value declarations retain their existing project re-declaration
+    // behavior. Impl methods never enter this spelling-keyed path.
     if ctx.emitted_fns.contains(c_name) { return }
     ctx.emitted_fns.insert(c_name)
 
-    let saved = begin_c_fn(ctx, mangled)
+    emit_c_callable_body(
+        ctx, mangled, c_name, params, body, trait_bounds, effect_ctx, span)
+}
+
+fn emit_c_method_body(
+    mut ctx: CCtx, method: ImplMethodRef, physical_identity: Str,
+    params: List<HParam>, body: HExpr, trait_bounds: List<TraitBound>,
+    effect_ctx: TypedCallableEffectCtx, span: Span
+) {
+    let method_info = c_exact_method_info(ctx, method)
+    if c_method_info_physical_identity(method_info) != physical_identity {
+        panic("C method index: definition physical identity differs")
+    }
+    let fn_info = c_method_info_fn(method_info)
+    if fn_info.total_params != params.len() + trait_bounds.len() + 1 ||
+       !fn_info.takes_effect_ctx {
+        panic("C method index: definition ABI differs")
+    }
+    if !c_mark_exact_method_emitted(ctx, method) { return }
+    if ctx.emitted_fns.contains(fn_info.c_name) {
+        panic("C method index: exact method C symbol collides")
+    }
+    ctx.emitted_fns.insert(fn_info.c_name)
+    emit_c_callable_body(
+        ctx, impl_method_ref_stable_key(method), fn_info.c_name,
+        params, body, trait_bounds, effect_ctx, span)
+}
+
+fn emit_c_callable_body(
+    mut ctx: CCtx, registry_key: Str, c_name: Str,
+    params: List<HParam>, body: HExpr,
+    trait_bounds: List<TraitBound>,
+    effect_ctx: TypedCallableEffectCtx, span: Span
+) {
+
+    let saved = begin_c_fn(ctx, registry_key)
 
     // Parameters → C signature (uniform void* boxing, LLVM parity).
     let mut sig_parts: List<Str> = []
@@ -1032,15 +1174,8 @@ fn emit_c_drop_functions(mut ctx: CCtx) {
                 // B-002p1: user `impl Drop` body runs BEFORE the recursive
                 // field drops (user cleanup can still read the fields).
                 if ctx.drop_types.contains(sname) {
-                    let user_drop_name = c_mangle_method(sname, "drop")
-                    match ctx.functions.get(user_drop_name) {
-                        some(fi) => {
-                            def.push("    ${fi.c_name}(${c_user_drop_args(ctx, user_drop_name, fi.total_params)});")
-                        },
-                        none => {
-                            eprintln("[drop-warn] user drop method '${user_drop_name}' not found for Drop type '${sname}'")
-                        },
-                    }
+                    let fi = c_exact_user_drop_info(ctx, sname)
+                    def.push("    ${fi.c_name}(${c_user_drop_args(ctx, fi.total_params)});")
                 }
 
                 for i in 0..info.field_names.len() {
@@ -1078,15 +1213,8 @@ fn emit_c_drop_functions(mut ctx: CCtx) {
                 // The user destructor runs while the complete enum payload is
                 // still live, matching the struct drop order above.
                 if ctx.drop_types.contains(ename) {
-                    let user_drop_name = c_mangle_method(ename, "drop")
-                    match ctx.functions.get(user_drop_name) {
-                        some(fi) => {
-                            def.push("    ${fi.c_name}(${c_user_drop_args(ctx, user_drop_name, fi.total_params)});")
-                        },
-                        none => {
-                            eprintln("[drop-warn] user drop method '${user_drop_name}' not found for Drop type '${ename}'")
-                        },
-                    }
+                    let fi = c_exact_user_drop_info(ctx, ename)
+                    def.push("    ${fi.c_name}(${c_user_drop_args(ctx, fi.total_params)});")
                 }
 
                 let mut variant_keys = enum_info.variants.keys()
@@ -1131,11 +1259,22 @@ fn emit_c_drop_functions(mut ctx: CCtx) {
     }
 }
 
+fn c_exact_user_drop_info(ctx: CCtx, physical_type: Str) -> CFnInfo {
+    let nominal_key = match ctx.nominal_exact_by_physical.get(physical_type) {
+        some(value) => value,
+        none => panic("C Drop index: physical type has no exact nominal")
+    }
+    let method = match ctx.drop_method_by_nominal_exact.get(nominal_key) {
+        some(value) => value,
+        none => panic("C Drop index: exact nominal has no Drop method")
+    }
+    c_method_info_fn(c_exact_method_info(ctx, method))
+}
+
 // User Drop receives the value, any dictionary fillers, then empty EffectCtx.
 fn c_user_drop_args(
-    mut ctx: CCtx, user_drop_name: Str, total_params: Int
+    mut ctx: CCtx, total_params: Int
 ) -> Str {
-    let _ = user_drop_name
     if total_params < 2 {
         panic("C ABI drop: Ring method lacks receiver/context")
     }
@@ -1399,19 +1538,21 @@ fn scan_fn_mut_params_with_prefix_c(
                     fn_mut_params, executable_ref, params, key,
                     exact_extern_mut_keys)
             },
-            HDecl::Impl { target_type, methods, .. } => {
+            HDecl::Impl { methods, .. } => {
                 for m in methods {
                     match m {
                         HDecl::Fn {
-                            name: mn, executable_ref, params: mp, ..
+                            impl_method_ref, params: mp, ..
                         } => {
-                            let ufcs_name = "${target_type}_${mn}"
-                            fn_mut_params.insert(ufcs_name,
+                            let exact = match impl_method_ref {
+                                some(value) => value,
+                                none => panic(
+                                    "C mut ABI: impl method lacks exact identity")
+                            }
+                            register_exact_mut_flags_c(
+                                fn_mut_params,
+                                impl_method_ref_stable_key(exact),
                                 body_mut_param_flags_c(mp, boxed_vars))
-                            insert_exact_body_mut_params_c(
-                                fn_mut_params, executable_ref, mp,
-                                boxed_vars, ufcs_name,
-                                exact_body_mut_keys)
                         },
                         _ => {},
                     }
@@ -1433,13 +1574,16 @@ fn scan_fn_mut_params_with_prefix_c(
 // each slot is a {thunk, env} closure (typeid 7).
 // ============================================================
 
-fn emit_c_trait_dict(mut ctx: CCtx, target_type: Str, trait_name: Str, methods: List<HDecl>) {
+fn emit_c_trait_dict(
+    mut ctx: CCtx, target_type: Str, trait_name: Str,
+    owner: ImplOwnerRef, methods: List<HDecl>
+) {
     let dict_name = trait_dict_name(target_type, trait_name)
 
-    let mut method_order: List<Str> = []
+    let mut method_order: List<ImplMethodRef> = []
     for m in methods {
         match m {
-            HDecl::Fn { name, impl_method_ref, .. } => {
+            HDecl::Fn { impl_method_ref, .. } => {
                 let exact = match impl_method_ref {
                     some(value) => value,
                     none => panic(
@@ -1449,7 +1593,19 @@ fn emit_c_trait_dict(mut ctx: CCtx, target_type: Str, trait_name: Str, methods: 
                         method_order.len() {
                     panic("C ABI dict: exact method slot order differs")
                 }
-                method_order.push(name)
+                if !impl_owner_ref_same(
+                        impl_method_ref_owner(exact), owner) {
+                    panic("C ABI dict: exact method owner differs")
+                }
+                let indexed = c_exact_method_for_owner_slot(
+                    ctx, owner, method_order.len())
+                let indexed_fn = c_method_info_fn(indexed)
+                let exact_fn = c_method_info_fn(c_exact_method_info(ctx, exact))
+                if indexed_fn.c_name != exact_fn.c_name ||
+                   indexed_fn.total_params != exact_fn.total_params {
+                    panic("C ABI dict: owner slot/index relation differs")
+                }
+                method_order.push(exact)
             },
             _ => panic("C ABI dict: impl method carrier is not a function"),
         }
@@ -1473,9 +1629,8 @@ fn emit_c_trait_dict(mut ctx: CCtx, target_type: Str, trait_name: Str, methods: 
     c_emit(ctx, "*(int64_t*)${dict} = ${method_count};")
     for i in 0..method_count {
         match method_order.get(i) {
-            some(method_name) => {
-                emit_c_dict_method_slot(
-                    ctx, target_type, method_name, dict, i)
+            some(method) => {
+                emit_c_dict_method_slot(ctx, method, dict, i)
             },
             none => {},
         }
@@ -1484,26 +1639,22 @@ fn emit_c_trait_dict(mut ctx: CCtx, target_type: Str, trait_name: Str, methods: 
     c_pop_fn(ctx, build_fn_name, "void", saved)
 
     // Memoised getter (routes through the build fn — dict_build_fns entry).
-    let _g = ensure_c_dict_getter(ctx, dict_name)
+    let _g = ensure_c_dict_getter(
+        ctx, dict_name, make_exact_static_dict_ref(owner))
 }
 
 fn emit_c_dict_method_slot(
-    mut ctx: CCtx, target_type: Str, method_name: Str,
+    mut ctx: CCtx, method: ImplMethodRef,
     dict_var: Str, slot_idx: Int
 ) {
-    let mangled = c_mangle_method(target_type, method_name)
-    match ctx.functions.get(mangled) {
-        some(fi) => {
-            // Direct-ABI impl method behind an env-dropping thunk (B-092).
-            let thunk = ensure_c_dict_method_thunk(ctx, fi.c_name, fi.total_params)
-            let cls = fresh_tmp(ctx)
-            c_emit(ctx, "${cls} = ring_alloc((int64_t)(2 * sizeof(void*)), 7);")
-            c_emit(ctx, "((void**)${cls})[0] = (void*)${thunk};")
-            c_emit(ctx, "((void**)${cls})[1] = RING_UNIT;")
-            c_emit(ctx, "((void**)${dict_var})[${slot_idx + 1}] = ${cls};")
-        },
-        none => panic("C ABI dict: exact ordinary method was not declared"),
-    }
+    let fi = c_method_info_fn(c_exact_method_info(ctx, method))
+    // Direct-ABI impl method behind an env-dropping thunk (B-092).
+    let thunk = ensure_c_dict_method_thunk(ctx, fi.c_name, fi.total_params)
+    let cls = fresh_tmp(ctx)
+    c_emit(ctx, "${cls} = ring_alloc((int64_t)(2 * sizeof(void*)), 7);")
+    c_emit(ctx, "((void**)${cls})[0] = (void*)${thunk};")
+    c_emit(ctx, "((void**)${cls})[1] = RING_UNIT;")
+    c_emit(ctx, "((void**)${dict_var})[${slot_idx + 1}] = ${cls};")
 }
 
 // Env-dropping thunk forwards visible/dictionary arguments then EffectCtx.

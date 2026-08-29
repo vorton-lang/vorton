@@ -11,7 +11,12 @@
 use types::{Type}
 use ast::{Span}
 use hir::{HDictDef, TraitBound}
-use ir_identity::{SlotRef, slot_ref_stable_key}
+use ir_identity::{
+    SlotRef, ImplOwnerRef, ImplMethodRef,
+    slot_ref_stable_key, impl_owner_ref_same, impl_method_ref_same,
+    impl_method_ref_owner, impl_method_ref_callable_slot_index,
+    impl_method_ref_stable_key}
+use ir_inventory::{ExactDictRef}
 use legacy_projection::{LegacyEffectCtxToken}
 
 // Per-function registration info (forward-declare pass).
@@ -54,6 +59,15 @@ pub struct CEnumInfo {
 // stack only tracks control frames that an early return must pop.
 pub struct CHandleCleanup {
     pub needs_catch_pop: Bool
+}
+
+// Backend-local relation from the exact Core-issued method identity to its
+// projected physical/C identity and complete C ABI shape.  No target/member
+// spelling participates in lookup.
+pub struct CMethodInfo {
+    method: ImplMethodRef,
+    physical_identity: Str,
+    fn_info: CFnInfo
 }
 
 // H+T final-emission authority. Exact and backend name-only registrations
@@ -142,16 +156,19 @@ pub struct CCtx {
     // Semantic/synthetic SlotRef identity is independent from legacy DefId.
     pub value_slots_by_slot_key: Map<Str, CExactSlotRef>,
     pub functions: Map<Str, CFnInfo>,          // C mangled name -> info
+    pub method_index: List<CMethodInfo>,
+    method_exact_by_physical: Map<Str, Str>,
+    emitted_method_keys: Set<Str>,
     pub fn_mut_params: Map<Str, List<Bool>>,
     pub struct_types: Map<Str, CStructInfo>,
     pub enum_types: Map<Str, CEnumInfo>,
+    pub nominal_exact_by_physical: Map<Str, Str>,
+    pub drop_method_by_nominal_exact: Map<Str, ImplMethodRef>,
     pub rt_protos: Map<Str, Str>,              // runtime fn name -> full C prototype line
     pub cstr_cache: Map<Str, Str>,             // interned message -> global cstr name
-    // C names whose definition has been emitted.  First definition wins:
-    // duplicate mangled names (user `enum Result` impl methods colliding with
-    // the prelude's `Result` impl) are a single LLVM module symbol there
-    // (LLVM auto-uniques; the later body lands in a dead block) — in C a
-    // second definition is a hard clang error, so later bodies are skipped.
+    // C names whose definition has been emitted. Exact impl methods have a
+    // separate identity-keyed ledger; this set only protects the final C
+    // symbol namespace used by ordinary functions and backend helpers.
     pub emitted_fns: Set<Str>,
     // Synthetic derive methods registered before any member of their SCC is
     // emitted. Kept separate from ordinary declarations so a predeclared
@@ -200,8 +217,10 @@ pub struct CCtx {
     // builtin fallback.  Pre-registration makes getter contents independent
     // of decl order (the LLVM backend's lazy variant is order-sensitive).
     pub dict_build_fns: Set<Str>,
-    // Dict names whose memoised getter ring_dict_init_<name> was emitted.
-    pub dict_getters: Set<Str>,
+    // Physical build/getter names remain emission payload only; the exact
+    // owner/tree beside each entry is mandatory for every lookup.
+    pub dict_build_owners: Map<Str, ImplOwnerRef>,
+    pub dict_getters: Map<Str, ExactDictRef>,
     // Function-value dict ABI invariant: the checker must attach exactly one
     // DictRef per bound.  Codegen keeps the declared bounds only to reject a
     // missing/partial dictionary list; it never re-resolves types.
@@ -277,9 +296,14 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         value_slots_by_def_id: map_new(),
         value_slots_by_slot_key: map_new(),
         functions: map_new(),
+        method_index: [],
+        method_exact_by_physical: map_new(),
+        emitted_method_keys: set_new(),
         fn_mut_params: map_new(),
         struct_types: map_new(),
         enum_types: map_new(),
+        nominal_exact_by_physical: map_new(),
+        drop_method_by_nominal_exact: map_new(),
         rt_protos: map_new(),
         cstr_cache: map_new(),
         emitted_fns: set_new(),
@@ -298,7 +322,8 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         trait_supertraits: map_new(),
         static_dict_defs: map_new(),
         dict_build_fns: set_new(),
-        dict_getters: set_new(),
+        dict_build_owners: map_new(),
+        dict_getters: map_new(),
         fn_trait_bounds: map_new(),
         lambda_counter: 0,
         dictwrap_counter: 0,
@@ -410,14 +435,6 @@ pub fn c_mangle_fn(name: Str) -> Str {
     }
 }
 
-pub fn c_mangle_method(type_name: Str, method_name: Str) -> Str {
-    if type_name.index_of("$$_").is_some() {
-        c_module_symbol("ring_${type_name}_${method_name}")
-    } else {
-        "ring_${c_sanitize(type_name)}_${c_sanitize(method_name)}"
-    }
-}
-
 // Module-qualified registry KEY: ring_<prefix>$$_<name> — byte-identical to
 // llvm_mangle_fn_with_prefix so the module resolution logic ports verbatim.
 // NOT a valid C identifier; the emitted symbol is c_sanitize'd in
@@ -491,6 +508,114 @@ pub fn fresh_tmp(mut ctx: CCtx) -> Str {
     let name = "t${n}"
     ctx.cur_decls.push("    void* ${name};")
     name
+}
+
+pub fn c_register_exact_method(
+    mut ctx: CCtx, method: ImplMethodRef, physical_identity: Str,
+    c_name: Str, total_params: Int
+) -> CMethodInfo {
+    if physical_identity == "" || c_name == "" || total_params < 1 {
+        panic("C method index: invalid physical identity/ABI")
+    }
+    let exact_key = impl_method_ref_stable_key(method)
+    for existing in ctx.method_index {
+        if impl_method_ref_same(existing.method, method) {
+            if existing.physical_identity != physical_identity ||
+               existing.fn_info.c_name != c_name ||
+               existing.fn_info.total_params != total_params ||
+               !existing.fn_info.takes_effect_ctx {
+                panic("C method index: duplicate exact method has different physical identity/ABI")
+            }
+            return existing
+        }
+    }
+    match ctx.method_exact_by_physical.get(physical_identity) {
+        some(existing_key) => if existing_key != exact_key {
+            panic("C method index: physical identity names multiple exact methods")
+        },
+        none => ctx.method_exact_by_physical.insert(
+            physical_identity, exact_key)
+    }
+    let info = CMethodInfo {
+        method: method, physical_identity: physical_identity,
+        fn_info: CFnInfo {
+            c_name: c_name, total_params: total_params,
+            takes_effect_ctx: true
+        }
+    }
+    ctx.method_index.push(info)
+    info
+}
+
+pub fn c_exact_method_info(
+    ctx: CCtx, method: ImplMethodRef
+) -> CMethodInfo {
+    let mut found: CMethodInfo? = none
+    for info in ctx.method_index {
+        if impl_method_ref_same(info.method, method) {
+            if found.is_some() {
+                panic("C method index: exact method is duplicated")
+            }
+            found = some(info)
+        }
+    }
+    match found {
+        some(info) => info,
+        none => panic("C method index: exact method is absent")
+    }
+}
+
+pub fn c_exact_method_for_owner_slot(
+    ctx: CCtx, owner: ImplOwnerRef, slot: Int
+) -> CMethodInfo {
+    if slot < 0 { panic("C method index: negative callable slot") }
+    let mut found: CMethodInfo? = none
+    for info in ctx.method_index {
+        if impl_owner_ref_same(impl_method_ref_owner(info.method), owner) &&
+           impl_method_ref_callable_slot_index(info.method) == slot {
+            if found.is_some() {
+                panic("C method index: owner/callable slot is duplicated")
+            }
+            found = some(info)
+        }
+    }
+    match found {
+        some(info) => info,
+        none => panic("C method index: owner/callable slot is absent")
+    }
+}
+
+pub fn c_exact_method_count_for_owner(
+    ctx: CCtx, owner: ImplOwnerRef
+) -> Int {
+    let mut count = 0
+    for info in ctx.method_index {
+        if impl_owner_ref_same(impl_method_ref_owner(info.method), owner) {
+            count = count + 1
+        }
+    }
+    let mut slot = 0
+    while slot < count {
+        let _ = c_exact_method_for_owner_slot(ctx, owner, slot)
+        slot = slot + 1
+    }
+    count
+}
+
+pub fn c_method_info_physical_identity(value: CMethodInfo) -> Str {
+    value.physical_identity
+}
+pub fn c_method_info_fn(value: CMethodInfo) -> CFnInfo { value.fn_info }
+
+// Returns true exactly once per exact method.  Repeated carriers are allowed
+// only after c_register_exact_method has proved identical physical/ABI shape.
+pub fn c_mark_exact_method_emitted(
+    mut ctx: CCtx, method: ImplMethodRef
+) -> Bool {
+    let key = impl_method_ref_stable_key(method)
+    if ctx.emitted_method_keys.contains(key) { return false }
+    ctx.emitted_method_keys.insert(key)
+    true
 }
 
 pub fn fresh_effect_ctx_token_array(mut ctx: CCtx, count: Int) -> Str {

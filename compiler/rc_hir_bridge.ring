@@ -1190,12 +1190,13 @@ fn callee_expr(
     }
 }
 
-fn method_name(value: ExactMethodRef) -> Str {
+fn method_name(projection: LegacyProjectionTable, value: ExactMethodRef) -> Str {
     if exact_method_ref_is_intrinsic(value) {
         symbol_ref_canonical_payload(intrinsic_ref_symbol(
             exact_method_ref_intrinsic(value)))
     } else if exact_method_ref_is_impl(value) {
-        impl_method_ref_name(exact_method_ref_impl(value))
+        executable_identity(projection, make_named_executable_ref(
+            impl_method_ref_member(exact_method_ref_impl(value))))
     } else if exact_method_ref_is_trait(value) {
         trait_method_ref_name(exact_method_ref_trait(value))
     } else {
@@ -1402,7 +1403,8 @@ fn simple_core_expr(
             }
             HExpr::FieldAccess {
                 receiver: serialized_receiver.value,
-                field: method_name(method), access_kind: HFieldAccessKind::Method,
+                field: method_name(ctx.projection, method),
+                access_kind: HFieldAccessKind::Method,
                 projection: none,
                 ty: Type::FnType {
                     params: method_params, return_type: ty, effects: effects
@@ -2368,7 +2370,7 @@ fn generated_method_decl(
     let executable = make_named_executable_ref(impl_method_ref_member(method))
     let callable = legacy_projection_callable_for(ctx.projection, executable)
     HDecl::Fn {
-        name: impl_method_ref_name(method), def_id: none,
+        name: executable_identity(ctx.projection, executable), def_id: none,
         executable_ref: executable, impl_method_ref: some(method),
         type_params: legacy_type_params(
             legacy_callable_type_parameters(callable)),
@@ -2476,7 +2478,12 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
             type_params, params, return_type, effects,
             is_pub, trait_bounds, span, ..
         } => HDecl::Fn {
-            name: name, def_id: def_id,
+            name: match impl_method_ref {
+                some(method) => executable_identity(
+                    ctx.projection, make_named_executable_ref(
+                        impl_method_ref_member(method))),
+                none => name
+            }, def_id: def_id,
             executable_ref: executable_ref,
             impl_method_ref: impl_method_ref,
             type_params: type_params, params: params,

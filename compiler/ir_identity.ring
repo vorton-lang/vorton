@@ -1439,6 +1439,39 @@ fn path_ref_stable_key(value: PathRef) -> Str {
     parts.join("/")
 }
 
+// Complete physical adapter key for one exact impl executable.  Every
+// variable-width component is length-prefixed before composition; physical
+// backends may encode this value, but must never reconstruct it from target or
+// member spellings.
+pub fn impl_method_ref_stable_key(value: ImplMethodRef) -> Str {
+    let owner = impl_method_ref_owner(value)
+    let provider = impl_owner_ref_provider(owner)
+    let mut parts = [
+        identity_key_atom("impl-method-v1"),
+        identity_key_atom(symbol_ref_stable_key(
+            impl_owner_ref_target(owner))),
+        identity_key_atom(path_ref_stable_key(
+            impl_provider_ref_site(provider))),
+        identity_key_atom(impl_provider_kind_tag(
+            impl_provider_ref_kind(provider)).to_str())
+    ]
+    match impl_owner_ref_trait(owner) {
+        some(trait_ref) => {
+            parts.push(identity_key_atom("1"))
+            parts.push(identity_key_atom(symbol_ref_stable_key(trait_ref)))
+        },
+        none => parts.push(identity_key_atom("0"))
+    }
+    parts.push(identity_key_atom(symbol_ref_stable_key(
+        impl_method_ref_member(value))))
+    parts.push(identity_key_atom(
+        impl_method_ref_source_member_index(value).to_str()))
+    parts.push(identity_key_atom(
+        impl_method_ref_callable_slot_index(value).to_str()))
+    parts.push(identity_key_atom(impl_method_ref_name(value)))
+    parts.join("/")
+}
+
 // Exact physical adapters may key maps by this value without weakening the
 // opaque SlotRef equality contract or reconstructing an identity from names.
 pub fn slot_ref_stable_key(value: SlotRef) -> Str {

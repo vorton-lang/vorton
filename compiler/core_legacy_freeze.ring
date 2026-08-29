@@ -42,6 +42,7 @@ use ir_identity::{
     symbol_ref_origin_module_key, symbol_ref_canonical_payload,
     impl_method_ref_owner, impl_method_ref_member, impl_method_ref_name,
     impl_method_ref_callable_slot_index,
+    impl_method_ref_stable_key,
     impl_owner_ref_target, impl_owner_ref_trait,
     intrinsic_ref_symbol, slot_ref_same, slot_ref_is_source,
     slot_ref_stable_key,
@@ -221,8 +222,7 @@ fn add_physical_identity(
                     impl_method_ref_member(exact)) {
                 panic("Core/legacy freeze: impl method executable differs")
             }
-            "${symbol_ref_canonical_payload(impl_owner_ref_target(
-                impl_method_ref_owner(exact)))}_${impl_method_ref_name(exact)}"
+            "impl-method/${impl_method_ref_stable_key(exact)}"
         },
         none => if executable_ref_is_named(reference) {
         if executable_uses_physical_owner(builder, reference) &&

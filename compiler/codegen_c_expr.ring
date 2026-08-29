@@ -19,7 +19,8 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
     HNominalStructFieldInit, HFieldAccessKind,
     HEffectHandler, HConstructorPlan, DictRef,
-    h_dict_construct_trait, h_dict_construct_effect_ctx,
+    h_dict_construct_effect_ctx,
+    h_dict_construct_base, h_dict_construct_inner,
     h_constructor_kind, h_constructor_fields, h_constructor_effect_ctx,
     TraitDispatch, MethodCallRef,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
@@ -32,12 +33,17 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     is_extern_handle_type,
     slot_bridge_runtime_name, is_synthetic_dict_def_id}
 use hir_exact::{
+    dict_ref_exact,
     dict_ref_is_simple_physical, dict_ref_is_static_physical,
     dict_ref_simple_name, dict_ref_static_name,
-    dict_ref_wrapped_name, dict_ref_wrapped_trait,
+    dict_ref_wrapped_name,
     dict_ref_wrapped_physical_inner
 }
-use ir_inventory::{EffectCtxRef, EffectCtxParentCapture,
+use ir_inventory::{ExactDictRef,
+    dict_ref_is_static, dict_ref_is_wrapped,
+    dict_ref_static, dict_ref_wrapped_base, dict_ref_wrapped_inner,
+    dict_ref_same, make_exact_wrapped_dict_ref,
+    EffectCtxRef, EffectCtxParentCapture,
     EffectOperationRef, make_named_executable_ref,
     effect_ctx_slot,
     effect_ctx_parent_capture_source, effect_ctx_parent_capture_target,
@@ -57,7 +63,7 @@ use effect_contract::{TypedHandledEffectInstance,
 use legacy_projection::{
     legacy_effect_ctx_token_ordinal, legacy_effect_ctx_token_instance}
 use extern_manifest::{compiler_extern_ref_for_executable}
-use ir_identity::{CalleeRef, SlotRef, SymbolRef,
+use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     callee_ref_is_named, callee_ref_named_symbol,
     compiler_extern_ref_site, compiler_extern_site_tag,
     path_owner_for_symbol, make_path_ref, path_role_synthetic,
@@ -66,8 +72,12 @@ use ir_identity::{CalleeRef, SlotRef, SymbolRef,
     slot_ref_is_source, slot_ref_source_def_id, slot_ref_same,
     handled_effect_ref_same,
     impl_method_ref_owner, impl_method_ref_name,
+    impl_method_ref_stable_key,
     trait_method_ref_callable_slot_index,
-    impl_owner_ref_target, symbol_ref_canonical_payload,
+    impl_owner_ref_target, impl_owner_ref_provider, impl_owner_ref_trait,
+    impl_owner_ref_same,
+    impl_provider_ref_kind, impl_provider_kind_builtin,
+    impl_provider_kind_same, symbol_ref_canonical_payload,
     BUILTIN_METHOD_STR_LEN, BUILTIN_METHOD_STR_CONTAINS,
     BUILTIN_METHOD_STR_STARTS_WITH, BUILTIN_METHOD_STR_ENDS_WITH,
     BUILTIN_METHOD_STR_SLICE, BUILTIN_METHOD_STR_TRIM,
@@ -114,7 +124,9 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEmitState, CHandleCl
     c_record_receiver_load, c_record_closure_call, c_mangle_fn,
     c_effect_ctx_token_symbol,
     c_resolve_fn,
-    c_mangle_method, c_sanitize, c_symbol_fragment, c_global_cstr, c_interned_cstr, c_stub_stmt, c_stub_expr,
+    c_exact_method_info, c_exact_method_for_owner_slot,
+    c_exact_method_count_for_owner, c_method_info_fn,
+    c_sanitize, c_symbol_fragment, c_global_cstr, c_interned_cstr, c_stub_stmt, c_stub_expr,
     c_line_directive, rt_use, rt_use_raw, rt_known_arity,
     get_or_assign_c_typeid,
     fresh_effect_ctx_token_array, fresh_effect_ctx_evidence_array,
@@ -296,8 +308,9 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
                 none => panic("C codegen: dictionary construct lacks exact plan")
             }
             let _ = h_dict_construct_effect_ctx(exact)
-            build_c_wrapped_dict(ctx, base_dict,
-                symbol_ref_canonical_payload(h_dict_construct_trait(exact)), inner)
+            let exact_dict = make_exact_wrapped_dict_ref(
+                h_dict_construct_base(exact), h_dict_construct_inner(exact))
+            build_c_wrapped_dict(ctx, base_dict, inner, exact_dict)
         },
         HExpr::Clone { inner, .. } => {
             // Perceus value-level clone: eval, ring_dup, yield the same ptr.
@@ -950,8 +963,27 @@ fn c_match_name_only_slot(
 // Calls consume the exact executable's recorded CELL-parameter ABI.  An
 // exact CalleeRef never falls back to a leaf/name-derived entry.
 fn c_lookup_call_mut_flags(
-    ctx: CCtx, callee: HExpr, callee_ref: CalleeRef?
+    ctx: CCtx, callee: HExpr, callee_ref: CalleeRef?,
+    method_ref: MethodCallRef?
 ) -> List<Bool>? {
+    match method_ref {
+        some(exact) => if method_call_ref_is_concrete(exact) {
+            let flags = match ctx.fn_mut_params.get(impl_method_ref_stable_key(
+                    method_call_ref_impl(exact))) {
+                some(values) => values,
+                none => return none
+            }
+            // Method arguments exclude the leading receiver/self slot.
+            let mut shifted: List<Bool> = []
+            let mut index = 1
+            while index < flags.len() {
+                shifted.push(flags.get(index).unwrap())
+                index = index + 1
+            }
+            return some(shifted)
+        },
+        none => {}
+    }
     match callee_ref {
         some(exact) => {
             if callee_ref_is_named(exact) {
@@ -1000,38 +1032,7 @@ fn c_lookup_call_mut_flags(
                 },
             }
         },
-        HExpr::FieldAccess { receiver, field, .. } => {
-            let recv_type = hexpr_type(receiver)
-            let type_name = match type_to_builtin_name(recv_type) {
-                some(n) => n,
-                none => match recv_type {
-                    Type::StructType { name, .. } => name,
-                    Type::EnumType { name, .. } => name,
-                    _ => "",
-                },
-            }
-            if type_name == "" {
-                none
-            } else {
-                let ufcs_name = "${type_name}_${field}"
-                match ctx.fn_mut_params.get(ufcs_name) {
-                    some(flags) => {
-                        // Drop the leading self flag so the list aligns with args.
-                        let mut shifted: List<Bool> = []
-                        let mut i = 1
-                        while i < flags.len() {
-                            match flags.get(i) {
-                                some(f) => shifted.push(f),
-                                none => {},
-                            }
-                            i = i + 1
-                        }
-                        some(shifted)
-                    },
-                    none => none,
-                }
-            }
-        },
+        HExpr::FieldAccess { .. } => none,
         _ => none,
     }
 }
@@ -1095,19 +1096,20 @@ pub fn gen_c_cell_alloc(mut ctx: CCtx, init_val: Str) -> Str {
 // ============================================================
 
 pub fn c_resolve_dict_ref(mut ctx: CCtx, dr: DictRef) -> CTypedRef {
+    let exact = dict_ref_exact(dr)
     if dict_ref_is_simple_physical(dr) {
         return c_resolve_simple_dict_name(ctx, dict_ref_simple_name(dr))
     }
     if dict_ref_is_static_physical(dr) {
-        return c_resolve_static_dict_name(ctx, dict_ref_static_name(dr))
+        let name = dict_ref_static_name(dr)
+        return c_ref_static(resolve_c_static_dict(ctx, name, exact), name)
     }
     let dict = dict_ref_wrapped_name(dr)
-    let trait_name = symbol_ref_canonical_payload(dict_ref_wrapped_trait(dr))
     // Post-dict_lower this survives in BinOp dispatch and dynamic derived
     // FieldAction evidence.
     let value = build_c_wrapped_dict(
-        ctx, dict, trait_name, dict_ref_wrapped_physical_inner(dr))
-    c_ref_computed(value, "wrapped-dict:${dict}:${trait_name}")
+        ctx, dict, dict_ref_wrapped_physical_inner(dr), exact)
+    c_ref_computed(value, "wrapped-dict:${dict}")
 }
 
 fn c_resolve_simple_dict_name(mut ctx: CCtx, name: Str) -> CTypedRef {
@@ -1118,14 +1120,12 @@ fn c_resolve_simple_dict_name(mut ctx: CCtx, name: Str) -> CTypedRef {
     }
 }
 
-fn c_resolve_static_dict_name(mut ctx: CCtx, name: Str) -> CTypedRef {
-    c_ref_static(resolve_c_static_dict(ctx, name), name)
-}
-
 // Borrow the memoised module singleton for a static dict: emit (once) the
 // lazy getter ring_dict_init_<name> and call it.
-pub fn resolve_c_static_dict(mut ctx: CCtx, name: Str) -> Str {
-    let getter = ensure_c_dict_getter(ctx, name)
+pub fn resolve_c_static_dict(
+    mut ctx: CCtx, name: Str, exact: ExactDictRef
+) -> Str {
+    let getter = ensure_c_dict_getter(ctx, name, exact)
     let t = fresh_tmp(ctx)
     c_emit(ctx, "${t} = ${getter}();")
     t
@@ -1140,12 +1140,19 @@ pub fn resolve_c_static_dict(mut ctx: CCtx, name: Str) -> Str {
 //   * a dict_lower wrapped INSTANCE (static_dict_defs, inner != []) →
 //     build_wrapped_dict with the DICT_STATIC typeid;
 //   * otherwise → runtime builtin dict (ring_get_builtin_dict).
-pub fn ensure_c_dict_getter(mut ctx: CCtx, name: Str) -> Str {
+pub fn ensure_c_dict_getter(
+    mut ctx: CCtx, name: Str, exact: ExactDictRef
+) -> Str {
     let getter_name = "ring_dict_init_${c_symbol_fragment(name)}"
-    if ctx.dict_getters.contains(name) {
-        return getter_name
+    match ctx.dict_getters.get(name) {
+        some(existing) => {
+            if !dict_ref_same(existing, exact) {
+                panic("C codegen: one static dict name has multiple exact identities")
+            }
+            return getter_name
+        },
+        none => ctx.dict_getters.insert(name, exact)
     }
-    ctx.dict_getters.insert(name)
     let gvar = "__ring_dictg_${c_symbol_fragment(name)}"
     ctx.globals.push("static void* ${gvar} = 0;")
     ctx.fn_protos.push("void* ${getter_name}(void);")
@@ -1153,36 +1160,55 @@ pub fn ensure_c_dict_getter(mut ctx: CCtx, name: Str) -> Str {
     let saved = c_push_fn(ctx, getter_name)
     c_emit(ctx, "if (${gvar} == 0) {")
     ctx.indent = ctx.indent + 1
-    if ctx.dict_build_fns.contains(name) {
-        c_emit(ctx, "${gvar} = ring_dict_build_${c_symbol_fragment(name)}();")
-    } else {
-        let inst_def = match ctx.static_dict_defs.get(name) {
-            some(def) => if def.inner.len() > 0 { some(def) } else { none },
-            none => none,
+    if dict_ref_is_wrapped(exact) {
+        let def = match ctx.static_dict_defs.get(name) {
+            some(value) => value,
+            none => panic("C codegen: exact wrapped singleton has no HDictDef")
         }
-        match inst_def {
-            some(def) => {
-                let v = build_c_wrapped_static_dict_typed(
-                    ctx, def.base_dict, def.trait_name, def.inner, 16)
-                c_emit(ctx, "${gvar} = ${v};")
+        if def.inner.len() == 0 {
+            panic("C codegen: exact wrapped singleton has no physical children")
+        }
+        let exact_base = dict_ref_wrapped_base(exact)
+        match impl_owner_ref_trait(exact_base) {
+            some(trait_ref) => if symbol_ref_canonical_payload(trait_ref) !=
+                    def.trait_name {
+                panic("C codegen: wrapped singleton trait projection differs")
+            },
+            none => panic("C codegen: wrapped singleton base is not a trait impl")
+        }
+        let v = build_c_wrapped_static_dict_typed(
+            ctx, def.base_dict, def.inner, exact, 16)
+        c_emit(ctx, "${gvar} = ${v};")
+    } else if dict_ref_is_static(exact) {
+        let owner = dict_ref_static(exact)
+        match ctx.dict_build_owners.get(name) {
+            some(registered) => {
+                if !impl_owner_ref_same(registered, owner) ||
+                   !ctx.dict_build_fns.contains(name) {
+                    panic("C codegen: ordinary dict build owner/index differs")
+                }
+                c_emit(ctx,
+                    "${gvar} = ring_dict_build_${c_symbol_fragment(name)}();")
             },
             none => {
-                // Json is an ordinary public trait: every valid Json dictionary
-                // is registered by an impl or the derive prepass. Falling
-                // through here would hide a broken SCC/registry edge.
-                if name.ends_with("_Json") {
-                    panic("C codegen invariant: unregistered Json dictionary '${name}'")
+                let provider_kind = impl_provider_ref_kind(
+                    impl_owner_ref_provider(owner))
+                if !impl_provider_kind_same(
+                        provider_kind, impl_provider_kind_builtin()) {
+                    panic("C codegen: exact ordinary dict has no build owner")
                 }
-                // Builtin primitive dict (__Int_Eq / __Str_Ord / enum tag-Eq)
-                // — the name STR is allocated once, in the getter.
+                // Compiler-provided primitive dictionaries are materialized by
+                // the runtime ABI, after exact provider classification.
                 rt_use(ctx, "ring_str_from_cstr", 1)
                 rt_use(ctx, "ring_get_builtin_dict", 1)
                 let g = c_global_cstr(ctx, name)
                 let s = fresh_tmp(ctx)
                 c_emit(ctx, "${s} = ring_str_from_cstr(${g});")
                 c_emit(ctx, "${gvar} = ring_get_builtin_dict(${s});")
-            },
+            }
         }
+    } else {
+        panic("C codegen: static getter lacks exact static/wrapped identity")
     }
     ctx.indent = ctx.indent - 1
     c_emit(ctx, "}")
@@ -1191,35 +1217,40 @@ pub fn ensure_c_dict_getter(mut ctx: CCtx, name: Str) -> Str {
     getter_name
 }
 
-// Recover "<Type>" from a dict name "__<Type>_<Trait>" (port of
-// wrapped_dict_target_type).
-fn c_wrapped_dict_target_type(dict_name: Str, trait_name: Str) -> Str {
-    let mut s = dict_name
-    if s.starts_with("__") { s = s.slice(2, s.len()) }
-    let suffix = "_${trait_name}"
-    if s.ends_with(suffix) {
-        s.slice(0, s.len() - suffix.len())
-    } else {
-        s
-    }
-}
-
 // #B-087 gap 2 port (build_wrapped_dict): a wrapper trait dict for a
 // parameterized type whose impl methods take the inner type-param dicts as
 // trailing params.  Each method slot is a {thunk, env} closure whose env
 // captures only inner dicts; invocation supplies EffectCtx last.
-pub fn build_c_wrapped_dict(mut ctx: CCtx, dict_name: Str, trait_name: Str, inner_dicts: List<DictRef>) -> Str {
-    build_c_wrapped_dict_typed(ctx, dict_name, trait_name, inner_dicts, 17)
+pub fn build_c_wrapped_dict(
+    mut ctx: CCtx, dict_name: Str, inner_dicts: List<DictRef>,
+    exact: ExactDictRef
+) -> Str {
+    build_c_wrapped_dict_typed(ctx, dict_name, inner_dicts, exact, 17)
 }
 
-pub fn build_c_wrapped_dict_typed(mut ctx: CCtx, dict_name: Str, trait_name: Str, inner_dicts: List<DictRef>, dict_tid: Int) -> Str {
+pub fn build_c_wrapped_dict_typed(
+    mut ctx: CCtx, dict_name: Str, inner_dicts: List<DictRef>,
+    exact: ExactDictRef, dict_tid: Int
+) -> Str {
+    if !dict_ref_is_wrapped(exact) {
+        panic("C codegen: wrapped dictionary lacks exact wrapped identity")
+    }
+    let exact_inner = dict_ref_wrapped_inner(exact)
+    if exact_inner.len() != inner_dicts.len() {
+        panic("C codegen: wrapped dictionary exact/physical arity differs")
+    }
     // Resolve the inner dicts at this site.
     let mut inner_vals: List<Str> = []
     // A surviving Wrapped child is freshly owned.  The parent wrapper envs
     // take their own refs below, so release these construction temporaries
     // once every method slot has captured them.
     let mut owned_inner_vals: List<Str> = []
+    let mut inner_index = 0
     for d in inner_dicts {
+        if !dict_ref_same(
+                dict_ref_exact(d), exact_inner.get(inner_index).unwrap()) {
+            panic("C codegen: wrapped dictionary child identity differs")
+        }
         let reference = c_resolve_dict_ref(ctx, d)
         let value = c_ref_c_name(reference)
         inner_vals.push(value)
@@ -1227,35 +1258,46 @@ pub fn build_c_wrapped_dict_typed(mut ctx: CCtx, dict_name: Str, trait_name: Str
            !dict_ref_is_static_physical(d) {
             owned_inner_vals.push(value)
         }
+        inner_index = inner_index + 1
     }
 
     build_c_wrapped_dict_values(
-        ctx, dict_name, trait_name, inner_vals, owned_inner_vals, dict_tid)
+        ctx, dict_name, dict_ref_wrapped_base(exact),
+        inner_vals, owned_inner_vals, dict_tid)
 }
 
 fn build_c_wrapped_static_dict_typed(
-    mut ctx: CCtx, dict_name: Str, trait_name: Str,
-    inner_names: List<Str>, dict_tid: Int
+    mut ctx: CCtx, dict_name: Str, inner_names: List<Str>,
+    exact: ExactDictRef, dict_tid: Int
 ) -> Str {
+    if !dict_ref_is_wrapped(exact) {
+        panic("C codegen: static wrapped dictionary lost exact identity")
+    }
+    let exact_inner = dict_ref_wrapped_inner(exact)
+    if exact_inner.len() != inner_names.len() {
+        panic("C codegen: static wrapped dictionary child arity differs")
+    }
     let mut inner_vals: List<Str> = []
+    let mut index = 0
     for name in inner_names {
-        inner_vals.push(resolve_c_static_dict(ctx, name))
+        let child = exact_inner.get(index).unwrap()
+        if !dict_ref_is_static(child) && !dict_ref_is_wrapped(child) {
+            panic("C codegen: fully-static wrapper contains dynamic evidence")
+        }
+        inner_vals.push(resolve_c_static_dict(ctx, name, child))
+        index = index + 1
     }
     build_c_wrapped_dict_values(
-        ctx, dict_name, trait_name, inner_vals, [], dict_tid)
+        ctx, dict_name, dict_ref_wrapped_base(exact),
+        inner_vals, [], dict_tid)
 }
 
 fn build_c_wrapped_dict_values(
-    mut ctx: CCtx, dict_name: Str, trait_name: Str,
+    mut ctx: CCtx, dict_name: Str, owner: ImplOwnerRef,
     inner_vals: List<Str>, owned_inner_vals: List<Str>, dict_tid: Int
 ) -> Str {
-
-    let target_type = c_wrapped_dict_target_type(dict_name, trait_name)
-    let method_order = match ctx.trait_method_order.get(trait_name) {
-        some(order) => order,
-        none => [],
-    }
-    let method_count = method_order.len()
+    let _ = dict_name
+    let method_count = c_exact_method_count_for_owner(ctx, owner)
     let inner_count = inner_vals.len()
 
     rt_use(ctx, "ring_alloc", 2)
@@ -1264,39 +1306,30 @@ fn build_c_wrapped_dict_values(
     c_emit(ctx, "*(int64_t*)${dict} = ${method_count};")
 
     for i in 0..method_count {
-        match method_order.get(i) {
-            some(method_name) => {
-                let mangled = c_mangle_method(target_type, method_name)
-                match ctx.functions.get(mangled) {
-                    some(fi) => {
-                        let dispatch_arity =
-                            fi.total_params - inner_count - 1
-                        let thunk = ensure_c_wrapped_method_thunk(
-                            ctx, fi.c_name, dispatch_arity, inner_count)
-
-                        let env = fresh_tmp(ctx)
-                        c_emit(ctx, "${env} = ring_alloc((int64_t)(sizeof(int64_t) + ${inner_count} * sizeof(void*)), 15);")
-                        c_emit(ctx, "*(int64_t*)${env} = ${inner_count};")
-                        let mut sj = 0
-                        for iv in inner_vals {
-                            rt_use(ctx, "ring_dup", 1)
-                            c_emit(ctx, "ring_dup(${iv});")
-                            c_emit(ctx, "((void**)${env})[${sj + 1}] = ${iv};")
-                            sj = sj + 1
-                        }
-                        let cls = fresh_tmp(ctx)
-                        c_emit(ctx, "${cls} = ring_alloc((int64_t)(2 * sizeof(void*)), 7);")
-                        c_emit(ctx, "((void**)${cls})[0] = (void*)${thunk};")
-                        c_emit(ctx, "((void**)${cls})[1] = ${env};")
-                        c_emit(ctx, "((void**)${dict})[${i + 1}] = ${cls};")
-                    },
-                    none => {
-                        c_emit(ctx, "((void**)${dict})[${i + 1}] = RING_UNIT;")
-                    },
-                }
-            },
-            none => {},
+        let fi = c_method_info_fn(
+            c_exact_method_for_owner_slot(ctx, owner, i))
+        let dispatch_arity = fi.total_params - inner_count - 1
+        if dispatch_arity < 0 {
+            panic("C codegen: wrapped method ABI is smaller than evidence")
         }
+        let thunk = ensure_c_wrapped_method_thunk(
+            ctx, fi.c_name, dispatch_arity, inner_count)
+
+        let env = fresh_tmp(ctx)
+        c_emit(ctx, "${env} = ring_alloc((int64_t)(sizeof(int64_t) + ${inner_count} * sizeof(void*)), 15);")
+        c_emit(ctx, "*(int64_t*)${env} = ${inner_count};")
+        let mut sj = 0
+        for iv in inner_vals {
+            rt_use(ctx, "ring_dup", 1)
+            c_emit(ctx, "ring_dup(${iv});")
+            c_emit(ctx, "((void**)${env})[${sj + 1}] = ${iv};")
+            sj = sj + 1
+        }
+        let cls = fresh_tmp(ctx)
+        c_emit(ctx, "${cls} = ring_alloc((int64_t)(2 * sizeof(void*)), 7);")
+        c_emit(ctx, "((void**)${cls})[0] = (void*)${thunk};")
+        c_emit(ctx, "((void**)${cls})[1] = ${env};")
+        c_emit(ctx, "((void**)${dict})[${i + 1}] = ${cls};")
     }
 
     for owned in owned_inner_vals {
@@ -2267,20 +2300,10 @@ fn resolve_c_dispatch_dict(
             c_resolve_simple_dict_name(ctx, param)
         },
         TraitDispatch::Direct { dict, extra_dicts } => {
-            if extra_dicts.len() == 0 {
-                c_resolve_static_dict_name(ctx, dict)
-            } else {
-                // B-121 gap 1: bind inner type-param dicts via a wrapped dict.
-                match trait_name_hint {
-                    some(tn) => {
-                        let value = build_c_wrapped_dict(
-                            ctx, dict, tn, extra_dicts)
-                        c_ref_computed(value, "dispatch-wrapped-dict:${dict}:${tn}")
-                    },
-                    none => panic(
-                        "C codegen: Direct wrapped dispatch has no trait tag"),
-                }
-            }
+            let _ = dict
+            let _ = extra_dicts
+            let _ = trait_name_hint
+            panic("C codegen: legacy name-only Direct dispatch crossed Core bridge")
         },
         TraitDispatch::Builtin => c_ref_computed(
             "RING_UNIT", "builtin-dispatch"),
@@ -3019,7 +3042,8 @@ fn gen_c_call(
         none => {}
     }
 
-    let mut_flags = c_lookup_call_mut_flags(ctx, callee, callee_ref)
+    let mut_flags = c_lookup_call_mut_flags(
+        ctx, callee, callee_ref, method_ref)
 
     // Evaluate all args first (mut value-type positions box into cells).
     let mut arg_vals: List<Str> = []
@@ -3056,12 +3080,8 @@ fn gen_c_call(
                 }
                 let receiver = gen_c_expr(ctx, receiver_expr)
                 let method_identity = method_call_ref_impl(exact_method)
-                let target_name = symbol_ref_canonical_payload(
-                    impl_owner_ref_target(
-                        impl_method_ref_owner(method_identity)))
                 gen_c_method_call(
-                    ctx, receiver, receiver_type, target_name,
-                    impl_method_ref_name(method_identity),
+                    ctx, receiver, receiver_type, method_identity,
                     arg_vals, dict_vals, effect_ctx)
             } else {
                 panic("C codegen: unknown method identity domain")
@@ -3427,31 +3447,29 @@ fn gen_c_ptr_method(mut ctx: CCtx, recv: Str, recv_type: Type, method: Str, args
 
 fn gen_c_method_call(
     mut ctx: CCtx, recv: Str, recv_type: Type,
-    type_name: Str, method: Str,
+    method_ref: ImplMethodRef,
     args: List<Str>, dict_vals: List<Str>,
     effect_ctx: TypedEffectCtxSource
 ) -> Str {
+    let type_name = symbol_ref_canonical_payload(impl_owner_ref_target(
+        impl_method_ref_owner(method_ref)))
+    let method = impl_method_ref_name(method_ref)
     if type_name == "Ptr" {
         return gen_c_ptr_method(ctx, recv, recv_type, method, args)
     }
     // Ordinary Ring method.  Every runtime-backed 0.1 method has already
     // returned through its exact MethodCallRef above.
-    let mangled = c_mangle_method(type_name, method)
-    match ctx.functions.get(mangled) {
-        some(fi) => {
-            let mut call_args: List<Str> = [recv]
-            for a in args { call_args.push(a) }
-            for dv in dict_vals { call_args.push(dv) }
-            call_args.push(c_effect_ctx_source_value(ctx, effect_ctx))
-            let t = fresh_tmp(ctx)
-            c_emit(ctx, "${t} = ${fi.c_name}(${call_args.join(", ")});")
-            t
-        },
-        none => {
-            eprintln("C codegen warning: unknown method '${type_name}.${method}' (mangled: ${mangled}), generating panic")
-            c_stub_expr(ctx, "missing method ${type_name}.${method}")
-        }
+    let fi = c_method_info_fn(c_exact_method_info(ctx, method_ref))
+    let mut call_args: List<Str> = [recv]
+    for a in args { call_args.push(a) }
+    for dv in dict_vals { call_args.push(dv) }
+    call_args.push(c_effect_ctx_source_value(ctx, effect_ctx))
+    if call_args.len() != fi.total_params {
+        panic("C method index: concrete call ABI arity differs")
     }
+    let t = fresh_tmp(ctx)
+    c_emit(ctx, "${t} = ${fi.c_name}(${call_args.join(", ")});")
+    t
 }
 
 // ============================================================

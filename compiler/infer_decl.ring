@@ -2217,18 +2217,6 @@ fn commit_impl_draft_group(
             value.name, value.scheme, value.span)
     }
     publish_owner_batches(ctx, prepared.batches)
-    for declaration in prepared.declarations {
-        match declaration {
-            HDecl::Fn { name, .. } => {
-                match ctx.fn_mut_params.get(name) {
-                    some(flags) => journal_fn_mut_params_set(
-                        ctx, "${target_type}_${name}", flags),
-                    none => {}
-                }
-            },
-            _ => {}
-        }
-    }
     prepared.declarations
 }
 

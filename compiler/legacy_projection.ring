@@ -1646,6 +1646,22 @@ pub fn make_legacy_projection_table(
         }
         dictionary_index = dictionary_index + 1
     }
+    let mut physical_index = 0
+    while physical_index < physical_identities.len() {
+        let left = physical_identities.get(physical_index).unwrap()
+        let mut right = physical_index + 1
+        while right < physical_identities.len() {
+            let candidate = physical_identities.get(right).unwrap()
+            if executable_ref_same(left.reference, candidate.reference) {
+                panic("legacy projection: executable has multiple physical identities")
+            }
+            if left.identity == candidate.identity {
+                panic("legacy projection: physical identity names multiple executables")
+            }
+            right = right + 1
+        }
+        physical_index = physical_index + 1
+    }
     let shell_entries = legacy_executable_shell_entries(shells)
     let mut shell_callable_count = 0
     for callable in callables {
