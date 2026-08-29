@@ -13,6 +13,7 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     registered_trait_ref_symbol,
     nominal_field_ref_owner, nominal_field_ref_index,
     nominal_field_ref_same,
+    variant_field_ref_same,
     trait_method_ref_trait, trait_method_ref_member,
     impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_target,
     impl_owner_ref_stable_key,
@@ -575,20 +576,35 @@ pub fn h_operator_elements(value: HOperatorPlan) -> List<HOperatorPlan> {
 }
 
 enum HConstructorPlanValue {
-    ExecutableConstructor { executable: ExecutableRef,
-                            fields: List<HProjectionRef>,
-                            effect_ctx: TypedEffectCtxSource },
+    VariantConstruction { fields: List<HProjectionRef> },
     TupleStructural { arity: Int },
     RecordStructural { fields: List<HProjectionRef> }
 }
 pub struct HConstructorPlan { value: HConstructorPlanValue }
-pub fn make_h_executable_constructor_plan(
-    executable: ExecutableRef, fields: List<HProjectionRef>,
-    effect_ctx: TypedEffectCtxSource
+pub fn make_h_variant_constructor_plan(
+    fields: List<HProjectionRef>
 ) -> HConstructorPlan {
-    HConstructorPlan { value: HConstructorPlanValue::ExecutableConstructor {
-        executable: executable, fields: fields.map(fn(value) { value }),
-        effect_ctx: effect_ctx } }
+    let mut index = 0
+    while index < fields.len() {
+        let field = fields.get(index).unwrap()
+        if h_projection_kind(field) != 1 {
+            panic("HIR constructor: variant plan has a non-variant field")
+        }
+        let mut right = index + 1
+        while right < fields.len() {
+            let candidate = fields.get(right).unwrap()
+            if h_projection_kind(candidate) != 1 ||
+               variant_field_ref_same(
+                    h_projection_variant(field),
+                    h_projection_variant(candidate)) {
+                panic("HIR constructor: variant field plan differs")
+            }
+            right = right + 1
+        }
+        index = index + 1
+    }
+    HConstructorPlan { value: HConstructorPlanValue::VariantConstruction {
+        fields: fields.map(fn(value) { value }) } }
 }
 pub fn make_h_tuple_constructor_plan(arity: Int) -> HConstructorPlan {
     if arity < 0 { panic("HIR constructor: negative tuple arity") }
@@ -603,21 +619,14 @@ pub fn make_h_record_constructor_plan(
 }
 pub fn h_constructor_kind(value: HConstructorPlan) -> Int {
     match value.value {
-        HConstructorPlanValue::ExecutableConstructor { .. } => 0,
+        HConstructorPlanValue::VariantConstruction { .. } => 0,
         HConstructorPlanValue::TupleStructural { .. } => 1,
         HConstructorPlanValue::RecordStructural { .. } => 2
     }
 }
-pub fn h_constructor_executable(value: HConstructorPlan) -> ExecutableRef {
-    match value.value {
-        HConstructorPlanValue::ExecutableConstructor { executable, .. } =>
-            executable,
-        _ => panic("HIR constructor: structural plan has no executable")
-    }
-}
 pub fn h_constructor_fields(value: HConstructorPlan) -> List<HProjectionRef> {
     match value.value {
-        HConstructorPlanValue::ExecutableConstructor { fields, .. } =>
+        HConstructorPlanValue::VariantConstruction { fields } =>
             fields.map(fn(item) { item }),
         HConstructorPlanValue::RecordStructural { fields } =>
             fields.map(fn(item) { item }),
@@ -625,19 +634,10 @@ pub fn h_constructor_fields(value: HConstructorPlan) -> List<HProjectionRef> {
             panic("HIR constructor: tuple plan has no stored fields")
     }
 }
-pub fn h_constructor_effect_ctx(
-    value: HConstructorPlan
-) -> TypedEffectCtxSource {
-    match value.value {
-        HConstructorPlanValue::ExecutableConstructor { effect_ctx, .. } =>
-            effect_ctx,
-        _ => panic("HIR constructor: structural plan has no EffectCtx")
-    }
-}
 pub fn h_constructor_tuple_arity(value: HConstructorPlan) -> Int {
     match value.value {
         HConstructorPlanValue::TupleStructural { arity } => arity,
-        _ => panic("HIR constructor: executable/record plan has no tuple arity")
+        _ => panic("HIR constructor: variant/record plan has no tuple arity")
     }
 }
 

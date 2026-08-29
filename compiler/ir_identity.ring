@@ -513,6 +513,33 @@ pub fn variant_ref_same(left: VariantRef, right: VariantRef) -> Bool {
         left.source_variant_index == right.source_variant_index
 }
 
+// Builtin Option is registered before resolver-backed source declarations,
+// so its exact variant identities originate here rather than being rebuilt by
+// each consumer from the public `Option` / `some` / `none` spellings.
+fn builtin_option_owner_ref() -> RegisteredNominalRef {
+    make_registered_nominal_ref(make_symbol_ref(
+        "$builtin", namespace_nominal(), "Option", "builtin:Option"),
+        "Option")
+}
+
+pub fn builtin_option_some_variant_ref() -> VariantRef {
+    make_variant_ref(
+        builtin_option_owner_ref(),
+        make_symbol_ref(
+            "$builtin", namespace_member(), "Option|variant:0",
+            "builtin:Option|variant:0"),
+        0)
+}
+
+pub fn builtin_option_none_variant_ref() -> VariantRef {
+    make_variant_ref(
+        builtin_option_owner_ref(),
+        make_symbol_ref(
+            "$builtin", namespace_member(), "Option|variant:1",
+            "builtin:Option|variant:1"),
+        1)
+}
+
 pub struct VariantFieldRef {
     variant: VariantRef,
     member: SymbolRef,

@@ -625,28 +625,6 @@ pub struct ImplMethodSchemeCore {
     def_id: Int?
 }
 
-pub fn enum_variant_constructor_effect_schema(
-    def: EnumDef, variant_index: Int
-) -> TypedEffectHeaderSchema {
-    let variant = def.variants.get(variant_index).unwrap_or_else(fn() {
-        panic("enum effect schema: variant index is invalid")
-    })
-    let schemas = def.variant_field_effect_schemas.get(
-        variant_index).unwrap_or_else(fn() {
-        panic("enum effect schema: variant schema is absent")
-    })
-    if variant.fields.len() != schemas.len() {
-        panic("enum effect schema: field census differs")
-    }
-    let mut bindings: List<TypedEffectHeaderBinding> = []
-    for schema in schemas {
-        for binding in typed_effect_header_schema_bindings(schema) {
-            bindings.push(binding)
-        }
-    }
-    make_typed_effect_header_schema(bindings)
-}
-
 pub fn make_impl_method_scheme_core(
     ty: Type, type_vars: List<Int>, effect_schema: TypedEffectHeaderSchema,
     def_id: Int?
@@ -893,10 +871,6 @@ pub struct TypeRegistry {
     pub enums: Map<Str, EnumDef>,
     pub effects: Map<Str, EffectDef>,
     pub variant_to_enum: Map<Str, Str>,
-    // Exact constructor provenance keyed by the lexical binding DefId. This is
-    // a codegen identity table for every variant constructor; ownership
-    // freshness is classified separately in shared HIR helpers.
-    pub variant_ctor_origins: Map<Int, Str>,
     pub type_aliases: Map<Str, TypeAliasDef>,
     pub effect_aliases: Map<Str, EffectAliasDef>
 }
@@ -969,7 +943,6 @@ pub fn new_type_env() -> TypeEnv {
             enums: map_new(),
             effects: map_new(),
             variant_to_enum: map_new(),
-            variant_ctor_origins: map_new(),
             type_aliases: map_new(),
             effect_aliases: map_new()
         },

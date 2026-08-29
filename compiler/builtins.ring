@@ -28,7 +28,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
 use ast::{TypeParam, span_zero}
 use effect_contract::{empty_typed_effect_header_schema}
 use hir::{HDecl, HStructField, HTypeParam,
-    variant_ctor_name, compare_by_first}
+    compare_by_first}
 use diagnostics::{CollectingSink}
 use ir_inventory::{CallableResourceContractFact,
     CallableResourceRoleFact,
@@ -40,8 +40,9 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     IntrinsicRef, BuiltinMethodSite, BuiltinValueSite,
     make_symbol_ref, make_nominal_field_ref, make_trait_method_ref,
-    VariantRef, VariantFieldRef, make_variant_ref, make_variant_field_ref,
+    make_variant_field_ref,
     make_registered_nominal_ref, make_registered_trait_ref,
+    builtin_option_some_variant_ref, builtin_option_none_variant_ref,
     make_module_body_ref, path_owner_for_module_body, make_path_ref,
     path_role_synthetic, make_impl_provider_ref,
     make_impl_owner_ref, make_impl_method_ref,
@@ -1405,14 +1406,8 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         "$builtin", namespace_nominal(), BUILTIN_OPTION, "builtin:Option")
     let option_registered = make_registered_nominal_ref(
         option_owner, BUILTIN_OPTION)
-    let some_member = make_symbol_ref(
-        "$builtin", namespace_member(), "Option|variant:0",
-        "builtin:Option|variant:0")
-    let none_member = make_symbol_ref(
-        "$builtin", namespace_member(), "Option|variant:1",
-        "builtin:Option|variant:1")
-    let some_ref = make_variant_ref(option_registered, some_member, 0)
-    let none_ref = make_variant_ref(option_registered, none_member, 1)
+    let some_ref = builtin_option_some_variant_ref()
+    let none_ref = builtin_option_none_variant_ref()
     let some_field_member = make_symbol_ref(
         "$builtin", namespace_member(), "Option|variant:0|field:0",
         "builtin:Option|variant:0|field:0")
@@ -1438,31 +1433,21 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
     env.types.variant_to_enum.insert("some", BUILTIN_OPTION)
     env.types.variant_to_enum.insert("none", BUILTIN_OPTION)
 
-    // some constructor: (T) -> Option<T>
+    // Direct constructor syntax infers payloads from the exact EnumDef.  The
+    // lexical binding only exposes the polymorphic enum result to the checker;
+    // it is not a callable scheme or a backend constructor symbol.
     let some_t_id = env.fresh_var_id()
     let some_t = Type::TypeVar { id: some_t_id, name: none }
     env.bind("some", TypeScheme {
-        ty: Type::FnType { params: [some_t], return_type: make_option_type(some_t), effects: EMPTY_ROW },
+        ty: make_option_type(some_t),
         type_vars: [some_t_id],
         bounds: [],
         effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
-    // `some` is a normal payload constructor. Preserve exact constructor
-    // identity through its DefId so call lowering and sink classification do
-    // not depend on a same-spelled local/global.
-    match env.lookup("some") {
-        some(scheme) => match scheme.def_id {
-            some(def_id) => {
-                env.types.variant_ctor_origins.insert(def_id,
-                    variant_ctor_name(BUILTIN_OPTION, "some"))
-            },
-            none => {}
-        },
-        none => {}
-    }
 
-    // none: Option<T> (not a function, just a polymorphic value)
+    // none is the same checker-only enum-result binding; its exact VariantRef
+    // selects the borrowed singleton at the physical C boundary.
     let none_t_id = env.fresh_var_id()
     let none_t = Type::TypeVar { id: none_t_id, name: none }
     env.bind("none", TypeScheme {
@@ -1472,20 +1457,6 @@ fn register_option(mut env: TypeEnv, sink: CollectingSink) {
         effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     })
-    // `none` still needs its exact canonical identity so both backends select
-    // the runtime singleton symbol. Ownership freshness is classified
-    // separately: is_nullary_variant_ctor_ident excludes this one borrowed
-    // built-in constructor result.
-    match env.lookup("none") {
-        some(scheme) => match scheme.def_id {
-            some(def_id) => {
-                env.types.variant_ctor_origins.insert(def_id,
-                    variant_ctor_name(BUILTIN_OPTION, "none"))
-            },
-            none => {}
-        },
-        none => {}
-    }
 
     // Option methods: is_some, is_none, unwrap_or
     let mut methods: Map<Str, TypeScheme> = map_new()

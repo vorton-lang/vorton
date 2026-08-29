@@ -94,7 +94,7 @@ use ir_identity::{
     registered_trait_ref_symbol,
     impl_owner_ref_target,
     handled_effect_ref_symbol,
-    variant_ref_member, variant_ref_same,
+    variant_ref_same,
     variant_field_ref_variant, variant_field_ref_member,
     nominal_field_ref_member, impl_provider_ref_site,
     nominal_field_ref_same,
@@ -192,8 +192,7 @@ use hir::{
     h_pattern_plan_variant, h_pattern_field_projection,
     h_pattern_field_pattern,
     h_operator_is_tuple, h_operator_method_ref, h_operator_elements,
-    h_constructor_kind, h_constructor_executable,
-    h_constructor_fields, h_constructor_effect_ctx,
+    h_constructor_kind, h_constructor_fields,
     h_constructor_tuple_arity,
     h_fail_operation_tag,
     h_delegate_contract, h_delegate_child_owner,
@@ -3545,7 +3544,7 @@ fn lower_named_update(
     mut ctx: LowerCtx, ty: CoreTypeRef, effects: CoreEffectSet,
     origin: OriginRef, spread: HExpr,
     inputs: List<LowerUpdateInput>, schema: List<FlowNominalFieldFact>,
-    constructor: CoreConstructorRef, effect_ctx: CoreEffectCtxArgument?
+    constructor: CoreConstructorRef
 ) -> CoreExpr {
     for input in inputs {
         if !schema.any(fn(fact) {
@@ -3564,8 +3563,7 @@ fn lower_named_update(
     }
     make_core_move_update_expr(
         ty, effects, origin, base, constructor,
-        schema.map(fn(fact) { lower_update_core_field(fact) }), overrides,
-        effect_ctx)
+        schema.map(fn(fact) { lower_update_core_field(fact) }), overrides)
 }
 
 fn primitive_tag(op: BinOp) -> Int {
@@ -3852,24 +3850,36 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     }
                     lower_named_update(
                         ctx, ty, effects, origin, base, inputs,
-                        schema, constructor, none)
+                        schema, constructor)
                 },
                 none => make_core_construct_expr(ty, effects, origin,
                     make_core_struct_constructor(
                         owner_ref, fields.map(fn(field) { field.field_ref })),
                     fields.map(fn(field) { make_core_field_value(
                         make_core_nominal_field(field.field_ref),
-                        lower_expr(ctx, field.value)) }), none)
+                        lower_expr(ctx, field.value)) }))
             }
         },
         HExpr::NamedVariantConstruct {
             variant_ref, fields, constructor: some(plan), spread, ..
         } => {
-            if h_constructor_kind(plan) != 0 {
+            let planned_fields = h_constructor_fields(plan)
+            if h_constructor_kind(plan) != 0 ||
+               planned_fields.len() != fields.len() {
                 panic("Core assembly: variant literal is not payload-complete")
             }
-            let constructor = make_core_variant_constructor(
-                variant_ref, h_constructor_executable(plan))
+            let mut planned_index = 0
+            while planned_index < fields.len() {
+                let planned = planned_fields.get(planned_index).unwrap()
+                if h_projection_kind(planned) != 1 ||
+                   !variant_field_ref_same(
+                        h_projection_variant(planned),
+                        fields.get(planned_index).unwrap().field_ref) {
+                    panic("Core assembly: variant field plan differs")
+                }
+                planned_index = planned_index + 1
+            }
+            let constructor = make_core_variant_constructor(variant_ref)
             match spread {
                 some(base) => {
                     let schema = lower_variant_update_schema(
@@ -3883,21 +3893,13 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     }
                     lower_named_update(
                         ctx, ty, effects, origin, base, inputs,
-                        schema, constructor,
-                        some(core_effect_ctx_argument_from_source(
-                            ctx, h_constructor_effect_ctx(plan),
-                            closed_callable_effect_receipt(
-                                ctx, h_constructor_executable(plan)))))
+                        schema, constructor)
                 },
                 none => make_core_construct_expr(ty, effects, origin,
                     constructor,
                     fields.map(fn(field) { make_core_field_value(
                         make_core_variant_field(field.field_ref),
-                        lower_expr(ctx, field.value)) }),
-                    some(core_effect_ctx_argument_from_source(
-                        ctx, h_constructor_effect_ctx(plan),
-                        closed_callable_effect_receipt(
-                            ctx, h_constructor_executable(plan)))))
+                        lower_expr(ctx, field.value)) }))
             }
         },
         HExpr::StructLit { .. } | HExpr::NamedVariantConstruct { .. } =>
@@ -3914,7 +3916,7 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                     let result = make_core_field_value(
                         make_core_tuple_field(index), lower_expr(ctx, item))
                     index = index + 1; result
-                }), none)
+                }))
         },
         HExpr::TupleLit { .. } =>
             panic("Core assembly: tuple constructor carrier is partial"),
@@ -5091,29 +5093,6 @@ fn derived_enum_plans(
         if semantic_tag == 3 {
             clone.push(make_core_derived_clone_variant_plan(
                 variant.variant_ref,
-                make_core_variant_constructor(
-                    variant.variant_ref,
-                    make_named_executable_ref(
-                        variant_ref_member(variant.variant_ref))),
-                make_empty_core_effect_ctx_argument(
-                    closed_callable_effect_receipt(
-                        LowerCtx {
-                            module_key: facts.module_key,
-                            owner: method.executable_ref,
-                            effect_parameters: facts.effect_parameters,
-                            project_callable_effects:
-                                facts.project_callable_effects,
-                            project_callable_type_formals:
-                                facts.project_callable_type_formals,
-                            project_type_mapping: facts.project_type_mapping,
-                            types: facts.type_sources,
-                            type_nodes: facts.type_nodes,
-                            effect_ctx_type: facts.effect_ctx_type,
-                            effect_ctx_layouts: [], binders: [], captures: [],
-                            next_origin: 0, diagnostic_origins: []
-                        },
-                        make_named_executable_ref(
-                            variant_ref_member(variant.variant_ref)))),
                 left_slots, fields, executable_origin(method.executable_ref)))
         }
         variant_index = variant_index + 1

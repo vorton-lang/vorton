@@ -23,8 +23,9 @@ use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, ImplProviderRef,
     trait_method_ref_name, trait_method_ref_member,
     impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_same,
     impl_method_ref_member, impl_method_ref_owner,
-    variant_ref_owner, variant_ref_source_index, variant_ref_member,
+    variant_ref_owner, variant_ref_source_index,
     variant_field_ref_variant, variant_field_ref_index,
+    variant_field_ref_same,
     variant_ref_same,
     handled_effect_ref_same, system_effect_ref_same,
     impl_provider_ref_same, impl_provider_ref_kind,
@@ -67,9 +68,10 @@ pub use hir_exact::{
     remap_h_effect_ctx_ref, remap_h_effect_ctx_source,
     remap_h_exact_call_effect_ctx,
     HOperatorPlan, h_operator_method, h_operator_tuple, h_operator_is_tuple,
-    h_operator_method_ref, h_operator_elements, HConstructorPlan, make_h_executable_constructor_plan,
-    make_h_tuple_constructor_plan, make_h_record_constructor_plan, h_constructor_kind, h_constructor_executable,
-    h_constructor_fields, h_constructor_effect_ctx, h_constructor_tuple_arity,
+    h_operator_method_ref, h_operator_elements, HConstructorPlan,
+    make_h_variant_constructor_plan,
+    make_h_tuple_constructor_plan, make_h_record_constructor_plan,
+    h_constructor_kind, h_constructor_fields, h_constructor_tuple_arity,
     HStringInterpPlan, make_h_string_interp_plan,
     h_string_interp_builder_binder, h_string_interp_builder, h_string_interp_append_literal, h_string_interp_append_value,
     h_string_interp_finish, h_string_interp_value_to_string,
@@ -1600,15 +1602,21 @@ fn validate_hir_expr(
                 some(value) => value,
                 none => panic("HIR variant literal: constructor plan is absent")
             }
+            let plan_fields = h_constructor_fields(plan)
             if h_constructor_kind(plan) != 0 ||
-               h_constructor_fields(plan).len() != field_values.len() ||
-               !typed_effect_ctx_source_is_empty(
-                    h_constructor_effect_ctx(plan)) ||
-               !symbol_ref_same(
-                    executable_ref_named_symbol(
-                        h_constructor_executable(plan)),
-                    variant_ref_member(variant_ref)) {
+               plan_fields.len() != field_values.len() {
                 panic("HIR variant literal: constructor identity differs")
+            }
+            let mut field_index = 0
+            while field_index < field_values.len() {
+                let planned = plan_fields.get(field_index).unwrap()
+                if h_projection_kind(planned) != 1 ||
+                   !variant_field_ref_same(
+                        h_projection_variant(planned),
+                        field_values.get(field_index).unwrap().field_ref) {
+                    panic("HIR variant literal: constructor field differs")
+                }
+                field_index = field_index + 1
             }
             validate_hir_variant_field_values(
                 variant_ref, field_values, spread, seen, scope)
@@ -2332,35 +2340,6 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
 // every escaping owner-bearing Type substructure (so the shallow ring_dup is
 // balanced by the deep recursive drop), and the working-set is reclaimed at
 // scope end.  See design.md §7.11 "Type-DAG 内存回收：pure Perceus RC".
-
-// Codegen naming conventions
-pub fn variant_ctor_name(enum_name: Str, variant_name: Str) -> Str {
-    "${enum_name}_${variant_name}"
-}
-
-// A fieldless user enum variant is represented by inference as an Ident whose
-// resolved_name comes from exact DefId-keyed constructor provenance. Unlike an
-// ordinary Ident read, evaluating that node CALLS the constructor and therefore
-// produces a fresh owned enum box. Keep this cross-stage ownership fact in one
-// place so Perceus and the post-RC verifier cannot disagree.
-pub fn is_nullary_variant_ctor_ident(expr: HExpr) -> Bool {
-    match expr {
-        HExpr::Ident { resolved_name, ty, .. } => match resolved_name {
-            some(rn) => match ty {
-                Type::EnumType { name, .. } =>
-                    // Option::none is the sole fieldless constructor whose
-                    // codegen result is a borrowed never-drop runtime singleton
-                    // rather than a fresh enum allocation. It still carries
-                    // resolved_name so codegen can select ring_Option_none.
-                    rn != variant_ctor_name(BUILTIN_OPTION, "none") &&
-                    rn.starts_with(variant_ctor_name(name, "")),
-                _ => false,
-            },
-            none => false,
-        },
-        _ => false,
-    }
-}
 
 // An Ident carrying some(dicts) is not a borrow read: codegen allocates a fresh
 // direct-ABI wrapper closure (some([]) is the explicit zero-bound marker).

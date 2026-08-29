@@ -33,7 +33,7 @@ use infer_decl::{check as infer_check, check_module_identity,
 use dict_lower::{lower_dicts}
 use andor_lower::{lower_andor}
 use infer_ctx::{InferCtx, new_infer_ctx as new_base_infer_ctx,
-    type_error, record_value_origin, record_variant_ctor_origin,
+    type_error, record_value_origin,
     record_value_binding_kind, record_value_symbol_ref,
     install_project_namespace_plan,
     install_struct_identity_ledger, enter_struct_identity_root_frame,
@@ -1280,7 +1280,6 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                 some(value) => value,
                 none => panic("module export: value lacks exact SymbolRef")
             }
-            let ctor_origin = mod_.variant_ctor_origins.get(lookup_name)
             if !hydrated_value_symbols.any(fn(existing) {
                     symbol_ref_same(existing, value_symbol)
                 }) {
@@ -1295,12 +1294,6 @@ fn inject_module_exports(mut ctx: InferCtx, exports: List<ModuleExports>) {
                 match mod_.value_binding_kinds.get(lookup_name) {
                     some(kind) => {
                         record_value_binding_kind(ctx, payload, kind)
-                    },
-                    none => {}
-                }
-                match ctor_origin {
-                    some(ctor) => {
-                        record_variant_ctor_origin(ctx, payload, ctor)
                     },
                     none => {}
                 }

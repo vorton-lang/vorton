@@ -13,7 +13,7 @@ use ast::{Span}
 use hir::{TraitBound, trait_dict_name}
 use hir_exact::{exact_dict_physical_key}
 use ir_identity::{
-    SlotRef, ImplOwnerRef, ImplMethodRef,
+    SlotRef, ImplOwnerRef, ImplMethodRef, VariantRef,
     slot_ref_stable_key, impl_owner_ref_same, impl_method_ref_same,
     impl_owner_ref_target, impl_owner_ref_provider, impl_owner_ref_trait,
     impl_provider_ref_kind, impl_provider_kind_builtin,
@@ -48,6 +48,7 @@ pub struct CStructInfo {
 // field_rc_skip: same extern-containment flags as CStructInfo, per payload
 // field — consumed by emit_c_drop_functions.
 pub struct CEnumVariantInfo {
+    pub variant_ref: VariantRef,
     pub tag: Int,
     pub field_count: Int,
     pub field_names: List<Str>,

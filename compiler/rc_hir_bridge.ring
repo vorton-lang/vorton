@@ -68,7 +68,7 @@ use hir::{
     make_h_pattern_field_plan,
     h_pattern_wildcard, h_pattern_binding, h_pattern_literal,
     h_pattern_tuple, h_pattern_struct, h_pattern_variant,
-    make_h_executable_constructor_plan, make_h_tuple_constructor_plan,
+    make_h_variant_constructor_plan, make_h_tuple_constructor_plan,
     make_h_record_constructor_plan,
     HFieldAccessKind, HNominalStructFieldInit, HStructFieldInit,
     HResourceSite,
@@ -103,7 +103,8 @@ use flow_ir::{
     flow_projection_contract_same,
     flow_projection_contract_result_type,
     flow_project_contract, flow_project_base, flow_project_result,
-    flow_initialize_inputs, flow_initialize_target,
+    flow_initialize_operation, flow_initialize_inputs, flow_initialize_target,
+    flow_operation_contract_kind_tag, flow_operation_contract_variant,
     flow_fail_raise_sink,
     flow_slot_reference, flow_slot_type
 }
@@ -148,10 +149,8 @@ use core_expr::{
     core_expr_system_host, core_expr_fail_payload,
     core_expr_project_base, core_expr_project_field,
     core_expr_constructor, core_expr_constructor_fields,
-    core_expr_constructor_effect_ctx,
     core_expr_move_update_base, core_expr_move_update_constructor,
     core_expr_move_update_schema, core_expr_move_update_overrides,
-    core_expr_move_update_effect_ctx,
     core_expr_lambda_executable, core_expr_lambda_captures,
     core_capture_source, core_capture_target,
     core_expr_block, core_expr_then_block, core_expr_else_block,
@@ -173,7 +172,7 @@ use core_expr::{
     core_place_field,
     core_place_value_type,
     core_constructor_kind_tag, core_constructor_struct_owner,
-    core_constructor_variant, core_constructor_executable,
+    core_constructor_variant,
     core_callee_ref, core_callee_kind_tag, core_callee_direct,
     core_callee_local, core_callee_dynamic, core_callee_contract,
     core_callee_effect_instantiation,
@@ -1151,6 +1150,17 @@ fn instruction_for_node_role(
     instruction
 }
 
+fn validate_flow_variant_initialize(
+    instruction: FlowInstruction, variant: VariantRef
+) {
+    let operation = flow_initialize_operation(instruction)
+    if flow_operation_contract_kind_tag(operation) != 6 ||
+       !variant_ref_same(
+            flow_operation_contract_variant(operation), variant) {
+        panic("RcHIR bridge: Flow/Core variant construct identity differs")
+    }
+}
+
 fn primitive_bin_op(tag: Int) -> BinOp {
     if tag == 0 { return BinOp::Add }
     if tag == 1 { return BinOp::Sub }
@@ -1555,6 +1565,8 @@ fn simple_core_expr(
         }
         if constructor_kind == 1 {
             let variant = core_constructor_variant(constructor)
+            validate_flow_variant_initialize(instruction_for_node_role(
+                ctx, node_ordinal, BRIDGE_ROLE_EXPR_PRIMARY, 0, 0), variant)
             let variant_shell = match enum_variant_in_decls_opt(
                     ctx.shell.decls, variant) {
                 some(found) => found,
@@ -1590,14 +1602,10 @@ fn simple_core_expr(
                 variant_ref: variant,
                 fields: values,
                 spread: none,
-                constructor: some(make_h_executable_constructor_plan(
-                    core_constructor_executable(constructor).unwrap(),
+                constructor: some(make_h_variant_constructor_plan(
                     fields.map(fn(field) {
                         hir_projection(core_field_value_field(field))
-                    }), typed_effect_ctx_source(
-                        core_expr_constructor_effect_ctx(expr).unwrap_or_else(
-                            fn() { panic("RcHIR bridge: constructor lacks EffectCtx")
-                            })))),
+                    }))),
                 ty: ty, effects: effects, span: span_zero()
             } }
         }
@@ -3318,6 +3326,7 @@ fn serialize_move_update_expr(
         }
     } else if constructor_kind == 1 {
         let variant = core_constructor_variant(constructor)
+        validate_flow_variant_initialize(initialize, variant)
         let variant_shell = match enum_variant_in_decls_opt(
                 ctx.shell.decls, variant) {
             some(value) => value,
@@ -3341,13 +3350,8 @@ fn serialize_move_update_expr(
                 variant_ref_owner(variant)),
             variant_name: variant_shell.name, variant_ref: variant,
             fields: fields, spread: none,
-            constructor: some(make_h_executable_constructor_plan(
-                core_constructor_executable(constructor).unwrap(),
-                schema.map(fn(field) { hir_projection(field) }),
-                typed_effect_ctx_source(
-                    core_expr_move_update_effect_ctx(expr).unwrap_or_else(fn() {
-                        panic("RcHIR bridge: update constructor lacks EffectCtx")
-                    })))),
+            constructor: some(make_h_variant_constructor_plan(
+                schema.map(fn(field) { hir_projection(field) }))),
             ty: ty, effects: effects, span: span_zero()
         }
     } else {

@@ -314,7 +314,7 @@
       "covers": [
         "Box<fn> actual and fallback branches preserve distinct exact effects and results",
         "positional and named enum fields preserve distinct exact callable effects and results",
-        "struct and enum constructor paths receive the uniform Ring callable context",
+        "struct and enum constructor paths use exact structural construction without callable context",
         "effect operation callable parameter and result preserve distinct exact effects and results",
         "generic fail<T> preserves its nested callable exact effect and result",
         "fully closed generic custom-effect instance preserves its nested callable effect and result",

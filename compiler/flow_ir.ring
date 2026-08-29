@@ -36,7 +36,8 @@ use ir_identity::{
     variant_field_ref_same, variant_field_ref_variant,
     variant_field_ref_member, variant_field_ref_index,
     variant_ref_owner, variant_ref_same,
-    variant_ref_member,
+    variant_ref_member, variant_ref_source_index,
+    builtin_option_none_variant_ref,
     registered_nominal_ref_symbol,
     impl_owner_ref_target, impl_owner_ref_provider, impl_owner_ref_trait,
     impl_provider_ref_site, impl_provider_ref_kind, impl_provider_kind_tag,
@@ -830,10 +831,7 @@ enum FlowOperationValue {
     BoolLiteralOperationValue(Bool),
     UnitLiteralOperationValue,
     PrimitiveOperationValue(FlowPrimitiveOp),
-    ConstructorOperationValue {
-        executable: ExecutableRef,
-        effect_ctx: CoreEffectCtxArgument
-    },
+    VariantConstructOperationValue(VariantRef),
     EffectCtxOverlayOperationValue {
         parent: EffectCtxRef,
         child: EffectCtxRef,
@@ -1027,20 +1025,20 @@ pub fn make_flow_primitive_contract(
         input_types, input_roles, empty_aggregate_inputs(input_types.len()),
         target_type, target_role, target_origin)
 }
-pub fn make_flow_constructor_contract(
-    constructor: ExecutableRef, input_types: List<CoreTypeRef>,
-    input_roles: List<FlowSemanticRole>,
+pub fn make_flow_variant_construct_contract(
+    variant: VariantRef, input_types: List<CoreTypeRef>,
     input_locations: List<FlowAggregateInputRef?>,
-    target_type: CoreTypeRef,
-    target_role: FlowSemanticRole, target_origin: FlowValueOriginContract,
-    effect_ctx: CoreEffectCtxArgument
+    target_type: CoreTypeRef
 ) -> FlowOperationContract {
+    let mut input_roles: List<FlowSemanticRole> = []
+    for _index in 0..input_types.len() {
+        input_roles.push(flow_semantic_role_consume())
+    }
     make_flow_operation_contract(
-        FlowOperationValue::ConstructorOperationValue {
-            executable: constructor, effect_ctx: effect_ctx
-        },
+        FlowOperationValue::VariantConstructOperationValue(variant),
         input_types, input_roles, input_locations,
-        target_type, target_role, target_origin)
+        target_type, flow_semantic_role_read(),
+        make_fresh_flow_value_origin())
 }
 pub fn make_flow_effect_ctx_overlay_contract(
     parent: EffectCtxRef, child: EffectCtxRef,
@@ -1154,7 +1152,7 @@ pub fn flow_operation_contract_kind_tag(value: FlowOperationContract) -> Int {
         FlowOperationValue::BoolLiteralOperationValue(_) => 3,
         FlowOperationValue::UnitLiteralOperationValue => 4,
         FlowOperationValue::PrimitiveOperationValue(_) => 5,
-        FlowOperationValue::ConstructorOperationValue { .. } => 6,
+        FlowOperationValue::VariantConstructOperationValue(_) => 6,
         FlowOperationValue::TupleAggregateOperationValue(_) => 9,
         FlowOperationValue::RecordAggregateOperationValue(_) => 10,
         FlowOperationValue::ClosureOperationValue { .. } => 11,
@@ -1192,22 +1190,12 @@ pub fn flow_operation_contract_primitive(
         _ => panic("FlowIR: operation is not primitive")
     }
 }
-pub fn flow_operation_contract_executable(
+pub fn flow_operation_contract_variant(
     value: FlowOperationContract
-) -> ExecutableRef {
+) -> VariantRef {
     match value.value {
-        FlowOperationValue::ConstructorOperationValue { executable, .. } =>
-            executable,
-        _ => panic("FlowIR: operation has no executable contract")
-    }
-}
-pub fn flow_operation_contract_constructor_effect_ctx(
-    value: FlowOperationContract
-) -> CoreEffectCtxArgument {
-    match value.value {
-        FlowOperationValue::ConstructorOperationValue { effect_ctx, .. } =>
-            effect_ctx,
-        _ => panic("FlowIR: operation is not an executable constructor")
+        FlowOperationValue::VariantConstructOperationValue(variant) => variant,
+        _ => panic("FlowIR: operation is not a variant construct")
     }
 }
 pub fn flow_operation_contract_effect_ctx_parent(
@@ -2099,16 +2087,6 @@ pub fn flow_instruction_operands(value: FlowInstruction) -> List<FlowOperandRef>
                     value, index, inputs.get(index).unwrap(),
                     operation.input_roles.get(index).unwrap()))
                 index = index + 1
-            }
-            if flow_operation_contract_kind_tag(operation) == 6 {
-                let argument = flow_operation_contract_constructor_effect_ctx(
-                    operation)
-                if core_effect_ctx_argument_kind_tag(argument) != 0 {
-                    result.push(make_instruction_operand(
-                        value, index, effect_ctx_slot(
-                            core_effect_ctx_argument_context(argument)),
-                        flow_semantic_role_read()))
-                }
             }
         },
         FlowInstructionValue::ReadValue { source, .. } =>
@@ -4628,35 +4606,68 @@ fn callable_for_symbol(
     }
 }
 
-fn validate_operation_callable_contract(
-    operation: FlowOperationContract, callable: FlowCallable
+fn validate_variant_construct_contract(
+    operation: FlowOperationContract, variant: VariantRef,
+    storage_contract: FlowStorageContract,
+    type_nodes: List<FlowTypeNode>
 ) {
-    let parameter_types = flow_call_contract_parameter_types(
-        callable.semantic_contract)
-    let parameter_roles = flow_call_contract_parameter_roles(
-        callable.semantic_contract)
-    if operation.input_types.len() != parameter_types.len() ||
-       operation.input_roles.len() != parameter_roles.len() ||
-       !core_type_ref_same(
-            operation.target_type,
-            flow_call_contract_result_type(callable.semantic_contract)) ||
+    let target = type_node_for(type_nodes, operation.target_type)
+    let nominal = match target.nominal {
+        some(value) => value,
+        none => panic("FlowIR: variant construct target is not nominal")
+    }
+    if flow_type_kind_tag(target.kind) != FLOW_TYPE_ENUM ||
+       !symbol_ref_same(
+            nominal,
+            registered_nominal_ref_symbol(variant_ref_owner(variant))) ||
        flow_semantic_role_tag(operation.target_role) !=
-            flow_semantic_role_tag(
-                flow_call_contract_result_role(callable.semantic_contract)) ||
-       !value_origin_same(
-            operation.target_origin,
-            flow_call_contract_result_origin(callable.semantic_contract)) {
-        panic("FlowIR: operation producer contract differs from callable")
+            flow_semantic_role_tag(flow_semantic_role_read()) ||
+       !flow_value_origin_is_fresh(operation.target_origin) {
+        panic("FlowIR: variant construct target contract differs")
+    }
+    let expected_storage = if variant_ref_same(
+            variant, builtin_option_none_variant_ref()) {
+        flow_borrow_storage()
+    } else { flow_own_storage() }
+    if flow_storage_contract_tag(storage_contract) !=
+            flow_storage_contract_tag(expected_storage) {
+        panic("FlowIR: variant construct result storage differs")
+    }
+
+    let mut expected: List<VariantFieldRef> = []
+    for fact in target.nominal_fields {
+        let identity = fact.identity
+        if flow_field_identity_is_variant(identity) {
+            let field = flow_field_identity_variant(identity)
+            if variant_ref_same(
+                    variant_field_ref_variant(field), variant) {
+                expected.push(field)
+            }
+        }
+    }
+    if expected.len() != operation.input_types.len() ||
+       expected.len() != operation.input_locations.len() ||
+       expected.len() != operation.input_roles.len() {
+        panic("FlowIR: variant construct field census differs")
     }
     let mut index = 0
-    while index < operation.input_types.len() {
-        if !core_type_ref_same(
-                operation.input_types.get(index).unwrap(),
-                parameter_types.get(index).unwrap()) ||
-           flow_semantic_role_tag(
+    while index < expected.len() {
+        if flow_semantic_role_tag(
                 operation.input_roles.get(index).unwrap()) !=
-                flow_semantic_role_tag(parameter_roles.get(index).unwrap()) {
-            panic("FlowIR: operation producer parameter contract differs")
+                flow_semantic_role_tag(flow_semantic_role_consume()) {
+            panic("FlowIR: variant construct field role differs")
+        }
+        let location = match operation.input_locations.get(index).unwrap() {
+            some(value) => value,
+            none => panic("FlowIR: variant construct field identity is absent")
+        }
+        if flow_aggregate_input_kind_tag(location) != 1 {
+            panic("FlowIR: variant construct field is not a variant field")
+        }
+        let actual = flow_aggregate_input_variant(location)
+        if variant_field_ref_index(actual) != index ||
+           !variant_field_ref_same(actual, expected.get(index).unwrap()) {
+            panic("FlowIR: variant construct field owner/order differs")
         }
         index = index + 1
     }
@@ -4950,21 +4961,13 @@ fn validate_typed_instructions(
                         validate_literal_or_primitive_contract(
                             operation, type_nodes)
                         match operation.value {
-                            FlowOperationValue::ConstructorOperationValue {
-                                executable, effect_ctx
-                            } => {
-                                let callable = callable_for_ref(
-                                    callables, executable)
-                                validate_operation_callable_contract(
-                                    operation, callable)
-                                if !core_effect_contract_same(
-                                        core_effect_instantiation_result(
-                                            core_effect_ctx_argument_receipt(
-                                                effect_ctx)),
-                                        callable.effects) {
-                                    panic("FlowIR: constructor EffectCtx differs")
-                                }
-                            },
+                            FlowOperationValue::VariantConstructOperationValue(
+                                variant
+                            ) => validate_variant_construct_contract(
+                                operation, variant,
+                                slot_for_ref(
+                                    body.slots, target).storage_contract,
+                                type_nodes),
                             FlowOperationValue::EffectCtxOverlayOperationValue {
                                 parent, child, entries
                             } => {
@@ -5190,6 +5193,16 @@ fn encode_symbol(value: SymbolRef) -> Str {
         namespace_kind_tag(symbol_ref_namespace_kind(value)).to_str(),
         encode_atom(symbol_ref_canonical_payload(value)),
         encode_atom(symbol_ref_declaration_site_path(value))
+    ].join("/")
+}
+
+fn encode_variant_ref(value: VariantRef) -> Str {
+    [
+        "V",
+        encode_symbol(registered_nominal_ref_symbol(
+            variant_ref_owner(value))),
+        encode_symbol(variant_ref_member(value)),
+        variant_ref_source_index(value).to_str()
     ].join("/")
 }
 
@@ -5441,12 +5454,8 @@ fn encode_operation(value: FlowOperationContract) -> Str {
         FlowOperationValue::UnitLiteralOperationValue => parts.push("unit"),
         FlowOperationValue::PrimitiveOperationValue(operation) =>
             parts.push(flow_primitive_op_tag(operation).to_str()),
-        FlowOperationValue::ConstructorOperationValue {
-            executable, effect_ctx
-        } => {
-            parts.push(encode_executable(executable))
-            parts.push(encode_effect_ctx_argument(effect_ctx))
-        },
+        FlowOperationValue::VariantConstructOperationValue(variant) =>
+            parts.push(encode_variant_ref(variant)),
         FlowOperationValue::EffectCtxOverlayOperationValue {
             parent, child, entries
         } => {

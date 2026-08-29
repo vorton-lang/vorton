@@ -18,7 +18,7 @@ use hir::{HDecl, HStmt, HExpr, HParam, HProgram, HMatchArm,
     hexpr_type, hexpr_span, hexpr_effects,
     is_rc_excluded_type, type_contains_extern_handle,
     is_borrow_returning_call, is_user_drop_type,
-    is_nullary_variant_ctor_ident, is_materialized_fn_value,
+    is_materialized_fn_value,
     is_exact_direct_call_ident,
     make_h_instruction_resource_site, h_resource_reason_drop,
     slot_read_identity, slot_take_identity, slot_write_identity,
@@ -455,7 +455,6 @@ fn anf_should_materialize(expr: HExpr, externs: Set<Str>) -> Bool {
     if is_materializable_fn_value(expr, externs) {
         return true
     }
-    let nullary_variant_ctor = is_nullary_variant_ctor_ident(expr)
     match expr {
         // Arithmetic / comparison BinOps box a FRESH result (gen_int_binop /
         // gen_*_binop → box_int/box_bool/box_float) — materialise.  `&&`/`||`
@@ -1662,12 +1661,8 @@ fn is_owner_bearing(expr: HExpr) -> Bool {
     if is_materialized_fn_value(expr) {
         return false
     }
-    let nullary_variant_ctor = is_nullary_variant_ctor_ident(expr)
     match expr {
-        // Ordinary identifiers read an existing owner.  A fieldless variant is
-        // the one Ident-shaped exception: codegen calls a constructor, so the
-        // result is fresh and must move without an escape Clone.
-        HExpr::Ident { .. } => nullary_variant_ctor == false,
+        HExpr::Ident { .. } => true,
         HExpr::FieldAccess { .. } => true,
         // B-104 D1 rule ③: `s[i]` on a Str is NOT owner-bearing — ring_str_get
         // returns a FRESH 1-char string (new ring_alloc, verified), so an escape
@@ -1816,8 +1811,8 @@ fn is_owner_bearing(expr: HExpr) -> Bool {
 //          ring_catch_pop (codegen-internal plumbing).
 //
 // ── Static (not extern, runtime-internal only) ────────────────────────────────
-//   ring_enum_some / enum_none (FRESH; HIR surface = variant-ctor call, whose
-//   args are sink positions — is_variant_constructor_call), ring_make_closure /
+//   ring_enum_some / enum_none (FRESH; HIR surface construction is handled by
+//   the NamedVariantConstruct ownership path), ring_make_closure /
 //   make_eq_dict / make_ord_dict (FRESH, dict plumbing), drop_* destructors.
 //
 // NOTE: `.get()` is NOT here — list.get / map.get build a FRESH owned Option
@@ -2739,27 +2734,17 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                       resolved_dicts, effect_ctx, callee_ref,
                       method_ref, system_host, ty, effects, span } => {
             // Callee is a borrow.  Arguments BORROW by default (the callee does not
-            // drop them — point 4) EXCEPT two ownership-taking sinks:
+            // drop them — point 4) EXCEPT known ownership-taking sinks:
             //   1. a known container-sink (push/insert/set): the value escapes into
             //      the container (it must co-own with the container);
-            //   2. an ENUM VARIANT CONSTRUCTOR call (`some(x)` / `ok(v)` / `err(e)` /
-            //      a user `Variant(payload)` written in call syntax): the runtime
-            //      constructor (`ring_enum_some` / `gen_named_variant_construct`)
-            //      STORES the argument pointer WITHOUT a dup, exactly like a
-            //      StructLit/NamedVariantConstruct field store.  So every value arg
-            //      escapes and must be Clone'd if owner-bearing — otherwise the
-            //      argument's own scope-end drop frees the payload the new enum holds
-            //      (the native prelude `match find_std_dir() { some(std_dir) => … }`
-            //      UAF, B-101).  The literal-syntax forms already escape their fields
-            //      (StructLit / NamedVariantConstruct arms below); this closes the
-            //      call-syntax gap so both lower identically.
+            // Enum construction is no longer represented as Call; its payloads
+            // use the NamedVariantConstruct field-store path below.
             let new_callee = rc_expr(callee, false, owned, boxed, externs, drop_types, gensym, loop_base)
-            let ctor_sink = is_variant_constructor_call(callee, ty)
             let sink = sink_arg_indices(callee, args.len())
             let mut new_args: List<HExpr> = []
             let mut i = 0
             for a in args {
-                let new_a = if ctor_sink || list_contains_int(sink, i) {
+                let new_a = if list_contains_int(sink, i) {
                     rc_escape(a, owned, boxed, externs, drop_types, gensym, loop_base)
                 } else {
                     rc_expr(a, false, owned, boxed, externs, drop_types, gensym, loop_base)
@@ -3096,39 +3081,6 @@ pub fn sink_arg_indices(callee: HExpr, arg_count: Int) -> List<Int> {
             }
         },
         _ => [],
-    }
-}
-
-// Whether a Call is an enum VARIANT CONSTRUCTOR written in call syntax
-// (`some(x)`, `ok(v)`, `err(e)`, or a user `Variant(payload)`).  Such a call
-// lowers to `ring_enum_some` / a `gen_named_variant_construct`-style store that
-// takes the argument BY OWNERSHIP without a dup — so its value args are escape
-// (sink) positions, like StructLit / NamedVariantConstruct fields.
-//
-// Detection (no enum-registry access in perceus): the callee is a BARE Ident
-// (not a method / FieldAccess) whose `resolved_name` is the variant's ctor name
-// `${Enum}_${variant}` (set by infer when the call name resolves through
-// `variant_to_enum`), AND the call's result type is that EnumType.  Requiring
-// resolved_name to start with the result enum's `${name}_` distinguishes a
-// constructor from an ordinary function that merely returns an enum (whose
-// callee resolved_name is its own mangled fn name, not `${Enum}_…`).
-//
-// Safety asymmetry (mirrors sink_arg_indices): a false POSITIVE only adds an
-// extra Clone on an already-owned arg → a leak (crash-free); a false NEGATIVE
-// (missing a real constructor) leaves the arg un-cloned → UAF.  The predicate
-// therefore errs toward inclusion for enum-returning bare-Ident calls.
-// (pub: shared with verify_rc.ring — same sink-agreement requirement as
-// sink_arg_indices.)
-pub fn is_variant_constructor_call(callee: HExpr, result_ty: Type) -> Bool {
-    match callee {
-        HExpr::Ident { resolved_name, .. } => match resolved_name {
-            some(rn) => match result_ty {
-                Type::EnumType { name, .. } => rn.starts_with("${name}_"),
-                _ => false,
-            },
-            none => false,
-        },
-        _ => false,
     }
 }
 

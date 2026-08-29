@@ -13,7 +13,7 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     HPatternPlan, HOperatorPlan,
     HProjectionRef, h_nominal_projection, h_structural_projection,
     h_tuple_projection,
-    make_h_executable_constructor_plan, make_h_tuple_constructor_plan,
+    make_h_variant_constructor_plan, make_h_tuple_constructor_plan,
     make_h_record_constructor_plan, h_variant_projection,
     HExactCallPlan, HStringInterpPlan, HListLiteralPlan,
     make_h_exact_call_plan,
@@ -73,7 +73,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     remove_fail_effect,
     generalize, free_type_vars, resolve_relative_qualifier,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
-    has_variant_ctor_origin_def_id, fresh_child_executable,
+    fresh_child_executable,
     enter_executable_owner, enter_handler_executable_owner,
     exit_executable_owner,
     current_executable_owner, current_dictionary_evidence_owner,
@@ -93,6 +93,7 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
     journal_let_def_insert, journal_mut_param_def_insert}
 use exhaustive::{check_exhaustive}
 use infer_helpers::{MethodLookupResult, StmtResult, CalleeMetadata,
+    ExactVariantConstructorTarget, exact_variant_constructor_target,
     is_value_type, cancel_local_mut_effects, resolve_var_id,
     check_assign_target_mutable, find_root_expr, get_assign_target_root_def_id, get_hexpr_root_type,
     infer_ident, infer_ident_with_receipt,
@@ -125,6 +126,173 @@ use effect_contract::{typed_effect_header_schema_bindings,
     empty_typed_effect_header_schema,
     make_typed_handled_effect_instance, typed_handled_effect_instance_same,
     make_empty_effect_ctx_source}
+
+fn exact_ident_variant_constructor_target(
+    ctx: InferCtx, value: HExpr
+) -> ExactVariantConstructorTarget? {
+    match value {
+        HExpr::Ident { def_id, .. } =>
+            exact_variant_constructor_target(ctx, def_id),
+        _ => none
+    }
+}
+
+fn exact_variant_construct(
+    target: ExactVariantConstructorTarget, fields: List<HStructFieldInit>,
+    ty: Type, effects: EffectRow, span: Span
+) -> HExpr {
+    HExpr::NamedVariantConstruct {
+        enum_name: target.enum_def.name,
+        variant_name: target.variant_name,
+        variant_ref: target.variant_ref,
+        fields: fields, spread: none,
+        constructor: some(make_h_variant_constructor_plan(
+            fields.map(fn(field) {
+                h_variant_projection(field.field_ref)
+            }))),
+        ty: ty, effects: effects, span: span
+    }
+}
+
+fn exact_variant_type_instantiation(
+    target: ExactVariantConstructorTarget, result_type: Type
+) -> Map<Int, Type> {
+    let type_params = match result_type {
+        Type::EnumType { type_params, .. } => type_params,
+        _ => panic("variant constructor target: result is not an enum")
+    }
+    if target.enum_def.type_param_vars.len() != type_params.len() {
+        panic("variant constructor target: type parameter census differs")
+    }
+    let mut mapping: Map<Int, Type> = map_new()
+    let mut index = 0
+    while index < type_params.len() {
+        mapping.insert(
+            target.enum_def.type_param_vars.get(index).unwrap(),
+            type_params.get(index).unwrap())
+        index = index + 1
+    }
+    mapping
+}
+
+fn infer_positional_variant_call(
+    mut ctx: InferCtx, callee: InferResult, args: List<Expr>,
+    target: ExactVariantConstructorTarget, span: Span
+) -> InferResult {
+    if callee.effects.effects.len() != 0 || callee.effects.tail.is_some() {
+        panic("variant constructor target: identifier has effects")
+    }
+    let raw_result_type = hexpr_type(callee.hexpr)
+    let inst_map = exact_variant_type_instantiation(
+        target, raw_result_type)
+    let variant = target.enum_def.variants.get(
+        target.variant_index).unwrap()
+    let schemas = target.enum_def.variant_field_effect_schemas.get(
+        target.variant_index).unwrap()
+    if variant.fields.len() != target.field_refs.len() ||
+       variant.fields.len() != schemas.len() {
+        panic("variant constructor target: payload census differs")
+    }
+
+    let mut expected_fields: List<Type> = []
+    let mut field_index = 0
+    while field_index < variant.fields.len() {
+        let raw_field = variant.fields.get(field_index).unwrap()
+        let localized = instantiate_effect_header_schema(
+            ctx.env, [raw_field], schemas.get(field_index).unwrap())
+        expected_fields.push(apply_subst_map(
+            inst_map, localized.0.get(0).unwrap()))
+        field_index = field_index + 1
+    }
+
+    let mut s = callee.subst
+    let mut effects: EffectRow = EMPTY_ROW
+    let mut hargs: List<HExpr> = []
+    let mut arg_index = 0
+    for arg in args {
+        let expected = expected_fields.get(arg_index)
+        let ar = match arg {
+            Expr::Lambda {
+                params: lambda_params, body, span: lambda_span, ..
+            } => match expected {
+                some(raw_expected) => match apply_subst(s, raw_expected) {
+                    Type::FnType { params, .. } => infer_lambda(
+                        ctx, lambda_params, body, lambda_span, s,
+                        some(params)),
+                    _ => infer_expr(ctx, arg, s)
+                },
+                none => infer_expr(ctx, arg, s)
+            },
+            _ => infer_expr(ctx, arg, s)
+        }
+        s = ar.subst
+        let merged = merge_effects(
+            ctx.sink, ctx.env, effects, ar.effects, s, span)
+        effects = merged.0
+        s = merged.1
+        match expected {
+            some(field_type) => {
+                s = unify_at(
+                    ctx.sink, ctx.env, hexpr_type(ar.hexpr),
+                    field_type, s, span)
+            },
+            none => {}
+        }
+        hargs.push(ar.hexpr)
+        arg_index = arg_index + 1
+    }
+
+    if hargs.len() != expected_fields.len() {
+        let display = nominal_display_name(target.enum_def.name)
+        let _ = type_error(ctx.sink, E0301,
+            "Enum constructor '${display}::${target.variant_name}' expects ${expected_fields.len().to_str()} argument(s), got ${hargs.len().to_str()}",
+            span, DiagnosticContext::TypeMismatch {
+                expected: "${expected_fields.len().to_str()} args",
+                actual: "${hargs.len().to_str()} args",
+                expression: none
+            })
+    }
+
+    let mut fields: List<HStructFieldInit> = []
+    field_index = 0
+    while field_index < target.field_refs.len() &&
+          field_index < hargs.len() {
+        fields.push(HStructFieldInit {
+            name: field_index.to_str(),
+            field_ref: target.field_refs.get(field_index).unwrap(),
+            value: hargs.get(field_index).unwrap()
+        })
+        field_index = field_index + 1
+    }
+    let result_type = apply_subst(s, raw_result_type)
+    InferResult {
+        hexpr: exact_variant_construct(
+            target, fields, result_type, effects, span),
+        subst: s, effects: effects
+    }
+}
+
+fn infer_value_ident(
+    ctx: InferCtx, name: Str, span: Span, subst: UnionFind,
+    qualifier: Str?
+) -> InferResult {
+    let result = infer_ident(ctx, name, span, subst, qualifier)
+    match exact_ident_variant_constructor_target(ctx, result.hexpr) {
+        some(target) => if target.field_refs.len() == 0 {
+            InferResult {
+                hexpr: exact_variant_construct(
+                    target, [], hexpr_type(result.hexpr),
+                    result.effects, span),
+                subst: result.subst, effects: result.effects
+            }
+        } else {
+            // instantiate_named_value_scheme already emitted the stable
+            // value-position diagnostic and returned ErrorType.
+            result
+        },
+        none => result
+    }
+}
 
 fn exact_call_callee_ref(ctx: InferCtx, callee: HExpr) -> CalleeRef? {
     let _ = ctx
@@ -1543,7 +1711,7 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
                 subst: subst, effects: EMPTY_ROW
             },
         Expr::Ident { name, qualifier, span } =>
-            infer_ident(ctx, name, span, subst, qualifier),
+            infer_value_ident(ctx, name, span, subst, qualifier),
         Expr::BinOp { op, left, right, span } =>
             infer_bin_op(ctx, op, left, right, span, subst),
         Expr::UnaryOp { op, operand, span } =>
@@ -1988,6 +2156,19 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
                 ctx, name, ident_span, subst, qualifier,
                 false, callee_receipts),
         _ => infer_expr(ctx, callee, subst)
+    }
+    let variant_target = exact_ident_variant_constructor_target(
+        ctx, callee_r.hexpr)
+    match variant_target {
+        some(target) => if target.positional &&
+                target.field_refs.len() > 0 {
+            if callee_receipts.len() != 1 {
+                panic("direct constructor: exact instantiation receipt is absent")
+            }
+            return infer_positional_variant_call(
+                ctx, callee_r, args, target, span)
+        },
+        none => {}
     }
     let callee_receipt: CallableInstantiationReceipt? = match
             callee_receipts.first() {
@@ -3131,12 +3312,10 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
             enum_name: enum_name, variant_name: variant_name,
             variant_ref: exact_variant_ref,
             fields: hfields, spread: hspread,
-            constructor: some(make_h_executable_constructor_plan(
-                make_named_executable_ref(
-                    variant_ref_member(exact_variant_ref)),
+            constructor: some(make_h_variant_constructor_plan(
                 hfields.map(fn(field) {
                     h_variant_projection(field.field_ref)
-                }), make_empty_effect_ctx_source())),
+                }))),
             ty: enum_type, effects: effects, span: span
         },
         subst: s, effects: effects

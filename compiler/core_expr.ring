@@ -46,7 +46,6 @@ use ir_identity::{
 use ir_inventory::{
     ExecutableRef, BinderKind, BinderEntry, EffectCtxRef,
     EffectCtxParentCapture,
-    make_named_executable_ref,
     EffectOperationRef, SystemHostCallableRef, ExactMethodRef, ExactDictRef,
     ExecutableContractMode, executable_contract_mode_same,
     executable_contract_mode_concrete_body,
@@ -1230,10 +1229,7 @@ enum CoreConstructorRefValue {
     TupleConstructorValue(Int)
 }
 
-pub struct CoreConstructorRef {
-    value: CoreConstructorRefValue,
-    executable: ExecutableRef?
-}
+pub struct CoreConstructorRef { value: CoreConstructorRefValue }
 
 fn copy_nominal_field_refs(
     values: List<NominalFieldRef>
@@ -1259,23 +1255,20 @@ pub fn make_core_struct_constructor(
     CoreConstructorRef {
         value: CoreConstructorRefValue::StructConstructorValue {
             owner: owner, fields: copy_nominal_field_refs(fields)
-        },
-        executable: none
+        }
     }
 }
 pub fn make_core_variant_constructor(
-    variant: VariantRef, executable: ExecutableRef
+    variant: VariantRef
 ) -> CoreConstructorRef {
     CoreConstructorRef {
-        value: CoreConstructorRefValue::VariantConstructorValue(variant),
-        executable: some(executable)
+        value: CoreConstructorRefValue::VariantConstructorValue(variant)
     }
 }
 pub fn make_core_tuple_constructor(arity: Int) -> CoreConstructorRef {
     if arity < 0 { panic("CoreHIR: negative tuple constructor arity") }
     CoreConstructorRef {
-        value: CoreConstructorRefValue::TupleConstructorValue(arity),
-        executable: none
+        value: CoreConstructorRefValue::TupleConstructorValue(arity)
     }
 }
 pub fn core_constructor_kind_tag(value: CoreConstructorRef) -> Int {
@@ -1314,10 +1307,6 @@ pub fn core_constructor_arity(value: CoreConstructorRef) -> Int {
         _ => panic("CoreHIR: nominal constructor has no structural arity")
     }
 }
-pub fn core_constructor_executable(value: CoreConstructorRef) -> ExecutableRef? {
-    value.executable
-}
-
 pub struct CoreFieldValue {
     field: CoreFieldRef,
     value: CoreExpr
@@ -1623,15 +1612,13 @@ enum CoreExprValue {
     },
     ConstructExprValue {
         constructor: CoreConstructorRef,
-        fields: List<CoreFieldValue>,
-        effect_ctx: CoreEffectCtxArgument?
+        fields: List<CoreFieldValue>
     },
     MoveUpdateExprValue {
         base: CoreExpr,
         constructor: CoreConstructorRef,
         schema: List<CoreFieldRef>,
-        overrides: List<CoreFieldValue>,
-        effect_ctx: CoreEffectCtxArgument?
+        overrides: List<CoreFieldValue>
     },
     LambdaExprValue {
         executable: ExecutableRef,
@@ -1905,25 +1892,23 @@ pub fn make_core_project_expr(
 pub fn make_core_construct_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     constructor: CoreConstructorRef,
-    fields: List<CoreFieldValue>, effect_ctx: CoreEffectCtxArgument?
+    fields: List<CoreFieldValue>
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::ConstructExprValue {
-            constructor: constructor, fields: copy_field_values(fields),
-            effect_ctx: effect_ctx
+            constructor: constructor, fields: copy_field_values(fields)
         })
 }
 pub fn make_core_move_update_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     base: CoreExpr, constructor: CoreConstructorRef,
-    schema: List<CoreFieldRef>, overrides: List<CoreFieldValue>,
-    effect_ctx: CoreEffectCtxArgument?
+    schema: List<CoreFieldRef>, overrides: List<CoreFieldValue>
 ) -> CoreExpr {
     make_core_expr(ty, effects, origin,
         CoreExprValue::MoveUpdateExprValue {
             base: base, constructor: constructor,
             schema: copy_core_field_refs(schema),
-            overrides: copy_field_values(overrides), effect_ctx: effect_ctx
+            overrides: copy_field_values(overrides)
         })
 }
 pub fn make_core_lambda_expr(
@@ -2408,14 +2393,6 @@ pub fn core_expr_constructor_fields(value: CoreExpr) -> List<CoreFieldValue> {
         _ => panic("CoreHIR: expression is not Construct")
     }
 }
-pub fn core_expr_constructor_effect_ctx(
-    value: CoreExpr
-) -> CoreEffectCtxArgument? {
-    match value.value {
-        CoreExprValue::ConstructExprValue { effect_ctx, .. } => effect_ctx,
-        _ => panic("CoreHIR: expression is not Construct")
-    }
-}
 pub fn core_expr_move_update_base(value: CoreExpr) -> CoreExpr {
     match value.value {
         CoreExprValue::MoveUpdateExprValue { base, .. } => base,
@@ -2576,15 +2553,6 @@ pub fn core_effect_ctx_install_entries(
 ) -> List<CoreHandlerInstallation> {
     copy_handler_installations(value.entries)
 }
-pub fn core_expr_move_update_effect_ctx(
-    value: CoreExpr
-) -> CoreEffectCtxArgument? {
-    match value.value {
-        CoreExprValue::MoveUpdateExprValue { effect_ctx, .. } => effect_ctx,
-        _ => panic("CoreHIR: expression is not MoveUpdate")
-    }
-}
-
 // ============================================================
 // Closed structured body and recursive validator
 // ============================================================
@@ -3058,20 +3026,11 @@ fn validate_expr_with_loop_depth(
             validate_expr_with_loop_depth(payload, body, loop_depth),
         CoreExprValue::ProjectExprValue { base, .. } =>
             validate_expr_with_loop_depth(base, body, loop_depth),
-        CoreExprValue::ConstructExprValue {
-            constructor, fields, effect_ctx
-        } => {
+        CoreExprValue::ConstructExprValue { constructor, fields } => {
             validate_constructor_fields(constructor, fields, body, loop_depth)
-            if constructor.executable.is_some() != effect_ctx.is_some() {
-                panic("CoreHIR: executable constructor EffectCtx differs")
-            }
-            match effect_ctx {
-                some(argument) => validate_effect_ctx_argument(argument, body),
-                none => {}
-            }
         },
         CoreExprValue::MoveUpdateExprValue {
-            base, constructor, schema, overrides, effect_ctx
+            base, constructor, schema, overrides
         } => {
             validate_expr_with_loop_depth(base, body, loop_depth)
             for override_value in overrides {
@@ -3113,13 +3072,6 @@ fn validate_expr_with_loop_depth(
                 CoreConstructorRefValue::StructConstructorValue { .. } |
                 CoreConstructorRefValue::VariantConstructorValue(_) => {},
                 _ => panic("CoreHIR: move update constructor is not nominal")
-            }
-            if constructor.executable.is_some() != effect_ctx.is_some() {
-                panic("CoreHIR: move-update constructor EffectCtx differs")
-            }
-            match effect_ctx {
-                some(argument) => validate_effect_ctx_argument(argument, body),
-                none => {}
             }
         },
         CoreExprValue::LambdaExprValue { captures, .. } => {
@@ -4199,20 +4151,16 @@ fn remap_core_expr_types(
                 base: remap_core_expr_types(base, ctx),
                 field: field, partial: partial
             },
-        CoreExprValue::ConstructExprValue {
-            constructor, fields, effect_ctx
-        } =>
+        CoreExprValue::ConstructExprValue { constructor, fields } =>
             CoreExprValue::ConstructExprValue {
                 constructor: constructor, fields: fields.map(fn(field) {
                     make_core_field_value(
                         field.field, remap_core_expr_types(
                             field.value, ctx))
-                }), effect_ctx: effect_ctx.map(fn(argument) {
-                    remap_effect_ctx_argument(argument, ctx)
                 })
             },
         CoreExprValue::MoveUpdateExprValue {
-            base, constructor, schema, overrides, effect_ctx
+            base, constructor, schema, overrides
         } => CoreExprValue::MoveUpdateExprValue {
             base: remap_core_expr_types(base, ctx),
             constructor: constructor,
@@ -4221,8 +4169,6 @@ fn remap_core_expr_types(
                 make_core_field_value(
                     field.field, remap_core_expr_types(
                         field.value, ctx))
-            }), effect_ctx: effect_ctx.map(fn(argument) {
-                remap_effect_ctx_argument(argument, ctx)
             })
         },
         CoreExprValue::LambdaExprValue { executable, captures } =>
@@ -5553,9 +5499,7 @@ fn validate_expr_with_program(
                     field, core_expr_type(base), graph),
                 graph, "CoreHIR: projection result type differs")
         },
-        CoreExprValue::ConstructExprValue {
-            constructor, fields, effect_ctx
-        } => {
+        CoreExprValue::ConstructExprValue { constructor, fields } => {
             for field in fields {
                 validate_expr_with_program(
                     field.value, body, graph, callables,
@@ -5563,32 +5507,9 @@ fn validate_expr_with_program(
             }
             validate_construct_with_graph(
                 constructor, fields, value.ty, graph)
-            match constructor.executable {
-                some(executable) => {
-                    if core_constructor_kind_tag(constructor) != 1 {
-                        panic("CoreHIR: structural constructor has executable")
-                    }
-                    let callable = core_callable_for(callables, executable)
-                    match effect_ctx {
-                        some(argument) => {
-                            if !core_effect_contract_same(
-                                    core_effect_instantiation_result(
-                                        core_effect_ctx_argument_receipt(argument)),
-                                    callable.effects) {
-                                panic("CoreHIR: constructor EffectCtx differs")
-                            }
-                        },
-                        none => panic(
-                            "CoreHIR: executable constructor lacks EffectCtx")
-                    }
-                },
-                none => if core_constructor_kind_tag(constructor) == 1 {
-                    panic("CoreHIR: variant constructor has no exact executable")
-                }
-            }
         },
         CoreExprValue::MoveUpdateExprValue {
-            base, constructor, schema, overrides, effect_ctx
+            base, constructor, schema, overrides
         } => {
             validate_expr_with_program(
                 base, body, graph, callables,
@@ -5601,27 +5522,6 @@ fn validate_expr_with_program(
             validate_move_update_with_graph(
                 constructor, schema, overrides, core_expr_type(base),
                 value.ty, graph)
-            match constructor.executable {
-                some(executable) => {
-                    if core_constructor_kind_tag(constructor) != 1 {
-                        panic("CoreHIR: move update structural constructor has executable")
-                    }
-                    let callable = core_callable_for(callables, executable)
-                    match effect_ctx {
-                        some(argument) => if !core_effect_contract_same(
-                                core_effect_instantiation_result(
-                                    core_effect_ctx_argument_receipt(argument)),
-                                callable.effects) {
-                            panic("CoreHIR: move-update EffectCtx differs")
-                        },
-                        none => panic(
-                            "CoreHIR: move-update constructor lacks EffectCtx")
-                    }
-                },
-                none => if core_constructor_kind_tag(constructor) == 1 {
-                    panic("CoreHIR: move update variant constructor has no executable")
-                }
-            }
         },
         CoreExprValue::LambdaExprValue { executable, .. } => {
             let contract = core_callable_for(callables, executable)

@@ -8,6 +8,7 @@
 use ir_identity::{
     CoreTypeRef, core_type_ref_same, core_type_ref_index,
     OriginRef, SlotRef, PathRef, PathOwnerRef,
+    variant_ref_same, builtin_option_none_variant_ref,
     slot_ref_same, slot_ref_is_source, make_synthetic_slot_ref,
     registered_nominal_ref_symbol, origin_ref_same,
     path_owner_for_symbol, path_ref_owner, path_ref_normalized_child_path,
@@ -86,11 +87,9 @@ use core_expr::{
     core_expr_project_base, core_expr_project_field,
     core_expr_project_is_partial,
     core_expr_constructor, core_expr_constructor_fields,
-    core_expr_constructor_effect_ctx,
     core_expr_move_update_base, core_expr_move_update_constructor,
     core_expr_move_update_schema, core_expr_move_update_overrides,
-    core_expr_move_update_effect_ctx,
-    core_constructor_kind_tag, core_constructor_executable,
+    core_constructor_kind_tag, core_constructor_variant,
     core_expr_lambda_executable, core_expr_block,
     core_expr_lambda_captures, core_capture_source, core_capture_target,
     core_expr_condition, core_expr_then_block, core_expr_else_block,
@@ -141,14 +140,10 @@ use core_type_source::{
     make_path_flow_field_identity
 }
 use resource_model::{
-    FlowStorageContract, flow_own_storage,
+    FlowStorageContract, flow_own_storage, flow_borrow_storage,
     FlowSemanticRole, flow_semantic_role_read,
     flow_semantic_role_mutate, flow_semantic_role_consume,
-    make_fresh_flow_value_origin,
-    flow_call_contract_parameter_types,
-    flow_call_contract_parameter_roles,
-    flow_call_contract_result_type, flow_call_contract_result_role,
-    flow_call_contract_result_origin
+    make_fresh_flow_value_origin
 }
 use flow_ir::{
     FlowProgram, FlowCallable, FlowBody,
@@ -187,7 +182,7 @@ use flow_ir::{
     make_flow_int_literal_contract, make_flow_float_literal_contract,
     make_flow_str_literal_contract, make_flow_bool_literal_contract,
     make_flow_unit_literal_contract,
-    make_flow_primitive_contract, make_flow_constructor_contract,
+    make_flow_primitive_contract, make_flow_variant_construct_contract,
     make_flow_effect_ctx_overlay_contract,
     make_flow_tuple_aggregate_contract, make_flow_record_aggregate_contract,
     make_flow_closure_contract,
@@ -664,7 +659,8 @@ fn activate_core_binder(
 fn new_admin_slot(
     mut ctx: FlowLowerCtx, ty: CoreTypeRef, scope: FlowScopeRef,
     kind: BinderKind, label: Str, role_tag: Int,
-    storage: FlowStorageClass, initial: FlowInitialSlotState
+    storage: FlowStorageClass, initial: FlowInitialSlotState,
+    storage_contract: FlowStorageContract
 ) -> SlotRef {
     let site = admin_site(ctx, label, ctx.slots.len(), role_tag)
     let reference = make_synthetic_slot_ref(site)
@@ -672,7 +668,7 @@ fn new_admin_slot(
         reference, ctx.owner, kind, site))
     ctx.slots.push(make_flow_slot(
         reference, ty, scope, scope_slot_count(ctx, scope), initial,
-        storage, flow_own_storage(), none))
+        storage, storage_contract, none))
     reference
 }
 fn record_current_step(
@@ -1116,7 +1112,8 @@ fn lower_pattern_projection(
                     new_admin_slot(
                         ctx, child_type, scope, binder_kind_pattern_projection(),
                         "pattern-projection", dispatch_ordinal,
-                        flow_storage_temp(), flow_initial_slot_empty())
+                        flow_storage_temp(), flow_initial_slot_empty(),
+                        flow_own_storage())
                 }
                 emit_instruction(ctx, make_flow_project(
                     next_instruction_ref(ctx), origin,
@@ -1147,7 +1144,8 @@ fn lower_pattern_projection(
                     new_admin_slot(
                         ctx, child_type, scope, binder_kind_pattern_projection(),
                         "pattern-projection", dispatch_ordinal,
-                        flow_storage_temp(), flow_initial_slot_empty())
+                        flow_storage_temp(), flow_initial_slot_empty(),
+                        flow_own_storage())
                 }
                 emit_instruction(ctx, make_flow_project(
                     next_instruction_ref(ctx), origin,
@@ -1337,7 +1335,7 @@ fn emit_simple_expr(
         let committed_base = new_admin_slot(
             ctx, result_type, scope, binder_kind_pre_anf(),
             "move-update-base", 0, flow_storage_temp(),
-            flow_initial_slot_empty())
+            flow_initial_slot_empty(), flow_own_storage())
         let mut role_ordinal = 0
         emit_instruction(ctx, make_flow_move_place(
             next_instruction_ref(ctx), origin, base_place, committed_base),
@@ -1381,7 +1379,7 @@ fn emit_simple_expr(
             let field_slot = new_admin_slot(
                 ctx, field_type, scope, binder_kind_pre_anf(),
                 "move-update-field", inputs.len(), flow_storage_temp(),
-                flow_initial_slot_empty())
+                flow_initial_slot_empty(), flow_own_storage())
             let projection = partial_projection_contract(
                 field, result_type, field_type,
                 flow_semantic_role_consume())
@@ -1398,28 +1396,16 @@ fn emit_simple_expr(
         let input_types = inputs.map(fn(slot) { frozen_slot_type_at(ctx, slot) })
         let roles = repeated_role(inputs.len(), flow_semantic_role_consume())
         let constructor_kind = core_constructor_kind_tag(constructor)
-        let contract = match core_constructor_executable(constructor) {
-            some(executable) => {
-                let callable = callable_for(ctx, executable)
-                let callable_contract = core_callable_semantic_contract(callable)
-                make_flow_constructor_contract(
-                    executable,
-                    flow_call_contract_parameter_types(callable_contract),
-                    flow_call_contract_parameter_roles(callable_contract),
-                    input_locations, result_type,
-                    flow_call_contract_result_role(callable_contract),
-                    flow_call_contract_result_origin(callable_contract),
-                    core_expr_move_update_effect_ctx(expr).unwrap_or_else(fn() {
-                        panic("Flow lowering: executable update lacks EffectCtx")
-                    }))
-            },
-            none => if constructor_kind == 0 || constructor_kind == 3 {
-                make_flow_record_aggregate_contract(
-                    inputs.len(), input_types, roles,
-                    input_locations, result_type)
-            } else {
-                panic("Flow lowering: move update variant lacks executable")
-            }
+        let contract = if constructor_kind == 1 {
+            make_flow_variant_construct_contract(
+                core_constructor_variant(constructor),
+                input_types, input_locations, result_type)
+        } else if constructor_kind == 0 {
+            make_flow_record_aggregate_contract(
+                inputs.len(), input_types, roles,
+                input_locations, result_type)
+        } else {
+            panic("Flow lowering: move update constructor is not nominal")
         }
         emit_instruction(ctx, make_flow_initialize(
             next_instruction_ref(ctx), origin, contract, inputs, result),
@@ -1474,32 +1460,19 @@ fn emit_simple_expr(
         let input_types = inputs.map(fn(slot) { frozen_slot_type_at(ctx, slot) })
         let roles = repeated_role(inputs.len(), flow_semantic_role_consume())
         let constructor_kind = core_constructor_kind_tag(constructor)
-        let contract = match core_constructor_executable(constructor) {
-            some(executable) => {
-                let callable = callable_for(ctx, executable)
-                let callable_contract = core_callable_semantic_contract(callable)
-                make_flow_constructor_contract(
-                    executable,
-                    flow_call_contract_parameter_types(callable_contract),
-                    flow_call_contract_parameter_roles(callable_contract),
-                    input_locations,
-                    result_type,
-                    flow_call_contract_result_role(callable_contract),
-                    flow_call_contract_result_origin(callable_contract),
-                    core_expr_constructor_effect_ctx(expr).unwrap_or_else(fn() {
-                        panic("Flow lowering: executable constructor lacks EffectCtx")
-                    }))
-            },
-            none => if constructor_kind == 2 {
-                make_flow_tuple_aggregate_contract(
-                    inputs.len(), input_types, roles, result_type)
-            } else if constructor_kind == 0 || constructor_kind == 3 {
-                make_flow_record_aggregate_contract(
-                    inputs.len(), input_types, roles,
-                    input_locations, result_type)
-            } else {
-                panic("Flow lowering: variant constructor lacks executable")
-            }
+        let contract = if constructor_kind == 1 {
+            make_flow_variant_construct_contract(
+                core_constructor_variant(constructor),
+                input_types, input_locations, result_type)
+        } else if constructor_kind == 2 {
+            make_flow_tuple_aggregate_contract(
+                inputs.len(), input_types, roles, result_type)
+        } else if constructor_kind == 0 {
+            make_flow_record_aggregate_contract(
+                inputs.len(), input_types, roles,
+                input_locations, result_type)
+        } else {
+            panic("Flow lowering: unknown constructor kind")
         }
         emit_instruction(ctx, make_flow_initialize(
             next_instruction_ref(ctx), origin, contract, inputs, result),
@@ -1815,7 +1788,8 @@ fn lower_handle_expression(
                     let closure_slot = new_admin_slot(
                         ctx, closure_type, body_scope,
                         binder_kind_lambda_value(), "handler-closure", 0,
-                        flow_storage_temp(), flow_initial_slot_empty())
+                        flow_storage_temp(), flow_initial_slot_empty(),
+                        flow_own_storage())
                     emit_instruction(ctx, make_flow_initialize(
                         next_instruction_ref(ctx),
                         core_handler_operation_origin(operation),
@@ -1884,10 +1858,28 @@ fn lower_expr(
     continue_target: FlowBlockRef?, break_target: FlowBlockRef?
 ) -> SlotRef {
     let kind = core_expr_kind_tag(expr)
+    let result_storage_contract = if kind == 10 {
+        let constructor = core_expr_constructor(expr)
+        if core_constructor_kind_tag(constructor) == 1 &&
+           variant_ref_same(
+                core_constructor_variant(constructor),
+                builtin_option_none_variant_ref()) {
+            flow_borrow_storage()
+        } else { flow_own_storage() }
+    } else if kind == 19 {
+        let constructor = core_expr_move_update_constructor(expr)
+        if core_constructor_kind_tag(constructor) == 1 &&
+           variant_ref_same(
+                core_constructor_variant(constructor),
+                builtin_option_none_variant_ref()) {
+            flow_borrow_storage()
+        } else { flow_own_storage() }
+    } else { flow_own_storage() }
     let result = new_admin_slot(
         ctx, core_expr_type(expr),
         current_draft(ctx).scope, binder_kind_pre_anf(), "expr", 3,
-        flow_storage_temp(), flow_initial_slot_empty())
+        flow_storage_temp(), flow_initial_slot_empty(),
+        result_storage_contract)
     let previous = enter_core_node(
         ctx, CORE_FLOW_NODE_EXPR, kind,
         core_expr_origin(expr), some(result))
@@ -1900,7 +1892,8 @@ fn lower_expr(
                 ctx, frozen_slot_type_at(ctx, payload),
                 current_draft(ctx).scope, binder_kind_pre_anf(),
                 "fail-payload", 3,
-                flow_storage_temp(), flow_initial_slot_empty())
+                flow_storage_temp(), flow_initial_slot_empty(),
+                flow_own_storage())
             emit_instruction(ctx, make_flow_fail_raise(
                 next_instruction_ref(ctx), core_expr_origin(expr),
                 payload, sink),

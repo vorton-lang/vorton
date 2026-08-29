@@ -23,7 +23,8 @@ use core_expr::{
     CorePattern, CorePatternField, CoreMatchArm,
     make_core_read_expr, make_core_project_expr,
     make_core_call_expr, make_core_method_call_expr,
-    make_core_construct_expr, make_core_if_expr, make_core_match_expr,
+    make_core_construct_expr, make_core_variant_constructor,
+    make_core_if_expr, make_core_match_expr,
     make_core_primitive_expr, make_core_primitive_op,
     make_core_literal_expr, make_core_int_literal,
     make_core_str_literal, make_core_bool_literal,
@@ -36,7 +37,7 @@ use core_expr::{
     core_field_ref_kind_tag, core_field_ref_same,
     core_field_ref_tuple_index, core_field_ref_variant,
     core_constructor_kind_tag, core_constructor_struct_owner,
-    core_constructor_variant, core_constructor_arity
+    core_constructor_arity
 }
 
 fn copy_binders(values: List<CoreBinder>) -> List<CoreBinder> {
@@ -1716,33 +1717,26 @@ fn clone_field_expr(value: CoreDerivedFieldPlan) -> CoreExpr {
                 index = index + 1
             }
             make_core_construct_expr(
-                value.ty, effects, origin, exact, values, none)
+                value.ty, effects, origin, exact, values)
         }
     }
 }
 
 pub struct CoreDerivedCloneVariantPlan {
     variant: VariantRef,
-    constructor: CoreConstructorRef,
-    effect_ctx: CoreEffectCtxArgument,
     pattern_slots: List<SlotRef>,
     fields: List<CoreDerivedFieldPlan>,
     origin: OriginRef
 }
 pub fn make_core_derived_clone_variant_plan(
-    variant: VariantRef, constructor: CoreConstructorRef,
-    effect_ctx: CoreEffectCtxArgument,
-    pattern_slots: List<SlotRef>,
+    variant: VariantRef, pattern_slots: List<SlotRef>,
     fields: List<CoreDerivedFieldPlan>, origin: OriginRef
 ) -> CoreDerivedCloneVariantPlan {
-    if core_constructor_kind_tag(constructor) != 1 ||
-       !variant_ref_same(core_constructor_variant(constructor), variant) ||
-       pattern_slots.len() != fields.len() {
-        panic("Core derive Clone: variant constructor/pattern census differs")
+    if pattern_slots.len() != fields.len() {
+        panic("Core derive Clone: variant pattern census differs")
     }
     CoreDerivedCloneVariantPlan {
-        variant: variant, constructor: constructor,
-        effect_ctx: effect_ctx,
+        variant: variant,
         pattern_slots: copy_slots(pattern_slots),
         fields: copy_derived_fields(fields), origin: origin
     }
@@ -1887,7 +1881,7 @@ pub fn elaborate_core_derived_clone_body(
             }
             make_core_construct_expr(
                 plan.target_type, plan.header.result_effects,
-                plan.header.body_origin, constructor, values, none)
+                plan.header.body_origin, constructor, values)
         },
         CoreDerivedClonePlanValue::EnumClone(variants) => {
             let scrutinee = make_core_read_expr(
@@ -1902,8 +1896,8 @@ pub fn elaborate_core_derived_clone_body(
                 }
                 let constructed = make_core_construct_expr(
                     plan.target_type, plan.header.result_effects,
-                    variant.origin, variant.constructor, values,
-                    some(variant.effect_ctx))
+                    variant.origin,
+                    make_core_variant_constructor(variant.variant), values)
                 arms.push(make_core_match_arm(
                     clone_variant_pattern(plan.target_type, variant), none,
                     make_core_block([], some(constructed), variant.origin),

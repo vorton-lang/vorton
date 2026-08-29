@@ -230,13 +230,13 @@ fn main() {
     assert(local_cell_shadow(plus_one, 60) == 61,
         "local Cell binding fails closed instead of becoming prelude callable")
 
-    match apply_payload(Payload::Value, 70) {
+    match apply_payload(fn(value) { Payload::Value(value) }, 70) {
         Payload::Value(value) =>
-            assert(value == 70, "user positional enum ctor remains Ring callable"),
+            assert(value == 70, "explicit lambda constructs user positional enum"),
     }
-    match apply_option(some, 80) {
+    match apply_option(fn(value) { some(value) }, 80) {
         some(value) =>
-            assert(value == 80, "builtin positional enum ctor remains Ring callable"),
+            assert(value == 80, "explicit lambda constructs builtin Option.some"),
         none => panic("builtin positional enum ctor returned none"),
     }
 

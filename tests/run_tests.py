@@ -4356,7 +4356,6 @@ class CProbeProgram:
 
 
 C_PROBE_CALL_ARITIES = {
-    "ring_Option_some": 1,
     "ring_list_new": 0,
     "ring_List_push": 2,
 }
@@ -4389,26 +4388,6 @@ C_PROBE_TEMPLATES = {
         ("rc", "ring_drop", "v1"),
         ("alias", "v4", "v3"),
         ("return", "v4"),
-    ),
-    "ring_structural_raw_option": (
-        ("declare", "v0"),
-        ("declare", "v1"),
-        ("declare", "v2"),
-        ("alias", "v0", "$value"),
-        ("call", "v1", "ring_Option_some", "v0"),
-        ("alias", "v2", "v1"),
-        ("return", "$unit"),
-    ),
-    "ring_structural_owned_option": (
-        ("declare", "v0"),
-        ("declare", "v1"),
-        ("declare", "v2"),
-        ("alias", "v0", "$value"),
-        ("rc", "ring_dup", "v0"),
-        ("call", "v1", "ring_Option_some", "v0"),
-        ("alias", "v2", "v1"),
-        ("rc", "ring_drop", "v2"),
-        ("return", "$unit"),
     ),
     "ring_structural_raw_list": (
         ("declare", "v0"),
@@ -4767,15 +4746,6 @@ ring_drop(r_decoy); t3 = r_scope; return t3;""",
         "normalized event template mismatch",
     ),
     (
-        "option-wrong-rc-roots",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped; void* r_decoy;
-t1 = r_value; r_decoy = RING_UNIT; ring_dup(r_decoy);
-t2 = ring_Option_some(t1); r_wrapped = t2;
-ring_drop(r_decoy); return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
         "list-wrong-drop-root",
         "ring_structural_owned_list",
         """void* t1; void* r_values; void* t2; void* t3; void* t4;
@@ -4801,37 +4771,6 @@ t1 = r_value; t2 = RING_UNIT; return t2;""",
         "normalized event template mismatch",
     ),
     (
-        "option-wrong-payload-root",
-        "ring_structural_raw_option",
-        """void* t1; void* t2; void* r_wrapped; void* r_decoy;
-r_decoy = RING_UNIT; t1 = r_decoy;
-t2 = ring_Option_some(t1); r_wrapped = t2; return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
-        "option-wrong-result-local",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t1; ring_drop(t2); return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
-        "option-use-after-drop",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-ring_drop(t2); r_wrapped = t2; return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
-        "option-missing-constructor",
-        "ring_structural_raw_option",
-        """void* t1; void* r_wrapped;
-t1 = r_value; r_wrapped = t1; return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
         "list-wrong-push-receiver",
         "ring_structural_raw_list",
         """void* t1; void* r_values; void* t2; void* t3;
@@ -4845,83 +4784,6 @@ t3 = ring_List_push(t2, t2); return RING_UNIT;""",
         """void* t1; void* r_values;
 t1 = ring_list_new(); r_values = t1; return RING_UNIT;""",
         "normalized event template mismatch",
-    ),
-    (
-        "return-before-dead-rc",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t2; return RING_UNIT; ring_drop(r_wrapped);""",
-        "return event is not the final statement",
-    ),
-    (
-        "conditional-rc",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t2; if (r_value) { ring_drop(r_wrapped); }
-return RING_UNIT;""",
-        "control flow is outside finite grammar",
-    ),
-    (
-        "aborting-extra-call",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t2; ring_drop(r_wrapped); ring_panic(r_wrapped);
-return RING_UNIT;""",
-        "standalone call ring_panic is outside finite grammar",
-    ),
-    (
-        "late-rc-alias",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped; void* r_late;
-t1 = r_value; ring_dup(r_late); t2 = ring_Option_some(t1);
-r_wrapped = t2; ring_drop(r_wrapped); r_late = r_value;
-return RING_UNIT;""",
-        "r_late used before initialization",
-    ),
-    (
-        "future-payload-alias",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped; void* r_late;
-t1 = r_late; ring_dup(r_value); t2 = ring_Option_some(t1);
-r_wrapped = t2; ring_drop(r_wrapped); r_late = r_value;
-return RING_UNIT;""",
-        "r_late used before initialization",
-    ),
-    (
-        "future-result-alias",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); r_wrapped = t2;
-t2 = ring_Option_some(t1); ring_drop(r_wrapped);
-return RING_UNIT;""",
-        "t2 used before initialization",
-    ),
-    (
-        "preprocessor-hidden-probe",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-#ifdef RING_NEVER_DEFINED
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t2; ring_drop(r_wrapped);
-#endif
-return RING_UNIT;""",
-        "preprocessor directive is outside finite grammar",
-    ),
-    (
-        "line-spliced-comment-hidden-probe",
-        "ring_structural_owned_option",
-        "void* t1; void* t2; void* r_wrapped;\n"
-        "// hidden probe \\\n"
-        "t1 = r_value; \\\n"
-        "ring_dup(t1); \\\n"
-        "t2 = ring_Option_some(t1); \\\n"
-        "r_wrapped = t2; \\\n"
-        "ring_drop(r_wrapped);\n"
-        "return RING_UNIT;",
-        "backslash-newline splice is outside finite grammar",
     ),
     (
         "non-null-declaration-initializer",
@@ -5831,7 +5693,6 @@ def identity_checkpoint_contract_errors(
             "ctx.env.bind(authority.name, authority.scheme)",
             "canonical or-pattern binding has no exact DefId",
             "or-pattern alternative binding has no exact DefId",
-            "pub fn has_variant_ctor_origin_def_id(",
         ),
         "dict": (
             "synthetic_def_id(",
@@ -5854,7 +5715,8 @@ def identity_checkpoint_contract_errors(
             "dict_closure_dicts: some([])",
             "ValueBindingKind::DirectCallable =>",
             "ValueBindingKind::ExternCallable =>",
-            "has_variant_ctor_origin_def_id(resolver, id)",
+            "ValueBindingKind::LocalBorrow =>\n"
+            "                            clear_zonk_local_callee_marker(ident)",
             "clear_zonk_local_callee_marker(ident)",
         ),
         "derive": (
@@ -6181,15 +6043,9 @@ def identity_checkpoint_contract_errors(
             "                            mark_zonk_direct_callee(ident)",
             "ValueBindingKind::ExternCallable =>\n"
             "                            mark_zonk_direct_callee(ident)",
-            "ValueBindingKind::LocalBorrow => match def_id",
-            "has_variant_ctor_origin_def_id(resolver, id)",
-            "mark_zonk_direct_callee(ident)",
-            "clear_zonk_local_callee_marker(ident)",
-            "else {\n"
-            "                                    clear_zonk_local_callee_marker(ident)\n"
-            "                                }",
-            "none => clear_zonk_local_callee_marker(ident)")):
-        errors.append("final zonk direct/extern/ctor marker authority drifted")
+            "ValueBindingKind::LocalBorrow =>\n"
+            "                            clear_zonk_local_callee_marker(ident)")):
+        errors.append("final zonk direct/extern/local marker authority drifted")
 
     marker_body, marker_error = extract_ring_function_body(
         sources["zonk"], "mark_zonk_direct_callee")
@@ -7814,9 +7670,9 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
 
 
 IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
-F1_EXECUTABLE_KIND_COUNT = 20
+F1_EXECUTABLE_KIND_COUNT = 19
 F1_BINDER_KIND_COUNT = 24
-F1_SEMANTIC_MUTATION_COUNT = 73
+F1_SEMANTIC_MUTATION_COUNT = 72
 F1_SCOPE_GUARD_COUNT = 13
 
 F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
@@ -7838,7 +7694,6 @@ F1_EXECUTABLE_KINDS = (
     ("handler", "EXECUTABLE_HANDLER"),
     ("default_specialization", "EXECUTABLE_DEFAULT_SPECIALIZATION"),
     ("derived_impl", "EXECUTABLE_DERIVED_IMPL"),
-    ("constructor", "EXECUTABLE_CONSTRUCTOR"),
     ("dict_helper", "EXECUTABLE_DICT_HELPER"),
     ("const_getter", "EXECUTABLE_CONST_GETTER"),
     ("drop_glue", "EXECUTABLE_DROP_GLUE"),
@@ -7949,7 +7804,7 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         ), errors)
     if len(F1_EXECUTABLE_KINDS) != F1_EXECUTABLE_KIND_COUNT:
         errors.append("F1 executable kind test census is incomplete")
-    if "const EXECUTABLE_KIND_COUNT: Int = 20" not in source:
+    if "const EXECUTABLE_KIND_COUNT: Int = 19" not in source:
         errors.append("F1 executable kind count drifted")
 
     allowed_modes, allowed_error = _f0_int_list(
@@ -8516,7 +8371,7 @@ def ir_inventory_f1_compile_errors(ring_exe: str) -> List[str]:
     anchor = "executable_kind_from_tag(EXECUTABLE_DROP_GLUE)"
     mutated, mutation_error = _f0_mutate_function_once(
         source, "executable_kind_drop_glue", anchor,
-        "executable_kind_from_tag(EXECUTABLE_CONSTRUCTOR)")
+        "executable_kind_from_tag(EXECUTABLE_DICT_HELPER)")
     if mutation_error:
         errors.append(f"F1 material mutation could not be built: {mutation_error}")
     else:
@@ -13304,8 +13159,8 @@ def identity_checkpoint_source_errors() -> List[str]:
          "ValueBindingKind::ExternCallable =>\n"
          "                            mark_zonk_direct_callee(ident)",
          "ValueBindingKind::ExternCallable => ident"),
-        ("constructor exact marker", "zonk",
-         "has_variant_ctor_origin_def_id(resolver, id)",
+        ("constructor exact target", "infer_helpers",
+         "exact_variant_constructor_target(ctx, def_id).is_some()",
          "false"),
         ("LocalBorrow marker clearing", "zonk",
          "..ident, dict_closure_dicts: none",

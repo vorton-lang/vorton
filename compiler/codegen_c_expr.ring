@@ -20,14 +20,15 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HNominalStructFieldInit, HFieldAccessKind,
     HEffectHandler, HConstructorPlan, DictRef,
     h_dict_construct_effect_ctx,
-    h_constructor_kind, h_constructor_fields, h_constructor_effect_ctx,
+    h_constructor_kind, h_constructor_fields,
+    h_projection_kind, h_projection_variant,
     TraitDispatch, MethodCallRef,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_is_bound,
     method_call_ref_intrinsic, method_call_ref_impl,
     method_call_ref_bound, method_call_ref_bound_evidence,
     method_call_ref_signature,
-    hexpr_type, hexpr_effects, is_fresh_owned_bool_value, variant_ctor_name, compare_by_first,
+    hexpr_type, hexpr_effects, is_fresh_owned_bool_value, compare_by_first,
     trait_bound_param_name,
     is_extern_handle_type,
     slot_bridge_runtime_name, is_synthetic_dict_def_id}
@@ -63,6 +64,7 @@ use legacy_projection::{
     legacy_effect_ctx_token_ordinal, legacy_effect_ctx_token_instance}
 use extern_manifest::{compiler_extern_ref_for_executable}
 use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
+    VariantRef,
     callee_ref_is_named, callee_ref_named_symbol,
     compiler_extern_ref_site, compiler_extern_site_tag,
     path_owner_for_symbol, make_path_ref, path_role_synthetic,
@@ -77,6 +79,11 @@ use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     impl_owner_ref_same,
     impl_provider_ref_kind, impl_provider_kind_builtin,
     impl_provider_kind_same, symbol_ref_canonical_payload,
+    variant_ref_owner, variant_ref_source_index, variant_ref_same,
+    variant_field_ref_variant, variant_field_ref_index,
+    variant_field_ref_same,
+    registered_nominal_ref_display_name,
+    builtin_option_none_variant_ref,
     BUILTIN_METHOD_STR_LEN, BUILTIN_METHOD_STR_CONTAINS,
     BUILTIN_METHOD_STR_STARTS_WITH, BUILTIN_METHOD_STR_ENDS_WITH,
     BUILTIN_METHOD_STR_SLICE, BUILTIN_METHOD_STR_TRIM,
@@ -106,7 +113,8 @@ use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     BUILTIN_METHOD_STR_DEBUG, BUILTIN_METHOD_BOOL_DEBUG,
     BUILTIN_METHOD_INT_HASH, BUILTIN_METHOD_STR_HASH,
     BUILTIN_METHOD_BOOL_HASH, BUILTIN_METHOD_SITE_COUNT}
-use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEmitState, CHandleCleanup,
+use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo,
+    CEmitState, CHandleCleanup,
     CNameOnlySlotRef, CTypedRef, CClosureEdge,
     c_emit, c_raw, fresh_tmp, fresh_i64, fresh_dbl, fresh_label,
     c_local, c_local_ref, c_local_def, c_local_def_ref,
@@ -277,10 +285,12 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
             gen_c_field_access(ctx, receiver, field, access_kind, ty),
         HExpr::StructLit { name, fields, spread, constructor, .. } =>
             gen_c_struct_lit(ctx, name, fields, spread, constructor),
-        HExpr::NamedVariantConstruct { enum_name, variant_name, fields,
+        HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref,
+                                       fields,
                                        spread, constructor, .. } =>
             gen_c_variant_construct(
-                ctx, enum_name, variant_name, fields, spread, constructor),
+                ctx, enum_name, variant_name, variant_ref,
+                fields, spread, constructor),
         HExpr::MatchExpr { scrutinee, arms, .. } =>
             gen_c_match_expr(ctx, scrutinee, arms),
         HExpr::Block { stmts, tail, .. } => gen_c_block(ctx, stmts, tail),
@@ -509,7 +519,7 @@ fn gen_c_ident(
                 },
                 _ => {},
             }
-            // Module-level const / zero-arg ctor reference.  Step 8: module-
+            // Module-level const getter. Step 8: module-
             // aware resolution chain — resolved key → bare name → resolved
             // name → bare lookup_name → precise lookup (gen_ident parity).
             let fn_info = match c_lookup_key(ctx, c_resolve_fn(ctx, lookup_name)) {
@@ -536,7 +546,7 @@ fn gen_c_ident(
                         lookup.fi.total_params
                     }
                     if value_arity == 0 {
-                        // Zero-arg const getter / ctor — call it.
+                        // Zero-arg const getter — call it.
                         let t = fresh_tmp(ctx)
                         if lookup.fi.takes_effect_ctx {
                             rt_use(ctx, "ring_effect_ctx_empty", 0)
@@ -3635,16 +3645,28 @@ fn gen_c_struct_lit(
 
 fn gen_c_variant_construct(
     mut ctx: CCtx, enum_name: Str, variant_name: Str,
+    variant_ref: VariantRef,
     fields: List<HStructFieldInit>, spread: HExpr?,
     constructor: HConstructorPlan?
 ) -> Str {
-    let constructor_ctx = match constructor {
+    match constructor {
         some(plan) => {
+            let planned_fields = h_constructor_fields(plan)
             if h_constructor_kind(plan) != 0 ||
-               h_constructor_fields(plan).len() != fields.len() {
+               planned_fields.len() != fields.len() {
                 panic("C codegen: variant constructor plan differs")
             }
-            h_constructor_effect_ctx(plan)
+            let mut field_index = 0
+            while field_index < fields.len() {
+                let planned = planned_fields.get(field_index).unwrap()
+                if h_projection_kind(planned) != 1 ||
+                   !variant_field_ref_same(
+                        h_projection_variant(planned),
+                        fields.get(field_index).unwrap().field_ref) {
+                    panic("C codegen: variant constructor field differs")
+                }
+                field_index = field_index + 1
+            }
         },
         none => panic("C codegen: variant construct lacks exact plan")
     }
@@ -3653,57 +3675,74 @@ fn gen_c_variant_construct(
             "C codegen: variant spread crossed verified ownership lowering"),
         none => {}
     }
-    match ctx.enum_types.get(enum_name) {
-        some(enum_info) => {
-            match enum_info.variants.get(variant_name) {
-                some(vi) => {
-                    rt_use(ctx, "ring_alloc", 2)
-                    let tid = get_or_assign_c_typeid(ctx, enum_name)
-                    let t = fresh_tmp(ctx)
-                    c_emit(ctx, "${t} = ring_alloc((int64_t)(sizeof(int64_t) + ${enum_info.max_fields} * sizeof(void*)), ${tid});")
-                    c_emit(ctx, "*(int64_t*)${t} = ${vi.tag};")
+    let exact_enum_name = registered_nominal_ref_display_name(
+        variant_ref_owner(variant_ref))
+    if enum_name != exact_enum_name {
+        panic("C codegen: variant construct enum identity differs")
+    }
+    if variant_ref_same(
+            variant_ref, builtin_option_none_variant_ref()) {
+        if fields.len() != 0 {
+            panic("C codegen: Option.none carries payload fields")
+        }
+        rt_use(ctx, "ring_Option_none", 0)
+        let result = fresh_tmp(ctx)
+        c_emit(ctx, "${result} = ring_Option_none();")
+        return result
+    }
 
-                    // Explicitly specified fields, resolved by declared name.
-                    for i in 0..fields.len() {
-                        match fields.get(i) {
-                            some(f) => {
-                                let val = gen_c_expr(ctx, f.value)
-                                let mut field_idx = i
-                                for fi in 0..vi.field_names.len() {
-                                    if vi.field_names[fi] == f.name {
-                                        field_idx = fi
-                                    }
-                                }
-                                c_emit(ctx, "((void**)${t})[${field_idx + 1}] = ${val};")
-                            },
-                            none => {},
+    let mut exact_info: (Str, CEnumInfo, CEnumVariantInfo)? = none
+    for enum_entry in ctx.enum_types.entries() {
+        let physical_name = enum_entry.0
+        let enum_info = enum_entry.1
+        for entry in enum_info.variants.entries() {
+            let candidate = entry.1
+            if variant_ref_same(candidate.variant_ref, variant_ref) {
+                if exact_info.is_some() {
+                    panic("C codegen: enum registry repeats exact variant")
+                }
+                if candidate.tag != variant_ref_source_index(variant_ref) {
+                    panic("C codegen: exact variant tag differs")
+                }
+                exact_info = some((physical_name, enum_info, candidate))
+            }
+        }
+    }
+    match exact_info {
+        some(found) => {
+            let (physical_name, enum_info, vi) = found
+            rt_use(ctx, "ring_alloc", 2)
+            let tid = get_or_assign_c_typeid(ctx, physical_name)
+            let t = fresh_tmp(ctx)
+            c_emit(ctx, "${t} = ring_alloc((int64_t)(sizeof(int64_t) + ${enum_info.max_fields} * sizeof(void*)), ${tid});")
+            c_emit(ctx, "*(int64_t*)${t} = ${vi.tag};")
+
+            // Field placement follows the exact typed field identity;
+            // source/display names remain diagnostic payload only.
+            for i in 0..fields.len() {
+                match fields.get(i) {
+                    some(f) => {
+                        let val = gen_c_expr(ctx, f.value)
+                        if !variant_ref_same(
+                                variant_field_ref_variant(f.field_ref),
+                                variant_ref) {
+                            panic("C codegen: variant field crosses constructor")
                         }
-                    }
+                        let field_idx = variant_field_ref_index(
+                            f.field_ref)
+                        if field_idx < 0 || field_idx >= vi.field_count {
+                            panic("C codegen: variant field index differs")
+                        }
+                        c_emit(ctx, "((void**)${t})[${field_idx + 1}] = ${val};")
+                    },
+                    none => {},
+                }
+            }
 
-                    t
-                },
-                none => panic("C codegen: variant '${variant_name}' not found in enum '${enum_name}'"),
-            }
+            t
         },
-        none => {
-            // Not a registered enum — try the variant constructor function
-            // (hir.ring variant_ctor_name convention; LLVM fallback parity).
-            let ctor_key = c_mangle_fn(variant_ctor_name(enum_name, variant_name))
-            match ctx.functions.get(ctor_key) {
-                some(fi) => {
-                    let mut args: List<Str> = []
-                    for f in fields {
-                        args.push(gen_c_expr(ctx, f.value))
-                    }
-                    args.push(c_effect_ctx_source_value(
-                        ctx, constructor_ctx))
-                    let t = fresh_tmp(ctx)
-                    c_emit(ctx, "${t} = ${fi.c_name}(${args.join(", ")});")
-                    t
-                },
-                none => panic("C codegen: enum '${enum_name}' not registered for variant construct"),
-            }
-        },
+        none => panic(
+            "C codegen: exact variant '${variant_name}' is absent from enum registry")
     }
 }
 

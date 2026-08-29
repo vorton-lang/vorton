@@ -1,13 +1,11 @@
-use types::{Type, EnumVariant, EMPTY_ROW}
+use types::{Type}
 use ast::{Program, Decl, UseDecl, UseImport, NamedImport}
-use hir::{HProgram, HDecl, ValueBindingKind, ModuleImplFact, compare_by_first,
-    variant_ctor_name}
+use hir::{HProgram, HDecl, ValueBindingKind, ModuleImplFact, compare_by_first}
 use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef, ImplEntry,
     TypeAliasDef, EffectAliasDef,
     find_impl_by_provider,
     impl_entry_exact_key_same, impl_entry_final_same,
-    optional_symbol_ref_same, ordered_effect_tail_vars,
-    enum_variant_constructor_effect_schema}
+    optional_symbol_ref_same}
 use ir_identity::{SymbolRef, ImplMethodRef,
     impl_provider_ref_same, impl_owner_ref_same,
     impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
@@ -25,11 +23,8 @@ pub struct ModuleExports {
     pub values: Map<Str, TypeScheme>,
     pub value_symbols: Map<Str, SymbolRef>,
     // Exact registration kind for public value bindings. Absence is a local
-    // borrow; variant constructors use variant_ctor_origins independently.
+    // borrow; constructor identity travels in value_symbols.
     pub value_binding_kinds: Map<Str, ValueBindingKind>,
-    // Export lookup spelling -> legacy C constructor spelling. Exact semantic
-    // identity remains in value_symbols as the VariantRef member.
-    pub variant_ctor_origins: Map<Str, Str>,
     pub types: Map<Str, TypeDef>,
     pub type_aliases: Map<Str, TypeAliasDef>,
     pub effects: Map<Str, EffectDef>,
@@ -144,30 +139,16 @@ fn exact_scheme_value_symbol(
 // with the same spelling may shadow that leaf while the public enum must still
 // export its own constructor. Consumers allocate a fresh local DefId, so export
 // schemes deliberately carry none here.
-fn variant_ctor_scheme(def: EnumDef, variant: EnumVariant) -> TypeScheme {
+fn variant_ctor_scheme(def: EnumDef) -> TypeScheme {
     let enum_params = def.type_param_vars.map(fn(id) {
         Type::TypeVar { id: id, name: none }
     })
     let enum_type = Type::EnumType { name: def.name, type_params: enum_params }
-    let ctor_type = if variant.field_names.is_some() || variant.fields.len() == 0 {
-        enum_type
-    } else {
-        Type::FnType { params: variant.fields, return_type: enum_type, effects: EMPTY_ROW }
-    }
-    let mut type_vars = list_clone(def.type_param_vars)
-    for tail in ordered_effect_tail_vars(ctor_type) {
-        if !type_vars.contains(tail) { type_vars.push(tail) }
-    }
-    let effect_schema = if variant.field_names.is_none() &&
-                               variant.fields.len() > 0 {
-        enum_variant_constructor_effect_schema(
-            def, def.variant_index.get(variant.name).unwrap())
-    } else { empty_typed_effect_header_schema() }
     TypeScheme {
-        ty: ctor_type,
-        type_vars: type_vars,
+        ty: enum_type,
+        type_vars: list_clone(def.type_param_vars),
         bounds: [],
-        effect_schema: effect_schema,
+        effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     }
 }
@@ -213,7 +194,6 @@ fn copy_inline_export(
     exact_value_symbols: Map<Int, SymbolRef>,
     exact_value_binding_kinds: Map<Int, ValueBindingKind>,
     mut value_binding_kinds: Map<Str, ValueBindingKind>,
-    mut variant_ctor_origins: Map<Str, Str>,
     mut types: Map<Str, TypeDef>, mut type_aliases: Map<Str, TypeAliasDef>, mut effects: Map<Str, EffectDef>,
     mut effect_aliases: Map<Str, EffectAliasDef>, mut traits: Map<Str, TraitDef>,
     mut inherent_methods: Map<Str, List<Str>>, mut struct_field_orders: Map<Str, List<Str>>,
@@ -236,13 +216,6 @@ fn copy_inline_export(
                         },
                         _ => {}
                     }
-                },
-                none => {}
-            }
-            match scheme.def_id {
-                some(def_id) => match env.types.variant_ctor_origins.get(def_id) {
-                    some(origin) => { variant_ctor_origins.insert(local, origin) },
-                    none => {}
                 },
                 none => {}
             }
@@ -302,22 +275,15 @@ fn copy_inline_export(
                     none => panic("module export: enum VariantRef is missing")
                 }
                 variant_index = variant_index + 1
-                let ctor_scheme = variant_ctor_scheme(def, variant)
-                let ctor_origin = variant_ctor_name(def.name, variant.name)
+                let ctor_scheme = variant_ctor_scheme(def)
                 let facade_ctor = "${local}::${variant.name}"
                 values.insert(facade_ctor, ctor_scheme)
                 value_symbols.insert(facade_ctor,
                     variant_ref_member(variant_ref))
-                if variant.field_names.is_none() {
-                    variant_ctor_origins.insert(facade_ctor, ctor_origin)
-                }
                 if !values.contains_key(variant.name) {
                     values.insert(variant.name, ctor_scheme)
                     value_symbols.insert(variant.name,
                         variant_ref_member(variant_ref))
-                    if variant.field_names.is_none() {
-                        variant_ctor_origins.insert(variant.name, ctor_origin)
-                    }
                 }
             }
             match env.trait_reg.mut_methods.get(def.name) {
@@ -350,7 +316,6 @@ fn extract_decl_export(
     exact_value_symbols: Map<Int, SymbolRef>,
     exact_value_binding_kinds: Map<Int, ValueBindingKind>,
     mut value_binding_kinds: Map<Str, ValueBindingKind>,
-    mut variant_ctor_origins: Map<Str, Str>,
     mut types: Map<Str, TypeDef>,
     mut type_aliases: Map<Str, TypeAliasDef>,
     mut effects: Map<Str, EffectDef>,
@@ -414,17 +379,10 @@ fn extract_decl_export(
                                     "module export: enum VariantRef is missing")
                             }
                             variant_index = variant_index + 1
-                            let ctor_scheme = variant_ctor_scheme(edef, v)
-                            let ctor_origin = variant_ctor_name(edef.name, v.name)
+                            let ctor_scheme = variant_ctor_scheme(edef)
                             values.insert(v.name, ctor_scheme)
                             value_symbols.insert(v.name,
                                 variant_ref_member(variant_ref))
-                            // Fieldless and positional constructors lower via
-                            // Ident/Call and therefore need provenance. Named
-                            // construction uses its dedicated HIR node.
-                            if v.field_names.is_none() {
-                                variant_ctor_origins.insert(v.name, ctor_origin)
-                            }
                         }
                     },
                     none => {},
@@ -520,7 +478,6 @@ fn extract_decl_export(
                     extract_decl_export(prefixed, env, fn_mut_params_map, program,
                         values, value_symbols, exact_value_symbols,
                         exact_value_binding_kinds, value_binding_kinds,
-                        variant_ctor_origins,
                         types, type_aliases, effects, effect_aliases, traits,
                         inherent_methods, struct_field_orders,
                         extern_values, mut_methods, fn_mut_params, false)
@@ -536,7 +493,7 @@ fn extract_decl_export(
                                     copy_inline_export(append_identity(source_prefix, item.name), "${facade}::${local_name}",
                                         env, fn_mut_params_map, program, values, value_symbols,
                                         exact_value_symbols, exact_value_binding_kinds,
-                                        value_binding_kinds, variant_ctor_origins,
+                                        value_binding_kinds,
                                         types, type_aliases, effects, effect_aliases, traits,
                                         inherent_methods, struct_field_orders, extern_values, mut_methods, fn_mut_params)
                                 }
@@ -548,7 +505,7 @@ fn extract_decl_export(
                                 copy_inline_export(append_identity(source_prefix, item_name), "${facade}::${local_name}",
                                     env, fn_mut_params_map, program, values, value_symbols,
                                     exact_value_symbols, exact_value_binding_kinds,
-                                    value_binding_kinds, variant_ctor_origins,
+                                    value_binding_kinds,
                                     types, type_aliases, effects, effect_aliases, traits,
                                     inherent_methods, struct_field_orders, extern_values, mut_methods, fn_mut_params)
                             }
@@ -570,7 +527,6 @@ fn copy_exported_name(
     source: ModuleExports, source_name: Str, local_name: Str,
     mut values: Map<Str, TypeScheme>, mut value_symbols: Map<Str, SymbolRef>,
     mut value_binding_kinds: Map<Str, ValueBindingKind>,
-    mut variant_ctor_origins: Map<Str, Str>,
     mut types: Map<Str, TypeDef>, mut type_aliases: Map<Str, TypeAliasDef>, mut effects: Map<Str, EffectDef>,
     mut effect_aliases: Map<Str, EffectAliasDef>, mut traits: Map<Str, TraitDef>,
     mut struct_field_orders: Map<Str, List<Str>>, mut extern_values: Set<Str>,
@@ -587,10 +543,6 @@ fn copy_exported_name(
             value_symbols.insert(local_name, symbol)
             match source.value_binding_kinds.get(source_name) {
                 some(kind) => { value_binding_kinds.insert(local_name, kind) },
-                none => {}
-            }
-            match source.variant_ctor_origins.get(source_name) {
-                some(origin) => { variant_ctor_origins.insert(local_name, origin) },
                 none => {}
             }
         },
@@ -881,7 +833,6 @@ pub fn extract_exports(
     let mut values: Map<Str, TypeScheme> = map_new()
     let mut value_symbols: Map<Str, SymbolRef> = map_new()
     let mut value_binding_kinds: Map<Str, ValueBindingKind> = map_new()
-    let mut variant_ctor_origins: Map<Str, Str> = map_new()
     let mut types: Map<Str, TypeDef> = map_new()
     let mut type_aliases: Map<Str, TypeAliasDef> = map_new()
     let mut effects: Map<Str, EffectDef> = map_new()
@@ -898,7 +849,6 @@ pub fn extract_exports(
         extract_decl_export(canonical_decl, env, fn_mut_params_map, program,
             values, value_symbols, exact_value_symbols,
             exact_value_binding_kinds, value_binding_kinds,
-            variant_ctor_origins,
             types, type_aliases, effects, effect_aliases, traits,
             inherent_methods, struct_field_orders,
             extern_values, mut_methods, fn_mut_params, true)
@@ -921,7 +871,6 @@ pub fn extract_exports(
                             let local_name = match item.alias { some(a) => a, none => item.name }
                             copy_exported_name(source, item.name, local_name,
                                 values, value_symbols, value_binding_kinds,
-                                variant_ctor_origins,
                                 types, type_aliases, effects, effect_aliases, traits,
                                 struct_field_orders, extern_values, fn_mut_params,
                                 inherent_methods, mut_methods)
@@ -931,7 +880,6 @@ pub fn extract_exports(
                                     for v in edef.variants {
                                         copy_exported_name(source, v.name, v.name,
                                             values, value_symbols, value_binding_kinds,
-                                            variant_ctor_origins,
                                             types, type_aliases, effects, effect_aliases, traits,
                                             struct_field_orders, extern_values, fn_mut_params,
                                             inherent_methods, mut_methods)
@@ -954,7 +902,6 @@ pub fn extract_exports(
                         for name in sorted_names {
                             copy_exported_name(source, name, name,
                                 values, value_symbols, value_binding_kinds,
-                                variant_ctor_origins,
                                 types, type_aliases, effects, effect_aliases, traits,
                                 struct_field_orders, extern_values, fn_mut_params,
                                 inherent_methods, mut_methods)
@@ -1028,7 +975,6 @@ pub fn extract_exports(
         values: values,
         value_symbols: value_symbols,
         value_binding_kinds: value_binding_kinds,
-        variant_ctor_origins: variant_ctor_origins,
         types: types,
         type_aliases: type_aliases,
         effects: effects,

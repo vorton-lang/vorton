@@ -1255,6 +1255,21 @@ fn instantiate_scheme_with_receipt_mapping(
 pub fn instantiate_callable_scheme(
     mut ctx: InferCtx, scheme: TypeScheme
 ) -> CallableInstantiationReceipt {
+    match scheme.ty {
+        Type::FnType { .. } => {},
+        _ => {
+            let instantiated = instantiate_scheme_with_receipt_mapping(
+                ctx, scheme)
+            if instantiated.1.len() != scheme.type_vars.len() {
+                panic("value instantiation: complete mapping is absent")
+            }
+            return CallableInstantiationReceipt {
+                ty: instantiated.0,
+                source_to_actual: instantiated.1,
+                type_args: [], effect_instantiation: none
+            }
+        }
+    }
     match scheme.def_id {
         some(def_id) => match ctx.value_symbols.get(def_id) {
             some(symbol) => if recursive_callable_is_active(
@@ -1475,13 +1490,6 @@ fn apply_project_value_binding(
             // Relate the fresh lexical DefId directly; constructors must not
             // recover this fact from their legacy codegen spelling.
             ctx.value_symbols.insert(new_def_id, binding.symbol)
-            match variant_ctor_origin(ctx, source_scheme) {
-                some(origin) => {
-                    ctx.env.types.variant_ctor_origins.insert(new_def_id, origin)
-                },
-                none => {}
-            }
-
             // Spelling-keyed metadata is part of the lexical overlay too.
             // Absence on the canonical source removes any parent-frame entry,
             // preventing stale metadata from leaking through shadowing.
@@ -1644,7 +1652,6 @@ fn restore_project_namespace_undo(mut ctx: InferCtx, undo: ProjectNamespaceUndo)
             }
             ctx.use_aliases.remove(new_def_id)
             ctx.value_binding_kinds.remove(new_def_id)
-            ctx.env.types.variant_ctor_origins.remove(new_def_id)
         },
         ProjectNamespaceUndo::Struct { name, previous } => match previous {
             some(def) => { ctx.env.types.structs.insert(name, def) },
@@ -2347,33 +2354,6 @@ pub fn record_value_origin(mut ctx: InferCtx, local_name: Str, origin: Str) {
         },
         none => {}
     }
-}
-
-// Constructor identity must follow the binding, not its spelling: enum
-// variants may be imported or aliased, while a local with the same name must
-// remain an ordinary value. The map covers fieldless and positional-payload
-// constructors; named-field construction has its own HIR node.
-pub fn record_variant_ctor_origin(mut ctx: InferCtx, local_name: Str, origin: Str) {
-    match ctx.env.lookup(local_name) {
-        some(scheme) => match scheme.def_id {
-            some(def_id) => {
-                ctx.env.types.variant_ctor_origins.insert(def_id, origin)
-            },
-            none => {}
-        },
-        none => {}
-    }
-}
-
-pub fn variant_ctor_origin(ctx: InferCtx, scheme: TypeScheme) -> Str? {
-    match scheme.def_id {
-        some(def_id) => ctx.env.types.variant_ctor_origins.get(def_id),
-        none => none
-    }
-}
-
-pub fn has_variant_ctor_origin_def_id(ctx: InferCtx, def_id: Int) -> Bool {
-    ctx.env.types.variant_ctor_origins.contains_key(def_id)
 }
 
 fn resolve_fn_bound_dict_ref(
@@ -5345,7 +5325,13 @@ pub fn bind_exact_import_alias(
                     none => scheme
                 }
                 let source_kind = value_binding_kind(ctx, scheme.def_id)
-                let ctor_origin = variant_ctor_origin(ctx, scheme)
+                let source_symbol = match scheme.def_id {
+                    some(def_id) => match ctx.value_symbols.get(def_id) {
+                        some(symbol) => some(symbol),
+                        none => ctx.value_symbols_by_payload.get(exact_origin)
+                    },
+                    none => ctx.value_symbols_by_payload.get(exact_origin)
+                }
                 let mut_flags = match ctx.fn_mut_params.get(source_identity) {
                     some(flags) => some(flags),
                     none => ctx.fn_mut_params.get(exact_origin)
@@ -5359,6 +5345,11 @@ pub fn bind_exact_import_alias(
                         def_id: none
                     })
                     record_value_origin(ctx, alias_name, exact_origin)
+                    match source_symbol {
+                        some(symbol) => record_value_symbol_ref(
+                            ctx, alias_name, symbol),
+                        none => {}
+                    }
                     match source_kind {
                         ValueBindingKind::DirectCallable =>
                             record_value_binding_kind(ctx, alias_name, source_kind),
@@ -5367,12 +5358,6 @@ pub fn bind_exact_import_alias(
                         ValueBindingKind::ConstGetter =>
                             record_value_binding_kind(ctx, alias_name, source_kind),
                         ValueBindingKind::LocalBorrow => {}
-                    }
-                    match ctor_origin {
-                        some(origin) => {
-                            record_variant_ctor_origin(ctx, alias_name, origin)
-                        },
-                        none => {}
                     }
                     match mut_flags {
                         some(flags) => journal_fn_mut_params_set(

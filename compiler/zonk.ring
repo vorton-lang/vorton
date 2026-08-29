@@ -40,7 +40,7 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     hexpr_type, hexpr_effects, hexpr_span}
 use union_find::{UnionFind}
 use env::{apply_subst, apply_subst_row}
-use infer_ctx::{InferCtx, value_binding_kind, has_variant_ctor_origin_def_id}
+use infer_ctx::{InferCtx, value_binding_kind}
 use infer_helpers::{resolve_value_ident}
 use effect_contract::{
     TypedHandledEffectInstance, TypedEffectCtxLayout, TypedCallableEffectCtx,
@@ -855,16 +855,8 @@ fn zonk_direct_callee(ctx: ZonkCtx, callee: HExpr) -> HExpr {
                             mark_zonk_direct_callee(ident),
                         ValueBindingKind::ExternCallable =>
                             mark_zonk_direct_callee(ident),
-                        ValueBindingKind::LocalBorrow => match def_id {
-                            some(id) => {
-                                if has_variant_ctor_origin_def_id(resolver, id) {
-                                    mark_zonk_direct_callee(ident)
-                                } else {
-                                    clear_zonk_local_callee_marker(ident)
-                                }
-                            },
-                            none => clear_zonk_local_callee_marker(ident)
-                        }
+                        ValueBindingKind::LocalBorrow =>
+                            clear_zonk_local_callee_marker(ident)
                     }
                 },
                 none => ident

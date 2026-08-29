@@ -34,7 +34,6 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     impl_target_symbol,
     specialize_trait_method_scheme, build_type_var_map,
     ordered_effect_tail_vars,
-    enum_variant_constructor_effect_schema,
     define_effect_header_schema, publish_effect_header_schema,
     instantiate_effect_header_schema,
     apply_effect_header_schema_subst,
@@ -44,10 +43,10 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     finalize_delegate_provider_plan, assert_no_pending_delegate_plans}
 use diagnostics::{DiagnosticContext}
 use codes::{E0207, E0406, E0501, E0502, E0503, E0504, E0505, E0506, E0507, E0508, E0509, E0510, E0511, E0513, E0514}
-use hir::{compare_by_first, module_item_identity, variant_ctor_name, ValueBindingKind}
+use hir::{compare_by_first, module_item_identity, ValueBindingKind}
 use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_expr, resolve_self_type, resolve_effect_expr,
     validate_fn_bound_order,
-    record_value_origin, record_variant_ctor_origin, record_value_binding_kind,
+    record_value_origin, record_value_binding_kind,
     record_value_symbol_ref, source_value_symbol_for_decl,
     record_h0_closed_registration_header,
     source_type_alias_symbol_for_decl,
@@ -1893,7 +1892,6 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                     none => panic("enum identity ledger: constructor VariantRef is missing")
                 }
                 ctor_index = ctor_index + 1
-                let ctor_payload = variant_ctor_name(name, variant.name)
                 let ctor_identity = symbol_ref_canonical_payload(
                     variant_ref_member(variant_ref))
                 let binding_name = if project_active {
@@ -1904,27 +1902,8 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                 if !project_active {
                     ctx.env.types.variant_to_enum.insert(variant.name, name)
                 }
-                if variant.field_names.is_some() {
-                    bind_variant_constructor(ctx, binding_name, enum_type, tv_ids)
-                } else if variant.fields.len() == 0 {
-                    bind_variant_constructor(ctx, binding_name, enum_type, tv_ids)
-                } else {
-                    let fn_type = Type::FnType { params: variant.fields, return_type: enum_type, effects: EMPTY_ROW }
-                    let mut ctor_vars = list_clone(tv_ids)
-                    for tail in ordered_effect_tail_vars(fn_type) {
-                        if !ctor_vars.contains(tail) { ctor_vars.push(tail) }
-                    }
-                    let ctor_schema = enum_variant_constructor_effect_schema(
-                        def, ctor_index - 1)
-                    if ctor_vars.len() > 0 {
-                        ctx.env.bind(binding_name, TypeScheme {
-                            ty: fn_type, type_vars: ctor_vars,
-                            bounds: [], effect_schema: ctor_schema,
-                            def_id: none })
-                    } else {
-                        ctx.env.bind_mono(binding_name, fn_type)
-                    }
-                }
+                bind_variant_constructor(
+                    ctx, binding_name, enum_type, tv_ids)
                 if !project_active {
                     // The single-file pipeline still binds the historical leaf
                     // first. Mirror its exact scheme under the canonical
@@ -1942,24 +1921,17 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                         none => {}
                     }
                 }
-                // Bare fieldless variants and positional payload constructors
-                // both lower through Ident/Call codegen and need an exact
-                // canonical constructor symbol. Named-field variants lower via
-                // HExpr::NamedVariantConstruct instead.
-                if variant.field_names.is_none() {
-                    if !project_active {
-                        record_value_origin(ctx, variant.name, ctor_identity)
-                        record_variant_ctor_origin(ctx, variant.name,
-                            ctor_payload)
-                        record_value_symbol_ref(
-                            ctx, variant.name, variant_ref_member(variant_ref))
-                    }
-                    record_value_origin(ctx, ctor_identity, ctor_identity)
-                    record_variant_ctor_origin(ctx, ctor_identity,
-                        ctor_payload)
+                // Every constructor binding carries the resolver-issued exact
+                // member. Positional/nullary inference consumes it directly;
+                // named-field syntax keeps its dedicated construction path.
+                if !project_active {
+                    record_value_origin(ctx, variant.name, ctor_identity)
                     record_value_symbol_ref(
-                        ctx, ctor_identity, variant_ref_member(variant_ref))
+                        ctx, variant.name, variant_ref_member(variant_ref))
                 }
+                record_value_origin(ctx, ctor_identity, ctor_identity)
+                record_value_symbol_ref(
+                    ctx, ctor_identity, variant_ref_member(variant_ref))
             }
 
             ctx.type_param_scope = saved

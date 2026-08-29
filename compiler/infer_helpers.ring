@@ -19,15 +19,15 @@ use hir_exact::{
 }
 use effect_contract::{make_empty_effect_ctx_source}
 use diagnostics::{DiagnosticContext, DiagnosticNote}
-use codes::{E0201, E0205, E0208, E0303, E0307, E0308, E0404, E0504, E0705}
+use codes::{E0201, E0205, E0208, E0301, E0303, E0307, E0308, E0404, E0504, E0705}
 use union_find::{UnionFind, uf_find, uf_lookup}
-use env::{TypeEnv, TypeScheme, ImplEntry, ImplMethodSchemeCore,
+use env::{TypeEnv, TypeScheme, EnumDef, ImplEntry, ImplMethodSchemeCore,
     apply_subst,
     has_impl, lookup_variant, find_impl_by_provider}
 use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     fn_bound_dict_ref,
     type_error, unify_at, resolve_relative_qualifier,
-    resolve_dict_ref_for_type, variant_ctor_origin,
+    resolve_dict_ref_for_type,
     CallableInstantiationReceipt,
     callable_receipt_type, callable_receipt_type_args,
     callable_receipt_effects, error_callable_receipt,
@@ -36,24 +36,142 @@ use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     register_callable_value_shadow,
     resolve_or_defer_dicts_from_scheme, PendingDictPurpose,
     value_binding_kind, value_symbol_ref, current_identity_file_key,
-    has_variant_ctor_origin_def_id,
     current_executable_owner, current_dictionary_evidence_owner,
     journal_boxed_var_insert}
 use ir_identity::{IntrinsicRef, ImplMethodRef,
-    symbol_ref_origin_module_key,
+    RegisteredNominalRef, VariantRef, VariantFieldRef,
+    symbol_ref_origin_module_key, symbol_ref_same,
+    registered_nominal_ref_same,
+    variant_ref_owner, variant_ref_member, variant_ref_source_index,
+    variant_ref_same,
+    variant_field_ref_variant, variant_field_ref_index,
+    variant_field_ref_same,
     impl_method_ref_owner, impl_owner_ref_trait, impl_owner_ref_provider,
     make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
     slot_domain_lexical}
 
+pub struct ExactVariantConstructorTarget {
+    pub enum_ref: RegisteredNominalRef,
+    pub enum_def: EnumDef,
+    pub variant_name: Str,
+    pub variant_index: Int,
+    pub variant_ref: VariantRef,
+    pub field_refs: List<VariantFieldRef>,
+    pub positional: Bool
+}
+
+fn exact_variant_field_refs_same(
+    left: List<VariantFieldRef>, right: List<VariantFieldRef>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    let mut index = 0
+    while index < left.len() {
+        if !variant_field_ref_same(
+                left.get(index).unwrap(), right.get(index).unwrap()) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+// Constructor classification consumes only the resolver-issued value member
+// attached to this lexical DefId. Enum aliases/re-exports may leave several
+// TypeEnv keys for one VariantRef, so repeated exact targets are accepted;
+// one member shared by distinct exact targets fails closed.
+pub fn exact_variant_constructor_target(
+    ctx: InferCtx, def_id: Int?
+) -> ExactVariantConstructorTarget? {
+    let member = match def_id {
+        some(id) => match ctx.value_symbols.get(id) {
+            some(value) => value,
+            none => return none
+        },
+        none => return none
+    }
+
+    let mut found: ExactVariantConstructorTarget? = none
+    for entry in ctx.env.types.enums.entries() {
+        let enum_def = entry.1
+        if enum_def.variants.len() != enum_def.variant_refs.len() ||
+           enum_def.variants.len() != enum_def.variant_field_refs.len() ||
+           enum_def.variants.len() !=
+                enum_def.variant_field_effect_schemas.len() {
+            panic("variant constructor target: enum inventory census differs")
+        }
+        let mut variant_index = 0
+        while variant_index < enum_def.variant_refs.len() {
+            let variant_ref = enum_def.variant_refs.get(
+                variant_index).unwrap()
+            if symbol_ref_same(member, variant_ref_member(variant_ref)) {
+                if variant_ref_source_index(variant_ref) != variant_index {
+                    panic("variant constructor target: source index differs")
+                }
+                let variant = enum_def.variants.get(variant_index).unwrap()
+                let field_refs = enum_def.variant_field_refs.get(
+                    variant_index).unwrap()
+                if variant.fields.len() != field_refs.len() {
+                    panic("variant constructor target: field census differs")
+                }
+                if variant.fields.len() !=
+                        enum_def.variant_field_effect_schemas.get(
+                            variant_index).unwrap().len() {
+                    panic("variant constructor target: field schema census differs")
+                }
+                let mut field_index = 0
+                while field_index < field_refs.len() {
+                    let field_ref = field_refs.get(field_index).unwrap()
+                    if field_index != variant_field_ref_index(field_ref) ||
+                       !variant_ref_same(
+                            variant_field_ref_variant(field_ref), variant_ref) {
+                        panic("variant constructor target: field order differs")
+                    }
+                    field_index = field_index + 1
+                }
+                let candidate = ExactVariantConstructorTarget {
+                    enum_ref: variant_ref_owner(variant_ref),
+                    enum_def: enum_def,
+                    variant_name: variant.name,
+                    variant_index: variant_index,
+                    variant_ref: variant_ref,
+                    field_refs: field_refs,
+                    positional: variant.field_names.is_none()
+                }
+                match found {
+                    some(existing) => {
+                        if !variant_ref_same(
+                                existing.variant_ref,
+                                candidate.variant_ref) ||
+                           !registered_nominal_ref_same(
+                                existing.enum_ref, candidate.enum_ref) ||
+                           existing.variant_index != candidate.variant_index ||
+                           !exact_variant_field_refs_same(
+                                existing.field_refs, candidate.field_refs) {
+                            panic("variant constructor target: member is shared by distinct exact targets")
+                        }
+                    },
+                    none => { found = some(candidate) }
+                }
+            }
+            variant_index = variant_index + 1
+        }
+    }
+    found
+}
+
 fn make_inferred_ident(
-    mut ctx: InferCtx, name: Str, resolved_name: Str?, scheme: TypeScheme?,
+    mut ctx: InferCtx, name: Str, scheme: TypeScheme?,
     receipt: CallableInstantiationReceipt, subst: UnionFind,
     materialize_value: Bool, span: Span
 ) -> HExpr {
     let ty = callable_receipt_type(receipt)
     let def_id = match scheme { some(value) => value.def_id, none => none }
     let kind = value_binding_kind(ctx, def_id)
-    let is_constructor = resolved_name.is_some()
+    let is_constructor = match kind {
+        ValueBindingKind::LocalBorrow =>
+            exact_variant_constructor_target(ctx, def_id).is_some(),
+        _ => false
+    }
     let source_slot = match (def_id, kind) {
         (some(id), ValueBindingKind::LocalBorrow) => if is_constructor {
             none
@@ -88,20 +206,11 @@ fn make_inferred_ident(
                     type_args: callable_receipt_type_args(receipt),
                     effects: callable_receipt_effects(receipt)
                 }),
-            ValueBindingKind::LocalBorrow => {
-                if is_constructor {
-                    some(HCallableValueInstantiation {
-                        type_args: callable_receipt_type_args(receipt),
-                        effects: callable_receipt_effects(receipt)
-                    })
-                } else { none }
-            },
+            ValueBindingKind::LocalBorrow => none,
             ValueBindingKind::ConstGetter => none
         }
     } else { none }
-    let dict_closure_dicts: List<DictRef>? = if is_callable && is_constructor {
-        some([])
-    } else if is_callable && materialize_value {
+    let dict_closure_dicts: List<DictRef>? = if is_callable && materialize_value {
         match (kind, scheme) {
             (ValueBindingKind::DirectCallable, some(value)) => {
                 let output: List<DictRef> = []
@@ -120,7 +229,7 @@ fn make_inferred_ident(
             _ => none
         }
     } else { none }
-    HExpr::Ident { name: name, resolved_name: resolved_name,
+    HExpr::Ident { name: name, resolved_name: none,
         def_id: def_id, source_slot: source_slot,
         callee_identity: callee_identity,
         dict_closure_dicts: dict_closure_dicts,
@@ -132,6 +241,25 @@ fn instantiate_named_value_scheme(
     mut ctx: InferCtx, name: Str, scheme: TypeScheme,
     materialize_value: Bool, span: Span
 ) -> CallableInstantiationReceipt {
+    let constructor_target = match value_binding_kind(ctx, scheme.def_id) {
+        ValueBindingKind::LocalBorrow =>
+            exact_variant_constructor_target(ctx, scheme.def_id),
+        _ => none
+    }
+    match constructor_target {
+        some(target) => if materialize_value &&
+                target.field_refs.len() > 0 {
+            let exact_name = "${nominal_display_name(
+                target.enum_def.name)}::${target.variant_name}"
+            let _ = type_error(
+                ctx.sink, E0301,
+                "Enum constructor '${exact_name}' cannot be used as a first-class function value; use an explicit lambda that directly calls the constructor",
+                span, DiagnosticContext::OtherContext { detail: some(
+                    "use an explicit lambda that directly calls the constructor") })
+            return error_callable_receipt()
+        },
+        none => {}
+    }
     let callable = match scheme.ty {
         Type::FnType { .. } => true,
         _ => false
@@ -435,7 +563,7 @@ pub fn infer_ident_with_receipt(
                             span, DiagnosticContext::OtherContext { detail: some("relative path out of scope") })
                         return InferResult {
                             hexpr: make_inferred_ident(
-                                ctx, name, none, none,
+                                ctx, name, none,
                                 error_callable_receipt(),
                                 subst, materialize_value, span),
                             subst: subst, effects: EMPTY_ROW
@@ -460,8 +588,8 @@ pub fn infer_ident_with_receipt(
                     let actual_name = exact_value_origin(ctx, qualified_name, ms)
                     return InferResult {
                         hexpr: make_inferred_ident(
-                            ctx, actual_name, variant_ctor_origin(ctx, ms),
-                            some(ms), t, subst, materialize_value, span),
+                            ctx, actual_name, some(ms), t, subst,
+                            materialize_value, span),
                         subst: subst, effects: EMPTY_ROW
                     }
                 },
@@ -481,9 +609,7 @@ pub fn infer_ident_with_receipt(
                                 let actual_name = exact_value_origin(ctx, full_qualified, fs)
                                 return InferResult {
                                     hexpr: make_inferred_ident(
-                                        ctx, actual_name,
-                                        variant_ctor_origin(ctx, fs),
-                                        some(fs), t, subst,
+                                        ctx, actual_name, some(fs), t, subst,
                                         materialize_value, span),
                                     subst: subst, effects: EMPTY_ROW
                                 }
@@ -507,7 +633,7 @@ pub fn infer_ident_with_receipt(
                         DiagnosticContext::UndefinedVariable { name: name, scope_locals: none })
                     return InferResult {
                         hexpr: make_inferred_ident(
-                            ctx, name, none, none,
+                            ctx, name, none,
                             error_callable_receipt(),
                             subst, materialize_value, span),
                         subst: subst, effects: EMPTY_ROW
@@ -519,7 +645,7 @@ pub fn infer_ident_with_receipt(
                 DiagnosticContext::UndefinedVariable { name: name, scope_locals: none })
             InferResult {
                 hexpr: make_inferred_ident(
-                    ctx, name, none, none,
+                    ctx, name, none,
                     error_callable_receipt(),
                     subst, materialize_value, span),
                 subst: subst, effects: EMPTY_ROW
@@ -569,8 +695,8 @@ pub fn infer_ident_with_receipt(
             }
             InferResult {
                 hexpr: make_inferred_ident(
-                    ctx, actual_name, variant_ctor_origin(ctx, s),
-                    some(s), t, subst, materialize_value, span),
+                    ctx, actual_name, some(s), t, subst,
+                    materialize_value, span),
                 subst: subst, effects: EMPTY_ROW
             }
         }
@@ -926,22 +1052,7 @@ pub fn finalize_value_ident_no_solve(
                 ValueBindingKind::ExternCallable => panic(
                     "callable value finalization: dictionary alias is absent"),
                 ValueBindingKind::ConstGetter => harg,
-                ValueBindingKind::LocalBorrow => {
-                    // Positional variant constructors have their own exact
-                    // DefId provenance and also need a zero-dict direct-ABI
-                    // wrapper when used as values.
-                    match resolved_name {
-                        some(_) => HExpr::Ident {
-                            name: name, resolved_name: resolved_name,
-                            def_id: def_id, source_slot: source_slot,
-                            callee_identity: callee_identity,
-                            dict_closure_dicts: some([]),
-                            callable_instantiation: callable_instantiation,
-                            ty: ty, effects: effects, span: span
-                        },
-                        none => harg
-                    }
-                }
+                ValueBindingKind::LocalBorrow => harg
             }
         },
         _ => harg
@@ -989,14 +1100,8 @@ pub fn finalize_direct_callee_no_solve(
                         "direct callee finalization: const getter was not lowered")
                 }
             },
-            ValueBindingKind::LocalBorrow => match def_id {
-                some(id) => if has_variant_ctor_origin_def_id(ctx, id) {
-                    mark_direct_callee_no_solve(harg)
-                } else {
-                    clear_direct_callee_no_solve(harg)
-                },
-                none => clear_direct_callee_no_solve(harg)
-            }
+            ValueBindingKind::LocalBorrow =>
+                clear_direct_callee_no_solve(harg)
         },
         _ => harg
     }
