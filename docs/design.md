@@ -1248,7 +1248,7 @@ let zs = xs.clone()    // 递归深拷贝，完全独立
 
 求值顺序固定为：`base` 只求值一次但暂不消费；随后所有显式 override RHS 按源码顺序完整求值，此时可继续读取或借用 `base`；只有全部 RHS 成功后，未覆盖字段才以 Own transfer 进入 fresh result，被覆盖字段在 `base` 中的旧值执行 Drop，override temporary 再转入对应结果字段，最后 `base` 整体失活。若任一 RHS 产生 `fail`，不得留下部分 move 的 `base`。override RHS 若试图在提交前 ownership-move `base` 的子字段，则按既有 partial-move 禁令拒绝；要保留该字段就省略 override，要保留整个 base 则显式写 `Type { ..base.clone(), ... }`。
 
-Planner 依据字段的 Logical OwnershipShape / Physical RcShape 将 Own transfer 兑现为 scalar copy、RC dup 或 exact Take，并负责旧字段 Drop 与 source clear；这不改变上述统一用户语义。结果在语言层始终是 fresh value，不能通过直接复用共享 base 后原地改字段影响其其他别名；只有证明 base 物理唯一时，后端才可做不可观察的原地复用优化。struct 与 named enum/variant update 使用同一规则。
+Planner 依据字段的 Logical OwnershipShape / Physical RcShape 将 Own transfer 兑现为 scalar copy、RC dup 或 exact Take，并负责旧字段恰好一次 Drop 与 source clear；这不改变上述统一用户语义。Ring 0.1 必须创建 fresh result shell 并逐字段填充：禁止先将 whole base MovePlace 到结果再原地覆盖字段，禁止因 base 物理唯一而复用其 storage，也禁止在字段已转移或清理后额外执行 whole-container Drop。struct 与 named enum/variant update 使用同一规则。
 
 ### 7.3 参数传递
 
