@@ -38,6 +38,7 @@ use ir_identity::{
     make_synthetic_slot_ref, make_path_ref, path_role_parameter,
     path_owner_for_symbol, path_ref_owner, make_path_origin_ref,
     make_symbol_origin_ref, symbol_ref_same,
+    path_ref_same,
     symbol_ref_origin_module_key, symbol_ref_canonical_payload,
     impl_method_ref_owner, impl_method_ref_member, impl_method_ref_name,
     impl_method_ref_callable_slot_index,
@@ -61,7 +62,9 @@ use ir_inventory::{
     executable_kind_builtin_intrinsic,
     executable_kind_default_specialization,
     executable_kind_derived_impl,
-    BinderEntry, binder_entry_slot,
+    BinderEntry, make_source_binder_entry,
+    binder_entry_slot, binder_entry_owner, binder_entry_kind,
+    binder_entry_site, binder_kind_tag, binder_kind_match_pattern,
     effect_operation_ref_callable
 }
 use builtins::{
@@ -524,17 +527,57 @@ fn add_operator_dictionaries(
     }
 }
 
-fn add_field_action_dictionaries(
-    mut builder: LegacyFactBuilder, value: FieldAction
+fn add_derived_field_action_facts(
+    mut builder: LegacyFactBuilder, value: FieldAction,
+    ord_owner: ExecutableRef?, ord_binders: List<BinderEntry>,
+    mut ord_cursor: List<Int>, mut ord_seen: List<BinderEntry>
 ) {
     match value {
         FieldAction::Call { base_dict, extra_dicts, .. } => {
             add_dictionary_fact(builder, base_dict)
             for item in extra_dicts { add_dictionary_fact(builder, item) }
+            match ord_owner {
+                some(owner) => {
+                    let index = match ord_cursor.get(0) {
+                        some(value) => value,
+                        none => panic("Core/legacy freeze: Ord binder cursor is absent")
+                    }
+                    let entry = match ord_binders.get(index) {
+                        some(value) => value,
+                        none => panic("Core/legacy freeze: Ord Call leaf lacks binder")
+                    }
+                    if !executable_ref_same(
+                            binder_entry_owner(entry), owner) ||
+                       binder_kind_tag(binder_entry_kind(entry)) !=
+                            binder_kind_tag(binder_kind_match_pattern()) {
+                        panic("Core/legacy freeze: Ord binder owner/kind differs")
+                    }
+                    let slot = binder_entry_slot(entry)
+                    let site = binder_entry_site(entry)
+                    let _ = make_source_binder_entry(
+                        slot, owner, binder_entry_kind(entry), site)
+                    for existing in ord_seen {
+                        if slot_ref_same(
+                                binder_entry_slot(existing), slot) ||
+                           path_ref_same(
+                                binder_entry_site(existing), site) {
+                            panic("Core/legacy freeze: Ord binder identity repeats")
+                        }
+                    }
+                    ord_seen.push(entry)
+                    let _ = add_binder_fact(
+                        builder, slot, "__derived_ord",
+                        slot_ref_source_def_id(slot), Type::IntType, false)
+                    ord_cursor.set(0, index + 1)
+                },
+                none => {}
+            }
         },
         FieldAction::Tuple { element_actions, .. } => {
             for child in element_actions {
-                add_field_action_dictionaries(builder, child)
+                add_derived_field_action_facts(
+                    builder, child, ord_owner, ord_binders,
+                    ord_cursor, ord_seen)
             }
         },
         FieldAction::Identity | FieldAction::FloatIdentity |
@@ -814,22 +857,40 @@ fn add_default_specialization_facts(
 }
 
 fn add_derived_field_binders(
-    mut builder: LegacyFactBuilder, fields: List<DerivedField>
+    mut builder: LegacyFactBuilder, fields: List<DerivedField>,
+    ord_owner: ExecutableRef?, mut ord_seen: List<BinderEntry>
 ) {
     for field in fields {
-        add_field_action_dictionaries(builder, field.action)
-        match field.ord_result_binder {
-            some(entry) => {
-                let slot = binder_entry_slot(entry)
-                if !slot_ref_is_source(slot) {
-                    panic("Core/legacy freeze: Ord result binder is not source")
-                }
-                let _ = add_binder_fact(
-                    builder, slot, "__derived_ord",
-                    slot_ref_source_def_id(slot), Type::IntType, false)
-            },
-            none => {}
+        let mut cursor: List<Int> = [0]
+        add_derived_field_action_facts(
+            builder, field.action, ord_owner, field.ord_result_binders,
+            cursor, ord_seen)
+        let consumed = match cursor.get(0) {
+            some(value) => value,
+            none => panic("Core/legacy freeze: Ord binder cursor is absent")
         }
+        if consumed != field.ord_result_binders.len() {
+            panic("Core/legacy freeze: Ord binder/Call-leaf census differs")
+        }
+    }
+}
+
+fn derived_ord_executable(value: DerivedImpl) -> ExecutableRef? {
+    if derived_semantic_kind_tag(value.semantic_kind) != 4 {
+        return none
+    }
+    let mut found: ExecutableRef? = none
+    for method in value.methods {
+        if derived_semantic_kind_tag(method.semantic_kind) == 4 {
+            if found.is_some() {
+                panic("Core/legacy freeze: derived Ord cmp repeats")
+            }
+            found = some(method.executable_ref)
+        }
+    }
+    match found {
+        some(owner) => some(owner),
+        none => panic("Core/legacy freeze: derived Ord cmp is absent")
     }
 }
 
@@ -838,6 +899,8 @@ fn add_derived_impl_facts(
 ) {
     let module_container = make_legacy_module_container(builder.module_body)
     for derived in values {
+        let ord_owner = derived_ord_executable(derived)
+        let mut ord_seen: List<BinderEntry> = []
         let mut method_refs: List<ImplMethodRef> = []
         for method in derived.methods {
             let (params, result, effects) = match method.signature {
@@ -854,13 +917,15 @@ fn add_derived_impl_facts(
             method_refs.push(method.method_ref)
         }
         match derived.struct_fields {
-            some(fields) => add_derived_field_binders(builder, fields),
+            some(fields) => add_derived_field_binders(
+                builder, fields, ord_owner, ord_seen),
             none => {}
         }
         match derived.enum_variants {
             some(variants) => {
                 for variant in variants {
-                    add_derived_field_binders(builder, variant.fields)
+                    add_derived_field_binders(
+                        builder, variant.fields, ord_owner, ord_seen)
                 }
             },
             none => {}

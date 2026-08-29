@@ -139,7 +139,7 @@ fn dl_derived_fields(fields: List<DerivedField>, mut defs: List<HDictDef>,
             positional_index: field.positional_index,
             field_ref: field.field_ref, ty: field.ty,
             action: dl_derived_action(field.action, defs, seen),
-            ord_result_binder: field.ord_result_binder
+            ord_result_binders: field.ord_result_binders
         })
     }
     lowered

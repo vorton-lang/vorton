@@ -69,6 +69,7 @@ use ir_identity::{
     origin_ref_same, origin_ref_is_symbol, origin_ref_symbol, origin_ref_path,
     path_owner_for_symbol, path_owner_for_module_body,
     path_ref_owner, path_ref_normalized_child_path, path_ref_role,
+    path_ref_same,
     path_role_same,
     path_owner_ref_is_symbol, path_owner_ref_symbol,
     path_owner_ref_module_body, module_body_ref_origin_module_key,
@@ -141,7 +142,9 @@ use ir_inventory::{
     binder_kind_effect_ctx_local,
     binder_kind_effect_ctx_param,
     binder_kind_effect_ctx_parent_capture,
-    binder_entry_slot, binder_entry_kind, binder_entry_site,
+    make_source_binder_entry,
+    binder_entry_slot, binder_entry_owner, binder_entry_kind,
+    binder_entry_site,
     EffectOperationRef, SystemHostCallableRef,
     EffectCtxRef, EffectCtxParentCapture,
     make_semantic_effect_ctx_binder, make_effect_ctx_ref,
@@ -312,6 +315,7 @@ use core_expr::{
     core_body_reference, core_body_origin, core_body_binders,
     core_body_origins,
     core_binder_reference, core_binder_type, core_binder_kind,
+    core_binder_site,
     core_callable_semantic_contract, core_callable_effect_contract,
     core_callable_effect_ctx,
     core_body_effect_ctx_tokens,
@@ -4789,19 +4793,6 @@ fn append_unique_core_binder(
     values.push(value)
 }
 
-fn derived_ord_pattern_slot(
-    owner: ExecutableRef, ty: CoreTypeRef,
-    path: List<Str>, mut binders: List<CoreBinder>
-) -> SlotRef {
-    let site = make_path_ref(
-        executable_owner(owner), path, path_role_parameter())
-    let slot = make_synthetic_slot_ref(site)
-    append_unique_core_binder(binders, make_core_binder(
-        slot, ty, binder_kind_match_pattern(), site,
-        flow_borrow_storage(), false))
-    slot
-}
-
 fn core_binder_from_entry(
     facts: FrozenCoreAssemblyFacts, entry: BinderEntry, ty: CoreTypeRef
 ) -> CoreBinder {
@@ -4811,13 +4802,50 @@ fn core_binder_from_entry(
         binder_entry_site(entry), flow_own_storage(), false)
 }
 
+fn consume_derived_ord_result_binder(
+    owner: ExecutableRef, ty: CoreTypeRef,
+    values: List<BinderEntry>, mut cursor: List<Int>,
+    mut binders: List<CoreBinder>
+) -> SlotRef {
+    let index = match cursor.get(0) {
+        some(value) => value,
+        none => panic("Core assembly: Ord binder cursor is absent")
+    }
+    let entry = match values.get(index) {
+        some(value) => value,
+        none => panic("Core assembly: Ord Call leaf lacks exact binder")
+    }
+    if !executable_ref_same(binder_entry_owner(entry), owner) ||
+       binder_kind_tag(binder_entry_kind(entry)) !=
+            binder_kind_tag(binder_kind_match_pattern()) {
+        panic("Core assembly: Ord result binder owner/kind differs")
+    }
+    let slot = binder_entry_slot(entry)
+    let site = binder_entry_site(entry)
+    let _ = make_source_binder_entry(
+        slot, owner, binder_entry_kind(entry), site)
+    for existing in binders {
+        if slot_ref_same(core_binder_reference(existing), slot) {
+            panic("Core assembly: Ord result binder slot is duplicated")
+        }
+        if path_ref_same(core_binder_site(existing), site) {
+            panic("Core assembly: Ord result binder site is duplicated")
+        }
+    }
+    binders.push(make_core_binder(
+        slot, ty, binder_entry_kind(entry), site,
+        flow_borrow_storage(), false))
+    cursor.set(0, index + 1)
+    slot
+}
+
 fn build_derived_field_plan(
     facts: FrozenCoreAssemblyFacts, owner: ExecutableRef,
     field: CoreFieldRef, field_type: CoreTypeRef,
     action: FieldAction,
     left: DerivedValuePath, right: DerivedValuePath?,
     callable_ctx: TypedCallableEffectCtx, semantic_tag: Int,
-    exact_ord_binder: BinderEntry?, path: List<Str>,
+    ord_result_binders: List<BinderEntry>, mut ord_binder_cursor: List<Int>,
     mut binders: List<CoreBinder>
 ) -> CoreDerivedFieldPlan {
     match action {
@@ -4833,23 +4861,9 @@ fn build_derived_field_plan(
                         facts.type_sources, return_type, facts.module_key),
                     _ => panic("Core assembly: Ord action is not callable")
                 }
-                match exact_ord_binder {
-                    some(entry) => {
-                        if binder_kind_tag(binder_entry_kind(entry)) !=
-                           binder_kind_tag(binder_kind_match_pattern()) {
-                            panic("Core assembly: Ord result is not a match binder")
-                        }
-                        append_unique_core_binder(
-                            binders, make_core_binder(
-                                binder_entry_slot(entry), result_type,
-                                binder_kind_match_pattern(),
-                                binder_entry_site(entry),
-                                flow_borrow_storage(), false))
-                        some(binder_entry_slot(entry))
-                    },
-                    none => some(derived_ord_pattern_slot(
-                        owner, result_type, path, binders))
-                }
+                some(consume_derived_ord_result_binder(
+                    owner, result_type, ord_result_binders,
+                    ord_binder_cursor, binders))
             } else { none }
             make_core_derived_field_plan(
                 field, field_type, core_derived_value(left),
@@ -4873,8 +4887,6 @@ fn build_derived_field_plan(
                 let child_type = type_fact_for(
                     facts.type_sources,
                     element_types.get(index).unwrap(), facts.module_key)
-                let mut child_path = path.map(fn(item) { item })
-                child_path.push("tuple:${index.to_str()}")
                 children.push(build_derived_field_plan(
                     facts, owner, child_field, child_type,
                     element_actions.get(index).unwrap(),
@@ -4882,7 +4894,8 @@ fn build_derived_field_plan(
                         left, child_field, child_type, left.origin),
                     right.map(fn(value) { extend_derived_value(
                         value, child_field, child_type, value.origin) }),
-                    callable_ctx, semantic_tag, none, child_path, binders))
+                    callable_ctx, semantic_tag, ord_result_binders,
+                    ord_binder_cursor, binders))
                 fields.push(child_field); types.push(child_type)
                 index = index + 1
             }
@@ -4899,6 +4912,29 @@ fn build_derived_field_plan(
             panic("Core assembly: FnLiteral crossed non-text derive"),
         _ => panic("Core assembly: unresolved derived field action")
     }
+}
+
+fn build_exact_derived_field_plan(
+    facts: FrozenCoreAssemblyFacts, owner: ExecutableRef,
+    field: CoreFieldRef, field_type: CoreTypeRef,
+    action: FieldAction,
+    left: DerivedValuePath, right: DerivedValuePath?,
+    callable_ctx: TypedCallableEffectCtx, semantic_tag: Int,
+    ord_result_binders: List<BinderEntry>,
+    mut binders: List<CoreBinder>
+) -> CoreDerivedFieldPlan {
+    let mut cursor: List<Int> = [0]
+    let result = build_derived_field_plan(
+        facts, owner, field, field_type, action, left, right,
+        callable_ctx, semantic_tag, ord_result_binders, cursor, binders)
+    let consumed = match cursor.get(0) {
+        some(value) => value,
+        none => panic("Core assembly: Ord binder cursor is absent")
+    }
+    if consumed != ord_result_binders.len() {
+        panic("Core assembly: Ord binder/Call-leaf census differs")
+    }
+    result
 }
 
 fn derived_pattern_slot(
@@ -4941,7 +4977,6 @@ fn derived_struct_fields(
     mut binders: List<CoreBinder>
 ) -> List<CoreDerivedFieldPlan> {
     let mut result: List<CoreDerivedFieldPlan> = []
-    let mut index = 0
     for field in source {
         let reference = derived_core_field(field.field_ref)
         let field_type = type_fact_for(
@@ -4956,13 +4991,11 @@ fn derived_struct_fields(
             projections: [reference], projection_types: [field_type],
             ty: field_type, origin: executable_origin(method.executable_ref)
         } })
-        result.push(build_derived_field_plan(
+        result.push(build_exact_derived_field_plan(
             facts, method.executable_ref, reference, field_type,
             field.action, left, right,
             method.effect_ctx, semantic_tag,
-            field.ord_result_binder,
-            ["derived-field:${index}"], binders))
-        index = index + 1
+            field.ord_result_binders, binders))
     }
     result
 }
@@ -5003,7 +5036,7 @@ fn derived_enum_plans(
                     origin: executable_origin(method.executable_ref)
                 }
             })
-            fields.push(build_derived_field_plan(
+            fields.push(build_exact_derived_field_plan(
                 facts, method.executable_ref, reference, field_type,
                 field.action,
                 DerivedValuePath {
@@ -5011,8 +5044,7 @@ fn derived_enum_plans(
                     projections: [], projection_types: [], ty: field_type,
                     origin: executable_origin(method.executable_ref)
                 }, right_path, method.effect_ctx,
-                semantic_tag, field.ord_result_binder,
-                ["derived-variant:${variant_index}:${field_index}"], binders))
+                semantic_tag, field.ord_result_binders, binders))
             field_index = field_index + 1
         }
         let common_variant = make_core_derived_variant_plan(

@@ -765,10 +765,10 @@ pub struct DerivedField {
     pub field_ref: DerivedFieldRef,
     pub ty: Type,
     pub action: FieldAction,
-    // Ord comparison results are semantic match bindings: the same exact
-    // value feeds both sign tests, while Flow alone materializes the call
-    // result and operational control.
-    pub ord_result_binder: BinderEntry?
+    // Ord comparison results are semantic match bindings in depth-first
+    // Call-leaf order.  Each exact value feeds both sign tests, while Flow
+    // alone materializes the call result and operational control.
+    pub ord_result_binders: List<BinderEntry>
 }
 
 pub struct DerivedVariant {

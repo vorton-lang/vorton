@@ -53,6 +53,7 @@ use ir_identity::{SymbolRef, ImplProviderRef, ImplOwnerRef, ImplMethodRef,
     make_path_ref, path_owner_for_symbol, path_role_declaration,
     path_role_parameter,
     make_source_slot_ref, slot_domain_lexical,
+    path_ref_same, slot_ref_same,
     impl_provider_ref_site, path_ref_owner,
     path_owner_ref_module_body, module_body_ref_origin_module_key,
     path_ref_normalized_child_path,
@@ -70,8 +71,10 @@ use ir_inventory::{ExecutableRef, BinderEntry,
     make_parameter_dict_ref, make_exact_static_dict_ref,
     make_exact_wrapped_dict_ref, dict_ref_wrapped_base,
     make_named_executable_ref, executable_ref_is_named,
-    executable_ref_named_symbol,
-    make_source_binder_entry, binder_kind_let,
+    executable_ref_named_symbol, executable_ref_same,
+    make_source_binder_entry,
+    binder_entry_slot, binder_entry_owner, binder_entry_kind,
+    binder_entry_site, binder_kind_tag, binder_kind_let,
     binder_kind_match_pattern,
     binder_kind_source_param,
     make_effect_ctx_parameter_ref}
@@ -249,7 +252,7 @@ fn option_derived_some_variant(
             name: "_0",
             positional_index: some(0),
             field_ref: DerivedFieldRef::VariantDerivedField(field_ref),
-            ty: field_type, action: action, ord_result_binder: none
+            ty: field_type, action: action, ord_result_binders: []
         }],
         has_named_fields: false
     }
@@ -1318,12 +1321,16 @@ fn exact_derived_methods(
 }
 
 fn derived_ord_executable(methods: List<DerivedMethod>) -> ExecutableRef? {
+    let mut found: ExecutableRef? = none
     for method in methods {
-        if impl_method_ref_name(method.method_ref) == "cmp" {
-            return some(method.executable_ref)
+        if derived_semantic_kind_tag(method.semantic_kind) == 4 {
+            if found.is_some() {
+                panic("derived Ord descriptor repeats executable")
+            }
+            found = some(method.executable_ref)
         }
     }
-    none
+    found
 }
 
 fn derived_hash_mix_call() -> DerivedDirectCall {
@@ -1409,33 +1416,114 @@ fn remap_derived_action(
     }
 }
 
-fn finalize_derived_field(
-    mut env: TypeEnv, field: DerivedField,
-    ord_executable: ExecutableRef?, ordinal: Int,
-    type_mapping: Map<Int, Type>
-) -> DerivedField {
-    let binder = match ord_executable {
-        some(executable) => {
+fn derived_action_call_leaf_count(value: FieldAction) -> Int {
+    match value {
+        FieldAction::Call { .. } => 1,
+        FieldAction::Tuple { element_actions, .. } => {
+            let mut result = 0
+            for action in element_actions {
+                result = result + derived_action_call_leaf_count(action)
+            }
+            result
+        },
+        _ => 0
+    }
+}
+
+fn append_derived_ord_result_binders(
+    mut env: TypeEnv, value: FieldAction, executable: ExecutableRef,
+    mut ordinal: List<Int>, mut result: List<BinderEntry>
+) {
+    match value {
+        FieldAction::Call { .. } => {
+            let index = match ordinal.get(0) {
+                some(value) => value,
+                none => panic("derived Ord binder ordinal is absent")
+            }
             let def_id = env.fresh_def_id()
             let symbol = executable_ref_named_symbol(executable)
-            some(make_source_binder_entry(
+            result.push(make_source_binder_entry(
                 make_source_slot_ref(
                     symbol_ref_origin_module_key(symbol),
                     slot_domain_lexical(), def_id),
                 executable, binder_kind_match_pattern(),
                 make_path_ref(
                     path_owner_for_symbol(symbol),
-                    ["derived-ord-result:${ordinal.to_str()}"],
+                    ["derived-ord-result:${index.to_str()}"],
                     path_role_declaration())))
+            ordinal.set(0, index + 1)
         },
-        none => none
+        FieldAction::Tuple { element_actions, .. } => {
+            for action in element_actions {
+                append_derived_ord_result_binders(
+                    env, action, executable, ordinal, result)
+            }
+        },
+        _ => {}
+    }
+}
+
+fn finalize_derived_field(
+    mut env: TypeEnv, field: DerivedField,
+    ord_executable: ExecutableRef?, mut ordinal: List<Int>,
+    type_mapping: Map<Int, Type>
+) -> DerivedField {
+    let action = remap_derived_action(field.action, type_mapping)
+    let mut binders: List<BinderEntry> = []
+    match ord_executable {
+        some(executable) => append_derived_ord_result_binders(
+            env, action, executable, ordinal, binders),
+        none => {}
+    }
+    let expected = match ord_executable {
+        some(_) => derived_action_call_leaf_count(action),
+        none => 0
+    }
+    if binders.len() != expected {
+        panic("derived Ord binder/Call-leaf census differs")
     }
     DerivedField {
         name: field.name, positional_index: field.positional_index,
         field_ref: field.field_ref,
         ty: apply_subst_map(type_mapping, field.ty),
-        action: remap_derived_action(field.action, type_mapping),
-        ord_result_binder: binder
+        action: action,
+        ord_result_binders: binders
+    }
+}
+
+fn validate_derived_ord_field_binders(
+    field: DerivedField, ord_executable: ExecutableRef?,
+    mut seen: List<BinderEntry>
+) {
+    let expected = match ord_executable {
+        some(_) => derived_action_call_leaf_count(field.action),
+        none => 0
+    }
+    if field.ord_result_binders.len() != expected {
+        panic("derived Ord binder/Call-leaf census changed")
+    }
+    for entry in field.ord_result_binders {
+        let executable = match ord_executable {
+            some(value) => value,
+            none => panic("non-Ord derived field carries result binder")
+        }
+        if !executable_ref_same(binder_entry_owner(entry), executable) ||
+           binder_kind_tag(binder_entry_kind(entry)) !=
+                binder_kind_tag(binder_kind_match_pattern()) {
+            panic("derived Ord result binder owner/kind differs")
+        }
+        let _ = make_source_binder_entry(
+            binder_entry_slot(entry), executable, binder_entry_kind(entry),
+            binder_entry_site(entry))
+        for existing in seen {
+            if slot_ref_same(
+                    binder_entry_slot(existing), binder_entry_slot(entry)) ||
+               path_ref_same(
+                    binder_entry_site(existing), binder_entry_site(entry)) {
+                panic("derived Ord result binder identity is duplicated")
+            }
+        }
+        seen.push(entry)
     }
 }
 
@@ -1475,14 +1563,13 @@ fn finalize_derived_impl(
             none => panic("derived Ord descriptor lost cmp executable")
         }
     } else { none }
-    let mut ordinal = 0
+    let mut ordinal: List<Int> = [0]
     let final_struct_fields = match di.struct_fields {
         some(fields) => {
             let mut result: List<DerivedField> = []
             for field in fields {
                 result.push(finalize_derived_field(
                     env, field, ord_executable, ordinal, type_mapping))
-                ordinal = ordinal + 1
             }
             some(result)
         },
@@ -1496,7 +1583,6 @@ fn finalize_derived_impl(
                 for field in variant.fields {
                     fields.push(finalize_derived_field(
                         env, field, ord_executable, ordinal, type_mapping))
-                    ordinal = ordinal + 1
                 }
                 result.push(DerivedVariant {
                     name: variant.name, variant_ref: variant.variant_ref,
@@ -1506,6 +1592,34 @@ fn finalize_derived_impl(
             some(result)
         },
         none => none
+    }
+    let mut ord_binders: List<BinderEntry> = []
+    match final_struct_fields {
+        some(fields) => {
+            for field in fields {
+                validate_derived_ord_field_binders(
+                    field, ord_executable, ord_binders)
+            }
+        },
+        none => {}
+    }
+    match final_variants {
+        some(variants) => {
+            for variant in variants {
+                for field in variant.fields {
+                    validate_derived_ord_field_binders(
+                        field, ord_executable, ord_binders)
+                }
+            }
+        },
+        none => {}
+    }
+    let produced_ord_binders = match ordinal.get(0) {
+        some(value) => value,
+        none => panic("derived Ord binder ordinal is absent")
+    }
+    if produced_ord_binders != ord_binders.len() {
+        panic("derived Ord binder production is not exhaustive")
     }
     DerivedImpl {
         semantic_kind: derived_impl_semantic_kind(di.trait_name),
@@ -1854,8 +1968,8 @@ fn try_derive(
                                             positional_index: some(j),
                                             field_ref: f.field_ref, ty: f.ty,
                                             action: f.action,
-                                            ord_result_binder:
-                                                f.ord_result_binder })
+                                            ord_result_binders:
+                                                f.ord_result_binders })
                                     }
                                     final_fields = updated
                                 }
@@ -1923,7 +2037,7 @@ fn try_derive_fields(
             some(a) => result.push(DerivedField {
                 name: field.name, positional_index: none,
                 field_ref: field.field_ref, ty: field.ty,
-                action: a, ord_result_binder: none }),
+                action: a, ord_result_binders: [] }),
             none => { return none },
         }
     }
