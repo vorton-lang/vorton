@@ -89,7 +89,7 @@ pub struct CheckResult {
     pub impl_facts: List<ModuleImplFact>
 }
 
-fn duplicate_direct_declaration_error_result(
+fn failed_check_result(
     ctx: InferCtx, prelude_physical_owner_module_key: Str
 ) -> CheckResult {
     CheckResult {
@@ -781,14 +781,14 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     match first_duplicate_direct_declaration(program) {
         some(duplicate) => {
             ctx.sink.report(duplicate_direct_declaration_diagnostic(duplicate))
-            return duplicate_direct_declaration_error_result(ctx, file_key)
+            return failed_check_result(ctx, file_key)
         },
         none => {}
     }
     match first_reserved_range_declaration(program) {
         some(span) => {
             ctx.sink.report(reserved_range_declaration_diagnostic(span))
-            return duplicate_direct_declaration_error_result(ctx, file_key)
+            return failed_check_result(ctx, file_key)
         },
         none => {}
     }
@@ -796,7 +796,16 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
     install_struct_identity_ledger(
         ctx, file_key,
         resolve_single_namespace_plan(program))
-    let hprogram = infer_check(ctx, program)
+    let inferred = some(infer_check(ctx, program)) catch { _ => none }
+    let hprogram = match inferred {
+        some(value) => value,
+        none => {
+            if !ctx.sink.has_errors() {
+                panic("checker: inference failed without a diagnostic")
+            }
+            return failed_check_result(ctx, file_key)
+        }
+    }
     let mut impl_facts: List<ModuleImplFact> = []
     validate_impl_carriers(ctx.env, hprogram.decls)
     collect_module_impl_facts(
@@ -1068,8 +1077,18 @@ pub fn check_module(
     let _ = install_project_namespace_plan(ctx, module_key, namespace_plan)
     install_struct_identity_ledger(ctx, module_key, namespace_plan)
     report_namespace_plan_issues(ctx, module_key, program, namespace_plan)
-    let hprogram = check_module_identity(
-        ctx, program, module_prefix, module_key)
+    let inferred = some(check_module_identity(
+        ctx, program, module_prefix, module_key)) catch { _ => none }
+    let hprogram = match inferred {
+        some(value) => value,
+        none => {
+            if !ctx.sink.has_errors() {
+                panic("project checker: inference failed without a diagnostic")
+            }
+            return failed_check_result(
+                ctx, prelude_physical_owner_module_key)
+        }
+    }
     // Project-wide builtin derived descriptors have one physical carrier and
     // are assembled by compiler_mod only after every module has crossed the
     // dictionary-lowering boundary.  Per-module checking validates user

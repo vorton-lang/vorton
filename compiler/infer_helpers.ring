@@ -88,20 +88,18 @@ fn make_inferred_ident(
                 }),
             ValueBindingKind::LocalBorrow => {
                 if is_constructor {
-                    match callable_receipt_effects(receipt) {
-                        some(effects) => if effects.substitutions.len() != 0 {
-                            panic("variant constructor: open callable producer is absent")
-                        },
-                        none => {}
-                    }
-                }
-                none
+                    some(HCallableValueInstantiation {
+                        type_args: callable_receipt_type_args(receipt),
+                        effects: callable_receipt_effects(receipt)
+                    })
+                } else { none }
             },
             ValueBindingKind::ConstGetter => none
         }
     } else { none }
-    let dict_closure_dicts: List<DictRef>? = if is_callable &&
-            materialize_value {
+    let dict_closure_dicts: List<DictRef>? = if is_callable && is_constructor {
+        some([])
+    } else if is_callable && materialize_value {
         match (kind, scheme) {
             (ValueBindingKind::DirectCallable, some(value)) => {
                 let output: List<DictRef> = []
