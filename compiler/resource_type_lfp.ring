@@ -8,7 +8,10 @@ use ir_inventory::{ExecutableRef, executable_ref_same}
 use core_type_source::{
     FlowGenericParamFact, make_flow_generic_param_fact,
     flow_generic_param_owner, flow_generic_param_index,
-    flow_generic_param_arity, flow_generic_param_bounds}
+    flow_generic_param_arity, flow_generic_param_bounds,
+    FlowTypeSubstitution, copy_flow_type_substitutions,
+    flow_type_substitution_parameter,
+    flow_type_substitution_replacement}
 use flow_ir::{
     FlowProjectionContract, FlowPlaceRef, FlowSemanticStepRef,
     flow_semantic_step_same,
@@ -655,26 +658,33 @@ enum PlannerCallTargetValue {
     SlotCallTargetValue(Int)
 }
 
-pub struct PlannerCallTarget { value: PlannerCallTargetValue }
+pub struct PlannerCallTarget {
+    value: PlannerCallTargetValue,
+    type_substitutions: List<FlowTypeSubstitution>
+}
 
-pub fn make_planner_direct_call_target(index: Int) -> PlannerCallTarget {
+pub fn make_planner_direct_call_target(
+    index: Int, type_substitutions: List<FlowTypeSubstitution>
+) -> PlannerCallTarget {
     if index < 0 { panic("ResourcePlanner: negative direct callable index") }
     PlannerCallTarget {
-        value: PlannerCallTargetValue::DirectCallTargetValue(index)
+        value: PlannerCallTargetValue::DirectCallTargetValue(index),
+        type_substitutions: copy_flow_type_substitutions(type_substitutions)
     }
 }
 
 pub fn make_planner_slot_call_target(slot: Int) -> PlannerCallTarget {
     if slot < 0 { panic("ResourcePlanner: negative callable slot index") }
     PlannerCallTarget {
-        value: PlannerCallTargetValue::SlotCallTargetValue(slot)
+        value: PlannerCallTargetValue::SlotCallTargetValue(slot),
+        type_substitutions: []
     }
 }
 
 fn copy_planner_call_target(value: PlannerCallTarget) -> PlannerCallTarget {
     match value.value {
         PlannerCallTargetValue::DirectCallTargetValue(index) =>
-            make_planner_direct_call_target(index),
+            make_planner_direct_call_target(index, value.type_substitutions),
         PlannerCallTargetValue::SlotCallTargetValue(slot) =>
             make_planner_slot_call_target(slot)
     }
@@ -699,6 +709,34 @@ pub fn planner_call_target_slot(value: PlannerCallTarget) -> Int {
         PlannerCallTargetValue::SlotCallTargetValue(slot) => slot,
         _ => panic("ResourcePlanner: direct call target has no callable slot")
     }
+}
+
+pub fn planner_call_target_type_substitutions(
+    value: PlannerCallTarget
+) -> List<FlowTypeSubstitution> {
+    if !planner_call_target_is_direct(value) &&
+       value.type_substitutions.len() != 0 {
+        panic("ResourcePlanner: indirect call carries type substitutions")
+    }
+    copy_flow_type_substitutions(value.type_substitutions)
+}
+
+pub fn planner_call_target_actual_type(
+    value: PlannerCallTarget, formal: FlowGenericParamFact
+) -> Int? {
+    if !planner_call_target_is_direct(value) { return none }
+    let mut found: Int? = none
+    for substitution in planner_call_target_type_substitutions(value) {
+        if planner_generic_param_fact_same(
+                flow_type_substitution_parameter(substitution), formal) {
+            if found.is_some() {
+                panic("ResourcePlanner: direct substitution repeats a formal")
+            }
+            found = some(core_type_ref_index(
+                flow_type_substitution_replacement(substitution)))
+        }
+    }
+    found
 }
 
 pub struct PlannerOperand {
@@ -1518,6 +1556,40 @@ fn validate_slot_index(index: Int, slots: List<PlannerSlot>) {
     }
 }
 
+fn planner_direct_actual_type(
+    target: PlannerCallTarget, formal_type_index: Int,
+    type_nodes: List<PlannerTypeNode>
+) -> Int? {
+    if !planner_call_target_is_direct(target) || formal_type_index < 0 ||
+       formal_type_index >= type_nodes.len() {
+        return none
+    }
+    let formal = match type_nodes.get(formal_type_index).unwrap().parameter_fact {
+        some(value) => value,
+        none => return none
+    }
+    let found = planner_call_target_actual_type(target, formal)
+    match found {
+        some(actual) => if actual < 0 || actual >= type_nodes.len() {
+            panic("ResourcePlanner: direct substitution actual is absent")
+        },
+        none => {}
+    }
+    found
+}
+
+fn planner_call_result_type_matches(
+    target: PlannerCallTarget, formal_type_index: Int,
+    actual_type_index: Int, type_nodes: List<PlannerTypeNode>
+) -> Bool {
+    if formal_type_index == actual_type_index { return true }
+    match planner_direct_actual_type(
+            target, formal_type_index, type_nodes) {
+        some(actual) => actual == actual_type_index,
+        none => false
+    }
+}
+
 fn validate_event(
     event: PlannerEvent, slots: List<PlannerSlot>,
     scopes: List<PlannerScope>, callables: List<PlannerCallable>,
@@ -1705,6 +1777,14 @@ fn validate_event(
                 panic("ResourcePlanner: call contract is incomplete")
             }
             if planner_call_target_is_direct(call_target) {
+                for substitution in
+                        planner_call_target_type_substitutions(call_target) {
+                    let actual = core_type_ref_index(
+                        flow_type_substitution_replacement(substitution))
+                    if actual < 0 || actual >= type_nodes.len() {
+                        panic("ResourcePlanner: direct call substitution is outside type graph")
+                    }
+                }
                 if callable_indices.len() != 1 ||
                    callable_indices.get(0).unwrap() !=
                         planner_call_target_direct(call_target) {
@@ -1742,7 +1822,9 @@ fn validate_event(
                     }
                     argument = argument + 1
                 }
-                if result_type_index != candidate.result_type_index ||
+                if !planner_call_result_type_matches(
+                        call_target, candidate.result_type_index,
+                        result_type_index, type_nodes) ||
                    (result_owned && !candidate.result_owned_seed) {
                     panic("ResourcePlanner: derived callable result contract differs")
                 }

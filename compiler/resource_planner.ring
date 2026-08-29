@@ -36,6 +36,7 @@ use flow_ir::{
     flow_callable_parameter_types, flow_callable_parameter_slots,
     flow_callable_result_type, flow_callable_mode,
     flow_callable_semantic_contract, flow_call_target_contract,
+    flow_call_target_type_substitutions,
     flow_call_target_is_direct, flow_call_target_is_local,
     flow_call_target_direct, flow_call_target_local,
     flow_call_target_dynamic, flow_callable_provenance_target,
@@ -430,8 +431,9 @@ fn planner_call_target_from_flow(
     callables: List<FlowCallable>
 ) -> PlannerCallTarget {
     if flow_call_target_is_direct(target) {
-        return make_planner_direct_call_target(flow_callable_index(
-            callables, flow_call_target_direct(target)))
+        return make_planner_direct_call_target(
+            flow_callable_index(callables, flow_call_target_direct(target)),
+            flow_call_target_type_substitutions(target))
     }
     if flow_call_target_is_local(target) {
         return make_planner_slot_call_target(flow_slot_index(
