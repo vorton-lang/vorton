@@ -14,6 +14,7 @@
 // try/catch; Ring 0.1 has no default handled-effect context path.
 //
 use types::{Type, EMPTY_ROW, type_to_builtin_name, types_equal}
+use env::{TypeScheme}
 use ast::{BinOp, UnaryOp, Pattern, LiteralValue, NamedPatternField, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
@@ -3306,9 +3307,10 @@ fn builtin_value_fact_for_callee(
     callee_ref: CalleeRef?
 ) -> BuiltinValueContractFact? {
     let symbol = match callee_ref {
-        some(value) => if callee_ref_is_named(value) {
+        some(value) => {
+            if !callee_ref_is_named(value) { return none }
             callee_ref_named_symbol(value)
-        } else { return none },
+        },
         none => return none
     }
     if symbol_ref_origin_module_key(symbol) != "$builtin" { return none }
