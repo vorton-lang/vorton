@@ -6111,9 +6111,17 @@ fn elaborate_derived_text(
 }
 
 fn append_derived_impl(
-    facts: FrozenCoreAssemblyFacts, module_body: ModuleBodyRef,
-    derived: DerivedImpl, mut assembly: ModuleAssembly
+    facts: FrozenCoreAssemblyFacts, derived: DerivedImpl,
+    mut assembly: ModuleAssembly
 ) {
+    let provider_site = impl_provider_ref_site(
+        impl_owner_ref_provider(derived.owner_ref))
+    let provider_owner = path_ref_owner(provider_site)
+    if path_owner_ref_is_symbol(provider_owner) {
+        panic("Core assembly: derived provider is not module-owned")
+    }
+    let executable_parent = make_module_body_parent(
+        path_owner_ref_module_body(provider_owner))
     let mut methods: List<ImplMethodRef> = []
     for method in derived.methods {
         let tag = derived_semantic_kind_tag(method.semantic_kind)
@@ -6130,7 +6138,7 @@ fn append_derived_impl(
         })
         let mutabilities = parameter_types.map(fn(_) { false })
         assembly.entries.push(make_executable_entry(
-            method.executable_ref, make_module_body_parent(module_body),
+            method.executable_ref, executable_parent,
             executable_kind_derived_impl(),
             make_concrete_body_contract(body_anchor(method.executable_ref))))
         assembly.callables.push(typed_callable_contract(
@@ -6154,11 +6162,11 @@ fn append_derived_impl(
 }
 
 fn append_derived_impls(
-    facts: FrozenCoreAssemblyFacts, module_body: ModuleBodyRef,
-    values: List<DerivedImpl>, mut assembly: ModuleAssembly
+    facts: FrozenCoreAssemblyFacts, values: List<DerivedImpl>,
+    mut assembly: ModuleAssembly
 ) {
     for value in values {
-        append_derived_impl(facts, module_body, value, assembly)
+        append_derived_impl(facts, value, assembly)
     }
 }
 
@@ -7382,8 +7390,7 @@ fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
         add_builtin_method_contracts(facts, assembly)
         add_builtin_value_contracts(facts, assembly)
         assemble_decls(facts, module_body, facts.program.decls, assembly)
-        append_derived_impls(
-            facts, module_body, facts.program.derived_impls, assembly)
+        append_derived_impls(facts, facts.program.derived_impls, assembly)
         validate_local_host_import_callables(facts, assembly)
         for value in assembly.callables {
             callables.push(remap_core_callable_types(
