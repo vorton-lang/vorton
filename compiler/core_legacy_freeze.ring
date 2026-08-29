@@ -299,6 +299,22 @@ fn callable_type_parameters(
     result
 }
 
+fn merge_callable_type_parameters(
+    outer: List<HTypeParam>, inner: List<HTypeParam>
+) -> List<HTypeParam> {
+    let mut result: List<HTypeParam> = []
+    for value in outer { result.push(value) }
+    for value in inner {
+        for existing in result {
+            if existing.type_var_id == value.type_var_id {
+                panic("Core/legacy freeze: callable type parameter repeats")
+            }
+        }
+        result.push(value)
+    }
+    result
+}
+
 fn callable_trait_bounds(
     parameters: List<LegacyTypeParameterProjection>,
     bounds: List<TraitBound>
@@ -774,7 +790,10 @@ fn add_derived_impl_facts(
     }
 }
 
-fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
+fn scan_decls(
+    mut builder: LegacyFactBuilder, values: List<HDecl>,
+    inherited_type_params: List<HTypeParam>
+) {
     let module_container = make_legacy_module_container(builder.module_body)
     for value in values {
         match value {
@@ -787,7 +806,10 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
                     if impl_method_ref.is_some() {
                         executable_kind_impl_method()
                     } else { executable_kind_fn() },
-                    module_container, type_params, trait_bounds, params,
+                    module_container,
+                    merge_callable_type_parameters(
+                        inherited_type_params, type_params),
+                    trait_bounds, params,
                     return_type, effects, true, is_pub, some(name))
                 scan_expr(builder, executable_ref, body)
             },
@@ -812,14 +834,16 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
                 builder, executable_ref, executable_kind_extern_fn(),
                 module_container, type_params, trait_bounds, params,
                 return_type, effects, false, is_pub, some(name)),
-            HDecl::Trait { name, methods, .. } => {
+            HDecl::Trait { name, type_params, methods, .. } => {
+                let callable_type_params = merge_callable_type_parameters(
+                    inherited_type_params, type_params)
                 for method in methods {
                     add_callable_fact(
                         builder, method.executable_ref,
                         if method.body.is_some() {
                             executable_kind_trait_default()
                         } else { executable_kind_bodyless_trait_member() },
-                        module_container, [], [], method.params,
+                        module_container, callable_type_params, [], method.params,
                         method.return_type, method.effects,
                         method.body.is_some(), false,
                         some("__${name}_${method.name}"))
@@ -830,13 +854,15 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
                     }
                 }
             },
-            HDecl::Effect { name, ops, .. } => {
+            HDecl::Effect { name, type_params, ops, .. } => {
+                let callable_type_params = merge_callable_type_parameters(
+                    inherited_type_params, type_params)
                 for op in ops {
                     match op.operation_ref {
                         some(reference) => add_callable_fact(
                             builder, effect_operation_ref_callable(reference),
                             executable_kind_bodyless_effect_operation(),
-                            module_container, [], [], op.params,
+                            module_container, callable_type_params, [], op.params,
                             op.return_type,
                             EffectRow { effects: [], tail: none }, false, false,
                             some("__${name}_${op.name}")),
@@ -853,7 +879,9 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
                     some(plan) => add_delegate_dictionaries(builder, plan),
                     none => {}
                 }
-                scan_decls(builder, methods)
+                let impl_type_params = merge_callable_type_parameters(
+                    inherited_type_params, type_params)
+                scan_decls(builder, methods, impl_type_params)
                 let mut method_refs = impl_method_refs(methods)
                 add_default_specialization_facts(
                     builder, default_specializations, method_refs)
@@ -877,18 +905,18 @@ fn scan_decls(mut builder: LegacyFactBuilder, values: List<HDecl>) {
                     make_legacy_physical_impl_fact_projection(
                         owner_ref, target_fact, target_ty,
                         impl_owner_ref_target(owner_ref), trait_ref,
-                        callable_type_parameters(type_params, []), assoc,
+                        callable_type_parameters(impl_type_params, []), assoc,
                         method_refs, builder.module_body, module_container)
                 } else {
                     make_legacy_impl_fact_projection(
                         owner_ref, target_fact, target_ty,
                         impl_owner_ref_target(owner_ref), trait_ref,
-                        callable_type_parameters(type_params, []), assoc,
+                        callable_type_parameters(impl_type_params, []), assoc,
                         method_refs, builder.module_body, module_container)
                 }
                 builder.impls.push(projection)
             },
-            HDecl::ModBlock { decls, .. } => scan_decls(builder, decls),
+            HDecl::ModBlock { decls, .. } => scan_decls(builder, decls, []),
             HDecl::Struct { .. } | HDecl::Enum { .. } |
             HDecl::ExternType { .. } | HDecl::TypeAlias { .. } => {}
         }
@@ -958,7 +986,7 @@ fn freeze_legacy_semantic_facts(
         callables: [], prelude_callables: [], builtin_callables: [],
         impls: [], dictionaries: [], physical_identities: [], shells: []
     }
-    scan_decls(builder, closed.decls)
+    scan_decls(builder, closed.decls, [])
     add_derived_impl_facts(builder, closed.derived_impls)
     if module_order == 0 { add_builtin_facts(builder, env) }
     let mut internal_types = [make_legacy_internal_type_fact_projection(
