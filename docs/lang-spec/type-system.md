@@ -337,10 +337,11 @@ apply(subst, τ):
 
 ── Enum 变体构造（位置）──
   枚举 E<P₁..Pₙ> 的变体 V 有字段 (σ₁, ..., σₘ)
-  构造器：V : (σ₁..σₘ) → E<P₁..Pₙ>
-  调用时：实例化构造器，统一参数
+  直接构造 V(e₁..eₘ) 时实例化 E 的类型参数并统一字段
   ─────────────────────────────────────────────
   Γ ⊢ V(e₁..eₘ) : E<α₁..αₙ> / (ε₁ ∪ ... ∪ εₘ)
+
+0.1的位置constructor不是普通函数值。带payload的constructor标识符不能脱离直接构造语法作为参数、返回值、变量或dynamic callee；例如`apply(some, value)`非法，诊断必须建议显式`apply(fn(x) { some(x) }, value)`。该限制不改变直接位置构造、named-field构造、用户nullary variant的fresh语义或builtin `Option.none`的borrowed singleton语义；编译器不得隐式生成constructor wrapper。
 
 ── Enum 变体构造（命名）──
   当名称解析为有命名字段的 enum 变体时触发。
