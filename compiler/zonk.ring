@@ -19,6 +19,10 @@ use hir::{HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
     h_exact_call_callee, h_exact_call_signature, h_exact_call_type_args,
     h_exact_call_method,
     h_exact_call_evidence, h_exact_call_effect_ctx,
+    HStringInterpPlan, make_h_string_interp_plan,
+    h_string_interp_builder_binder, h_string_interp_builder,
+    h_string_interp_append_literal, h_string_interp_append_value,
+    h_string_interp_finish, h_string_interp_value_to_string,
     HListLiteralPlan, make_h_list_literal_plan,
     h_list_literal_builder, h_list_literal_owner,
     h_list_literal_constructor, h_list_literal_allocator,
@@ -196,6 +200,20 @@ fn zonk_list_literal_plan(
         h_list_literal_constructor(value),
         zonk_exact_call_plan(ctx, h_list_literal_allocator(value)),
         zonk_exact_call_plan(ctx, h_list_literal_push(value)))
+}
+
+fn zonk_string_interp_plan(
+    ctx: ZonkCtx, value: HStringInterpPlan
+) -> HStringInterpPlan {
+    make_h_string_interp_plan(
+        h_string_interp_builder_binder(value),
+        zonk_exact_call_plan(ctx, h_string_interp_builder(value)),
+        zonk_exact_call_plan(ctx, h_string_interp_append_literal(value)),
+        zonk_exact_call_plan(ctx, h_string_interp_append_value(value)),
+        zonk_exact_call_plan(ctx, h_string_interp_finish(value)),
+        h_string_interp_value_to_string(value).map(fn(plan) {
+            zonk_exact_call_plan(ctx, plan)
+        }))
 }
 
 fn zonk_for_in_plan(ctx: ZonkCtx, value: HForInPlan) -> HForInPlan {
@@ -700,7 +718,9 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                         HStringInterpPart::Expression(e) => HStringInterpPart::Expression(zonk_expr(ctx, e)),
                     }
                 }),
-                plan: plan,
+                plan: plan.map(fn(value) {
+                    zonk_string_interp_plan(ctx, value)
+                }),
                 ty: z_ty, effects: z_eff, span: z_span
             },
         HExpr::TryCatch { body, error_type, arms, physical, .. } =>
