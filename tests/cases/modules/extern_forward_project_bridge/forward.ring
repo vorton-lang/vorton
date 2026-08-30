@@ -12,7 +12,7 @@ extern fn bridge_effect_contract() -> Int with {}
 extern fn borrow_resource(value: BridgeResource) -> Int with {}
 extern fn token_bridge(value: Token) -> Int
 extern fn generic_bridge<T>(value: T) -> T
-extern fn generic_hof<T>(callback: fn(T) -> T, value: T) -> T
+extern fn generic_select<T>(left: T, right: T) -> T
 
 // This remains genuine FFI even though another project module defines a
 // same-signature Ring function named parse_int: that module does not depend
@@ -31,10 +31,10 @@ pub fn call_borrow_resource() -> Int {
 pub fn call_token_bridge() -> Int {
     token_bridge(Token { value: 6 })
 }
-fn increment(value: Int) -> Int with {} { value + 1 }
-fn suffix(value: Str) -> Str with {} { "${value}!" }
 pub fn call_generic_bridge_int() -> Int { generic_bridge(8) }
 pub fn call_generic_bridge_str() -> Str { generic_bridge("stable") }
-pub fn call_generic_hof_int() -> Int { generic_hof(increment, 8) }
-pub fn call_generic_hof_str() -> Str { generic_hof(suffix, "nested") }
+pub fn call_generic_select_int() -> Int { generic_select(8, 9) }
+pub fn call_generic_select_str() -> Str {
+    generic_select("nested", "nested!")
+}
 pub fn call_ffi() -> Int { parse_int("7").unwrap_or(0) }

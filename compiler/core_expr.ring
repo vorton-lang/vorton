@@ -698,24 +698,6 @@ pub fn copy_core_executable_redirects(
     })
 }
 
-fn redirect_formal_bounds_same(
-    left: FlowGenericParamFact, right: FlowGenericParamFact
-) -> Bool {
-    let left_bounds = flow_generic_param_bounds(left)
-    let right_bounds = flow_generic_param_bounds(right)
-    if left_bounds.len() != right_bounds.len() { return false }
-    let mut index = 0
-    while index < left_bounds.len() {
-        if !symbol_ref_same(
-                left_bounds.get(index).unwrap(),
-                right_bounds.get(index).unwrap()) {
-            return false
-        }
-        index = index + 1
-    }
-    true
-}
-
 pub fn core_callable_redirect(
     source: CoreCallableContract, target: CoreCallableContract,
     graph: CoreTypeGraph
@@ -758,7 +740,8 @@ pub fn core_callable_redirect(
            flow_generic_param_index(target_fact) != type_index ||
            flow_generic_param_arity(source_fact) != source.type_formals.len() ||
            flow_generic_param_arity(target_fact) != target.type_formals.len() ||
-           !redirect_formal_bounds_same(source_fact, target_fact) {
+           flow_generic_param_bounds(source_fact).len() != 0 ||
+           flow_generic_param_bounds(target_fact).len() != 0 {
             return none
         }
         type_pairs.push((source_formal, target_formal))
