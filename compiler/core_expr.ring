@@ -2704,7 +2704,9 @@ fn validate_open_effect_set(value: CoreEffectSet) {
         }
     }
 }
-fn validate_dictionary_binder(value: ExactDictRef, body: CoreBody) {
+fn validate_dictionary_binder(
+    value: ExactDictRef, body: CoreBody
+) with {} {
     if dict_ref_is_local(value) {
         let slot = dict_ref_local(value)
         let binder = exact_binder(body.binders, slot)
