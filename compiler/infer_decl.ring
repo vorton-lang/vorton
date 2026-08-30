@@ -282,10 +282,10 @@ fn test_executable_for_site(ctx: InferCtx, decl_index: Int) -> ExecutableRef {
     if decl_index < 0 { panic("test executable: declaration index is missing") }
     let (file_key, frame_index) = current_impl_check_site(ctx)
     let owner = path_owner_for_module_body(
-        make_module_body_ref(
-            file_key, "inline-frame:${frame_index.to_str()}"))
+        make_module_body_ref(file_key, "module-body"))
     make_anonymous_executable_ref(make_path_ref(
-        owner, ["decl:${decl_index}", "test"], path_role_declaration()))
+        owner, ["inline-frame:${frame_index}:decl:${decl_index}:test"],
+        path_role_declaration()))
 }
 
 fn check_decl(
