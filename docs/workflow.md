@@ -208,6 +208,14 @@ Generic callable必须按子形态分流：factory/aggregate subforms在strict s
 
 Fast validation bus不因首个红项取消其他独立case；等待全部terminal后按exact failure identity去重汇总，再由confirmed结果决定下一班车。Static review在实现、construction与validation运行期间继续推进，但不得读取半写生成物或把moving WIP冒充fixed review snapshot。Fixed point、full、ASan、self-host与exact CI等存在artifact/前门依赖的sealed关键链仍服从各自DAG、per-SHA artifact exclusivity与no-retry纪律；不同SHA的独立节点可在最多3辆在途班车内并发。同SHA内部与全部班车汇总后均没有班车级进程数量门，只有既定memory/ASan资源门及具体sealed命令自身的active spec。
 
+### 4.3.4 Root EvidenceKey 与因果对账门
+
+高风险recommendation、route stop、用户decision packet、sealed transaction，以及把static review提升为behavior/durable claim之前，root必须亲自核对同一个`EvidenceKey = (source SHA, artifact或patch SHA, producer command/receipt, observed stage)`；subagent数量、review“CLEAR”或彼此一致不能替代root读取exact source/artifact。证据输出必须区分`observed fact`、`inference`、`hypothesis`与`unverified assumption`，未知项不得写成root cause、green或用户已批准事实。
+
+任一source SHA、artifact/patch SHA或observed stage变化，先前census、ABI/layout结论、review与Argument默认失效；只有root给出该diff不影响结论的直接证据后才能复用。不得把current source静态事实外推到old seed binary，不得把另一candidate或同名temp路径的schema/ABI当成固定artifact，也不得把static CLEAR冒充behavior evidence。
+
+每个高风险或长交易只有一个root-owned causal hypothesis，并在启动前记录expected first falsifier、retained facts与本交易会使哪些旧结论失效。结果反驳hypothesis后，依赖它的patch、review和后续计划立即失效；root完成因果对账前不得派生下一实现。并行只读lens必须绑定同一EvidenceKey并各自标明question；它们可以互相反驳，但不能形成多个竞争的causal owner。机器并发与认知因果单线彼此独立：该门不限制安全的独立进程，只禁止用并行票数或持续补位绕过事实归属。
+
 ### 4.4 执行与并发
 
 - S 且路径唯一的工作可由 root 直接在 main 完成；
