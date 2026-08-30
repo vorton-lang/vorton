@@ -2361,7 +2361,11 @@ fn register_trait(
                 }
                 let ret = match return_type {
                     some(rt) => resolve_type_expr(ctx, rt),
-                    none => ctx.env.fresh_var()
+                    none => if is_abstract {
+                        Type::UnitType
+                    } else {
+                        ctx.env.fresh_var()
+                    }
                 }
                 // #77: Resolve declared effects so delegate forwarding can propagate evidence
                 let method_effects = match declared_effects {

@@ -71,7 +71,7 @@ fn dummy_span() -> Span {
 // ============================================================
 
 pub trait DiagnosticSink {
-    fn report(mut self, d: Diagnostic)
+    fn report(mut self, d: Diagnostic) -> Unit
     fn has_errors(self) -> Bool
     fn get_diagnostics(self) -> List<Diagnostic>
 }
