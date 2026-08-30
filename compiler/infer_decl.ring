@@ -1118,6 +1118,15 @@ fn draft_canonical_type_var_ids(
                     none => result.insert(representative, source)
                 }
             },
+            Type::EffectRowType { tail: some(representative), .. } => {
+                match result.get(representative) {
+                    some(existing) => if !effect_tails.contains(existing) {
+                        panic(
+                            "function zonk: effect tail shares a value formal representative")
+                    },
+                    none => result.insert(representative, source)
+                }
+            },
             _ => {}
         }
     }
