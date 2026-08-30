@@ -47,6 +47,10 @@
 
 **当前未发布期 standing decision（2026-08-07）**：对于已经依上述授权边界拍板的变更，Steward 应选择 clean break，不得仅为向后兼容追加 deprecated alias、双 ABI/双语义路径、旧行为 fallback 或迁移 shim；仓内消费者、规范和测试原子迁移。该 standing decision 只消除兼容层工作，不把尚未拍板的新语法、公开语义或保证变更转为 Steward 自主决定，也不允许降低 correctness、ownership/safety、验证或可移植性门槛。首次公开发布后重新建立版本兼容规则。
 
+**一次性topo-prefix bootstrap例外（2026-08-30 用户批准）**：只允许对固定clean `d06 main.c` blob做已独立review的三语句generated-C修改：在`compiler_mod::compile_phases`中丢弃每module的direct-deps `r_deps`，改借`graph.topo_order`的deterministic borrowed copy；既有`module_exports_map`只命中已完成module，因而实际hydrate prior-topological metadata prefix。该例外只服务exact83 private-type overlay（21 files、63 enum+20 struct、241 variants、8 pure header annotations、unexpected diff 0）跨越旧seed的direct-only metadata边界；source namespace仍唯一由`namespace_plan`裁决，不新增name fallback、alias、registry或公开语义。
+
+固定seed/blob/source/patch/manifest/tool/output必须hash-pinned。Patched seed只编译overlay bridge，bridge只编译clean private current source；patched seed、overlay与bridge都不是candidate，不得commit、进入tracked anchor、形成fallback或复用为后续seed，crossing后永久删除。只有clean second product可进入gen2/gen3 fixed point与compiler/hello smoke；失败立即停止，任何不同或额外generated-C改动都必须重新取得用户批准。本例外之外的generated-C compatibility shim继续受standing decision禁止。
+
 **GitHub 竞品雷达 standing authorization（2026-08-08）**：用户将公开的 [`Ring-lang` Star List](https://github.com/stars/YYF233333/lists/ring-lang) 交由 Steward 持续维护。Steward 可按 `docs/competitive-analysis.md` 的口径读取该清单、为纳入清单而 Star 官方仓库、更新清单描述，并自主增删清单成员；这项授权不扩展到其他 GitHub 外部状态、私有资源、付费资源、发布或仓库权限。移出 `Ring-lang` 清单默认只删除清单成员关系，不取消用户已有 Star，除非用户另行明确授权。清单是研究雷达与复查入口，不是产品事实或采用度证据，也不替代用户保留的语言方向与 release 决定。
 
 修复违反既有公开语义或 safety/ownership 保证的 bug，不等于修改该保证：只要候选方案都恢复既有契约，Steward 经 Argument + 独立反驳后自主选择内部实现。只有接受已知违约、降低/豁免保证或改变契约本身才必须交由用户。
