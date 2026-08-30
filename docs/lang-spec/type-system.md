@@ -84,6 +84,12 @@ Set<T>       — 可变无序集合
 
 三者都在标准库中声明为纯 Ring struct。`List<T>` 的值相等/排序操作分别要求 `T: Eq` / `T: Ord`；Map 的 key lookup 与 Set 的成员操作要求 key/element 满足 `Hash + Eq`。公开方法和当前字段定义以 [`std/list.ring`](../../std/list.ring)、[`std/map.ring`](../../std/map.ring) 与 [`std/set.ring`](../../std/set.ring) 为准。
 
+### 0.1 保留的 type binding
+
+Ring 0.1 在 type namespace 中保留以下 18 个最终本地绑定名：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`Ptr`、`Range`、`Cell`、`Option`、`List`、`ListIterator`、`Map`、`MapIterator`、`Set`、`SetIterator`、`StringBuilder`、`Result`。用户的 struct、enum、extern type、type alias，或 import/re-export，不得在可见 type namespace 建立这些名字，冲突稳定报 `E0207`；它们不是词法关键字，value、function、trait、effect 与 module namespace 的同名绑定仍合法。只有编译器固定的 canonical builtin/std loader producer 可建立这些 0.1 绑定。
+
+这是 0.1 的已知限制，不把最终会迁入标准库的类型永久定义为语言 builtin。相应类型随既有标准库/RIIR 迁移成为普通 module type 后，逐项解除其保留绑定；届时同名类型遵守普通 module/import 冲突规则，并通过限定路径或 import alias 消歧。真正保留在语言中的 builtin type（例如 `Range`）继续不可覆盖。本规则不新增 exact-owner Type carrier或第二套名字 authority。
+
 ### 类型变量
 
 ```
@@ -364,7 +370,7 @@ apply(subst, τ):
   Γ ⊢ start..end : Range<Int> / (ε₁ ∪ ε₂)
   Γ ⊢ start..=end : Range<Int> / (ε₁ ∪ ε₂)
 
-这里的 `Range` 必须是 exact builtin nominal owner，不能由当前模块或 import 的同名 type binding 遮蔽。用户 struct、enum、extern type、type alias 或 import/re-export 若在可见 type namespace 产生 `Range`，稳定报 `E0207`；value/function namespace 的同名绑定仍合法。
+这里的 `Range` 必须是 exact builtin nominal owner，并服从上文 0.1 保留 type binding gate；当前模块或 import 不得以同名 type binding 遮蔽它。
 
 ── 块 ──
   Γ ⊢ stmt₁ ⇒ (Γ₁, ε₁)

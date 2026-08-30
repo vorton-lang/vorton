@@ -483,7 +483,9 @@ Ring 0.1 的 builtin public `Eq` contract 只有 exact `eq` member。`==` dispat
 | **整数除零** | panic | 所有 native lane 一致 |
 | **栈溢出** | 实现定义的 panic 或 abort | 不保证所有平台均可捕获 |
 
-**`Range` 内建类型名（2026-08-27 用户决定）**：`Range<T>` 是语言预声明的 nominal type；`start..end` 与 `start..=end` 固定产生 exact builtin `Range<Int>`，range annotation、构造与 `for-in` 特化必须引用同一 owner。`Range` 只在 type namespace 中保留：用户的 struct、enum、extern type、type alias 或 import/re-export 不得在可见 type namespace 建立同名绑定，冲突稳定报 `E0207`。它不是词法关键字，也不限制 value/function namespace 中的同名绑定；本规则不顺带保留其他 builtin 名称。
+**0.1 保留 type binding gate（2026-08-30 用户批准 Nominal B）**：0.1 的 type namespace 暂时保留完整集合 `Int Float Str Bool Unit Never Ptr Range Cell Option List ListIterator Map MapIterator Set SetIterator StringBuilder Result`。用户的 struct、enum、extern type、type alias 或 import/re-export 不得建立这些最终本地绑定名，冲突稳定报 `E0207`；只有固定 canonical builtin/std loader producer可建立它们。该集合不是 lexer keyword，也不限制 value、function、trait、effect 或 module namespace。实现不得用local-wins覆盖、Type name side map或exact-owner Type纵切绕过本门。
+
+其中真正的语言 builtin type继续永久不可覆盖；当前以内建方式注入但最终属于标准库的类型，本门明确作为0.1已知限制。它们随既有标准库/RIIR迁移逐项成为ordinary module type后解除对应保留名，同名来源通过qualified path或import alias消歧，不静默覆盖。该解锁复用既有迁移真值，不新增post-0.1 item。`Range<T>`仍是语言预声明nominal；range语法、annotation、构造与`for-in`特化固定引用同一exact builtin owner。
 
 #### 1.7.1 字符串编码模型
 

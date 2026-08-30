@@ -143,6 +143,12 @@ pub use leaf::Wrap
 
 最后一种写法在re-export处稳定报错并建议同时公开owner enum。直接`pub use`一个enum仍自动携带其constructors；private/local `use`不受该public closure规则影响。实现按exact `VariantRef.owner`核对，不能从constructor leaf、alias spelling或唯一名字猜owner，也不能为接受constructor-only facade而隐式扩大type/impl可见性。
 
+### 0.1 保留 type binding 与模块冲突
+
+0.1 的 type namespace 保留集合为：`Int Float Str Bool Unit Never Ptr Range Cell Option List ListIterator Map MapIterator Set SetIterator StringBuilder Result`。Direct type declaration、`use` 或 `pub use` 的最终本地绑定名若命中该集合，稳定报 `E0207`；same-origin delivery或re-export不能豁免保留名冲突，alias只按其最终本地名字判定，改成非保留名后服从普通模块规则。只有固定 canonical builtin/std loader producer 具有内部豁免。该规则不限制 value、function、trait、effect 或 module namespace 的同名符号。
+
+这是一项 0.1 已知限制：最终上移到标准库的类型完成既有标准库/RIIR 迁移后，会逐项恢复为普通 module type；此后两个来源的同名 type binding 不能静默互相覆盖，用户应保留限定路径或使用非冲突的 import alias。真正的语言 builtin type仍保持不可覆盖。该迁移不需要在本规范中建立新的 post-0.1 item。
+
 ## Inline `mod` 块
 
 除了基于文件的模块外，Ring 支持在同一文件内定义 inline 模块块。
