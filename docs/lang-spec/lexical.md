@@ -33,7 +33,7 @@ while  break  continue loop  use     as      extern  mod
 super  requires unsafe
 ```
 
-注意：`type`、`delegate`、`self`、`sig` 不是关键字。`type`、`delegate`、`self` 在特定上下文中由 Parser 特殊解析；0.1 没有 `sig` 声明，因此 `sig` 是普通标识符。Post-0.1 若重新设计完整 module signature conformance，必须选择不破坏 0.1 标识符的 contextual/versioned syntax。`try` 是保留关键字，使用时产生编译错误。
+注意：`type`、`delegate`、`self`、`sig` 不是关键字。`type`与`self`在特定上下文中由 Parser 特殊解析；0.1没有`delegate`或`sig`声明，因此二者都是普通标识符。Post-0.1若重新设计相应语法，必须选择不破坏0.1标识符的contextual/versioned syntax。`try`是保留关键字，使用时产生编译错误。
 
 ## 运算符和定界符
 

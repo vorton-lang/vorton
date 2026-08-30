@@ -84,6 +84,12 @@ Set<T>       — 可变无序集合
 
 三者都在标准库中声明为纯 Ring struct。`List<T>` 的值相等/排序操作分别要求 `T: Eq` / `T: Ord`；Map 的 key lookup 与 Set 的成员操作要求 key/element 满足 `Hash + Eq`。公开方法和当前字段定义以 [`std/list.ring`](../../std/list.ring)、[`std/map.ring`](../../std/map.ring) 与 [`std/set.ring`](../../std/set.ring) 为准。
 
+### 0.1 raw payload 的 generic aggregate 边界
+
+Ring 0.1 不允许 `Ptr` 或 non-RC `extern type` 递归出现在 generic aggregate 的 storage type argument 中；例如 `List<Ptr<T>>`、`Option<ForeignHandle>`、`Map<K, Ptr<V>>` 以及用户 generic struct/enum 中保存同类actual均稳定报错。Direct `Ptr`/extern value、top-level extern ABI与只使用普通Ring-managed actual的generic container/HOF不受影响。
+
+该限制避免shared/erased aggregate依赖runtime payload-policy mask：0.1不存在B-min hidden evidence、packed mask、function table或按name/header猜RC策略。若某generic function不形成此类aggregate storage，本条本身不额外禁止其direct type actual；其普通ownership规则仍由现有类型与ResourcePlanner契约裁决。
+
 ### 0.1 保留的 type binding
 
 Ring 0.1 在 type namespace 中保留以下 18 个最终本地绑定名：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`Ptr`、`Range`、`Cell`、`Option`、`List`、`ListIterator`、`Map`、`MapIterator`、`Set`、`SetIterator`、`StringBuilder`、`Result`。用户的 struct、enum、extern type、type alias，或 import/re-export，不得在可见 type namespace 建立这些名字，冲突稳定报 `E0207`；它们不是词法关键字，value、function、trait、effect 与 module namespace 的同名绑定仍合法。只有编译器固定的 canonical builtin/std loader producer 可建立这些 0.1 绑定。
@@ -432,7 +438,7 @@ apply(subst, τ):
   见 Effect 系统规范。
 ```
 
-Ring 0.1 的 builtin public `Eq` trait 只包含 `eq`；不存在 `ne` member、override slot 或默认 body。`!=` 的唯一语义是 `!Eq.eq(left, right)`，不得通过独立 `Ne` intrinsic、dictionary slot、derived method 或后端名字分派实现。该限制只适用于 builtin `Eq`，不删除用户 source trait 的一般 default method 能力。
+Ring 0.1 的 builtin public `Eq` trait 只包含 `eq`；不存在 `ne` member、override slot 或默认 body。`!=` 的唯一语义是 `!Eq.eq(left, right)`，不得通过独立 `Ne` intrinsic、dictionary slot、derived method 或后端名字分派实现。0.1 source trait同样只允许method signature，不提供一般default method body；builtin/auto-derived exact impl不属于source default。
 
 ### 语句
 
