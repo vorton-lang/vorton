@@ -2534,7 +2534,7 @@ pub fn is_exact_direct_call_ident(expr: HExpr) -> Bool {
     }
 }
 
-pub fn is_materialized_fn_value(expr: HExpr) -> Bool {
+pub fn is_materialized_fn_value(expr: HExpr) -> Bool with {} {
     match expr {
         HExpr::Ident { dict_closure_dicts, .. } => dict_closure_dicts.is_some(),
         HExpr::Block { tail, .. } => match tail {
@@ -2582,7 +2582,11 @@ pub fn default_method_self_name(type_name: Str) -> Str {
 // plus the built-in trait seeds; a backend must consume these instead of
 // hardcoding its own registry (the LLVM backend's private scan_trait_decls
 // predates this and is retired with the backend in B-163 Phase 2).
-pub fn scan_trait_method_order(decls: List<HDecl>, mut trait_method_order: Map<Str, List<Str>>, mut trait_supertraits: Map<Str, List<Str>>) {
+pub fn scan_trait_method_order(
+    decls: List<HDecl>,
+    mut trait_method_order: Map<Str, List<Str>>,
+    mut trait_supertraits: Map<Str, List<Str>>
+) with {mut<Map<Str, List<Str>>>} {
     for decl in decls {
         match decl {
             HDecl::Trait { name, methods, supertraits, .. } => {
