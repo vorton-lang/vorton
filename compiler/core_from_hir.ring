@@ -102,7 +102,7 @@ use ir_identity::{
     impl_method_ref_owner,
     impl_method_ref_member,
     impl_method_ref_callable_slot_index,
-    intrinsic_ref_symbol, trait_method_ref_member,
+    intrinsic_ref_symbol, trait_method_ref_trait, trait_method_ref_member,
     intrinsic_ref_same, trait_method_ref_same,
     BUILTIN_METHOD_SITE_COUNT,
     builtin_value_site_tag, BUILTIN_VALUE_SITE_COUNT,
