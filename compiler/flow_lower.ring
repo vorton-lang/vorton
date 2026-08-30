@@ -138,12 +138,14 @@ use core_type_source::{
     core_type_graph_nodes,
     FlowTypeNode, FlowFieldIdentity,
     flow_type_node_kind, flow_type_kind_tag, flow_type_kind_never,
+    flow_type_kind_unit,
     copy_flow_type_graph_nodes,
     make_nominal_flow_field_identity, make_variant_flow_field_identity,
     make_path_flow_field_identity
 }
 use resource_model::{
     FlowStorageContract, flow_own_storage, flow_borrow_storage,
+    flow_storage_contract_tag,
     FlowSemanticRole, flow_semantic_role_read,
     flow_semantic_role_mutate, flow_semantic_role_consume,
     make_fresh_flow_value_origin
@@ -168,6 +170,7 @@ use flow_ir::{
     flow_storage_temp, flow_storage_result, flow_storage_capture,
     flow_storage_context,
     flow_slot_reference, flow_slot_type, flow_slot_scope,
+    flow_slot_storage, flow_slot_storage_contract,
     make_flow_successor,
     make_flow_goto, make_flow_branch, make_flow_loop,
     make_flow_return, make_flow_continue,
@@ -307,8 +310,8 @@ fn core_flow_step_role_from_tag(
     if tag < CORE_FLOW_ROLE_EXPR_PRIMARY || tag >= CORE_FLOW_ROLE_COUNT ||
        ordinal < 0 ||
        ((tag == CORE_FLOW_ROLE_EXPR_PRIMARY ||
-         tag == CORE_FLOW_ROLE_STMT_ASSIGN ||
-         tag == CORE_FLOW_ROLE_BODY_RETURN) && ordinal != 0) {
+         tag == CORE_FLOW_ROLE_STMT_ASSIGN) && ordinal != 0) ||
+       (tag == CORE_FLOW_ROLE_BODY_RETURN && ordinal > 1) {
         panic("Flow lowering: invalid Core/Flow step role")
     }
     CoreFlowStepRole { tag: tag, ordinal: ordinal }
@@ -328,8 +331,8 @@ fn core_flow_role_branch_merge(ordinal: Int) -> CoreFlowStepRole {
 fn core_flow_role_control_exit(ordinal: Int) -> CoreFlowStepRole {
     core_flow_step_role_from_tag(CORE_FLOW_ROLE_CONTROL_EXIT, ordinal)
 }
-fn core_flow_role_body_return() -> CoreFlowStepRole {
-    core_flow_step_role_from_tag(CORE_FLOW_ROLE_BODY_RETURN, 0)
+fn core_flow_role_body_return(ordinal: Int) -> CoreFlowStepRole {
+    core_flow_step_role_from_tag(CORE_FLOW_ROLE_BODY_RETURN, ordinal)
 }
 pub fn core_flow_step_role(value: CoreFlowStepRelation) -> CoreFlowStepRole {
     value.role
@@ -849,6 +852,22 @@ fn all_exited_scopes(ctx: FlowLowerCtx) -> List<FlowScopeRef> {
     scope_lineage(ctx, current_draft(ctx).scope)
 }
 
+fn return_exited_scopes(ctx: FlowLowerCtx) -> List<FlowScopeRef> {
+    let lineage = scope_lineage(ctx, current_draft(ctx).scope)
+    let root = make_flow_scope_ref(ctx.owner, 0)
+    if lineage.len() < 2 ||
+       !flow_scope_ref_same(lineage.last().unwrap(), root) {
+        panic("Flow lowering: Return has no lexical body scope")
+    }
+    let mut result: List<FlowScopeRef> = []
+    let mut index = 0
+    while index + 1 < lineage.len() {
+        result.push(lineage.get(index).unwrap())
+        index = index + 1
+    }
+    result
+}
+
 fn callable_for(
     ctx: FlowLowerCtx, reference: ExecutableRef
 ) -> CoreCallableContract {
@@ -859,13 +878,52 @@ fn callable_for(
     }
     panic("Flow lowering: exact Core callable is absent")
 }
-fn frozen_slot_type_at(ctx: FlowLowerCtx, slot: SlotRef) -> CoreTypeRef {
+fn frozen_slot_at(ctx: FlowLowerCtx, slot: SlotRef) -> FlowSlot {
     for value in ctx.slots {
         if slot_ref_same(flow_slot_reference(value), slot) {
-            return flow_slot_type(value)
+            return value
         }
     }
-    panic("Flow lowering: Core slot type is absent")
+    panic("Flow lowering: Core slot is absent")
+}
+fn frozen_slot_type_at(ctx: FlowLowerCtx, slot: SlotRef) -> CoreTypeRef {
+    flow_slot_type(frozen_slot_at(ctx, slot))
+}
+
+fn callable_result_needs_sink(ctx: FlowLowerCtx) -> Bool {
+    let result = ctx.type_nodes.get(core_type_ref_index(
+        core_body_result_type(ctx.core_body))).unwrap_or_else(fn() {
+        panic("Flow lowering: callable result type is absent")
+    })
+    let kind = flow_type_kind_tag(flow_type_node_kind(result))
+    kind != flow_type_kind_tag(flow_type_kind_unit()) &&
+        kind != flow_type_kind_tag(flow_type_kind_never())
+}
+
+fn stabilize_return_value(
+    mut ctx: FlowLowerCtx, source: SlotRef,
+    origin: OriginRef, role: CoreFlowStepRole
+) -> SlotRef {
+    let source_slot = frozen_slot_at(ctx, source)
+    let storage_contract = flow_slot_storage_contract(source_slot)
+    let sink = new_admin_slot(
+        ctx, flow_slot_type(source_slot), make_flow_scope_ref(ctx.owner, 0),
+        binder_kind_scope_result(), "return-sink", 1,
+        flow_slot_storage(source_slot), flow_initial_slot_empty(),
+        storage_contract)
+    let contract_tag = flow_storage_contract_tag(storage_contract)
+    if contract_tag == flow_storage_contract_tag(flow_own_storage()) {
+        emit_instruction(ctx, make_flow_assign(
+            next_instruction_ref(ctx), origin, source,
+            make_flow_slot_place(sink)), role)
+    } else if contract_tag ==
+            flow_storage_contract_tag(flow_borrow_storage()) {
+        emit_instruction(ctx, make_flow_read(
+            next_instruction_ref(ctx), origin, source, sink), role)
+    } else {
+        panic("Flow lowering: Return source storage contract is unknown")
+    }
+    sink
 }
 
 fn flow_primitive(tag: Int) -> FlowPrimitiveOp {
@@ -2125,7 +2183,7 @@ fn lower_statement(
             core_flow_role_control_exit(0))
     } else if kind == 6 {
         let returned = core_stmt_return_value(statement)
-        let returned_slot = match returned {
+        let source_slot = match returned {
             some(expr) => some(lower_expr(
                 ctx, expr, continue_target, break_target)),
             none => none
@@ -2134,9 +2192,14 @@ fn lower_statement(
             restore_core_node(ctx, previous)
             return
         }
+        let returned_slot = if callable_result_needs_sink(ctx) {
+            source_slot.map(fn(source) { stabilize_return_value(
+                ctx, source, origin, core_flow_role_control_exit(0)) })
+        } else { none }
+        let return_role = if returned_slot.is_some() { 1 } else { 0 }
         terminate(ctx, make_flow_return(
-            origin, returned_slot, all_exited_scopes(ctx)),
-            core_flow_role_control_exit(0))
+            origin, returned_slot, return_exited_scopes(ctx)),
+            core_flow_role_control_exit(return_role))
     } else if kind == 7 {
         let source = lower_expr(
             ctx, core_stmt_destructure_scrutinee(statement),
@@ -2211,10 +2274,11 @@ fn lower_core_body(
         active_node: none, next_node_ordinal: first_node_ordinal,
         nodes: [], step_relations: [], catch_targets: []
     }
+    let body_scope = new_child_scope(ctx, root_scope)
     let _ = enter_core_node(
         ctx, CORE_FLOW_NODE_BODY, 0, core_body_origin(body), none)
     for parameter in core_body_parameter_slots(body) {
-        activate_core_binder(ctx, parameter, root_scope)
+        activate_core_binder(ctx, parameter, body_scope)
     }
     for binder in core_body_binders(body) {
         let kind_tag = binder_kind_tag(core_binder_kind(binder))
@@ -2224,20 +2288,26 @@ fn lower_core_body(
            kind_tag == binder_kind_tag(
                 binder_kind_effect_ctx_parent_capture()) {
             activate_core_binder(
-                ctx, core_binder_reference(binder), root_scope)
+                ctx, core_binder_reference(binder), body_scope)
         }
     }
-    let entry = new_draft(ctx, core_block_origin(root_block), root_scope)
+    let entry = new_draft(ctx, core_block_origin(root_block), body_scope)
     set_current(ctx, entry)
     let tail = lower_core_block(ctx, root_block, none, none)
     if !is_terminated(ctx) {
+        let returned = if callable_result_needs_sink(ctx) {
+            tail.map(fn(source) { stabilize_return_value(
+                ctx, source, core_body_origin(body),
+                core_flow_role_body_return(0)) })
+        } else { none }
+        let return_role = if returned.is_some() { 1 } else { 0 }
         terminate(ctx, make_flow_return(
-            core_body_origin(body), tail, all_exited_scopes(ctx)),
-            core_flow_role_body_return())
+            core_body_origin(body), returned, return_exited_scopes(ctx)),
+            core_flow_role_body_return(return_role))
     }
     for binder in core_body_binders(body) {
         if !flow_slot_exists(ctx, core_binder_reference(binder)) {
-            activate_core_binder(ctx, core_binder_reference(binder), root_scope)
+            activate_core_binder(ctx, core_binder_reference(binder), body_scope)
         }
     }
     if ctx.catch_targets.len() != 0 {

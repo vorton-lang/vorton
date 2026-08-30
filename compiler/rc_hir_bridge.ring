@@ -130,6 +130,7 @@ use flow_ir::{
     flow_operation_contract_dict_construct_result,
     flow_fail_raise_sink,
     flow_terminator_kind_tag, flow_terminator_successors,
+    flow_terminator_read_slots,
     flow_pattern_branch_scrutinee, flow_branch_condition,
     flow_raise_error,
     flow_slot_reference, flow_slot_type
@@ -1338,6 +1339,60 @@ fn terminator_for_node_role(
     terminator
 }
 
+struct SerializedReturnSink {
+    statements: List<HStmt>, sink: SlotRef
+}
+
+fn serialize_return_sink(
+    ctx: HirBridgeCtx, node_ordinal: Int, source: SlotRef,
+    selector: Int
+) -> SerializedReturnSink {
+    let step = step_for_node_role(ctx, node_ordinal, selector, 0)
+    let instruction = instruction_for_step(ctx, step)
+    let kind = flow_instruction_kind_tag(instruction)
+    let sink = if kind == 5 {
+        let target = flow_assign_target(instruction)
+        if !slot_ref_same(flow_assign_rhs_temp(instruction), source) ||
+           !flow_place_is_slot(target) {
+            panic("RcHIR bridge: Return Assign relation differs")
+        }
+        flow_place_slot(target)
+    } else if kind == 1 {
+        if !slot_ref_same(flow_read_source(instruction), source) {
+            panic("RcHIR bridge: Return Read source differs")
+        }
+        flow_read_target(instruction)
+    } else {
+        panic("RcHIR bridge: Return sink transfer is not Assign/Read")
+    }
+    let mut statements = before_drop_statements(
+        ctx, node_ordinal, none, selector, 0)
+    statements.push(bridge_let_for_slot(
+        ctx, sink, wrap_resource_operand(
+            ctx, node_ordinal, 0, source, selector, 0)))
+    append_all(statements, after_resource_statements(
+        ctx, node_ordinal, selector, 0))
+    SerializedReturnSink { statements: statements, sink: sink }
+}
+
+fn validate_return_terminator(
+    ctx: HirBridgeCtx, node_ordinal: Int,
+    selector: Int, role_ordinal: Int, sink: SlotRef?
+) {
+    let terminator = terminator_for_node_role(
+        ctx, node_ordinal, selector, role_ordinal, 3)
+    let values = flow_terminator_read_slots(terminator)
+    match sink {
+        some(expected) => if values.len() != 1 ||
+                !slot_ref_same(values.get(0).unwrap(), expected) {
+            panic("RcHIR bridge: Return terminator sink differs")
+        },
+        none => if values.len() != 0 {
+            panic("RcHIR bridge: Unit Return carries a sink")
+        }
+    }
+}
+
 fn validate_flow_variant_initialize(
     instruction: FlowInstruction, variant: VariantRef
 ) {
@@ -2390,19 +2445,31 @@ fn serialize_core_statement(
                     init: serialized.value, span: span_zero()
                 })
                 append_all(result, serialized.after)
-                returned_slot = some(slot)
+                if !types_equal(
+                        legacy_binder_projection_type(binder),
+                        Type::UnitType) {
+                    let stable = serialize_return_sink(
+                        ctx, node_ordinal, slot,
+                        BRIDGE_ROLE_CONTROL_EXIT)
+                    append_all(result, stable.statements)
+                    returned_slot = some(stable.sink)
+                }
             },
             none => {}
         }
+        let return_role = if returned_slot.is_some() { 1 } else { 0 }
+        validate_return_terminator(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT,
+            return_role, returned_slot)
         append_all(result, before_terminator_drops(
-            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0))
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, return_role))
         append_all(result, edge_cleanup_statements(
-            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0, 0))
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, return_role, 0))
         result.push(HStmt::Return {
             value: match returned_slot {
                 some(slot) => some(wrap_terminator_operand(
                     ctx, node_ordinal, 0, slot,
-                    BRIDGE_ROLE_CONTROL_EXIT, 0)),
+                    BRIDGE_ROLE_CONTROL_EXIT, return_role)),
                 none => none
             },
             span: span_zero()
@@ -2506,7 +2573,7 @@ fn serialize_callable_body(
     for statement in core_block_statements(block) {
         append_all(statements, serialize_core_statement(ctx, reference, statement))
     }
-    let mut tail: HExpr? = none
+    let mut returned_slot: SlotRef? = none
     match core_block_tail(block) {
         some(expr) => {
             let serialized = serialize_core_expr(ctx, reference, expr)
@@ -2521,21 +2588,28 @@ fn serialize_callable_body(
                 init: serialized.value, span: span_zero()
             })
             append_all(statements, serialized.after)
-            append_all(statements, before_terminator_drops(
-                ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, 0))
-            append_all(statements, edge_cleanup_statements(
-                ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, 0, 0))
-            tail = some(wrap_terminator_operand(
-                ctx, node_ordinal, 0, slot,
-                BRIDGE_ROLE_BODY_RETURN, 0))
+            if !types_equal(
+                    legacy_callable_result_type(callable), Type::UnitType) {
+                let stable = serialize_return_sink(
+                    ctx, node_ordinal, slot, BRIDGE_ROLE_BODY_RETURN)
+                append_all(statements, stable.statements)
+                returned_slot = some(stable.sink)
+            }
         },
-        none => {
-            append_all(statements, before_terminator_drops(
-                ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, 0))
-            append_all(statements, edge_cleanup_statements(
-                ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, 0, 0))
-        }
+        none => {}
     }
+    let return_role = if returned_slot.is_some() { 1 } else { 0 }
+    validate_return_terminator(
+        ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN,
+        return_role, returned_slot)
+    append_all(statements, before_terminator_drops(
+        ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, return_role))
+    append_all(statements, edge_cleanup_statements(
+        ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, return_role, 0))
+    let tail = returned_slot.map(fn(slot) { wrap_terminator_operand(
+        ctx, node_ordinal, 0, slot,
+        BRIDGE_ROLE_BODY_RETURN, return_role)
+    })
     let result = HExpr::Block {
         stmts: statements, tail: tail,
         ty: legacy_callable_result_type(callable),

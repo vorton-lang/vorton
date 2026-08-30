@@ -64,7 +64,8 @@ use ir_inventory::{
     executable_contract_mode_contract_only,
     BinderManifest, BinderEntry,
     binder_manifest_owner, binder_manifest_entries,
-    binder_entry_slot, make_binder_manifest
+    binder_entry_slot, binder_entry_kind, binder_kind_tag,
+    binder_kind_scope_result, make_binder_manifest
 }
 use core_expr::{
     CoreEffectCtxTokenRef, CoreEffectCtxLayout, CoreCallableEffectCtx,
@@ -3952,6 +3953,145 @@ fn validate_typed_terminators(
     }
 }
 
+fn binder_kind_tag_for_slot(body: FlowBody, target: SlotRef) -> Int {
+    let mut found: Int? = none
+    for binder in binder_manifest_entries(body.manifest) {
+        if slot_ref_same(binder_entry_slot(binder), target) {
+            if found.is_some() {
+                panic("FlowIR: Return sink binder repeats")
+            }
+            found = some(binder_kind_tag(binder_entry_kind(binder)))
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("FlowIR: Return sink binder is absent")
+    }
+}
+
+fn validate_stable_return_sinks(
+    body: FlowBody, callable: FlowCallable,
+    type_nodes: List<FlowTypeNode>
+) {
+    if body.scopes.len() < 2 {
+        panic("FlowIR: body lacks permanent root/lexical scopes")
+    }
+    let root = body.scopes.get(0).unwrap()
+    let lexical = body.scopes.get(1).unwrap()
+    if flow_scope_has_parent(root) || !flow_scope_has_parent(lexical) ||
+       !flow_scope_ref_same(flow_scope_parent(lexical), root.reference) ||
+       !flow_scope_ref_same(
+            block_for_ref(body.blocks, body.entry).scope,
+            lexical.reference) {
+        panic("FlowIR: body root/lexical scope relation differs")
+    }
+    for block in body.blocks {
+        if flow_scope_ref_same(block.scope, root.reference) {
+            panic("FlowIR: permanent root scope contains a block")
+        }
+    }
+    let scope_result_tag = binder_kind_tag(binder_kind_scope_result())
+    for slot in body.slots {
+        let kind_tag = binder_kind_tag_for_slot(body, slot.reference)
+        if flow_scope_ref_same(slot.scope, root.reference) {
+            if kind_tag != scope_result_tag ||
+               slot.initial_state.tag != FLOW_SLOT_EMPTY ||
+               slot.parameter_ordinal.is_some() {
+                panic("FlowIR: permanent root contains a non-Return sink")
+            }
+        } else if kind_tag == scope_result_tag {
+            panic("FlowIR: Return sink escapes permanent root scope")
+        }
+        let entry_carrier = slot.initial_state.tag == FLOW_SLOT_LIVE ||
+            flow_storage_class_same(slot.storage, flow_storage_parameter()) ||
+            flow_storage_class_same(slot.storage, flow_storage_capture()) ||
+            flow_storage_class_same(slot.storage, flow_storage_context())
+        if entry_carrier &&
+           !flow_scope_ref_same(slot.scope, lexical.reference) {
+            panic("FlowIR: entry carrier escapes lexical body scope")
+        }
+    }
+
+    let mut returned_sinks: List<SlotRef> = []
+    for block in body.blocks {
+        match block.terminator.value {
+            FlowTerminatorValue::ReturnValue { value: some(sink), .. } => {
+                let sink_slot = slot_for_ref(body.slots, sink)
+                if !flow_scope_ref_same(sink_slot.scope, root.reference) ||
+                   binder_kind_tag_for_slot(body, sink) != scope_result_tag ||
+                   sink_slot.initial_state.tag != FLOW_SLOT_EMPTY {
+                    panic("FlowIR: Return value is not an exact root sink")
+                }
+                for existing in returned_sinks {
+                    if slot_ref_same(existing, sink) {
+                        panic("FlowIR: Return sink is shared by two Returns")
+                    }
+                }
+                returned_sinks.push(sink)
+                let transfer = block.instructions.last().unwrap_or_else(fn() {
+                    panic("FlowIR: value Return lacks sink transfer")
+                })
+                let kind = flow_instruction_kind_tag(transfer)
+                let source = if kind == 5 {
+                    let target = flow_assign_target(transfer)
+                    if !flow_place_is_slot(target) ||
+                       !slot_ref_same(flow_place_slot(target), sink) {
+                        panic("FlowIR: Return Assign target differs")
+                    }
+                    flow_assign_rhs_temp(transfer)
+                } else if kind == 1 {
+                    if !slot_ref_same(flow_read_target(transfer), sink) {
+                        panic("FlowIR: Return Read target differs")
+                    }
+                    flow_read_source(transfer)
+                } else {
+                    panic("FlowIR: Return sink transfer is not Assign/Read")
+                }
+                let source_slot = slot_for_ref(body.slots, source)
+                if flow_scope_ref_same(source_slot.scope, root.reference) ||
+                   !core_type_ref_same(source_slot.ty, sink_slot.ty) ||
+                   !flow_storage_class_same(
+                        source_slot.storage, sink_slot.storage) ||
+                   flow_storage_contract_tag(source_slot.storage_contract) !=
+                        flow_storage_contract_tag(sink_slot.storage_contract) {
+                    panic("FlowIR: Return sink does not copy source facts")
+                }
+                let own = flow_storage_contract_tag(
+                    source_slot.storage_contract) ==
+                    flow_storage_contract_tag(flow_own_storage())
+                let borrow = flow_storage_contract_tag(
+                    source_slot.storage_contract) ==
+                    flow_storage_contract_tag(flow_borrow_storage())
+                if (own && kind != 5) || (borrow && kind != 1) ||
+                   (!own && !borrow) {
+                    panic("FlowIR: Return transfer differs from source storage")
+                }
+            },
+            _ => {}
+        }
+    }
+    for slot in body.slots {
+        if flow_scope_ref_same(slot.scope, root.reference) {
+            let mut returns = 0
+            for sink in returned_sinks {
+                if slot_ref_same(slot.reference, sink) {
+                    returns = returns + 1
+                }
+            }
+            if returns != 1 {
+                panic("FlowIR: root Return sink has no unique Return")
+            }
+        }
+    }
+    let result_kind = flow_type_kind_tag(type_node_for(
+        type_nodes,
+        flow_call_contract_result_type(callable.semantic_contract)).kind)
+    if (result_kind == FLOW_TYPE_UNIT || result_kind == FLOW_TYPE_NEVER) &&
+       returned_sinks.len() != 0 {
+        panic("FlowIR: Unit/Never Return owns a stable sink")
+    }
+}
+
 fn validate_effect_ctx_overlays(bodies: List<FlowBody>) {
     for body in bodies {
         for block in body.blocks {
@@ -4351,6 +4491,17 @@ fn validate_terminator_slots(body: FlowBody, terminator: FlowTerminator) {
     }
 }
 
+fn validate_return_exits(
+    body: FlowBody, from_scope: FlowScopeRef, exited: List<FlowScopeRef>
+) {
+    let lineage = scope_lineage(body.scopes, from_scope)
+    validate_exited_scope_prefix(lineage, exited)
+    if exited.len() + 1 != lineage.len() ||
+       flow_scope_ref_ordinal(lineage.last().unwrap()) != 0 {
+        panic("FlowIR: Return does not preserve only permanent root scope")
+    }
+}
+
 fn validate_raise_block_contract(body: FlowBody, block: FlowBlock) {
     let is_raise = flow_terminator_kind_tag(block.terminator) == 11
     let mut fail_count = 0
@@ -4450,9 +4601,13 @@ fn validate_body_blocks(body: FlowBody) {
         for successor in terminator_successors(block.terminator) {
             validate_successor(body, active_scope, successor)
         }
-        match terminator_terminal_exited_scopes(block.terminator) {
-            some(exited) => validate_terminal_exits(body, active_scope, exited),
-            none => {}
+        match block.terminator.value {
+            FlowTerminatorValue::ReturnValue { exited_scopes, .. } =>
+                validate_return_exits(body, active_scope, exited_scopes),
+            FlowTerminatorValue::UnreachableValue { exited_scopes } |
+            FlowTerminatorValue::DivergeValue { exited_scopes } =>
+                validate_terminal_exits(body, active_scope, exited_scopes),
+            _ => {}
         }
         ordinal = ordinal + 1
     }
@@ -4502,6 +4657,7 @@ fn validate_bodies(
             validate_body_blocks(body)
             validate_typed_terminators(
                 body, callable, type_nodes, callables)
+            validate_stable_return_sinks(body, callable, type_nodes)
             expected_body_index = expected_body_index + 1
         }
     }
