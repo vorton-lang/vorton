@@ -4436,7 +4436,9 @@ fn advance_instruction_scope(
     }
 }
 
-fn validate_flow_pattern_slots(body: FlowBody, pattern: FlowPatternContract) {
+fn validate_flow_pattern_slots(
+    body: FlowBody, pattern: FlowPatternContract
+) with {} {
     match pattern.value {
         FlowPatternContractValue::FlowBindingPattern(slot) => {
             let _ = slot_for_ref(body.slots, slot)
