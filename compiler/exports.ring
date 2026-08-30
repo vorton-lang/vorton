@@ -447,7 +447,7 @@ fn exported_physical_nominal_closure(
     let pool: List<PhysicalNominalFact> = []
     append_dependency_physical_nominals(dependencies, pool)
     append_environment_physical_nominals(env, pool)
-    let pending: List<PhysicalNominalFact> = []
+    let mut pending: List<PhysicalNominalFact> = []
     let mut roots = types.entries()
     roots.sort_by(compare_by_first)
     for entry in roots {
@@ -457,7 +457,7 @@ fn exported_physical_nominal_closure(
         }
         pending.push(physical_fact_for_owner(pool, owner))
     }
-    let result: List<PhysicalNominalFact> = []
+    let mut result: List<PhysicalNominalFact> = []
     let mut cursor = 0
     while cursor < pending.len() {
         let fact = pending.get(cursor).unwrap()
