@@ -2780,13 +2780,15 @@ pub fn hexpr_span(e: HExpr) -> Span {
 
 // Collect the extern type names declared by this module's HIR (recursing into
 // inline mod blocks, whose decl names are already module-prefixed).
-pub fn collect_extern_type_names(decls: List<HDecl>) -> Set<Str> {
+pub fn collect_extern_type_names(decls: List<HDecl>) -> Set<Str> with {} {
     let mut out: Set<Str> = set_new()
     collect_extern_type_names_rec(decls, out)
     out
 }
 
-fn collect_extern_type_names_rec(decls: List<HDecl>, mut out: Set<Str>) {
+fn collect_extern_type_names_rec(
+    decls: List<HDecl>, mut out: Set<Str>
+) with {mut<Set<Str>>} {
     for d in decls {
         match d {
             HDecl::ExternType { name, .. } => { out.insert(name) },
