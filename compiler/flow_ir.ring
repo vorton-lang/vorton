@@ -5878,7 +5878,7 @@ fn encode_impl_owner(value: ImplOwnerRef) -> Str {
         impl_provider_ref_kind(provider)).to_str()}/${trait_identity}"
 }
 
-fn encode_dict_evidence(value: ExactDictRef) -> Str {
+fn encode_dict_evidence(value: ExactDictRef) -> Str with {} {
     if dict_ref_is_local(value) {
         "local:${encode_slot(dict_ref_local(value))}"
     } else if dict_ref_is_static(value) {
