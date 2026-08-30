@@ -1175,7 +1175,9 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
             HExpr::MatchExpr { scrutinee: new_scrutinee, arms: new_arms, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::TryCatch { body, arms, ty, effects, span } => {
+        HExpr::TryCatch {
+            body, error_type, arms, ty, effects, span
+        } => {
             // body + catch arms are their own scopes (R2); abort-path RC is out of
             // scope (B-002).
             let new_body = anf_block_expr(body, externs, counter)
@@ -1191,7 +1193,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                     bindings: arm.bindings, guard: new_guard,
                     body: new_body_arm, span: arm.span })
             }
-            HExpr::TryCatch { body: new_body, arms: new_arms, ty: ty, effects: effects, span: span }
+            HExpr::TryCatch { body: new_body, error_type: error_type,
+                arms: new_arms, ty: ty, effects: effects, span: span }
         },
 
         HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {
@@ -2873,7 +2876,9 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 ty: ty, effects: effects, span: span }
         },
 
-        HExpr::TryCatch { body, arms, ty, effects, span } => {
+        HExpr::TryCatch {
+            body, error_type, arms, ty, effects, span
+        } => {
             // body + catch arms inherit escape; each is its own scope.  abort-path
             // RC (longjmp) is out of B-098 scope (B-002 drop-aware unwind); on the
             // normal path the body/arm blocks drop their own locals.
@@ -2893,7 +2898,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                     bindings: arm.bindings, guard: new_guard,
                     body: new_body_arm, span: arm.span })
             }
-            HExpr::TryCatch { body: new_body, arms: new_arms, ty: ty, effects: effects, span: span }
+            HExpr::TryCatch { body: new_body, error_type: error_type,
+                arms: new_arms, ty: ty, effects: effects, span: span }
         },
 
         HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {

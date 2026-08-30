@@ -3815,7 +3815,9 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
 
     let final_type = apply_subst(s, result_type)
     InferResult {
-        hexpr: HExpr::TryCatch { body: expr_r.hexpr, arms: harms, ty: final_type, effects: effects, span: span },
+        hexpr: HExpr::TryCatch {
+            body: expr_r.hexpr, error_type: error_type_resolved,
+            arms: harms, ty: final_type, effects: effects, span: span },
         subst: s, effects: effects
     }
 }

@@ -1727,9 +1727,12 @@ fn finalize_effect_ctx_expr(
                             finalize_effect_ctx_expr(ctx, batch, expr))
                 } }), plan: plan,
                 ty: ty, effects: effects, span: span },
-        HExpr::TryCatch { body, arms, ty, effects, span } =>
+        HExpr::TryCatch {
+            body, error_type, arms, ty, effects, span
+        } =>
             HExpr::TryCatch {
                 body: finalize_effect_ctx_expr(ctx, batch, body),
+                error_type: error_type,
                 arms: finalize_effect_ctx_match_arms(ctx, batch, arms),
                 ty: ty, effects: effects, span: span },
         HExpr::ListLit { elements, plan, ty, effects, span } =>

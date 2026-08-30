@@ -650,9 +650,10 @@ fn dl_expr(
             HExpr::StringInterp { parts: new_parts, plan: plan,
                 ty: ty, effects: effects, span: span }
         },
-        HExpr::TryCatch { body, arms, ty, effects, span } =>
+        HExpr::TryCatch { body, error_type, arms, ty, effects, span } =>
             HExpr::TryCatch { body: dl_expr(
                     body, defs, seen, counter, owner),
+                error_type: error_type,
                 arms: dl_arms(arms, defs, seen, counter, owner),
                 ty: ty, effects: effects, span: span },
         HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {

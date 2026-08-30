@@ -1480,8 +1480,11 @@ fn close_expr(value: HExpr) -> HExpr {
                 none => panic(
                     "PreCore closure: StringInterp exact plan is absent")
             }, ty, effects, span),
-        HExpr::TryCatch { body, arms, ty, effects, span } => HExpr::TryCatch {
+        HExpr::TryCatch {
+            body, error_type, arms, ty, effects, span
+        } => HExpr::TryCatch {
             body: close_expr(body), arms: close_arms(arms),
+            error_type: error_type,
             ty: ty, effects: effects, span: span
         },
         HExpr::HandleExpr {

@@ -178,7 +178,7 @@ use core_expr::{
     core_expr_block, core_expr_then_block, core_expr_else_block,
     core_expr_condition, core_expr_scrutinee,
     core_expr_match_arms, core_expr_try_body, core_expr_handle_body,
-    core_expr_error_slot, core_expr_effect_ctx_install,
+    core_expr_error_type, core_expr_effect_ctx_install,
     core_match_arm_pattern, core_match_arm_guard, core_match_arm_body,
     core_pattern_kind_tag, core_pattern_type, core_pattern_binding,
     core_pattern_literal, core_pattern_elements, core_pattern_fields,
@@ -3851,6 +3851,8 @@ fn serialize_structured_core_expr(
             node_ordinal: node_ordinal, prefix: prefix,
             value: HExpr::TryCatch {
                 body: protected, arms: serialized_arms,
+                error_type: legacy_type_for(
+                    ctx.projection, core_expr_error_type(expr)),
                 ty: ty, effects: effects, span: span_zero()
             },
             after: []

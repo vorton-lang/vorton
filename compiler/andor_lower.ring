@@ -286,9 +286,10 @@ fn al_expr(e: HExpr) -> HExpr {
             HExpr::StringInterp { parts: new_parts, plan: plan,
                 ty: ty, effects: effects, span: span }
         },
-        HExpr::TryCatch { body, arms, ty, effects, span } =>
+        HExpr::TryCatch { body, error_type, arms, ty, effects, span } =>
             HExpr::TryCatch { body: al_expr(body),
-                arms: al_arms(arms), ty: ty, effects: effects, span: span },
+                error_type: error_type, arms: al_arms(arms),
+                ty: ty, effects: effects, span: span },
         HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {

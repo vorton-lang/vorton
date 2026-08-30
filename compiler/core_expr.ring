@@ -1647,7 +1647,7 @@ enum CoreExprValue {
     },
     TryCatchExprValue {
         body: CoreBlock,
-        error_slot: SlotRef,
+        error_type: CoreTypeRef,
         arms: List<CoreMatchArm>
     },
     HandleExprValue {
@@ -2103,13 +2103,13 @@ pub fn make_core_match_expr(
 }
 pub fn make_core_try_catch_expr(
     ty: CoreTypeRef, effects: CoreEffectSet,
-    origin: OriginRef, body: CoreBlock, error_slot: SlotRef,
+    origin: OriginRef, body: CoreBlock, error_type: CoreTypeRef,
     arms: List<CoreMatchArm>
 ) -> CoreExpr {
     if arms.len() == 0 { panic("CoreHIR: catch has no arms") }
     make_core_expr(ty, effects, origin,
         CoreExprValue::TryCatchExprValue {
-            body: body, error_slot: error_slot,
+            body: body, error_type: error_type,
             arms: copy_match_arms(arms)
         })
 }
@@ -2555,9 +2555,9 @@ pub fn core_expr_try_body(value: CoreExpr) -> CoreBlock {
         _ => panic("CoreHIR: expression is not TryCatch")
     }
 }
-pub fn core_expr_error_slot(value: CoreExpr) -> SlotRef {
+pub fn core_expr_error_type(value: CoreExpr) -> CoreTypeRef {
     match value.value {
-        CoreExprValue::TryCatchExprValue { error_slot, .. } => error_slot,
+        CoreExprValue::TryCatchExprValue { error_type, .. } => error_type,
         _ => panic("CoreHIR: expression is not TryCatch")
     }
 }
@@ -3180,9 +3180,8 @@ fn validate_expr_with_loop_depth(
             for arm in arms { validate_match_arm(arm, body, loop_depth) }
         },
         CoreExprValue::TryCatchExprValue {
-            body: protected, error_slot, arms
+            body: protected, arms, ..
         } => {
-            require_binder(body.binders, error_slot)
             validate_block_with_loop_depth(protected, body, loop_depth)
             for arm in arms { validate_match_arm(arm, body, loop_depth) }
         },
@@ -4347,10 +4346,10 @@ fn remap_core_expr_types(
                     remap_core_match_arm_types(arm, ctx)
                 })
             },
-        CoreExprValue::TryCatchExprValue { body, error_slot, arms } =>
+        CoreExprValue::TryCatchExprValue { body, error_type, arms } =>
             CoreExprValue::TryCatchExprValue {
                 body: remap_core_block_types(body, ctx),
-                error_slot: error_slot,
+                error_type: remap_core_type_reference(error_type, ctx),
                 arms: arms.map(fn(arm) {
                     remap_core_match_arm_types(arm, ctx)
                 })
@@ -5824,13 +5823,12 @@ fn validate_expr_with_program(
             }
         },
         CoreExprValue::TryCatchExprValue {
-            body: protected, error_slot, arms
+            body: protected, error_type, arms
         } => {
             validate_block_with_program(
                 protected, body, graph, callables,
                 impls, current_callable, loop_depth)
             require_block_result_type(protected, value.ty, graph)
-            let error_type = core_binder_type_for(body, error_slot)
             for arm in arms {
                 validate_pattern_with_graph(
                     arm.pattern, error_type, body, graph)

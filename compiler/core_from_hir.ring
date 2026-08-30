@@ -1753,7 +1753,9 @@ fn producer_record_expr(
                 }
             }
         },
-        HExpr::TryCatch { body, arms, .. } => {
+        HExpr::TryCatch { body, error_type, arms, .. } => {
+            let _ = producer_record_type(
+                producer, error_type, some(executable_origin(owner)))
             producer_record_expr(producer, owner, body)
             for arm in arms { producer_record_match_arm(producer, owner, arm) }
         },
@@ -4326,21 +4328,11 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                         binder_kind_match_pattern())
                 }))
         },
-        HExpr::TryCatch { body, arms, .. } => {
-            let error = match arms.get(0) {
-                some(arm) => match arm.bindings.get(0) {
-                    some(binding) => binding.slot,
-                    none => panic("Core assembly: catch lacks error binder")
-                },
-                none => panic("Core assembly: catch has no arms")
-            }
+        HExpr::TryCatch { body, error_type, arms, .. } => {
             let pattern_type = type_fact_for(
-                ctx.types, match arms.get(0).unwrap().bindings.get(0) {
-                    some(binding) => binding.ty,
-                    none => panic("Core assembly: catch pattern type is absent")
-                }, ctx.module_key)
+                ctx.types, error_type, ctx.module_key)
             make_core_try_catch_expr(ty, effects, origin,
-                block_from_expr(ctx, body), error,
+                block_from_expr(ctx, body), pattern_type,
                 arms.map(fn(arm) {
                     lower_arm(
                         ctx, arm, true, pattern_type,

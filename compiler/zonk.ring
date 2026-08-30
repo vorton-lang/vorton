@@ -703,9 +703,10 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 plan: plan,
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::TryCatch { body, arms, .. } =>
+        HExpr::TryCatch { body, error_type, arms, .. } =>
             HExpr::TryCatch {
                 body: zonk_expr(ctx, body),
+                error_type: zonk_type(ctx, error_type),
                 arms: arms.map(fn(a) {
                     HMatchArm {
                         pattern: a.pattern,

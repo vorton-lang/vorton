@@ -95,7 +95,7 @@ use core_expr::{
     core_expr_lambda_captures, core_capture_source, core_capture_target,
     core_expr_condition, core_expr_then_block, core_expr_else_block,
     core_expr_scrutinee, core_expr_match_arms,
-    core_expr_try_body, core_expr_error_slot,
+    core_expr_try_body, core_expr_error_type,
     core_expr_handle_body, core_expr_effect_ctx_install,
     core_match_arm_pattern, core_match_arm_guard,
     core_match_arm_body, core_match_arm_origin,
@@ -510,7 +510,7 @@ struct FlowBlockDraft {
 }
 
 struct SameFrameCatchTarget {
-    error: SlotRef,
+    caught_payload: SlotRef,
     caught: FlowBlockRef
 }
 
@@ -532,20 +532,20 @@ struct FlowLowerCtx {
 }
 
 fn push_same_frame_catch(
-    mut ctx: FlowLowerCtx, error: SlotRef, caught: FlowBlockRef
+    mut ctx: FlowLowerCtx, caught_payload: SlotRef, caught: FlowBlockRef
 ) {
     ctx.catch_targets.push(SameFrameCatchTarget {
-        error: error, caught: caught
+        caught_payload: caught_payload, caught: caught
     })
 }
 
 fn pop_same_frame_catch(
-    mut ctx: FlowLowerCtx, error: SlotRef, caught: FlowBlockRef
+    mut ctx: FlowLowerCtx, caught_payload: SlotRef, caught: FlowBlockRef
 ) {
     let removed = ctx.catch_targets.pop().unwrap_or_else(fn() {
         panic("Flow lowering: same-frame catch stack underflow")
     })
-    if !slot_ref_same(removed.error, error) ||
+    if !slot_ref_same(removed.caught_payload, caught_payload) ||
        !flow_block_ref_same(removed.caught, caught) {
         panic("Flow lowering: same-frame catch stack drifted")
     }
@@ -1762,21 +1762,24 @@ fn lower_try_expression(
         ctx, core_block_origin(protected), protected_scope)
     let caught_entry = new_draft(ctx, origin, caught_scope)
     let join = new_draft(ctx, origin, parent_scope)
-    activate_core_binder(ctx, core_expr_error_slot(expr), caught_scope)
+    let caught_payload = new_admin_slot(
+        ctx, core_expr_error_type(expr), caught_scope,
+        binder_kind_pre_anf(), "caught-payload", 3,
+        flow_storage_local(), flow_initial_slot_empty(), flow_own_storage())
     terminate(ctx, make_flow_goto(origin, successor_to(ctx, protected_entry)),
         core_flow_role_control_dispatch(0))
     set_current(ctx, protected_entry)
-    push_same_frame_catch(ctx, core_expr_error_slot(expr), caught_entry)
+    push_same_frame_catch(ctx, caught_payload, caught_entry)
     let protected_tail = lower_core_block(
         ctx, protected, continue_target, break_target)
-    pop_same_frame_catch(ctx, core_expr_error_slot(expr), caught_entry)
+    pop_same_frame_catch(ctx, caught_payload, caught_entry)
     if !is_terminated(ctx) {
         merge_block_tail(ctx, protected_tail, result, origin, 0)
         terminate_goto(ctx, join, origin, core_flow_role_control_exit(0))
     }
     set_current(ctx, caught_entry)
     lower_match_arms(
-        ctx, core_expr_error_slot(expr), core_expr_match_arms(expr),
+        ctx, caught_payload, core_expr_match_arms(expr),
         result, origin, join,
         continue_target, break_target, 1)
     set_current(ctx, join)
@@ -1945,7 +1948,7 @@ fn lower_expr(
                 flow_own_storage())
             if !core_type_ref_same(
                     frozen_slot_type_at(ctx, payload),
-                    frozen_slot_type_at(ctx, catch_target.error)) {
+                    frozen_slot_type_at(ctx, catch_target.caught_payload)) {
                 panic("Flow lowering: fail payload/catch type differs")
             }
             emit_instruction(ctx, make_flow_fail_raise(
@@ -1954,10 +1957,10 @@ fn lower_expr(
                 core_flow_role_expr_primary())
             emit_instruction(ctx, make_flow_move_place(
                 next_instruction_ref(ctx), core_expr_origin(expr),
-                make_flow_slot_place(sink), catch_target.error),
+                make_flow_slot_place(sink), catch_target.caught_payload),
                 core_flow_role_control_dispatch(0))
             terminate(ctx, make_flow_raise(
-                core_expr_origin(expr), catch_target.error,
+                core_expr_origin(expr), catch_target.caught_payload,
                 successor_to(ctx, catch_target.caught)),
                 core_flow_role_control_exit(0))
         }
