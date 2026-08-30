@@ -1396,7 +1396,7 @@ pub struct CoreDerivedTextPlan {
 fn validate_text_pieces(
     pieces: List<CoreDerivedTextPiece>,
     string_type: CoreTypeRef, unit_type: CoreTypeRef
-) {
+) with {} {
     for piece in pieces {
         match piece.value {
             CoreDerivedTextPieceValue::LiteralText { ty, append, .. } => {
@@ -1523,7 +1523,7 @@ pub fn make_core_derived_enum_text_plan(
 fn append_text_pieces(
     plan: CoreDerivedTextPlan, pieces: List<CoreDerivedTextPiece>,
     origin: OriginRef, mut statements: List<CoreStmt>
-) -> List<CoreStmt> {
+) -> List<CoreStmt> with {mut<List<CoreStmt>>} {
     for piece in pieces {
         match piece.value {
             CoreDerivedTextPieceValue::LiteralText { value, ty, append } => {
