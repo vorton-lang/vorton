@@ -2872,9 +2872,7 @@ fn append_effect_formal_to_batch(
 ) {
     match combined_effect_formal_for_raw(env, batch, raw_tail) {
         some(existing) => if !effect_param_ref_same(existing, parameter) {
-            panic("effect fact batch: raw tail ${raw_tail} changed parameter " +
-                "${effect_param_debug_identity(existing)} -> " +
-                effect_param_debug_identity(parameter))
+            panic("effect fact batch: raw tail ${raw_tail} changed parameter ${effect_param_debug_identity(existing)} -> ${effect_param_debug_identity(parameter)}")
         },
         none => batch.effect_formals.push(
             make_typed_effect_formal_fact(raw_tail, parameter))
