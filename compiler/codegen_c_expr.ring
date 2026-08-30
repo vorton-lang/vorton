@@ -2570,11 +2570,15 @@ fn rt_use_catch_fns(mut ctx: CCtx) {
     rt_use(ctx, "ring_catch_pop", 0)
 }
 
-// #173/#193: walk enclosing control scopes innermost-first and pop catch
-// frames. All resource cleanup, including EffectCtx, is explicit RcHIR.
-fn emit_c_cleanup_walk(mut ctx: CCtx) {
+// Walk enclosing control scopes innermost-first and pop catch frames down to
+// an exact cleanup-stack boundary. All resource cleanup, including EffectCtx,
+// is explicit RcHIR.
+fn emit_c_cleanup_walk_from(mut ctx: CCtx, boundary: Int) {
     let n = ctx.handle_cleanup_stack.len()
-    for i in 0..n {
+    if boundary < 0 || boundary > n {
+        panic("C codegen: cleanup boundary is outside the control stack")
+    }
+    for i in 0..(n - boundary) {
         match ctx.handle_cleanup_stack.get(n - 1 - i) {
             some(cleanup) => {
                 if cleanup.needs_catch_pop {
@@ -2585,6 +2589,20 @@ fn emit_c_cleanup_walk(mut ctx: CCtx) {
             none => {},
         }
     }
+}
+
+// #173/#193: return leaves the complete current C frame.
+fn emit_c_cleanup_walk(mut ctx: CCtx) {
+    emit_c_cleanup_walk_from(ctx, 0)
+}
+
+// break/continue leave only control scopes entered after the innermost loop
+// target. Catch frames enclosing that loop remain active.
+fn emit_c_loop_cleanup_walk(mut ctx: CCtx) {
+    if !ctx.in_loop || ctx.loop_cleanup_depth < 0 {
+        panic("C codegen: loop cleanup requested without a loop target")
+    }
+    emit_c_cleanup_walk_from(ctx, ctx.loop_cleanup_depth)
 }
 
 // TryCatch — inline setjmp (B-089 G-b port of gen_try_catch).  Body and catch
@@ -5102,11 +5120,13 @@ pub fn emit_c_stmt(mut ctx: CCtx, stmt: HStmt) {
             "C codegen: for-in surface statement crossed PreCore"),
         HStmt::Break { .. } => {
             if ctx.in_loop {
+                emit_c_loop_cleanup_walk(ctx)
                 c_emit(ctx, "break;")
             }
         },
         HStmt::Continue { .. } => {
             if ctx.in_loop {
+                emit_c_loop_cleanup_walk(ctx)
                 c_emit(ctx, ctx.loop_continue_stmt)
             }
         },
@@ -5328,6 +5348,14 @@ fn emit_c_if_let(
 fn emit_c_while(mut ctx: CCtx, condition: HExpr, body: HExpr) {
     c_emit(ctx, "while (1) {")
     ctx.indent = ctx.indent + 1
+
+    let saved_cont = ctx.loop_continue_stmt
+    let saved_depth = ctx.loop_cleanup_depth
+    let saved_in_loop = ctx.in_loop
+    ctx.loop_continue_stmt = "continue;"
+    ctx.loop_cleanup_depth = ctx.handle_cleanup_stack.len()
+    ctx.in_loop = true
+
     let cond = gen_c_expr(ctx, condition)
     let flag = fresh_i64(ctx)
     c_emit(ctx, "${flag} = RING_COND(${cond});")
@@ -5338,12 +5366,9 @@ fn emit_c_while(mut ctx: CCtx, condition: HExpr, body: HExpr) {
     }
     c_emit(ctx, "if (!${flag}) break;")
 
-    let saved_cont = ctx.loop_continue_stmt
-    let saved_in_loop = ctx.in_loop
-    ctx.loop_continue_stmt = "continue;"
-    ctx.in_loop = true
     discard_c(gen_c_expr(ctx, body))
     ctx.loop_continue_stmt = saved_cont
+    ctx.loop_cleanup_depth = saved_depth
     ctx.in_loop = saved_in_loop
 
     ctx.indent = ctx.indent - 1

@@ -247,6 +247,9 @@ pub struct CCtx {
     // "continue;" for while loops (cond re-evaluated at the top) or
     // "goto <incr label>;" for for-loops (increment/drop sequence first).
     pub loop_continue_stmt: Str,
+    // Cleanup-stack depth at which the innermost loop target was entered.
+    // break/continue pop only catch frames created inside that loop.
+    pub loop_cleanup_depth: Int,
     pub in_loop: Bool,
 
     // ---- #line directives (--no-c-lines disables) ----
@@ -334,6 +337,7 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         identity_load_counter: 0,
         handle_cleanup_stack: [],
         loop_continue_stmt: "",
+        loop_cleanup_depth: -1,
         in_loop: false,
         emit_lines: emit_lines,
         last_line: -1,
@@ -1538,6 +1542,7 @@ pub struct CEmitState {
     pub current_fn_name: Str,
     pub in_loop: Bool,
     pub loop_continue_stmt: Str,
+    pub loop_cleanup_depth: Int,
     pub last_line: Int,
     pub last_file: Str,
     // Step 6: a nested function is a fresh C frame — a `return` inside a
@@ -1562,6 +1567,7 @@ pub fn c_push_fn(mut ctx: CCtx, fn_name: Str) -> CEmitState {
         current_fn_name: ctx.current_fn_name,
         in_loop: ctx.in_loop,
         loop_continue_stmt: ctx.loop_continue_stmt,
+        loop_cleanup_depth: ctx.loop_cleanup_depth,
         last_line: ctx.last_line,
         last_file: ctx.last_file,
         handle_cleanup_stack: ctx.handle_cleanup_stack
@@ -1578,6 +1584,7 @@ pub fn c_push_fn(mut ctx: CCtx, fn_name: Str) -> CEmitState {
     ctx.current_fn_name = fn_name
     ctx.in_loop = false
     ctx.loop_continue_stmt = ""
+    ctx.loop_cleanup_depth = -1
     ctx.last_line = -1
     ctx.last_file = ""
     ctx.handle_cleanup_stack = []
@@ -1605,6 +1612,7 @@ pub fn c_pop_fn(mut ctx: CCtx, c_name: Str, params_str: Str, saved: CEmitState) 
     ctx.current_fn_name = saved.current_fn_name
     ctx.in_loop = saved.in_loop
     ctx.loop_continue_stmt = saved.loop_continue_stmt
+    ctx.loop_cleanup_depth = saved.loop_cleanup_depth
     ctx.last_line = saved.last_line
     ctx.last_file = saved.last_file
     ctx.handle_cleanup_stack = saved.handle_cleanup_stack
