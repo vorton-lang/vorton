@@ -5088,10 +5088,8 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
     let dictionary_owner = current_dictionary_evidence_owner(ctx)
     let lambda_executable = fresh_child_executable(
         ctx, "lambda", path_role_child())
-    let mut entered_owner = false
+    enter_executable_owner(ctx, lambda_executable)
     let lambda_result: InferResult? = some({
-        enter_executable_owner(ctx, lambda_executable)
-        entered_owner = true
         inherit_dictionary_evidence_owner(ctx, dictionary_owner)
         ctx.env.push_scope()
         ctx.lambda_depth = saved_lambda_depth + 1
@@ -5196,19 +5194,17 @@ fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, 
     while ctx.env.scope.scopes.len() > saved_scope_depth {
         ctx.env.pop_scope()
     }
-    if entered_owner {
-        if ctx.executable_stack.len() < saved_executable_depth + 1 {
-            panic("lambda lifecycle: executable stack underflow")
-        }
-        while ctx.executable_stack.len() > saved_executable_depth + 1 {
-            exit_executable_owner(ctx)
-        }
-        if !executable_ref_same(
-                current_executable_owner(ctx), lambda_executable) {
-            panic("lambda lifecycle: active executable differs")
-        }
+    if ctx.executable_stack.len() < saved_executable_depth + 1 {
+        panic("lambda lifecycle: executable stack underflow")
+    }
+    while ctx.executable_stack.len() > saved_executable_depth + 1 {
         exit_executable_owner(ctx)
     }
+    if !executable_ref_same(
+            current_executable_owner(ctx), lambda_executable) {
+        panic("lambda lifecycle: active executable differs")
+    }
+    exit_executable_owner(ctx)
     if ctx.executable_stack.len() != saved_executable_depth ||
        !executable_ref_same(
             current_executable_owner(ctx), saved_executable) ||
