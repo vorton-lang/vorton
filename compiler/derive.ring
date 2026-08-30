@@ -412,8 +412,7 @@ fn derived_impl_matches_owner(
         if !impl_method_ref_same(actual.method_ref, expected_ref) ||
            derived_semantic_kind_tag(actual.semantic_kind) !=
                 derived_semantic_kind_tag(
-                    derived_method_semantic_kind(
-                        di.trait_name, method_name)) ||
+                    derived_impl_semantic_kind(di.trait_name)) ||
            !types_equal(actual.signature, impl_method_core_type(expected_core)) ||
            !executable_ref_is_named(actual.executable_ref) ||
            !symbol_ref_same(
