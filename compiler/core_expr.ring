@@ -49,6 +49,7 @@ use ir_inventory::{
     EffectOperationRef, SystemHostCallableRef, ExactMethodRef, ExactDictRef,
     ExecutableContractMode, executable_contract_mode_same,
     executable_contract_mode_concrete_body,
+    executable_contract_mode_contract_only,
     executable_ref_same, executable_ref_is_named,
     executable_ref_named_symbol, executable_ref_origin_module_key,
     make_source_binder_entry, make_synthetic_binder_entry,
@@ -115,6 +116,7 @@ use core_type_source::{
     CoreTypeGraph, core_type_graph_count, core_type_graph_nodes,
     core_type_graph_node, core_type_graph_ref_from_flow,
     FlowTypeNode, FlowFieldIdentity, FlowNominalFieldFact,
+    FlowGenericParamFact,
     flow_type_node_kind, flow_type_node_children,
     flow_type_node_nominal, flow_type_node_nominal_fields,
     flow_type_node_parameter_count,
@@ -696,78 +698,22 @@ pub fn copy_core_executable_redirects(
     })
 }
 
-fn callable_redirect_semantic_shell_same(
-    source: CoreCallableContract, target: CoreCallableContract
+fn redirect_formal_bounds_same(
+    left: FlowGenericParamFact, right: FlowGenericParamFact
 ) -> Bool {
-    let source_roles = flow_call_contract_parameter_roles(
-        source.semantic_contract)
-    let target_roles = flow_call_contract_parameter_roles(
-        target.semantic_contract)
-    if source_roles.len() != target_roles.len() ||
-       flow_semantic_role_tag(flow_call_contract_result_role(
-            source.semantic_contract)) !=
-       flow_semantic_role_tag(flow_call_contract_result_role(
-            target.semantic_contract)) ||
-       !value_origin_same(
-            flow_call_contract_result_origin(source.semantic_contract),
-            flow_call_contract_result_origin(target.semantic_contract)) {
-        return false
-    }
+    let left_bounds = flow_generic_param_bounds(left)
+    let right_bounds = flow_generic_param_bounds(right)
+    if left_bounds.len() != right_bounds.len() { return false }
     let mut index = 0
-    while index < source_roles.len() {
-        if flow_semantic_role_tag(source_roles.get(index).unwrap()) !=
-           flow_semantic_role_tag(target_roles.get(index).unwrap()) {
+    while index < left_bounds.len() {
+        if !symbol_ref_same(
+                left_bounds.get(index).unwrap(),
+                right_bounds.get(index).unwrap()) {
             return false
         }
         index = index + 1
     }
     true
-}
-
-fn callable_redirect_effect_ctx_same(
-    source: CoreCallableEffectCtx, target: CoreCallableEffectCtx,
-    type_substitutions: List<FlowTypeSubstitution>,
-    effect_substitutions: List<FlowEffectParamSubstitution>,
-    effect_pairs: List<(EffectParamRef, EffectParamRef)>,
-    graph: CoreTypeGraph
-) -> Bool {
-    if !core_type_ref_same(source.aggregate_type, target.aggregate_type) ||
-       source.layout.entries.len() != target.layout.entries.len() {
-        return false
-    }
-    let mut index = 0
-    while index < source.layout.entries.len() {
-        let actual = source.layout.entries.get(index).unwrap().instance
-        let formal = target.layout.entries.get(index).unwrap().instance
-        if !handled_effect_ref_same(
-                core_effect_atom_handled_ref(actual),
-                core_effect_atom_handled_ref(formal)) {
-            return false
-        }
-        let actual_args = core_effect_atom_type_arguments(actual)
-        let formal_args = core_effect_atom_type_arguments(formal)
-        if actual_args.len() != formal_args.len() { return false }
-        let mut argument = 0
-        while argument < actual_args.len() {
-            if !flow_type_actual_matches_formal_exact(
-                    core_type_graph_nodes(graph),
-                    actual_args.get(argument).unwrap(),
-                    formal_args.get(argument).unwrap(), type_substitutions,
-                    effect_substitutions) {
-                return false
-            }
-            argument = argument + 1
-        }
-        index = index + 1
-    }
-    match (source.layout.formal, target.layout.formal) {
-        (none, none) => true,
-        (some(actual), some(formal)) => effect_pairs.any(fn(pair) {
-            effect_param_ref_same(pair.0, actual) &&
-                effect_param_ref_same(pair.1, formal)
-        }),
-        _ => false
-    }
 }
 
 pub fn core_callable_redirect(
@@ -776,11 +722,17 @@ pub fn core_callable_redirect(
 ) -> CoreExecutableRedirect? {
     if source.type_formals.len() != target.type_formals.len() ||
        source.effect_formals.len() != target.effect_formals.len() ||
-       source.effect_ctx.is_some() != target.effect_ctx.is_some() ||
-       !callable_redirect_semantic_shell_same(source, target) ||
+       !executable_contract_mode_same(
+            source.mode, executable_contract_mode_contract_only()) ||
+       !executable_contract_mode_same(
+            target.mode, executable_contract_mode_concrete_body()) ||
        !executable_ref_is_named(source.reference) ||
        !executable_ref_is_named(target.reference) {
         return none
+    }
+    for atom in core_effect_set_atoms(
+            core_effect_contract_exact(source.effects)) {
+        if core_effect_atom_kind_tag(atom) == 4 { return none }
     }
     let source_owner = executable_ref_named_symbol(source.reference)
     let target_owner = executable_ref_named_symbol(target.reference)
@@ -806,8 +758,7 @@ pub fn core_callable_redirect(
            flow_generic_param_index(target_fact) != type_index ||
            flow_generic_param_arity(source_fact) != source.type_formals.len() ||
            flow_generic_param_arity(target_fact) != target.type_formals.len() ||
-           flow_generic_param_bounds(source_fact).len() != 0 ||
-           flow_generic_param_bounds(target_fact).len() != 0 {
+           !redirect_formal_bounds_same(source_fact, target_fact) {
             return none
         }
         type_pairs.push((source_formal, target_formal))
@@ -837,15 +788,6 @@ pub fn core_callable_redirect(
             target.header_type, type_substitutions,
             effect_substitutions) {
         return none
-    }
-    match (source.effect_ctx, target.effect_ctx) {
-        (some(left), some(right)) => if !callable_redirect_effect_ctx_same(
-                left, right, type_substitutions, effect_substitutions,
-                effect_pairs, graph) {
-            return none
-        },
-        (none, none) => {},
-        _ => return none
     }
     some(make_core_executable_redirect(
         source.reference, target.reference, type_pairs, effect_pairs))
@@ -4023,6 +3965,50 @@ fn remap_effect_ctx_argument(
             core_effect_ctx_argument_context(value), source, target, receipt)
     }
 }
+
+fn effect_ctx_layout_from_contract(
+    value: CoreEffectContract
+) -> CoreEffectCtxLayout {
+    make_core_effect_ctx_layout(
+        core_effect_set_atoms(core_effect_contract_exact(value)).filter(
+            fn(atom) { core_effect_atom_kind_tag(atom) == 3 }).map(fn(atom) {
+            make_core_effect_ctx_token_ref(atom)
+        }),
+        core_effect_contract_parameter(value))
+}
+
+fn remap_call_effect_ctx_argument(
+    value: CoreEffectCtxArgument, source: CoreCalleeRef,
+    target: CoreCalleeRef, ctx: CoreRewriteContext
+) -> CoreEffectCtxArgument {
+    let redirect = if core_callee_kind_tag(source) == CORE_CALLEE_DIRECT {
+        core_executable_redirect_for(core_callee_direct(source), ctx.redirects)
+    } else { none }
+    match redirect {
+        none => remap_effect_ctx_argument(value, ctx),
+        some(_) => {
+            let receipt = core_callee_effect_instantiation(target)
+            let target_layout = effect_ctx_layout_from_contract(
+                core_effect_instantiation_result(receipt))
+            let kind = core_effect_ctx_argument_kind_tag(value)
+            if kind == 0 {
+                make_empty_core_effect_ctx_argument(receipt)
+            } else if kind == 1 {
+                make_borrow_current_core_effect_ctx_argument(
+                    core_effect_ctx_argument_context(value),
+                    target_layout, receipt)
+            } else if kind == 2 {
+                make_borrow_view_core_effect_ctx_argument(
+                    core_effect_ctx_argument_context(value),
+                    remap_effect_ctx_layout(
+                        core_effect_ctx_argument_source_layout(value), ctx),
+                    target_layout, receipt)
+            } else {
+                panic("CoreHIR: unknown redirected EffectCtx argument")
+            }
+        }
+    }
+}
 fn remap_effect_ctx_lookup(
     value: CoreEffectCtxLookup, ctx: CoreRewriteContext
 ) -> CoreEffectCtxLookup {
@@ -4127,13 +4113,19 @@ fn remap_core_callee(
         _ => panic("CoreHIR: callee rewrite context is partial")
     }
     if value.kind == CORE_CALLEE_DIRECT {
+        let redirect = core_executable_redirect_for(
+            value.direct.unwrap(), ctx.redirects)
         let remapped = remap_direct_callable_instantiation(
             value.direct.unwrap(), value.type_substitutions,
             value.effect_substitutions, value.effects, ctx)
-        let semantic_contract = if ctx.project_direct_semantics {
-            project_direct_callee_semantic_contract(
-                contract, remapped.0, ctx.semantic_callables)
-        } else { contract }
+        let semantic_contract = match redirect {
+            some(_) => project_direct_callee_semantic_contract(
+                contract, remapped.0, ctx.redirect_callables),
+            none => if ctx.project_direct_semantics {
+                project_direct_callee_semantic_contract(
+                    contract, remapped.0, ctx.semantic_callables)
+            } else { contract }
+        }
         make_core_direct_callee(
             remapped.0, semantic_contract,
             remapped.1, remapped.2, remapped.3)
@@ -4251,26 +4243,33 @@ fn remap_core_expr_types(
             },
         CoreExprValue::CallExprValue {
             callee, arguments, evidence, effect_ctx
-        } =>
+        } => {
+            let remapped_callee = remap_core_callee(callee, ctx)
             CoreExprValue::CallExprValue {
-                callee: remap_core_callee(callee, ctx),
+                callee: remapped_callee,
                 arguments: arguments.map(fn(argument) {
                     remap_core_expr_types(argument, ctx)
                 }),
                 evidence: copy_evidence(evidence),
-                effect_ctx: remap_effect_ctx_argument(effect_ctx, ctx)
-            },
+                effect_ctx: remap_call_effect_ctx_argument(
+                    effect_ctx, callee, remapped_callee, ctx)
+            }
+        },
         CoreExprValue::MethodCallExprValue {
             callee, method, receiver, arguments, evidence, effect_ctx
-        } => CoreExprValue::MethodCallExprValue {
-            callee: remap_core_callee(callee, ctx),
-            method: method,
-            receiver: remap_core_expr_types(receiver, ctx),
-            arguments: arguments.map(fn(argument) {
-                remap_core_expr_types(argument, ctx)
-            }),
-            evidence: copy_evidence(evidence),
-            effect_ctx: remap_effect_ctx_argument(effect_ctx, ctx)
+        } => {
+            let remapped_callee = remap_core_callee(callee, ctx)
+            CoreExprValue::MethodCallExprValue {
+                callee: remapped_callee,
+                method: method,
+                receiver: remap_core_expr_types(receiver, ctx),
+                arguments: arguments.map(fn(argument) {
+                    remap_core_expr_types(argument, ctx)
+                }),
+                evidence: copy_evidence(evidence),
+                effect_ctx: remap_call_effect_ctx_argument(
+                    effect_ctx, callee, remapped_callee, ctx)
+            }
         },
         CoreExprValue::EffectCallExprValue {
             operation, arguments, evidence, effect_ctx_lookup
