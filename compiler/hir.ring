@@ -942,7 +942,7 @@ pub struct HProgram {
 // Definition identity is a cross-pass invariant.  Validate immediately after
 // synthetic lowering and again after RC insertion so a missing/colliding slot
 // cannot degrade into a backend spelling lookup.
-pub fn validate_hir_binder_def_ids(program: HProgram) {
+pub fn validate_hir_binder_def_ids(program: HProgram) with {} {
     let mut seen: Set<Int> = set_new()
     validate_hir_decls(program.decls, seen)
 }
@@ -957,11 +957,15 @@ fn new_hir_validation_scope() -> HirValidationScope {
     HirValidationScope { names: [], def_ids: [], frames: [] }
 }
 
-fn push_hir_validation_scope(mut scope: HirValidationScope) {
+fn push_hir_validation_scope(
+    mut scope: HirValidationScope
+) with {mut<HirValidationScope>} {
     scope.frames.push(scope.names.len())
 }
 
-fn pop_hir_validation_scope(mut scope: HirValidationScope) {
+fn pop_hir_validation_scope(
+    mut scope: HirValidationScope
+) with {mut<HirValidationScope>} {
     let base = match scope.frames.pop() { some(value) => value, none => 0 }
     while scope.names.len() > base {
         scope.names.pop()
@@ -971,7 +975,7 @@ fn pop_hir_validation_scope(mut scope: HirValidationScope) {
 
 fn bind_hir_validation_scope(
     mut scope: HirValidationScope, name: Str, def_id: Int
-) {
+) with {mut<HirValidationScope>} {
     scope.names.push(name)
     scope.def_ids.push(def_id)
 }
@@ -1028,7 +1032,9 @@ fn validate_hir_drop_reference(
     }
 }
 
-fn validate_hir_binder(mut seen: Set<Int>, def_id: Int, label: Str) {
+fn validate_hir_binder(
+    mut seen: Set<Int>, def_id: Int, label: Str
+) with {mut<Set<Int>>} {
     if seen.contains(def_id) {
         panic("HIR binder DefId collision ${def_id} at ${label}")
     }
@@ -1045,7 +1051,7 @@ fn required_hir_def_id(def_id: Int?, label: Str) -> Int {
 fn validate_hir_params(
     params: List<HParam>, mut seen: Set<Int>,
     mut scope: HirValidationScope, label: Str
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     for param in params {
         let id = required_hir_def_id(
             param.def_id, "${label} parameter '${param.name}'")
@@ -1087,7 +1093,7 @@ fn collect_hir_pattern_names(
 fn validate_hir_pattern_bindings(
     pattern: Pattern, bindings: List<HPatternBinding>,
     mut seen: Set<Int>, mut scope: HirValidationScope, label: Str
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     let mut pattern_names: Set<Str> = set_new()
     collect_hir_pattern_names(pattern, pattern_names)
     let mut metadata_names: Set<Str> = set_new()
@@ -1118,7 +1124,7 @@ fn validate_hir_pattern_bindings(
 fn validate_hir_arm(
     arm: HMatchArm, mut seen: Set<Int>,
     mut scope: HirValidationScope, label: Str
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     if arm.pattern_plan.is_none() {
         panic("HIR ${label} has no typed PatternPlan")
     }
@@ -1136,7 +1142,7 @@ fn validate_hir_arm(
 fn validate_hir_local_binding(
     name: Str, def_id: Int?, init: HExpr,
     mut seen: Set<Int>, mut scope: HirValidationScope
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     validate_hir_expr(init, seen, scope)
     if name != "_" {
         let id = required_hir_def_id(
@@ -1148,7 +1154,7 @@ fn validate_hir_local_binding(
 
 fn validate_hir_stmt(
     stmt: HStmt, mut seen: Set<Int>, mut scope: HirValidationScope
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     match stmt {
         HStmt::Let { name, def_id, init, .. } =>
             validate_hir_local_binding(
@@ -1257,7 +1263,7 @@ fn validate_hir_stmt(
 fn validate_hir_field_values(
     field_values: List<HStructFieldInit>, spread: HExpr?,
     mut seen: Set<Int>, mut scope: HirValidationScope
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     for field in field_values {
         validate_hir_expr(field.value, seen, scope)
     }
@@ -1270,7 +1276,7 @@ fn validate_hir_field_values(
 fn validate_hir_variant_field_values(
     variant_ref: VariantRef, field_values: List<HStructFieldInit>, spread: HExpr?,
     mut seen: Set<Int>, mut scope: HirValidationScope
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     let mut field_indices: Set<Int> = set_new()
     for field in field_values {
         if !variant_ref_same(
@@ -1291,7 +1297,7 @@ fn validate_hir_nominal_field_values(
     name: Str, owner_ref: RegisteredNominalRef,
     field_values: List<HNominalStructFieldInit>, spread: HExpr?,
     mut seen: Set<Int>, mut scope: HirValidationScope
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     if registered_nominal_ref_display_name(owner_ref) != name {
         panic("HIR identity: struct literal nominal name drifted")
     }
@@ -1393,7 +1399,7 @@ fn validate_hir_field_access_kind(
 
 fn validate_hir_expr_values(
     values: List<HExpr>, mut seen: Set<Int>, mut scope: HirValidationScope
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     for value in values {
         validate_hir_expr(value, seen, scope)
     }
@@ -1547,7 +1553,7 @@ fn validate_complete_handler_groups(values: List<HEffectHandler>) {
 
 fn validate_hir_expr(
     expr: HExpr, mut seen: Set<Int>, mut scope: HirValidationScope
-) {
+) with {mut<Set<Int>>, mut<HirValidationScope>} {
     match expr {
         HExpr::Ident {
             name, def_id, source_slot, callee_identity,
@@ -2329,7 +2335,9 @@ fn validate_trait_method_type_formals(method: HTraitMethod) {
     }
 }
 
-fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
+fn validate_hir_decls(
+    decls: List<HDecl>, mut seen: Set<Int>
+) with {mut<Set<Int>>} {
     for decl in decls {
         match decl {
             HDecl::Fn { name, def_id, executable_ref, impl_method_ref,
