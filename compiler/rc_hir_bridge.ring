@@ -1224,10 +1224,10 @@ fn fail_instruction_for_node(
     }
 }
 
-fn step_for_node_role(
+fn step_for_node_role_opt(
     ctx: HirBridgeCtx, ordinal: Int,
     selector: Int, role_ordinal: Int
-) -> FlowSemanticStepRef {
+) -> FlowSemanticStepRef? {
     let mut target_step: FlowSemanticStepRef? = none
     for relation in core_flow_step_map_relations(ctx.stages.step_map) {
         if core_flow_node_ordinal(core_flow_step_node(relation)) == ordinal &&
@@ -1238,7 +1238,14 @@ fn step_for_node_role(
             target_step = some(core_flow_step(relation))
         }
     }
-    match target_step {
+    target_step
+}
+
+fn step_for_node_role(
+    ctx: HirBridgeCtx, ordinal: Int,
+    selector: Int, role_ordinal: Int
+) -> FlowSemanticStepRef {
+    match step_for_node_role_opt(ctx, ordinal, selector, role_ordinal) {
         some(value) => value,
         none => panic("RcHIR bridge: Core node role lacks Flow step")
     }
@@ -2426,6 +2433,8 @@ fn serialize_core_statement(
         let returned = core_stmt_return_value(statement)
         let mut result: List<HStmt> = []
         let mut returned_slot: SlotRef? = none
+        let has_control_exit = step_for_node_role_opt(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 0).is_some()
         match returned {
             some(expr) => {
                 let serialized = serialize_core_expr(ctx, owner, expr)
@@ -2440,7 +2449,7 @@ fn serialize_core_statement(
                     init: serialized.value, span: span_zero()
                 })
                 append_all(result, serialized.after)
-                if !types_equal(
+                if has_control_exit && !types_equal(
                         legacy_binder_projection_type(binder),
                         Type::UnitType) {
                     let stable = serialize_return_sink(
@@ -2452,23 +2461,25 @@ fn serialize_core_statement(
             },
             none => {}
         }
-        let return_role = if returned_slot.is_some() { 1 } else { 0 }
-        validate_return_terminator(
-            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT,
-            return_role, returned_slot)
-        append_all(result, before_terminator_drops(
-            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, return_role))
-        append_all(result, edge_cleanup_statements(
-            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, return_role, 0))
-        result.push(HStmt::Return {
-            value: match returned_slot {
-                some(slot) => some(wrap_terminator_operand(
-                    ctx, node_ordinal, 0, slot,
-                    BRIDGE_ROLE_CONTROL_EXIT, return_role)),
-                none => none
-            },
-            span: span_zero()
-        })
+        if has_control_exit {
+            let return_role = if returned_slot.is_some() { 1 } else { 0 }
+            validate_return_terminator(
+                ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT,
+                return_role, returned_slot)
+            append_all(result, before_terminator_drops(
+                ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, return_role))
+            append_all(result, edge_cleanup_statements(
+                ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, return_role, 0))
+            result.push(HStmt::Return {
+                value: match returned_slot {
+                    some(slot) => some(wrap_terminator_operand(
+                        ctx, node_ordinal, 0, slot,
+                        BRIDGE_ROLE_CONTROL_EXIT, return_role)),
+                    none => none
+                },
+                span: span_zero()
+            })
+        }
         return result
     }
     if kind == 7 {
@@ -2565,6 +2576,8 @@ fn serialize_callable_body(
         ctx, reference, 0, core_body_origin(body))
     let block = core_body_block(body)
     let mut statements: List<HStmt> = []
+    let has_body_return = step_for_node_role_opt(
+        ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, 0).is_some()
     for statement in core_block_statements(block) {
         append_all(statements, serialize_core_statement(ctx, reference, statement))
     }
@@ -2583,7 +2596,7 @@ fn serialize_callable_body(
                 init: serialized.value, span: span_zero()
             })
             append_all(statements, serialized.after)
-            if !types_equal(
+            if has_body_return && !types_equal(
                     legacy_callable_result_type(callable), Type::UnitType) {
                 let stable = serialize_return_sink(
                     ctx, node_ordinal, slot, BRIDGE_ROLE_BODY_RETURN)
@@ -2593,18 +2606,22 @@ fn serialize_callable_body(
         },
         none => {}
     }
-    let return_role = if returned_slot.is_some() { 1 } else { 0 }
-    validate_return_terminator(
-        ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN,
-        return_role, returned_slot)
-    append_all(statements, before_terminator_drops(
-        ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, return_role))
-    append_all(statements, edge_cleanup_statements(
-        ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, return_role, 0))
-    let tail = returned_slot.map(fn(slot) { wrap_terminator_operand(
-        ctx, node_ordinal, 0, slot,
-        BRIDGE_ROLE_BODY_RETURN, return_role)
-    })
+    let tail = if has_body_return {
+        let return_role = if returned_slot.is_some() { 1 } else { 0 }
+        validate_return_terminator(
+            ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN,
+            return_role, returned_slot)
+        append_all(statements, before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, return_role))
+        append_all(statements, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_BODY_RETURN, return_role, 0))
+        returned_slot.map(fn(slot) { wrap_terminator_operand(
+            ctx, node_ordinal, 0, slot,
+            BRIDGE_ROLE_BODY_RETURN, return_role)
+        })
+    } else {
+        none
+    }
     let result = HExpr::Block {
         stmts: statements, tail: tail,
         ty: legacy_callable_result_type(callable),
