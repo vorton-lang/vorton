@@ -32,11 +32,11 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     define_effect_header_schema, publish_effect_header_schema,
     instantiate_effect_header_schema,
     register_callable_effect_header}
-use diagnostics::{DiagnosticContext}
+use diagnostics::{CompileError, DiagnosticContext}
 use codes::{E0207, E0406, E0501, E0502, E0503, E0504, E0505, E0506,
     E0510, E0511, E0513, E0514}
 use hir::{compare_by_first, module_item_identity, ValueBindingKind}
-use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_expr, resolve_self_type, resolve_effect_expr,
+use infer_ctx::{InferCtx, FnBoundsEntry, type_error, resolve_type_expr, resolve_self_type, resolve_effect_expr,
     validate_fn_bound_order,
     record_value_origin, record_value_binding_kind,
     record_value_symbol_ref, source_value_symbol_for_decl,

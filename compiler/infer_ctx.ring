@@ -20,7 +20,8 @@ use hir_exact::{
     DictRef, dict_ref_exact,
     make_simple_dict_ref, make_static_dict_ref, make_wrapped_dict_ref
 }
-use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink, Severity, Suggestion, make_diag, make_diagnostic}
+use diagnostics::{CompileError, DiagnosticContext, DiagnosticNote, Diagnostic,
+    CollectingSink, Severity, Suggestion, make_diag, make_diagnostic}
 use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
 use union_find::{UnionFind, new_union_find, uf_find}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
@@ -215,12 +216,6 @@ enum DictEvidenceResolution {
     Pending,
     Missing { suppress_diagnostic: Bool }
 }
-
-// ============================================================
-// CompileError (raised via fail effect, caught at declaration level)
-// ============================================================
-
-pub struct CompileError {}
 
 // ============================================================
 // InferCtx — mutable type inference context

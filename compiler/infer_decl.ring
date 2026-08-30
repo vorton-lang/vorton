@@ -77,11 +77,10 @@ use extern_manifest::{compiler_extern_manifest_entry_executable,
     host_import_fact_for_declaration}
 use union_find::{UnionFind}
 use unify::{empty_subst}
-use diagnostics::{DiagnosticContext, DiagnosticNote, Severity}
+use diagnostics::{CompileError, DiagnosticContext, DiagnosticNote, Severity}
 use codes::{E0201, E0204, E0402, E0403, E0404, E0405, E0407, E0501, E0503, E0504, E0802, E0803}
 use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
     OwnerInferenceBatch, OwnerBatchCheckpoint, CallableFinalizationHeader,
-    CompileError,
     validate_fn_bound_order,
     type_error, type_error_with_notes,
     unify_at, unify_at_noted,

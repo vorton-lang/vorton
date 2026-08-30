@@ -25,6 +25,10 @@ pub fn severity_to_str(s: Severity) -> Str {
 // Diagnostic data types
 // ============================================================
 
+// Internal front-end abort token.  It lives below parser and inference so
+// both layers can share one typed fail channel without a module cycle.
+pub struct CompileError {}
+
 pub struct DiagnosticNote {
     pub message: Str,
     pub span: Span?

@@ -35,7 +35,8 @@ use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET, BUILTIN_OPTION,
     hexpr_type, hexpr_effects, hexpr_span, map_index_helper_identity}
 use hir_exact::{dict_ref_exact}
-use diagnostics::{DiagnosticContext, DiagnosticNote, CollectingSink, Severity, make_diag}
+use diagnostics::{CompileError, DiagnosticContext, DiagnosticNote,
+    CollectingSink, Severity, make_diag}
 use codes::{E0201, E0203, E0205, E0206, E0301, E0303, E0304, E0305, E0306,
     E0307, E0308, E0309, E0402, E0411, E0503, E0601, E0705, W0001}
 use union_find::{UnionFind}
@@ -51,7 +52,7 @@ use extern_manifest::{
     compiler_extern_manifest_entry_normalized_signature,
     compiler_extern_manifest_entry_generic_arity}
 use unify::{unify, empty_subst}
-use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
+use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
     fn_bound_dict_ref,
     PendingDictPurpose,
     type_error, type_error_with_notes, merge_effects, unify_at, unify_at_noted, update_fn_effects,
