@@ -298,7 +298,7 @@ fn require_derived_child_projection(
        !core_field_ref_same(
             child.projections.get(child.projections.len() - 1).unwrap(), field) ||
        !core_type_ref_same(child.ty, field_type) ||
-       core_field_ref_kind_tag(field) != 2 ||
+       core_field_ref_kind_tag(field) != 1 ||
        core_field_ref_tuple_index(field) != ordinal {
         panic("Core derive: tuple child projection/order differs")
     }
@@ -1266,7 +1266,7 @@ pub fn make_core_derived_text_pattern_field(
     field: CoreFieldRef, ty: CoreTypeRef,
     binding: SlotRef?, rendered: Bool
 ) -> CoreDerivedTextPatternField {
-    if core_field_ref_kind_tag(field) != 1 ||
+    if core_field_ref_kind_tag(field) != 3 ||
        rendered != binding.is_some() {
         panic("Core derive text: variant pattern field contract differs")
     }
