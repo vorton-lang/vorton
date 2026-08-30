@@ -1258,9 +1258,7 @@ let zs = xs.clone()    // 递归深拷贝，完全独立
 
 求值顺序固定为：`base` 只求值一次但暂不消费；随后所有显式 override RHS 按源码顺序完整求值，此时可继续读取或借用 `base`；只有全部 RHS 成功后，未覆盖字段才以 Own transfer 进入 fresh result，被覆盖字段在 `base` 中的旧值执行 Drop，override temporary 再转入对应结果字段，最后 `base` 整体失活。若任一 RHS 产生 `fail`，不得留下部分 move 的 `base`。override RHS 若试图在提交前 ownership-move `base` 的子字段，则按既有 partial-move 禁令拒绝；要保留该字段就省略 override，要保留整个 base 则显式写 `Type { ..base.clone(), ... }`。
 
-对 struct update，Planner 依据字段的 Logical OwnershipShape / Physical RcShape 将 Own transfer 兑现为 scalar copy、physical RC dup 或 exact Take，并负责旧字段恰好一次 Drop 与 source clear；这不改变字段的静态类型 `T`。Flow / Planner 另行维护每条字段 path 的 storage occupancy（`Live` / `Moved`）：exact Take 后 source slot 变为物理 empty / NULL 并标记 `Moved`，而不是把字段类型改写成 `Option<T>`、`MaybeUninit<T>` 或其他公开类型。全 shareable 的字段通过 physical RC dup 进入结果，base 字段保持 `Live`，随后仍走普通 Drop。
-
-Ring 0.1 必须创建 fresh result shell 并逐字段填充：禁止先将 whole base MovePlace 到结果再原地覆盖字段，也禁止因 base 物理唯一而复用其 storage。提交完成后，base 仍执行唯一的普通 aggregate Drop：它只 Drop `Live` 字段，对 physical empty / `Moved` 字段 no-op，最后正常 release shell，因而不会 double-drop 已转移字段。禁止新增 `ReleaseMovedAggregate`、shell bypass、额外 whole-container Drop 或用 backend 猜测 occupancy。直接定义用户 `Drop` 的 aggregate 若该 spread 需要任一字段 exact Take，则稳定拒绝；编译器不得把 partial value 传给要求完整 `Self` 的用户 destructor。
+**0.1 internal-checkpoint Known Issue（2026-08-30 用户决定）**：上述是目标语义，不是当前0.1 compiler对所有字段形状的已验证保证。当前self-host只依赖8处全shareable spread；这一路径继续使用physical RC dup并保留base完整。若未覆盖字段为owning或其资源行为依赖type parameter、因而需要exact Take，compiler仍可能接受源码但错误处理source clear/Drop，产生leak、double-drop、UAF或错误析构顺序；0.1不要求为它新增诊断，也不实现partial/open-drop、`Live`/`Moved` occupancy或专用moved-shell operation。外部程序在迁仓后修复前应显式destructure并重建全部字段。现有反例进入GitHub Known Issues；internal checkpoint与公开preview都不得宣称owning spread已正确。
 
 Ring 0.1 不支持 named enum / variant update spread。`Variant { ..base, field: value }` 稳定产生 source diagnostic；在已经匹配出 exact variant 的 arm 中，显式重建全部字段，例如 `Circle { radius, color: next }`。这不影响 named-field variant construction、generic enum、pattern matching、字段 move 或普通 struct spread。编译器不为该纯缩写引入 runtime tag check、variant-refinement carrier、fallback 或第二条 MoveUpdate 路径。
 
@@ -1720,7 +1718,7 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 - match/catch 按源码 arm 顺序，穷尽失败 fail loud；Drop、cleanup 与 evidence 生命周期在嵌套函数边界隔离，并由共享 RC/verifier 契约审计。
 - 编译器进程只生成文本并调用外部编译器，不恢复 LLVM-C 式进程内 FFI/IR builder 信道。
 
-**发布边界**：C-only 迁移、clean-clone 重复门与旧 worktree 收官已经完成。critical correctness 清零后，B-176/B-180 先恢复可接受的 check/验证反馈速度，再由 B-174/B-177/B-175 承担 CLI 闭环、版本化 agent contract 与 candidate 打包产品面；生成程序性能证据由 B-181 承担。未来第二后端只能消费同一 HIR/ABI 契约，不能恢复进程内 LLVM-C FFI 或成为唯一 bootstrap。
+**内部检查点与发布边界（2026-08-30 用户决定）**：当前0.1只要求C-only tracked anchor生成可用current compiler、连续self-host到文本fixed point并完成B-183仓库/GitHub治理迁移；不要求critical correctness清零，也不是公开preview。迁仓后B-176/B-180先恢复可接受的check/验证反馈速度，Known Issues与剩余correctness/ABI在GitHub继续，再由B-174/B-177/B-175承担CLI闭环、版本化agent contract与candidate打包产品面；生成程序性能证据由B-181承担。未来第二后端只能消费同一HIR/ABI契约，不能恢复进程内LLVM-C FFI或成为唯一bootstrap。
 
 **未来 LLVM target 重启门**：只有代表性负载证明 C 不可表达的性能瓶颈、Ring 级调试信息刚需，或目标平台缺少成熟 C 工具链时才重新立项。届时 C 后端永久保留为 reference/stage-0，LLVM 只能是第二信道，并且只发文本 `.ll`，不得恢复进程内 LLVM-C FFI。
 
@@ -1959,7 +1957,7 @@ Source
 
 **渐进迁移而非平行重写**：#268/#269 先建立通用 typed identity、executable inventory、neutral normalization、FlowIR/RcIR 与 validator 骨架；后续 type/effect/evidence、failure/control、RIIR/FFI、optimization 各自在既有 backlog 里迁入其唯一所属层。一个事实切换到新层时必须原子迁移全部消费者并删除旧 fallback/side map；禁止长期双写、shadow authority 或以“兼容”保留旧解释路径。B-190 负责在相应消费者已迁移并有证据后删除遗留重复 authority，不把本架构变成一次无界全仓 rewrite。
 
-**0.1 real-consumer implementation boundary（2026-08-24 用户直接决定）**：首次0.1发布前，#268/#269与上述分层只实现0.1已有语义和验收矩阵的真实consumer。删除或拒绝任何仅为post-0.1预留的variant、carrier、fallback、extension hook或validator branch；未来能力不得要求当前IR携带空节点、unknown占位或兼容路径。Review finding只有在候选违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI，或实际阻止#268/#269闭合时才BLOCK；纯未来扩展性、post-0.1 feature兼容性和没有0.1 consumer的“完整性”意见不得阻塞，也不在当前工作中顺手新增post-0.1 item。该裁剪不降低0.1 Deep Clone、exact identity、Core closure、RC conservation、single/project一致性，以及source-build/fixed-point/full/ASan/self-host/exact CI门。
+**0.1 internal self-host implementation boundary（2026-08-30 supersede）**：#268/#269当前只实现tracked anchor、current compiler连续self-host/fixed point、compiler/hello最小smoke与B-183迁仓的真实consumer。其他外部程序缺陷可保留为Known Issues而不新增source diagnostic；对应IR纵切、完整matrix、full/RC/ASan与一般correctness/safety/ownership证明迁到Vorton GitHub继续，不能被描述成0.1检查点已通过。未来能力仍不得要求当前IR预留空节点、unknown占位、fallback或双authority。
 
 **Koka 作为参考实现**：Effect 推断（`InferEffect.hs`）和 evidence passing（`Evidence.hs`）的算法翻译自 Koka 编译器（MIT 许可）。Perceus 引用计数已翻译其 POPL'21 实现落地（§7.11）。
 

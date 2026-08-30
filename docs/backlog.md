@@ -9,21 +9,25 @@
 
 ## 当前排序
 
-当前主线目标是形成 **v0.1 developer-preview candidate**；实际公开 release、许可证与最终支持平台仍由用户在候选产物和证据齐备后拍板。Preview 可以明确标注未实现能力，但不得明知违反当前语言规范、ownership/safety 保证或用豁免降低门槛。
+当前主线目标是形成 **v0.1 internal self-host / repository-migration checkpoint**：tracked anchor可构建当前compiler，当前compiler连续自编译到可复现fixed point，并足以把完整历史与活动治理原子迁移到`vorton-lang/vorton`。它不是developer preview、release、语言bug清零或ownership/safety产品保证；不命中当前compiler/self-host/迁仓路径的缺陷可保留为Known Issues，迁仓后进入GitHub Issue继续处理。实际公开preview/release、许可证、正确性与最终支持平台仍由用户在后续候选产物和证据齐备后拍板。
 
-**未发布期 clean-break 原则（2026-08-07 用户拍板）**：首次公开 preview/release 之前，一项公开语法、API、ABI 或语义变更一旦按授权边界拍板，就采用最简单的原子切换；兼容性本身不是增加 deprecated alias、双实现路径、旧 ABI fallback 或迁移 shim 的理由。仓内调用点、规范和测试在同一变更中整体迁移，并明确记录 break。此原则不授权降低 correctness、ownership/safety 或测试门槛，也不替代新语义本身的用户保留决定；首次公开发布后的版本兼容政策另行建立。
+**未发布期 clean-break 原则（2026-08-07 用户拍板；2026-08-30 checkpoint澄清）**：首次公开 preview/release 之前，一项公开语法、API、ABI 或语义变更一旦按授权边界拍板，就采用最简单的原子切换；兼容性本身不是增加 deprecated alias、双实现路径、旧 ABI fallback 或迁移 shim 的理由。仓内调用点、规范和测试在同一变更中整体迁移，并明确记录 break。该原则不替代新语义本身的用户保留决定。0.1 internal checkpoint允许把不命中self-host/迁仓路径的已知缺陷原样后移，而不是假称correctness/safety门已通过；首次公开preview前再按产品治理建立相称质量门，首次公开发布后的版本兼容政策另行建立。
 
 **近期 break 审核门**：任何修改公开语法、签名、ABI 或可观察语义的 item，在实现前必须标成“已拍板 clean break”“等待 decision dossier”或“仅内部、非 breaking”之一。已拍板的 #268/#269 ownership 真值、B-167 调用点 evidence、0.1 no-index-assignment 与 B-193~B-196 surface/effect边界均采用一次性切换；旧 ownership、default evidence、宽泛`io`/host fallback、effectful Drop、index-assignment carrier与refinement placeholder必须在各自原子变更中删除，不形成双轨。B-168/B-169 的探针结论，以及 B-152、B-156、B-171、B-133 等潜在用户面变化在进入实现前仍显式核对 break 边界。每个已拍板 break 的验收都必须列出被删除的旧路径、同步迁移的仓内消费者/规范/测试，并用负例证明旧形式不会经 alias、fallback 或旧 ABI 继续生效。
 
-Canonical dependency chain：`#268/#269 -> B-176/B-180 -> B-190 -> B-193/B-194/B-195/B-196 -> remaining correctness/ABI -> B-183 -> B-191 -> B-174/B-177/B-175 -> post-0.1 B-204 -> B-072/B-197/B-198/B-202`。
+Canonical dependency chain：`#268/#269 minimal self-host checkpoint -> B-183 repository/GitHub migration -> B-176/B-180 -> B-190 -> remaining correctness/ABI + imported Known Issues -> B-191 -> B-174/B-177/B-175 -> B-204 -> B-072/B-197/B-198/B-202`。
+
+历史validator索引`#268/#269 -> B-176/B-180；B-176/B-180 -> B-190 -> remaining correctness/ABI -> B-183 -> B-174/B-177/B-175`已被上述2026-08-30迁仓优先路线supersede，只用于验证旧路线文本被显式识别，不再授权性能或correctness backlog先于B-183。
 
 B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（check/test/bootstrap 全绿）完成；worktree/ref/WIP、authority、paired-session、push/CI 与 health 约束已转为 `docs/workflow.md` / `docs/repository-health.json` 的持续门，活动历史只留 Git。
-`B-176` 保持 queued；B-180 只保留 runner anchor-object cache，compiler lane 继续冻结到 #268/#269 fixed point 闭环。
+`B-176` 保持 queued；B-180 只保留 runner anchor-object cache，compiler optimization继续冻结到#268/#269最小fixed point与B-183迁移闭环。
 
-处理顺序固定为七道门：
+处理顺序固定为六道门：
 
 1. **B-186 Repository convergence recovery（已完成）**：worktree/ref/WIP、单一 authority、main/branch 看板、repository-health 与 push/CI 已恢复；这些约束转为持续门。
-2. **#268/#269 信任闭环**：ownership/RC fixed point 与原完整门真正关闭前，不再启动 compiler optimization。固定 archive 只能重建精确 `DBC154…` C，无法重建 `5E862…` / `9DFD…` native-object pins，且没有另存的权威 object/recipe；因此 22 GiB crossing 路线已永久关闭且不计为已执行。用户已理解并批准唯一终态：`accepted I-prime identity -> project FlowIR freeze -> ONE ResourcePlanner (A-prime transfer + S-prime cleanup统一) -> verified RcIR -> final acceptance`。所有语义 lowering 与 ownership-neutral 造槽必须先完成；Planner 一次求 logical/physical shape、callable least fixed point 与 per-body CFG，并输出全部 Clone/Take/Drop/Cleanup；其后无 Perceus ownership pass、无新 binder、无 resolver/typecheck 回放或 backend 猜测。
+2. **#268/#269 最小自举检查点**：当前只要求tracked anchor构建当前compiler，随后同一clean-current源码连续生成可执行compiler并达到gen2/gen3 `main.c`文本fixed point；固定artifact通过compiler/hello最小smoke，且证据足以在B-183后从clean clone重建。固定 archive 只能重建精确 `DBC154…` C，无法重建 `5E862…` / `9DFD…` native-object pins，且没有另存的权威 object/recipe；因此22 GiB crossing 路线已永久关闭且不计为已执行，latest main也不得恢复S-prime或同类资源加码。FlowIR/ONE ResourcePlanner/RcIR仍是后续唯一终态，不允许为过桥建立第二ownership authority；但其不命中当前self-host路径的未闭合语义、完整矩阵与RC/ASan门转为迁仓后的GitHub Known Issues，不再阻止本检查点。
+
+> **2026-08-30 Known Issues demotion（用户决定）**：0.1检查点允许compiler继续接受已知有缺陷的外部程序而不新增诊断，只要exact census证明当前compiler/std self-host与迁仓路径不命中。必须保留现有最小复现、已知后果和workaround，B-183导入为GitHub Issue；不得删除证据后声称支持。owning或type-parameter-dependent struct spread已确认compiler/std/examples owning consumer为零，直接后移，保留8处shareable compiler spread；B-170在self-host零命中时后移；B-165只在self-host命中其跨catch automatic-mutation形态时阻塞；B-160/B-162不跑独立验收，随唯一self-host/fixed-point交易验证。Generic callable先允许把compiler内部实际HOF consumer机械改为loop/direct call以解除自举依赖，其余instance-sensitive行为后移，不为0.1实现全局BodyInstance分析。
 
 > **I′ final-emission H+T acceptance boundary（2026-08-20 用户批准）**：I′ 可增加一个永久但 internal-only 的 bounded acceptance TCB。Exact/NameOnly map 保存不可混用的 typed refs；所有 capture/dict/effect/closure critical leaf helper 必须从同一个 typed operand 原子生成实际 C line 与 ledger event，ledger 记录唯一 parent closure edge，并逐 edge 校验 store/extract、receiver load/call、domain、slot、index 与顺序。隐藏 flag 不进入公开 CLI/支持面；off/on 的 C、object 与诊断必须字节一致，相同输入 ledger hash 必须稳定，mutation 必须杀死缺失/交换的 tag、key、slot、index、edge 与 event。B-188 是首次 H+T one-shot 验收的硬前置；sealed artifact 一律不复用，fresh candidate 仍须原 runtime/RC/ASan/self-host/12 GiB fixed-point 完整门。任何 raw critical emitter 未接入、caller 可独立拼 C/event、closure edge 不唯一、ledger 不稳定、off-mode 漂移、需扩到 HIR/Perceus/runtime 或 12 GiB 失败都立即停止并重新 routing。T-alone 因不能证明 event 对应真实 raw slot而拒绝；提前 A′ 因重排路线并重新汇合资源风险而拒绝。
 
@@ -45,17 +49,17 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **Private physical nominal B + one-time bridge（2026-08-30 用户批准，supersede `680ee56c` Cut-A）**：public struct的private field可递归包含private nominal，source privacy对齐Rust；public fn/pub field/public enum payload等真正interface仍拒绝private type。正常revert `1d9028f4`恢复`a3ac0d8f` carrier后，必须把`physical_fact_for_name`/`producer_use_physical_nominal`改为exact `RegisteredNominalRef`入口，禁止name-first后验owner；closure matrix覆盖confirmed158 public roots、84 private identities、244 variants及same/cross-provider、alias、generic、recursive、re-export/diamond。Bootstrap只允许一次isolated git-archive overlay机械publicizeexact84并固定path/source/hash manifest，d06→bridge后由bridge编译clean private source；只有第二产物可candidate，overlay不commit、不进source/docs/fallback并在crossing后永久删除。Generated-C shim、name fallback和第二registry仍拒绝。
 
-> **Struct move-spread partial/open-drop gate（2026-08-30 用户批准）**：#268/#269 的 struct move spread 必须始终构造 fresh result；字段静态类型保持 `T`，Flow / ONE Planner 以 exact field path 的 `Live` / `Moved` occupancy 作为唯一初始化状态 authority。字段 exact Take 后 source slot 清为 physical empty / NULL；普通 aggregate Drop 只 Drop `Live` 字段、跳过 empty / `Moved` 字段并恰好一次 release shell。全 shareable 字段走 physical RC dup、base 保持完整后执行同一普通 Drop。禁止 whole-base MovePlace / storage reuse、`ReleaseMovedAggregate`、shell bypass、extra whole Drop、把 occupancy 编码成公开 `Option<T>` / `MaybeUninit<T>` 或 backend 重建。直接 user-`Drop` aggregate 若 spread 需要任一 partial Take，必须在 source/TypedHIR 边界稳定拒绝；不得把 partial `Self` 交给用户 destructor。验收必须覆盖 base 单次求值、override LTR 且失败前零partial move、Take后source-clear、mixed Live/Moved open drop、shareable physical RC dup、shell恰好释放一次、user-Drop负例，以及杀死未clear、double-drop和专用shell释放路径的mutation。
+> **Struct move-spread Known Issue（2026-08-30 用户批准demotion，supersede partial/open-drop gate）**：#268/#269只依赖当前compiler中的8处全shareable spread；它们保持base单次求值、override LTR与现有physical RC语义。Owning或type-parameter-dependent字段需要exact Take时，0.1 compiler仍可接受源码但可能产生leak、double-drop、UAF或错误Drop顺序；不要求新增source diagnostic，也不实现`Live`/`Moved` partial/open-drop、`ReleaseMovedAggregate`、storage reuse或专用shell路径。compiler/std/examples当前owning consumer为零；外部程序应显式destructure并重建全部字段。现有反例与workaround随B-183导入GitHub，不阻塞internal self-host/migration checkpoint，也不得据此宣传owning spread正确。
 
 > **0.1 named-enum update spread clean break（2026-08-30 用户批准）**：`Variant { ..base, ... }`稳定source diagnostic，并建议在已匹配exact variant的arm内显式重建全部字段；保留struct spread、named-field/generic/nullary variant construction、pattern/match与字段move。仓内0.1 production/std/examples consumer为0；7个测试source sites原子迁移为显式重建。实现必须删除`HExpr::NamedVariantConstruct.spread`及Core/Flow/Rc MoveUpdate的variant-only producer/consumer，old-authority census为0；不得新增runtime tag check、exact-variant refinement carrier、fallback、兼容语法或post item。验收覆盖single/generic enum显式重建正例、named-enum spread稳定负例、struct spread不回归及旧variant MoveUpdate mutation。
 
 > **0.1 complete custom-handler gate（2026-08-30 用户批准 A）**：一个`handle...with`只要包含某exact `HandledEffectRef`的任一arm，就必须按对应`EffectDef`覆盖全部declared `EffectOperationRef`各一次；source order任意，TypedHIR按decl ordinal冻结dense `0..N-1`，完整后才消除whole effect atom/发布facts。Missing/duplicate/unknown/cross-owner稳定source diagnostic，Core复核owner/count/ordinal全集，现有dense C evidence ABI不变。Partial residual row、unhandled parent forwarding与sparse ABI不进入0.1。验收覆盖不同source顺序、nested/cross-module/generic closed instance、missing/duplicate/unknown/cross-owner及count/ordinal mutation；System effect仍不可handle。
 
-> **实施硬门**：旧d5/17/df1/37a4/a7 S1候选与sealed packet只作反例/evidence，不作seed或逐点返修；a7 one-shot已user-directed终止且inconclusive。新authority从最新main建立，先固定完整type-state pipeline、typed identity、CoreHIR elaboration closure、neutral normalization、ExecutableInventory与“Planner后零binder”structural/mutation contract；所有组件只可在同一authority group渐进checkpoint，未形成完整ResourcePlanner时不得merge行为改变到main。最终验收覆盖direct/named owning sink、struct/variant/list/tuple/range/slot、function value/HOF/factory、explicit ImplFn、derive、handled effect、reexport/diamond/extern bridge、ordinary managed generic recursive shape、loop/catch/handler、none→some overwrite、partial move与single/project parity；另以稳定负例证明source trait body、delegate与raw generic aggregate不能进入TypedHIR/Core。Mutation必须杀死surface-only node、implicit executable obligation、system→evidence、handled→HostImport或resolver/type/effect/trait/backend fallback越过CoreHIR边界。随后12 GiB source-built fixed point、完整RC/ASan/self-host/full与exact CI全绿才关闭#268/#269，并立即进入B-176/B-180性能路线。
+> **Internal-checkpoint硬门（2026-08-30 supersede原完整验收）**：旧d5/17/df1/37a4/a7 S1候选与sealed packet只作反例/evidence，不作seed或逐点返修；a7 one-shot已user-directed终止且inconclusive。当前只修会阻止tracked anchor→current compiler→gen2/gen3文本fixed point、compiler/hello smoke或B-183 clean-clone重建的真实路径；其他既有矩阵失败、ownership/RC边角与未完成纵切保留证据后导入GitHub。关闭#268/#269 internal checkpoint要求一个fixed source的连续self-host交易、gen2/gen3 `main.c`字节一致、两个最终compiler可启动并通过最小smoke，以及无证据拼接；不要求standard full、完整RC/ASan、全部single/project/factory/catch/spread矩阵或exact CI先行全绿。后者没有被删除或宣称通过，而是迁仓后按GitHub Issue/PR恢复。
 
-> **Compiler-wide staged IR adoption（2026-08-22 用户批准；2026-08-23 naming clean break）**：总架构固定为 `AST -> ResolvedAST -> TypedHIR -> CoreHIR -> FlowIR -> RcIR -> AbiIR -> mechanical C11`，但不新增平行 P0 或一次性 rewrite。`FinalHIR`/`RcHIR`旧名不保留alias；FlowIR明确是first MIR/CFG-style operational IR，RcIR是其资源显式版本。当前 #268/#269 只建立后续可共用的 exact identity、typed carrier、ExecutableInventory、neutral normalization、freeze/validator 与 RcIR 骨架；不得用 ownership-only side map 抢先形成第二套前端。以后 B-180 仅在测量支持时消费稳定 stage hash/cache，B-168/B-169/B-167 在既有顺序中把 control/evidence/call ABI 放入 CoreHIR/FlowIR/AbiIR，B-152 把 RIIR/FFI representation 收口到 AbiIR；其他 item 同理按其现有优先级迁入唯一层。每个 cutover 必须原子迁移消费者并删除旧 name/type/backend fallback，B-190 只清理已有迁移证据支持的遗留 authority；上述约束不改变七道门顺序、公开语义/ABI或原验收门。
+> **Compiler-wide staged IR adoption（2026-08-22 用户批准；2026-08-30 checkpoint澄清）**：总架构固定为 `AST -> ResolvedAST -> TypedHIR -> CoreHIR -> FlowIR -> RcIR -> AbiIR -> mechanical C11`，但不新增平行 P0 或一次性 rewrite。`FinalHIR`/`RcHIR`旧名不保留alias；FlowIR明确是first MIR/CFG-style operational IR，RcIR是其资源显式版本。当前#268/#269只保留self-host实际需要且后续可共用的exact identity、typed carrier、ExecutableInventory、neutral normalization、freeze/validator与RcIR路径；不命中self-host的未完成纵切迁入GitHub，不得用ownership-only side map抢先形成第二套前端。B-180仅在测量支持时消费稳定stage hash/cache，后续control/evidence/RIIR/optimization仍进入唯一所属层。每个cutover必须原子迁移消费者并删除旧name/type/backend fallback；长期架构与公开语义目标不变，但当前验收范围由上述internal-checkpoint硬门取代原七道门。
 
-> **0.1 real-consumer execution boundary（2026-08-24 用户直接决定）**：当前#268/#269与staged-IR authority只实现0.1真实consumer。任何仅服务post-0.1的variant/carrier/fallback/extension hook/validator branch必须删除或不新增；review finding只有在违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI，或阻止#268/#269闭合时才BLOCK。纯未来扩展性、post-0.1 feature兼容或无0.1 consumer的完整性不得阻塞，也不得在本轮顺手新增post-0.1 item；既有deferred items保持原排期，但当前IR不为它们预铺carrier。该裁剪不降低Deep Clone、exact identity、Core closure、RC conservation、single/project、source-build/fixed-point/full/ASan/self-host/exact CI门。
+> **0.1 self-host execution boundary（2026-08-30 supersede）**：当前#268/#269只实现compiler自身、tracked bootstrap与B-183迁仓的真实consumer。任何仅服务外部边角程序、post-migration correctness或未来能力的variant、carrier、fallback、extension hook与validator branch均删除、不新增或保留为Known Issue证据；只有阻止current compiler连续self-host/fixed point、最小smoke或迁仓重建的finding才BLOCK。Deep Clone、exact identity、Core closure、RC conservation、single/project、full/ASan与公开preview门仍是后续真实工作，但不再是internal checkpoint已完成的claim。
 
 > **Core effect closure（2026-08-26 用户批准）**：TypedHIR freeze必须把普通effect inference变量完全求解，并把合法多态tail generalize为稳定`EffectParamRef(owner, ordinal)`；raw UnionFind/type-var tail禁止进入Core。`CoreCallableEffectContract`保存canonical system/handled/fail/mut/unsafe atoms与可选formal effect参数，call site保存exact实例化；first-class/dynamic candidate逐项核对effect/evidence契约。Core/Flow不重跑effect inference，Planner不消费effect。本边界是现有0.1 effect-polymorphic HOF/B-167与B-194/B-195的真实consumer，不是未来扩展hook。
 
@@ -87,13 +91,12 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **0.1 no-index-assignment clean break（2026-08-26 用户批准）**：`x[i]` 只作读取；`x[i] = value`及compound index assignment稳定hard-fail并建议具名mutator，绝不按receiver类型隐式改写setter。List使用`set(mut self, index, value)`，Map使用既有`insert(mut self, key, value)`；0.1删除assignment-only Core/Flow/Planner/bridge `IndexPlace` carrier，不保留fallback或未来hook。完整`IndexMut`/嵌套index place由B-202仅在首次0.1后、存在真实consumer时重新设计，当前实现/review/验收视其为不存在。
 
-3. **B-176/B-180 反馈速度**：在 post-ownership 最新 main 重做 baseline；runner 与 compiler 分 checkpoint，但原 2x 量化验收不变。compiler 只允许一个 profile-guided wave。
-4. **B-190 全仓简化**：B-180完成并吸收B-187文档盘点后，以固定snapshot做一次有界过度设计复核与减法refactor；不做rewrite-for-perfection。
-5. **0.1 surface + Remaining correctness / ABI freeze**：先原子关闭 B-193/B-194/B-195/B-196；随后处理 B-162、B-164、#263、#264、#239、#244、#267、#257，再走 B-168 → B-169 → B-167 → B-152 → B-002，并完成 unsafe/Str 等 candidate gate。B-168/B-169只消费system/handled分域后的契约，不再设计root evidence。
-6. **B-183 repository identity / GitHub workflow**：放在 technical ABI/ownership/failure fixed point 之后、产品化之前；不再晚于 B-174 才处理。
-7. **Preview candidate**：B-191 clean-break 删除 `T?` → B-174 → B-177 → B-175；随后 B-204优先恢复proper callable-occurrence ResolvedAST与同检查单元具名函数值完整推断，再由B-181、B-178/B-016、B-111等证据与工具面按依赖推进。B-072/B-197/B-198/B-202只在0.1后按真实consumer与既有优先级重启。
+3. **B-183 repository identity / GitHub workflow**：最小self-host fixed point后立即进入planning与用户批准的外部cutover；活动backlog、review与用户决策迁到GitHub Issue/PR，稳定spec/verdict继续入库，不建立两套手工真值。
+4. **B-176/B-180 反馈速度**：在迁移后的Vorton仓库对self-host基线重做测量；runner与compiler分checkpoint，原2x量化验收不变，compiler只允许一个profile-guided wave。
+5. **B-190 + Remaining correctness / ABI**：性能反馈改善后做一次有界减法复核，再由GitHub backlog处理B-193/B-194/B-195/B-196、B-162/B-164、现存issues及B-168/B-169/B-167/B-152/B-002；Known Issues按影响与真实consumer重新排序，不因0.1检查点关闭而冒充完成。
+6. **Public preview candidate**：B-191 → B-174 → B-177 → B-175；随后B-204优先恢复proper callable-occurrence ResolvedAST，再由B-181、B-178/B-016、B-111等证据与工具面推进。B-072/B-197/B-198/B-202只在迁仓后按真实consumer与既有优先级重启。
 
-B-180 不得以早期 developer-unblock checkpoint 绕过 #268/#269 final fixed point；其已证明的 runner anchor-object cache 可保留，所有 compiler candidates 冻结。B-176 只有在最新 main 可重放完整 baseline 后才算完成。
+B-180不得绕过#268/#269最小fixed point或B-183迁仓闭环；其已证明的runner anchor-object cache可保留。B-176只有在Vorton clean clone可重放同一self-host基线后才算完成。
 
 ---
 
@@ -299,6 +302,8 @@ fn process_all(items: List<dyn Describable>) { ... }
 - 调研本身不改变 main 的公开行为，`python .agents/scripts/validate_workflow.py` 通过。
 
 ### B-170 bounded generic + 空容器字面量的 bound 求解时序（E0503 误报）[bugfix] [P2] [M] [judgment] [queued]
+
+> **0.1 internal-checkpoint处置（2026-08-30 用户决定）**：compiler/std/examples的exact self-host trigger为零时，本项不再运行独立focused验收或阻塞#268/#269；保留现有复现与`set_new()`、concrete helper或非空input workaround，随B-183导入GitHub Known Issues。若唯一self-host交易实际命中，才按当前failure class恢复修复。
 
 2026-07-31 B-107 wave 收尾归因立项。**主复现（通用形态，2026-07-31 于 B-107 tip 双重验证仍触发）**：`fn count_tags<T: Marker>(items: List<T>)` + `count_tags([])` → E0503 'Marker'。根因：`resolve_dicts_from_scheme`（infer_ctx.ring:1306-1356，行号=立项时）对未解 TypeVar 的 trait bound fail-closed，而该求解发生在 let 注解双向传播之前——**带了显式注解也无法单轮修复**（`let s: Set<Int> = set_from([])` 同报），违反公理①「错误单轮可修」。main 既有 checker 通用限制，非 Set 特有；b973859 给 `set_from` 加 `T: Hash+Eq` bound 后被 `set_ops.ring` 撞出（该用例经 runner `CHECK_BLOCKED_POSITIVE_GAPS` skip 挂本条，注意验证时编译器必须是含 bound 版 std 的分支/merge 后编译器——main 旧 std 无 bound 不触发，勿误判「已修复」）。
 
@@ -564,7 +569,7 @@ G1 inline relative import、G2 single-file plan 按 staged NOTES 激活；Param.
 - **合法性边界（2026-06-12 D-1 拍板）**：last-use drop / 重用仅限「无用户 Drop impl 且非 `Weak<T>` 目标」的类型（as-if 条款，公理⑥ / design.md §7.11）；Weak 目标与带 Drop 类型钉死 scope-end，不得重用
 - **验收**：典型 FBIP 模式（list map/filter、tree insert）生成就地改写而非新分配；基准显示分配数下降；完整 C/native、RC/verifier 与自举回归通过；Weak/Drop 用例在 reuse 启用前后输出一致（D-1 锚点）
 
-### B-176 `check` / 验证反馈基线与 regression budget [infra] [P0] [M] [judgment] [queued] [after: #268+#269] [before: B-180]
+### B-176 `check` / 验证反馈基线与 regression budget [infra] [P0] [M] [judgment] [queued] [after: #268+#269+B-183] [before: B-180]
 
 此前 `95e12437` snapshot 的 directional measurements 与 replay index 不能在最新 main
 重放，且 Codex 管理的 ignored raw directory 已被宿主回收，因此不构成 B-176 完成证据。
@@ -579,7 +584,7 @@ tracked compiler construction、单个 focused case、e2e/golden/RC/structural/s
 compiler 内部、每进程初始化/重复 parse-check、runner/clang 调度。默认测量关闭时近零开销；
 一个 bounded wave 收口，不扩为通用 telemetry。
 
-### B-180 开发反馈回路吞吐专项 [refactor] [P0] [XL] [judgment] [queued] [after: B-176+#268+#269] [before: B-183]
+### B-180 开发反馈回路吞吐专项 [refactor] [P0] [XL] [judgment] [queued] [after: B-176+#268+#269+B-183] [before: B-190]
 
 **进入门（2026-08-19 用户重置）**：#268/#269 fixed point 与 B-176 最新-main baseline 必须先完成。此前 developer-unblock checkpoint 只保留为历史证据，不再授权 compiler lane 与 ownership critical 并行。
 
@@ -626,7 +631,7 @@ compiler 内部、每进程初始化/重复 parse-check、runner/clang 调度。
 
 **整体验收**：恢复原 2x 量化门，不降级。以 post-ownership B-176 同机同 manifest 为基线，`compiler/main.ring check` median、`check --verify-rc compiler/main.ring` 与完整本地标准门 wall time 均以基线的 `<=50%` 为目标；tiny/大单文件/module check p95 不得回退 >10%。runner/compiler checkpoint 可分别验收正确性，但只有合计达到 2x 且完整 C/RC/ASan/self-host/double-bootstrap 全绿才完成 B-180。串行 oracle 与并行 runner 的 pass/fail/skip、诊断、生成 C/fixed point 必须一致，覆盖数不减少；任何原始失败必须 fail loud。
 
-### B-190 Repository overengineering audit and simplification [refactor] [P1] [XL] [judgment] [queued] [after: B-180+B-187] [before: B-183]
+### B-190 Repository overengineering audit and simplification [refactor] [P1] [XL] [judgment] [queued] [after: B-180+B-187+B-183] [before: B-174]
 
 性能专项完成后，对固定最新 main 做一次 bounded 全仓盘点，识别历史执行中混入但不再服务当前路线的复杂度；目标是减轻维护面，不是追求抽象完美或重写编译器。范围覆盖 compiler/runtime/std/tests、构建与 one-shot harness、provider adapter、活动治理入口及重复 authority；B-187 已处理的纯文档漂移只作为输入，不重复清扫。
 
@@ -634,9 +639,9 @@ compiler 内部、每进程初始化/重复 parse-check、runner/clang 调度。
 
 **约束 / 验收**：不改变公开语义、ownership/safety保证、ABI或 release门，不把“清理”变成新架构项目；当前可用、近期无已知bug而仅不够漂亮的代码允许继续保留。每个变更必须说明删除了哪个维护负担及为何不影响当前/已登记近程消费者；完整 C/RC/ASan/self-host/fixed point与workflow/health通过，独立 reviewer主动寻找误删和新重复层。一次盘点后收口，禁止 audit-until-dry或为了填满波次制造工作。
 
-### B-183 Vorton 仓库身份与 GitHub 工作流原子迁移 [infra] [P0] [XL] [judgment] [queued] [after: B-168+B-169+B-167+B-152+B-002+B-180] [before: B-174+B-177+B-175]
+### B-183 Vorton 仓库身份与 GitHub 工作流原子迁移 [infra] [P0] [XL] [judgment] [queued] [after: #268+#269] [before: B-176+B-180+B-174+B-177+B-175]
 
-> **2026-08-09 用户方向**：性能优化完成后、preview CLI 与 release 准备开始前迁移到 `vorton-lang`，并把用户—Steward 的异步协作切到 GitHub Issue / PR。D-004 只批准路线与顺序；进入本项时必须先展开执行规范和外部变更清单，再由用户批准 transfer、凭据/App、组织权限与批量导入等具体动作。
+> **2026-08-30 用户方向（supersede原性能优先顺序）**：#268/#269最小self-host/migration checkpoint完成后立即迁移到`vorton-lang`，并把用户—Steward的活动协作切到GitHub Issue/PR；B-176/B-180与Known Issues修复在新仓库继续。进入本项时仍必须先展开执行规范和外部变更清单，再由用户批准transfer、凭据/App、组织权限与批量导入等具体动作；本顺序变化本身不授权任何仓库外写入。
 
 **范围 / 文件与外部面**：GitHub organization/repository settings、`.github/` Issue/PR 模板与 ruleset、`docs/workflow.md`、`docs/backlog.md`、`docs/audit-report.md`、`.agents/` / `.claude/` provider adapter 与验证器、Git notes audit ledger、repo-wide public identity/CLI/source extension/editor package/cache path、`.gitattributes`、tracked bootstrap、README/规范/测试/CI。
 
@@ -654,7 +659,7 @@ compiler 内部、每进程初始化/重复 parse-check、runner/clang 调度。
 - 定义 Steward 的 GitHub 读写授权矩阵、同账号署名/机器标记、用户保留决定门、Issue/PR 生命周期、merge 策略、review/CI/thread gate、回访频率、离线补扫和未来 webhook 切换；不读取或改变用户个人 notification read-state。
 - 把 repo transfer、公共标识 clean break、bootstrap 重生、workflow/ruleset/template 上线和活动账本导入排成一个有界维护窗口；任何需要组织管理、凭据、App 安装或公开状态变化的步骤在执行前逐项取得用户批准。
 
-**验收**：迁移前 manifest 能从备份恢复全部 durable ref/notes，main 与远端 exact SHA、活动工作处置和 CI 状态可复核；迁移后 `vorton-lang/vorton` 保留完整 ancestry/tag/notes 与旧 URL/Git 重定向，仓内公共标识、最终扩展名、CLI/editor/runtime/test/文档一次切换且无遗留 alias；tracked C anchor 可从 clean clone 构建并达到 self-compile fixed point，GitHub 语言统计不计该生成文件；Issue/PR schema、ruleset、最小权限访问和定时/离线扫描均有 dry-run 与负面测试，导入计数和依赖映射可重放且不存在双重手工真值；本地完整 C/RC/structural/parity/self-compile 与迁移后远端 CI 全绿。本项不创建 release/tag，也不授权公开 preview。
+**验收**：迁移前 manifest 能从备份恢复全部 durable ref/notes，main 与远端 exact SHA、活动工作处置和 CI 状态可复核；迁移后 `vorton-lang/vorton` 保留完整 ancestry/tag/notes 与旧 URL/Git 重定向，仓内公共标识、最终扩展名、CLI/editor/runtime/test/文档一次切换且无遗留 alias；tracked C anchor 可从 clean clone 构建并达到同一 self-compile fixed point，compiler/hello最小smoke与迁移后远端bootstrap CI通过；Issue/PR schema、ruleset、最小权限访问和定时/离线扫描均有 dry-run 与负面测试，导入计数、Known Issues和依赖映射可重放且不存在双重手工真值。完整C/RC/structural/parity/ASan等语言质量矩阵作为导入后的GitHub工作继续，不冒充本项已绿。本项不创建 release/tag，也不授权公开 preview。
 
 ### B-184 Ownership checker workaround retirement / 语义人体工学收口 [refactor] [P1] [L] [judgment] [queued] [after: B-183]
 
@@ -1027,6 +1032,8 @@ System capability由B-195的transitive TypedHIR/inspection summary提供；manif
 
 ### B-165 跨 catch（setjmp/longjmp）边界的 `let mut` 写入丢失 [bugfix] [P1] [M] [judgment] [queued] [after: B-168]
 
+> **0.1 internal-checkpoint处置（2026-08-30 用户决定）**：只以current compiler是否真实出现“protected catch内写automatic `let mut`、离开后读取”的exact census决定当前门；零命中即允许作为Known Issue迁仓，compiler不新增诊断，外部workaround为heap `Cell`或让catch显式返回新状态。只有命中self-host并阻止fixed point时才在迁仓前修复；潜在invalid read/UAF/double-drop/OOB风险必须写入导入issue，不能被描述成安全支持。
+
 > 2026-07-12 立项（B-163 step 6 worker 实测发现，用户拍板方案 b：立案修复，不文档化）。**2026-07-29 前置更新**：暂停单独实现，先由 B-168 确定 C-native failure/control ABI；若显式 failure-status 模型结构性保留普通 C 控制流，本项改为验证后关闭，若 cleanup stack + `setjmp`/`longjmp` 胜出，再执行下面的精确 boxed-vars 方案。
 
 **现象**：`let mut progress = 0; let r = { progress = 1; raise_x() } catch { _ => progress + 100 }` ——当前 C `-O2` 下 catch arm 与后续代码读到 `progress = 0`（写入丢失）。**gen_try_catch 的 B-089 G-b 注释宣称的「body 内 let mut 赋值对外可见」不成立**：跨 setjmp 修改的非 volatile 局部变量在 C 中是 indeterminate。golden 零覆盖（有则早红）。
@@ -1039,6 +1046,8 @@ System capability由B-195的transitive TypedHIR/inspection summary提供；manif
 - 全部 E2E + golden + rc 通过；动 RC 相关（box dup/drop）→ golden ×3
 
 ### B-162 Perceus FieldAccess scalar reassign 不消费旧 boxed scalar [bugfix] [P1] [M] [judgment] [queued]
+
+> **0.1 internal-checkpoint处置（2026-08-30 用户决定）**：现有DropOldPlace实现不再单独消费focused/full/ASan验收交易；由唯一clean-current self-host/fixed-point交易覆盖compiler真实字段写。该交易不失败则随其他Known Issues迁仓继续验证；若命中并阻止self-host才返修。
 
 FieldAccess overwrite 不消费旧 boxed scalar，造成线性泄漏。优先在共享 FlowIR/ResourcePlanner/RcIR 定义 overwrite；AbiIR/C emitter 只 materialize 已验证的 load/drop/store，不能复制 ownership authority，且 target 只求值一次。本项不与 unboxing 混做。
 
@@ -1053,6 +1062,8 @@ B-164 已把 `ring_slot_alloc`、`ring_buf_alloc`、`ring_buf_alloc_zeroed` 的�
 **验收**：zero/边界/正常增长与搬移的可证伪矩阵；请求范围与分配失败不延迟成后续 null/越界；Windows native + ASan gating、Linux C runtime 编译门、完整 e2e/structural/self-host fixed point 通过。
 
 ### B-160 rebind_fn_type / update_fn_effects 不查 impl_methods [bugfix] [P2] [M] [judgment] [queued]
+
+> **0.1 internal-checkpoint处置（2026-08-30 用户决定）**：A1 exact store已有实现，不再安排独立1–3小时验证；唯一clean-current self-host/fixed-point交易负责验证compiler Parser impl与std impl真实路径。成功即迁仓后继续一般矩阵，失败且命中self-host才返修。
 
 > 2026-06-30 立项（B-159 修复过程中发现的残留问题）。
 

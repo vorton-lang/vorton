@@ -346,7 +346,7 @@ FieldInit    ::= Ident (':' Expr)?
 
 当该字面量解析为 struct 时，`..expr` 前缀是 **move spread**：基础表达式只求值一次；显式字段 RHS 按源码顺序先全部求值，期间基础值仍可读取或借用；成功后未指定字段从基础值转移到 fresh result，被覆盖的旧字段执行 Drop，最后基础值整体失活。该语法不隐式调用语言级 `.clone()`，也不提供 shareable-only 分支；需要保留基础值时显式使用 `..base.clone()`。在 RHS 中 ownership-move 基础值的子字段会形成 partial move，稳定报错；任一 RHS 失败时不得留下部分 move 的基础值。
 
-Ring 0.1 的 struct lowering 必须创建 fresh result shell 并逐字段完成 transfer；即使基础值已证明物理唯一，也不得复用其 storage 后原地覆盖字段。字段被 Take 后仍具有静态类型 `T`，只有编译器内部的 storage occupancy 从 `Live` 变为 `Moved`，对应 source slot 清为物理 empty / NULL。基础 aggregate 随后执行普通 Drop：只清理仍为 `Live` 的字段，跳过 empty / `Moved` 字段，并正常释放 shell。全 shareable 字段通过 physical RC dup 进入结果，基础字段保持完整并由同一普通 Drop 清理。直接定义用户 `Drop` 的 aggregate 若该 spread 需要字段 Take，则稳定报错；不存在专用 moved-shell release 或绕过普通 Drop 的路径。
+**0.1 compiler Known Issue（2026-08-30）**：上述move-spread语义目前只在全shareable字段路径上作为self-host依赖；compiler/std/examples没有owning或type-parameter-dependent spread consumer。若未覆盖字段需要ownership Take，0.1 compiler仍可能接受程序却产生leak、double-drop、UAF或错误Drop顺序，并且不保证给出专门诊断。迁仓后修复前，程序应显式destructure `base`并重建全部字段。0.1 internal checkpoint不实现partial/open-drop、`Live`/`Moved` occupancy或专用moved-shell release，也不把该路径计入已支持能力。
 
 Ring 0.1 不允许 named enum / variant 字面量包含 `..expr`；解析后若目标是 variant，编译器稳定报错并建议在对应 match arm 中显式重建全部字段。Named-field variant construction、generic enum、pattern matching 与字段 move 保持不变。
 

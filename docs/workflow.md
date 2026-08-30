@@ -170,9 +170,13 @@
 2. **Acceptance evidence**：只有active spec明确指定的claim-advancing fixed-SHA transaction才使用sealed/no-retry纪律。启动前必须完成已知实现与review修正、固定输入/候选/环境/命令和failure identity；source-build、fixed point、standard full、ASan、exact CI等长门集中在真实纵向或integration boundary运行，不因每个carrier/micro-commit重复启动。Cheap targeted acceptance若确属final matrix可保留，但不得在候选仍探索时冒充development feedback提前消费。
 3. **Review economy**：多个micro-commit可组成一个green vertical checkpoint；reviewer审固定累计diff、producer→consumer契约、canary和旧authority边界，不要求每个中间commit分别完成一轮独立对抗仪式。高风险/架构单元在写码前做一次bounded refutation，green boundary做一次独立contract/code review；bounded implementation finding在同一review链返修，不重新启动完整Argument或全矩阵。若出现duplicate-authority、跨层回放或共同不变量缺失，则立即按宏观架构监督/方向止损门处理，而不是增加review轮数直到偶然CLEAR。
 4. **Reporting economy**：进展摘要只把net-new capability、已建立的producer→consumer路径、authority retirement/cutover、真实behavior或structural canary、remaining risk和下一可证伪门计为信息。命令数、mutation数量、fixture数量、receipt大小、review“CLEAR”或commit数量只能作为按需证据索引，不能单独冒充进展或里程碑。
-5. **0.1 real-consumer scope**：首次0.1发布前，当前实现只服务0.1真实consumer。删除/不新增仅为post-0.1准备的variant、carrier、fallback、extension hook或validator branch；review finding仅在违反0.1 durable semantics、correctness/safety/ownership、current platform/ABI，或阻止当前总门闭合时BLOCK。纯未来扩展性、post-0.1 feature兼容与没有0.1 consumer的完整性意见不得阻塞，也不得从当前工作顺手新增post-0.1 item。
+5. **0.1 internal-checkpoint scope**：0.1当前只表示“当前compiler可从tracked anchor跨越bootstrap、连续自编译到可复现fixed point，并足以原子迁移仓库与活动治理到GitHub”的内部工程检查点，不是公开developer preview、release或语言bug清零声明。Review finding只有在命中当前compiler/self-host路径、破坏tracked-anchor构建或gen2/gen3 fixed point、阻止最小compiler/hello smoke、破坏迁仓/clean-clone重建，或使这些证据本身不可相信时才BLOCK该检查点。其他语言缺陷即使会对外部程序产生false rejection、wrong-code、leak、crash或ownership/safety违约，也可在用户已知风险下不新增source diagnostic，保留复现与workaround后进入Known Issues，并在B-183导入GitHub继续处理。
 
-该减负规则不降低0.1 Deep Clone、exact identity、Core closure、RC conservation、single/project一致性、correctness、safety、ownership、current platform/ABI、bootstrap、source-build/fixed-point/full/ASan/self-host/exact CI或最终release门；它只消除未形成真实纵向价值的重复审查、验收与未来占位。Audit仍按§6处理，不因本节减少finding的独立证据要求。用户直接查看Steward过程时以原始diff、命令和证据为准，Discussion不成为中间批准者。
+**2026-08-30 internal-checkpoint demotion（用户决定）**：owning或type-parameter-dependent struct spread在compiler/std/examples没有当前owning consumer，不再实现partial/open-drop，也不阻塞#268/#269；现有shareable compiler spread继续保留，外部触发与显式destructure/rebuild规避写入Known Issues。B-170在self-host触发为零时直接后移；B-165只以“当前compiler是否在protected catch中写automatic `let mut`并于外部读取”的exact census决定当前门，零命中即后移；B-160/B-162不设独立验收交易，只由同一个clean-current self-host/fixed-point交易验证，失败且命中self-host时才返修。Generic callable等其他缺陷沿用同一判定，不因已有大矩阵或旧acceptance文本自动保活。
+
+该减负规则仍要求0.1检查点的bootstrap、连续self-host、gen2/gen3文本fixed point、最小smoke、repository-health与迁移后clean-clone重建真实通过；不得把不同SHA证据拼接、伪造green或让损坏的compiler继续生成后续artifact。原完整C/RC/ASan/full、广义correctness/safety/ownership、single/project和公开preview/release门没有被宣称通过，而是后移到Vorton仓库的GitHub backlog与产品候选阶段。Audit独立证据规则不变；用户直接查看Steward过程时以原始diff、命令和证据为准，Discussion不成为中间批准者。
+
+这里的`0.1 real consumer`（0.1真实consumer）在internal checkpoint中专指self-host与迁仓consumer；post-0.1或公开preview的外部consumer不得诱使当前工作预造extension hook、validator branch、fallback或空carrier，也不新增post-0.1 item。迁仓只是改变执行地点：公开preview与最终release门仍不降低correctness，并继续要求Deep Clone、exact identity、Core closure、RC conservation、current platform/ABI及相称的完整验证；这些词不构成internal checkpoint的当前验收清单。
 
 **长执行信息增益门（2026-08-29 用户决定）**：预计耗时较长的source-build、candidate construction、fixed point、full、ASan、self-host或同类命令，单个进程内部仍保持fail-fast；不得在推断、lowering、Planner、codegen或其他已可能损坏状态的pass中吞掉首错并继续。信息增益通过长门前的共同不变量闭包与长门后的独立case并发取得：
 
@@ -270,6 +274,8 @@ root 对通过 review 的工作：
 ### 4.9 B-186 one-time resource crossing
 
 本授权只适用于固定 ownership authority 的一次 bootstrap crossing，不形成通用资源豁免：
+
+> **2026-08-30 状态澄清**：本节保存已经结束的一次性22 GiB crossing授权与历史stop条件，不再定义当前0.1 internal checkpoint的验收范围。当前门以§4.3.3的连续self-host/fixed-point与迁仓边界为准；本节提到的完整C/RC/ASan/final acceptance没有被宣称通过，作为迁仓后的GitHub工作保留。
 
 1. 启动前 B-186 repository-health、main/branch board sync、bundle/WIP protection、空闲机器与 exact seed/source/runtime/toolchain pins 全部通过；源码和生成输入不得变化。
 2. 唯一 S-prime gen1 -> gen2 使用 Job commit `23622320128` bytes（22 GiB）、active process `<=5`、无其他重负载、首次等待点估计精确 72 分钟、hard wall 90 分钟。gen1 只作 bootstrap seed。
