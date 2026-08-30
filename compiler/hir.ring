@@ -1055,7 +1055,9 @@ fn validate_hir_params(
     }
 }
 
-fn collect_hir_pattern_names(pattern: Pattern, mut names: Set<Str>) {
+fn collect_hir_pattern_names(
+    pattern: Pattern, mut names: Set<Str>
+) with {mut<Set<Str>>} {
     match pattern {
         Pattern::Binding { name, .. } => {
             if name != "_" { names.insert(name) }
