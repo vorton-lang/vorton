@@ -1919,7 +1919,9 @@ pub fn replace_impl_method_core(
 // Used for local type parameter instantiation maps (not the global substitution).
 // ============================================================
 
-fn chase_type_var_map(subst: Map<Int, Type>, id: Int, depth: Int) -> Type {
+fn chase_type_var_map(
+    subst: Map<Int, Type>, id: Int, depth: Int
+) -> Type with {} {
     if depth > 100 { return Type::TypeVar { id: id, name: none } }
     match subst.get(id) {
         some(resolved) => match resolved {
@@ -1930,7 +1932,7 @@ fn chase_type_var_map(subst: Map<Int, Type>, id: Int, depth: Int) -> Type {
     }
 }
 
-pub fn apply_subst_map(subst: Map<Int, Type>, t: Type) -> Type {
+pub fn apply_subst_map(subst: Map<Int, Type>, t: Type) -> Type with {} {
     match t {
         Type::IntType => Type::IntType,
         Type::FloatType => Type::FloatType,
@@ -1999,7 +2001,9 @@ pub fn apply_subst_map(subst: Map<Int, Type>, t: Type) -> Type {
     }
 }
 
-pub fn apply_subst_effect_map(subst: Map<Int, Type>, e: Effect) -> Effect {
+pub fn apply_subst_effect_map(
+    subst: Map<Int, Type>, e: Effect
+) -> Effect with {} {
     match e {
         Effect::FailEffect { error_type } =>
             Effect::FailEffect { error_type: apply_subst_map(subst, error_type) },
@@ -2013,7 +2017,9 @@ pub fn apply_subst_effect_map(subst: Map<Int, Type>, e: Effect) -> Effect {
     }
 }
 
-pub fn apply_subst_row_map(subst: Map<Int, Type>, row: EffectRow) -> EffectRow {
+pub fn apply_subst_row_map(
+    subst: Map<Int, Type>, row: EffectRow
+) -> EffectRow with {} {
     let effects = row.effects.map(fn(e) { apply_subst_effect_map(subst, e) })
     match row.tail {
         some(t_id) => match subst.get(t_id) {
