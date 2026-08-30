@@ -118,7 +118,7 @@ fn exact_dict_key_atom(value: Str) -> Str {
 // records its tag and arity; owner/slot identities and recursively ordered
 // children are length-prefixed before composition. Physical backends may
 // encode this key, but must not reconstruct it from HIR spellings.
-pub fn exact_dict_physical_key(value: ExactDictRef) -> Str {
+pub fn exact_dict_physical_key(value: ExactDictRef) -> Str with {} {
     if dict_ref_is_local(value) {
         return [
             exact_dict_key_atom("local-dict-v1"),
