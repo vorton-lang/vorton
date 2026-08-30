@@ -3560,7 +3560,9 @@ fn slot_for_ref(values: List<FlowSlot>, target: SlotRef) -> FlowSlot {
     }
 }
 
-fn validate_dictionary_evidence(value: ExactDictRef, body: FlowBody) {
+fn validate_dictionary_evidence(
+    value: ExactDictRef, body: FlowBody
+) with {} {
     if dict_ref_is_local(value) {
         let _ = slot_for_ref(body.slots, dict_ref_local(value))
     } else if !dict_ref_is_static(value) {
