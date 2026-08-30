@@ -54,7 +54,7 @@ class IdentityCheckpointRunnerTests(unittest.TestCase):
                 runner, "identity_checkpoint_source_errors", return_value=[]
             ) as source_oracle,
             patch.object(
-                runner, "default_body_identity_generated_c_errors"
+                runner, "callable_identity_generated_c_errors"
             ) as generated_oracle,
         ):
             errors, detail = runner.identity_checkpoint_errors()
@@ -96,7 +96,7 @@ class IdentityCheckpointRunnerTests(unittest.TestCase):
                     runner, "identity_checkpoint_source_errors", return_value=[]
                 ) as source_oracle,
                 patch.object(
-                    runner, "default_body_identity_generated_c_errors",
+                    runner, "callable_identity_generated_c_errors",
                     side_effect=generate_candidate,
                 ) as generated_oracle,
             ):
@@ -138,7 +138,7 @@ class IdentityCheckpointRunnerTests(unittest.TestCase):
                     runner, "identity_checkpoint_source_errors", return_value=[]
                 ),
                 patch.object(
-                    runner, "default_body_identity_generated_c_errors",
+                    runner, "callable_identity_generated_c_errors",
                     side_effect=mutate_candidate,
                 ) as generated_oracle,
             ):
@@ -173,7 +173,7 @@ class IdentityCheckpointRunnerTests(unittest.TestCase):
                         ),
                         patch.object(
                             runner,
-                            "default_body_identity_generated_c_errors",
+                            "callable_identity_generated_c_errors",
                         ) as generated_oracle,
                     ):
                         errors, _ = runner.identity_checkpoint_errors()
@@ -203,7 +203,7 @@ class IdentityCheckpointRunnerTests(unittest.TestCase):
                 runner, "identity_candidate_case_root",
             ) as case_root,
             patch.object(
-                runner, "default_body_identity_generated_c_errors",
+                runner, "callable_identity_generated_c_errors",
             ) as generated_oracle,
         ):
             errors, detail = runner.identity_checkpoint_errors()

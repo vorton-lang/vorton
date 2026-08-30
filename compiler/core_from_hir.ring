@@ -11,6 +11,8 @@ use env::{
     physical_nominal_owner, physical_nominal_name,
     physical_nominal_is_struct, physical_nominal_struct,
     physical_nominal_enum, physical_nominal_drop_method,
+    physical_nominal_dependency_owners,
+    physical_nominal_owner_for_type,
     RegisteredTraitAssocContract, RegisteredTraitMethodContract,
     registered_trait_contract_owner,
     registered_trait_contract_methods,
@@ -139,10 +141,9 @@ use ir_inventory::{
     make_concrete_body_contract, make_contract_only,
     executable_contract_body_path,
     executable_kind_fn, executable_kind_impl_method,
-    executable_kind_trait_default, executable_kind_test,
+    executable_kind_test,
     executable_kind_const_getter, executable_kind_lambda,
     executable_kind_handler, executable_kind_builtin_intrinsic,
-    executable_kind_default_specialization,
     executable_kind_derived_impl,
     executable_kind_extern_fn, executable_kind_bodyless_effect_operation,
     executable_kind_bodyless_trait_member,
@@ -185,8 +186,7 @@ use hir::{
     HPatternBinding, HProjectionRef, HPatternPlan, HPatternFieldPlan,
     HNominalStructFieldInit, HStructFieldInit, HFieldAccessKind,
     HAssocType, HTraitMethod, DictRef, MethodCallRef,
-    HDelegateTypedPlan, HDelegateMethodPlan,
-    HDefaultSpecializationPlan, HExactCallPlan, HOperatorPlan,
+    HExactCallPlan, HOperatorPlan,
     DerivedImpl, DerivedMethod, DerivedField, DerivedVariant,
     DerivedFieldRef, FieldAction, DerivedTextPlan, DerivedTextPiece,
     DerivedTextSequence,
@@ -210,38 +210,6 @@ use hir::{
     h_constructor_kind, h_constructor_fields,
     h_constructor_tuple_arity,
     h_fail_operation_tag,
-    h_delegate_contract, h_delegate_child_owner,
-    h_delegate_child_provider, h_delegate_field_owner,
-    h_delegate_field_provider, h_delegate_field_target,
-    h_delegate_field, h_delegate_source_member_index,
-    h_delegate_methods, h_delegate_assoc_bindings,
-    h_delegate_dict_evidence,
-    h_delegate_method_required, h_delegate_method_generated,
-    h_delegate_method_executable, h_delegate_method_origin,
-    h_delegate_method_child_call, h_delegate_method_child_callee,
-    h_delegate_method_binders, h_delegate_method_parameter_types,
-    h_delegate_method_result_type, h_delegate_method_effects,
-    h_delegate_method_evidence, h_delegate_method_effect_ctx,
-    h_delegate_method_child_effect_ctx,
-    h_delegate_assoc_member, h_delegate_assoc_type,
-    h_default_specialization_owner,
-    h_default_specialization_generated_method,
-    h_default_specialization_generated_executable,
-    h_default_specialization_source_method,
-    h_default_specialization_default_executable,
-    h_default_specialization_source_bound_traits,
-    h_default_specialization_generated_type_var_ids,
-    h_default_specialization_generated_type_formals,
-    h_default_specialization_dictionary_constructions,
-    h_default_dict_construction_dictionary,
-    h_default_dict_construction_result,
-    h_default_specialization_parameter_types,
-    h_default_specialization_parameter_mutabilities,
-    h_default_specialization_binders,
-    h_default_specialization_result_type,
-    h_default_specialization_effects,
-    h_default_specialization_effect_ctx,
-    h_default_specialization_forward_call,
     h_exact_call_callee, h_exact_call_signature, h_exact_call_type_args,
     h_exact_call_method,
     h_exact_call_evidence, h_exact_call_effect_ctx,
@@ -408,16 +376,6 @@ use extern_manifest::{HostImportFact,
     host_import_fact_host, host_import_fact_executable,
     host_import_fact_callable_signature, host_import_fact_same,
     compiler_extern_ref_for_executable}
-use delegate_plan::{
-    DelegateMethodPlan, DelegateEvidenceBinding,
-    make_delegate_method_body_plan, make_delegate_method_plan,
-    make_delegate_assoc_binding, make_delegate_evidence_binding,
-    make_delegate_plan_input, validate_delegate_plan
-}
-use delegate_elaborate::{elaborate_delegate_to_core}
-use core_elaborate::{
-    make_core_ordinary_body_plan, elaborate_core_default_specialization
-}
 use core_derive_lower::{
     CoreDerivedHeader, CoreDerivedValueRef, CoreDerivedCallPlan,
     CoreDerivedFieldPlan, CoreDerivedVariantPlan,
@@ -657,7 +615,8 @@ fn materialize_type(
 
 struct ProducerRecordedType {
     ty: Type,
-    fact: CoreTypeFactRef
+    fact: CoreTypeFactRef,
+    nominal_owner: RegisteredNominalRef?
 }
 
 struct ClosedCoreProducer {
@@ -838,9 +797,9 @@ fn producer_register_parameter(
 
 fn producer_recorded_type(
     producer: ClosedCoreProducer, ty: Type
-) -> CoreTypeFactRef? {
+) -> ProducerRecordedType? {
     for relation in producer.recorded_types {
-        if types_equal(relation.ty, ty) { return some(relation.fact) }
+        if types_equal(relation.ty, ty) { return some(relation) }
     }
     none
 }
@@ -870,26 +829,29 @@ fn producer_nominal_parameters(
 }
 
 fn producer_use_physical_nominal(
-    mut producer: ClosedCoreProducer, name: Str, want_struct: Bool
+    mut producer: ClosedCoreProducer, owner: RegisteredNominalRef,
+    want_struct: Bool
 ) -> PhysicalNominalFact {
     let mut found: PhysicalNominalFact? = none
     for candidate in producer.physical_nominals {
-        if physical_nominal_name(candidate) == name {
+        if registered_nominal_ref_same(
+                physical_nominal_owner(candidate), owner) {
+            let expected_name = symbol_ref_canonical_payload(
+                registered_nominal_ref_symbol(owner))
+            if physical_nominal_name(candidate) != expected_name {
+                panic("Core producer: physical nominal payload differs")
+            }
             if physical_nominal_is_struct(candidate) != want_struct {
-                panic("Core producer: physical nominal kind differs: ${name}")
+                panic("Core producer: physical nominal kind differs")
             }
-            match found {
-                some(existing) => if !registered_nominal_ref_same(
-                        physical_nominal_owner(existing),
-                        physical_nominal_owner(candidate)) {
-                    panic("Core producer: physical nominal identity repeats: ${name}")
-                },
-                none => { found = some(candidate) }
+            if found.is_some() {
+                panic("Core producer: physical nominal exact owner repeats")
             }
+            found = some(candidate)
         }
     }
     let result = found.unwrap_or_else(fn() {
-        panic("Core producer: physical nominal is absent: ${name}")
+        panic("Core producer: physical nominal exact owner is absent")
     })
     if !producer.used_physical_nominals.any(fn(existing) {
             registered_nominal_ref_same(
@@ -897,20 +859,6 @@ fn producer_use_physical_nominal(
                 physical_nominal_owner(result))
         }) {
         producer.used_physical_nominals.push(result)
-    }
-    result
-}
-
-fn producer_use_physical_nominal_owner(
-    mut producer: ClosedCoreProducer, owner: SymbolRef, want_struct: Bool
-) -> PhysicalNominalFact {
-    let name = symbol_ref_canonical_payload(owner)
-    let result = producer_use_physical_nominal(
-        producer, name, want_struct)
-    if !symbol_ref_same(
-            registered_nominal_ref_symbol(physical_nominal_owner(result)),
-            owner) {
-        panic("Core producer: physical nominal owner differs")
     }
     result
 }
@@ -983,15 +931,178 @@ fn producer_record_effect_contract(
     make_core_effect_contract(make_core_effect_set(atoms), parameter)
 }
 
-fn producer_record_type(
+struct ProducerPhysicalOwnerCursor {
+    values: List<RegisteredNominalRef>,
+    next: Int
+}
+
+fn producer_take_physical_owner(
+    mut cursor: ProducerPhysicalOwnerCursor,
+    expected_name: Str
+) -> RegisteredNominalRef {
+    let owner = cursor.values.get(cursor.next).unwrap_or_else(fn() {
+        panic("Core producer: physical field owner sequence is partial")
+    })
+    cursor.next = cursor.next + 1
+    if symbol_ref_canonical_payload(
+            registered_nominal_ref_symbol(owner)) != expected_name {
+        panic("Core producer: physical field owner payload differs")
+    }
+    owner
+}
+
+fn producer_seed_physical_effect_dependencies(
+    mut producer: ClosedCoreProducer, raw: List<Effect>,
+    substitutions: Map<Int, Type>, owner: OriginRef?,
+    mut cursor: ProducerPhysicalOwnerCursor
+) {
+    for atom in raw {
+        match atom {
+            Effect::FailEffect { error_type } =>
+                producer_seed_physical_type_dependencies(
+                    producer, error_type, substitutions, owner, cursor),
+            Effect::MutEffect { state_type } =>
+                producer_seed_physical_type_dependencies(
+                    producer, state_type, substitutions, owner, cursor),
+            Effect::CustomEffect { type_args, .. } => {
+                for argument in type_args {
+                    producer_seed_physical_type_dependencies(
+                        producer, argument, substitutions, owner, cursor)
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+fn producer_seed_physical_type_dependencies(
+    mut producer: ClosedCoreProducer, raw: Type,
+    substitutions: Map<Int, Type>, owner: OriginRef?,
+    mut cursor: ProducerPhysicalOwnerCursor
+) {
+    match raw {
+        Type::TypeVar { .. } => {},
+        Type::FnType {
+            params: raw_params, return_type: raw_result,
+            effects: raw_effects
+        } => {
+            for parameter in raw_params {
+                producer_seed_physical_type_dependencies(
+                    producer, parameter, substitutions, owner, cursor)
+            }
+            producer_seed_physical_type_dependencies(
+                producer, raw_result, substitutions, owner, cursor)
+            producer_seed_physical_effect_dependencies(
+                producer, raw_effects.effects, substitutions, owner, cursor)
+        },
+        Type::StructType { name, type_params } => {
+            let exact = producer_take_physical_owner(cursor, name)
+            for parameter in type_params {
+                producer_seed_physical_type_dependencies(
+                    producer, parameter, substitutions, owner, cursor)
+            }
+            let _ = producer_record_type_with_nominal_owner(
+                producer, apply_subst_map(substitutions, raw),
+                owner, some(exact))
+        },
+        Type::EnumType { name, type_params } => {
+            let exact = producer_take_physical_owner(cursor, name)
+            for parameter in type_params {
+                producer_seed_physical_type_dependencies(
+                    producer, parameter, substitutions, owner, cursor)
+            }
+            let _ = producer_record_type_with_nominal_owner(
+                producer, apply_subst_map(substitutions, raw),
+                owner, some(exact))
+        },
+        Type::GenericType { base, args } => {
+            producer_seed_physical_type_dependencies(
+                producer, base, substitutions, owner, cursor)
+            for argument in args {
+                producer_seed_physical_type_dependencies(
+                    producer, argument, substitutions, owner, cursor)
+            }
+        },
+        Type::RecordType { fields, .. } => {
+            for field in fields {
+                producer_seed_physical_type_dependencies(
+                    producer, field.ty, substitutions, owner, cursor)
+            }
+        },
+        Type::EffectRowType { effects, .. } =>
+            producer_seed_physical_effect_dependencies(
+                producer, effects, substitutions, owner, cursor),
+        Type::TupleType { elements } => {
+            for element in elements {
+                producer_seed_physical_type_dependencies(
+                    producer, element, substitutions, owner, cursor)
+            }
+        },
+        Type::PtrType { pointee } =>
+            producer_seed_physical_type_dependencies(
+                producer, pointee, substitutions, owner, cursor),
+        _ => {}
+    }
+}
+
+fn producer_record_physical_field_type(
+    mut producer: ClosedCoreProducer, raw: Type,
+    substitutions: Map<Int, Type>, owner: OriginRef?,
+    mut cursor: ProducerPhysicalOwnerCursor
+) -> CoreTypeFactRef {
+    producer_seed_physical_type_dependencies(
+        producer, raw, substitutions, owner, cursor)
+    producer_record_type(
+        producer, apply_subst_map(substitutions, raw), owner)
+}
+
+fn producer_record_type_with_nominal_owner(
     mut producer: ClosedCoreProducer, ty: Type,
-    effect_owner: OriginRef?
+    effect_owner: OriginRef?, exact_nominal_owner: RegisteredNominalRef?
 ) -> CoreTypeFactRef {
     match producer_recorded_type(producer, ty) {
-        some(fact) => return fact, none => {}
+        some(recorded) => {
+            match exact_nominal_owner {
+                some(expected) => match recorded.nominal_owner {
+                    some(actual) => if !registered_nominal_ref_same(
+                            actual, expected) {
+                        panic("Core producer: recorded nominal owner differs")
+                    },
+                    none => panic(
+                        "Core producer: exact owner applied to structural type")
+                },
+                none => {}
+            }
+            return recorded.fact
+        },
+        none => {}
+    }
+    let nominal_owner: RegisteredNominalRef? = match ty {
+        Type::StructType { name, .. } |
+        Type::EnumType { name, .. } => match exact_nominal_owner {
+            some(owner) => {
+                if symbol_ref_canonical_payload(
+                        registered_nominal_ref_symbol(owner)) != name {
+                    panic("Core producer: supplied nominal owner payload differs")
+                }
+                some(owner)
+            },
+            none => some(physical_nominal_owner_for_type(
+                producer.env, ty).unwrap_or_else(fn() {
+                    panic("Core producer: typed nominal owner is absent")
+                }))
+        },
+        _ => {
+            if exact_nominal_owner.is_some() {
+                panic("Core producer: exact nominal owner applied to non-nominal type")
+            }
+            none
+        }
     }
     let fact = reserve_core_type_fact(producer.recorder)
-    producer.recorded_types.push(ProducerRecordedType { ty: ty, fact: fact })
+    producer.recorded_types.push(ProducerRecordedType {
+        ty: ty, fact: fact, nominal_owner: nominal_owner
+    })
     producer.type_sources.push(make_core_type_source_fact(ty, fact))
     match ty {
         Type::IntType => define_core_atomic_type_fact(
@@ -1027,10 +1138,16 @@ fn producer_record_type(
                 effect_contract)
         },
         Type::StructType { name, type_params } => {
+            let exact_owner = nominal_owner.unwrap_or_else(fn() {
+                panic("Core producer: struct exact owner is absent")
+            })
             let physical = producer_use_physical_nominal(
-                producer, name, true)
+                producer, exact_owner, true)
             let def = physical_nominal_struct(physical)
             let nominal = registered_nominal_ref_symbol(def.owner_ref)
+            if name != symbol_ref_canonical_payload(nominal) {
+                panic("Core producer: struct canonical payload differs")
+            }
             if def.type_param_vars.len() != type_params.len() {
                 panic("Core producer: struct application arity differs")
             }
@@ -1051,14 +1168,22 @@ fn producer_record_type(
                     nominal, arguments)
             } else {
                 let mut fields: List<CoreNominalFieldSpec> = []
+                let mut dependency_cursor = ProducerPhysicalOwnerCursor {
+                    values: physical_nominal_dependency_owners(physical),
+                    next: 0
+                }
                 for field in def.fields {
-                    let field_type = apply_subst_map(type_map, field.ty)
-                    let field_fact = producer_record_type(
-                        producer, field_type, some(make_symbol_origin_ref(
-                            nominal_field_ref_member(field.field_ref))))
+                    let field_fact = producer_record_physical_field_type(
+                        producer, field.ty, type_map,
+                        some(make_symbol_origin_ref(
+                            nominal_field_ref_member(field.field_ref))),
+                        dependency_cursor)
                     fields.push(make_core_nominal_field_spec(
                         make_nominal_flow_field_identity(field.field_ref),
                         field_fact))
+                }
+                if dependency_cursor.next != dependency_cursor.values.len() {
+                    panic("Core producer: struct dependency census differs")
                 }
                 let drop_contract = producer_nominal_drop_contract(physical)
                 define_core_nominal_type_fact(
@@ -1070,10 +1195,16 @@ fn producer_record_type(
             }
         },
         Type::EnumType { name, type_params } => {
+            let exact_owner = nominal_owner.unwrap_or_else(fn() {
+                panic("Core producer: enum exact owner is absent")
+            })
             let physical = producer_use_physical_nominal(
-                producer, name, false)
+                producer, exact_owner, false)
             let def = physical_nominal_enum(physical)
             let nominal = registered_nominal_ref_symbol(def.owner_ref)
+            if name != symbol_ref_canonical_payload(nominal) {
+                panic("Core producer: enum canonical payload differs")
+            }
             if def.type_param_vars.len() != type_params.len() {
                 panic("Core producer: enum application arity differs")
             }
@@ -1089,22 +1220,30 @@ fn producer_record_type(
                 index = index + 1
             }
             let mut fields: List<CoreNominalFieldSpec> = []
+            let mut dependency_cursor = ProducerPhysicalOwnerCursor {
+                values: physical_nominal_dependency_owners(physical),
+                next: 0
+            }
             let mut variant_index = 0
             for variant in def.variants {
                 let field_refs = def.variant_field_refs.get(variant_index).unwrap()
                 let mut field_index = 0
                 for field_ty in variant.fields {
-                    let resolved = apply_subst_map(type_map, field_ty)
-                    let field_fact = producer_record_type(
-                        producer, resolved, some(make_symbol_origin_ref(
+                    let field_fact = producer_record_physical_field_type(
+                        producer, field_ty, type_map,
+                        some(make_symbol_origin_ref(
                             variant_field_ref_member(
-                                field_refs.get(field_index).unwrap()))))
+                                field_refs.get(field_index).unwrap()))),
+                        dependency_cursor)
                     fields.push(make_core_nominal_field_spec(
                         make_variant_flow_field_identity(
                             field_refs.get(field_index).unwrap()), field_fact))
                     field_index = field_index + 1
                 }
                 variant_index = variant_index + 1
+            }
+            if dependency_cursor.next != dependency_cursor.values.len() {
+                panic("Core producer: enum dependency census differs")
             }
             let drop_contract = producer_nominal_drop_contract(physical)
             define_core_nominal_type_fact(
@@ -1157,6 +1296,14 @@ fn producer_record_type(
             panic("Core producer: non-canonical type crossed closure")
     }
     fact
+}
+
+fn producer_record_type(
+    mut producer: ClosedCoreProducer, ty: Type,
+    effect_owner: OriginRef?
+) -> CoreTypeFactRef {
+    producer_record_type_with_nominal_owner(
+        producer, ty, effect_owner, none)
 }
 
 fn producer_effect_ctx_type(
@@ -1233,9 +1380,10 @@ fn producer_register_trait_method_formals(
 }
 
 fn producer_nominal_definition_raw_parameters(
-    mut producer: ClosedCoreProducer, owner: SymbolRef, is_struct: Bool
+    mut producer: ClosedCoreProducer, owner: RegisteredNominalRef,
+    is_struct: Bool
 ) -> List<Int> {
-    let physical = producer_use_physical_nominal_owner(
+    let physical = producer_use_physical_nominal(
         producer, owner, is_struct)
     if is_struct {
         physical_nominal_struct(physical).type_param_vars
@@ -1245,16 +1393,17 @@ fn producer_nominal_definition_raw_parameters(
 }
 
 fn producer_register_nominal_decl_parameters(
-    mut producer: ClosedCoreProducer, owner: SymbolRef,
+    mut producer: ClosedCoreProducer, owner: RegisteredNominalRef,
     source: List<HTypeParam>, is_struct: Bool
 ) {
-    producer_register_h_type_params(producer, owner, source)
+    let symbol = registered_nominal_ref_symbol(owner)
+    producer_register_h_type_params(producer, symbol, source)
     let raw_formals = producer_nominal_definition_raw_parameters(
         producer, owner, is_struct)
     if raw_formals.len() != source.len() {
         panic("Core producer: local nominal formal arity differs")
     }
-    let exact = producer_nominal_parameters(owner, raw_formals.len())
+    let exact = producer_nominal_parameters(symbol, raw_formals.len())
     let mut index = 0
     while index < raw_formals.len() {
         let raw_formal = raw_formals.get(index).unwrap()
@@ -1265,7 +1414,7 @@ fn producer_register_nominal_decl_parameters(
                 panic("Core producer: local nominal formal identity differs")
             },
             none => producer_register_parameter(
-                producer, raw_formal, owner, index,
+                producer, raw_formal, symbol, index,
                 raw_formals.len(), [])
         }
         index = index + 1
@@ -1361,11 +1510,11 @@ fn producer_register_decl_parameters(
             },
             HDecl::Struct { owner_ref, type_params, .. } =>
                 producer_register_nominal_decl_parameters(
-                    producer, registered_nominal_ref_symbol(owner_ref),
+                    producer, owner_ref,
                     type_params, true),
             HDecl::Enum { owner_ref, type_params, .. } =>
                 producer_register_nominal_decl_parameters(
-                    producer, registered_nominal_ref_symbol(owner_ref),
+                    producer, owner_ref,
                     type_params, false),
             HDecl::Effect { owner_ref, type_params, .. } => match owner_ref {
                 some(owner) => producer_register_h_type_params(
@@ -1387,33 +1536,10 @@ fn producer_register_decl_parameters(
                     producer_register_trait_method_formals(producer, method)
                 }
             },
-            HDecl::Impl {
-                owner_ref, type_params, methods,
-                default_specializations, ..
-            } => {
+            HDecl::Impl { owner_ref, type_params, methods, .. } => {
                 producer_register_h_type_params(
                     producer, impl_owner_ref_target(owner_ref), type_params)
                 producer_register_decl_parameters(producer, methods)
-                for plan in default_specializations {
-                    let ids =
-                        h_default_specialization_generated_type_var_ids(plan)
-                    let formals =
-                        h_default_specialization_generated_type_formals(plan)
-                    if ids.len() != formals.len() {
-                        panic("Core producer: generated default formal census differs")
-                    }
-                    let mut index = 0
-                    while index < ids.len() {
-                        let formal = formals.get(index).unwrap()
-                        producer_register_parameter(
-                            producer, ids.get(index).unwrap(),
-                            flow_generic_param_owner(formal),
-                            flow_generic_param_index(formal),
-                            flow_generic_param_arity(formal),
-                            flow_generic_param_bounds(formal))
-                        index = index + 1
-                    }
-                }
             },
             HDecl::ModBlock { decls: nested, .. } =>
                 producer_register_decl_parameters(producer, nested),
@@ -1987,7 +2113,7 @@ fn producer_record_decls(
                 name, owner_ref, type_params, fields, ..
             } => {
                 let owner = registered_nominal_ref_symbol(owner_ref)
-                let _ = producer_record_type(
+                let _ = producer_record_type_with_nominal_owner(
                     producer, Type::StructType {
                         name: name,
                         type_params: type_params.map(fn(parameter) {
@@ -1996,7 +2122,7 @@ fn producer_record_decls(
                                 name: some(parameter.source.name)
                             }
                         })
-                    }, some(make_symbol_origin_ref(owner)))
+                    }, some(make_symbol_origin_ref(owner)), some(owner_ref))
                 for field in fields {
                     let _ = producer_record_type(
                         producer, field.ty, some(make_symbol_origin_ref(
@@ -2007,7 +2133,7 @@ fn producer_record_decls(
                 name, owner_ref, type_params, variants, ..
             } => {
                 let owner = registered_nominal_ref_symbol(owner_ref)
-                let _ = producer_record_type(
+                let _ = producer_record_type_with_nominal_owner(
                     producer, Type::EnumType {
                         name: name,
                         type_params: type_params.map(fn(parameter) {
@@ -2016,7 +2142,7 @@ fn producer_record_decls(
                                 name: some(parameter.source.name)
                             }
                         })
-                    }, some(make_symbol_origin_ref(owner)))
+                    }, some(make_symbol_origin_ref(owner)), some(owner_ref))
                 for variant in variants {
                     if variant.fields.len() != variant.field_refs.len() {
                         panic("Core producer: enum field identity census differs")
@@ -2034,8 +2160,7 @@ fn producer_record_decls(
                     }
                 }
             },
-            HDecl::Impl { target_ty, owner_ref, methods, assoc_types,
-                          default_specializations, delegate_plan, .. } => {
+            HDecl::Impl { target_ty, owner_ref, methods, assoc_types, .. } => {
                 let provider_origin = make_path_origin_ref(
                     impl_provider_ref_site(impl_owner_ref_provider(owner_ref)))
                 let _ = producer_record_type(
@@ -2049,57 +2174,6 @@ fn producer_record_decls(
                     }
                 }
                 producer_record_decls(producer, methods)
-                for plan in default_specializations {
-                    let owner = h_default_specialization_generated_executable(plan)
-                    for id in
-                            h_default_specialization_generated_type_var_ids(plan) {
-                        let _ = producer_record_type(
-                            producer,
-                            Type::TypeVar { id: id, name: none },
-                            some(executable_origin(owner)))
-                    }
-                    let params = h_default_specialization_parameter_types(plan)
-                    let result = h_default_specialization_result_type(plan)
-                    let effects = h_default_specialization_effects(plan)
-                    let _ = producer_record_type(producer, Type::FnType {
-                        params: params, return_type: result, effects: effects
-                    }, some(executable_origin(owner)))
-                    for construction in
-                            h_default_specialization_dictionary_constructions(plan) {
-                        producer_record_physical_dictionary(
-                            producer, owner,
-                            h_default_dict_construction_dictionary(
-                                construction))
-                        producer_record_dictionary(
-                            producer, owner,
-                            h_default_dict_construction_result(construction))
-                    }
-                    let forward = h_default_specialization_forward_call(plan)
-                    for actual in h_exact_call_type_args(forward) {
-                        let _ = producer_record_type(
-                            producer, actual.actual,
-                            some(executable_origin(owner)))
-                    }
-                    for value in h_exact_call_evidence(forward) {
-                        producer_record_physical_dictionary(
-                            producer, owner, value)
-                    }
-                }
-                match delegate_plan {
-                    some(plan) => {
-                        for method in h_delegate_methods(plan) {
-                            let owner = h_delegate_method_executable(method)
-                            let params = h_delegate_method_parameter_types(method)
-                            let result = h_delegate_method_result_type(method)
-                            let effects = h_delegate_method_effects(method)
-                            let _ = producer_record_type(producer, Type::FnType {
-                                params: params, return_type: result,
-                                effects: effects
-                            }, some(executable_origin(owner)))
-                        }
-                    },
-                    none => {}
-                }
             },
             HDecl::Effect { handled_ref, type_params, ops, .. } => {
                 let effect_type_args = type_params.map(fn(parameter) {
@@ -2128,19 +2202,12 @@ fn producer_record_decls(
                     hexpr_effects(body), some(body)),
             HDecl::Trait { methods, .. } => {
                 for method in methods {
-                    if method.body.is_none() &&
-                       method.trait_bounds.len() != 0 {
-                        panic("Core producer: bodyless trait method carries bounds")
-                    }
-                    producer_record_callable_bounds(
-                        producer, method.executable_ref,
-                        method.trait_bounds)
                     producer_record_declared_type_formals(
                         producer, method.executable_ref,
                         method.type_params)
                     producer_record_callable(
                         producer, method.executable_ref, method.params,
-                        method.return_type, method.effects, method.body)
+                        method.return_type, method.effects, none)
                 }
             },
             HDecl::ExternFn { executable_ref, type_params, params,
@@ -2209,8 +2276,9 @@ fn producer_record_derived(
             producer, parameter_owner, derived.type_params)
         let derived_origin = make_path_origin_ref(impl_provider_ref_site(
             impl_owner_ref_provider(derived.owner_ref)))
-        let _ = producer_record_type(
-            producer, derived.target_type, some(derived_origin))
+        let _ = producer_record_type_with_nominal_owner(
+            producer, derived.target_type, some(derived_origin),
+            some(derived.target_owner))
         match derived.struct_fields {
             some(fields) => {
                 for field in fields {
@@ -2661,17 +2729,6 @@ fn seed_diagnostic_decls(
                 for method in methods {
                     add_diagnostic_owner_seed(
                         seed, method.executable_ref, module_key, span)
-                    match method.body {
-                        some(body) => {
-                            seed_diagnostic_params(
-                                seed, method.executable_ref,
-                                method.params, span)
-                            seed_diagnostic_expr(
-                                seed, module_key, method.executable_ref,
-                                span, body)
-                        },
-                        none => {}
-                    }
                 }
             },
             HDecl::Effect { ops, span, .. } => {
@@ -2686,26 +2743,8 @@ fn seed_diagnostic_decls(
                         module_key, span)
                 }
             },
-            HDecl::Impl {
-                methods, default_specializations, delegate_plan, span, ..
-            } => {
+            HDecl::Impl { methods, .. } => {
                 seed_diagnostic_decls(seed, module_key, methods)
-                for specialization in default_specializations {
-                    add_diagnostic_owner_seed(
-                        seed,
-                        h_default_specialization_generated_executable(
-                            specialization), module_key, span)
-                }
-                match delegate_plan {
-                    some(plan) => {
-                        for method in h_delegate_methods(plan) {
-                            add_diagnostic_owner_seed(
-                                seed, h_delegate_method_executable(method),
-                                module_key, span)
-                        }
-                    },
-                    none => {}
-                }
             },
             HDecl::ModBlock { decls, .. } =>
                 seed_diagnostic_decls(seed, module_key, decls),
@@ -5262,224 +5301,6 @@ fn append_effect_ctx_core_binder(
         flow_borrow_storage(), false))
 }
 
-fn delegate_field_type_in_decls(
-    values: List<HDecl>, field: NominalFieldRef
-) -> Type? {
-    for value in values {
-        match value {
-            HDecl::Struct { fields, .. } => {
-                for candidate in fields {
-                    if nominal_field_ref_same(candidate.field_ref, field) {
-                        return some(candidate.ty)
-                    }
-                }
-            },
-            HDecl::ModBlock { decls, .. } => match
-                    delegate_field_type_in_decls(decls, field) {
-                some(found) => return some(found), none => {}
-            },
-            _ => {}
-        }
-    }
-    none
-}
-
-fn tail_types(values: List<Type>) -> List<Type> {
-    let mut result: List<Type> = []
-    let mut index = 1
-    while index < values.len() {
-        result.push(values.get(index).unwrap()); index = index + 1
-    }
-    result
-}
-fn tail_slots(values: List<SlotRef>) -> List<SlotRef> {
-    let mut result: List<SlotRef> = []
-    let mut index = 1
-    while index < values.len() {
-        result.push(values.get(index).unwrap()); index = index + 1
-    }
-    result
-}
-fn tail_core_exprs(values: List<CoreExpr>) -> List<CoreExpr> {
-    let mut result: List<CoreExpr> = []
-    let mut index = 1
-    while index < values.len() {
-        result.push(values.get(index).unwrap()); index = index + 1
-    }
-    result
-}
-
-fn append_default_specialization(
-    facts: FrozenCoreAssemblyFacts, module_body: ModuleBodyRef,
-    plan: HDefaultSpecializationPlan, mut assembly: ModuleAssembly
-) -> ImplMethodRef {
-    let reference = h_default_specialization_generated_executable(plan)
-    let generated_method = h_default_specialization_generated_method(plan)
-    if !impl_owner_ref_same(
-            h_default_specialization_owner(plan),
-            impl_method_ref_owner(generated_method)) {
-        panic("Core assembly: default specialization owner differs")
-    }
-    let parameter_types = h_default_specialization_parameter_types(plan)
-    let entries = h_default_specialization_binders(plan)
-    let parameter_slots = entries.map(fn(entry) { binder_entry_slot(entry) })
-    let forward = h_default_specialization_forward_call(plan)
-    let callable_ctx = h_default_specialization_effect_ctx(plan)
-    let mutabilities = h_default_specialization_parameter_mutabilities(plan)
-    let mut binders = core_parameter_binders(
-        facts, entries, parameter_types,
-        parameter_roles_from_mutabilities(mutabilities),
-        mutabilities)
-    append_effect_ctx_core_binder(facts, callable_ctx, binders)
-    let signature = Type::FnType {
-        params: parameter_types,
-        return_type: h_default_specialization_result_type(plan),
-        effects: h_default_specialization_effects(plan)
-    }
-    let forward_signature = h_exact_call_signature(forward)
-    if !types_equal(signature, forward_signature) {
-        panic("Core assembly: default forward signature differs")
-    }
-    let call_ctx = LowerCtx {
-        module_key: facts.module_key, owner: reference,
-        effect_parameters: facts.effect_parameters,
-        project_callable_effects: facts.project_callable_effects,
-        project_callable_type_formals: facts.project_callable_type_formals,
-        project_host_imports: facts.project_host_imports,
-        project_type_mapping: facts.project_type_mapping,
-        types: facts.type_sources, type_nodes: facts.type_nodes,
-        effect_ctx_type: facts.effect_ctx_type,
-        effect_ctx_layouts: [],
-        binders: binders, captures: [], next_origin: 0,
-        diagnostic_origins: []
-    }
-    let frozen_callable_ctx = core_callable_effect_ctx_from_typed(
-        facts.type_sources, facts.effect_ctx_type,
-        callable_ctx, facts.module_key)
-    activate_effect_ctx_binder(
-        call_ctx, core_callable_effect_ctx_reference(frozen_callable_ctx),
-        core_callable_effect_ctx_layout(frozen_callable_ctx))
-    let mut construction_statements: List<CoreStmt> = []
-    for construction in
-            h_default_specialization_dictionary_constructions(plan) {
-        let source = h_default_dict_construction_dictionary(construction)
-        let result = h_default_dict_construction_result(construction)
-        if !dict_ref_is_local(result) {
-            panic("Core assembly: default dictionary result is not local")
-        }
-        let dictionary = remap_dictionary_evidence(
-            call_ctx, dict_ref_exact(source))
-        let result_slot = ensure_binder(
-            call_ctx, dict_ref_local(result),
-            Type::TupleType { elements: [] },
-            binder_kind_dictionary_evidence_local(), false)
-        let origin = executable_origin(reference)
-        construction_statements.push(make_core_bind_stmt(
-            result_slot,
-            make_core_dict_construct_expr(
-                type_fact_for(
-                    facts.type_sources,
-                    Type::TupleType { elements: [] }, facts.module_key),
-                make_core_effect_set([]), origin,
-                dictionary, result_slot),
-            false, origin))
-    }
-    let type_args = h_exact_call_type_args(forward)
-    let source_bounds = h_default_specialization_source_bound_traits(plan)
-    let mut formal_count: Int? = none
-    for source in call_ctx.project_callable_type_formals {
-        if executable_ref_same(
-                source.reference,
-                h_default_specialization_default_executable(plan)) {
-            if formal_count.is_some() {
-                panic("Core assembly: default callable formal source repeats")
-            }
-            formal_count = some(source.formals.len())
-        }
-    }
-    if type_args.len() != formal_count.unwrap_or_else(fn() {
-            panic("Core assembly: default callable formal source is absent")
-        }) ||
-       h_exact_call_evidence(forward).len() != source_bounds.len() {
-        panic("Core assembly: default forward ABI receipt differs")
-    }
-    let callee = core_callee(
-        call_ctx, h_exact_call_callee(forward), forward_signature,
-        type_args, none)
-    let arguments = parameter_slots.map(fn(slot) {
-        let mut found: CoreTypeRef? = none
-        for binder in binders {
-            if slot_ref_same(core_binder_reference(binder), slot) {
-                found = some(core_binder_type(binder))
-            }
-        }
-        make_core_read_expr(
-            match found {
-                some(value) => value,
-                none => panic("Core assembly: default parameter binder absent")
-            }, make_core_effect_set([]), executable_origin(reference), slot)
-    })
-    let evidence = evidence(call_ctx, h_exact_call_evidence(forward))
-    let call_effect_ctx = core_effect_ctx_argument_from_source(
-        call_ctx, h_exact_call_effect_ctx(forward),
-        core_callee_effect_instantiation(callee))
-    let call = match h_exact_call_method(forward) {
-        some(method) => {
-            if arguments.len() == 0 {
-                panic("Core assembly: default method call lacks receiver")
-            }
-            make_core_method_call_expr(
-                type_fact_for(
-                    facts.type_sources,
-                    h_default_specialization_result_type(plan),
-                    facts.module_key),
-                core_effects(
-                    facts.type_sources,
-                    h_default_specialization_effects(plan), facts.module_key),
-                executable_origin(reference), callee, exact_method_ref(method),
-                arguments.get(0).unwrap(), tail_core_exprs(arguments),
-                evidence, call_effect_ctx)
-        },
-        none => make_core_call_expr(
-            type_fact_for(
-                facts.type_sources,
-                h_default_specialization_result_type(plan), facts.module_key),
-            core_effects(
-                facts.type_sources,
-                h_default_specialization_effects(plan), facts.module_key),
-            executable_origin(reference), callee, arguments,
-            evidence, call_effect_ctx)
-    }
-    let body = elaborate_core_default_specialization(
-        make_core_ordinary_body_plan(
-            reference, executable_origin(reference), binders,
-            parameter_slots,
-            type_fact_for(
-                facts.type_sources,
-                h_default_specialization_result_type(plan), facts.module_key),
-            construction_statements, some(call),
-            executable_origin(reference)))
-    assembly.entries.push(make_executable_entry(
-        reference, make_module_body_parent(module_body),
-        executable_kind_default_specialization(),
-        make_concrete_body_contract(body_anchor(reference))))
-    assembly.callables.push(typed_callable_contract(
-        facts, reference, parameter_types, parameter_slots,
-        mutabilities, h_default_specialization_result_type(plan),
-        h_default_specialization_effects(plan),
-        executable_contract_mode_concrete_body(), callable_ctx,
-        h_default_specialization_generated_type_var_ids(plan).map(fn(id) {
-            type_fact_for(
-                facts.type_sources,
-                Type::TypeVar { id: id, name: none }, facts.module_key)
-        })))
-    append_generated_body_diagnostic_origins(
-        facts, reference, body, assembly)
-    assembly.bodies.push(make_core_body_entry(
-        reference, executable_origin(reference), body_anchor(reference), body))
-    generated_method
-}
-
 fn derived_core_field(value: DerivedFieldRef) -> CoreFieldRef {
     match value {
         DerivedFieldRef::NominalDerivedField(field) =>
@@ -6389,164 +6210,6 @@ fn append_derived_impls(
     }
 }
 
-fn append_delegate_impl(
-    facts: FrozenCoreAssemblyFacts, module_body: ModuleBodyRef,
-    plan: HDelegateTypedPlan, mut assembly: ModuleAssembly
-) {
-    let contract = h_delegate_contract(plan)
-    let contract_methods = registered_trait_contract_methods(contract)
-    let methods = h_delegate_methods(plan)
-    if methods.len() == 0 || methods.len() != contract_methods.len() {
-        panic("Core assembly: delegate method contract census differs")
-    }
-    let field_type_source = match delegate_field_type_in_decls(
-            facts.program.decls, h_delegate_field(plan)) {
-        some(value) => value,
-        none => panic("Core assembly: delegate field exact type is absent")
-    }
-    let field_type = type_fact_for(
-        facts.type_sources, field_type_source, facts.module_key)
-    let mut method_plans: List<DelegateMethodPlan> = []
-    let mut method_index = 0
-    while method_index < methods.len() {
-        let method = methods.get(method_index).unwrap()
-        let parameter_types = h_delegate_method_parameter_types(method)
-        if parameter_types.len() == 0 {
-            panic("Core assembly: delegate method lacks self")
-        }
-        let mutabilities = registered_trait_method_mutabilities(
-            contract_methods.get(method_index).unwrap())
-        let entries = h_delegate_method_binders(method)
-        let parameter_slots = entries.map(fn(entry) {
-            binder_entry_slot(entry)
-        })
-        let callable_ctx = h_delegate_method_effect_ctx(method)
-        let mut binders = core_parameter_binders(
-            facts, entries, parameter_types,
-            parameter_roles_from_mutabilities(mutabilities),
-            mutabilities)
-        append_effect_ctx_core_binder(facts, callable_ctx, binders)
-        let reference = h_delegate_method_executable(method)
-        let origin = h_delegate_method_origin(method)
-        let child_call = h_delegate_method_child_call(method)
-        let callee_ctx = LowerCtx {
-            module_key: facts.module_key, owner: reference,
-            effect_parameters: facts.effect_parameters,
-            project_callable_effects: facts.project_callable_effects,
-            project_callable_type_formals: facts.project_callable_type_formals,
-            project_host_imports: facts.project_host_imports,
-            project_type_mapping: facts.project_type_mapping,
-            types: facts.type_sources, type_nodes: facts.type_nodes,
-            effect_ctx_type: facts.effect_ctx_type,
-            effect_ctx_layouts: [],
-            binders: binders, captures: [], next_origin: 0,
-            diagnostic_origins: []
-        }
-        let frozen_ctx = core_callable_effect_ctx_from_typed(
-            facts.type_sources, facts.effect_ctx_type,
-            callable_ctx, facts.module_key)
-        activate_effect_ctx_binder(
-            callee_ctx, core_callable_effect_ctx_reference(frozen_ctx),
-            core_callable_effect_ctx_layout(frozen_ctx))
-        let child_callee = core_callee(
-            callee_ctx, h_delegate_method_child_callee(method),
-            method_call_ref_signature(child_call), [], none)
-        let body_plan = make_delegate_method_body_plan(
-            binders, parameter_slots,
-            type_fact_for(
-                facts.type_sources, parameter_types.get(0).unwrap(),
-                facts.module_key),
-            field_type,
-            type_fact_for(
-                facts.type_sources, h_delegate_method_result_type(method),
-                facts.module_key),
-            parameter_slots.get(0).unwrap(), tail_slots(parameter_slots),
-            core_effects(
-                facts.type_sources, h_delegate_method_effects(method),
-                facts.module_key),
-            evidence(callee_ctx, h_delegate_method_evidence(method)),
-            frozen_ctx,
-            core_effect_ctx_argument_from_source(
-                callee_ctx, h_delegate_method_child_effect_ctx(method),
-                core_callee_effect_instantiation(child_callee)), origin)
-        method_plans.push(make_delegate_method_plan(
-            h_delegate_method_required(method),
-            h_delegate_method_generated(method), reference, origin,
-            exact_method_ref(child_call),
-            child_callee,
-            tail_types(parameter_types).map(fn(ty) {
-                type_fact_for(facts.type_sources, ty, facts.module_key)
-            }),
-            type_fact_for(
-                facts.type_sources, h_delegate_method_result_type(method),
-                facts.module_key), body_plan))
-        method_index = method_index + 1
-    }
-    let assoc = h_delegate_assoc_bindings(plan).map(fn(value) {
-        make_delegate_assoc_binding(
-            h_delegate_assoc_member(value),
-            type_fact_for(
-                facts.type_sources, h_delegate_assoc_type(value),
-                facts.module_key))
-    })
-    let requirements = registered_trait_contract_dict_obligations(contract)
-    let dict_values = h_delegate_dict_evidence(plan)
-    if requirements.len() != dict_values.len() {
-        panic("Core assembly: delegate dictionary census differs")
-    }
-    let mut dict_bindings: List<DelegateEvidenceBinding> = []
-    let mut dict_index = 0
-    while dict_index < requirements.len() {
-        dict_bindings.push(make_delegate_evidence_binding(
-            requirements.get(dict_index).unwrap(),
-            make_core_dict_evidence(dict_ref_exact(
-                dict_values.get(dict_index).unwrap()))))
-        dict_index = dict_index + 1
-    }
-    let child_owner = h_delegate_child_owner(plan)
-    let typed_plan = validate_delegate_plan(make_delegate_plan_input(
-        child_owner, impl_owner_ref_provider(child_owner),
-        h_delegate_child_provider(plan), h_delegate_source_member_index(plan),
-        h_delegate_field_owner(plan), h_delegate_field_provider(plan),
-        h_delegate_field_target(plan),
-        make_module_core_type_graph(facts.module_key, facts.type_nodes),
-        h_delegate_field(plan),
-        type_fact_for(
-            facts.type_sources,
-            h_delegate_method_parameter_types(methods.get(0).unwrap()).get(0).unwrap(),
-            facts.module_key), field_type, contract, method_plans,
-        assoc, dict_bindings))
-    let (metadata, bodies) = elaborate_delegate_to_core(typed_plan)
-    assembly.impls.push(metadata)
-    let mut body_index = 0
-    while body_index < bodies.len() {
-        let method = methods.get(body_index).unwrap()
-        let body = bodies.get(body_index).unwrap()
-        let reference = h_delegate_method_executable(method)
-        let parameter_types = h_delegate_method_parameter_types(method)
-        let mutabilities = registered_trait_method_mutabilities(
-            contract_methods.get(body_index).unwrap())
-        let parameter_slots = h_delegate_method_binders(method).map(fn(entry) {
-            binder_entry_slot(entry)
-        })
-        assembly.entries.push(make_executable_entry(
-            reference, make_module_body_parent(module_body),
-            executable_kind_impl_method(),
-            make_concrete_body_contract(body_anchor(reference))))
-        assembly.callables.push(typed_callable_contract(
-            facts, reference, parameter_types, parameter_slots,
-            mutabilities, h_delegate_method_result_type(method),
-            h_delegate_method_effects(method),
-            executable_contract_mode_concrete_body(),
-            h_delegate_method_effect_ctx(method), []))
-        append_generated_body_diagnostic_origins(
-            facts, reference, body, assembly)
-        assembly.bodies.push(make_core_body_entry(
-            reference, h_delegate_method_origin(method),
-            body_anchor(reference), body))
-        body_index = body_index + 1
-    }
-}
 fn add_executable_body(
     facts: FrozenCoreAssemblyFacts, parent: ExecutableParentRef,
     reference: ExecutableRef, kind: ExecutableKind,
@@ -6868,76 +6531,43 @@ fn assemble_decls(
             HDecl::Trait { methods, .. } => {
                 for method in methods {
                     let reference = method.executable_ref
-                    if method.has_default != method.body.is_some() {
-                        panic("Core assembly: trait default/body relation differs")
-                    }
-                    match method.body {
-                        some(body) => add_executable_body(
-                            facts, source_parent(module_body, reference), reference,
-                            executable_kind_trait_default(),
-                            method.type_params,
-                            method.trait_bounds, method.params,
-                            method.return_type, method.effects, body,
-                            method.effect_ctx, [], assembly),
-                        none => {
-                            if method.trait_bounds.len() != 0 {
-                                panic("Core assembly: bodyless trait method carries bounds")
-                            }
-                            add_contract_only(
-                                facts, source_parent(module_body, reference),
-                                reference,
-                                executable_kind_bodyless_trait_member(),
-                                method.type_params,
-                                method.params, method.return_type,
-                                method.effects, some(method.effect_ctx),
-                                none, assembly)
-                        }
-                    }
+                    add_contract_only(
+                        facts, source_parent(module_body, reference),
+                        reference,
+                        executable_kind_bodyless_trait_member(),
+                        method.type_params,
+                        method.params, method.return_type,
+                        method.effects, some(method.effect_ctx),
+                        none, assembly)
                 }
             },
             HDecl::Impl {
-                owner_ref, delegate_plan, default_specializations,
-                methods, assoc_types, ..
+                owner_ref, methods, assoc_types, ..
             } => {
-                match delegate_plan {
-                    some(plan) => {
-                        if default_specializations.len() != 0 {
-                            panic("Core assembly: delegate carries defaults")
-                        }
-                        append_delegate_impl(
-                            facts, module_body, plan, assembly)
-                    },
-                    none => {
-                        assemble_decls(facts, module_body, methods, assembly)
-                        let mut method_refs: List<ImplMethodRef> = []
-                        for method in methods {
-                            match method {
-                                HDecl::Fn {
-                                    impl_method_ref: some(v), ..
-                                } => method_refs.push(v),
-                                _ => {}
-                            }
-                        }
-                        for specialization in default_specializations {
-                            method_refs.push(append_default_specialization(
-                                facts, module_body, specialization, assembly))
-                        }
-                        method_refs.sort_by(fn(left, right) {
-                            impl_method_ref_callable_slot_index(left) -
-                                impl_method_ref_callable_slot_index(right)
-                        })
-                        let bindings = assoc_types.filter(fn(a) {
-                            a.concrete.is_some()
-                        }).map(fn(a) {
-                            make_core_assoc_binding(a.member_ref,
-                                type_fact_for(
-                                    facts.type_sources,
-                                    a.concrete.unwrap(), facts.module_key))
-                        })
-                        assembly.impls.push(make_core_impl_metadata(
-                            owner_ref, method_refs, bindings))
+                assemble_decls(facts, module_body, methods, assembly)
+                let mut method_refs: List<ImplMethodRef> = []
+                for method in methods {
+                    match method {
+                        HDecl::Fn {
+                            impl_method_ref: some(value), ..
+                        } => method_refs.push(value),
+                        _ => {}
                     }
                 }
+                method_refs.sort_by(fn(left, right) {
+                    impl_method_ref_callable_slot_index(left) -
+                        impl_method_ref_callable_slot_index(right)
+                })
+                let bindings = assoc_types.filter(fn(a) {
+                    a.concrete.is_some()
+                }).map(fn(a) {
+                    make_core_assoc_binding(a.member_ref,
+                        type_fact_for(
+                            facts.type_sources,
+                            a.concrete.unwrap(), facts.module_key))
+                })
+                assembly.impls.push(make_core_impl_metadata(
+                    owner_ref, method_refs, bindings))
             },
             HDecl::ModBlock { decls: nested, .. } =>
                 assemble_decls(facts, module_body, nested, assembly),
@@ -7197,15 +6827,8 @@ fn collect_decl_callable_type_formals(
                         method.type_formals)
                 }
             },
-            HDecl::Impl { methods, default_specializations, .. } => {
-                collect_decl_callable_type_formals(methods, result)
-                for plan in default_specializations {
-                    append_exact_callable_type_formal_source(
-                        result,
-                        h_default_specialization_generated_executable(plan),
-                        h_default_specialization_generated_type_formals(plan))
-                }
-            },
+            HDecl::Impl { methods, .. } =>
+                collect_decl_callable_type_formals(methods, result),
             HDecl::ModBlock { decls: nested, .. } =>
                 collect_decl_callable_type_formals(nested, result),
             _ => {}
@@ -7613,96 +7236,10 @@ fn freeze_project_effect_ctx_tokens(
     result
 }
 
-fn collect_project_trait_method(
-    decls: List<HDecl>, wanted: TraitMethodRef,
-    mut result: List<HTraitMethod>
-) {
-    for decl in decls {
-        match decl {
-            HDecl::Trait { methods, .. } => {
-                for method in methods {
-                    if trait_method_ref_same(method.method_ref, wanted) {
-                        result.push(method)
-                    }
-                }
-            },
-            HDecl::ModBlock { decls: nested, .. } =>
-                collect_project_trait_method(nested, wanted, result),
-            _ => {}
-        }
-    }
-}
-
-fn project_trait_method(
-    values: List<FrozenCoreAssemblyFacts>, wanted: TraitMethodRef
-) -> HTraitMethod {
-    let result: List<HTraitMethod> = []
-    for facts in values {
-        collect_project_trait_method(facts.program.decls, wanted, result)
-    }
-    if result.len() != 1 {
-        panic("Core assembly: default source trait method is not unique")
-    }
-    result.get(0).unwrap()
-}
-
-fn validate_default_specialization_decl_sources(
-    values: List<FrozenCoreAssemblyFacts>, decls: List<HDecl>
-) {
-    for decl in decls {
-        match decl {
-            HDecl::Impl { default_specializations, methods, .. } => {
-                for plan in default_specializations {
-                    let method = project_trait_method(
-                        values,
-                        h_default_specialization_source_method(plan))
-                    let expected = method.trait_bounds
-                    let actual =
-                        h_default_specialization_source_bound_traits(plan)
-                    if !method.has_default || method.body.is_none() ||
-                       expected.len() != actual.len() ||
-                       !executable_ref_same(
-                            method.executable_ref,
-                            h_default_specialization_default_executable(plan)) {
-                        panic("Core assembly: default source method relation differs")
-                    }
-                    let mut index = 0
-                    while index < expected.len() {
-                        let bound = expected.get(index).unwrap()
-                        if bound.dict_ordinal != index ||
-                           !symbol_ref_same(
-                                bound.trait_ref,
-                                actual.get(index).unwrap()) {
-                            panic("Core assembly: default source bound order differs")
-                        }
-                        index = index + 1
-                    }
-                }
-                validate_default_specialization_decl_sources(
-                    values, methods)
-            },
-            HDecl::ModBlock { decls: nested, .. } =>
-                validate_default_specialization_decl_sources(
-                    values, nested),
-            _ => {}
-        }
-    }
-}
-
-fn validate_default_specialization_sources(
-    values: List<FrozenCoreAssemblyFacts>
-) {
-    for facts in values {
-        validate_default_specialization_decl_sources(
-            values, facts.program.decls)
-    }
-}
-
 fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
     if values.len() == 0 { panic("Core assembly: project has no modules") }
     validate_prelude_source_parent_canary()
     validate_fact_order(values)
-    validate_default_specialization_sources(values)
     let project = intern_project_types(values)
     let project_effect_sources = close_project_callable_effect_sources(
         values, project.mappings)

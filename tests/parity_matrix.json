@@ -138,7 +138,7 @@
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
-      "reason": "Custom, nested, abort-arm, re-raise, capture, cleanup, and default effect handler paths execute."
+      "reason": "Custom, nested, abort-arm, re-raise, capture, cleanup, and ordinary complete-handler paths execute."
     },
     {
       "feature_id": "HExpr.Lambda",
@@ -355,7 +355,7 @@
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
-      "reason": "Effect declarations with multiple and default operations execute."
+      "reason": "Effect declarations with multiple signature-only operations execute through explicit handlers."
     },
     {
       "feature_id": "HDecl.Test",

@@ -123,7 +123,7 @@ class ProvenanceBContractTests(unittest.TestCase):
                 return_value=(str(Path(sys.executable).resolve()), "a" * 64, None),
             ),
             mock.patch.object(
-                runner, "default_body_identity_generated_c_errors", candidate_gate),
+                runner, "callable_identity_generated_c_errors", candidate_gate),
         ):
             errors, detail = runner.identity_checkpoint_errors()
         self.assertEqual(
@@ -148,7 +148,7 @@ class ProvenanceBContractTests(unittest.TestCase):
                 return_value=(str(Path(sys.executable).resolve()), "b" * 64, None),
             ),
             mock.patch.object(
-                runner, "default_body_identity_generated_c_errors", candidate_gate),
+                runner, "callable_identity_generated_c_errors", candidate_gate),
         ):
             errors, _detail = runner.identity_checkpoint_errors()
         self.assertEqual(
@@ -247,7 +247,7 @@ class ProvenanceBContractTests(unittest.TestCase):
             with mock.patch.object(
                 runner, "run_identity_candidate_mode", side_effect=completed_mode
             ):
-                errors = runner.default_body_identity_generated_c_errors(
+                errors = runner.callable_identity_generated_c_errors(
                     sys.executable, evidence_root, evidence_log)
             self.assertIn("identity ledger changed off/on1 C bytes", errors)
             for case_name in ("off", "on1", "on2"):

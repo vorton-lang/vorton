@@ -144,7 +144,11 @@ pub struct PhysicalNominalFact {
     owner: RegisteredNominalRef,
     struct_def: StructDef?,
     enum_def: EnumDef?,
-    drop_method: ImplMethodRef?
+    drop_method: ImplMethodRef?,
+    // Exact physical field dependencies in declaration/Type preorder. The
+    // provider freezes these edges while its complete private TypeEnv is
+    // available; consumers never reconstruct a private owner from spelling.
+    dependency_owners: List<RegisteredNominalRef>
 }
 
 fn validate_physical_nominal_owner(
@@ -166,25 +170,42 @@ fn validate_physical_nominal_owner(
     }
 }
 
+fn validate_physical_nominal_dependencies(
+    values: List<RegisteredNominalRef>
+) {
+    for owner in values {
+        if symbol_ref_canonical_payload(
+                registered_nominal_ref_symbol(owner)) == "" {
+            panic("physical nominal fact: dependency owner is empty")
+        }
+    }
+}
+
 pub fn make_physical_struct_fact(
-    def: StructDef, drop_method: ImplMethodRef?
+    def: StructDef, drop_method: ImplMethodRef?,
+    dependency_owners: List<RegisteredNominalRef>
 ) -> PhysicalNominalFact {
     validate_physical_nominal_owner(def.owner_ref, def.name, drop_method)
+    validate_physical_nominal_dependencies(dependency_owners)
     PhysicalNominalFact {
         owner: def.owner_ref,
         struct_def: some(def), enum_def: none,
-        drop_method: drop_method
+        drop_method: drop_method,
+        dependency_owners: dependency_owners
     }
 }
 
 pub fn make_physical_enum_fact(
-    def: EnumDef, drop_method: ImplMethodRef?
+    def: EnumDef, drop_method: ImplMethodRef?,
+    dependency_owners: List<RegisteredNominalRef>
 ) -> PhysicalNominalFact {
     validate_physical_nominal_owner(def.owner_ref, def.name, drop_method)
+    validate_physical_nominal_dependencies(dependency_owners)
     PhysicalNominalFact {
         owner: def.owner_ref,
         struct_def: none, enum_def: some(def),
-        drop_method: drop_method
+        drop_method: drop_method,
+        dependency_owners: dependency_owners
     }
 }
 
@@ -237,6 +258,12 @@ pub fn physical_nominal_enum(value: PhysicalNominalFact) -> EnumDef {
 pub fn physical_nominal_drop_method(
     value: PhysicalNominalFact
 ) -> ImplMethodRef? { value.drop_method }
+
+pub fn physical_nominal_dependency_owners(
+    value: PhysicalNominalFact
+) -> List<RegisteredNominalRef> {
+    value.dependency_owners.map(fn(owner) { owner })
+}
 
 pub fn lookup_variant(def: EnumDef, name: Str) -> EnumVariant? {
     match def.variant_index.get(name) {
@@ -1091,6 +1118,42 @@ pub fn new_type_env() -> TypeEnv {
         },
         compiler_externs: new_compiler_extern_manifest(),
         effect_formal_facts: [], callable_effect_facts: []
+    }
+}
+
+fn validate_physical_type_owner(
+    expected_name: Str, actual_name: Str, owner: RegisteredNominalRef
+) -> RegisteredNominalRef {
+    if actual_name != expected_name ||
+       symbol_ref_canonical_payload(
+           registered_nominal_ref_symbol(owner)) != expected_name {
+        panic("physical nominal type: exact owner payload differs")
+    }
+    owner
+}
+
+// Resolve the outer nominal at the typed registry boundary, where a Type's
+// canonical spelling and its resolver-issued owner are both still present.
+// Downstream physical-fact consumers receive only the returned exact owner.
+pub fn physical_nominal_owner_for_type(
+    env: TypeEnv, ty: Type
+) -> RegisteredNominalRef? {
+    match ty {
+        Type::StructType { name, .. } => match env.types.structs.get(name) {
+            some(def) => some(validate_physical_type_owner(
+                name, def.name, def.owner_ref)),
+            none => match env.types.extern_structs.get(name) {
+                some(def) => some(validate_physical_type_owner(
+                    name, def.name, def.owner_ref)),
+                none => none
+            }
+        },
+        Type::EnumType { name, .. } => match env.types.enums.get(name) {
+            some(def) => some(validate_physical_type_owner(
+                name, def.name, def.owner_ref)),
+            none => none
+        },
+        _ => none
     }
 }
 
@@ -3338,16 +3401,17 @@ pub fn localize_physical_nominal_fact(
     mut env: TypeEnv, value: PhysicalNominalFact
 ) -> PhysicalNominalFact {
     let drop_method = physical_nominal_drop_method(value)
+    let dependency_owners = physical_nominal_dependency_owners(value)
     if physical_nominal_is_struct(value) {
         make_physical_struct_fact(
             localize_imported_struct_def(
                 env, physical_nominal_struct(value)),
-            drop_method)
+            drop_method, dependency_owners)
     } else {
         make_physical_enum_fact(
             localize_imported_enum_def(
                 env, physical_nominal_enum(value)),
-            drop_method)
+            drop_method, dependency_owners)
     }
 }
 
