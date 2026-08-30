@@ -851,7 +851,7 @@ pub struct CoreDerivedOrdPlan {
 fn validate_ord_field(
     value: CoreDerivedFieldPlan,
     header: CoreDerivedHeader, int_type: CoreTypeRef
-) {
+) with {} {
     if value.right.is_none() {
         panic("Core derive Ord: field lacks right operand")
     }
@@ -938,7 +938,7 @@ pub fn make_core_derived_enum_ord_plan(
 fn flatten_ord_fields(
     values: List<CoreDerivedFieldPlan>,
     mut result: List<CoreDerivedFieldPlan>
-) -> List<CoreDerivedFieldPlan> {
+) -> List<CoreDerivedFieldPlan> with {mut<List<CoreDerivedFieldPlan>>} {
     for value in values {
         match value.value {
             CoreDerivedFieldPlanValue::DerivedLeaf { .. } =>
@@ -951,10 +951,17 @@ fn flatten_ord_fields(
     result
 }
 
+fn flattened_ord_fields(
+    values: List<CoreDerivedFieldPlan>
+) -> List<CoreDerivedFieldPlan> with {} {
+    let result: List<CoreDerivedFieldPlan> = []
+    flatten_ord_fields(values, result)
+}
+
 fn ord_fields(
     fields: List<CoreDerivedFieldPlan>, index: Int,
     plan: CoreDerivedOrdPlan, origin: OriginRef
-) -> CoreExpr {
+) -> CoreExpr with {} {
     if index >= fields.len() {
         return int_literal(plan.int_type, 0, origin)
     }
@@ -1035,7 +1042,7 @@ fn derived_ord_expr(plan: CoreDerivedOrdPlan) -> CoreExpr {
     match plan.value {
         CoreDerivedOrdShapeValue::StructOrd(fields) =>
             ord_fields(
-                flatten_ord_fields(fields, []), 0,
+                flattened_ord_fields(fields), 0,
                 plan, plan.header.body_origin),
         CoreDerivedOrdShapeValue::EnumOrd(variants) => {
             let left = make_core_read_expr(
@@ -1053,7 +1060,7 @@ fn derived_ord_expr(plan: CoreDerivedOrdPlan) -> CoreExpr {
                             left_variant.variant.variant,
                             right_variant.variant.variant) {
                         ord_fields(
-                            flatten_ord_fields(left_variant.fields, []),
+                            flattened_ord_fields(left_variant.fields),
                             0, plan,
                             left_variant.variant.origin)
                     } else {
