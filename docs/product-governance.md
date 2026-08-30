@@ -1,6 +1,6 @@
 # Ring 产品主张与发布传播治理
 
-> 事实截止：2026-08-13。
+> 事实截止：2026-08-30。
 >
 > 本文件控制 Ring 可以向谁、在什么证据下、用什么边界表达产品主张。它不是实现 backlog，不改变 [`docs/backlog.md`](backlog.md) 的优先级；实现状态仍以 `CLAUDE.md`、活动看板、audit 与可重放测试为准。
 
@@ -20,6 +20,14 @@
 4. **愿景与现状分离**：backlog、design 和论文先例不算已发货证据。
 5. **负向结果保留**：B-111、B-181、B-182 等测量允许 null/负向结论；不得只传播胜例。
 6. **传播不越权**：release、tag、公开 campaign、机构接触与外部权限仍由用户拍板。
+
+### 1.1 0.1 internal checkpoint 与产品发布分离（2026-08-30 用户决定）
+
+当前“0.1”不是developer preview、release candidate或公开产品版本，而是一个内部工程检查点：tracked C anchor能够构建current compiler，current compiler连续自编译到可复现fixed point，并足以把仓库、durable refs/notes与活动治理原子迁移到`vorton-lang/vorton`。它的首要目标是解除旧仓库与文本活动看板对后续开发的约束，不是语言bug清零。
+
+因此，不命中current compiler/self-host/迁仓路径的已知语言缺陷可以继续被compiler接受而没有专门诊断，只需保留可复现触发、实际后果与workaround，并在B-183中导入GitHub Known Issues。该处理允许false rejection、wrong-code、leak、crash或ownership/safety违约存在于未覆盖的外部程序；相应能力不得进入`shipped`，不得据此宣称“所有通过编译的程序安全/正确”，也不得把internal checkpoint称为公开preview。任何阻止tracked-anchor构建、连续self-host、gen2/gen3 fixed point、compiler/hello最小smoke、仓库迁移或clean-clone重建的缺陷仍是检查点blocker。
+
+公开developer preview继续服从本文件后续candidate、known limitations、artifact与用户release决定；0.1内部检查点不会提升任何产品claim状态。GitHub Issue/PR承载迁仓后的活动工作、review与用户决策，稳定语言spec和已批准verdict仍版本化入库，不能把Issue变成第二份永久设计真值。
 
 ## 2. 主张状态
 
@@ -120,7 +128,7 @@ Repository Steward 维护本账本；用户保留 release、公开 campaign 和�
 
 ## 10. 仓库与 GitHub 工作流迁移方向（2026-08-09 D-004）
 
-用户批准在 B-180 性能优化完成后、B-168 与 B-174 开始前执行 B-183，目标是把核心仓库迁至 `vorton-lang/vorton`，并把用户—Repository Steward 的异步协作入口迁到 GitHub Issue / PR。该顺序避免在旧 Ring 公共标识上继续建设 preview CLI、release packaging 与后续高风险 ABI 工作。
+用户于2026-08-30重新固定顺序：#268/#269最小self-host/fixed-point检查点完成后立即执行B-183 planning与另行批准的cutover，把核心仓库迁至`vorton-lang/vorton`，并把用户—Repository Steward的活动协作入口迁到GitHub Issue/PR；B-176/B-180性能专项与Known Issues修复在新仓库继续。该顺序避免在旧Ring公共标识和文本活动看板上继续投入开发基础设施，也不把内部检查点误作preview。
 
 迁移保留完整 Git history、tag、自定义 durable ref 与 audit notes，采用 GitHub transfer + rename，不重建或重写历史；旧 `YYF233333/Ring-lang` slug 不得复用。`compiler/dist-c/main.c` 继续留在核心仓库充当唯一 tracked bootstrap anchor，不拆仓或使用 Git LFS，并在 `.gitattributes` 标记为 `linguist-generated`。公共身份按未发布期 clean break 一次迁到 Vorton；`.v` 扩展名已因现有语言/工具链冲突排除，最终源码扩展名及 CLI/package/editor namespace 留到 B-183 planning 固定。
 
