@@ -206,7 +206,7 @@ Generic callable必须按子形态分流：factory/aggregate subforms在strict s
 
 **静态审查—验证班车双线（2026-08-29 用户决定）**：机器执行不得阻塞agent继续产生独立信息。Lane A持续对固定authority snapshot做只读static review、failure-class census与oracle核对；Lane B由Steward持续实现并组织validation bus。Review finding只有取得独立证据并由root读码复核后才作为confirmed blocker发给实现线；killed、重复、纯未来完整性或没有0.1 consumer的观察不打断班车。
 
-**Candidate execution/review同启（仓库级用户决定）**：一个fixed candidate的machine execution与针对同一EvidenceKey的candidate review必须同时启动；不得让机器等待review terminal。Review未CLEAR前，machine result保持quarantine，不得支持claim、下一命令、merge、bookkeeping或后续artifact；Review BLOCK时无论exit为何都丢弃结果。该规则只改变launch ordering，不放宽EvidenceKey、资源、安全、command tuple、postcondition、no-retry或root复核。
+**Candidate execution/review同启与machine-FAIL优先（仓库级用户决定）**：一个fixed candidate的machine execution与针对同一EvidenceKey的candidate review必须同时启动；不得让机器等待review terminal。Machine terminal FAIL后，root可立即读取exact failure作为development feedback并生成下一candidate，无需等待review；machine failure处理优先于review finding。原review继续，confirmed blocker不会被豁免，必须在后续PASS支持下游artifact、merge、bookkeeping或claim前完成reconcile。Machine PASS仍保持quarantine直到review CLEAR；Review BLOCK时PASS无效并丢弃。该规则只改变launch与失败处理顺序，不放宽EvidenceKey、资源、安全、command tuple、postcondition、no-fallback、no-retry或root复核。
 
 每班车固定source SHA、candidate hash、输入与命令；从该SHA的construction启动起，到其全部validation terminal为止，该fixed SHA算一辆**在途班车**。不同fixed commit/SHA同时在途的班车总数必须 `<4`，即最多3辆。不同SHA的source-build/gen1等candidate construction可以并发；同一SHA只禁止重复construction或多个命令写同一artifact。Candidate产生后，同一SHA内部同样不限制独立matrix validation数量或进程数，各任务只需使用isolated output。班车机制本身不设置全局或per-SHA进程数量门；aggregate commit `<=12 GiB`及对应ASan/resource门保持，某道sealed命令若由其active spec另有进程约束，只约束该命令，不得外推为validation bus通则。运行中的结果永远归属于其固定candidate；其间产生的新fix只进入下一班车，禁止把不同SHA的成功或失败拼成同一claim。
 

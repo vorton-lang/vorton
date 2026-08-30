@@ -647,8 +647,15 @@ REPOSITORY_EXECUTION_DECISIONS_CONTRACT = TextContract(
         ("machine execution",),
         ("review必须同时启动",),
         ("不得让机器等待review",),
+        ("Machine terminal FAIL",),
+        ("立即读取",),
+        ("development feedback",),
+        ("无需等待review",),
+        ("review继续", "In-flight review继续"),
+        ("confirmed blocker",),
+        ("Machine PASS",),
         ("quarantine",),
-        ("Review未CLEAR",),
+        ("Review CLEAR",),
         ("Review BLOCK",),
         ("丢弃",),
         ("`docs/**`",),
@@ -664,6 +671,8 @@ REPOSITORY_EXECUTION_DECISIONS_CONTRACT = TextContract(
     ),
     (
         "必须让机器等待review结束后才运行",
+        "Machine terminal FAIL必须等待review CLEAR",
+        "任何机器结果都必须等待review",
         "每个docs请求必须逐次query",
         "适用于所有仓库",
     ),
@@ -1628,7 +1637,8 @@ Discussion 休眠/idle 时不轮询；高层变化用 compact packet 唤醒，�
 GOOD_REPOSITORY_EXECUTION_DECISIONS_FIXTURE = """
 本skill只适用于当前Ring-lang仓库，不得外推到其他仓库。
 一个fixed candidate的machine execution与review必须同时启动；不得让机器等待review。
-Review未CLEAR时结果quarantine，Review BLOCK就丢弃，且不放宽EvidenceKey和no-retry。
+Machine terminal FAIL由root立即读取为development feedback，无需等待review，review继续且confirmed blocker不豁免。
+Machine PASS保持quarantine直到Review CLEAR；Review BLOCK就丢弃PASS，且不放宽EvidenceKey和no-retry。
 Discussion严格修改`docs/**`时，无需事前query Steward或申请main mutation lease；
 本地核对HEAD/working tree/exact diff，完成验证与commit后通知Steward。
 连续到来的docs请求合并为最终batch，只发送一次合并通知。
@@ -1868,6 +1878,17 @@ def run_self_tests(*, include_audit_ledger_process: bool) -> list[str]:
             lambda: check_text_contract(
                 GOOD_REPOSITORY_EXECUTION_DECISIONS_FIXTURE
                 + "\n每个docs请求必须逐次query。",
+                REPOSITORY_EXECUTION_DECISIONS_CONTRACT,
+            ),
+            "repository-local execution decisions",
+        )
+    )
+    failures.extend(
+        deterministic_failure(
+            "machine-failure waits for review fixture",
+            lambda: check_text_contract(
+                GOOD_REPOSITORY_EXECUTION_DECISIONS_FIXTURE
+                + "\nMachine terminal FAIL必须等待review CLEAR。",
                 REPOSITORY_EXECUTION_DECISIONS_CONTRACT,
             ),
             "repository-local execution decisions",
@@ -2245,7 +2266,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(
             "workflow validator self-test passed: "
-            "32 legacy/broken fixtures rejected deterministically; "
+            "33 legacy/broken fixtures rejected deterministically; "
             "2 durable-ledger regressions passed"
         )
         return 0
@@ -2275,7 +2296,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{backlog_count} active backlog items, "
         f"{audit_count} active audit items, "
         "2 steward adapters, 4 Codex roles, "
-        "32 fast negative fixtures; "
+        "33 fast negative fixtures; "
         "run --self-test for 2 durable-ledger process regressions"
     )
     return 0

@@ -10,8 +10,9 @@ description: Apply user-established execution-process decisions inside the Ring-
 ## Candidate机器执行与review同启
 
 - 一个fixed candidate的machine execution与针对该candidate的review必须同时启动；不得让机器等待review结束后才运行。
-- Review未CLEAR前，机器结果保持quarantine，不得支持claim、下一命令、merge、bookkeeping或后续artifact。
-- Review BLOCK时无论machine exit为何都丢弃该结果；不得以已消耗机器时间为理由复用。
+- Machine terminal FAIL后，root立即读取exact failure作为development feedback并生成下一candidate，无需等待review；machine error优先于review finding。
+- In-flight review继续，confirmed blocker不会被豁免；修复machine failure后，任何PASS支持下游artifact、merge、bookkeeping或claim前必须完成reconcile。
+- Machine PASS保持quarantine直到Review CLEAR；Review BLOCK时PASS无效并丢弃，不得以已消耗机器时间为理由复用。
 - 该规则只改变launch ordering，不放宽EvidenceKey、资源、安全、命令、postcondition、no-retry或root复核门。
 
 ## Discussion纯文档修改默认无需lease
