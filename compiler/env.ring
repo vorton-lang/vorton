@@ -2449,7 +2449,11 @@ fn collect_ordered_type_var_ids(
             collect_ordered_type_var_ids(return_type, result)
             collect_ordered_effect_row_vars(effects, result)
         },
-        Type::StructType { type_params, .. } |
+        Type::StructType { type_params, .. } => {
+            for param in type_params {
+                collect_ordered_type_var_ids(param, result)
+            }
+        },
         Type::EnumType { type_params, .. } => {
             for param in type_params {
                 collect_ordered_type_var_ids(param, result)
@@ -2505,7 +2509,11 @@ fn collect_effect_tail_ids_in_type(
                 none => {}
             }
         },
-        Type::StructType { type_params, .. } |
+        Type::StructType { type_params, .. } => {
+            for param in type_params {
+                collect_effect_tail_ids_in_type(param, result)
+            }
+        },
         Type::EnumType { type_params, .. } => {
             for param in type_params {
                 collect_effect_tail_ids_in_type(param, result)
@@ -3144,7 +3152,9 @@ fn collect_value_type_vars(ty: Type, mut result: Set<Int>) {
                 collect_value_type_vars_in_atom(atom, result)
             }
         },
-        Type::StructType { type_params, .. } |
+        Type::StructType { type_params, .. } => {
+            for param in type_params { collect_value_type_vars(param, result) }
+        },
         Type::EnumType { type_params, .. } => {
             for param in type_params { collect_value_type_vars(param, result) }
         },

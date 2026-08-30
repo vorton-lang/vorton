@@ -2043,8 +2043,12 @@ fn validate_effect_ctx_lookup_stmt(
     mut installs: List<List<TypedHandledEffectInstance>>
 ) {
     match value {
-        HStmt::Let { init, .. } | HStmt::Var { init, .. } |
-        HStmt::ExprStmt { expr: init, .. } |
+        HStmt::Let { init, .. } =>
+            validate_effect_ctx_lookup_expr(init, layout, installs),
+        HStmt::Var { init, .. } =>
+            validate_effect_ctx_lookup_expr(init, layout, installs),
+        HStmt::ExprStmt { expr: init, .. } =>
+            validate_effect_ctx_lookup_expr(init, layout, installs),
         HStmt::LetDestructure { init, .. } =>
             validate_effect_ctx_lookup_expr(init, layout, installs),
         HStmt::Assign { target, value, .. } => {
@@ -2148,10 +2152,14 @@ fn validate_effect_ctx_lookup_expr(
             validate_effect_ctx_lookup_expr(left, layout, installs)
             validate_effect_ctx_lookup_expr(right, layout, installs)
         },
-        HExpr::UnaryOp { operand, .. } |
-        HExpr::FieldAccess { receiver: operand, .. } |
-        HExpr::Clone { inner: operand, .. } |
-        HExpr::Take { source: operand, .. } |
+        HExpr::UnaryOp { operand, .. } =>
+            validate_effect_ctx_lookup_expr(operand, layout, installs),
+        HExpr::FieldAccess { receiver: operand, .. } =>
+            validate_effect_ctx_lookup_expr(operand, layout, installs),
+        HExpr::Clone { inner: operand, .. } =>
+            validate_effect_ctx_lookup_expr(operand, layout, installs),
+        HExpr::Take { source: operand, .. } =>
+            validate_effect_ctx_lookup_expr(operand, layout, installs),
         HExpr::UnsafeBlock { body: operand, .. } =>
             validate_effect_ctx_lookup_expr(operand, layout, installs),
         HExpr::StructLit { fields, spread, .. } => {
@@ -2174,7 +2182,17 @@ fn validate_effect_ctx_lookup_expr(
                 none => {}
             }
         },
-        HExpr::MatchExpr { scrutinee, arms, .. } |
+        HExpr::MatchExpr { scrutinee, arms, .. } => {
+            validate_effect_ctx_lookup_expr(scrutinee, layout, installs)
+            for arm in arms {
+                match arm.guard {
+                    some(guard) => validate_effect_ctx_lookup_expr(
+                        guard, layout, installs),
+                    none => {}
+                }
+                validate_effect_ctx_lookup_expr(arm.body, layout, installs)
+            }
+        },
         HExpr::TryCatch { body: scrutinee, arms, .. } => {
             validate_effect_ctx_lookup_expr(scrutinee, layout, installs)
             for arm in arms {
@@ -2214,7 +2232,11 @@ fn validate_effect_ctx_lookup_expr(
                 }
             }
         },
-        HExpr::ListLit { elements, .. } |
+        HExpr::ListLit { elements, .. } => {
+            for expr in elements {
+                validate_effect_ctx_lookup_expr(expr, layout, installs)
+            }
+        },
         HExpr::TupleLit { elements, .. } => {
             for expr in elements {
                 validate_effect_ctx_lookup_expr(expr, layout, installs)

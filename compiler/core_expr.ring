@@ -402,7 +402,8 @@ pub fn core_effect_ctx_argument_context(
     match value.value {
         CoreEffectCtxArgumentValue::BorrowCurrentEffectCtxArgument {
             context, ..
-        } | CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument {
+        } => context,
+        CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument {
             context, ..
         } => context,
         _ => panic("CoreHIR: empty EffectCtx has no binding")
@@ -441,10 +442,12 @@ pub fn core_effect_ctx_argument_receipt(
     value: CoreEffectCtxArgument
 ) -> CoreEffectInstantiation {
     match value.value {
-        CoreEffectCtxArgumentValue::EmptyEffectCtxArgument { receipt } |
+        CoreEffectCtxArgumentValue::EmptyEffectCtxArgument { receipt } =>
+            receipt_copy(receipt),
         CoreEffectCtxArgumentValue::BorrowCurrentEffectCtxArgument {
             receipt, ..
-        } | CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument {
+        } => receipt_copy(receipt),
+        CoreEffectCtxArgumentValue::BorrowViewEffectCtxArgument {
             receipt, ..
         } => receipt_copy(receipt)
     }
@@ -3556,7 +3559,8 @@ fn collect_stmt_effect_ctx_tokens(
     value: CoreStmt, mut result: List<CoreEffectCtxTokenRef>
 ) {
     match value.value {
-        CoreStmtValue::Bind { value: expr, .. } |
+        CoreStmtValue::Bind { value: expr, .. } =>
+            collect_expr_effect_ctx_tokens(expr, result),
         CoreStmtValue::ExprStmt { value: expr, .. } =>
             collect_expr_effect_ctx_tokens(expr, result),
         CoreStmtValue::Assign { target, value: expr, .. } => {
@@ -3605,8 +3609,16 @@ fn collect_core_expr_origins(value: CoreExpr, mut result: List<OriginRef>) {
         CoreExprValue::PrimitiveExprValue { operands, .. } => {
             for operand in operands { collect_core_expr_origins(operand, result) }
         },
-        CoreExprValue::CallExprValue { arguments, .. } |
-        CoreExprValue::EffectCallExprValue { arguments, .. } |
+        CoreExprValue::CallExprValue { arguments, .. } => {
+            for argument in arguments {
+                collect_core_expr_origins(argument, result)
+            }
+        },
+        CoreExprValue::EffectCallExprValue { arguments, .. } => {
+            for argument in arguments {
+                collect_core_expr_origins(argument, result)
+            }
+        },
         CoreExprValue::SystemCallExprValue { arguments, .. } => {
             for argument in arguments {
                 collect_core_expr_origins(argument, result)
@@ -3678,7 +3690,8 @@ fn collect_core_expr_origins(value: CoreExpr, mut result: List<OriginRef>) {
 fn collect_core_stmt_origins(value: CoreStmt, mut result: List<OriginRef>) {
     result.push(core_stmt_origin(value))
     match value.value {
-        CoreStmtValue::Bind { value: expr, .. } |
+        CoreStmtValue::Bind { value: expr, .. } =>
+            collect_core_expr_origins(expr, result),
         CoreStmtValue::ExprStmt { value: expr, .. } =>
             collect_core_expr_origins(expr, result),
         CoreStmtValue::Assign { target, value: expr, .. } => {

@@ -760,8 +760,18 @@ fn register_phase1(
         _ => {
             register_decl(ctx, decl, decl_index)
             match decl {
-                Decl::Fn { name, .. } |
-                Decl::ExternFn { name, .. } |
+                Decl::Fn { name, .. } => {
+                    let symbol = source_value_symbol_for_decl(ctx, decl_index)
+                    record_value_origin(
+                        ctx, name, symbol_ref_canonical_payload(symbol))
+                    record_value_symbol_ref(ctx, name, symbol)
+                },
+                Decl::ExternFn { name, .. } => {
+                    let symbol = source_value_symbol_for_decl(ctx, decl_index)
+                    record_value_origin(
+                        ctx, name, symbol_ref_canonical_payload(symbol))
+                    record_value_symbol_ref(ctx, name, symbol)
+                },
                 Decl::Const { name, .. } => {
                     let symbol = source_value_symbol_for_decl(ctx, decl_index)
                     record_value_origin(

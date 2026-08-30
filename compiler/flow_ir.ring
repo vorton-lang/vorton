@@ -4604,7 +4604,8 @@ fn validate_body_blocks(body: FlowBody) {
         match block.terminator.value {
             FlowTerminatorValue::ReturnValue { exited_scopes, .. } =>
                 validate_return_exits(body, active_scope, exited_scopes),
-            FlowTerminatorValue::UnreachableValue { exited_scopes } |
+            FlowTerminatorValue::UnreachableValue { exited_scopes } =>
+                validate_terminal_exits(body, active_scope, exited_scopes),
             FlowTerminatorValue::DivergeValue { exited_scopes } =>
                 validate_terminal_exits(body, active_scope, exited_scopes),
             _ => {}

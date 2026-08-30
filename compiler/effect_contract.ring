@@ -126,7 +126,9 @@ pub fn typed_runtime_handled_argument_is_fully_closed(
             }) &&
             typed_runtime_handled_argument_is_fully_closed(return_type) &&
             typed_runtime_effect_row_is_fully_closed(effects),
-        Type::StructType { type_params, .. } |
+        Type::StructType { type_params, .. } => type_params.all(fn(ty) {
+            typed_runtime_handled_argument_is_fully_closed(ty)
+        }),
         Type::EnumType { type_params, .. } => type_params.all(fn(ty) {
             typed_runtime_handled_argument_is_fully_closed(ty)
         }),
@@ -171,7 +173,9 @@ fn typed_runtime_nested_type_has_closed_handled_instances(
                 return_type) &&
             typed_runtime_effect_row_has_closed_handled_instances(
                 effects),
-        Type::StructType { type_params, .. } |
+        Type::StructType { type_params, .. } => type_params.all(fn(ty) {
+            typed_runtime_nested_type_has_closed_handled_instances(ty)
+        }),
         Type::EnumType { type_params, .. } => type_params.all(fn(ty) {
             typed_runtime_nested_type_has_closed_handled_instances(ty)
         }),

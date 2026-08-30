@@ -1078,7 +1078,19 @@ fn producer_record_type_with_nominal_owner(
         none => {}
     }
     let nominal_owner: RegisteredNominalRef? = match ty {
-        Type::StructType { name, .. } |
+        Type::StructType { name, .. } => match exact_nominal_owner {
+            some(owner) => {
+                if symbol_ref_canonical_payload(
+                        registered_nominal_ref_symbol(owner)) != name {
+                    panic("Core producer: supplied nominal owner payload differs")
+                }
+                some(owner)
+            },
+            none => some(physical_nominal_owner_for_type(
+                producer.env, ty).unwrap_or_else(fn() {
+                    panic("Core producer: typed nominal owner is absent")
+                }))
+        },
         Type::EnumType { name, .. } => match exact_nominal_owner {
             some(owner) => {
                 if symbol_ref_canonical_payload(
@@ -1499,7 +1511,14 @@ fn producer_register_decl_parameters(
 ) {
     for decl in decls {
         match decl {
-            HDecl::Fn { executable_ref, type_params, .. } |
+            HDecl::Fn { executable_ref, type_params, .. } => {
+                if !executable_ref_is_named(executable_ref) {
+                    panic("Core producer: named declaration has anonymous owner")
+                }
+                producer_register_h_type_params(
+                    producer, executable_ref_named_symbol(executable_ref),
+                    type_params)
+            },
             HDecl::ExternFn { executable_ref, type_params, .. } => {
                 if !executable_ref_is_named(executable_ref) {
                     panic("Core producer: named declaration has anonymous owner")
@@ -1725,7 +1744,12 @@ fn producer_record_stmt(
     mut producer: ClosedCoreProducer, owner: ExecutableRef, stmt: HStmt
 ) {
     match stmt {
-        HStmt::Let { ty, init, .. } | HStmt::Var { ty, init, .. } => {
+        HStmt::Let { ty, init, .. } => {
+            let _ = producer_record_type(
+                producer, ty, some(executable_origin(owner)))
+            producer_record_expr(producer, owner, init)
+        },
+        HStmt::Var { ty, init, .. } => {
             let _ = producer_record_type(
                 producer, ty, some(executable_origin(owner)))
             producer_record_expr(producer, owner, init)
@@ -1891,7 +1915,9 @@ fn producer_record_expr(
                     producer, owner, plan), none => {}
             }
         },
-        HExpr::UnaryOp { operand, .. } | HExpr::Clone { inner: operand, .. } =>
+        HExpr::UnaryOp { operand, .. } =>
+            producer_record_expr(producer, owner, operand),
+        HExpr::Clone { inner: operand, .. } =>
             producer_record_expr(producer, owner, operand),
         HExpr::Call {
             callee, args, type_args, effect_instantiation,
@@ -2007,7 +2033,12 @@ fn producer_record_expr(
                 producer_record_expr(producer, owner, argument)
             }
         },
-        HExpr::ListLit { elements, .. } | HExpr::TupleLit { elements, .. } => {
+        HExpr::ListLit { elements, .. } => {
+            for element in elements {
+                producer_record_expr(producer, owner, element)
+            }
+        },
+        HExpr::TupleLit { elements, .. } => {
             for element in elements {
                 producer_record_expr(producer, owner, element)
             }
@@ -2537,7 +2568,11 @@ fn seed_diagnostic_stmt(
     owner_span: Span, value: HStmt
 ) {
     match value {
-        HStmt::Let { name, name_span, def_id: some(id), init, .. } |
+        HStmt::Let { name, name_span, def_id: some(id), init, .. } => {
+            add_diagnostic_slot_seed(
+                seed, source_slot(owner, id), name_span, name)
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, init)
+        },
         HStmt::Var { name, name_span, def_id: some(id), init, .. } => {
             add_diagnostic_slot_seed(
                 seed, source_slot(owner, id), name_span, name)
@@ -2606,8 +2641,10 @@ fn seed_diagnostic_expr(
             seed_diagnostic_expr(seed, module_key, owner, owner_span, left)
             seed_diagnostic_expr(seed, module_key, owner, owner_span, right)
         },
-        HExpr::UnaryOp { operand, .. } |
-        HExpr::FieldAccess { receiver: operand, .. } |
+        HExpr::UnaryOp { operand, .. } =>
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, operand),
+        HExpr::FieldAccess { receiver: operand, .. } =>
+            seed_diagnostic_expr(seed, module_key, owner, owner_span, operand),
         HExpr::UnsafeBlock { body: operand, .. } =>
             seed_diagnostic_expr(seed, module_key, owner, owner_span, operand),
         HExpr::StructLit { fields, spread, .. } => {
@@ -2654,7 +2691,12 @@ fn seed_diagnostic_expr(
                     seed, module_key, owner, owner_span, expr), none => {}
             }
         },
-        HExpr::MatchExpr { scrutinee, arms, .. } |
+        HExpr::MatchExpr { scrutinee, arms, .. } => {
+            seed_diagnostic_expr(
+                seed, module_key, owner, owner_span, scrutinee)
+            for arm in arms { seed_diagnostic_arm(
+                seed, module_key, owner, owner_span, arm) }
+        },
         HExpr::TryCatch { body: scrutinee, arms, .. } => {
             seed_diagnostic_expr(
                 seed, module_key, owner, owner_span, scrutinee)
@@ -2716,7 +2758,11 @@ fn seed_diagnostic_decls(
                 seed_diagnostic_expr(
                     seed, module_key, executable_ref, span, body)
             },
-            HDecl::Test { executable_ref, body, span, .. } |
+            HDecl::Test { executable_ref, body, span, .. } => {
+                add_diagnostic_owner_seed(seed, executable_ref, module_key, span)
+                seed_diagnostic_expr(
+                    seed, module_key, executable_ref, span, body)
+            },
             HDecl::Const { executable_ref, init: body, span, .. } => {
                 add_diagnostic_owner_seed(seed, executable_ref, module_key, span)
                 seed_diagnostic_expr(
@@ -2759,7 +2805,13 @@ fn diagnostic_nominal_span(
     let mut found: Span? = none
     for value in values {
         match value {
-            HDecl::Struct { owner_ref, span, .. } |
+            HDecl::Struct { owner_ref, span, .. } => if symbol_ref_same(
+                    registered_nominal_ref_symbol(owner_ref), target) {
+                if found.is_some() {
+                    panic("Core diagnostic projection: nominal source repeats")
+                }
+                found = some(span)
+            },
             HDecl::Enum { owner_ref, span, .. } => if symbol_ref_same(
                     registered_nominal_ref_symbol(owner_ref), target) {
                 if found.is_some() {
@@ -6807,7 +6859,9 @@ fn collect_decl_callable_type_formals(
 ) {
     for decl in decls {
         match decl {
-            HDecl::Fn { executable_ref, type_params, .. } |
+            HDecl::Fn { executable_ref, type_params, .. } =>
+                append_callable_type_formal_source(
+                    result, executable_ref, type_params),
             HDecl::ExternFn { executable_ref, type_params, .. } =>
                 append_callable_type_formal_source(
                     result, executable_ref, type_params),

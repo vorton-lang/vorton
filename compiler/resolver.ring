@@ -284,9 +284,24 @@ fn first_reserved_type_declaration_in_scope(
 ) -> ReservedTypeDeclaration? {
     for decl in decls {
         match decl {
-            Decl::Struct { name, span, .. } |
-            Decl::ExternType { name, span, .. } |
-            Decl::Enum { name, span, .. } |
+            Decl::Struct { name, span, .. } => if
+                    is_reserved_0_1_type_name(name) {
+                return some(ReservedTypeDeclaration {
+                    name: name, span: span
+                })
+            },
+            Decl::ExternType { name, span, .. } => if
+                    is_reserved_0_1_type_name(name) {
+                return some(ReservedTypeDeclaration {
+                    name: name, span: span
+                })
+            },
+            Decl::Enum { name, span, .. } => if
+                    is_reserved_0_1_type_name(name) {
+                return some(ReservedTypeDeclaration {
+                    name: name, span: span
+                })
+            },
             Decl::TypeAlias { name, span, .. } => if
                     is_reserved_0_1_type_name(name) {
                 return some(ReservedTypeDeclaration {

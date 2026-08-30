@@ -3429,7 +3429,10 @@ pub fn resolve_immediate_impl_owner_dicts(
         owner, method_core, receipt, s, span, true
     ) {
         SchemeEvidenceResolution::Resolved { dicts, .. } => dicts,
-        SchemeEvidenceResolution::Pending { failures } |
+        SchemeEvidenceResolution::Pending { failures } => {
+            report_evidence_failures(sink, failures, span)
+            []
+        },
         SchemeEvidenceResolution::Missing { failures } => {
             report_evidence_failures(sink, failures, span)
             []
@@ -3688,7 +3691,10 @@ fn preflight_pending_dict_obligation(value: PendingDictObligation) {
             value.receipt, impl_method_core_type_vars(method_core))
     }
     match value.purpose {
-        PendingDictPurpose::DirectCallPublish { output_slot } |
+        PendingDictPurpose::DirectCallPublish { output_slot } =>
+            if output_slot.len() != 0 {
+                panic("owner batch dictionary preflight: output is not empty")
+            },
         PendingDictPurpose::CallableValueShadow { output_slot } =>
             if output_slot.len() != 0 {
                 panic("owner batch dictionary preflight: output is not empty")
@@ -5581,7 +5587,8 @@ pub fn prove_dict_evidence_for_type(
     match apply_subst(s, source) {
         Type::TypeVar { .. } => find_matching_fn_bound(
             current_fn_bounds, source, s, trait_name).is_some(),
-        Type::StructType { name, type_params } |
+        Type::StructType { name, type_params } => prove_named_dict_evidence(
+            env, current_fn_bounds, name, type_params, s, trait_name),
         Type::EnumType { name, type_params } => prove_named_dict_evidence(
             env, current_fn_bounds, name, type_params, s, trait_name),
         Type::ErrorType => false,

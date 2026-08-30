@@ -1039,7 +1039,11 @@ fn collect_builtin_type_formals(
             collect_builtin_type_formals(return_type, value_vars, row_tails)
             collect_builtin_effect_row_formals(effects, value_vars, row_tails)
         },
-        Type::StructType { type_params, .. } |
+        Type::StructType { type_params, .. } => {
+            for parameter in type_params {
+                collect_builtin_type_formals(parameter, value_vars, row_tails)
+            }
+        },
         Type::EnumType { type_params, .. } => {
             for parameter in type_params {
                 collect_builtin_type_formals(parameter, value_vars, row_tails)
