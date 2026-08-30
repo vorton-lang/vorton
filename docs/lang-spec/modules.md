@@ -143,6 +143,12 @@ pub use leaf::Wrap
 
 最后一种写法在re-export处稳定报错并建议同时公开owner enum。直接`pub use`一个enum仍自动携带其constructors；private/local `use`不受该public closure规则影响。实现按exact `VariantRef.owner`核对，不能从constructor leaf、alias spelling或唯一名字猜owner，也不能为接受constructor-only facade而隐式扩大type/impl可见性。
 
+### 0.1 public nominal 的物理布局可见性
+
+一个public struct/enum的transitive physical representation中出现的nominal type必须同样public并可由该module正常导出。检查递归覆盖private field、enum payload及nested generic/tuple/function type；因此`pub struct Wrapper { hidden: PrivatePayload }`非法，即使`hidden`字段本身private。修复方式是公开`PrivatePayload`，或让public wrapper不直接保存该private nominal。
+
+该规则不公开字段名，也不限制普通private nominal或只在private布局内出现的private依赖。编译器在provider的最终export census给source diagnostic；consumer不会获得private type namespace binding、隐藏physical metadata或backend fallback。
+
 ### 0.1 保留 type binding 与模块冲突
 
 0.1 的 type namespace 保留集合为：`Int Float Str Bool Unit Never Ptr Range Cell Option List ListIterator Map MapIterator Set SetIterator StringBuilder Result`。Direct type declaration、`use` 或 `pub use` 的最终本地绑定名若命中该集合，稳定报 `E0207`；same-origin delivery或re-export不能豁免保留名冲突，alias只按其最终本地名字判定，改成非保留名后服从普通模块规则。只有固定 canonical builtin/std loader producer 具有内部豁免。该规则不限制 value、function、trait、effect 或 module namespace 的同名符号。

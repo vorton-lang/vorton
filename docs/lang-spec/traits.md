@@ -37,7 +37,7 @@ Ring 0.1的inherent impl与trait impl都不接受`extern fn` member；这与visi
 
 ### Public interface、private impl 与 opaque return
 
-Public item的参数、返回类型、字段、generic bound及effect/trait contract不得引用更private的declaration；违反时hard-fail。`impl PublicTrait for PrivateType`可在module内部合法存在并参与project coherence，但不会成为外部callable surface。Trait impl只有target与trait均对调用方可见时才随module export，public inherent type也只导出其`pub`methods。
+Public item的参数、返回类型、字段、generic bound及effect/trait contract不得引用更private的declaration；违反时hard-fail。对于public struct/enum，该检查还覆盖private字段及payload的transitive physical nominal dependencies：字段名可private，但其layout所需nominal不得比public root更private。`impl PublicTrait for PrivateType`可在module内部合法存在并参与project coherence，但不会成为外部callable surface。Trait impl只有target与trait均对调用方可见时才随module export，public inherent type也只导出其`pub`methods。
 
 Ring 0.1不支持return-position`impl Trait`、opaque type或由推断产生的匿名public concrete type。需要隐藏返回值具体类型时，当前使用显式public wrapper/generic contract；post-0.1由B-200在真实consumer下重新设计。`impl`出现在type position必须稳定parse error，不能先建立只transport不约束的占位节点。
 

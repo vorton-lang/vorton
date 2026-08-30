@@ -86,6 +86,8 @@ trait Collection {
 
 **Public interface 与 private implementation（2026-08-23 用户决定）**：public item的参数、返回类型、字段、generic bound与effect/trait contract不得引用更private的declaration，违反即hard error。`impl PublicTrait for PrivateType`可合法留在module/project internal coherence registry，但不构成外部callable surface；trait impl只有target与trait均可见时才对外发布，public inherent type只发布其`pub` methods。0.1不把private concrete type的推断泄漏冒充opaque type；需要隐藏具体返回类型时留待post-0.1 B-200显式设计。
 
+**0.1 public physical-layout closure（2026-08-30 用户批准 Cut-A）**：public struct/enum的物理布局递归引用的每个nominal type也必须public/exportable，即使承载它的字段名本身private。Provider在最终export/visibility census中递归验证struct field、enum payload及其nested generic/tuple/function type中的nominal dependencies；任何更private nominal稳定报source diagnostic。普通private type、private字段和不进入public nominal布局的private representation不受影响。该限制使consumer无需获得private `StructDef/EnumDef`或第二套physical registry；Core只消费正常public type exports，禁止`PhysicalNominalFact`、ModuleExports private-layout closure、name fallback或bootstrap shim。
+
 **Impl-member extern 边界（2026-08-24 用户决定）**：0.1 的用户 FFI 声明只有 top-level `extern fn` / `extern type`；inherent impl 与 trait impl 都不接受 `extern fn` member。现有 Str、Int、Float 的宿主桥接方法仍保持普通 public inherent method 的调用表面，但由编译器在唯一 builtin assembly 中以 exact `BuiltinMethodSite + IntrinsicRef + signature` 安装，不能从 target/method 字符串、span 或声明顺序恢复。CoreHIR 在闭合前必须看见该 exact intrinsic contract，AbiIR 只按穷尽 intrinsic tag 做机械 ABI 投影；C 后端不得保留 `method_to_runtime_c(type, name)` 一类隐式表。该 clean break 不改变 top-level extern、runtime ABI 或 B-156 的 capability 边界。
 
 ### 1.1a JSON 编码支持域（2026-08-06 D-001）
