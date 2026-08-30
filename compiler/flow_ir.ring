@@ -5992,7 +5992,7 @@ fn encode_instruction(value: FlowInstruction) -> Str {
     parts.join(";")
 }
 
-fn encode_flow_pattern(value: FlowPatternContract) -> Str {
+fn encode_flow_pattern(value: FlowPatternContract) -> Str with {} {
     let mut parts: List<Str> = [
         flow_pattern_kind_tag(value).to_str(), encode_type_ref(value.ty)
     ]
