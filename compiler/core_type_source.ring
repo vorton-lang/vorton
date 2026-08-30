@@ -822,7 +822,7 @@ fn exact_record_shape_satisfies(
     effect_actuals: List<CoreEffectSubstitution>,
     exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
-) -> Bool with {mut<List<CoreTypeRef>>} {
+) -> Bool with {} {
     if actual.nominal_fields.len() != formal.nominal_fields.len() {
         return false
     }
