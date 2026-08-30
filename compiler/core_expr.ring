@@ -3343,7 +3343,7 @@ pub fn core_body_block(value: CoreBody) -> CoreBlock { value.body }
 
 fn collect_expr_effect_sets(
     value: CoreExpr, mut result: List<CoreEffectSet>
-) {
+) with {mut<List<CoreEffectSet>>} {
     result.push(make_core_effect_set(core_effect_set_atoms(value.effects)))
     match value.value {
         CoreExprValue::PrimitiveExprValue { operands, .. } => {
@@ -3410,7 +3410,7 @@ fn collect_expr_effect_sets(
 
 fn collect_statement_effect_sets(
     value: CoreStmt, mut result: List<CoreEffectSet>
-) {
+) with {mut<List<CoreEffectSet>>} {
     match value.value {
         CoreStmtValue::Bind { value: expr, .. } =>
             collect_expr_effect_sets(expr, result),
@@ -3438,7 +3438,7 @@ fn collect_statement_effect_sets(
 
 fn collect_block_effect_sets(
     value: CoreBlock, mut result: List<CoreEffectSet>
-) {
+) with {mut<List<CoreEffectSet>>} {
     for statement in value.statements {
         collect_statement_effect_sets(statement, result)
     }
@@ -3448,7 +3448,9 @@ fn collect_block_effect_sets(
     }
 }
 
-pub fn core_body_effect_sets(value: CoreBody) -> List<CoreEffectSet> {
+pub fn core_body_effect_sets(
+    value: CoreBody
+) -> List<CoreEffectSet> with {} {
     let mut result: List<CoreEffectSet> = []
     collect_block_effect_sets(value.body, result)
     result
@@ -3603,7 +3605,9 @@ pub fn core_body_effect_ctx_tokens(
     result
 }
 
-fn collect_core_expr_origins(value: CoreExpr, mut result: List<OriginRef>) {
+fn collect_core_expr_origins(
+    value: CoreExpr, mut result: List<OriginRef>
+) with {mut<List<OriginRef>>} {
     result.push(value.origin)
     match value.value {
         CoreExprValue::PrimitiveExprValue { operands, .. } => {
@@ -3687,7 +3691,9 @@ fn collect_core_expr_origins(value: CoreExpr, mut result: List<OriginRef>) {
     }
 }
 
-fn collect_core_stmt_origins(value: CoreStmt, mut result: List<OriginRef>) {
+fn collect_core_stmt_origins(
+    value: CoreStmt, mut result: List<OriginRef>
+) with {mut<List<OriginRef>>} {
     result.push(core_stmt_origin(value))
     match value.value {
         CoreStmtValue::Bind { value: expr, .. } =>
@@ -3715,7 +3721,9 @@ fn collect_core_stmt_origins(value: CoreStmt, mut result: List<OriginRef>) {
     }
 }
 
-fn collect_core_block_origins(value: CoreBlock, mut result: List<OriginRef>) {
+fn collect_core_block_origins(
+    value: CoreBlock, mut result: List<OriginRef>
+) with {mut<List<OriginRef>>} {
     result.push(value.origin)
     for statement in value.statements { collect_core_stmt_origins(statement, result) }
     match value.tail {
@@ -3723,7 +3731,7 @@ fn collect_core_block_origins(value: CoreBlock, mut result: List<OriginRef>) {
     }
 }
 
-pub fn core_body_origins(value: CoreBody) -> List<OriginRef> {
+pub fn core_body_origins(value: CoreBody) -> List<OriginRef> with {} {
     let mut result: List<OriginRef> = [value.origin]
     collect_core_block_origins(value.body, result)
     result
