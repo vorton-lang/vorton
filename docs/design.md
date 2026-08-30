@@ -465,6 +465,8 @@ Ring 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2�
 
 通过 trait 实现。算术（`Add/Sub/Mul/Div/Rem/Neg`）、比较（`Eq/Ord`，`Ord: Eq`）、位运算（`BitAnd/BitOr/BitXor/BitNot/Shl/Shr`）与索引读取（`Index`）。不支持跨类型运算。14 个数值类型各自 impl 全套 trait（编译器内置）。0.1 不支持 `IndexMut` 或 `x[i] = value`；容器 mutation 使用具名方法，完整 index-assignment 语义仅由 post-0.1 B-202 在真实 consumer 下重新设计。
 
+Ring 0.1 的 builtin public `Eq` contract 只有 exact `eq` member。`==` dispatch 到 `Eq.eq`，`!=` 固定降低为同一 exact dispatch 的 Bool 取反；不存在 `Eq.ne`、独立 `Ne` intrinsic、override slot、derived body 或默认特化。该 clean break 不改变一般 source trait default method：只有 builtin `Eq.ne` 这一零 consumer surface 被删除。
+
 #### 尾调用优化（2026-05-24 决策）
 
 编译器自动检测，无新语法。尾位置 + 无 Drop + 签名匹配 → 保证 TCO（debug/release 都做）。自递归转循环；互递归/间接尾调用由后端使用受保证的 tail-call 机制或 trampoline 实现，不能把优化器“碰巧消除”当作语义保证。

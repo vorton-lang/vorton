@@ -281,7 +281,8 @@ apply(subst, τ):
 ── 比较（==, !=）──
   Γ ⊢ e₁ : τ₁ / ε₁     Γ ⊢ e₂ : τ₂ / ε₂
   unify(τ₁, τ₂)
-  τ₁ 实现 Eq trait 时解糖为 Eq.eq() / Eq.ne() trait dispatch
+  τ₁ 实现 Eq trait；== 解糖为 exact Eq.eq() trait dispatch，
+  != 解糖为同一次 exact Eq.eq() dispatch 的 Bool 取反
   ──────────────────────────────────────
   Γ ⊢ e₁ op e₂ : Bool / (ε₁ ∪ ε₂)
 
@@ -424,6 +425,8 @@ apply(subst, τ):
 ── Handle ──
   见 Effect 系统规范。
 ```
+
+Ring 0.1 的 builtin public `Eq` trait 只包含 `eq`；不存在 `ne` member、override slot 或默认 body。`!=` 的唯一语义是 `!Eq.eq(left, right)`，不得通过独立 `Ne` intrinsic、dictionary slot、derived method 或后端名字分派实现。该限制只适用于 builtin `Eq`，不删除用户 source trait 的一般 default method 能力。
 
 ### 语句
 
