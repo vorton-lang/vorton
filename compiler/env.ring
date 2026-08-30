@@ -2194,7 +2194,7 @@ fn apply_schema_subst_once(
 fn collect_effect_var_mappings(
     source_row: EffectRow, target_row: EffectRow,
     source_vars: Set<Int>, mut result: Map<Int, Type>
-) {
+) with {mut<Map<Int, Type>>} {
     match (source_row.tail, target_row.tail) {
         (some(source_id), some(target_id)) => {
             if source_vars.contains(source_id) {
@@ -2243,7 +2243,7 @@ fn collect_effect_var_mappings(
 fn collect_var_mappings(
     source_type: Type, target_type: Type,
     source_vars: Set<Int>, mut result: Map<Int, Type>
-) {
+) with {mut<Map<Int, Type>>} {
     match source_type {
         Type::TypeVar { id, .. } => {
             if source_vars.contains(id) {
@@ -2402,7 +2402,7 @@ fn collect_var_mappings(
 
 pub fn build_type_var_map(
     source_type: Type, target_type: Type, source_var_ids: List<Int>
-) -> Map<Int, Type> {
+) -> Map<Int, Type> with {} {
     let mut result: Map<Int, Type> = map_new()
     collect_var_mappings(
         source_type, target_type, set_from(source_var_ids), result)
