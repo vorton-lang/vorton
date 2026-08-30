@@ -2982,7 +2982,7 @@ pub fn is_borrow_returning_call(callee: HExpr) -> Bool {
 // BoolType requirement is a belt against audit #149 TypeVar-typed conditions
 // (an unannotated fn's over-generalised return — unknown ownership, possibly
 // the Unit ABI receiver-return accident).
-pub fn is_fresh_owned_bool_value(expr: HExpr) -> Bool {
+pub fn is_fresh_owned_bool_value(expr: HExpr) -> Bool with {} {
     let is_bool = match hexpr_type(expr) {
         Type::BoolType => true,
         _ => false,
