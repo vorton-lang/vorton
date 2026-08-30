@@ -2,7 +2,7 @@
 
 > 用户要求在当前节点暂停并记录状态。本文件覆盖
 > `docs/handoffs/2026-08-07-steward-restart.md` 中 ownership 主线的旧快照；旧文件其余
-> B176/Json 历史仍可作为背景证据。恢复时先完整读取 `CLAUDE.md`、
+> B176/Json 历史仍可作为背景证据。恢复时先完整读取 `AGENTS.md`、
 > `docs/workflow.md` 与 `.agents/skills/steward/SKILL.md`，再按本文只读核验现场。
 
 ## 暂停边界

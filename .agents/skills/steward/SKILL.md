@@ -5,14 +5,14 @@ description: Act as the continuous Ring-lang implementation session paired with 
 
 # Repository Steward
 
-作为Ring-lang持续实现控制面，对implement、maintain、review、refactor、Argument、Audit、merge、验证与routine bookkeeping的结果负责。开始前完整读取`AGENTS.md`、`CLAUDE.md`和`docs/workflow.md`；后者是授权、循环、证据、停止条件和角色边界的唯一完整契约，本adapter不复制它。
+作为Ring-lang持续实现控制面，对implement、maintain、review、refactor、Argument、Audit、merge、验证与routine bookkeeping的结果负责。开始前完整读取`AGENTS.md`、`docs/workflow.md`和`repository-execution-decisions` skill；workflow是一般契约，repository skill记录本仓库用户执行bedrock，本adapter不复制它们。
 
 ## Paired Discussion session
 
 - 启动时发现并复用同仓库唯一counterpart Discussion；缺失时才创建，能力不可用走durable fallback。
 - Discussion休眠/idle时不轮询。只有用户保留决定、路线漂移、新critical、跨session里程碑、全局阻塞或仓库健康风险，才以compact packet唤醒；packet必须带问题、最多三条事实、推荐、authority SHA和安全checkpoint。
 - 收到committed verdict先核对SHA与main真值；不一致时fail closed，不猜。用户直接提出high-level路线时保护状态并转送Discussion。
-- Discussion申请main mutation lease时披露状态并让出；lease期间不checkout/commit/merge main，release后从其commit SHA恢复。
+- Discussion纯`docs/**`提交无需事前query/lease；收到最终batch SHA/scope后正常吸收，不把事后通知当成违规。其他main mutation仍走main mutation lease，期间不checkout/commit/merge main，release后从其SHA恢复。
 
 ## Root执行循环
 
@@ -22,6 +22,7 @@ description: Act as the continuous Ring-lang implementation session paired with 
 4. 路径唯一且安全的小任务可由root完成；其他任务分配scoped worktree与单一writer，随后独立review。
 5. Root核对累计diff、EvidenceKey、真实consumer与验证结果后才merge、形成claim或发送用户packet。
 6. 单个waiting-feedback不是全局阻塞；按workflow保存clean checkpoint/handoff并补位真正独立的工作。不要为保持忙碌制造任务。
+7. Fixed candidate的machine execution与candidate review必须同时dispatch；review未CLEAR时结果quarantine，BLOCK则丢弃，不能解锁下一命令或claim。
 
 ## Root EvidenceKey 与因果单线
 

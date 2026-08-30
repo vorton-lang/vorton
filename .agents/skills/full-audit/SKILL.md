@@ -7,7 +7,7 @@ description: Run one repository-wide bounded adversarial audit round. Use only f
 
 每次调用只执行一个固定 snapshot 的 bounded round：finder → 对抗验证 → root 终审 → 落表。不得在同一 round 中循环到 dry 或开启第二轮；完成后返回 Repository Steward。
 
-Steward 可在高风险 milestone、信任边界变化、修复批次后或队列空档自主触发未来的新 round，无需用户手动发令。每个新 round 仍必须独立、有限。开始前完整读取 `AGENTS.md`、`CLAUDE.md`、`docs/workflow.md`、backlog、audit-report 和 Steward Inbox。
+Steward 可在高风险 milestone、信任边界变化、修复批次后或队列空档自主触发未来的新 round，无需用户手动发令。每个新 round 仍必须独立、有限。开始前完整读取 `AGENTS.md`、`docs/workflow.md`、backlog、audit-report 和 Steward Inbox。
 
 同一 trigger + 未变 snapshot 最多一轮。没有新 commit、新 lens 证据或新的风险事件时，不得仅因队列仍空就立即重开；无 finding 的 round 返回维护/队列扫描，否则属于形式 bounded、实质 loop-until-dry。
 

@@ -11,7 +11,7 @@
 3. **Steward 职责**：持有 implement/maintain/review/refactor/Argument/Audit、测试、merge、routine bookkeeping 与仓库健康。它在既定路线内自主推进，不因 Discussion 休眠而停机。
 4. **双向消息**：Discussion 通常在用户 verdict 已写入真值并 commit 后，向 Steward 发送 commit SHA、约束、被阻塞/解锁 item 与优先级。若用户已明确批准、Discussion 治理文件与 isolated authority 实现范围无路径重叠，Discussion 可先发送一条 exact provisional packet，允许 Steward 在隔离 worktree 并行实现；治理 commit 仍必须在 review/merge/main mutation 前完成并由 authority 吸收，provisional packet 不得扩大用户 verdict、授权 main 写入或替代 durable 真值。Steward 只在用户保留决定、路线/依赖漂移、新 critical 改变主线、跨 session 里程碑、全局阻塞或仓库健康风险需要用户可见时唤醒 Discussion。普通实现状态、命令等待、局部 blocker 与 review 往返不得唤醒 Discussion。
 5. **休眠而非轮询**：Discussion 没有用户问题、开放决策、路线监督或治理写入时结束当前 turn并保持 idle；不得通过定时读取 Steward、日志或进程保持“活跃”。Steward 的触发消息或新的用户输入负责唤醒它。Discussion 需要状态时读取一次 compact task snapshot，不尾随实现日志。
-6. **main mutation lease**：任何时刻只有一个 session 可写/commit/checkout/merge main；lease 只串行化 shared main，不冻结其他 worktree，非 holder 不得变更 main。Discussion 写治理前必须向 Steward申请 lease；Steward 披露 main 与 authority dirty 状态、命令和路径重叠，形成必要 checkpoint/备份并明确让出。范围无交集时，lease 期间 Steward 应在隔离 worktree 继续实现/commit，Discussion 同时在 main 提交声明范围内的治理/skill 文件；双方只需互报 base、scope 与合流顺序。Discussion 完成后把 SHA 发给 Steward并明确释放，authority 在 review/merge 前吸收该 governance commit。只有路径重叠、同一生成物或共享状态会互相覆盖时才冻结冲突侧；未获 lease 时 Discussion 只可在外部草稿准备，不得并发改 shared main。
+6. **main mutation lease**：非文档main mutation仍由lease串行化，任何时刻只有一个session可执行这类write/commit/checkout/merge；lease不冻结其他worktree。**Discussion的变更若严格限于`docs/**`则是用户批准的例外**：默认无需事前query Steward或申请lease，Discussion本地核对HEAD、working tree与exact diff后正常commit，完成后把最终SHA/scope通知Steward。若实际出现重叠dirty path、merge conflict或scope扩到`docs/**`之外，再进入reconcile/lease。一个连续处理窗口内连续到来的多个docs请求合并处理，只在最终batch完成后通知一次，不逐请求query或通知。该例外不授权push、GitHub/外部状态、history rewrite或其他non-doc mutation。非docs lease完成后仍由holder发SHA/release，authority在review/merge前吸收。
 7. **降级恢复**：peer messaging 暂不可用时，当前 session 将待传 packet 写入允许的治理真值或 Steward Inbox，并继续其授权范围内的安全工作；恢复配对后先消费 durable packet。不得因为 counterpart 离线扩大权限或丢弃未决状态。
 
 ## 1. 运行契约
@@ -108,7 +108,7 @@ A′授权已消费且失败，patched seed/overlay只作sealed历史反证，�
 
 每次 session：
 
-1. 完整读取 `AGENTS.md`、`CLAUDE.md`、本文件；
+1. 完整读取 `AGENTS.md`、本文件与`repository-execution-decisions` skill；
 2. 读取 backlog、audit-report 和 Steward Inbox；
 3. 检查 main、活动 worktree、未提交变更与最近 commit；
 4. 运行 `python .agents/scripts/validate_workflow.py`；
@@ -205,6 +205,8 @@ Generic callable必须按子形态分流：factory/aggregate subforms在strict s
 本决定不授权通用multi-error validator框架、IR snapshot/replay/cache、新artifact authority、第二验证系统或让损坏的单进程fail-late。若以后需要其中任何一项，必须先以重复实测失败证明现实收益，并按其真实架构与维护成本重新分类。
 
 **静态审查—验证班车双线（2026-08-29 用户决定）**：机器执行不得阻塞agent继续产生独立信息。Lane A持续对固定authority snapshot做只读static review、failure-class census与oracle核对；Lane B由Steward持续实现并组织validation bus。Review finding只有取得独立证据并由root读码复核后才作为confirmed blocker发给实现线；killed、重复、纯未来完整性或没有0.1 consumer的观察不打断班车。
+
+**Candidate execution/review同启（仓库级用户决定）**：一个fixed candidate的machine execution与针对同一EvidenceKey的candidate review必须同时启动；不得让机器等待review terminal。Review未CLEAR前，machine result保持quarantine，不得支持claim、下一命令、merge、bookkeeping或后续artifact；Review BLOCK时无论exit为何都丢弃结果。该规则只改变launch ordering，不放宽EvidenceKey、资源、安全、command tuple、postcondition、no-retry或root复核。
 
 每班车固定source SHA、candidate hash、输入与命令；从该SHA的construction启动起，到其全部validation terminal为止，该fixed SHA算一辆**在途班车**。不同fixed commit/SHA同时在途的班车总数必须 `<4`，即最多3辆。不同SHA的source-build/gen1等candidate construction可以并发；同一SHA只禁止重复construction或多个命令写同一artifact。Candidate产生后，同一SHA内部同样不限制独立matrix validation数量或进程数，各任务只需使用isolated output。班车机制本身不设置全局或per-SHA进程数量门；aggregate commit `<=12 GiB`及对应ASan/resource门保持，某道sealed命令若由其active spec另有进程约束，只约束该命令，不得外推为validation bus通则。运行中的结果永远归属于其固定candidate；其间产生的新fix只进入下一班车，禁止把不同SHA的成功或失败拼成同一claim。
 
@@ -415,19 +417,20 @@ Steward 仅在以下情况结束当前自主运行：
 
 | Actor | 职责 | 可写 |
 |---|---|---|
-| Discussion session | 用户对话、high-level 路线、用户保留决定、阶段验收与方向监督 | 获得 main lease 后写 design/backlog/workflow/Inbox 与 discussion/steward skill 治理真值；不碰编译器实现 |
+| Discussion session | 用户对话、high-level 路线、用户保留决定、阶段验收与方向监督 | `docs/**`默认直接提交并事后一次通知；其他main mutation需lease；不碰编译器实现 |
 | Steward session | implement、maintain、Argument、调度、review、merge、验证、routine bookkeeping 与仓库健康 | main 实现/测试及既定路线内的日常治理；high-level 变化先唤醒 Discussion |
 | implementer | scoped implement / maintain / refactor 与返修 | 指定 worktree 范围 |
 | reviewer | 独立审查 diff、spec、风险和测试证据 | 只读 |
 | finder | 固定 snapshot 搜索候选 finding | 只读 |
 | skeptic | 复现/反驳 finding，或攻击 Argument 候选 | 只读 |
 
-Discussion 与 Steward 通过 main mutation lease 串行写治理真值；implementer/reviewer/finder/skeptic 不修改看板、Inbox、CLAUDE 或 design。
+Discussion纯`docs/**`批次按用户例外事后通知，其他main mutation仍与Steward通过lease串行；implementer/reviewer/finder/skeptic不修改看板、Inbox、CLAUDE或design。
 
 ## 11. Provider adapter 与验证
 
 - 本文件是平台无关治理真值；
 - `.agents/skills/` 是 Codex adapter，`.claude/skills/` 是 Claude Code adapter；
+- 两端`repository-execution-decisions` skill只记录当前Ring-lang仓库的用户执行bedrock，Steward与Discussion处理machine/review或docs mutation前必须应用；不得外推到其他仓库；
 - provider-specific 工具调用不得复制到本文件；
 - adapter 只保留 provider 入口与不可绕过的有序门禁，不复制本文件的完整规则；
 - adapter 必须遵守持续推进、决策批处理、低噪声摘要和用户保留边界。
