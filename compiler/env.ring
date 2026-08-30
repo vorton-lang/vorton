@@ -3146,7 +3146,7 @@ pub fn type_env_callable_effect_facts(
 
 fn collect_value_type_vars_in_atom(
     atom: Effect, mut result: Set<Int>
-) {
+) with {mut<Set<Int>>} {
     match atom {
         Effect::FailEffect { error_type } =>
             collect_value_type_vars(error_type, result),
@@ -3161,7 +3161,9 @@ fn collect_value_type_vars_in_atom(
     }
 }
 
-fn collect_value_type_vars(ty: Type, mut result: Set<Int>) {
+fn collect_value_type_vars(
+    ty: Type, mut result: Set<Int>
+) with {mut<Set<Int>>} {
     match ty {
         Type::TypeVar { id, .. } => { result.insert(id) },
         Type::FnType { params, return_type, effects } => {
@@ -3200,7 +3202,7 @@ fn collect_value_type_vars(ty: Type, mut result: Set<Int>) {
 // HIR Call.type_args transports only ordinary type generics.  Row-tail
 // formals are carried by CoreEffectInstantiation; payload variables inside
 // fail<T>/mut<T>/custom<T> remain ordinary type generics.
-pub fn scheme_value_type_vars(value: TypeScheme) -> List<Int> {
+pub fn scheme_value_type_vars(value: TypeScheme) -> List<Int> with {} {
     let used: Set<Int> = set_new()
     collect_value_type_vars(value.ty, used)
     let mut result: List<Int> = []
