@@ -3456,7 +3456,7 @@ pub fn core_body_effect_sets(value: CoreBody) -> List<CoreEffectSet> {
 
 fn append_effect_ctx_token(
     mut values: List<CoreEffectCtxTokenRef>, token: CoreEffectCtxTokenRef
-) {
+) with {mut<List<CoreEffectCtxTokenRef>>} {
     if !values.any(fn(existing) {
             core_effect_ctx_token_same(existing, token)
         }) {
@@ -3465,7 +3465,7 @@ fn append_effect_ctx_token(
 }
 fn collect_expr_effect_ctx_tokens(
     value: CoreExpr, mut result: List<CoreEffectCtxTokenRef>
-) {
+) with {mut<List<CoreEffectCtxTokenRef>>} {
     match value.value {
         CoreExprValue::PrimitiveExprValue { operands, .. } => {
             for operand in operands { collect_expr_effect_ctx_tokens(
@@ -3548,7 +3548,7 @@ fn collect_expr_effect_ctx_tokens(
 }
 fn collect_arm_effect_ctx_tokens(
     value: CoreMatchArm, mut result: List<CoreEffectCtxTokenRef>
-) {
+) with {mut<List<CoreEffectCtxTokenRef>>} {
     match value.guard {
         some(guard) => collect_expr_effect_ctx_tokens(guard, result),
         none => {}
@@ -3557,7 +3557,7 @@ fn collect_arm_effect_ctx_tokens(
 }
 fn collect_stmt_effect_ctx_tokens(
     value: CoreStmt, mut result: List<CoreEffectCtxTokenRef>
-) {
+) with {mut<List<CoreEffectCtxTokenRef>>} {
     match value.value {
         CoreStmtValue::Bind { value: expr, .. } =>
             collect_expr_effect_ctx_tokens(expr, result),
@@ -3586,7 +3586,7 @@ fn collect_stmt_effect_ctx_tokens(
 }
 fn collect_block_effect_ctx_tokens(
     value: CoreBlock, mut result: List<CoreEffectCtxTokenRef>
-) {
+) with {mut<List<CoreEffectCtxTokenRef>>} {
     for statement in value.statements {
         collect_stmt_effect_ctx_tokens(statement, result)
     }
@@ -3597,7 +3597,7 @@ fn collect_block_effect_ctx_tokens(
 }
 pub fn core_body_effect_ctx_tokens(
     value: CoreBody
-) -> List<CoreEffectCtxTokenRef> {
+) -> List<CoreEffectCtxTokenRef> with {} {
     let result: List<CoreEffectCtxTokenRef> = []
     collect_block_effect_ctx_tokens(value.body, result)
     result
