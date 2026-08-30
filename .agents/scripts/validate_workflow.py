@@ -30,7 +30,12 @@ AUDIT_HEADING = re.compile(
 )
 
 SKILL_PROVIDERS = (".agents", ".claude")
-SKILL_NAMES = ("steward", "discussion", "full-audit")
+SKILL_NAMES = (
+    "steward",
+    "discussion",
+    "full-audit",
+    "repository-execution-decisions",
+)
 CODEX_ROLES = ("implementer", "reviewer", "finder", "skeptic")
 
 LEGACY_ADAPTER_PATTERNS = {
@@ -576,8 +581,12 @@ PAIRED_WORKFLOW_CONTRACT = TextContract(
         ("唤醒 Discussion",),
         ("休眠而非轮询",),
         ("main mutation lease",),
-        ("只有一个 session 可写",),
-        ("不得变更 main",),
+        ("只有一个 session 可写", "只有一个session"),
+        ("不得变更 main", "non-doc mutation"),
+        ("`docs/**`",),
+        ("无需事前query",),
+        ("最终batch",),
+        ("通知一次",),
     ),
     (
         "Discussion 与 Steward 可同时写 main",
@@ -603,6 +612,10 @@ DISCUSSION_PAIR_CONTRACT = TextContract(
         ("durable fallback",),
         ("main mutation lease",),
         ("commit SHA",),
+        ("`docs/**`",),
+        ("不事前query",),
+        ("最终SHA/scope",),
+        ("一个batch",),
         ("唤醒",),
         ("休眠/idle",),
         ("不轮询",),
@@ -615,6 +628,8 @@ STEWARD_PAIR_CONTRACT = TextContract(
         ("Paired Discussion session",),
         ("counterpart",),
         ("main mutation lease",),
+        ("`docs/**`",),
+        ("最终batch SHA/scope", "事后一次通知"),
         ("compact packet",),
         ("唤醒",),
         ("休眠/idle",),
@@ -623,11 +638,42 @@ STEWARD_PAIR_CONTRACT = TextContract(
     ),
 )
 
+REPOSITORY_EXECUTION_DECISIONS_CONTRACT = TextContract(
+    "repository-local execution decisions",
+    (
+        ("当前Ring-lang仓库",),
+        ("不得外推到其他仓库",),
+        ("fixed candidate",),
+        ("machine execution",),
+        ("review必须同时启动",),
+        ("不得让机器等待review",),
+        ("quarantine",),
+        ("Review未CLEAR",),
+        ("Review BLOCK",),
+        ("丢弃",),
+        ("`docs/**`",),
+        ("无需事前query",),
+        ("无需事前query Steward或申请main mutation lease",),
+        ("完成验证与commit后通知Steward",),
+        ("连续到来",),
+        ("最终batch",),
+        ("一次合并通知",),
+        ("真实重叠dirty path",),
+        ("scope扩到`docs/**`之外",),
+        ("不授权push",),
+    ),
+    (
+        "必须让机器等待review结束后才运行",
+        "每个docs请求必须逐次query",
+        "适用于所有仓库",
+    ),
+)
+
 STEWARD_ADAPTER_CONTRACT = TextContract(
     "concise Steward provider adapter",
     (
         ("docs/workflow.md",),
-        ("唯一完整契约",),
+        ("唯一完整契约", "一般契约"),
         ("Root EvidenceKey",),
         ("source SHA",),
         ("artifact/patch SHA",),
@@ -852,7 +898,7 @@ ROLE_CONTRACTS = {
             ("scoped",),
             ("blocker",),
             ("root",),
-            ("先完整读取 AGENTS.md、CLAUDE.md 和 docs/workflow.md。",),
+            ("先完整读取 AGENTS.md 和 docs/workflow.md。",),
             ("不直接等待或请求用户", "不要直接等待或请求用户"),
             ("同一连续任务复用当前身份",),
         ),
@@ -866,7 +912,7 @@ ROLE_CONTRACTS = {
             ("Argument",),
             ("反证",),
             ("root",),
-            ("先完整读取 AGENTS.md、CLAUDE.md 和 docs/workflow.md。",),
+            ("先完整读取 AGENTS.md 和 docs/workflow.md。",),
             ("不直接等待或请求用户", "不要直接等待或请求用户"),
         ),
     ),
@@ -878,7 +924,7 @@ ROLE_CONTRACTS = {
             ("bounded Audit",),
             ("Argument",),
             ("root",),
-            ("先完整读取 AGENTS.md、CLAUDE.md 和 docs/workflow.md。",),
+            ("先完整读取 AGENTS.md 和 docs/workflow.md。",),
             ("不直接等待或请求用户", "不要直接等待或请求用户"),
         ),
     ),
@@ -890,7 +936,7 @@ ROLE_CONTRACTS = {
             ("refute",),
             ("verdict",),
             ("root",),
-            ("先完整读取 AGENTS.md、CLAUDE.md 和 docs/workflow.md。",),
+            ("先完整读取 AGENTS.md 和 docs/workflow.md。",),
             ("不直接等待或请求用户", "不要直接等待或请求用户"),
         ),
     ),
@@ -1185,6 +1231,11 @@ class WorkflowValidator:
                     ):
                         for error in check_text_contract(text, contract):
                             self.errors.append(f"{relative}: {error}")
+                elif skill_name == "repository-execution-decisions":
+                    for error in check_text_contract(
+                        text, REPOSITORY_EXECUTION_DECISIONS_CONTRACT
+                    ):
+                        self.errors.append(f"{relative}: {error}")
                 else:
                     for contract in (
                         AUDIT_CONTRACT,
@@ -1193,6 +1244,41 @@ class WorkflowValidator:
                     ):
                         for error in check_text_contract(text, contract):
                             self.errors.append(f"{relative}: {error}")
+
+    def validate_retired_instruction_entry(self) -> None:
+        retired = "CLAUDE" + ".md"
+        retired_path = self.root / retired
+        if retired_path.exists():
+            self.errors.append(f"retired instruction entry remains: {retired}")
+
+        candidates: list[Path] = [self.root / "AGENTS.md"]
+        for relative_root in (
+            "docs",
+            ".agents/skills",
+            ".claude/skills",
+            ".codex/agents",
+        ):
+            root = self.root / relative_root
+            if not root.exists():
+                continue
+            candidates.extend(
+                path
+                for path in root.rglob("*")
+                if path.is_file() and path.suffix in {".md", ".toml"}
+            )
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError as error:
+                self.errors.append(f"{path.relative_to(self.root)}: {error}")
+                continue
+            if retired in text:
+                self.errors.append(
+                    f"{path.relative_to(self.root)}: "
+                    f"reference to retired instruction entry {retired}"
+                )
 
     def validate_audit_ledger_helper(self) -> None:
         relative = ".agents/scripts/audit_ledger.py"
@@ -1301,6 +1387,7 @@ class WorkflowValidator:
         self.validate_workflow_contract()
         self.validate_b186_backlog_contract()
         self.validate_skills()
+        self.validate_retired_instruction_entry()
         self.validate_audit_ledger_helper()
         self.validate_repository_health_helper()
         self.validate_codex_config()
@@ -1521,19 +1608,31 @@ GOOD_PAIRED_WORKFLOW_FIXTURE = """
 ## 0. Discussion–Steward 双 session 控制面
 唯一配对一个 Discussion session 与一个 Steward session；counterpart 缺失时使用
 durable fallback。Steward 只在高层变化时唤醒 Discussion，Discussion 采用休眠而非轮询。
-main mutation lease 保证任何时刻只有一个 session 可写；lease 期间另一方不得变更 main。
+non-doc mutation由main mutation lease保证任何时刻只有一个session可写；lease期间另一方不得变更 main。
+Discussion纯`docs/**`无需事前query，连续请求合并成最终batch并通知一次。
 """
 
 GOOD_DISCUSSION_PAIR_FIXTURE = """
 Discussion 使用 paired Steward session，先发现并复用 counterpart；工具不可用走 durable fallback。
-写 main 前取得 main mutation lease，提交后发送 commit SHA。收到消息可被唤醒；
+非docs写main前取得main mutation lease并保留commit SHA；`docs/**`不事前query，合成一个batch后发送最终SHA/scope。
+收到消息可被唤醒；
 无事时休眠/idle，不轮询实现状态。
 """
 
 GOOD_STEWARD_PAIR_FIXTURE = """
 ## Paired Discussion session
-Steward 复用 counterpart，通过 main mutation lease 串行写 main。
+Steward 复用 counterpart，非docs通过 main mutation lease 串行写 main；`docs/**`接受最终batch SHA/scope事后通知。
 Discussion 休眠/idle 时不轮询；高层变化用 compact packet 唤醒，并核对 verdict SHA。
+"""
+
+GOOD_REPOSITORY_EXECUTION_DECISIONS_FIXTURE = """
+本skill只适用于当前Ring-lang仓库，不得外推到其他仓库。
+一个fixed candidate的machine execution与review必须同时启动；不得让机器等待review。
+Review未CLEAR时结果quarantine，Review BLOCK就丢弃，且不放宽EvidenceKey和no-retry。
+Discussion严格修改`docs/**`时，无需事前query Steward或申请main mutation lease；
+本地核对HEAD/working tree/exact diff，完成验证与commit后通知Steward。
+连续到来的docs请求合并为最终batch，只发送一次合并通知。
+真实重叠dirty path或scope扩到`docs/**`之外才reconcile；不授权push。
 """
 
 
@@ -1638,6 +1737,15 @@ def run_self_tests(*, include_audit_ledger_process: bool) -> list[str]:
             "self-test good root EvidenceKey fixture rejected: "
             f"{root_evidence_errors!r}"
         )
+    execution_decision_errors = check_text_contract(
+        GOOD_REPOSITORY_EXECUTION_DECISIONS_FIXTURE,
+        REPOSITORY_EXECUTION_DECISIONS_CONTRACT,
+    )
+    if execution_decision_errors:
+        failures.append(
+            "self-test good repository execution decisions fixture rejected: "
+            f"{execution_decision_errors!r}"
+        )
     evidence_errors = check_text_contract(
         GOOD_AUDIT_EVIDENCE_FIXTURE, AUDIT_EVIDENCE_CONTRACT
     )
@@ -1741,6 +1849,28 @@ def run_self_tests(*, include_audit_ledger_process: bool) -> list[str]:
                 ROOT_EVIDENCE_GATE_CONTRACT,
             ),
             "root EvidenceKey and causal reconciliation gate",
+        )
+    )
+    failures.extend(
+        deterministic_failure(
+            "serialized candidate review fixture",
+            lambda: check_text_contract(
+                GOOD_REPOSITORY_EXECUTION_DECISIONS_FIXTURE
+                + "\n必须让机器等待review结束后才运行。",
+                REPOSITORY_EXECUTION_DECISIONS_CONTRACT,
+            ),
+            "repository-local execution decisions",
+        )
+    )
+    failures.extend(
+        deterministic_failure(
+            "per-request docs query fixture",
+            lambda: check_text_contract(
+                GOOD_REPOSITORY_EXECUTION_DECISIONS_FIXTURE
+                + "\n每个docs请求必须逐次query。",
+                REPOSITORY_EXECUTION_DECISIONS_CONTRACT,
+            ),
+            "repository-local execution decisions",
         )
     )
 
@@ -2007,7 +2137,7 @@ def run_self_tests(*, include_audit_ledger_process: bool) -> list[str]:
     )
 
     bad_paired_lease = GOOD_PAIRED_WORKFLOW_FIXTURE.replace(
-        "main mutation lease 保证任何时刻只有一个 session 可写；lease 期间另一方不得变更 main。",
+        "non-doc mutation由main mutation lease保证任何时刻只有一个session可写；lease期间另一方不得变更 main。",
         "Discussion 与 Steward 可同时写 main，并持续轮询彼此。",
     )
     failures.extend(
@@ -2115,7 +2245,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(
             "workflow validator self-test passed: "
-            "30 legacy/broken fixtures rejected deterministically; "
+            "32 legacy/broken fixtures rejected deterministically; "
             "2 durable-ledger regressions passed"
         )
         return 0
@@ -2145,7 +2275,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{backlog_count} active backlog items, "
         f"{audit_count} active audit items, "
         "2 steward adapters, 4 Codex roles, "
-        "30 fast negative fixtures; "
+        "32 fast negative fixtures; "
         "run --self-test for 2 durable-ledger process regressions"
     )
     return 0

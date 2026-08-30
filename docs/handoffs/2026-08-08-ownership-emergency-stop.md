@@ -147,7 +147,7 @@
 
 ## 下一 session 的最安全恢复顺序
 
-1. 完整读取 `CLAUDE.md`、`docs/workflow.md`、`.agents/skills/steward/SKILL.md`、本 handoff，
+1. 完整读取 `AGENTS.md`、`docs/workflow.md`、`.agents/skills/steward/SKILL.md`、本 handoff，
    再核对 main/ownership HEAD、上述源码哈希与进程状态。
 2. 不清理 dirty snapshot，不复用空 gen2 或被覆盖的 gen1 `main.c`。先用 diagnostic executable
    对当前 `compiler/main.ring` 重新取得完整 strict inventory；保留原始 stdout/stderr、命令、

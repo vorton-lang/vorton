@@ -1003,7 +1003,7 @@ async 需要挂起，现行 handler 只有 tail-resumptive + abort。中性评�
 
 > **2026-08-20 用户方向**：当前 ownership 主线完成后，安排一轮 bounded 文档维护，清理再次累积的过期、重复和相互矛盾内容；不打断 I′ → S′ → A′，也不把文档清理包装成新的语言设计。
 
-**范围 / 真值对账**：`CLAUDE.md`、root/子目录 README、`docs/*.md`、`docs/lang-spec/`、活动 backlog/audit/Inbox/handoff，以及 `.agents/.claude` provider adapter。以最新 main 的 C11 compiler/runtime/std、可执行测试、tracked bootstrap 和现行 workflow 为事实源，逐项核对：退役 LLVM/JS/旧 anchor 仍被写成现状、完成 item/历史过程残留在活动 spec、失效路径/命令/行号/依赖、设计/规范/实现互相矛盾、重复产品主张、过长 handoff 与断链引用。
+**范围 / 真值对账**：`AGENTS.md`、root/子目录 README、`docs/*.md`、`docs/lang-spec/`、活动 backlog/audit/Inbox/handoff，以及 `.agents/.claude` provider adapter。以最新 main 的 C11 compiler/runtime/std、可执行测试、tracked bootstrap 和现行 workflow 为事实源，逐项核对：退役 LLVM/JS/旧 anchor 仍被写成现状、完成 item/历史过程残留在活动 spec、失效路径/命令/行号/依赖、设计/规范/实现互相矛盾、重复产品主张、过长 handoff 与断链引用。
 
 **约束**：
 

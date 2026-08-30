@@ -2,7 +2,7 @@
 
 > 事实截止：2026-08-30。
 >
-> 本文件控制 Ring 可以向谁、在什么证据下、用什么边界表达产品主张。它不是实现 backlog，不改变 [`docs/backlog.md`](backlog.md) 的优先级；实现状态仍以 `CLAUDE.md`、活动看板、audit 与可重放测试为准。
+> 本文件控制 Ring 可以向谁、在什么证据下、用什么边界表达产品主张。它不是实现 backlog，不改变 [`docs/backlog.md`](backlog.md) 的优先级；实现状态仍以 `AGENTS.md`、活动看板、audit 与可重放测试为准。
 
 ## 1. 目标
 

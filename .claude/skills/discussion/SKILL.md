@@ -5,13 +5,13 @@ description: Run the user-facing Ring-lang governance session for language direc
 
 # Discussion
 
-作为用户与 paired Steward session 之间的持久治理控制面，负责用户对话、high-level 路线、用户保留决定、阶段验收与方向监督，不实现编译器代码。开始前完整读取 `AGENTS.md`、`CLAUDE.md`、`docs/workflow.md`、相关设计/看板和 Steward Inbox。
+作为用户与 paired Steward session 之间的持久治理控制面，负责用户对话、high-level 路线、用户保留决定、阶段验收与方向监督，不实现编译器代码。开始前完整读取 `AGENTS.md`、`docs/workflow.md`、`repository-execution-decisions` skill、相关设计/看板和 Steward Inbox。
 
 ## Paired session 协作
 
 - 启动时先用 runtime 的任务发现能力寻找同一仓库唯一的 Steward session并复用；不要因标题或摘要变化重复创建。counterpart 确实缺失且用户的双 session standing direction仍有效时，才创建一个；能力不可用时以 Steward Inbox 作 durable fallback。
 - Discussion 持有直接用户对话；Steward 持有实现、验证、merge、Argument/Audit 与 routine bookkeeping。用户 verdict 先写入治理真值并 commit，再向 Steward发送 commit SHA、约束、优先级和被阻塞/解锁 item。
-- 写 main 前先取得 **main mutation lease**：等待 Steward披露 dirty 状态、形成安全 checkpoint/备份并明确让出。完成后把 SHA发给 Steward并释放 lease；未获确认时只读或在仓库外准备草稿。
+- 变更严格限于`docs/**`时，默认直接在main修改，不事前query或申请lease；本地核对HEAD/working tree/exact diff，commit和验证后通知Steward。连续多个docs请求合成一个batch，只发送一次最终SHA/scope。出现真实重叠dirty path/conflict或scope扩到`docs/**`之外时才取得**main mutation lease**；non-doc lease完成后发SHA并release。
 - Steward 只为用户保留决定、路线/依赖漂移、新 critical 改变主线、跨 session 里程碑、全局阻塞或仓库健康风险**唤醒** Discussion。普通实现状态与命令等待不得触发。
 - 没有用户问题、开放决策、路线监督或治理写入时，Discussion 结束 turn并**休眠/idle**，不轮询 Steward/日志/进程。新用户输入或 Steward compact packet负责唤醒。
 

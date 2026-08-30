@@ -1,7 +1,7 @@
 # Repository Steward 重启恢复点（2026-08-07 09:47 +09:00）
 
 > 本文件是用户重启 Codex 桌面软件前的耐久恢复点。恢复工作时先完整读取
-> `CLAUDE.md`、`docs/workflow.md` 与 `.agents/skills/steward/SKILL.md`，再按本文核验
+> `AGENTS.md`、`docs/workflow.md` 与 `.agents/skills/steward/SKILL.md`，再按本文核验
 > Git/进程/证据状态；不要把本文记录的运行中或失效样本当作通过证据。
 
 ## 用户当前优先级与授权
