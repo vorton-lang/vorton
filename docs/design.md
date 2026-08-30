@@ -1248,15 +1248,17 @@ let zs = xs.clone()    // 递归深拷贝，完全独立
 
 **无 `&T`/`&mut T` 类型**：非 Drop 赋值用 rc+1 代替零成本引用。rc+1 不是深拷贝（仅一个计数器加一），且可被后续优化（reuse / RC 消除 / 逃逸分析）消除至零成本。不引入二等类型、逃逸规则等复杂度。
 
-#### 7.2.1 Struct / enum update spread
+#### 7.2.1 Struct update spread
 
-`Type { ..base, field: value }` 采用 **move spread**。它是消费 `base` 构造 fresh result 的语法，不是隐式 `.clone()`，也不按字段是否 shareable 选择不同的公开语义。
+对 struct，`Type { ..base, field: value }` 采用 **move spread**。它是消费 `base` 构造 fresh result 的语法，不是隐式 `.clone()`，也不按字段是否 shareable 选择不同的公开语义。
 
 求值顺序固定为：`base` 只求值一次但暂不消费；随后所有显式 override RHS 按源码顺序完整求值，此时可继续读取或借用 `base`；只有全部 RHS 成功后，未覆盖字段才以 Own transfer 进入 fresh result，被覆盖字段在 `base` 中的旧值执行 Drop，override temporary 再转入对应结果字段，最后 `base` 整体失活。若任一 RHS 产生 `fail`，不得留下部分 move 的 `base`。override RHS 若试图在提交前 ownership-move `base` 的子字段，则按既有 partial-move 禁令拒绝；要保留该字段就省略 override，要保留整个 base 则显式写 `Type { ..base.clone(), ... }`。
 
 对 struct update，Planner 依据字段的 Logical OwnershipShape / Physical RcShape 将 Own transfer 兑现为 scalar copy、physical RC dup 或 exact Take，并负责旧字段恰好一次 Drop 与 source clear；这不改变字段的静态类型 `T`。Flow / Planner 另行维护每条字段 path 的 storage occupancy（`Live` / `Moved`）：exact Take 后 source slot 变为物理 empty / NULL 并标记 `Moved`，而不是把字段类型改写成 `Option<T>`、`MaybeUninit<T>` 或其他公开类型。全 shareable 的字段通过 physical RC dup 进入结果，base 字段保持 `Live`，随后仍走普通 Drop。
 
-Ring 0.1 必须创建 fresh result shell 并逐字段填充：禁止先将 whole base MovePlace 到结果再原地覆盖字段，也禁止因 base 物理唯一而复用其 storage。提交完成后，base 仍执行唯一的普通 aggregate Drop：它只 Drop `Live` 字段，对 physical empty / `Moved` 字段 no-op，最后正常 release shell，因而不会 double-drop 已转移字段。禁止新增 `ReleaseMovedAggregate`、shell bypass、额外 whole-container Drop 或用 backend 猜测 occupancy。直接定义用户 `Drop` 的 aggregate 若该 spread 需要任一字段 exact Take，则稳定拒绝；编译器不得把 partial value 传给要求完整 `Self` 的用户 destructor。本段 physical contract 只约束 struct update，不裁决 named enum/variant update 的支持边界。
+Ring 0.1 必须创建 fresh result shell 并逐字段填充：禁止先将 whole base MovePlace 到结果再原地覆盖字段，也禁止因 base 物理唯一而复用其 storage。提交完成后，base 仍执行唯一的普通 aggregate Drop：它只 Drop `Live` 字段，对 physical empty / `Moved` 字段 no-op，最后正常 release shell，因而不会 double-drop 已转移字段。禁止新增 `ReleaseMovedAggregate`、shell bypass、额外 whole-container Drop 或用 backend 猜测 occupancy。直接定义用户 `Drop` 的 aggregate 若该 spread 需要任一字段 exact Take，则稳定拒绝；编译器不得把 partial value 传给要求完整 `Self` 的用户 destructor。
+
+Ring 0.1 不支持 named enum / variant update spread。`Variant { ..base, field: value }` 稳定产生 source diagnostic；在已经匹配出 exact variant 的 arm 中，显式重建全部字段，例如 `Circle { radius, color: next }`。这不影响 named-field variant construction、generic enum、pattern matching、字段 move 或普通 struct spread。编译器不为该纯缩写引入 runtime tag check、variant-refinement carrier、fallback 或第二条 MoveUpdate 路径。
 
 ### 7.3 参数传递
 
