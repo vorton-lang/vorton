@@ -2957,6 +2957,20 @@ fn constrain_declared_fn_effects(
                 })
         }
     }
+    match inferred_effects.tail {
+        some(inferred_tail) => {
+            s = unify_at(
+                ctx.sink, ctx.env,
+                Type::EffectRowType {
+                    effects: [], tail: some(inferred_tail)
+                },
+                Type::EffectRowType {
+                    effects: [], tail: declared_row.tail
+                },
+                s, span)
+        },
+        none => {}
+    }
     (declared_row, s)
 }
 
