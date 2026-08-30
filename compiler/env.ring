@@ -3817,7 +3817,9 @@ pub fn specialize_trait_method_scheme(
 // Uses uf_find for O(alpha(n)) path-compressed type variable resolution.
 // ============================================================
 
-pub fn apply_subst(subst: UnionFind, t: Type) -> Type {
+pub fn apply_subst(
+    subst: UnionFind, t: Type
+) -> Type with {mut<UnionFind>} {
     match t {
         Type::IntType => Type::IntType,
         Type::FloatType => Type::FloatType,
@@ -3902,7 +3904,9 @@ pub fn apply_subst(subst: UnionFind, t: Type) -> Type {
     }
 }
 
-fn apply_subst_effect(subst: UnionFind, e: Effect) -> Effect {
+fn apply_subst_effect(
+    subst: UnionFind, e: Effect
+) -> Effect with {mut<UnionFind>} {
     match e {
         Effect::FailEffect { error_type } =>
             Effect::FailEffect { error_type: apply_subst(subst, error_type) },
@@ -3916,7 +3920,9 @@ fn apply_subst_effect(subst: UnionFind, e: Effect) -> Effect {
     }
 }
 
-pub fn apply_subst_row(subst: UnionFind, row: EffectRow) -> EffectRow {
+pub fn apply_subst_row(
+    subst: UnionFind, row: EffectRow
+) -> EffectRow with {mut<UnionFind>} {
     let effects = row.effects.map(fn(e) { apply_subst_effect(subst, e) })
     match row.tail {
         some(t_id) => {
