@@ -418,7 +418,6 @@ use core_derive_lower::{
     make_core_derived_variant_plan,
     make_core_derived_struct_shape, make_core_derived_enum_shape,
     make_core_derived_eq_plan, elaborate_core_derived_eq_body,
-    elaborate_core_derived_ne_body,
     make_core_derived_hash_plan, elaborate_core_derived_hash_body,
     make_core_derived_struct_ord_plan,
     make_core_derived_enum_ord_plan,
@@ -5464,7 +5463,7 @@ fn build_derived_field_plan(
             let operation = derived_call_plan_from_method(
                 facts, owner, method_ref, evidence_values, callable_ctx,
                 left.origin, binders)
-            let result_slot = if semantic_tag == 4 {
+            let result_slot = if semantic_tag == 3 {
                 let result_type = match method_call_ref_signature(method_ref) {
                     Type::FnType { return_type, .. } => type_fact_for(
                         facts.type_sources, return_type, facts.module_key),
@@ -5511,7 +5510,7 @@ fn build_derived_field_plan(
             make_core_derived_tuple_field_plan(
                 field, field_type, core_derived_value(left),
                 right.map(fn(value) { core_derived_value(value) }),
-                if semantic_tag == 3 {
+                if semantic_tag == 2 {
                     some(make_core_tuple_constructor(fields.len()))
                 } else { none },
                 fields, types, children,
@@ -5660,11 +5659,11 @@ fn derived_enum_plans(
             variant.variant_ref, left_slots, right_slots, fields,
             variant.discriminator, executable_origin(method.executable_ref))
         common.push(common_variant)
-        if semantic_tag == 4 {
+        if semantic_tag == 3 {
             ord.push(make_core_derived_ord_variant_plan(
                 common_variant, fields))
         }
-        if semantic_tag == 3 {
+        if semantic_tag == 2 {
             clone.push(make_core_derived_clone_variant_plan(
                 variant.variant_ref,
                 left_slots, fields, executable_origin(method.executable_ref)))
@@ -5687,7 +5686,7 @@ fn elaborate_derived_non_text(
     }
     let target_type = type_fact_for(
         facts.type_sources, derived.target_type, facts.module_key)
-    let other = if semantic_tag == 0 || semantic_tag == 1 || semantic_tag == 4 {
+    let other = if semantic_tag == 0 || semantic_tag == 3 {
         match slots.get(1) {
             some(value) => some(value),
             none => panic("Core assembly: binary derived method lacks other")
@@ -5729,7 +5728,7 @@ fn elaborate_derived_non_text(
         method.executable_ref, origin, binders, slots, result_type,
         slots.get(0).unwrap(), other, origin,
         core_effects(facts.type_sources, result_effects, facts.module_key))
-    if semantic_tag == 0 || semantic_tag == 1 {
+    if semantic_tag == 0 {
         let shape = match derived.type_kind {
             TypeKind::StructKind => make_core_derived_struct_shape(
                 derived.target_owner, target_type, struct_fields),
@@ -5739,11 +5738,9 @@ fn elaborate_derived_non_text(
         let plan = make_core_derived_eq_plan(
             header, shape,
             type_fact_for(facts.type_sources, Type::BoolType, facts.module_key))
-        return if semantic_tag == 0 {
-            elaborate_core_derived_eq_body(plan)
-        } else { elaborate_core_derived_ne_body(plan) }
+        return elaborate_core_derived_eq_body(plan)
     }
-    if semantic_tag == 2 {
+    if semantic_tag == 1 {
         let mix = match derived.hash_mix {
             some(value) => derived_call_plan_from_exact(
                 facts, method.executable_ref, value.plan,
@@ -5761,7 +5758,7 @@ fn elaborate_derived_non_text(
             type_fact_for(facts.type_sources, Type::IntType, facts.module_key),
             DERIVED_HASH_SEED, mix))
     }
-    if semantic_tag == 3 {
+    if semantic_tag == 2 {
         return elaborate_core_derived_clone_body(match derived.type_kind {
             TypeKind::StructKind => {
                 let mut nominal_fields: List<NominalFieldRef> = []
@@ -5781,7 +5778,7 @@ fn elaborate_derived_non_text(
                 header, derived.target_owner, target_type, clone_variants)
         })
     }
-    if semantic_tag == 4 {
+    if semantic_tag == 3 {
         let int_type = type_fact_for(
             facts.type_sources, Type::IntType, facts.module_key)
         let bool_type = type_fact_for(
@@ -5853,9 +5850,9 @@ fn text_render_plan(
                element_types.len() != element_actions.len() {
                 panic("Core assembly: text tuple action census differs")
             }
-            let open = if semantic_tag == 6 { "[" } else { "(" }
-            let close = if semantic_tag == 6 { "]" } else { ")" }
-            let separator = if semantic_tag == 6 { "," } else { ", " }
+            let open = if semantic_tag == 5 { "[" } else { "(" }
+            let close = if semantic_tag == 5 { "]" } else { ")" }
+            let separator = if semantic_tag == 5 { "," } else { ", " }
             let mut fields: List<CoreFieldRef> = []
             let mut types: List<CoreTypeRef> = []
             let mut pieces = [make_core_derived_literal_text_piece(
@@ -6109,7 +6106,7 @@ fn elaborate_derived_text(
                 builder_type, builder_call, finish_call, built)
         }
     }
-    if derived_semantic_kind_tag(method.semantic_kind) == 5 {
+    if derived_semantic_kind_tag(method.semantic_kind) == 4 {
         elaborate_core_derived_debug_body(make_core_derived_debug_plan(plan))
     } else {
         elaborate_core_derived_json_body(make_core_derived_json_plan(plan))
@@ -6131,7 +6128,7 @@ fn append_derived_impl(
     let mut methods: List<ImplMethodRef> = []
     for method in derived.methods {
         let tag = derived_semantic_kind_tag(method.semantic_kind)
-        let body = if tag == 5 || tag == 6 {
+        let body = if tag == 4 || tag == 5 {
             elaborate_derived_text(facts, derived, method)
         } else { elaborate_derived_non_text(facts, derived, method) }
         let (parameter_types, result_type, effects) = match method.signature {

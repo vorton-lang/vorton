@@ -77,10 +77,8 @@ use ir_identity::{SymbolRef, TraitMethodRef,
     BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE, BUILTIN_METHOD_OPTION_TO_FAIL,
     BUILTIN_METHOD_CELL_GET, BUILTIN_METHOD_CELL_SET,
     BUILTIN_METHOD_CELL_UPDATE,
-    BUILTIN_METHOD_INT_EQ, BUILTIN_METHOD_INT_NE,
-    BUILTIN_METHOD_FLOAT_EQ, BUILTIN_METHOD_FLOAT_NE,
-    BUILTIN_METHOD_STR_EQ, BUILTIN_METHOD_STR_NE,
-    BUILTIN_METHOD_BOOL_EQ, BUILTIN_METHOD_BOOL_NE,
+    BUILTIN_METHOD_INT_EQ, BUILTIN_METHOD_FLOAT_EQ,
+    BUILTIN_METHOD_STR_EQ, BUILTIN_METHOD_BOOL_EQ,
     BUILTIN_METHOD_INT_CLONE, BUILTIN_METHOD_FLOAT_CLONE,
     BUILTIN_METHOD_STR_CLONE, BUILTIN_METHOD_BOOL_CLONE,
     BUILTIN_METHOD_INT_CMP, BUILTIN_METHOD_FLOAT_CMP,
@@ -1994,13 +1992,11 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
     let self_var = Type::TypeVar { id: self_var_id, name: none }
 
     let eq_fn = Type::FnType { params: [self_var, self_var], return_type: BOOL, effects: EMPTY_ROW }
-    let ne_fn = Type::FnType { params: [self_var, self_var], return_type: BOOL, effects: EMPTY_ROW }
 
     let owner_ref = builtin_trait_symbol("Eq")
     install_builtin_trait_contract(
         env, "Eq", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "eq", method_ref: builtin_trait_method(owner_ref, 0, 0, "eq"), ty: eq_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false, false], method_type_params: [] },
-            TraitMethodDef { name: "ne", method_ref: builtin_trait_method(owner_ref, 1, 1, "ne"), ty: ne_fn, effect_schema: empty_typed_effect_header_schema(), has_default: true, param_mutabilities: [false, false], method_type_params: [] }
+            TraitMethodDef { name: "eq", method_ref: builtin_trait_method(owner_ref, 0, 0, "eq"), ty: eq_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false, false], method_type_params: [] }
         ], [], [])
 
     // Register Eq impls with the exact intrinsic contract at the producer.
@@ -2008,17 +2004,9 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
         builtin_intrinsic_method("eq", BUILTIN_METHOD_INT_EQ,
             builtin_resource_contract(
                 [callable_resource_role_read(), callable_resource_role_read()],
-                callable_resource_role_read(), [])),
-        builtin_intrinsic_method("ne", BUILTIN_METHOD_INT_NE,
-            builtin_resource_contract(
-                [callable_resource_role_read(), callable_resource_role_read()],
                 callable_resource_role_read(), []))])
     add_builtin_impl(env, sink, "Eq", "Float", [], [], [], [
         builtin_intrinsic_method("eq", BUILTIN_METHOD_FLOAT_EQ,
-            builtin_resource_contract(
-                [callable_resource_role_read(), callable_resource_role_read()],
-                callable_resource_role_read(), [])),
-        builtin_intrinsic_method("ne", BUILTIN_METHOD_FLOAT_NE,
             builtin_resource_contract(
                 [callable_resource_role_read(), callable_resource_role_read()],
                 callable_resource_role_read(), []))])
@@ -2026,17 +2014,9 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
         builtin_intrinsic_method("eq", BUILTIN_METHOD_STR_EQ,
             builtin_resource_contract(
                 [callable_resource_role_read(), callable_resource_role_read()],
-                callable_resource_role_read(), [])),
-        builtin_intrinsic_method("ne", BUILTIN_METHOD_STR_NE,
-            builtin_resource_contract(
-                [callable_resource_role_read(), callable_resource_role_read()],
                 callable_resource_role_read(), []))])
     add_builtin_impl(env, sink, "Eq", "Bool", [], [], [], [
         builtin_intrinsic_method("eq", BUILTIN_METHOD_BOOL_EQ,
-            builtin_resource_contract(
-                [callable_resource_role_read(), callable_resource_role_read()],
-                callable_resource_role_read(), [])),
-        builtin_intrinsic_method("ne", BUILTIN_METHOD_BOOL_NE,
             builtin_resource_contract(
                 [callable_resource_role_read(), callable_resource_role_read()],
                 callable_resource_role_read(), []))])
@@ -2050,7 +2030,7 @@ fn register_option_eq(mut env: TypeEnv, sink: CollectingSink) {
     let t_id = env.fresh_var_id()
     add_builtin_impl(env, sink, "Eq", BUILTIN_OPTION, ["T"], [t_id],
         [BuiltinPredicateSpec { subject_param_index: 0, trait_name: "Eq" }],
-        [builtin_impl_method("eq"), builtin_impl_method("ne")])
+        [builtin_impl_method("eq")])
 }
 
 // ============================================================

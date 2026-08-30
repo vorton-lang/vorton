@@ -8811,13 +8811,9 @@ B201_BUILTIN_METHODS = (
     ("BUILTIN_METHOD_CELL_SET", "Cell", "set", "ring_Cell_set", "register_cell", "intrinsics"),
     ("BUILTIN_METHOD_CELL_UPDATE", "Cell", "update", "ring_Cell_update", "register_cell", "intrinsics"),
     ("BUILTIN_METHOD_INT_EQ", "Int", "eq", "ring_cl_eq_int", "register_eq_trait", ""),
-    ("BUILTIN_METHOD_INT_NE", "Int", "ne", "ring_cl_ne_int", "register_eq_trait", ""),
     ("BUILTIN_METHOD_FLOAT_EQ", "Float", "eq", "ring_cl_eq_float", "register_eq_trait", ""),
-    ("BUILTIN_METHOD_FLOAT_NE", "Float", "ne", "ring_cl_ne_float", "register_eq_trait", ""),
     ("BUILTIN_METHOD_STR_EQ", "Str", "eq", "ring_cl_eq_str", "register_eq_trait", ""),
-    ("BUILTIN_METHOD_STR_NE", "Str", "ne", "ring_cl_ne_str", "register_eq_trait", ""),
     ("BUILTIN_METHOD_BOOL_EQ", "Bool", "eq", "ring_cl_eq_bool", "register_eq_trait", ""),
-    ("BUILTIN_METHOD_BOOL_NE", "Bool", "ne", "ring_cl_ne_bool", "register_eq_trait", ""),
     ("BUILTIN_METHOD_INT_CLONE", "Int", "clone", "ring_dup", "register_clone_trait", ""),
     ("BUILTIN_METHOD_FLOAT_CLONE", "Float", "clone", "ring_dup", "register_clone_trait", ""),
     ("BUILTIN_METHOD_STR_CLONE", "Str", "clone", "ring_dup", "register_clone_trait", ""),
@@ -8894,8 +8890,8 @@ def builtin_method_intrinsic_contract_errors(
     codegen = compiler_sources["codegen_c_expr.ring"]
     runtime = compiler_sources["ring_runtime.cpp"]
 
-    if len(B201_BUILTIN_METHODS) != 62:
-        errors.append("B-201 test census is not exact62")
+    if len(B201_BUILTIN_METHODS) != 58:
+        errors.append("B-201 test census is not exact58")
     for tag, method in enumerate(B201_BUILTIN_METHODS):
         constant_name, _, method_name, _, producer, map_name = method
         declaration = f"pub const {constant_name}: Int = {tag}"
@@ -8916,7 +8912,7 @@ def builtin_method_intrinsic_contract_errors(
         if relation not in normalized:
             errors.append(
                 f"B-201 producer {producer} misses {constant_name}/{method_name}")
-    if "pub const BUILTIN_METHOD_SITE_COUNT: Int = 62" not in identity:
+    if "pub const BUILTIN_METHOD_SITE_COUNT: Int = 58" not in identity:
         errors.append("B-201 identity site census drifted")
     ptr_producer = re.sub(r"\s+", "", _b201_function_body(
         builtins, "register_ptr_builtins", errors))
@@ -9213,8 +9209,8 @@ def builtin_method_intrinsic_mutation_errors(
     errors: List[str] = []
     mutations = (
         ("site count", "ir_identity.ring", None,
-         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 62",
-         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 61"),
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 58",
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 57"),
         ("tag duplicate", "ir_identity.ring", None,
          "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 1",
          "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 0"),
@@ -9223,7 +9219,7 @@ def builtin_method_intrinsic_mutation_errors(
         ("producer swap", "builtins.ring", "register_scalar_method_intrinsics",
          "BUILTIN_METHOD_STR_LEN", "BUILTIN_METHOD_STR_CONTAINS"),
         ("scalar producer swap", "builtins.ring", "register_eq_trait",
-         "BUILTIN_METHOD_INT_EQ", "BUILTIN_METHOD_INT_NE"),
+         "BUILTIN_METHOD_INT_EQ", "BUILTIN_METHOD_FLOAT_EQ"),
         ("option producer", "builtins.ring", "register_option",
          "BUILTIN_METHOD_OPTION_UNWRAP, builtin_resource_contract(",
          "BUILTIN_METHOD_OPTION_UNWRAP_OR, builtin_resource_contract("),

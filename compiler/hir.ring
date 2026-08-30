@@ -893,7 +893,6 @@ pub const DERIVED_HASH_SEED: Int = 1469598103934665603
 
 pub enum DerivedSemanticKind {
     DerivedEqPrimary,
-    DerivedEqNe,
     DerivedHash,
     DerivedClone,
     DerivedOrd,
@@ -904,12 +903,11 @@ pub enum DerivedSemanticKind {
 pub fn derived_semantic_kind_tag(value: DerivedSemanticKind) -> Int {
     match value {
         DerivedSemanticKind::DerivedEqPrimary => 0,
-        DerivedSemanticKind::DerivedEqNe => 1,
-        DerivedSemanticKind::DerivedHash => 2,
-        DerivedSemanticKind::DerivedClone => 3,
-        DerivedSemanticKind::DerivedOrd => 4,
-        DerivedSemanticKind::DerivedDebug => 5,
-        DerivedSemanticKind::DerivedJson => 6
+        DerivedSemanticKind::DerivedHash => 1,
+        DerivedSemanticKind::DerivedClone => 2,
+        DerivedSemanticKind::DerivedOrd => 3,
+        DerivedSemanticKind::DerivedDebug => 4,
+        DerivedSemanticKind::DerivedJson => 5
     }
 }
 
@@ -2529,7 +2527,7 @@ pub fn scan_trait_method_order(decls: List<HDecl>, mut trait_method_order: Map<S
     }
     // Built-in traits that never appear as HDecl::Trait.
     if trait_method_order.get("Eq").is_none() {
-        trait_method_order.insert("Eq", ["eq", "ne"])
+        trait_method_order.insert("Eq", ["eq"])
     }
     if trait_method_order.get("Clone").is_none() {
         trait_method_order.insert("Clone", ["clone"])

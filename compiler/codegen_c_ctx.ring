@@ -1939,10 +1939,8 @@ fn rt_sig(name: Str) -> Str? {
     if name == "ring_match_fail" { return some("piip>p") }
     // Trait dicts (step 5)
     if name == "ring_get_builtin_dict" { return some("p>p") }
-    if name == "ring_cl_eq_int" || name == "ring_cl_ne_int" ||
-       name == "ring_cl_eq_float" || name == "ring_cl_ne_float" ||
-       name == "ring_cl_eq_str" || name == "ring_cl_ne_str" ||
-       name == "ring_cl_eq_bool" || name == "ring_cl_ne_bool" ||
+    if name == "ring_cl_eq_int" || name == "ring_cl_eq_float" ||
+       name == "ring_cl_eq_str" || name == "ring_cl_eq_bool" ||
        name == "ring_cl_cmp_int" || name == "ring_cl_cmp_float" ||
        name == "ring_cl_cmp_str" || name == "ring_cl_cmp_bool" {
         return some("pppe>p")

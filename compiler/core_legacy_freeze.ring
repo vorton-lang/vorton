@@ -969,12 +969,12 @@ fn add_derived_field_binders(
 }
 
 fn derived_ord_executable(value: DerivedImpl) -> ExecutableRef? {
-    if derived_semantic_kind_tag(value.semantic_kind) != 4 {
+    if derived_semantic_kind_tag(value.semantic_kind) != 3 {
         return none
     }
     let mut found: ExecutableRef? = none
     for method in value.methods {
-        if derived_semantic_kind_tag(method.semantic_kind) == 4 {
+        if derived_semantic_kind_tag(method.semantic_kind) == 3 {
             if found.is_some() {
                 panic("Core/legacy freeze: derived Ord cmp repeats")
             }

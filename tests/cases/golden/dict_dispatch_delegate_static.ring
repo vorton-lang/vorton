@@ -1,9 +1,6 @@
-// B-121 gap 2: delegate-expanded dict dispatch where dict_param is a static
-// dict name (e.g. __Inner_Eq) rather than a __ring_T_X parameter.  The default
-// method `ne` is not explicitly implemented on Inner, so the delegate stub uses
-// dict dispatch with dict_param = "__Inner_Eq".  Previously the LLVM backend
-// returned null when named_values lookup missed, crashing on the subsequent
-// method slot load.  Fix: fall back to resolve_static_dict_by_name.
+// Delegate-expanded Eq dispatch where dict_param is a static dict name
+// (e.g. __Inner_Eq) rather than a __ring_T_X parameter.  Both == and != route
+// through the exact Eq.eq slot; != negates that result at the operator site.
 
 struct Inner { x: Int }
 

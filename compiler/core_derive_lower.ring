@@ -519,7 +519,7 @@ fn pattern_for_variant(
 }
 
 // ============================================================
-// Eq / Ne — exact field calls with lexical short-circuiting
+// Eq — exact field calls with lexical short-circuiting
 // ============================================================
 
 pub struct CoreDerivedEqPlan {
@@ -676,15 +676,6 @@ fn derived_eq_expr(plan: CoreDerivedEqPlan) -> CoreExpr {
 pub fn elaborate_core_derived_eq_body(plan: CoreDerivedEqPlan) -> CoreBody {
     let header = plan.header
     finalize_body(header, derived_eq_expr(plan))
-}
-
-pub fn elaborate_core_derived_ne_body(plan: CoreDerivedEqPlan) -> CoreBody {
-    let header = plan.header
-    let equality = derived_eq_expr(plan)
-    let negated = make_core_primitive_expr(
-        plan.bool_type, header.result_effects, header.body_origin,
-        make_core_primitive_op(6), [equality])
-    finalize_body(header, negated)
 }
 
 // ============================================================

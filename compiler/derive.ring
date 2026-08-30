@@ -1306,8 +1306,7 @@ fn exact_derived_methods(
                     path_role_parameter())))
         }
         result.push(DerivedMethod {
-            semantic_kind: derived_method_semantic_kind(
-                trait_name, method_name),
+            semantic_kind: derived_impl_semantic_kind(trait_name),
             method_ref: method_ref,
             executable_ref: executable,
             signature: signature,
@@ -1323,7 +1322,7 @@ fn exact_derived_methods(
 fn derived_ord_executable(methods: List<DerivedMethod>) -> ExecutableRef? {
     let mut found: ExecutableRef? = none
     for method in methods {
-        if derived_semantic_kind_tag(method.semantic_kind) == 4 {
+        if derived_semantic_kind_tag(method.semantic_kind) == 3 {
             if found.is_some() {
                 panic("derived Ord descriptor repeats executable")
             }
@@ -2069,16 +2068,6 @@ fn derived_impl_semantic_kind(trait_name: Str) -> DerivedSemanticKind {
         "Debug" => DerivedSemanticKind::DerivedDebug,
         "Json" => DerivedSemanticKind::DerivedJson,
         _ => panic("derive semantic kind: unsupported trait")
-    }
-}
-
-fn derived_method_semantic_kind(
-    trait_name: Str, method_name: Str
-) -> DerivedSemanticKind {
-    if trait_name == "Eq" && method_name == "ne" {
-        DerivedSemanticKind::DerivedEqNe
-    } else {
-        derived_impl_semantic_kind(trait_name)
     }
 }
 
@@ -2866,7 +2855,7 @@ fn register_derived_impl(
 
 fn get_method_names(trait_name: Str) -> List<Str> {
     match trait_name {
-        "Eq" => { let mut r = ["eq"]; r.push("ne"); r },
+        "Eq" => ["eq"],
         "Clone" => ["clone"],
         "Debug" => ["debug"],
         "Ord" => ["cmp"],
@@ -2894,8 +2883,6 @@ fn register_trait_methods(
         "Eq" => {
             let eq_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW }
             methods.insert("eq", TypeScheme { ty: eq_fn, type_vars: type_var_ids, bounds: bounds, effect_schema: empty_typed_effect_header_schema(), def_id: none })
-            let ne_fn = Type::FnType { params: [self_type, self_type], return_type: BOOL, effects: EMPTY_ROW }
-            methods.insert("ne", TypeScheme { ty: ne_fn, type_vars: type_var_ids, bounds: bounds, effect_schema: empty_typed_effect_header_schema(), def_id: none })
         },
         "Clone" => {
             let clone_fn = Type::FnType { params: [self_type], return_type: self_type, effects: EMPTY_ROW }
