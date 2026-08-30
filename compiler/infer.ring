@@ -4443,13 +4443,18 @@ fn append_exact_dictionary_capture(
     })
 }
 
+fn dictionary_capture_type() -> Type {
+    Type::TupleType { elements: [] }
+}
+
 fn append_dictionary_capture(
     value: ExactDictRef, executable: ExecutableRef,
     mut captures: List<HLambdaCapture>
 ) {
     if dict_ref_is_local(value) {
         append_exact_dictionary_capture(
-            dict_ref_local(value), UNIT, executable, captures)
+            dict_ref_local(value), dictionary_capture_type(),
+            executable, captures)
     } else if dict_ref_is_wrapped(value) {
         for inner in dict_ref_wrapped_inner(value) {
             append_dictionary_capture(inner, executable, captures)
@@ -4463,7 +4468,7 @@ fn is_synthetic_dictionary_parameter(
     if slot_ref_is_source(value) { return false }
     let site = slot_ref_synthetic_path(value)
     path_role_same(path_ref_role(site), path_role_parameter()) &&
-        types_equal(source_type, UNIT)
+        types_equal(source_type, dictionary_capture_type())
 }
 
 fn dictionary_parameter_belongs_to(
