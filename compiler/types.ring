@@ -259,7 +259,7 @@ pub fn row_merge(a: EffectRow, b: EffectRow) -> RowMergeResult {
     }
 }
 
-fn type_lists_equal(a: List<Type>, b: List<Type>) -> Bool {
+fn type_lists_equal(a: List<Type>, b: List<Type>) -> Bool with {} {
     if a.len() != b.len() { return false }
     let mut i = 0
     while i < a.len() {
@@ -273,7 +273,7 @@ fn type_lists_equal(a: List<Type>, b: List<Type>) -> Bool {
     true
 }
 
-fn effects_list_equal(a: List<Effect>, b: List<Effect>) -> Bool {
+fn effects_list_equal(a: List<Effect>, b: List<Effect>) -> Bool with {} {
     if a.len() != b.len() { return false }
     let mut i = 0
     while i < a.len() {
@@ -287,14 +287,14 @@ fn effects_list_equal(a: List<Effect>, b: List<Effect>) -> Bool {
     true
 }
 
-fn optional_ids_equal(a: Int?, b: Int?) -> Bool {
+fn optional_ids_equal(a: Int?, b: Int?) -> Bool with {} {
     match (a, b) {
         (some(x), some(y)) => x == y,
         _ => a.is_none() && b.is_none()
     }
 }
 
-pub fn effects_equal(a: Effect, b: Effect) -> Bool {
+pub fn effects_equal(a: Effect, b: Effect) -> Bool with {} {
     match a {
         Effect::SystemEffect { reference: a_ref } => match b {
             Effect::SystemEffect { reference: b_ref } =>
@@ -319,7 +319,7 @@ pub fn effects_equal(a: Effect, b: Effect) -> Bool {
     }
 }
 
-pub fn types_equal(a: Type, b: Type) -> Bool {
+pub fn types_equal(a: Type, b: Type) -> Bool with {} {
     match a {
         Type::IntType => match b { Type::IntType => true, _ => false },
         Type::FloatType => match b { Type::FloatType => true, _ => false },
@@ -397,7 +397,7 @@ pub fn nominal_display_name(identity: Str) -> Str {
     identity.replace("$$_", "::").replace("$", "::")
 }
 
-pub fn type_to_string(t: Type) -> Str {
+pub fn type_to_string(t: Type) -> Str with {} {
     match t {
         Type::IntType => BUILTIN_INT,
         Type::FloatType => BUILTIN_FLOAT,
@@ -457,7 +457,7 @@ pub fn type_to_string(t: Type) -> Str {
     }
 }
 
-pub fn effect_to_string(e: Effect) -> Str {
+pub fn effect_to_string(e: Effect) -> Str with {} {
     match e {
         Effect::SystemEffect { reference } => system_effect_ref_name(reference),
         Effect::MutEffect { state_type } => "mut<${type_to_string(state_type)}>",
@@ -471,7 +471,7 @@ pub fn effect_to_string(e: Effect) -> Str {
     }
 }
 
-pub fn effect_row_to_string(row: EffectRow) -> Str {
+pub fn effect_row_to_string(row: EffectRow) -> Str with {} {
     if row.effects.len() == 0 && row.tail.is_none() { return "" }
     let mut parts = row.effects.map(fn(e) { effect_to_string(e) })
     match row.tail {
