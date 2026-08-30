@@ -1693,12 +1693,14 @@ fn finalize_effect_ctx_expr(
                 finalize_effect_ctx_expr(ctx, batch, expr)
             }), constructor: constructor,
             ty: ty, effects: effects, span: span },
-        HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
+        HExpr::MatchExpr {
+            scrutinee, arms, physical, ty, effects, span
+        } =>
             HExpr::MatchExpr {
                 scrutinee: finalize_effect_ctx_expr(
                     ctx, batch, scrutinee),
                 arms: finalize_effect_ctx_match_arms(ctx, batch, arms),
-                ty: ty, effects: effects, span: span },
+                physical: physical, ty: ty, effects: effects, span: span },
         HExpr::Block { stmts, tail, ty, effects, span } =>
             HExpr::Block {
                 stmts: stmts.map(fn(stmt) {
@@ -1728,13 +1730,13 @@ fn finalize_effect_ctx_expr(
                 } }), plan: plan,
                 ty: ty, effects: effects, span: span },
         HExpr::TryCatch {
-            body, error_type, arms, ty, effects, span
+            body, error_type, arms, physical, ty, effects, span
         } =>
             HExpr::TryCatch {
                 body: finalize_effect_ctx_expr(ctx, batch, body),
                 error_type: error_type,
                 arms: finalize_effect_ctx_match_arms(ctx, batch, arms),
-                ty: ty, effects: effects, span: span },
+                physical: physical, ty: ty, effects: effects, span: span },
         HExpr::ListLit { elements, plan, ty, effects, span } =>
             HExpr::ListLit {
                 elements: elements.map(fn(expr) {

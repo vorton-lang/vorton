@@ -1134,7 +1134,9 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 else_branch: new_else, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::MatchExpr { scrutinee, arms, ty, effects, span } => {
+        HExpr::MatchExpr {
+            scrutinee, arms, physical, ty, effects, span
+        } => {
             // B-104 W2: materialise a FRESH-OWNED scrutinee (`match map.get(k) {…}`,
             // `match find(…) {…}` — the dominant residual OPTION leak: fresh Option
             // temporaries read once by the match and never dropped).  anf_operand
@@ -1172,11 +1174,12 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                     bindings: arm.bindings, guard: new_guard,
                     body: new_body, span: arm.span })
             }
-            HExpr::MatchExpr { scrutinee: new_scrutinee, arms: new_arms, ty: ty, effects: effects, span: span }
+            HExpr::MatchExpr { scrutinee: new_scrutinee, arms: new_arms,
+                physical: physical, ty: ty, effects: effects, span: span }
         },
 
         HExpr::TryCatch {
-            body, error_type, arms, ty, effects, span
+            body, error_type, arms, physical, ty, effects, span
         } => {
             // body + catch arms are their own scopes (R2); abort-path RC is out of
             // scope (B-002).
@@ -1194,7 +1197,8 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                     body: new_body_arm, span: arm.span })
             }
             HExpr::TryCatch { body: new_body, error_type: error_type,
-                arms: new_arms, ty: ty, effects: effects, span: span }
+                arms: new_arms, physical: physical,
+                ty: ty, effects: effects, span: span }
         },
 
         HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {
@@ -2837,7 +2841,9 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 else_branch: new_else, ty: ty, effects: effects, span: span }
         },
 
-        HExpr::MatchExpr { scrutinee, arms, ty, effects, span } => {
+        HExpr::MatchExpr {
+            scrutinee, arms, physical, ty, effects, span
+        } => {
             // Scrutinee borrows.  Each arm body inherits escape.  Arm pattern
             // bindings PROJECT borrows from the scrutinee (loaded without a dup),
             // so they are NOT owned — excluded from the arm's owned set (no
@@ -2858,7 +2864,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                     bindings: arm.bindings, guard: new_guard,
                     body: new_body, span: arm.span })
             }
-            HExpr::MatchExpr { scrutinee: new_scrutinee, arms: new_arms, ty: ty, effects: effects, span: span }
+            HExpr::MatchExpr { scrutinee: new_scrutinee, arms: new_arms,
+                physical: physical, ty: ty, effects: effects, span: span }
         },
 
         HExpr::StringInterp { parts, plan, ty, effects, span } => {
@@ -2877,7 +2884,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
         },
 
         HExpr::TryCatch {
-            body, error_type, arms, ty, effects, span
+            body, error_type, arms, physical, ty, effects, span
         } => {
             // body + catch arms inherit escape; each is its own scope.  abort-path
             // RC (longjmp) is out of B-098 scope (B-002 drop-aware unwind); on the
@@ -2899,7 +2906,8 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                     body: new_body_arm, span: arm.span })
             }
             HExpr::TryCatch { body: new_body, error_type: error_type,
-                arms: new_arms, ty: ty, effects: effects, span: span }
+                arms: new_arms, physical: physical,
+                ty: ty, effects: effects, span: span }
         },
 
         HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {

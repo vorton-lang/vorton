@@ -4317,7 +4317,10 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                 lower_expr(ctx, condition), block_from_expr(ctx, then_branch),
                 block_from_expr(ctx, match else_branch { some(v) => v,
                     none => panic("Core assembly: If lacks else after PreCore") })),
-        HExpr::MatchExpr { scrutinee, arms, .. } => {
+        HExpr::MatchExpr { scrutinee, arms, physical, .. } => {
+            if physical.is_some() {
+                panic("Core assembly: verified Match physical plan crossed TypedHIR")
+            }
             let pattern_type = type_fact_for(
                 ctx.types, hexpr_type(scrutinee), ctx.module_key)
             make_core_match_expr(
@@ -4328,7 +4331,10 @@ fn lower_expr(mut ctx: LowerCtx, value: HExpr) -> CoreExpr {
                         binder_kind_match_pattern())
                 }))
         },
-        HExpr::TryCatch { body, error_type, arms, .. } => {
+        HExpr::TryCatch { body, error_type, arms, physical, .. } => {
+            if physical.is_some() {
+                panic("Core assembly: verified Catch physical plan crossed TypedHIR")
+            }
             let pattern_type = type_fact_for(
                 ctx.types, error_type, ctx.module_key)
             make_core_try_catch_expr(ty, effects, origin,

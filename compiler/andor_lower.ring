@@ -254,9 +254,12 @@ fn al_expr(e: HExpr) -> HExpr {
                 constructor: constructor,
                 ty: ty, effects: effects, span: span }
         },
-        HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
+        HExpr::MatchExpr {
+            scrutinee, arms, physical, ty, effects, span
+        } =>
             HExpr::MatchExpr { scrutinee: al_expr(scrutinee),
-                arms: al_arms(arms), ty: ty, effects: effects, span: span },
+                arms: al_arms(arms), physical: physical,
+                ty: ty, effects: effects, span: span },
         HExpr::Block { stmts, tail, ty, effects, span } => {
             let mut new_stmts: List<HStmt> = []
             for s in stmts { new_stmts.push(al_stmt(s)) }
@@ -286,10 +289,12 @@ fn al_expr(e: HExpr) -> HExpr {
             HExpr::StringInterp { parts: new_parts, plan: plan,
                 ty: ty, effects: effects, span: span }
         },
-        HExpr::TryCatch { body, error_type, arms, ty, effects, span } =>
+        HExpr::TryCatch {
+            body, error_type, arms, physical, ty, effects, span
+        } =>
             HExpr::TryCatch { body: al_expr(body),
                 error_type: error_type, arms: al_arms(arms),
-                ty: ty, effects: effects, span: span },
+                physical: physical, ty: ty, effects: effects, span: span },
         HExpr::HandleExpr { body, handlers, effect_ctx_install, ty, effects, span } => {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {

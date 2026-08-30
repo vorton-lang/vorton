@@ -2862,6 +2862,18 @@ pub fn make_flow_pattern_branch(
             scrutinee: scrutinee, pattern: pattern,
             matched: matched, unmatched: unmatched } }
 }
+pub fn flow_pattern_branch_scrutinee(value: FlowTerminator) -> SlotRef {
+    match value.value {
+        FlowTerminatorValue::PatternValue { scrutinee, .. } => scrutinee,
+        _ => panic("FlowIR: terminator is not PatternBranch")
+    }
+}
+pub fn flow_branch_condition(value: FlowTerminator) -> SlotRef {
+    match value.value {
+        FlowTerminatorValue::BranchValue { condition, .. } => condition,
+        _ => panic("FlowIR: terminator is not Branch")
+    }
+}
 pub fn make_flow_raise(
     origin: OriginRef, error: SlotRef, caught: FlowSuccessor
 ) -> FlowTerminator {

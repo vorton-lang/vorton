@@ -19,10 +19,20 @@ use ast::{BinOp, UnaryOp, Pattern, LiteralValue, NamedPatternField, Span}
 use hir::{HExpr, HStmt, HParam, HMatchArm, HStringInterpPart,
     HLetDestructureBinding, HPatternBinding, HStructFieldInit,
     HNominalStructFieldInit, HFieldAccessKind,
-    HEffectHandler, HConstructorPlan, DictRef,
+    HEffectHandler, HConstructorPlan, HProjectionRef,
+    HPatternPhysicalArmPlan,
+    HPatternPhysicalPlan, DictRef,
+    h_pattern_physical_scrutinee_binding, h_pattern_physical_arms,
+    h_pattern_physical_unmatched_cleanup,
+    h_pattern_arm_bindings, h_pattern_arm_test_prefix,
+    h_pattern_arm_matched_prefix,
+    h_pattern_arm_pattern_false_cleanup,
+    h_pattern_arm_guard_true_cleanup,
+    h_pattern_arm_guard_false_cleanup,
     h_dict_construct_effect_ctx,
     h_constructor_kind, h_constructor_fields,
-    h_projection_kind, h_projection_variant,
+    h_projection_kind, h_projection_nominal,
+    h_projection_variant, h_projection_tuple_index,
     TraitDispatch, MethodCallRef,
     method_call_ref_is_intrinsic, method_call_ref_is_concrete,
     method_call_ref_is_bound,
@@ -101,6 +111,7 @@ use ir_identity::{CalleeRef, SlotRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
     symbol_ref_origin_module_key, symbol_ref_canonical_payload,
     symbol_ref_same,
     variant_ref_owner, variant_ref_source_index, variant_ref_same,
+    nominal_field_ref_index,
     variant_field_ref_variant, variant_field_ref_index,
     variant_field_ref_same,
     registered_nominal_ref_display_name,
@@ -150,6 +161,7 @@ use codegen_c_ctx::{CCtx, CFnInfo, CStructInfo, CEnumInfo, CEnumVariantInfo,
     CNameOnlySlotRef, CTypedRef, CClosureEdge,
     c_emit, c_raw, fresh_tmp, fresh_i64, fresh_dbl, fresh_label,
     c_local, c_local_ref, c_local_def, c_local_def_ref,
+    c_bind_semantic_value_slot, c_local_semantic_def_slot,
     c_param, c_param_def, c_value_slot, c_exact_value_slot,
     c_local_semantic_slot, c_semantic_value_slot,
     c_local_effect_ctx_slot, c_param_effect_ctx_slot,
@@ -301,9 +313,11 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
         },
         HExpr::StrLit { value, .. } => gen_c_str_lit(ctx, value),
         HExpr::BoolLit { value, .. } => if value { "RING_TRUE" } else { "RING_FALSE" },
-        HExpr::Ident { name, resolved_name, def_id, callee_identity,
+        HExpr::Ident { name, resolved_name, def_id, source_slot,
+                       callee_identity,
                        dict_closure_dicts, ty, span, .. } =>
-            gen_c_ident(ctx, name, resolved_name, def_id, callee_identity,
+            gen_c_ident(ctx, name, resolved_name, def_id, source_slot,
+                callee_identity,
                 dict_closure_dicts, ty, span),
         HExpr::BinOp { op, left, right, eq_dispatch, ord_dispatch, ty, .. } =>
             gen_c_binop(ctx, op, left, right, eq_dispatch, ord_dispatch, ty),
@@ -313,8 +327,10 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
             gen_c_call(
                 ctx, callee, args, resolved_dicts,
                 effect_ctx, callee_ref, method_ref, system_host, ty),
-        HExpr::FieldAccess { receiver, field, access_kind, ty, .. } =>
-            gen_c_field_access(ctx, receiver, field, access_kind, ty),
+        HExpr::FieldAccess {
+            receiver, field, access_kind, projection, ty, ..
+        } => gen_c_field_access(
+            ctx, receiver, field, access_kind, projection, ty),
         HExpr::StructLit { name, fields, spread, constructor, .. } =>
             gen_c_struct_lit(ctx, name, fields, spread, constructor),
         HExpr::NamedVariantConstruct { enum_name, variant_name, variant_ref,
@@ -323,13 +339,14 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
             gen_c_variant_construct(
                 ctx, enum_name, variant_name, variant_ref,
                 fields, spread, constructor),
-        HExpr::MatchExpr { scrutinee, arms, .. } =>
-            gen_c_match_expr(ctx, scrutinee, arms),
+        HExpr::MatchExpr { scrutinee, arms, physical, .. } =>
+            gen_c_match_expr(ctx, scrutinee, arms, physical),
         HExpr::Block { stmts, tail, .. } => gen_c_block(ctx, stmts, tail),
         HExpr::IfExpr { condition, then_branch, else_branch, .. } =>
             gen_c_if_expr(ctx, condition, then_branch, else_branch),
         HExpr::StringInterp { parts, .. } => gen_c_string_interp(ctx, parts),
-        HExpr::TryCatch { body, arms, .. } => gen_c_try_catch(ctx, body, arms),
+        HExpr::TryCatch { body, arms, physical, .. } =>
+            gen_c_try_catch(ctx, body, arms, physical),
         HExpr::HandleExpr { body, handlers, effect_ctx_install, .. } =>
             gen_c_handle_expr(ctx, body, handlers, effect_ctx_install),
         HExpr::Lambda { params, return_type, body, ty, effect_ctx, .. } =>
@@ -378,24 +395,37 @@ pub fn gen_c_expr(mut ctx: CCtx, expr: HExpr) -> Str {
                     none => panic(
                         "C codegen: Take source has no exact physical slot")
                 },
-                HExpr::FieldAccess { receiver, field, access_kind, .. } => {
+                HExpr::FieldAccess {
+                    receiver, access_kind, projection, ..
+                } => {
                     reject_c_error_field_access(access_kind)
-                    let recv_type = hexpr_type(receiver)
                     let recv_val = gen_c_expr(ctx, receiver)
-                    let type_name = match recv_type {
-                        Type::StructType { name, .. } => name,
-                        Type::EnumType { name, .. } => name,
-                        _ => panic("C codegen: projected Take base is not nominal")
+                    let exact = match projection {
+                        some(value) => value,
+                        none => panic(
+                            "C codegen: projected Take lacks exact projection")
                     }
-                    let info = ctx.struct_types.get(type_name).unwrap_or_else(fn() {
-                        panic("C codegen: projected Take nominal is unregistered")
-                    })
-                    let mut field_index = -1
-                    for index in 0..info.field_names.len() {
-                        if info.field_names[index] == field { field_index = index }
+                    let kind = h_projection_kind(exact)
+                    if kind == 3 {
+                        let index = h_projection_tuple_index(exact)
+                        rt_use(ctx, "ring_list_get", 2)
+                        rt_use(ctx, "ring_list_set", 3)
+                        rt_use(ctx, "ring_dup", 1)
+                        let saved = fresh_tmp(ctx)
+                        c_emit(ctx,
+                            "${saved} = ring_list_get(${recv_val}, ${index});")
+                        c_emit(ctx, "ring_dup(${saved});")
+                        c_emit(ctx,
+                            "ring_list_set(${recv_val}, ${index}, RING_NULL);")
+                        return saved
                     }
-                    if field_index < 0 {
-                        panic("C codegen: projected Take field is absent")
+                    let field_index = if kind == 0 {
+                        nominal_field_ref_index(h_projection_nominal(exact))
+                    } else if kind == 1 {
+                        variant_field_ref_index(
+                            h_projection_variant(exact)) + 1
+                    } else {
+                        panic("C codegen: projected Take is not exact nominal/tuple")
                     }
                     let saved = fresh_tmp(ctx)
                     c_emit(ctx, "${saved} = ((void**)${recv_val})[${field_index}];")
@@ -484,7 +514,8 @@ fn c_find_function_in_ctx(ctx: CCtx, mangled: Str, name: Str) -> CFnLookup? {
 
 fn gen_c_ident(
     mut ctx: CCtx, name: Str, resolved_name: Str?, def_id: Int?,
-    callee_identity: CalleeRef?, dict_closure_dicts: List<DictRef>?,
+    source_slot: SlotRef?, callee_identity: CalleeRef?,
+    dict_closure_dicts: List<DictRef>?,
     ty: Type, span: Span
 ) -> Str {
     // #B-087 gap 1: a polymorphic function used as a first-class value carries
@@ -535,6 +566,17 @@ fn gen_c_ident(
     }
     match found {
         some(reference) => {
+            match (source_slot, def_id) {
+                (some(slot), some(id)) => match c_exact_value_slot(
+                        ctx, name, id) {
+                    some(exact) => c_bind_semantic_value_slot(ctx, slot, exact),
+                    none => panic(
+                        "C codegen: semantic source has no exact DefId slot")
+                },
+                (none, _) => {},
+                (some(_), none) => panic(
+                    "C codegen: semantic source has no DefId")
+            }
             let cv = c_ref_c_name(reference)
             let t = fresh_tmp(ctx)
             if boxed {
@@ -2547,7 +2589,19 @@ fn emit_c_cleanup_walk(mut ctx: CCtx) {
 
 // TryCatch — inline setjmp (B-089 G-b port of gen_try_catch).  Body and catch
 // arms execute in the current C stack frame, sharing all hoisted locals.
-fn gen_c_try_catch(mut ctx: CCtx, body: HExpr, arms: List<HMatchArm>) -> Str {
+fn gen_c_try_catch(
+    mut ctx: CCtx, body: HExpr, arms: List<HMatchArm>,
+    physical: HPatternPhysicalPlan?
+) -> Str {
+    let plan = match physical {
+        some(value) => value,
+        none => panic("C codegen: TryCatch lacks verified physical plan")
+    }
+    let caught = h_pattern_physical_scrutinee_binding(plan)
+    let arm_plans = h_pattern_physical_arms(plan)
+    if arm_plans.len() != arms.len() {
+        panic("C codegen: TryCatch physical arm census differs")
+    }
     rt_use_catch_fns(ctx)
     let frame = fresh_tmp(ctx)
     let buf = fresh_tmp(ctx)
@@ -2576,16 +2630,25 @@ fn gen_c_try_catch(mut ctx: CCtx, body: HExpr, arms: List<HMatchArm>) -> Str {
     let err = fresh_tmp(ctx)
     c_emit(ctx, "${err} = ring_catch_get_error(${frame});")
     c_emit(ctx, "ring_catch_pop();")
+    let caught_slot = c_local_semantic_def_slot(
+        ctx, caught.slot, caught.name, caught.def_id)
+    c_emit(ctx, "${c_exact_slot_c_name(caught_slot)} = ${err};")
     // Catch arms reuse the unified match test-and-fall-through chain — this
     // runs the FULL nested pattern check (ctor tags at every depth, literal
     // sub-patterns, guards) per arm, so audit #246's LLVM defect (top-level
     // tag test only) is NOT ported.
+    let mut arm_index = 0
     for arm in arms {
-        emit_c_match_arm(ctx, arm, err, res, merge_lbl)
+        emit_c_match_arm(
+            ctx, arm, arm_plans.get(arm_index).unwrap(),
+            err, res, merge_lbl)
+        arm_index = arm_index + 1
     }
     // Exhaustion default: the checker guarantees catch-arm exhaustiveness, so
     // this is unreachable in well-typed programs.  C panics (same stable
     // deviation from LLVM `unreachable` as gen_c_match_expr).
+    emit_c_pattern_statements(
+        ctx, h_pattern_physical_unmatched_cleanup(plan))
     ctx.match_counter = ctx.match_counter + 1
     let msg = gen_c_str_lit(ctx, "catch exhaustion failure #${ctx.match_counter}")
     rt_use(ctx, "ring_panic", 1)
@@ -3764,11 +3827,41 @@ fn reject_c_error_field_access(kind: HFieldAccessKind) {
 
 fn gen_c_field_access(
     mut ctx: CCtx, receiver: HExpr, field: Str,
-    access_kind: HFieldAccessKind, ty: Type
+    access_kind: HFieldAccessKind, projection: HProjectionRef?, ty: Type
 ) -> Str {
     reject_c_error_field_access(access_kind)
     let recv_val = gen_c_expr(ctx, receiver)
     let recv_type = hexpr_type(receiver)
+    match projection {
+        some(exact) => {
+            let kind = h_projection_kind(exact)
+            if kind == 0 {
+                let index = nominal_field_ref_index(
+                    h_projection_nominal(exact))
+                let result = fresh_tmp(ctx)
+                c_emit(ctx, "${result} = ((void**)${recv_val})[${index}];")
+                return result
+            }
+            if kind == 1 {
+                let index = variant_field_ref_index(
+                    h_projection_variant(exact))
+                let result = fresh_tmp(ctx)
+                c_emit(ctx, "${result} = ((void**)${recv_val})[${index + 1}];")
+                return result
+            }
+            if kind == 3 {
+                let index = h_projection_tuple_index(exact)
+                rt_use(ctx, "ring_list_get", 2)
+                let result = fresh_tmp(ctx)
+                c_emit(ctx, "${result} = ring_list_get(${recv_val}, ${index});")
+                return result
+            }
+            if kind != 2 {
+                panic("C codegen: field access has a non-value projection")
+            }
+        },
+        none => {}
+    }
     match recv_type {
         Type::TupleType { .. } => {
             let idx = match parse_int(field) {
@@ -4038,19 +4131,64 @@ fn gen_c_variant_construct(
 // jumps to the end label.  Fall-through past the last arm = exhaustion panic.
 // ============================================================
 
-fn gen_c_match_expr(mut ctx: CCtx, scrutinee: HExpr, arms: List<HMatchArm>) -> Str {
+fn emit_c_pattern_statements(mut ctx: CCtx, values: List<HStmt>) {
+    for value in values { emit_c_stmt(ctx, value) }
+}
+
+fn bind_existing_c_pattern_slot(
+    mut ctx: CCtx, value: HPatternBinding
+) {
+    let exact = match c_exact_value_slot(ctx, value.name, value.def_id) {
+        some(slot) => slot,
+        none => panic("C codegen: pattern scrutinee lacks an exact slot")
+    }
+    c_bind_semantic_value_slot(ctx, value.slot, exact)
+}
+
+fn register_c_pattern_slot(
+    mut ctx: CCtx, value: HPatternBinding
+) {
+    match c_exact_value_slot(ctx, value.name, value.def_id) {
+        some(slot) => c_bind_semantic_value_slot(ctx, value.slot, slot),
+        none => {
+            let _ = c_local_semantic_def_slot(
+                ctx, value.slot, value.name, value.def_id)
+        }
+    }
+}
+
+fn gen_c_match_expr(
+    mut ctx: CCtx, scrutinee: HExpr, arms: List<HMatchArm>,
+    physical: HPatternPhysicalPlan?
+) -> Str {
+    let plan = match physical {
+        some(value) => value,
+        none => panic("C codegen: Match lacks verified physical plan")
+    }
+    let arm_plans = h_pattern_physical_arms(plan)
+    if arm_plans.len() != arms.len() {
+        panic("C codegen: Match physical arm census differs")
+    }
     let scrut = gen_c_expr(ctx, scrutinee)
+    bind_existing_c_pattern_slot(
+        ctx, h_pattern_physical_scrutinee_binding(plan))
     ctx.match_counter = ctx.match_counter + 1
     let match_id = ctx.match_counter
     let res = fresh_tmp(ctx)
     let end_lbl = fresh_label(ctx, "mend")
 
+    let mut arm_index = 0
     for arm in arms {
-        emit_c_match_arm(ctx, arm, scrut, res, end_lbl)
+        emit_c_match_arm(
+            ctx, arm, arm_plans.get(arm_index).unwrap(),
+            scrut, res, end_lbl)
+        arm_index = arm_index + 1
     }
 
     // Exhaustion default (gen_match_if_else parity: the checker guarantees
     // exhaustiveness, so this is unreachable in well-typed programs).
+    emit_c_pattern_statements(
+        ctx, h_pattern_physical_unmatched_cleanup(plan))
     let msg = gen_c_str_lit(ctx, "match exhaustion failure #${match_id}")
     rt_use(ctx, "ring_panic", 1)
     c_emit(ctx, "ring_panic(${msg});")
@@ -4059,75 +4197,67 @@ fn gen_c_match_expr(mut ctx: CCtx, scrutinee: HExpr, arms: List<HMatchArm>) -> S
     res
 }
 
-// One arm: pattern tests (fail → next label) → binds → guard → body.
-fn emit_c_match_arm(mut ctx: CCtx, arm: HMatchArm, scrut: Str, res: Str, end_lbl: Str) {
+// One arm: pattern tests → verified physical projection/transfer → guard/body.
+fn emit_c_match_arm(
+    mut ctx: CCtx, arm: HMatchArm, physical: HPatternPhysicalArmPlan,
+    scrut: Str, res: Str, end_lbl: Str
+) {
     // Checker parity: every match/catch arm owns a lexical scope.  Clone the
     // inherited bindings before pattern binding / guard / body emission, then
     // restore the outer snapshot before the next arm is generated.
     let saved_named = ctx.named_values
     ctx.named_values = map_clone(saved_named)
     let next_lbl = fresh_label(ctx, "mnext")
-    let mut next_used = false
-    let exact_bindings = arm.bindings
+    let pattern_fail_lbl = fresh_label(ctx, "mpfail")
+    for binding in h_pattern_arm_bindings(physical) {
+        register_c_pattern_slot(ctx, binding)
+    }
+    emit_c_pattern_statements(ctx, h_pattern_arm_test_prefix(physical))
 
     match arm.pattern {
         Pattern::Wildcard { .. } => {},
-        Pattern::Binding { name: bname, .. } => {
-            let bv = c_pattern_local(ctx, bname, exact_bindings)
-            c_emit(ctx, "${bv} = ${scrut};")
-        },
+        Pattern::Binding { .. } => {},
         Pattern::Literal { value, .. } => {
-            emit_c_literal_fail_test(ctx, scrut, value, next_lbl)
-            next_used = true
+            emit_c_literal_fail_test(ctx, scrut, value, pattern_fail_lbl)
         },
         Pattern::Constructor { name: cname, qualifier, fields, .. } => {
             // Phase 0: outer tag test (unresolvable ctor = unconditional match,
             // mirroring gen_ctor_tag_test's best-effort branch).
-            if emit_c_ctor_tag_fail_test(ctx, scrut, cname, qualifier, next_lbl) {
-                next_used = true
-            }
+            discard_c_bool(emit_c_ctor_tag_fail_test(
+                ctx, scrut, cname, qualifier, pattern_fail_lbl))
             // Phase 1: nested constructor tags (only when the enum resolves —
             // struct patterns skip this, LLVM parity).
             match find_c_enum_by_variant(ctx, cname, qualifier) {
                 some(_ei) => {
-                    if check_c_positional_fields_nested_tags(ctx, scrut, fields, next_lbl) {
-                        next_used = true
-                    }
+                    discard_c_bool(check_c_positional_fields_nested_tags(
+                        ctx, scrut, fields, pattern_fail_lbl))
                 },
                 none => {},
             }
-            // Phase 2: bind fields.
-            bind_c_constructor_fields(
-                ctx, scrut, cname, qualifier, fields, exact_bindings)
         },
         Pattern::NamedConstructor { name: cname, qualifier, fields: nfields, .. } => {
-            if emit_c_ctor_tag_fail_test(ctx, scrut, cname, qualifier, next_lbl) {
-                next_used = true
-            }
+            discard_c_bool(emit_c_ctor_tag_fail_test(
+                ctx, scrut, cname, qualifier, pattern_fail_lbl))
             match find_c_enum_by_variant(ctx, cname, qualifier) {
                 some(ei) => match ei.variants.get(cname) {
                     some(vi) => {
-                        if check_c_named_fields_nested_tags(ctx, scrut, vi.field_names, nfields, 1, next_lbl) {
-                            next_used = true
-                        }
+                        discard_c_bool(check_c_named_fields_nested_tags(
+                            ctx, scrut, vi.field_names, nfields, 1,
+                            pattern_fail_lbl))
                     },
                     none => {},
                 },
                 none => match resolve_c_struct_type(ctx, cname) {
                     some(si) => {
-                        if check_c_named_fields_nested_tags(ctx, scrut, si.field_names, nfields, 0, next_lbl) {
-                            next_used = true
-                        }
+                        discard_c_bool(check_c_named_fields_nested_tags(
+                            ctx, scrut, si.field_names, nfields, 0,
+                            pattern_fail_lbl))
                     },
                     none => {},
                 },
             }
-            bind_c_named_constructor_fields(
-                ctx, scrut, cname, qualifier, nfields, exact_bindings)
         },
         Pattern::OrPattern { patterns, .. } => {
-            // Every successful alternative writes the arm's one shared set of
-            // exact slots before entering the common guard/body.
             let body_lbl = fresh_label(ctx, "mor")
             let mut body_used = false
             let nalts = patterns.len()
@@ -4138,18 +4268,12 @@ fn emit_c_match_arm(mut ctx: CCtx, arm: HMatchArm, scrut: Str, res: Str, end_lbl
                 match patterns.get(k) {
                     some(alt) => {
                         if k == nalts - 1 {
-                            if check_c_nested_ctor_tags(
-                                    ctx, scrut, alt, next_lbl) {
-                                next_used = true
-                            }
-                            bind_c_root_pattern_after_success(
-                                ctx, scrut, alt, exact_bindings)
+                            discard_c_bool(check_c_nested_ctor_tags(
+                                ctx, scrut, alt, pattern_fail_lbl))
                         } else {
                             let alt_miss = fresh_label(ctx, "morfail")
                             let tested = check_c_nested_ctor_tags(
                                 ctx, scrut, alt, alt_miss)
-                            bind_c_root_pattern_after_success(
-                                ctx, scrut, alt, exact_bindings)
                             c_emit(ctx, "goto ${body_lbl};")
                             body_used = true
                             if tested {
@@ -4182,26 +4306,8 @@ fn emit_c_match_arm(mut ctx: CCtx, arm: HMatchArm, scrut: Str, res: Str, end_lbl
                             _ => {
                                 let ev = fresh_tmp(ctx)
                                 c_emit(ctx, "${ev} = ring_list_get(${scrut}, ${j});")
-                                if check_c_nested_ctor_tags(ctx, ev, elem_pat, next_lbl) {
-                                    next_used = true
-                                }
-                            },
-                        }
-                    },
-                    none => {},
-                }
-            }
-            // Phase 2: all checks passed — bind.
-            for j2 in 0..elements.len() {
-                match elements.get(j2) {
-                    some(elem_pat2) => {
-                        match elem_pat2 {
-                            Pattern::Wildcard { .. } => {},
-                            _ => {
-                                let fv = fresh_tmp(ctx)
-                                c_emit(ctx, "${fv} = ring_list_get(${scrut}, ${j2});")
-                                bind_c_nested_pattern(
-                                    ctx, fv, elem_pat2, exact_bindings)
+                                discard_c_bool(check_c_nested_ctor_tags(
+                                    ctx, ev, elem_pat, pattern_fail_lbl))
                             },
                         }
                     },
@@ -4210,6 +4316,8 @@ fn emit_c_match_arm(mut ctx: CCtx, arm: HMatchArm, scrut: Str, res: Str, end_lbl
             }
         },
     }
+
+    emit_c_pattern_statements(ctx, h_pattern_arm_matched_prefix(physical))
 
     // Guard (emit_match_arm_body parity): evaluated after binds; a false
     // guard falls through to the next arm.  B-104 D1 Stage 2: a fresh-owned
@@ -4224,19 +4332,36 @@ fn emit_c_match_arm(mut ctx: CCtx, arm: HMatchArm, scrut: Str, res: Str, end_lbl
                 rt_use(ctx, "ring_drop", 1)
                 c_emit(ctx, "ring_drop(${gv});")
             }
-            c_emit(ctx, "if (!${flag}) goto ${next_lbl};")
-            next_used = true
+            let false_cleanup = h_pattern_arm_guard_false_cleanup(physical)
+            if false_cleanup.len() == 0 {
+                c_emit(ctx, "if (!${flag}) goto ${next_lbl};")
+            } else {
+                let guard_true_lbl = fresh_label(ctx, "mgtrue")
+                c_emit(ctx, "if (${flag}) goto ${guard_true_lbl};")
+                emit_c_pattern_statements(ctx, false_cleanup)
+                c_emit(ctx, "goto ${next_lbl};")
+                c_raw(ctx, "${guard_true_lbl}:;")
+            }
+            emit_c_pattern_statements(
+                ctx, h_pattern_arm_guard_true_cleanup(physical))
         },
-        none => {},
+        none => {
+            if h_pattern_arm_guard_true_cleanup(physical).len() != 0 ||
+               h_pattern_arm_guard_false_cleanup(physical).len() != 0 {
+                panic("C codegen: guardless arm carries guard cleanup")
+            }
+        },
     }
 
     // Body.
     let bv = gen_c_expr(ctx, arm.body)
     c_emit(ctx, "${res} = ${bv};")
     c_emit(ctx, "goto ${end_lbl};")
-    if next_used {
-        c_raw(ctx, "${next_lbl}:;")
-    }
+    c_raw(ctx, "${pattern_fail_lbl}:;")
+    emit_c_pattern_statements(
+        ctx, h_pattern_arm_pattern_false_cleanup(physical))
+    c_emit(ctx, "goto ${next_lbl};")
+    c_raw(ctx, "${next_lbl}:;")
     ctx.named_values = saved_named
 }
 
@@ -4492,22 +4617,23 @@ fn bind_c_root_pattern_after_success(
     }
 }
 
-fn exact_pattern_def_id(
+fn exact_pattern_binding(
     bindings: List<HPatternBinding>, name: Str
-) -> Int {
-    let mut result: Int? = none
+) -> HPatternBinding {
+    let mut result: HPatternBinding? = none
     for binding in bindings {
         if binding.name == name {
             match result {
-                some(existing) => if existing != binding.def_id {
+                some(existing) => if existing.def_id != binding.def_id ||
+                        !slot_ref_same(existing.slot, binding.slot) {
                     panic("C codegen: colliding pattern DefIds for '${name}'")
                 },
-                none => { result = some(binding.def_id) }
+                none => { result = some(binding) }
             }
         }
     }
     match result {
-        some(id) => id,
+        some(value) => value,
         none => panic(
             "C codegen: pattern binding '${name}' has no exact DefId metadata")
     }
@@ -4519,10 +4645,14 @@ fn c_pattern_local(
     if name == "_" {
         return fresh_tmp(ctx)
     }
-    let def_id = exact_pattern_def_id(bindings, name)
-    match c_exact_value_slot(ctx, name, def_id) {
-        some(slot) => c_exact_slot_c_name(slot),
-        none => c_local_def(ctx, name, some(def_id))
+    let binding = exact_pattern_binding(bindings, name)
+    match c_exact_value_slot(ctx, name, binding.def_id) {
+        some(slot) => {
+            c_bind_semantic_value_slot(ctx, binding.slot, slot)
+            c_exact_slot_c_name(slot)
+        },
+        none => c_exact_slot_c_name(c_local_semantic_def_slot(
+            ctx, binding.slot, name, binding.def_id))
     }
 }
 
@@ -4920,7 +5050,13 @@ pub fn emit_c_stmt(mut ctx: CCtx, stmt: HStmt) {
             c_line_directive(ctx, span)
             let is_name_only_dict = c_is_name_only_dict_def_id(def_id)
             let val = gen_c_expr(ctx, init)
-            let cv = c_local_def(ctx, name, def_id)
+            let cv = match def_id {
+                some(id) => match c_exact_value_slot(ctx, name, id) {
+                    some(slot) => c_exact_slot_c_name(slot),
+                    none => c_local_def(ctx, name, def_id)
+                },
+                none => c_local_def(ctx, name, def_id)
+            }
             if is_name_only_dict {
                 c_register_name_only_value(ctx, name, cv)
             }

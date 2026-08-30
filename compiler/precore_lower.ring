@@ -1155,7 +1155,7 @@ fn close_stmt(value: HStmt) -> List<HStmt> {
                 hexpr_effects(scrutinee), branch_effects)
             [HStmt::ExprStmt {
                 expr: HExpr::MatchExpr {
-                    scrutinee: scrutinee, arms: arms,
+                    scrutinee: scrutinee, arms: arms, physical: none,
                     ty: Type::UnitType, effects: effects, span: span
                 },
                 span: span
@@ -1443,9 +1443,12 @@ fn close_expr(value: HExpr) -> HExpr {
                 ty: ty, effects: effects, span: span
             }
         },
-        HExpr::MatchExpr { scrutinee, arms, ty, effects, span } =>
+        HExpr::MatchExpr {
+            scrutinee, arms, physical, ty, effects, span
+        } =>
             HExpr::MatchExpr {
                 scrutinee: close_expr(scrutinee), arms: close_arms(arms),
+                physical: physical,
                 ty: ty, effects: effects, span: span
             },
         HExpr::Block { stmts, tail, ty, effects, span } => HExpr::Block {
@@ -1481,10 +1484,10 @@ fn close_expr(value: HExpr) -> HExpr {
                     "PreCore closure: StringInterp exact plan is absent")
             }, ty, effects, span),
         HExpr::TryCatch {
-            body, error_type, arms, ty, effects, span
+            body, error_type, arms, physical, ty, effects, span
         } => HExpr::TryCatch {
             body: close_expr(body), arms: close_arms(arms),
-            error_type: error_type,
+            error_type: error_type, physical: physical,
             ty: ty, effects: effects, span: span
         },
         HExpr::HandleExpr {

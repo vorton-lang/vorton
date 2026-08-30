@@ -83,7 +83,8 @@ use hir::{
     make_h_record_constructor_plan,
     make_h_dict_construct_plan,
     HFieldAccessKind, HNominalStructFieldInit, HStructFieldInit,
-    HResourceSite,
+    HResourceSite, HPatternPhysicalArmPlan,
+    make_h_pattern_physical_arm_plan, make_h_pattern_physical_plan,
     DictRef, MethodCallRef, HCallableTypeActual,
     make_intrinsic_method_call_ref, make_concrete_method_call_ref,
     make_bound_method_call_ref,
@@ -110,19 +111,27 @@ use flow_ir::{
     flow_block_reference, flow_block_instructions, flow_block_terminator,
     flow_block_ref_same,
     flow_instruction_reference, flow_instruction_kind_tag,
+    flow_read_source, flow_read_target,
     flow_assign_rhs_temp, flow_assign_target,
     flow_move_place_source, flow_move_place_target,
     flow_place_is_slot, flow_place_slot, flow_place_base,
     flow_place_projection,
     flow_projection_contract_same,
+    flow_projection_contract_kind_tag,
     flow_projection_contract_result_type,
+    flow_projection_contract_is_partial,
+    flow_projection_contract_nominal_field,
+    flow_projection_contract_variant_field,
+    flow_projection_contract_tuple_index,
     flow_project_contract, flow_project_base, flow_project_result,
     flow_initialize_operation, flow_initialize_inputs, flow_initialize_target,
     flow_operation_contract_kind_tag, flow_operation_contract_variant,
     flow_operation_contract_dict_construct_dictionary,
     flow_operation_contract_dict_construct_result,
     flow_fail_raise_sink,
-    flow_terminator_kind_tag, flow_raise_error,
+    flow_terminator_kind_tag, flow_terminator_successors,
+    flow_pattern_branch_scrutinee, flow_branch_condition,
+    flow_raise_error,
     flow_slot_reference, flow_slot_type
 }
 use core_hir::{
@@ -188,6 +197,7 @@ use core_expr::{
     core_field_ref_variant, core_field_ref_tuple_index,
     core_field_ref_record_path, core_field_ref_record_name,
     core_field_ref_same,
+    make_core_nominal_field, make_core_variant_field,
     make_core_tuple_field,
     core_field_value_field, core_field_value_expr,
     core_place_is_slot, core_place_slot, core_place_base,
@@ -1218,10 +1228,10 @@ fn fail_instruction_for_node(
     }
 }
 
-fn instruction_for_node_role(
+fn step_for_node_role(
     ctx: HirBridgeCtx, ordinal: Int,
-    selector: Int, role_ordinal: Int, expected_kind: Int
-) -> FlowInstruction {
+    selector: Int, role_ordinal: Int
+) -> FlowSemanticStepRef {
     let mut target_step: FlowSemanticStepRef? = none
     for relation in core_flow_step_map_relations(ctx.stages.step_map) {
         if core_flow_node_ordinal(core_flow_step_node(relation)) == ordinal &&
@@ -1232,10 +1242,44 @@ fn instruction_for_node_role(
             target_step = some(core_flow_step(relation))
         }
     }
-    let step = match target_step {
+    match target_step {
         some(value) => value,
         none => panic("RcHIR bridge: Core node role lacks Flow step")
     }
+}
+
+fn instruction_for_step(
+    ctx: HirBridgeCtx, step: FlowSemanticStepRef
+) -> FlowInstruction {
+    if !flow_semantic_step_is_instruction(step) {
+        panic("RcHIR bridge: Flow step is not an instruction")
+    }
+    let reference = flow_semantic_step_instruction(step)
+    let mut found: FlowInstruction? = none
+    for body in flow_program_bodies(ctx.stages.flow) {
+        for block in flow_body_blocks(body) {
+            for instruction in flow_block_instructions(block) {
+                if flow_instruction_ref_same(
+                        flow_instruction_reference(instruction), reference) {
+                    if found.is_some() {
+                        panic("RcHIR bridge: Flow instruction repeats")
+                    }
+                    found = some(instruction)
+                }
+            }
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("RcHIR bridge: Flow instruction is absent")
+    }
+}
+
+fn instruction_for_node_role(
+    ctx: HirBridgeCtx, ordinal: Int,
+    selector: Int, role_ordinal: Int, expected_kind: Int
+) -> FlowInstruction {
+    let step = step_for_node_role(ctx, ordinal, selector, role_ordinal)
     if !flow_semantic_step_is_instruction(step) {
         panic("RcHIR bridge: Core expression role is not an instruction")
     }
@@ -1268,20 +1312,7 @@ fn terminator_for_node_role(
     ctx: HirBridgeCtx, ordinal: Int,
     selector: Int, role_ordinal: Int, expected_kind: Int
 ) -> FlowTerminator {
-    let mut target_step: FlowSemanticStepRef? = none
-    for relation in core_flow_step_map_relations(ctx.stages.step_map) {
-        if core_flow_node_ordinal(core_flow_step_node(relation)) == ordinal &&
-           role_matches(core_flow_step_role(relation), selector, role_ordinal) {
-            if target_step.is_some() {
-                panic("RcHIR bridge: Core node role has multiple Flow terminators")
-            }
-            target_step = some(core_flow_step(relation))
-        }
-    }
-    let step = match target_step {
-        some(value) => value,
-        none => panic("RcHIR bridge: Core node role lacks Flow terminator")
-    }
+    let step = step_for_node_role(ctx, ordinal, selector, role_ordinal)
     if flow_semantic_step_is_instruction(step) {
         panic("RcHIR bridge: Core node control role is not a terminator")
     }
@@ -1505,6 +1536,12 @@ fn projected_field_access(
                 ctx.shell.decls, nominal_field_ref_owner(reference)),
             field_ref: reference,
             field_index: nominal_field_ref_index(reference)
+        }
+    } else if kind == 3 {
+        let reference = core_field_ref_variant(field)
+        HFieldAccessKind::VariantField {
+            field_ref: reference,
+            field_index: variant_field_ref_index(reference)
         }
     } else if kind == 1 {
         HFieldAccessKind::TupleField
@@ -3430,17 +3467,6 @@ fn serialize_pattern_plan(
     }
 }
 
-fn require_no_edge_cleanup(
-    ctx: HirBridgeCtx, node: Int,
-    selector: Int, role_ordinal: Int, successor: Int,
-    detail: Str
-) {
-    if edge_cleanup_statements(
-            ctx, node, selector, role_ordinal, successor).len() != 0 {
-        panic("RcHIR bridge: unrepresentable cleanup on ${detail}")
-    }
-}
-
 fn serialize_guard_expr(
     mut ctx: HirBridgeCtx, owner: ExecutableRef,
     guard: CoreExpr, parent_node: Int, dispatch_ordinal: Int
@@ -3460,9 +3486,6 @@ fn serialize_guard_expr(
     append_all(statements, before_terminator_drops(
         ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
         dispatch_ordinal))
-    require_no_edge_cleanup(
-        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
-        dispatch_ordinal, 1, "guard-false edge")
     HExpr::Block {
         stmts: statements,
         tail: some(wrap_terminator_operand(
@@ -3474,41 +3497,257 @@ fn serialize_guard_expr(
     }
 }
 
+fn h_pattern_binding_for_slot(
+    ctx: HirBridgeCtx, slot: SlotRef
+) -> HPatternBinding {
+    let binder = bridge_binder_for(ctx, slot)
+    HPatternBinding {
+        name: legacy_binder_projection_name(binder),
+        def_id: legacy_binder_projection_def_id(binder),
+        slot: slot, ty: legacy_binder_projection_type(binder)
+    }
+}
+
+fn core_pattern_has_binding_slot(
+    value: CorePattern, target: SlotRef
+) -> Bool {
+    let kind = core_pattern_kind_tag(value)
+    if kind == 1 {
+        return slot_ref_same(core_pattern_binding(value), target)
+    }
+    if kind == 3 {
+        for child in core_pattern_elements(value) {
+            if core_pattern_has_binding_slot(child, target) { return true }
+        }
+    } else if kind == 4 || kind == 5 {
+        for field in core_pattern_fields(value) {
+            if core_pattern_has_binding_slot(
+                    core_pattern_field_pattern(field), target) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn slot_list_contains(values: List<SlotRef>, target: SlotRef) -> Bool {
+    values.any(fn(value) { slot_ref_same(value, target) })
+}
+
+fn core_field_for_pattern_projection(
+    value: FlowProjectionContract
+) -> CoreFieldRef {
+    let kind = flow_projection_contract_kind_tag(value)
+    if kind == 0 {
+        return make_core_nominal_field(
+            flow_projection_contract_nominal_field(value))
+    }
+    if kind == 3 {
+        return make_core_variant_field(
+            flow_projection_contract_variant_field(value))
+    }
+    if kind == 4 {
+        return make_core_tuple_field(
+            flow_projection_contract_tuple_index(value))
+    }
+    panic("RcHIR bridge: structural pattern projection lacks an exact field identity")
+}
+
+fn append_pattern_projection_step(
+    mut ctx: HirBridgeCtx, node: Int, role_ordinal: Int,
+    instruction: FlowInstruction, pattern: CorePattern,
+    mut available: List<SlotRef>, mut prefix: List<HStmt>
+) {
+    let kind = flow_instruction_kind_tag(instruction)
+    if kind == 1 {
+        let source = flow_read_source(instruction)
+        let target = flow_read_target(instruction)
+        if !slot_list_contains(available, source) ||
+           !core_pattern_has_binding_slot(pattern, target) ||
+           slot_list_contains(available, target) {
+            panic("RcHIR bridge: pattern Read relation differs")
+        }
+        append_all(prefix, before_drop_statements(
+            ctx, node, none, BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal))
+        prefix.push(HStmt::Assign {
+            target: bridge_binder_ident(ctx, target),
+            value: wrap_resource_operand(
+                ctx, node, 0, source,
+                BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal),
+            span: span_zero()
+        })
+        append_all(prefix, after_resource_statements(
+            ctx, node, BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal))
+        available.push(target)
+        return
+    }
+    if kind == 7 {
+        let source = flow_project_base(instruction)
+        let target = flow_project_result(instruction)
+        let contract = flow_project_contract(instruction)
+        if !slot_list_contains(available, source) ||
+           slot_list_contains(available, target) ||
+           !flow_projection_contract_is_partial(contract) {
+            panic("RcHIR bridge: pattern Project relation differs")
+        }
+        let target_binder = bridge_binder_for(ctx, target)
+        let projected = projected_field_access(
+            ctx, bridge_binder_ident(ctx, source),
+            core_field_for_pattern_projection(contract),
+            legacy_binder_projection_type(target_binder), EMPTY_ROW)
+        append_all(prefix, before_drop_statements(
+            ctx, node, none, BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal))
+        let value = wrap_exact_place_take(
+            ctx, node, source, target, projected, some(contract), false,
+            BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal)
+        if core_pattern_has_binding_slot(pattern, target) {
+            prefix.push(HStmt::Assign {
+                target: bridge_binder_ident(ctx, target),
+                value: value, span: span_zero()
+            })
+        } else {
+            prefix.push(bridge_let_for_slot(ctx, target, value))
+        }
+        append_all(prefix, after_resource_statements(
+            ctx, node, BRIDGE_ROLE_CONTROL_DISPATCH, role_ordinal))
+        available.push(target)
+        return
+    }
+    panic("RcHIR bridge: pattern projection step is not Read/Project")
+}
+
+fn require_pattern_bindings_materialized(
+    pattern: CorePattern, available: List<SlotRef>
+) {
+    let kind = core_pattern_kind_tag(pattern)
+    if kind == 1 {
+        if !slot_list_contains(available, core_pattern_binding(pattern)) {
+            panic("RcHIR bridge: pattern binding lacks a Flow materialization")
+        }
+        return
+    } else if kind == 3 {
+        for child in core_pattern_elements(pattern) {
+            require_pattern_bindings_materialized(child, available)
+        }
+    } else if kind == 4 || kind == 5 {
+        for field in core_pattern_fields(pattern) {
+            require_pattern_bindings_materialized(
+                core_pattern_field_pattern(field), available)
+        }
+    }
+}
+
+struct SerializedPatternArm {
+    arm: HMatchArm,
+    physical: HPatternPhysicalArmPlan,
+    next_dispatch: Int
+}
+
+fn require_pattern_dispatch_complete(
+    ctx: HirBridgeCtx, node: Int, next_dispatch: Int
+) {
+    for relation in core_flow_step_map_relations(ctx.stages.step_map) {
+        if core_flow_node_ordinal(core_flow_step_node(relation)) == node &&
+           core_flow_step_role_is_control_dispatch(
+                core_flow_step_role(relation)) &&
+           core_flow_step_role_ordinal(
+                core_flow_step_role(relation)) >= next_dispatch {
+            panic("RcHIR bridge: pattern dispatch cursor is not total")
+        }
+    }
+}
+
 fn serialize_match_arm(
     mut ctx: HirBridgeCtx, owner: ExecutableRef,
-    arm: CoreMatchArm, parent_node: Int,
+    arm: CoreMatchArm, parent_node: Int, scrutinee: SlotRef,
     arm_ordinal: Int, dispatch_ordinal: Int,
-    result_type: Type, effects: EffectRow,
-    entry_prefix: List<HStmt>
-) -> HMatchArm {
+    result_type: Type, effects: EffectRow
+) -> SerializedPatternArm {
     let pattern = core_match_arm_pattern(arm)
+    let pattern_dispatch = dispatch_ordinal
+    let pattern_step = terminator_for_node_role(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+        pattern_dispatch, 10)
+    if !slot_ref_same(
+            flow_pattern_branch_scrutinee(pattern_step), scrutinee) ||
+       flow_terminator_successors(pattern_step).len() != 2 {
+        panic("RcHIR bridge: PatternBranch relation differs")
+    }
+    let test_prefix = before_terminator_drops(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH, pattern_dispatch)
+    let pattern_false_cleanup = edge_cleanup_statements(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+        pattern_dispatch, 1)
+    let mut matched_prefix = edge_cleanup_statements(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+        pattern_dispatch, 0)
+    let mut next_dispatch = pattern_dispatch + 1
+    let mut available: List<SlotRef> = [scrutinee]
+    let mut scanning = true
+    while scanning {
+        let step = step_for_node_role(
+            ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH, next_dispatch)
+        if flow_semantic_step_is_instruction(step) {
+            let instruction = instruction_for_step(ctx, step)
+            let kind = flow_instruction_kind_tag(instruction)
+            if kind != 1 && kind != 7 {
+                panic("RcHIR bridge: pattern cursor found a non-projection instruction")
+            }
+            append_pattern_projection_step(
+                ctx, parent_node, next_dispatch, instruction,
+                pattern, available, matched_prefix)
+            next_dispatch = next_dispatch + 1
+        } else {
+            scanning = false
+        }
+    }
+    require_pattern_bindings_materialized(pattern, available)
+    let physical_bindings = available.filter(fn(slot) {
+        !slot_ref_same(slot, scrutinee)
+    }).map(fn(slot) { h_pattern_binding_for_slot(ctx, slot) })
+    let candidate = terminator_for_node_role(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH, next_dispatch, 0)
+    if flow_terminator_successors(candidate).len() != 1 {
+        panic("RcHIR bridge: pattern candidate Goto relation differs")
+    }
+    append_all(matched_prefix, before_terminator_drops(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH, next_dispatch))
+    append_all(matched_prefix, edge_cleanup_statements(
+        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH, next_dispatch, 0))
+    next_dispatch = next_dispatch + 1
+
+    let mut guard_true_cleanup: List<HStmt> = []
+    let mut guard_false_cleanup: List<HStmt> = []
     let guard = match core_match_arm_guard(arm) {
-        some(value) => some(serialize_guard_expr(
-            ctx, owner, value, parent_node, dispatch_ordinal + 1)),
+        some(value) => {
+            let branch = terminator_for_node_role(
+                ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+                next_dispatch, 1)
+            let guard_node = ctx.next_node_ordinal
+            let serialized = serialize_guard_expr(
+                ctx, owner, value, parent_node, next_dispatch)
+            if !slot_ref_same(
+                    flow_branch_condition(branch),
+                    node_anchor(ctx, guard_node)) ||
+               flow_terminator_successors(branch).len() != 2 {
+                panic("RcHIR bridge: pattern guard Branch relation differs")
+            }
+            guard_true_cleanup = edge_cleanup_statements(
+                ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+                next_dispatch, 0)
+            guard_false_cleanup = edge_cleanup_statements(
+                ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
+                next_dispatch, 1)
+            next_dispatch = next_dispatch + 1
+            some(serialized)
+        },
         none => none
-    }
-    let mut prefix = entry_prefix
-    append_all(prefix, edge_cleanup_statements(
-        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
-        dispatch_ordinal, 0))
-    if guard.is_some() {
-        append_all(prefix, edge_cleanup_statements(
-            ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
-            dispatch_ordinal + 1, 0))
-    }
-    require_no_edge_cleanup(
-        ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
-        dispatch_ordinal, 1, "pattern-unmatched edge")
-    if dispatch_ordinal != 0 && before_terminator_drops(
-            ctx, parent_node, BRIDGE_ROLE_CONTROL_DISPATCH,
-            dispatch_ordinal).len() != 0 {
-        panic("RcHIR bridge: later pattern test has resource drops")
     }
     let mut suffix = before_terminator_drops(
         ctx, parent_node, BRIDGE_ROLE_CONTROL_EXIT, arm_ordinal)
     append_all(suffix, edge_cleanup_statements(
         ctx, parent_node, BRIDGE_ROLE_CONTROL_EXIT, arm_ordinal, 0))
-    HMatchArm {
+    let serialized_arm = HMatchArm {
         pattern: serialize_pattern(ctx, pattern),
         pattern_plan: some(serialize_pattern_plan(ctx.projection, pattern)),
         bindings: {
@@ -3520,8 +3759,16 @@ fn serialize_match_arm(
         body: serialize_core_block(
             ctx, owner, core_match_arm_body(arm),
             result_type, effects, some(parent_node), arm_ordinal,
-            prefix, suffix),
+            [], suffix),
         span: span_zero()
+    }
+    SerializedPatternArm {
+        arm: serialized_arm,
+        physical: make_h_pattern_physical_arm_plan(
+            physical_bindings,
+            test_prefix, matched_prefix, pattern_false_cleanup,
+            guard_true_cleanup, guard_false_cleanup),
+        next_dispatch: next_dispatch
     }
 }
 
@@ -3792,30 +4039,49 @@ fn serialize_structured_core_expr(
         }
     }
     if kind == 14 {
-        let scrutinee = serialize_terminator_operand(
-            ctx, owner, core_expr_scrutinee(expr), node_ordinal, 0,
-            BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+        let scrutinee_ref = serialize_child_reference(
+            ctx, owner, core_expr_scrutinee(expr))
+        let scrutinee = SerializedOperand {
+            prefix: scrutinee_ref.prefix,
+            value: wrap_terminator_operand(
+                ctx, node_ordinal, 0, scrutinee_ref.slot,
+                BRIDGE_ROLE_CONTROL_DISPATCH, 0)
+        }
         let arms = core_expr_match_arms(expr)
         let mut serialized_arms: List<HMatchArm> = []
+        let mut physical_arms: List<HPatternPhysicalArmPlan> = []
+        let mut dispatch_cursor = 0
         let mut index = 0
         for arm in arms {
-            serialized_arms.push(serialize_match_arm(
-                ctx, owner, arm, node_ordinal, index, index * 2,
-                ty, effects, []))
+            let serialized = serialize_match_arm(
+                ctx, owner, arm, node_ordinal, scrutinee_ref.slot,
+                index, dispatch_cursor, ty, effects)
+            serialized_arms.push(serialized.arm)
+            physical_arms.push(serialized.physical)
+            dispatch_cursor = serialized.next_dispatch
             index = index + 1
         }
+        require_pattern_dispatch_complete(
+            ctx, node_ordinal, dispatch_cursor)
         let mut prefix = scrutinee.prefix
-        append_all(prefix, before_terminator_drops(
-            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 0)
-        )
-        require_no_edge_cleanup(
+        let unmatched = terminator_for_node_role(
             ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT,
-            arms.len(), 0, "final unmatched edge")
+            arms.len(), 8)
+        if flow_terminator_successors(unmatched).len() != 0 {
+            panic("RcHIR bridge: Match final unmatched is not terminal")
+        }
+        let mut unmatched_cleanup = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, arms.len())
+        append_all(unmatched_cleanup, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, arms.len(), 0))
         return SerializedExpr {
             node_ordinal: node_ordinal, prefix: prefix,
             value: HExpr::MatchExpr {
                 scrutinee: scrutinee.value,
                 arms: serialized_arms,
+                physical: some(make_h_pattern_physical_plan(
+                    h_pattern_binding_for_slot(ctx, scrutinee_ref.slot),
+                    physical_arms, unmatched_cleanup)),
                 ty: ty, effects: effects, span: span_zero()
             },
             after: []
@@ -3838,21 +4104,44 @@ fn serialize_structured_core_expr(
         if arms.len() == 0 {
             panic("RcHIR bridge: TryCatch has no exact catch arms")
         }
+        let first_pattern = terminator_for_node_role(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_DISPATCH, 1, 10)
+        let caught_payload = flow_pattern_branch_scrutinee(first_pattern)
         let mut serialized_arms: List<HMatchArm> = []
+        let mut physical_arms: List<HPatternPhysicalArmPlan> = []
+        let mut dispatch_cursor = 1
         let mut index = 0
         for arm in arms {
-            serialized_arms.push(serialize_match_arm(
-                ctx, owner, arm, node_ordinal,
-                index + 1, 1 + index * 2, ty, effects,
-                []))
+            let serialized = serialize_match_arm(
+                ctx, owner, arm, node_ordinal, caught_payload,
+                index + 1, dispatch_cursor, ty, effects)
+            serialized_arms.push(serialized.arm)
+            physical_arms.push(serialized.physical)
+            dispatch_cursor = serialized.next_dispatch
             index = index + 1
         }
+        require_pattern_dispatch_complete(
+            ctx, node_ordinal, dispatch_cursor)
+        let unmatched = terminator_for_node_role(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT,
+            1 + arms.len(), 8)
+        if flow_terminator_successors(unmatched).len() != 0 {
+            panic("RcHIR bridge: Catch final unmatched is not terminal")
+        }
+        let mut unmatched_cleanup = before_terminator_drops(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT, 1 + arms.len())
+        append_all(unmatched_cleanup, edge_cleanup_statements(
+            ctx, node_ordinal, BRIDGE_ROLE_CONTROL_EXIT,
+            1 + arms.len(), 0))
         return SerializedExpr {
             node_ordinal: node_ordinal, prefix: prefix,
             value: HExpr::TryCatch {
                 body: protected, arms: serialized_arms,
                 error_type: legacy_type_for(
                     ctx.projection, core_expr_error_type(expr)),
+                physical: some(make_h_pattern_physical_plan(
+                    h_pattern_binding_for_slot(ctx, caught_payload),
+                    physical_arms, unmatched_cleanup)),
                 ty: ty, effects: effects, span: span_zero()
             },
             after: []

@@ -895,6 +895,27 @@ pub fn c_semantic_value_slot(
     ctx.value_slots_by_slot_key.get(slot_ref_stable_key(slot))
 }
 
+pub fn c_bind_semantic_value_slot(
+    mut ctx: CCtx, slot: SlotRef, exact: CExactSlotRef
+) {
+    let key = slot_ref_stable_key(slot)
+    match ctx.value_slots_by_slot_key.get(key) {
+        some(existing) => if existing.c_name != exact.c_name ||
+                existing.def_id != exact.def_id {
+            panic("C codegen: semantic SlotRef changed exact storage")
+        },
+        none => { ctx.value_slots_by_slot_key.insert(key, exact) }
+    }
+}
+
+pub fn c_local_semantic_def_slot(
+    mut ctx: CCtx, slot: SlotRef, name: Str, def_id: Int
+) -> CExactSlotRef {
+    let exact = c_local_def_ref(ctx, name, some(def_id))
+    c_bind_semantic_value_slot(ctx, slot, exact)
+    exact
+}
+
 pub fn c_semantic_value_slot_key(
     ctx: CCtx, key: Str
 ) -> CExactSlotRef? {

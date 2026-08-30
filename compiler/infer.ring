@@ -3490,7 +3490,9 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
         apply_subst(s, result_type)
     } else { NEVER }
     InferResult {
-        hexpr: HExpr::MatchExpr { scrutinee: scrut_r.hexpr, arms: harms, ty: final_type, effects: effects, span: span },
+        hexpr: HExpr::MatchExpr {
+            scrutinee: scrut_r.hexpr, arms: harms, physical: none,
+            ty: final_type, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -3793,6 +3795,15 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
         }
     }
 
+    // A closed body with no fail atom cannot reach any catch arm. The arms
+    // above are still fully checked for diagnostics, but no error payload type
+    // exists to freeze. Elide the dead catch before TypedHIR publication.
+    if !found_fail && !has_open_tail {
+        return InferResult {
+            hexpr: expr_r.hexpr, subst: s, effects: expr_r.effects
+        }
+    }
+
     // Check exhaustiveness of catch arms against the error type
     let error_type_resolved = apply_subst(s, error_type)
     let missing = check_exhaustive(ctx.env, harms, error_type_resolved, s)
@@ -3817,7 +3828,8 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
     InferResult {
         hexpr: HExpr::TryCatch {
             body: expr_r.hexpr, error_type: error_type_resolved,
-            arms: harms, ty: final_type, effects: effects, span: span },
+            arms: harms, physical: none,
+            ty: final_type, effects: effects, span: span },
         subst: s, effects: effects
     }
 }

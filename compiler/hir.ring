@@ -351,6 +351,7 @@ pub struct HNominalStructFieldInit {
 pub enum HFieldAccessKind {
     NominalField { owner_ref: RegisteredNominalRef,
                    field_ref: NominalFieldRef, field_index: Int },
+    VariantField { field_ref: VariantFieldRef, field_index: Int },
     RecordField,
     TupleField,
     Method,
@@ -365,6 +366,87 @@ pub struct HMatchArm {
     pub body: HExpr,
     pub span: Span
 }
+
+// Verified Core/Flow/Rc pattern control is materialized only by the RcHIR
+// bridge. TypedHIR carries `none`; the bridge supplies one exact plan whose
+// statement lists are consumed mechanically by physical codegen.
+pub struct HPatternPhysicalArmPlan {
+    bindings: List<HPatternBinding>,
+    test_prefix: List<HStmt>,
+    matched_prefix: List<HStmt>,
+    pattern_false_cleanup: List<HStmt>,
+    guard_true_cleanup: List<HStmt>,
+    guard_false_cleanup: List<HStmt>
+}
+
+pub struct HPatternPhysicalPlan {
+    scrutinee_binding: HPatternBinding,
+    arms: List<HPatternPhysicalArmPlan>,
+    unmatched_cleanup: List<HStmt>
+}
+
+fn copy_h_stmts(values: List<HStmt>) -> List<HStmt> {
+    values.map(fn(value) { value })
+}
+
+pub fn make_h_pattern_physical_arm_plan(
+    bindings: List<HPatternBinding>,
+    test_prefix: List<HStmt>, matched_prefix: List<HStmt>,
+    pattern_false_cleanup: List<HStmt>,
+    guard_true_cleanup: List<HStmt>, guard_false_cleanup: List<HStmt>
+) -> HPatternPhysicalArmPlan {
+    HPatternPhysicalArmPlan {
+        bindings: bindings.map(fn(value) { value }),
+        test_prefix: copy_h_stmts(test_prefix),
+        matched_prefix: copy_h_stmts(matched_prefix),
+        pattern_false_cleanup: copy_h_stmts(pattern_false_cleanup),
+        guard_true_cleanup: copy_h_stmts(guard_true_cleanup),
+        guard_false_cleanup: copy_h_stmts(guard_false_cleanup)
+    }
+}
+
+pub fn make_h_pattern_physical_plan(
+    scrutinee_binding: HPatternBinding,
+    arms: List<HPatternPhysicalArmPlan>,
+    unmatched_cleanup: List<HStmt>
+) -> HPatternPhysicalPlan {
+    if arms.len() == 0 {
+        panic("HIR pattern physical plan: arm census is empty")
+    }
+    HPatternPhysicalPlan {
+        scrutinee_binding: scrutinee_binding,
+        arms: arms.map(fn(value) { value }),
+        unmatched_cleanup: copy_h_stmts(unmatched_cleanup)
+    }
+}
+
+pub fn h_pattern_physical_scrutinee_binding(
+    value: HPatternPhysicalPlan
+) -> HPatternBinding { value.scrutinee_binding }
+pub fn h_pattern_physical_arms(
+    value: HPatternPhysicalPlan
+) -> List<HPatternPhysicalArmPlan> { value.arms.map(fn(item) { item }) }
+pub fn h_pattern_physical_unmatched_cleanup(
+    value: HPatternPhysicalPlan
+) -> List<HStmt> { copy_h_stmts(value.unmatched_cleanup) }
+pub fn h_pattern_arm_test_prefix(
+    value: HPatternPhysicalArmPlan
+) -> List<HStmt> { copy_h_stmts(value.test_prefix) }
+pub fn h_pattern_arm_bindings(
+    value: HPatternPhysicalArmPlan
+) -> List<HPatternBinding> { value.bindings.map(fn(item) { item }) }
+pub fn h_pattern_arm_matched_prefix(
+    value: HPatternPhysicalArmPlan
+) -> List<HStmt> { copy_h_stmts(value.matched_prefix) }
+pub fn h_pattern_arm_pattern_false_cleanup(
+    value: HPatternPhysicalArmPlan
+) -> List<HStmt> { copy_h_stmts(value.pattern_false_cleanup) }
+pub fn h_pattern_arm_guard_true_cleanup(
+    value: HPatternPhysicalArmPlan
+) -> List<HStmt> { copy_h_stmts(value.guard_true_cleanup) }
+pub fn h_pattern_arm_guard_false_cleanup(
+    value: HPatternPhysicalArmPlan
+) -> List<HStmt> { copy_h_stmts(value.guard_false_cleanup) }
 
 pub struct HEffectHandler {
     pub effect_name: Str,
@@ -537,13 +619,15 @@ pub enum HExpr {
                             fields: List<HStructFieldInit>, spread: HExpr?,
                             constructor: HConstructorPlan?, ty: Type,
                             effects: EffectRow, span: Span },
-    MatchExpr { scrutinee: HExpr, arms: List<HMatchArm>, ty: Type, effects: EffectRow, span: Span },
+    MatchExpr { scrutinee: HExpr, arms: List<HMatchArm>,
+                physical: HPatternPhysicalPlan?, ty: Type,
+                effects: EffectRow, span: Span },
     Block { stmts: List<HStmt>, tail: HExpr?, ty: Type, effects: EffectRow, span: Span },
     IfExpr { condition: HExpr, then_branch: HExpr, else_branch: HExpr?, ty: Type, effects: EffectRow, span: Span },
     StringInterp { parts: List<HStringInterpPart>, plan: HStringInterpPlan?,
                    ty: Type, effects: EffectRow, span: Span },
     TryCatch { body: HExpr, error_type: Type,
-               arms: List<HMatchArm>, ty: Type,
+               arms: List<HMatchArm>, physical: HPatternPhysicalPlan?, ty: Type,
                effects: EffectRow, span: Span },
     HandleExpr { body: HExpr, handlers: List<HEffectHandler>,
                  effect_ctx_install: TypedEffectCtxInstall?,
@@ -1278,6 +1362,23 @@ fn validate_hir_field_access_kind(
                     }
                 },
                 _ => panic("HIR identity: nominal field has non-struct receiver")
+            }
+        },
+        HFieldAccessKind::VariantField { field_ref, field_index } => {
+            if field_index != variant_field_ref_index(field_ref) {
+                panic("HIR identity: variant field index drifted")
+            }
+            match projection {
+                some(exact) => if h_projection_kind(exact) != 1 ||
+                        !variant_field_ref_same(
+                            h_projection_variant(exact), field_ref) {
+                    panic("HIR identity: variant projection drifted")
+                },
+                none => panic("HIR identity: variant projection is absent")
+            }
+            match hexpr_type(receiver) {
+                Type::EnumType { .. } => {},
+                _ => panic("HIR identity: variant field has non-enum receiver")
             }
         },
         HFieldAccessKind::RecordField => {

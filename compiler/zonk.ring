@@ -648,7 +648,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 ty: z_ty, effects: z_eff, span: z_span
             }
         },
-        HExpr::MatchExpr { scrutinee, arms, .. } =>
+        HExpr::MatchExpr { scrutinee, arms, physical, .. } =>
             HExpr::MatchExpr {
                 scrutinee: zonk_expr(ctx, scrutinee),
                 arms: arms.map(fn(a) {
@@ -666,7 +666,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                             ty: zonk_type(ctx, b.ty) } }),
                         guard: z_guard, body: zonk_expr(ctx, a.body),
                         span: a.span }
-                }),
+                }), physical: physical,
                 ty: z_ty, effects: z_eff, span: z_span
             },
         HExpr::Block { stmts, tail, .. } => {
@@ -703,7 +703,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 plan: plan,
                 ty: z_ty, effects: z_eff, span: z_span
             },
-        HExpr::TryCatch { body, error_type, arms, .. } =>
+        HExpr::TryCatch { body, error_type, arms, physical, .. } =>
             HExpr::TryCatch {
                 body: zonk_expr(ctx, body),
                 error_type: zonk_type(ctx, error_type),
@@ -724,7 +724,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                         body: zonk_expr(ctx, a.body),
                         span: a.span
                     }
-                }),
+                }), physical: physical,
                 ty: z_ty, effects: z_eff, span: z_span
             },
         HExpr::HandleExpr { body, handlers, effect_ctx_install, .. } =>
