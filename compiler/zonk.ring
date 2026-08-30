@@ -733,6 +733,8 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 handlers: handlers.map(fn(h) {
                     HEffectHandler {
                         effect_name: h.effect_name,
+                        declared_operation_count:
+                            h.declared_operation_count,
                         handled_instance: h.handled_instance.map(fn(instance) {
                             zonk_typed_handled_effect_instance(ctx, instance)
                         }),

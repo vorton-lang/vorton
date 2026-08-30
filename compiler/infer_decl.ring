@@ -1538,6 +1538,7 @@ fn finalize_effect_ctx_handler(
     }
     HEffectHandler {
         effect_name: handler.effect_name,
+        declared_operation_count: handler.declared_operation_count,
         handled_instance: handler.handled_instance,
         operation_ref: handler.operation_ref,
         fail_ref: handler.fail_ref,

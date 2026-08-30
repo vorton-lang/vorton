@@ -1208,6 +1208,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 let h_body = anf_block_expr(h.body, externs, counter)
                 new_handlers.push(HEffectHandler {
                     effect_name: h.effect_name,
+                    declared_operation_count: h.declared_operation_count,
                     handled_instance: h.handled_instance,
                     operation_ref: h.operation_ref,
                     fail_ref: h.fail_ref,
@@ -2928,6 +2929,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 let h_body = rc_block_root(h.body, true, [], boxed, externs, drop_types, gensym, 0 - 1)
                 new_handlers.push(HEffectHandler {
                     effect_name: h.effect_name,
+                    declared_operation_count: h.declared_operation_count,
                     handled_instance: h.handled_instance,
                     operation_ref: h.operation_ref,
                     fail_ref: h.fail_ref,

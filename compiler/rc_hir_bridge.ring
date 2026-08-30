@@ -213,6 +213,7 @@ use core_expr::{
     core_callee_effect_instantiation,
     core_evidence_dict,
     core_handler_installation_token,
+    core_handler_installation_declared_operation_count,
     core_handler_installation_operations,
     core_handler_operation_ref, core_handler_operation_executable,
     core_handler_operation_parameter_slots,
@@ -2634,7 +2635,7 @@ fn serialize_callable_body(
 
 fn serialize_handler(
     mut ctx: HirBridgeCtx, handler: CoreHandlerOperation,
-    token: CoreEffectCtxTokenRef,
+    token: CoreEffectCtxTokenRef, declared_operation_count: Int,
     node_ordinal: Int, dispatch_ordinal: Int
 ) -> HEffectHandler {
     let operation = core_handler_operation_ref(handler)
@@ -2684,6 +2685,7 @@ fn serialize_handler(
         result
     })
     HEffectHandler {
+        declared_operation_count: declared_operation_count,
         handled_instance: some(typed_effect_ctx_instance(
             ctx.projection, token)),
         operation_ref: some(operation),
@@ -4294,6 +4296,8 @@ fn serialize_structured_core_expr(
                 for operation in core_handler_installation_operations(entry) {
                     handlers.push(serialize_handler(
                         ctx, operation, token,
+                        core_handler_installation_declared_operation_count(
+                            entry),
                         node_ordinal, dispatch_ordinal))
                     dispatch_ordinal = dispatch_ordinal + 1
                 }

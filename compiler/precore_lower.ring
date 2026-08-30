@@ -33,7 +33,7 @@ use ir_inventory::{
     executable_ref_anonymous_path, executable_ref_origin_module_key,
     system_host_callable_effect, system_host_callable_executable,
     binder_entry_slot,
-    effect_operation_ref_effect,
+    effect_operation_ref_effect, effect_operation_ref_source_index,
     dict_ref_same
 }
 use env::{TypeEnv}
@@ -1197,19 +1197,24 @@ fn close_handlers(values: List<HEffectHandler>) -> List<HEffectHandler> {
             (some(instance), some(operation_ref), none) => {
                 if !handled_effect_ref_same(
                         typed_handled_effect_instance_reference(instance),
-                        effect_operation_ref_effect(operation_ref)) {
+                        effect_operation_ref_effect(operation_ref)) ||
+                   handler.declared_operation_count <= 0 ||
+                   effect_operation_ref_source_index(operation_ref) >=
+                        handler.declared_operation_count {
                     panic("PreCore closure: handler operation/effect differs")
                 }
             },
             (none, none, some(fail_ref)) => if
                 h_fail_operation_tag(fail_ref) != 0 ||
-                handler.params.len() != 1 {
+                handler.params.len() != 1 ||
+                handler.declared_operation_count != 0 {
                 panic("PreCore closure: invalid dedicated fail handler")
             },
             _ => panic("PreCore closure: handler exact identity is ambiguous")
         }
         result.push(HEffectHandler {
             effect_name: handler.effect_name,
+            declared_operation_count: handler.declared_operation_count,
             handled_instance: handler.handled_instance,
             operation_ref: handler.operation_ref,
             fail_ref: handler.fail_ref,

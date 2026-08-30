@@ -123,6 +123,8 @@ use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
     path_ref_normalized_child_path, path_role_same,
     variant_ref_member}
 use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
+    EffectOperationRef, effect_operation_ref_same,
+    effect_operation_ref_source_index,
     ExactDictRef, dict_ref_is_local, dict_ref_is_wrapped,
     dict_ref_local, dict_ref_wrapped_inner,
     make_named_executable_ref, make_system_host_callable_ref,
@@ -131,6 +133,7 @@ use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
 use effect_contract::{typed_effect_header_schema_bindings,
     empty_typed_effect_header_schema,
     make_typed_handled_effect_instance, typed_handled_effect_instance_same,
+    typed_handled_effect_instance_reference,
     make_empty_effect_ctx_source}
 
 fn exact_ident_variant_constructor_target(
@@ -3838,7 +3841,238 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
 // infer_handle
 // ============================================================
 
+fn exact_handler_operation(
+    effect_def: EffectDef, operation_name: Str
+) -> EffectOperationRef? {
+    match effect_def.ops.find(fn(operation) {
+            operation.name == operation_name
+        }) {
+        some(operation) => match operation.operation_ref {
+            some(reference) => some(reference),
+            none => if effect_def.handled_ref.is_some() {
+                panic("handler census: custom operation lacks exact identity")
+            } else { none }
+        },
+        none => none
+    }
+}
+
+fn validate_complete_custom_handler_census(
+    mut ctx: InferCtx, handlers: List<EffectHandler>
+) {
+    let mut valid = true
+    let mut handler_index = 0
+    while handler_index < handlers.len() {
+        let handler = handlers.get(handler_index).unwrap()
+        match ctx.env.types.effects.get(handler.effect_name) {
+            none => {
+                let display = nominal_display_name(handler.effect_name)
+                let _ = type_error(ctx.sink, E0402,
+                    "Effect '${display}' cannot be handled",
+                    handler.span, DiagnosticContext::OtherContext {
+                        detail: some("handler names an undeclared effect")
+                    })
+                valid = false
+            },
+            some(effect_def) => {
+                let is_abort = effect_def.name == "fail" &&
+                    handler.op_name == "raise"
+                if !is_abort {
+                    match effect_def.handled_ref {
+                        none => {
+                            let display = nominal_display_name(effect_def.name)
+                            let _ = type_error(ctx.sink, E0402,
+                                "Effect '${display}' is not a handled custom effect",
+                                handler.span, DiagnosticContext::OtherContext {
+                                    detail: some(
+                                        "system, mutation, and unsafe effects cannot be handled")
+                                })
+                            valid = false
+                        },
+                        some(effect_ref) => match exact_handler_operation(
+                                effect_def, handler.op_name) {
+                            none => {
+                                let display = nominal_display_name(effect_def.name)
+                                let _ = type_error(ctx.sink, E0402,
+                                    "Operation '${handler.op_name}' is not declared by handled effect '${display}'",
+                                    handler.span,
+                                    DiagnosticContext::OtherContext {
+                                        detail: some(
+                                            "handler operation has an unknown or cross-owner source identity")
+                                    })
+                                valid = false
+                            },
+                            some(operation) => {
+                                let mut prior = 0
+                                while prior < handler_index {
+                                    let earlier = handlers.get(prior).unwrap()
+                                    match ctx.env.types.effects.get(
+                                            earlier.effect_name) {
+                                        some(earlier_def) => match (
+                                                earlier_def.handled_ref,
+                                                exact_handler_operation(
+                                                    earlier_def,
+                                                    earlier.op_name)) {
+                                            (some(earlier_ref), some(earlier_op)) =>
+                                                if handled_effect_ref_same(
+                                                        earlier_ref, effect_ref) &&
+                                                   effect_operation_ref_same(
+                                                        earlier_op, operation) {
+                                                    let display = nominal_display_name(
+                                                        effect_def.name)
+                                                    let _ = type_error(
+                                                        ctx.sink, E0402,
+                                                        "Duplicate handler arm for effect operation '${display}.${handler.op_name}'",
+                                                        handler.span,
+                                                        DiagnosticContext::OtherContext {
+                                                            detail: some(
+                                                                "each declared operation requires exactly one arm")
+                                                        })
+                                                    valid = false
+                                                },
+                                            _ => {}
+                                        },
+                                        none => {}
+                                    }
+                                    prior = prior + 1
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        handler_index = handler_index + 1
+    }
+
+    let mut group_index = 0
+    while group_index < handlers.len() {
+        let first = handlers.get(group_index).unwrap()
+        match ctx.env.types.effects.get(first.effect_name) {
+            some(effect_def) => match effect_def.handled_ref {
+                some(effect_ref) => {
+                    let mut prior_group = false
+                    let mut prior = 0
+                    while prior < group_index {
+                        let earlier = handlers.get(prior).unwrap()
+                        match ctx.env.types.effects.get(earlier.effect_name) {
+                            some(earlier_def) => match earlier_def.handled_ref {
+                                some(earlier_ref) => if handled_effect_ref_same(
+                                        earlier_ref, effect_ref) {
+                                    prior_group = true
+                                },
+                                none => {}
+                            },
+                            none => {}
+                        }
+                        prior = prior + 1
+                    }
+                    if !prior_group {
+                        let mut missing: List<Str> = []
+                        for operation in effect_def.ops {
+                            let expected = match operation.operation_ref {
+                                some(reference) => reference,
+                                none => panic(
+                                    "handler census: custom operation lacks exact identity")
+                            }
+                            let mut count = 0
+                            for candidate in handlers {
+                                match ctx.env.types.effects.get(
+                                        candidate.effect_name) {
+                                    some(candidate_def) => match (
+                                            candidate_def.handled_ref,
+                                            exact_handler_operation(
+                                                candidate_def,
+                                                candidate.op_name)) {
+                                        (some(candidate_ref), some(candidate_op)) =>
+                                            if handled_effect_ref_same(
+                                                    candidate_ref, effect_ref) &&
+                                               effect_operation_ref_same(
+                                                    candidate_op, expected) {
+                                                count = count + 1
+                                            },
+                                        _ => {}
+                                    },
+                                    none => {}
+                                }
+                            }
+                            if count == 0 { missing.push(operation.name) }
+                        }
+                        if missing.len() != 0 {
+                            let display = nominal_display_name(effect_def.name)
+                            let _ = type_error(ctx.sink, E0402,
+                                "Incomplete handler for effect '${display}': missing operation(s) ${missing.join(", ")}",
+                                first.span, DiagnosticContext::OtherContext {
+                                    detail: some(
+                                        "a handled custom effect requires every declared operation exactly once")
+                                })
+                            valid = false
+                        }
+                    }
+                },
+                none => {}
+            },
+            none => {}
+        }
+        group_index = group_index + 1
+    }
+    if !valid { fail.raise(CompileError {}) }
+}
+
+fn canonical_complete_handlers(
+    values: List<HEffectHandler>
+) -> List<HEffectHandler> {
+    let mut result: List<HEffectHandler> = []
+    let mut emitted: List<HandledEffectRef> = []
+    for handler in values {
+        match handler.handled_instance {
+            none => result.push(handler),
+            some(instance) => if !emitted.any(fn(existing) {
+                    handled_effect_ref_same(
+                        existing,
+                        typed_handled_effect_instance_reference(instance))
+                }) {
+                let reference =
+                    typed_handled_effect_instance_reference(instance)
+                let expected = handler.declared_operation_count
+                if expected <= 0 {
+                    panic("handler census: custom operation count is invalid")
+                }
+                let mut ordinal = 0
+                while ordinal < expected {
+                    let mut found: HEffectHandler? = none
+                    for candidate in values {
+                        match (candidate.handled_instance,
+                               candidate.operation_ref) {
+                            (some(candidate_instance), some(operation)) =>
+                                if handled_effect_ref_same(
+                                        typed_handled_effect_instance_reference(
+                                            candidate_instance), reference) &&
+                                   effect_operation_ref_source_index(operation) ==
+                                        ordinal {
+                                    if candidate.declared_operation_count !=
+                                           expected || found.is_some() {
+                                        panic("handler census: canonical operation repeats")
+                                    }
+                                    found = some(candidate)
+                                },
+                            _ => {}
+                        }
+                    }
+                    result.push(found.unwrap_or_else(fn() {
+                        panic("handler census: canonical operation is absent")
+                    }))
+                    ordinal = ordinal + 1
+                }
+                emitted.push(reference)
+            }
+        }
+    }
+    result
+}
+
 fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, span: Span, subst: UnionFind) -> InferResult {
+    validate_complete_custom_handler_census(ctx, handlers)
     let mut installed_requirements: List<HandledEffectRef> = []
     for handler in handlers {
         match ctx.env.types.effects.get(handler.effect_name) {
@@ -3894,7 +4128,9 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
     // One runtime evidence value backs every operation arm for a canonical
     // effect in this handle. Share its type arguments even when the body is
     // pure or contains only an unknown open tail.
-    let mut handler_inst_type_args_by_effect: Map<Str, List<Type>> = map_new()
+    let mut handler_inst_type_args_by_effect:
+        List<(HandledEffectRef, List<Type>)> = []
+    let mut dedicated_handler_inst_type_args: Map<Str, List<Type>> = map_new()
 
     for handler in handlers {
         let handler_executable = fresh_child_executable(
@@ -3966,24 +4202,54 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 body_fail_types_extracted = true
             }
 
-            // Instantiate effect type params once per canonical effect for this
-            // handle. Every operation arm rebuilds its declaration-variable map
-            // from the shared instance.
+            // Instantiate type params once per exact custom effect for this
+            // handle. Dedicated fail retains its existing builtin-key path.
+            // Every operation arm rebuilds its declaration-variable map from
+            // the shared instance.
             let mut handler_inst_map: Map<Int, Type> = map_new()
             let mut handler_inst_type_args: List<Type> = []
             match effect_def {
                 some(ed) => {
-                    match handler_inst_type_args_by_effect.get(canonical_effect_name) {
-                        some(shared_type_args) => {
-                            handler_inst_type_args = shared_type_args
-                        },
-                        none => {
-                            for _tpv in ed.type_param_vars {
-                                handler_inst_type_args.push(ctx.env.fresh_var())
+                    match handler_handled_ref {
+                        some(reference) => {
+                            let mut shared: List<Type>? = none
+                            for entry in handler_inst_type_args_by_effect {
+                                if handled_effect_ref_same(
+                                        entry.0, reference) {
+                                    if shared.is_some() {
+                                        panic("handler census: exact instance repeats")
+                                    }
+                                    shared = some(entry.1)
+                                }
                             }
-                            handler_inst_type_args_by_effect.insert(
-                                canonical_effect_name, handler_inst_type_args
-                            )
+                            match shared {
+                                some(shared_type_args) => {
+                                    handler_inst_type_args = shared_type_args
+                                },
+                                none => {
+                                    for _tpv in ed.type_param_vars {
+                                        handler_inst_type_args.push(
+                                            ctx.env.fresh_var())
+                                    }
+                                    handler_inst_type_args_by_effect.push(
+                                        (reference, handler_inst_type_args))
+                                }
+                            }
+                        },
+                        none => match dedicated_handler_inst_type_args.get(
+                                canonical_effect_name) {
+                            some(shared_type_args) => {
+                                handler_inst_type_args = shared_type_args
+                            },
+                            none => {
+                                for _tpv in ed.type_param_vars {
+                                    handler_inst_type_args.push(
+                                        ctx.env.fresh_var())
+                                }
+                                dedicated_handler_inst_type_args.insert(
+                                    canonical_effect_name,
+                                    handler_inst_type_args)
+                            }
                         }
                     }
                     let mut shared_type_arg_index = 0
@@ -4281,6 +4547,14 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 handler_executable, handler_captures)
             hhandlers.push(HEffectHandler {
                 effect_name: canonical_effect_name,
+                declared_operation_count: match handler_handled_ref {
+                    some(_) => match effect_def {
+                        some(definition) => definition.ops.len(),
+                        none => panic(
+                            "handler census: custom effect definition is absent")
+                    },
+                    none => 0
+                },
                 handled_instance: handler_handled_ref.map(fn(reference) {
                     make_typed_handled_effect_instance(
                         reference, handler_inst_type_args.map(fn(ty) {
@@ -4324,6 +4598,8 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
             none => fail.raise(CompileError {})
         }
     }
+
+    hhandlers = canonical_complete_handlers(hhandlers)
 
     let resolved_effects = apply_subst_row(s, effects)
     let mut filtered_effects: List<Effect> = []

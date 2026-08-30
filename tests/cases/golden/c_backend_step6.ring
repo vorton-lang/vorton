@@ -7,7 +7,7 @@
 // multi-arm ctor dispatch + nested literal sub-patterns + guards (#246),
 // deep-recursion raise (setjmp/longjmp across frames), return inside a
 // handle body (#173 cleanup), default evidence with sibling op calls
-// (B-097), and handler override of a default op (B-161).
+// (B-097), and a complete table replacing defaulted operations (B-161).
 // Runs on BOTH backends — differential-oracle coverage for step 6.
 
 effect Calc {
@@ -144,11 +144,12 @@ fn main() {
     // --- default evidence: sibling op through the default struct (B-097) ---
     print("default: ${use_counter()}")         // 1
 
-    // --- handler overrides get; increment's default body must see it (B-161) ---
+    // --- a complete Counter table may replace both declared operations ---
     let ov = handle {
         use_counter()
     } with {
         Counter.get() => 10,
+        Counter.increment() => 11,
     }
     print("override: ${ov}")                   // 11
 }

@@ -4606,11 +4606,22 @@ fn lower_effect_ctx_install(
                 ctx.types, instance, ctx.module_key)
         }) {
         let mut operations: List<CoreHandlerOperation> = []
+        let mut declared_operation_count: Int? = none
         for handler in handlers {
             match handler.handled_instance {
                 some(instance) => if core_effect_ctx_token_same(
                         core_effect_ctx_token_from_typed(
                             ctx.types, instance, ctx.module_key), token) {
+                    match declared_operation_count {
+                        some(expected) => if expected !=
+                                handler.declared_operation_count {
+                            panic("Core assembly: handler operation census differs")
+                        },
+                        none => {
+                            declared_operation_count = some(
+                                handler.declared_operation_count)
+                        }
+                    }
                     operations.push(lower_handler_operation(ctx, handler))
                 },
                 none => panic(
@@ -4625,6 +4636,9 @@ fn lower_effect_ctx_install(
         })
         result.push(make_core_handler_installation(
             token,
+            declared_operation_count.unwrap_or_else(fn() {
+                panic("Core assembly: handler operation census is absent")
+            }),
             operations, fresh_origin(ctx, "installation", source_span)))
     }
     some(make_core_effect_ctx_install(parent, child, result))

@@ -462,6 +462,7 @@ pub fn h_pattern_arm_guard_false_cleanup(
 
 pub struct HEffectHandler {
     pub effect_name: Str,
+    pub declared_operation_count: Int,
     pub handled_instance: TypedHandledEffectInstance?,
     pub operation_ref: EffectOperationRef?,
     pub fail_ref: HFailOperationRef?,
@@ -1526,6 +1527,59 @@ fn validate_callable_effect_instantiation(
     }
 }
 
+fn validate_complete_handler_groups(values: List<HEffectHandler>) {
+    let mut seen: List<HandledEffectRef> = []
+    let mut index = 0
+    while index < values.len() {
+        let first = values.get(index).unwrap()
+        match first.handled_instance {
+            none => {
+                if first.declared_operation_count != 0 {
+                    panic("HIR effect handler: dedicated handler has custom census")
+                }
+                index = index + 1
+            },
+            some(instance) => {
+                let reference =
+                    typed_handled_effect_instance_reference(instance)
+                if seen.any(fn(existing) {
+                        handled_effect_ref_same(existing, reference)
+                    }) || first.declared_operation_count <= 0 {
+                    panic("HIR effect handler: custom census group repeats")
+                }
+                let expected = first.declared_operation_count
+                let mut ordinal = 0
+                while ordinal < expected {
+                    let handler = values.get(index + ordinal).unwrap_or_else(
+                        fn() {
+                            panic("HIR effect handler: custom census is incomplete")
+                        })
+                    match (handler.handled_instance, handler.operation_ref,
+                           handler.fail_ref) {
+                        (some(candidate), some(operation), none) => {
+                            if handler.declared_operation_count != expected ||
+                               !typed_handled_effect_instance_same(
+                                    candidate, instance) ||
+                               !handled_effect_ref_same(
+                                    effect_operation_ref_effect(operation),
+                                    reference) ||
+                               effect_operation_ref_source_index(operation) !=
+                                    ordinal {
+                                panic("HIR effect handler: owner/count/ordinal differs")
+                            }
+                        },
+                        _ => panic(
+                            "HIR effect handler: custom census identity differs")
+                    }
+                    ordinal = ordinal + 1
+                }
+                seen.push(reference)
+                index = index + expected
+            }
+        }
+    }
+}
+
 fn validate_hir_expr(
     expr: HExpr, mut seen: Set<Int>, mut scope: HirValidationScope
 ) {
@@ -1787,6 +1841,7 @@ fn validate_hir_expr(
         },
         HExpr::HandleExpr { body, handlers, effect_ctx_install, .. } => {
             validate_hir_expr(body, seen, scope)
+            validate_complete_handler_groups(handlers)
             let mut installed_instances: List<TypedHandledEffectInstance> = []
             for handler in handlers {
                 if executable_ref_is_named(handler.executable_ref) {

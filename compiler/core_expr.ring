@@ -1635,6 +1635,7 @@ pub struct CoreHandlerOperation {
 
 pub struct CoreHandlerInstallation {
     token: CoreEffectCtxTokenRef,
+    declared_operation_count: Int,
     operations: List<CoreHandlerOperation>,
     origin: OriginRef
 }
@@ -1681,11 +1682,10 @@ fn copy_handler_installations(
 ) -> List<CoreHandlerInstallation> {
     let mut result: List<CoreHandlerInstallation> = []
     for value in values {
-        result.push(CoreHandlerInstallation {
-            token: make_core_effect_ctx_token_ref(value.token.instance),
-            operations: copy_handler_operations(value.operations),
-            origin: value.origin
-        })
+        result.push(make_core_handler_installation(
+            make_core_effect_ctx_token_ref(value.token.instance),
+            value.declared_operation_count,
+            value.operations, value.origin))
     }
     result
 }
@@ -1938,12 +1938,13 @@ pub fn make_core_handler_operation(
         origin: origin
     }
 }
-pub fn make_core_handler_installation(
-    token: CoreEffectCtxTokenRef,
-    operations: List<CoreHandlerOperation>, origin: OriginRef
-) -> CoreHandlerInstallation {
-    if operations.len() == 0 {
-        panic("CoreHIR: handled effect installation has no operations")
+fn validate_core_handler_installation(
+    token: CoreEffectCtxTokenRef, declared_operation_count: Int,
+    operations: List<CoreHandlerOperation>
+) {
+    if declared_operation_count <= 0 ||
+       operations.len() != declared_operation_count {
+        panic("CoreHIR: handled effect operation census differs")
     }
     let requirement = core_effect_atom_handled_ref(token.instance)
     let mut index = 0
@@ -1966,8 +1967,15 @@ pub fn make_core_handler_installation(
         }
         index = index + 1
     }
+}
+pub fn make_core_handler_installation(
+    token: CoreEffectCtxTokenRef, declared_operation_count: Int,
+    operations: List<CoreHandlerOperation>, origin: OriginRef
+) -> CoreHandlerInstallation {
+    validate_core_handler_installation(
+        token, declared_operation_count, operations)
     CoreHandlerInstallation {
-        token: token,
+        token: token, declared_operation_count: declared_operation_count,
         operations: copy_handler_operations(operations), origin: origin
     }
 }
@@ -2540,6 +2548,9 @@ pub fn core_handler_operation_origin(
 pub fn core_handler_installation_token(
     value: CoreHandlerInstallation
 ) -> CoreEffectCtxTokenRef { value.token }
+pub fn core_handler_installation_declared_operation_count(
+    value: CoreHandlerInstallation
+) -> Int { value.declared_operation_count }
 pub fn core_handler_installation_operations(
     value: CoreHandlerInstallation
 ) -> List<CoreHandlerOperation> {
@@ -4343,9 +4354,10 @@ fn remap_core_expr_types(
                     CoreEffectCtxInstall {
                         parent: install.parent, child: install.child,
                         entries: install.entries.map(fn(entry) {
-                          CoreHandlerInstallation {
-                            token: remap_effect_ctx_token(entry.token, ctx),
-                            operations: entry.operations.map(fn(operation) {
+                          make_core_handler_installation(
+                            remap_effect_ctx_token(entry.token, ctx),
+                            entry.declared_operation_count,
+                            entry.operations.map(fn(operation) {
                             CoreHandlerOperation {
                                 operation: operation.operation,
                                 executable: operation.executable,
@@ -4357,8 +4369,7 @@ fn remap_core_expr_types(
                                 origin: operation.origin
                             }
                         }),
-                            origin: entry.origin
-                          }
+                            entry.origin)
                         })
                     }
                 })
@@ -5886,6 +5897,9 @@ fn validate_expr_with_program(
             match installation {
                 some(context) => {
                     for entry in context.entries {
+                        validate_core_handler_installation(
+                            entry.token, entry.declared_operation_count,
+                            entry.operations)
                         for operation in entry.operations {
                             let operation_callable = effect_operation_ref_callable(
                                 operation.operation)

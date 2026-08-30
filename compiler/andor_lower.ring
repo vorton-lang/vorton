@@ -302,6 +302,7 @@ fn al_expr(e: HExpr) -> HExpr {
             let mut new_handlers: List<HEffectHandler> = []
             for h in handlers {
                 new_handlers.push(HEffectHandler { effect_name: h.effect_name,
+                    declared_operation_count: h.declared_operation_count,
                     handled_instance: h.handled_instance,
                     operation_ref: h.operation_ref,
                     fail_ref: h.fail_ref,

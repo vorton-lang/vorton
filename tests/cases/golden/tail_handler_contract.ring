@@ -1,7 +1,7 @@
 // Audit #258 tail-row rules under R1 dynamic handled evidence. Ordinary
 // closures borrow exact evidence at each call and never capture creation-site
-// handlers. A handler removes only an explicit matching label from its body
-// row; an unknown callback tail remains open and propagates to the outer scope.
+// handlers. A complete custom-effect table removes the whole exact effect from
+// its body row; an unknown callback tail remains open and propagates outward.
 // Tail-resumptive arms are internal runtime objects: they may retain explicit
 // outer evidence so a same-effect re-perform escapes the current handler.
 
@@ -31,6 +31,7 @@ fn direct_io_handler() -> Int with {console} {
             print("io-arm:${seed}")
             seed + 1
         },
+        Probe.bottom() => 0,
     }
 }
 
@@ -95,6 +96,7 @@ fn closed_pure_handler() -> Int {
         40
     } with {
         Probe.value(seed) => seed,
+        Probe.bottom() => 0,
     }
 }
 
@@ -103,6 +105,7 @@ fn bottom_handler() -> Int {
         handle {
             Probe.bottom()
         } with {
+            Probe.value(seed) => seed,
             Probe.bottom() => fail.raise("tail-bottom"),
         }
     } with {
