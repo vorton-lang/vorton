@@ -1,4 +1,6 @@
 E0207
 builtin type 'StringBuilder' is already defined
 StringBuilder is a reserved 0.1 builtin type
+E0201
+Undefined variable: Built
 !internal compiler error

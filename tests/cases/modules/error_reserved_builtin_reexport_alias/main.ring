@@ -1,3 +1,5 @@
-pub use source::{UserSet as Set}
+use facade::{Inserted}
 
-fn main() {}
+fn main() {
+    let _ = Inserted
+}

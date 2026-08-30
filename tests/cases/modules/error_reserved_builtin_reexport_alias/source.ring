@@ -1,3 +1,3 @@
-pub struct UserSet {
-    value: Int,
+pub enum UserSet {
+    Inserted,
 }

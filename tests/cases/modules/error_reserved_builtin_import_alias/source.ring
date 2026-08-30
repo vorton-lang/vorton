@@ -1,3 +1,3 @@
-pub struct UserBuilder {
-    value: Int,
+pub enum UserBuilder {
+    Built,
 }

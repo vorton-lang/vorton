@@ -3337,6 +3337,9 @@ fn deliver_namespace_fact(
                         ImportSelection::Named => obligation.local_name,
                         ImportSelection::Wildcard => fact.exposed_name
                     }
+                    let reserved_type_alias =
+                        namespace_is_reserved_0_1_type(
+                            fact.namespace, local_name)
                     add_namespace_fact(ResolvedNamespaceBinding {
                         file_key: obligation.file_key,
                         frame_index: obligation.target_frame_index,
@@ -3357,6 +3360,7 @@ fn deliver_namespace_fact(
                     publication_bindings, publication_occurrences,
                     binding_indices, queue, import_ledger,
                     ambiguous_keys, issues)
+                    if reserved_type_alias { continue }
 
                     // Named enum aliases import constructor leaves explicitly.
                     // This is distinct from source closure: the target owner
