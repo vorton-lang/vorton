@@ -2923,7 +2923,7 @@ fn validate_callee(value: CoreCalleeRef, body: CoreBody) {
 fn validate_constructor_fields(
     constructor: CoreConstructorRef, fields: List<CoreFieldValue>,
     body: CoreBody, loop_depth: Int
-) {
+) with {} {
     let mut index = 0
     while index < fields.len() {
         let field = fields.get(index).unwrap()
@@ -2985,7 +2985,7 @@ fn validate_constructor_fields(
 
 fn validate_expr_with_loop_depth(
     value: CoreExpr, body: CoreBody, loop_depth: Int
-) {
+) with {} {
     if core_type_ref_index(value.ty) < 0 {
         panic("CoreHIR: expression has an invalid type")
     }
@@ -3158,7 +3158,7 @@ fn validate_expr(value: CoreExpr, body: CoreBody) {
 
 fn validate_match_arm(
     value: CoreMatchArm, body: CoreBody, loop_depth: Int
-) {
+) with {} {
     validate_origin(value.origin, body.reference)
     let _ = validate_pattern(value.pattern, body.binders, [])
     match value.guard {
@@ -3181,7 +3181,9 @@ fn validate_destructure_pattern_shape(value: CorePattern) {
     }
 }
 
-fn validate_statement(value: CoreStmt, body: CoreBody, loop_depth: Int) {
+fn validate_statement(
+    value: CoreStmt, body: CoreBody, loop_depth: Int
+) with {} {
     match value.value {
         CoreStmtValue::Bind { target, value: expr, origin, .. } => {
             validate_origin(origin, body.reference)
@@ -3243,7 +3245,7 @@ fn validate_statement(value: CoreStmt, body: CoreBody, loop_depth: Int) {
 
 fn validate_block_with_loop_depth(
     value: CoreBlock, body: CoreBody, loop_depth: Int
-) {
+) with {} {
     validate_origin(value.origin, body.reference)
     for statement in value.statements {
         validate_statement(statement, body, loop_depth)
