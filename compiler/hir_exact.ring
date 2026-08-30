@@ -37,6 +37,9 @@ use env::{RegisteredTraitContract,
     registered_trait_contract_assoc_items,
     registered_trait_contract_dict_obligations,
     registered_trait_method_ref, registered_trait_assoc_member}
+use core_type_source::{FlowGenericParamFact,
+    flow_generic_param_owner, flow_generic_param_index,
+    flow_generic_param_arity, flow_generic_param_bounds}
 
 // B-104 D4 (#151): dict evidence is FIRST-CLASS in HIR.  Three reference forms:
 //   Simple(name)  — a SCOPE reference: a dict PARAM (`__ring_T_Eq`, from
@@ -1054,12 +1057,49 @@ pub fn h_delegate_dict_evidence(value: HDelegateTypedPlan) -> List<DictRef> {
     value.dict_evidence.map(fn(item) { item })
 }
 
+pub struct HDefaultDictConstruction {
+    dictionary: DictRef,
+    result: ExactDictRef,
+    result_name: Str
+}
+
+pub fn make_h_default_dict_construction(
+    dictionary: DictRef, result: ExactDictRef, result_name: Str
+) -> HDefaultDictConstruction {
+    if !dict_ref_is_wrapped(dict_ref_exact(dictionary)) ||
+       !dict_ref_is_local(result) ||
+       !slot_ref_is_source(dict_ref_local(result)) ||
+       result_name == "" ||
+       !slot_domain_same(
+            slot_ref_source_domain(dict_ref_local(result)),
+            slot_domain_dictionary()) {
+        panic("default specialization: dictionary construction differs")
+    }
+    HDefaultDictConstruction {
+        dictionary: dictionary, result: result,
+        result_name: result_name
+    }
+}
+pub fn h_default_dict_construction_dictionary(
+    value: HDefaultDictConstruction
+) -> DictRef { value.dictionary }
+pub fn h_default_dict_construction_result(
+    value: HDefaultDictConstruction
+) -> ExactDictRef { value.result }
+pub fn h_default_dict_construction_result_name(
+    value: HDefaultDictConstruction
+) -> Str { value.result_name }
+
 pub struct HDefaultSpecializationPlan {
     owner: ImplOwnerRef,
     generated_method: ImplMethodRef,
     generated_executable: ExecutableRef,
     source_method: TraitMethodRef,
     default_executable: ExecutableRef,
+    source_bound_traits: List<SymbolRef>,
+    generated_type_var_ids: List<Int>,
+    generated_type_formals: List<FlowGenericParamFact>,
+    dictionary_constructions: List<HDefaultDictConstruction>,
     parameter_types: List<Type>,
     parameter_mutabilities: List<Bool>,
     binders: List<BinderEntry>,
@@ -1073,6 +1113,10 @@ pub fn make_h_default_specialization_plan(
     owner: ImplOwnerRef, generated_method: ImplMethodRef,
     generated_executable: ExecutableRef,
     source_method: TraitMethodRef, default_executable: ExecutableRef,
+    source_bound_traits: List<SymbolRef>,
+    generated_type_var_ids: List<Int>,
+    generated_type_formals: List<FlowGenericParamFact>,
+    dictionary_constructions: List<HDefaultDictConstruction>,
     parameter_types: List<Type>, parameter_mutabilities: List<Bool>,
     binders: List<BinderEntry>,
     result_type: Type, effects: EffectRow,
@@ -1089,6 +1133,12 @@ pub fn make_h_default_specialization_plan(
        !symbol_ref_same(
             executable_ref_named_symbol(default_executable),
             trait_method_ref_member(source_method)) ||
+       source_bound_traits.len() == 0 ||
+       source_bound_traits.len() != forward_call.evidence.len() ||
+       !symbol_ref_same(
+            source_bound_traits.get(0).unwrap(),
+            trait_method_ref_trait(source_method)) ||
+       generated_type_var_ids.len() != generated_type_formals.len() ||
        parameter_types.len() != parameter_mutabilities.len() ||
        parameter_types.len() != binders.len() ||
        !symbol_ref_same(
@@ -1098,11 +1148,122 @@ pub fn make_h_default_specialization_plan(
             })) {
         panic("default specialization: exact owner/method relation differs")
     }
+    let generated_owner = executable_ref_named_symbol(generated_executable)
+    let mut generated_index = 0
+    while generated_index < generated_type_formals.len() {
+        let formal = generated_type_formals.get(generated_index).unwrap()
+        if generated_type_var_ids.get(generated_index).unwrap() < 0 ||
+           !symbol_ref_same(
+                flow_generic_param_owner(formal), generated_owner) ||
+           flow_generic_param_index(formal) != generated_index ||
+           flow_generic_param_arity(formal) !=
+                generated_type_formals.len() ||
+           flow_generic_param_bounds(formal).len() != 0 {
+            panic("default specialization: generated formal differs")
+        }
+        generated_index = generated_index + 1
+    }
+    let trait_owner = trait_method_ref_trait(source_method)
+    let member_owner = trait_method_ref_member(source_method)
+    let mut group_is_member = false
+    let mut group_arity = 0
+    let mut next_ordinal = 0
+    for index in 0..forward_call.type_args.len() {
+        let actual = forward_call.type_args.get(index).unwrap()
+        let is_trait = symbol_ref_same(actual.owner, trait_owner)
+        let is_member = symbol_ref_same(actual.owner, member_owner)
+        if (!is_trait && !is_member) || (is_trait && group_is_member) {
+            panic("default specialization: type actual owner order differs")
+        }
+        if index == 0 || (is_member && !group_is_member) {
+            if index > 0 && next_ordinal != group_arity {
+                panic("default specialization: type actual group is partial")
+            }
+            group_is_member = is_member
+            group_arity = actual.arity
+            next_ordinal = 0
+        }
+        if actual.arity != group_arity ||
+           actual.ordinal != next_ordinal {
+            panic("default specialization: owner-local type actual differs")
+        }
+        next_ordinal = next_ordinal + 1
+    }
+    if forward_call.type_args.len() == 0 ||
+       next_ordinal != group_arity {
+        panic("default specialization: ordered type actual receipt differs")
+    }
+    for evidence in forward_call.evidence {
+        if !dict_ref_is_simple_physical(evidence) &&
+           !dict_ref_is_static_physical(evidence) {
+            panic("default specialization: forward evidence is not materialized")
+        }
+    }
+    let mut method_actual_index = 0
+    for actual in forward_call.type_args {
+        if symbol_ref_same(actual.owner, member_owner) {
+            let actual_id = match actual.actual {
+                Type::TypeVar { id, .. } => id,
+                _ => panic(
+                    "default specialization: method actual is not a formal")
+            }
+            if generated_type_var_ids.get(method_actual_index).unwrap_or_else(
+                    fn() {
+                        panic("default specialization: generated formal is absent")
+                    }) != actual_id {
+                panic("default specialization: generated formal actual differs")
+            }
+            method_actual_index = method_actual_index + 1
+        }
+    }
+    if method_actual_index != generated_type_var_ids.len() {
+        panic("default specialization: generated formal receipt differs")
+    }
+    let mut bound_index = 0
+    while bound_index < source_bound_traits.len() {
+        let bound = source_bound_traits.get(bound_index).unwrap()
+        let mut prior = 0
+        while prior < bound_index {
+            if symbol_ref_same(
+                    source_bound_traits.get(prior).unwrap(), bound) {
+                panic("default specialization: source bound repeats")
+            }
+            prior = prior + 1
+        }
+        bound_index = bound_index + 1
+    }
+    let mut construction_index = 0
+    while construction_index < dictionary_constructions.len() {
+        let result = h_default_dict_construction_result(
+            dictionary_constructions.get(construction_index).unwrap())
+        let mut prior = 0
+        while prior < construction_index {
+            if dict_ref_same(
+                    result,
+                    h_default_dict_construction_result(
+                        dictionary_constructions.get(prior).unwrap())) ||
+               h_default_dict_construction_result_name(
+                    dictionary_constructions.get(construction_index).unwrap()) ==
+               h_default_dict_construction_result_name(
+                    dictionary_constructions.get(prior).unwrap()) {
+                panic("default specialization: dictionary result repeats")
+            }
+            prior = prior + 1
+        }
+        construction_index = construction_index + 1
+    }
     HDefaultSpecializationPlan {
         owner: owner, generated_method: generated_method,
         generated_executable: generated_executable,
         source_method: source_method,
         default_executable: default_executable,
+        source_bound_traits: source_bound_traits.map(fn(item) { item }),
+        generated_type_var_ids:
+            generated_type_var_ids.map(fn(item) { item }),
+        generated_type_formals:
+            generated_type_formals.map(fn(item) { item }),
+        dictionary_constructions:
+            dictionary_constructions.map(fn(item) { item }),
         parameter_types: parameter_types.map(fn(value) { value }),
         parameter_mutabilities:
             parameter_mutabilities.map(fn(value) { value }),
@@ -1128,6 +1289,22 @@ pub fn h_default_specialization_source_method(
 pub fn h_default_specialization_default_executable(
     value: HDefaultSpecializationPlan
 ) -> ExecutableRef { value.default_executable }
+pub fn h_default_specialization_source_bound_traits(
+    value: HDefaultSpecializationPlan
+) -> List<SymbolRef> { value.source_bound_traits.map(fn(item) { item }) }
+pub fn h_default_specialization_generated_type_var_ids(
+    value: HDefaultSpecializationPlan
+) -> List<Int> { value.generated_type_var_ids.map(fn(item) { item }) }
+pub fn h_default_specialization_generated_type_formals(
+    value: HDefaultSpecializationPlan
+) -> List<FlowGenericParamFact> {
+    value.generated_type_formals.map(fn(item) { item })
+}
+pub fn h_default_specialization_dictionary_constructions(
+    value: HDefaultSpecializationPlan
+) -> List<HDefaultDictConstruction> {
+    value.dictionary_constructions.map(fn(item) { item })
+}
 pub fn h_default_specialization_parameter_types(
     value: HDefaultSpecializationPlan
 ) -> List<Type> { value.parameter_types.map(fn(item) { item }) }

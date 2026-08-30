@@ -4,6 +4,7 @@
 // and no downstream consumer may replay resolver/type/effect selection.
 
 use types::{Type, EffectRow, types_equal, effects_equal, type_to_string}
+use ast::{TypeParam, span_zero}
 use env::{
     TypeEnv, registered_trait_contract_methods,
     registered_trait_method_ref, registered_trait_method_signature
@@ -18,6 +19,12 @@ use hir::{
     DerivedImpl, DerivedMethod, DerivedField, TypeKind,
     h_default_specialization_generated_method,
     h_default_specialization_generated_executable,
+    h_default_specialization_generated_type_var_ids,
+    h_default_specialization_generated_type_formals,
+    h_default_specialization_dictionary_constructions,
+    h_default_dict_construction_dictionary,
+    h_default_dict_construction_result,
+    h_default_dict_construction_result_name,
     h_default_specialization_parameter_types,
     h_default_specialization_parameter_mutabilities,
     h_default_specialization_binders,
@@ -56,6 +63,7 @@ use ir_identity::{
 }
 use ir_inventory::{
     ExecutableRef, ExecutableKind, EffectOperationRef, dict_ref_same,
+    dict_ref_is_local, dict_ref_local,
     make_named_executable_ref, make_exact_wrapped_dict_ref,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_anonymous_path, executable_ref_same,
@@ -90,6 +98,7 @@ use typed_effect_freeze::{
 }
 use core_type_source::{
     CoreTypeSourceFact, CoreEffectCtxTypeSource,
+    flow_generic_param_bounds,
     core_type_source_type, core_type_source_fact,
     core_effect_ctx_source_aggregate_fact
 }
@@ -930,12 +939,51 @@ fn add_default_specialization_facts(
 ) {
     for value in values {
         let method = h_default_specialization_generated_method(value)
+        for construction in
+                h_default_specialization_dictionary_constructions(value) {
+            let result = h_default_dict_construction_result(construction)
+            if !dict_ref_is_local(result) {
+                panic("Core/legacy freeze: default dictionary result is not local")
+            }
+            let slot = dict_ref_local(result)
+            let def_id = slot_ref_source_def_id(slot)
+            let _ = add_binder_fact(
+                builder, slot,
+                h_default_dict_construction_result_name(construction), def_id,
+                Type::TupleType { elements: [] }, false)
+            add_dictionary_fact(
+                builder,
+                h_default_dict_construction_dictionary(construction))
+        }
+        let generated_ids =
+            h_default_specialization_generated_type_var_ids(value)
+        let generated_formals =
+            h_default_specialization_generated_type_formals(value)
+        if generated_ids.len() != generated_formals.len() {
+            panic("Core/legacy freeze: default formal census differs")
+        }
+        let mut generated_type_params: List<HTypeParam> = []
+        let mut formal_index = 0
+        while formal_index < generated_ids.len() {
+            generated_type_params.push(HTypeParam {
+                source: TypeParam {
+                    name: "__default_type_${formal_index}",
+                    bounds: [], span: span_zero()
+                },
+                type_var_id: generated_ids.get(formal_index).unwrap(),
+                bound_refs: flow_generic_param_bounds(
+                    generated_formals.get(formal_index).unwrap())
+            })
+            formal_index = formal_index + 1
+        }
         add_generated_callable_fact(
             builder,
             h_default_specialization_generated_executable(value),
             method,
             executable_kind_default_specialization(),
-            type_params, trait_bounds_from_type_parameters(type_params),
+            merge_callable_type_parameters(
+                type_params, generated_type_params),
+            trait_bounds_from_type_parameters(type_params),
             h_default_specialization_binders(value),
             h_default_specialization_parameter_types(value),
             h_default_specialization_parameter_mutabilities(value),
@@ -1127,9 +1175,7 @@ fn scan_decls(
                     module_container, type_params, trait_bounds, params,
                     return_type, effects, false, is_pub, none, some(name))
             },
-            HDecl::Trait { name, type_params, methods, .. } => {
-                let callable_type_params = merge_callable_type_parameters(
-                    inherited_type_params, type_params)
+            HDecl::Trait { name, methods, .. } => {
                 for method in methods {
                     if method.body.is_none() &&
                        method.trait_bounds.len() != 0 {
@@ -1140,7 +1186,7 @@ fn scan_decls(
                         if method.body.is_some() {
                             executable_kind_trait_default()
                         } else { executable_kind_bodyless_trait_member() },
-                        module_container, callable_type_params,
+                        module_container, method.type_params,
                         method.trait_bounds, method.params,
                         method.return_type, method.effects,
                         method.body.is_some(), false,
@@ -1148,7 +1194,7 @@ fn scan_decls(
                     match method.body {
                         some(body) => scan_expr(
                             builder, method.executable_ref, body,
-                            callable_type_params, method.trait_bounds),
+                            method.type_params, method.trait_bounds),
                         none => {}
                     }
                 }

@@ -53,6 +53,10 @@ use effect_contract::{EffectParamRef, effect_param_ref_same,
     typed_effect_ctx_lookup_instance,
     typed_effect_ctx_install_parent,
     typed_effect_ctx_install_entries}
+use core_type_source::{FlowGenericParamFact,
+    flow_generic_param_owner, flow_generic_param_index,
+    flow_generic_param_arity, flow_generic_param_bounds,
+    flow_generic_param_fact_same}
 
 pub use hir_exact::{
     DictRef, MethodCallRef, make_intrinsic_method_call_ref, method_call_ref_intrinsic,
@@ -98,12 +102,20 @@ pub use hir_exact::{
     h_delegate_trait, h_delegate_source_member_index, h_delegate_methods,
     h_delegate_assoc_bindings, h_delegate_dict_evidence,
     HPatternPlan, HPatternFieldPlan,
+    HDefaultDictConstruction, make_h_default_dict_construction,
+    h_default_dict_construction_dictionary,
+    h_default_dict_construction_result,
+    h_default_dict_construction_result_name,
     HDefaultSpecializationPlan, make_h_default_specialization_plan,
     h_default_specialization_owner,
     h_default_specialization_generated_method,
     h_default_specialization_generated_executable,
     h_default_specialization_source_method,
     h_default_specialization_default_executable,
+    h_default_specialization_source_bound_traits,
+    h_default_specialization_generated_type_var_ids,
+    h_default_specialization_generated_type_formals,
+    h_default_specialization_dictionary_constructions,
     h_default_specialization_parameter_types,
     h_default_specialization_parameter_mutabilities,
     h_default_specialization_binders,
@@ -741,6 +753,8 @@ pub struct HEffectOp {
 pub struct HTraitMethod {
     pub name: Str,
     pub method_ref: TraitMethodRef,
+    pub type_params: List<HTypeParam>,
+    pub type_formals: List<FlowGenericParamFact>,
     pub params: List<HParam>,
     pub return_type: Type,
     pub effects: EffectRow,
@@ -2203,6 +2217,69 @@ fn validate_effect_ctx_lookup_expr(
     }
 }
 
+fn validate_trait_method_type_formals(method: HTraitMethod) {
+    if method.type_params.len() != method.type_formals.len() ||
+       method.type_formals.len() == 0 {
+        panic("HIR identity: trait method formal census differs")
+    }
+    let trait_owner = trait_method_ref_trait(method.method_ref)
+    let member_owner = trait_method_ref_member(method.method_ref)
+    let mut in_member_group = false
+    let mut group_arity = 0
+    let mut next_ordinal = 0
+    for index in 0..method.type_formals.len() {
+        let parameter = method.type_params.get(index).unwrap()
+        let formal = method.type_formals.get(index).unwrap()
+        let owner = flow_generic_param_owner(formal)
+        let is_trait = symbol_ref_same(owner, trait_owner)
+        let is_member = symbol_ref_same(owner, member_owner)
+        if !is_trait && !is_member {
+            panic("HIR identity: trait method formal owner differs")
+        }
+        if is_trait && in_member_group {
+            panic("HIR identity: trait formal follows method formal")
+        }
+        if index == 0 || (is_member && !in_member_group) {
+            if index > 0 && next_ordinal != group_arity {
+                panic("HIR identity: trait method formal group is partial")
+            }
+            in_member_group = is_member
+            group_arity = flow_generic_param_arity(formal)
+            next_ordinal = 0
+        }
+        if flow_generic_param_arity(formal) != group_arity ||
+           flow_generic_param_index(formal) != next_ordinal ||
+           parameter.type_var_id < 0 || parameter.source.name == "" {
+            panic("HIR identity: trait method owner-local formal order differs")
+        }
+        let bounds = flow_generic_param_bounds(formal)
+        if bounds.len() != parameter.bound_refs.len() {
+            panic("HIR identity: trait method formal bounds differ")
+        }
+        for bound_index in 0..bounds.len() {
+            if !symbol_ref_same(
+                    bounds.get(bound_index).unwrap(),
+                    parameter.bound_refs.get(bound_index).unwrap()) {
+                panic("HIR identity: trait method formal bound identity differs")
+            }
+        }
+        let mut prior = 0
+        while prior < index {
+            if method.type_params.get(prior).unwrap().type_var_id ==
+                    parameter.type_var_id ||
+               flow_generic_param_fact_same(
+                    method.type_formals.get(prior).unwrap(), formal) {
+                panic("HIR identity: trait method formal repeats")
+            }
+            prior = prior + 1
+        }
+        next_ordinal = next_ordinal + 1
+    }
+    if next_ordinal != group_arity {
+        panic("HIR identity: final trait method formal group is partial")
+    }
+}
+
 fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
     for decl in decls {
         match decl {
@@ -2364,6 +2441,7 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                             trait_method_ref_member(method.method_ref)) {
                         panic("HIR identity: trait method executable drifted")
                     }
+                    validate_trait_method_type_formals(method)
                     if method.has_default != method.body.is_some() {
                         panic("HIR identity: trait default/body relation drifted")
                     }

@@ -20,7 +20,7 @@ use ir_identity::{
     OriginRef,
     symbol_ref_same, symbol_ref_origin_module_key,
     symbol_ref_namespace_kind,
-    namespace_kind_same, namespace_effect, namespace_member,
+    namespace_kind_same, namespace_trait, namespace_effect, namespace_member,
     registered_nominal_ref_symbol, registered_nominal_ref_same,
     nominal_field_ref_same, nominal_field_ref_owner, nominal_field_ref_index,
     variant_ref_owner, variant_ref_same,
@@ -4568,13 +4568,18 @@ pub fn validate_core_callable_contracts(
                 flow_type_node_callable_effects(header), left.effects) {
             panic("CoreHIR: callable header result/effects differ")
         }
-        let owner = if left.type_formals.len() == 0 {
-            none
-        } else if executable_ref_is_named(left.reference) {
-            some(executable_ref_named_symbol(left.reference))
-        } else {
+        if left.type_formals.len() != 0 &&
+           !executable_ref_is_named(left.reference) {
             panic("CoreHIR: anonymous callable declares type formals")
         }
+        let callable_owner = if left.type_formals.len() == 0 {
+            none
+        } else { some(executable_ref_named_symbol(left.reference)) }
+        let mut group_owner: SymbolRef? = none
+        let mut group_arity = 0
+        let mut next_ordinal = 0
+        let mut closed_owners: List<SymbolRef> = []
+        let mut group_has_owner_bound: List<Bool> = []
         let mut formal_index = 0
         while formal_index < left.type_formals.len() {
             let node = core_type_graph_node(
@@ -4584,14 +4589,67 @@ pub fn validate_core_callable_contracts(
                 panic("CoreHIR: callable type formal is not a parameter node")
             }
             let fact = flow_type_node_generic_param(node)
-            if !symbol_ref_same(
-                    flow_generic_param_owner(fact), owner.unwrap()) ||
-               flow_generic_param_index(fact) != formal_index ||
-               flow_generic_param_arity(fact) != left.type_formals.len() {
-                panic("CoreHIR: callable type formal owner/order/arity differs")
+            let owner = flow_generic_param_owner(fact)
+            let same_group = match group_owner {
+                some(existing) => symbol_ref_same(existing, owner),
+                none => false
             }
-            let _ = flow_generic_param_bounds(fact)
+            if !same_group {
+                if group_owner.is_some() && next_ordinal != group_arity {
+                    panic("CoreHIR: callable type formal group is partial")
+                }
+                if closed_owners.any(fn(existing) {
+                        symbol_ref_same(existing, owner)
+                    }) || flow_generic_param_index(fact) != 0 {
+                    panic("CoreHIR: callable type formal group order differs")
+                }
+                closed_owners.push(owner)
+                group_has_owner_bound.push(false)
+                group_owner = some(owner)
+                group_arity = flow_generic_param_arity(fact)
+                next_ordinal = 0
+            }
+            if flow_generic_param_index(fact) != next_ordinal ||
+               flow_generic_param_arity(fact) != group_arity {
+                panic("CoreHIR: callable owner-local formal order differs")
+            }
+            let bounds = flow_generic_param_bounds(fact)
+            if bounds.len() != 0 && symbol_ref_same(
+                    bounds.get(0).unwrap(), owner) {
+                group_has_owner_bound.set(
+                    group_has_owner_bound.len() - 1, true)
+            }
+            next_ordinal = next_ordinal + 1
             formal_index = formal_index + 1
+        }
+        if group_owner.is_some() && next_ordinal != group_arity {
+            panic("CoreHIR: final callable type formal group is partial")
+        }
+        if closed_owners.len() == 1 {
+            let owner = closed_owners.get(0).unwrap()
+            if !symbol_ref_same(owner, callable_owner.unwrap()) &&
+               (!namespace_kind_same(
+                    symbol_ref_namespace_kind(owner), namespace_trait()) ||
+                !group_has_owner_bound.get(0).unwrap_or(false) ||
+                !namespace_kind_same(
+                    symbol_ref_namespace_kind(callable_owner.unwrap()),
+                    namespace_member())) {
+                panic("CoreHIR: callable type formal owner differs")
+            }
+        } else if closed_owners.len() == 2 {
+            let trait_owner = closed_owners.get(0).unwrap()
+            let member_owner = closed_owners.get(1).unwrap()
+            if !namespace_kind_same(
+                    symbol_ref_namespace_kind(trait_owner), namespace_trait()) ||
+               !group_has_owner_bound.get(0).unwrap_or(false) ||
+               !symbol_ref_same(member_owner, callable_owner.unwrap()) ||
+               !namespace_kind_same(
+                    symbol_ref_namespace_kind(member_owner),
+                    namespace_member()) {
+                panic("CoreHIR: trait callable formal owner groups differ")
+            }
+        } else if closed_owners.len() > 2 {
+            panic("CoreHIR: callable type formal owner group census differs")
         }
         let mut effect_formal_index = 0
         while effect_formal_index < left.effect_formals.len() {

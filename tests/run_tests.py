@@ -13766,9 +13766,11 @@ def ownership_cutover_source_errors() -> List[str]:
         errors.append(default_fields_error)
     elif default_fields is not None and [name for _, name in default_fields] != [
             "owner", "generated_method", "generated_executable",
-            "source_method", "default_executable", "parameter_types",
+            "source_method", "default_executable", "source_bound_traits",
+            "generated_type_var_ids", "generated_type_formals",
+            "dictionary_constructions", "parameter_types",
             "parameter_mutabilities", "binders", "result_type", "effects",
-            "forward_call"]:
+            "effect_ctx", "forward_call"]:
         errors.append("default specialization exact carrier drifted")
     if "trait_method.param_mutabilities, binders" not in sources["infer_decl"]:
         errors.append("default specialization lost registered mutabilities")

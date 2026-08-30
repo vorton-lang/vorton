@@ -17,7 +17,8 @@ use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     make_impl_owner_ref, impl_owner_ref_target, impl_owner_ref_provider,
     impl_owner_ref_trait, impl_owner_ref_same,
     impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
-    trait_method_ref_trait, trait_method_ref_source_member_index,
+    trait_method_ref_trait, trait_method_ref_member,
+    trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index, trait_method_ref_same,
     handled_effect_ref_same, origin_ref_same,
     symbol_ref_namespace_kind, namespace_kind_same,
@@ -50,6 +51,11 @@ use effect_contract::{
     effect_param_owner, effect_param_ref_same, make_typed_effect_formal_fact,
     typed_effect_formal_raw_tail, typed_effect_formal_parameter
 }
+use core_type_source::{FlowGenericParamFact,
+    make_flow_generic_param_fact,
+    flow_generic_param_owner, flow_generic_param_index,
+    flow_generic_param_arity, flow_generic_param_bounds,
+    flow_generic_param_fact_same}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -379,6 +385,137 @@ pub fn registered_trait_contract_dict_obligations(
     value: RegisteredTraitContract
 ) -> List<SymbolRef> { value.dict_obligations.map(fn(item) { item }) }
 
+// One source trait method has two owner-local generic groups in 0.1. Trait
+// parameters, Self, and associated types retain the exact trait owner;
+// method-declared parameters retain the exact member owner. The ordered list
+// is the single producer for HIR callable formals and specialization actuals.
+pub struct TraitMethodCallableFormal {
+    type_var_id: Int,
+    name: Str,
+    fact: FlowGenericParamFact
+}
+
+pub fn trait_method_callable_formal_type_var(
+    value: TraitMethodCallableFormal
+) -> Int { value.type_var_id }
+pub fn trait_method_callable_formal_name(
+    value: TraitMethodCallableFormal
+) -> Str { value.name }
+pub fn trait_method_callable_formal_fact(
+    value: TraitMethodCallableFormal
+) -> FlowGenericParamFact { value.fact }
+
+fn append_trait_method_callable_formal(
+    mut values: List<TraitMethodCallableFormal>, type_var_id: Int,
+    name: Str, owner: SymbolRef, ordinal: Int, arity: Int,
+    bounds: List<SymbolRef>
+) {
+    if type_var_id < 0 || name == "" {
+        panic("trait method formal: invalid raw identity")
+    }
+    for existing in values {
+        if existing.type_var_id == type_var_id {
+            panic("trait method formal: raw type variable repeats")
+        }
+    }
+    values.push(TraitMethodCallableFormal {
+        type_var_id: type_var_id, name: name,
+        fact: make_flow_generic_param_fact(
+            owner, ordinal, arity, bounds)
+    })
+}
+
+pub fn trait_method_callable_formals(
+    trait_def: TraitDef, method: TraitMethodDef
+) -> List<TraitMethodCallableFormal> {
+    let trait_owner = registered_trait_ref_symbol(trait_def.owner_ref)
+    if !symbol_ref_same(
+            trait_method_ref_trait(method.method_ref), trait_owner) ||
+       trait_def.type_params.len() != trait_def.type_param_vars.len() ||
+       trait_def.assoc_types.len() !=
+            registered_trait_contract_assoc_items(
+                trait_def.contract).len() {
+        panic("trait method formal: trait/method relation differs")
+    }
+    for parameter in method.method_type_params {
+        if parameter.bounds.len() != 0 {
+            panic("trait method formal: method bounds escaped 0.1")
+        }
+    }
+
+    let trait_arity = trait_def.type_param_vars.len() + 1 +
+        trait_def.assoc_types.len()
+    let mut result: List<TraitMethodCallableFormal> = []
+    let mut index = 0
+    while index < trait_def.type_param_vars.len() {
+        append_trait_method_callable_formal(
+            result, trait_def.type_param_vars.get(index).unwrap(),
+            trait_def.type_params.get(index).unwrap(),
+            trait_owner, index, trait_arity, [])
+        index = index + 1
+    }
+    let mut self_bounds: List<SymbolRef> = [trait_owner]
+    for obligation in registered_trait_contract_dict_obligations(
+            trait_def.contract) {
+        if !self_bounds.any(fn(existing) {
+                symbol_ref_same(existing, obligation)
+            }) {
+            self_bounds.push(obligation)
+        }
+    }
+    append_trait_method_callable_formal(
+        result, trait_def.self_type_var_id, "self", trait_owner,
+        trait_def.type_param_vars.len(), trait_arity, self_bounds)
+
+    let assoc_contracts = registered_trait_contract_assoc_items(
+        trait_def.contract)
+    let mut assoc_index = 0
+    while assoc_index < trait_def.assoc_types.len() {
+        let assoc = trait_def.assoc_types.get(assoc_index).unwrap()
+        let contract = assoc_contracts.get(assoc_index).unwrap()
+        let contract_id = match registered_trait_assoc_type(contract) {
+            Type::TypeVar { id, .. } => id,
+            _ => panic("trait method formal: associated contract is concrete")
+        }
+        if !symbol_ref_same(
+                assoc.member_ref,
+                registered_trait_assoc_member(contract)) ||
+           assoc.var_id != contract_id {
+            panic("trait method formal: associated type relation differs")
+        }
+        append_trait_method_callable_formal(
+            result, assoc.var_id, assoc.name, trait_owner,
+            trait_def.type_param_vars.len() + 1 + assoc_index,
+            trait_arity, registered_trait_assoc_bounds(contract))
+        assoc_index = assoc_index + 1
+    }
+
+    let inherited = result.map(fn(value) { value.type_var_id })
+    let mut all_ids: List<Int> = []
+    collect_ordered_type_var_ids(method.ty, all_ids)
+    let ordinary_ids = scheme_value_type_vars(TypeScheme {
+        ty: method.ty, type_vars: all_ids, bounds: [],
+        effect_schema: method.effect_schema, def_id: none
+    })
+    let mut method_ids = ordinary_ids.filter(fn(id) {
+        !inherited.contains(id)
+    })
+    method_ids.sort()
+    if method_ids.len() != method.method_type_params.len() {
+        panic("trait method formal: method type-parameter census differs")
+    }
+    let method_owner = trait_method_ref_member(method.method_ref)
+    let mut method_index = 0
+    while method_index < method_ids.len() {
+        append_trait_method_callable_formal(
+            result, method_ids.get(method_index).unwrap(),
+            method.method_type_params.get(method_index).unwrap().name,
+            method_owner, method_index, method_ids.len(), [])
+        method_index = method_index + 1
+    }
+    result
+}
+
 pub fn make_impl_assoc_predicate(name: Str, ty: Type) -> ImplAssocPredicate {
     if name == "" {
         panic("impl predicate: associated type name is empty")
@@ -618,23 +755,117 @@ pub fn frozen_impl_predicate_set_same(
 
 // Method schemes intentionally cannot carry impl-owner predicates.  Every
 // consumer resolves those predicates through the owning ImplEntry.
+pub struct ImplMethodSpecializationActual {
+    formal: FlowGenericParamFact,
+    actual: Type
+}
+
+pub fn make_impl_method_specialization_actual(
+    formal: FlowGenericParamFact, actual: Type
+) -> ImplMethodSpecializationActual {
+    ImplMethodSpecializationActual { formal: formal, actual: actual }
+}
+pub fn impl_method_specialization_actual_formal(
+    value: ImplMethodSpecializationActual
+) -> FlowGenericParamFact { value.formal }
+pub fn impl_method_specialization_actual_type(
+    value: ImplMethodSpecializationActual
+) -> Type { value.actual }
+
+fn copy_impl_method_specialization_actuals(
+    values: List<ImplMethodSpecializationActual>
+) -> List<ImplMethodSpecializationActual> {
+    values.map(fn(value) {
+        make_impl_method_specialization_actual(
+            make_flow_generic_param_fact(
+                flow_generic_param_owner(value.formal),
+                flow_generic_param_index(value.formal),
+                flow_generic_param_arity(value.formal),
+                flow_generic_param_bounds(value.formal)),
+            value.actual)
+    })
+}
+
+fn validate_impl_method_specialization_actuals(
+    values: List<ImplMethodSpecializationActual>
+) {
+    let mut group_owner: SymbolRef? = none
+    let mut group_arity = 0
+    let mut next_ordinal = 0
+    let mut closed_owners: List<SymbolRef> = []
+    for value in values {
+        let formal = value.formal
+        let owner = flow_generic_param_owner(formal)
+        let ordinal = flow_generic_param_index(formal)
+        let arity = flow_generic_param_arity(formal)
+        let same_group = match group_owner {
+            some(existing) => symbol_ref_same(existing, owner),
+            none => false
+        }
+        if !same_group {
+            if group_owner.is_some() && next_ordinal != group_arity {
+                panic("impl method specialization: formal group is partial")
+            }
+            if closed_owners.any(fn(existing) {
+                    symbol_ref_same(existing, owner)
+                }) || ordinal != 0 {
+                panic("impl method specialization: formal group order differs")
+            }
+            closed_owners.push(owner)
+            group_owner = some(owner)
+            group_arity = arity
+            next_ordinal = 0
+        }
+        if arity != group_arity || ordinal != next_ordinal {
+            panic("impl method specialization: owner-local ordinal differs")
+        }
+        next_ordinal = next_ordinal + 1
+    }
+    if group_owner.is_some() && next_ordinal != group_arity {
+        panic("impl method specialization: final formal group is partial")
+    }
+}
+
 pub struct ImplMethodSchemeCore {
     ty: Type,
     type_vars: List<Int>,
     effect_schema: TypedEffectHeaderSchema,
-    def_id: Int?
+    def_id: Int?,
+    specialization_actuals: List<ImplMethodSpecializationActual>
+}
+
+fn make_impl_method_scheme_core_with_actuals(
+    ty: Type, type_vars: List<Int>, effect_schema: TypedEffectHeaderSchema,
+    def_id: Int?, actuals: List<ImplMethodSpecializationActual>
+) -> ImplMethodSchemeCore {
+    validate_impl_method_specialization_actuals(actuals)
+    ImplMethodSchemeCore {
+        ty: ty, type_vars: list_clone(type_vars),
+        effect_schema: make_typed_effect_header_schema(
+            typed_effect_header_schema_bindings(effect_schema)),
+        def_id: def_id,
+        specialization_actuals:
+            copy_impl_method_specialization_actuals(actuals)
+    }
 }
 
 pub fn make_impl_method_scheme_core(
     ty: Type, type_vars: List<Int>, effect_schema: TypedEffectHeaderSchema,
     def_id: Int?
 ) -> ImplMethodSchemeCore {
-    ImplMethodSchemeCore {
-        ty: ty, type_vars: list_clone(type_vars),
-        effect_schema: make_typed_effect_header_schema(
-            typed_effect_header_schema_bindings(effect_schema)),
-        def_id: def_id
+    make_impl_method_scheme_core_with_actuals(
+        ty, type_vars, effect_schema, def_id, [])
+}
+
+pub fn make_specialized_impl_method_scheme_core(
+    ty: Type, type_vars: List<Int>, effect_schema: TypedEffectHeaderSchema,
+    def_id: Int?, actuals: List<ImplMethodSpecializationActual>
+) -> ImplMethodSchemeCore {
+    if actuals.len() == 0 {
+        panic("impl method specialization: ordered actual receipt is empty")
     }
+    make_impl_method_scheme_core_with_actuals(
+        ty, type_vars, effect_schema, def_id, actuals)
 }
 
 pub fn impl_method_core_from_scheme(scheme: TypeScheme) -> ImplMethodSchemeCore {
@@ -664,6 +895,12 @@ pub fn impl_method_core_def_id(value: ImplMethodSchemeCore) -> Int? {
     value.def_id
 }
 
+pub fn impl_method_core_specialization_actuals(
+    value: ImplMethodSchemeCore
+) -> List<ImplMethodSpecializationActual> {
+    copy_impl_method_specialization_actuals(value.specialization_actuals)
+}
+
 pub fn impl_method_core_as_scheme(value: ImplMethodSchemeCore) -> TypeScheme {
     TypeScheme {
         ty: value.ty, type_vars: list_clone(value.type_vars),
@@ -678,10 +915,20 @@ fn impl_method_core_same(
     if !types_equal(left.ty, right.ty) || left.type_vars.len() != right.type_vars.len() ||
        !typed_effect_header_schema_same(
             left.effect_schema, right.effect_schema) ||
-       left.def_id != right.def_id { return false }
+       left.def_id != right.def_id ||
+       left.specialization_actuals.len() !=
+            right.specialization_actuals.len() { return false }
     for index in 0..left.type_vars.len() {
         if left.type_vars.get(index).unwrap_or(-1) !=
            right.type_vars.get(index).unwrap_or(-1) { return false }
+    }
+    for index in 0..left.specialization_actuals.len() {
+        let a = left.specialization_actuals.get(index).unwrap()
+        let b = right.specialization_actuals.get(index).unwrap()
+        if !flow_generic_param_fact_same(a.formal, b.formal) ||
+           !types_equal(a.actual, b.actual) {
+            return false
+        }
     }
     true
 }
@@ -3543,12 +3790,19 @@ pub fn localize_imported_impl_entry(
             impl_method_core_effect_schema(core))
         fresh_mapping_for_ids(
             env, impl_method_core_type_vars(core), mapping)
-        method_schemes.insert(name, make_impl_method_scheme_core(
+        method_schemes.insert(name, make_impl_method_scheme_core_with_actuals(
             apply_subst_map(mapping, impl_method_core_type(core)),
             mapped_var_ids(mapping, impl_method_core_type_vars(core)),
             remap_effect_header_schema(
                 mapping, impl_method_core_effect_schema(core)),
-            impl_method_core_def_id(core)))
+            impl_method_core_def_id(core),
+            impl_method_core_specialization_actuals(core).map(fn(value) {
+                make_impl_method_specialization_actual(
+                    impl_method_specialization_actual_formal(value),
+                    apply_subst_map(
+                        mapping,
+                        impl_method_specialization_actual_type(value)))
+            })))
     }
     for entry in assoc_schemas.entries() {
         publish_effect_header_schema(env, entry.1)
@@ -3725,10 +3979,18 @@ pub fn specialize_trait_method_scheme(
     for id in remaining_ids {
         if !quantified.contains(id) { quantified.push(id) }
     }
-    make_impl_method_scheme_core(
+    let actuals = trait_method_callable_formals(
+        trait_def, method).map(fn(formal) {
+        make_impl_method_specialization_actual(
+            formal.fact,
+            apply_subst_map(mapping, Type::TypeVar {
+                id: formal.type_var_id, name: some(formal.name)
+            }))
+    })
+    make_specialized_impl_method_scheme_core(
         specialized_type, quantified,
         apply_effect_header_schema_subst(
-            mapping, method.effect_schema), none)
+            mapping, method.effect_schema), none, actuals)
 }
 
 // ============================================================

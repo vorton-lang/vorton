@@ -20,7 +20,12 @@ use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, Enu
     find_impl_by_provider,
     find_impls_by_provider,
     install_method_core, replace_impl_method_core,
-    make_impl_method_scheme_core, impl_method_core_as_scheme,
+    make_impl_method_scheme_core, make_specialized_impl_method_scheme_core,
+    make_impl_method_specialization_actual,
+    impl_method_specialization_actual_formal,
+    impl_method_specialization_actual_type,
+    impl_method_core_specialization_actuals,
+    impl_method_core_as_scheme,
     impl_method_core_type, impl_method_core_type_vars,
     impl_method_core_effect_schema,
     impl_method_core_def_id,
@@ -3127,6 +3132,19 @@ fn localize_generated_effect_schema(
     if source_bindings.len() != localized_bindings.len() {
         panic("generated effect schema: binding census changed")
     }
+    let tail_mapping: Map<Int, Type> = map_new()
+    let mut binding_index = 0
+    while binding_index < source_bindings.len() {
+        tail_mapping.insert(
+            typed_effect_header_binding_raw_tail(
+                source_bindings.get(binding_index).unwrap()),
+            Type::TypeVar {
+                id: typed_effect_header_binding_raw_tail(
+                    localized_bindings.get(binding_index).unwrap()),
+                name: none
+            })
+        binding_index = binding_index + 1
+    }
     let mut quantified: List<Int> = []
     for source_id in impl_method_core_type_vars(core) {
         let mut mapped = source_id
@@ -3142,9 +3160,23 @@ fn localize_generated_effect_schema(
         if !quantified.contains(mapped) { quantified.push(mapped) }
     }
     publish_effect_header_schema(ctx.env, localized.1)
-    make_impl_method_scheme_core(
-        localized.0.get(0).unwrap(), quantified, localized.1,
-        impl_method_core_def_id(core))
+    let actuals = impl_method_core_specialization_actuals(core).map(
+        fn(value) {
+            make_impl_method_specialization_actual(
+                impl_method_specialization_actual_formal(value),
+                apply_subst_map(
+                    tail_mapping,
+                    impl_method_specialization_actual_type(value)))
+        })
+    if actuals.len() == 0 {
+        make_impl_method_scheme_core(
+            localized.0.get(0).unwrap(), quantified, localized.1,
+            impl_method_core_def_id(core))
+    } else {
+        make_specialized_impl_method_scheme_core(
+            localized.0.get(0).unwrap(), quantified, localized.1,
+            impl_method_core_def_id(core), actuals)
+    }
 }
 
 fn specialize_delegate_method_core(

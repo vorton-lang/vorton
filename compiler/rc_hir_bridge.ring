@@ -618,14 +618,9 @@ fn legacy_callable_type_actuals(
     if !executable_ref_is_named(executable) {
         panic("RcHIR bridge: callable receipt executable is not named")
     }
-    let symbol = executable_ref_named_symbol(executable)
     substitutions.map(
         fn(substitution) {
             let parameter = flow_type_substitution_parameter(substitution)
-            if !symbol_ref_same(
-                    flow_generic_param_owner(parameter), symbol) {
-                panic("RcHIR bridge: callable receipt type formal owner differs")
-            }
             HCallableTypeActual {
                 owner: flow_generic_param_owner(parameter),
                 ordinal: flow_generic_param_index(parameter),
@@ -2708,20 +2703,24 @@ fn serialize_handler(
 fn serialize_trait_method(
     mut ctx: HirBridgeCtx, value: HTraitMethod
 ) -> HTraitMethod {
-    let body = if value.has_default {
-        some(serialize_callable_body(ctx, value.executable_ref))
-    } else { none }
+    if value.has_default != value.body.is_some() {
+        panic("RcHIR bridge: trait default metadata differs")
+    }
     HTraitMethod {
         name: value.name, method_ref: value.method_ref,
-        params: value.params, trait_bounds: value.trait_bounds,
+        type_params: value.type_params,
+        type_formals: value.type_formals.map(fn(item) { item }),
+        params: value.params, trait_bounds: [],
         return_type: value.return_type,
         effects: validate_legacy_effect_row(value.effects),
-        has_default: value.has_default,
+        // The verified Core body is emitted once as an ordinary HDecl::Fn;
+        // the trait declaration remains dictionary-layout metadata only.
+        has_default: false,
         executable_ref: value.executable_ref,
         effect_ctx: typed_callable_effect_ctx(
             ctx.projection, core_callable_effect_ctx_for(
                 ctx.stages.core, value.executable_ref)),
-        body: body
+        body: none
     }
 }
 
@@ -3038,6 +3037,28 @@ fn body_was_consumed(values: List<ExecutableRef>, reference: ExecutableRef) -> B
     false
 }
 
+fn physical_fn_count(
+    values: List<HDecl>, reference: ExecutableRef
+) -> Int {
+    let mut count = 0
+    for value in values {
+        match value {
+            HDecl::Fn { executable_ref, .. } => if
+                    executable_ref_same(executable_ref, reference) {
+                count = count + 1
+            },
+            HDecl::Impl { methods, .. } => {
+                count = count + physical_fn_count(methods, reference)
+            },
+            HDecl::ModBlock { decls, .. } => {
+                count = count + physical_fn_count(decls, reference)
+            },
+            _ => {}
+        }
+    }
+    count
+}
+
 fn validate_projection_against_core(
     core: CoreProgram, projection: LegacyProjectionTable
 ) {
@@ -3222,7 +3243,9 @@ pub fn materialize_verified_project_hir(
         if !body_was_consumed(ctx.consumed_bodies, reference) {
             let callable = legacy_projection_callable_for(projection, reference)
             let kind = legacy_callable_kind(callable)
-            if executable_kind_same(kind, executable_kind_dict_helper()) {
+            if executable_kind_same(kind, executable_kind_dict_helper()) ||
+               executable_kind_same(
+                    kind, executable_kind_trait_default()) {
                 let module_key = module_body_ref_origin_module_key(
                     legacy_callable_module(callable))
                 let draft_index = project_draft_index(drafts, module_key)
@@ -3235,11 +3258,25 @@ pub fn materialize_verified_project_hir(
                executable_kind_same(kind, executable_kind_handler()) ||
                executable_kind_same(kind, executable_kind_impl_method()) ||
                executable_kind_same(kind, executable_kind_default_specialization()) ||
-               executable_kind_same(kind, executable_kind_derived_impl()) ||
-               executable_kind_same(kind, executable_kind_trait_default()) {
+               executable_kind_same(kind, executable_kind_derived_impl()) {
                 panic("RcHIR bridge: nested/generated body was not materialized")
             }
             panic("RcHIR bridge: source executable shell is absent")
+        }
+    }
+    for callable in core_program_callables(stages.core) {
+        if executable_kind_same(
+                legacy_callable_kind(legacy_projection_callable_for(
+                    projection, core_callable_reference(callable))),
+                executable_kind_trait_default()) {
+            let mut count = 0
+            for draft in drafts {
+                count = count + physical_fn_count(
+                    draft.decls, core_callable_reference(callable))
+            }
+            if count != 1 {
+                panic("RcHIR bridge: trait default physical function is not unique")
+            }
         }
     }
     if ctx.consumed_bodies.len() != core_program_bodies(stages.core).len() ||

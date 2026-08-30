@@ -979,6 +979,8 @@ fn close_trait_method(value: HTraitMethod) -> HTraitMethod {
     }
     HTraitMethod {
         name: value.name, method_ref: value.method_ref,
+        type_params: exact_h_type_params(value.type_params),
+        type_formals: value.type_formals.map(fn(item) { item }),
         params: value.params, return_type: value.return_type,
         effects: value.effects, has_default: value.has_default,
         executable_ref: value.executable_ref,

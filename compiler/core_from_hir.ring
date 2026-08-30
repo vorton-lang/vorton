@@ -224,6 +224,14 @@ use hir::{
     h_default_specialization_owner,
     h_default_specialization_generated_method,
     h_default_specialization_generated_executable,
+    h_default_specialization_source_method,
+    h_default_specialization_default_executable,
+    h_default_specialization_source_bound_traits,
+    h_default_specialization_generated_type_var_ids,
+    h_default_specialization_generated_type_formals,
+    h_default_specialization_dictionary_constructions,
+    h_default_dict_construction_dictionary,
+    h_default_dict_construction_result,
     h_default_specialization_parameter_types,
     h_default_specialization_parameter_mutabilities,
     h_default_specialization_binders,
@@ -231,7 +239,8 @@ use hir::{
     h_default_specialization_effects,
     h_default_specialization_effect_ctx,
     h_default_specialization_forward_call,
-    h_exact_call_callee, h_exact_call_signature, h_exact_call_method,
+    h_exact_call_callee, h_exact_call_signature, h_exact_call_type_args,
+    h_exact_call_method,
     h_exact_call_evidence, h_exact_call_effect_ctx,
     derived_semantic_kind_tag, DERIVED_HASH_SEED,
     validate_hir_binder_def_ids
@@ -1136,6 +1145,42 @@ fn producer_register_h_type_params(
     }
 }
 
+fn producer_register_trait_method_formals(
+    mut producer: ClosedCoreProducer, method: HTraitMethod
+) {
+    if method.type_params.len() != method.type_formals.len() {
+        panic("Core producer: trait method formal census differs")
+    }
+    let trait_owner = trait_method_ref_trait(method.method_ref)
+    let member_owner = trait_method_ref_member(method.method_ref)
+    let mut index = 0
+    while index < method.type_params.len() {
+        let parameter = method.type_params.get(index).unwrap()
+        let formal = method.type_formals.get(index).unwrap()
+        let owner = flow_generic_param_owner(formal)
+        let bounds = flow_generic_param_bounds(formal)
+        if (!symbol_ref_same(owner, trait_owner) &&
+            !symbol_ref_same(owner, member_owner)) ||
+           parameter.bound_refs.len() != bounds.len() {
+            panic("Core producer: trait method formal relation differs")
+        }
+        let mut bound_index = 0
+        while bound_index < bounds.len() {
+            if !symbol_ref_same(
+                    parameter.bound_refs.get(bound_index).unwrap(),
+                    bounds.get(bound_index).unwrap()) {
+                panic("Core producer: trait method formal bound differs")
+            }
+            bound_index = bound_index + 1
+        }
+        producer_register_parameter(
+            producer, parameter.type_var_id, owner,
+            flow_generic_param_index(formal),
+            flow_generic_param_arity(formal), bounds)
+        index = index + 1
+    }
+}
+
 fn producer_nominal_definition_raw_parameters(
     producer: ClosedCoreProducer, owner: SymbolRef, is_struct: Bool
 ) -> List<Int> {
@@ -1313,12 +1358,36 @@ fn producer_register_decl_parameters(
                     if !executable_ref_is_named(method.executable_ref) {
                         panic("Core producer: trait method owner is anonymous")
                     }
+                    producer_register_trait_method_formals(producer, method)
                 }
             },
-            HDecl::Impl { owner_ref, type_params, methods, .. } => {
+            HDecl::Impl {
+                owner_ref, type_params, methods,
+                default_specializations, ..
+            } => {
                 producer_register_h_type_params(
                     producer, impl_owner_ref_target(owner_ref), type_params)
                 producer_register_decl_parameters(producer, methods)
+                for plan in default_specializations {
+                    let ids =
+                        h_default_specialization_generated_type_var_ids(plan)
+                    let formals =
+                        h_default_specialization_generated_type_formals(plan)
+                    if ids.len() != formals.len() {
+                        panic("Core producer: generated default formal census differs")
+                    }
+                    let mut index = 0
+                    while index < ids.len() {
+                        let formal = formals.get(index).unwrap()
+                        producer_register_parameter(
+                            producer, ids.get(index).unwrap(),
+                            flow_generic_param_owner(formal),
+                            flow_generic_param_index(formal),
+                            flow_generic_param_arity(formal),
+                            flow_generic_param_bounds(formal))
+                        index = index + 1
+                    }
+                }
             },
             HDecl::ModBlock { decls: nested, .. } =>
                 producer_register_decl_parameters(producer, nested),
@@ -1956,12 +2025,39 @@ fn producer_record_decls(
                 producer_record_decls(producer, methods)
                 for plan in default_specializations {
                     let owner = h_default_specialization_generated_executable(plan)
+                    for id in
+                            h_default_specialization_generated_type_var_ids(plan) {
+                        let _ = producer_record_type(
+                            producer,
+                            Type::TypeVar { id: id, name: none },
+                            some(executable_origin(owner)))
+                    }
                     let params = h_default_specialization_parameter_types(plan)
                     let result = h_default_specialization_result_type(plan)
                     let effects = h_default_specialization_effects(plan)
                     let _ = producer_record_type(producer, Type::FnType {
                         params: params, return_type: result, effects: effects
                     }, some(executable_origin(owner)))
+                    for construction in
+                            h_default_specialization_dictionary_constructions(plan) {
+                        producer_record_physical_dictionary(
+                            producer, owner,
+                            h_default_dict_construction_dictionary(
+                                construction))
+                        producer_record_dictionary(
+                            producer, owner,
+                            h_default_dict_construction_result(construction))
+                    }
+                    let forward = h_default_specialization_forward_call(plan)
+                    for actual in h_exact_call_type_args(forward) {
+                        let _ = producer_record_type(
+                            producer, actual.actual,
+                            some(executable_origin(owner)))
+                    }
+                    for value in h_exact_call_evidence(forward) {
+                        producer_record_physical_dictionary(
+                            producer, owner, value)
+                    }
                 }
                 match delegate_plan {
                     some(plan) => {
@@ -2013,6 +2109,9 @@ fn producer_record_decls(
                     producer_record_callable_bounds(
                         producer, method.executable_ref,
                         method.trait_bounds)
+                    producer_record_declared_type_formals(
+                        producer, method.executable_ref,
+                        method.type_params)
                     producer_record_callable(
                         producer, method.executable_ref, method.params,
                         method.return_type, method.effects, method.body)
@@ -3651,7 +3750,6 @@ fn direct_type_substitutions(
     if !executable_ref_is_named(executable) {
         panic("Core assembly: generic direct callee is not named")
     }
-    let owner = executable_ref_named_symbol(executable)
     let mut declared: ProjectCallableTypeFormalSource? = none
     for source in ctx.project_callable_type_formals {
         if executable_ref_same(source.reference, executable) {
@@ -3666,24 +3764,41 @@ fn direct_type_substitutions(
         none => panic("Core assembly: generic direct callee lacks declared formals")
     }
     let mut result: List<FlowTypeSubstitution> = []
-    let mut prior_ordinal = 0 - 1
+    let mut prior_source_index = 0 - 1
     for argument in type_args {
-        if !symbol_ref_same(argument.owner, owner) ||
-           argument.ordinal <= prior_ordinal ||
-           argument.ordinal < 0 || argument.ordinal >= source.formals.len() ||
-           argument.arity != source.formals.len() {
-            panic("Core assembly: direct type substitution plan differs")
+        let mut found_index: Int? = none
+        let mut index = 0
+        while index < source.formals.len() {
+            let candidate = source.formals.get(index).unwrap()
+            if symbol_ref_same(
+                    flow_generic_param_owner(candidate), argument.owner) &&
+               flow_generic_param_index(candidate) == argument.ordinal &&
+               flow_generic_param_arity(candidate) == argument.arity {
+                if found_index.is_some() {
+                    panic("Core assembly: direct type formal identity repeats")
+                }
+                found_index = some(index)
+            }
+            index = index + 1
         }
-        let formal = source.formals.get(argument.ordinal).unwrap()
-        if !symbol_ref_same(flow_generic_param_owner(formal), owner) ||
+        let source_index = match found_index {
+            some(value) => value,
+            none => panic("Core assembly: direct type substitution plan differs")
+        }
+        if source_index <= prior_source_index {
+            panic("Core assembly: direct type substitution order differs")
+        }
+        let formal = source.formals.get(source_index).unwrap()
+        if !symbol_ref_same(
+                flow_generic_param_owner(formal), argument.owner) ||
            flow_generic_param_index(formal) != argument.ordinal ||
-           flow_generic_param_arity(formal) != source.formals.len() {
+           flow_generic_param_arity(formal) != argument.arity {
             panic("Core assembly: declared type formal source differs")
         }
         result.push(make_flow_type_substitution(
             formal, type_fact_for(
                 ctx.types, argument.actual, ctx.module_key)))
-        prior_ordinal = argument.ordinal
+        prior_source_index = source_index
     }
     result
 }
@@ -5024,7 +5139,8 @@ fn typed_callable_contract(
     parameter_types_in: List<Type>, parameter_slots: List<SlotRef>,
     parameter_mutabilities: List<Bool>, result: Type,
     effects: EffectRow, mode: ExecutableContractMode,
-    effect_ctx: TypedCallableEffectCtx
+    effect_ctx: TypedCallableEffectCtx,
+    type_formals: List<CoreTypeRef>
 ) -> CoreCallableContract {
     if parameter_types_in.len() != parameter_mutabilities.len() {
         panic("Core assembly: typed callable mutability arity differs")
@@ -5040,7 +5156,8 @@ fn typed_callable_contract(
     make_core_callable_contract(
         reference, executable_origin(reference),
         type_fact_for(facts.type_sources, header, facts.module_key),
-        [], callable_owned_effect_formals(facts, reference, header),
+        type_formals,
+        callable_owned_effect_formals(facts, reference, header),
         if executable_contract_mode_same(
                 mode, executable_contract_mode_concrete_body()) {
             parameter_slots
@@ -5194,8 +5311,53 @@ fn append_default_specialization(
     activate_effect_ctx_binder(
         call_ctx, core_callable_effect_ctx_reference(frozen_callable_ctx),
         core_callable_effect_ctx_layout(frozen_callable_ctx))
+    let mut construction_statements: List<CoreStmt> = []
+    for construction in
+            h_default_specialization_dictionary_constructions(plan) {
+        let source = h_default_dict_construction_dictionary(construction)
+        let result = h_default_dict_construction_result(construction)
+        if !dict_ref_is_local(result) {
+            panic("Core assembly: default dictionary result is not local")
+        }
+        let dictionary = remap_dictionary_evidence(
+            call_ctx, dict_ref_exact(source))
+        let result_slot = ensure_binder(
+            call_ctx, dict_ref_local(result),
+            Type::TupleType { elements: [] },
+            binder_kind_dictionary_evidence_local(), false)
+        let origin = executable_origin(reference)
+        construction_statements.push(make_core_bind_stmt(
+            result_slot,
+            make_core_dict_construct_expr(
+                type_fact_for(
+                    facts.type_sources,
+                    Type::TupleType { elements: [] }, facts.module_key),
+                make_core_effect_set([]), origin,
+                dictionary, result_slot),
+            false, origin))
+    }
+    let type_args = h_exact_call_type_args(forward)
+    let source_bounds = h_default_specialization_source_bound_traits(plan)
+    let mut formal_count: Int? = none
+    for source in call_ctx.project_callable_type_formals {
+        if executable_ref_same(
+                source.reference,
+                h_default_specialization_default_executable(plan)) {
+            if formal_count.is_some() {
+                panic("Core assembly: default callable formal source repeats")
+            }
+            formal_count = some(source.formals.len())
+        }
+    }
+    if type_args.len() != formal_count.unwrap_or_else(fn() {
+            panic("Core assembly: default callable formal source is absent")
+        }) ||
+       h_exact_call_evidence(forward).len() != source_bounds.len() {
+        panic("Core assembly: default forward ABI receipt differs")
+    }
     let callee = core_callee(
-        call_ctx, h_exact_call_callee(forward), forward_signature, [], none)
+        call_ctx, h_exact_call_callee(forward), forward_signature,
+        type_args, none)
     let arguments = parameter_slots.map(fn(slot) {
         let mut found: CoreTypeRef? = none
         for binder in binders {
@@ -5247,7 +5409,8 @@ fn append_default_specialization(
             type_fact_for(
                 facts.type_sources,
                 h_default_specialization_result_type(plan), facts.module_key),
-            [], some(call), executable_origin(reference)))
+            construction_statements, some(call),
+            executable_origin(reference)))
     assembly.entries.push(make_executable_entry(
         reference, make_module_body_parent(module_body),
         executable_kind_default_specialization(),
@@ -5256,7 +5419,12 @@ fn append_default_specialization(
         facts, reference, parameter_types, parameter_slots,
         mutabilities, h_default_specialization_result_type(plan),
         h_default_specialization_effects(plan),
-        executable_contract_mode_concrete_body(), callable_ctx))
+        executable_contract_mode_concrete_body(), callable_ctx,
+        h_default_specialization_generated_type_var_ids(plan).map(fn(id) {
+            type_fact_for(
+                facts.type_sources,
+                Type::TypeVar { id: id, name: none }, facts.module_key)
+        })))
     append_generated_body_diagnostic_origins(
         facts, reference, body, assembly)
     assembly.bodies.push(make_core_body_entry(
@@ -6148,7 +6316,7 @@ fn append_derived_impl(
             facts, method.executable_ref, parameter_types, parameter_slots,
             mutabilities, result_type, effects,
             executable_contract_mode_concrete_body(),
-            method.effect_ctx))
+            method.effect_ctx, []))
         append_generated_body_diagnostic_origins(
             facts, method.executable_ref, body, assembly)
         assembly.bodies.push(make_core_body_entry(
@@ -6322,7 +6490,7 @@ fn append_delegate_impl(
             mutabilities, h_delegate_method_result_type(method),
             h_delegate_method_effects(method),
             executable_contract_mode_concrete_body(),
-            h_delegate_method_effect_ctx(method)))
+            h_delegate_method_effect_ctx(method), []))
         append_generated_body_diagnostic_origins(
             facts, reference, body, assembly)
         assembly.bodies.push(make_core_body_entry(
@@ -6658,7 +6826,8 @@ fn assemble_decls(
                     match method.body {
                         some(body) => add_executable_body(
                             facts, source_parent(module_body, reference), reference,
-                            executable_kind_trait_default(), [],
+                            executable_kind_trait_default(),
+                            method.type_params,
                             method.trait_bounds, method.params,
                             method.return_type, method.effects, body,
                             method.effect_ctx, [], assembly),
@@ -6670,7 +6839,8 @@ fn assemble_decls(
                                 facts, source_parent(module_body, reference),
                                 reference,
                                 executable_kind_bodyless_trait_member(),
-                                [], method.params, method.return_type,
+                                method.type_params,
+                                method.params, method.return_type,
                                 method.effects, some(method.effect_ctx),
                                 none, assembly)
                         }
@@ -6963,8 +7133,31 @@ fn collect_decl_callable_type_formals(
             HDecl::ExternFn { executable_ref, type_params, .. } =>
                 append_callable_type_formal_source(
                     result, executable_ref, type_params),
-            HDecl::Impl { methods, .. } =>
-                collect_decl_callable_type_formals(methods, result),
+            HDecl::Trait { methods, .. } => {
+                for method in methods {
+                    if method.type_params.len() !=
+                           method.type_formals.len() ||
+                       !executable_ref_is_named(method.executable_ref) ||
+                       !symbol_ref_same(
+                            executable_ref_named_symbol(
+                                method.executable_ref),
+                            trait_method_ref_member(method.method_ref)) {
+                        panic("Core assembly: trait callable formal source differs")
+                    }
+                    append_exact_callable_type_formal_source(
+                        result, method.executable_ref,
+                        method.type_formals)
+                }
+            },
+            HDecl::Impl { methods, default_specializations, .. } => {
+                collect_decl_callable_type_formals(methods, result)
+                for plan in default_specializations {
+                    append_exact_callable_type_formal_source(
+                        result,
+                        h_default_specialization_generated_executable(plan),
+                        h_default_specialization_generated_type_formals(plan))
+                }
+            },
             HDecl::ModBlock { decls: nested, .. } =>
                 collect_decl_callable_type_formals(nested, result),
             _ => {}
@@ -7371,10 +7564,96 @@ fn freeze_project_effect_ctx_tokens(
     result
 }
 
+fn collect_project_trait_method(
+    decls: List<HDecl>, wanted: TraitMethodRef,
+    mut result: List<HTraitMethod>
+) {
+    for decl in decls {
+        match decl {
+            HDecl::Trait { methods, .. } => {
+                for method in methods {
+                    if trait_method_ref_same(method.method_ref, wanted) {
+                        result.push(method)
+                    }
+                }
+            },
+            HDecl::ModBlock { decls: nested, .. } =>
+                collect_project_trait_method(nested, wanted, result),
+            _ => {}
+        }
+    }
+}
+
+fn project_trait_method(
+    values: List<FrozenCoreAssemblyFacts>, wanted: TraitMethodRef
+) -> HTraitMethod {
+    let result: List<HTraitMethod> = []
+    for facts in values {
+        collect_project_trait_method(facts.program.decls, wanted, result)
+    }
+    if result.len() != 1 {
+        panic("Core assembly: default source trait method is not unique")
+    }
+    result.get(0).unwrap()
+}
+
+fn validate_default_specialization_decl_sources(
+    values: List<FrozenCoreAssemblyFacts>, decls: List<HDecl>
+) {
+    for decl in decls {
+        match decl {
+            HDecl::Impl { default_specializations, methods, .. } => {
+                for plan in default_specializations {
+                    let method = project_trait_method(
+                        values,
+                        h_default_specialization_source_method(plan))
+                    let expected = method.trait_bounds
+                    let actual =
+                        h_default_specialization_source_bound_traits(plan)
+                    if !method.has_default || method.body.is_none() ||
+                       expected.len() != actual.len() ||
+                       !executable_ref_same(
+                            method.executable_ref,
+                            h_default_specialization_default_executable(plan)) {
+                        panic("Core assembly: default source method relation differs")
+                    }
+                    let mut index = 0
+                    while index < expected.len() {
+                        let bound = expected.get(index).unwrap()
+                        if bound.dict_ordinal != index ||
+                           !symbol_ref_same(
+                                bound.trait_ref,
+                                actual.get(index).unwrap()) {
+                            panic("Core assembly: default source bound order differs")
+                        }
+                        index = index + 1
+                    }
+                }
+                validate_default_specialization_decl_sources(
+                    values, methods)
+            },
+            HDecl::ModBlock { decls: nested, .. } =>
+                validate_default_specialization_decl_sources(
+                    values, nested),
+            _ => {}
+        }
+    }
+}
+
+fn validate_default_specialization_sources(
+    values: List<FrozenCoreAssemblyFacts>
+) {
+    for facts in values {
+        validate_default_specialization_decl_sources(
+            values, facts.program.decls)
+    }
+}
+
 fn assemble_all(values: List<FrozenCoreAssemblyFacts>) -> CoreAssemblyResult {
     if values.len() == 0 { panic("Core assembly: project has no modules") }
     validate_prelude_source_parent_canary()
     validate_fact_order(values)
+    validate_default_specialization_sources(values)
     let project = intern_project_types(values)
     let project_effect_sources = close_project_callable_effect_sources(
         values, project.mappings)

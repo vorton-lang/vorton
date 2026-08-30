@@ -1,6 +1,6 @@
 use types::{Type, Effect, EffectRow, UNIT, EMPTY_ROW, type_to_string, effect_to_string, nominal_display_name, effects_match_kind, types_equal}
-use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, Span, EffectOpDecl, EffectExpr,
-    UseDecl}
+use ast::{Program, Decl, Expr, Param, TypeExpr, TypeParam, TypeBound,
+    Span, EffectOpDecl, EffectExpr, UseDecl, span_zero}
 use hir::{HDecl, HParam, HTypeParam, HExpr, HStmt, HProgram, DerivedImpl, TraitBound, HAssocType,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod, HFieldAccessKind,
     HNominalStructFieldInit, HStructFieldInit,
@@ -9,6 +9,7 @@ use hir::{HDecl, HParam, HTypeParam, HExpr, HStmt, HProgram, DerivedImpl, TraitB
     HCallableValueInstantiation,
     h_nominal_projection,
     HDelegateMethodPlan, HDelegateAssocPlan,
+    HDefaultDictConstruction, make_h_default_dict_construction,
     HDefaultSpecializationPlan, make_h_default_specialization_plan,
     make_h_delegate_method_plan, make_h_delegate_assoc_plan,
     make_h_delegate_typed_plan, method_call_ref_callee_identity,
@@ -16,11 +17,17 @@ use hir::{HDecl, HParam, HTypeParam, HExpr, HStmt, HProgram, DerivedImpl, TraitB
     DictRef, trait_dict_name,
     make_intrinsic_method_call_ref, make_concrete_method_call_ref,
     make_bound_method_call_ref,
-    make_h_exact_call_plan,
+    make_h_exact_call_plan, make_h_exact_call_plan_with_type_args,
     hexpr_type, hexpr_effects, hexpr_span,
+    synthetic_def_id, SYNTHETIC_DICT_DEF_ID_BASE,
     collect_extern_type_names, compare_by_first, extern_abi_leaf}
-use hir_exact::{make_static_dict_ref}
-use ir_identity::{SymbolRef, NominalFieldRef, HandledEffectRef,
+use hir_exact::{make_simple_dict_ref, make_static_dict_ref,
+    make_wrapped_dict_ref,
+    dict_ref_exact, dict_ref_is_simple_physical,
+    dict_ref_is_static_physical,
+    dict_ref_wrapped_name, dict_ref_wrapped_trait,
+    dict_ref_wrapped_physical_inner, exact_dict_physical_key}
+use ir_identity::{SymbolRef, NominalFieldRef, TraitMethodRef, HandledEffectRef,
     nominal_field_ref_index, symbol_ref_same,
     ImplOwnerRef, ImplMethodRef,
     impl_owner_ref_provider, impl_owner_ref_trait, impl_owner_ref_target,
@@ -38,6 +45,10 @@ use ir_identity::{SymbolRef, NominalFieldRef, HandledEffectRef,
     handled_effect_ref_same}
 use ir_inventory::{ExecutableRef, BinderEntry,
     make_exact_static_dict_ref,
+    make_exact_wrapped_dict_ref,
+    make_dictionary_local_dict_ref,
+    dict_ref_is_static, dict_ref_is_wrapped,
+    dict_ref_static, dict_ref_wrapped_base,
     CallableResourceContractFact, CallableResourceRoleFact,
     make_callable_resource_contract_fact,
     callable_resource_contract_parameter_roles,
@@ -45,6 +56,7 @@ use ir_inventory::{ExecutableRef, BinderEntry,
     callable_resource_role_consume,
     make_named_executable_ref,
     make_anonymous_executable_ref,
+    executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_same}
 use effect_contract::{TypedEffectHeaderSchema, TypedCallableEffectCtx,
     TypedEffectCtxLayout, TypedEffectCtxSource,
@@ -61,7 +73,7 @@ use effect_contract::{TypedEffectHeaderSchema, TypedCallableEffectCtx,
     typed_runtime_actual_type_has_closed_handled_instances,
     typed_runtime_effect_actual_has_closed_handled_instances}
 use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
-    ImplEntry,
+    TraitDef, TraitMethodDef, ImplEntry, ImplMethodSchemeCore,
     apply_subst, apply_subst_map,
     find_impl, find_impl_by_provider,
     find_impls_by_provider, find_delegate_child_provider_plan,
@@ -74,7 +86,15 @@ use env::{TypeScheme, SchemeBound, AssocConstraintEntry,
     install_method_core, replace_impl_method_core,
     impl_method_core_as_scheme, impl_method_core_from_scheme,
     impl_method_core_type, impl_method_core_effect_schema,
+    impl_method_core_specialization_actuals,
+    impl_method_specialization_actual_formal,
+    impl_method_specialization_actual_type,
+    trait_method_callable_formals,
+    trait_method_callable_formal_type_var,
+    trait_method_callable_formal_name,
+    trait_method_callable_formal_fact,
     build_type_var_map, ordered_effect_tail_vars,
+    apply_effect_header_schema_subst,
     build_definition_effect_header_schema,
     validate_effect_header_schema,
     instantiate_effect_header_schema}
@@ -93,7 +113,7 @@ use infer_ctx::{InferCtx, FnBoundsEntry, AssocRebindEntry,
     unify_at, unify_at_noted,
     resolve_type_expr, resolve_self_type,
     make_callable_impl_definition_receipt,
-    resolve_immediate_impl_owner_dicts,
+    resolve_immediate_impl_owner_dicts, resolve_dict_ref_for_type,
     pending_dict_checkpoint, drain_pending_dicts, rollback_pending_dicts,
     assert_pending_dict_owner_closed,
     generalize, free_type_vars, resolve_mod_uses,
@@ -136,6 +156,9 @@ use infer::{infer_block, infer_expr}
 use zonk::{ZonkCtx, zonk_type, zonk_row, zonk_param, zonk_block, zonk_expr}
 use derive::{run_derive_pass}
 use scc::{build_call_graph, tarjan_scc, collect_registered_fn_names, collect_self_method_callees}
+use core_type_source::{FlowGenericParamFact, make_flow_generic_param_fact,
+    flow_generic_param_owner, flow_generic_param_index,
+    flow_generic_param_arity, flow_generic_param_bounds}
 
 struct FnValidationContext {
     capability: EffectRow?,
@@ -2566,15 +2589,17 @@ fn check_impl_decl_canonical(
                         trait_method.name).unwrap_or_else(fn() {
                         panic("default specialization: specialized scheme is absent")
                     })
-                    let signature = impl_method_core_type(core)
+                    let generated_executable = make_named_executable_ref(
+                        impl_method_ref_member(generated_method))
+                    let type_receipt = localize_default_specialization_types(
+                        ctx, core, generated_executable, trait_method)
+                    let signature = type_receipt.signature
                     let (parameter_types, result_type, effects) = match signature {
                         Type::FnType { params, return_type, effects } =>
                             (params, return_type, effects),
                         _ => panic(
                             "default specialization: scheme is not callable")
                     }
-                    let generated_executable = make_named_executable_ref(
-                        impl_method_ref_member(generated_method))
                     let default_executable = make_named_executable_ref(
                         trait_method_ref_member(trait_method.method_ref))
                     let mut binders: List<BinderEntry> = []
@@ -2586,18 +2611,21 @@ fn check_impl_decl_canonical(
                     }
                     enter_executable_owner(ctx, generated_executable)
                     let generated_effect_ctx = current_typed_callable_effect_ctx(
-                        ctx, effects, impl_method_core_effect_schema(core))
+                        ctx, effects, type_receipt.effect_schema)
                     let forward_effect_ctx = effect_ctx_source_for_callable(
                         ctx, signature)
                     exit_executable_owner(ctx)
-                    let definition_receipt =
-                        make_callable_impl_definition_receipt(
-                            impl_owner, core, generated_method)
-                    let dict_evidence = resolve_immediate_impl_owner_dicts(
-                        generated_executable,
-                        ctx.sink, ctx.env, impl_bounds,
-                        impl_owner, core, definition_receipt,
-                        ctx.subst, span)
+                    let source_bounds = exact_trait_default_bounds(
+                        ctx, exact_trait_name, Type::TypeVar {
+                            id: trait_def.self_type_var_id,
+                            name: some("Self")
+                        })
+                    let dict_evidence = default_specialization_evidence(
+                        ctx, generated_executable, impl_self_type,
+                        impl_bounds, source_bounds)
+                    let materialized_evidence =
+                        materialize_default_specialization_evidence(
+                            ctx, generated_executable, dict_evidence)
                     let d1_checkpoint = ctx.sink.save()
                     check_final_runtime_handled_contract(
                         ctx, signature, some(generated_effect_ctx),
@@ -2607,20 +2635,26 @@ fn check_impl_decl_canonical(
                     }
                     publish_exact_callable_effect_header(
                         ctx, generated_executable, signature,
-                        impl_method_core_effect_schema(core))
+                        type_receipt.effect_schema)
                     default_specializations.push(
                         make_h_default_specialization_plan(
                             selected_owner, generated_method,
                             generated_executable, trait_method.method_ref,
-                            default_executable, parameter_types,
+                            default_executable,
+                            source_bounds.map(fn(bound) { bound.trait_ref }),
+                            type_receipt.generated_type_var_ids,
+                            type_receipt.generated_type_formals,
+                            materialized_evidence.1,
+                            parameter_types,
                             trait_method.param_mutabilities, binders,
                             result_type, effects, generated_effect_ctx,
-                            make_h_exact_call_plan(
+                            make_h_exact_call_plan_with_type_args(
                                 make_named_callee_ref(
                                     trait_method_ref_member(
                                         trait_method.method_ref)),
-                                signature, none,
-                                dict_evidence, forward_effect_ctx)))
+                                signature, type_receipt.type_actuals, none,
+                                materialized_evidence.0,
+                                forward_effect_ctx)))
                 }
             }
         },
@@ -3561,6 +3595,8 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
     let self_var = Type::TypeVar {
         id: trait_def.self_type_var_id, name: none
     }
+    let trait_h_type_params = exact_h_type_params(
+        ctx, type_params, trait_def.type_param_vars)
 
     let mut hmethods: List<HTraitMethod> = []
     for method_index in 0..trait_def.methods.len() {
@@ -3665,8 +3701,12 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
            (method_body.is_none() && method_trait_bounds.len() != 0) {
             panic("trait HIR: default body/bound relation differs")
         }
+        let callable_formals = exact_trait_method_callable_formals(
+            trait_def, m, trait_h_type_params)
         hmethods.push(HTraitMethod {
             name: m.name, method_ref: m.method_ref,
+            type_params: callable_formals.0,
+            type_formals: callable_formals.1,
             params: hparams, return_type: fn_ret,
             effects: fn_effects, has_default: m.has_default,
             executable_ref: method_executable,
@@ -3686,8 +3726,7 @@ fn check_trait_decl(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
 
     HDecl::Trait {
         name: name, owner_ref: trait_def.owner_ref,
-        type_params: exact_h_type_params(
-            ctx, type_params, trait_def.type_param_vars), methods: hmethods,
+        type_params: trait_h_type_params, methods: hmethods,
         supertraits: trait_def.supertraits,
         assoc_types: hassoc_types, is_pub: is_pub, span: span
     }
@@ -3726,6 +3765,248 @@ fn exact_trait_default_bounds(
         panic("trait default bounds: current trait is absent")
     }
     result
+}
+
+fn default_specialization_type_actuals(
+    core: ImplMethodSchemeCore, source_method: TraitMethodRef
+) -> List<HCallableTypeActual> {
+    let trait_owner = trait_method_ref_trait(source_method)
+    let member_owner = trait_method_ref_member(source_method)
+    let actuals = impl_method_core_specialization_actuals(core)
+    if actuals.len() == 0 {
+        panic("default specialization: ordered type actual receipt is absent")
+    }
+    actuals.map(fn(value) {
+        let formal = impl_method_specialization_actual_formal(value)
+        let owner = flow_generic_param_owner(formal)
+        if !symbol_ref_same(owner, trait_owner) &&
+           !symbol_ref_same(owner, member_owner) {
+            panic("default specialization: type actual owner differs")
+        }
+        HCallableTypeActual {
+            owner: owner,
+            ordinal: flow_generic_param_index(formal),
+            arity: flow_generic_param_arity(formal),
+            actual: impl_method_specialization_actual_type(value)
+        }
+    })
+}
+
+struct DefaultSpecializationTypeReceipt {
+    signature: Type,
+    effect_schema: TypedEffectHeaderSchema,
+    type_actuals: List<HCallableTypeActual>,
+    generated_type_var_ids: List<Int>,
+    generated_type_formals: List<FlowGenericParamFact>
+}
+
+fn localize_default_specialization_types(
+    mut ctx: InferCtx, core: ImplMethodSchemeCore,
+    generated_executable: ExecutableRef, source_method: TraitMethodDef
+) -> DefaultSpecializationTypeReceipt {
+    if !executable_ref_is_named(generated_executable) {
+        panic("default specialization: generated executable is anonymous")
+    }
+    let source_actuals = default_specialization_type_actuals(
+        core, source_method.method_ref)
+    let member_owner = trait_method_ref_member(source_method.method_ref)
+    let mapping: Map<Int, Type> = map_new()
+    let mut generated_ids: List<Int> = []
+    for actual in source_actuals {
+        if symbol_ref_same(actual.owner, member_owner) {
+            let raw_id = match actual.actual {
+                Type::TypeVar { id, .. } => id,
+                _ => panic(
+                    "default specialization: method formal actual is concrete")
+            }
+            let localized = ctx.env.fresh_var()
+            let localized_id = match localized {
+                Type::TypeVar { id, .. } => id,
+                _ => panic("default specialization: fresh formal is concrete")
+            }
+            mapping.insert(raw_id, localized)
+            generated_ids.push(localized_id)
+        }
+    }
+    if generated_ids.len() != source_method.method_type_params.len() {
+        panic("default specialization: generated method formal census differs")
+    }
+    let generated_owner = executable_ref_named_symbol(generated_executable)
+    let mut facts: List<FlowGenericParamFact> = []
+    let mut index = 0
+    while index < generated_ids.len() {
+        facts.push(make_flow_generic_param_fact(
+            generated_owner, index, generated_ids.len(), []))
+        index = index + 1
+    }
+    DefaultSpecializationTypeReceipt {
+        signature: apply_subst_map(mapping, impl_method_core_type(core)),
+        effect_schema: apply_effect_header_schema_subst(
+            mapping, impl_method_core_effect_schema(core)),
+        type_actuals: source_actuals.map(fn(actual) {
+            HCallableTypeActual {
+                owner: actual.owner, ordinal: actual.ordinal,
+                arity: actual.arity,
+                actual: apply_subst_map(mapping, actual.actual)
+            }
+        }),
+        generated_type_var_ids: generated_ids,
+        generated_type_formals: facts
+    }
+}
+
+fn default_specialization_dict_trait(value: DictRef) -> SymbolRef {
+    let exact = dict_ref_exact(value)
+    let owner = if dict_ref_is_static(exact) {
+        dict_ref_static(exact)
+    } else if dict_ref_is_wrapped(exact) {
+        dict_ref_wrapped_base(exact)
+    } else {
+        panic("default specialization: Self evidence is local")
+    }
+    match impl_owner_ref_trait(owner) {
+        some(trait_ref) => trait_ref,
+        none => panic("default specialization: evidence owner is inherent")
+    }
+}
+
+fn default_specialization_evidence(
+    ctx: InferCtx, runtime_owner: ExecutableRef,
+    self_type: Type, current_bounds: List<FnBoundsEntry>,
+    source_bounds: List<TraitBound>
+) -> List<DictRef> {
+    let mut result: List<DictRef> = []
+    let mut index = 0
+    while index < source_bounds.len() {
+        let bound = source_bounds.get(index).unwrap()
+        if bound.dict_ordinal != index || bound.type_param != "self" {
+            panic("default specialization: source bound order differs")
+        }
+        let evidence = resolve_dict_ref_for_type(
+            runtime_owner, ctx.env, current_bounds,
+            self_type, ctx.subst, bound.trait_name).unwrap_or_else(fn() {
+                panic("default specialization: exact Self evidence is absent")
+            })
+        if !symbol_ref_same(
+                default_specialization_dict_trait(evidence),
+                bound.trait_ref) {
+            panic("default specialization: evidence trait identity differs")
+        }
+        result.push(evidence)
+        index = index + 1
+    }
+    if result.len() == 0 {
+        panic("default specialization: current trait evidence is absent")
+    }
+    result
+}
+
+fn materialize_default_specialization_dict(
+    mut ctx: InferCtx, owner: ExecutableRef, value: DictRef,
+    mut constructions: List<HDefaultDictConstruction>
+) -> DictRef {
+    if dict_ref_is_simple_physical(value) { return value }
+    if dict_ref_is_static_physical(value) {
+        return make_static_dict_ref(
+            exact_dict_physical_key(dict_ref_exact(value)),
+            dict_ref_exact(value))
+    }
+    let mut inner: List<DictRef> = []
+    for child in dict_ref_wrapped_physical_inner(value) {
+        inner.push(materialize_default_specialization_dict(
+            ctx, owner, child, constructions))
+    }
+    let exact = make_exact_wrapped_dict_ref(
+        dict_ref_wrapped_base(dict_ref_exact(value)),
+        inner.map(fn(child) { dict_ref_exact(child) }))
+    if inner.all(fn(child) { dict_ref_is_static_physical(child) }) {
+        return make_static_dict_ref(
+            exact_dict_physical_key(exact), exact)
+    }
+    let ordinal = ctx.env.fresh_def_id()
+    let def_id = synthetic_def_id(
+        SYNTHETIC_DICT_DEF_ID_BASE, ordinal)
+    let result = make_dictionary_local_dict_ref(owner, def_id)
+    let result_name = "__ring_default_dict_${ordinal}"
+    let lowered = make_wrapped_dict_ref(
+        dict_ref_wrapped_name(value), dict_ref_wrapped_trait(value),
+        inner, exact)
+    constructions.push(make_h_default_dict_construction(
+        lowered, result, result_name))
+    make_simple_dict_ref(result_name, result)
+}
+
+fn materialize_default_specialization_evidence(
+    ctx: InferCtx, owner: ExecutableRef, values: List<DictRef>
+) -> (List<DictRef>, List<HDefaultDictConstruction>) {
+    let result: List<DictRef> = []
+    let constructions: List<HDefaultDictConstruction> = []
+    for value in values {
+        result.push(materialize_default_specialization_dict(
+            ctx, owner, value, constructions))
+    }
+    (result, constructions)
+}
+
+fn exact_trait_method_callable_formals(
+    trait_def: TraitDef, method: TraitMethodDef,
+    trait_type_params: List<HTypeParam>
+) -> (List<HTypeParam>, List<FlowGenericParamFact>) {
+    let source = trait_method_callable_formals(trait_def, method)
+    let mut parameters: List<HTypeParam> = []
+    let mut facts: List<FlowGenericParamFact> = []
+    for formal in source {
+        let raw_id = trait_method_callable_formal_type_var(formal)
+        let name = trait_method_callable_formal_name(formal)
+        let fact = trait_method_callable_formal_fact(formal)
+        let bounds = flow_generic_param_bounds(fact)
+        let mut source_param: HTypeParam? = none
+        for parameter in trait_type_params {
+            if parameter.type_var_id == raw_id {
+                if source_param.is_some() {
+                    panic("trait HIR: callable source formal repeats")
+                }
+                source_param = some(parameter)
+            }
+        }
+        let parameter = match source_param {
+            some(existing) => {
+                if existing.source.name != name ||
+                   existing.bound_refs.len() != bounds.len() {
+                    panic("trait HIR: callable trait formal differs")
+                }
+                let mut bound_index = 0
+                while bound_index < bounds.len() {
+                    if !symbol_ref_same(
+                            existing.bound_refs.get(bound_index).unwrap(),
+                            bounds.get(bound_index).unwrap()) {
+                        panic("trait HIR: callable trait bound differs")
+                    }
+                    bound_index = bound_index + 1
+                }
+                existing
+            },
+            none => HTypeParam {
+                source: TypeParam {
+                    name: name,
+                    bounds: bounds.map(fn(bound) { TypeBound {
+                        trait_name: symbol_ref_canonical_payload(bound),
+                        type_args: [], assoc_constraints: [],
+                        span: span_zero()
+                    } }),
+                    span: span_zero()
+                },
+                type_var_id: raw_id,
+                bound_refs: bounds
+            }
+        }
+        parameters.push(parameter)
+        facts.push(fact)
+    }
+    if parameters.len() == 0 || parameters.len() != facts.len() {
+        panic("trait HIR: callable formal census differs")
+    }
+    (parameters, facts)
 }
 
 struct TraitDefaultBodyResult {

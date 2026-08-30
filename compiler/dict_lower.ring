@@ -242,7 +242,10 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: Dict
                     none => none,
                 }
                 new_methods.push(HTraitMethod { name: tm.name,
-                    method_ref: tm.method_ref, params: tm.params,
+                    method_ref: tm.method_ref,
+                    type_params: tm.type_params,
+                    type_formals: tm.type_formals.map(fn(item) { item }),
+                    params: tm.params,
                     return_type: tm.return_type, effects: tm.effects,
                     has_default: tm.has_default,
                     executable_ref: tm.executable_ref,
