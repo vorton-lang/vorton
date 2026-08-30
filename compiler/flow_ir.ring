@@ -3788,7 +3788,7 @@ fn validate_body_callable_parameters(body: FlowBody, callable: FlowCallable) {
 fn validate_typed_flow_pattern(
     pattern: FlowPatternContract, expected: CoreTypeRef,
     body: FlowBody, type_nodes: List<FlowTypeNode>
-) {
+) with {} {
     require_same_flow_type(
         pattern.ty, expected, "FlowIR: pattern/scrutinee type differs")
     let node = type_node_for(type_nodes, pattern.ty)
